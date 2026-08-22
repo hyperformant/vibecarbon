@@ -223,18 +223,18 @@ jobs:
           # this leg actually selected (--provider below), so a hetzner-only
           # dispatch never needs the DIGITALOCEAN_* / LINODE_* / VULTR_*
           # secrets configured.
-          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
-          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_ACCESS_KEY }}
+          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_SECRET_KEY }}
           # Username lives in Environment VARIABLES (not secrets) since
-          # 2026-08-07 — `secrets.DOCKERHUB_USERNAME` would now evaluate
+          # 2026-08-07 — `secrets.DOCKER_HUB_USERNAME` would now evaluate
           # empty, and resolveDockerHubCreds requires BOTH values, so a
           # stale `secrets.` reference here silently reverts every CI pull
           # to unauthenticated (the exact quota class this login prevents).
-          DOCKER_HUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
-          DOCKER_HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKER_HUB_USERNAME: ${{ vars.DOCKER_HUB_USERNAME }}
+          DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
           DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
-          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_SPACES_KEY }}
-          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SPACES_SECRET }}
+          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_KEY }}
+          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SECRET_KEY }}
           # Dedicated DO project for e2e (vibecarbon-e2e) — env-first override
           # for ensureProjectAssignment, so CI runs file droplets into the
           # standing project instead of find-or-creating one per run.
@@ -242,17 +242,17 @@ jobs:
           # Linode (linode/compose scenario). Same empty-until-configured
           # contract as the DigitalOcean pair above.
           LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
-          LINODE_ACCESS_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_KEY }}
-          LINODE_SECRET_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_SECRET }}
-          LINODE_STORAGE_REGION: ${{ secrets.LINODE_OBJECT_STORAGE_REGION }}
+          LINODE_ACCESS_KEY: ${{ secrets.LINODE_ACCESS_KEY }}
+          LINODE_SECRET_KEY: ${{ secrets.LINODE_SECRET_KEY }}
+          LINODE_STORAGE_REGION: ${{ secrets.LINODE_STORAGE_REGION }}
           # Vultr (vultr/compose scenario). Same empty-until-configured
           # contract. The REGION is the subscription's object-storage CLUSTER
           # slug and is part of the required set, not an override — see the
           # prerequisite block at the top of this file.
           VULTR_API_TOKEN: ${{ secrets.VULTR_API_TOKEN }}
-          VULTR_ACCESS_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_KEY }}
-          VULTR_SECRET_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_SECRET }}
-          VULTR_STORAGE_REGION: ${{ secrets.VULTR_OBJECT_STORAGE_REGION }}
+          VULTR_ACCESS_KEY: ${{ secrets.VULTR_ACCESS_KEY }}
+          VULTR_SECRET_KEY: ${{ secrets.VULTR_SECRET_KEY }}
+          VULTR_STORAGE_REGION: ${{ secrets.VULTR_STORAGE_REGION }}
           # Scaleway (s1 scenario). Same empty-until-configured contract.
           # The credential is a TRIPLE — the Pulumi provider requires all
           # three, and the SAME pair signs S3 (no separate storage keys).
@@ -316,20 +316,20 @@ jobs:
         env:
           HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
-          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
-          DOCKER_HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_ACCESS_KEY }}
+          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_SECRET_KEY }}
+          DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
           DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
-          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_SPACES_KEY }}
-          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SPACES_SECRET }}
+          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_KEY }}
+          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SECRET_KEY }}
           DIGITALOCEAN_PROJECT_ID: ${{ vars.DIGITALOCEAN_PROJECT_ID }}
           LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
-          LINODE_ACCESS_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_KEY }}
-          LINODE_SECRET_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_SECRET }}
-          LINODE_STORAGE_REGION: ${{ secrets.LINODE_OBJECT_STORAGE_REGION }}
+          LINODE_ACCESS_KEY: ${{ secrets.LINODE_ACCESS_KEY }}
+          LINODE_SECRET_KEY: ${{ secrets.LINODE_SECRET_KEY }}
+          LINODE_STORAGE_REGION: ${{ secrets.LINODE_STORAGE_REGION }}
           VULTR_API_TOKEN: ${{ secrets.VULTR_API_TOKEN }}
-          VULTR_ACCESS_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_KEY }}
-          VULTR_SECRET_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_SECRET }}
+          VULTR_ACCESS_KEY: ${{ secrets.VULTR_ACCESS_KEY }}
+          VULTR_SECRET_KEY: ${{ secrets.VULTR_SECRET_KEY }}
           SCALEWAY_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
           SCALEWAY_ACCESS_KEY: ${{ secrets.SCALEWAY_ACCESS_KEY }}
           # SCALEWAY_DEFAULT_PROJECT_ID is IN the scrub list although it is not a
@@ -393,8 +393,8 @@ jobs:
           # sweep-hetzner.js's S3-bucket pass reads these directly (env-only,
           # same as the matrix step above) — without them the orphaned-bucket
           # half of the sweep silently no-ops every run.
-          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
-          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_ACCESS_KEY }}
+          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_SECRET_KEY }}
         run: node scripts/sweep-hetzner.js
 
       - name: Safety-net sweep, DigitalOcean (CI namespace only)
@@ -403,8 +403,8 @@ jobs:
         env:
           E2E_NAMESPACE: ci
           DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
-          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_SPACES_KEY }}
-          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SPACES_SECRET }}
+          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_KEY }}
+          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SECRET_KEY }}
         # Self-skips (exit 0 with a log line) when no DO token is configured,
         # so this step is inert until the DIGITALOCEAN_* secrets exist.
         run: npx tsx tests/e2e/sweep-digitalocean-ci.ts
@@ -415,9 +415,9 @@ jobs:
         env:
           E2E_NAMESPACE: ci
           LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
-          LINODE_ACCESS_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_KEY }}
-          LINODE_SECRET_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_SECRET }}
-          LINODE_STORAGE_REGION: ${{ secrets.LINODE_OBJECT_STORAGE_REGION }}
+          LINODE_ACCESS_KEY: ${{ secrets.LINODE_ACCESS_KEY }}
+          LINODE_SECRET_KEY: ${{ secrets.LINODE_SECRET_KEY }}
+          LINODE_STORAGE_REGION: ${{ secrets.LINODE_STORAGE_REGION }}
         # Self-skips (exit 0 with a log line) when no Linode token is
         # configured, so this step is inert until the LINODE_* secrets exist.
         run: npx tsx tests/e2e/sweep-linode-ci.ts
@@ -428,12 +428,12 @@ jobs:
         env:
           E2E_NAMESPACE: ci
           VULTR_API_TOKEN: ${{ secrets.VULTR_API_TOKEN }}
-          VULTR_ACCESS_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_KEY }}
-          VULTR_SECRET_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_SECRET }}
+          VULTR_ACCESS_KEY: ${{ secrets.VULTR_ACCESS_KEY }}
+          VULTR_SECRET_KEY: ${{ secrets.VULTR_SECRET_KEY }}
           # Required, not decorative: the bucket half of the sweep can only
           # authenticate against the subscription's own cluster, and exits 1
           # (enumeration incomplete) rather than guessing without this.
-          VULTR_STORAGE_REGION: ${{ secrets.VULTR_OBJECT_STORAGE_REGION }}
+          VULTR_STORAGE_REGION: ${{ secrets.VULTR_STORAGE_REGION }}
         # Self-skips (exit 0 with a log line) when no Vultr token is
         # configured, so this step is inert until the VULTR_* secrets exist.
         run: npx tsx tests/e2e/sweep-vultr-ci.ts
