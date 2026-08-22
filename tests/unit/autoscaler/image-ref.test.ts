@@ -248,8 +248,23 @@ describe('mirror job copies the manifest — never rebuilds, never multi-arch', 
   });
 
   it('authenticates to ghcr the same way the publish job does', () => {
-    expect(workflow).toMatch(/GHCR_ORG_PAT/);
-    // Both jobs must be bound to the environment that holds the PAT.
+    // Pins SAMENESS, not a particular credential. This asserted `GHCR_ORG_PAT`
+    // literally until 2026-08-22, when ghcr auth moved to the built-in
+    // GITHUB_TOKEN (the repo now lives in the org that owns the packages, so a
+    // long-lived org PAT bought nothing but a 90-day renewal). Pinning the
+    // name made the guard fail on an improvement while still permitting the
+    // thing it exists to prevent: two jobs drifting onto different credentials
+    // and one of them silently losing push access.
+    const passwords = [
+      ...workflow.matchAll(
+        /registry:\s*ghcr\.io[\s\S]{0,160}?password:\s*\$\{\{\s*secrets\.(\w+)\s*\}\}/g,
+      ),
+    ].map((m) => m[1]);
+    expect(
+      passwords.length,
+      'expected a ghcr login in every publishing job',
+    ).toBeGreaterThanOrEqual(2);
+    expect(new Set(passwords).size, `ghcr logins disagree: ${passwords.join(', ')}`).toBe(1);
     const jobEnvironments = [...workflow.matchAll(/^\s{4}environment:\s*(\S+)/gm)].map((m) => m[1]);
     expect(jobEnvironments.length).toBeGreaterThanOrEqual(2);
     for (const env of jobEnvironments) expect(env).toBe('e2e-infra');

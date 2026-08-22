@@ -51,8 +51,8 @@ jobs:
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
-          username: brandonpowers
-          password: ${{ secrets.GHCR_ORG_PAT }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -206,8 +206,8 @@ jobs:
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
-          username: brandonpowers
-          password: ${{ secrets.GHCR_ORG_PAT }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Mirror the amd64 manifest to ghcr (digest-preserving copy, never a rebuild)
         env:
           # Via env, never inlined into the script body: matrix values are
