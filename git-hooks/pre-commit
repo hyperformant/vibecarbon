@@ -6,6 +6,27 @@
 # To skip: git commit --no-verify
 # To run full tests: FULL_TEST=1 git commit
 
+# CI IS NOT A DEVELOPER MACHINE — and this hook reaches it by accident.
+#
+# package.json's `prepare` runs `git config core.hooksPath git-hooks`, so
+# `pnpm install` in ANY workflow arms these hooks. semantic-release then makes
+# a real `git commit` for the version bump, which fires this gate INSIDE the
+# release job.
+#
+# That is exactly how release run 32605420027 died (2026-08-22): the commit
+# was rejected by `pnpm lint`, semantic-release aborted during `prepare`, and
+# vibecarbon@0.39.16 never published. Note what it was linting — a tree
+# semantic-release had just rewritten (bumped package.json, generated
+# CHANGELOG.md). The gate was judging output it had never been designed to see.
+#
+# Re-running the suite here buys nothing: release.yml already REFUSES to
+# publish unless test.yml is green for that exact commit. It only adds a second
+# place for the release to die.
+if [ -n "$CI" ]; then
+  echo "CI detected — skipping the local gate (workflow jobs are the gate)."
+  exit 0
+fi
+
 echo "Running pre-commit tests..."
 echo ""
 
