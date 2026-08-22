@@ -1,0 +1,57 @@
+# The backup CronJob pod no longer talks to postgres:5432 or S3 directly — it
+# runs `kubectl exec` into the supabase-db pod (wal-g runs there). So its only
+# egress need is the Kubernetes apiserver. DNS + intra-namespace egress come
+# from the cluster-baseline policies (network-policies.yaml, podSelector {}).
+# The wal-g → S3 egress now happens from the supabase-db pod, allowed by the
+# supabase-db-s3-egress policy in network-policies.yaml.
+#
+# Also covers the manual `backup-manual-<ts>` Job created by
+# `kubectl create job --from=cronjob/backup` (src/backup.js triggerBackupJob):
+# that command copies cronJob.spec.jobTemplate.spec verbatim, including the
+# pod template's `app: vibecarbon-backup` label, so the ad-hoc Job's pod
+# matches this policy's podSelector too — no separate policy needed.
+#
+# LIVE RCA (e3 kept rig, 2026-07-07): `vibecarbon backup <env> -y -action
+# create` crash-looped with `dial tcp 10.43.0.1:443: connect: connection
+# refused` from inside the Job pod. The 10.43.0.1/32:443 rule below looks
+# right but is NOT sufficient by itself: kube-proxy DNATs the
+# kubernetes.default ClusterIP to the master node's real IP at the OUTPUT
+# chain BEFORE kube-router evaluates NetworkPolicy egress, so the policy
+# actually has to match the *post-NAT* destination, not 10.43.0.1. Same root
+# cause already hit + fixed for traefik-policy and app-policy (see
+# carbon/k8s/base/traefik/network-policy.yaml for the full RCA) — this policy
+# predates that fix and never got the matching rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backup-policy
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-backup
+  policyTypes:
+    - Egress
+  egress:
+    # Kubernetes apiserver (kubernetes.default → ClusterIP 10.43.0.1:443) so
+    # `kubectl exec` works. Mirrors the app/traefik apiserver-egress pattern.
+    # Kept even though it doesn't fire post-NAT (see comment above) — matches
+    # the sibling policies and costs nothing.
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # 0.0.0.0/0:6443 = the apiserver, dial-anywhere on apiserver-protocol
+    # port. This is the rule that actually matches, because kube-router sees
+    # the post-NAT master node IP (which changes every deploy and can be
+    # public — see traefik/network-policy.yaml for the full CIDR-coupling
+    # RCA). Port 6443 is apiserver-protocol only; deny-by-default holds on
+    # every other port.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443

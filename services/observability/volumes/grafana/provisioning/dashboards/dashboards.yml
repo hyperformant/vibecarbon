@@ -1,0 +1,16 @@
+# Grafana Dashboard Provisioning for {{PROJECT_NAME}}
+# Auto-loads dashboards from the dashboards directory
+
+apiVersion: 1
+
+providers:
+  - name: '{{PROJECT_NAME}}'
+    orgId: 1
+    folder: '{{PROJECT_NAME}}'
+    folderUid: '{{PROJECT_NAME}}'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

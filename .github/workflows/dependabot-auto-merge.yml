@@ -1,0 +1,141 @@
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+  # A top-level permissions block zeroes every unlisted scope, so the
+  # check-runs poll below 403s without this — silently, for 30 min, then
+  # exits 1. Broke every non-major bump from 2026-07-13 until 2026-08-12.
+  checks: read
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve + enable auto-merge (patch, minor, or security)
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor' ||
+          contains(github.event.pull_request.labels.*.name, 'security')
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEPENDENCY_TYPE: ${{ steps.meta.outputs.dependency-type }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SELF_CHECK: ${{ github.job }}
+        run: |
+          # Gate on the PR's other checks (Test Suite) before merging. main
+          # has no required status checks (they would also block direct
+          # pushes), so without this the merge lands the moment this job
+          # runs — minutes before the Test Suite finishes — and a red bump
+          # could reach main unverified.
+          deadline=$((SECONDS + 1800))
+          grace=$((SECONDS + 180))
+          while :; do
+            if ! runs=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+              --jq "[.check_runs[] | select(.name != \"$SELF_CHECK\") | {name, status, conclusion}]"); then
+              echo "check-runs API call failed — retrying"
+              [ $SECONDS -gt $deadline ] && exit 1
+              sleep 30
+              continue
+            fi
+            total=$(jq length <<<"$runs")
+            pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
+            failed=$(jq '[.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")] | length' <<<"$runs")
+            if [ "$failed" -gt 0 ]; then
+              echo "::error::checks failed on $HEAD_SHA — not merging:"
+              jq -r '.[] | "\(.name): \(.status)/\(.conclusion // "-")"' <<<"$runs"
+              exit 1
+            fi
+            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+              echo "all $total checks green"
+              break
+            fi
+            # No sibling checks may ever appear (path-filtered workflows) —
+            # give them a grace window to register, then stop waiting.
+            if [ "$total" -eq 0 ] && [ $SECONDS -gt $grace ]; then
+              echo "no sibling checks registered within grace window — nothing to wait for"
+              break
+            fi
+            if [ $SECONDS -gt $deadline ]; then
+              echo "::error::checks still pending after 30 min — not merging"
+              exit 1
+            fi
+            echo "waiting: $pending of $total checks pending"
+            sleep 30
+          done
+
+          # WHAT THIS GATE DOES NOT COVER, and it is not a small gap.
+          #
+          # The wait above proves the PR HEAD is green. The merge below then
+          # squashes onto main using GITHUB_TOKEN — and GitHub deliberately
+          # creates NO workflow runs for pushes made with that token (its
+          # recursion guard). So the resulting main commit gets no Test Suite
+          # run of its own: what was verified is the pre-merge head, never the
+          # merge result.
+          #
+          # Measured 2026-08-21: ten bumps merged here between 20:26 and 20:52
+          # (8c3d5719 -> 6a78254b); `gh run list --commit` returned zero runs
+          # for every one. main was fine — a local `lint + test:unit +
+          # test:integration` on 6a78254b was green (6317 + 309 tests) — but
+          # nothing in CI said so, and release.yml's guard reads exactly that
+          # missing record, which left main UNRELEASABLE.
+          #
+          # Mitigated for now by `workflow_dispatch` on test.yml (dispatch it
+          # against main to mint a run keyed to the head SHA). The real fix is
+          # a decision nobody has made yet: either merge with a PAT so the
+          # push triggers workflows normally, or have this job dispatch
+          # test.yml against main after a successful merge. Both widen what
+          # this workflow can do, which is why it is a decision and not a
+          # patch.
+          gh pr review --approve "$PR_URL" \
+            --body "Auto-approved: $UPDATE_TYPE ($DEPENDENCY_TYPE) by Dependabot auto-merge workflow."
+          # Retry the merge: when Dependabot opens several PRs in the same
+          # minute their merges race, and GitHub rejects the laggards with
+          # "Base branch was modified. Review and try the merge again."
+          # (PR #146, 2026-07-13 — the approve landed but the merge died,
+          # stranding an approved-but-unmerged PR).
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge --auto --squash "$PR_URL"; then
+              exit 0
+            fi
+            echo "::warning::merge attempt $attempt failed — retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "::error::merge failed after 5 attempts"
+          exit 1
+
+      - name: Label major updates for human review
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPS: ${{ steps.meta.outputs.dependency-names }}
+          PREV: ${{ steps.meta.outputs.previous-version }}
+          NEXT: ${{ steps.meta.outputs.new-version }}
+        run: |
+          # Tolerate missing labels — a deleted label shouldn't fail the
+          # whole workflow and block the more important comment below.
+          gh pr edit "$PR_URL" --add-label "deps:major,needs-review" || \
+            echo "::warning::Failed to add labels (likely missing in repo)"
+          # Group updates emit empty PREV/NEXT — only include the range when both are set.
+          if [ -n "$PREV" ] && [ -n "$NEXT" ]; then
+            VERSION_INFO=" $PREV -> $NEXT"
+          else
+            VERSION_INFO=""
+          fi
+          gh pr comment "$PR_URL" --body "Major version bump (\`$DEPS\`$VERSION_INFO). Auto-merge skipped — needs human review for potential breaking changes. CI will still run on this PR."

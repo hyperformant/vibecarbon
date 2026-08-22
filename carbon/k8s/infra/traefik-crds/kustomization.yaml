@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Traefik CRDs for IngressRoute, Middleware, etc.
+# Apply this BEFORE base manifests that use Traefik CRs
+# Usage: kubectl apply -k k8s/infra/traefik-crds/
+
+# LOCKSTEP PIN — the tag below MUST equal the Traefik image tag we run:
+#   carbon/k8s/base/traefik/deployment.yaml   (image: traefik:vX.Y.Z)
+#   carbon/docker-compose.yml                 (image: traefik:vX.Y.Z)
+# tests/unit/template/traefik-crd-version.test.ts fails the build if they drift.
+#
+# Why it matters: the CRDs define the schema the API server validates against,
+# so anything newer than the CRD tag is silently PRUNED from an IngressRoute or
+# Middleware rather than rejected. This sat at v3.3.6 while Traefik ran v3.6.11
+# — same 10 CRD kinds, but the v3.3.6 schemas are ~700 lines shorter, so every
+# field added in 3.4-3.6 was being dropped without an error.
+resources:
+  # Traefik v3 CRDs from official repository
+  - https://raw.githubusercontent.com/traefik/traefik/v3.6.11/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml

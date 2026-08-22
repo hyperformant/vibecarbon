@@ -1,0 +1,20 @@
+# Traefik Dynamic Configuration for Vite Dev Server
+# Routes app.localhost to the Vite dev server running on the host
+#
+# This enables ForwardAuth to work in development by ensuring all services
+# (app, n8n, metabase, etc.) are accessed via *.localhost subdomains,
+# allowing auth cookies to be shared across all services.
+
+http:
+  routers:
+    vite-dev:
+      rule: "Host(`app.localhost`)"
+      entrypoints:
+        - web
+      service: vite-dev
+
+  services:
+    vite-dev:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:5173"

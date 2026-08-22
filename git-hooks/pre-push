@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Pre-push hook to catch CI failures before pushing
+#
+# Runs lint + unit + integration tests (matches CI jobs that must pass).
+# E2E and smoke tests are excluded (require Docker, take 15-20 min).
+#
+# To skip: git push --no-verify
+# To run manually: pnpm test:prepush
+
+echo "Running pre-push checks..."
+echo ""
+
+pnpm lint || exit 1
+pnpm test:unit || exit 1
+pnpm test:integration || exit 1
+
+echo ""
+echo "All pre-push checks passed."
+exit 0

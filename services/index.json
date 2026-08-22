@@ -1,0 +1,29 @@
+[
+  {
+    "name": "observability",
+    "description": "Prometheus, Grafana, Loki monitoring stack",
+    "version": "1.0.0",
+    "url": "http://grafana.localhost"
+  },
+  {
+    "name": "n8n",
+    "description": "Workflow automation platform",
+    "version": "1.0.0",
+    "port": 5678,
+    "url": "http://localhost:5678"
+  },
+  {
+    "name": "redis",
+    "description": "In-memory data store for caching and sessions",
+    "version": "1.0.0",
+    "port": 6379,
+    "url": "redis://localhost:6379"
+  },
+  {
+    "name": "metabase",
+    "description": "Business intelligence and analytics dashboard",
+    "version": "1.0.0",
+    "port": 3001,
+    "url": "http://metabase.localhost"
+  }
+]

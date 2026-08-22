@@ -1,0 +1,10 @@
+# Phase 3 of the GitOps refactor: cert-manager-webhook-hetzner as a
+# single kustomize bundle. Applied via `kubectl apply -k` directly from
+# this directory (no values templating needed — the HelmRelease's
+# values are static).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: flux-system
+resources:
+  - helm-repository.yaml
+  - helm-release.yaml

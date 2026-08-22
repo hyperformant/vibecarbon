@@ -1,0 +1,66 @@
+# Loki Configuration for Vibecarbon
+# Single-node setup optimized for self-hosted deployments
+# Compatible with Loki 3.x (requires TSDB + schema v13)
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+
+limits_config:
+  # Retain logs for 31 days
+  retention_period: 744h
+  # Allow larger log lines
+  max_line_size: 256kb
+  # Ingestion limits
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  retention_delete_delay: 2h
+  compaction_interval: 10m
+  # Loki 3.x requires delete_request_store when retention_enabled is true,
+  # otherwise the container fails to start with "CONFIG ERROR: invalid
+  # compactor config: compactor.delete-request-store should be configured
+  # when retention is enabled" and crash-loops. RCA: prod-1 2026-05-26,
+  # loki had been restart-looping since first deploy because of this.
+  # filesystem matches the storage_config above; switch to s3/gcs if the
+  # rest of loki storage moves off filesystem.
+  delete_request_store: filesystem

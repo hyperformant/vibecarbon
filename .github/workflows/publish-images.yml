@@ -1,0 +1,255 @@
+# Every image a cluster pulls that is not published by publish-db-image.yml:
+# the one image this org BUILDS (carbon-autoscaler) plus the whole
+# mirror-upstream-images matrix (#237). Named for the set, not for its first
+# member — it was `publish-carbon-autoscaler-image` until the mirror matrix
+# grew past it.
+name: publish-images
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/carbon-autoscaler/**'
+      - 'src/autoscaler/**'
+      - 'src/lib/providers/**'
+      - 'src/lib/images.js'
+      - 'scripts/mirror-matrix.mjs'
+      - '.github/workflows/publish-images.yml'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  packages: write   # push to ghcr
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: e2e-infra
+    steps:
+      - uses: actions/checkout@v7
+      - id: ref
+        name: Resolve ref from src/lib/images.js
+        run: |
+          IMG=$(grep -oP "CARBON_AUTOSCALER_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
+          TAG=$(grep -oP "CARBON_AUTOSCALER_TAG\s*=\s*'\K[^']+" src/lib/images.js)
+          echo "image=$IMG:$TAG" >> "$GITHUB_OUTPUT"
+      # amd64-only, deliberately. This image has exactly ONE consumer: the
+      # `carbon-autoscaler` sidecar in carbon/k8s/base/cluster-autoscaler/
+      # deployment.yaml, which is nodeSelector-pinned to
+      # node-role.kubernetes.io/control-plane — i.e. it only ever runs on a
+      # provisioned k3s control-plane server, never on a developer machine.
+      # vibecarbon standardizes on x86-64 servers (2026-07-30): DigitalOcean
+      # offers no ARM instances at all, and Hetzner ARM is 4 SKUs in 3 of 6
+      # locations behind a "limited availability" tier. No arm64 consumer
+      # exists, so building one is pure QEMU tax.
+      #
+      # Native amd64 on the ubuntu-latest runner needs no
+      # docker/setup-qemu-action, so that step is gone too. Measured on run
+      # 30588306810 (the last multi-arch publish): setup-qemu 7s + a 36s
+      # two-arch build-push out of a 60s job. Dropping the emulated arm64 leg
+      # is worth ~25s per run here — small, but it is pure waste.
+      #
+      # Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: brandonpowers
+          password: ${{ secrets.GHCR_ORG_PAT }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/carbon-autoscaler/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ref.outputs.image }}
+      - name: Smoke-test the full server import graph on the published amd64 image
+        # Imports server.js (superset of proto.js) — catches any runtime dep
+        # missing from the image's npm-install line. Field-proven 2026-07-27:
+        # the proto-only smoke missed undici + @clack/prompts, and the sidecar
+        # crash-looped on the first real k8s deploy.
+        run: |
+          docker run --rm --entrypoint node ${{ steps.ref.outputs.image }} \
+            -e "import('/app/src/autoscaler/server.js').then(()=>console.log('server import ok')).catch(e=>{console.error(e.message);process.exit(1)})"
+
+  # Everything below mirrors UPSTREAM registry.k8s.io images (never rebuilds
+  # them) into our ghcr org. One workflow owns both of the cluster-autoscaler
+  # pod's images plus every CSI sidecar a cluster needs to have storage at all.
+  #
+  # WHY — the same failure, twice, on two different image sets:
+  #
+  #   2026-07-31, e3 k8s e2e. Kubelet on the control-plane node:
+  #
+  #     Failed to pull image
+  #     "registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.7": ... failed to
+  #     resolve reference ... unexpected status from HEAD request to
+  #     https://europe-west3-docker.pkg.dev/v2/k8s-artifacts-prod/images/
+  #     autoscaling/cluster-autoscaler/manifests/v1.32.7: 403 Forbidden
+  #
+  #   x3 pulls, all 403, BackOff x20 over 5m11s → the 300s rollout wait failed
+  #   the deploy. Fixed by mirroring cluster-autoscaler (#222).
+  #
+  #   2026-08-05, fresh k8s-ha rig. The identical 403 class hit
+  #   registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1 and
+  #   sig-storage/livenessprobe:v2.13.1 on ONE node of three. That node's
+  #   hcloud-csi node plugin never registered, its CSINode carried no topology
+  #   key, the db PVCs could not provision, and `helm upgrade --wait` sat until
+  #   timeout. Two sibling nodes pulled the same images fine.
+  #
+  # registry.k8s.io routes by CLIENT IP to a cloud backend, and its GCP leg
+  # intermittently 403s datacenter ranges (Hetzner among them) — not fixable by
+  # retrying, because a retry lands on the same backend. It is per-node
+  # roulette, which is why a three-node cluster can lose storage entirely on one
+  # bad coin flip. ghcr.io was already a hard dependency of every cluster we
+  # build, so mirroring removes a registry rather than adding one. Full
+  # write-up: src/lib/images.js.
+  #
+  # OPERATOR NOTE: the first successful run of a matrix leg CREATES its package
+  # PRIVATE. k3s nodes pull anonymously (no imagePullSecret), so EVERY package
+  # must be flipped to public by hand in the org's package settings — there is
+  # no REST API for container package visibility. The exact list is
+  # `mirroredK8sPackageNames()` in src/lib/images.js. Verify each with an
+  # unauthenticated `docker pull` BEFORE merging any code that consumes it.
+  #
+  # PACKAGE PAGE: bare on purpose — it cannot currently be otherwise, and the
+  # failure mode is silent, so read this before "fixing" it.
+  #
+  # ghcr builds a container package's description from exactly one input,
+  # `org.opencontainers.image.description`. There is no UI field and no API to
+  # set it. The org's two OWNED images supply it as a Dockerfile LABEL (see
+  # docker/carbon-autoscaler/Dockerfile), but a LABEL lives in the image CONFIG,
+  # so setting one here would mean rebuilding — the one thing this job must
+  # never do. The non-destructive alternative is an annotation on the index this
+  # job mints, which would leave upstream's platform manifest untouched:
+  #
+  #   docker buildx imagetools create \
+  #     --annotation "index:org.opencontainers.image.description=..." \
+  #     --tag "$DST" "${SRC%:*}@$DIGEST"
+  #
+  # GitHub documents exactly that shape — a multi-platform package takes its
+  # description from `org.opencontainers.image.description` in the index's
+  # `annotations`, not from a config label (docs.github.com "Working with the
+  # Container registry"; the Actions example spells it
+  # `annotation-index.org.opencontainers.image.description=...`). So the
+  # mechanism is right. It still does not work here, and it fails SILENTLY.
+  #
+  # Probed against buildx v0.35.0 on 2026-08-05: `imagetools create` derives the
+  # output media type from its SOURCE. Upstream's child manifests are
+  # `application/vnd.docker.distribution.manifest.v2+json` (verified against the
+  # live index the same day), so the index this job mints is a Docker manifest
+  # LIST — a schema with no `annotations` field at all. Every prefix buildx
+  # accepts (bare, `index:`, `manifest:`, `manifest-descriptor:`,
+  # `index-descriptor:`) was taken without a warning or a non-zero exit and then
+  # discarded: the pushed index came out byte-for-byte identical to one created
+  # with no `--annotation` whatsoever. Re-running the identical probe against an
+  # OCI-media-type source makes buildx emit an OCI index and the annotation
+  # lands — which pins the cause to the media type, not to the flag or its
+  # spelling. It is buildx's code path, not a quirk of this registry: it applies
+  # annotations only when the output media type is the OCI image index, and
+  # chooses a Docker manifest list whenever the source descriptors are Docker
+  # ones. Tracked (open, undiagnosed) as docker/buildx#3061, and there is no
+  # `--oci-mediatypes`-style escape hatch on `imagetools create`. Adding the flag
+  # anyway would leave a line in this file that looks like it documents the
+  # package and does nothing.
+  #
+  # That leaves: rebuild (destroys the digest parity this whole job exists to
+  # preserve — no), hand-PUT an OCI index referencing upstream's unmodified
+  # Docker-typed manifest (possible, but it puts a hand-rolled registry API call
+  # on the critical path of a deploy-blocking image to fix a cosmetic problem),
+  # or leave the page bare and explain why. Leaving it bare.
+  #
+  # WHEN THIS BECOMES A ONE-LINER: upstream adopting OCI media types is the only
+  # thing in the way. Re-probe with `docker buildx imagetools inspect --raw` on
+  # the upstream ref; the day `.manifests[].mediaType` reads
+  # `application/vnd.oci.image.manifest.v1+json`, add the `--annotation` line
+  # above. VERIFY THE PAGE, do not assume: nobody has published an end-to-end
+  # confirmation that ghcr renders an index annotation, ghcr's description
+  # surface has a history of quietly regressing (community discussions #26565,
+  # #109670), and there is a report that an index carrying an attestation child
+  # suppresses metadata rendering entirely (#45969). Guarded by
+  # tests/unit/deploy/oci-image-metadata.test.ts, which fails if a `--annotation`
+  # appears in this job without this note being revisited.
+
+  # Resolve the mirror set ONCE, into a matrix. The list lives in
+  # src/lib/images.js and is read by importing it, not by grepping it: #222
+  # resolved two scalar constants and `grep -oP` was fine, but the set is now a
+  # list of (repo, tag) tuples, which grep cannot express. A pattern that
+  # silently matches nothing writes an empty ref like ":" into $GITHUB_OUTPUT —
+  # a silent CI failure, not a visible one. scripts/mirror-matrix.mjs has no
+  # dependencies (plain ESM over a constants module), so this job needs no
+  # install step. Guarded by tests/unit/deploy/k8s-image-mirrors.test.ts, which
+  # runs THAT EXACT SCRIPT and compares its output to the constants.
+  mirror-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.gen.outputs.include }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: gen
+        name: Build the mirror matrix from src/lib/images.js
+        run: |
+          set -euo pipefail
+          INCLUDE=$(node scripts/mirror-matrix.mjs)
+          test -n "$INCLUDE"
+          echo "include=$INCLUDE" >> "$GITHUB_OUTPUT"
+
+  mirror-upstream-images:
+    needs: mirror-matrix
+    runs-on: ubuntu-latest
+    environment: e2e-infra
+    strategy:
+      # Every image is independent. One package failing (a bad tag, a transient
+      # upstream 5xx) must not cancel the other legs — a partially-mirrored set
+      # that reports which leg died beats an all-or-nothing abort that hides it.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.mirror-matrix.outputs.include) }}
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: brandonpowers
+          password: ${{ secrets.GHCR_ORG_PAT }}
+      - name: Mirror the amd64 manifest to ghcr (digest-preserving copy, never a rebuild)
+        env:
+          # Via env, never inlined into the script body: matrix values are
+          # trusted here (they come from a checked-in constants module, not from
+          # event payload), but the shape stays uniform with every other job.
+          SRC: ${{ matrix.src }}
+          DST: ${{ matrix.dst }}
+        # Upstream publishes a multi-platform index. vibecarbon runs x86-64
+        # only (see tests/unit/deploy/workflow-platforms.test.ts), so resolve
+        # the linux/amd64 child manifest and copy just that — hauling the other
+        # platforms' blobs into our org would be pure storage tax. The digest is
+        # RESOLVED AT RUN TIME from upstream's tag; it is not a digest pin in a
+        # template (the house rule) — what ships in the manifest is a tag.
+        #
+        # `imagetools create` is a registry-side manifest copy: it re-pushes
+        # the same layer blobs and the same config, so the mirrored image is
+        # bit-identical to upstream's. Re-running is a no-op that lands on the
+        # same digest, which is what makes this safe to fire on every push.
+        # The select is on PLATFORM ONLY, deliberately. Upstream's index uses
+        # `application/vnd.docker.distribution.manifest.v2+json`, not the OCI
+        # `image.manifest` type (verified against the live index 2026-07-31),
+        # so a mediaType filter is the kind of thing that matches nothing and
+        # fails loudly at best. Attestation entries carry
+        # platform.architecture "unknown" and are excluded by this filter for
+        # free. Guarded by tests/unit/autoscaler/image-ref.test.ts, which runs
+        # this exact jq program against a captured copy of upstream's index.
+        run: |
+          set -euo pipefail
+          echo "mirroring $SRC -> $DST"
+          DIGEST=$(docker buildx imagetools inspect --raw "$SRC" \
+            | jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0]')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::no linux/amd64 manifest found in $SRC" >&2
+            exit 1
+          fi
+          echo "resolved amd64 manifest: $DIGEST"
+          docker buildx imagetools create --tag "$DST" "${SRC%:*}@$DIGEST"
+      - name: Verify the mirrored tag resolves
+        env:
+          DST: ${{ matrix.dst }}
+        # Authenticated inspect only — this cannot prove the package is public.
+        # That flip is a manual, one-time operator step (see the job header),
+        # and it is per PACKAGE, not per tag: flipping csi-provisioner once
+        # covers every tag this matrix pushes under that name.
+        run: docker buildx imagetools inspect "$DST"

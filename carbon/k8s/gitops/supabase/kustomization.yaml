@@ -1,0 +1,33 @@
+# Phase 2 of the GitOps refactor: Supabase HelmRepository + HelmRelease +
+# values ConfigMap as a single kustomize bundle. See
+# plans/gitops-refactor-2026-04-20.md.
+#
+# How the deploy code uses this:
+#   1. Render carbon/k8s/values/supabase.values.yaml into a tempdir
+#      (substituting {{DOMAIN}} + {{PROJECT_NAME}}).
+#   2. Copy this kustomization + helm-repository.yaml + helm-release.yaml
+#      into the same tempdir.
+#   3. Run `kubectl apply -k <tempdir>`. Kustomize generates the values
+#      ConfigMap from the rendered values.yaml; Flux reconciles
+#      HelmRepository → HelmChart → HelmRelease in dependency order.
+#   4. Wait for `helmrelease/supabase` Ready condition.
+#
+# Replaces the imperative apply/poke/wait flow in
+# src/lib/deploy/k8s/index.js (~40 LOC eliminated).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: flux-system
+resources:
+  - helm-repository.yaml
+  - helm-release.yaml
+configMapGenerator:
+  - name: supabase-values
+    files:
+      - values.yaml
+generatorOptions:
+  # Kustomize defaults to hashed ConfigMap names (supabase-values-abc123)
+  # so rolling updates trigger. Our HelmRelease references the name
+  # directly via `valuesFrom.name: supabase-values`, so we disable the
+  # hash suffix. Flux will notice ConfigMap changes via generation bumps
+  # and re-reconcile.
+  disableNameSuffixHash: true

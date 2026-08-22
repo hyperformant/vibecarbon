@@ -1,0 +1,100 @@
+# =============================================================================
+# VIBECARBON REPLICATION GATEWAY (HA k8s only)
+# =============================================================================
+# Cross-cluster PostgreSQL streaming replication runs over a point-to-point
+# WireGuard tunnel between the two clusters' supabase nodes (wg0, UDP 51821).
+# This gateway is a hostNetwork socat relay pinned to the supabase node; it
+# bridges the intra-cluster db pod to the tunnel.
+#
+#   standby db pod ──tcp <node-priv-ip>:15433──► standby repl-gateway (this pod)
+#        └─ socat into wg0 → 10.99.0.1:15433 ──► primary repl-gateway (this pod)
+#                                                    └─ socat → 127.0.0.1:5433 (primary postgres hostPort)
+#
+# The WireGuard device (wg0) is owned by the HOST kernel (brought up over SSH by
+# setupReplication / exchangeAndBringUpTunnel). Because this pod is
+# `hostNetwork: true`, its socat shares the host netns and reaches wg0 + the
+# node's private IP directly — so the pod itself needs NO extra capabilities.
+#
+# This manifest is NOT part of the base kustomization: it is HA-only and needs
+# per-cluster values (relay direction + node private IP). setupReplication
+# renders the placeholders below and applies it to each cluster via stdin.
+#
+# Placeholders (patched at apply time by setupReplication — NEVER at runtime):
+#   __RELAY_LISTEN__       socat listen address spec  (differs per primary/standby)
+#   __RELAY_TARGET__       socat downstream target    (differs per primary/standby)
+#   __SUPABASE_PRIVATE_IP__  this cluster's supabase node private IP (egress netpol)
+# =============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: repl-gateway
+  namespace: vibecarbon
+  labels:
+    app: repl-gateway
+spec:
+  # Share the host netns so socat can bind the node's private IP / the wg0
+  # tunnel IP and reach the host WireGuard device.
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  # The supabase node carries a dedicated taint; without this toleration the
+  # pod stays Pending ("untolerated taint {dedicated: supabase}").
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: supabase
+      effect: NoSchedule
+  nodeSelector:
+    dedicated: supabase
+  restartPolicy: Always
+  containers:
+    - name: relay
+      # Version tag, not a digest and not floating. The previous comment here
+      # claimed "users always get the latest socat" while the image was
+      # untagged (implicit :latest) with imagePullPolicy: IfNotPresent — the
+      # opposite of what that combination does. IfNotPresent never re-pulls a
+      # tag already cached on the node, so nodes silently pinned themselves to
+      # whatever :latest meant the first time each one pulled, and two nodes in
+      # the same cluster could run different socat builds. This sits on the
+      # replication/WireGuard path, so that nondeterminism is worth removing.
+      # Bump deliberately; alpine/socat 1.8.1.3 was current 2026-07-25.
+      # The image ENTRYPOINT is `socat`; args are its two address specs.
+      image: alpine/socat:1.8.1.3
+      imagePullPolicy: IfNotPresent
+      args:
+        - "__RELAY_LISTEN__"
+        - "__RELAY_TARGET__"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 250m
+          memory: 64Mi
+---
+# The ONE additive egress NetworkPolicy that admits the db pod → local gateway
+# hop. The gateway presents as the node's private IP (inside the 10.0.0.0/8
+# range excluded by supabase-db-s3-egress) on tcp 15433, so the hop is blocked
+# by default. This policy is additive to default-deny-all and scoped to exactly
+# one destination IP + one port. NetworkPolicy is connection-stateful, so
+# allowing the egress SYN clears the return path too — no ingress rule needed
+# (and none applies to the hostNetwork gateway). Shipped on BOTH clusters (each
+# targeting its own node) for failover symmetry.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-db-repl-gateway-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: supabase
+      app.kubernetes.io/name: supabase-db
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: __SUPABASE_PRIVATE_IP__/32
+      ports:
+        - protocol: TCP
+          port: 15433

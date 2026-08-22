@@ -1,0 +1,61 @@
+# =============================================================================
+# GRAFANA PROVISIONING CONFIGMAP
+# =============================================================================
+# Pre-configures Grafana datasources (Prometheus, Loki) and dashboard
+# provisioning so Grafana starts ready-to-use without manual setup.
+#
+# NOTE: unlike the Docker Compose provisioning, this k8s config ships NO
+# PostgreSQL datasource. The compose stack has a postgres-exporter and a
+# least-privilege `observability_ro` datasource role (provisioned by the db
+# init script); k8s has neither an exporter nor a role-provisioning path, and
+# the shipped dashboards query only Prometheus/Loki. The previous PostgreSQL
+# datasource here was hardcoded to the `supabase_admin` SUPERUSER yet was
+# non-functional anyway (its $DB_PASSWORD was never set in the Grafana env, and
+# its host `postgres` does not match the chart's `supabase-supabase-db`
+# Service). It was removed rather than shipped as a dormant superuser
+# credential. FOLLOW-UP: to add app-DB panels on k8s, deploy a postgres-exporter
+# and provision an `observability_ro` (pg_monitor) role with its password
+# threaded into vibecarbon-secrets — see the H-9 addendum in
+# the security-remediation-design spec.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+  labels:
+    app: vibecarbon-grafana
+    component: observability
+data:
+  datasources.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          httpMethod: POST
+          timeInterval: "15s"
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki:3100
+        editable: false
+        jsonData:
+          maxLines: 1000
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+      - name: 'vibecarbon'
+        orgId: 1
+        folder: 'vibecarbon'
+        folderUid: 'vibecarbon'
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards

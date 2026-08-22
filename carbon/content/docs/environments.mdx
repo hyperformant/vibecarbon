@@ -1,0 +1,98 @@
+---
+title: "Environments"
+description: "Manage multiple deployment environments with per-environment configuration and defaults."
+order: 8
+---
+
+## Overview
+
+Vibecarbon supports multiple named environments. Each environment is an independent deployment with its own infrastructure, database, secrets, and configuration.
+
+```bash
+npx vibecarbon deploy prod      # Production
+npx vibecarbon deploy staging   # Staging
+npx vibecarbon deploy dev       # Dev / preview
+```
+
+The environment name is free-form, so use any name that fits your workflow. `prod` (and its alias `production`) is the only special name and unlocks production-grade defaults.
+
+## Environment Defaults
+
+The following defaults differ between `prod` and all other environments:
+
+| Setting | `prod` | `staging` / `dev` / `qa` |
+|---------|--------|--------------------------|
+| Backup schedule | Every 6 hours | Daily at 2 AM |
+| Backup retention | 30 days | 7 days |
+
+The default **server type** does not vary by environment. It is derived from
+your provider's live catalog for the region you deploy into, filtered to the
+SKUs that region can actually place. Providers sell different generations in
+different locations (on Hetzner the EU locations and the US locations are on
+different shared-vCPU lines), so the default you get depends on your region.
+
+If the CLI cannot reach the provider API it falls back to a built-in list,
+which is a best-effort snapshot rather than a guarantee; run the deploy prompt
+with a valid API token to select from live availability.
+
+All settings can be overridden interactively during the deploy prompt. After the first deploy, choices are saved to `.vibecarbon.json` and reused automatically on subsequent deploys.
+
+## Managing Multiple Environments
+
+You can run as many environments as you need. A typical setup:
+
+| Environment | Purpose |
+|-------------|---------|
+| `prod` | Live traffic, production data |
+| `staging` | Pre-release validation, mirrors prod config |
+| `dev` | Feature development, throwaway data |
+
+Each environment gets its own cluster, domain, and database. They share nothing at the infrastructure level.
+
+## Node Scaling
+
+Worker nodes are bounds-controlled at deploy time. The default is `min=1, max=3` (cluster-autoscaler scales 0..(max-min) workers on top of the static floor). Worker bounds are set during the `vibecarbon deploy` interactive prompt or in `.vibecarbon.json`.
+
+```bash
+# Pick mode interactively, including k8s/k8s-ha and worker bounds
+npx vibecarbon deploy prod
+
+# Scripted: explicit mode, region, and skip prompts (hel1 is a Hetzner region)
+npx vibecarbon deploy prod -mode k8s-ha -region hel1 -y
+
+# A new environment on a different cloud (nyc3 is a DigitalOcean region)
+npx vibecarbon deploy staging -provider digitalocean -region nyc3 -mode compose -y
+```
+
+`-provider` selects the cloud for a **new** environment, and `-region` takes that provider's own region ids. An environment keeps the provider it was first deployed with, so later deploys of the same environment don't repeat the flag. See [Choosing a provider](/docs/deployment#choosing-a-provider) for which modes and regions each cloud offers.
+
+Available modes: `compose`, `compose-ha` (multi-region with streaming replication), `k8s`, and `k8s-ha`. `compose` is free on Graphite; `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license. Mode availability varies by provider — `k8s-ha` is Hetzner-only today.
+
+To re-tune bounds or worker server types on an existing cluster, run `npx vibecarbon scale`, and the wizard walks you through what's changeable. Power users can seed a server-type change with `-type`, using an id from that environment's provider catalog (e.g. `npx vibecarbon scale prod -type cx33 -y` on Hetzner).
+
+## Backups
+
+Backups run automatically on a schedule that differs by environment:
+
+```bash
+# Create a manual backup
+npx vibecarbon backup staging
+
+# List backups
+npx vibecarbon backup prod -l
+
+# Restore (interactive picker)
+npx vibecarbon restore staging
+```
+
+See the [Deployment](/docs/deployment) guide for full backup and restore options.
+
+## Destroying an Environment
+
+To tear down an environment and all its infrastructure:
+
+```bash
+npx vibecarbon destroy staging
+```
+
+This removes the cluster, load balancers, volumes, and DNS records for that environment. Production environments prompt for confirmation before proceeding.

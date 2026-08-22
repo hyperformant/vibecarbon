@@ -1,0 +1,28 @@
+# Development overrides - automatically loaded by docker compose
+# Note: Admin services (studio, traefik) have no auth in local dev - auth added via prod overlay
+#
+# IMPORTANT: For ForwardAuth to work with admin services (n8n, metabase, etc.),
+# access the app at http://app.localhost instead of http://localhost:5173.
+# This ensures auth cookies are shared across all *.localhost subdomains.
+#
+# Secrets (DB passwords, JWTs) are read from env vars at runtime — no dev-specific
+# SQL files needed for roles or service init. Only super-admin uses a dev override
+# (for the admin email and password hash).
+
+services:
+  db:
+    ports:
+      - "${DEV_DB_PORT:-5432}:5432"
+    volumes:
+      - ./volumes/db/super-admin.dev.sql:/tmp/super-admin.sql:Z
+
+  # Traefik dev config: add extra_hosts so it can reach the Vite dev server on the host
+  # Also mount dev middlewares that use host.docker.internal for ForwardAuth
+  traefik:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./volumes/traefik:/etc/traefik/dynamic:ro
+      # Override middlewares to use host.docker.internal for ForwardAuth in dev
+      - ./volumes/traefik/middlewares.dev.yml:/etc/traefik/dynamic/middlewares.yml:ro

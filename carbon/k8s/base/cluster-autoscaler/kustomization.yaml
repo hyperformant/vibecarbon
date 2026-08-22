@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Cluster-autoscaler must live in `kube-system`. The parent
+# `carbon/k8s/base/kustomization.yaml` sets `namespace: vibecarbon`,
+# whose namespace transformer overrides every namespaced resource
+# below it — including ours. Phase 5 (`applyK3sManifests`) therefore
+# applies this kustomization standalone via
+# `kubectl apply -k carbon/k8s/base/cluster-autoscaler/` so the
+# `namespace: kube-system` directive below takes effect, mirroring
+# the CCM/CSI pattern (those are listed in `base/kustomization.yaml`
+# only as comments and applied separately from cloud-init).
+namespace: kube-system
+
+resources:
+  - deployment.yaml
+  - rbac.yaml
+  - cloud-config.yaml

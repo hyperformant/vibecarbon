@@ -1,0 +1,23 @@
+# Local development configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vibecarbon-config
+data:
+  # Site Configuration (local URLs)
+  SITE_URL: "http://localhost:8080"
+  PROJECT_NAME: "vibecarbon-local"
+
+  # Database
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "postgres"
+
+  # Internal Service URLs
+  KONG_URL: "http://kong:8000"
+  AUTH_URL: "http://auth:9999"
+  REST_URL: "http://rest:3000"
+  REALTIME_URL: "http://realtime:4000"
+  STORAGE_URL: "http://storage:5000"
+  META_URL: "http://meta:8080"
+  IMGPROXY_URL: "http://imgproxy:5001"

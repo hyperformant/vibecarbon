@@ -1,0 +1,43 @@
+# Let's Encrypt ClusterIssuers for the `manual` DNS provider strategy.
+#
+# Uses HTTP-01 ACME validation: cert-manager temporarily exposes a
+# challenge token at http://<domain>/.well-known/acme-challenge/<token>
+# and Let's Encrypt fetches it to prove control. This works only when
+# port 80 is reachable from the public internet straight to traefik —
+# i.e., NOT behind a reverse proxy that terminates TLS at the edge
+# (Cloudflare orange-cloud, Fastly, etc.). For those, use the matching
+# `*-cloudflare` or `*-hetzner` DNS-01 issuer instead.
+#
+# The `letsencrypt-{prod,staging}-manual` issuer is selected by
+# applyK3sManifests in src/lib/deploy/k8s/k3s.js when
+# dnsProvider === 'manual' (or unknown).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod-manual
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: "{{ADMIN_EMAIL}}"
+    privateKeySecretRef:
+      name: letsencrypt-prod-manual-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: traefik
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging-manual
+spec:
+  acme:
+    # Staging has higher rate limits but issues untrusted certs.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: "{{ADMIN_EMAIL}}"
+    privateKeySecretRef:
+      name: letsencrypt-staging-manual-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: traefik

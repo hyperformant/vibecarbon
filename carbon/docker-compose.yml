@@ -1,0 +1,616 @@
+# Vibecarbon Docker Compose
+# Supabase self-hosted + Hono API + Traefik reverse proxy
+
+services:
+  # ===========================================
+  # REVERSE PROXY
+  # ===========================================
+  traefik:
+    image: traefik:v3.6.11
+    container_name: ${PROJECT_NAME}-traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.exposedbydefault=false"
+      # Constrain discovery to THIS compose project. Traefik watches the whole
+      # docker socket; with two vibecarbon projects running side-by-side, each
+      # traefik would otherwise adopt BOTH projects' identically-named services
+      # as backends of one load balancer — half of them on a network this
+      # traefik isn't attached to → intermittent Gateway Timeouts on every
+      # stack (RCA 2026-07-17: my-app + swim2 dev stacks cross-contaminated).
+      # `com.docker.compose.project` is compose's automatic project label and
+      # always equals PROJECT_NAME for stacks created by `vibecarbon create`.
+      - "--providers.docker.constraints=Label(`com.docker.compose.project`,`${PROJECT_NAME}`)"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--entrypoints.web.address=:80"
+      - "--log.level=INFO"
+    ports:
+      - "${DEV_TRAEFIK_PORT:-80}:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./volumes/traefik:/etc/traefik/dynamic:ro
+    networks:
+      - vibecarbon-network
+    labels:
+      - "traefik.enable=true"
+      # Subdomain routing - auth added via prod overlay (docker-compose.prod.yml)
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.dashboard.entrypoints=web"
+      - "traefik.http.routers.dashboard.service=api@internal"
+
+  # ===========================================
+  # APPLICATION
+  # ===========================================
+  app:
+    build:
+      context: .
+      args:
+        VITE_PROJECT_NAME: ${PROJECT_NAME}
+        VITE_SUPABASE_URL: ${SITE_URL}
+        VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+        VITE_PLAUSIBLE_DOMAIN: ${VITE_PLAUSIBLE_DOMAIN:-}
+        VITE_PLAUSIBLE_SCRIPT_URL: ${VITE_PLAUSIBLE_SCRIPT_URL:-}
+    container_name: ${PROJECT_NAME}-app
+    restart: unless-stopped
+    # Make every configure-managed runtime key (billing/OAuth/SMTP) available to
+    # the app container. `create` writes .env and the deploy bundle stages it
+    # alongside this file; the `environment:` overrides below still take
+    # precedence over anything in .env.
+    env_file:
+      - .env
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - NODE_ENV=production
+      - SUPABASE_URL=http://kong:8000
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SITE_URL=${SITE_URL:-http://localhost:5173}
+    depends_on:
+      # The Hono backend uses the Supabase JS client (calls flow through Kong)
+      # and never touches postgres directly, so we don't need `db: healthy`
+      # gating app startup. `service_started` on both lets the app boot in
+      # parallel with db's ~20-30s initial warmup.
+      db:
+        condition: service_started
+      kong:
+        condition: service_started
+    networks:
+      - vibecarbon-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app.rule=Host(`localhost`)"
+      - "traefik.http.routers.app.entrypoints=web"
+      - "traefik.http.services.app.loadbalancer.server.port=3000"
+
+  # ===========================================
+  # SUPABASE CORE SERVICES
+  # ===========================================
+
+  # PostgreSQL Database
+  db:
+    build:
+      context: ./db
+    image: ${PROJECT_NAME}-db:latest
+    # The db image is built locally from ./db (no registry to pull from).
+    # Without this, compose's default `pull_policy: missing` first attempts
+    # a Docker Hub pull, which 401s with "pull access denied for {image}"
+    # before falling back to the local build. Functional but scary noise on
+    # every `docker compose up` invocation.
+    pull_policy: build
+    container_name: ${PROJECT_NAME}-db
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      # First-time init runs all Supabase migrations + WAL-G init before the
+      # server accepts TCP connections (~60-150s under fanout-3 load — observed
+      # restore re-deploy failing at deploy.compose.up=160s while the same db
+      # eventually became healthy ~3min later, fanout9 e1 2026-05-01). Without
+      # start_period, retries × interval = 50s expires before first init
+      # completes, compose marks db unhealthy, and dependent services fail
+      # with "dependency failed to start". start_period suppresses the
+      # unhealthy verdict during initial boot.
+      start_period: 180s
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_min_messages=fatal
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      # Fault-tolerant wrapper around `wal-g wal-push`. If wal-g fails (S3
+      # outage, bad creds, missing bucket), the wrapper retries with backoff
+      # then logs "WAL_ARCHIVE_FAILED" to stderr and exits 0 so PG can recycle
+      # the segment instead of pinning the entire pg_wal directory. Without
+      # this, a single archive failure pins WAL forever and fills the disk
+      # within days (~20 GiB/day of WAL on an idle Supabase DB given
+      # archive_timeout below, because supabase extensions like pg_cron,
+      # pg_stat_statements, realtime publications all generate background
+      # writes every minute). RCA: prod-1 2026-05-26, 58 GiB of WAL retained
+      # in 3 days because wal-g couldn't reach the configured S3 bucket;
+      # disk filled, db went into Error state, /api/v1/notifications 500'd,
+      # whole stack down. Trade-off: a persistent archive outage leaves a
+      # PITR gap, but the DB stays up — strictly better than the previous
+      # behavior for a SaaS template. Grep `docker logs db` for
+      # WAL_ARCHIVE_FAILED to detect silent backup regressions.
+      # Invoke via `bash` rather than relying on the script's exec bit: the
+      # create-time scaffold copy (copyFileSync) drops +x, and a 0644 script
+      # made postgres fail archiving with exit 126 ("not executable"), which
+      # silently re-pins WAL. bash-invoking it (like reconcile.sh) is immune to
+      # the file mode, so the fault-tolerant wrapper always runs.
+      - archive_command=bash /etc/postgresql/wal-archive.sh %p
+      - -c
+      # 60s was too aggressive — on an idle Supabase DB, that forces a
+      # 16 MiB segment switch every minute regardless of write volume (PG14+
+      # is supposed to skip empty switches but supabase's bundled extensions
+      # write enough every minute to trip it). 23 GiB/day of WAL baseline.
+      # 900s (15 min) drops baseline to ~1.5 GiB/day with an RPO cap that's
+      # plenty for SaaS workloads. Override via postgresql.conf or compose
+      # if tighter RPO is needed.
+      - archive_timeout=900
+      - -c
+      # hot_standby=on lets a server in recovery mode (i.e. our standby)
+      # accept read-only psql connections. Required so failover's
+      # pg_promote() call can connect to the standby (psql connections
+      # otherwise return "database is not accepting connections / Hot
+      # standby mode is disabled" and pg_promote can't be invoked).
+      # No-op on the primary — hot_standby only affects standbys. PG15
+      # default is on, but supabase/postgres:15.8.1.085 ships with it
+      # off, so set it explicitly. RCA: compose-ha 2026-05-01 fanout13
+      # failover — pg_promote retried 5 times against an unreachable
+      # standby psql before aborting.
+      - hot_standby=on
+      - -c
+      # Explicit connection ceiling (image default is 100). Real consumers —
+      # PostgREST pool + auth + storage + realtime + meta + Supavisor's server
+      # pool + replication + superuser_reserved — sum to ~65; 200 leaves
+      # headroom for the HA standby and scale-ups so the ceiling can't be hit.
+      # Connection pooling for EXTERNAL direct-DB clients is Supavisor (prod
+      # overlay); the internal stack connects directly. See docs/security.md.
+      - max_connections=200
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: 5432
+      POSTGRES_PORT: 5432
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: postgres
+      POSTGRES_DB: postgres
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: 3600
+      # WAL-G Configuration
+      # `:-` defaults so local dev (no .env-set S3 creds) doesn't trigger
+      # `WARN The "S3_*" variable is not set` for every compose invocation.
+      # WAL-G is dormant locally without these anyway; the warns were pure
+      # noise.
+      #
+      # WALG_S3_PREFIX is a SINGLE canonical path (NO role segment). Reads
+      # (backup-fetch/restore/reseed) and writes (backup-push/wal-push) must all
+      # agree on ONE prefix — otherwise a standby restoring/reseeding would read
+      # an empty `…/walg/standby` and fail with "No backups found". Anti-collision
+      # (finding #3: a standby / bring-up-phase independent primary must never
+      # WRITE into this prefix) is enforced by the WALG_ROLE WRITE-GUARD:
+      # wal-archive.sh and the backup path both no-op when WALG_ROLE=standby.
+      # WALG_ROLE is exposed to the container so those write guards can read it;
+      # deployComposeHA writes WALG_ROLE=standby into the standby's .env.
+      WALG_S3_PREFIX: s3://${S3_BACKUP_BUCKET:-${S3_BUCKET:-}}/backups/${PROJECT_NAME}/walg
+      WALG_ROLE: ${WALG_ROLE:-primary}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-}
+      AWS_ENDPOINT: ${S3_ENDPOINT:-}
+      AWS_REGION: ${S3_REGION:-us-east-1}
+      WALG_COMPRESSION_METHOD: lz4
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./volumes/db/wal-archive.sh:/etc/postgresql/wal-archive.sh:ro,Z
+      - ./volumes/db/pooler.sql:/docker-entrypoint-initdb.d/init-scripts/97-pooler.sql:Z
+      - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/98-roles.sql:Z
+      - ./volumes/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:Z
+      - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+      - ./volumes/db/set-passwords.sh:/docker-entrypoint-initdb.d/zz-set-passwords.sh:Z
+      - ./supabase/migrations:/migrations:ro
+    networks:
+      - vibecarbon-network
+
+  # Kong API Gateway
+  kong:
+    image: kong:3.9.1
+    container_name: ${PROJECT_NAME}-kong
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "${DEV_KONG_PORT:-8000}:8000/tcp"
+      - "${DEV_KONG_SSL_PORT:-8443}:8443/tcp"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    entrypoint: /home/kong/docker-entrypoint.sh
+    environment:
+      KONG_DATABASE: "off"
+      KONG_PREFIX: /tmp/kong
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+    volumes:
+      - ./volumes/kong/kong.yml:/home/kong/kong.yml.template:ro
+      - ./volumes/kong/docker-entrypoint.sh:/home/kong/docker-entrypoint.sh:ro
+    # Kong runs in DB-less mode (KONG_DATABASE: "off") — config comes from
+    # the declarative kong.yml volume. No postgres dependency at all, so
+    # we intentionally don't list `db` here. Kong can boot in parallel
+    # with the database, shaving ~20s off the compose cold start.
+    networks:
+      - vibecarbon-network
+
+  # GoTrue Authentication
+  auth:
+    image: supabase/gotrue:v2.186.0
+    container_name: ${PROJECT_NAME}-auth
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${SITE_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: "${SITE_URL}/**,http://localhost:${DEV_VITE_PORT:-5173}/**,http://localhost:${DEV_API_PORT:-3000}/**"
+      GOTRUE_DISABLE_SIGNUP: "false"
+      # Minimum password length (GoTrue defaults to 6). The signup client
+      # validates the same minimum before calling signUp.
+      GOTRUE_PASSWORD_MIN_LENGTH: "8"
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      # Default true: without working SMTP every signup would 500 on the
+      # unsendable confirmation email. `vibecarbon configure` → SMTP asks
+      # "Require email confirmation for new signups?" and writes false (i.e.
+      # send real confirmation emails) when the operator opts in.
+      GOTRUE_MAILER_AUTOCONFIRM: ${GOTRUE_MAILER_AUTOCONFIRM:-true}
+      # MFA/TOTP
+      GOTRUE_MFA_ENABLED: "true"
+      # OAuth Providers
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: ${GOOGLE_ENABLED:-false}
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: ${SITE_URL}/auth/v1/callback
+      GOTRUE_EXTERNAL_AZURE_ENABLED: ${MICROSOFT_ENABLED:-false}
+      GOTRUE_EXTERNAL_AZURE_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_AZURE_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      GOTRUE_EXTERNAL_AZURE_URL: https://login.microsoftonline.com/${MICROSOFT_TENANT_ID:-common}
+      GOTRUE_EXTERNAL_AZURE_REDIRECT_URI: ${SITE_URL}/auth/v1/callback
+      # SMTP (optional)
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL:-}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME:-}
+      GOTRUE_MAILER_URLPATHS_INVITE: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_RECOVERY: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: /auth/v1/verify
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+
+  # PostgREST API
+  rest:
+    image: postgrest/postgrest:v14.6
+    container_name: ${PROJECT_NAME}-rest
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage,graphql_public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: 3600
+      # Explicit DB connection pool (= PostgREST's default, made intentional)
+      # plus a fail-fast acquisition timeout so a saturated pool returns a clear
+      # error instead of hanging. Part of the max_connections budget on `db`.
+      PGRST_DB_POOL: "10"
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: "10"
+    command: postgrest
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+
+  # Realtime Server
+  realtime:
+    image: supabase/realtime:v2.76.5
+    container_name: ${PROJECT_NAME}-realtime
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/rel/realtime/tmp
+      - /app/rel/realtime/releases/2.76.5
+    healthcheck:
+      test: ["CMD-SHELL", "curl -so /dev/null -w '%{http_code}' http://localhost:4000/ | grep -qE '^[0-9]+$'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${DB_ENC_KEY:-devdbencryptkey1}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${REALTIME_SECRET:-realtimesecret}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      FLY_ALLOC_ID: fly123
+      FLY_APP_NAME: realtime
+      REPLICATION_MODE: RLS
+      REPLICATION_POLL_INTERVAL: 100
+      SECURE_CHANNELS: "true"
+      SLOT_NAME: supabase_realtime_rls
+      TEMPORARY_SLOT: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+
+  # ===========================================
+  # SUPABASE STORAGE
+  # ===========================================
+
+  storage:
+    image: supabase/storage-api:v1.44.2
+    container_name: ${PROJECT_NAME}-storage
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5000/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      ANON_KEY: ${SUPABASE_ANON_KEY}
+      SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: s3
+      TENANT_ID: stub
+      REGION: ${S3_REGION:-stub}
+      GLOBAL_S3_BUCKET: ${S3_BUCKET:-stub}
+      GLOBAL_S3_ENDPOINT: ${S3_ENDPOINT:-}
+      GLOBAL_S3_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-}
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://imgproxy:5001
+      VAULT_ENC_KEY: ${VAULT_ENC_KEY:-vaultenckey}
+    volumes:
+      - storage_data:/var/lib/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      imgproxy:
+        condition: service_started
+    networks:
+      - vibecarbon-network
+
+  imgproxy:
+    image: darthsim/imgproxy:v3.30.1
+    container_name: ${PROJECT_NAME}-imgproxy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "imgproxy", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: "true"
+    volumes:
+      - storage_data:/var/lib/storage
+    networks:
+      - vibecarbon-network
+
+  # ===========================================
+  # SUPABASE MANAGEMENT
+  # ===========================================
+
+  meta:
+    image: supabase/postgres-meta:v0.95.2
+    container_name: ${PROJECT_NAME}-meta
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY:-pgmetacryptokey}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+
+  studio:
+    image: supabase/studio:2026.03.16-sha-5528817
+    container_name: ${PROJECT_NAME}-studio
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      disable: true
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: ${PROJECT_NAME}
+      DEFAULT_PROJECT_NAME: ${PROJECT_NAME}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SITE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      LOGFLARE_API_KEY: ${LOGFLARE_API_KEY:-logflarekey}
+      LOGFLARE_URL: http://analytics:4000
+      NEXT_PUBLIC_ENABLE_LOGS: "false"
+      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+    labels:
+      - "traefik.enable=true"
+      # Subdomain routing - auth added via prod overlay (docker-compose.prod.yml)
+      - "traefik.http.routers.studio.rule=Host(`studio.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.studio.entrypoints=web"
+      - "traefik.http.services.studio.loadbalancer.server.port=3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      meta:
+        condition: service_started
+    networks:
+      - vibecarbon-network
+
+volumes:
+  db_data:
+  storage_data:
+
+networks:
+  vibecarbon-network:
+    driver: bridge
+    # Pin the IPAM subnet in the BASE file (not an overlay) so EVERY docker
+    # compose op resolves the identical network — regardless of which overlays
+    # (-f flags) it loads. The observability overlay pins Traefik to a static IP
+    # on this network (<prefix>.10, for Grafana's auth-proxy trust boundary); if
+    # the subnet lived only in that overlay, any op run without it (compose
+    # scale's `run --rm db`, compose-ha's `up -d db`) would see a DYNAMIC subnet,
+    # mismatch the live pinned network, and force a mid-op network recreate that
+    # fails with "has active endpoints" while sibling containers are attached.
+    # A /24 (256 addrs) keeps the pinned range small to minimise the chance it
+    # collides with a subnet the host already routes.
+    #
+    # The prefix comes from DEV_SUBNET_PREFIX so several projects can share one
+    # Docker daemon: with a fixed subnet, the second project's `up` dies with
+    # "Pool overlaps with other one on this address space". `vibecarbon up`
+    # detects that and writes a free prefix to .env — which compose reads on
+    # every invocation (unlike .env.local, which only wrapper scripts merge),
+    # so bare `docker compose` ops still resolve the same subnet. The
+    # observability overlay's ipv4_address and GF_AUTH_PROXY_WHITELIST derive
+    # from this SAME variable and move with it.
+    #
+    # ip_range partitions the subnet: Docker hands DYNAMIC addresses only from
+    # the upper /25 (.128-.254), so a static ipv4_address pinned below .128
+    # (the observability overlay pins Traefik to .10) can never be squatted by
+    # a dynamically-allocated sibling. Without this, any recreate wave that
+    # released and re-allocated addresses could hand .10 to another container,
+    # after which Traefik fails to start with "Address already in use" on
+    # every subsequent up — observed on the 2026-08-06 d1 warm deploys (rest
+    # landed on .10; traefik and the site stayed down until teardown). Pins
+    # live below .128, dynamics above; both derive from DEV_SUBNET_PREFIX.
+    ipam:
+      config:
+        - subnet: ${DEV_SUBNET_PREFIX:-172.30.0}.0/24
+          ip_range: ${DEV_SUBNET_PREFIX:-172.30.0}.128/25

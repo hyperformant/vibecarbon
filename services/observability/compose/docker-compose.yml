@@ -1,0 +1,182 @@
+# Observability Stack - Docker Compose Override
+# Use with: docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Includes:
+# - Prometheus: Metrics collection and storage
+# - Grafana: Dashboards and visualization
+# - Loki: Log aggregation
+# - Promtail: Docker log shipper
+# - postgres-exporter: PostgreSQL metrics
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ${PROJECT_NAME:-vibecarbon}-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./volumes/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      # Default to 9190 to avoid conflict with Google's Antigravity IDE (uses 9090-9092)
+      - "${DEV_PROMETHEUS_PORT:-9190}:9090"
+    networks:
+      - vibecarbon-network
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:9090/-/healthy']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      db:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ${PROJECT_NAME:-vibecarbon}-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_EMAIL}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # No host port (H-9) — Grafana is reached via Traefik, so ROOT_URL must be
+      # the Traefik hostname (prod overlay overrides to https://grafana.${DOMAIN}).
+      - GF_SERVER_ROOT_URL=${GRAFANA_URL:-http://grafana.localhost}
+      # H-9: anonymous access is OFF. Grafana is reachable only through Traefik's
+      # super-admin ForwardAuth, which injects the verified identity below.
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      # Auth-proxy: trust the X-Authenticated-User header (set by ForwardAuth) as
+      # the logged-in user, so super_admins don't need a second Grafana login.
+      - GF_AUTH_PROXY_ENABLED=true
+      - GF_AUTH_PROXY_HEADER_NAME=X-Authenticated-User
+      - GF_AUTH_PROXY_HEADER_PROPERTY=username
+      - GF_AUTH_PROXY_AUTO_SIGN_UP=true
+      # SECURITY (header trust boundary): only requests whose SOURCE IP is in the
+      # whitelist may present X-Authenticated-User. Grafana checks the direct TCP
+      # peer (not X-Forwarded-For), so this must be Traefik's address. Traefik is
+      # pinned to a static IP on vibecarbon-network (see the traefik/network stanzas
+      # at the bottom of this file) so the whitelist can be exact — a header-capable
+      # SSRF from another in-network container (e.g. the app) cannot forge identity
+      # to grafana:3000. The unauthenticated /api/health probe is unaffected (the
+      # whitelist only gates whether the auth-proxy header is honored).
+      - GF_AUTH_PROXY_WHITELIST=${DEV_SUBNET_PREFIX:-172.30.0}.10
+      - GF_USERS_AUTO_ASSIGN_ORG_ROLE=Admin
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/overview.json
+      # Password for the least-privilege PostgreSQL datasource role (referenced as
+      # $OBSERVABILITY_DB_PASSWORD in provisioning/datasources/datasources.yml).
+      - OBSERVABILITY_DB_PASSWORD=${OBSERVABILITY_DB_PASSWORD}
+    volumes:
+      - ./volumes/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./volumes/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    # H-9: no host port. Grafana is reachable only via Traefik (grafana.localhost),
+    # which enforces ForwardAuth. Direct host access would bypass authentication.
+    networks:
+      - vibecarbon-network
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3000/api/health']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      # Traefik routing with ForwardAuth (super_admin only). The chain strips any
+      # client-supplied X-Authenticated-User, then ForwardAuth injects the verified
+      # value — see volumes/traefik/middlewares.yml.
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+      - "traefik.http.routers.grafana.entrypoints=web"
+      - "traefik.http.routers.grafana.middlewares=super-admin-auth@file"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.3.0
+    container_name: ${PROJECT_NAME:-vibecarbon}-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./volumes/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    ports:
+      - "${DEV_LOKI_PORT:-3100}:3100"
+    networks:
+      - vibecarbon-network
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3100/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  promtail:
+    image: grafana/promtail:3.3.0
+    container_name: ${PROJECT_NAME:-vibecarbon}-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./volumes/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    networks:
+      - vibecarbon-network
+    depends_on:
+      - loki
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.19.1
+    container_name: ${PROJECT_NAME:-vibecarbon}-postgres-exporter
+    restart: unless-stopped
+    environment:
+      # Least-privilege metrics role (pg_monitor), not the supabase_admin
+      # superuser. Provisioned by volumes/db/observability-init.sh.
+      DATA_SOURCE_NAME: "postgresql://observability_ro:${OBSERVABILITY_DB_PASSWORD}@db:5432/postgres?sslmode=disable"
+    networks:
+      - vibecarbon-network
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Extend the base `db` service: mount the observability role-init script and
+  # expose the role password to the init shell. Runs on first db init only (see
+  # the script header for the already-initialized caveat).
+  db:
+    environment:
+      OBSERVABILITY_DB_PASSWORD: ${OBSERVABILITY_DB_PASSWORD}
+    volumes:
+      - ./volumes/db/observability-init.sh:/docker-entrypoint-initdb.d/zz-observability-init.sh:Z
+
+  # H-9 header trust boundary: pin Traefik to a fixed IP on vibecarbon-network so
+  # Grafana's GF_AUTH_PROXY_WHITELIST can name it exactly. This override only
+  # merges in when the observability overlay is active. The `traefik` service and
+  # the network's IPAM subnet (${DEV_SUBNET_PREFIX:-172.30.0}.0/24) are BOTH
+  # defined in the base compose file; here we only add Traefik's static address
+  # within that subnet. GF_AUTH_PROXY_WHITELIST (in the grafana env above), this
+  # ipv4_address, and the base subnet all derive from the SAME
+  # DEV_SUBNET_PREFIX variable so they cannot drift apart when `vibecarbon up`
+  # moves the project to a free /24 (multi-project daemons).
+  #
+  # The subnet deliberately lives in base (not here): if it lived only in this
+  # overlay, any op that loads a file set WITHOUT observability (compose scale's
+  # `run --rm db`, compose-ha's `up -d db`) would see a DYNAMIC subnet, mismatch
+  # the live pinned network, and force a mid-op network recreate that fails with
+  # "has active endpoints". Pinning in base makes every overlay subset agree.
+  traefik:
+    networks:
+      vibecarbon-network:
+        # .10 sits BELOW the base ipam's dynamic ip_range (.128/25), so a
+        # dynamic sibling can never squat it across recreate waves — see the
+        # ip_range note on the network definition in the base file.
+        ipv4_address: ${DEV_SUBNET_PREFIX:-172.30.0}.10
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:

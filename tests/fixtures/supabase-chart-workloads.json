@@ -1,0 +1,23 @@
+{
+  "chartVersion": "0.7.1",
+  "deployments": [
+    "auth",
+    "imgproxy",
+    "kong",
+    "meta",
+    "realtime",
+    "rest",
+    "storage",
+    "studio"
+  ],
+  "statefulsets": [
+    "db"
+  ],
+  "pvcs": [
+    "db",
+    "imgproxy",
+    "pgsodium",
+    "snippets",
+    "storage"
+  ]
+}

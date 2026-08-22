@@ -1,0 +1,124 @@
+# Nightly wal-g base backup.
+#
+# wal-g backup-push needs direct PGDATA filesystem access, which only the
+# supabase-db pod has. So instead of a separate backup container that talks to
+# postgres over the network (the old pg_dump design), this CronJob runs a tiny
+# kubectl image and `kubectl exec`s wal-g INSIDE the db pod — where wal-g, the
+# WALG_*/AWS_* env, and PGDATA already live (see k8s/values/supabase.values.yaml
+# + the WAL-archiving setup in applyK3sManifests). No bespoke backup image, no
+# sideload, no registry push.
+#
+# HA-safe: the command guards on pg_is_in_recovery()=f, so it only takes a base
+# backup on the PRIMARY. On the standby (in recovery) it no-ops, and after a
+# failover the new primary's CronJob transparently starts taking base backups —
+# no per-cluster config.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+  labels:
+    app: vibecarbon-backup
+    component: backup
+spec:
+  schedule: 0 2 * * *
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: vibecarbon-backup
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: backup-sa
+          containers:
+            - name: backup
+              # Pinned public kubectl image — no build/sideload/push. Bump the
+              # tag deliberately; `latest` would risk a silent client/server
+              # skew on the scheduled run. Needs bash (the script below uses
+              # `set -euo pipefail`) + kubectl on PATH, so the distroless
+              # registry.k8s.io/kubectl is unusable. Was bitnami/kubectl:1.31
+              # until Bitnami sunset their public Docker Hub catalog (2025) and
+              # the tag vanished (`not found` → ImagePullBackOff); alpine/k8s
+              # is the maintained drop-in (alpine base, bash + kubectl).
+              image: alpine/k8s:1.31.12
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: BACKUP_RETENTION_DAYS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vibecarbon-config
+                      key: BACKUP_RETENTION_DAYS
+                      optional: true
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  RETAIN="${BACKUP_RETENTION_DAYS:-7}"
+                  # Exec wal-g inside the db pod. The guard makes this a no-op on
+                  # a standby (in recovery) so only the primary takes base backups.
+                  kubectl exec -n vibecarbon statefulset/supabase-supabase-db -- bash -c '
+                    set -euo pipefail
+                    # wal-g backup-push connects to Postgres (pg_backup_start) using
+                    # libpq env. Unset, PGUSER defaults to the container OS user
+                    # "root" → "role \"root\" does not exist". And only the cluster
+                    # superuser may call pg_backup_start — supabase_admin is the sole
+                    # superuser ("postgres" gets "permission denied for function
+                    # pg_backup_start"). So pin the libpq connection explicitly.
+                    # (wal-push/archiving and backup-fetch/restore do not connect to
+                    # PG, which is why this only bit backup-push. RCA 2026-05-30.)
+                    export PGUSER=supabase_admin PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
+                    # WRITE-GUARD (finding #3): never base-backup on a standby into
+                    # the single canonical WALG_S3_PREFIX. WALG_ROLE is rendered
+                    # into the db container env (supabase.values.yaml) and inherited
+                    # by this kubectl-exec. Closes the bring-up window the recovery
+                    # check below cannot (independent primary, not yet in recovery).
+                    if [ "${WALG_ROLE:-primary}" = "standby" ]; then
+                      echo "WALG_ROLE=standby — skipping base backup (only the primary writes the canonical prefix)."
+                      exit 0
+                    fi
+                    # The recovery probe must FAIL LOUD when it cannot prove
+                    # primary vs standby. The previous form compared $(psql …)
+                    # inside a test: a failed psql (database starting up, exec
+                    # transport broken) collapsed to "", read as standby, and
+                    # the job exited 0 having backed up NOTHING (latent
+                    # false-green found in the 2026-08-16 backup RCA). Only a
+                    # literal t skips; only a literal f proceeds.
+                    REC="$(psql -U supabase_admin -d postgres -tAc "SELECT pg_is_in_recovery()")" || {
+                      echo "recovery probe failed (psql exit $?) — refusing to guess primary/standby."
+                      exit 1
+                    }
+                    case "$REC" in
+                      t)
+                        echo "supabase-db is in recovery (standby) — skipping base backup."
+                        exit 0
+                        ;;
+                      f) ;;
+                      *)
+                        # No quotes around $REC: a literal single quote here
+                        # would end the bash -c single-quoted wrapper above.
+                        echo "unexpected pg_is_in_recovery() output: $REC — refusing to guess."
+                        exit 1
+                        ;;
+                    esac
+                    wal-g backup-push "$PGDATA"
+                    wal-g delete retain FULL '"${RETAIN}"' --confirm
+                  '
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault

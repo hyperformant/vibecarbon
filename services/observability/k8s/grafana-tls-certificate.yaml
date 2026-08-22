@@ -1,0 +1,33 @@
+# TLS certificate for the Grafana IngressRoute, LOCAL to vibecarbon-observability.
+#
+# Grafana is served path-based at https://<domain>/admin/grafana, so this cert is
+# for the app domain (same as the base vibecarbon-tls). The base secret lives in
+# the vibecarbon namespace and Traefik can't read a TLS secret cross-namespace, so
+# we issue a second cert into a local `grafana-tls` secret here.
+#
+# issuerRef.name and dnsNames are PATCHED per-deployment by applyK3sManifests
+# (src/lib/deploy/k8s/k3s.js):
+#   - issuerRef.name → letsencrypt-{prod,staging}-{cloudflare,hetzner,manual}
+#   - dnsNames → [domain], ALWAYS — never the wildcard, unlike the base
+#     vibecarbon-tls cert. Grafana routes on PathPrefix(`/admin/grafana`) with
+#     no Host() of its own (ingressroute.yaml), so the wildcard SAN is useless
+#     here and actively harmful: an IDENTICAL identifier set on the same ACME
+#     account makes Boulder hand both Certificates ONE shared order, both
+#     finalize it, and cert-manager marks the loser terminally Errored with
+#     `403 orderNotReady :: Order was already processing` (cert-manager#8960,
+#     unfixed in the v1.20.2 we pin — it broke the 2026-08-11 e2e k8s restore).
+#     See observabilityCertificateDnsNames in src/lib/deploy/k8s/k3s.js.
+# The ClusterIssuer is cluster-scoped, so referencing it from this namespace is
+# fine. The placeholders keep this valid for kustomize; they're overwritten before
+# cert-manager sees the request.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: grafana-tls
+spec:
+  secretName: grafana-tls
+  issuerRef:
+    name: letsencrypt-prod-manual
+    kind: ClusterIssuer
+  dnsNames:
+    - app.example.com  # Patched with the actual domain at deploy time

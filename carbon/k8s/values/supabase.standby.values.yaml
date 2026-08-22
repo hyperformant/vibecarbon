@@ -1,0 +1,43 @@
+# Pilot-light standby overlay (spec: 2026-07-16-pilot-light-standby-design).
+# Passed as a SECOND `-f` by installSupabase ONLY when role=standby. Renders
+# every app-tier Deployment at 0 replicas: realtime/storage cannot boot
+# against the seeded read-only replica (Ecto lock_for_migrations, ERROR
+# 25006), the 2-node floor has no capacity for app pods, and anything
+# Pending would hang `helm --wait`. The db StatefulSet stays at 1.
+# ONLY scalar keys belong here (chart >= 0.7.1 replaces LISTS wholesale —
+# an env list in this file would wipe the primary defaults).
+# Drift guard: tests/unit/deploy/standby-overlay-drift.test.ts against
+# tests/fixtures/supabase-chart-workloads.json (regen on pin bump).
+deployment:
+  auth:
+    replicaCount: 0
+  imgproxy:
+    replicaCount: 0
+  kong:
+    replicaCount: 0
+  meta:
+    replicaCount: 0
+  realtime:
+    replicaCount: 0
+  rest:
+    replicaCount: 0
+  storage:
+    replicaCount: 0
+  studio:
+    replicaCount: 0
+# Persistence for zeroed components is disabled: their PVCs bind
+# WaitForFirstConsumer, and with 0 consumers they sit Pending forever —
+# blocking helm --wait's PVC readiness check until its 15m timeout (RCA
+# 2026-07-17 e4 rig: supabase-{storage,imgproxy,snippets} Pending while the
+# db had been Ready since minute 9). Data-safe: STORAGE_BACKEND=s3 (files
+# live in object storage; these PVCs are cache/scratch) and a standby's
+# local PVC contents are never replicated anyway — the reconverge deploy
+# re-renders persistence when this cluster becomes primary. db + pgsodium
+# are exempt: the db StatefulSet stays at 1 and binds them immediately.
+persistence:
+  imgproxy:
+    enabled: false
+  snippets:
+    enabled: false
+  storage:
+    enabled: false

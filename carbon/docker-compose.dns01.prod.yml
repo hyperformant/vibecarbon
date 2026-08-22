@@ -1,0 +1,53 @@
+# DNS-01 ACME override — applied ONLY for managed-DNS deploys (the
+# DNS01_PROVIDERS table: cloudflare, hetzner, digitalocean, linode, vultr,
+# scaleway).
+#
+# Activated by the deploy bundler (src/lib/deploy/bundle.js -> composeFileFlags)
+# when the deploy manages DNS via an API. It is appended AFTER
+# docker-compose.prod.yml, so the `command:` below REPLACES the base Traefik
+# command — Compose replaces sequences, it does not merge them. That means the
+# full command list must be restated here; keep every non-ACME flag in sync
+# with docker-compose.prod.yml. Only the two `httpchallenge` lines are swapped
+# for the three `dnschallenge` lines.
+#
+# Why: these providers expose an API lego (Traefik's ACME client) uses to
+# solve the DNS-01 challenge by writing a TXT record. This removes the HTTP-01
+# race against A-record propagation, so the deploy no longer needs the
+# DNS-propagation poll or the Traefik cert self-heal. `manual` DNS keeps the
+# base HTTP-01 path (this override is not applied for it).
+#
+# Tokens: lego picks the provider from ACME_DNS_PROVIDER and reads that
+# provider's own token var (names verified against go-acme.github.io/lego/dns/;
+# they are NOT uniform — DigitalOcean's is DO_AUTH_TOKEN, not the CLI's
+# DIGITALOCEAN_TOKEN, and Scaleway's is the plugin-native SCW_SECRET_KEY, not
+# the operator-facing SCALEWAY_SECRET_KEY). Hetzner uses the consolidated Cloud API token
+# HETZNER_API_TOKEN (lego v4.27+, Traefik >= 3.6.6; we pin v3.6.11) — the same
+# token as server ops. Every var is passed through and an unset one
+# interpolates to empty, so only the active provider's token is ever
+# populated; the bundler writes exactly that one into .env. Drift-guarded by
+# tests/unit/deploy/acme.test.ts.
+services:
+  traefik:
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.endpoint=tcp://docker-socket-proxy:2375"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=${ACME_DNS_PROVIDER}"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+      - "--certificatesresolvers.letsencrypt.acme.email={{ADMIN_EMAIL}}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+      - "--log.level=WARN"
+    environment:
+      ACME_DNS_PROVIDER: ${ACME_DNS_PROVIDER:-}
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:-}
+      HETZNER_API_TOKEN: ${HETZNER_API_TOKEN:-}
+      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:-}
+      LINODE_TOKEN: ${LINODE_TOKEN:-}
+      VULTR_API_KEY: ${VULTR_API_KEY:-}
+      SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}

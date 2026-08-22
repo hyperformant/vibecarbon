@@ -1,0 +1,24 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: vibecarbon-n8n
+  namespace: vibecarbon
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # N8N_PATH=/admin/n8n/ makes n8n generate HTML with /admin/n8n/assets/... paths.
+    # strip-prefix removes /admin/n8n before forwarding, so n8n serves assets at /assets/...
+    # and the REST API at /rest/... — exactly what the browser requests after stripping.
+    - match: PathPrefix(`/admin/n8n`)
+      kind: Rule
+      priority: 20
+      services:
+        - name: n8n
+          port: 5678
+      middlewares:
+        - name: admin-auth
+        - name: security-headers
+        - name: strip-admin-n8n-prefix
+  tls:
+    secretName: vibecarbon-tls

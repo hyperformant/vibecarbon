@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n
+  labels:
+    app: vibecarbon-n8n
+    component: automation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vibecarbon-n8n
+  template:
+    metadata:
+      labels:
+        app: vibecarbon-n8n
+        component: automation
+    spec:
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: n8n
+        image: n8nio/n8n:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5678
+          name: http
+        env:
+        - name: N8N_BASIC_AUTH_ACTIVE
+          value: 'false'
+        - name: N8N_HOST
+          value: 0.0.0.0
+        - name: N8N_PORT
+          value: '5678'
+        - name: N8N_PROTOCOL
+          value: http
+        - name: N8N_PATH
+          value: /admin/n8n/
+        - name: NODE_ENV
+          value: production
+        - name: WEBHOOK_URL
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: SITE_URL
+        - name: GENERIC_TIMEZONE
+          value: UTC
+        - name: DB_TYPE
+          value: postgresdb
+        - name: DB_POSTGRESDB_HOST
+          value: postgres
+        - name: DB_POSTGRESDB_PORT
+          value: '5432'
+        - name: DB_POSTGRESDB_DATABASE
+          value: n8n
+        - name: DB_POSTGRESDB_USER
+          value: n8n
+        - name: DB_POSTGRESDB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-secrets
+              key: DB_PASSWORD
+        - name: SUPABASE_URL
+          value: http://kong:8000
+        - name: SUPABASE_ANON_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-secrets
+              key: ANON_KEY
+        - name: SUPABASE_SERVICE_ROLE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-secrets
+              key: SERVICE_ROLE_KEY
+        - name: N8N_SECURE_COOKIE
+          value: 'true'
+        volumeMounts:
+        - name: n8n-data
+          mountPath: /home/node/.n8n
+        - name: tmp-vol-0
+          mountPath: /tmp
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+      volumes:
+      - name: n8n-data
+        persistentVolumeClaim:
+          claimName: n8n-data
+      - name: tmp-vol-0
+        emptyDir: {}

@@ -1,0 +1,145 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kubectl get:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(kubectl top:*)",
+      "Bash(kubectl explain:*)",
+      "Bash(kubectl version:*)",
+      "Bash(kubectl cluster-info:*)",
+      "Bash(kubectl config get-contexts:*)",
+      "Bash(kubectl config view:*)",
+      "Bash(kubectl config current-context:*)",
+      "Bash(kubectl auth can-i:*)",
+      "Bash(kubectl api-resources:*)",
+      "Bash(kubectl api-versions:*)",
+      "Bash(kubectl events:*)",
+      "Bash(kubectl rollout status:*)",
+      "Bash(kubectl rollout history:*)",
+      "Bash(hcloud server list:*)",
+      "Bash(hcloud server describe:*)",
+      "Bash(hcloud network list:*)",
+      "Bash(hcloud network describe:*)",
+      "Bash(hcloud firewall list:*)",
+      "Bash(hcloud firewall describe:*)",
+      "Bash(hcloud load-balancer list:*)",
+      "Bash(hcloud load-balancer describe:*)",
+      "Bash(hcloud volume list:*)",
+      "Bash(hcloud volume describe:*)",
+      "Bash(hcloud floating-ip list:*)",
+      "Bash(hcloud floating-ip describe:*)",
+      "Bash(hcloud ssh-key list:*)",
+      "Bash(hcloud ssh-key describe:*)",
+      "Bash(hcloud iso list:*)",
+      "Bash(hcloud datacenter list:*)",
+      "Bash(hcloud image list:*)",
+      "Bash(hcloud image describe:*)",
+      "Bash(hcloud location list:*)",
+      "Bash(hcloud server-type list:*)",
+      "Bash(hcloud context active:*)",
+      "Bash(hcloud context list:*)",
+      "Bash(vibecarbon diagnose:*)",
+      "Bash(vibecarbon status:*)",
+      "Bash(vibecarbon --help:*)",
+      "Bash(vibecarbon --version:*)",
+      "Bash(vibecarbon -h:*)",
+      "Bash(vibecarbon -v:*)",
+      "Bash(dig:*)",
+      "Bash(nslookup:*)",
+      "Bash(host:*)",
+      "Bash(ping:*)",
+      "Bash(ping6:*)",
+      "Bash(traceroute:*)",
+      "Bash(traceroute6:*)",
+      "Bash(mtr:*)",
+      "Bash(curl -I:*)",
+      "Bash(curl --head:*)",
+      "Bash(curl -sI:*)",
+      "Bash(curl -fsSL:*)",
+      "Bash(nc -z:*)",
+      "Bash(nc -zv:*)",
+      "Bash(nmap -p:*)",
+      "Bash(jq:*)",
+      "Bash(yq:*)",
+      "Bash(tree:*)",
+      "Bash(file:*)",
+      "Bash(stat:*)",
+      "Bash(realpath:*)",
+      "Bash(readlink:*)",
+      "Bash(wc:*)",
+      "Bash(env:*)",
+      "Bash(printenv:*)",
+      "Bash(date:*)",
+      "Bash(uptime:*)",
+      "Bash(uname:*)",
+      "Bash(df:*)",
+      "Bash(du:*)",
+      "Bash(free:*)",
+      "Bash(ps:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git config --get:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git stash list:*)"
+    ]
+  },
+  "hooks": {
+    "TeammateIdle": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/teammate-idle-gate.sh"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/task-completed-gate.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ff-main.sh",
+            "timeout": 30,
+            "statusMessage": "Fast-forwarding local main"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/ff-main.sh",
+            "if": "Bash(gh pr merge*)",
+            "async": true,
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "skill-creator@claude-plugins-official": true
+  }
+}

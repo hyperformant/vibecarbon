@@ -1,0 +1,29 @@
+# Development overrides for observability stack
+# Use with: docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.observability.override.yml up -d
+
+services:
+  grafana:
+    environment:
+      # Dev drops the ForwardAuth middleware (see labels), so the trusted proxy
+      # that sets X-Authenticated-User is gone. Turn the auth-proxy OFF here too —
+      # otherwise Grafana would honor a client-supplied X-Authenticated-User (no
+      # strip, no whitelist enforcement on this path) and anyone reaching
+      # grafana.localhost could log in as an arbitrary user. With it off + anon
+      # off (base), dev Grafana requires the normal admin login.
+      - GF_AUTH_PROXY_ENABLED=false
+    volumes:
+      - ./volumes/grafana/provisioning/dashboards/dashboards.dev.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./volumes/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./volumes/grafana/dashboards.dev:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    labels:
+      # Dev: drop the ForwardAuth requirement (same as studio/traefik in local dev)
+      # so you don't need to be logged into the app as super_admin. H-9 keeps
+      # anonymous auth OFF unconditionally, so local Grafana now shows its normal
+      # login — sign in with GF_SECURITY_ADMIN_USER / _PASSWORD (ADMIN_EMAIL /
+      # ADMIN_PASSWORD). No host port is published; reach it via grafana.localhost.
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+      - "traefik.http.routers.grafana.entrypoints=web"
+      - "traefik.http.routers.grafana.middlewares="
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"

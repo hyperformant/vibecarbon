@@ -1,0 +1,132 @@
+# =============================================================================
+# S3-PURPOSED EGRESS: CLUSTER VPC CIDR ALLOWANCE (provider-conditional)
+# =============================================================================
+# NOTE: this manifest is intentionally NOT referenced by the parent
+# carbon/k8s/base/kustomization.yaml (see this dir's own kustomization.yaml).
+# It is DO-only and conditional: applyK3sManifests (src/lib/deploy/k8s/k3s.js)
+# renders the __VPC_CIDR__ placeholder and applies this file via
+# `kubectl apply -f -` ONLY when ProviderClass.getS3EgressExtraCidrs(vpcCidr)
+# returns a non-empty list — on Hetzner that call always returns [], so this
+# file is never read, let alone applied, and carbon/k8s/base's OTHER manifests
+# (network-policies.yaml, app/network-policy.yaml, registry/local-registry.yaml)
+# stay byte-identical for every provider. Mirrors
+# carbon/k8s/base/repl-gateway/repl-gateway.yaml's "outside base, rendered +
+# applied at deploy time, NEVER at runtime" idiom.
+#
+# RCA (M3 Task 9c, DO kept rig d3, 2026-07-29): on DigitalOcean, same-region
+# Spaces endpoints resolve INSIDE pods to a VPC-internal gateway address
+# (observed: nyc3.digitaloceanspaces.com -> 10.10.15.254, the top of the
+# cluster VPC's 10.10.0.0/20). The S3-purposed egress rules in app-policy,
+# registry-policy, and supabase-db-s3-egress (carbon/k8s/base/{app,registry}/
+# *.yaml, carbon/k8s/base/network-policies.yaml) all allow TCP 443 to
+# `0.0.0.0/0 except [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]` — which cuts
+# that gateway address off, so every S3-dependent pod on DO (the local
+# registry, wal-g backups/restores, the app's own storage calls) fails to
+# reach it. Hetzner is unaffected — its Object Storage endpoints resolve to
+# public IPs — which is why this never fired there.
+#
+# Why the cluster's VPC CIDR and not the literal gateway IP: DO does not
+# document a stable gateway address anywhere — the top-of-range IP observed
+# on the rig is an implementation detail, not a contract. Allowing the whole
+# VPC CIDR on 443 is additive-only (default-deny-all still holds on every
+# other port, and every OTHER port to the VPC stays denied), and the marginal
+# exposure is HTTPS to our own droplets, nothing external.
+#
+# Each policy below targets the SAME podSelector as its sibling S3-purposed
+# policy. NetworkPolicy egress is additive-allow-only across every matching
+# NetworkPolicy object in a namespace (see app-observability-egress in
+# network-policies.yaml for the same additive-sibling-policy idiom already in
+# this codebase) — so granting the extra allowance via a separate policy here
+# is equivalent to appending the rule directly into the original policy's
+# `egress` array, without ever touching that checked-in file.
+#
+# Placeholder (rendered at apply time by applyK3sManifests — NEVER at
+# runtime): __VPC_CIDR__
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-s3-vpc-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-app
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: __VPC_CIDR__
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: registry-s3-vpc-egress
+  namespace: vibecarbon
+  labels:
+    app.kubernetes.io/part-of: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: local-registry
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: __VPC_CIDR__
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: supabase-db-s3-vpc-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: supabase-db
+      app.kubernetes.io/instance: supabase
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: __VPC_CIDR__
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Storage's arm. Its sibling is supabase-storage-s3-egress in
+# network-policies.yaml — added at the same time, for the same reason: the
+# storage pod had NO S3 egress allowance at all, on any provider, because it
+# had never been configured to make an S3 call (no credentials, no endpoint)
+# and so never had one to drop. The first live upload on DO failed on
+# credentials; the next failed on this — connect ECONNREFUSED 10.10.15.254:443,
+# the very VPC gateway address this file's header documents.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: supabase-storage-s3-vpc-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: supabase-storage
+      app.kubernetes.io/instance: supabase
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: __VPC_CIDR__
+      ports:
+        - protocol: TCP
+          port: 443

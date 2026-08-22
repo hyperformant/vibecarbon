@@ -1,0 +1,469 @@
+{
+  "common": {
+    "back": "Back",
+    "cancel": "Cancel",
+    "continue": "Continue",
+    "create": "Create",
+    "creating": "Creating...",
+    "delete": "Delete",
+    "loading": "Loading...",
+    "save": "Save Changes",
+    "settings": "Settings",
+    "signOut": "Sign out",
+    "skipForNow": "Skip for now",
+    "toggleTheme": "Toggle theme",
+    "free": "Free",
+    "popular": "Popular",
+    "manage": "Manage",
+    "update": "Update",
+    "remove": "Remove"
+  },
+  "nav": {
+    "docs": "User Docs",
+    "apiDocs": "API Docs",
+    "dashboard": "Dashboard",
+    "logIn": "Sign in",
+    "signUp": "Sign up"
+  },
+  "sidebar": {
+    "dashboard": "Dashboard",
+    "uiComponents": "Forms",
+    "charts": "Charts",
+    "menu": "Menu",
+    "selectOrganization": "Select Organization",
+    "createOrganization": "Create Organization",
+    "userSettings": "User Settings",
+    "profile": "Profile",
+    "billing": "Billing",
+    "security": "Security",
+    "orgDetails": "Org Details",
+    "members": "Members",
+    "superAdmin": "Super Admin",
+    "overview": "Overview",
+    "organizations": "Organizations",
+    "users": "Users",
+    "notifications": "Notifications",
+    "logs": "Logs",
+    "theme": "Theme",
+    "settings": "Settings"
+  },
+  "createOrg": {
+    "title": "Create Organization",
+    "description": "Add a new organization to manage your team and projects.",
+    "nameLabel": "Organization Name",
+    "namePlaceholder": "Enter organization name"
+  },
+  "auth": {
+    "checkYourEmail": "Check your email",
+    "createAccount": "Create account",
+    "signIn": "Sign in",
+    "signUp": "Sign up",
+    "signInAction": "Sign in",
+    "magicLinkSent": "We sent a sign-in link to {{email}}",
+    "poweredBy": "Powered by Supabase Auth",
+    "magicLinkExpiry": "Click the link in your email to sign in. The link expires in 1 hour.",
+    "backToSignIn": "Back to sign in",
+    "passwordInstead": "Sign in with password instead",
+    "namePlaceholder": "Name",
+    "emailPlaceholder": "Email",
+    "passwordPlaceholder": "Password",
+    "sending": "Sending...",
+    "sendMagicLink": "Send magic link",
+    "signInWithMagicLink": "Sign in with magic link",
+    "forgotPassword": "Forgot password?",
+    "orContinueWith": "Or continue with",
+    "alreadyHaveAccount": "Already have an account?",
+    "dontHaveAccount": "Don't have an account?",
+    "authFailed": "Authentication failed",
+    "magicLinkFailed": "Failed to send magic link",
+    "oauthFailed": "OAuth failed"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "welcomeBack": "Welcome back!",
+    "signedInAs": "Signed in as",
+    "nextSteps": "Getting Started",
+    "nextStepsDescription": "Set up the remaining integrations for your app.",
+    "exploreStudio": "Explore Supabase Studio",
+    "configureOAuth": "Configure OAuth Providers",
+    "setupStripe": "Set up Stripe Billing",
+    "deployProduction": "Deploy to Production",
+    "totalUsers": "Total Users",
+    "newSignups": "New Signups",
+    "activeUsers": "Active Users",
+    "organizations": "Organizations",
+    "vsLastMonth": "{{diff}} vs last month",
+    "newThisMonth": "+{{count}} new this month",
+    "greeting": {
+      "morning": "Good morning",
+      "afternoon": "Good afternoon",
+      "evening": "Good evening"
+    },
+    "userId": "User ID"
+  },
+  "profile": {
+    "title": "Profile",
+    "description": "Manage your personal information",
+    "profileInfo": "Profile Information",
+    "profileInfoDescription": "Update your personal details and profile picture.",
+    "fullName": "Full Name",
+    "namePlaceholder": "Enter your name",
+    "email": "Email",
+    "emailChangeHint": "Contact support to change your email address.",
+    "account": "Account",
+    "accountDescription": "Manage your account settings.",
+    "deleteAccount": "Delete Account",
+    "deleteAccountDescription": "Permanently delete your account and all associated data.",
+    "deleteAccountConfirmTitle": "Delete your account?",
+    "deleteAccountConfirmDescription": "This action cannot be undone. Your account, profile data, and all associated information will be permanently deleted.",
+    "deleteAccountConfirmButton": "Delete my account",
+    "superAdminCannotDelete": "Super admin accounts cannot be deleted. Remove the super_admin role first, then try again.",
+    "saved": "Profile saved"
+  },
+  "billing": {
+    "title": "Billing",
+    "description": "Subscription and payment settings",
+    "notConfigured": "Billing is not configured. Set <code>STRIPE_SECRET_KEY</code> and <code>STRIPE_WEBHOOK_SECRET</code> in your environment to enable billing.",
+    "currentPlan": "Current Plan",
+    "onPlan": "You are on the <strong>{{plan}}</strong> plan.",
+    "trial": "Trial",
+    "cancelsOn": "Cancels on {{date}}",
+    "subscriptionEndsOn": "Your subscription will end on ",
+    "nextBillingDate": "Next billing date: ",
+    "changePlan": "Change Plan",
+    "choosePlan": "Choose a Plan",
+    "changePlanDescription": "Switch to a different plan via the customer portal.",
+    "choosePlanDescription": "Select the plan that works best for you.",
+    "currentPlanButton": "Current plan",
+    "switchPlan": "Switch plan",
+    "upgrade": "Upgrade",
+    "paymentMethod": "Payment Method",
+    "paymentMethodDescription": "Manage your payment information through the customer portal.",
+    "paymentOnFile": "Payment method on file",
+    "manageInPortal": "Manage in customer portal",
+    "noPaymentMethod": "No payment method",
+    "addCardDescription": "Add a card to enable faster checkout",
+    "addCard": "Add card",
+    "billingHistory": "Billing History",
+    "billingHistoryDescription": "View and download your past invoices.",
+    "viewInPortal": "View your complete billing history in the customer portal.",
+    "viewInvoices": "View Invoices",
+    "noBillingHistory": "No billing history yet",
+    "invoicesAppearHere": "Your invoices will appear here once you upgrade."
+  },
+  "security": {
+    "title": "Security",
+    "description": "Password, MFA, and session management",
+    "mfaRequired": "Two-factor authentication required",
+    "mfaRequiredDescription": "Your organization requires two-factor authentication. Please set it up to continue.",
+    "twoFactor": "Two-Factor Authentication",
+    "twoFactorDescription": "Add an extra layer of security to your account by requiring a verification code from your authenticator app.",
+    "mfaEnabled": "Two-factor authentication is enabled",
+    "mfaEnabledDescription": "Your account is protected with an authenticator app.",
+    "enrolledAuthenticators": "Enrolled authenticators",
+    "authenticatorApp": "Authenticator App",
+    "mfaNotEnabled": "Two-factor authentication is not enabled",
+    "mfaNotEnabledDescription": "Enable 2FA to add an extra layer of security to your account.",
+    "enableMfa": "Enable two-factor authentication",
+    "settingUp": "Setting up...",
+    "mfaRequiredByOrg": "Two-factor authentication is required by your organization.",
+    "setupMfa": "Set up two-factor authentication",
+    "setupMfaDescription": "Scan the QR code with your authenticator app, then enter the verification code.",
+    "cantScan": "Can't scan? Enter this code manually:",
+    "enterCode": "Enter verification code",
+    "verifying": "Verifying...",
+    "verifyAndEnable": "Verify and enable",
+    "disableMfa": "Disable two-factor authentication?",
+    "disableMfaDescription": "This will remove the authenticator from your account. You can set it up again at any time.",
+    "disableMfaWarning": "Warning: Your organization requires two-factor authentication. You will need to set it up again before you can access your account.",
+    "disabling": "Disabling...",
+    "disable2fa": "Disable 2FA"
+  },
+  "onboarding": {
+    "getStarted": "Get Started",
+    "steps": {
+      "profile": "Profile",
+      "organization": "Organization",
+      "plan": "Plan",
+      "invite": "Invite"
+    },
+    "profile": {
+      "title": "Welcome! What should we call you?",
+      "description": "This helps personalize your experience.",
+      "fullName": "Full Name",
+      "placeholder": "Jane Smith"
+    },
+    "org": {
+      "title": "Create your organization",
+      "description": "Organizations help you manage teams and projects.",
+      "nameLabel": "Organization Name",
+      "placeholder": "Acme Inc",
+      "error": "Failed to create organization"
+    },
+    "plan": {
+      "title": "Choose your plan",
+      "description": "You can always change this later.",
+      "continueWithFree": "Continue with Free",
+      "continueToCheckout": "Continue to Checkout",
+      "dayTrial": "{{days}}-day trial"
+    },
+    "invite": {
+      "title": "Invite your team",
+      "description": "Add team members by email. You can do this later too.",
+      "emailLabel": "Email addresses",
+      "placeholder": "alice@example.com, bob@example.com",
+      "hint": "Separate multiple emails with commas.",
+      "finish": "Finish Setup"
+    }
+  },
+  "charts": {
+    "title": "Charts",
+    "revenue": "Revenue",
+    "revenueDescription": "Monthly revenue, Jan–Jun",
+    "revenueSparkline": "$29.8k",
+    "newUsers": "New Users",
+    "activeUsers": "Active Users",
+    "activeUsersDescription": "Weekly signups: new vs. returning",
+    "mrr": "MRR",
+    "mrrGrowth": "MRR Growth",
+    "mrrGrowthDescription": "Cumulative monthly recurring revenue",
+    "mrrSparkline": "$31k",
+    "grossMargin": "Gross Margin",
+    "grossMarginSparkline": "53%",
+    "planDistribution": "Plan Distribution",
+    "planDistributionDescription": "Breakdown by subscription tier",
+    "featureUsage": "Feature Usage",
+    "featureUsageDescription": "Adoption across 6 product areas",
+    "revenueAndMargin": "Revenue & Margin",
+    "revenueAndMarginDescription": "Monthly revenue with gross margin %"
+  },
+  "theme": {
+    "title": "Theme",
+    "description": "Customize the app's brand colors and appearance",
+    "lightMode": "Light Mode",
+    "darkMode": "Dark Mode",
+    "borderRadius": "Border Radius",
+    "resetToDefaults": "Reset to Defaults",
+    "saveChanges": "Save Changes",
+    "saved": "Theme saved",
+    "saveFailed": "Failed to save theme",
+    "smoothScrolling": "Smooth Scrolling",
+    "smoothScrollEnabled": "Enable smooth scrolling",
+    "smoothScrollIntensity": "Intensity",
+    "smoothScrollDuration": "{{value}}s duration",
+    "colorSlots": {
+      "gradientStart": "Background Start",
+      "gradientEnd": "Background End",
+      "card": "Card",
+      "primary": "Primary",
+      "primaryDim": "Primary Dim",
+      "primaryForeground": "Primary Text",
+      "secondaryAccent": "Accent",
+      "secondaryAccentForeground": "Accent Text",
+      "destructive": "Destructive",
+      "warning": "Warning",
+      "success": "Success"
+    }
+  },
+  "admin": {
+    "impersonating": "Viewing as {{email}}",
+    "stopImpersonating": "Stop",
+    "loginAsUser": "Sign in as user",
+    "impersonateConfirm": "You will be signed in as this user. You can return to your admin account at any time.",
+    "cannotImpersonate": "Cannot impersonate this user",
+    "settings": {
+      "documentation": {
+        "title": "Documentation",
+        "description": "Turn off a documentation surface your project does not ship. Disabled sections stop serving and every link to them is removed from the app.",
+        "userDocsLabel": "User Docs",
+        "userDocsDescription": "The guides at /docs, plus their links in the navigation, footer, pricing, and dashboard",
+        "apiDocsLabel": "API (API Docs, OpenAPI Spec, Swagger)",
+        "apiDocsDescription": "The reference at /api/docs, the spec at /api/openapi.json, and Swagger UI at /api/swagger. These travel together; the spec is what the viewers render.",
+        "userDocsUpdateFailed": "Failed to update user docs setting",
+        "apiDocsUpdateFailed": "Failed to update API docs setting"
+      }
+    }
+  },
+  "landing": {
+    "hero": {
+      "badge": "Fully Automated · Self-Hosted",
+      "headline1": "Professional-Grade",
+      "subheading": "Full-stack SaaS starter with the most powerful DevOps CLI ever. Built for AI-driven development.",
+      "getUpdates": "Get Updates"
+    },
+    "pillars": {
+      "eyebrow": "We build on",
+      "headline": "Four commitments,",
+      "headlineHighlight": "enforced by design.",
+      "sovereign": {
+        "name": "Sovereign",
+        "definition": "Privacy within borders",
+        "belief": "Full-stack self-contained. Infrastructure, code, data, and integrations under your complete control."
+      },
+      "agnostic": {
+        "name": "Agnostic",
+        "definition": "Modular and portable",
+        "belief": "Swap components, move providers. All the batteries included, but easily changed."
+      },
+      "grounded": {
+        "name": "Grounded",
+        "definition": "Rooted in transparency",
+        "belief": "Fair Source CLI, Open Source Templates. Everything transparent all the way down."
+      },
+      "agentic": {
+        "name": "Agentic",
+        "definition": "AI-native guardrails",
+        "belief": "Security and governance built in. Architected for software built by agents."
+      }
+    },
+    "stack": {
+      "headline": "Complete,",
+      "headlineHighlight": "but modular.",
+      "subheading": "Every layer included, every piece swappable. All the way down.",
+      "layers": {
+        "app": "Application",
+        "api": "API & data",
+        "integrations": "Integrations",
+        "edge": "Edge & delivery",
+        "ops": "Operations",
+        "infra": "Infrastructure"
+      }
+    },
+    "logoStrip": {
+      "label": "Optimized for the tools you use"
+    },
+    "workflow": {
+      "headline": "Three commands to production.",
+      "subheading": "Provision, deploy, and scale from the CLI",
+      "create": {
+        "label": "Create",
+        "description": "A full-stack app with auth, teams, an admin panel, uploads, blog, and docs working on the first run. Billing, email, OAuth, analytics, and more languages are ready to wire up."
+      },
+      "develop": {
+        "label": "Develop",
+        "description": "Spin up a dev environment for building your app using AI, complete with security guardrails and a hot-reloading frontend."
+      },
+      "deploy": {
+        "label": "Deploy",
+        "description": "Deploy with Docker Compose or Kubernetes on the hosting provider you choose. Backups, scaling, and high-availability are automated commands."
+      }
+    },
+    "pricing": {
+      "headline1": "From",
+      "headlineSketch": "sketch",
+      "headline2": "to",
+      "headlineScale": "scale.",
+      "subheading": "Same carbon, different form. Pay once, or talk to us about Agency.",
+      "redirecting": "Redirecting…",
+      "checkoutError": "Something went wrong. Please try again.",
+      "popular": "All 4 Modes",
+      "contactUs": "Contact us",
+      "units": {
+        "forever": "forever",
+        "oneTime": "one-time payment",
+        "contact": "signed agreement"
+      },
+      "graphite": {
+        "tagline": "Sketch, build, and deploy!",
+        "cta": "Start Sketching",
+        "features": {
+          "unlimitedProjects": "Unlimited projects",
+          "localDev": "Full local dev environment",
+          "production": "Compose only production deploys",
+          "backups": "Backups, restore & scaling",
+          "cicd": "Push-to-deploy CI/CD",
+          "addOns": "Every add-on included",
+          "supabase": "Complete Vibecarbon stack",
+          "fairSource": "Fair Source — audit, fork, use commercially",
+          "community": "Community support"
+        }
+      },
+      "fullerene": {
+        "tagline": "Advanced scaling and redundancy.",
+        "cta": "Get Fullerene",
+        "features": {
+          "graphite": "Everything in Graphite",
+          "deployModes": "Compose HA, K8s & K8s HA deploys",
+          "replication": "High availability with replication",
+          "healthChecks": "One-command failover",
+          "cicd": "Flux GitOps on the Kubernetes modes",
+          "monitoring": "Advanced monitoring & alerting",
+          "unlimited": "Unlimited servers & projects",
+          "support": "Email support"
+        }
+      },
+      "agency": {
+        "tagline": "Deploy for clients and enterprise.",
+        "cta": "Contact Us",
+        "features": {
+          "fullerene": "Everything in Fullerene",
+          "exception": "Embed or resell Vibecarbon-powered services",
+          "clients": "Deploy for clients and employers",
+          "whiteLabel": "White-label Vibecarbon-powered services",
+          "customTerms": "Custom terms, signed agreement",
+          "priority": "Priority support"
+        }
+      }
+    },
+    "faq": {
+      "headline": "Frequently asked questions.",
+      "subheading": "Common questions, direct answers.",
+      "q1": {
+        "question": "What do I get out of the box?",
+        "answer": "A full-stack app with React 19, Hono API, self-hosted Supabase, auth, billing, file uploads, blog, docs, i18n, Kubernetes manifests, and Docker Compose for local dev."
+      },
+      "q2": {
+        "question": "Can I modify or customize everything?",
+        "answer": "Yes. Every line is yours, generated once and kept forever. No vendor lock-in, no runtime dependency on Vibecarbon."
+      },
+      "q3": {
+        "question": "What cloud providers are supported?",
+        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider: Hetzner runs Compose, Compose HA, Kubernetes, and Kubernetes HA; DigitalOcean runs Compose, Compose HA, and Kubernetes; Linode, Vultr, and Scaleway run Compose and Compose HA. Kubernetes HA (multi-region pilot-light standby) is Hetzner-only today. The provider is a per-environment setting: pick one, and pick again whenever you want."
+      },
+      "q4": {
+        "question": "How does deployment work?",
+        "answer": "Run \"npx vibecarbon deploy\" to provision a VPS, install your stack (Docker Compose or Kubernetes, depending on deploy mode), configure Traefik, deploy your app with auto-HTTPS, and set up automated backups, all in one command."
+      },
+      "q5": {
+        "question": "How does pricing work?",
+        "answer": "Graphite is free forever: create projects, develop locally, and deploy in production on a single server, with every add-on included. Fullerene ($149, one-time) unlocks advanced deploy modes (Compose HA, Kubernetes, and Kubernetes HA) plus GitOps CI/CD, for your own products. Agency is a contact-us license for deploying on behalf of clients, white-labeling, or reselling Vibecarbon-powered services. Fullerene is a one-time payment with no subscriptions; Agency pricing is set by agreement. Either way, your infrastructure."
+      },
+      "q6": {
+        "question": "How many projects can I create with one license?",
+        "answer": "Unlimited. One Fullerene license covers every project you create; there's no per-project fee. The license is tied to you or your organization."
+      },
+      "q7": {
+        "question": "Do I need a paid license to charge users or run a SaaS?",
+        "answer": "No. Single-server Docker Compose production deploys are free on Graphite, including your own commercial SaaS. You need Fullerene only for advanced deploy modes: Compose HA, Kubernetes, or Kubernetes HA. Deploying for someone else (a client, an employer, a white-label product) is Agency, a contact-us license for client and enterprise deployments. The test: is this your product? Fullerene. Someone else's? Agency."
+      },
+      "q8": {
+        "question": "What happens if Vibecarbon shuts down?",
+        "answer": "Nothing changes for your app. The generated code is MIT-licensed with zero runtime dependency on Vibecarbon; it's just a codebase you own outright. The CLI is Fair Source (FSL), so you can run it from source indefinitely for any non-competing use, and every release converts to the MIT license two years after publication. Your infrastructure runs in your own cloud account."
+      },
+      "q9": {
+        "question": "Do I need DevOps experience to deploy?",
+        "answer": "No. The CLI handles provisioning, SSL, scaling, backups, and monitoring. You need an account with a supported provider, a domain, and SMTP credentials for email. That's it. All the Kubernetes manifests and Docker Compose files live in your project if you want to understand or customize what's being set up."
+      }
+    },
+    "newsletter": {
+      "placeholder": "Enter your email",
+      "button": "Get updates",
+      "success": "Check your email to confirm your subscription.",
+      "errorEmpty": "Please enter your email address",
+      "errorInvalid": "Please enter a valid email address"
+    },
+    "cta": {
+      "headline": "Ship your next big thing!",
+      "subheading": "Production-grade infrastructure, without the DevOps hire."
+    },
+    "footer": {
+      "userDocs": "User Docs",
+      "apiDocs": "API Docs",
+      "blog": "Blog",
+      "changelog": "Changelog",
+      "contact": "Contact",
+      "privacy": "Privacy",
+      "terms": "Terms"
+    }
+  }
+}

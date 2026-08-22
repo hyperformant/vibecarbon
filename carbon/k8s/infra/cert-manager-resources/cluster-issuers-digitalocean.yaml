@@ -1,0 +1,53 @@
+# Let's Encrypt ClusterIssuers for the `digitalocean` DNS provider strategy.
+#
+# Uses cert-manager's native DigitalOcean DNS-01 solver: the controller
+# writes a TXT record under `_acme-challenge.<domain>` via the
+# DigitalOcean Domains API, Let's Encrypt resolves it to validate, no
+# port-80 round trip. Like Cloudflare (and unlike Hetzner) this solver
+# ships in cert-manager core, so there is no webhook chart to install
+# and no `groupName`/`solverName` indirection — see
+# DNS01_PROVIDERS.digitalocean.webhook (null) in src/lib/dns-provider.js.
+#
+# Requires Secret `digitalocean-dns` with key `access-token` in the
+# cert-manager namespace — the shape cert-manager's own docs specify for
+# `dns01.digitalocean.tokenSecretRef`. The token needs write scope so it
+# can create and delete the challenge record.
+# `applyK3sManifests` creates this Secret from the resolved `dnsToken`
+# (buildDnsProviderSecret) before applying these issuers; the gitops path
+# creates it from the DIGITALOCEAN_TOKEN Environment secret in
+# .github/workflows/deploy.yml. Without it cert-manager Orders pin
+# Pending forever.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod-digitalocean
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: "{{ADMIN_EMAIL}}"
+    privateKeySecretRef:
+      name: letsencrypt-prod-digitalocean-account-key
+    solvers:
+      - dns01:
+          digitalocean:
+            tokenSecretRef:
+              name: digitalocean-dns
+              key: access-token
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging-digitalocean
+spec:
+  acme:
+    # Staging has higher rate limits but issues untrusted certs.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: "{{ADMIN_EMAIL}}"
+    privateKeySecretRef:
+      name: letsencrypt-staging-digitalocean-account-key
+    solvers:
+      - dns01:
+          digitalocean:
+            tokenSecretRef:
+              name: digitalocean-dns
+              key: access-token

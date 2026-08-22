@@ -1,0 +1,230 @@
+---
+title: "Authentication"
+description: "Configure sign-in methods, OAuth providers, and multi-factor authentication."
+order: 4
+---
+
+## Overview
+
+Authentication is handled by self-hosted Supabase Auth. It supports:
+
+- **Email/password** sign-up and sign-in
+- **OAuth** providers (Google, Microsoft, GitHub, Apple, Discord)
+- **Magic links**: passwordless email authentication
+- **Multi-factor authentication** (TOTP)
+
+All auth state is managed through the `useAuth()` hook on the client and JWT middleware on the server.
+
+## useAuth() Hook
+
+The `useAuth()` hook (from `AuthProvider`) exposes everything you need for auth in React components:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `user` | `User \| null` | Current Supabase user object |
+| `session` | `Session \| null` | Current session with tokens |
+| `isLoading` | `boolean` | `true` while session is being validated |
+| `isSuperAdmin` | `boolean` | User has `super_admin` role in `app_metadata` |
+| `mfaRequired` | `boolean` | MFA is enforced app-wide (set by admin) |
+| `hasMfaEnabled` | `boolean` | Current user has enrolled a TOTP factor |
+| `signIn` | `object` | Sign-in methods (see below) |
+| `signUp` | `function` | Create a new account |
+| `signOut` | `function` | Sign out and clear session |
+| `mfa` | `object` | MFA operations (enroll, challenge, verify) |
+| `impersonateUser` | `function` | Impersonate a user (super admin only) |
+| `stopImpersonating` | `function` | Return to admin session |
+
+```typescript
+import { useAuth } from '@/components/auth/AuthProvider';
+
+function MyComponent() {
+  const { user, isLoading, isSuperAdmin } = useAuth();
+
+  if (isLoading) return <p>Loading...</p>;
+  if (!user) return <p>Not signed in</p>;
+
+  return <p>Hello, {user.email}</p>;
+}
+```
+
+## Sign-In Methods
+
+### Email & Password
+
+The default sign-in method. Calls the server-side login endpoint which handles account lockout checks before authenticating.
+
+```typescript
+const { signIn } = useAuth();
+
+try {
+  const { requiresMfa } = await signIn.email('user@example.com', 'password');
+  if (requiresMfa) {
+    // Redirect to MFA verification page
+  }
+} catch (error) {
+  // Handle error (invalid credentials, account locked, etc.)
+}
+```
+
+The `signIn.email()` method returns `{ requiresMfa: boolean }`. When `true`, the user has MFA enrolled and must verify a TOTP code before accessing the app.
+
+### Magic Links
+
+Users receive a sign-in link via email; no password required. Requires SMTP to be configured.
+
+```typescript
+const { signIn } = useAuth();
+
+await signIn.magicLink('user@example.com');
+// User receives an email with a sign-in link
+```
+
+### OAuth Providers
+
+Enable social login by configuring providers. Each provider has a dedicated method:
+
+```typescript
+const { signIn } = useAuth();
+
+await signIn.google();
+await signIn.github();
+await signIn.microsoft();
+await signIn.apple();
+await signIn.discord();
+```
+
+To enable an OAuth provider (self-hosted auth reads these from environment variables, and there is no Supabase Studio step):
+
+1. Set the provider's credentials as environment variables. `vibecarbon configure` → **OAuth** does this for Google and Microsoft, writing `GOOGLE_ENABLED` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (and the Microsoft equivalents) to `.env` / `.env.local`. For other providers, set them by hand. `vibecarbon deploy` ships them to the server, where GoTrue reads them as `GOTRUE_EXTERNAL_*`.
+2. In the provider's developer console, set the **authorized redirect URI** to `<SUPABASE_URL>/auth/v1/callback` (the `configure` wizard prints the exact URL to paste).
+3. The provider button automatically appears on the sign-in page.
+
+## Sign-Up
+
+Create a new account with email, password, and an optional display name:
+
+```typescript
+const { signUp } = useAuth();
+
+await signUp('user@example.com', 'password', 'Jane Smith');
+// User is signed in and redirected to onboarding
+```
+
+The `name` parameter is stored in `user_metadata.full_name`.
+
+## Route Protection
+
+Two route guard components are defined in `App.tsx`:
+
+**`ProtectedRoute`** requires any authenticated user. Redirects to `/sign-in` if not logged in. Also redirects to `/mfa-verify` if MFA is required but not yet verified.
+
+**`SuperAdminProtectedRoute`** requires the `super_admin` role. Redirects to the dashboard if the user is not a super admin.
+
+```tsx
+// In App.tsx routes
+<Route
+  path="/dashboard"
+  element={
+    <ProtectedRoute>
+      <Dashboard />
+    </ProtectedRoute>
+  }
+/>
+
+<Route
+  path="/admin/*"
+  element={
+    <SuperAdminProtectedRoute>
+      <AdminPanel />
+    </SuperAdminProtectedRoute>
+  }
+/>
+```
+
+Public pages (like the landing page, blog, docs) don't need a wrapper.
+
+## Multi-Factor Authentication
+
+### Enrollment
+
+Users enroll in MFA from **Settings → Security**. The flow:
+
+1. Call `mfa.enroll()` to generate a TOTP secret and QR code
+2. User scans the QR code with an authenticator app
+3. User enters a TOTP code to verify enrollment
+
+```typescript
+const { mfa } = useAuth();
+
+// Step 1: Enroll
+const data = await mfa.enroll('My Authenticator');
+// data.totp.qr_code: data URI for the QR code
+// data.totp.uri: otpauth:// URI for manual entry
+
+// Step 2: Verify enrollment with a code from the authenticator app
+await mfa.challengeAndVerify(data.id, '123456');
+```
+
+### Sign-In with MFA
+
+When a user with MFA signs in via email/password:
+
+1. `signIn.email()` returns `{ requiresMfa: true }`
+2. The app redirects to `/mfa-verify`
+3. User enters their TOTP code
+4. The code is verified against the pending challenge
+
+```typescript
+const { signIn, pendingMfaChallenge, mfa } = useAuth();
+
+// During sign-in
+const { requiresMfa } = await signIn.email(email, password);
+if (requiresMfa) {
+  // Navigate to MFA verification page
+}
+
+// On the MFA verification page
+if (pendingMfaChallenge) {
+  await mfa.verify(
+    pendingMfaChallenge.factorId,
+    pendingMfaChallenge.challengeId,
+    totpCode
+  );
+}
+```
+
+### Admin Enforcement
+
+Super admins can require MFA for all users from the admin dashboard. This sets the `mfa_enabled` key in the `app_settings` table. When enforced, `ProtectedRoute` redirects users without MFA to the enrollment page.
+
+## Account Lockout
+
+Brute force protection is built in. After **5 failed login attempts** from the same email and IP address within a **15-minute window**, the account is locked.
+
+- Locked accounts receive an HTTP `429 Too Many Requests` response with `remaining_minutes`
+- Failed attempts are tracked in the `failed_login_attempts` table
+- Successful login clears all failed attempts for that email/IP pair
+- Super admins can unlock accounts via the `admin_unlock_account(email)` database function
+
+## Server-Side Auth
+
+API requests include the user's JWT in the `Authorization` header. The server middleware validates it and makes the user available in route handlers:
+
+```typescript
+const user = c.get('user');
+if (!user) return c.json({ error: 'Unauthorized' }, 401);
+```
+
+The middleware chain runs on every request:
+
+1. **Extract token** from `Authorization: Bearer <token>` header
+2. **Validate** with `supabase.auth.getUser()` (server-side verification)
+3. **Set context**: `c.set('user', user)` and `c.set('supabase', client)` where `supabase` is a user-scoped client that respects RLS
+
+For operations that need to bypass RLS (admin tasks, webhooks), use the service role client:
+
+```typescript
+import { supabaseAdmin } from '@/server/lib/supabase';
+
+const { data } = await supabaseAdmin.from('organizations').select('*');
+```

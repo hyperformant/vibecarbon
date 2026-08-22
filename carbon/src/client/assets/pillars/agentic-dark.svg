@@ -1,0 +1,9 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><linearGradient id="vc-pillar-agentic-dark" x1="60" y1="0" x2="60" y2="120" gradientUnits="userSpaceOnUse"><stop stop-color="#F71DA6"/><stop offset="1" stop-color="#C4077F"/></linearGradient></defs>
+<polygon points="60.0,14.0 99.8,37.0 99.8,83.0 60.0,106.0 20.2,83.0 20.2,37.0" fill="none" stroke="#EDF1F4" stroke-width="4" stroke-linejoin="miter"/>
+<circle cx="60" cy="60" r="28" fill="none" stroke="#EDF1F4" stroke-width="1.5" stroke-dasharray="4 5" opacity="0.45"/>
+<circle cx="60" cy="60" r="4.5" fill="#EDF1F4"/>
+<circle cx="33.0" cy="52.8" r="5" fill="#EDF1F4"/>
+<circle cx="67.2" cy="87.0" r="5" fill="#EDF1F4"/>
+<circle cx="81.4" cy="42.0" r="7.5" fill="url(#vc-pillar-agentic-dark)"/>
+</svg>

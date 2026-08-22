@@ -1,0 +1,685 @@
+# Supabase Helm chart values (supabase-community/supabase-kubernetes).
+#
+# Chart schema reference:
+#   helm show values supabase-community/supabase
+#
+# Top-level keys recognised by this chart: secret, deployment, image,
+# environment, persistence, service, autoscaling, ingress, migration,
+# bigQuery. Component toggles live under `deployment.<comp>.enabled` —
+# top-level keys like `functions:` or `analytics:` are silently ignored.
+#
+# Placeholders like {{DOMAIN}} are substituted at deploy time in
+# installSupabase — do not hand-edit after deploy.
+#
+# We intentionally do NOT set fullnameOverride/nameOverride: the chart's
+# generated resources ignore the top-level override, so attempting to
+# rename creates a mismatch (ConfigMap URLs stop resolving). Deploy code
+# and the production overlay reference the chart-generated names directly
+# (`supabase-supabase-<component>`).
+
+# Shared secret wiring — every component reads from the vibecarbon-secrets
+# Secret created by applyVibecarbonSecrets before helm install runs. The
+# chart's `secretRef` + `secretRefKey` map the chart's internal field
+# names to keys in our secret; plain `secretName: vibecarbon-secrets`
+# does NOT work — the chart silently falls back to generating its own
+# supabase-jwt/supabase-dashboard secrets with random values (hit on
+# 2026-04-19 run #3 — Kong rejected our app's SERVICE_ROLE_KEY because
+# it was signed with our JWT_SECRET while the chart-generated
+# supabase-jwt.secret was a different string).
+secret:
+  jwt:
+    secretRef: vibecarbon-secrets
+    secretRefKey:
+      anonKey: ANON_KEY
+      serviceKey: SERVICE_ROLE_KEY
+      secret: JWT_SECRET
+  dashboard:
+    # Inline values — dashboard.openAiApiKey is chart-required and we don't
+    # ship one in vibecarbon-secrets. Using secretRef here would force the
+    # chart to read EVERY dashboard field from the secret (including
+    # openAiApiKey), and kubelet would fail the studio StatefulSet with
+    # "couldn't find key openAiApiKey in Secret vibecarbon/vibecarbon-secrets".
+    # Inline values are rendered into the chart's own supabase-dashboard
+    # secret at install time — still secure, just not deduped into ours.
+    username: "{{ADMIN_EMAIL}}"
+    password: "{{ADMIN_PASSWORD}}"
+    openAiApiKey: ""
+  db:
+    secretRef: vibecarbon-secrets
+    # When secretRef is set, the chart uses secret keys for every db.* value
+    # (inline values are ignored). Maps the chart's lowercase field names to
+    # the uppercase keys vibecarbon-secrets ships (DB_NAME defaulted to
+    # "postgres" by applyVibecarbonSecrets).
+    secretRefKey:
+      password: DB_PASSWORD
+      database: DB_NAME
+
+# Override the db image with vibecarbon's wal-g-equipped build (carbon/db/
+# Dockerfile: FROM supabase/postgres + wal-g v3.0.5). The stock chart image
+# has no wal-g, which is why k8s historically had no WAL archiving / PITR.
+# Built + sideloaded to the supabase node by deployK3s (k3s-db-build /
+# k3s-db-sideload); IfNotPresent so the sideloaded image is used, not pulled.
+# {{DB_IMAGE}}/{{DB_IMAGE_TAG}} substituted at deploy time in installSupabase.
+image:
+  db:
+    repository: "{{DB_IMAGE}}"
+    tag: "{{DB_IMAGE_TAG}}"
+    pullPolicy: IfNotPresent
+
+# Component enable toggles — chart's path is deployment.<comp>.enabled.
+# Top-level `functions:`/`analytics:`/`vector:` are silently ignored
+# (was the bug behind the 2026-04-26 e2e helm-wait timeout).
+deployment:
+  functions:
+    # Chart's edge-runtime expects a function source at /home/deno/functions.
+    # The template doesn't ship a default `main/index.ts`, so the chart's
+    # default deployment fetches `https://deno.land/x/jose@v4.14.4/index.ts`
+    # at boot — and the network policy + missing function source produce
+    # a CrashLoopBackOff that holds up `helm --wait`. Re-enable once a
+    # project actually defines a function.
+    enabled: false
+  analytics:
+    # Logflare — disable until we need it. Adds ClickHouse + BigQuery deps.
+    enabled: false
+  vector:
+    # Log-shipper — disable; conflicts with the optional observability stack.
+    enabled: false
+  db:
+    # Pin postgres to the dedicated supabase node (taint applied by Pulumi).
+    nodeSelector:
+      dedicated: supabase
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: supabase
+        effect: NoSchedule
+    # Headroom for the daily wal-g base backup, which runs INSIDE this
+    # container's cgroup (via `kubectl exec`, see k8s/base/backup/cronjob.yaml).
+    # backup-push streams PGDATA → lz4 → S3; size the limit for the backup
+    # window, not steady state, or it throttles postgres too. WALG_UPLOAD_
+    # CONCURRENCY is kept at 2 (vs compose's 4) to bound the burst.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+    # Mount the fault-tolerant WAL-archive wrapper that postgres'
+    # archive_command calls (enabled at runtime via ALTER SYSTEM in
+    # applyK3sManifests). Script body lives in the vibecarbon-wal-archive
+    # ConfigMap (k8s/base/backup/configmap-walg.yaml) — verbatim copy of
+    # carbon/volumes/db/wal-archive.sh (retry + exit-0 prevents disk-fill).
+    volumeMounts:
+      - name: wal-archive-script
+        mountPath: /etc/postgresql/wal-archive.sh
+        subPath: wal-archive.sh
+        readOnly: true
+      - name: walg-s3-creds
+        mountPath: /etc/walg
+        readOnly: true
+    volumes:
+      - name: wal-archive-script
+        configMap:
+          # Invoked as `bash /etc/postgresql/wal-archive.sh` (archive_command),
+          # so no exec bit is required on the mounted file.
+          name: vibecarbon-wal-archive
+      - name: walg-s3-creds
+        secret:
+          secretName: vibecarbon-secrets
+          # Optional so a no-S3 (dev) deploy still schedules the db pod; wal-g
+          # is simply unconfigured then. items maps the INI key → credentials.
+          optional: true
+          items:
+            - key: S3_CREDENTIALS_INI
+              path: credentials
+      # Optional: a deploy path that never created the map (or a manual helm
+      # install) must not wedge the db pod in ContainerCreating.
+      - name: seed-standby-script
+        configMap:
+          name: vibecarbon-seed-standby
+          optional: true
+    # Restore bootstrap: a marker-gated init container that, ONLY when a
+    # restore is requested (RESTORE_TARGET set in vibecarbon-secrets), fetches
+    # the latest wal-g base backup into PGDATA before postgres starts. On a
+    # normal boot RESTORE_TARGET is empty and the init container is a no-op.
+    # Uses the same wal-g-equipped db image. RESTORE_TARGET is an OPTIONAL
+    # secretKeyRef so deploys without the key still schedule.
+    extraInitContainers:
+      # ROBUSTNESS FIX (RCA 2026-06-23): the chart's init-pgsodium copies the
+      # /etc/postgresql-custom confs into the pgsodium PVC ONLY when it sees the
+      # volume as empty (`[ -z "$(ls -A /mnt/pgsodium)" ]`). A freshly-formatted
+      # Hetzner CSI ext4 volume contains a `lost+found` dir, so init-pgsodium
+      # treats it as "already initialized" and SKIPS the copy — postgres then
+      # FATALs on the missing wal-g.conf / read-replica.conf / supautils.conf
+      # `include` directives and CrashLoopBackOffs (intermittent, gated on the
+      # CSI mke2fs format race; failed k8s + k8s-ha in the 2026-06-22 matrix).
+      # This runs after init-pgsodium and idempotently restores the image's
+      # default confs whenever any required conf is absent — checking the confs
+      # themselves, not dir-emptiness. Same db image (its /etc/postgresql-custom
+      # holds the wal-g-equipped defaults); cp -a only overlays, never deletes.
+      - name: ensure-postgresql-custom
+        image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/sh
+          - -c
+          - |
+            for f in supautils.conf wal-g.conf read-replica.conf; do
+              if [ ! -f "/mnt/pgsodium/$f" ]; then
+                echo "postgresql-custom: $f missing (init-pgsodium skipped a non-empty volume, e.g. lost+found) — restoring image defaults"
+                cp -a /etc/postgresql-custom/. /mnt/pgsodium/
+                break
+              fi
+            done
+            echo "postgresql-custom verified: $(ls -A /mnt/pgsodium 2>/dev/null | tr '\n' ' ')"
+        volumeMounts:
+          - name: pgsodium
+            mountPath: /mnt/pgsodium
+      - name: walg-restore
+        image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -euo pipefail
+            if [ -z "${RESTORE_TARGET:-}" ]; then
+              echo "walg-restore: RESTORE_TARGET empty — normal boot, skipping."
+              exit 0
+            fi
+            echo "walg-restore: RESTORE_TARGET=${RESTORE_TARGET} — restoring from S3."
+            if [ -f "${PGDATA}/PG_VERSION" ]; then
+              echo "walg-restore: existing PGDATA — clearing for backup-fetch."
+              rm -rf "${PGDATA:?}/"* "${PGDATA:?}/".* 2>/dev/null || true
+            fi
+            # Fetch the latest base backup into PGDATA. (For PITR the base that
+            # precedes the target is also the latest base — base backups are
+            # frequent, so LATEST is the right starting point either way.)
+            #
+            # Bounded retry over Hetzner Object Storage read-after-write
+            # staleness: a frontend that has not caught up 404s a bucket/object
+            # that provably exists (NoSuchBucket / NoSuchKey / status code:
+            # 404 / wal-g's own "object '…' not found in storage" wording),
+            # which is how a compose scale died on 2026-07-31 seconds
+            # after a successful base-backup push — and again on 2026-08-06,
+            # in the wal-g wording the pattern didn't cover. Bash mirror of the compose
+            # path's JS retry (src/lib/deploy/walg-staleness.js) — same
+            # signatures, same 5-attempt 2/4/8/16s budget. It exists separately
+            # because there is no JS seam here: the kubelet runs this, and its
+            # own init-container restart is not a substitute (each restart
+            # burns the `rollout status --timeout=120s` the restore waits on,
+            # and leaves no breadcrumb saying why). Anything that is not a
+            # storage 404 fails on attempt 1, and a bucket that really is gone
+            # still fails once the budget is spent.
+            WALG_FETCH_ATTEMPTS=5
+            WALG_FETCH_LOG=/tmp/walg-restore-fetch.log
+            walg_attempt=1
+            walg_delay=2
+            while :; do
+              if wal-g backup-fetch "${PGDATA}" LATEST 2>&1 | tee "${WALG_FETCH_LOG}"; then
+                break
+              fi
+              if [ "${walg_attempt}" -ge "${WALG_FETCH_ATTEMPTS}" ] || \
+                 ! grep -qE "NoSuchBucket|NoSuchKey|status code: 404|object '[^']*' not found in storage" "${WALG_FETCH_LOG}"; then
+                echo "walg-restore: backup-fetch FAILED on attempt ${walg_attempt}/${WALG_FETCH_ATTEMPTS} — see the output above."
+                exit 1
+              fi
+              echo "[walg] backup-fetch hit a stale storage frontend (attempt ${walg_attempt}/${WALG_FETCH_ATTEMPTS}), retrying in ${walg_delay}s"
+              # backup-fetch requires an EMPTY target dir — clear whatever the
+              # failed attempt left so the retry starts from the state attempt
+              # 1 saw. (The staleness bites on the initial LIST, before any
+              # bytes land, but a mid-fetch 404 must not wedge the retry.)
+              rm -rf "${PGDATA:?}/"* "${PGDATA:?}/".* 2>/dev/null || true
+              sleep "${walg_delay}"
+              walg_attempt=$((walg_attempt + 1))
+              walg_delay=$((walg_delay * 2))
+            done
+            # Configure archive recovery. A fetched base backup is only
+            # consistent AFTER replaying the WAL from its redo point to its
+            # stop point — and that WAL lives in S3, not in the fetched PGDATA.
+            # Without restore_command + recovery.signal postgres aborts startup
+            # with "could not locate required checkpoint record" (the bug this
+            # fixes — the `latest` branch previously did neither). restore_command
+            # pulls each segment back from S3 via `wal-g wal-fetch`; recovery.signal
+            # puts postgres into archive recovery; on reaching the end of WAL (or
+            # the PITR target) it promotes to read-write. (RCA 2026-05-31: e2e
+            # k8s/k8s-ha restore — postgres crash-looped post-fetch.)
+            {
+              echo "restore_command = 'wal-g wal-fetch \"%f\" \"%p\"'"
+              echo "recovery_target_action = 'promote'"
+              # Pin recovery to the fetched base backup's OWN timeline. Default
+              # 'latest' makes postgres chase the newest timeline with a .history
+              # file; in HA, repeated restore→promote cycles leave DIVERGENT
+              # timelines in the shared wal-g S3 prefix, and 'latest' can pick one
+              # that forked before this base backup → crash-loop "requested
+              # timeline N is not a child of this server's history". 'current'
+              # recovers along the base backup's timeline, then promotes fresh.
+              echo "recovery_target_timeline = 'current'"
+              if [ "${RESTORE_TARGET}" != "latest" ]; then
+                # PITR: RESTORE_TARGET is an ISO-8601 timestamp — replay only up
+                # to that point instead of to the end of the WAL stream.
+                echo "recovery_target_time = '${RESTORE_TARGET}'"
+              fi
+            } >> "${PGDATA}/postgresql.auto.conf"
+            touch "${PGDATA}/recovery.signal"
+            echo "walg-restore: backup-fetch complete; archive recovery configured."
+        env:
+          - name: PGDATA
+            value: /var/lib/postgresql/data
+          - name: RESTORE_TARGET
+            valueFrom:
+              secretKeyRef:
+                name: vibecarbon-secrets
+                key: RESTORE_TARGET
+                optional: true
+          - name: WALG_S3_PREFIX
+            value: "{{WALG_S3_PREFIX}}"
+          - name: WALG_COMPRESSION_METHOD
+            value: lz4
+          - name: AWS_ENDPOINT
+            value: "{{S3_ENDPOINT}}"
+          - name: AWS_REGION
+            value: "{{S3_REGION}}"
+          - name: AWS_SHARED_CREDENTIALS_FILE
+            value: /etc/walg/credentials
+        volumeMounts:
+          - name: postgres-volume
+            mountPath: /var/lib/postgresql/data
+            subPath: postgres-data
+          - name: walg-s3-creds
+            mountPath: /etc/walg
+            readOnly: true
+      # Standby first-boot seeding (spec 2026-07-16-standby-init-seeding):
+      # on the k8s-ha STANDBY's first boot only, pg_basebackup the primary's
+      # data into empty PGDATA (via the local repl-gateway relay) so postgres
+      # boots directly into recovery as a streaming replica — no independent
+      # boot, no scale-to-zero swap. Self-gates (in-script) on
+      # WALG_ROLE=standby + empty PGDATA + no RESTORE_TARGET, so it is a
+      # logged no-op on the primary, on single-cluster k8s, on restores, and
+      # on every non-first boot. Bounded: ~6 min of retries, then exits 0
+      # UNSEEDED and the serial reseed path takes over (fallback, decision
+      # #2). Script delivered via the vibecarbon-seed-standby ConfigMap
+      # (rendered at deploy time from the shared basebackup builder —
+      # secret-free; REPL_PASSWORD arrives via env below). Mounts the RAW
+      # volume (no subPath): PGDATA is <mount>/postgres-data, staging a
+      # sibling — the same layout the helper-pod swap uses.
+      - name: seed-standby
+        image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/bash
+          - -c
+          # An optional ConfigMap that is MISSING mounts as an empty dir — a
+          # bare `bash <script>` would then fail the init and block the pod.
+          - '[ -f /etc/vibecarbon/seed-standby.sh ] && exec bash /etc/vibecarbon/seed-standby.sh; echo "[seed-standby] no script mounted — skipping"; exit 0'
+        env:
+          - name: WALG_ROLE
+            value: "{{WALG_ROLE}}"
+          - name: SEED_PRIMARY_HOST
+            value: "{{REPL_RELAY_HOST}}"
+          - name: SEED_PRIMARY_PORT
+            value: "{{REPL_RELAY_PORT}}"
+          - name: RESTORE_TARGET
+            valueFrom:
+              secretKeyRef:
+                name: vibecarbon-secrets
+                key: RESTORE_TARGET
+                optional: true
+          - name: REPL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: vibecarbon-secrets
+                key: REPL_PASSWORD
+                optional: true
+        volumeMounts:
+          - name: postgres-volume
+            mountPath: /seed-volume
+          - name: seed-standby-script
+            mountPath: /etc/vibecarbon
+            readOnly: true
+
+# Per-component environment — chart's path is environment.<comp>.
+#
+# SCHEMA (chart >= 0.7.1): each component's env is a LIST of {name, value}
+# entries, and helm REPLACES lists wholesale (no merge, unlike the <= 0.7.0
+# map schema which deep-merged with chart defaults). Overriding a component
+# therefore requires carrying the chart's FULL default list for it, with our
+# changes applied in place. Consequence: these lists are PINNED to the chart
+# version (SUPABASE_HELM_CHART_VERSION in src/lib/deploy/k8s/k3s.js) — when
+# bumping the pin, re-diff each list against the new chart's values.yaml
+# defaults (`helm show values supabase-community/supabase --version <new>`).
+# Entries marked "vibecarbon:" are ours; unmarked entries are chart defaults
+# carried verbatim.
+environment:
+  auth:
+    # vibecarbon: public URLs point at the deployed domain (defaults:
+    # http://supabase.local).
+    - name: API_EXTERNAL_URL
+      value: https://{{DOMAIN}}
+    - name: GOTRUE_API_HOST
+      value: "0.0.0.0"
+    - name: GOTRUE_API_PORT
+      value: "9999"
+    - name: GOTRUE_SITE_URL
+      value: https://{{DOMAIN}}
+    # Redirect allow-list — MUST be origin-scoped, NEVER "*". GoTrue validates
+    # the `redirectTo` on recovery/magiclink/OAuth against this; "*" lets an
+    # attacker point an unauthenticated resetPasswordForEmail at their own
+    # domain and receive the victim's recovery tokens (account takeover).
+    # {{DOMAIN}} is patched at deploy (same as GOTRUE_SITE_URL above).
+    - name: GOTRUE_URI_ALLOW_LIST
+      value: "https://{{DOMAIN}}/**"
+    - name: GOTRUE_DISABLE_SIGNUP
+      value: "false"
+    # Minimum password length (GoTrue defaults to 6); signup client validates
+    # the same minimum before calling signUp.
+    - name: GOTRUE_PASSWORD_MIN_LENGTH
+      value: "8"
+    - name: GOTRUE_JWT_DEFAULT_GROUP_NAME
+      value: authenticated
+    - name: GOTRUE_JWT_ADMIN_ROLES
+      value: service_role
+    - name: GOTRUE_JWT_AUD
+      value: authenticated
+    - name: GOTRUE_JWT_EXP
+      value: "3600"
+    - name: GOTRUE_EXTERNAL_EMAIL_ENABLED
+      value: "true"
+    # Rendered at deploy time by installSupabase: "false" only when the
+    # operator opted into signup confirmation emails via `vibecarbon
+    # configure` → SMTP (GOTRUE_MAILER_AUTOCONFIRM=false in .env.local),
+    # otherwise "true" — without working SMTP every signup would return 500
+    # "Error sending confirmation email" (observed 2026-04-26 batch run #3 —
+    # k8s verify-deploy failed at the auth_signup check).
+    - name: GOTRUE_MAILER_AUTOCONFIRM
+      value: "{{GOTRUE_MAILER_AUTOCONFIRM}}"
+    - name: GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED
+      value: "false"
+    - name: GOTRUE_EXTERNAL_PHONE_ENABLED
+      value: "false"
+    - name: GOTRUE_SMS_AUTOCONFIRM
+      value: "false"
+    - name: GOTRUE_MAILER_URLPATHS_INVITE
+      value: /auth/v1/verify
+    - name: GOTRUE_MAILER_URLPATHS_CONFIRMATION
+      value: /auth/v1/verify
+    - name: GOTRUE_MAILER_URLPATHS_RECOVERY
+      value: /auth/v1/verify
+    - name: GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE
+      value: /auth/v1/verify
+    # vibecarbon: SMTP wiring. Replaces the chart's junk placeholder literals
+    # (GOTRUE_SMTP_HOST: SMTP_HOST etc.) with OPTIONAL secretKeyRefs into
+    # vibecarbon-secrets — `vibecarbon configure` writes SMTP_* to .env.local,
+    # applyVibecarbonSecrets ships them into the Secret, and GoTrue reads them
+    # here. Absent key → env unset → GoTrue's own default (mirrors compose's
+    # `${SMTP_HOST:-}` fallbacks). Self-hosted GoTrue reads config ONLY from
+    # env at boot (Studio's Auth→Providers screen is a supabase.com hosted
+    # feature) — changing these post-deploy needs an auth pod restart.
+    - name: GOTRUE_SMTP_HOST
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: SMTP_HOST
+          optional: true
+    - name: GOTRUE_SMTP_PORT
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: SMTP_PORT
+          optional: true
+    - name: GOTRUE_SMTP_USER
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: SMTP_USER
+          optional: true
+    - name: GOTRUE_SMTP_PASS
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: SMTP_PASS
+          optional: true
+    - name: GOTRUE_SMTP_ADMIN_EMAIL
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: SMTP_ADMIN_EMAIL
+          optional: true
+    - name: GOTRUE_SMTP_SENDER_NAME
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: SMTP_SENDER_NAME
+          optional: true
+    # vibecarbon: OAuth providers (Google + Microsoft/Azure), same optional-
+    # secretKeyRef pattern as SMTP above. GOOGLE_*/MICROSOFT_* are written by
+    # `vibecarbon configure` → OAuth; an absent ENABLED key leaves the
+    # provider disabled (GoTrue default), exactly like compose's `:-false`.
+    # The redirect URI is rendered at deploy time from the domain; register
+    # it in the provider's developer console.
+    - name: GOTRUE_EXTERNAL_GOOGLE_ENABLED
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: GOOGLE_ENABLED
+          optional: true
+    - name: GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: GOOGLE_CLIENT_ID
+          optional: true
+    - name: GOTRUE_EXTERNAL_GOOGLE_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: GOOGLE_CLIENT_SECRET
+          optional: true
+    - name: GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI
+      value: https://{{DOMAIN}}/auth/v1/callback
+    - name: GOTRUE_EXTERNAL_AZURE_ENABLED
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: MICROSOFT_ENABLED
+          optional: true
+    - name: GOTRUE_EXTERNAL_AZURE_CLIENT_ID
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: MICROSOFT_CLIENT_ID
+          optional: true
+    - name: GOTRUE_EXTERNAL_AZURE_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: vibecarbon-secrets
+          key: MICROSOFT_CLIENT_SECRET
+          optional: true
+    # {{AZURE_TENANT_URL}} = https://login.microsoftonline.com/<MICROSOFT_
+    # TENANT_ID|common>, rendered by installSupabase (mirrors compose's
+    # `${MICROSOFT_TENANT_ID:-common}` interpolation, which k8s env
+    # valueFrom cannot express).
+    - name: GOTRUE_EXTERNAL_AZURE_URL
+      value: "{{AZURE_TENANT_URL}}"
+  realtime:
+    - name: DB_USER
+      value: supabase_admin
+    - name: DB_SSL
+      value: "false"
+    - name: PORT
+      value: "4000"
+    - name: FLY_ALLOC_ID
+      value: fly123
+    - name: FLY_APP_NAME
+      value: realtime
+    - name: ENABLE_TAILSCALE
+      value: "false"
+    - name: DB_AFTER_CONNECT_QUERY
+      value: SET search_path TO _realtime
+    - name: ERL_AFLAGS
+      value: -proto_dist inet_tcp
+    - name: DNS_NODES
+      value: "''"
+    - name: RLIMIT_NOFILE
+      value: "10000"
+    - name: APP_NAME
+      value: realtime
+    - name: SEED_SELF_HOST
+      value: "true"
+    - name: RUN_JANITOR
+      value: "true"
+    # NOTE: no DB_NAME entry here — the pre-0.7.1 values carried one, but the
+    # chart's realtime template already sources DB_NAME from the db secretRef
+    # (vibecarbon-secrets/DB_NAME via secret.db.secretRefKey.database), and a
+    # values entry would shadow the secret-sourced one (last env wins).
+  db:
+    - name: POSTGRES_HOST
+      value: /var/run/postgresql
+    - name: PGPORT
+      value: "5432"
+    - name: POSTGRES_PORT
+      value: "5432"
+    - name: JWT_EXP
+      value: "3600"
+    # vibecarbon: non-secret WAL-G env for the db container (continuous WAL
+    # archiving + the exec'd base-backup CronJob both read these). The chart
+    # renders these as plain `value:` strings (no valueFrom), so the SECRET
+    # keys (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) are injected
+    # separately via a StatefulSet env patch in applyK3sManifests.
+    # {{WALG_S3_PREFIX}} resolves to s3://<backup-bucket|storage-bucket>/
+    # backups/<project>/walg (a SINGLE canonical prefix; fallback handled in
+    # installSupabase). {{WALG_ROLE}} is 'primary' or 'standby' — it is NOT
+    # part of the prefix; it's the WRITE-GUARD signal that wal-archive.sh +
+    # the backup CronJob read to no-op on the standby (so a standby never
+    # writes into the canonical prefix), while restore/reseed still READ the
+    # one canonical prefix.
+    - name: WALG_S3_PREFIX
+      value: "{{WALG_S3_PREFIX}}"
+    - name: WALG_ROLE
+      value: "{{WALG_ROLE}}"
+    - name: WALG_COMPRESSION_METHOD
+      value: lz4
+    - name: WALG_UPLOAD_CONCURRENCY
+      value: "2"
+    - name: AWS_ENDPOINT
+      value: "{{S3_ENDPOINT}}"
+    - name: AWS_REGION
+      value: "{{S3_REGION}}"
+    # wal-g (AWS SDK) reads S3 creds from this INI file, mounted from
+    # vibecarbon-secrets (deployment.db.volumes below). File-mount, not env,
+    # so it's helm-owned and survives every upgrade with no db restart.
+    - name: AWS_SHARED_CREDENTIALS_FILE
+      value: /etc/walg/credentials
+  storage:
+    - name: REQUEST_ALLOW_X_FORWARDED_PATH
+      value: "true"
+    - name: FILE_SIZE_LIMIT
+      value: "52428800"
+    - name: FILE_STORAGE_BACKEND_PATH
+      value: /var/lib/storage
+    - name: TENANT_ID
+      value: stub
+    # S3 wiring for the storage service. These were literal `stub` with no
+    # endpoint and no credentials at all, while STORAGE_BACKEND was already
+    # `s3` — so storage-api came up pointed at S3 with nothing to reach it
+    # with, and every upload 500'd:
+    #
+    #   CredentialsProviderError: Could not load credentials from any providers
+    #
+    # It stayed invisible for months because the e2e storage checks skipped
+    # (the test bucket was never created), so the k8s tier shipped green with
+    # its object-storage path non-functional. Compose has always set the full
+    # set — these mirror docker-compose.yml's storage service exactly.
+    #
+    # Rendered through the same {{...}} substitution the wal-g block beside
+    # this uses (k3s.js renders into a 0600 file via writeSecretFile, which
+    # already carries ADMIN_PASSWORD).
+    - name: REGION
+      value: "{{S3_REGION}}"
+    - name: GLOBAL_S3_BUCKET
+      value: "{{S3_STORAGE_BUCKET}}"
+    - name: GLOBAL_S3_ENDPOINT
+      value: "{{S3_ENDPOINT}}"
+    # Non-AWS S3 (Hetzner/DO Spaces/Linode/Vultr/Scaleway) is path-style;
+    # virtual-host style resolves to a bucket subdomain that does not exist.
+    - name: GLOBAL_S3_FORCE_PATH_STYLE
+      value: "true"
+    - name: AWS_ACCESS_KEY_ID
+      value: "{{S3_ACCESS_KEY}}"
+    - name: AWS_SECRET_ACCESS_KEY
+      value: "{{S3_SECRET_KEY}}"
+    - name: ENABLE_IMAGE_TRANSFORMATION
+      value: "true"
+    # vibecarbon: S3-backed object storage instead of the local backend.
+    - name: STORAGE_BACKEND
+      value: s3
+  imgproxy:
+    - name: IMGPROXY_BIND
+      value: ":5001"
+    - name: IMGPROXY_LOCAL_FILESYSTEM_ROOT
+      value: /
+    - name: IMGPROXY_USE_ETAG
+      value: "true"
+    - name: IMGPROXY_ENABLE_WEBP_DETECTION
+      value: "true"
+    # vibecarbon: serve transforms from S3 (matches storage above).
+    - name: IMGPROXY_USE_S3
+      value: "true"
+  studio:
+    - name: HOSTNAME
+      value: "::"
+    - name: STUDIO_PORT
+      value: "3000"
+    - name: POSTGRES_PORT
+      value: "5432"
+    - name: DEFAULT_ORGANIZATION_NAME
+      value: Default Organization
+    - name: DEFAULT_PROJECT_NAME
+      value: Default Project
+    # vibecarbon: public URL points at the deployed domain.
+    - name: SUPABASE_PUBLIC_URL
+      value: https://{{DOMAIN}}
+    - name: NEXT_PUBLIC_ENABLE_LOGS
+      value: "true"
+    - name: NEXT_ANALYTICS_BACKEND_PROVIDER
+      value: postgres
+    # vibecarbon: not a chart default — kept from the pre-0.7.1 values for
+    # effective-env parity (the chart default also sets
+    # DEFAULT_ORGANIZATION_NAME above; whichever the studio image reads).
+    - name: STUDIO_DEFAULT_ORGANIZATION
+      value: "{{PROJECT_NAME}}"
+  # Kong reads its declarative config from /usr/local/kong/kong.yml — written
+  # by the chart's kong-entrypoint.sh after env substitution. The chart's
+  # default `KONG_DECLARATIVE_CONFIG` already points at this path, so leave
+  # it un-overridden. (Setting it to `/usr/local/kong/declarative/kong.yml`
+  # — which doesn't exist — was the cause of the 2026-04-26 e2e kong
+  # CrashLoopBackOff.)
+
+# We front Kong with our own Traefik IngressRoute (k8s/base/traefik) — the
+# chart's ingress object is off so we don't end up with two ingresses
+# pointing at the same Service.
+ingress:
+  enabled: false
+
+# Persistence:
+# - db: bump default 5Gi → 10Gi.
+# - functions: disable PVC creation. The chart's persistence.functions PVC
+#   is independent of deployment.functions.enabled — without this, studio
+#   stays Pending forever waiting for a `supabase-functions` PVC that
+#   persistence.yaml gates on `deployment.functions.enabled` (off here).
+#
+# storageClassName is DELIBERATELY absent here: the deploy pins it with
+# `helm --set persistence.<key>.storageClassName=<ProviderClass.K8S_STORAGE_CLASS>`
+# (installSupabase, src/lib/deploy/k8s/k3s.js), which helm applies AFTER every
+# `-f`. This file is the PROJECT's copy — `create` lays it down once and never
+# re-syncs it — so a value written here would be silently stale on every
+# project older than the CLI, which is exactly how a state-resumed deploy put
+# PGDATA on k3s' node-local `local-path` (kept k8s-ha rig e4, 2026-08-05).
+# Do not set it here; change the provider static instead.
+persistence:
+  db:
+    enabled: true
+    size: 10Gi
+  functions:
+    enabled: false

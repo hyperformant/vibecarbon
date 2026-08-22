@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  labels:
+    app: vibecarbon-app
+    component: application
+spec:
+  replicas: 2
+  # 900s (15m) — cold k8s deploys race the rollout window: `kubectl set image`
+  # triggers the rollout BEFORE `helm install supabase --wait` returns, and the
+  # app's readiness probe (/api/health/ready) stays 503 until kong is up. On
+  # the slow HA path the sideload + helm install consumed >29m before kong was
+  # reachable; the old 120s deadline tripped before kong existed and the
+  # subsequent `kubectl rollout status` failed even though pods were healthy
+  # by then. 900s covers worst-observed cold path; warm rollouts still finish
+  # in <60s so this only matters on the cold cycle.
+  progressDeadlineSeconds: 900
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: vibecarbon-app
+  template:
+    metadata:
+      labels:
+        app: vibecarbon-app
+        component: application
+    spec:
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: vibecarbon-app
+      containers:
+      - name: app
+        image: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}:main
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - containerPort: 3000
+          name: http
+        envFrom:
+        - configMapRef:
+            name: vibecarbon-config
+        # All configure-managed runtime keys (billing/OAuth/SMTP) live in
+        # vibecarbon-secrets; envFrom makes them available to the app without a
+        # per-key list here. Explicit env entries below still win on conflict.
+        - secretRef:
+            name: vibecarbon-secrets
+        env:
+        - name: NODE_ENV
+          value: production
+        - name: SUPABASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: KONG_URL
+        - name: SITE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: SITE_URL
+        - name: SUPABASE_ANON_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-secrets
+              key: ANON_KEY
+        - name: SUPABASE_SERVICE_ROLE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-secrets
+              key: SERVICE_ROLE_KEY
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          failureThreshold: 5
+          periodSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 5
+        readinessProbe:
+          httpGet:
+            path: /api/health/ready
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 3
+          timeoutSeconds: 3
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sh
+              - -c
+              - sleep 5
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: vibecarbon-app
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault

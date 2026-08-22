@@ -1,0 +1,706 @@
+---
+title: "CLI Reference"
+description: "All vibecarbon commands, options, and flags."
+order: 2
+---
+
+## Usage
+
+```bash
+npx vibecarbon                    # show top-level help
+npx vibecarbon <command>          # bare command, opens guided prompts
+npx vibecarbon <command> [seeds]  # positional/flag seeds skip matching prompts
+```
+
+**Vibecarbon is interactive-by-default.** Running a bare command always opens a
+guided prompt flow, so you never have to memorise flags. Positionals and flags are
+*optional prompt seeds*: when present they pre-fill the corresponding prompt and
+skip it. When absent, the prompt asks you. CI and piped-stdin contexts that
+can't prompt fail with a canonical error that names exactly which flags would
+unblock the invocation.
+
+**Flag form:** vibecarbon uses **single-dash flags only** (`-h`, not `--help`).
+Multi-letter flags are spelled out (`-env`, `-mode`, `-source`). Only `-h`,
+`-v`, `-y`, and `-l` are single-letter.
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show help |
+| `-v` | Show version number |
+
+---
+
+## License Requirements
+
+Licensing follows the **deploy scenario**, never the command. No command is
+paid for being that command.
+
+| Deploy scenario | License |
+|-----------------|---------|
+| Single-server Docker Compose | None, always free |
+| Compose HA, Kubernetes, Kubernetes HA | Fullerene |
+
+Only the commands that act on a deployed environment consult it at all:
+`deploy`, `backup`, `restore`, `failover`, and `scale`, each once it knows
+which scenario it is working on. Every other command, including all of
+`configure`, is free in every mode.
+
+Run `npx vibecarbon activate <key>` to activate a license.
+
+---
+
+# Dev
+
+Local-development primitives. All free, all interactive-by-default.
+
+## create
+
+Scaffold a new Vibecarbon project.
+
+```bash
+# Interactive (recommended)
+npx vibecarbon create
+
+# Power-user / CI
+npx vibecarbon create my-saas -y -admin-email admin@example.com -admin-password secret123
+npx vibecarbon create my-saas -install
+```
+
+Generates secure secrets (JWT, database password, Supabase keys), copies the
+template, initializes a git repository (with pre-commit + pre-push hooks),
+optionally runs `npm install`, and creates the admin user in Supabase Auth.
+
+| Flag | Description |
+|------|-------------|
+| `-y` | Skip prompts (requires `-admin-email` and `-admin-password`) |
+| `-admin-email <email>` | Admin email for dashboard access |
+| `-admin-password <pw>` | Admin password for dashboard access |
+| `-pm <name>` | Package manager: `npm` (default), `pnpm`, or `bun` |
+| `-install` | Run `<pm> install` during create (default: deferred to first `vibecarbon up`) |
+
+A git repository is initialized automatically (with pre-commit + pre-push hooks). If `git` isn't on PATH, this step is skipped silently with a hint to run `git init` manually afterwards.
+
+---
+
+## up
+
+Start the local development environment.
+
+```bash
+npx vibecarbon up
+```
+
+Auto-detects the project's package manager and runs the `dev:start` script,
+which boots Docker services (PostgreSQL, Supabase, Traefik), runs database
+migrations, and starts the Hono API and Vite dev servers. If ports are already
+in use, a port offset is applied automatically.
+
+---
+
+## down
+
+Stop the local development environment.
+
+```bash
+npx vibecarbon down
+```
+
+Stops all Docker Compose services for this project. Volumes (database data) are
+preserved.
+
+---
+
+## reset
+
+Reset the local development environment.
+
+```bash
+# Interactive (prompts for confirmation)
+npx vibecarbon reset
+
+# Skip the confirmation prompt
+npx vibecarbon reset -y
+```
+
+Removes containers, Docker volumes, and locally-built images. **All local
+database data will be lost.** Run `npx vibecarbon up` afterward to restart.
+
+| Flag | Description |
+|------|-------------|
+| `-y` | Skip confirmation prompt |
+
+---
+
+## status
+
+Show project and deployment status (read-only).
+
+```bash
+# Full status
+npx vibecarbon status
+
+# Specific environment
+npx vibecarbon status -env prod
+
+# Machine-readable JSON for CI/scripting
+npx vibecarbon status -json
+```
+
+When run outside a project directory, shows a summary of all registered
+projects. When run inside a project, shows detailed environment status. Live
+server checks require your provider's API token in the environment (for
+example `HETZNER_API_TOKEN` or `DIGITALOCEAN_API_TOKEN`).
+
+| Flag | Description |
+|------|-------------|
+| `-env <name>` | Show only a specific environment |
+| `-json` | Machine-readable JSON output |
+
+---
+
+## add
+
+Add an optional service or feature to a Vibecarbon project.
+
+```bash
+# Interactive: prompts for which feature
+npx vibecarbon add
+
+# Add a specific feature
+npx vibecarbon add observability
+
+# Add multiple features
+npx vibecarbon add observability redis
+```
+
+**Available features:** `observability`, `redis`.
+
+CI/CD and external services (Stripe, OAuth, SMTP, etc.) live in
+[`vibecarbon configure`](#configure) instead.
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show this help |
+| `-y` | Skip confirmation prompts |
+| `-offline` | Use bundled templates (for air-gapped environments) |
+
+---
+
+## remove
+
+Remove a feature from a Vibecarbon project.
+
+```bash
+# Interactive: prompts for which feature
+npx vibecarbon remove
+
+# Remove a specific feature
+npx vibecarbon remove redis
+
+# Remove without confirmation
+npx vibecarbon remove redis -force
+```
+
+Service data (volumes, databases) is preserved; only deployment configs
+(Docker / k8s manifests) are removed.
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show this help |
+| `-y` | Skip confirmation prompts |
+| `-force` | Skip confirmation prompts (alias for `-y`) |
+| `-offline` | Use bundled service definitions (for air-gapped environments) |
+
+---
+
+## configure
+
+Interactive wizard for configuring external services (billing, OAuth, SMTP,
+CI/CD).
+
+```bash
+# Configure a new project after creation
+npx vibecarbon configure
+
+# Layer GitOps onto a deployed k8s cluster
+npx vibecarbon configure cicd prod
+
+# Choose which languages the app ships
+npx vibecarbon configure globalization
+```
+
+Walks you through enabling features and entering API keys, then writes
+everything to `.env.local` and `.env`. Configured credentials are deployed
+automatically when you run `vibecarbon deploy`.
+
+**Configurable features:** CI/CD (GitHub Actions), Billing (Stripe / Paddle /
+Polar), Google OAuth, Microsoft OAuth, SMTP / Email, Plausible Analytics,
+Globalization (which languages the app ships).
+
+### `configure globalization` subcommand
+
+Chooses which languages the app ships. Aliased as `configure languages`.
+
+```bash
+npx vibecarbon configure globalization
+```
+
+The locale files in `src/client/locales/` **are** the language set: the app
+globs that directory, so there is no separate list to keep in sync and nothing
+that can disagree with what actually ships. This command writes and deletes
+those files for you.
+
+Projects start with English only, and the language switcher hides itself while
+there is just one language, so a single-language app has no dead control in its
+navigation. Adding a language seeds every key with its English string, which
+means the new file passes the parity check immediately and the command can tell
+you exactly how much is still untranslated. Translate by editing the locale
+file; the app picks it up on the next build.
+
+English cannot be removed. It is the fallback language, and without it every
+key renders as its own path.
+
+Removing a language deletes its locale file, which discards the translations in
+it. The command confirms first, and the file is recoverable with
+`git checkout`.
+
+### `configure cicd` subcommand
+
+Sets up CI/CD in one or two stages, depending on what the environment runs.
+This is the same CI/CD feature the interactive wizard offers; the subcommand
+just skips the menu.
+
+```bash
+npx vibecarbon configure cicd          # stage 1 only
+npx vibecarbon configure cicd prod     # stage 1, plus stage 2 if prod is k8s
+```
+
+**Stage 1** installs `.github/workflows/vibecarbon-build.yml` and
+`.github/workflows/deploy.yml` if missing, rewrites image references to your
+GitHub owner, and marks `cicdEnabled: true` in `vibecarbon.json`. It runs in
+every deploy mode and is free.
+
+**Stage 2** connects to the cluster, installs Flux, seeds the GitHub
+Environment secrets/vars, uploads `KUBECONFIG_B64`, and triggers the first
+reconcile. For HA clusters the handover runs against both the primary and
+standby kubeconfigs. It runs only when the named environment is `k8s` or
+`k8s-ha`.
+
+Naming a Compose environment does stage 1 and stops there, successfully.
+Compose CD is push-based: the Actions workflow builds and deploys to your
+server. Flux is a Kubernetes controller that reconciles from inside the
+cluster, so there is nothing for it to do on Compose.
+
+Pre-conditions: the `gh` CLI must be authenticated. For stage 2 the cluster
+must already be deployed (`vibecarbon deploy <env>` with `-mode k8s` or
+`-mode k8s-ha`), which itself requires Fullerene.
+
+After stage 2, future commits to `main` reconcile through Flux automatically.
+The deploy path itself stays local-first: `vibecarbon deploy` continues to
+build and sideload as before; GitOps just runs on top.
+
+---
+
+## upgrade
+
+Update infrastructure files in your project to match the latest template.
+
+```bash
+# Preview changes without applying
+npx vibecarbon upgrade -dry
+
+# Interactive upgrade
+npx vibecarbon upgrade
+
+# Non-interactive: update safe files, skip merge files
+npx vibecarbon upgrade -y
+```
+
+User source code (`src/**`, `content/**`, `migrations/**`) is never touched.
+Files are classified into three categories:
+
+- **Safe**: auto-replaced if you haven't modified them
+- **Merge**: always shown for review (e.g. `docker-compose.yml`, `package.json`)
+- **Never**: your code, never touched (e.g. `src/**`, `supabase/**`, `.env`)
+
+| Flag | Description |
+|------|-------------|
+| `-y` | Auto-accept safe replacements, skip merge files |
+| `-dry` | Preview changes without applying |
+| `-force` | Replace all files (creates `.upgrade-backup` copies) |
+
+---
+
+# Deploy
+
+Cloud infrastructure primitives. `destroy` is always free. `deploy`, `backup`,
+`restore`, `failover`, and `scale` are free on single-server Docker Compose;
+a Fullerene license is required for Compose HA, Kubernetes, or Kubernetes HA.
+
+## deploy
+
+Deploy a Vibecarbon environment to the cloud.
+
+```bash
+# Interactive: prompts for env (defaults to prod) and mode
+npx vibecarbon deploy
+
+# Env seeded; prompts for the rest
+npx vibecarbon deploy prod
+
+# Scripted HA k8s deploy to Helsinki
+npx vibecarbon deploy prod -mode k8s-ha -region hel1 -y
+
+# Scripted single-server deploy to a new DigitalOcean environment
+npx vibecarbon deploy prod -provider digitalocean -region nyc3 -mode compose -y
+
+# Redo a previously-failed deploy from scratch
+npx vibecarbon deploy prod -full
+```
+
+Most settings (server type, S3, DNS, backup schedule, worker bounds) come from
+the interactive prompt or `.vibecarbon.json`. Power users who want one-shot
+scripted deploys configure `.vibecarbon.json` once and re-run with `-y` to skip
+confirmations.
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show this help |
+| `-y` | Skip confirmation prompts |
+| `-env <name>` | Environment seed (alternative to positional) |
+| `-provider <id>` | Cloud provider for a NEW environment (existing environments keep their binding). Required with `-y` on a new environment. |
+| `-region <id>` | Primary region (provider-specific, e.g. `hel1` on Hetzner, `nyc3` on DigitalOcean) |
+| `-standby-region <id>` | HA standby/failover region (defaults to a same-continent partner of `-region`) |
+| `-mode <mode>` | Deploy mode: `compose`, `compose-ha`, `k8s`, or `k8s-ha` |
+| `-full` | Clear resume state and redo every step from scratch |
+| `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3, or PITR to an ISO-8601 timestamp. Skips migrations; the restored DB is authoritative. K8s modes only. |
+| `-allow-degraded` | HA only: finish even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy fails unless replication is confirmed streaming. |
+
+Provider support varies by mode: `compose` runs on all five providers,
+`compose-ha` and `k8s` on Hetzner and DigitalOcean, and `k8s-ha` is
+Hetzner-only today. See [Deployment](/docs/deployment#choosing-a-provider) for
+the full matrix and the API token each provider reads.
+
+> Server types, worker bounds, domain, DNS provider, S3 credentials, and backup
+> schedules are configured interactively or via `.vibecarbon.json`, and they don't
+> have CLI flags. The "does this deserve a flag?" question is the forcing
+> function for elegance: anything you'd set once and forget belongs in the
+> config file.
+
+---
+
+## destroy
+
+Tear down a cloud environment. **This is irreversible.**
+
+```bash
+# Interactive: prompts for env
+npx vibecarbon destroy
+
+# Env seeded; still prompts for confirmation
+npx vibecarbon destroy prod
+
+# Skip confirmation (dangerous!)
+npx vibecarbon destroy prod -y
+
+# Also delete the backup S3 bucket
+npx vibecarbon destroy prod -y -purge
+```
+
+The following are deleted from the environment's cloud provider: servers and
+all data on them, volumes (orphaned PVCs), firewalls, and SSH keys (deployment
+keys only) — plus DNS records and health checks at whichever DNS provider the
+environment uses, and GitHub environment secrets.
+
+> Production environments (`prod` or `production`) require a type-to-confirm
+> prompt **even with `-y`**. This is a hard guard that can't be bypassed.
+
+| Flag | Description |
+|------|-------------|
+| `-y` | Skip confirmation prompts (does not skip prod type-to-confirm) |
+| `-env <name>` | Environment seed (alternative to positional) |
+| `-orphans` | Destroy stray Pulumi stacks not tracked in config |
+| `-purge` | Also delete the backup S3 bucket (default: preserved) |
+
+---
+
+## backup
+
+Create or manage database backups.
+
+```bash
+# Interactive: prompts for env and action
+npx vibecarbon backup
+
+# Env seeded; prompts for action
+npx vibecarbon backup prod
+
+# List backups for prod
+npx vibecarbon backup prod -l
+
+# Scripted download
+npx vibecarbon backup -env prod -action download -source myapp_20260507.tar.gz
+```
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show this help |
+| `-y` | Skip confirmation prompts |
+| `-l` | List backups (read-only; equivalent to `-action list`) |
+| `-env <name>` | Environment seed (alternative to positional) |
+| `-action <verb>` | Action seed: `create`, `list`, or `download` |
+| `-source <file>` | Backup filename (required for non-interactive download) |
+
+---
+
+## restore
+
+Restore a database from a backup.
+
+```bash
+# Interactive: prompts for env and backup
+npx vibecarbon restore
+
+# List available backups for prod
+npx vibecarbon restore prod -l
+
+# Restore a specific backup from S3
+npx vibecarbon restore prod -source myapp_20260507.tar.gz
+
+# Restore from a local file
+npx vibecarbon restore prod -source ./backup.tar.gz -y
+
+# Restore the most-recent S3 backup, non-interactively
+npx vibecarbon restore prod -y -source latest
+```
+
+`-source` accepts a local file path, an S3 backup name, or the literal
+`latest` to fetch the most recent S3 backup.
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show this help |
+| `-y` | Skip confirmation prompts |
+| `-l` | List available backups (read-only; does not restore) |
+| `-env <name>` | Environment seed (alternative to positional) |
+| `-source <file-or-name-or-latest>` | Local file path, S3 backup name, or `latest` |
+
+---
+
+## failover
+
+Promote the standby region of an HA deployment to primary.
+
+```bash
+# Interactive: prompts for env
+npx vibecarbon failover
+
+# Preview the failover plan
+npx vibecarbon failover prod -dry
+
+# Execute without confirmation
+npx vibecarbon failover prod -y
+```
+
+Behavior depends on deployment topology:
+
+| Topology | Behavior |
+|----------|----------|
+| HA + Cloudflare DNS | Promotes standby DB, switches DNS A record automatically |
+| HA + provider DNS (Hetzner, DigitalOcean, Linode, Vultr, Scaleway) | Promotes standby DB, switches DNS A record automatically |
+| HA + manual DNS | Promotes standby DB, prints DNS update instructions |
+| Single server | Prints backup/restore recovery steps (failover is a no-op) |
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show this help |
+| `-y` | Skip confirmation prompts |
+| `-dry` | Show plan without executing |
+| `-env <name>` | Environment seed (alternative to positional) |
+
+---
+
+## scale
+
+Adjust instance types post-deploy without re-running the full deploy flow.
+
+```bash
+# Interactive: prompts for env and changes
+npx vibecarbon scale
+
+# Env seeded; prompts for changes
+npx vibecarbon scale prod
+
+# Scripted: resize all roles (cx33 is a Hetzner server type)
+npx vibecarbon scale -env prod -type cx33 -y
+```
+
+| Topology | What you can change |
+|----------|---------------------|
+| Compose / Compose HA | VPS server type (blue-green; zero downtime) |
+| Kubernetes | Worker / master / supabase server types (in-place) |
+| Kubernetes | Worker bounds (autoscaler floor + ceiling) |
+
+| Flag | Description |
+|------|-------------|
+| `-y` | Skip confirmations (required with `-type`) |
+| `-env <name>` | Environment seed (alternative to positional) |
+| `-type <id>` | Server type to scale to, from the environment's own provider catalog (e.g. `cx33` on Hetzner, `s-4vcpu-8gb` on DigitalOcean). Compose: resizes the VPS. K8s: resizes all roles. |
+
+---
+
+# Debug & Access
+
+Operator tools for cluster introspection and access management. Always free,
+no license required.
+
+## shell
+
+Drop into an interactive bash with cluster context exported.
+
+```bash
+# Default to prod
+npx vibecarbon shell
+
+# Specific environment
+npx vibecarbon shell staging
+```
+
+Exports `KUBECONFIG`, `VC_SSH_KEY`, `VC_KNOWN_HOSTS`, `VC_ENV`, and the
+environment provider's own CLI token variable, so `kubectl` and that provider's
+CLI "just work" against the named environment. On Hetzner that is
+`HCLOUD_TOKEN` plus `HCLOUD_NETWORK`; a provider whose controller manager reads
+its network identity from instance metadata instead (DigitalOcean, for example)
+exports the token alone. Use SSH directly for per-node debug. The master IP and
+SSH key path are in the welcome banner.
+
+---
+
+## diagnose
+
+Dump full cluster state for an environment.
+
+```bash
+# Full dump (excludes the heavy egress probe)
+npx vibecarbon diagnose prod
+
+# Just one section
+npx vibecarbon diagnose prod network
+npx vibecarbon diagnose prod flux
+
+# Heavy egress probe (netshoot DNS + MTU + route battery)
+npx vibecarbon diagnose prod egress
+```
+
+Streams sections to stdout AND writes the full report to
+`~/.vibecarbon/diag-<env>-<timestamp>.txt`.
+
+**Sections:** `nodes`, `pods`, `network`, `flux`, `hcloud`, `egress`, `all`
+(default, excludes `egress`).
+
+---
+
+## console
+
+Open Hetzner's web VNC console for a node. A last-resort debug helper for when
+SSH is broken (firewall change, cloud-init failure, kernel panic). Hetzner-only
+today: on an environment deployed elsewhere it exits with an unsupported-provider
+error, and you reach for that provider's own web console instead.
+
+```bash
+# Open the noVNC URL for the master node
+npx vibecarbon console master
+
+# Specific server by full name
+npx vibecarbon console myproject-prod-supabase
+```
+
+The `<node>` argument is a substring matched against server names. Tries
+`hcloud server request-console` (which prints the noVNC URL directly) when
+available; otherwise prints the Hetzner Cloud Console URL and the server ID
+so you can click through. Does NOT auto-open a browser.
+
+---
+
+## access
+
+Manage the operator-CIDR allowlist that locks SSH (port 22) and the Kubernetes
+API (port 6443) on the cloud firewall. The allowlist push assumes one provider
+per project and targets the Hetzner Cloud firewall today.
+
+```bash
+# List current CIDRs (default)
+npx vibecarbon access
+
+# Add a CIDR + push to all firewalls
+npx vibecarbon access add 5.6.7.8/32
+
+# Remove a CIDR + push to all firewalls
+npx vibecarbon access remove 5.6.7.8/32
+
+# Drop entries with lastUsedAt > 90 days, push
+npx vibecarbon access prune
+```
+
+Every interactive command that needs SSH or k8s-API access (`deploy`, `shell`,
+`diagnose`, `scale`, `failover`, `backup`, `restore`) auto-detects the
+operator's public IP, persists it under `operatorCidrs` in `.vibecarbon.json`,
+and patches the live firewall via the environment's provider API. Subsequent
+commands from the same IP are silent.
+
+**Non-interactive (`-y`) flows do *not* auto-detect**. CI runners have
+ephemeral IPs that would pollute the list. Either commit a populated
+`operatorCidrs` to `.vibecarbon.json` or set
+`ALLOWED_SSH_IPS="1.2.3.4/32,5.6.7.8/32"` once on the first deploy.
+
+If you somehow lock yourself out (no Hetzner API token, API unreachable), use
+[`vibecarbon console <node>`](#console): Hetzner's web VNC bypasses the
+firewall entirely.
+
+---
+
+# License
+
+## activate
+
+Activate a license key (Fullerene tier; Agency customers also receive a Fullerene-tier key).
+
+```bash
+# Prompts for key
+npx vibecarbon activate
+
+# Key seeded
+npx vibecarbon activate vc-xxxxxxxx-signature...
+```
+
+License keys start with `vc-`. Purchase a license at
+[vibecarbon.com/#pricing](https://vibecarbon.com/#pricing).
+
+---
+
+## deactivate
+
+Remove the current license and revert to the Graphite (free) tier.
+
+```bash
+# Interactive: prompts for confirmation
+npx vibecarbon deactivate
+
+# Skip confirmation
+npx vibecarbon deactivate -y
+```
+
+| Flag | Description |
+|------|-------------|
+| `-y` | Skip confirmation prompt |
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `HETZNER_API_TOKEN`, `DIGITALOCEAN_API_TOKEN`, `LINODE_API_TOKEN`, `VULTR_API_TOKEN`, `SCALEWAY_SECRET_KEY` | Your environment provider's API token — enables live server status checks and deployment. You only need the one for the provider that environment uses. |
+| `CLOUDFLARE_API_TOKEN` | Required for Cloudflare DNS operations |
+| `ALLOWED_SSH_IPS` | Bootstrap CIDRs for non-interactive deploys (CI) |
+| `DEV_PORT_OFFSET` | Port offset for local development (set by `vibecarbon up`) |

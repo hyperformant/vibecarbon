@@ -1,0 +1,201 @@
+# =============================================================================
+# VIBECARBON NETWORK POLICIES (CLUSTER BASELINE)
+# =============================================================================
+# These policies implement a "deny by default" approach with explicit allowlists
+# for required communication paths.
+#
+# Security Principle: Pods can only communicate with explicitly allowed targets.
+# =============================================================================
+
+---
+# Default deny all INGRESS for the namespace. We don't deny egress by
+# default — that broke the Supabase community chart whose subcharts
+# (auth, rest, realtime, storage, analytics) init-container against the
+# `supabase-supabase-db` service and don't have vibecarbon-app labels
+# our specific allow-policies matched.
+#
+# The chart-internal east/west traffic is fine inside the namespace;
+# external egress restrictions are enforced by the Hetzner firewall
+# (no outbound from cluster-public nets to arbitrary ports anyway).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: vibecarbon
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# Allow ALL ingress from other pods in the same namespace. Chart
+# subcharts need to reach the db / kong / each other without us
+# having to enumerate every label combination the chart might use.
+# External ingress still gates through traefik-policy + app-policy etc.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace
+  namespace: vibecarbon
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon
+
+---
+# Allow egress to pods in the same namespace. Symmetric with the
+# allow-intra-namespace ingress policy above. Required because
+# `allow-dns` below selects all pods with Egress policyType, which
+# implicitly switches the namespace to default-deny-egress for those
+# pods. Without this, the Supabase subchart init containers can resolve
+# `supabase-supabase-db` via DNS but the TCP connect to :5432 is
+# dropped, causing a 25-minute wait-for-db loop on every cold install.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace-egress
+  namespace: vibecarbon
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon
+---
+# Allow DNS resolution for all pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: vibecarbon
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # Use namespaceSelector only (no podSelector) so kustomize commonLabels doesn't
+        # add environment/region/role labels to the selector, which would exclude CoreDNS
+        # pods (managed by k3s, they only have k8s-app: kube-dns, not overlay labels).
+        - namespaceSelector:
+            matchLabels:
+                kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Allow the supabase-db pod to egress to S3 (HTTPS) for wal-g: continuous WAL
+# archiving (archive_command → wal-g wal-push) and the nightly base backup
+# (kubectl exec → wal-g backup-push) both run INSIDE the db container and push
+# to Hetzner Object Storage. Without this, the implicit default-deny-egress
+# (allow-dns/allow-intra-namespace-egress select all pods with Egress type)
+# drops the db pod's outbound 443 and wal-g hangs/fails.
+# Selector matches the chart-generated db pod labels; base kustomize `labels:`
+# does not include selectors, so these are not mutated.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: supabase-db-s3-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: supabase-db
+      app.kubernetes.io/instance: supabase
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# The storage service pushes and fetches user objects in S3 (STORAGE_BACKEND=s3
+# in k8s/values/supabase.values.yaml). Like the db's wal-g egress above, the
+# implicit default-deny (allow-dns / allow-intra-namespace-egress select every
+# pod with an Egress type) drops its outbound 443 without this.
+#
+# This was MISSING entirely, on every provider, for as long as the k8s tier has
+# existed. It went unnoticed because storage was ALSO shipped without S3
+# credentials or an endpoint (fixed 5b2e8dfa), so it never attempted a
+# connection that could be dropped — and because the e2e storage checks skipped
+# on a bucket nothing created, nothing ever tried an upload. Two independent
+# faults, both invisible behind the same skip: the first live upload attempt
+# failed on credentials, and the very next one failed here.
+#
+# Same shape as supabase-db-s3-egress: public S3 only, private ranges excluded.
+# The DO-specific VPC-gateway allowance lives in
+# k8s/base/s3-egress-vpc/s3-egress-vpc.yaml, which grants the sibling arm.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: supabase-storage-s3-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: supabase-storage
+      app.kubernetes.io/instance: supabase
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# H-9: allow the app pod to reach the (optional) vibecarbon-observability
+# namespace. The app's services-status API polls grafana:3000, prometheus:9090
+# and loki:3100 for health, and pushes logs to loki:3100. This namespace is
+# default-deny-egress (allow-dns + allow-intra-namespace-egress select all pods),
+# so without this the cross-namespace probes/log-push are silently dropped.
+# When observability is not installed the target namespace doesn't exist and this
+# rule simply matches nothing — harmless. (Egress rules are additive-allow only.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-observability-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-app
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon-observability
+      ports:
+        - protocol: TCP
+          port: 3000
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 3100

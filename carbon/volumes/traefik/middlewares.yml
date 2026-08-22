@@ -1,0 +1,123 @@
+# Traefik Dynamic Configuration
+# Middlewares for admin routes with ForwardAuth authentication
+
+http:
+  middlewares:
+    # Deny external clients. Attached to the public /api/_internal/verify-role
+    # router so the ForwardAuth trust anchor (a role-check oracle) is not
+    # reachable from the internet. Traefik's own ForwardAuth calls verify-role
+    # over the internal docker network (http://app:3000/...), which never
+    # traverses this public router, so ForwardAuth is unaffected. The browser
+    # never calls verify-role (only /api/_internal/services/*, left public and
+    # super_admin-gated in-handler). sourceRange is loopback-only → every real
+    # client is rejected 403.
+    internal-only:
+      ipAllowList:
+        sourceRange:
+          - "127.0.0.1/32"
+          - "::1/128"
+
+    # Strip identity headers from client requests before ForwardAuth sets real values.
+    # Prevents spoofing if a request bypasses Traefik or hits the service directly.
+    # (authResponseHeaders below already overwrites these from the auth response;
+    # this is belt-and-suspenders for requests where the auth server omits them.)
+    strip-proxy-headers:
+      headers:
+        customRequestHeaders:
+          X-User-Id: ""
+          X-User-Email: ""
+          X-User-Role: ""
+          # Grafana auth-proxy identity header — must never be client-supplied.
+          X-Authenticated-User: ""
+
+    # ForwardAuth for the (currently unused) admin-auth chain. The platform has
+    # exactly ONE elevated role — super_admin (app_metadata.role); there is no
+    # platform `admin` role (that name belongs to the org-membership axis:
+    # OWNER/ADMIN/MEMBER, enforced by RLS, never by ForwardAuth). So this gate
+    # requires super_admin, matching the k8s admin-auth. Do NOT set this to
+    # `?role=admin` or `?roles=admin,...`: that references a role nothing ever
+    # assigns and would create a compose-vs-k8s asymmetry. Any real
+    # admin-below-super_admin tier is a deliberate future opt-in.
+    admin-forward-auth:
+      forwardAuth:
+        address: "http://app:3000/api/_internal/verify-role?role=super_admin"
+        authRequestHeaders:
+          - "Cookie"
+          - "Authorization"
+          - "Accept"
+        authResponseHeaders:
+          - "X-User-Id"
+          - "X-User-Email"
+          - "X-User-Role"
+        trustForwardHeader: true
+
+    # Chain: strip spoofed headers → verify super_admin role (see note above)
+    admin-auth:
+      chain:
+        middlewares:
+          - strip-proxy-headers
+          - admin-forward-auth
+
+    # ForwardAuth - verifies user is authenticated with super_admin role
+    # Used for sensitive admin tools: n8n, Metabase, Grafana
+    super-admin-forward-auth:
+      forwardAuth:
+        address: "http://app:3000/api/_internal/verify-role?role=super_admin"
+        authRequestHeaders:
+          - "Cookie"
+          - "Authorization"
+          - "Accept"
+        authResponseHeaders:
+          - "X-User-Id"
+          - "X-User-Email"
+          - "X-User-Role"
+          # Injected into Grafana as the auth-proxy identity (GF_AUTH_PROXY_HEADER_NAME).
+          # Traefik overwrites any client-supplied copy with this verified value.
+          - "X-Authenticated-User"
+        trustForwardHeader: true
+
+    # Chain: strip spoofed headers → verify super_admin role
+    super-admin-auth:
+      chain:
+        middlewares:
+          - strip-proxy-headers
+          - super-admin-forward-auth
+
+    # Strip prefix middlewares for path-based admin routing
+    strip-admin-studio:
+      stripPrefix:
+        prefixes:
+          - "/admin/studio"
+
+    strip-admin-traefik:
+      stripPrefix:
+        prefixes:
+          - "/admin/traefik"
+
+    strip-admin-grafana:
+      stripPrefix:
+        prefixes:
+          - "/admin/grafana"
+
+    strip-admin-n8n:
+      stripPrefix:
+        prefixes:
+          - "/admin/n8n"
+
+    strip-admin-metabase:
+      stripPrefix:
+        prefixes:
+          - "/admin/metabase"
+
+    # Security headers — applied to admin services (Grafana, n8n, etc.)
+    security-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        frameDeny: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customFrameOptionsValue: "SAMEORIGIN"
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"

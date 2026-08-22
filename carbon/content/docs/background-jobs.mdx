@@ -1,0 +1,116 @@
+---
+title: "Background Jobs"
+description: "Schedule and manage recurring tasks with pg_cron."
+order: 7
+---
+
+## Overview
+
+Background jobs are powered by **pg_cron**, a PostgreSQL extension that runs scheduled tasks directly in the database. This means zero additional infrastructure: no Redis, no separate worker process, no external job queue.
+
+## Built-in Jobs
+
+Your app comes with three pre-configured jobs:
+
+| Job | Schedule | Description |
+|-----|----------|-------------|
+| `cleanup-login-attempts` | Every 6 hours | Removes failed login attempts older than 24 hours |
+| `cleanup-expired-notifications` | Daily at 3 AM | Deletes notifications past their expiry date |
+| `cleanup-job-history` | Weekly (Sunday 4 AM) | Prunes job execution history older than 30 days |
+
+## Admin Panel
+
+Super admins can view and manage jobs from **Admin > Jobs**:
+
+- View all scheduled jobs and their last execution status
+- See execution history with timestamps and results
+- Manually trigger any job with the "Run Now" button
+
+## Adding Custom Jobs
+
+To add a new scheduled job, create a new SQL migration:
+
+```sql
+-- supabase/migrations/XXXXXX_my_custom_job.sql
+
+SELECT cron.schedule(
+  'my-job-name',           -- unique job name
+  '*/30 * * * *',          -- cron expression (every 30 minutes)
+  $$
+  DO $$
+  DECLARE
+    affected INTEGER;
+  BEGIN
+    -- Your SQL logic here
+    DELETE FROM some_table WHERE expired_at < now();
+    GET DIAGNOSTICS affected = ROW_COUNT;
+
+    -- Log the result
+    PERFORM public.log_cron_job('my-job-name', 'succeeded',
+      'Processed ' || affected || ' rows');
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM public.log_cron_job('my-job-name', 'failed', NULL, SQLERRM);
+  END $$;
+  $$
+);
+```
+
+Run `npm run db:migrate` to apply the migration.
+
+## Cron Expression Reference
+
+```
+┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day of month (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── day of week (0-6, Sunday=0)
+│ │ │ │ │
+* * * * *
+```
+
+Common patterns:
+
+| Expression | Meaning |
+|-----------|---------|
+| `*/5 * * * *` | Every 5 minutes |
+| `0 */6 * * *` | Every 6 hours |
+| `0 3 * * *` | Daily at 3:00 AM |
+| `0 0 * * 0` | Weekly on Sunday at midnight |
+| `0 0 1 * *` | Monthly on the 1st at midnight |
+
+## Managing Jobs
+
+### Remove a Job
+
+```sql
+SELECT cron.unschedule('job-name');
+```
+
+### List All Jobs
+
+```sql
+SELECT * FROM cron.job;
+```
+
+### View Execution Log
+
+```sql
+SELECT * FROM cron.job_run_details
+ORDER BY start_time DESC
+LIMIT 20;
+```
+
+## Job History
+
+All job executions are logged in the `cron_job_history` table. Use `public.log_cron_job()` in your custom jobs to record results:
+
+```sql
+-- Log success
+PERFORM public.log_cron_job('my-job', 'succeeded', 'Processed 42 rows');
+
+-- Log failure
+PERFORM public.log_cron_job('my-job', 'failed', NULL, 'Connection timeout');
+```
+
+History is automatically cleaned up after 30 days by the `cleanup-job-history` job.

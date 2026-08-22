@@ -1,0 +1,129 @@
+{
+  "providers": {
+    "hetzner": {
+      "run": {
+        "id": "08adda6",
+        "date": "2026-08-13",
+        "origin": "GitHub-hosted runner"
+      },
+      "scenarios": {
+        "compose": {
+          "deploy": 282000,
+          "warm-deploy": 29400,
+          "backup": 13300,
+          "restore": 296000,
+          "scale": 281000,
+          "destroy": 39400
+        },
+        "compose-ha": {
+          "deploy": 376000,
+          "warm-deploy": 135000,
+          "backup": 13000,
+          "restore": 396000,
+          "scale": 277000,
+          "destroy": 38100
+        },
+        "k8s": {
+          "deploy": 513000,
+          "warm-deploy": 11500,
+          "backup": 31800,
+          "restore": 1086000,
+          "scale": 180000,
+          "destroy": 149000
+        },
+        "k8s-ha": {
+          "deploy": 556000,
+          "warm-deploy": 81000,
+          "backup": 30900,
+          "restore": 684000,
+          "scale": 318000,
+          "destroy": 136000
+        }
+      }
+    },
+    "digitalocean": {
+      "run": {
+        "id": "fd40094",
+        "date": "2026-08-15",
+        "origin": "GitHub-hosted runner"
+      },
+      "scenarios": {
+        "compose": {
+          "deploy": 487033,
+          "warm-deploy": 81765,
+          "scale": 431880,
+          "backup": 2633,
+          "destroy": 38531,
+          "restore": 533085
+        },
+        "compose-ha": {
+          "deploy": 648713,
+          "warm-deploy": 145205,
+          "scale": 463206,
+          "backup": 3054,
+          "destroy": 41203,
+          "restore": 708197
+        },
+        "k8s": {
+          "deploy": 489775,
+          "warm-deploy": 126159,
+          "scale": 286153,
+          "backup": 27263,
+          "destroy": 117217,
+          "restore": 600371
+        }
+      }
+    },
+    "linode": {
+      "run": {
+        "id": "97bfdbc",
+        "date": "2026-08-15",
+        "origin": "GitHub-hosted runner"
+      },
+      "scenarios": {
+        "compose": {
+          "deploy": 457629,
+          "warm-deploy": 63880,
+          "scale": 463206,
+          "backup": 2845,
+          "destroy": 31123,
+          "restore": 506812
+        }
+      }
+    },
+    "vultr": {
+      "run": {
+        "id": "d0a663c",
+        "date": "2026-08-15",
+        "origin": "GitHub-hosted runner"
+      },
+      "scenarios": {
+        "compose": {
+          "deploy": 279428,
+          "warm-deploy": 58687,
+          "scale": 299321,
+          "backup": 124403,
+          "destroy": 38753,
+          "restore": 291608
+        }
+      }
+    },
+    "scaleway": {
+      "run": {
+        "id": "c335aaf",
+        "date": "2026-08-15",
+        "origin": "GitHub-hosted runner"
+      },
+      "scenarios": {
+        "compose": {
+          "deploy": 421111,
+          "warm-deploy": 80749,
+          "scale": 315953,
+          "backup": 6397,
+          "destroy": 47200,
+          "restore": 456959
+        }
+      }
+    }
+  }
+}

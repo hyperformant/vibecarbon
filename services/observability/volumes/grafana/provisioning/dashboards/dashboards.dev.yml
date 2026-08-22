@@ -1,0 +1,16 @@
+# Grafana Dashboard Provisioning for local development
+# Auto-loads dashboards from the dashboards directory
+
+apiVersion: 1
+
+providers:
+  - name: 'vibecarbon'
+    orgId: 1
+    folder: 'vibecarbon'
+    folderUid: 'vibecarbon'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

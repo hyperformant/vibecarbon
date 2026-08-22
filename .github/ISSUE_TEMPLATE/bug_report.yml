@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a problem with the vibecarbon CLI or a deployed stack
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a report. The details below let us reproduce the
+        problem instead of guessing. For **security** issues, do not use this
+        form — see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+      placeholder: Describe the problem and the impact.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran, in order.
+      placeholder: |
+        1. vibecarbon create my-app
+        2. vibecarbon deploy -e prod
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Deploy mode
+      options:
+        - "not applicable / local (up)"
+        - compose
+        - compose-ha
+        - k8s
+        - k8s-ha
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - "not applicable"
+        - Hetzner
+        - DigitalOcean
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: vibecarbon version
+      description: Output of `vibecarbon -v`.
+      placeholder: "0.39.15"
+    validations:
+      required: true
+  - type: input
+    id: os-node
+    attributes:
+      label: OS and Node version
+      description: e.g. "macOS 15 / Node 24.15.0", "Ubuntu 24.04 (WSL2) / Node 24.18".
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / diagnostics
+      description: >
+        Relevant output. For deploy/scale/restore/failover issues, attach a
+        `vibecarbon diagnose <env>` bundle (k8s modes) or the `~/.vibecarbon/logs`
+        file for the run. Redact secrets first.
+      render: shell

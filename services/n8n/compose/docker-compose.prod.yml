@@ -1,0 +1,32 @@
+# n8n Production Overrides
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.n8n.yml -f docker-compose.n8n.prod.yml up -d
+#
+# Adds:
+# - SSL subdomain routing for n8n (n8n.yourdomain.com)
+# - ForwardAuth (super_admin role required)
+# - HTTP to HTTPS redirect
+
+services:
+  n8n:
+    environment:
+      # Override URLs for production subdomain
+      - N8N_HOST=n8n.${DOMAIN}
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://n8n.${DOMAIN}/
+      - N8N_EDITOR_BASE_URL=https://n8n.${DOMAIN}/
+      - N8N_SECURE_COOKIE=true
+    ports: !reset null # Reached via Traefik over the compose network; no host port in prod
+    labels:
+      # Production Traefik routing with SSL
+      - "traefik.enable=true"
+      # HTTPS router with super_admin auth + security headers
+      - "traefik.http.routers.n8n.rule=Host(`n8n.${DOMAIN}`)"
+      - "traefik.http.routers.n8n.entrypoints=websecure"
+      - "traefik.http.routers.n8n.tls=true"
+      - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.n8n.middlewares=super-admin-auth@file,security-headers@file"
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.n8n-http.rule=Host(`n8n.${DOMAIN}`)"
+      - "traefik.http.routers.n8n-http.entrypoints=web"
+      - "traefik.http.routers.n8n-http.middlewares=redirect-to-https"

@@ -1,0 +1,43 @@
+# Prometheus Configuration for Vibecarbon
+# Scrapes metrics from all stack components
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # PostgreSQL database metrics via postgres-exporter
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # Kong API Gateway metrics
+  # Note: Requires Kong prometheus plugin to be enabled
+  - job_name: 'kong'
+    static_configs:
+      - targets: ['kong:8001']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # n8n workflow automation (if enabled)
+  # n8n exposes metrics at /metrics when N8N_METRICS=true
+  - job_name: 'n8n'
+    static_configs:
+      - targets: ['n8n:5678']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    # Fail silently if n8n is not running
+    honor_labels: true
+
+  # Application metrics (optional)
+  # Uncomment if your app exposes Prometheus metrics
+  # - job_name: 'app'
+  #   static_configs:
+  #     - targets: ['app:3000']
+  #   metrics_path: '/api/metrics'
+  #   scrape_interval: 30s

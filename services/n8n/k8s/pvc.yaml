@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: n8n-data
+  labels:
+    app: vibecarbon-n8n
+    component: automation
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{K8S_STORAGE_CLASS}}
+  resources:
+    requests:
+      storage: 5Gi

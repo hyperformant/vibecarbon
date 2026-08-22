@@ -1,0 +1,238 @@
+---
+title: "Development"
+description: "Day-to-day development workflow, commands, and how to add pages, routes, and content."
+order: 3
+---
+
+## CLI Commands
+
+If you installed Vibecarbon globally, you can manage your dev environment with these commands:
+
+| Command | Purpose |
+|---------|---------|
+| `npx vibecarbon up` | Full cold start: Docker, migrations, and dev servers |
+| `npx vibecarbon down` | Stop all Docker services |
+| `npx vibecarbon reset` | Remove containers, volumes, and built images (run `npx vibecarbon up` to restart) |
+
+These are wrappers around the `npm` scripts listed below; use whichever you prefer.
+
+## Dev Commands
+
+| Command | Purpose |
+|---------|---------|
+| `npm run dev:start` | Full cold start: Docker, migrations, and dev servers |
+| `npm run dev` | Start API + Vite (assumes Docker is already running) |
+| `npm run dev:reset` | Remove containers, volumes, and built images (run `npm run dev:start` to restart) |
+| `npm run docker:up` | Start Supabase and infrastructure services |
+| `npm run docker:down` | Stop all Docker services |
+| `npm run db:migrate` | Run SQL migrations from `supabase/migrations/` |
+| `npm run build` | Build client (Vite) and server (esbuild) for production |
+| `npm run lint` | Biome linting and formatting check |
+| `npm run lint:fix` | Auto-fix lint and formatting issues |
+| `npm run typecheck` | TypeScript type checking |
+| `npm test` | Run vitest tests |
+| `npm start` | Run production server (`node dist/server/index.js`) |
+| `npm run stripe:listen` | Forward Stripe webhooks to local API |
+| `npm run docker:logs` | Tail logs from all Docker containers |
+
+## How It Works
+
+`npm run dev:start` runs three phases in sequence:
+
+1. **Docker startup**: starts PostgreSQL, Kong, GoTrue, PostgREST, Realtime, Storage, Studio, and Traefik. Blocks until all services are healthy.
+2. **Migrations**: executes all SQL files in `supabase/migrations/` to set up the schema, RLS policies, and initial admin user.
+3. **Dev servers**: spawns two processes in parallel:
+   - **Hono API** on port 3000 via `tsx watch` (auto-restarts on file changes)
+   - **Vite** on port 5173 with full HMR (instant browser updates)
+
+Vite proxies all `/api/*` requests to the Hono server, so the client can call `fetch('/api/v1/...')` without worrying about ports or CORS.
+
+## Development URLs
+
+Traefik routes `*.localhost` subdomains to each service:
+
+| Service | URL |
+|---------|-----|
+| App | http://app.localhost |
+| Supabase Studio | http://studio.localhost |
+| Traefik Dashboard | http://traefik.localhost |
+
+Optional services like observability (Grafana) get their own subdomains when enabled; see the [CLI reference](/docs/cli#add).
+
+## Hot Reloading
+
+**Client changes** (React components, CSS, MDX) update instantly in the browser via Vite HMR. Component state is preserved.
+
+**Server changes** (API routes, middleware) trigger a full process restart via `tsx watch`. The API is briefly unavailable during restart.
+
+**Database changes** require running `npm run db:migrate` manually; migrations are not watched.
+
+## Debugging
+
+**Container logs**: run `npm run docker:logs` to tail logs from all Docker services. Useful for debugging Supabase Auth errors, PostgREST issues, or Kong routing problems.
+
+**Supabase Studio**: open [http://studio.localhost](http://studio.localhost) to browse your database, inspect tables, view RLS policies, and manage auth users directly.
+
+**React DevTools**: Vite's dev server supports React DevTools out of the box. Install the browser extension for component inspection and state debugging.
+
+## Adding a Page
+
+1. Create a component in `src/client/pages/`:
+
+```tsx
+export default function MyPage() {
+  return <h1>My Page</h1>;
+}
+```
+
+2. Add a route in `src/client/App.tsx`:
+
+```tsx
+<Route
+  path="/my-page"
+  element={
+    <ProtectedRoute>
+      <MyPage />
+    </ProtectedRoute>
+  }
+/>
+```
+
+Wrap with `<ProtectedRoute>` to require authentication, or omit it for public pages.
+
+## Adding an API Route
+
+1. Create a route file in `src/server/routes/v1/`:
+
+```typescript
+import { Hono } from 'hono';
+import { z } from 'zod';
+import type { HonoVariables } from '../../types';
+
+const items = new Hono<{ Variables: HonoVariables }>();
+
+const createSchema = z.object({
+  name: z.string().min(1).max(100),
+});
+
+items.get('/', async (c) => {
+  const user = c.get('user');
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  const supabase = c.get('supabase');
+  const { data, error } = await supabase.from('items').select('*');
+  if (error) return c.json({ error: 'Failed to fetch items' }, 500);
+  return c.json(data);
+});
+
+items.post('/', async (c) => {
+  const user = c.get('user');
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  const body = await c.req.json();
+  const result = createSchema.safeParse(body);
+  if (!result.success) {
+    return c.json({ error: result.error.issues.map((e) => e.message).join(', ') }, 400);
+  }
+
+  const supabase = c.get('supabase');
+  const { data, error } = await supabase
+    .from('items')
+    .insert(result.data)
+    .select()
+    .single();
+  if (error) return c.json({ error: 'Failed to create item' }, 500);
+  return c.json({ item: data }, 201);
+});
+
+export { items };
+```
+
+2. Mount in `src/server/index.ts`:
+
+```typescript
+import { items } from './routes/v1/items';
+app.route('/api/v1/items', items);
+```
+
+The Vite proxy forwards `/api/*` to the Hono server automatically.
+
+## Adding MDX Content
+
+MDX files in `content/` are auto-discovered at build time. Drop a file in the right directory and it appears on the site.
+
+**Blog post** (`content/blog/my-post.mdx`):
+
+```markdown
+---
+title: "My Post"
+description: "A short summary."
+date: "2025-01-15"
+author: "Your Name"
+---
+
+Post content with **markdown** and JSX.
+```
+
+**Documentation page** (`content/docs/my-page.mdx`):
+
+```markdown
+---
+title: "My Page"
+description: "What this page covers."
+order: 7
+---
+
+Page content here.
+```
+
+**Changelog entry** (`content/changelog/v1-1-0.mdx`):
+
+```markdown
+---
+title: "v1.1.0"
+description: "What changed."
+date: "2025-01-15"
+version: "1.1.0"
+---
+
+## Features
+- New feature
+```
+
+The `order` field controls sidebar position in docs. Blog and changelog entries sort by `date` (newest first).
+
+## Running Multiple Projects
+
+To run two Vibecarbon projects simultaneously, set a port offset in `.env.local`:
+
+```bash
+DEV_PORT_OFFSET=100
+```
+
+This shifts all ports by 100 (Vite → 5273, API → 3100, Kong → 8100, etc.). You can also override individual ports:
+
+```bash
+DEV_VITE_PORT=5273
+DEV_API_PORT=3100
+DEV_KONG_PORT=8100
+```
+
+## Resetting the Environment
+
+If your database gets into a bad state or you want a clean slate:
+
+```bash
+npm run dev:reset  # Remove containers, volumes, and built images
+npm run dev:start  # Cold start: Docker + migrations + dev servers
+```
+
+`dev:reset` removes all Docker containers, volumes (including database data), and locally-built images. It does **not** restart services; run `npm run dev:start` afterward to start fresh.
+
+To stop services without losing data:
+
+```bash
+npm run docker:down # Stop services, data preserved in volumes
+npm run docker:up  # Restart services with existing data
+npm run dev        # Start dev servers
+```

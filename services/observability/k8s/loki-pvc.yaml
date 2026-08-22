@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-pvc
+  labels:
+    app: vibecarbon-loki
+    component: observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{K8S_STORAGE_CLASS}}
+  resources:
+    requests:
+      storage: 10Gi

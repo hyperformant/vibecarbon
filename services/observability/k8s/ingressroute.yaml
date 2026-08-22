@@ -1,0 +1,32 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: vibecarbon-grafana
+  # No metadata.namespace: the kustomization's namespace transformer places this
+  # in vibecarbon-observability. It MUST be co-located with the grafana Service
+  # (same namespace) — Traefik watches all namespaces but has no
+  # allowCrossNamespace, so an IngressRoute in `vibecarbon` could not target a
+  # Service in vibecarbon-observability. The referenced middlewares + TLS secret
+  # below are likewise local to this namespace for the same reason.
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # No strip-prefix: Grafana handles the subpath itself via GF_SERVER_SERVE_FROM_SUB_PATH
+    # and GF_SERVER_ROOT_URL=$(SITE_URL)/admin/grafana/.
+    - match: PathPrefix(`/admin/grafana`)
+      kind: Rule
+      priority: 20
+      services:
+        - name: grafana
+          port: 3000
+      middlewares:
+        # Local (vibecarbon-observability) copies — see middleware.yaml. Unqualified
+        # refs resolve to this IngressRoute's namespace.
+        - name: admin-auth
+        - name: security-headers
+  tls:
+    # Local cert (grafana-tls, issued by grafana-tls-certificate.yaml). The base
+    # vibecarbon-tls secret lives in the vibecarbon namespace and is not visible
+    # here.
+    secretName: grafana-tls

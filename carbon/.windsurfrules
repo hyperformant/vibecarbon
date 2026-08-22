@@ -1,0 +1,75 @@
+# {{PROJECT_NAME}} Development Rules
+
+> **Read and follow all rules in AGENTS.md at the project root.** It contains mandatory security constraints for database, API, and infrastructure code.
+
+## Security Quick Reference
+
+- MUST check auth on every endpoint: `if (!c.get('user')) return c.json({ error: 'Unauthorized' }, 401)`
+- MUST validate all input with Zod schemas before processing
+- MUST use `c.get('supabase')` for user-facing queries (respects RLS) — never `supabaseAdmin`
+- MUST enable RLS on every new table with `(SELECT auth.uid())` in policies
+- MUST use `createAuthClient()` for `signInWithPassword()` — never the `supabaseAdmin` singleton
+- NEVER return raw database errors to clients
+- NEVER expose `SUPABASE_SERVICE_ROLE_KEY` to the client
+
+## Stack
+- Frontend: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4
+- Backend: Hono (Node.js), Pino logger, Zod validation
+- Auth/Database: Self-hosted Supabase (PostgreSQL, Auth, REST API, Realtime, Storage)
+- Tooling: Biome (lint/format), TypeScript, esbuild, Vitest
+
+## Commands
+- `npm run dev:start` - Full cold start (Docker + migrations + dev servers)
+- `npm run dev` - Start API and Vite dev servers
+- `npm run build` - Build client and server
+- `npm run lint` - Biome linting
+- `npm run typecheck` - TypeScript checking
+- `npm test` - Run vitest tests
+- `npm run db:migrate` - Run SQL migrations
+
+## Path Aliases
+- `@/*` → `src/client/*`
+- `@shared/*` → `src/shared/*`
+- Never use `@/shared/*` - it won't resolve
+
+## Key Patterns
+
+### Supabase
+- Client-side (`src/client/lib/supabase.ts`): anon key, RLS enforced
+- Server-side (`src/server/lib/supabase.ts`): service role key, bypasses RLS
+- Auth is handled by Supabase - don't implement custom auth
+- Use `(SELECT auth.uid())` in RLS policies (not `auth.uid()` directly)
+
+### API Routes
+- Create in `src/server/routes/v1/`, mount in `src/server/index.ts`
+- Validate input with Zod schemas
+- Get user via `c.get('user')`, get Supabase client via `c.get('supabase')`
+
+### React Pages
+- Protected pages: wrap with `<ProtectedRoute>` in `App.tsx`
+- Admin pages: wrap with `<SuperAdminProtectedRoute>`
+- App pages use `<SidebarProvider>` + `<AppSidebar />` + `<SidebarInset>` layout
+
+### UI
+- **Two design libraries**: Shadcn UI primitives (`src/client/components/ui/`) for interface elements; Launch UI blocks (MIT, vendored copy/paste; retinted to the OKLCH palette) for marketing/landing sections. Build custom only when neither fits — and comment why.
+- Shadcn UI components in `src/client/components/ui/`
+- Use `cn()` from `@/lib/utils` for conditional classes
+- Use `toast` from `sonner` for notifications
+- Button `asChild` with Link children: add `className="inline-flex items-center gap-2"` to the Link, `shrink-0` on icons
+
+### Data Fetching
+- **NEVER use raw `fetch` in `useEffect`** — always use `useQuery` for reads, `useMutation` for writes. Raw fetch bypasses deduplication/caching and React StrictMode will double-fire it.
+- **Gate authenticated queries** with `enabled: !!user` to prevent 401s for logged-out users
+- **Use `getAuthHeaders()`** from `@/lib/api.ts` — never duplicate it locally, never send empty `Authorization` headers
+- Shared hooks in `src/client/hooks/api/`
+- Invalidate related queries after mutations: `queryClient.invalidateQueries({ queryKey: ['items'] })`
+
+### Database
+- Migrations in `supabase/migrations/` with incrementing prefix
+- Always enable RLS on new tables
+- Helper functions: `get_user_org_ids()`, `get_user_admin_org_ids()`, `is_super_admin()`
+
+### Environment Variables
+- Server env vars validated in `src/server/lib/env.ts`
+- Client env vars must start with `VITE_`
+- Feature flags use `isXConfigured()` pattern

@@ -1,0 +1,163 @@
+# Traefik CRDs - IngressRoute for Vibecarbon
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: vibecarbon-app
+  labels:
+    app: vibecarbon
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # Deny public access to the ForwardAuth trust anchor (role oracle).
+    # verify-role is called by Traefik over the in-cluster Service, never by the
+    # browser; the sibling /api/_internal/services/* paths stay public (admin
+    # panel, super_admin-gated in-handler). Priority above the app catch-all.
+    - match: PathPrefix(`/api/_internal/verify-role`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: app
+          port: 3000
+      middlewares:
+        - name: internal-only
+        - name: security-headers
+    # Main application routes
+    - match: PathPrefix(`/`)
+      kind: Rule
+      priority: 1
+      services:
+        - name: app
+          port: 3000
+      middlewares:
+        - name: security-headers
+    # API routes go to Kong (Supabase gateway)
+    # Versioned prefixes ONLY — the SPA owns /auth/callback and /reset-password;
+    # a bare /auth prefix would send the OAuth landing page to Kong (404).
+    - match: PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`)
+      kind: Rule
+      priority: 10
+      services:
+        - name: supabase-supabase-kong
+          port: 8000
+      middlewares:
+        - name: security-headers
+    # Admin routes - protected by ForwardAuth (requires admin role)
+    # Studio dashboard
+    - match: PathPrefix(`/admin/studio`)
+      kind: Rule
+      priority: 20
+      services:
+        - name: supabase-supabase-studio
+          port: 3000
+      middlewares:
+        - name: strip-proxy-headers
+        - name: admin-auth
+        - name: security-headers
+        - name: strip-admin-studio-prefix
+    # Next.js static assets for Studio (/_next/... paths are absolute in Next.js builds).
+    # The main app uses Vite, so /_next/ requests only ever originate from Studio's HTML.
+    # Priority 15: higher than the app catch-all (1), lower than explicit admin routes (20).
+    - match: PathPrefix(`/_next`)
+      kind: Rule
+      priority: 15
+      middlewares:
+        - name: strip-proxy-headers
+        - name: admin-auth
+      services:
+        - name: supabase-supabase-studio
+          port: 3000
+    # Studio's internal Next.js routes. After strip-prefix serves the root HTML,
+    # Studio redirects the browser to /project/default (the default project dashboard).
+    # These routes are protected by admin-auth so only super admins can access them.
+    - match: PathPrefix(`/project`)
+      kind: Rule
+      priority: 15
+      services:
+        - name: supabase-supabase-studio
+          port: 3000
+      middlewares:
+        - name: strip-proxy-headers
+        - name: admin-auth
+        - name: security-headers
+  tls:
+    secretName: vibecarbon-tls
+---
+# HTTP fallback - redirects HTTP to HTTPS via redirect-https middleware.
+# When a domain is configured, this ensures all HTTP traffic is upgraded to HTTPS.
+# When no TLS cert exists yet, Traefik serves with its default self-signed cert
+# on the websecure entrypoint while cert-manager provisions the real certificate.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: vibecarbon-http-direct
+  labels:
+    app: vibecarbon
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: PathPrefix(`/`)
+      kind: Rule
+      priority: 1
+      services:
+        - name: app
+          port: 3000
+      middlewares:
+        - name: redirect-https
+    # Versioned prefixes ONLY — the SPA owns /auth/callback and /reset-password;
+    # a bare /auth prefix would send the OAuth landing page to Kong (404).
+    - match: PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`)
+      kind: Rule
+      priority: 10
+      services:
+        - name: supabase-supabase-kong
+          port: 8000
+      middlewares:
+        - name: redirect-https
+---
+# Traefik Dashboard - exposed on websecure entrypoint via /admin/traefik/dashboard/
+# Protected by admin-auth (ForwardAuth requires super_admin).
+#
+# How it works:
+# - Dashboard HTML loads at /admin/traefik/dashboard/ (strip-prefix → /dashboard/)
+# - Assets use ./relative paths so they resolve to /admin/traefik/dashboard/assets/...
+#   which the strip-prefix route forwards correctly as /dashboard/assets/...
+# - The dashboard JS hardcodes window.APIUrl = "/api/" so API calls go to /api/version,
+#   /api/overview, /api/http/... etc. — these don't overlap with the Hono API paths
+#   (/api/v1/, /api/health, /api/_internal/, /api/webhooks/, /api/docs).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard
+  labels:
+    app: vibecarbon-traefik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # Dashboard UI — strip /admin/traefik so Traefik's api@internal receives /dashboard/
+    - match: PathPrefix(`/admin/traefik`)
+      kind: Rule
+      priority: 20
+      services:
+        - name: api@internal
+          kind: TraefikService
+      middlewares:
+        - name: strip-proxy-headers
+        - name: admin-auth
+        - name: security-headers
+        - name: strip-admin-traefik-prefix
+    # Traefik REST API — dashboard JS calls /api/version, /api/overview, /api/http/, etc.
+    # These paths don't overlap with Hono API routes so we can route them here.
+    - match: PathPrefix(`/api/version`) || PathPrefix(`/api/overview`) || PathPrefix(`/api/http`) || PathPrefix(`/api/tcp`) || PathPrefix(`/api/udp`) || PathPrefix(`/api/entrypoints`) || PathPrefix(`/api/rawdata`)
+      kind: Rule
+      priority: 12
+      services:
+        - name: api@internal
+          kind: TraefikService
+      middlewares:
+        - name: strip-proxy-headers
+        - name: admin-auth
+  tls:
+    secretName: vibecarbon-tls

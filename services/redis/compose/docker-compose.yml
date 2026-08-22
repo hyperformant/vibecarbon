@@ -1,0 +1,33 @@
+# Redis - In-memory data store
+# Added via: vibecarbon add redis
+
+services:
+  # Wire the app's Redis consumers to this container. Without REDIS_URL the
+  # app silently falls back to in-memory rate limiting (non-distributed, lost
+  # on restart) and the Redis container idles. Generated REDIS_PASSWORD is
+  # URL-safe ([A-Za-z0-9x]); if you hand-set one, keep it URL-safe — it is
+  # embedded in this connection URL.
+  app:
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379"
+
+  redis:
+    image: redis:alpine
+    container_name: {{PROJECT_NAME}}-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - vibecarbon-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
+    driver: local

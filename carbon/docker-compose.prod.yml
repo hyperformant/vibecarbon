@@ -1,0 +1,391 @@
+# Production Enhancements - Docker Compose Override
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# This file adds production-grade features:
+# - Pre-built Docker image from GHCR (instead of local build)
+# - Supavisor (connection pooler)
+# - Edge Functions runtime
+# - Enhanced resource limits
+# - Production-optimized settings
+# - Secure Traefik configuration (disables insecure dashboard)
+# - Docker socket proxy for safer container discovery
+
+services:
+  # ===========================================
+  # APPLICATION (Production Image)
+  # ===========================================
+  # Override to use pre-built image from GitHub Container Registry
+  # Default uses project name; override APP_IMAGE env var if needed
+  app:
+    image: ${APP_IMAGE:-ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}:latest}
+    build: !reset null
+    environment:
+      # Admin Infrastructure pages (service discovery + container logs) reach
+      # the Docker Engine API through the read-only socket proxy below — the
+      # app image ships no docker CLI and never mounts the socket. POST=0
+      # means a compromised app cannot start, stop, exec, or create anything;
+      # but CONTAINERS=1 still permits GET /containers/{id}/json, whose
+      # Config.Env exposes every container's env (secrets included) host-wide.
+      # The proxy is a write barrier, not a confidentiality boundary.
+      - DOCKER_API_PROXY=http://docker-socket-proxy:2375
+    labels:
+      - "traefik.enable=true"
+      # HTTP to HTTPS redirect (whole host — covers the Kong paths too)
+      - "traefik.http.routers.app-http.rule=Host(`${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.app-http.priority=1"
+      - "traefik.http.routers.app-http.entrypoints=web"
+      - "traefik.http.routers.app-http.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      # HTTPS router for the app at the bare apex (${DOMAIN}). The apex gets its
+      # OWN single-domain cert via certresolver — it is intentionally NOT in the
+      # default wildcard store cert, because apex + `*.${DOMAIN}` share the
+      # `_acme-challenge.${DOMAIN}` TXT name and some DNS providers (Hetzner)
+      # can't hold both challenge values at once. The subdomain routers below use
+      # `tls=true` (no resolver) and serve the `*.${DOMAIN}` default cert via SNI.
+      - "traefik.http.routers.app.rule=Host(`${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.app.priority=1"
+      - "traefik.http.routers.app.entrypoints=websecure"
+      - "traefik.http.routers.app.tls=true"
+      - "traefik.http.routers.app.tls.certresolver=letsencrypt"
+      - "traefik.http.services.app.loadbalancer.server.port=3000"
+      # Deny public access to the ForwardAuth trust anchor. verify-role is
+      # called by Traefik over the internal network (app:3000), never by the
+      # browser, so blocking it on the public entrypoint costs nothing and
+      # removes a role-check oracle. Higher priority than the app catch-all so
+      # it wins; the sibling /api/_internal/services/* paths stay public
+      # (browser admin panel, super_admin-gated in-handler).
+      - "traefik.http.routers.app-internal-deny.rule=Host(`${DOMAIN:-localhost}`) && PathPrefix(`/api/_internal/verify-role`)"
+      - "traefik.http.routers.app-internal-deny.priority=100"
+      - "traefik.http.routers.app-internal-deny.entrypoints=websecure"
+      - "traefik.http.routers.app-internal-deny.tls=true"
+      - "traefik.http.routers.app-internal-deny.middlewares=internal-only@file"
+      - "traefik.http.routers.app-internal-deny.service=app"
+
+  # ===========================================
+  # SECURITY HARDENING
+  # ===========================================
+
+  # Docker socket proxy - limits Traefik's (and the app's) access to the
+  # Docker API. Traefik uses it for router discovery; the app uses it for the
+  # admin Infrastructure pages (GET /containers list + logs via
+  # DOCKER_API_PROXY above). POST:0 blocks all mutations, but the enabled GET
+  # sections (CONTAINERS/SERVICES/TASKS/NETWORKS) still expose read state for
+  # EVERY container on the host — including env secrets via container
+  # inspect — so treat this as a write barrier, not a secrets boundary.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: ${PROJECT_NAME}-socket-proxy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # Only allow read-only access to specific endpoints
+      CONTAINERS: 1
+      SERVICES: 1
+      TASKS: 1
+      NETWORKS: 1
+      # Deny dangerous operations
+      POST: 0
+      BUILD: 0
+      COMMIT: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      EXEC: 0
+      GRPC: 0
+      IMAGES: 0
+      INFO: 0
+      NODES: 0
+      PLUGINS: 0
+      SECRETS: 0
+      SESSION: 0
+      SWARM: 0
+      SYSTEM: 0
+      VOLUMES: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - vibecarbon-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+  # Override Traefik to use socket proxy and secure dashboard behind ForwardAuth
+  traefik:
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.endpoint=tcp://docker-socket-proxy:2375"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email={{ADMIN_EMAIL}}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+      - "--log.level=WARN"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt_data:/letsencrypt
+      - ./volumes/traefik:/etc/traefik/dynamic:ro
+    depends_on:
+      - docker-socket-proxy
+    labels:
+      - "traefik.enable=true"
+      # HTTP to HTTPS redirect for dashboard subdomain
+      - "traefik.http.routers.dashboard-http.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.dashboard-http.entrypoints=web"
+      - "traefik.http.routers.dashboard-http.middlewares=redirect-to-https"
+      # HTTPS dashboard with super_admin auth — cert from default store
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.middlewares=super-admin-auth@file"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+  # ===========================================
+  # ADMIN SERVICES (Production Auth)
+  # ===========================================
+
+  # Supabase Studio with admin authentication
+  studio:
+    labels:
+      - "traefik.enable=true"
+      # HTTPS router — cert from default store. Studio is FULL database access,
+      # the most privileged surface: super_admin only, matching the k8s
+      # middleware and every other admin tool (grafana/n8n/metabase/dashboard).
+      - "traefik.http.routers.studio.rule=Host(`studio.${DOMAIN}`)"
+      - "traefik.http.routers.studio.entrypoints=websecure"
+      - "traefik.http.routers.studio.tls=true"
+      - "traefik.http.routers.studio.middlewares=super-admin-auth@file"
+      - "traefik.http.services.studio.loadbalancer.server.port=3000"
+
+  # ===========================================
+  # CONNECTION POOLER (Production)
+  # ===========================================
+
+  supavisor:
+    image: supabase/supavisor:2.7.4
+    container_name: ${PROJECT_NAME}-supavisor
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The image's default entrypoint only starts the server. A working pooler
+    # needs its metadata migrated (--prefix _supavisor; schema pre-created by
+    # volumes/db/pooler.sql) and the tenant seeded (volumes/pooler/pooler.exs)
+    # — without both, EVERY client connection fails "tenant not found".
+    # Mirrors supabase/docker's self-hosted bootstrap. `$$` is compose
+    # escaping for a literal `$` in the shell command.
+    command:
+      [
+        "/bin/sh",
+        "-c",
+        '/app/bin/migrate && /app/bin/supavisor eval "$$(cat /etc/pooler/pooler.exs)" && /app/bin/server',
+      ]
+    volumes:
+      - ./volumes/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,Z
+    ports:
+      - "5432:5432"  # Session mode (pooled — prepared statements, LISTEN/NOTIFY)
+      - "6543:6543"  # Transaction mode (pooled — short stateless queries)
+    environment:
+      # Database Configuration — secrets are REQUIRED (`:?`): compose aborts
+      # loudly if one is missing instead of booting with a blank value.
+      # `vibecarbon create` auto-generates all of them into .env.local.
+      VAULT_ENC_KEY: ${VAULT_ENC_KEY:?VAULT_ENC_KEY missing — vibecarbon create writes it to .env.local}
+      API_JWT_SECRET: ${JWT_SECRET:?JWT_SECRET missing — vibecarbon create writes it to .env.local}
+      SECRET_KEY_BASE: ${REALTIME_SECRET:?REALTIME_SECRET missing — vibecarbon create writes it to .env.local}
+      DATABASE_URL: postgres://supabase_admin:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — vibecarbon create writes it to .env.local}@db:5432/postgres
+
+      # Pooler Configuration (POSTGRES_* + POOLER_POOL_MODE feed the tenant
+      # seed — see volumes/pooler/pooler.exs)
+      POOLER_MAX_CLIENT_CONN: "1000"
+      POOLER_DEFAULT_POOL_SIZE: "15"
+      POOLER_TENANT_ID: ${PROJECT_NAME}
+      POOLER_POOL_MODE: transaction
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — vibecarbon create writes it to .env.local}
+      # Pin the port->mode mapping explicitly (these ARE Supavisor's defaults,
+      # declared so config and docs can never drift apart): session mode on
+      # 5432, transaction mode on 6543 — same convention as hosted Supabase.
+      PROXY_PORT_SESSION: "5432"
+      PROXY_PORT_TRANSACTION: "6543"
+
+      # Network Configuration
+      PORT: "4000"
+
+      # Metrics
+      METRICS_PORT: "9999"
+
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+    # Resource limits for production
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # Update database to use supavisor for external connections
+  # (Internal services still connect directly for better performance)
+
+  # ===========================================
+  # EDGE FUNCTIONS (Production) — opt-in
+  # ===========================================
+  # Off by default: the template ships no real edge functions (only the 404
+  # stub at functions/main/index.ts), so running this container buys nothing
+  # and just adds an idle process. This `profiles:` gate keeps it from starting
+  # on a normal deploy — matching the k8s setup, where functions are likewise
+  # off until needed (deployment.functions.enabled in k8s/values/supabase.values.yaml).
+  # A project that adds a real function opts in with:
+  #   docker compose --profile functions ... up
+  # The functions/ dir is already bundled to the server (see bundle.js), so
+  # enabling the profile works out of the box.
+
+  edge-functions:
+    image: supabase/edge-runtime:v1.71.2
+    container_name: ${PROJECT_NAME}-functions
+    profiles: ["functions"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "9000:9000"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET missing — vibecarbon create writes it to .env.local}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_DB_URL: postgres://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — vibecarbon create writes it to .env.local}@db:5432/postgres
+      VERIFY_JWT: "true"
+    volumes:
+      - ./functions:/home/deno/functions:Z
+    depends_on:
+      # Edge runtime only calls db + kong at function-invocation time. If
+      # either isn't ready yet, the first function call errors with 502 and
+      # the user retries — but the container itself starts fine. `started`
+      # (not `healthy`) lets it boot in parallel with the rest of the stack.
+      db:
+        condition: service_started
+      kong:
+        condition: service_started
+    networks:
+      - vibecarbon-network
+    command: start --main-service /home/deno/functions/main
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ===========================================
+  # PRODUCTION OPTIMIZATIONS
+  # ===========================================
+
+  # Add resource limits to core services in production
+  db:
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+
+  kong:
+    # `!override`, NOT `ports: []` — Compose CONCATENATES `ports` across -f
+    # files, so an empty list contributes nothing and the base file's
+    # 0.0.0.0:8000 + 0.0.0.0:8443 publications survived into production,
+    # exposing the unauthenticated Supabase gateway outside Traefik/TLS.
+    #
+    # Bound to LOOPBACK rather than removed outright: createAdminUser reaches
+    # the gateway over `ssh -L <port>:localhost:8000` (compose/index.js), whose
+    # forward target resolves ON THE SERVER, so dropping the publication
+    # entirely breaks admin-user provisioning on every compose deploy
+    # (ExitOnForwardFailure=yes — it fails hard, it does not degrade).
+    # 127.0.0.1 keeps that path working while making the gateway unreachable
+    # externally regardless of firewall state. 8443 is dropped — nothing
+    # tunnels to it, and public TLS terminates at Traefik.
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    labels:
+      - "traefik.enable=true"
+      # Supabase gateway on the apex — VERSIONED path prefixes only. Bare
+      # /auth is FORBIDDEN: the SPA owns /auth/callback and /reset-password.
+      # Same host as the app router, so the apex cert is shared (Traefik
+      # dedupes the ACME order); priority 10 beats the app catch-all (1).
+      # The :80 side needs no kong router — app-http redirects the whole host.
+      - "traefik.http.routers.kong.rule=Host(`${DOMAIN:-localhost}`) && (PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`))"
+      - "traefik.http.routers.kong.priority=10"
+      - "traefik.http.routers.kong.entrypoints=websecure"
+      - "traefik.http.routers.kong.tls=true"
+      - "traefik.http.routers.kong.tls.certresolver=letsencrypt"
+      - "traefik.http.services.kong.loadbalancer.server.port=8000"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  auth:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  rest:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  realtime:
+    # Fail closed in production: the base file's `:-dev...` fallbacks are for
+    # bare local dev only. `vibecarbon create` writes both to .env.local.
+    environment:
+      DB_ENC_KEY: ${DB_ENC_KEY:?DB_ENC_KEY missing — vibecarbon create writes it to .env.local}
+      SECRET_KEY_BASE: ${REALTIME_SECRET:?REALTIME_SECRET missing — vibecarbon create writes it to .env.local}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  storage:
+    environment:
+      VAULT_ENC_KEY: ${VAULT_ENC_KEY:?VAULT_ENC_KEY missing — vibecarbon create writes it to .env.local}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  meta:
+    environment:
+      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY:?PG_META_CRYPTO_KEY missing — vibecarbon create writes it to .env.local}
+
+volumes:
+  letsencrypt_data:

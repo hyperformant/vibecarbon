@@ -1,0 +1,152 @@
+# Traefik Middlewares
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: security-headers
+  labels:
+    app: vibecarbon
+spec:
+  headers:
+    browserXssFilter: true
+    contentTypeNosniff: true
+    frameDeny: true
+    stsIncludeSubdomains: true
+    stsPreload: true
+    stsSeconds: 31536000
+    customFrameOptionsValue: "SAMEORIGIN"
+    customResponseHeaders:
+      X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
+---
+# Clears client-supplied identity headers before ForwardAuth runs, so a spoofed
+# X-Authenticated-User can never reach Grafana even on a hypothetical
+# 200-without-header auth response. Prepended to every admin-auth route for
+# parity with the compose super-admin-auth chain (defense-in-depth on top of
+# admin-auth's authResponseHeaders overwrite + GF_AUTH_PROXY_WHITELIST).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-proxy-headers
+  labels:
+    app: vibecarbon
+spec:
+  headers:
+    customRequestHeaders:
+      X-User-Id: ""
+      X-User-Email: ""
+      X-User-Role: ""
+      X-Authenticated-User: ""
+---
+# Denies external clients — attached to the public /api/_internal/verify-role
+# route so the ForwardAuth trust anchor (role oracle) is not internet-reachable.
+# Traefik's own ForwardAuth reaches verify-role via the in-cluster Service
+# (http://app:3000/...), which never traverses this IngressRoute, so ForwardAuth
+# is unaffected. The browser never calls verify-role. Loopback-only source range
+# → every real client 403s.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: internal-only
+  labels:
+    app: vibecarbon
+spec:
+  ipAllowList:
+    sourceRange:
+      - "127.0.0.1/32"
+      - "::1/128"
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  labels:
+    app: vibecarbon
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-admin-studio-prefix
+  labels:
+    app: vibecarbon
+spec:
+  stripPrefix:
+    prefixes:
+      - /admin/studio
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-admin-n8n-prefix
+  labels:
+    app: vibecarbon
+spec:
+  stripPrefix:
+    prefixes:
+      - /admin/n8n
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-admin-metabase-prefix
+  labels:
+    app: vibecarbon
+spec:
+  stripPrefix:
+    prefixes:
+      - /admin/metabase
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-admin-traefik-prefix
+  labels:
+    app: vibecarbon
+spec:
+  stripPrefix:
+    prefixes:
+      - /admin/traefik
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit
+  labels:
+    app: vibecarbon
+spec:
+  rateLimit:
+    average: 100
+    burst: 200
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: compress
+  labels:
+    app: vibecarbon
+spec:
+  compress: {}
+---
+# ForwardAuth middleware for admin routes
+# Verifies user is authenticated and has admin role via app's verify-role endpoint
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: admin-auth
+  labels:
+    app: vibecarbon
+spec:
+  forwardAuth:
+    address: http://app:3000/api/_internal/verify-role?role=super_admin
+    authResponseHeaders:
+      - X-User-Id
+      - X-User-Email
+      - X-User-Role
+      # Injected into Grafana as the auth-proxy identity (GF_AUTH_PROXY_HEADER_NAME).
+      # Listing it here makes Traefik overwrite any client-supplied X-Authenticated-User
+      # with the verified email from the auth response, so it cannot be spoofed via
+      # requests that pass through Traefik. Direct-to-grafana:3000 spoofing is blocked
+      # separately by GF_AUTH_PROXY_WHITELIST + the grafana NetworkPolicy.
+      - X-Authenticated-User

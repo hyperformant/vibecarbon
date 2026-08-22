@@ -1,0 +1,27 @@
+# TLS Certificate for Vibecarbon application
+# Requires cert-manager to be installed (kubectl apply -k k8s/infra/)
+#
+# issuerRef.name and dnsNames are BOTH patched per-deployment by
+# applyK3sManifests in src/lib/deploy/k8s/k3s.js:
+#   - issuerRef.name → letsencrypt-{prod,staging}-{cloudflare,hetzner,manual}
+#     based on dnsProvider + ACME_CA_SERVER.
+#   - dnsNames → [domain] for manual (HTTP-01) issuers;
+#                [domain, "*.domain"] for DNS-01 (cloudflare/hetzner) issuers.
+#     DNS-01 allows a wildcard SAN so one cert covers every subdomain
+#     (api, studio, dashboard, grafana, n8n, ...) without separate ACME orders.
+#
+# The placeholders below keep this template valid for kustomize; they are
+# overwritten before cert-manager ever sees a Certificate request.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vibecarbon-tls
+spec:
+  secretName: vibecarbon-tls
+  issuerRef:
+    name: letsencrypt-prod-manual
+    kind: ClusterIssuer
+  dnsNames:
+    - app.example.com  # Patched with actual domain at deploy time
+    # For DNS-01 (managed-DNS) deploys the wildcard is added at deploy time:
+    # - "*.app.example.com"

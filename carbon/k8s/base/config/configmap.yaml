@@ -1,0 +1,48 @@
+# Non-secret runtime configuration consumed by Supabase + app containers.
+# Committed to git; safe to reconcile via Flux.
+#
+# The vibecarbon-secrets Secret that used to live next to this file is
+# now created at deploy time — either by the vibecarbon CLI (imperative
+# deploy) or by the GitHub Actions deploy workflow
+# (.github/workflows/deploy.yml, GitOps deploy). That Secret is NOT
+# reconciled by Flux — it's owned by field-manager=github-actions-deploy
+# (workflow) or field-manager=kubectl-client-side-apply (CLI), and Flux
+# leaves it alone. This lets us rotate secrets via `gh secret set --env
+# prod KEY=value` without a git commit.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vibecarbon-config
+data:
+  # Site Configuration — SITE_URL is patched in by deploy code once the
+  # real domain is known (before-domain-known default is the placeholder
+  # below; deploy patches to https://<domain> via kubectlPatch).
+  SITE_URL: "https://app.example.com"
+  PROJECT_NAME: "vibecarbon"
+
+  # Database (in-cluster service names). The Supabase community Helm chart
+  # gives every component a `supabase-supabase-<name>` service via its
+  # release-name + chart-name pattern — `db` lives at supabase-supabase-db.
+  # Consumed by app/deployment.yaml + backup/cronjob.yaml; the chart's
+  # subcharts have their own internal wiring and do NOT read this map.
+  # Plain "postgres" silently falls back to no-such-host: backup pods print
+  # "could not translate host name 'postgres'" and pg_dump exits 1 (observed
+  # 2026-04-27 k8s-ha matrix #6).
+  DB_HOST: "supabase-supabase-db"
+  DB_PORT: "5432"
+  DB_NAME: "postgres"
+
+  # Internal Service URLs. Supabase community chart gives each subchart a
+  # fullnameOverride of `supabase-supabase-<name>`, so these are the ACTUAL
+  # in-cluster service names as of supabase-community chart v0.5.5.
+  KONG_URL: "http://supabase-supabase-kong:8000"
+  AUTH_URL: "http://supabase-supabase-auth:9999"
+  REST_URL: "http://supabase-supabase-rest:3000"
+  REALTIME_URL: "http://supabase-supabase-realtime:4000"
+  STORAGE_URL: "http://supabase-supabase-storage:5000"
+  META_URL: "http://supabase-supabase-meta:8080"
+  IMGPROXY_URL: "http://supabase-supabase-imgproxy:5001"
+
+  # Backup Configuration
+  BACKUP_RETENTION_DAYS: "7"

@@ -1,0 +1,576 @@
+#!/bin/bash
+set -euo pipefail
+
+# Note: This script runs AS PART of cloud-init (user_data), so we cannot wait for
+# cloud-init to complete (that would cause a deadlock). The script starts immediately.
+
+# apt's default behaviour on lock contention is to try once and exit 100,
+# and unattended-upgrades holds dpkg's lock right through first boot --
+# which is exactly when cloud-init runs this. `-o DPkg::Lock::Timeout`
+# makes apt block on the lock instead. See src/lib/deploy/apt.js for the
+# RCA and the live verification.
+#
+# This replaced a `fuser` poll loop that was broken two ways: it polled
+# /var/lib/dpkg/lock, lists/lock and archives/lock but never
+# /var/lib/dpkg/lock-frontend -- the lock that actually fails the install
+# -- and being a pre-check it was TOCTOU, since unattended-upgrades could
+# take the lock in the gap between the loop passing and apt-get starting.
+
+# Update apt lists + install the packages we need. `apt-get upgrade` was
+# removed from the critical path — unattended-upgrades handles security
+# patches async. Saves 30-60s per deploy.
+apt-get -o DPkg::Lock::Timeout=300 update -qq
+apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
+
+# Validate k3s version is set
+K3S_TARGET_VERSION="v1.31.5+k3s1"
+if [ -z "$K3S_TARGET_VERSION" ]; then
+  echo "ERROR: k3s_version not set"
+  exit 1
+fi
+echo "Installing k3s version: $K3S_TARGET_VERSION"
+
+# IDENTICAL block in master-init.sh / worker-init.sh / supabase-init.sh — keep in sync.
+# (Three-way duplication is acceptable here because the cloud-init scripts are
+# rendered independently per role; extracting a shared snippet would require
+# restructuring the renderScript() pipeline. Out of scope for Phase 1.)
+# Configure containerd to mirror pulls for 10.0.1.1:5000 to the local registry
+# we run on master. Cluster-autoscaler-spawned workers pull the app image from
+# here on-demand (sideload only reaches workers that exist at sideload time).
+# k3s only reads /etc/rancher/k3s/registries.yaml on agent start, so this MUST
+# land before the k3s install step below.
+#
+# Plain http://10.0.1.1:5000 — the registry runs HTTP on the private network.
+# Do NOT add `insecure_skip_verify: true` here: that flag only affects HTTPS
+# endpoints, and recent k3s versions place it incorrectly when present
+# (k3s-io/k3s#13215), which can break containerd config generation.
+mkdir -p /etc/rancher/k3s
+cat > /etc/rancher/k3s/registries.yaml << 'REGEOF'
+mirrors:
+  "10.0.1.1:5000":
+    endpoint:
+      - "http://10.0.1.1:5000"
+REGEOF
+
+# Configure Floating IP on the OS so the kernel accepts packets destined for it.
+# Hetzner routes the Floating IP to this server at the network level, but without
+# a local address binding the kernel drops the packets.
+# Use `ip addr add` instead of netplan — a separate netplan file that redefines
+# ethernets.eth0 can override Hetzner's cloud-init config and drop the primary IP.
+ip addr add 203.0.113.10/32 dev eth0 2>/dev/null || true
+
+# Persist across reboots via a long-running systemd service (netplan-safe).
+# Must be Type=simple (not oneshot) so it survives DHCP renewals — when networkd
+# re-applies the cloud-init netplan config it can flush manually-added addresses.
+# The loop re-adds the floating IP within 30 seconds if that happens.
+cat > /etc/systemd/system/floating-ip.service << FIPEOF
+[Unit]
+Description=Maintain Hetzner Floating IP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'while true; do if ! ip addr show eth0 | grep -q "203.0.113.10"; then ip addr add 203.0.113.10/32 dev eth0 && echo "Floating IP re-added"; fi; sleep 30; done'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+FIPEOF
+systemctl daemon-reload
+# `--now`, not a bare `enable`: enable only arms the unit for the NEXT boot, and
+# these masters are not rebooted. Without it the `ip addr add` above is the only
+# thing holding the address for the node's entire life, and the 30s re-add loop
+# this block exists to install never runs — a netplan re-apply or a networkd
+# DHCP-renewal flush then drops the Floating IP for good, taking public ingress
+# down while every node stays Ready and kubectl looks clean.
+# Same shape as _private-net-guard.sh, which enables THEN starts its watchdog.
+systemctl enable --now floating-ip.service || true
+
+# Get node IPs for k3s configuration.
+# Fetch the public IPv4 robustly: k3s installs with --node-ip "$PUBLIC_IP" below,
+# and the Hetzner CCM matches the node against the API by this IP to clear the
+# node.cloudprovider.kubernetes.io/uninitialized taint. The metadata service can
+# be slow/empty on first boot — a single curl that returns "" silently installs
+# k3s with `--node-ip ""`, leaving the node InternalIP=<none> and breaking
+# control-plane<->kubelet comms (RCA 2026-06-23, ash/US: cert-manager-webhook
+# never became Ready because its node was unreachable). Retry the metadata
+# endpoint, fall back to the default-route source address, and FAIL the provision
+# rather than install a node with an empty node-ip.
+PUBLIC_IP=""
+for i in $(seq 1 30); do
+  PUBLIC_IP=$(curl -sf --max-time 5 http://169.254.169.254/hetzner/v1/metadata/public-ipv4 || true)
+  if echo "$PUBLIC_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then break; fi
+  PUBLIC_IP=""
+  sleep 2
+done
+if [ -z "$PUBLIC_IP" ]; then
+  echo "Metadata public-ipv4 unavailable after retries — deriving from default route"
+  PUBLIC_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || true)
+fi
+if ! echo "$PUBLIC_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "FATAL: could not determine public IPv4 for --node-ip; refusing to install k3s with an empty node-ip"
+  exit 1
+fi
+echo "Public IP: $PUBLIC_IP"
+
+# Wait for the private network interface (10.0.x.x) to be assigned.
+# Hetzner attaches the private network after the server boots, so the interface
+# may not exist yet when cloud-init runs. grep exits 1 if no match, which kills
+# the script under set -euo pipefail — so we retry with || true.
+PRIVATE_IFACE=""
+RETRY_COUNT=0
+MAX_RETRIES=120
+DHCP_TRIGGERED=false
+echo "Waiting for private network interface..."
+while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+  PRIVATE_IFACE=$(ip -4 addr show | grep 'inet 10\.0\.' | awk '{print $NF}' || true)
+  if [ -z "$PRIVATE_IFACE" ]; then
+    # See worker-init.sh for the dhcpcd-race RCA. Same recovery applies here.
+    if [ "$DHCP_TRIGGERED" = "false" ] && [ $RETRY_COUNT -ge 6 ] && command -v dhcpcd >/dev/null 2>&1; then
+      CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
+      if [ -n "$CANDIDATE" ]; then
+        DHCP_TRIGGERED=true
+        echo "Private NIC $CANDIDATE has no lease after 30s — triggering dhcpcd"
+        ip link set "$CANDIDATE" up 2>&1 || true
+        dhcpcd -1 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
+      fi
+    fi
+    if [ $((RETRY_COUNT % 12)) -eq 0 ]; then
+      echo "Private interface not ready yet... ($RETRY_COUNT/$MAX_RETRIES)"
+    fi
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    sleep 5
+  fi
+done
+if [ -z "$PRIVATE_IFACE" ]; then
+  echo "FATAL: Private network interface not found after $MAX_RETRIES retries"
+  echo "Hetzner private network may not be attached to this server."
+  exit 1
+fi
+echo "Private interface: $PRIVATE_IFACE"
+PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' || echo "")
+
+# The loop above only guards BOOT. Install the lifetime guard now that we have
+# a working private NIC to record. Shared with supabase-init.sh/worker-init.sh
+# via loadCloudInit's @include, so the three copies cannot drift.
+# ===========================================================================
+# Private-NIC address guard — SHARED SNIPPET, spliced into master-init.sh /
+# supabase-init.sh / worker-init.sh by the `# @include` directive that
+# loadCloudInit() resolves (src/lib/iac/cloud-init.js). Requires
+# PRIVATE_IFACE + PRIVATE_IP, so it must sit AFTER the private-NIC wait loop.
+#
+# WHY (RCA 2026-08-05, 4-day-old k8s-ha rig): two of three nodes went NotReady
+# with node.kubernetes.io/unreachable. uptime 4d21h, never rebooted, k3s-agent
+# still ACTIVE — but enp7s0 had NO IPv4 address. Its DHCP lease was lost
+# mid-life and never re-acquired, severing the 10.0.1.x path to the master;
+# kubelet's apiserver tunnel then died with TLS-handshake timeouts. The dhcpcd
+# self-heal in the wait loop above only runs during cloud-init — it guards
+# BOOT. Nothing guarded day 4, and the exposure grows with uptime. Hetzner's
+# Ubuntu images leave the private NIC out of cloud-init's network-config (that
+# covers the public NIC only) and let `hc-utils` auto-start a DHCP client for
+# it, so the address is lease-derived for the node's whole life.
+#
+# DESIGN — DHCP stays the acquisition path, unchanged, so this adds nothing to
+# the happy path and its worst case is exactly today's behaviour. A watchdog
+# re-acquires on loss and, only if DHCP will not answer, pins the address
+# statically from the Hetzner metadata service. Metadata rather than a
+# render-time constant because it is the only source covering every node
+# class: cluster-autoscaler workers are created with `networks: [networkId]`
+# and no `ip` (src/autoscaler/groups.js), so Hetzner picks their address at
+# create time and no constant exists for them.
+#
+# systemd loop + `ip addr add` rather than a netplan drop-in: Hetzner's docs
+# require uninstalling/deactivating hc-utils before hand-writing static config
+# (its DHCP client otherwise fights it), and a netplan drop-in can clobber
+# cloud-init's own config — see master-init.sh's floating-ip.service, which
+# chose this same mechanism for the same reason.
+# ===========================================================================
+
+# Record the known-good configuration the guard restores. Gateway/network come
+# from the routes DHCP just installed, so the fallback reproduces a
+# configuration observed working on THIS node rather than one we invented.
+mkdir -p /etc/vibecarbon
+PN_INSTALL_MAC=$(cat /sys/class/net/"$PRIVATE_IFACE"/address 2>/dev/null || echo "")
+PN_INSTALL_MTU=$(cat /sys/class/net/"$PRIVATE_IFACE"/mtu 2>/dev/null || echo "")
+PN_INSTALL_GW=$(ip -4 route show dev "$PRIVATE_IFACE" 2>/dev/null | awk '/ via / {print $3; exit}' || true)
+PN_INSTALL_NET=$(ip -4 route show dev "$PRIVATE_IFACE" 2>/dev/null | awk '/ via / {print $1; exit}' || true)
+PN_INSTALL_META=$(curl -sf --max-time 5 http://169.254.169.254/hetzner/v1/metadata/private-networks 2>/dev/null || true)
+# The `|| true` on each pipeline is load-bearing: the enclosing role script
+# runs under `set -euo pipefail`, where `head -1` closing the pipe early can
+# SIGPIPE sed and take the whole cloud-init down. A best-effort guard install
+# must never be able to fail a deploy.
+if [ -z "$PN_INSTALL_GW" ]; then
+  PN_INSTALL_GW=$(printf '%s\n' "$PN_INSTALL_META" | sed -n 's/^[- ]*gateway:[ ]*\([^ ]*\).*/\1/p' | head -1 || true)
+fi
+if [ -z "$PN_INSTALL_NET" ]; then
+  PN_INSTALL_NET=$(printf '%s\n' "$PN_INSTALL_META" | sed -n 's/^[- ]*network:[ ]*\([^ ]*\).*/\1/p' | head -1 || true)
+fi
+# Last resort, only reached if the live routing table AND metadata both came
+# back empty: Hetzner's defaults for our networks (ip_range 10.0.0.0/8,
+# gateway = its first address). 1450 is the Hetzner private-network MTU —
+# DHCP delivers it via option 26, a hand-added address does not, and a silent
+# 1500 blackholes large frames through flannel.
+if [ -z "$PN_INSTALL_NET" ]; then PN_INSTALL_NET=10.0.0.0/8; fi
+if [ -z "$PN_INSTALL_GW" ]; then PN_INSTALL_GW=10.0.0.1; fi
+if [ -z "$PN_INSTALL_MTU" ]; then PN_INSTALL_MTU=1450; fi
+
+cat > /etc/vibecarbon/private-net.env << PNCONFEOF
+PN_IFACE=$PRIVATE_IFACE
+PN_IP=$PRIVATE_IP
+PN_MAC=$PN_INSTALL_MAC
+PN_MTU=$PN_INSTALL_MTU
+PN_GATEWAY=$PN_INSTALL_GW
+PN_NETWORK=$PN_INSTALL_NET
+PNCONFEOF
+
+cat > /usr/local/sbin/vibecarbon-private-net-guard << 'PNGUARDEOF'
+#!/bin/bash
+# vibecarbon private-network address guard — see the RCA and design in
+# carbon/cloud-init/k3s/_private-net-guard.sh. `set -e` is deliberately
+# absent: a watchdog that exits on one failed `ip` or `curl` stops guarding,
+# and surviving a broken network is the entire point.
+set -uo pipefail
+
+CONF=/etc/vibecarbon/private-net.env
+LOGFILE=/var/log/vibecarbon-private-net.log
+METADATA_URL=http://169.254.169.254/hetzner/v1/metadata/private-networks
+# Kubernetes marks a node NotReady after node-monitor-grace-period (40s), so
+# detect-and-repair has to fit inside that to keep a lease loss invisible.
+POLL_SECONDS=10
+DHCP_WAIT_SECONDS=15
+
+PN_IFACE=""
+PN_IP=""
+PN_MAC=""
+PN_MTU=1450
+PN_GATEWAY=""
+PN_NETWORK=""
+
+log() {
+  logger -t vibecarbon-private-net -- "$1" 2>/dev/null || true
+  printf '%s %s\n' "$(date -Is)" "$1" >> "$LOGFILE" 2>/dev/null || true
+}
+
+# Metadata block for MAC $2 out of blob $1, falling back to the first block.
+# Hetzner serves YAML; awk/sed rather than a YAML dependency keeps the
+# recovery path working when the network is already down.
+meta_block() {
+  printf '%s\n' "$1" | awk -v want="$2" '
+    /^-/ { n += 1; block[n] = "" }
+    n > 0 {
+      block[n] = block[n] $0 "\n"
+      line = tolower($0); gsub(/[ \t]+/, " ", line); sub(/^ /, "", line); sub(/^- /, "", line)
+      if (want != "" && line == "mac_address: " want) hit = n
+    }
+    END { if (hit == 0) hit = 1; printf "%s", block[hit] }
+  '
+}
+
+# Field $2 out of block $1, anchored on the exact key so `network:` does not
+# also match `network_id:`/`network_name:`.
+meta_value() {
+  printf '%s\n' "$1" | sed -n "s/^[- ]*$2:[ ]*\([^ ]*\).*/\1/p" | head -1
+}
+
+# RFC1918 only. REJECTS 169.254.x IPv4LL, which is what a DHCP client
+# self-assigns when it cannot get a lease — accepting that as healthy would
+# make the guard a no-op in precisely the failure it exists for.
+is_private_ipv4() {
+  printf '%s' "$1" | grep -qE '^(10\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]+\.[0-9]+$'
+}
+
+# Stored name first (stable for a node's life), then MAC, then the Hetzner
+# private-NIC naming shape. Never matches the public interface.
+resolve_iface() {
+  if [ -n "$PN_IFACE" ] && [ -e /sys/class/net/"$PN_IFACE" ]; then
+    printf '%s' "$PN_IFACE"
+    return 0
+  fi
+  if [ -n "$PN_MAC" ]; then
+    for d in /sys/class/net/*; do
+      [ -r "$d/address" ] || continue
+      if [ "$(cat "$d/address" 2>/dev/null)" = "$PN_MAC" ]; then
+        basename "$d"
+        return 0
+      fi
+    done
+  fi
+  ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2; exit}'
+}
+
+current_ip() {
+  ip -4 -o addr show dev "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1
+}
+
+route_ok() {
+  [ -n "$PN_NETWORK" ] || return 0
+  ip -4 route show dev "$1" 2>/dev/null | grep -q "^$PN_NETWORK "
+}
+
+# A surviving address with a dropped route into the network range is the same
+# outage wearing a different hat, and the check costs one `ip route show`.
+# The address is a /32, so the gateway sits on no connected subnet and the
+# route needs `onlink` — Hetzner's own documented static configuration.
+ensure_route() {
+  [ -n "$PN_NETWORK" ] || return 0
+  [ -n "$PN_GATEWAY" ] || return 0
+  route_ok "$1" && return 0
+  ip route replace "$PN_NETWORK" via "$PN_GATEWAY" dev "$1" onlink 2>/dev/null || true
+  route_ok "$1" && log "restored route $PN_NETWORK via $PN_GATEWAY dev $1"
+  return 0
+}
+
+# Re-read the authoritative address/gateway/network for this NIC. Only called
+# on the unhealthy path, so a healthy node never talks to metadata at all.
+refresh_expectation() {
+  MAC=$(cat /sys/class/net/"$1"/address 2>/dev/null || echo "")
+  if [ -n "$MAC" ]; then PN_MAC="$MAC"; fi
+  BLOB=$(curl -sf --max-time 5 "$METADATA_URL" 2>/dev/null || true)
+  if [ -z "$BLOB" ]; then return 0; fi
+  BLOCK=$(meta_block "$BLOB" "$PN_MAC")
+  M_IP=$(meta_value "$BLOCK" ip)
+  M_GW=$(meta_value "$BLOCK" gateway)
+  M_NET=$(meta_value "$BLOCK" network)
+  if is_private_ipv4 "$M_IP"; then PN_IP="$M_IP"; fi
+  if [ -n "$M_GW" ]; then PN_GATEWAY="$M_GW"; fi
+  if [ -n "$M_NET" ]; then PN_NETWORK="$M_NET"; fi
+  return 0
+}
+
+repair() {
+  IFACE="$1"
+  log "private NIC $IFACE has no usable address/route — repairing"
+  ip link set dev "$IFACE" up 2>/dev/null || true
+
+  # 1. DHCP first: it is the path hc-utils manages, and the one that stays
+  #    correct if Hetzner ever re-assigns the address. `-n` rebinds a RUNNING
+  #    dhcpcd (the incident's shape: daemon alive, lease gone) and starts one
+  #    if none is running; `-1` is the one-shot fallback for a daemon that is
+  #    wedged rather than merely idle.
+  if command -v dhcpcd >/dev/null 2>&1; then
+    timeout 20 dhcpcd -n "$IFACE" >/dev/null 2>&1 || true
+    timeout 20 dhcpcd -1 "$IFACE" >/dev/null 2>&1 || true
+  elif command -v networkctl >/dev/null 2>&1; then
+    networkctl renew "$IFACE" >/dev/null 2>&1 || true
+  fi
+  WAITED=0
+  while [ "$WAITED" -lt "$DHCP_WAIT_SECONDS" ]; do
+    CUR=$(current_ip "$IFACE")
+    if is_private_ipv4 "$CUR"; then
+      log "private NIC $IFACE recovered via DHCP: $CUR"
+      ensure_route "$IFACE"
+      return 0
+    fi
+    sleep 3
+    WAITED=$((WAITED + 3))
+  done
+
+  # 2. DHCP would not answer. Pin the address statically.
+  refresh_expectation "$IFACE"
+  if ! is_private_ipv4 "$PN_IP"; then
+    log "no expected private IP known for $IFACE (metadata unreachable, nothing recorded) — retrying"
+    return 1
+  fi
+  ip addr add "$PN_IP"/32 dev "$IFACE" 2>/dev/null || true
+  ip link set dev "$IFACE" mtu "$PN_MTU" 2>/dev/null || true
+  ensure_route "$IFACE"
+  CUR=$(current_ip "$IFACE")
+  if is_private_ipv4 "$CUR"; then
+    log "private NIC $IFACE pinned statically: $PN_IP/32 mtu $PN_MTU via $PN_GATEWAY"
+    return 0
+  fi
+  log "private NIC $IFACE still unaddressed after static pin — retrying in $POLL_SECONDS s"
+  return 1
+}
+
+if [ -r "$CONF" ]; then
+  # shellcheck source=/dev/null
+  . "$CONF"
+fi
+log "guard started (iface=$PN_IFACE expect=$PN_IP net=$PN_NETWORK gw=$PN_GATEWAY mtu=$PN_MTU)"
+
+# k3s/kubelet are NOT restarted after a repair: remotedialer and the kubelet's
+# apiserver client both reconnect on their own once the path is back, and
+# bouncing the agent would evict pods for a fault that just healed.
+while true; do
+  IFACE=$(resolve_iface)
+  if [ -z "$IFACE" ]; then
+    log "no private NIC present on this host — retrying"
+    sleep "$POLL_SECONDS"
+    continue
+  fi
+  CUR=$(current_ip "$IFACE")
+  if is_private_ipv4 "$CUR" && route_ok "$IFACE"; then
+    sleep "$POLL_SECONDS"
+    continue
+  fi
+  repair "$IFACE" || true
+  sleep "$POLL_SECONDS"
+done
+PNGUARDEOF
+chmod 0755 /usr/local/sbin/vibecarbon-private-net-guard
+
+cat > /etc/systemd/system/vibecarbon-private-net.service << 'PNUNITEOF'
+[Unit]
+Description=vibecarbon private-network address guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/vibecarbon-private-net-guard
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+PNUNITEOF
+
+systemctl daemon-reload || true
+systemctl enable vibecarbon-private-net.service || true
+systemctl restart vibecarbon-private-net.service || true
+echo "Private-NIC address guard installed (iface $PRIVATE_IFACE, ip $PRIVATE_IP)"
+
+# Install k3s master with pre-shared token.
+# --node-ip must be the PUBLIC IP so Hetzner CCM can match it against the Hetzner API
+# and remove the node.cloudprovider.kubernetes.io/uninitialized taint.
+# --flannel-iface routes pod-to-pod traffic over the private network.
+# --advertise-address must be the PRIVATE IP (statically 10.0.1.1 — assigned by
+# the Pulumi program's master ServerNetwork, same constant supabase-init.sh and
+# worker-init.sh join through). It steers BOTH (a) the in-cluster `kubernetes`
+# Endpoints every pod's 10.43.0.1 DNATs to, and (b) the supervisor endpoint
+# k3s agents dial for the apiserver→kubelet reverse tunnel (remotedialer).
+# With the public IP here, both paths dial master-public:6443 — which the
+# Hetzner firewall admits from OPERATOR CIDRs only since the H-2 closeout
+# (c99f571) — so agent tunnels retry forever ("Failed to connect to proxy...
+# connection timed out") and every kubectl exec/logs to a non-master node
+# 502s, and any apiserver-dependent pod scheduled off-master is locked out.
+# RCA 2026-07-17 e4 rig — the first real k8s deploy after the H-2 closeout
+# (the Actions billing outage had suppressed e2e coverage of it).
+# Private-sourced 6443 is admitted by the firewall's private-range rule, and
+# CA-spawned workers get the tunnel for free (no public allowlisting).
+#
+# The k3s install script itself fetches https://github.com/k3s-io/k3s/releases/... and
+# GitHub routinely returns 504 for brief windows. The outer curl has --retry 3, but
+# GitHub failures happen inside the install script where we can't hand --retry through.
+# Wrap the whole pipeline in a bash retry loop — up to 5 attempts with 20s backoff —
+# so a transient CDN hiccup doesn't kill a fresh provision.
+K3S_INSTALL_OK=false
+for attempt in 1 2 3 4 5; do
+  if curl -sfL --max-time 120 --retry 3 --retry-delay 10 https://get.k3s.io | INSTALL_K3S_VERSION="v1.31.5+k3s1" sh -s - server \
+      --cluster-init \
+      --token "deadbeefcafe1234567890abcdef" \
+      --tls-san "$PUBLIC_IP" \
+      --tls-san "203.0.113.10" \
+      --tls-san "10.0.1.1" \
+      --node-ip "$PUBLIC_IP" \
+      --node-external-ip "$PUBLIC_IP" \
+      --advertise-address "10.0.1.1" \
+      --flannel-iface "$PRIVATE_IFACE" \
+      --disable traefik \
+      --disable servicelb \
+      --disable-cloud-controller \
+      --flannel-backend=wireguard-native \
+      --kubelet-arg="cloud-provider=external" \
+      --write-kubeconfig-mode=644; then
+    K3S_INSTALL_OK=true
+    break
+  fi
+  echo "k3s install attempt $attempt failed (likely transient GitHub/CDN issue), retrying in 20s..."
+  sleep 20
+done
+if [ "$K3S_INSTALL_OK" != "true" ]; then
+  echo "k3s install failed after 5 attempts — check GitHub CDN status" >&2
+  exit 1
+fi
+
+# Wait for k3s to be ready (max 3 minutes — if it hasn't started by then, something is wrong)
+K3S_READY=false
+for i in $(seq 1 36); do
+  if kubectl get nodes 2>/dev/null | grep -q "Ready"; then
+    K3S_READY=true
+    break
+  fi
+  echo "Waiting for k3s to be ready... ($i/36)"
+  sleep 5
+done
+if [ "$K3S_READY" != "true" ]; then
+  echo "FATAL: k3s did not become ready within 3 minutes"
+  echo "k3s service status:"
+  systemctl status k3s --no-pager 2>&1 || true
+  journalctl -u k3s --no-pager -n 20 2>&1 || true
+  exit 1
+fi
+
+# Marker for vibecarbon's deployK3s waiter — set AFTER hcloud Secret + CCM/CSI
+# install below complete (see end of script). Keeps the early-readiness signal
+# distinct from "fully provisioned and ready for app install."
+
+# Create secret for Hetzner Cloud Controller Manager
+kubectl -n kube-system create secret generic hcloud \
+  --from-literal=token="htk_test_token_1234" \
+  --from-literal=network="12345" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Create secret for Hetzner CSI Driver
+kubectl -n kube-system create secret generic hcloud-csi \
+  --from-literal=token="htk_test_token_1234" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Install Hetzner Cloud Controller Manager
+# Use ccm.yaml (not ccm-networks.yaml) since k3s manages pod networking via flannel
+# Retry up to 3 times — kubectl apply can fail if API server is briefly unavailable
+for i in 1 2 3; do
+  kubectl apply -f https://github.com/hetznercloud/hcloud-cloud-controller-manager/releases/download/v1.20.0/ccm.yaml && break
+  echo "CCM install attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+
+# Install Hetzner CSI Driver
+#
+# VERSION WINDOW — v2.18.1 is the NEWEST release upstream supports on
+# Kubernetes v1.31 (what INSTALL_K3S_VERSION pins): the driver supports the
+# latest three k8s minors, and v2.18.2's changelog entry is "drop Kubernetes
+# v1.31 support". The FLOOR is v2.15.0, below which the volume-label line
+# below does nothing. Both ends are asserted by
+# tests/unit/deploy/k8s-image-mirrors.test.ts, which also re-derives the
+# sig-storage sidecar tags src/lib/images.js re-pins onto our ghcr mirrors —
+# bump this URL and that fixture fails until the tags are re-derived too.
+for i in 1 2 3; do
+  kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.18.1/deploy/kubernetes/hcloud-csi.yml && break
+  echo "CSI install attempt $i failed, retrying in 10s..."
+  sleep 10
+done
+
+# Label every CSI-created volume with this project. Hetzner volumes are named
+# pvc-<uuid> with no owner information; anything enumerating the (shared)
+# Hetzner project — e2e sweeps especially — cannot otherwise attribute them.
+# RCA 2026-07-18: a concurrent CI matrix's sweep deleted another live rig's
+# volumes while they were legitimately DETACHED mid-reseed (db scaled to zero
+# during the pilot-light reconverge), because "unattached pvc-*" was the only
+# available heuristic. HCLOUD_VOLUME_EXTRA_LABELS makes the CSI controller
+# stamp `project=<name>` on creation; sweeps filter on it (server parity —
+# servers already carry the same label from the Pulumi program, which is also
+# why the value is already known-valid to Hetzner's label validator).
+#
+# This line was a NO-OP from 2026-07-18 until the v2.18.1 bump: volume
+# labelling only landed upstream in v2.14.0, and the v2.9.0 controller read
+# exactly one env var (HCLOUD_VOLUME_DEFAULT_LOCATION), so every volume leaked
+# in the three occurrences #236 catalogues was unlabelled. On v2.18.1 the
+# controller parses this into extra labels and stamps them on every
+# CreateVolume (cmd/main.go:128 -> internal/driver/controller.go:87-91,118),
+# alongside the driver's own managed-by / pvc-name / pvc-namespace / pv-name
+# defaults. Deleting this line re-opens the attribution gap.
+kubectl -n kube-system set env deployment/hcloud-csi-controller \
+  HCLOUD_VOLUME_EXTRA_LABELS="project=acme" || \
+  echo "WARN: could not set CSI volume labels — volumes will be unattributed"
+
+echo "k3s master installation complete!"
+
+# Final marker: vibecarbon's deployK3s polls for /tmp/k3s-ready before fetching
+# kubeconfig + applying app manifests. Written here so the marker only fires
+# after k3s + hcloud secrets + CCM + CSI are all in place — i.e., the cluster
+# is ready for real workloads, not just "k3s daemon is up."
+touch /tmp/k3s-ready

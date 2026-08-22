@@ -1,0 +1,197 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      serviceAccountName: cluster-autoscaler
+      priorityClassName: system-cluster-critical
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cluster-autoscaler
+          # Upstream cluster-autoscaler v1.32.7, MIRRORED into our ghcr org.
+          # Same bits (the mirror is a digest-preserving manifest copy, not a
+          # rebuild) — only the registry host differs. registry.k8s.io routes
+          # by client IP to a cloud backend whose GCP leg intermittently 403s
+          # datacenter ranges, and it 403'd this exact pull on Hetzner on
+          # 2026-07-31 until the rollout timed out. ghcr.io is already this
+          # pod's other registry (see the sidecar below). Full incident +
+          # bump procedure: src/lib/images.js.
+          image: ghcr.io/hyperformant/cluster-autoscaler:v1.32.7
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - ./cluster-autoscaler
+          args:
+            - --cloud-provider=externalgrpc
+            - --cloud-config=/config/cloud-config
+            - --scale-down-delay-after-add=10m
+            - --scale-down-delay-after-delete=1m
+            - --scale-down-delay-after-failure=3m
+            - --scale-down-unneeded-time=10m
+            - --scale-down-utilization-threshold=0.5
+            - --skip-nodes-with-local-storage=false
+            - --skip-nodes-with-system-pods=false
+            - --balance-similar-node-groups=true
+            - --expander=least-waste
+            - --v=4
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          volumeMounts:
+            - name: ssl-certs
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              readOnly: true
+            - name: tmp-vol-0
+              mountPath: /tmp
+            - name: cloud-config
+              mountPath: /config
+              readOnly: true
+        # Serves the externalgrpc CloudProvider contract to the
+        # cluster-autoscaler container above, over pod-local loopback
+        # (127.0.0.1:8086 — this Deployment's pod is hostNetwork, so that's
+        # the control-plane node's own loopback: same trust domain as the
+        # node's kube-apiserver, see m2-dossier-externalgrpc.md §2/§9).
+        # Config comes from the carbon-autoscaler-config Secret, rendered at
+        # deploy time from the provider registry (node groups, image,
+        # cloud-init, credentials).
+        - name: carbon-autoscaler
+          image: '{{CARBON_AUTOSCALER_IMAGE}}'
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PROVIDER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: carbon-autoscaler-config
+                  key: token
+            - name: CARBON_AUTOSCALER_CONFIG
+              value: /config-ca/config.json
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: autoscaler-config
+              mountPath: /config-ca
+              readOnly: true
+          # Liveness: process alive + gRPC socket answering (any Check
+          # response counts) — restart-worthy death only, never gated on
+          # SERVING so a still-starting or provider-slow sidecar isn't
+          # killed before its first Refresh completes.
+          #
+          # Task 9j incident (live d3 rig, s-2vcpu-4gb DO master; control
+          # plane + registry + traefik + observability + CA all resident):
+          # both probes are `exec`, spawning a full `node` process per
+          # invocation (127.0.0.1-only bind means tcpSocket/grpc probes
+          # can't reach it without an image change — see healthcheck.js's
+          # header). Under that contention, node's own cold-start alone
+          # repeatedly exceeded the old 5s timeoutSeconds while the backend
+          # was demonstrably healthy (server logs showed a clean listen ->
+          # SIGTERM cycle each restart) — kubelet events: "command timed
+          # out ... after 5s" x6 liveness / x20 readiness in 11 minutes, 6
+          # CrashLoopBackOff restarts, cluster-autoscaler's externalgrpc
+          # calls refused throughout. timeoutSeconds 5 -> 15 gives ~3x the
+          # margin the failing runs needed (healthcheck.js's own internal
+          # gRPC deadline is 3s, so 15s covers a slow node cold-start on
+          # top of that with room to spare) without image changes.
+          # initialDelaySeconds bumped in step so the very first attempt —
+          # fired while the rest of the control-plane pods are also
+          # starting — gets the same slack.
+          #
+          # Worst-case detection window (true backend death to kubelet
+          # restart), assuming death lands right after a successful check:
+          # failureThreshold(3) x periodSeconds(30) + timeoutSeconds(15) =
+          # ~105s. That's only ~10s worse than the pre-incident bound
+          # (~95s), because periodSeconds (unchanged, still > timeoutSeconds
+          # so probes can't overlap) dominates the bound, not
+          # timeoutSeconds — i.e. this buys headroom against slow-but-alive
+          # without materially widening the window in which a genuinely
+          # dead sidecar goes undetected.
+          livenessProbe:
+            exec:
+              command:
+                - node
+                - src/autoscaler/healthcheck.js
+                - --liveness
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          # Readiness: SERVING only (first successful Refresh has landed)
+          # — gates whether this pod is safe to consider Ready / count
+          # toward rollout-status. Never restart-worthy on its own (no
+          # Service fronts this sidecar; cluster-autoscaler dials it
+          # directly over loopback), so a longer detection window than
+          # liveness is acceptable in exchange for the same cold-start
+          # margin — see the Task 9j incident note on livenessProbe above.
+          # periodSeconds raised 10 -> 20 alongside timeoutSeconds (must
+          # stay > timeoutSeconds or successive exec attempts would
+          # overlap/queue instead of running on a clean cadence).
+          # Worst-case detection window: failureThreshold(3) x
+          # periodSeconds(20) + timeoutSeconds(15) = ~75s (was ~35s) —
+          # still well bounded, and non-destructive when hit.
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - src/autoscaler/healthcheck.js
+                - --readiness
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: ssl-certs
+          hostPath:
+            path: /etc/ssl/certs/ca-certificates.crt
+        - name: tmp-vol-0
+          emptyDir: {}
+        - name: cloud-config
+          configMap:
+            name: cluster-autoscaler-cloud-config
+        - name: autoscaler-config
+          secret:
+            secretName: carbon-autoscaler-config

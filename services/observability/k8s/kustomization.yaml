@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# H-9: the observability stack lives in its OWN namespace so the permissive
+# `allow-intra-namespace` baseline policy in the `vibecarbon` namespace no longer
+# selects Grafana. This `namespace:` transformer rewrites every namespaced
+# resource below into vibecarbon-observability.
+#
+# IMPORTANT: this kustomization must be applied ON ITS OWN (kubectl apply -k
+# k8s/base/observability / a dedicated Flux Kustomization), NOT listed under
+# k8s/base/kustomization.yaml — that parent sets `namespace: vibecarbon`, and a
+# parent namespace transformer OVERRIDES a child's, silently pulling everything
+# back into vibecarbon (verified). This mirrors how cluster-autoscaler is applied
+# separately for the same reason (see k8s/base/kustomization.yaml).
+namespace: vibecarbon-observability
+
+resources:
+  # Namespace (must be first)
+  - namespace.yaml
+  # Prometheus
+  - prometheus-rbac.yaml
+  - prometheus-configmap.yaml
+  - prometheus-pvc.yaml
+  - prometheus-deployment.yaml
+  - prometheus-service.yaml
+  # Grafana
+  - grafana-pvc.yaml
+  - grafana-provisioning-configmap.yaml
+  - grafana-deployment.yaml
+  - grafana-service.yaml
+  # Loki
+  - loki-configmap.yaml
+  - loki-pvc.yaml
+  - loki-deployment.yaml
+  - loki-service.yaml
+  # Network policies
+  - network-policy.yaml
+  # Traefik middlewares (local copies — see middleware.yaml) + IngressRoute + TLS
+  - middleware.yaml
+  - grafana-tls-certificate.yaml
+  - ingressroute.yaml

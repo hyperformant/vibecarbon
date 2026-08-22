@@ -1,0 +1,90 @@
+---
+title: "Analytics"
+description: "Privacy-friendly product analytics with Plausible."
+order: 9
+---
+
+## Overview
+
+Your app includes built-in support for **Plausible Analytics**, a lightweight, privacy-friendly alternative to Google Analytics. Plausible is:
+
+- **Cookie-free**: no consent banners needed
+- **No cross-site tracking**: visitors aren't followed from your app to anywhere else
+- **Lightweight**: under 1KB script, no impact on page speed
+- **Open source**: self-host or use their cloud service
+
+## Setup
+
+### Option 1: Plausible Cloud
+
+1. Sign up at [plausible.io](https://plausible.io)
+2. Add your domain in the Plausible dashboard
+3. Set the environment variables:
+
+```bash
+VITE_PLAUSIBLE_DOMAIN="yourdomain.com"
+VITE_PLAUSIBLE_SCRIPT_URL="https://plausible.io/js/script.js"
+```
+
+### Option 2: Self-Hosted Plausible
+
+1. Follow the [Plausible self-hosting guide](https://plausible.io/docs/self-hosting)
+2. Deploy Plausible alongside your app (or on a separate server)
+3. Set the environment variables:
+
+```bash
+VITE_PLAUSIBLE_DOMAIN="yourdomain.com"
+VITE_PLAUSIBLE_SCRIPT_URL="https://analytics.yourdomain.com/js/script.js"
+```
+
+## How It Works
+
+The analytics script is conditionally injected into the HTML `<head>` at build time. When `VITE_PLAUSIBLE_DOMAIN` is empty (the default), no script is loaded and no data is collected.
+
+The script tag uses Plausible's `defer` attribute and `data-domain` configuration, so no additional client-side code is needed.
+
+## What Gets Tracked
+
+By default, Plausible tracks:
+
+- **Page views**: which pages are visited
+- **Referral sources**: where visitors come from
+- **Browser & OS**: what devices are used
+- **Country**: geographic distribution (city-level detail is not collected)
+
+Plausible does **not** track:
+
+- Individual users or sessions
+- Personal data or IP addresses
+- Cross-site browsing behavior
+
+## Custom Events (Optional)
+
+To track custom events (button clicks, signups, etc.), use the Plausible JavaScript API:
+
+```typescript
+// Track a custom event
+window.plausible?.('Signup', { props: { plan: 'pro' } });
+
+// Track a goal conversion
+window.plausible?.('Purchase', { revenue: { currency: 'USD', amount: '19.00' } });
+```
+
+Add the TypeScript declaration to avoid type errors:
+
+```typescript
+// src/client/types/plausible.d.ts
+declare global {
+  interface Window {
+    plausible?: (event: string, options?: { props?: Record<string, string>; revenue?: { currency: string; amount: string } }) => void;
+  }
+}
+export {};
+```
+
+## Dashboard
+
+Access your analytics dashboard at:
+
+- **Cloud**: `https://plausible.io/yourdomain.com`
+- **Self-hosted**: `https://analytics.yourdomain.com/yourdomain.com`

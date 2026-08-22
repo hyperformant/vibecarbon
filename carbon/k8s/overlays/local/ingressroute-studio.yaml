@@ -1,0 +1,104 @@
+# ============================================================================
+# LOCAL DEVELOPMENT ROUTES
+# ============================================================================
+# For local development, we use host-based routing for simplicity.
+# Production uses path-based /admin/* routes with ForwardAuth protection.
+#
+# Local URLs (no auth required):
+#   http://studio.localhost:8080  - Supabase Studio
+#   http://n8n.localhost:8080     - n8n Workflows
+#   http://traefik.localhost:8080 - Traefik Dashboard
+#
+# Production-like URLs (requires admin role):
+#   http://localhost:8080/admin/studio
+#   http://localhost:8080/admin/n8n
+# ============================================================================
+
+# Studio - direct access for local development
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: studio-local
+  labels:
+    app: vibecarbon-studio
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`studio.localhost`)
+      kind: Rule
+      services:
+        - name: studio
+          port: 3000
+---
+# n8n - direct access for local development
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: n8n-local
+  labels:
+    app: vibecarbon-n8n
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`n8n.localhost`)
+      kind: Rule
+      services:
+        - name: n8n
+          port: 5678
+---
+# Traefik dashboard - direct access for local development
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard-local
+  labels:
+    app: vibecarbon-traefik
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`traefik.localhost`)
+      kind: Rule
+      services:
+        - name: traefik-dashboard
+          port: 8080
+---
+# ============================================================================
+# PRODUCTION-LIKE ROUTES (for testing ForwardAuth locally)
+# ============================================================================
+# These routes mirror production but are only enabled when testing the full
+# auth flow locally. Requires the app to be running with verify-role endpoint.
+
+# Admin routes with ForwardAuth (production-like)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: admin-routes-local
+  labels:
+    app: vibecarbon-admin
+spec:
+  entryPoints:
+    - web
+  routes:
+    # /admin/studio with ForwardAuth
+    - match: PathPrefix(`/admin/studio`)
+      kind: Rule
+      priority: 20
+      services:
+        - name: studio
+          port: 3000
+      middlewares:
+        - name: admin-auth
+        - name: strip-admin-studio-prefix
+    # /admin/n8n with ForwardAuth
+    - match: PathPrefix(`/admin/n8n`)
+      kind: Rule
+      priority: 20
+      services:
+        - name: n8n
+          port: 5678
+      middlewares:
+        - name: admin-auth
+        - name: strip-admin-n8n-prefix

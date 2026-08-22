@@ -1,0 +1,82 @@
+---
+# Network policy for n8n automation service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: n8n-policy
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-n8n
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-traefik
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-app
+      ports:
+        - protocol: TCP
+          port: 5678
+  egress:
+    # DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Kong (Supabase API gateway)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-kong
+      ports:
+        - protocol: TCP
+          port: 8000
+    # External HTTP/HTTPS (for webhook calls, npm packages, etc.)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+# Allow n8n to connect to postgres
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: n8n-database-ingress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-n8n
+      ports:
+        - protocol: TCP
+          port: 5432

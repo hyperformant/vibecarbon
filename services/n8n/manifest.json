@@ -1,0 +1,36 @@
+{
+  "name": "n8n",
+  "description": "Workflow automation platform",
+  "version": "1.0.0",
+  "port": 5678,
+  "url": "http://n8n.localhost",
+
+  "files": {
+    "compose/docker-compose.yml": "docker-compose.n8n.yml",
+    "compose/docker-compose.prod.yml": "docker-compose.n8n.prod.yml",
+    "compose/docker-compose.override.yml": "docker-compose.n8n.override.yml",
+    "k8s/": "k8s/base/n8n/",
+    "db/init.sh": "volumes/db/n8n-init.sh",
+    "scripts/setup.sh": "volumes/n8n/scripts/setup.sh",
+    "hooks/hooks.js": "volumes/n8n/hooks.js",
+    "docs/integration.md": "n8n-integration.md"
+  },
+
+  "envVars": {
+    "N8N_WEBHOOK_URL": { "value": "http://localhost:5678" },
+    "N8N_API_KEY": { "value": "" },
+    "N8N_ADMIN_EMAIL": { "from": "ADMIN_EMAIL", "default": "admin@localhost" }
+  },
+
+  "credentials": {
+    "title": "n8n",
+    "fields": [
+      { "label": "URL", "value": "http://n8n.localhost" },
+      { "label": "Auth", "value": "Traefik ForwardAuth SSO (super_admin)" }
+    ]
+  },
+
+  "kustomization": {
+    "entry": "n8n/"
+  }
+}

@@ -1,0 +1,16 @@
+---
+# Hetzner Cloud Helm chart repository. Used by the
+# cert-manager-webhook-hetzner HelmRelease in this same overlay.
+# Migrated from carbon/k8s/flux/helm-repositories.yaml as part of
+# Phase 3 of the GitOps refactor.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: hetzner-cloud
+  namespace: flux-system
+spec:
+  # 5-minute interval matches Phase 1 convention. Short enough that
+  # initial source-controller fetch failures retry within the
+  # HelmRelease wait budget.
+  interval: 5m
+  url: https://charts.hetzner.cloud

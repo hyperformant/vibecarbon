@@ -1,0 +1,84 @@
+# Metabase Analytics - Docker Compose Override
+# Use with: docker compose -f docker-compose.yml -f docker-compose.metabase.yml up -d
+#
+# Access:
+#   Local dev: http://metabase.localhost (subdomain routing)
+#   Production: /admin/metabase (path routing via docker-compose.prod.yml)
+# Auth: Requires super_admin role via Traefik ForwardAuth
+# Docs: https://www.metabase.com/docs/latest/
+
+services:
+  # Extend db service to add metabase database initialization
+  db:
+    volumes:
+      - ./volumes/db/metabase-init.sh:/docker-entrypoint-initdb.d/zz-metabase-init.sh:Z
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: ${PROJECT_NAME:-vibecarbon}-metabase
+    restart: unless-stopped
+    environment:
+      # Database connection for Metabase app data
+      - MB_DB_TYPE=postgres
+      - MB_DB_DBNAME=metabase
+      - MB_DB_PORT=5432
+      - MB_DB_USER=metabase
+      - MB_DB_PASS=${POSTGRES_PASSWORD}
+      - MB_DB_HOST=db
+      # Site configuration
+      - MB_SITE_URL=${METABASE_SITE_URL:-http://metabase.localhost}
+      - MB_SITE_NAME=${PROJECT_NAME:-Vibecarbon} Analytics
+      # Embedding configuration for iframe access
+      - MB_EMBEDDING_APP_ORIGIN=${SITE_URL:-http://localhost:5173}
+      - MB_ENABLE_EMBEDDING=true
+      # Security settings
+      - MB_PASSWORD_COMPLEXITY=strong
+      - MB_SESSION_COOKIES=true
+      - MB_COOKIE_SAMESITE=lax
+      # Timezone
+      - MB_TIMEZONE=${TIMEZONE:-UTC}
+      - JAVA_TIMEZONE=${TIMEZONE:-UTC}
+      # Performance
+      - JAVA_OPTS=-Xmx2g
+    volumes:
+      - metabase_data:/metabase-data
+    networks:
+      - vibecarbon-network
+    labels:
+      # Traefik routing with ForwardAuth (super_admin only)
+      # Local dev uses subdomain: metabase.localhost
+      - "traefik.enable=true"
+      - "traefik.http.routers.metabase.rule=Host(`metabase.localhost`)"
+      - "traefik.http.routers.metabase.entrypoints=web"
+      - "traefik.http.routers.metabase.middlewares=super-admin-auth@file"
+      - "traefik.http.services.metabase.loadbalancer.server.port=3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 120s
+
+  metabase-setup:
+    image: alpine:latest
+    container_name: ${PROJECT_NAME:-vibecarbon}-metabase-setup
+    volumes:
+      - ./volumes/metabase/scripts:/scripts:ro
+    environment:
+      - METABASE_URL=http://metabase:3000
+      - METABASE_ADMIN_EMAIL=${METABASE_ADMIN_EMAIL:-${ADMIN_EMAIL}}
+      - METABASE_ADMIN_PASSWORD=${METABASE_ADMIN_PASSWORD:-${ADMIN_PASSWORD}}
+      - DB_PASSWORD=${DB_PASSWORD}
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq && sh /scripts/setup.sh"]
+    depends_on:
+      metabase:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+    restart: "no"
+
+volumes:
+  metabase_data:

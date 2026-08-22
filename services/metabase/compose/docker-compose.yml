@@ -1,0 +1,68 @@
+# Metabase - Business intelligence dashboard
+# Added via: vibecarbon add metabase
+
+services:
+  metabase:
+    image: metabase/metabase:latest
+    container_name: {{PROJECT_NAME}}-metabase
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      # Metabase application database (stores dashboards, questions, etc.)
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: 5432
+      MB_DB_USER: metabase
+      MB_DB_PASS: ${POSTGRES_PASSWORD}
+      MB_DB_HOST: db
+      # Performance settings
+      JAVA_OPTS: "-Xmx1g"
+    volumes:
+      - metabase_plugins:/plugins
+    networks:
+      - vibecarbon-network
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 120s
+    labels:
+      # Traefik routing with ForwardAuth protection
+      - "traefik.enable=true"
+      - "traefik.http.routers.metabase.rule=Host(`metabase.localhost`)"
+      - "traefik.http.routers.metabase.entrypoints=web"
+      # Note: No ForwardAuth - Metabase has its own authentication
+      - "traefik.http.services.metabase.loadbalancer.server.port=3000"
+
+  metabase-setup:
+    image: alpine:latest
+    container_name: {{PROJECT_NAME}}-metabase-setup
+    volumes:
+      - ./volumes/metabase/scripts:/scripts:ro
+    environment:
+      METABASE_URL: http://metabase:3000
+      METABASE_ADMIN_EMAIL: ${METABASE_ADMIN_EMAIL:-admin@localhost}
+      METABASE_ADMIN_PASSWORD: ${METABASE_ADMIN_PASSWORD}
+      METABASE_ADMIN_FIRST_NAME: ${METABASE_ADMIN_FIRST_NAME:-Admin}
+      METABASE_ADMIN_LAST_NAME: ${METABASE_ADMIN_LAST_NAME:-User}
+      APP_DB_HOST: db
+      APP_DB_PORT: 5432
+      APP_DB_NAME: postgres
+      APP_DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq && sh /scripts/setup.sh"]
+    depends_on:
+      metabase:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+    restart: "no"
+
+volumes:
+  metabase_plugins:
+    driver: local

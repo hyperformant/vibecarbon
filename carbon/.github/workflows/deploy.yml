@@ -1,0 +1,392 @@
+name: Deploy
+
+# Phase 4 of the GitOps refactor (2026-04-20). Deploy is now driven by
+# GitHub Actions rather than the vibecarbon CLI applying manifests from a
+# local workstation. This keeps:
+#
+#   • Secrets in GitHub Environments (never committed, env-scoped).
+#   • Source of truth in the repo under k8s/.
+#   • Reconciliation via Flux (the cluster's own GitRepository +
+#     Kustomization watches the repo's main branch every minute).
+#
+# The CLI still creates the cluster (Pulumi) and bootstraps the first
+# workflow run — thereafter, `git push` is the deploy verb.
+#
+# Security note: all external-input interpolation flows through the
+# `env:` block rather than inline `${{ }}` in `run:` blocks, to avoid the
+# script-injection class of workflow CVEs. Secrets are written to files
+# via base64 when possible (kubeconfig) to avoid shell quoting hazards.
+
+on:
+  # No `push` trigger: this workflow requires a per-environment KUBECONFIG_B64
+  # secret which only exists after `vibecarbon deploy --k8s` has seeded the
+  # matching GitHub Environment. A `push` trigger would fail fast (kubectl
+  # connection refused) for every deploy, whether k8s or compose-only. The
+  # vibecarbon CLI invokes this workflow explicitly via the gh CLI
+  # (triggerDeployWorkflow in gitops-deploy.js) with the right environment,
+  # so manual dispatch is the only entry point.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy (dev / staging / prod)'
+        type: environment
+        required: true
+
+concurrency:
+  # Serialize per-environment so two pushes don't race against Flux's
+  # reconcile loop.
+  group: deploy-${{ inputs.environment || 'prod' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write  # for future OIDC to cloud providers; not used today
+
+jobs:
+  apply-secrets:
+    # Reads env-specific secrets from GitHub Environments and applies them
+    # to the cluster as the `vibecarbon-secrets` Secret. Flux does NOT
+    # manage this Secret (no manifest in k8s/) so there's no drift.
+    name: Apply env secrets → cluster
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'prod' }}
+    env:
+      KUBECONFIG: ${{ github.workspace }}/kubeconfig
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          # Pin to a specific minor; bump deliberately.
+          version: 'v1.32.0'
+
+      - name: Write kubeconfig from env secret
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          printf '%s' "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"
+          chmod 600 "$KUBECONFIG"
+          kubectl version --client=true
+
+      - name: Ensure vibecarbon namespace exists
+        run: kubectl create namespace vibecarbon --dry-run=client -o yaml | kubectl apply -f -
+
+      # Apply the vibecarbon-secrets Secret. Server-side apply with a
+      # distinct field manager ensures Flux doesn't try to prune these
+      # fields later, and that rotations simply overwrite.
+      #
+      # Self-syncing: instead of enumerating every key (which silently drops
+      # any new `vibecarbon configure` secret that the CLI started seeding),
+      # we materialize ALL environment+repo secrets from `toJSON(secrets)` and
+      # build the Secret from them. Adding a feature key to the CLI's
+      # seedEnvironmentSecrets is enough — no edit here. The exclude list
+      # below is the only maintained piece, and it's an exclude (safe by
+      # default): drop infra/CI secrets that have their own Secret or that
+      # must never reach the app pod (the app envFrom's this whole Secret).
+      # `toJSON(secrets)` is bound to an env var (not interpolated inline in
+      # the script) for defense-in-depth; kubectl --from-literal passes values
+      # through argv with no shell interpretation.
+      - name: Apply vibecarbon-secrets Secret
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          mapfile -t ARGS < <(printf '%s' "$ALL_SECRETS" | jq -r '
+            del(
+              .KUBECONFIG_B64,
+              .GITHUB_TOKEN, .github_token,
+              .HETZNER_API_TOKEN, .CLOUDFLARE_API_TOKEN,
+              .DIGITALOCEAN_TOKEN, .LINODE_TOKEN, .VULTR_API_KEY
+            )
+            | to_entries[]
+            | select(.value != null and .value != "")
+            | "--from-literal=\(.key)=\(.value)"')
+          kubectl create secret generic vibecarbon-secrets \
+            --namespace=vibecarbon \
+            --from-literal=SITE_URL="$SITE_URL" \
+            "${ARGS[@]}" \
+            --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts \
+              --field-manager=github-actions-deploy -f -
+
+      # One arm per DNS provider whose ClusterIssuers reference a Secret.
+      # Each Secret's name + key are the issuer's tokenSecretRef contract
+      # (k8s/infra/cert-manager-resources/cluster-issuers-<provider>.yaml) and
+      # must equal what the dev-push path creates (buildDnsProviderSecret in
+      # src/lib/deploy/k8s/k3s.js). A provider with issuers but no arm here
+      # deploys ClusterIssuers pointing at a Secret nothing created: Orders
+      # pin Pending with no error at apply time. `manual` is HTTP-01 and needs
+      # no Secret. Census-guarded by
+      # tests/unit/deploy/gitops-cert-webhook-wiring.test.ts.
+      - name: Apply hetzner Secret (cert-manager DNS-01 webhook token)
+        if: vars.DNS_PROVIDER == 'hetzner'
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+        # The webhook chart itself reads no secret values — the issuer's
+        # tokenSecretKeyRef is the ONLY binding: Secret/hetzner, key `token`.
+        run: |
+          kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic hetzner \
+            --namespace=cert-manager \
+            --from-literal=token="$HETZNER_API_TOKEN" \
+            --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts \
+              --field-manager=github-actions-deploy -f -
+
+      - name: Apply cloudflare Secret (cert-manager DNS-01 token)
+        if: vars.DNS_PROVIDER == 'cloudflare'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        # Native core solver (no webhook). Token needs Zone:DNS:Edit on the
+        # target zone + Zone:Zone:Read on all zones.
+        run: |
+          kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic cloudflare-api-token \
+            --namespace=cert-manager \
+            --from-literal=api-token="$CLOUDFLARE_API_TOKEN" \
+            --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts \
+              --field-manager=github-actions-deploy -f -
+
+      - name: Apply digitalocean Secret (cert-manager DNS-01 token)
+        if: vars.DNS_PROVIDER == 'digitalocean'
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+        # Native core solver (no webhook). cert-manager's documented shape is
+        # Secret/digitalocean-dns, key `access-token`; the token needs write
+        # scope on the Domains API.
+        run: |
+          kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic digitalocean-dns \
+            --namespace=cert-manager \
+            --from-literal=access-token="$DIGITALOCEAN_TOKEN" \
+            --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts \
+              --field-manager=github-actions-deploy -f -
+
+      - name: Apply kube-system/hcloud Secret (CCM + CSI)
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          HCLOUD_NETWORK_ID: ${{ vars.HCLOUD_NETWORK_ID }}
+        run: |
+          kubectl create secret generic hcloud \
+            --namespace=kube-system \
+            --from-literal=token="$HETZNER_API_TOKEN" \
+            --from-literal=network="$HCLOUD_NETWORK_ID" \
+            --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts \
+              --field-manager=github-actions-deploy -f -
+
+  bootstrap-flux:
+    # Phase 4.3b.C of the GitOps refactor: idempotently install Flux +
+    # the flux-system Secret (Git auth) + the root GitRepository and
+    # Kustomizations that watch the customer's repo. Runs every deploy
+    # (safe — kubectl apply --server-side is a no-op when state matches).
+    #
+    # After this job succeeds, Flux is in charge of reconciling
+    # k8s/gitops/{supabase,cert-manager-webhook-hetzner}/ and k8s/base/
+    # from the main branch. The apply-secrets job is what keeps the
+    # per-env vibecarbon-secrets / cert-manager `hetzner` / hcloud Secrets
+    # in sync with GitHub Environment secrets.
+    name: Bootstrap Flux + root Kustomization
+    needs: apply-secrets
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'prod' }}
+    env:
+      KUBECONFIG: ${{ github.workspace }}/kubeconfig
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.32.0'
+
+      - name: Write kubeconfig from env secret
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          printf '%s' "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"
+          chmod 600 "$KUBECONFIG"
+
+      - name: Install Flux if not present
+        # FLUX_INSTALL_URL matches src/lib/deploy/k8s/index.js so the
+        # imperative path and GitOps path land on the same Flux version.
+        # Bumping here requires a matching bump there + a re-test.
+        run: |
+          if ! kubectl -n flux-system get deployment source-controller > /dev/null 2>&1; then
+            kubectl apply -f https://github.com/fluxcd/flux2/releases/download/v2.8.5/install.yaml
+            kubectl -n flux-system wait --for=condition=available \
+              deployment/source-controller deployment/kustomize-controller \
+              deployment/helm-controller deployment/notification-controller \
+              --timeout=5m
+          fi
+
+      # cert-manager + Traefik CRDs must be installed BEFORE the root
+      # Kustomization reconciles. k8s/base/traefik/ contains IngressRoute
+      # (traefik.io/v1alpha1) and Certificate (cert-manager.io/v1)
+      # resources; Flux's vibecarbon-base Kustomization will sit with
+      # "Ready=False: resource mapping not found" forever without the
+      # CRDs installed out-of-band.
+      #
+      # Under the pre-GitOps flow these were installed imperatively by
+      # applyKubernetesManifests before Flux was bootstrapped (see
+      # src/lib/deploy/k8s/index.js and the CERT_MANAGER_INSTALL_URL
+      # constant). The GitOps refactor moved Flux bootstrap here but
+      # left this step out — e2e run 2026-04-22 18:29 UTC showed
+      # vibecarbon-base timing out after 10m on exactly this.
+      #
+      # cert-manager v1.20.2 matches k8s/infra/kustomization.yaml +
+      # CERT_MANAGER_VERSION in src/lib/deploy/k8s/k3s.js; bump in lockstep.
+      - name: Install cert-manager + Traefik CRDs
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
+          kubectl apply -k k8s/infra/traefik-crds/
+          kubectl -n cert-manager wait --for=condition=available \
+            deployment/cert-manager \
+            deployment/cert-manager-webhook \
+            deployment/cert-manager-cainjector \
+            --timeout=5m
+
+      - name: Create flux-system Secret (Git auth for private repo)
+        # Flux uses `username`/`password` keys on a namespace Secret to
+        # pull the GitRepository. Using the workflow's GITHUB_TOKEN keeps
+        # everything within the repo's own perms — no separate PAT to
+        # rotate. `x-access-token` is GitHub's convention for short-lived
+        # Actions tokens.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          kubectl create namespace flux-system --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic flux-system \
+            --namespace=flux-system \
+            --from-literal=username=x-access-token \
+            --from-literal=password="$GITHUB_TOKEN" \
+            --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts \
+              --field-manager=github-actions-deploy -f -
+
+      - name: Apply root GitRepository + Kustomizations
+        # Template at carbon/k8s/flux/clusters/primary/vibecarbon.yaml
+        # (copied to k8s/flux/clusters/primary/vibecarbon.yaml in the
+        # customer repo by `vibecarbon create`). `{{GITHUB_OWNER}}` +
+        # `{{PROJECT_NAME}}` in that template are substituted at create
+        # time, so by the time Actions runs this file has the real URL.
+        run: |
+          kubectl apply --server-side --force-conflicts \
+            --field-manager=github-actions-deploy \
+            -f k8s/flux/clusters/primary/vibecarbon.yaml
+
+  trigger-reconcile:
+    # After Secrets are fresh + Flux is bootstrapped, nudge Flux to
+    # reconcile now rather than wait up to 10 min for its interval.
+    name: Trigger Flux reconcile
+    needs: [apply-secrets, bootstrap-flux]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'prod' }}
+    env:
+      KUBECONFIG: ${{ github.workspace }}/kubeconfig
+    steps:
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.32.0'
+
+      - name: Write kubeconfig from env secret
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          printf '%s' "$KUBECONFIG_B64" | base64 -d > "$KUBECONFIG"
+          chmod 600 "$KUBECONFIG"
+
+      - name: Annotate GitRepository + root Kustomizations
+        run: |
+          now="$(date -u +%FT%TZ)"
+          kubectl -n flux-system annotate --overwrite gitrepository/vibecarbon \
+            reconcile.fluxcd.io/requestedAt="$now" || true
+          for ks in vibecarbon-base vibecarbon-supabase vibecarbon-cert-manager-webhook-hetzner; do
+            kubectl -n flux-system annotate --overwrite kustomization/"$ks" \
+              reconcile.fluxcd.io/requestedAt="$now" || true
+          done
+
+      # State dump is inlined into the SAME shell as the wait commands so
+      # its output shows up in `gh run view <id> --log-failed`. A separate
+      # `if: failure()` job-step would run but wouldn't be in the failed-
+      # step logs (which is what waitForLatestWorkflowRun fetches), so
+      # debugging from the operator's machine would still be opaque.
+      - name: Wait for reconciliation (20 min budget)
+        run: |
+          set +e
+          kubectl -n flux-system wait --for=condition=Ready kustomization/vibecarbon-base --timeout=10m
+          BASE_RC=$?
+          kubectl -n flux-system wait --for=condition=Ready kustomization/vibecarbon-supabase --timeout=20m
+          SUPABASE_RC=$?
+          if [ $BASE_RC -ne 0 ] || [ $SUPABASE_RC -ne 0 ]; then
+            echo "=== RECONCILE FAILED — dumping Flux state ==="
+            echo "base=$BASE_RC supabase=$SUPABASE_RC"
+            echo
+            echo "=== Flux GitRepository ==="
+            kubectl -n flux-system describe gitrepository/vibecarbon || true
+            for ks in vibecarbon-base vibecarbon-supabase vibecarbon-cert-manager-webhook-hetzner; do
+              echo
+              echo "=== Kustomization: $ks ==="
+              kubectl -n flux-system describe kustomization/"$ks" || true
+            done
+            echo
+            echo "=== Flux events (last 80) ==="
+            kubectl -n flux-system get events --sort-by=.lastTimestamp 2>/dev/null | tail -80
+            echo
+            echo "=== vibecarbon namespace events (last 80) ==="
+            kubectl -n vibecarbon get events --sort-by=.lastTimestamp 2>/dev/null | tail -80
+            echo
+            echo "=== Non-ready pods (all namespaces) ==="
+            kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded 2>/dev/null
+            echo
+            echo "=== vibecarbon pods ==="
+            kubectl -n vibecarbon get pods -o wide 2>/dev/null
+            echo
+            echo "=== nodes (internal/external IPs) ==="
+            kubectl get nodes -o wide 2>/dev/null
+            echo
+            echo "=== kube-system pods (CoreDNS + CCM + CSI) ==="
+            kubectl -n kube-system get pods -o wide 2>/dev/null
+            echo
+            echo "=== CoreDNS ConfigMap (upstream resolvers) ==="
+            kubectl -n kube-system get configmap coredns -o yaml 2>/dev/null | sed -n '/data:/,/^[^ ]/p' | head -40
+            echo
+            echo "=== CoreDNS logs (last 30 lines per pod) ==="
+            for pod in $(kubectl -n kube-system get pods -l k8s-app=kube-dns -o name 2>/dev/null); do
+              echo "--- $pod ---"
+              kubectl -n kube-system logs "$pod" --tail=30 2>/dev/null
+            done
+            echo
+            echo "=== Hetzner CCM logs (last 40 lines) ==="
+            for pod in $(kubectl -n kube-system get pods -l app.kubernetes.io/name=hcloud-cloud-controller-manager -o name 2>/dev/null); do
+              echo "--- $pod ---"
+              kubectl -n kube-system logs "$pod" --tail=40 2>/dev/null
+            done
+            echo
+            echo "=== source-controller logs (last 40 lines) ==="
+            SC_POD=$(kubectl -n flux-system get pods -l app=source-controller -o name 2>/dev/null | head -1)
+            if [ -n "$SC_POD" ]; then
+              kubectl -n flux-system logs "$SC_POD" --tail=40 2>/dev/null || true
+              kubectl -n flux-system logs "$SC_POD" --previous --tail=40 2>/dev/null || true
+            fi
+            echo
+            echo "=== pod DNS probe (busybox in kube-system) ==="
+            # kube-system has relaxed PodSecurity (allows system pods).
+            # A plain pod can curl/nslookup without host namespaces —
+            # this is what Flux's source-controller is actually doing.
+            kubectl -n kube-system run dns-probe-$RANDOM --image=busybox:1.36 \
+              --restart=Never --rm -i --timeout=60s \
+              --overrides='{"spec":{"containers":[{"name":"probe","image":"busybox:1.36","command":["sh","-c","echo \"--- /etc/resolv.conf ---\"; cat /etc/resolv.conf; echo; echo \"--- nslookup github.com (via coredns) ---\"; nslookup github.com; echo; echo \"--- nslookup github.com @1.1.1.1 ---\"; nslookup github.com 1.1.1.1; echo; echo \"--- wget github.com ---\"; wget -qO- --timeout=5 https://github.com 2>&1 | head -5 || echo wget-failed"]}]}}' \
+              2>&1 | head -50 || echo "(pod dns-probe failed)"
+            echo
+            echo "=== kube-proxy / node routing (kube-proxy pod logs) ==="
+            for pod in $(kubectl -n kube-system get pods -l k8s-app=kube-proxy -o name 2>/dev/null | head -1); do
+              echo "--- $pod ---"
+              kubectl -n kube-system logs "$pod" --tail=20 2>/dev/null
+            done
+            exit 1
+          fi

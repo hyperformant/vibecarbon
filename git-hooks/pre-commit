@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# Pre-commit hook to run tests
+#
+# This runs unit tests by default (fast).
+# To skip: git commit --no-verify
+# To run full tests: FULL_TEST=1 git commit
+
+echo "Running pre-commit tests..."
+echo ""
+
+# Run linting first (fast fail)
+pnpm lint || exit 1
+
+if [ "$FULL_TEST" = "1" ]; then
+    echo "(Running full test suite - this may take a few minutes)"
+    echo ""
+    pnpm test:e2e
+else
+    pnpm test:unit
+fi
+
+# Capture exit code
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "Pre-commit check failed. Fix the issues above before committing."
+    echo "To skip this check: git commit --no-verify"
+    exit 1
+fi
+
+echo ""
+echo "All checks passed."
+echo "Tip: Run 'pnpm test:e2e' for full end-to-end tests"
+exit 0

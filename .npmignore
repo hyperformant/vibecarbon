@@ -1,0 +1,51 @@
+# Exclude install/build artifacts everywhere. Bare names match at any depth
+# (gitignore semantics). The `files` whitelist in package.json picks src/ and
+# carbon/; this strips install/build noise nested under them. pnpm install
+# artifacts in carbon/node_modules are hard-linked to the global pnpm store
+# and trip npm registry E415 ("Hard link is not allowed"), so excluding them
+# is mandatory, not just hygiene.
+
+# Dependency install artifacts (any depth)
+node_modules
+.pnpm-store
+.yarn
+.npm
+
+# Build outputs / caches
+dist
+build
+.next
+.turbo
+.cache
+.parcel-cache
+.expo
+coverage
+.nyc_output
+
+# Lockfiles inside the template.
+#
+# carbon/package-lock.json is deliberately NOT listed: `create` copies it into
+# every new npm project instead of re-resolving the tree there (~1 min saved,
+# and every project starts on the tree CI actually tested). npm strips a
+# lockfile from the ROOT of a tarball but not one nested under carbon/, so it
+# ships as long as nothing excludes it here. tests/unit/template pins that.
+#
+# The rest stay excluded — `-pm pnpm` / `-pm bun` projects generate their own.
+carbon/pnpm-lock.yaml
+carbon/yarn.lock
+carbon/bun.lockb
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Repo metadata that doesn't belong in the package
+.github
+.git
+docs
+specs
+e2e-runs
+tests/results
+tests/results.db

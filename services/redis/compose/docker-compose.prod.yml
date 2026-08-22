@@ -1,0 +1,10 @@
+# Redis - Production Overrides
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.redis.yml -f docker-compose.redis.prod.yml up -d
+#
+# Redis is an internal cache/session store — the app reaches it over the compose
+# network (redis://redis:6379). Drop the dev host-port publishing so prod never
+# binds 6379 on the host (defense-in-depth behind the 22/80/443-only firewall).
+
+services:
+  redis:
+    ports: !reset null

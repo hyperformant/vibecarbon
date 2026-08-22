@@ -1,0 +1,96 @@
+version: 2
+
+updates:
+  # Root CLI package
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      production-patches:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [patch]
+      development-patches-and-minors:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [patch, minor]
+      security-fixes:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  # Template (carbon/) — ships to user projects.
+  #
+  # carbon/package-lock.json is PROJECT PAYLOAD, not a CI convenience: `create`
+  # copies it into every new npm project instead of resolving the tree there
+  # (see writeTemplateLockfile in src/lib/package-manager.js). Three
+  # consequences for anyone editing this block:
+  #
+  #   1. These PRs are what keeps new projects current. Never set a
+  #      versioning-strategy that stops Dependabot rewriting the lockfile —
+  #      the lock IS the shipped artifact, package.json ranges are not.
+  #   2. Weekly is deliberate and sufficient. Security advisories do NOT wait
+  #      for this schedule; Dependabot opens those as soon as they land, and
+  #      dependabot-auto-merge.yml merges them once CI is green.
+  #   3. Transitive-only drift no longer reaches users on its own. It used to
+  #      arrive free, because every `create` re-resolved the floating ranges on
+  #      the user's machine. Now it lands only via these PRs and the security
+  #      ones — which is the point (a tested tree beats a fresh unknown one),
+  #      but it means letting this block rot has user-visible reach.
+  #
+  # The Template Tests job in test.yml runs `npm ci` + typecheck + test:prepush
+  # + build against this lockfile, so a bump that breaks it cannot merge.
+  - package-ecosystem: npm
+    directory: /carbon
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore(template-deps)
+      include: scope
+    labels:
+      - dependencies
+      - template
+    groups:
+      template-patches:
+        applies-to: version-updates
+        update-types: [patch]
+      template-dev-minors:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [minor]
+      template-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  # GitHub Actions versions (referenced in .github/workflows/*.yml)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(ci-deps)
+      include: scope
+    labels:
+      - dependencies
+      - ci
+    groups:
+      all-actions:
+        patterns: ["*"]

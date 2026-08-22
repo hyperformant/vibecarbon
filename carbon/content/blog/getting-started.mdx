@@ -1,0 +1,40 @@
+---
+title: Getting Started
+description: Learn how to set up your project and start building your SaaS application.
+date: "2025-01-15"
+author: Team
+---
+
+# Getting Started
+
+Welcome to your new SaaS application! This guide will help you get up and running quickly.
+
+## Prerequisites
+
+Before you begin, make sure you have:
+
+- **Node.js 24.15+** installed
+- **Docker** running for local development
+
+## Quick Start
+
+1. Start the development environment:
+
+```bash
+npm run dev:start
+```
+
+This command will:
+- Start Docker containers (Supabase, PostgreSQL, etc.)
+- Run database migrations
+- Launch the API server and Vite dev server
+
+2. Open your browser to `http://app.localhost`
+
+3. Sign in with your admin credentials
+
+## Next Steps
+
+- Configure your [Stripe billing](/settings/billing) to start accepting payments
+- Set up [OAuth providers](/settings/security) for social login
+- Invite your [team members](/dashboard) to collaborate

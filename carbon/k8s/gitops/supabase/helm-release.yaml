@@ -1,0 +1,72 @@
+---
+# Flux-managed replacement for the former imperative `helm install supabase`
+# in deploy.js. The values shape comes straight from supabase.values.yaml;
+# {{DOMAIN}} and {{PROJECT_NAME}} are substituted at deploy time.
+#
+# The HelmRelease reads secrets from the pre-created vibecarbon-secrets
+# Secret in the vibecarbon namespace (populated by our deploy flow before
+# this resource is applied).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: supabase
+  namespace: flux-system
+spec:
+  interval: 10m
+  releaseName: supabase
+  targetNamespace: vibecarbon
+  chart:
+    spec:
+      chart: supabase
+      # PINNED in lockstep with supabase.values.yaml's schema (and the
+      # imperative deploy's SUPABASE_HELM_CHART_VERSION in the vibecarbon
+      # CLI). Chart 0.7.1 switched environment.* from maps to lists (which
+      # helm replaces wholesale, no merge) — bump only together with a
+      # values re-diff against the new chart defaults.
+      version: 0.7.1
+      sourceRef:
+        kind: HelmRepository
+        name: supabase-community
+        namespace: flux-system
+  install:
+    # First-time chart install includes postgres-init + DB migrations + all
+    # subchart init containers (wait-for-db). Observed 20+ min on cold nodes
+    # where images pull from Docker Hub in parallel. Budget 25m to give it
+    # headroom without blowing up the overall deploy timeout.
+    timeout: 25m
+    remediation:
+      # First install failures are usually schema / values / image problems.
+      # Fail fast instead of burning another 25m on a doomed retry.
+      retries: 0
+  upgrade:
+    timeout: 15m
+    remediation:
+      retries: 1
+  valuesFrom:
+    - kind: ConfigMap
+      name: supabase-values
+      valuesKey: values.yaml
+  # Expose PostgreSQL port 5432 on the node's interface so cross-cluster
+  # replication works. The standby cluster's supabase node opens a TCP
+  # connection to the primary's public IP on 5432 during pg_basebackup and
+  # subsequent streaming. Without hostPort the service is only reachable
+  # via ClusterIP or NodePort; NodePort cross-cluster was historically
+  # blocked by Hetzner Cloud firewalls even with a rule in place (see
+  # memory project_replication_broken.md). hostPort binds the port on the
+  # node's host network namespace, so it's reachable at the public node IP
+  # — and the Hetzner firewall rule for 5432 that src/lib/deploy/k8s/ha/
+  # index.js:254-266 adds now has something to route traffic to.
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              kind: StatefulSet
+              name: supabase-supabase-db
+            patch: |
+              - op: add
+                path: /spec/template/spec/containers/0/ports/-
+                value:
+                  containerPort: 5432
+                  hostPort: 5432
+                  protocol: TCP
+                  name: postgres-host

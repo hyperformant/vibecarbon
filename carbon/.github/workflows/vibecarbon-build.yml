@@ -1,0 +1,118 @@
+name: Build & Push
+
+# Builds the app image on every push to main and every tagged release, then
+# publishes to GitHub Container Registry. `vibecarbon deploy` pulls from this
+# registry — no deploy logic lives in CI. This keeps CI fast and focused, and
+# lets users deploy from their laptop (or a CI runner) against any cluster.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Node comes from this project's .nvmrc — the same file your local nvm /
+      # fnm / asdf reads, so CI and your machine can't drift. `vibecarbon
+      # create` writes it, and `vibecarbon deploy`/`configure` re-installs it
+      # alongside this workflow if it's missing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: "npm"
+      # Strict `npm ci`, same as the Dockerfile — no `|| npm install` repair.
+      # `npm ci` installs the lockfile verbatim; a repair branch would re-resolve
+      # floating ranges on the runner, so CI would test a dependency tree that
+      # isn't the one your image ships. A failure here means the committed
+      # package-lock.json is stale: run `npm install` locally and commit it.
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      # Security invariants (RLS, write-policy scoping, routing) MUST gate the
+      # build — never `|| true` these. A red security test means a change would
+      # ship a data-exposure or auth regression.
+      - run: npm run test:security
+      - run: npm test
+
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Native amd64 build on the GitHub runner — no QEMU. This is not a
+      # convenience pin, it is the architecture standard: vibecarbon targets
+      # x86-64 (amd64) servers only (decision 2026-07-30). DigitalOcean offers
+      # no ARM instances at all — and its CCM/CSI ship amd64-only images
+      # regardless — while Hetzner ARM is 4 SKUs in 3 of 6 locations, behind a
+      # "Cost-Optimized / Limited availability" tier. Dropping QEMU saves
+      # 2-4 min per CI build on the hot path.
+      #
+      # This image runs only on servers the CLI provisions, so amd64-only is
+      # correct by construction: the CLI's ARM server types (Hetzner cax*) were
+      # removed from the catalog and the prompts, and an ARM type is rejected
+      # wherever one could still arrive as raw text — so an arm64 server cannot
+      # be selected in the first place.
+      #
+      # Do NOT "restore" arm64 here — there is no arm64 consumer, and the
+      # pin is guarded by tests/unit/deploy/workflow-platforms.test.ts in the
+      # vibecarbon CLI repo.
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Vite inlines import.meta.env.VITE_* at build time, so the browser
+          # bundle bakes whatever these resolve to. They come from repo-level
+          # Actions variables seeded by `vibecarbon deploy` (push mode) via
+          # seedBuildVars. Without them the bundle ships empty VITE_SUPABASE_*
+          # and the SPA throws "Missing Supabase environment variables" on
+          # load. Empty/unset vars resolve to "" — same as a fresh project
+          # before its first push-mode deploy.
+          build-args: |
+            VITE_PROJECT_NAME=${{ vars.VITE_PROJECT_NAME }}
+            VITE_SUPABASE_URL=${{ vars.VITE_SUPABASE_URL }}
+            VITE_SUPABASE_ANON_KEY=${{ vars.VITE_SUPABASE_ANON_KEY }}
+            VITE_PUBLIC_URL=${{ vars.VITE_PUBLIC_URL }}
+            VITE_PLAUSIBLE_DOMAIN=${{ vars.VITE_PLAUSIBLE_DOMAIN }}
+            VITE_PLAUSIBLE_SCRIPT_URL=${{ vars.VITE_PLAUSIBLE_SCRIPT_URL }}
+          # GHA cache keyed on Dockerfile + lockfile. `mode=max` caches every
+          # layer including intermediate ones, so re-builds with an unchanged
+          # install step reuse the `npm ci` layer (biggest single layer).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

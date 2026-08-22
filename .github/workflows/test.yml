@@ -1,0 +1,294 @@
+name: Test Suite
+
+# Three CI tiers — match the four-tier model in tests/ minus `e2e`
+# (real-infra Hetzner / Cloudflare / S3, would burn budget on every PR) and
+# minus `loadtest` (auto-skips without PERF_BASE_URL, would always be a
+# no-op in CI; runs on demand against a deployed env via
+# `pnpm test:loadtest`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # ON-DEMAND RUN FOR A SPECIFIC COMMIT. Not a convenience — without it there
+  # are commits on `main` that CANNOT be released.
+  #
+  # GitHub deliberately does not create workflow runs for pushes made with
+  # `GITHUB_TOKEN` (its recursion guard). `dependabot-auto-merge.yml` merges
+  # with exactly that token, so every auto-merged bump lands on `main` with
+  # NO Test Suite run of its own. Observed 2026-08-21: ten bumps merged
+  # 20:26-20:52 (8c3d5719 -> 6a78254b) and `gh run list --commit` returned
+  # zero runs for every one of them.
+  #
+  # That is not just missing coverage. release.yml's guard queries
+  # `test.yml/runs?head_sha=$SHA` and refuses anything that is not `success`
+  # — an absent run reads as `none`, so a freshly auto-merged `main` is
+  # UNRELEASABLE until some later normal push happens to produce a run.
+  # Dispatching this workflow against the ref yields a run keyed to that
+  # head SHA, which is exactly what the guard looks for.
+  #
+  # The deeper question — whether auto-merge should verify the merge result
+  # itself rather than leaving it to whoever pushes next — is open; see the
+  # note in dependabot-auto-merge.yml.
+  workflow_dispatch: {}
+
+# pnpm is not pinned in this file; Node is pinned in exactly one job.
+#
+# Node: `.nvmrc` at the repo root is the single source of truth — every
+# setup-node step below reads it via `node-version-file`, and
+# tests/unit/lib/node-version-pins.test.ts fails if any workflow, Dockerfile,
+# or `engines.node` drifts from it.
+#
+# The ONE exception is the `engines-min` job, which pins the exact
+# `engines.node` floor instead of floating on `.nvmrc`'s major. `.nvmrc` is a
+# bare major by design, so without that job the declared floor was never
+# executed — see the comment on the job itself. That closes the Node
+# single-source workstream started in PR #211, which landed the pins but left
+# the CI leg open.
+#
+# pnpm: the root package.json's `packageManager` field is the single source of
+# truth. `pnpm/action-setup` reads it whenever the `version:` input is omitted,
+# so there is nothing to repeat here; pnpm 10+ reads the same field itself, so
+# CI and laptops land on one version without anyone syncing anything.
+# tests/unit/lib/pnpm-version-pins.test.ts fails if a literal `version:` input,
+# or an env-var indirection standing in for one, comes back.
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Run linter
+        run: pnpm lint
+
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # tests/unit/e2e/* exercise setupE2EEnv, whose assertLicenseActive reads
+      # the ACTIVATED FILE at ~/.vibecarbon/license (not the env var) — the
+      # same materialization e2e-us-perf.yml performs, minted from the same
+      # secret. Without it those unit tests pass on operator laptops (which
+      # have an activated license) and fail only in CI.
+      - name: Materialize license
+        env:
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+        run: |
+          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
+            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — license-gated tests cannot run."
+            exit 1
+          fi
+          mkdir -p ~/.vibecarbon
+          umask 177
+          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
+            "$VIBECARBON_TEST_LICENSE_KEY" \
+            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
+            > ~/.vibecarbon/license
+
+      - name: Run unit tests
+        run: pnpm test:unit
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v7
+        if: always()
+        with:
+          files: coverage/coverage-final.json
+          fail_ci_if_error: false
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Run integration tests
+        run: pnpm test:integration
+        timeout-minutes: 10
+        env:
+          # Real Ed25519-signed Fullerene key — integration tests spawn paid
+          # commands and there is no dev bypass any more (c7efe141). The
+          # harness (tests/integration/_harness/run-cli.ts) reads the env var
+          # and writes its own fake-HOME license file, so no materialize step
+          # is needed here — but it hard-fails without the variable.
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+
+  # The engines.node MINIMUM leg — the one job here that does NOT float.
+  #
+  # `.nvmrc` holds a bare major, so every job above runs the newest release of
+  # the line (v24.18.1 at the time of writing) while package.json advertises
+  # `engines.node: ">=24.15.0"`. Nothing ran that floor, which made it a
+  # declared-but-unexercised claim: docs/tests.md § "Failure classes", class 4,
+  # whose rule is that every support claim maps to a leg that executes it or
+  # the claim gets deleted. This is that leg — it is what makes `>=24.15.0` a
+  # tested statement rather than an aspiration.
+  #
+  # The version below is the ONE sanctioned literal `node-version:` in the
+  # repo: a leg that executes the floor cannot read `.nvmrc`, which is the
+  # entire point of it. `pnpm node:sync` writes it from the computed floor, and
+  # tests/unit/lib/node-version-pins.test.ts pins it two-way to `engines.node`
+  # while still rejecting a literal in any other job or workflow.
+  engines-min:
+    name: Unit + Integration (engines.node minimum)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          # SANCTIONED LITERAL — written by `pnpm node:sync`; don't hand-edit.
+          node-version: '24.15.0'
+          cache: 'pnpm'
+
+      - name: Assert the runtime IS the declared floor
+        # setup-node does not fail a job when it cannot resolve the requested
+        # version — it logs and leaves the runner's preinstalled Node in place.
+        # This leg would then quietly re-run what `unit` already covers and
+        # report green, so it asserts the effect instead of trusting the
+        # request. The floor is re-read from package.json rather than repeated
+        # as a second literal.
+        run: |
+          node -e '
+            const floor = require("./package.json").engines.node.replace(/^>=/, "");
+            if (process.version !== "v" + floor) {
+              console.error(`::error::expected v${floor} (the engines.node floor), got ${process.version}`);
+              process.exit(1);
+            }
+            console.log(`running on ${process.version}, exactly the engines.node floor`);
+          '
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # Same contract as the unit job's materialize step above.
+      - name: Materialize license
+        env:
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+        run: |
+          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
+            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — license-gated tests cannot run."
+            exit 1
+          fi
+          mkdir -p ~/.vibecarbon
+          umask 177
+          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
+            "$VIBECARBON_TEST_LICENSE_KEY" \
+            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
+            > ~/.vibecarbon/license
+
+      - name: Run unit tests
+        run: pnpm test:unit
+
+      - name: Run integration tests
+        run: pnpm test:integration
+        timeout-minutes: 10
+        env:
+          # Same contract as the integration job above.
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+
+  # carbon/ is a SEPARATE project with its own lockfile (it ships inside the
+  # published CLI and is scaffolded into user projects), so the root jobs
+  # above never exercise its typecheck or tests. Without this job a
+  # dependabot bump to carbon deps gets zero carbon CI — typescript 7
+  # (PR #148) landed green while `tsc` was hard-broken on the removed
+  # baseUrl option.
+  #
+  # The root repo uses pnpm; the template uses npm (decision 2026-07-30 —
+  # npm ships with Node, so a generated project needs nothing installed
+  # beyond what `npx vibecarbon` already required). Do not "unify" these.
+  template:
+    name: Template Tests (carbon)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: carbon
+    steps:
+      - uses: actions/checkout@v7
+
+      # No pnpm setup step: carbon/ is an npm project, and npm ships with the
+      # Node the action installs. Node still comes from the root .nvmrc, like
+      # every other job.
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'npm'
+          cache-dependency-path: carbon/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # carbon/package-lock.json is copied verbatim into every new npm project
+      # (writeTemplateLockfile), so a high-severity advisory against it is
+      # shipped to every customer scaffold — not just a note on our own CI.
+      #
+      # This gate exists because that failure mode is silent and was already
+      # real: on 2026-08-12 the committed lock carried 3 high advisories
+      # (fast-uri, js-yaml, nanoid) while a freshly-resolved tree carried none.
+      # Nothing was red, because until then the lock was CI-only and every
+      # `create` re-resolved on the user's machine.
+      #
+      # Fix is almost always a pure lockfile refresh, no manifest edit:
+      #   cd carbon && npm audit fix --package-lock-only && npm ci --dry-run
+      #
+      # Gated at `high` deliberately. A new third-party advisory will redden
+      # unrelated PRs; that is the intended trade — shipping a known-high
+      # scaffold to paying users is the worse outcome. If the noise becomes
+      # unmanageable, move this to a scheduled job that opens an issue rather
+      # than dropping the check.
+      - name: Audit the shipped lockfile
+        run: npm audit --audit-level=high
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint + unit + component + integration
+        run: npm run test:prepush
+        timeout-minutes: 10
+
+      - name: Build
+        run: npm run build

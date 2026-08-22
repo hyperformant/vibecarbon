@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik
+  labels:
+    app: vibecarbon-traefik
+    component: ingress
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: web
+      protocol: TCP
+      name: web
+    - port: 443
+      targetPort: websecure
+      protocol: TCP
+      name: websecure
+  selector:
+    app: vibecarbon-traefik
+---
+# Internal service for dashboard access
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik-dashboard
+  labels:
+    app: vibecarbon-traefik
+    component: ingress
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: traefik
+      protocol: TCP
+      name: traefik
+  selector:
+    app: vibecarbon-traefik

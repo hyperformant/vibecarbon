@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vibecarbon
+
+resources:
+  - namespace.yaml
+  - network-policies.yaml
+  # `config/` holds the vibecarbon-config ConfigMap (non-secret runtime
+  # settings — service URLs, retention days, etc.). The previous
+  # `secrets/` dir which bundled a Secret alongside the ConfigMap is
+  # gone — the Secret is now applied at deploy time by either the
+  # vibecarbon CLI or the .github/workflows/deploy.yml GitHub Action,
+  # with field-manager=github-actions-deploy so Flux doesn't touch it.
+  - config/
+  # Note: hetzner-ccm and hetzner-csi are installed via cloud-init (master-init.sh)
+  # Note: cert-manager is installed separately via infra/ kustomization
+  # Note: Supabase (postgres, kong, auth, rest, realtime, storage, imgproxy,
+  # meta, studio, supavisor, edge-functions) is installed via the community
+  # Helm chart — see the helm step in src/lib/deploy/k8s/k3s.js. Values come
+  # from k8s/values/supabase.values.yaml, rendered at deploy time with our
+  # secrets.
+  - app/
+  - backup/
+  # `registry/` runs an S3-backed image registry on the master node (hostPort
+  # 5000 on the private network). Sideload remains primary for static workers,
+  # but cluster-autoscaler-spawned workers don't exist at sideload time —
+  # they pull from this registry on first schedule via the registries.yaml
+  # mirror config laid down in cloud-init.
+  - registry/
+  # Note: cluster-autoscaler is installed separately by applyK3sManifests
+  # (Phase 5) because it lives in `kube-system`, not `vibecarbon` — listing
+  # it here would let this kustomization's `namespace: vibecarbon`
+  # transformer rewrite its ServiceAccount/Role/RoleBinding/Deployment
+  # into the wrong namespace. Apply with:
+  #   kubectl apply -k carbon/k8s/base/cluster-autoscaler/
+  # Mirrors the CCM/CSI pattern above.
+  - traefik/
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: vibecarbon

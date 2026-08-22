@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# cert-manager custom resources (per-DNS-provider ClusterIssuers).
+# IMPORTANT: Apply this AFTER cert-manager CRDs are installed and ready.
+# Usage: kubectl apply -k k8s/infra/cert-manager-resources/
+#
+# All issuer sets ship together; cert-manager only acts on the one
+# referenced by the Certificate (issuerRef.name is patched per
+# deployment in src/lib/deploy/k8s/k3s.js → applyK3sManifests).
+
+# Every cluster-issuers-*.yaml in this directory must be listed — an
+# unlisted file never applies, and the Certificate that references its
+# issuer sits Pending with no error. Guarded by
+# tests/integration/template/manifest-dry-run.test.ts.
+#
+# linode and vultr are DNS-01 providers on the compose tier only; they
+# have no k8s deploy mode, so there is deliberately no issuer file for
+# either (see the comment on their DNS01_PROVIDERS rows).
+resources:
+  - cluster-issuers-manual.yaml
+  - cluster-issuers-cloudflare.yaml
+  - cluster-issuers-hetzner.yaml
+  - cluster-issuers-digitalocean.yaml

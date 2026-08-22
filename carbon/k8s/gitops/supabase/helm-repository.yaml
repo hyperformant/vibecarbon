@@ -1,0 +1,18 @@
+---
+# Supabase community Helm chart repository.
+# Extracted from carbon/k8s/flux/helm-repositories.yaml as part of the
+# Phase 2 Supabase-kustomize bundle. The other HelmRepository
+# (`hetzner-cloud`) stays in the old file until Phase 3 migrates
+# cert-manager-webhook-hetzner.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: supabase-community
+  namespace: flux-system
+spec:
+  # 5-minute interval matches the global convention set in
+  # carbon/k8s/flux/helm-repositories.yaml. Short enough that initial
+  # source-controller fetch failures retry within our HelmRelease wait
+  # budget.
+  interval: 5m
+  url: https://supabase-community.github.io/supabase-kubernetes

@@ -1,0 +1,130 @@
+name: Release
+
+# MANUAL GATE. A release is a human decision, not a consequence of pushing.
+#
+# This used to fire automatically on every successful Test Suite run on main,
+# so any push that went green published to the public npm registry. That made
+# the release cadence a side effect of commit cadence and gave no veto point.
+#
+# GitHub's native gate for this is an Environment with required reviewers, but
+# protection rules need a paid plan on a private repo (the API rejects them
+# with HTTP 422 here). A workflow_dispatch trigger achieves the same control
+# with no plan dependency: you decide WHEN, and the guard job below still
+# verifies the machine agrees the commit is green, so a manual dispatch cannot
+# cut a release on red.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this release now (recorded in the run log)'
+        required: false
+        type: string
+
+# Rapid consecutive pushes to main each chain their own release run;
+# unserialized, the loser fails `git push HEAD:main` mid-prepare
+# (observed 2026-07-10). Queue them instead — never cancel a release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      # Needed by the guard below to read Test Suite runs. A top-level
+      # permissions block sets every UNLISTED scope to none, so omitting this
+      # makes the API call 403 — the exact failure that silently broke
+      # dependabot-auto-merge for a month (missing `checks: read`).
+      actions: read
+      # npm TRUSTED PUBLISHING (OIDC). Lets this job mint a short-lived,
+      # workflow-scoped token npm will accept, instead of a long-lived
+      # NPM_TOKEN. Same "unlisted scope is none" rule as above — its absence
+      # is why release 32530727366 failed:
+      #
+      #   Retrieval of GitHub Actions OIDC token failed: Unable to get
+      #   ACTIONS_ID_TOKEN_REQUEST_URL env variable
+      #   Have you granted the `id-token: write` permission to this workflow?
+      #   ... npm error 401 Unauthorized - GET /-/whoami
+      #   EINVALIDNPMTOKEN Invalid npm token.
+      #
+      # @semantic-release/npm 13.1.5 already tries OIDC first and only falls
+      # back to NPM_TOKEN — that log line is the plugin's OIDC attempt, so
+      # nothing needed upgrading, only this scope.
+      #
+      # WHY NOT JUST ROTATE THE TOKEN: the one that expired was a 2FA-bypass
+      # automation token, and npm is actively restricting that class —
+      # account changes Aug 2026, direct publishing Jan 2027 — with the token
+      # form itself now saying "For automation or CI/CD uses, please use
+      # Trusted Publishing instead." A fresh token would have expired again in
+      # ~90 days, mid-beta.
+      #
+      # REQUIRES a matching publisher on npmjs.com (Package settings ->
+      # Trusted Publisher): GitHub Actions, owner + repo, workflow filename
+      # `release.yml`, environment left EMPTY — this job declares no
+      # `environment:`, and the fields are case-sensitive and must match
+      # exactly. One config per package, bound to owner/repo, so it must be
+      # re-pointed when this repo moves to its public home.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Manual dispatch decides WHEN; this decides WHETHER. Without it, a
+      # dispatch on a red commit would publish to npm regardless — the human
+      # gate replaced an automated one, so the automated check has to survive.
+      - name: Verify Test Suite is green for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          # Via env, never interpolated into the script: workflow inputs are
+          # attacker-controlled text in the general case and belong nowhere
+          # near a shell command line.
+          REASON: ${{ inputs.reason }}
+        run: |
+          echo "Release requested for $SHA"
+          echo "Reason: ${REASON:-<none given>}"
+          conclusion=$(gh api \
+            "repos/$REPO/actions/workflows/test.yml/runs?head_sha=$SHA&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          echo "Test Suite conclusion for this commit: $conclusion"
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::refusing to release $SHA — Test Suite is '$conclusion', not 'success'."
+            echo "Push the commit and let Test Suite finish green before dispatching a release."
+            exit 1
+          fi
+
+      # No `version:` — pnpm comes from the root package.json's
+      # `packageManager` field, the same source the Test Suite gate used.
+      # This step used to hardcode `9` while every test job ran 10.x, so the
+      # published tarball was installed by a different pnpm than the one that
+      # green-lit it.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Release
+        run: pnpm exec semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # semantic-release runs git through a pnpm-installed checkout, so
+          # husky hooks can fire; the pre-push gate spawns the integration
+          # suite, whose harness reads this env var directly. Same class as
+          # the e2e-us-perf publish step (run 32309395314) — inoculated here
+          # before it costs a release.
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}

@@ -1,0 +1,97 @@
+# n8n Workflow Automation - Docker Compose Override
+# Use with: docker compose -f docker-compose.yml -f docker-compose.n8n.yml up -d
+#
+# Access:
+#   Local dev: http://n8n.localhost (subdomain routing)
+#   Production: /admin/n8n (path routing via docker-compose.prod.yml)
+# Auth (dev): n8n's built-in auth (owner user created by setup.sh)
+# Auth (prod): ForwardAuth SSO via Traefik + hooks.js (cookie sharing works across subdomains)
+# Docs: https://docs.n8n.io/hosting/
+
+services:
+  # Extend db service to add n8n database initialization
+  db:
+    volumes:
+      - ./volumes/db/n8n-init.sh:/docker-entrypoint-initdb.d/zz-n8n-init.sh:Z
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ${PROJECT_NAME:-vibecarbon}-n8n
+    restart: unless-stopped
+    environment:
+      # Database connection (uses project PostgreSQL)
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=db
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      # Uses project POSTGRES_PASSWORD (same as n8n-init.sh sets for the n8n role)
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      # Webhook and external URL configuration
+      - N8N_HOST=${N8N_HOST:-n8n.localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://n8n.localhost/}
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL:-http://n8n.localhost/}
+      # Security
+      # Dev default: n8n_dev_encryption_key (set N8N_ENCRYPTION_KEY in .env for production)
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-n8n_dev_encryption_key}
+      - N8N_SECURE_COOKIE=false
+      # ForwardAuth SSO hook
+      - EXTERNAL_HOOK_FILES=/home/node/.n8n/hooks.js
+      # Execution settings
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # Timezone
+      - GENERIC_TIMEZONE=${TIMEZONE:-UTC}
+      - TZ=${TIMEZONE:-UTC}
+      # Metrics for Prometheus (optional)
+      - N8N_METRICS=true
+      - N8N_METRICS_PREFIX=n8n_
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./volumes/n8n/hooks.js:/home/node/.n8n/hooks.js:ro
+    networks:
+      - vibecarbon-network
+    labels:
+      # Traefik routing — subdomain: n8n.localhost
+      # No ForwardAuth in dev (cookies don't cross localhost → n8n.localhost).
+      # Production overlay adds super-admin-auth@file middleware.
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`n8n.localhost`)"
+      - "traefik.http.routers.n8n.entrypoints=web"
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  n8n-setup:
+    image: alpine:latest
+    container_name: ${PROJECT_NAME:-vibecarbon}-n8n-setup
+    volumes:
+      - ./volumes/n8n/scripts:/scripts:ro
+    environment:
+      - N8N_ADMIN_EMAIL=${N8N_ADMIN_EMAIL:-${ADMIN_EMAIL}}
+      - N8N_DB_HOST=db
+      - N8N_DB_NAME=n8n
+      - N8N_DB_USER=n8n
+      # Uses project POSTGRES_PASSWORD (same as n8n-init.sh sets for the n8n role)
+      - N8N_DB_PASSWORD=${POSTGRES_PASSWORD}
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache postgresql16-client && sh /scripts/setup.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - vibecarbon-network
+    restart: "no"
+
+volumes:
+  n8n_data:

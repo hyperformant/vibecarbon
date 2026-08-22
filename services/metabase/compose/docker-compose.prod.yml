@@ -1,0 +1,29 @@
+# Metabase Production Overrides
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.metabase.yml -f docker-compose.metabase.prod.yml up -d
+#
+# Adds:
+# - SSL subdomain routing for Metabase (metabase.yourdomain.com)
+# - ForwardAuth (super_admin role required)
+# - HTTP to HTTPS redirect
+
+services:
+  metabase:
+    environment:
+      # Override site URL for production subdomain
+      - MB_SITE_URL=https://metabase.${DOMAIN}
+      - MB_EMBEDDING_APP_ORIGIN=https://${DOMAIN}
+    ports: !reset null # Reached via Traefik over the compose network; no host port in prod
+    labels:
+      # Production Traefik routing with SSL
+      - "traefik.enable=true"
+      # HTTPS router with super_admin auth + security headers
+      - "traefik.http.routers.metabase.rule=Host(`metabase.${DOMAIN}`)"
+      - "traefik.http.routers.metabase.entrypoints=websecure"
+      - "traefik.http.routers.metabase.tls=true"
+      - "traefik.http.routers.metabase.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.metabase.middlewares=super-admin-auth@file,security-headers@file"
+      - "traefik.http.services.metabase.loadbalancer.server.port=3000"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.metabase-http.rule=Host(`metabase.${DOMAIN}`)"
+      - "traefik.http.routers.metabase-http.entrypoints=web"
+      - "traefik.http.routers.metabase-http.middlewares=redirect-to-https"

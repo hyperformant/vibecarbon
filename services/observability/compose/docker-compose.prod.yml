@@ -1,0 +1,36 @@
+# Observability Production Overrides
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.yml -f docker-compose.observability.prod.yml up -d
+#
+# Adds:
+# - SSL subdomain routing for Grafana (grafana.yourdomain.com)
+# - Security headers
+# - HTTP to HTTPS redirect
+
+services:
+  grafana:
+    environment:
+      # Override ROOT_URL for production subdomain
+      - GF_SERVER_ROOT_URL=https://grafana.${DOMAIN}
+    ports: !reset null # Disable direct port exposure in production (`[]` would NOT clear it)
+    labels:
+      # Production Traefik routing with SSL
+      - "traefik.enable=true"
+      # HTTPS router
+      - "traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN}`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      # Security headers
+      - "traefik.http.routers.grafana.middlewares=super-admin-auth@file,security-headers@file"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.grafana-http.rule=Host(`grafana.${DOMAIN}`)"
+      - "traefik.http.routers.grafana-http.entrypoints=web"
+      - "traefik.http.routers.grafana-http.middlewares=redirect-to-https"
+
+  # Prometheus and Loki have no Traefik route; Grafana/Promtail reach them over
+  # the compose network. Drop the dev host-port publishing so prod never binds
+  # them on the host (defense-in-depth behind the 22/80/443-only firewall).
+  prometheus:
+    ports: !reset null
+  loki:
+    ports: !reset null

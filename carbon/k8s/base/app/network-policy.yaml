@@ -1,0 +1,124 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-policy
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from Traefik ingress controller (runs in same namespace)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-traefik
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    # Allow connection to Kong (Supabase API gateway)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-kong
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Allow connection to database (direct queries)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow access to Kubernetes API server for reading pod logs (admin dashboard)
+    # 10.43.0.1:443 = ClusterIP via kube-proxy DNAT (works on worker nodes)
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # 0.0.0.0/0:6443 = apiserver, dial-anywhere on apiserver-protocol port.
+    # See carbon/k8s/base/traefik/network-policy.yaml for the full RCA. tl;dr:
+    # kube-proxy DNATs 10.43.0.1 to the master's node IP at the OUTPUT chain
+    # BEFORE the CNI evaluates egress, so the policy sees the post-NAT IP.
+    # With --node-ip=public (master-init.sh) and the CCM HCLOUD_NETWORK patch
+    # reverted (kubelet cert SAN), the master IP is public — outside any
+    # private CIDR we could list. Allow any destination on 6443; deny-by-
+    # default is preserved on every other port.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
+    # Allow outbound HTTPS (Stripe, SMTP provider, external APIs)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    # Allow connection to Redis (if configured)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Allow health checks to optional services (n8n, metabase, observability)
+    # These are only used for the admin services-status API; unused rules are harmless.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-n8n
+      ports:
+        - protocol: TCP
+          port: 5678
+    - to:
+        - podSelector:
+            matchLabels:
+              app: metabase
+      ports:
+        - protocol: TCP
+          port: 3000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-grafana
+      ports:
+        - protocol: TCP
+          port: 3000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-loki
+      ports:
+        - protocol: TCP
+          port: 3100
+    # Allow health checks to Studio (for admin services-status API)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-studio
+      ports:
+        - protocol: TCP
+          port: 3000

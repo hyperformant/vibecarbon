@@ -1,0 +1,22 @@
+# =============================================================================
+# OBSERVABILITY NAMESPACE (H-9 hardening)
+# =============================================================================
+# Grafana + Prometheus + Loki + Promtail live in their OWN namespace so the
+# permissive `allow-intra-namespace` baseline policy in the `vibecarbon`
+# namespace (podSelector:{}, all ports) no longer selects Grafana. Combined with
+# the default-deny ingress in this namespace (network-policy.yaml), only Traefik
+# and the app (for /api/health) can reach grafana:3000 — n8n/metabase/storage/etc.
+# can't, so a compromised one of THOSE can no longer forge X-Authenticated-User
+# to reach Grafana's auth-proxy.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vibecarbon-observability
+  labels:
+    # Set explicitly: cross-namespace NetworkPolicy namespaceSelectors below (and
+    # in the vibecarbon namespace) match on this label. k8s ≥1.21 auto-applies it
+    # via NamespaceDefaultLabelName, but pinning it makes the policies robust
+    # regardless of that feature gate.
+    kubernetes.io/metadata.name: vibecarbon-observability
+    app.kubernetes.io/part-of: vibecarbon
+    component: observability

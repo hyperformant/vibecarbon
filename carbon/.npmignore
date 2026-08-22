@@ -1,0 +1,45 @@
+# This file ships inside the vibecarbon package and excludes install/build
+# artifacts that get generated inside the template directory but should never
+# be published. Contributors who run the template with `-pm pnpm` end up with
+# hard-linked install artifacts here that trip the npm registry's E415
+# ("Hard link is not allowed"), so the store dirs stay excluded too.
+
+node_modules
+.npm
+.pnpm-store
+.yarn
+
+dist
+build
+.next
+.turbo
+.cache
+.parcel-cache
+.expo
+coverage
+.nyc_output
+
+# package-lock.json is deliberately NOT excluded: `create` copies it into every
+# new npm project rather than re-resolving the tree there, so it is payload, not
+# a build artifact. See writeTemplateLockfile in src/lib/package-manager.js;
+# tests/unit/template/shipped-lockfile.test.ts pins that it ships.
+# The rest stay excluded — `-pm pnpm` / `-pm bun` projects generate their own.
+pnpm-lock.yaml
+yarn.lock
+bun.lockb
+
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local dev artifacts — never publish (blocker #9, 2026-08-08 pre-launch audit).
+# .npmignore overrides .gitignore per-directory, so these git-ignored files
+# would otherwise be packed into the tarball. Keep .env.example as the only
+# committed env file.
+.env
+.env.*
+!.env.example
+.claude/agent-memory
+*.generated.sql
+docker-compose.dev-init.yml

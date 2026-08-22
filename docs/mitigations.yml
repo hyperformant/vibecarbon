@@ -1,0 +1,271 @@
+# Mitigation Attribution Registry
+#
+# Every runtime mitigation (transient classifier, retry ladder, watchdog,
+# mutex, poll gate) is registered here under a ROOT-CAUSE CLASS with an
+# explicit attribution. Enforced by
+# tests/unit/lib/mitigation-attribution-census.test.ts. Policy: AGENTS.md
+# "Mitigation policy" — 1 mitigation per class with proof of RCA; a class
+# whose root fix has not landed is FROZEN at its audited size. Do not bump
+# frozenSites to admit another layer; land the root fix instead (the
+# 2026-08-14 Pulumi post-mortem documents where the other road goes).
+#
+# attribution:
+#   external-proven   — trigger outside our code, with hard evidence
+#                       (run id, request id, upstream issue, URL, commit).
+#   external-asserted — external attribution from error text/timing only.
+#                       Requires proofDebtSpec: the discriminating
+#                       experiment that would settle it.
+#   ours              — trigger is our own code, load, or ordering. AS OF
+#                       2026-08-16 an `ours` class may not carry mitigation
+#                       sites AT ALL: our own bugs get root fixes, never
+#                       retries (census rule R7). An `ours` entry may exist
+#                       only transiently while its root fix is being built,
+#                       with rootFix naming the open spec; landing the fix
+#                       DELETES the sites and then the class.
+#
+# sites: "<file> :: <name>". detectable: false marks machinery the census
+# detectors cannot see (watchdogs, inline ladders); those rows are
+# maintained by hand and exempt from the stale check.
+
+version: 1
+
+classes:
+  - class: pulumi-state-backend-consistency
+    attribution: external-proven
+    evidence: >-
+      Hetzner Object Storage read-after-write staleness with request-id-bearing
+      error bodies (tx...-nbg1-prod1-ceph5) across runs 31843736065 and
+      31857911325; commits 2b236261 and a0b64ff7 carry upstream stack frames
+      (pulumi v3.231.0 diy backend). Our amplification (concurrent HA writers,
+      fresh-bucket churn, state-op volume) was the root cause of FREQUENCY and
+      is FIXED: per-bucket lock, bucket retention (no delete/recreate), warm
+      e2e bucket, project-scoped keys, checkpoint-backup off — validated run
+      31913846541, 38 backpressure events -> 0. The staleness RECOVERY
+      machinery is DELETED with that trigger (2026-08-16): guarded re-run,
+      read-only rereads, poll-throughs, requiredOutputs poll, up-path
+      widenings all gone; classifyStateError fails every staleness spelling
+      loudly by name. What remains below absorbs only evidenced external
+      weather.
+    rootFix: "landed: de0f5226"
+    sites:
+      - site: "src/lib/iac/state-error.js :: THROTTLE_PATTERN"
+        notes: >-
+          Server-side backpressure (SlowDown/503) — the store's own signal,
+          retried with backoff. LOCK_CONTENTION retries ride the same
+          classifier decision.
+      - site: "src/lib/iac/state-error.js :: LOCK_CONTENTION_PATTERN"
+        detectable: false
+        notes: held-lock retry (cancel + reacquire); never an "already gone" answer
+      - site: "src/lib/iac/index.js :: verifyStateAfterHistoryWrite"
+        detectable: false
+        notes: >-
+          History-write adjudicator: update fully APPLIED, cosmetic
+          .pulumi/history/ write failed on a degraded ceph night (tx-evidenced
+          403). Reports success only after a clean read-back; not a retry.
+      - site: "src/lib/deploy/walg-staleness.js :: WALG_STALE_STORAGE_PATTERN"
+        detectable: false
+        notes: wal-g reads of the BACKUP bucket riding documented Hetzner OS staleness
+      - site: "src/lib/deploy/walg-staleness.js :: WALG_STALE_RETRY_DELAYS_MS"
+      - site: "src/lib/providers/s3-base.js :: createBucket-consistency-ladder"
+        detectable: false
+        notes: bucket create/exists propagation on genuinely-first deploys
+      - site: "src/lib/providers/s3-base.js :: deleteBucket-consistency-ladder"
+        detectable: false
+        notes: inline BucketNotEmpty post-empty lag ride-out (-purge path)
+  - class: provider-api-network-transients
+    attribution: external-asserted
+    evidence: >-
+      Founding taxonomy (6afff1d7) was a-priori; fetchWithRetry's 119 call
+      sites have never had retry outcomes measured; the >50s Hetzner
+      unreachability evidence was circular (8f7b4190).
+    proofDebtSpec: docs/attribution-ledger.md
+    frozenSites: 8
+    sites:
+      - site: "src/lib/fetch-retry.js :: TRANSIENT_STATUS"
+      - site: "src/lib/fetch-retry.js :: isTransientNetworkError"
+      - site: "src/lib/providers/s3-base.js :: TRANSIENT_HTTP_STATUSES"
+      - site: "src/lib/providers/s3-base.js :: TRANSIENT_S3_ERROR_RE"
+      - site: "src/lib/providers/s3-base.js :: isTransientS3Error"
+      - site: "src/lib/deploy/plan/runner.js :: DEPLOY_TRANSIENT"
+      - site: "src/lib/deploy/prompts.js :: isTransient"
+      - site: "src/lib/backup-s3.js :: isTransient@1"
+
+  - class: cluster-network-transients
+    attribution: external-asserted
+    evidence: >-
+      Operator-to-apiserver transport blips over the public internet (read tcp
+      ...:6443 connection timed out, RCA 2026-06-01 k8s-ha standby) and WAN
+      drops mid-sideload (kex_exchange timeout 21min into a healthy deploy,
+      iter-wave1a 2026-05-01). Replaces `k8s-control-plane-warmup`
+      (attribution was OURS): its root fix LANDED 2026-08-16 — condition
+      probes (awaitControlPlaneServing / awaitCertManagerAdmission /
+      awaitPostgresAccepting, src/lib/deploy/k8s/readiness.js) replace the
+      warm-up ladders, which are DELETED, not retained. What survives here is
+      transport vocabulary only; whether these residues are weather or our
+      fan-out is the same open experiment as ssh-transport-blips.
+    proofDebtSpec: docs/attribution-ledger.md
+    frozenSites: 6
+    sites:
+      - site: "src/lib/deploy/k8s/k3s.js :: KUBECTL_TRANSIENT_PATTERN"
+      - site: "src/lib/deploy/k8s/k3s.js :: isTransient@1"
+      - site: "src/lib/deploy/k8s/k3s.js :: isTransient@2"
+      - site: "src/lib/deploy/k8s/k3s.js :: RETRY_DELAYS_MS"
+      - site: "src/lib/deploy/k8s/k3s.js :: ROLLOUT_RETRY_DELAYS_MS"
+      - site: "src/lib/deploy/k8s/k3s.js :: SIDELOAD_DELAYS_MS"
+        notes: WAN drop mid-transfer on a multi-GB pipe; 2 bounded attempts
+  - class: ssh-transport-blips
+    attribution: external-asserted
+    evidence: >-
+      Error text plus same-environment adjacency only (c0773fb0); two family
+      members already proven ours (MaxStartups under verify fan-out; CPU-starved
+      sshd under concurrent reconcile, 7d045250).
+    proofDebtSpec: docs/attribution-ledger.md
+    frozenSites: 7
+    sites:
+      - site: "src/lib/ssh.js :: SSH_TRANSPORT_NEVER_STARTED_RE"
+      - site: "src/lib/ssh.js :: isTransientSshCommandError"
+      - site: "src/lib/ssh.js :: TRANSPORT_RETRY_DELAYS_MS"
+      - site: "src/lib/ssh.js :: SCP_RETRY_DELAY_MS"
+      - site: "src/lib/deploy/remote-build.js :: SSH_PROBE_DELAYS_MS"
+      - site: "tests/e2e/checks/replication.ts :: SSH_RETRY_DELAY_MS"
+      - site: "tests/e2e/checks/pilot-light.ts :: SSH_RETRY_DELAY_MS"
+
+  - class: fresh-server-dns-settle
+    attribution: external-asserted
+    evidence: >-
+      Self-flagged (3dd719ac): ladder sized against the private-NIC dhcpcd data
+      point, a different interface/subsystem than the public DNS failures it
+      absorbs; dedicated RCA never ran.
+    proofDebtSpec: docs/attribution-ledger.md
+    sites:
+      - site: "src/lib/deploy/remote-build.js :: DNS_NOT_SETTLED_RETRY_DELAYS_MS"
+
+  - class: walg-failover-terminal-guards
+    attribution: external-asserted
+    evidence: >-
+      Audit-blip transience inferred from wordings; never isolated from the
+      proven staleness class or from our own restore-path bucket recreation
+      (b924bac2).
+    proofDebtSpec: docs/attribution-ledger.md
+    frozenSites: 3
+    sites:
+      - site: "src/lib/deploy/walg-audit.js :: NON_RETRYABLE_CODES"
+      - site: "src/lib/deploy/walg-audit.js :: isTransient@1"
+      - site: "src/lib/deploy/walg-audit.js :: WALG_AUDIT_RETRY_DELAYS_MS"
+
+  - class: e2e-check-blips
+    attribution: external-asserted
+    evidence: >-
+      Ladders sized from single incidents (HEALTH_RETRY_DELAYS_MS from one 113s
+      flake, 2026-05-01); the resolver-warmup member is partly ours (our
+      0.0.0.0 placeholder record is what the pinned upstreams serve stale).
+    proofDebtSpec: docs/attribution-ledger.md
+    frozenSites: 6
+    sites:
+      - site: "tests/e2e/checks/health.ts :: HEALTH_RETRY_DELAYS_MS"
+      - site: "tests/e2e/checks/health.ts :: SSL_RETRY_DELAY_MS"
+      - site: "tests/e2e/checks/feature-redis.ts :: RETRY_DELAY_MS"
+      - site: "tests/e2e/checks/app-functional.ts :: RETRY_DELAY_MS"
+      - site: "tests/e2e/checks/app-api.ts :: RETRY_DELAY_MS"
+      - site: "tests/e2e/checks/feature-functions.ts :: RETRY_DELAY_MS"
+
+  - class: wan-transfer-transients
+    attribution: external-asserted
+    evidence: >-
+      Drops and stalls on multi-minute WAN transfers from the operator uplink
+      (docker push over ssh tunnel, remote builds). Replaces
+      `uplink-congestion` (attribution was OURS): its root fix LANDED
+      2026-08-16 — per-process tunnel-push mutex (91a66a3e) plus the
+      cross-process host-wide uplink lock (src/lib/deploy/uplink-lock.js) —
+      and the self-inflicted-throttle settle tail was DELETED with it
+      (DEFAULT_PUSH_SETTLE_DELAYS_MS shrunk to registry-pod-reschedule scale).
+      What survives here absorbs single-connection WAN weather only; whether
+      any residue is still our load is the same uplink experiment as
+      ssh-transport-blips.
+    proofDebtSpec: docs/attribution-ledger.md
+    frozenSites: 6
+    sites:
+      - site: "src/lib/deploy/remote-build.js :: isTransientBuildError"
+      - site: "src/lib/deploy/remote-build.js :: transient"
+      - site: "src/lib/deploy/remote-build.js :: TRANSPORT_DROP_RETRY_DELAYS_MS"
+      - site: "src/lib/deploy/registry-push.js :: isTransient@1"
+      - site: "src/lib/deploy/registry-push.js :: DEFAULT_PUSH_SETTLE_DELAYS_MS"
+      - site: "src/lib/deploy/compose/registry-config.js :: COMPOSE_PUSH_SETTLE_DELAYS_MS"
+
+  - class: hetzner-ip-release-lag
+    attribution: external-asserted
+    evidence: >-
+      RESOURCE_LIMIT_DELAYS_MS rides out Hetzner's 30-90s Primary-IP release
+      accounting lag (observed iter-reliab 2026-05-01): the API answers
+      resource_limit_exceeded while an IP freed moments earlier is still
+      counted against the quota. Re-attributed from
+      `quota-churn-under-parallel-load` (was OURS): our parallel teardown
+      creates the burst, but the release LAG is Hetzner-side accounting we
+      cannot root-fix; steady-state leak residue is separately surfaced as
+      code-owned by classify-failure.
+    proofDebtSpec: docs/attribution-ledger.md
+    sites:
+      - site: "src/lib/providers/hetzner.js :: RESOURCE_LIMIT_DELAYS_MS"
+
+  - class: acme-issuance-pending
+    attribution: external-proven
+    evidence: >-
+      Upstream cert-manager#8960 / PR#8968 matched by pinned-source read of
+      v1.20.2; watchdog + terminal classification landed 33c68884. Our
+      duplicate-order trigger (grafana-tls dnsNames) root-fixed in the same
+      change.
+    sites:
+      - site: "src/lib/deploy/k8s/acme-order-recovery.js :: createAcmeIssuanceWatchdog"
+        detectable: false
+        notes: bounded in-place repair of terminal Orders; fails open
+
+  - class: provider-provisioning-slowness
+    attribution: external-asserted
+    evidence: >-
+      k3s install timeouts never separated from our own cloud-init content
+      (ufw + unattended-upgrades front-load) or Docker Hub quota.
+    proofDebtSpec: docs/attribution-ledger.md
+    sites: []
+
+  - class: hetzner-capacity
+    attribution: external-proven
+    evidence: >-
+      resource_unavailable sustained ~4h across two independent scenarios
+      2026-04-28 (hel1 out of cx23), commit b118f4b0; recurred provider-wide
+      2026-04-28 incident.
+    sites: []
+
+  - class: provider-api-outages
+    attribution: external-proven
+    evidence: >-
+      DO platform incident 2026-08-08 (https://status.digitalocean.com,
+      "Droplets, Reserved IPs ... multiple regions") surfaced as 524 on droplet
+      create; TF-bridge nil-state aftershock 2026-08-09 in the same window.
+    sites: []
+
+  - class: provider-rate-limits
+    attribution: external-proven
+    evidence: >-
+      Provider-issued bodies observed verbatim: Docker Hub toomanyrequests
+      (compose-ha restore), Hetzner rate_limit_exceeded 429 (2026-08-07 family
+      sweep, fec58e1f), LE rateLimited ACME responses.
+    sites: []
+
+# Every INFRA_PATTERNS reason in tests/e2e/utils/classify-failure.ts —
+# i.e. everything eligible for the runner's E2E_RETRY_FLAKES auto-retry —
+# maps to a class above. The census fails if a reason maps to an 'ours'
+# class: our own defects must never auto-retry.
+flakeRetry:
+  - { reason: "k3s install timeout", class: provider-provisioning-slowness }
+  - { reason: "Hetzner capacity", class: hetzner-capacity }
+  - { reason: "Hetzner API 5xx", class: provider-api-network-transients }
+  - { reason: "DigitalOcean API 5xx", class: provider-api-outages }
+  - { reason: "cloud API nil-state response (TF-bridge transient)", class: provider-api-outages }
+  - { reason: "state-backend S3 auth lag (Hetzner OS transient)", class: pulumi-state-backend-consistency }
+  - { reason: "rate limit", class: provider-rate-limits }
+  - { reason: "network error", class: provider-api-network-transients }
+  - { reason: "TLS error", class: provider-api-network-transients }
+  - { reason: "S3 transient", class: pulumi-state-backend-consistency }
+  - { reason: "Docker Hub transient", class: provider-rate-limits }
+  - { reason: "SSH connection blip", class: ssh-transport-blips }
+  - { reason: "LE cert pending", class: acme-issuance-pending }

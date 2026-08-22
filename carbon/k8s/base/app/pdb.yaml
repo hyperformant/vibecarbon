@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app
+  labels:
+    app: vibecarbon-app
+    component: application
+spec:
+  # Ensure at least 1 pod is available during voluntary disruptions
+  # (e.g., node upgrades, cluster maintenance, kubectl drain)
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vibecarbon-app

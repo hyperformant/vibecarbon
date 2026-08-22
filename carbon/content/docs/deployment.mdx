@@ -1,0 +1,253 @@
+---
+title: "Deployment"
+description: "Deploy your application to production with Docker or Kubernetes."
+order: 6
+---
+
+> **Single-server Docker Compose deploys are free.** `create`, local development (`up`, `down`), and single-server production deploys are always free. Advanced deploy modes (Compose HA, Kubernetes, Kubernetes HA) require a Fullerene license. See [Getting Started](/docs/getting-started) for licensing details.
+
+## Overview
+
+Your application can be deployed using Docker Compose (free, single server), Compose HA, or Kubernetes; the latter two require a Fullerene license. Deploying for a client, white-label, or resale use case? See Agency in [Getting Started](/docs/getting-started).
+
+## Choosing a provider
+
+Each environment is bound to one cloud provider, picked the first time you deploy it. Not every provider offers every deploy mode:
+
+| Provider | `-provider` | Deploy modes | Region examples | API token |
+|----------|-------------|--------------|-----------------|-----------|
+| Hetzner Cloud | `hetzner` | `compose`, `compose-ha`, `k8s`, `k8s-ha` | `fsn1`, `nbg1`, `hel1`, `ash`, `hil` | `HETZNER_API_TOKEN` |
+| DigitalOcean | `digitalocean` | `compose`, `compose-ha`, `k8s` | `nyc3`, `sfo3`, `ams3`, `fra1`, `lon1` | `DIGITALOCEAN_API_TOKEN` |
+| Linode | `linode` | `compose`, `compose-ha` | `us-iad`, `us-ord`, `fr-par`, `gb-lon` | `LINODE_API_TOKEN` |
+| Vultr | `vultr` | `compose`, `compose-ha` | `ewr`, `ord`, `ams`, `lhr`, `sgp` | `VULTR_API_TOKEN` |
+| Scaleway | `scaleway` | `compose`, `compose-ha` | `fr-par-1`, `fr-par-2`, `nl-ams-1`, `nl-ams-2` | `SCALEWAY_SECRET_KEY` |
+
+`k8s-ha` (multi-region Kubernetes with one-command failover) is Hetzner-only today.
+
+`-provider` selects the cloud for a **new** environment; existing environments keep the provider they were first deployed with. It is required alongside `-y` when you create a new environment non-interactively — otherwise the deploy prompt asks. `-region` takes the provider's own region id, so the value is only meaningful next to the provider it belongs to:
+
+```bash
+npx vibecarbon deploy prod -provider digitalocean -region nyc3 -mode compose -y
+```
+
+Database backups are written to the S3-compatible object storage of the same provider: Hetzner Object Storage, DigitalOcean Spaces, Linode Object Storage, Vultr Object Storage, or Scaleway Object Storage.
+
+## Prerequisites
+
+**Always required (all deploy modes):**
+- **GitHub CLI** (`gh`), authenticated with `read:packages` + `delete_repo` scopes. Images are built by GitHub Actions and published to ghcr.io; deploy waits for the tagged image to appear before provisioning the cluster.
+- **Pulumi** (`curl -fsSL https://get.pulumi.com | sh`) drives VM provisioning on your chosen cloud provider.
+- Your provider's **API token** in the environment (see [Choosing a provider](#choosing-a-provider) for the variable each one reads).
+- A **domain name** with DNS access (Cloudflare, your provider's DNS, or manual DNS records).
+- **SMTP credentials** for transactional email (auth confirmations, magic links, invitations).
+- (Optional) **Stripe API keys** for billing.
+
+**Additional for `-mode k8s` / `-mode k8s-ha`:**
+- **kubectl** applies manifests + waits for the app rollout.
+- **docker** + **ssh**: the image is built locally and sideloaded to each k3s node via `docker save | ssh node 'k3s ctr images import -'`. No registry round-trip on the deploy path.
+
+**Optional:**
+- `helm` is only required if you layer Flux GitOps on top via [`vibecarbon configure cicd <env>`](/docs/cli#configure-cicd-subcommand) (Flux-managed Helm releases). The default deploy path doesn't use it.
+
+## Build
+
+Build the client and server for production:
+
+```bash
+npm run build
+```
+
+This produces:
+- `dist/client/`: Static assets (Vite build with hashed filenames)
+- `dist/server/`: Bundled API server (esbuild output)
+
+The `Dockerfile` uses a multi-stage build: a Node.js build stage compiles both client and server, then copies the output into a slim runtime image.
+
+## Docker Compose
+
+For a single-server deployment:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+The production overlay (`docker-compose.prod.yml`) adds:
+- Production environment variables (`NODE_ENV=production`)
+- Resource limits for containers
+- Restart policies (`unless-stopped`)
+- Traefik SSL configuration with Let's Encrypt
+- Host-based routing for your domain
+
+Verify the deployment:
+
+```bash
+curl -s https://your-domain.com/api/health | jq
+```
+
+## Kubernetes
+
+For production deployments with auto-scaling and monitoring (requires a Fullerene license):
+
+```bash
+# Bare command opens a guided prompt for env, mode, region, etc.
+npx vibecarbon deploy
+
+# Or seed env + mode for a scripted deploy
+npx vibecarbon deploy prod -mode k8s
+```
+
+This command:
+1. Builds the app and sideloads images to every k3s node via SSH (no registry round-trip)
+2. Applies Kubernetes manifests with Kustomize overlays
+3. Configures Traefik ingress with automatic SSL
+4. Sets up monitoring (Grafana, Prometheus, Loki) if observability is enabled
+
+The `k8s/` directory structure:
+
+```
+k8s/
+├── base/                # Shared manifests
+│   ├── app/             # App deployment, service, ingress
+│   ├── supabase/        # Supabase services
+│   └── kustomization.yaml
+└── overlays/
+    ├── staging/         # Staging-specific config
+    └── production/      # Production-specific config
+```
+
+### Node Scaling
+
+Worker nodes are bounds-controlled at deploy time. The default is `min=1, max=3` (cluster-autoscaler scales 0..(max-min) workers on top of the static floor). Worker bounds and server types are configured interactively during `vibecarbon deploy` or in `.vibecarbon.json`; they don't have CLI flags (the design principle is "things you set once and forget belong in the config file").
+
+To re-tune bounds or worker server types on an existing cluster, run `npx vibecarbon scale`, and the wizard walks you through what's changeable for your topology. Power users can seed a server-type change with `-type`, using a type id from their own provider's catalog (e.g. `npx vibecarbon scale prod -type cx33 -y` on Hetzner). Pod-level autoscaling (HPA) is configured for the app and rest services and scales pods within the existing worker pool based on CPU.
+
+> **Note**: k3s masters have no `NoSchedule` taint by default, so all application pods run on the master node when no workers are present.
+
+### High Availability
+
+**Compose HA**: multi-region Docker Compose with PostgreSQL streaming replication:
+
+```bash
+npx vibecarbon deploy prod -mode compose-ha
+```
+
+This adds:
+- PostgreSQL streaming replication across regions
+- DNS-based health checks with one-command failover (`vibecarbon failover`)
+- Primary + standby VPS architecture
+
+**Kubernetes HA**: full K8s clusters per region (Hetzner-only today):
+
+```bash
+npx vibecarbon deploy prod -mode k8s-ha
+```
+
+This additionally includes:
+- Kubernetes HPA (pod-level autoscaling) per region
+- Cluster Autoscaler (VPS-level autoscaling) per region
+- Health monitoring across replicas
+
+Both HA modes place the standby in a second region. `-region` sets the primary and `-standby-region` sets the standby; leave `-standby-region` off and the CLI picks a same-continent partner of `-region` for you. An HA deploy fails unless replication is confirmed streaming — pass `-allow-degraded` to finish anyway and accept a warm-standby (degraded DR) result.
+
+## Environment Variables
+
+Production requires these environment variables in `.env.production` or your deployment secrets:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SUPABASE_URL` | Yes | Your Supabase API URL |
+| `SUPABASE_ANON_KEY` | Yes | Public anonymous key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-side service role key |
+| `SITE_URL` | Yes | Your production URL (e.g., `https://app.example.com`) |
+| `DOMAIN` | Yes | Your root domain (e.g., `example.com`) |
+| `SMTP_HOST` | Yes | SMTP server hostname |
+| `SMTP_PORT` | No | SMTP port (default: 587) |
+| `SMTP_USER` | Yes | SMTP username |
+| `SMTP_PASS` | Yes | SMTP password |
+| `SMTP_SENDER_NAME` | No | Display name for outgoing emails |
+| `SMTP_ADMIN_EMAIL` | No | Admin contact email for system notifications |
+| `BILLING_PROVIDER` | No | Payment provider: `stripe` (default), `paddle`, or `polar` |
+| `STRIPE_SECRET_KEY` | No | Stripe API key (required if using Stripe) |
+| `STRIPE_WEBHOOK_SECRET` | No | Stripe webhook signing secret |
+| `STRIPE_PRICE_STARTER` | No | Stripe price ID for the Startup plan |
+| `STRIPE_PRICE_PRO` | No | Stripe price ID for the Pro plan |
+| `PADDLE_API_KEY` | No | Paddle API key (required if using Paddle) |
+| `PADDLE_WEBHOOK_SECRET` | No | Paddle webhook signing secret |
+| `PADDLE_ENVIRONMENT` | No | `sandbox` or `production` (default: sandbox) |
+| `PADDLE_PRICE_STARTER` | No | Paddle price ID for the Startup plan |
+| `PADDLE_PRICE_PRO` | No | Paddle price ID for the Pro plan |
+| `POLAR_ACCESS_TOKEN` | No | Polar access token (required if using Polar) |
+| `POLAR_WEBHOOK_SECRET` | No | Polar webhook signing secret |
+| `POLAR_ORGANIZATION_ID` | No | Polar organization ID |
+| `POLAR_PRICE_STARTER` | No | Polar product ID for the Startup plan |
+| `POLAR_PRICE_PRO` | No | Polar product ID for the Pro plan |
+| `VITE_PLAUSIBLE_DOMAIN` | No | Plausible analytics domain (e.g., `myapp.com`) |
+| `VITE_PLAUSIBLE_SCRIPT_URL` | No | Plausible script URL (default: Plausible Cloud) |
+| `REDIS_URL` | No | Redis connection URL (for distributed rate limiting) |
+
+## SMTP Configuration
+
+SMTP credentials are shared between Supabase Auth (for email confirmation, password reset, magic links) and the application's email service (for welcome emails, team invitations, billing notifications).
+
+**Required variables**: `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`
+
+**Optional variables**: `SMTP_PORT` (defaults to 587), `SMTP_SENDER_NAME`, `SMTP_ADMIN_EMAIL`
+
+Without SMTP configured:
+- Email confirmation is disabled, so users can sign in immediately after sign-up
+- Magic link authentication is unavailable
+- Team invitation emails won't send (invitations still work via shareable link)
+- Transactional emails (welcome, billing) are skipped silently
+
+## DNS Configuration
+
+Point your domain to the server's IP address:
+
+| Record | Name | Value |
+|--------|------|-------|
+| A | `app.example.com` | `<server-ip>` |
+
+The app is served from a single origin. Auth, REST, realtime, and storage APIs are path-routed under it (`/auth/v1`, `/rest/v1`, `/realtime/v1`, `/storage/v1`), so no separate `api.` record exists.
+
+If you have optional services enabled, add records for their subdomains too (e.g., `grafana.example.com`).
+
+SSL certificates are handled automatically by Traefik via Let's Encrypt, with no manual certificate management required.
+
+## Backup & Restore
+
+Create and manage database backups with the CLI:
+
+```bash
+# Interactive: prompts for env and action
+npx vibecarbon backup
+
+# Create a backup for a specific env
+npx vibecarbon backup prod
+
+# List existing backups
+npx vibecarbon backup prod -l
+
+# Restore from a backup (interactive picker)
+npx vibecarbon restore prod
+```
+
+Backups include the full PostgreSQL database (schema, data, and auth tables).
+
+## Monitoring
+
+Add the observability stack for metrics, dashboards, and log aggregation:
+
+```bash
+npx vibecarbon add observability
+```
+
+This enables:
+- **Prometheus**: Metrics collection from all services
+- **Grafana**: Pre-built dashboards for API performance, database metrics, and container health
+- **Loki**: Centralized log aggregation with Grafana integration
+
+Access Grafana at `https://grafana.your-domain.com` (requires `super_admin` role in production).
+
+## SSL Certificates
+
+Traefik automatically obtains and renews SSL certificates via Let's Encrypt. No manual certificate management required.

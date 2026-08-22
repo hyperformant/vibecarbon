@@ -1,0 +1,60 @@
+# =============================================================================
+# PROMETHEUS RBAC
+# =============================================================================
+# Prometheus needs cluster-wide read access to discover and scrape targets.
+# ServiceAccount is namespace-scoped; ClusterRole + ClusterRoleBinding grant
+# read access to nodes, pods, services, and endpoints across all namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  labels:
+    app: vibecarbon-prometheus
+    component: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vibecarbon-prometheus
+  labels:
+    app: vibecarbon-prometheus
+    component: observability
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs:
+      - /metrics
+      - /metrics/cadvisor
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vibecarbon-prometheus
+  labels:
+    app: vibecarbon-prometheus
+    component: observability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vibecarbon-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    # H-9: Prometheus SA now lives in vibecarbon-observability. The kustomize
+    # namespace transformer does NOT rewrite ClusterRoleBinding subject
+    # namespaces (verified), so this must match the SA's new namespace by hand —
+    # otherwise the binding points at a non-existent vibecarbon/prometheus SA and
+    # Prometheus loses cluster read (node/pod discovery) → empty targets.
+    namespace: vibecarbon-observability

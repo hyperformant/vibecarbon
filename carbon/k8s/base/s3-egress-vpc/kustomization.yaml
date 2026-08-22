@@ -1,0 +1,13 @@
+# s3-egress-vpc — DO-only S3-purposed-egress VPC CIDR allowance (M3 Task 9c).
+#
+# NOTE: this kustomization is intentionally NOT referenced by the parent
+# carbon/k8s/base/kustomization.yaml. It's applied only when
+# ProviderClass.getS3EgressExtraCidrs(vpcCidr) returns a non-empty list (DO
+# today), with the __VPC_CIDR__ placeholder rendered at apply time by
+# applyK3sManifests (src/lib/deploy/k8s/k3s.js). Keeping it as a standalone
+# base lets `kubectl kustomize` validate the manifest in isolation — mirrors
+# carbon/k8s/base/repl-gateway/kustomization.yaml's identical rationale.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - s3-egress-vpc.yaml

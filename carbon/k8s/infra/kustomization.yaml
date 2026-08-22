@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# cert-manager installation — applied directly by the deploy script, NOT via kustomize.
+#
+# NOT because kustomize can't fetch it. An earlier version of this comment claimed
+# "kustomize v5 no longer supports raw HTTP remote resources in `resources:`" — that
+# is false, and the sibling traefik-crds/kustomization.yaml disproves it in this very
+# tree: it lists a raw https:// URL and is applied in production. Verified again with
+# kubectl v1.35.0 / Kustomize v5.7.1 — `kubectl kustomize k8s/infra/traefik-crds`
+# builds and emits the CRDs, exit 0.
+#
+# The real reason is ordering and readiness, which a single kustomize build cannot
+# express: cert-manager's CRDs must be Established, and its webhook must be serving,
+# BEFORE any ClusterIssuer is applied. The deploy script therefore applies
+# cert-manager, waits on the webhook, then applies k8s/infra/cert-manager-resources/
+# as a separate step. See src/lib/deploy/k8s/k3s.js.
+#
+# cert-manager version: v1.20.2
+# cert-manager URL: https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
+#
+# To upgrade cert-manager: update CERT_MANAGER_VERSION in src/lib/deploy/k8s/k3s.js
+# (and bump cert-manager-webhook-hetzner in lockstep — see HETZNER_WEBHOOK_CHART_VERSION).
+#
+# IMPORTANT: ClusterIssuers are applied separately AFTER cert-manager is ready
+# See: k8s/infra/cert-manager-resources/ for ClusterIssuers
+
+# No resources here — cert-manager is applied directly by the deploy script.
+# hetzner-ccm and hetzner-csi are installed via cloud-init (see master-init.sh)

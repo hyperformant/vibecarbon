@@ -1,0 +1,6 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><linearGradient id="vc-pillar-sovereign-light" x1="60" y1="0" x2="60" y2="120" gradientUnits="userSpaceOnUse"><stop stop-color="#5EEAD4"/><stop offset="1" stop-color="#0D9488"/></linearGradient></defs>
+<polygon points="60.0,14.0 99.8,37.0 99.8,83.0 60.0,106.0 20.2,83.0 20.2,37.0" fill="none" stroke="#1C2431" stroke-width="4" stroke-linejoin="miter"/>
+<polygon points="60.0,24.0 91.2,42.0 91.2,78.0 60.0,96.0 28.8,78.0 28.8,42.0" fill="none" stroke="#1C2431" stroke-width="1.5" opacity="0.35"/>
+<polygon points="60.0,44.0 73.9,52.0 73.9,68.0 60.0,76.0 46.1,68.0 46.1,52.0" fill="url(#vc-pillar-sovereign-light)"/>
+</svg>

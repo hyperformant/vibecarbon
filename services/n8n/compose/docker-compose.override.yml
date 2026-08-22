@@ -1,0 +1,14 @@
+# Development overrides for n8n
+# Use with: docker compose -f docker-compose.yml -f docker-compose.n8n.yml -f docker-compose.n8n.override.yml up -d
+
+services:
+  n8n:
+    labels:
+      # Dev: No auth required (same as studio/traefik in local dev)
+      # Production uses ForwardAuth via docker-compose.n8n.yml labels
+      # Empty middlewares override removes ForwardAuth requirement
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`n8n.localhost`)"
+      - "traefik.http.routers.n8n.entrypoints=web"
+      - "traefik.http.routers.n8n.middlewares="
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"

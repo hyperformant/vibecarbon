@@ -1,0 +1,30 @@
+{
+  "name": "redis",
+  "description": "In-memory data store for caching and sessions",
+  "version": "1.0.0",
+  "port": 6379,
+  "url": "redis://localhost:6379",
+
+  "files": {
+    "compose/docker-compose.yml": "docker-compose.redis.yml",
+    "compose/docker-compose.prod.yml": "docker-compose.redis.prod.yml",
+    "k8s/": "k8s/base/redis/",
+    "docs/integration.md": "redis-integration.md"
+  },
+
+  "envVars": {
+    "REDIS_PASSWORD": { "generate": "password", "length": 32 }
+  },
+
+  "kustomization": {
+    "entry": "redis/"
+  },
+
+  "credentials": {
+    "title": "Redis",
+    "fields": [
+      { "label": "Host", "value": "localhost:6379" },
+      { "label": "Credentials", "value": "Stored in .env.local (REDIS_PASSWORD)" }
+    ]
+  }
+}

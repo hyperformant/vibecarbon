@@ -1,0 +1,532 @@
+name: E2E US Perf Run
+
+# On-demand e2e perf matrix from a GitHub-hosted runner against Hetzner US
+# regions (and, opt-in, DigitalOcean). Rationale: perf-table numbers
+# measured from an operator laptop inherit the local uplink (a degraded
+# Wi-Fi link inflated the 2026-07-08 table 20-40x on sideload-bearing
+# cells); Azure-US → Hetzner-US is datacenter-class and reproducible. Spec:
+# the ci-us-perf-run-design spec
+#
+# Topology: one job per provider (`matrix`, fail-fast: false — so a
+# DigitalOcean regression never cancels a green Hetzner leg or vice versa),
+# each running the selection grammar's `--provider <x>` against its own
+# checkout and uploading its own `e2e.db`. A single `publish-perf` job then
+# downloads every leg's db, merges each into docs/perf-data.json in turn,
+# and re-renders the published surfaces (unified README table, inline
+# markers, carbon data copy) once from the merged result — see
+# tests/e2e/metrics/publish-perf-pr.ts's module doc for why merging
+# leg-by-leg (rather than merging the dbs first) is safe by construction:
+# a leg's db only ever contains scenario rows for the ONE
+# provider that leg ran, so merging from it can only ever touch that
+# provider's own block.
+#
+# Prerequisite: GitHub Environment `e2e-infra` with
+#   secrets:   HETZNER_API_TOKEN (the dedicated vibecarbon-e2e project),
+#              HETZNER_S3_ACCESS_KEY, HETZNER_S3_SECRET_KEY,
+#              DOCKERHUB_TOKEN,
+#              CLOUDFLARE_API_TOKEN (OPTIONAL — only if a dispatch runs
+#              scenarios on Cloudflare DNS),
+#              DIGITALOCEAN_API_TOKEN, DIGITALOCEAN_SPACES_KEY,
+#              DIGITALOCEAN_SPACES_SECRET (OPTIONAL — only needed for a
+#              `provider: digitalocean` or `provider: all` dispatch; the
+#              DigitalOcean leg hard-aborts with a clear message if absent),
+#              LINODE_API_TOKEN, LINODE_OBJECT_STORAGE_KEY,
+#              LINODE_OBJECT_STORAGE_SECRET, LINODE_OBJECT_STORAGE_REGION
+#              (OPTIONAL — same contract, for a `provider: linode` or
+#              `provider: all` dispatch). The REGION is REQUIRED, not an
+#              override: Linode assigns each ACCOUNT one storage cluster per
+#              region and it is not always the documented `-1` one (this
+#              account's us-iad cluster is `us-iad-10`). Omitting it sends
+#              bucket creation to the wrong cluster, where it fails as
+#              `exists but is owned by another account` — a message that
+#              reads like a name collision and is really a wrong endpoint.
+#              Run 31663154544 lost the whole Linode leg to exactly that.
+#              VULTR_API_TOKEN, VULTR_OBJECT_STORAGE_KEY,
+#              VULTR_OBJECT_STORAGE_SECRET, VULTR_OBJECT_STORAGE_REGION
+#              (OPTIONAL — same contract, for a `provider: vultr` or
+#              `provider: all` dispatch). REGION is a cluster slug (e.g.
+#              `ewr1`) and is NOT sensitive, so an Environment VARIABLE
+#              would do — it is carried as a secret anyway so the whole
+#              VULTR_* set stays one copy-paste unit and the leg's env
+#              block has no mixed `secrets.`/`vars.` spelling to get wrong
+#              (the DOCKERHUB_USERNAME class of bug). It is required, not
+#              optional, whenever the Vultr leg runs: object-storage keys
+#              are minted per SUBSCRIPTION (one subscription = one cluster)
+#              and authenticate against no other cluster.
+#   variables: DOCKERHUB_USERNAME (moved from secrets 2026-08-07 — it is
+#              not sensitive, and as a variable it is inspectable)
+#   variables: E2E_DNS_PROVIDER / E2E_DOMAIN — do NOT set these. Each leg
+#              takes its DNS provider and domain from the tests/config.ts
+#              registry so it is self-contained on its own provider. Setting
+#              either one steamrolls EVERY scenario onto a single DNS
+#              provider; they survive only as escape hatches for a perf run
+#              that deliberately wants DNS held constant.
+#
+# E2E_NAMESPACE=ci isolates each leg from concurrent local matrices:
+# citest-* resource names, DNS prefixes, prefix-scoped preflight and sweep.
+# A laptop run's testapp-* rigs are invisible to this workflow. Scoped to
+# the `matrix` job only — the `publish-perf` job never provisions
+# anything, so exporting it there would be a no-op at best and confusing
+# at worst (the class of gap the sweep-pagination E2E_NAMESPACE=ci
+# regression fell into).
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: 'Which provider(s) to run'
+        required: false
+        type: choice
+        options:
+          - hetzner
+          - digitalocean
+          - linode
+          - vultr
+          - scaleway
+          - all
+        default: hetzner
+      scenarios:
+        description: "Qualified scenario tokens (e.g. 'hetzner/k8s-ha,digitalocean/compose') — each leg keeps only its own provider's tokens and skips if none name it; empty = the selected provider(s)' defaults"
+        required: false
+        default: ''
+      regions:
+        description: 'Comma-separated Hetzner locations (E2E_REGIONS) — only meaningful on the Hetzner leg'
+        required: false
+        default: 'ash,hil'
+
+permissions:
+  contents: read
+
+# Node comes from .nvmrc via node-version-file below, and pnpm from the root
+# package.json's `packageManager` field via pnpm/action-setup's default —
+# neither is ever pinned here. See tests/unit/lib/node-version-pins.test.ts
+# and tests/unit/lib/pnpm-version-pins.test.ts.
+
+jobs:
+  matrix:
+    name: E2E (${{ matrix.provider }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: e2e-infra
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: ${{ inputs.provider == 'all' && fromJSON('["hetzner","digitalocean","linode","vultr","scaleway"]') || fromJSON(format('["{0}"]', inputs.provider)) }}
+    # Per-leg group: re-dispatching (or re-running) one provider never
+    # cancels or queues behind the other provider's in-flight leg. Before
+    # this restructure the whole workflow shared one `e2e-us-perf` group,
+    # so a DigitalOcean dispatch would queue behind a live Hetzner run with
+    # nothing in common but the workflow file.
+    concurrency:
+      group: e2e-us-perf-${{ matrix.provider }}
+      cancel-in-progress: false
+    env:
+      E2E_NAMESPACE: ci
+      # The ONE long-lived Pulumi state bucket each leg reuses across runs
+      # (per provider — same name, each provider's own storage namespace).
+      # Salted via an e2e-infra variable because bucket names are GLOBAL per
+      # provider and the unsalted default (vc-e2e-state-ci) is guessable.
+      # See tests/e2e/utils/namespace.ts sharedStateBucketName.
+      VC_E2E_STATE_BUCKET: ${{ vars.VC_E2E_STATE_BUCKET }}
+      E2E_REGIONS: ${{ inputs.regions }}
+      # Paid deploy modes (compose-ha/k8s/k8s-ha) hit the Fullerene license
+      # gate, satisfied by the REAL signed key materialized into
+      # ~/.vibecarbon/license below. There is no dev-license mode any more:
+      # VIBECARBON_DEV_LICENSE skipped Ed25519 verification and shipped inside
+      # the npm package, so it was also a free Fullerene grant to every
+      # customer. First full-matrix dispatch failed all three paid modes at
+      # this gate (run 29127601332).
+      # E2E_DNS_PROVIDER / E2E_DOMAIN are deliberately NOT set here.
+      #
+      # Each scenario's dnsProvider + domain come from the registry in
+      # tests/config.ts, so every leg uses the DNS of the provider that owns
+      # its compute and is self-contained. Setting either variable applies
+      # overrideDnsProvider()/resolveBaseDomain() (tests/e2e/utils/
+      # scenario-overrides.ts), which steamrolls EVERY scenario onto one
+      # provider — they remain as deliberate escape hatches for a perf run
+      # that wants DNS held constant, not as the default.
+      #
+      # They previously lived as e2e-infra environment variables pinning the
+      # whole matrix to hetzner/carbonstack.dev. Both were created 2026-07-10,
+      # a month BEFORE the DNS seam convergence built the native backends, and
+      # silently overrode a registry that was already correct.
+      # Cloud API tokens are deliberately NOT job-level env — they're scoped to
+      # the individual steps that consume them (matrix / scrub / sweep). A
+      # prior perf-table commit step ran with tokens in its env and an
+      # env-hermeticity bug printed a real token prefix into the log (run
+      # 29865109795, token-resolution.test.ts) — that commit step now lives
+      # in the token-free publish-perf job instead (see below).
+      # Frontend smoke check drives headless Chrome over CDP; ubuntu-latest
+      # ships Chrome here. Without this the check degrades to a loud skip.
+      VIBECARBON_CHROME_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Install Pulumi
+        run: |
+          curl -fsSL https://get.pulumi.com | sh
+          echo "$HOME/.pulumi/bin" >> "$GITHUB_PATH"
+
+      - name: Install kubectl and helm
+        run: |
+          curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Materialize credentials
+        env:
+          # Via env, never interpolated into the script body — a secret on a
+          # shell command line is a secret in the process table.
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+        run: |
+          mkdir -p ~/.vibecarbon
+          umask 177
+          # Real Ed25519-signed Fullerene key — the same activation path a
+          # customer walks. Signature verification has no bypass, so a missing
+          # or malformed secret fails the run at e2e preflight
+          # (assertLicenseActive in tests/e2e/utils/e2e-env.js) rather than 40
+          # minutes into the first paid deploy.
+          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
+            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — paid-tier scenarios cannot run."
+            exit 1
+          fi
+          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
+            "$VIBECARBON_TEST_LICENSE_KEY" \
+            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
+            > ~/.vibecarbon/license
+
+      - name: Run e2e (provider leg)
+        env:
+          PROVIDER: ${{ matrix.provider }}
+          SCENARIOS: ${{ inputs.scenarios }}
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # The v2 credential-profiles store is retired (A5) — every
+          # resolution site in the CLI is env-first only (resolveProviderToken,
+          # config-registry.js's operator-secret class). These four map the
+          # `e2e-infra` environment's provider-named secrets onto the exact
+          # env vars the CLI and e2e runner read directly. Every provider's
+          # secrets are present on EVERY leg — the runner's registry-driven
+          # credential preflight only requires the vars for the provider
+          # this leg actually selected (--provider below), so a hetzner-only
+          # dispatch never needs the DIGITALOCEAN_* / LINODE_* / VULTR_*
+          # secrets configured.
+          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
+          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+          # Username lives in Environment VARIABLES (not secrets) since
+          # 2026-08-07 — `secrets.DOCKERHUB_USERNAME` would now evaluate
+          # empty, and resolveDockerHubCreds requires BOTH values, so a
+          # stale `secrets.` reference here silently reverts every CI pull
+          # to unauthenticated (the exact quota class this login prevents).
+          DOCKER_HUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKER_HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_SPACES_KEY }}
+          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SPACES_SECRET }}
+          # Dedicated DO project for e2e (vibecarbon-e2e) — env-first override
+          # for ensureProjectAssignment, so CI runs file droplets into the
+          # standing project instead of find-or-creating one per run.
+          DIGITALOCEAN_PROJECT_ID: ${{ vars.DIGITALOCEAN_PROJECT_ID }}
+          # Linode (linode/compose scenario). Same empty-until-configured
+          # contract as the DigitalOcean pair above.
+          LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
+          LINODE_ACCESS_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_KEY }}
+          LINODE_SECRET_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_SECRET }}
+          LINODE_STORAGE_REGION: ${{ secrets.LINODE_OBJECT_STORAGE_REGION }}
+          # Vultr (vultr/compose scenario). Same empty-until-configured
+          # contract. The REGION is the subscription's object-storage CLUSTER
+          # slug and is part of the required set, not an override — see the
+          # prerequisite block at the top of this file.
+          VULTR_API_TOKEN: ${{ secrets.VULTR_API_TOKEN }}
+          VULTR_ACCESS_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_KEY }}
+          VULTR_SECRET_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_SECRET }}
+          VULTR_STORAGE_REGION: ${{ secrets.VULTR_OBJECT_STORAGE_REGION }}
+          # Scaleway (s1 scenario). Same empty-until-configured contract.
+          # The credential is a TRIPLE — the Pulumi provider requires all
+          # three, and the SAME pair signs S3 (no separate storage keys).
+          # SCALEWAY_DEFAULT_PROJECT_ID must name the DEDICATED e2e Project
+          # (Scaleway SSH keys are Project-scoped and re-applied to every
+          # instance at boot). It is an identifier, not a secret, but is
+          # carried as a secret so the SCALEWAY_* set stays one copy-paste
+          # unit (the VULTR_STORAGE_REGION reasoning above).
+          SCALEWAY_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+          SCALEWAY_ACCESS_KEY: ${{ secrets.SCALEWAY_ACCESS_KEY }}
+          SCALEWAY_DEFAULT_PROJECT_ID: ${{ secrets.SCALEWAY_DEFAULT_PROJECT_ID }}
+        run: |
+          set -o pipefail
+          mkdir -p tests/results
+          # --skip-steps setup-repo: the throwaway GitHub repo only serves
+          # the CI-image build path, which no perf scenario uses (compose =
+          # local build + sideload, compose-ha = remote build, k8s = local
+          # registry). Skipping it means no repo-create/delete PAT in CI;
+          # teardown-repo self-skips when no repo was created.
+          FLAGS=(--skip-steps setup-repo --provider "$PROVIDER")
+          if [ -n "$SCENARIOS" ]; then
+            # `scenarios` is ONE dispatch input shared by every leg, but its
+            # tokens are provider-qualified and the selection grammar
+            # hard-errors on a token outside the `--provider` pool
+            # (tests/e2e/selection.ts `is outside --provider`). Passing the
+            # whole list to both legs would kill the leg the token doesn't
+            # name — e.g. `provider: all` + `scenarios: hetzner/k8s-ha` used
+            # to exit 2 on the DigitalOcean leg within minutes. So each leg
+            # keeps only its OWN tokens.
+            LEG_SCENARIOS=$(printf '%s\n' "$SCENARIOS" \
+              | tr ',' '\n' \
+              | sed 's/[[:space:]]//g' \
+              | grep -E "^${PROVIDER}/" \
+              | paste -sd, - || true)
+            if [ -z "$LEG_SCENARIOS" ]; then
+              # Deliberately does NOT fall through to this provider's default
+              # selection: the dispatcher asked for a named subset and none of
+              # it names this provider, so the honest answer is "nothing to do
+              # here", not "run everything".
+              echo "no scenarios for this provider — skipping leg (provider=${PROVIDER}, input=${SCENARIOS})"
+              exit 0
+            fi
+            FLAGS+=(--scenario "$LEG_SCENARIOS")
+          fi
+          pnpm test:e2e:batch -- "${FLAGS[@]}" 2>&1 | tee "tests/results/ci-batch-${PROVIDER}.log"
+
+      - name: Collect CLI logs and failure diagnostics
+        if: always()
+        run: |
+          # The vibecarbon CLI writes per-env deploy logs and the e2e runner
+          # writes failure-diagnostic dumps to ~/.vibecarbon/logs — pull them
+          # into the artifact root so red runs are debuggable from artifacts
+          # alone (upload-artifact does not expand ~).
+          mkdir -p tests/results/cli-logs
+          if [ -d "$HOME/.vibecarbon/logs" ]; then
+            cp -r "$HOME/.vibecarbon/logs/." tests/results/cli-logs/ || true
+          fi
+
+      - name: Scrub secret values from artifacts
+        if: always()
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
+          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+          DOCKER_HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_SPACES_KEY }}
+          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SPACES_SECRET }}
+          DIGITALOCEAN_PROJECT_ID: ${{ vars.DIGITALOCEAN_PROJECT_ID }}
+          LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
+          LINODE_ACCESS_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_KEY }}
+          LINODE_SECRET_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_SECRET }}
+          LINODE_STORAGE_REGION: ${{ secrets.LINODE_OBJECT_STORAGE_REGION }}
+          VULTR_API_TOKEN: ${{ secrets.VULTR_API_TOKEN }}
+          VULTR_ACCESS_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_KEY }}
+          VULTR_SECRET_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_SECRET }}
+          SCALEWAY_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+          SCALEWAY_ACCESS_KEY: ${{ secrets.SCALEWAY_ACCESS_KEY }}
+          # SCALEWAY_DEFAULT_PROJECT_ID is IN the scrub list although it is not a
+          # credential: it identifies the account, and as a full UUID it is
+          # long/unique enough that the length-preserving value replace can
+          # never blank legitimate log text (unlike Vultr's short cluster
+          # slug). The audit is explicit that the scrub list and the
+          # secret-scan credential list stay DISTINCT judgments.
+          SCALEWAY_DEFAULT_PROJECT_ID: ${{ secrets.SCALEWAY_DEFAULT_PROJECT_ID }}
+          # VULTR_OBJECT_STORAGE_REGION is deliberately absent: it is a
+          # cluster slug (`ewr1`), not a credential, and this scrubber
+          # replaces literal VALUES — feeding it a short common token would
+          # blank every legitimate mention of the region in the logs.
+        run: |
+          # Defense-in-depth for the uploaded logs/db: replace any literal
+          # occurrence of this job's secret values with same-length XXXX
+          # padding (length-preserving so e2e.db stays a valid SQLite file).
+          # Checks the actual values — no brittle pattern list to maintain.
+          python3 - <<'PY'
+          import os, pathlib
+          names = ['HETZNER_API_TOKEN', 'CLOUDFLARE_API_TOKEN',
+                   'HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY', 'DOCKER_HUB_TOKEN',
+                   'DIGITALOCEAN_API_TOKEN', 'DIGITALOCEAN_ACCESS_KEY',
+                   'DIGITALOCEAN_SECRET_KEY', 'DIGITALOCEAN_PROJECT_ID',
+                   'LINODE_API_TOKEN',
+                   'LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY',
+                   'VULTR_API_TOKEN', 'VULTR_ACCESS_KEY',
+                   'VULTR_SECRET_KEY', 'SCALEWAY_SECRET_KEY',
+                   'SCALEWAY_ACCESS_KEY', 'SCALEWAY_DEFAULT_PROJECT_ID']
+          secrets = [os.environ[n].encode() for n in names if os.environ.get(n)]
+          for path in pathlib.Path('tests/results').rglob('*'):
+              if not path.is_file():
+                  continue
+              data = orig = path.read_bytes()
+              for sec in secrets:
+                  data = data.replace(sec, b'X' * len(sec))
+              if data != orig:
+                  path.write_bytes(data)
+                  print(f'redacted secret value(s) in {path}')
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-results-${{ matrix.provider }}
+          path: |
+            tests/results/e2e.db*
+            tests/results/ci-batch-${{ matrix.provider }}.log
+            tests/results/cli-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Safety-net sweep (CI namespace only)
+        # Hetzner-only: the DigitalOcean leg never provisions Hetzner
+        # resources, so running this there would only burn API calls
+        # finding nothing.
+        if: always() && matrix.provider == 'hetzner'
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          # sweep-hetzner.js's S3-bucket pass reads these directly (env-only,
+          # same as the matrix step above) — without them the orphaned-bucket
+          # half of the sweep silently no-ops every run.
+          HETZNER_ACCESS_KEY: ${{ secrets.HETZNER_S3_ACCESS_KEY }}
+          HETZNER_SECRET_KEY: ${{ secrets.HETZNER_S3_SECRET_KEY }}
+        run: node scripts/sweep-hetzner.js
+
+      - name: Safety-net sweep, DigitalOcean (CI namespace only)
+        # DigitalOcean-only — the mirror image of the Hetzner sweep above.
+        if: always() && matrix.provider == 'digitalocean'
+        env:
+          E2E_NAMESPACE: ci
+          DIGITALOCEAN_API_TOKEN: ${{ secrets.DIGITALOCEAN_API_TOKEN }}
+          DIGITALOCEAN_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_SPACES_KEY }}
+          DIGITALOCEAN_SECRET_KEY: ${{ secrets.DIGITALOCEAN_SPACES_SECRET }}
+        # Self-skips (exit 0 with a log line) when no DO token is configured,
+        # so this step is inert until the DIGITALOCEAN_* secrets exist.
+        run: npx tsx tests/e2e/sweep-digitalocean-ci.ts
+
+      - name: Safety-net sweep, Linode (CI namespace only)
+        # Linode-only — the mirror image of the sweeps above.
+        if: always() && matrix.provider == 'linode'
+        env:
+          E2E_NAMESPACE: ci
+          LINODE_API_TOKEN: ${{ secrets.LINODE_API_TOKEN }}
+          LINODE_ACCESS_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_KEY }}
+          LINODE_SECRET_KEY: ${{ secrets.LINODE_OBJECT_STORAGE_SECRET }}
+          LINODE_STORAGE_REGION: ${{ secrets.LINODE_OBJECT_STORAGE_REGION }}
+        # Self-skips (exit 0 with a log line) when no Linode token is
+        # configured, so this step is inert until the LINODE_* secrets exist.
+        run: npx tsx tests/e2e/sweep-linode-ci.ts
+
+      - name: Safety-net sweep, Vultr (CI namespace only)
+        # Vultr-only — the mirror image of the sweeps above.
+        if: always() && matrix.provider == 'vultr'
+        env:
+          E2E_NAMESPACE: ci
+          VULTR_API_TOKEN: ${{ secrets.VULTR_API_TOKEN }}
+          VULTR_ACCESS_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_KEY }}
+          VULTR_SECRET_KEY: ${{ secrets.VULTR_OBJECT_STORAGE_SECRET }}
+          # Required, not decorative: the bucket half of the sweep can only
+          # authenticate against the subscription's own cluster, and exits 1
+          # (enumeration incomplete) rather than guessing without this.
+          VULTR_STORAGE_REGION: ${{ secrets.VULTR_OBJECT_STORAGE_REGION }}
+        # Self-skips (exit 0 with a log line) when no Vultr token is
+        # configured, so this step is inert until the VULTR_* secrets exist.
+        run: npx tsx tests/e2e/sweep-vultr-ci.ts
+
+      - name: Safety-net sweep, Scaleway (CI namespace only)
+        # Scaleway-only — the mirror image of the sweeps above.
+        if: always() && matrix.provider == 'scaleway'
+        env:
+          E2E_NAMESPACE: ci
+          SCALEWAY_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+          SCALEWAY_ACCESS_KEY: ${{ secrets.SCALEWAY_ACCESS_KEY }}
+          # Scopes the sweep's SSH-key arm to the dedicated e2e Project and
+          # names the Project whose buckets the (same-pair) S3 credentials
+          # enumerate.
+          SCALEWAY_DEFAULT_PROJECT_ID: ${{ secrets.SCALEWAY_DEFAULT_PROJECT_ID }}
+        # Self-skips (exit 0 with a log line) when no Scaleway secret key is
+        # configured, so this step is inert until the SCALEWAY_* secrets exist.
+        run: npx tsx tests/e2e/sweep-scaleway-ci.ts
+
+  publish-perf:
+    name: Publish perf table
+    needs: matrix
+    # Deliberately unconditional rather than trying to detect "at least one
+    # leg succeeded" from `needs.matrix.result`: for a matrix job that
+    # result is a single aggregate string (success only if EVERY leg
+    # succeeded, failure if ANY did) — there is no per-instance status
+    # exposed through `needs`, so no boolean expression here can actually
+    # distinguish "one leg green, one red" from "both red" or "all green".
+    # publish-perf-pr.ts already handles every one of those cases correctly
+    # on its own: discoverLegArtifacts finds only the legs that produced a
+    # db, and each leg's block only patches on that leg's own full-green
+    # coverage (Task 4's reporter semantics) — a run with zero green legs
+    # just logs "nothing to publish" and exits 0. always() lets that logic
+    # do the deciding instead of a workflow expression that can't see it.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # Serializes overlapping collector runs (e.g. two dispatches finishing
+    # close together) so they can't race force-pushing the same
+    # perf-table-update branch.
+    concurrency:
+      group: e2e-us-perf-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: e2e-results-*
+          path: ci-results/
+
+      # publish-perf-pr.ts commits WITHOUT --no-verify (deliberate — see its
+      # module doc), so the repo's pre-commit hook runs the full unit suite
+      # here, including the license-gated tests/unit/e2e/* (assertLicenseActive
+      # reads ~/.vibecarbon/license). This job is outside the e2e-infra
+      # environment; the secret resolves at REPO level. Run 31898658781 lost
+      # its perf publish to exactly this gap.
+      - name: Materialize license
+        env:
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+        run: |
+          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
+            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — the pre-commit unit suite cannot run."
+            exit 1
+          fi
+          mkdir -p ~/.vibecarbon
+          umask 177
+          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
+            "$VIBECARBON_TEST_LICENSE_KEY" \
+            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
+            > ~/.vibecarbon/license
+
+      - name: Merge perf data, re-render surfaces, and open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The publisher pushes WITHOUT --no-verify, so husky's pre-push gate
+          # spawns the INTEGRATION suite — whose harness reads this env var
+          # directly (run-cli.ts), independent of the ~/.vibecarbon/license
+          # file the step above materialized. Run 32309395314's perf publish
+          # died on 131 integration failures for want of exactly this line.
+          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+        run: npx tsx tests/e2e/metrics/publish-perf-pr.ts ci-results/

@@ -1,0 +1,129 @@
+/*
+ * Launch UI foundation layer (MIT — https://github.com/launch-ui/launch-ui),
+ * retinted to this template's "Refined Depth" palette.
+ *
+ * Launch UI's marketing blocks lean on a small set of brand tokens, custom
+ * utilities and keyframes. Rather than entangle them with index.css's OKLCH
+ * system, they live here and are @imported after Tailwind. The retint is a
+ * single remap: --brand -> the template's teal --primary (which is already
+ * mode-aware), so every Launch UI section renders on-brand in light and dark
+ * with no per-component overrides.
+ */
+
+@theme {
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --spacing-container: 1280px;
+
+  --animate-appear: appear 0.6s forwards ease-out;
+  --animate-appear-zoom: appear-zoom 0.6s forwards ease-out;
+
+  @keyframes appear {
+    0% {
+      opacity: 0;
+      transform: translateY(1rem);
+      filter: blur(0.5rem);
+    }
+    50% {
+      filter: blur(0);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+      filter: blur(0);
+    }
+  }
+  @keyframes appear-zoom {
+    0% {
+      opacity: 0;
+      transform: scale(0.5);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+}
+
+:root {
+  /* Retint: Launch UI's brand -> the Depth teal (mode-aware via --primary). */
+  --brand: var(--primary);
+  --brand-foreground: var(--primary);
+  /* Launch UI's line-* utilities draw a hairline only when this is set. */
+  --line-width: 1px;
+}
+
+/* --- Glass effects (ported verbatim from Launch UI utils.css) --- */
+@utility glass-1 {
+  @apply border-border from-card/80 to-card/40 dark:border-border/10 dark:border-b-border/5 dark:border-t-border/20 dark:from-card/5 dark:to-card/0 border bg-linear-to-b;
+}
+@utility glass-2 {
+  @apply border-border from-card/100 to-card/80 dark:border-border/10 dark:border-b-border/5 dark:border-t-border/20 dark:from-card/10 dark:to-card/5 border bg-linear-to-b;
+}
+@utility glass-3 {
+  @apply border-border from-card/30 to-card/20 dark:border-border/10 dark:border-t-border/20 dark:border-b-border/5 dark:from-primary/5 dark:to-primary/2 border bg-linear-to-b;
+}
+@utility glass-4 {
+  @apply border-border border-b-input/90 from-card/60 to-card/20 dark:border-border/10 dark:border-t-border/30 dark:from-primary/10 dark:to-primary/5 border bg-linear-to-b dark:border-b-0;
+}
+@utility glass-5 {
+  @apply border-border border-b-input from-card/100 to-card/20 dark:border-border/10 dark:border-t-border/30 dark:from-primary/15 dark:to-primary/5 border bg-linear-to-b dark:border-b-0;
+}
+
+/* --- Fade masks --- */
+@utility fade-x {
+  mask-image: linear-gradient(to right, transparent 0%, black 25%, black 75%, transparent 100%);
+}
+@utility fade-y {
+  mask-image: linear-gradient(to top, transparent 0%, black 25%, black 75%, transparent 100%);
+}
+@utility fade-top {
+  mask-image: linear-gradient(to bottom, transparent 0%, black 35%);
+}
+@utility fade-bottom {
+  mask-image: linear-gradient(to top, transparent 0%, black 35%);
+}
+@utility fade-top-lg {
+  mask-image: linear-gradient(to bottom, transparent 15%, black 100%);
+}
+@utility fade-bottom-lg {
+  mask-image: linear-gradient(to top, transparent 15%, black 100%);
+}
+@utility fade-left {
+  mask-image: linear-gradient(to right, transparent 0%, black 35%);
+}
+@utility fade-right {
+  mask-image: linear-gradient(to left, transparent 0%, black 35%);
+}
+@utility fade-left-lg {
+  mask-image: linear-gradient(to right, transparent 15%, black 100%);
+}
+@utility fade-right-lg {
+  mask-image: linear-gradient(to left, transparent 15%, black 100%);
+}
+
+/* --- Hairline borders (driven by --line-width) --- */
+@utility line-y {
+  @apply border-border dark:border-border/10;
+  border-width: 0 var(--line-width, 0);
+}
+@utility line-x {
+  @apply border-border dark:border-border/10;
+  border-width: var(--line-width, 0) 0;
+}
+@utility line-b {
+  @apply border-border dark:border-border/10;
+  border-width: 0 0 var(--line-width, 0);
+}
+@utility line-t {
+  @apply border-border dark:border-border/10;
+  border-width: var(--line-width, 0) 0;
+}
+@utility line-dashed {
+  @apply border-dashed;
+}
+
+/* Launch UI's container max-width. */
+@utility max-w-container {
+  max-width: var(--spacing-container);
+}

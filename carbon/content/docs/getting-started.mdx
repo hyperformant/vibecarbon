@@ -1,0 +1,118 @@
+---
+title: "Getting Started"
+description: "Scaffold a full-stack app, run it locally, and deploy to production."
+order: 1
+---
+
+## Prerequisites
+
+- **Node.js 24.15+** ([Download](https://nodejs.org))
+- **Docker** ([Download](https://docker.com/get-started))
+
+## 1. Create Your Project
+
+```bash
+npx vibecarbon create my-app
+```
+
+This scaffolds a complete full-stack application. You'll be prompted for an admin email and password. These become your first sign-in credentials.
+
+Behind the scenes, `create` generates secure secrets, copies the template, installs dependencies, and initializes a git repository. When it finishes you'll have a complete project in the `my-app/` directory, ready for local development.
+
+### What's Included
+
+| Category | Features |
+|----------|----------|
+| Auth | Email/password, magic links, OAuth (Google, GitHub, Microsoft, Apple, Discord), MFA |
+| Billing | Multi-provider (Stripe, Paddle, Polar) subscriptions, checkout, portal, plan gating |
+| Admin | Super admin panel, user/org management, impersonation, notifications, jobs, contact, newsletter |
+| Content | MDX blog, changelog, docs (with search), legal pages (privacy, terms) |
+| Engagement | Contact form, newsletter (double opt-in), analytics (Plausible) |
+| Languages | Internationalized throughout. English ships; add more with `vibecarbon configure globalization` |
+| Infrastructure | File uploads, background jobs (pg_cron), onboarding wizard, rate limiting |
+
+## 2. Start Developing
+
+```bash
+cd my-app
+npx vibecarbon up
+```
+
+This single command boots your entire development environment:
+
+1. **Starts Docker services**: PostgreSQL, Supabase (Auth, REST, Realtime, Storage, Studio), and Traefik reverse proxy
+2. **Runs database migrations**: creates tables, security policies, and your admin user
+3. **Launches dev servers**: Hono API on port 3000 and Vite on port 5173 with hot reloading
+
+Open [http://app.localhost](http://app.localhost) and sign in with the credentials you chose during creation. You'll be guided through onboarding to set up your profile, create an organization, and choose a plan.
+
+| Service | URL |
+|---------|-----|
+| App | http://app.localhost |
+| Supabase Studio | http://studio.localhost |
+| Traefik Dashboard | http://traefik.localhost |
+
+### Documentation visibility
+
+Your admin account is a `super_admin`, and **Admin → Settings** carries two toggles for the documentation surfaces this project ships:
+
+- **User Docs**: the guides at `/docs`, plus their links in the navigation, footer, pricing, and dashboard.
+- **API Docs**: the reference at `/api/docs` and the spec at `/api/openapi.json`, enforced server-side rather than merely hidden.
+
+Both default to on. Turn one off and that surface stops serving, and every link to it disappears from the app.
+
+Before deploying, configure `DOMAIN` in `.env.local` to match your production domain.
+
+## 3. Deploy to Production
+
+Deploying on a single Docker Compose server is free. Advanced deploy modes require a license key. Vibecarbon has three tiers:
+
+| Tier | Price | Who it's for |
+|------|-------|--------------|
+| **Graphite** | Free | Everyone: create projects, develop locally, deploy production on a single server, set up CI/CD, use every add-on |
+| **Fullerene** | $149 one-time (retail $299) | Advanced deploy modes (Compose HA, Kubernetes, Kubernetes HA) and Flux GitOps on them, for your own products |
+| **Agency** | Contact us | Deploy for clients and enterprise, white-label or resell |
+
+If you're deploying single-server Docker Compose, skip straight to `deploy`; no license needed. Advanced modes need a Fullerene license; activate it first:
+
+```bash
+npx vibecarbon activate <your-key>
+npx vibecarbon deploy
+```
+
+The bare `deploy` command opens a guided prompt that walks you through environment selection, mode (`compose`, `compose-ha`, `k8s`, or `k8s-ha`), region, and other settings. Behind the scenes it builds your app, pushes container images, and applies your infrastructure configuration. Traefik handles SSL certificates automatically via Let's Encrypt.
+
+See the [Deployment](/docs/deployment) guide for details on Docker Compose and Kubernetes options.
+
+## Project Structure
+
+```
+src/
+├── client/              # React SPA (Vite)
+├── server/              # Hono API (Node.js)
+└── shared/              # Shared TypeScript types
+
+supabase/
+└── migrations/          # SQL migrations
+
+content/
+├── blog/                # Blog posts (MDX)
+├── changelog/           # Release notes (MDX)
+└── docs/                # Documentation (MDX)
+
+docker-compose.yml       # Local dev environment (Supabase, Traefik)
+docker-compose.prod.yml  # Production overlay
+k8s/                     # Kubernetes manifests (Kustomize)
+.env.local               # Local environment variables (git-ignored)
+```
+
+## Next Steps
+
+- [CLI Reference](/docs/cli): all commands, options, and flags
+- [Development](/docs/development): commands, adding pages, routes, and content
+- [Authentication](/docs/authentication): sign-in methods and security
+- [Database](/docs/database): Supabase, migrations, and RLS
+- [Deployment](/docs/deployment): deploy to production
+- [Background Jobs](/docs/background-jobs): scheduled tasks with pg_cron
+- [Analytics](/docs/analytics): privacy-friendly analytics with Plausible
+- [Environments](/docs/environments): manage staging, dev, and production environments

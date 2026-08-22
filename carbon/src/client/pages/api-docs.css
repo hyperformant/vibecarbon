@@ -1,0 +1,156 @@
+/*
+ * Scalar API docs overrides
+ *
+ * Scalar uses scoped Vue styles ([data-v-*]) and .scalar-app-prefixed Tailwind
+ * utilities, making customCss overrides unreliable. This file loads AFTER
+ * Scalar's stylesheet and uses high-specificity selectors to win.
+ */
+
+/* ── Sidebar container ── */
+/* Match docs sidebar pattern: constrain to viewport, let the sidebar
+   container handle overflow — not Scalar's internal nav list. */
+.scalar-wrapper .t-doc__sidebar {
+  top: 5rem !important;
+  height: calc(100vh - 5rem) !important;
+  overflow-y: auto !important;
+  padding: 0 !important;
+}
+
+/* Strip internal padding from the sidebar scroll area */
+.scalar-wrapper .sidebar-height {
+  padding: 0.5rem 0.25rem 0 !important;
+}
+
+/* The flex column inside sidebar-height that holds search + nav groups */
+.scalar-wrapper .sidebar-height > div {
+  padding: 0 !important;
+  gap: 0.75rem !important;
+}
+
+/* ── Sidebar search bar container — has px-3 pt-3, remove left padding ── */
+.scalar-wrapper .t-doc__sidebar .flex.gap-1\.5.px-3 {
+  padding-left: 0 !important;
+}
+
+/* ── Sidebar footer (Open API Client / Powered by Scalar) — has p-3, remove left padding ── */
+.scalar-wrapper .t-doc__sidebar .flex.flex-col.gap-3.p-3 {
+  padding-left: 0 !important;
+}
+
+/* ── Sidebar nav items list — has p-3, remove left padding ── */
+/* Also disable independent scrolling so the page scrolls naturally. */
+.scalar-wrapper .t-doc__sidebar ul.group\/items {
+  padding-left: 0 !important;
+  overflow: visible !important;
+}
+
+/* ── Sidebar nav buttons ── */
+/* The actual button element uses classes: group/button peer/button rounded p-2 */
+.scalar-wrapper .scalar-app .peer\/button {
+  padding: 0.5rem 0.75rem !important;
+  border-radius: var(--radius-md) !important;
+  font-size: 0.875rem !important;
+  line-height: 1.25rem !important;
+}
+
+/* Space between nav items (li elements) */
+.scalar-wrapper .scalar-app li.group\/item {
+  margin-bottom: 0.125rem !important;
+}
+
+/* Space between nav groups / sections */
+.scalar-wrapper .scalar-app .group\/section {
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
+}
+
+/* ── Right content column ── */
+.scalar-wrapper .references-rendered {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.scalar-wrapper .section-container {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+/* ── Dev toolbar ── */
+.scalar-wrapper .api-reference-toolbar {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.scalar-wrapper .references-classic-header-container {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+/* ── Layout grid ── */
+.scalar-wrapper .references-layout {
+  gap: 2.5rem !important;
+}
+
+/* ── Remove vertical sidebar/content border ── */
+.scalar-wrapper .references-sidebar,
+.scalar-wrapper .t-doc__sidebar {
+  border-right: none !important;
+}
+.scalar-wrapper .scalar-sidebar-indent-border,
+.scalar-wrapper .bg-sidebar-indent-border {
+  display: none !important;
+}
+.scalar-wrapper .border-sidebar-border {
+  border-color: transparent !important;
+}
+
+/* ── Soften horizontal section dividers ── */
+.scalar-wrapper .section-accordion-content,
+.scalar-wrapper .section-accordion-transparent {
+  border-color: oklch(0.33 0.025 195 / 0.2) !important;
+}
+
+/* ── Remove top spacing on Scalar root container ── */
+.scalar-wrapper .scalar-api-reference {
+  padding-top: 0 !important;
+  margin-top: 0 !important;
+}
+
+/* ── Ask AI overlay — match app modal backdrop ── */
+.scalar-wrapper .agent-scalar-overlay {
+  background: oklch(0 0 0 / 0.8) !important;
+  backdrop-filter: blur(4px) !important;
+  -webkit-backdrop-filter: blur(4px) !important;
+}
+
+/* ── Ask AI drawer panel — match app card/dialog styles ── */
+.scalar-wrapper .agent-scalar {
+  background: oklch(0.28 0.04 255 / 0.5) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border-radius: var(--radius-card) !important;
+  box-shadow: 0 0 0 1px oklch(0.33 0.025 195) !important;
+  margin: 1rem !important;
+}
+
+/* ── Search / command palette modal ── */
+/* Scalar's commandmenu is position:fixed but has no z-index, so it renders
+   behind the app Nav (z-50). Lift both the overlay and the panel above it. */
+.scalar-wrapper .commandmenu-overlay {
+  z-index: 60 !important;
+  background: oklch(0 0 0 / 0.6) !important;
+  backdrop-filter: blur(4px) !important;
+  -webkit-backdrop-filter: blur(4px) !important;
+}
+.scalar-wrapper .commandmenu {
+  z-index: 61 !important;
+  border: 1px solid oklch(0.33 0.025 195 / 0.6) !important;
+}
+
+/* Same treatment for the generic scalar-modal (e.g. API client) */
+.scalar-wrapper .scalar-modal-layout {
+  z-index: 60 !important;
+}
+
+/* ── Hide Scalar's dark/light mode toggle in sidebar footer ── */
+.scalar-wrapper .t-doc__sidebar .group\/toggle {
+  display: none !important;
+}

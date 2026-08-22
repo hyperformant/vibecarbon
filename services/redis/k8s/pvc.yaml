@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  labels:
+    app: redis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Pinned to the provider CSI class, NOT left to the DefaultStorageClass
+  # admission plugin: our clusters always carry TWO default-annotated classes
+  # (k3s' node-local `local-path` and the provider's own CSI class), and with
+  # two defaults the plugin picks the newest by creationTimestamp. Unpinned,
+  # redis' data landed on node-local disk on the unlucky flip, the PV's node
+  # affinity pinned redis to that node, and the data died with it — silently,
+  # since redis comes up Ready either way. Same defect #234 fixed for the
+  # Supabase PVCs.
+  # Resolved to a real class BEFORE apply by renderK8sStorageClassPlaceholder
+  # (storageClassName is immutable once the PVC exists, so it cannot be patched
+  # afterwards).
+  storageClassName: {{K8S_STORAGE_CLASS}}
+  resources:
+    requests:
+      storage: 1Gi

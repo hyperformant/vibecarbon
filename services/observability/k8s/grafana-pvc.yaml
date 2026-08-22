@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  labels:
+    app: vibecarbon-grafana
+    component: observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{K8S_STORAGE_CLASS}}
+  resources:
+    requests:
+      storage: 5Gi

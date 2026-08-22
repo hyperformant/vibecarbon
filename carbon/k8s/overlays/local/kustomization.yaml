@@ -1,0 +1,219 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vibecarbon
+
+# Local overlay - only includes components needed for local testing
+# Excludes: cert-manager (installed separately), hetzner-ccm and hetzner-csi (installed via cloud-init)
+resources:
+  - namespace.yaml
+  - ../../base/app/
+  - ../../base/supabase/postgres/
+  - ../../base/supabase/kong/
+  - ../../base/supabase/auth/
+  - ../../base/supabase/rest/
+  - ../../base/supabase/realtime/
+  - ../../base/supabase/storage/
+  - ../../base/supabase/imgproxy/
+  - ../../base/supabase/meta/
+  - ../../base/supabase/studio/
+  - ../../base/traefik/
+  - secrets.yaml
+  - configmap.yaml
+  - ingressroute-studio.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: vibecarbon
+      environment: local
+    includeSelectors: false
+
+patches:
+  # Use emptyDir instead of PVC for local ephemeral storage
+  # Override postStart to use hardcoded local dev password
+  - target:
+      kind: StatefulSet
+      name: postgres
+    patch: |-
+      - op: remove
+        path: /spec/volumeClaimTemplates
+      - op: add
+        path: /spec/template/spec/volumes
+        value:
+          - name: postgres-data
+            emptyDir: {}
+      - op: replace
+        path: /spec/template/spec/containers/0/lifecycle/postStart/exec/command
+        value:
+          - /bin/sh
+          - -c
+          - |
+            sleep 15
+            until pg_isready -U supabase_admin -h /var/run/postgresql; do sleep 2; done
+            sleep 5
+            psql -U supabase_admin -h /var/run/postgresql -c "
+              ALTER ROLE authenticator WITH PASSWORD 'local-dev-password-12345';
+              ALTER ROLE supabase_auth_admin WITH PASSWORD 'local-dev-password-12345';
+              ALTER ROLE supabase_storage_admin WITH PASSWORD 'local-dev-password-12345';
+              ALTER ROLE supabase_admin WITH PASSWORD 'local-dev-password-12345';
+              CREATE SCHEMA IF NOT EXISTS _realtime;
+              GRANT ALL ON SCHEMA _realtime TO postgres, authenticator;
+              -- n8n database and user
+              DO \$\$ BEGIN
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'n8n') THEN
+                  CREATE ROLE n8n WITH LOGIN PASSWORD 'local-dev-password-12345';
+                END IF;
+              END \$\$;
+              CREATE DATABASE n8n WITH OWNER n8n ENCODING 'UTF8' TEMPLATE template0;
+              GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
+            " || true
+
+  # Use local-path for storage PVC
+  - target:
+      kind: PersistentVolumeClaim
+      name: storage-data
+    patch: |-
+      - op: replace
+        path: /spec/storageClassName
+        value: local-path
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 1Gi
+
+  # Use local-path for n8n PVC
+  - target:
+      kind: PersistentVolumeClaim
+      name: n8n-data
+    patch: |-
+      - op: replace
+        path: /spec/storageClassName
+        value: local-path
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 1Gi
+
+  # Use pause container for app (local dev builds app separately, this is just a placeholder)
+  # Mirrored to ghcr, not pulled from registry.k8s.io: that host routes by
+  # client IP to a cloud backend whose GCP leg intermittently 403s datacenter
+  # ranges. Kept identical to the ref every other path uses (src/lib/images.js,
+  # `pauseImageRef()`) so there is one pause image in the product, not two.
+  - target:
+      kind: Deployment
+      name: app
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: ghcr.io/hyperformant/pause:3.9
+      - op: replace
+        path: /spec/template/spec/containers/0/ports/0/containerPort
+        value: 80
+      - op: remove
+        path: /spec/template/spec/containers/0/env
+      - op: remove
+        path: /spec/template/spec/containers/0/livenessProbe
+      - op: remove
+        path: /spec/template/spec/containers/0/readinessProbe
+
+  # Reduce replicas for local testing (base now has correct memory limits)
+  - target:
+      kind: Deployment
+      name: kong
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  - target:
+      kind: Deployment
+      name: auth
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  - target:
+      kind: Deployment
+      name: rest
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  - target:
+      kind: Deployment
+      name: realtime
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  - target:
+      kind: Deployment
+      name: traefik
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      # Remove HTTPS redirect args for local HTTP testing
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - "--api.dashboard=true"
+          - "--api.insecure=true"
+          - "--providers.kubernetescrd"
+          - "--providers.kubernetesingress"
+          - "--entrypoints.web.address=:80"
+          - "--entrypoints.websecure.address=:443"
+          - "--entrypoints.traefik.address=:8080"
+          - "--ping=true"
+          - "--log.level=INFO"
+          - "--accesslog=true"
+
+  # Change IngressRoute to use HTTP (web) for local testing
+  # Remove admin routes (using host-based routing locally: studio.localhost, n8n.localhost)
+  - target:
+      kind: IngressRoute
+      name: vibecarbon-app
+    patch: |-
+      - op: replace
+        path: /spec/entryPoints
+        value:
+          - web
+      - op: remove
+        path: /spec/tls
+      - op: remove
+        path: /spec/routes/3
+      - op: remove
+        path: /spec/routes/2
+
+  # Remove HTTP redirect route (not needed for local)
+  - target:
+      kind: IngressRoute
+      name: vibecarbon-http-redirect
+    patch: |-
+      $patch: delete
+      apiVersion: traefik.io/v1alpha1
+      kind: IngressRoute
+      metadata:
+        name: vibecarbon-http-redirect
+
+  # Disable HPA for local testing
+  - target:
+      kind: HorizontalPodAutoscaler
+    patch: |-
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: placeholder
+
+  # Disable cert-manager Certificate for local testing (since cert-manager isn't deployed locally)
+  - target:
+      kind: Certificate
+      name: vibecarbon-tls
+    patch: |-
+      $patch: delete
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: vibecarbon-tls

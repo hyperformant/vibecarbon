@@ -1,0 +1,14 @@
+# Development overrides for Metabase
+# Use with: docker compose -f docker-compose.yml -f docker-compose.metabase.yml -f docker-compose.metabase.override.yml up -d
+
+services:
+  metabase:
+    labels:
+      # Dev: No auth required (same as studio/traefik in local dev)
+      # Production uses ForwardAuth via docker-compose.metabase.yml labels
+      # Empty middlewares override removes ForwardAuth requirement
+      - "traefik.enable=true"
+      - "traefik.http.routers.metabase.rule=Host(`metabase.localhost`)"
+      - "traefik.http.routers.metabase.entrypoints=web"
+      - "traefik.http.routers.metabase.middlewares="
+      - "traefik.http.services.metabase.loadbalancer.server.port=3000"

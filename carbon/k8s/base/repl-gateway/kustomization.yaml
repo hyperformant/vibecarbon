@@ -1,0 +1,11 @@
+# repl-gateway — HA-only cross-cluster replication transport (WireGuard + socat).
+#
+# NOTE: this kustomization is intentionally NOT referenced by the parent
+# carbon/k8s/base/kustomization.yaml. The gateway is applied only on HA k8s
+# deploys (by setupReplication), with per-cluster placeholders rendered at apply
+# time. Keeping it as a standalone base lets `kustomize build` validate the
+# manifest in isolation.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - repl-gateway.yaml

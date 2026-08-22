@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik
+  labels:
+    app: vibecarbon-traefik
+    component: ingress
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vibecarbon-traefik
+  template:
+    metadata:
+      labels:
+        app: vibecarbon-traefik
+        component: ingress
+    spec:
+      serviceAccountName: traefik
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: 'true'
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: traefik
+        image: traefik:v3.6.11
+        imagePullPolicy: IfNotPresent
+        args:
+        - --api.dashboard=true
+        - --api.insecure=false
+        - --providers.kubernetescrd
+        - --providers.kubernetesingress
+        - --entrypoints.web.address=:80
+        - --entrypoints.websecure.address=:443
+        - --entrypoints.traefik.address=:8080
+        - --ping=true
+        - --log.level=INFO
+        - --accesslog=true
+        ports:
+        - containerPort: 80
+          name: web
+          hostPort: 80
+        - containerPort: 443
+          name: websecure
+          hostPort: 443
+        - containerPort: 8080
+          name: traefik
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /ping
+            port: traefik
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: traefik
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: tmp-vol-0
+          mountPath: /tmp
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: tmp-vol-0
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traefik
+  labels:
+    app: vibecarbon-traefik
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traefik
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - services
+  - endpoints
+  - secrets
+  - configmaps
+  - pods
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - extensions
+  - networking.k8s.io
+  resources:
+  - ingresses
+  - ingressclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - extensions
+  - networking.k8s.io
+  resources:
+  - ingresses/status
+  verbs:
+  - update
+- apiGroups:
+  - traefik.io
+  resources:
+  - middlewares
+  - middlewaretcps
+  - ingressroutes
+  - traefikservices
+  - ingressroutetcps
+  - ingressrouteudps
+  - tlsoptions
+  - tlsstores
+  - serverstransports
+  - serverstransporttcps
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traefik
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traefik
+subjects:
+- kind: ServiceAccount
+  name: traefik
+  namespace: vibecarbon

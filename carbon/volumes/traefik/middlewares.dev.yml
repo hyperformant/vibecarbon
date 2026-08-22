@@ -1,0 +1,90 @@
+# Traefik Dynamic Configuration (Development)
+# Middlewares for admin routes with ForwardAuth authentication
+# Uses host.docker.internal to reach the app running on the host via npm run dev
+
+http:
+  middlewares:
+    # Strip identity headers from client requests before ForwardAuth sets real values.
+    # Prevents spoofing if a request bypasses Traefik or hits the service directly.
+    # (authResponseHeaders below already overwrites these from the auth response;
+    # this is belt-and-suspenders for requests where the auth server omits them.)
+    strip-proxy-headers:
+      headers:
+        customRequestHeaders:
+          X-User-Id: ""
+          X-User-Email: ""
+          X-User-Role: ""
+          # Grafana auth-proxy identity header — must never be client-supplied.
+          X-Authenticated-User: ""
+
+    # ForwardAuth - verifies user is authenticated with admin role
+    admin-forward-auth:
+      forwardAuth:
+        address: "http://host.docker.internal:3000/api/_internal/verify-role?role=super_admin"
+        authRequestHeaders:
+          - "Cookie"
+          - "Authorization"
+          - "Accept"
+        authResponseHeaders:
+          - "X-User-Id"
+          - "X-User-Email"
+          - "X-User-Role"
+        trustForwardHeader: true
+
+    # Chain: strip spoofed headers → verify admin role
+    admin-auth:
+      chain:
+        middlewares:
+          - strip-proxy-headers
+          - admin-forward-auth
+
+    # ForwardAuth - verifies user is authenticated with super_admin role
+    # Used for sensitive admin tools: n8n, Metabase, Grafana
+    super-admin-forward-auth:
+      forwardAuth:
+        address: "http://host.docker.internal:3000/api/_internal/verify-role?role=super_admin"
+        authRequestHeaders:
+          - "Cookie"
+          - "Authorization"
+          - "Accept"
+        authResponseHeaders:
+          - "X-User-Id"
+          - "X-User-Email"
+          - "X-User-Role"
+          # Injected into Grafana as the auth-proxy identity (GF_AUTH_PROXY_HEADER_NAME).
+          # Traefik overwrites any client-supplied copy with this verified value.
+          - "X-Authenticated-User"
+        trustForwardHeader: true
+
+    # Chain: strip spoofed headers → verify super_admin role
+    super-admin-auth:
+      chain:
+        middlewares:
+          - strip-proxy-headers
+          - super-admin-forward-auth
+
+    # Strip prefix middlewares for path-based admin routing
+    strip-admin-studio:
+      stripPrefix:
+        prefixes:
+          - "/admin/studio"
+
+    strip-admin-traefik:
+      stripPrefix:
+        prefixes:
+          - "/admin/traefik"
+
+    strip-admin-grafana:
+      stripPrefix:
+        prefixes:
+          - "/admin/grafana"
+
+    strip-admin-n8n:
+      stripPrefix:
+        prefixes:
+          - "/admin/n8n"
+
+    strip-admin-metabase:
+      stripPrefix:
+        prefixes:
+          - "/admin/metabase"

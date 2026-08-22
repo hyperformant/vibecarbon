@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vibecarbon-app
+# Pull secrets are attached to the `default` SA by deploy.js at runtime
+# (dockerhub-pull-secret for Supabase images, ghcr-pull-secret for the app
+# image). This app SA inherits the same set so the app Deployment — which
+# uses serviceAccountName: vibecarbon-app — can pull the private ghcr image.
+imagePullSecrets:
+  - name: dockerhub-pull-secret
+  - name: ghcr-pull-secret
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vibecarbon-app-logs
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vibecarbon-app-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vibecarbon-app-logs
+subjects:
+  - kind: ServiceAccount
+    name: vibecarbon-app
+    namespace: vibecarbon

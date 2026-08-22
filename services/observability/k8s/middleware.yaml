@@ -1,0 +1,49 @@
+# =============================================================================
+# OBSERVABILITY-NAMESPACE TRAEFIK MIDDLEWARES (H-9)
+# =============================================================================
+# Local copies of the base admin-auth + security-headers middlewares. The grafana
+# IngressRoute moved into vibecarbon-observability (co-located with the grafana
+# Service, since Traefik has no allowCrossNamespace); an unqualified middleware
+# ref resolves to the IngressRoute's own namespace, so the middlewares must exist
+# HERE. Kept in sync with carbon/k8s/base/traefik/middleware.yaml.
+#
+# The ForwardAuth address is namespace-qualified (app.vibecarbon) because the app
+# runs in the vibecarbon namespace; Traefik (also in vibecarbon) issues the auth
+# subrequest, and the qualified name resolves unambiguously either way.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: admin-auth
+  labels:
+    app: vibecarbon
+spec:
+  forwardAuth:
+    address: http://app.vibecarbon:3000/api/_internal/verify-role?role=super_admin
+    authResponseHeaders:
+      - X-User-Id
+      - X-User-Email
+      - X-User-Role
+      # Injected into Grafana as the auth-proxy identity (GF_AUTH_PROXY_HEADER_NAME).
+      # Traefik overwrites any client-supplied X-Authenticated-User with the verified
+      # email from the auth response, so it cannot be spoofed via requests through
+      # Traefik. Direct-to-grafana:3000 forgery is bounded by the grafana
+      # NetworkPolicy (only {traefik, app} reach :3000) + GF_AUTH_PROXY_WHITELIST.
+      - X-Authenticated-User
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: security-headers
+  labels:
+    app: vibecarbon
+spec:
+  headers:
+    browserXssFilter: true
+    contentTypeNosniff: true
+    frameDeny: true
+    stsIncludeSubdomains: true
+    stsPreload: true
+    stsSeconds: 31536000
+    customFrameOptionsValue: "SAMEORIGIN"
+    customResponseHeaders:
+      X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"

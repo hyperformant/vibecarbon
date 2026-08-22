@@ -1,0 +1,16 @@
+# Read by the cluster-autoscaler container's --cloud-config flag (externalgrpc
+# client config, see m2-dossier-externalgrpc.md §2). Plaintext loopback is
+# deliberate: this Deployment's pod is hostNetwork, so 127.0.0.1:8086 reaches
+# the carbon-autoscaler sidecar over the control-plane node's own loopback —
+# the same trust domain as the node's kube-apiserver.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-cloud-config
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+data:
+  cloud-config: |
+    address: "127.0.0.1:8086"
+    grpc_timeout: 5s

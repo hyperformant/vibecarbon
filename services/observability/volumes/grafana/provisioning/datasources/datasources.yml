@@ -1,0 +1,47 @@
+# Grafana Datasources for {{PROJECT_NAME}}
+# Auto-provisioned on startup
+
+apiVersion: 1
+
+datasources:
+  # Prometheus - Metrics
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: "15s"
+
+  # Loki - Logs
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+
+  # PostgreSQL - monitoring views only (pg_monitor).
+  # Uses the least-privilege observability_ro role, NOT the supabase_admin
+  # superuser. This role can read pg_stat_* / pg_settings but has no SELECT on
+  # application tables — the shipped dashboards query Prometheus/Loki, not app
+  # data. Password comes from OBSERVABILITY_DB_PASSWORD (set in the grafana env).
+  - name: PostgreSQL
+    type: postgres
+    uid: postgres
+    url: db:5432
+    database: postgres
+    user: observability_ro
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: $OBSERVABILITY_DB_PASSWORD
+    editable: false

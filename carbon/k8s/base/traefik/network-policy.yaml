@@ -1,0 +1,92 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traefik-policy
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-traefik
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow external traffic on HTTP and HTTPS (from LB and direct)
+    - ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    # Allow health check probes on traefik port
+    - ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Allow connection to all pods in namespace (Traefik routes to app, kong, studio)
+    - to:
+        - podSelector: {}
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API egress for traefik's CRD/Ingress informers.
+    # Without these rules kube-router rejects outbound traffic from
+    # traefik to the apiserver, traefik loops on `connect: connection
+    # refused`, never loads IngressRoutes, and serves its default 404
+    # on every request. Surfaced in k8s-ha 2026-04-28 deploy run
+    # (verify-1df-1dg log) when the public probe got 404 even though
+    # the app pods + Service endpoints were healthy.
+    #
+    # CIDR coupling: the two ranges below are k3s defaults
+    # (--service-cidr 10.43.0.0/16, --cluster-cidr 10.42.0.0/16) that
+    # carbon/cloud-init/k3s/master-init.sh does NOT override. If you
+    # ever pass --service-cidr or --cluster-cidr there, also update
+    # both this file AND carbon/k8s/base/app/network-policy.yaml.
+    # k8s NetworkPolicy has no Service-name selector, so we have to
+    # name the CIDRs explicitly.
+    #
+    # 10.43.0.1:443 = kubernetes.default Service ClusterIP via kube-proxy
+    # DNAT (works on worker nodes).
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # 0.0.0.0/0:6443 = the apiserver, dial-anywhere on apiserver-protocol
+    # port. Background: the kubernetes Service ClusterIP (10.43.0.1) DNATs
+    # at the OUTPUT chain BEFORE the CNI evaluates NetworkPolicy egress, so
+    # the policy sees the *post-NAT* destination — the master node IP from
+    # the EndpointSlice. With k3s installed via `--node-ip=<public>` and
+    # HCLOUD_NETWORK NOT set on the Hetzner CCM (the patch that would
+    # populate InternalIP=10.0.1.x was reverted in src/lib/deploy/k8s/k3s.js
+    # because it broke kubelet's TLS cert SAN — cert is generated for the
+    # public IP only, so kubectl logs/exec fail x509 verify when InternalIP
+    # changes post-startup), the master's reported IP is the public IP. So
+    # 10.0.0.0/8 doesn't match and 10.42.0.0/16 (pod CIDR) was never on the
+    # wire — both diagnostically wrong RCAs from earlier.
+    #
+    # The IP changes every deploy, so we can't list it. Allow any
+    # destination on 6443 — port 6443 is apiserver-protocol; the only
+    # listeners are k8s control planes. Deny-by-default is preserved on
+    # every other port.
+    #
+    # Repro chain:
+    # - k8s deploy fanout4 2026-04-30 e3: 10.42.0.0/16:6443 → connection refused
+    # - k8s-ha deploy fanout4b 2026-05-01: tightened to 10.0.0.0/8 + tried
+    #   CCM HCLOUD_NETWORK; reverted CCM (cert SAN) — left 10.0.0.0/8
+    # - k8s-ha restore fanout5 2026-05-01: same connection-refused on
+    #   redeploy because Endpoint resolved to public IP again. Final fix.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443

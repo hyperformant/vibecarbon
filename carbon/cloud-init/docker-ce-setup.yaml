@@ -1,0 +1,78 @@
+#cloud-config
+# Vibecarbon compose-deploy bootstrap.
+#
+# This user-data runs at VPS boot time in parallel with Hetzner's default
+# docker-ce app (Ubuntu 24.04 with Docker + compose-plugin pre-installed).
+# By finishing UFW + unattended-upgrades before SSH is even reachable, the
+# CLI's post-SSH setupServer becomes a ~2-second marker-file probe instead
+# of a ~90-second serial apt-get chain.
+#
+# Writing the marker file `/var/lib/vibecarbon/ready` is the contract that
+# tells the CLI it's safe to proceed. If user-data fails, the marker never
+# appears; the CLI reports and dumps /var/log/cloud-init-output.log.
+
+package_update: true
+packages:
+  - ufw
+  - unattended-upgrades
+
+write_files:
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: '0644'
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  # Bound Docker's json-file logs at the DAEMON level so every container the
+  # deploy later starts inherits the cap — no per-service logging block needed.
+  # Without this, a chatty container grows /var/lib/docker/containers/*/*.log
+  # without limit until the single-VPS root disk fills and the whole stack
+  # wedges (slow disk-fill outage). 10m x 3 files = 30MB/container ceiling.
+  # A fresh Ubuntu + docker-ce app ships no daemon.json, so this is a create,
+  # not a merge; if that ever changes, fold these keys into the existing file.
+  - path: /etc/docker/daemon.json
+    permissions: '0644'
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+
+runcmd:
+  # UFW defaults + the three ports Traefik needs. Ordering matters: we enable
+  # last so the allow rules are in place before the first policy flip.
+  - [ufw, default, deny, incoming]
+  - [ufw, default, allow, outgoing]
+  - [ufw, allow, '22/tcp']
+  - [ufw, allow, '80/tcp']
+  - [ufw, allow, '443/tcp']
+  - [sh, -c, 'echo y | ufw enable']
+
+  # Ensure Docker is running (docker-ce app usually starts it, but be defensive)
+  # and restart so it picks up /etc/docker/daemon.json written above. write_files
+  # runs before runcmd, but the docker-ce app has usually already started the
+  # daemon with the OLD config, so `enable --now` alone would leave the log cap
+  # unapplied. The restart is cheap here — no app containers exist yet at boot.
+  - [systemctl, enable, --now, docker]
+  - [systemctl, restart, docker]
+
+  # Note: an earlier iteration (iter-perfwave4b 2026-05-06) added parallel
+  # `docker pull` of supabase service images here to overlap pulls with
+  # iac.upStack. Net result was -25s: the unauthenticated pulls from
+  # Hetzner DC IPs hit Docker Hub's per-IP rate limit, serializing/
+  # throttling them, which extended cloudInitReady by ~61s while only
+  # saving ~35s on compose.up. The marker file can't land until cloud-init
+  # finishes runcmd, so a slow pre-pull blocks the operator longer than
+  # paying the same cost during compose.up (which uses authenticated
+  # pulls — quota-exempt). Reverted; reconcile.sh's `docker compose pull`
+  # is the right place for this work, post-dockerLoginOnServer.
+
+  # Marker file — the CLI's setupServer polls for this. The parent dir may
+  # not exist yet on a first boot; mkdir -p is safe either way.
+  - [mkdir, -p, /var/lib/vibecarbon]
+  - [sh, -c, 'printf "%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /var/lib/vibecarbon/ready']
+
+final_message: "vibecarbon cloud-init complete after $UPTIME seconds"

@@ -1,0 +1,45 @@
+---
+# Flux-managed replacement for the former imperative `helm install
+# cert-manager-webhook-hetzner` in deploy.js. Installed only when the
+# deployment uses Hetzner DNS (Cloudflare DNS01 has its own path).
+#
+# The webhook requires: cert-manager CRDs + controller Ready (installed
+# imperatively earlier in deploy) and the `hetzner` Secret (key `token`)
+# in the cert-manager namespace (created by the deploy workflow's
+# apply-secrets job before this is applied). The chart reads NO
+# secret-related Helm values — the ClusterIssuers' `tokenSecretKeyRef`
+# (k8s/infra/cert-manager-resources) is the ONLY thing that binds the
+# webhook to that Secret.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager-webhook-hetzner
+  namespace: flux-system
+spec:
+  interval: 10m
+  releaseName: cert-manager-webhook-hetzner
+  targetNamespace: cert-manager
+  chart:
+    spec:
+      chart: cert-manager-webhook-hetzner
+      # PINNED: floating charts break overnight when upstream ships a values
+      # schema change (see the supabase 0.7.1 incident, 2026-07-14). Bump
+      # deliberately, together with any values updates — and in lockstep
+      # with DNS01_PROVIDERS.hetzner.webhook.version in src/lib/dns-provider.js
+      # (the dev-push path installs the same chart imperatively).
+      # Drift-guarded by tests/unit/deploy/gitops-cert-webhook-wiring.test.ts.
+      version: 0.7.0
+      sourceRef:
+        kind: HelmRepository
+        name: hetzner-cloud
+        namespace: flux-system
+  install:
+    timeout: 5m
+    remediation:
+      # First install failures are usually secret-missing or CRD-missing.
+      # Fail fast so the deploy surfaces the real issue.
+      retries: 0
+  upgrade:
+    timeout: 5m
+    remediation:
+      retries: 2

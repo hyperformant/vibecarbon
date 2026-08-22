@@ -1,0 +1,31 @@
+{
+  "name": "observability",
+  "description": "Prometheus, Grafana, Loki monitoring stack",
+  "version": "1.0.0",
+  "url": "http://grafana.localhost",
+
+  "files": {
+    "compose/docker-compose.yml": "docker-compose.observability.yml",
+    "compose/docker-compose.prod.yml": "docker-compose.observability.prod.yml",
+    "compose/docker-compose.override.yml": "docker-compose.observability.override.yml",
+    "volumes/": "volumes/",
+    "db/init.sh": "volumes/db/observability-init.sh",
+    "k8s/": "k8s/base/observability/",
+    "docs/integration.md": "observability-integration.md"
+  },
+
+  "envVars": {
+    "OBSERVABILITY_DB_PASSWORD": { "generate": "password", "length": 32 }
+  },
+
+  "_comment_kustomization": "H-9: intentionally NO 'kustomization' entry, so add/remove NEVER wire observability into k8s/base. The base 'namespace: vibecarbon' transformer would override the child namespace and ship the stack UN-isolated on every deploy path (the forge vuln we fix). The direct k3s deploy applies it as a SEPARATE isolated kustomization into vibecarbon-observability (applyK3sManifests). The gitops/Flux deploy reconciles only k8s/base, so it does NOT deploy observability yet — deployK8sGitOps emits a loud warning; isolation on gitops is a tracked follow-up (the Flux Kustomization).",
+
+  "credentials": {
+    "title": "Observability Stack",
+    "fields": [
+      { "label": "Grafana", "value": "http://grafana.localhost (k8s: /admin/grafana via Traefik admin-auth)" },
+      { "label": "Prometheus", "value": "http://prometheus.localhost (k8s: in-cluster :9090)" },
+      { "label": "Loki", "value": "http://loki.localhost (k8s: in-cluster :3100)" }
+    ]
+  }
+}

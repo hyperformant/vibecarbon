@@ -1,0 +1,83 @@
+---
+# Flux GitRepository + Kustomizations for the standby cluster (HA setup).
+#
+# Mirror of clusters/primary/vibecarbon.yaml, minus the supabase
+# HelmRelease (the standby only runs replication-ready base resources;
+# Supabase runs on primary and replicates its DB to the standby's
+# postgres StatefulSet). The path layout + templating is identical.
+#
+# Applied once by the deploy workflow at first standby-cluster bootstrap.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: vibecarbon
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://github.com/{{GITHUB_OWNER}}/{{PROJECT_NAME}}
+  ref:
+    branch: main
+  secretRef:
+    name: flux-system
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: vibecarbon-base
+  namespace: flux-system
+spec:
+  interval: 10m
+  targetNamespace: vibecarbon
+  sourceRef:
+    kind: GitRepository
+    name: vibecarbon
+  path: ./k8s/base
+  prune: true
+  wait: true
+  timeout: 10m
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: StatefulSet
+      name: postgres
+      namespace: vibecarbon
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: vibecarbon-cert-manager-webhook-hetzner
+  namespace: flux-system
+spec:
+  interval: 10m
+  targetNamespace: flux-system
+  sourceRef:
+    kind: GitRepository
+    name: vibecarbon
+  path: ./k8s/gitops/cert-manager-webhook-hetzner
+  prune: true
+  wait: true
+  timeout: 10m
+  dependsOn:
+    - name: vibecarbon-base
+  healthChecks:
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      name: cert-manager-webhook-hetzner
+      namespace: flux-system
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: vibecarbon-production-hel1
+  namespace: flux-system
+spec:
+  interval: 10m
+  targetNamespace: vibecarbon
+  sourceRef:
+    kind: GitRepository
+    name: vibecarbon
+  path: ./k8s/overlays/production-hel1
+  prune: true
+  wait: true
+  timeout: 10m
+  dependsOn:
+    - name: vibecarbon-base

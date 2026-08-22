@@ -1,0 +1,236 @@
+---
+title: "Database"
+description: "Work with Supabase PostgreSQL, migrations, and row-level security."
+order: 5
+---
+
+## Overview
+
+Your application uses self-hosted Supabase with PostgreSQL. All database operations go through Supabase's client libraries, which provide built-in support for row-level security (RLS).
+
+## Schema Overview
+
+The initial migration (`supabase/migrations/00001_init.sql`) creates the following tables:
+
+| Table | Purpose |
+|-------|---------|
+| `organizations` | Multi-tenant orgs with name, slug, and plan (FREE, STARTER, PRO, ENTERPRISE) |
+| `memberships` | User-org relationships with role (OWNER, ADMIN, MEMBER) |
+| `customers` | Billing customer records, linked to a user or organization (any provider) |
+| `subscriptions` | Billing subscription data (status, period, cancellation) |
+| `notifications` | System-wide or org-specific notifications with scheduling |
+| `notification_dismissals` | Tracks which notifications each user has dismissed |
+| `failed_login_attempts` | Brute force protection (email, IP, timestamp) |
+| `app_settings` | Key-value store for global config (e.g., MFA enforcement) |
+| `cron_job_history` | Background job execution tracking (pg_cron, see [Background Jobs](/docs/background-jobs)) |
+| `contact_submissions` | Contact form submissions (name, email, subject, message, status) |
+| `newsletter_subscribers` | Newsletter subscribers with double opt-in (email, status, confirmation token) |
+
+## Migrations
+
+SQL migrations live in `supabase/migrations/`. Run them with:
+
+```bash
+npm run db:migrate
+```
+
+### Conventions
+
+- **Naming**: Use zero-padded sequential numbering: `00001_init.sql`, `00002_my_feature.sql`
+- **RLS**: Always enable RLS on new tables and add policies
+- **Timestamps**: Include `created_at` and `updated_at` columns with `TIMESTAMPTZ DEFAULT NOW()`
+- **Triggers**: Always add the `update_updated_at()` trigger for auto-updating `updated_at`
+- **Indexes**: Add indexes for foreign keys and frequently queried columns
+
+### Creating a New Table
+
+Create a migration file with the table, index, RLS policies, and trigger:
+
+```sql
+-- supabase/migrations/00002_my_table.sql
+
+CREATE TABLE IF NOT EXISTS my_table (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_my_table_user_id ON my_table(user_id);
+
+-- Enable RLS
+ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;
+
+-- CRUD policies
+CREATE POLICY "Users can view their own items"
+  ON my_table FOR SELECT
+  USING (user_id = (SELECT auth.uid()));
+
+CREATE POLICY "Users can create their own items"
+  ON my_table FOR INSERT
+  WITH CHECK (user_id = (SELECT auth.uid()));
+
+CREATE POLICY "Users can update their own items"
+  ON my_table FOR UPDATE
+  USING (user_id = (SELECT auth.uid()));
+
+CREATE POLICY "Users can delete their own items"
+  ON my_table FOR DELETE
+  USING (user_id = (SELECT auth.uid()));
+
+-- Auto-update updated_at
+CREATE TRIGGER my_table_updated_at
+  BEFORE UPDATE ON my_table
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at();
+```
+
+## Row-Level Security
+
+Every table has RLS enabled. Policies use helper functions defined in the initial migration:
+
+### RLS Helper Functions
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `get_user_org_ids()` | `SETOF UUID` | Org IDs where the user is a member (any role) |
+| `get_user_admin_org_ids()` | `SETOF UUID` | Org IDs where the user is OWNER or ADMIN |
+| `get_user_owner_org_ids()` | `SETOF UUID` | Org IDs where the user is OWNER |
+| `get_user_customer_ids()` | `SETOF UUID` | Customer IDs for the user or their orgs |
+| `is_super_admin()` | `BOOLEAN` | `true` if user's `app_metadata.role` is `super_admin` |
+
+All helper functions use `SECURITY DEFINER` so they can read the `memberships` table regardless of the calling user's permissions.
+
+### Common Policy Patterns
+
+**User-owned data**: rows belong to a specific user:
+
+```sql
+CREATE POLICY "Users can view their own items"
+  ON my_table FOR SELECT
+  USING (user_id = (SELECT auth.uid()));
+```
+
+**Organization data**: rows belong to an org the user is a member of:
+
+```sql
+CREATE POLICY "Members can view org data"
+  ON my_table FOR SELECT
+  USING (organization_id IN (SELECT get_user_org_ids()));
+```
+
+**Admin-only writes**: only org owners/admins can modify:
+
+```sql
+CREATE POLICY "Admins can update org data"
+  ON my_table FOR UPDATE
+  USING (organization_id IN (SELECT get_user_admin_org_ids()));
+```
+
+**Super admin access**: full access for super admins:
+
+```sql
+CREATE POLICY "Super admins can do anything"
+  ON my_table FOR ALL
+  USING (is_super_admin());
+```
+
+## Client-Side Queries
+
+```typescript
+import { supabase } from '@/lib/supabase';
+
+// Fetch data (RLS enforced automatically)
+const { data: items, error: fetchError } = await supabase
+  .from('my_table')
+  .select('*');
+
+// Insert data
+const { data: newItem, error: insertError } = await supabase
+  .from('my_table')
+  .insert({ name: 'New item' })
+  .select()
+  .single();
+```
+
+## Server-Side Queries
+
+```typescript
+// User-context (respects RLS)
+const supabase = c.get('supabase');
+const { data } = await supabase.from('my_table').select('*');
+
+// Admin operations (bypasses RLS)
+import { supabaseAdmin } from '@/server/lib/supabase';
+const { data } = await supabaseAdmin.from('my_table').select('*');
+```
+
+## TanStack Query
+
+Use TanStack Query for client-side data fetching with caching, deduplication, and automatic refetching.
+
+### Fetching Data
+
+```typescript
+import { useQuery } from '@tanstack/react-query';
+import { supabase } from '@/lib/supabase';
+
+export function useItems() {
+  return useQuery({
+    queryKey: ['items'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('items').select('*');
+      if (error) throw error;
+      return data;
+    },
+  });
+}
+```
+
+### Mutations with Cache Invalidation
+
+```typescript
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { supabase } from '@/lib/supabase';
+
+export function useCreateItem() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (item: { name: string }) => {
+      const { data, error } = await supabase
+        .from('items')
+        .insert(item)
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['items'] });
+    },
+  });
+}
+```
+
+### Usage in Components
+
+```tsx
+function ItemList() {
+  const { data: items, isLoading, error } = useItems();
+  const createItem = useCreateItem();
+
+  if (isLoading) return <p>Loading...</p>;
+  if (error) return <p>Error: {error.message}</p>;
+
+  return (
+    <div>
+      {items?.map((item) => <p key={item.id}>{item.name}</p>)}
+      <button onClick={() => createItem.mutate({ name: 'New item' })}>
+        Add Item
+      </button>
+    </div>
+  );
+}
+```

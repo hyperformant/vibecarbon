@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#000000" />
+
+    <!-- {{PROJECT_DISPLAY_NAME}} is substituted at create time; edit freely to rebrand. -->
+    <title>{{PROJECT_DISPLAY_NAME}}</title>
+    <meta name="description" content="{{PROJECT_DISPLAY_NAME}} — Build, launch, and scale your SaaS product with auth, billing, teams, email, blog, docs, i18n, and production infrastructure included." />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="{{PROJECT_DISPLAY_NAME}}" />
+    <meta property="og:description" content="Build, launch, and scale your SaaS product with auth, billing, teams, email, blog, docs, i18n, and production infrastructure included." />
+    <meta property="og:url" content="%VITE_PUBLIC_URL%" />
+    <meta property="og:site_name" content="{{PROJECT_DISPLAY_NAME}}" />
+    <!-- Replace with your own 1200x630 OG image for social sharing previews -->
+    <meta property="og:image" content="%VITE_PUBLIC_URL%/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="{{PROJECT_DISPLAY_NAME}}" />
+    <meta name="twitter:description" content="Build, launch, and scale your SaaS product with auth, billing, teams, email, blog, docs, i18n, and production infrastructure included." />
+    <meta name="twitter:image" content="%VITE_PUBLIC_URL%/og-image.png" />
+
+    <!-- RSS -->
+    <link rel="alternate" type="application/rss+xml" title="{{PROJECT_DISPLAY_NAME}} Blog" href="/rss.xml" />
+
+    <!-- Analytics (Plausible - privacy-friendly, no cookies) -->
+    <script>
+      (function() {
+        var d = '%VITE_PLAUSIBLE_DOMAIN%';
+        var s = '%VITE_PLAUSIBLE_SCRIPT_URL%';
+        if (d && d !== '' && !d.startsWith('%')) {
+          var el = document.createElement('script');
+          el.defer = true;
+          el.setAttribute('data-domain', d);
+          el.src = s || 'https://plausible.io/js/script.js';
+          document.head.appendChild(el);
+        }
+      })();
+    </script>
+
+    <!-- Dark theme - prevent any flash -->
+    <style>
+      html, body { background-color: #0d0d0d; color-scheme: dark; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

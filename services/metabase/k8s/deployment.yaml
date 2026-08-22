@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metabase
+  labels:
+    app: metabase
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metabase
+  template:
+    metadata:
+      labels:
+        app: metabase
+    spec:
+      containers:
+      - name: metabase
+        image: metabase/metabase:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: MB_DB_TYPE
+          value: postgres
+        - name: MB_DB_DBNAME
+          value: metabase
+        - name: MB_DB_PORT
+          value: '5432'
+        - name: MB_DB_USER
+          value: metabase
+        - name: MB_DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-secrets
+              key: DB_PASSWORD
+        - name: MB_DB_HOST
+          value: postgres
+        - name: MB_PASSWORD_COMPLEXITY
+          value: strong
+        - name: MB_SESSION_COOKIES
+          value: 'true'
+        - name: MB_COOKIE_SAMESITE
+          value: lax
+        - name: MB_SITE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: SITE_URL
+        - name: JAVA_OPTS
+          value: -Xmx1536m
+        volumeMounts:
+        - name: metabase-plugins
+          mountPath: /plugins
+        - name: tmp-vol-0
+          mountPath: /tmp
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 1000m
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+      volumes:
+      - name: metabase-plugins
+        persistentVolumeClaim:
+          claimName: metabase-plugins-pvc
+      - name: tmp-vol-0
+        emptyDir: {}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault

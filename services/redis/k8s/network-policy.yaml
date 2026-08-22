@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-policy
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow connections from the application server only
+    - from:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-app
+      ports:
+        - protocol: TCP
+          port: 6379

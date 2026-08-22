@@ -1,0 +1,34 @@
+---
+title: Authentication Guide
+description: A complete guide to authentication features including OAuth, magic links, and MFA.
+date: "2025-01-20"
+author: Team
+---
+
+# Authentication Guide
+
+Your application comes with a full authentication system powered by Supabase Auth.
+
+## Supported Methods
+
+- **Email & Password**: traditional sign-up and sign-in
+- **OAuth Providers**: Google, Microsoft, GitHub, Apple, Discord
+- **Magic Links**: passwordless sign-in via email
+- **Multi-Factor Authentication**: TOTP-based MFA for added security
+
+## Enabling OAuth Providers
+
+OAuth providers are configured in your Supabase dashboard and toggled via environment variables:
+
+```bash
+GITHUB_ENABLED=true
+APPLE_ENABLED=true
+DISCORD_ENABLED=true
+MAGIC_LINK_ENABLED=true
+```
+
+The sign-in page automatically shows buttons for enabled providers.
+
+## Row-Level Security
+
+All database access is secured with Row-Level Security (RLS) policies. Users can only access data they're authorized to see, enforced at the database level.

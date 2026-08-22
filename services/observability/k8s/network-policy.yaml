@@ -1,0 +1,220 @@
+# =============================================================================
+# OBSERVABILITY NAMESPACE NETWORK POLICIES (H-9)
+# =============================================================================
+# The observability stack runs in its own `vibecarbon-observability` namespace so
+# the permissive `allow-intra-namespace` baseline (podSelector:{}, all ports) in
+# the `vibecarbon` namespace no longer selects Grafana. Here we default-deny
+# ingress and open only the required paths, so grafana:3000 is reachable by
+# exactly {Traefik, app}. Cross-namespace `from`/`to` rules pair a
+# namespaceSelector + podSelector IN THE SAME LIST ITEM (AND semantics): "pod X
+# in namespace vibecarbon", not "any pod OR any pod in vibecarbon".
+#
+# DNS: the vibecarbon `allow-dns` policy does NOT cover this namespace, so we ship
+# our own `allow-dns` below. Because it selects all pods with an Egress
+# policyType, every pod here is implicitly default-deny-egress (DNS only) unless a
+# policy below grants more — so Loki needs no egress rule, while Grafana and
+# Prometheus declare theirs.
+#
+# INVARIANT: this isolation is only real if the cluster CNI ENFORCES
+# NetworkPolicies. k3s enforces them via its built-in kube-router controller by
+# default (see carbon/cloud-init/k3s/master-init.sh — it must NOT pass
+# `--disable-network-policy`). If enforcement is ever disabled, these policies
+# (and the vibecarbon baseline default-deny) silently become no-ops and ANY pod
+# could reach grafana:3000 again — the H-9 forge vector reopens with no error.
+# Same caveat for any non-enforcing CNI.
+
+---
+# Default-deny INGRESS for the whole namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: vibecarbon-observability
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# DNS egress for all pods (kube-system CoreDNS). namespaceSelector only — no
+# podSelector — so kustomize label injection can't exclude the k3s-managed
+# CoreDNS pods (mirrors the vibecarbon allow-dns rationale).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: vibecarbon-observability
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# =============================================================================
+# GRAFANA
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana-policy
+  namespace: vibecarbon-observability
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-grafana
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Traefik (cross-ns) — the ONLY authenticated path in (super-admin ForwardAuth
+    # injects the verified X-Authenticated-User).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon
+          podSelector:
+            matchLabels:
+              app: vibecarbon-traefik
+      ports:
+        - protocol: TCP
+          port: 3000
+    # App (cross-ns) — services-status /api/health poll ONLY. This request carries
+    # no X-Authenticated-User, so it doesn't authenticate. RESIDUAL RISK: a
+    # COMPROMISED app pod could instead send a forged X-Authenticated-User here and
+    # reach Grafana's auth-proxy. This is the one remaining forge vector after the
+    # namespace move (n8n/metabase/storage/etc. can no longer reach :3000 at all),
+    # and it's bounded — a compromised app pod already holds the service-role key.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon
+          podSelector:
+            matchLabels:
+              app: vibecarbon-app
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    # Query Prometheus + Loki (same namespace).
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-loki
+      ports:
+        - protocol: TCP
+          port: 3100
+
+---
+# =============================================================================
+# PROMETHEUS
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-policy
+  namespace: vibecarbon-observability
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-prometheus
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Grafana (same ns) queries metrics.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-grafana
+      ports:
+        - protocol: TCP
+          port: 9090
+    # App (cross-ns) — services-status /api/health poll.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon
+          podSelector:
+            matchLabels:
+              app: vibecarbon-app
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    # Scrape targets in the vibecarbon namespace (kubernetes-pods SD job). Scrape
+    # ports vary per target's prometheus.io/port annotation, so allow all ports to
+    # that namespace. NOTE: the vibecarbon namespace's own default-deny-all ingress
+    # must additionally allow ingress from here for any annotated target to be
+    # reachable — nothing is annotated today, so this is latent capability (see the
+    # H-9 spec addendum for the follow-up).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon
+    # Scrape kubelet / cAdvisor on the nodes. Node IPs sit outside the pod CIDR, so
+    # allow egress to the node network on 10250 (except the pod CIDR, already
+    # covered by the namespace rule above).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.42.0.0/16
+      ports:
+        - protocol: TCP
+          port: 10250
+
+---
+# =============================================================================
+# LOKI
+# =============================================================================
+# Ingress-only policy: Loki has no outbound dependency (single-process, local
+# storage). DNS egress comes from the allow-dns policy above; no other egress is
+# granted, so Loki is effectively egress-locked to DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loki-policy
+  namespace: vibecarbon-observability
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-loki
+  policyTypes:
+    - Ingress
+  ingress:
+    # App (cross-ns) pushes logs AND health-probes /ready on 3100.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon
+          podSelector:
+            matchLabels:
+              app: vibecarbon-app
+      ports:
+        - protocol: TCP
+          port: 3100
+    # Grafana (same ns) queries logs.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: vibecarbon-grafana
+      ports:
+        - protocol: TCP
+          port: 3100
