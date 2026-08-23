@@ -1,6 +1,6 @@
 {
   "name": "vibecarbon",
-  "version": "0.39.15",
+  "version": "0.39.16",
   "description": "Create and manage production-ready Vibecarbon applications",
   "type": "module",
   "bin": {
