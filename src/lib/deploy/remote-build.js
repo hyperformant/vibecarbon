@@ -72,10 +72,17 @@ export function isDnsNotSettledBuildError(output) {
  *
  * @param {string} output  Combined stderr+stdout of the failed build.
  * @returns {boolean}
+ * 2026-08-23 addition: the docker CLI reports its OWN ssh helper dying as
+ *   `command [ssh ... docker system dial-stdio] has exited with exit status 255`
+ * around the daemon /_ping — the exact linode shape (runs 32614839037 /
+ * 32620565774). Bare, it matched NONE of the patterns below and fell through
+ * to fail-fast; overnight retries only fired when BuildKit happened to emit an
+ * additional matching line alongside it. Bounded (`.{0,60}`) so a random
+ * '255' elsewhere cannot ride in — the classify-failure lesson (ab55384a).
  */
 export function isTransientBuildError(output) {
   return (
-    /http2|preface|connection reset|connection closed|file already closed|banner exchange|kex_exchange_identification|ssh_exchange_identification|broken pipe|no route to host|unexpected eof/i.test(
+    /dial-stdio.{0,60}exit status 255|http2|preface|connection reset|connection closed|file already closed|banner exchange|kex_exchange_identification|ssh_exchange_identification|broken pipe|no route to host|unexpected eof/i.test(
       output || '',
     ) || isDnsNotSettledBuildError(output)
   );
@@ -276,8 +283,43 @@ exec /usr/bin/ssh -i "$VIBECARBON_SSH_KEY" -o StrictHostKeyChecking=accept-new -
         const totalAttempts = delaysMs.length + 1;
         if (attempt >= totalAttempts) {
           buildT.end();
+          // EVIDENCE CAPTURE before giving up. Three transport drops in one
+          // night (2026-08-23, linode: dial-stdio exit 255 at the daemon
+          // _ping) exhausted this ladder with nothing recorded about WHY the
+          // wrapper's ssh died — while the plain probe ssh, seconds earlier,
+          // succeeded. One verbose probe through the SAME wrapper turns the
+          // next occurrence into a diagnosis (kex? banner? mux? peer reset?)
+          // instead of another "transient". Diagnostics must never mask the
+          // real failure, so this is best-effort and the throw is unchanged.
+          let sshDiag = '';
+          try {
+            runCommand(
+              // BatchMode explicitly even though the PATH wrapper adds it too — the
+              // shell-safety census reads argv literals; belt+braces costs nothing.
+              [
+                'ssh',
+                '-vv',
+                '-o',
+                'BatchMode=yes',
+                `root@${ip}`,
+                'docker version --format {{.Server.Version}}',
+              ],
+              {
+                silent: true,
+                env,
+              },
+            );
+            sshDiag =
+              '\n[ssh-diag] verbose probe SUCCEEDED after the build transport died — the drop is build-session-specific (BuildKit stream/mux), not host reachability.';
+          } catch (diagErr) {
+            const detail = diagErr instanceof Error ? diagErr.message : String(diagErr);
+            sshDiag = `\n[ssh-diag] verbose probe ALSO failed — transport-level. Last ssh -vv output:\n${detail
+              .split('\n')
+              .slice(-25)
+              .join('\n')}`;
+          }
           throw new Error(
-            `docker build failed on ${ip} for tag ${imageTag} after ${totalAttempts} transient attempts:\n${lastOutput
+            `docker build failed on ${ip} for tag ${imageTag} after ${totalAttempts} transient attempts:${sshDiag}\n${lastOutput
               .split('\n')
               .slice(-40)
               .join('\n')}`,
