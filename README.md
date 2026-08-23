@@ -24,8 +24,6 @@
 
 ---
 
-## What is Vibecarbon?
-
 Vibecarbon is a full-stack SaaS starter that combines React 19, Vite, Tailwind v4, Hono, and self-hosted Supabase, with automated DevOps built in.
 
 Skip the choice between vendor lock-in and DIY infrastructure. Ship an application with authentication, billing, teams, email, blog, docs, and i18n already wired up, then put it in production without a dedicated DevOps engineer.
@@ -38,42 +36,40 @@ Vibecarbon handles Docker Compose and Kubernetes, high availability with one-com
 
 <table>
   <tr>
-    <td align="center" width="25%">
+    <td width="112" align="center">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/sovereign-dark.svg">
-        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/sovereign-light.svg" alt="Sovereign" width="96" height="96" />
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/sovereign-light.svg" alt="Sovereign" width="88" height="88" />
       </picture>
-      <br /><strong>Sovereign</strong>
-      <br /><em>Privacy within borders</em>
-      <br />Full-stack self-contained. Infrastructure, code, data, and integrations under your complete control.
     </td>
-    <td align="center" width="25%">
+    <td><strong>Sovereign</strong> · <em>Privacy within borders</em><br />Full-stack self-contained. Infrastructure, code, data, and integrations under your complete control.</td>
+  </tr>
+  <tr>
+    <td width="112" align="center">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agnostic-dark.svg">
-        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agnostic-light.svg" alt="Agnostic" width="96" height="96" />
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agnostic-light.svg" alt="Agnostic" width="88" height="88" />
       </picture>
-      <br /><strong>Agnostic</strong>
-      <br /><em>Modular and portable</em>
-      <br />Swap components, move hosting providers. All the batteries included, but easily changed.
     </td>
-    <td align="center" width="25%">
+    <td><strong>Agnostic</strong> · <em>Modular and portable</em><br />Swap components, move hosting providers. All the batteries included, but easily changed.</td>
+  </tr>
+  <tr>
+    <td width="112" align="center">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/grounded-dark.svg">
-        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/grounded-light.svg" alt="Grounded" width="96" height="96" />
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/grounded-light.svg" alt="Grounded" width="88" height="88" />
       </picture>
-      <br /><strong>Grounded</strong>
-      <br /><em>Rooted in transparency</em>
-      <br />Fair Source CLI, Open Source Templates. Everything transparent all the way down.
     </td>
-    <td align="center" width="25%">
+    <td><strong>Grounded</strong> · <em>Rooted in transparency</em><br />Fair Source CLI, Open Source Templates. Everything transparent all the way down.</td>
+  </tr>
+  <tr>
+    <td width="112" align="center">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agentic-dark.svg">
-        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agentic-light.svg" alt="Agentic" width="96" height="96" />
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agentic-light.svg" alt="Agentic" width="88" height="88" />
       </picture>
-      <br /><strong>Agentic</strong>
-      <br /><em>AI-native guardrails</em>
-      <br />Security and governance built in. Architected for software built by agents.
     </td>
+    <td><strong>Agentic</strong> · <em>AI-native guardrails</em><br />Security and governance built in. Architected for software built by agents.</td>
   </tr>
 </table>
 
