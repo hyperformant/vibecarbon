@@ -684,9 +684,30 @@ async function runStorageChecks(
 
     if (!res.ok) {
       const body = await res.text();
+      // DIAGNOSTIC RETRY — NOT AN ABSORBER. 2026-08-23 (matrix 32614839037,
+      // hetzner compose verify-restore): the public download 404'd 137ms
+      // after a successful upload, then the identical sequence passed on the
+      // rerun. One data point cannot distinguish "object never readable"
+      // from "read-after-write race on a restored stack". So on failure,
+      // probe once more after 2s and FAIL EITHER WAY — the check stays red,
+      // but its message now names which failure mode occurred, which is the
+      // evidence the next occurrence needs. An absorbing retry here would be
+      // an unregistered mitigation hiding an `ours` bug (mitigation policy).
+      let retryNote = '';
+      if (res.status === 404) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const again = await safeFetch(publicUrl, { method: 'GET', headers: authHeaders });
+          retryNote = again.ok
+            ? ` READ-AFTER-WRITE RACE: same URL succeeded on a 2s-later retry — the object became publicly readable late, it was not missing.`
+            : ` Retry after 2s also failed (${again.status}) — not a settle race at this horizon.`;
+        } catch (retryErr) {
+          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
+        }
+      }
       results.push(
         result('storage_download', 'fail', downloadStart, {
-          errorMessage: `Download returned ${res.status}: ${body}`,
+          errorMessage: `Download returned ${res.status}: ${body}${retryNote}`,
         }),
       );
     } else {
