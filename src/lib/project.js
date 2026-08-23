@@ -106,6 +106,46 @@ export function loadEnvVariables(cwd = process.cwd()) {
 }
 
 /**
+ * Find runtime env keys that would silently miss a deploy: set (non-empty)
+ * in `.env.local` but empty or absent in `.env`.
+ *
+ * `vibecarbon deploy` ships `.env` as the server's runtime baseline
+ * (renderBundle, deploy/bundle.js), while `.env.local` never leaves the
+ * operator's machine. An operator who hand-edits only `.env.local` (e.g.
+ * migrating values from another project instead of running `configure`)
+ * deploys a server whose STRIPE_/SMTP_/etc. values are blank — the app comes
+ * up healthy and fails only when the feature is exercised ("Billing is not
+ * configured", vibecarbon.com 2026-08-22).
+ *
+ * Operator-secret keys (provider credentials) are excluded: those are
+ * `.env.local`-only BY DESIGN (see config-registry.js) and stripped from
+ * bundles, so their absence from `.env` is correct, not drift.
+ *
+ * A key non-empty in BOTH files with different values is NOT reported —
+ * `.env` is the deploy baseline and a differing `.env.local` value is a
+ * local-dev override, not missing production config.
+ *
+ * @param {string} [cwd] - Working directory (defaults to process.cwd())
+ * @returns {string[]} - Sorted key names, empty when there is no drift
+ */
+export function findEnvDrift(cwd = process.cwd()) {
+  const localPath = join(cwd, '.env.local');
+  if (!existsSync(localPath)) return [];
+  const local = parseDotenv(readFileSync(localPath, 'utf-8'));
+  const envPath = join(cwd, '.env');
+  const base = existsSync(envPath) ? parseDotenv(readFileSync(envPath, 'utf-8')) : {};
+  const operator = new Set(operatorSecretKeys());
+  return Object.keys(local)
+    .filter((key) => {
+      if (operator.has(key)) return false;
+      if (!local[key] || local[key].trim() === '') return false;
+      const baseVal = base[key];
+      return baseVal === undefined || baseVal.trim() === '';
+    })
+    .sort();
+}
+
+/**
  * Append a section of environment variables to .env.local and .env
  *
  * @param {string} sectionName - Name for the section header (e.g., 'N8N', 'S3 STORAGE')

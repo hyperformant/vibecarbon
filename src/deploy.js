@@ -226,6 +226,25 @@ async function main(values, positional) {
     await refuseIfSecretsPresent('deploy');
   }
 
+  // 0d. Warn about env-file drift before any prompt or provisioning work.
+  // The deploy ships `.env` to the server; a runtime key that only lives in
+  // `.env.local` (hand-migrated env, `configure` never run) deploys as blank
+  // and fails at feature-use time, not deploy time. Warning only — a key can
+  // legitimately be local-first mid-setup — but it must be loud and name the
+  // keys (vibecarbon.com 2026-08-22: STRIPE_/SMTP_ shipped empty this way).
+  {
+    const { findEnvDrift } = await import('./lib/project.js');
+    const drifted = findEnvDrift(process.cwd());
+    if (drifted.length > 0) {
+      p.log.warn(
+        `These keys are set in .env.local but empty or missing in .env:\n  ${drifted.join(', ')}\n` +
+          'Deploys ship .env to the server, so the deployed app will NOT see them. ' +
+          'If they are app config (not provider credentials), copy them into .env — ' +
+          '`vibecarbon configure` writes both files.',
+      );
+    }
+  }
+
   // Build the legacy `args` struct that gatherDeploymentConfig and the
   // orchestrator both read. Field translations live in buildLegacyArgs;
   // the orchestration code stays untouched.
