@@ -35,7 +35,7 @@ importers:
         version: 0.8.1
       '@pulumi/digitalocean':
         specifier: ^4.75.0
-        version: 4.78.1(typescript@7.0.2)
+        version: 4.79.0(typescript@7.0.2)
       '@pulumi/hcloud':
         specifier: ^1.39.0
         version: 1.41.0(typescript@7.0.2)
@@ -776,8 +776,8 @@ packages:
   '@protobufjs/utf8@1.1.2':
     resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
 
-  '@pulumi/digitalocean@4.78.1':
-    resolution: {integrity: sha512-adAwo7F6YmvnETfchV+jTULkqlsYpsAowqhbrNsW4+xiQOaDbJwqVa4XKNVR5b2JZqq9Qn8iLsXPYATsBUtBFQ==}
+  '@pulumi/digitalocean@4.79.0':
+    resolution: {integrity: sha512-+Bw5ePKkeKJT/bGUlGtdguZ8PWNGW2Nb3V6HEWCmQ4V30Pfff9OInELttjq/EU8OREdGm8jT0clIx7I5S6KUDQ==}
 
   '@pulumi/hcloud@1.41.0':
     resolution: {integrity: sha512-I6Lrf9yIUzU7qNi/lZ4TR8d83RmwgIy3Lf0PepqQC9auJSc0HdF6ty4miOSTOGc6/xVGKW8JdWUdYZPyPenmHg==}
@@ -3859,7 +3859,7 @@ snapshots:
 
   '@protobufjs/utf8@1.1.2': {}
 
-  '@pulumi/digitalocean@4.78.1(typescript@7.0.2)':
+  '@pulumi/digitalocean@4.79.0(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.258.0(typescript@7.0.2)
     transitivePeerDependencies:
