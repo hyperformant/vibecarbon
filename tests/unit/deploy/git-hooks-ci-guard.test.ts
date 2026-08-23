@@ -39,3 +39,33 @@ describe('git hooks', () => {
     expect(body.slice(guardAt), `${hook}: guard does not exit`).toMatch(/exit 0/);
   });
 });
+
+/**
+ * Same class, second surface: npm lifecycle scripts.
+ *
+ * `prepublishOnly` ran the whole unit suite + lint, and `npm publish` fires it
+ * — so semantic-release hit it too. Release run 32607476095 got past the git
+ * hook (guarded above) and died here instead, on
+ * tests/unit/e2e/staging-ca-trust.test.ts: that test reads AMBIENT
+ * NODE_EXTRA_CA_CERTS, npm's lifecycle sets it, and the "merge rather than
+ * clobber" branch fired. Green in test.yml on the identical commit.
+ *
+ * Any lifecycle script that runs the suite must skip under CI, for the same
+ * reason the hooks must: release.yml already refuses to publish unless
+ * test.yml is green for that commit.
+ */
+describe('npm lifecycle gates', () => {
+  const scripts = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf-8'))
+    .scripts as Record<string, string>;
+  const GATE = /pnpm\s+(test:unit|test:integration|lint|test:prepush)/;
+  const gated = Object.entries(scripts).filter(
+    ([name, body]) =>
+      /^(prepublishOnly|prepublish|prepack|prepare|preversion)$/.test(name) && GATE.test(body),
+  );
+
+  it('every suite-running lifecycle script is CI-guarded', () => {
+    for (const [name, body] of gated) {
+      expect(body, `${name} runs the suite without a CI guard`).toMatch(/-n\s+"?\$CI"?/);
+    }
+  });
+});

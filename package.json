@@ -46,7 +46,7 @@
     "bump:major": "node scripts/bump.js major",
     "prepare": "git config core.hooksPath git-hooks || true",
     "test:prepush": "pnpm lint && pnpm test:unit && pnpm test:integration",
-    "prepublishOnly": "pnpm test:unit && pnpm lint"
+    "prepublishOnly": "if [ -n \"$CI\" ]; then echo \"CI \u2014 workflow jobs are the gate, skipping prepublish suite\"; else pnpm test:unit && pnpm lint; fi"
   },
   "keywords": [
     "vibecarbon",
