@@ -1,13 +1,13 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-dark.svg">
-    <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-light.svg" alt="Vibecarbon - Idea to production SaaS. Own it. Move freely. Stand on something real. Build with agents. Deployment modes: compose, compose-ha, k8s, k8s-ha." width="820" />
+    <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-light.svg" alt="Vibecarbon - Idea to production SaaS. Launch in minutes with auth, billing, email, templates, and more. Deploy, scale, backup, restore, and failover with simple commands. Deployment modes: compose, compose-ha, k8s, k8s-ha." width="820" />
   </picture>
 </p>
 
-<p align="center"><strong>Professional Grade SaaS Architecture & Starter Kit</strong></p>
+<p align="center"><strong>Idea to launch in minutes, with auth, billing, email, templates, and more.</strong></p>
 
-<p align="center">Own it. Move freely. Stand on something real. Build with agents.</p>
+<p align="center">Advanced DevOps CLI for multiple hosting providers: deploy, scale, backup, restore, and failover with simple commands.</p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/npm/v/vibecarbon?color=0a7ea4&label=npm" alt="npm version" /></a>
@@ -31,6 +31,22 @@ Vibecarbon is a full-stack SaaS starter that combines React 19, Vite, Tailwind v
 Skip the choice between vendor lock-in and DIY infrastructure. Ship an application with authentication, billing, teams, email, blog, docs, and i18n already wired up, then put it in production without a dedicated DevOps engineer.
 
 Vibecarbon handles Docker Compose and Kubernetes, high availability with one-command failover, worker scaling, and automated backups. The complete stack stays self-contained under one flag you chose, yours to keep, move, or delete. Choose the provider underneath, and choose again whenever you want: your infrastructure choice stays reversible.
+
+---
+
+## Four Commitments, Enforced by Design
+
+**Sovereign** · Privacy within borders
+Full-stack self-contained. Infrastructure, code, data, and integrations under your complete control.
+
+**Agnostic** · Modular and portable
+Swap components, move hosting providers. All the batteries included, but easily changed.
+
+**Grounded** · Rooted in transparency
+Fair Source CLI, Open Source Templates. Everything transparent all the way down.
+
+**Agentic** · AI-native guardrails
+Security and governance built in. Architected for software built by agents.
 
 ---
 
@@ -101,10 +117,10 @@ DEBUG COMMANDS
 ## Who It's For
 
 **Indie Hackers & Solopreneurs**
-Ship faster, spend less, control the whole stack. Launch a production-grade MVP this weekend.
+Ship fast and control the whole stack. Launch a production-grade MVP this weekend.
 
 **Startup Founders & Small Teams**
-Enterprise architecture without the complexity. Multi-tenant organizations, auto-scaling, and high-availability when you need it.
+Multi-tenant organizations, auto-scaling, and high availability when you need it, without a dedicated DevOps engineer.
 
 **Agencies & Consultancies**
 One stack for every client project. Consistent, production-ready foundation with easy handoff.
@@ -265,3 +281,4 @@ See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT]
 
 - GitHub Issues: [Report bugs or request features](https://github.com/hyperformant/vibecarbon/issues)
 - GitHub: [github.com/hyperformant/vibecarbon](https://github.com/hyperformant/vibecarbon)
+

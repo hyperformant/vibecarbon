@@ -188,19 +188,22 @@ function _extractLaunchAssetsGrid(text: string): Record<string, Set<string>> {
 
 describe('terminology census', () => {
   it('never brands the project "open source" (Fair Source / FSL only)', () => {
-    // No carve-out: the old "becomes MIT open source two years after
-    // publication" sentence was rewritten (Task 6) to "converts to the MIT
-    // license two years after publication" precisely so this ban can be
-    // absolute on swept surfaces. LICENSE files stay exempt by not being in
-    // SURFACES.
+    // The old "becomes MIT open source two years after publication" sentence
+    // was rewritten (Task 6) to "converts to the MIT license two years after
+    // publication" so this ban needs no license-sentence carve-out. LICENSE
+    // files stay exempt by not being in SURFACES. Single exception, same as
+    // the locale guard below (2026-08-14 pillar copy): exactly "Open Source
+    // Templates" — the carbon template genuinely ships MIT, and the Grounded
+    // pillar quotes it verbatim wherever the strip appears. Claims-registry
+    // rule 5 records the exception.
     for (const rel of SURFACES) {
       // These docs hard-wrap prose, so the phrase can straddle a line break
       // ("open\nsource") and slip past a line-local match — normalize
       // whitespace first, the same way the launch-assets check below does.
       const text = read(rel).replace(/\s+/g, ' ');
-      const hits = [...text.matchAll(/open[- ]source/gi)].map((m) =>
-        text.slice(Math.max(0, (m.index ?? 0) - 60), (m.index ?? 0) + 60),
-      );
+      const hits = [...text.matchAll(/open[- ]source(?:[- ]templates?)?/gi)]
+        .filter((m) => !/templates?$/i.test(m[0]))
+        .map((m) => text.slice(Math.max(0, (m.index ?? 0) - 60), (m.index ?? 0) + 60));
       expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
     }
   });

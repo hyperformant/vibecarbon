@@ -66,10 +66,12 @@ JBM = FONT_DIR / "jbm.ttf"
 # ---------------------------------------------------------------- copy
 # The only strings in the artwork. Everything else is geometry.
 HEAD_A, HEAD_B = "Idea", "production SaaS"       # joined by the drawn arrow
-SUB = "Own it. Move freely. Stand on something real. Build with agents."
+SUB_A = "Launch in minutes with auth, billing, email, templates, and more."
+SUB_B = "Deploy, scale, backup, restore, and failover with simple commands."
 CHIPS = ["compose", "compose-ha", "k8s", "k8s-ha"]
-ALT = ("Vibecarbon - Idea to production SaaS. Own it. Move freely. Stand on "
-       "something real. Build with agents. Deployment modes: compose, "
+ALT = ("Vibecarbon - Idea to production SaaS. Launch in minutes with auth, "
+       "billing, email, templates, and more. Deploy, scale, backup, restore, "
+       "and failover with simple commands. Deployment modes: compose, "
        "compose-ha, k8s, k8s-ha.")
 
 # ---------------------------------------------------------------- theme tokens
@@ -104,6 +106,7 @@ MARK_WORD_GAP = 16            # mark -> wordmark; tighter than GAP_ELEM, they ar
 WORD_W_RATIO = 1.4            # wordmark width relative to mark width
 HEAD_SIZE, HEAD_WGHT, HEAD_TRACK = 72, 650, -0.018
 SUB_SIZE, SUB_WGHT = 24, 400
+SUB_LEAD = 35                 # sub baseline-to-baseline (~1.45 line-height)
 CHIP_SIZE, CHIP_WGHT, CHIP_TRACK = 14, 500, 0.02
 CHIP_H, CHIP_R, CHIP_PAD = 32, 8, 16
 PANEL_R = 16
@@ -390,11 +393,12 @@ def build(theme, logo, head_size=None, left=None):
     f, upem = load(NOTO, HEAD_WGHT)[0], load(NOTO, HEAD_WGHT)[1]
     cap, xh = f["OS/2"].sCapHeight / upem, f["OS/2"].sxHeight / upem
     head_cap, sub_cap = cap * head_size, cap * SUB_SIZE
-    block = head_cap + GAP_ELEM + sub_cap + GAP_ELEM + CHIP_H
+    block = head_cap + GAP_ELEM + sub_cap + SUB_LEAD + GAP_ELEM + CHIP_H
     top = (H - block) / 2
     head_base = round(top + head_cap)
     sub_base = round(head_base + GAP_ELEM + sub_cap)
-    chip_top = round(sub_base + GAP_ELEM)
+    sub2_base = sub_base + SUB_LEAD
+    chip_top = round(sub2_base + GAP_ELEM)
 
     # ---- horizontal: column | hairline rule | copy, 48 either side of the rule
     rule_x = round(col_x + col_w + GAP_SECTION)
@@ -411,7 +415,8 @@ def build(theme, logo, head_size=None, left=None):
     b_d, b_adv = outline(HEAD_B, NOTO, HEAD_WGHT, head_size, b_x, head_base, HEAD_TRACK)
     head_right = b_x + b_adv
 
-    s_d, s_adv = outline(SUB, NOTO, SUB_WGHT, SUB_SIZE, text_x, sub_base)
+    s_d, s_adv = outline(SUB_A, NOTO, SUB_WGHT, SUB_SIZE, text_x, sub_base)
+    s2_d, s2_adv = outline(SUB_B, NOTO, SUB_WGHT, SUB_SIZE, text_x, sub2_base)
 
     # ---- chips: one shared baseline, centred on the whole row's ink
     chips, cx = [], text_x
@@ -488,7 +493,7 @@ def build(theme, logo, head_size=None, left=None):
                 fmt(arrow_x + arrow_len), fmt(arrow_y),
                 fmt(arrow_x + arrow_len - arrow_head), fmt(arrow_y + arrow_head),
                 accent, fmt(sw)))
-    o.append('<path fill="%s" d="%s"/>' % (t["muted"], s_d))
+    o.append('<path fill="%s" d="%s%s"/>' % (t["muted"], s_d, s2_d))
 
     for cx0, cw, _, _ in chips:
         o.append('<rect x="%s" y="%s" width="%s" height="%s" rx="%s" stroke="%s" '
@@ -506,7 +511,7 @@ def build(theme, logo, head_size=None, left=None):
 
     m = dict(col=(col_x, col_x + col_w), col_y=(col_y, col_y + col_h), rule=rule_x,
              text_x=text_x, mark_w=mark_w, word_w=word_w, word_h=word_h,
-             head_right=head_right, sub_right=text_x + s_adv, chip_right=chip_right,
+             head_right=head_right, sub_right=text_x + max(s_adv, s2_adv), chip_right=chip_right,
              head_base=head_base, sub_base=sub_base, chip_top=chip_top, stroke=sw)
     return "\n".join(o) + "\n", m
 
