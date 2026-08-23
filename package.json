@@ -1,6 +1,6 @@
 {
   "name": "vibecarbon",
-  "version": "0.39.16",
+  "version": "0.40.0",
   "description": "Create and manage production-ready Vibecarbon applications",
   "type": "module",
   "bin": {
@@ -46,7 +46,7 @@
     "bump:major": "node scripts/bump.js major",
     "prepare": "git config core.hooksPath git-hooks || true",
     "test:prepush": "pnpm lint && pnpm test:unit && pnpm test:integration",
-    "prepublishOnly": "if [ -n \"$CI\" ]; then echo \"CI \u2014 workflow jobs are the gate, skipping prepublish suite\"; else pnpm test:unit && pnpm lint; fi"
+    "prepublishOnly": "if [ -n \"$CI\" ]; then echo \"CI — workflow jobs are the gate, skipping prepublish suite\"; else pnpm test:unit && pnpm lint; fi"
   },
   "keywords": [
     "vibecarbon",
