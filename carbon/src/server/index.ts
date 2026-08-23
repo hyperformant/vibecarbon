@@ -37,6 +37,24 @@ const app = new Hono<{ Variables: HonoVariables }>();
 // SECURITY MIDDLEWARE
 // ============================================================================
 
+// Analytics (Plausible) CSP allowance. `configure analytics` sets
+// VITE_PLAUSIBLE_* in .env; the injected tag (see client index.html) can
+// only load its script and POST /api/event if the CSP allows that origin.
+// Derived from the configured script URL so Plausible Cloud and
+// self-hosted instances both work — and gated on the same env that gates
+// the tag, so an unconfigured project opens nothing. Without this the tag
+// renders and every pageview is silently blocked (vibecarbon.com,
+// 2026-08-23: 0 visitors under a perfectly rendered tag).
+const plausibleOrigin = (() => {
+  if (!process.env.VITE_PLAUSIBLE_DOMAIN) return null;
+  try {
+    return new URL(process.env.VITE_PLAUSIBLE_SCRIPT_URL || 'https://plausible.io/js/script.js')
+      .origin;
+  } catch {
+    return null;
+  }
+})();
+
 // Security headers (X-Content-Type-Options, X-Frame-Options, etc.)
 app.use(
   '*',
@@ -45,7 +63,12 @@ app.use(
       process.env.NODE_ENV === 'production'
         ? {
             defaultSrc: ["'self'"],
-            scriptSrc: ["'self'", "'unsafe-inline'", 'https://static.cloudflareinsights.com'],
+            scriptSrc: [
+              "'self'",
+              "'unsafe-inline'",
+              'https://static.cloudflareinsights.com',
+              ...(plausibleOrigin ? [plausibleOrigin] : []),
+            ],
             styleSrc: ["'self'", "'unsafe-inline'"],
             imgSrc: ["'self'", 'data:', 'https:'],
             connectSrc: [
@@ -57,6 +80,7 @@ app.use(
               env.SITE_URL ?? env.SUPABASE_URL,
               'https://cloudflareinsights.com',
               'https://api.github.com',
+              plausibleOrigin,
             ].filter(Boolean) as string[],
             fontSrc: ["'self'", 'data:'],
             objectSrc: ["'none'"],
