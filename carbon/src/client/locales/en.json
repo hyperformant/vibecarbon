@@ -303,7 +303,7 @@
       "agnostic": {
         "name": "Agnostic",
         "definition": "Modular and portable",
-        "belief": "Swap components, move providers. All the batteries included, but easily changed."
+        "belief": "Swap components, move hosting providers. All the batteries included, but easily changed."
       },
       "grounded": {
         "name": "Grounded",
