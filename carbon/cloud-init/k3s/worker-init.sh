@@ -17,8 +17,17 @@ set -euo pipefail
 # take the lock in the gap between the loop passing and apt-get starting.
 
 # Update apt lists + install the packages we need. `apt-get upgrade` was
-# removed from the critical path — unattended-upgrades handles security
+# removed from the critical path - unattended-upgrades handles security
 # patches async. Saves 30-60s per deploy.
+
+# sshd concurrency headroom - same rationale as docker-ce-setup.yaml's
+# 99-vibecarbon-concurrency.conf: the deploy fans concurrent ssh (builds,
+# tunnels, probes) past Ubuntu's MaxStartups 10:30:100 default, which drops
+# connections at the door (kex_exchange_identification reset; 2026-08-23).
+mkdir -p /etc/ssh/sshd_config.d
+printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
+systemctl reload ssh || systemctl reload sshd || true
+
 apt-get -o DPkg::Lock::Timeout=300 update -qq
 apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq
 
@@ -30,7 +39,7 @@ if [ -z "$K3S_TARGET_VERSION" ]; then
 fi
 echo "Installing k3s version: $K3S_TARGET_VERSION"
 
-# IDENTICAL block in master-init.sh / worker-init.sh / supabase-init.sh — keep in sync.
+# IDENTICAL block in master-init.sh / worker-init.sh / supabase-init.sh - keep in sync.
 # (Three-way duplication is acceptable here because the cloud-init scripts are
 # rendered independently per role; extracting a shared snippet would require
 # restructuring the renderScript() pipeline. Out of scope for Phase 1.)
@@ -40,7 +49,7 @@ echo "Installing k3s version: $K3S_TARGET_VERSION"
 # k3s only reads /etc/rancher/k3s/registries.yaml on agent start, so this MUST
 # land before the k3s install step below.
 #
-# Plain http://10.0.1.1:5000 — the registry runs HTTP on the private network.
+# Plain http://10.0.1.1:5000 - the registry runs HTTP on the private network.
 # Do NOT add `insecure_skip_verify: true` here: that flag only affects HTTPS
 # endpoints, and recent k3s versions place it incorrectly when present
 # (k3s-io/k3s#13215), which can break containerd config generation.
@@ -53,7 +62,7 @@ mirrors:
 REGEOF
 
 # Get node IPs for k3s configuration.
-# Robust public-IPv4 fetch — see master-init.sh for the full RCA. A single curl
+# Robust public-IPv4 fetch - see master-init.sh for the full RCA. A single curl
 # that returns "" installs k3s with `--node-ip ""`, leaving the node
 # InternalIP=<none> and unreachable from the control plane. Retry the metadata
 # endpoint, fall back to the default-route source address, and FAIL rather than
@@ -66,7 +75,7 @@ for i in $(seq 1 30); do
   sleep 2
 done
 if [ -z "$PUBLIC_IP" ]; then
-  echo "Metadata public-ipv4 unavailable after retries — deriving from default route"
+  echo "Metadata public-ipv4 unavailable after retries - deriving from default route"
   PUBLIC_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || true)
 fi
 if ! echo "$PUBLIC_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -78,10 +87,10 @@ echo "Public IP: $PUBLIC_IP"
 # Wait for the private network interface (10.0.x.x) to be assigned.
 # Hetzner attaches the private network after the server boots, so the interface
 # may not exist yet when cloud-init runs. grep exits 1 if no match, which kills
-# the script under set -euo pipefail — so we retry with || true.
+# the script under set -euo pipefail - so we retry with || true.
 #
 # This must happen BEFORE the master-readyz probe below, because that probe
-# uses the master's private IP (10.0.1.1) — unreachable until our private NIC
+# uses the master's private IP (10.0.1.1) - unreachable until our private NIC
 # is up. Workers stuck in master-readyz with no private NIC was the failure
 # mode in k8s-ha 2026-05-01 deploy run (yir52p, primary-worker-1): hung 600s
 # in "Master not ready yet..." while enp7s0 sat in state DOWN with no IP.
@@ -97,13 +106,13 @@ while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     # unmanaged enp* NIC. Hetzner ships dhcpcd-base + auto-starts dhcpcd at
     # boot, but it races with the post-boot Hetzner private-network
     # attachment. When dhcpcd loses the race the interface stays DOWN and no
-    # IP is ever requested — running `dhcpcd -1 <iface>` once obtains the
+    # IP is ever requested - running `dhcpcd -1 <iface>` once obtains the
     # lease idempotently. Skip if already triggered or dhcpcd missing.
     if [ "$DHCP_TRIGGERED" = "false" ] && [ $RETRY_COUNT -ge 6 ] && command -v dhcpcd >/dev/null 2>&1; then
       CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
       if [ -n "$CANDIDATE" ]; then
         DHCP_TRIGGERED=true
-        echo "Private NIC $CANDIDATE has no lease after 30s — triggering dhcpcd"
+        echo "Private NIC $CANDIDATE has no lease after 30s - triggering dhcpcd"
         ip link set "$CANDIDATE" up 2>&1 || true
         dhcpcd -1 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
       fi
@@ -124,11 +133,11 @@ PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d
 
 # The loop above only guards BOOT. Install the lifetime guard now that we have
 # a working private NIC to record. This same file is the cluster-autoscaler's
-# node template (renderCarbonAutoscalerConfig), so CA-spawned workers — the
-# node class with no render-time IP — are covered by the same code path.
+# node template (renderCarbonAutoscalerConfig), so CA-spawned workers - the
+# node class with no render-time IP - are covered by the same code path.
 # @include _private-net-guard.sh
 
-# Wait for master k3s API to be ready before joining (uses private IP — must
+# Wait for master k3s API to be ready before joining (uses private IP - must
 # come AFTER private-NIC bring-up above).
 MAX_RETRIES=120
 RETRY_COUNT=0
@@ -153,7 +162,7 @@ fi
 
 # Install k3s agent with pre-shared token.
 # --node-ip must be the PUBLIC IP so Hetzner CCM can match it (see master-init.sh).
-# Bash retry loop around the whole pipeline — the k3s install script fetches
+# Bash retry loop around the whole pipeline - the k3s install script fetches
 # from github.com which returns transient 504s under load. 5 attempts, 20s backoff.
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
@@ -169,7 +178,7 @@ for attempt in 1 2 3 4 5; do
   sleep 20
 done
 if [ "$K3S_INSTALL_OK" != "true" ]; then
-  echo "k3s worker install failed after 5 attempts — check GitHub CDN status" >&2
+  echo "k3s worker install failed after 5 attempts - check GitHub CDN status" >&2
   exit 1
 fi
 

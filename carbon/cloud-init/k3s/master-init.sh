@@ -17,8 +17,17 @@ set -euo pipefail
 # take the lock in the gap between the loop passing and apt-get starting.
 
 # Update apt lists + install the packages we need. `apt-get upgrade` was
-# removed from the critical path — unattended-upgrades handles security
+# removed from the critical path - unattended-upgrades handles security
 # patches async. Saves 30-60s per deploy.
+
+# sshd concurrency headroom - same rationale as docker-ce-setup.yaml's
+# 99-vibecarbon-concurrency.conf: the deploy fans concurrent ssh (builds,
+# tunnels, probes) past Ubuntu's MaxStartups 10:30:100 default, which drops
+# connections at the door (kex_exchange_identification reset; 2026-08-23).
+mkdir -p /etc/ssh/sshd_config.d
+printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
+systemctl reload ssh || systemctl reload sshd || true
+
 apt-get -o DPkg::Lock::Timeout=300 update -qq
 apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
 
@@ -30,7 +39,7 @@ if [ -z "$K3S_TARGET_VERSION" ]; then
 fi
 echo "Installing k3s version: $K3S_TARGET_VERSION"
 
-# IDENTICAL block in master-init.sh / worker-init.sh / supabase-init.sh — keep in sync.
+# IDENTICAL block in master-init.sh / worker-init.sh / supabase-init.sh - keep in sync.
 # (Three-way duplication is acceptable here because the cloud-init scripts are
 # rendered independently per role; extracting a shared snippet would require
 # restructuring the renderScript() pipeline. Out of scope for Phase 1.)
@@ -40,7 +49,7 @@ echo "Installing k3s version: $K3S_TARGET_VERSION"
 # k3s only reads /etc/rancher/k3s/registries.yaml on agent start, so this MUST
 # land before the k3s install step below.
 #
-# Plain http://10.0.1.1:5000 — the registry runs HTTP on the private network.
+# Plain http://10.0.1.1:5000 - the registry runs HTTP on the private network.
 # Do NOT add `insecure_skip_verify: true` here: that flag only affects HTTPS
 # endpoints, and recent k3s versions place it incorrectly when present
 # (k3s-io/k3s#13215), which can break containerd config generation.
@@ -55,12 +64,12 @@ REGEOF
 # Configure Floating IP on the OS so the kernel accepts packets destined for it.
 # Hetzner routes the Floating IP to this server at the network level, but without
 # a local address binding the kernel drops the packets.
-# Use `ip addr add` instead of netplan — a separate netplan file that redefines
+# Use `ip addr add` instead of netplan - a separate netplan file that redefines
 # ethernets.eth0 can override Hetzner's cloud-init config and drop the primary IP.
 ip addr add ${floating_ip}/32 dev eth0 2>/dev/null || true
 
 # Persist across reboots via a long-running systemd service (netplan-safe).
-# Must be Type=simple (not oneshot) so it survives DHCP renewals — when networkd
+# Must be Type=simple (not oneshot) so it survives DHCP renewals - when networkd
 # re-applies the cloud-init netplan config it can flush manually-added addresses.
 # The loop re-adds the floating IP within 30 seconds if that happens.
 cat > /etc/systemd/system/floating-ip.service << FIPEOF
@@ -82,7 +91,7 @@ systemctl daemon-reload
 # `--now`, not a bare `enable`: enable only arms the unit for the NEXT boot, and
 # these masters are not rebooted. Without it the `ip addr add` above is the only
 # thing holding the address for the node's entire life, and the 30s re-add loop
-# this block exists to install never runs — a netplan re-apply or a networkd
+# this block exists to install never runs - a netplan re-apply or a networkd
 # DHCP-renewal flush then drops the Floating IP for good, taking public ingress
 # down while every node stays Ready and kubectl looks clean.
 # Same shape as _private-net-guard.sh, which enables THEN starts its watchdog.
@@ -92,7 +101,7 @@ systemctl enable --now floating-ip.service || true
 # Fetch the public IPv4 robustly: k3s installs with --node-ip "$PUBLIC_IP" below,
 # and the Hetzner CCM matches the node against the API by this IP to clear the
 # node.cloudprovider.kubernetes.io/uninitialized taint. The metadata service can
-# be slow/empty on first boot — a single curl that returns "" silently installs
+# be slow/empty on first boot - a single curl that returns "" silently installs
 # k3s with `--node-ip ""`, leaving the node InternalIP=<none> and breaking
 # control-plane<->kubelet comms (RCA 2026-06-23, ash/US: cert-manager-webhook
 # never became Ready because its node was unreachable). Retry the metadata
@@ -106,7 +115,7 @@ for i in $(seq 1 30); do
   sleep 2
 done
 if [ -z "$PUBLIC_IP" ]; then
-  echo "Metadata public-ipv4 unavailable after retries — deriving from default route"
+  echo "Metadata public-ipv4 unavailable after retries - deriving from default route"
   PUBLIC_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || true)
 fi
 if ! echo "$PUBLIC_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -118,7 +127,7 @@ echo "Public IP: $PUBLIC_IP"
 # Wait for the private network interface (10.0.x.x) to be assigned.
 # Hetzner attaches the private network after the server boots, so the interface
 # may not exist yet when cloud-init runs. grep exits 1 if no match, which kills
-# the script under set -euo pipefail — so we retry with || true.
+# the script under set -euo pipefail - so we retry with || true.
 PRIVATE_IFACE=""
 RETRY_COUNT=0
 MAX_RETRIES=120
@@ -132,7 +141,7 @@ while [ -z "$PRIVATE_IFACE" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
       CANDIDATE=$(ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: en[a-z]+[0-9]+s[0-9]+/ {print $2}' | grep -v '^eth' | head -1 || true)
       if [ -n "$CANDIDATE" ]; then
         DHCP_TRIGGERED=true
-        echo "Private NIC $CANDIDATE has no lease after 30s — triggering dhcpcd"
+        echo "Private NIC $CANDIDATE has no lease after 30s - triggering dhcpcd"
         ip link set "$CANDIDATE" up 2>&1 || true
         dhcpcd -1 "$CANDIDATE" 2>&1 | sed 's/^/  dhcpcd: /' || true
       fi
@@ -161,17 +170,17 @@ PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d
 # --node-ip must be the PUBLIC IP so Hetzner CCM can match it against the Hetzner API
 # and remove the node.cloudprovider.kubernetes.io/uninitialized taint.
 # --flannel-iface routes pod-to-pod traffic over the private network.
-# --advertise-address must be the PRIVATE IP (statically 10.0.1.1 — assigned by
+# --advertise-address must be the PRIVATE IP (statically 10.0.1.1 - assigned by
 # the Pulumi program's master ServerNetwork, same constant supabase-init.sh and
 # worker-init.sh join through). It steers BOTH (a) the in-cluster `kubernetes`
 # Endpoints every pod's 10.43.0.1 DNATs to, and (b) the supervisor endpoint
 # k3s agents dial for the apiserver→kubelet reverse tunnel (remotedialer).
-# With the public IP here, both paths dial master-public:6443 — which the
+# With the public IP here, both paths dial master-public:6443 - which the
 # Hetzner firewall admits from OPERATOR CIDRs only since the H-2 closeout
-# (c99f571) — so agent tunnels retry forever ("Failed to connect to proxy...
+# (c99f571) - so agent tunnels retry forever ("Failed to connect to proxy...
 # connection timed out") and every kubectl exec/logs to a non-master node
 # 502s, and any apiserver-dependent pod scheduled off-master is locked out.
-# RCA 2026-07-17 e4 rig — the first real k8s deploy after the H-2 closeout
+# RCA 2026-07-17 e4 rig - the first real k8s deploy after the H-2 closeout
 # (the Actions billing outage had suppressed e2e coverage of it).
 # Private-sourced 6443 is admitted by the firewall's private-range rule, and
 # CA-spawned workers get the tunnel for free (no public allowlisting).
@@ -179,7 +188,7 @@ PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d
 # The k3s install script itself fetches https://github.com/k3s-io/k3s/releases/... and
 # GitHub routinely returns 504 for brief windows. The outer curl has --retry 3, but
 # GitHub failures happen inside the install script where we can't hand --retry through.
-# Wrap the whole pipeline in a bash retry loop — up to 5 attempts with 20s backoff —
+# Wrap the whole pipeline in a bash retry loop - up to 5 attempts with 20s backoff -
 # so a transient CDN hiccup doesn't kill a fresh provision.
 K3S_INSTALL_OK=false
 for attempt in 1 2 3 4 5; do
@@ -206,11 +215,11 @@ for attempt in 1 2 3 4 5; do
   sleep 20
 done
 if [ "$K3S_INSTALL_OK" != "true" ]; then
-  echo "k3s install failed after 5 attempts — check GitHub CDN status" >&2
+  echo "k3s install failed after 5 attempts - check GitHub CDN status" >&2
   exit 1
 fi
 
-# Wait for k3s to be ready (max 3 minutes — if it hasn't started by then, something is wrong)
+# Wait for k3s to be ready (max 3 minutes - if it hasn't started by then, something is wrong)
 K3S_READY=false
 for i in $(seq 1 36); do
   if kubectl get nodes 2>/dev/null | grep -q "Ready"; then
@@ -228,7 +237,7 @@ if [ "$K3S_READY" != "true" ]; then
   exit 1
 fi
 
-# Marker for vibecarbon's deployK3s waiter — set AFTER hcloud Secret + CCM/CSI
+# Marker for vibecarbon's deployK3s waiter - set AFTER hcloud Secret + CCM/CSI
 # install below complete (see end of script). Keeps the early-readiness signal
 # distinct from "fully provisioned and ready for app install."
 
@@ -245,7 +254,7 @@ kubectl -n kube-system create secret generic hcloud-csi \
 
 # Install Hetzner Cloud Controller Manager
 # Use ccm.yaml (not ccm-networks.yaml) since k3s manages pod networking via flannel
-# Retry up to 3 times — kubectl apply can fail if API server is briefly unavailable
+# Retry up to 3 times - kubectl apply can fail if API server is briefly unavailable
 for i in 1 2 3; do
   kubectl apply -f https://github.com/hetznercloud/hcloud-cloud-controller-manager/releases/download/v1.20.0/ccm.yaml && break
   echo "CCM install attempt $i failed, retrying in 10s..."
@@ -254,13 +263,13 @@ done
 
 # Install Hetzner CSI Driver
 #
-# VERSION WINDOW — v2.18.1 is the NEWEST release upstream supports on
+# VERSION WINDOW - v2.18.1 is the NEWEST release upstream supports on
 # Kubernetes v1.31 (what INSTALL_K3S_VERSION pins): the driver supports the
 # latest three k8s minors, and v2.18.2's changelog entry is "drop Kubernetes
 # v1.31 support". The FLOOR is v2.15.0, below which the volume-label line
 # below does nothing. Both ends are asserted by
 # tests/unit/deploy/k8s-image-mirrors.test.ts, which also re-derives the
-# sig-storage sidecar tags src/lib/images.js re-pins onto our ghcr mirrors —
+# sig-storage sidecar tags src/lib/images.js re-pins onto our ghcr mirrors -
 # bump this URL and that fixture fails until the tags are re-derived too.
 for i in 1 2 3; do
   kubectl apply -f https://raw.githubusercontent.com/hetznercloud/csi-driver/v2.18.1/deploy/kubernetes/hcloud-csi.yml && break
@@ -270,12 +279,12 @@ done
 
 # Label every CSI-created volume with this project. Hetzner volumes are named
 # pvc-<uuid> with no owner information; anything enumerating the (shared)
-# Hetzner project — e2e sweeps especially — cannot otherwise attribute them.
+# Hetzner project - e2e sweeps especially - cannot otherwise attribute them.
 # RCA 2026-07-18: a concurrent CI matrix's sweep deleted another live rig's
 # volumes while they were legitimately DETACHED mid-reseed (db scaled to zero
 # during the pilot-light reconverge), because "unattached pvc-*" was the only
 # available heuristic. HCLOUD_VOLUME_EXTRA_LABELS makes the CSI controller
-# stamp `project=<name>` on creation; sweeps filter on it (server parity —
+# stamp `project=<name>` on creation; sweeps filter on it (server parity -
 # servers already carry the same label from the Pulumi program, which is also
 # why the value is already known-valid to Hetzner's label validator).
 #
@@ -289,12 +298,12 @@ done
 # defaults. Deleting this line re-opens the attribution gap.
 kubectl -n kube-system set env deployment/hcloud-csi-controller \
   HCLOUD_VOLUME_EXTRA_LABELS="project=${project_name}" || \
-  echo "WARN: could not set CSI volume labels — volumes will be unattributed"
+  echo "WARN: could not set CSI volume labels - volumes will be unattributed"
 
 echo "k3s master installation complete!"
 
 # Final marker: vibecarbon's deployK3s polls for /tmp/k3s-ready before fetching
 # kubeconfig + applying app manifests. Written here so the marker only fires
-# after k3s + hcloud secrets + CCM + CSI are all in place — i.e., the cluster
+# after k3s + hcloud secrets + CCM + CSI are all in place - i.e., the cluster
 # is ready for real workloads, not just "k3s daemon is up."
 touch /tmp/k3s-ready

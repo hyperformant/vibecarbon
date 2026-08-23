@@ -19,6 +19,15 @@ set -euo pipefail
 # Update apt lists + install the packages we need. `apt-get upgrade` was
 # removed from the critical path -- unattended-upgrades handles security
 # patches async. Saves 30-60s per deploy.
+
+# sshd concurrency headroom - same rationale as docker-ce-setup.yaml's
+# 99-vibecarbon-concurrency.conf: the deploy fans concurrent ssh (builds,
+# tunnels, probes) past Ubuntu's MaxStartups 10:30:100 default, which drops
+# connections at the door (kex_exchange_identification reset; 2026-08-23).
+mkdir -p /etc/ssh/sshd_config.d
+printf 'MaxStartups 100:30:200\nMaxSessions 64\n' > /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
+systemctl reload ssh || systemctl reload sshd || true
+
 apt-get -o DPkg::Lock::Timeout=300 update -qq
 apt-get -o DPkg::Lock::Timeout=300 install -y -qq curl jq docker.io docker-buildx
 

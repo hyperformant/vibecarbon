@@ -24,7 +24,7 @@ write_files:
       APT::Periodic::Unattended-Upgrade "1";
 
   # Bound Docker's json-file logs at the DAEMON level so every container the
-  # deploy later starts inherits the cap — no per-service logging block needed.
+  # deploy later starts inherits the cap - no per-service logging block needed.
   # Without this, a chatty container grows /var/lib/docker/containers/*/*.log
   # without limit until the single-VPS root disk fills and the whole stack
   # wedges (slow disk-fill outage). 10m x 3 files = 30MB/container ceiling.
@@ -41,7 +41,27 @@ write_files:
         }
       }
 
+  # sshd connection-concurrency headroom. Ubuntu's default MaxStartups
+  # 10:30:100 probabilistically DROPS unauthenticated connections beyond 10
+  # concurrent - and a vibecarbon deploy legitimately fans builds (BuildKit
+  # dials several ssh streams), image pulls, admin tunnels, and verification
+  # probes at exactly that scale, concurrently, per node. On slow provider
+  # links each connection sits unauthenticated longer, so the burst overlaps
+  # harder: three subsystems on one linode leg died with
+  # `kex_exchange_identification: read: Connection reset by peer`
+  # (2026-08-23, runs 32640636398/32642715052) before this existed. These are
+  # our nodes; provision them for our workload.
+  - path: /etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf
+    permissions: '0644'
+    content: |
+      MaxStartups 100:30:200
+      MaxSessions 64
+
 runcmd:
+  # Pick up the sshd drop-in written above (write_files runs first; ssh is
+  # already up serving cloud-init's own channel, so reload - never restart,
+  # which would sever the session provisioning us).
+  - [systemctl, reload, ssh]
   # UFW defaults + the three ports Traefik needs. Ordering matters: we enable
   # last so the allow rules are in place before the first policy flip.
   - [ufw, default, deny, incoming]
@@ -55,7 +75,7 @@ runcmd:
   # and restart so it picks up /etc/docker/daemon.json written above. write_files
   # runs before runcmd, but the docker-ce app has usually already started the
   # daemon with the OLD config, so `enable --now` alone would leave the log cap
-  # unapplied. The restart is cheap here — no app containers exist yet at boot.
+  # unapplied. The restart is cheap here - no app containers exist yet at boot.
   - [systemctl, enable, --now, docker]
   - [systemctl, restart, docker]
 
@@ -67,10 +87,10 @@ runcmd:
   # saving ~35s on compose.up. The marker file can't land until cloud-init
   # finishes runcmd, so a slow pre-pull blocks the operator longer than
   # paying the same cost during compose.up (which uses authenticated
-  # pulls — quota-exempt). Reverted; reconcile.sh's `docker compose pull`
+  # pulls - quota-exempt). Reverted; reconcile.sh's `docker compose pull`
   # is the right place for this work, post-dockerLoginOnServer.
 
-  # Marker file — the CLI's setupServer polls for this. The parent dir may
+  # Marker file - the CLI's setupServer polls for this. The parent dir may
   # not exist yet on a first boot; mkdir -p is safe either way.
   - [mkdir, -p, /var/lib/vibecarbon]
   - [sh, -c, 'printf "%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /var/lib/vibecarbon/ready']
