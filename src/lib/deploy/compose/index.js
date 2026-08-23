@@ -946,21 +946,33 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
 }
 
 /**
- * Pre-pull container images on the remote server.
- * Run this in parallel with the local Docker build to overlap I/O.
+ * Pull container images on the remote server. Runs in parallel with the
+ * image build to overlap I/O.
+ *
+ * LOUD ON FAILURE, deliberately. This used to be silenced four layers deep
+ * (three `||` fallbacks ending `|| true`, plus `ignoreError: true`), on the
+ * theory that `docker compose up` would pull whatever was missing anyway.
+ * 2026-08-23 (runs 32614839037 / 32620565774, linode compose-ha) showed
+ * where that theory dies: the pull failed silently on a fresh node, and the
+ * deploy surfaced two steps later as a wall of daemon `No such image`
+ * errors from `up` — with the pull's actual stderr (the only evidence of
+ * WHY: rate limit vs DNS vs timeout) discarded. A failed pull now rejects
+ * with that stderr attached, so the step that broke is the step that fails.
+ *
+ * `--ignore-buildable` stays: db/app carry `build:` sections and local-only
+ * tags — they are built or sideloaded, never pulled, and pulling them 401s.
+ * `--policy missing` stays: warm nodes must not re-download ~2GB.
+ * Pinned by tests/unit/deploy/pull-images-loud.test.ts.
  */
 export async function pullComposeImages(ip, sshKeyPath, projectName, options = {}) {
   const remoteDir = `/opt/${projectName}`;
   const flags = composeFileFlags(options);
-  // `docker compose pull` over SSH — first deploys pull ~2GB of Supabase
-  // images and Hetzner ingress can spike to several minutes. Warm pulls
-  // (everything cached) finish in <5s.
   await perfAsync('deploy.compose.imagesPull', () =>
     sshRunAsync(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && (docker compose ${flags} pull --policy missing --ignore-buildable || docker compose ${flags} pull --ignore-buildable || docker compose ${flags} pull 2>&1 || true)`,
-      { timeout: 600_000, ignoreError: true },
+      `cd ${remoteDir} && docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`,
+      { timeout: 600_000 },
     ),
   );
 }

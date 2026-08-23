@@ -64,7 +64,7 @@ describe('haWriteReplicationOverlay flag extraction', () => {
 
   it('the db up appends the replication overlay to the extracted flags and keeps the bounded fallback', () => {
     expect(EFFECTS_SRC).toMatch(
-      /docker compose \$FLAGS -f docker-compose\.replication\.yml up -d db/,
+      /docker compose \$FLAGS -f docker-compose\.replication\.yml up -d --no-build db/,
     );
     expect(EFFECTS_SRC).toMatch(/\[ -n "\$FLAGS" \] \|\| FLAGS='\$\{REPL_COMPOSE_FLAGS_BASE\}'/);
   });
@@ -140,5 +140,51 @@ describe('haWriteReplicationOverlay flag extraction', () => {
     // The sanctioned base trio must NOT be flagged.
     expect(RE.test('-f docker-compose.yml -f docker-compose.prod.yml')).toBe(false);
     expect(RE.test('-f docker-compose.replication.yml')).toBe(false);
+  });
+});
+
+describe('overlay db materialization is explicit, never implicit (2026-08-23)', () => {
+  /**
+   * Runs 32614839037/32620567017 (vultr compose-ha): the standby's FIRST db
+   * image materialization happened inside this step's `up -d db` — an
+   * IMPLICIT compose build (db carries `pull_policy: build`), whose base
+   * image pull alone can exceed the step's 60s ssh timeout on a slow
+   * provider link. Hetzner won that race on bandwidth; vultr could not, and
+   * the failure surfaced as an opaque timeout with the build half-done.
+   *
+   * Contract: build db EXPLICITLY (its own command, pull-scale timeout, its
+   * own stderr) BEFORE the recreate, and run the recreate with `--no-build`
+   * so a missing image can never again turn into a silent under-timed build.
+   */
+  const fnStart = EFFECTS_SRC.indexOf('async function haWriteReplicationOverlay');
+  const fnBody = EFFECTS_SRC.slice(
+    fnStart,
+    EFFECTS_SRC.indexOf('\nconst REPL_COMPOSE_FLAGS_BASE', fnStart),
+  );
+
+  it('builds the db image explicitly before the up', () => {
+    expect(fnStart).toBeGreaterThan(-1);
+    const buildAt = fnBody.indexOf('build db');
+    const upAt = fnBody.indexOf('up -d --no-build db');
+    expect(buildAt, 'explicit `compose build db` missing').toBeGreaterThan(-1);
+    expect(upAt, '`up -d db` must carry --no-build').toBeGreaterThan(-1);
+    expect(buildAt, 'build must precede the up').toBeLessThan(upAt);
+  });
+
+  it('gives the explicit build a pull-scale timeout, not the 60s step timeout', () => {
+    // The build pulls the db base image (~GBs cold); 60s is a bandwidth
+    // lottery. Same 600s budget as pullComposeImages.
+    const buildAt = fnBody.indexOf('build db');
+    const window = fnBody.slice(buildAt, buildAt + 400);
+    expect(window).toMatch(/timeout:\s*600_000/);
+  });
+
+  it('the up keeps the extracted-flag invocation byte-compatible plus --no-build only', () => {
+    // The 2026-08-06 config-hash lesson above still binds: same flag set,
+    // same file order. --no-build changes create behaviour, not the rendered
+    // config, so the hash contract survives.
+    expect(fnBody).toMatch(
+      /docker compose \$FLAGS -f docker-compose\.replication\.yml up -d --no-build db/,
+    );
   });
 });
