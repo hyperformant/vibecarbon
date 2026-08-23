@@ -46,9 +46,18 @@ describe('git hooks', () => {
  * `prepublishOnly` ran the whole unit suite + lint, and `npm publish` fires it
  * — so semantic-release hit it too. Release run 32607476095 got past the git
  * hook (guarded above) and died here instead, on
- * tests/unit/e2e/staging-ca-trust.test.ts: that test reads AMBIENT
- * NODE_EXTRA_CA_CERTS, npm's lifecycle sets it, and the "merge rather than
- * clobber" branch fired. Green in test.yml on the identical commit.
+ * tests/unit/e2e/staging-ca-trust.test.ts — three tests that were GREEN in
+ * test.yml on the identical commit.
+ *
+ * WHY they failed there is NOT established. The obvious theory — that the test
+ * reads ambient NODE_EXTRA_CA_CERTS and npm's lifecycle sets it — was tested
+ * on 2026-08-23 and DISPROVED: the suite passes with that variable set. Some
+ * other difference in npm's lifecycle context is responsible and nobody has
+ * isolated it. Recorded as unknown rather than guessed, because it was guessed
+ * confidently once already.
+ *
+ * The guard stands either way: the gate should not run there whatever the
+ * cause, since test.yml already proved that commit green.
  *
  * Any lifecycle script that runs the suite must skip under CI, for the same
  * reason the hooks must: release.yml already refuses to publish unless

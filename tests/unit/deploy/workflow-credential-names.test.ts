@@ -66,6 +66,36 @@ describe('workflow credential names', () => {
     expect(violations).toEqual([]);
   });
 
+  /**
+   * ghcr logins must agree ACROSS workflows, not just within one.
+   *
+   * image-ref.test.ts pins sameness, but reads only publish-images.yml — so
+   * publish-db-image.yml could drift onto a different credential and stay
+   * green. Found 2026-08-23 when a mutation aimed at that file failed to fail:
+   * a mutation that does not apply proves nothing, and chasing why exposed the
+   * gap. This walks every workflow.
+   */
+  it('every ghcr login across ALL workflows uses one credential', () => {
+    const creds = new Map<string, string[]>();
+    for (const file of workflowFiles()) {
+      const text = readFileSync(join(WORKFLOWS, file), 'utf-8');
+      for (const m of text.matchAll(
+        /registry:\s*ghcr\.io[\s\S]{0,200}?password:\s*\$\{\{\s*secrets\.(\w+)\s*\}\}/g,
+      )) {
+        const list = creds.get(m[1]) ?? [];
+        list.push(file);
+        creds.set(m[1], list);
+      }
+    }
+    const summary = [...creds].map(
+      ([cred, files]) => `${cred} (${[...new Set(files)].join(', ')})`,
+    );
+    expect(
+      creds.size,
+      `ghcr logins disagree across workflows: ${summary.join(' vs ')}`,
+    ).toBeLessThanOrEqual(1);
+  });
+
   it('the census actually looks at workflows (never vacuously green)', () => {
     const files = workflowFiles();
     expect(files.length).toBeGreaterThan(0);
