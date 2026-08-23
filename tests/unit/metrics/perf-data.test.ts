@@ -331,7 +331,7 @@ describe('renderUnifiedPerfTableMd', () => {
   it('renders CLI-command column headers', () => {
     const md = renderUnifiedPerfTableMd(fixtureData());
     expect(md.split('\n')[0]).toBe(
-      '| Provider | Scenario | Cold `deploy` | Warm `deploy` | `backup` | `restore` | `scale` | `destroy` |',
+      '| Provider | Scenario | Cold `deploy` | Warm `deploy` | `backup` | `restore` | `scale` | `destroy` | `failover` |',
     );
   });
 
@@ -367,13 +367,13 @@ describe('renderUnifiedPerfTableMd', () => {
     const md = renderUnifiedPerfTableMd(fixtureData());
     const lines = md.split('\n');
     expect(lines).toContain(
-      '| Hetzner Cloud | `compose` | 4m 42s | 29.4s | 13.3s | 4m 56s | 4m 41s | 39.4s |',
+      '| Hetzner Cloud | `compose` | 4m 42s | 29.4s | 13.3s | 4m 56s | 4m 41s | 39.4s | — |',
     );
     expect(lines).toContain(
-      '| Vultr | `compose` | 6m 43s | 29.4s | 13.3s | 4m 56s | 4m 41s | 39.4s |',
+      '| Vultr | `compose` | 6m 43s | 29.4s | 13.3s | 4m 56s | 4m 41s | 39.4s | — |',
     );
     expect(lines).toContain(
-      '| Linode | `compose` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |',
+      '| Linode | `compose` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |',
     );
   });
 
@@ -382,7 +382,7 @@ describe('renderUnifiedPerfTableMd', () => {
     delete data.providers.vultr.scenarios.compose['warm-deploy'];
     const md = renderUnifiedPerfTableMd(data);
     expect(md.split('\n')).toContain(
-      '| Vultr | `compose` | 6m 43s | — | 13.3s | 4m 56s | 4m 41s | 39.4s |',
+      '| Vultr | `compose` | 6m 43s | — | 13.3s | 4m 56s | 4m 41s | 39.4s | — |',
     );
   });
 
@@ -560,5 +560,49 @@ describe('published numbers prefer the CLI wall over the step wall (2026-08-23)'
     const k8s = data?.scenarios.k8s as Record<string, number>;
     expect(k8s['warm-deploy'], 'cli wall must win when recorded').toBe(6_200);
     expect(k8s.deploy, 'steps without substeps keep the step wall').toBe(120_000);
+  });
+});
+
+describe('failover is a published column (2026-08-23)', () => {
+  /**
+   * The site's vendor matrix shipped a failover tab typed and waiting
+   * ("Not emitted by CI yet" — vendor-matrix.tsx), and the launch rule pins
+   * HA/failover claims to the latest green matrix. The emission side was the
+   * only missing piece: `failover` was not a curated PERF_TABLE_ROWS step, so
+   * green HA runs measured it and the publisher dropped it.
+   */
+  it('collects the failover step duration for HA modes', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    for (const mode of HETZNER_MODES) {
+      const scenarioId = randomUUID();
+      db.createScenario({
+        id: scenarioId,
+        runId,
+        mode,
+        dnsProvider: 'manual',
+        domain: `${mode}.example.test`,
+        features: [],
+        projectName: `hetzner-${mode}`,
+        envPrefix: 'e1',
+        provider: 'hetzner',
+      });
+      const steps = mode.endsWith('-ha') ? [...CURATED_STEPS, 'failover'] : [...CURATED_STEPS];
+      for (const step of steps) {
+        const stepId = randomUUID();
+        db.createStep({ id: stepId, scenarioId, name: step, command: step });
+        db.startStep(stepId);
+        db.completeStep(stepId, 'pass', step === 'failover' ? 95_000 : 60_000);
+      }
+      db.updateScenarioStatus(scenarioId, 'pass');
+    }
+    db.completeRun(runId, 'pass');
+
+    const data = collectProviderRunData(db, runId, 'hetzner', { origin: 'test' });
+    if (!data) throw new Error('expected provider run data');
+    expect((data.scenarios['compose-ha'] as Record<string, number>).failover).toBe(95_000);
+    expect((data.scenarios['k8s-ha'] as Record<string, number>).failover).toBe(95_000);
+    // Non-HA modes simply have no failover cell — never a zero.
+    expect((data.scenarios.compose as Record<string, number>).failover).toBeUndefined();
   });
 });

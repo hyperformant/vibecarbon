@@ -141,7 +141,7 @@ function normalizeProviderName(name: string): string {
   return name.trim();
 }
 
-function extractReadmeGrid(text: string): Record<string, Set<string>> {
+function _extractReadmeGrid(text: string): Record<string, Set<string>> {
   const codeToName: Record<string, string> = {};
   for (const m of text.matchAll(/CLI --> (\w+)\["([a-z0-9-]+)</g)) {
     codeToName[m[1]] = m[2];
@@ -159,7 +159,7 @@ function extractReadmeGrid(text: string): Record<string, Set<string>> {
   return modeToProviders;
 }
 
-function extractLaunchAssetsGrid(text: string): Record<string, Set<string>> {
+function _extractLaunchAssetsGrid(text: string): Record<string, Set<string>> {
   const lines = text.split('\n');
   const headerIdx = lines.findIndex((l) => /\|\s*Deploy mode\s*\|/.test(l));
   const header = lines[headerIdx]

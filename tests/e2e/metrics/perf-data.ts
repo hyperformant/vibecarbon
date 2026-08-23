@@ -189,6 +189,8 @@ const CLI_COLUMN_HEADERS: Record<string, string> = {
   restore: '`restore`',
   scale: '`scale`',
   destroy: '`destroy`',
+  // One-command role flip (HA modes only; other rows render an em-dash).
+  failover: '`failover`',
 };
 
 /** One markdown table row; an empty cell renders as `| |` (group continuation). */

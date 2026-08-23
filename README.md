@@ -222,21 +222,21 @@ Real numbers, not estimates. Every cell is wall-clock time for the CLI command i
 The rows are every provider and deploy scenario the CLI supports. An absent row means that scenario is not offered on that provider yet; _pending_ means it ships but has no measured CI baseline yet. The numbers refresh automatically from each provider's next green CI run.
 
 <!-- BEGIN:perf-table -->
-| Provider | Scenario | Cold `deploy` | Warm `deploy` | `backup` | `restore` | `scale` | `destroy` |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Hetzner Cloud | `compose` | 4m 42s | 29.4s | 13.3s | 4m 56s | 4m 41s | 39.4s |
-| | `compose-ha` | 6m 16s | 2m 15s | 13.0s | 6m 36s | 4m 37s | 38.1s |
-| | `k8s` | 8m 33s | 11.5s | 31.8s | 18m 6s | 3m 0s | 2m 29s |
-| | `k8s-ha` | 9m 16s | 1m 21s | 30.9s | 11m 24s | 5m 18s | 2m 16s |
-| DigitalOcean | `compose` | 8m 7s | 1m 22s | 2.6s | 8m 53s | 7m 12s | 38.5s |
-| | `compose-ha` | 10m 49s | 2m 25s | 3.1s | 11m 48s | 7m 43s | 41.2s |
-| | `k8s` | 8m 10s | 2m 6s | 27.3s | 10m 0s | 4m 46s | 1m 57s |
-| Linode | `compose` | 7m 38s | 1m 4s | 2.8s | 8m 27s | 7m 43s | 31.1s |
-| | `compose-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| Vultr | `compose` | 4m 39s | 58.7s | 2m 4s | 4m 52s | 4m 59s | 38.8s |
-| | `compose-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| Scaleway | `compose` | 7m 1s | 1m 21s | 6.4s | 7m 37s | 5m 16s | 47.2s |
-| | `compose-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| Provider | Scenario | Cold `deploy` | Warm `deploy` | `backup` | `restore` | `scale` | `destroy` | `failover` |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Hetzner Cloud | `compose` | 4m 42s | 29.4s | 13.3s | 4m 56s | 4m 41s | 39.4s | — |
+| | `compose-ha` | 6m 16s | 2m 15s | 13.0s | 6m 36s | 4m 37s | 38.1s | — |
+| | `k8s` | 8m 33s | 11.5s | 31.8s | 18m 6s | 3m 0s | 2m 29s | — |
+| | `k8s-ha` | 9m 16s | 1m 21s | 30.9s | 11m 24s | 5m 18s | 2m 16s | — |
+| DigitalOcean | `compose` | 8m 7s | 1m 22s | 2.6s | 8m 53s | 7m 12s | 38.5s | — |
+| | `compose-ha` | 10m 49s | 2m 25s | 3.1s | 11m 48s | 7m 43s | 41.2s | — |
+| | `k8s` | 8m 10s | 2m 6s | 27.3s | 10m 0s | 4m 46s | 1m 57s | — |
+| Linode | `compose` | 7m 38s | 1m 4s | 2.8s | 8m 27s | 7m 43s | 31.1s | — |
+| | `compose-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| Vultr | `compose` | 4m 39s | 58.7s | 2m 4s | 4m 52s | 4m 59s | 38.8s | — |
+| | `compose-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| Scaleway | `compose` | 7m 1s | 1m 21s | 6.4s | 7m 37s | 5m 16s | 47.2s | — |
+| | `compose-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 
 _Latest green CI runs: Hetzner Cloud `08adda6` (2026-08-13) · DigitalOcean `fd40094` (2026-08-15) · Linode `97bfdbc` (2026-08-15) · Vultr `d0a663c` (2026-08-15) · Scaleway `c335aaf` (2026-08-15) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->

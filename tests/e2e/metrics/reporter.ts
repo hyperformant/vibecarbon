@@ -502,6 +502,13 @@ export const PERF_TABLE_ROWS: PerfRow[] = [
   // `final-destroy`. final-destroy is the post-restore test cleanup and
   // doesn't reflect what a user experiences.
   { header: 'Destroy', step: 'destroy' },
+  // HA modes only — the one-command role flip a customer runs in an incident.
+  // Non-HA scenarios never record this step, so their cells render empty
+  // rather than zero. The site's vendor-matrix failover tab sat on "Coming
+  // soon" until this row existed: the tab was typed and waiting, the data
+  // byte-syncs from perf-data.json, and emission was the only missing piece
+  // (launch rule: HA/failover claims pin to the latest green matrix).
+  { header: 'Failover', step: 'failover' },
 ];
 
 // Anomaly guard knobs (Option A). A green-but-slow matrix run — Hetzner

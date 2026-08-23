@@ -388,7 +388,7 @@ describe('transient-classifier census', () => {
       const site = sites.find((s) => keyOf(s) === keyOf(row));
       expect(site, `registered http-status-set not detected: ${keyOf(row)}`).toBeDefined();
       expect(
-        statusFloorViolations(site!.window),
+        statusFloorViolations(site?.window),
         `${keyOf(row)} treats these statuses as fatal while sibling classifiers retry them ` +
           '(the exact drift that shipped 500-as-fatal and then 429-as-fatal in s3-base):',
       ).toEqual([]);
@@ -405,8 +405,8 @@ describe('transient-classifier census', () => {
         site,
         `registered network-wording classifier not detected: ${keyOf(row)}`,
       ).toBeDefined();
-      if (!TIMEOUT_VOCAB.test(site!.window)) violations.push(`${keyOf(row)} — no timeout wording`);
-      if (!DROP_VOCAB.test(site!.window))
+      if (!TIMEOUT_VOCAB.test(site?.window)) violations.push(`${keyOf(row)} — no timeout wording`);
+      if (!DROP_VOCAB.test(site?.window))
         violations.push(`${keyOf(row)} — no connection-drop wording`);
     }
     expect(
@@ -420,7 +420,7 @@ describe('transient-classifier census', () => {
     for (const row of REGISTRY.filter((r) => r.domain === 'drop-wording-only')) {
       const site = sites.find((s) => keyOf(s) === keyOf(row));
       expect(site, `not detected: ${keyOf(row)}`).toBeDefined();
-      expect(DROP_VOCAB.test(site!.window), `${keyOf(row)} — no connection-drop wording`).toBe(
+      expect(DROP_VOCAB.test(site?.window), `${keyOf(row)} — no connection-drop wording`).toBe(
         true,
       );
     }
