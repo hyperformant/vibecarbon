@@ -741,9 +741,27 @@ async function runStorageChecks(
 
     if (!res.ok) {
       const body = await res.text();
+      // DIAGNOSTIC RETRY — NOT AN ABSORBER (same contract as the download
+      // leg above). 2026-08-23 run 32646830369: upload and download passed,
+      // then this DELETE got a bare storage-api 500 — the same hetzner
+      // object-storage degradation family the registry-500 RCA documented.
+      // One 5xx tells us nothing about blip-vs-broken, so probe once after
+      // 2s and FAIL EITHER WAY with the mode named.
+      let retryNote = '';
+      if (res.status >= 500) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const again = await safeFetch(objectUrl, { method: 'DELETE', headers: authHeaders });
+          retryNote = again.ok
+            ? ' S3-BACKEND BLIP: the identical delete succeeded on a 2s-later retry — transient backend error, not a broken delete path.'
+            : ` Retry after 2s also failed (${again.status}) — the delete path itself is failing.`;
+        } catch (retryErr) {
+          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
+        }
+      }
       results.push(
         result('storage_delete', 'fail', deleteStart, {
-          errorMessage: `Delete returned ${res.status}: ${body}`,
+          errorMessage: `Delete returned ${res.status}: ${body}${retryNote}`,
         }),
       );
     } else {
