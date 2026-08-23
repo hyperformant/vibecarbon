@@ -190,6 +190,13 @@ jobs:
           # Via env, never interpolated into the script body — a secret on a
           # shell command line is a secret in the process table.
           VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          # Pulumi downloads third-party provider plugins (vultr, linode) from
+          # github:// servers. Unauthenticated, that shares the runner IP's
+          # 60/hr GitHub API budget with every other tenant — run 32614839037's
+          # vultr leg died at provision on "failed all 5 attempts" downloading
+          # pulumi-resource-vultr v2.27.1 while the release itself was fine.
+          # Pulumi honors GITHUB_TOKEN for exactly this.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p ~/.vibecarbon
           umask 177
@@ -508,6 +515,13 @@ jobs:
       - name: Materialize license
         env:
           VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          # Pulumi downloads third-party provider plugins (vultr, linode) from
+          # github:// servers. Unauthenticated, that shares the runner IP's
+          # 60/hr GitHub API budget with every other tenant — run 32614839037's
+          # vultr leg died at provision on "failed all 5 attempts" downloading
+          # pulumi-resource-vultr v2.27.1 while the release itself was fine.
+          # Pulumi honors GITHUB_TOKEN for exactly this.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
             echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — the pre-commit unit suite cannot run."
@@ -529,4 +543,11 @@ jobs:
           # file the step above materialized. Run 32309395314's perf publish
           # died on 131 integration failures for want of exactly this line.
           VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          # Pulumi downloads third-party provider plugins (vultr, linode) from
+          # github:// servers. Unauthenticated, that shares the runner IP's
+          # 60/hr GitHub API budget with every other tenant — run 32614839037's
+          # vultr leg died at provision on "failed all 5 attempts" downloading
+          # pulumi-resource-vultr v2.27.1 while the release itself was fine.
+          # Pulumi honors GITHUB_TOKEN for exactly this.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx tsx tests/e2e/metrics/publish-perf-pr.ts ci-results/
