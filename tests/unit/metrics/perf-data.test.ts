@@ -606,3 +606,40 @@ describe('failover is a published column (2026-08-23)', () => {
     expect((data.scenarios.compose as Record<string, number>).failover).toBeUndefined();
   });
 });
+
+it('SUMS multiple cli.*.total substeps on one step — restore runs re-deploy THEN restore', () => {
+  const db = new E2EDb(':memory:');
+  const runId = createTestRun(db);
+  let restoreStepId = '';
+  for (const mode of HETZNER_MODES) {
+    const scenarioId = randomUUID();
+    db.createScenario({
+      id: scenarioId,
+      runId,
+      mode,
+      dnsProvider: 'manual',
+      domain: `${mode}.example.test`,
+      features: [],
+      projectName: `hetzner-${mode}`,
+      envPrefix: 'e1',
+      provider: 'hetzner',
+    });
+    for (const step of CURATED_STEPS) {
+      const stepId = randomUUID();
+      db.createStep({ id: stepId, scenarioId, name: step, command: step });
+      db.startStep(stepId);
+      db.completeStep(stepId, 'pass', 900_000);
+      if (mode === 'compose' && step === 'restore') restoreStepId = stepId;
+    }
+    db.updateScenarioStatus(scenarioId, 'pass');
+  }
+  // A customer's restore-from-nothing is BOTH commands, sequentially.
+  db.recordPerfSubsteps(restoreStepId, [
+    { name: 'cli.deploy.total', ms: 300_000 },
+    { name: 'cli.restore.total', ms: 20_000 },
+  ]);
+  db.completeRun(runId, 'pass');
+  const data = collectProviderRunData(db, runId, 'hetzner', { origin: 'test' });
+  if (!data) throw new Error('expected provider run data');
+  expect((data.scenarios.compose as Record<string, number>).restore).toBe(320_000);
+});

@@ -2,42 +2,44 @@
   "providers": {
     "hetzner": {
       "run": {
-        "id": "08adda6",
-        "date": "2026-08-13",
+        "id": "a0fc2ef",
+        "date": "2026-08-23",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 282000,
-          "warm-deploy": 29400,
-          "backup": 13300,
-          "restore": 296000,
-          "scale": 281000,
-          "destroy": 39400
+          "deploy": 290787,
+          "warm-deploy": 15825,
+          "scale": 260461,
+          "backup": 26361,
+          "destroy": 24868,
+          "restore": 267642
         },
         "compose-ha": {
-          "deploy": 376000,
-          "warm-deploy": 135000,
-          "backup": 13000,
-          "restore": 396000,
-          "scale": 277000,
-          "destroy": 38100
+          "deploy": 428086,
+          "warm-deploy": 126793,
+          "scale": 278600,
+          "backup": 12047,
+          "destroy": 42768,
+          "restore": 428353,
+          "failover": 36818
         },
         "k8s": {
-          "deploy": 513000,
-          "warm-deploy": 11500,
-          "backup": 31800,
-          "restore": 1086000,
-          "scale": 180000,
-          "destroy": 149000
+          "deploy": 429499,
+          "warm-deploy": 6821,
+          "scale": 153473,
+          "backup": 29060,
+          "destroy": 115025,
+          "restore": 928609
         },
         "k8s-ha": {
-          "deploy": 556000,
-          "warm-deploy": 81000,
-          "backup": 30900,
-          "restore": 684000,
-          "scale": 318000,
-          "destroy": 136000
+          "deploy": 580275,
+          "warm-deploy": 41084,
+          "scale": 333217,
+          "backup": 27524,
+          "destroy": 124735,
+          "restore": 812686,
+          "failover": 176998
         }
       }
     },
@@ -76,52 +78,79 @@
     },
     "linode": {
       "run": {
-        "id": "97bfdbc",
-        "date": "2026-08-15",
+        "id": "d85ff7a",
+        "date": "2026-08-23",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 457629,
-          "warm-deploy": 63880,
-          "scale": 463206,
-          "backup": 2845,
-          "destroy": 31123,
-          "restore": 506812
+          "deploy": 466163,
+          "warm-deploy": 14930,
+          "scale": 419226,
+          "backup": 2144,
+          "destroy": 28561,
+          "restore": 480350
+        },
+        "compose-ha": {
+          "deploy": 605930,
+          "warm-deploy": 50208,
+          "scale": 446283,
+          "backup": 1716,
+          "destroy": 30477,
+          "restore": 671376,
+          "failover": 49137
         }
       }
     },
     "vultr": {
       "run": {
-        "id": "d0a663c",
-        "date": "2026-08-15",
+        "id": "59915e3",
+        "date": "2026-08-23",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 279428,
-          "warm-deploy": 58687,
-          "scale": 299321,
-          "backup": 124403,
-          "destroy": 38753,
-          "restore": 291608
+          "deploy": 308319,
+          "warm-deploy": 15276,
+          "scale": 545988,
+          "backup": 4197,
+          "destroy": 39157,
+          "restore": 668308
+        },
+        "compose-ha": {
+          "deploy": 659449,
+          "warm-deploy": 77028,
+          "scale": 577824,
+          "backup": 5345,
+          "destroy": 46400,
+          "restore": 650075,
+          "failover": 49016
         }
       }
     },
     "scaleway": {
       "run": {
-        "id": "c335aaf",
-        "date": "2026-08-15",
+        "id": "6ce67f3",
+        "date": "2026-08-23",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 421111,
-          "warm-deploy": 80749,
-          "scale": 315953,
-          "backup": 6397,
-          "destroy": 47200,
-          "restore": 456959
+          "deploy": 435802,
+          "warm-deploy": 30666,
+          "scale": 333137,
+          "backup": 5241,
+          "destroy": 55061,
+          "restore": 449794
+        },
+        "compose-ha": {
+          "deploy": 674560,
+          "warm-deploy": 179048,
+          "scale": 277499,
+          "backup": 4140,
+          "destroy": 79752,
+          "restore": 738877,
+          "failover": 63572
         }
       }
     }

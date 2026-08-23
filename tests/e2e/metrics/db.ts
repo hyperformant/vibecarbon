@@ -442,11 +442,12 @@ export class E2EDb {
     `);
 
     this.selectCliWallsByRun = this.db.prepare(`
-      SELECT p.step_id as step_id, p.duration_ms as duration_ms
+      SELECT p.step_id as step_id, SUM(p.duration_ms) as duration_ms
       FROM perf_substep p
       JOIN steps s ON p.step_id = s.id
       JOIN scenarios sc ON s.scenario_id = sc.id
       WHERE sc.run_id = ? AND p.name LIKE 'cli.%.total'
+      GROUP BY p.step_id
     `);
 
     this.selectStepTrends = this.db.prepare(`
