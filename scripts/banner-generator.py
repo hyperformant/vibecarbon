@@ -6,7 +6,7 @@ theme token block below. Their geometry is byte-identical.
 
 WHY THIS SCRIPT EXISTS
   The banner's text is baked into <path> outlines, not <text> elements, so a
-  copy change (headline, subhead, chip labels) CANNOT be hand-edited in the SVG
+  copy change (headline, chip labels) CANNOT be hand-edited in the SVG
   — edit COPY below and re-run this. Outlining is deliberate: GitHub renders
   README SVGs inside <img>, where a font-family would resolve against whatever
   fonts the *viewer* has, shifting advance widths and breaking the text-sized
@@ -66,12 +66,8 @@ JBM = FONT_DIR / "jbm.ttf"
 # ---------------------------------------------------------------- copy
 # The only strings in the artwork. Everything else is geometry.
 HEAD_A, HEAD_B = "Idea", "production SaaS"       # joined by the drawn arrow
-SUB_A = "Launch in minutes with auth, billing, email, templates, and more."
-SUB_B = "Deploy, scale, backup, restore, and failover with simple commands."
 CHIPS = ["compose", "compose-ha", "k8s", "k8s-ha"]
-ALT = ("Vibecarbon - Idea to production SaaS. Launch in minutes with auth, "
-       "billing, email, templates, and more. Deploy, scale, backup, restore, "
-       "and failover with simple commands. Deployment modes: compose, "
+ALT = ("Vibecarbon - Idea to production SaaS. Deployment modes: compose, "
        "compose-ha, k8s, k8s-ha.")
 
 # ---------------------------------------------------------------- theme tokens
@@ -105,8 +101,6 @@ MARK_H = 176                  # mark height; the stacked wordmark shares its col
 MARK_WORD_GAP = 16            # mark -> wordmark; tighter than GAP_ELEM, they are one lockup
 WORD_W_RATIO = 1.4            # wordmark width relative to mark width
 HEAD_SIZE, HEAD_WGHT, HEAD_TRACK = 72, 650, -0.018
-SUB_SIZE, SUB_WGHT = 24, 400
-SUB_LEAD = 35                 # sub baseline-to-baseline (~1.45 line-height)
 CHIP_SIZE, CHIP_WGHT, CHIP_TRACK = 14, 500, 0.02
 CHIP_H, CHIP_R, CHIP_PAD = 32, 8, 16
 PANEL_R = 16
@@ -392,13 +386,11 @@ def build(theme, logo, head_size=None, left=None):
     # ---- vertical rhythm of the copy block, centred as one unit
     f, upem = load(NOTO, HEAD_WGHT)[0], load(NOTO, HEAD_WGHT)[1]
     cap, xh = f["OS/2"].sCapHeight / upem, f["OS/2"].sxHeight / upem
-    head_cap, sub_cap = cap * head_size, cap * SUB_SIZE
-    block = head_cap + GAP_ELEM + sub_cap + SUB_LEAD + GAP_ELEM + CHIP_H
+    head_cap = cap * head_size
+    block = head_cap + GAP_ELEM + CHIP_H
     top = (H - block) / 2
     head_base = round(top + head_cap)
-    sub_base = round(head_base + GAP_ELEM + sub_cap)
-    sub2_base = sub_base + SUB_LEAD
-    chip_top = round(sub2_base + GAP_ELEM)
+    chip_top = round(head_base + GAP_ELEM)
 
     # ---- horizontal: column | hairline rule | copy, 48 either side of the rule
     rule_x = round(col_x + col_w + GAP_SECTION)
@@ -414,9 +406,6 @@ def build(theme, logo, head_size=None, left=None):
     b_x = arrow_x + arrow_len + arrow_pad
     b_d, b_adv = outline(HEAD_B, NOTO, HEAD_WGHT, head_size, b_x, head_base, HEAD_TRACK)
     head_right = b_x + b_adv
-
-    s_d, s_adv = outline(SUB_A, NOTO, SUB_WGHT, SUB_SIZE, text_x, sub_base)
-    s2_d, s2_adv = outline(SUB_B, NOTO, SUB_WGHT, SUB_SIZE, text_x, sub2_base)
 
     # ---- chips: one shared baseline, centred on the whole row's ink
     chips, cx = [], text_x
@@ -493,8 +482,6 @@ def build(theme, logo, head_size=None, left=None):
                 fmt(arrow_x + arrow_len), fmt(arrow_y),
                 fmt(arrow_x + arrow_len - arrow_head), fmt(arrow_y + arrow_head),
                 accent, fmt(sw)))
-    o.append('<path fill="%s" d="%s%s"/>' % (t["muted"], s_d, s2_d))
-
     for cx0, cw, _, _ in chips:
         o.append('<rect x="%s" y="%s" width="%s" height="%s" rx="%s" stroke="%s" '
                  'stroke-opacity="%s" stroke-width="%s" fill="none"/>'
@@ -511,15 +498,15 @@ def build(theme, logo, head_size=None, left=None):
 
     m = dict(col=(col_x, col_x + col_w), col_y=(col_y, col_y + col_h), rule=rule_x,
              text_x=text_x, mark_w=mark_w, word_w=word_w, word_h=word_h,
-             head_right=head_right, sub_right=text_x + max(s_adv, s2_adv), chip_right=chip_right,
-             head_base=head_base, sub_base=sub_base, chip_top=chip_top, stroke=sw)
+             head_right=head_right, chip_right=chip_right,
+             head_base=head_base, chip_top=chip_top, stroke=sw)
     return "\n".join(o) + "\n", m
 
 
 def render(theme, logo, head_size=None):
     """Two passes: measure the content, then re-lay it out horizontally centred."""
     _, m = build(theme, logo, head_size)
-    content = max(m["head_right"], m["sub_right"], m["chip_right"], m["col"][1]) - 64
+    content = max(m["head_right"], m["chip_right"], m["col"][1]) - 64
     return build(theme, logo, head_size, left=round((W - content) / 2))
 
 
@@ -536,5 +523,5 @@ if __name__ == "__main__":
     print()
     for k, v in m.items():
         print("  %-11s %s" % (k, v))
-    print("  margins: left %.1f | right: head %.1f  sub %.1f  chips %.1f"
-          % (m["col"][0], W - m["head_right"], W - m["sub_right"], W - m["chip_right"]))
+    print("  margins: left %.1f | right: head %.1f  chips %.1f"
+          % (m["col"][0], W - m["head_right"], W - m["chip_right"]))

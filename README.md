@@ -1,13 +1,13 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-dark.svg">
-    <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-light.svg" alt="Vibecarbon - Idea to production SaaS. Launch in minutes with auth, billing, email, templates, and more. Deploy, scale, backup, restore, and failover with simple commands. Deployment modes: compose, compose-ha, k8s, k8s-ha." width="820" />
+    <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-light.svg" alt="Vibecarbon - Idea to production SaaS. Deployment modes: compose, compose-ha, k8s, k8s-ha." width="820" />
   </picture>
 </p>
 
-<p align="center"><strong>Idea to launch in minutes, with auth, billing, email, templates, and more.</strong></p>
+<p align="center"><strong>Launch in minutes with auth, billing, email, templates, and more.</strong></p>
 
-<p align="center">Advanced DevOps CLI for multiple hosting providers: deploy, scale, backup, restore, and failover with simple commands.</p>
+<p align="center">Deploy, scale, backup, restore, and failover with simple commands.</p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/npm/v/vibecarbon?color=0a7ea4&label=npm" alt="npm version" /></a>
