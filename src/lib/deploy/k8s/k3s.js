@@ -4103,6 +4103,31 @@ export async function applyK3sManifests({
       ],
       { env, description: 'applyK3sManifests: zero app deployment (pilot standby)' },
     );
+
+    // Reap stale worker Node OBJECTS. A pilot standby has minWorkers:0, so
+    // ANY '-worker-' node here is stale by definition — after a failover,
+    // the reconverge deploy demotes the old primary to standby and Pulumi
+    // deletes its worker VMs, but nothing deletes the Kubernetes Node
+    // records those VMs left behind. Run 32620564611 caught
+    // `...-primary-worker-1` still registered on the new standby while the
+    // provider account held zero servers; whether the CCM eventually reaps
+    // it is a race this deploy must not depend on (conditions, not timers).
+    // Fresh standbys list no workers and this is a no-op.
+    const nodesOut = await runKubectlWithRetry(['get', 'nodes', '-o', 'name'], {
+      env,
+      silent: true,
+      description: 'applyK3sManifests: list nodes for stale-worker reap (pilot standby)',
+    });
+    const staleWorkers = String(nodesOut ?? '')
+      .split('\n')
+      .map((l) => l.trim().replace(/^node\//, ''))
+      .filter((n) => n.includes('-worker-'));
+    for (const node of staleWorkers) {
+      await runKubectlWithRetry(['delete', 'node', node, '--ignore-not-found'], {
+        env,
+        description: `applyK3sManifests: reap stale worker Node object ${node} (pilot standby)`,
+      });
+    }
   }
   // 5a. M3 Task 9c: provider-conditional S3-egress VPC CIDR allowance.
   //     MUST run before the registry-pod readiness wait (5b' below) — on

@@ -142,11 +142,26 @@ function fakeChild({
   return child;
 }
 
+// `kubectl get nodes -o name` answer for the stale-worker reap (pilot
+// standby). Default: no nodes reported — every unrelated test sees an empty
+// cluster and the reap stays a no-op.
+let getNodesOut = '';
+
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
     cmdCalls.push([cmd, ...(args ?? [])]);
     const argv = args ?? [];
     const full = [cmd, ...argv];
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('get') &&
+      argv.includes('nodes') &&
+      argv.includes('-o')
+    ) {
+      return fakeChild({ exitCode: 0, stdout: getNodesOut, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
     if (cmd === 'docker' && argv[0] === 'push') {
       return fakeChild({
         exitCode: pushExit.code,
@@ -504,6 +519,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
 describe('applyK3sManifests pilot-standby role', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
+    getNodesOut = '';
     cmdCalls = [];
     stdinCalls = [];
     pushGate = null;
@@ -512,6 +528,39 @@ describe('applyK3sManifests pilot-standby role', () => {
     webhookWaitExit = 0;
     installSpawnMock();
     resetAdminUserMock();
+  });
+
+  it('reaps stale -worker- Node objects on the pilot standby (run 32620564611)', async () => {
+    // Post-failover reconverge: minWorkers:0 makes Pulumi delete the demoted
+    // primary's worker VMs, but nothing deleted their k8s Node OBJECTS — the
+    // first rerun night caught `...-primary-worker-1` still registered while
+    // the account held zero servers. On a pilot standby ANY '-worker-' node
+    // is stale by definition; reap declaratively, don't race the CCM.
+    const { applyK3sManifests } = await k3sPromise;
+    getNodesOut = 'node/citest-k8s-ha-x-primary-worker-1\nnode/citest-k8s-ha-x-standby-master\n';
+    const projectDir = makeProjectDir({ withStandbyOverlay: true });
+    await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
+    const dels = cmdCalls.filter(
+      (c) => c[0] === 'kubectl' && c.includes('delete') && c.includes('node'),
+    );
+    // ALL delete-node calls, not just the first: a reap whose filter widens
+    // deletes the master as a SECOND call, which a .find()-based assertion
+    // sails past (mutation-verified: filter(() => true) passed that shape).
+    expect(dels, 'exactly one stale worker must be deleted').toHaveLength(1);
+    expect(dels[0]).toContain('citest-k8s-ha-x-primary-worker-1');
+    expect(dels[0]).toContain('--ignore-not-found');
+    expect(JSON.stringify(dels)).not.toContain('standby-master');
+  });
+
+  it('does NOT reap worker nodes on the primary role', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    getNodesOut = 'node/citest-k8s-ha-x-primary-worker-1\n';
+    const projectDir = makeProjectDir();
+    await applyK3sManifests({ ...baseArgs(projectDir) });
+    const del = cmdCalls.find(
+      (c) => c[0] === 'kubectl' && c.includes('delete') && c.includes('node'),
+    );
+    expect(del, 'primary must never reap its live workers').toBeUndefined();
   });
 
   const zeroPatchArgv = (ns: string, name: string) => [
