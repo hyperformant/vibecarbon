@@ -21,6 +21,7 @@ import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
 import { runAppFunctionalChecks } from '../checks/app-functional.js';
 import { runBackupEvidenceChecks } from '../checks/backup-evidence.js';
+import { runClientKeyAgreementCheck } from '../checks/client-key-agreement.js';
 import { resolveComposeFirewallServers, runCloudFirewallChecks } from '../checks/cloud-firewall.js';
 import {
   CONFIG_CANARY_SECRET,
@@ -1933,6 +1934,13 @@ export async function runLifecycle(
         // if no browser binary is available on the runner.
         const frontendResults = await runFrontendSmokeChecks(config.domain);
         allResults.push(...frontendResults);
+
+        // Client/server key agreement — the anon key baked into the served
+        // bundle must be the SAME key the auth checks above just passed.
+        // Closes the vibecarbon.com 2026-08-22 blindspot where every auth
+        // check was green (they use the harness's server-side key) while
+        // every real browser 401'd on a stale baked key.
+        allResults.push(await runClientKeyAgreementCheck(config.domain, supabaseKeys.anonKey));
 
         // Cloud-firewall presence — compose/compose-ha only, verify-deploy only
         // (RCA in checks/cloud-firewall.ts: an empirical experiment proved DO
