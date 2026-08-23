@@ -151,7 +151,7 @@ Both HA modes place the standby in a second region. `-region` sets the primary a
 
 ## Environment Variables
 
-Production requires these environment variables in `.env.production` or your deployment secrets:
+Production requires these environment variables in your project's `.env` file — the file `vibecarbon deploy` ships to the server as the runtime baseline. (`.env.local` never leaves your machine: it holds operator credentials and local-dev overrides. `vibecarbon configure` writes app config to both files, which is why the configure flow is the recommended way to set these.)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
