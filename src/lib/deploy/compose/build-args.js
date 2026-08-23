@@ -22,10 +22,12 @@
  * threw "Missing Supabase environment variables" because the bundle had
  * empty VITE_SUPABASE_URL.
  *
- * Selection rule: every key in .env.local that starts with `VITE_` is
- * pulled through. We further rewrite a couple of values that must differ
- * between local dev and production (mirrors bundle.js's runtime .env
- * rewrites at src/lib/deploy/bundle.js:147-152):
+ * Selection rule: every key starting with `VITE_` is pulled through —
+ * seeded from .env.local, then overridden by any non-empty value in `.env`
+ * (the deploy's server-runtime baseline; client and server must agree on
+ * keys like VITE_SUPABASE_ANON_KEY). We further rewrite a couple of values
+ * that must differ between local dev and production (mirrors bundle.js's
+ * runtime .env rewrites at src/lib/deploy/bundle.js:147-152):
  *   - VITE_PROJECT_NAME: forced to the deploy's projectName (the operator
  *     might have changed it in .env.local during local dev iteration)
  *   - VITE_SUPABASE_URL: rewritten to https://${domain} — production serves
@@ -49,11 +51,25 @@ import { parseDotenv } from '../../shell.js';
 export function collectComposeBuildArgs(cwd, opts = {}) {
   const { projectName, domain } = opts;
   const args = {};
-  const envPath = join(cwd, '.env.local');
+  // .env.local seeds the args, but `.env` overrides it for any key it holds
+  // non-empty: `.env` is the SAME baseline bundle.js ships as the server's
+  // runtime env, and client-baked values like VITE_SUPABASE_ANON_KEY must
+  // agree with the server's JWT secret from that file. (vibecarbon.com
+  // 2026-08-22: an .env.local migrated from another project baked a foreign
+  // anon key while the server ran this project's .env — browser auth 401'd.)
+  // .env.local still fills keys .env lacks, preserving the 2026-05-19 fix.
+  const localPath = join(cwd, '.env.local');
+  if (existsSync(localPath)) {
+    const parsed = parseDotenv(readFileSync(localPath, 'utf-8'));
+    for (const [k, v] of Object.entries(parsed)) {
+      if (k.startsWith('VITE_')) args[k] = v;
+    }
+  }
+  const envPath = join(cwd, '.env');
   if (existsSync(envPath)) {
     const parsed = parseDotenv(readFileSync(envPath, 'utf-8'));
     for (const [k, v] of Object.entries(parsed)) {
-      if (k.startsWith('VITE_')) args[k] = v;
+      if (k.startsWith('VITE_') && v && v.trim() !== '') args[k] = v;
     }
   }
   // Prod rewrites — these must match what bundle.js writes into the

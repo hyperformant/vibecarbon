@@ -110,6 +110,39 @@ describe('collectComposeBuildArgs', () => {
     expect(args.VITE_REDIS_ENABLED).toBe('true');
     expect(args.VITE_PLAUSIBLE_DOMAIN).toBe('myapp.com');
   });
+
+  // The client bundle must agree with the server runtime env: bundle.js ships
+  // `.env` as the server baseline, so build-time VITE_* values must come from
+  // `.env` when it has them. Regression for vibecarbon.com 2026-08-22: an
+  // .env.local migrated from another project baked that project's
+  // VITE_SUPABASE_ANON_KEY into the image while the server ran this project's
+  // JWT secret from .env — every browser auth call answered 401.
+  it('prefers a non-empty .env value over .env.local for the same VITE_ key', () => {
+    writeFileSync(join(tmpDir, '.env'), 'VITE_SUPABASE_ANON_KEY="prod-anon-jwt"\n');
+    writeEnvLocal('VITE_SUPABASE_ANON_KEY="old-project-anon-jwt"\n');
+    const args = collectComposeBuildArgs(tmpDir);
+    expect(args.VITE_SUPABASE_ANON_KEY).toBe('prod-anon-jwt');
+  });
+
+  it('falls back to .env.local for VITE_ keys empty or missing in .env', () => {
+    writeFileSync(
+      join(tmpDir, '.env'),
+      ['VITE_SUPABASE_ANON_KEY=""', 'VITE_PROJECT_NAME="my-app"'].join('\n'),
+    );
+    writeEnvLocal(
+      ['VITE_SUPABASE_ANON_KEY="local-anon-jwt"', 'VITE_N8N_ENABLED="true"'].join('\n'),
+    );
+    const args = collectComposeBuildArgs(tmpDir);
+    expect(args.VITE_SUPABASE_ANON_KEY).toBe('local-anon-jwt'); // empty in .env
+    expect(args.VITE_N8N_ENABLED).toBe('true'); // missing from .env
+    expect(args.VITE_PROJECT_NAME).toBe('my-app');
+  });
+
+  it('collects VITE_ keys from .env alone when no .env.local exists', () => {
+    writeFileSync(join(tmpDir, '.env'), 'VITE_SUPABASE_ANON_KEY="prod-anon-jwt"\n');
+    const args = collectComposeBuildArgs(tmpDir);
+    expect(args.VITE_SUPABASE_ANON_KEY).toBe('prod-anon-jwt');
+  });
 });
 
 describe('buildArgFlags', () => {
