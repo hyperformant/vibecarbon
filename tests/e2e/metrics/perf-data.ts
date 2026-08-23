@@ -106,7 +106,11 @@ export function collectProviderRunData(
     if (!curatedSteps.has(step.name)) continue;
     const mode = scenarioIdToMode.get(step.scenario_id);
     if (!mode) continue;
-    scenarios[mode][step.name] = step.duration_ms;
+    // Prefer the CLI's own wall where the step recorded one: the published
+    // grid describes what a customer experiences, and the step wall carries
+    // harness tail (the 2026-08-23 audit's "11x DO warm-deploy" was 6.2s of
+    // CLI inside a 123.5s step). Steps without substeps keep the step wall.
+    scenarios[mode][step.name] = details.cliWallByStep.get(step.id) ?? step.duration_ms;
   }
 
   const run: PerfRunProvenance = {

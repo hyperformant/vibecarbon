@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { E2EDb } from '../../e2e/metrics/db.js';
 import {
+  collectProviderRunData,
   loadPerfData,
   type PerfData,
   patchInlinePerfMarkers,
@@ -512,5 +513,52 @@ describe('syncCarbonPerfData', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'vc-carbon-data-')), 'vendor-matrix-data.json');
     syncCarbonPerfData(file, fixtureData());
     expect(syncCarbonPerfData(file, fixtureData())).toBe(false);
+  });
+});
+
+describe('published numbers prefer the CLI wall over the step wall (2026-08-23)', () => {
+  /**
+   * The DO k8s warm-deploy "11x outlier" was the harness, not the product:
+   * step wall 123.5s, cli.deploy.total 6.2s — the CLI process lingered after
+   * completing, and the step wall booked that tail as product latency. The
+   * published grid claims to describe what a CUSTOMER experiences, so when a
+   * step recorded the CLI's own wall (perf_substep `cli.<cmd>.total`), that
+   * number wins; the step wall stays the fallback for steps with no substeps.
+   */
+  it('uses cli.*.total when present, step wall otherwise', () => {
+    const db = new E2EDb(':memory:');
+    const runId = createTestRun(db);
+    // The collector requires EVERY configured mode green for the provider.
+    let warmK8sStepId = '';
+    for (const mode of HETZNER_MODES) {
+      const scenarioId = randomUUID();
+      db.createScenario({
+        id: scenarioId,
+        runId,
+        mode,
+        dnsProvider: 'manual',
+        domain: `${mode}.example.test`,
+        features: [],
+        projectName: `hetzner-${mode}`,
+        envPrefix: 'e1',
+        provider: 'hetzner',
+      });
+      for (const step of CURATED_STEPS) {
+        const stepId = randomUUID();
+        db.createStep({ id: stepId, scenarioId, name: step, command: step });
+        db.startStep(stepId);
+        db.completeStep(stepId, 'pass', 120_000); // inflated step wall
+        if (mode === 'k8s' && step === 'warm-deploy') warmK8sStepId = stepId;
+      }
+      db.updateScenarioStatus(scenarioId, 'pass');
+    }
+    db.recordPerfSubsteps(warmK8sStepId, [{ name: 'cli.deploy.total', ms: 6_200 }]);
+    db.completeRun(runId, 'pass');
+
+    const data = collectProviderRunData(db, runId, 'hetzner', { origin: 'test' });
+    expect(data).not.toBeNull();
+    const k8s = data?.scenarios.k8s as Record<string, number>;
+    expect(k8s['warm-deploy'], 'cli wall must win when recorded').toBe(6_200);
+    expect(k8s.deploy, 'steps without substeps keep the step wall').toBe(120_000);
   });
 });

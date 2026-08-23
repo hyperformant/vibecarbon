@@ -139,9 +139,19 @@ export async function spawnAndCapture(
   },
 ): Promise<CliResult> {
   return new Promise((resolveFn) => {
+    // Preload the handle probe into every CLI we spawn: when the process
+    // lingers after its completion banner (the 2026-08-23 audit's k8s
+    // warm-deploy +117s / -purge final-destroy +180s), the probe prints the
+    // handle inventory at loop-drain so the culprit is NAMED in the step's
+    // captured stderr instead of inferred from wall-clock arithmetic.
+    // Appended to any caller-provided NODE_OPTIONS rather than replacing.
+    const probePath = join(__dirname, 'handle-probe.cjs');
+    const nodeOptions = [opts.env?.NODE_OPTIONS, `--require ${probePath}`]
+      .filter(Boolean)
+      .join(' ');
     const child = spawn(bin, argv, {
       cwd: opts.cwd,
-      env: opts.env,
+      env: { ...opts.env, NODE_OPTIONS: nodeOptions },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });

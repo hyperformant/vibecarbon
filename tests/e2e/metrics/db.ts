@@ -151,6 +151,14 @@ export interface RunDetails {
   steps: StepRow[];
   metrics: MetricRow[];
   verifications: VerificationRow[];
+  /**
+   * step_id -> the CLI's own wall (`cli.<cmd>.total` perf substep), where the
+   * step recorded one. The step wall includes harness tail — most visibly the
+   * CLI process lingering after completion on k8s warm deploys (123.5s step
+   * vs 6.2s CLI, DO run 32614839037) — so consumers describing CUSTOMER
+   * latency must prefer this.
+   */
+  cliWallByStep: Map<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +289,7 @@ export class E2EDb {
   private updateStepStart: Database.Statement;
   private updateStepComplete: Database.Statement;
   private selectStepsByScenarios: Database.Statement;
+  private selectCliWallsByRun: Database.Statement;
   private selectStepTrends: Database.Statement;
   private selectColdWarm: Database.Statement;
   private selectLastGreenScenario: Database.Statement;
@@ -430,6 +439,14 @@ export class E2EDb {
       JOIN scenarios sc ON s.scenario_id = sc.id
       WHERE sc.run_id = ?
       ORDER BY s.started_at ASC
+    `);
+
+    this.selectCliWallsByRun = this.db.prepare(`
+      SELECT p.step_id as step_id, p.duration_ms as duration_ms
+      FROM perf_substep p
+      JOIN steps s ON p.step_id = s.id
+      JOIN scenarios sc ON s.scenario_id = sc.id
+      WHERE sc.run_id = ? AND p.name LIKE 'cli.%.total'
     `);
 
     this.selectStepTrends = this.db.prepare(`
@@ -817,8 +834,15 @@ export class E2EDb {
     const steps = this.selectStepsByScenarios.all(runId) as StepRow[];
     const metrics = this.selectMetricsBySteps.all(runId) as MetricRow[];
     const verifications = this.selectVerificationsBySteps.all(runId) as VerificationRow[];
+    const cliWallByStep = new Map<string, number>();
+    for (const row of this.selectCliWallsByRun.all(runId) as Array<{
+      step_id: string;
+      duration_ms: number;
+    }>) {
+      cliWallByStep.set(row.step_id, row.duration_ms);
+    }
 
-    return { run, scenarios, steps, metrics, verifications };
+    return { run, scenarios, steps, metrics, verifications, cliWallByStep };
   }
 
   getStepTrends(stepName: string, limit = 20): StepTrendRow[] {
