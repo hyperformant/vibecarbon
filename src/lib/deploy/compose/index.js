@@ -967,11 +967,23 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
 export async function pullComposeImages(ip, sshKeyPath, projectName, options = {}) {
   const remoteDir = `/opt/${projectName}`;
   const flags = composeFileFlags(options);
+  // The app service must be EXCLUDED from the pre-pull. prod.yml resets its
+  // `build:` (`build: !reset null`), so `--ignore-buildable` does NOT skip it
+  // — and its image is a local-only tag that no registry serves. The first
+  // loud run (linode 32640636398) showed what that does to a plain
+  // `compose pull`: `pull access denied for <project>-app` ABORTS the whole
+  // command and every sibling image logs `Interrupted` — fifteen of them.
+  // The old silencers had been eating exactly this on every compose-ha
+  // deploy, leaving nodes to pull ad-hoc during `up` — the missing-images
+  // family's true origin. Pulling the service LIST minus `app` keeps the
+  // pull loud for real failures while never asking a registry for an image
+  // that only exists in a docker daemon.
   await perfAsync('deploy.compose.imagesPull', () =>
     sshRunAsync(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`,
+      `cd ${remoteDir} && docker compose ${flags} config --services | grep -vx app | ` +
+        `xargs -r docker compose ${flags} pull --policy missing --ignore-buildable 2>&1`,
       { timeout: 600_000 },
     ),
   );

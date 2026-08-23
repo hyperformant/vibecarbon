@@ -35,5 +35,12 @@ describe('pullComposeImages failure contract', () => {
     expect(fnBody, 'pull must not chain fallback pulls').not.toMatch(/pull[^\n]*\|\|[^\n]*pull/);
     expect(fnBody, 'pull must not use ignoreError').not.toMatch(/ignoreError:\s*true/);
     expect(fnBody, 'buildable images are built, never pulled').toMatch(/--ignore-buildable/);
+    // prod.yml resets app's build:, so --ignore-buildable does NOT cover it;
+    // its local-only tag aborts a plain `compose pull` and interrupts every
+    // sibling image (linode 32640636398, fifteen `Interrupted` lines). The
+    // pull must enumerate services minus app.
+    expect(fnBody, 'app must be excluded from the pre-pull').toMatch(
+      /config --services \| grep -vx app/,
+    );
   });
 });
