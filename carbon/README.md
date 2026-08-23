@@ -4,11 +4,14 @@ A full-stack application: a React 19 single-page app, a Hono API, and self-hoste
 
 ## Quick Start
 
+Install the Vibecarbon CLI globally (once), then start everything with a single command:
+
 ```bash
-npx vibecarbon up
+npm install -g vibecarbon
+vibecarbon up
 ```
 
-One command starts the Docker services, runs the database migrations, and launches both dev servers.
+`up` starts the Docker services, runs the database migrations, and launches both dev servers.
 
 | Surface | URL |
 |---------|-----|
@@ -18,7 +21,7 @@ One command starts the Docker services, runs the database migrations, and launch
 | Supabase Studio | http://studio.localhost |
 | Traefik dashboard | http://traefik.localhost |
 
-Sign in with the admin email and password you chose during `npx vibecarbon create`.
+Sign in with the admin email and password you chose during `vibecarbon create`.
 
 ## Tech Stack
 
@@ -177,7 +180,7 @@ supabase/
 ## Deployment
 
 ```bash
-npx vibecarbon deploy
+vibecarbon deploy
 ```
 
 The bare command opens a guided prompt for environment, provider, region, and deploy mode, then provisions the infrastructure, ships the images, and configures TLS. Not every cloud offers every mode:
@@ -232,7 +235,7 @@ DEV_KONG_PORT=8100
 ## Default Credentials
 
 The admin account created during setup:
-- **Email**: (provided during `npx vibecarbon create`)
-- **Password**: (provided during `npx vibecarbon create`)
+- **Email**: (provided during `vibecarbon create`)
+- **Password**: (provided during `vibecarbon create`)
 
 This account has `super_admin` role for accessing `/admin/*` routes.

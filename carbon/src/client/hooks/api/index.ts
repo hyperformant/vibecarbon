@@ -16,4 +16,5 @@ export {
   useDocsVisibility,
   useMfaRequired,
 } from './useAuthSettings';
+export { GITHUB_REPO_URL, gitHubStarsQueryKey, useGitHubStars } from './useGitHubStars';
 export { subscriptionQueryKey, useSubscription } from './useSubscription';

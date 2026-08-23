@@ -79,6 +79,20 @@ describe('isTransientSshCommandError', () => {
     );
   });
 
+  it('classifies an established-session drop — Broken pipe — as transient (2026-08-23 family sweep)', () => {
+    // The kubectl sibling of this classifier missed the `broken pipe`
+    // spelling and a DO restore re-deploy died unretried (run 32659821814).
+    // This classifier's consumers are declared re-runnable, and it already
+    // retries `Connection closed`; `client_loop: send disconnect: Broken
+    // pipe` is the same established-connection-drop class in ssh's own
+    // canonical wording.
+    expect(
+      isTransientSshCommandError(
+        new Error('Command failed: ssh\nclient_loop: send disconnect: Broken pipe'),
+      ),
+    ).toBe(true);
+  });
+
   it('does NOT classify a real remote answer as transient', () => {
     // A missing source file is a real answer, not a blip — retrying it just
     // burns the deploy's clock three times over.

@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 import { twMerge } from 'tailwind-merge';
 import { Nav } from './Nav';
 import { ShimmerBadge } from './ShimmerBadge';
+import { CommandBox } from './WorkflowSection';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -37,7 +38,7 @@ const TerminalWindow = ({ onComplete }: { onComplete: () => void }) => {
   const [spinnerChar, setSpinnerChar] = useState(0);
   const [selectedPm, setSelectedPm] = useState(0);
 
-  const command = 'npx vibecarbon create';
+  const command = 'vibecarbon create';
   const spinnerChars = ['◒', '◐', '◓', '◑'];
   const spinnerSteps = [
     'Creating project structure',
@@ -173,7 +174,7 @@ const TerminalWindow = ({ onComplete }: { onComplete: () => void }) => {
             animate={{ opacity: 1 }}
             className="mt-2 text-muted-foreground"
           >
-            <span className="text-secondary-accent">◆</span> npx vibecarbon create
+            <span className="text-secondary-accent">◆</span> vibecarbon create
           </motion.div>
         )}
 
@@ -527,6 +528,15 @@ export default function Hero() {
             </span>
           </motion.p>
         </div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.8, delay: 0.3 }}
+          className="w-full max-w-md mx-auto mb-10"
+        >
+          <CommandBox command="npm install -g vibecarbon" />
+        </motion.div>
 
         <div className="w-full max-w-3xl relative overflow-visible">
           {/* Ambient glow orb — 3 layers for depth */}

@@ -160,7 +160,7 @@ export function DocsIndex() {
 const PM_OPTIONS: PackageManager[] = ['npm', 'pnpm', 'bun'];
 
 // Docs are authored against npm; only rewrite snippets that actually invoke
-// it. Word-boundary matched so `npx …` and `npm_config_*` are left alone.
+// it. Word-boundary matched so `npm_config_*` and the like are left alone.
 const NPM_INVOCATION = /\bnpm\b/;
 
 function PackageManagerSwitcher({

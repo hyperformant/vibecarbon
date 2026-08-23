@@ -208,6 +208,13 @@ export function isTransientSshCommandError(err) {
     msg.includes('Connection closed') ||
     msg.includes('kex_exchange_identification') ||
     msg.includes('ssh_exchange_identification') ||
+    // Established-session drop, ssh's canonical wording (`client_loop: send
+    // disconnect: Broken pipe`). 2026-08-23 family sweep: the kubectl
+    // classifier missed this spelling and a DO restore re-deploy died
+    // unretried (run 32659821814). Safe here because this classifier's
+    // consumers are re-runnable by contract (see the docblock above) —
+    // the never-started classifier deliberately keeps excluding it.
+    /broken pipe/i.test(msg) ||
     msg.includes('No route to host');
   const isTimeout =
     err?.timedOut === true || /timed out|timeout/i.test(msg) || msg.includes('ETIMEDOUT');

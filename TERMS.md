@@ -2,7 +2,7 @@
 
 **Effective date:** 2026-04-14
 
-These terms govern use of the **Vibecarbon distributed package** (`npx vibecarbon`, `npm install -g vibecarbon`). They do not apply to the CLI source code, which is released under the Functional Source License 1.1 with MIT future license (FSL-1.1-MIT) and may be built and used freely for any non-competing purpose.
+These terms govern use of the **Vibecarbon distributed package** (`npm install -g vibecarbon`, `npx vibecarbon`). They do not apply to the CLI source code, which is released under the Functional Source License 1.1 with MIT future license (FSL-1.1-MIT) and may be built and used freely for any non-competing purpose.
 
 ---
 
@@ -12,7 +12,7 @@ Vibecarbon operates on two parallel tracks:
 
 **Source code (FSL-1.1-MIT):** The CLI source code is Fair Source. Anyone may clone, build, modify, and run Vibecarbon from source for any purpose except offering a product or service that competes with Vibecarbon, at no cost. Each release irrevocably converts to the MIT license two years after publication.
 
-**Distributed package:** The pre-built `npx vibecarbon` package includes license enforcement based on deploy mode, and on deploy mode only. Single-server Docker Compose deploys (including `deploy`, `backup`, `restore`, `failover`, and `scale` on that mode) are free, and `upgrade` is free for every tier. Advanced deploy modes (Compose HA, Kubernetes, Kubernetes HA) require a valid license key. No command requires a license for being that command.
+**Distributed package:** The pre-built `vibecarbon` npm package includes license enforcement based on deploy mode, and on deploy mode only. Single-server Docker Compose deploys (including `deploy`, `backup`, `restore`, `failover`, and `scale` on that mode) are free, and `upgrade` is free for every tier. Advanced deploy modes (Compose HA, Kubernetes, Kubernetes HA) require a valid license key. No command requires a license for being that command.
 
 ---
 

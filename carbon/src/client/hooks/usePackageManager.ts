@@ -59,11 +59,12 @@ export function usePackageManager() {
 }
 
 // Docs are authored against npm (the default for generated projects) and
-// rewritten on the fly for readers who picked pnpm or bun. `npx` is left
-// alone deliberately — it ships with Node, so `npx vibecarbon …` is the one
-// invocation that works for every reader regardless of their choice here.
+// rewritten on the fly for readers who picked pnpm or bun.
 export function replacePackageManager(text: string, pm: PackageManager): string {
   if (pm === 'npm') return text;
+
+  // "npm install -g <pkg>" → the global add for the target manager
+  text = text.replace(/\bnpm install -g\b/g, () => (pm === 'pnpm' ? 'pnpm add -g' : 'bun add -g'));
 
   // "npm run <script>" → "pnpm <script>" / "bun run <script>"
   text = text.replace(/\bnpm run (\S+)/g, (_match, script: string) =>

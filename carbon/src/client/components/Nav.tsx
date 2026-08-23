@@ -5,6 +5,7 @@ import { Link } from 'react-router';
 import { useDocsVisibility } from '@/hooks/api';
 import { cn } from '@/lib/utils';
 import { useAuth } from './auth/AuthProvider';
+import { GitHubStarsButton } from './GitHubStarsButton';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { Wordmark } from './Logo';
 import { Button } from './ui/button';
@@ -52,6 +53,7 @@ export function Nav() {
 
         {/* Desktop nav */}
         <div className="hidden md:flex items-center gap-2">
+          <GitHubStarsButton />
           <LanguageSwitcher />
           {userDocsEnabled && (
             <Button variant="ghost" size="sm" asChild>
@@ -99,6 +101,7 @@ export function Nav() {
           <div className="mx-auto max-w-7xl px-6 py-6 flex flex-col gap-4">
             <div className="flex items-center gap-3">
               <LanguageSwitcher />
+              <GitHubStarsButton />
             </div>
             {userDocsEnabled && (
               <Link

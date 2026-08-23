@@ -9,10 +9,18 @@ order: 1
 - **Node.js 24.15+** ([Download](https://nodejs.org))
 - **Docker** ([Download](https://docker.com/get-started))
 
-## 1. Create Your Project
+## 1. Install the CLI
 
 ```bash
-npx vibecarbon create my-app
+npm install -g vibecarbon
+```
+
+Installing globally puts the `vibecarbon` command on your PATH, so every command below runs natively — no `npx` prefix needed.
+
+## 2. Create Your Project
+
+```bash
+vibecarbon create my-app
 ```
 
 This scaffolds a complete full-stack application. You'll be prompted for an admin email and password. These become your first sign-in credentials.
@@ -31,11 +39,11 @@ Behind the scenes, `create` generates secure secrets, copies the template, insta
 | Languages | Internationalized throughout. English ships; add more with `vibecarbon configure globalization` |
 | Infrastructure | File uploads, background jobs (pg_cron), onboarding wizard, rate limiting |
 
-## 2. Start Developing
+## 3. Start Developing
 
 ```bash
 cd my-app
-npx vibecarbon up
+vibecarbon up
 ```
 
 This single command boots your entire development environment:
@@ -63,7 +71,7 @@ Both default to on. Turn one off and that surface stops serving, and every link 
 
 Before deploying, configure `DOMAIN` in `.env.local` to match your production domain.
 
-## 3. Deploy to Production
+## 4. Deploy to Production
 
 Deploying on a single Docker Compose server is free. Advanced deploy modes require a license key. Vibecarbon has three tiers:
 
@@ -76,8 +84,8 @@ Deploying on a single Docker Compose server is free. Advanced deploy modes requi
 If you're deploying single-server Docker Compose, skip straight to `deploy`; no license needed. Advanced modes need a Fullerene license; activate it first:
 
 ```bash
-npx vibecarbon activate <your-key>
-npx vibecarbon deploy
+vibecarbon activate <your-key>
+vibecarbon deploy
 ```
 
 The bare `deploy` command opens a guided prompt that walks you through environment selection, mode (`compose`, `compose-ha`, `k8s`, or `k8s-ha`), region, and other settings. Behind the scenes it builds your app, pushes container images, and applies your infrastructure configuration. Traefik handles SSL certificates automatically via Let's Encrypt.

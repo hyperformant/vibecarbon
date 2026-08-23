@@ -9,32 +9,32 @@ Guidance for AI coding agents working on this repository.
 Vibecarbon is a CLI tool that generates production-ready software applications with Hono + Vite + React 19 + self-hosted Supabase. The repository contains:
 
 1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`, `activate.js`)
-2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `npx vibecarbon create`
+2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `vibecarbon create`
 3. **Test suite** (`tests/`): Comprehensive Vitest test suite
 
 ### CLI Commands
 ```bash
-npx vibecarbon create <project-name>   # Create new project
-npx vibecarbon add <feature>           # Add optional feature (observability, redis)
-npx vibecarbon remove <feature>        # Remove a feature from project
-npx vibecarbon up                      # Start local dev environment
-npx vibecarbon down                    # Stop local dev environment
-npx vibecarbon reset                   # Reset local environment (removes all data)
-npx vibecarbon deploy [environment]    # Deploy an environment (-provider, -mode <compose|compose-ha|k8s|k8s-ha>, -region, -standby-region, -full, -restore, -allow-degraded)
-npx vibecarbon destroy [environment]   # Tear down cloud environment
-npx vibecarbon status                  # Show project and deployment status
-npx vibecarbon backup [environment]    # Create or list database backups
-npx vibecarbon restore [environment]   # Restore database from backup
-npx vibecarbon failover [environment]  # Initiate failover to standby region (HA deployments)
-npx vibecarbon scale [environment]     # Scale worker nodes and instance sizes
-npx vibecarbon configure               # Configure external services and project settings (billing, OAuth, SMTP, CI/CD, globalization, etc.)
-npx vibecarbon upgrade                 # Upgrade infrastructure files to latest template
-npx vibecarbon activate <key>          # Activate a Fullerene license key
-npx vibecarbon deactivate              # Remove the current license
-npx vibecarbon shell [environment]     # Interactive bash with KUBECONFIG + cloud credentials exported
-npx vibecarbon diagnose [environment]  # Dump full cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
-npx vibecarbon console <node>          # Open the cloud provider's web console for a node
-npx vibecarbon access [subcommand]     # Manage SSH + k8s-API operator-CIDR allowlist
+vibecarbon create <project-name>   # Create new project
+vibecarbon add <feature>           # Add optional feature (observability, redis)
+vibecarbon remove <feature>        # Remove a feature from project
+vibecarbon up                      # Start local dev environment
+vibecarbon down                    # Stop local dev environment
+vibecarbon reset                   # Reset local environment (removes all data)
+vibecarbon deploy [environment]    # Deploy an environment (-provider, -mode <compose|compose-ha|k8s|k8s-ha>, -region, -standby-region, -full, -restore, -allow-degraded)
+vibecarbon destroy [environment]   # Tear down cloud environment
+vibecarbon status                  # Show project and deployment status
+vibecarbon backup [environment]    # Create or list database backups
+vibecarbon restore [environment]   # Restore database from backup
+vibecarbon failover [environment]  # Initiate failover to standby region (HA deployments)
+vibecarbon scale [environment]     # Scale worker nodes and instance sizes
+vibecarbon configure               # Configure external services and project settings (billing, OAuth, SMTP, CI/CD, globalization, etc.)
+vibecarbon upgrade                 # Upgrade infrastructure files to latest template
+vibecarbon activate <key>          # Activate a Fullerene license key
+vibecarbon deactivate              # Remove the current license
+vibecarbon shell [environment]     # Interactive bash with KUBECONFIG + cloud credentials exported
+vibecarbon diagnose [environment]  # Dump full cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
+vibecarbon console <node>          # Open the cloud provider's web console for a node
+vibecarbon access [subcommand]     # Manage SSH + k8s-API operator-CIDR allowlist
 ```
 
 ### `destroy` exit codes
@@ -277,7 +277,7 @@ Generated projects never hit a missing-env wall — `vibecarbon create` writes t
 
 ## Licensing
 
-Two licenses, two scopes. **The source in this repo is FSL-1.1-MIT** (`LICENSE`): clone, build, modify and run it freely for any Permitted Purpose. Editing `src/lib/licensing/` in a source checkout is not a violation — contributors do it routinely. **The distributed package** (`npx vibecarbon`) is governed by `TERMS.md`, which separately prohibits using the paid deploy modes without a valid key, sharing or reselling keys, and removing license enforcement from that package.
+Two licenses, two scopes. **The source in this repo is FSL-1.1-MIT** (`LICENSE`): clone, build, modify and run it freely for any Permitted Purpose. Editing `src/lib/licensing/` in a source checkout is not a violation — contributors do it routinely. **The distributed package** (`vibecarbon`) is governed by `TERMS.md`, which separately prohibits using the paid deploy modes without a valid key, sharing or reselling keys, and removing license enforcement from that package.
 
 Enforcement is by deploy mode, never by command: `PAID_TIERS` in `src/lib/licensing/gate.js` is `compose-ha`/`k8s`/`k8s-ha`, single-server Compose is free, and `isPaidTier()` fails closed. Keys are Ed25519-verified offline in `validator.js` — no activation server, no expiry. Guards live in `tests/unit/licensing/`.
 

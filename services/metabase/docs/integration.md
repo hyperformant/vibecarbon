@@ -6,7 +6,7 @@ Metabase is an open-source business intelligence tool that lets you create dashb
 
 Metabase is **automatically configured** when you start your development environment:
 
-1. **Start services**: `npx vibecarbon up`
+1. **Start services**: `vibecarbon up`
 2. **Access Metabase**: http://metabase.localhost
 3. **Sign in** with your admin email and password
 

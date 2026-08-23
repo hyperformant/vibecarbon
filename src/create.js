@@ -711,7 +711,7 @@ async function bootstrap(cliArgs) {
           `Either upgrade pnpm:\n` +
           `  npm install -g pnpm@latest\n` +
           `or create the project with npm, which needs no install at all:\n` +
-          `  npx vibecarbon create ${projectName} -pm npm`,
+          `  vibecarbon create ${projectName} -pm npm`,
       );
       process.exit(1);
     }

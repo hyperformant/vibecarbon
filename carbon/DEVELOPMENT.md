@@ -16,7 +16,7 @@ pnpm dev    # ensures carbon/'s dev env exists, then runs `vibecarbon up` in car
 
 ## Template Variable System
 
-The CLI replaces placeholders like `{{PROJECT_NAME}}` when users run `npx vibecarbon create`. However, these placeholders cause issues when testing locally because:
+The CLI replaces placeholders like `{{PROJECT_NAME}}` when users run `vibecarbon create`. However, these placeholders cause issues when testing locally because:
 
 1. Services may reject special characters (`{}`) in identifiers
 2. YAML parsers may fail on unquoted template syntax

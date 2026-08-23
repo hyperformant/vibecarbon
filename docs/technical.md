@@ -391,11 +391,11 @@ The first admin user is created during project setup:
 
 ```bash
 # Interactive mode
-npx vibecarbon create
+vibecarbon create
 # You'll be prompted for admin email and password
 
 # Non-interactive mode
-npx vibecarbon create my-app -y \
+vibecarbon create my-app -y \
   -admin-email admin@example.com \
   -admin-password yourpassword123
 ```

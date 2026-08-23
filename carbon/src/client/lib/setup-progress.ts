@@ -151,7 +151,7 @@ const STEP_DEFS: StepDef[] = [
     description: 'Scaffold your app from the starter',
     spotlightDescription: 'Scaffold a new app from the starter.',
     icon: 'sparkles',
-    command: 'npx vibecarbon create my-app',
+    command: 'vibecarbon create my-app',
     done: () => true,
   },
   {

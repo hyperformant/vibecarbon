@@ -43,7 +43,7 @@ export default function Checkout() {
           Your license key will be delivered to your email. Activate it with:
         </p>
         <pre className="mb-8 rounded-xl bg-muted/50 p-4 text-left text-sm text-muted-foreground">
-          <code>npx vibecarbon activate {'<your-key>'}</code>
+          <code>vibecarbon activate {'<your-key>'}</code>
         </pre>
         <Button variant="outline" asChild>
           <Link to="/">Back to Home</Link>

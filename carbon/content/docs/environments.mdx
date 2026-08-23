@@ -9,9 +9,9 @@ order: 8
 Vibecarbon supports multiple named environments. Each environment is an independent deployment with its own infrastructure, database, secrets, and configuration.
 
 ```bash
-npx vibecarbon deploy prod      # Production
-npx vibecarbon deploy staging   # Staging
-npx vibecarbon deploy dev       # Dev / preview
+vibecarbon deploy prod      # Production
+vibecarbon deploy staging   # Staging
+vibecarbon deploy dev       # Dev / preview
 ```
 
 The environment name is free-form, so use any name that fits your workflow. `prod` (and its alias `production`) is the only special name and unlocks production-grade defaults.
@@ -55,20 +55,20 @@ Worker nodes are bounds-controlled at deploy time. The default is `min=1, max=3`
 
 ```bash
 # Pick mode interactively, including k8s/k8s-ha and worker bounds
-npx vibecarbon deploy prod
+vibecarbon deploy prod
 
 # Scripted: explicit mode, region, and skip prompts (hel1 is a Hetzner region)
-npx vibecarbon deploy prod -mode k8s-ha -region hel1 -y
+vibecarbon deploy prod -mode k8s-ha -region hel1 -y
 
 # A new environment on a different cloud (nyc3 is a DigitalOcean region)
-npx vibecarbon deploy staging -provider digitalocean -region nyc3 -mode compose -y
+vibecarbon deploy staging -provider digitalocean -region nyc3 -mode compose -y
 ```
 
 `-provider` selects the cloud for a **new** environment, and `-region` takes that provider's own region ids. An environment keeps the provider it was first deployed with, so later deploys of the same environment don't repeat the flag. See [Choosing a provider](/docs/deployment#choosing-a-provider) for which modes and regions each cloud offers.
 
 Available modes: `compose`, `compose-ha` (multi-region with streaming replication), `k8s`, and `k8s-ha`. `compose` is free on Graphite; `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license. Mode availability varies by provider — `k8s-ha` is Hetzner-only today.
 
-To re-tune bounds or worker server types on an existing cluster, run `npx vibecarbon scale`, and the wizard walks you through what's changeable. Power users can seed a server-type change with `-type`, using an id from that environment's provider catalog (e.g. `npx vibecarbon scale prod -type cx33 -y` on Hetzner).
+To re-tune bounds or worker server types on an existing cluster, run `vibecarbon scale`, and the wizard walks you through what's changeable. Power users can seed a server-type change with `-type`, using an id from that environment's provider catalog (e.g. `vibecarbon scale prod -type cx33 -y` on Hetzner).
 
 ## Backups
 
@@ -76,13 +76,13 @@ Backups run automatically on a schedule that differs by environment:
 
 ```bash
 # Create a manual backup
-npx vibecarbon backup staging
+vibecarbon backup staging
 
 # List backups
-npx vibecarbon backup prod -l
+vibecarbon backup prod -l
 
 # Restore (interactive picker)
-npx vibecarbon restore staging
+vibecarbon restore staging
 ```
 
 See the [Deployment](/docs/deployment) guide for full backup and restore options.
@@ -92,7 +92,7 @@ See the [Deployment](/docs/deployment) guide for full backup and restore options
 To tear down an environment and all its infrastructure:
 
 ```bash
-npx vibecarbon destroy staging
+vibecarbon destroy staging
 ```
 
 This removes the cluster, load balancers, volumes, and DNS records for that environment. Production environments prompt for confirmation before proceeding.

@@ -10,7 +10,7 @@ describe('compose cloud-init user_data', () => {
   const cloudInitPath = join(process.cwd(), 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
 
   it('ships the cloud-init YAML in carbon/cloud-init/', () => {
-    // Must be packaged with the CLI so every `npx vibecarbon deploy` has it.
+    // Must be packaged with the CLI so every `vibecarbon deploy` has it.
     expect(existsSync(cloudInitPath)).toBe(true);
   });
 

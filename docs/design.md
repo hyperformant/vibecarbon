@@ -63,5 +63,5 @@ npx create-vibecarbon@latest [app-name]
 npm run dev:start
 
 # Deploy to production
-npx vibecarbon deploy
+vibecarbon deploy
 ```

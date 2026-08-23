@@ -21,7 +21,7 @@ The observability stack provides:
 Run the following CLI command to add the observability stack:
 
 ```bash
-npx vibecarbon add observability
+vibecarbon add observability
 ```
 
 ### Local Development
@@ -72,7 +72,7 @@ Grafana is protected by the unified admin SSO system using Traefik ForwardAuth.
 
 ### First-Time Setup
 
-When you create a project with `npx vibecarbon create`, you provide an admin email and password. This creates a user in Supabase with `role=super_admin` in their app metadata.
+When you create a project with `vibecarbon create`, you provide an admin email and password. This creates a user in Supabase with `role=super_admin` in their app metadata.
 
 If you try to access Grafana without being logged in, you'll be redirected to the login page.
 

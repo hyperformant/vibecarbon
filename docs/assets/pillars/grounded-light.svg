@@ -1,0 +1,5 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><linearGradient id="vc-pillar-grounded-light" x1="60" y1="0" x2="60" y2="120" gradientUnits="userSpaceOnUse"><stop stop-color="#5EEAD4"/><stop offset="1" stop-color="#0D9488"/></linearGradient></defs>
+<polyline points="21.9,55 21.9,36 60,14 98.1,36 98.1,55" fill="none" stroke="#1C2431" stroke-width="4" stroke-linejoin="miter"/>
+<polygon points="100.1,61 100.1,81.2 60,104.3 19.9,81.2 19.9,61" fill="url(#vc-pillar-grounded-light)"/>
+</svg>

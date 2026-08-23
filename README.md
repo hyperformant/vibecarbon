@@ -36,17 +36,46 @@ Vibecarbon handles Docker Compose and Kubernetes, high availability with one-com
 
 ## Four Commitments, Enforced by Design
 
-**Sovereign** · Privacy within borders
-Full-stack self-contained. Infrastructure, code, data, and integrations under your complete control.
-
-**Agnostic** · Modular and portable
-Swap components, move hosting providers. All the batteries included, but easily changed.
-
-**Grounded** · Rooted in transparency
-Fair Source CLI, Open Source Templates. Everything transparent all the way down.
-
-**Agentic** · AI-native guardrails
-Security and governance built in. Architected for software built by agents.
+<table>
+  <tr>
+    <td align="center" width="25%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/sovereign-dark.svg">
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/sovereign-light.svg" alt="Sovereign" width="96" height="96" />
+      </picture>
+      <br /><strong>Sovereign</strong>
+      <br /><em>Privacy within borders</em>
+      <br />Full-stack self-contained. Infrastructure, code, data, and integrations under your complete control.
+    </td>
+    <td align="center" width="25%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agnostic-dark.svg">
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agnostic-light.svg" alt="Agnostic" width="96" height="96" />
+      </picture>
+      <br /><strong>Agnostic</strong>
+      <br /><em>Modular and portable</em>
+      <br />Swap components, move hosting providers. All the batteries included, but easily changed.
+    </td>
+    <td align="center" width="25%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/grounded-dark.svg">
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/grounded-light.svg" alt="Grounded" width="96" height="96" />
+      </picture>
+      <br /><strong>Grounded</strong>
+      <br /><em>Rooted in transparency</em>
+      <br />Fair Source CLI, Open Source Templates. Everything transparent all the way down.
+    </td>
+    <td align="center" width="25%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agentic-dark.svg">
+        <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/pillars/agentic-light.svg" alt="Agentic" width="96" height="96" />
+      </picture>
+      <br /><strong>Agentic</strong>
+      <br /><em>AI-native guardrails</em>
+      <br />Security and governance built in. Architected for software built by agents.
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -60,18 +89,21 @@ Security and governance built in. Architected for software built by agents.
 - **Linux, macOS, or Windows via [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)**. Native Windows is not supported.
 
 ```bash
+# Install the CLI globally
+npm install -g vibecarbon
+
 # Create a new project
-npx vibecarbon create my-app
+vibecarbon create my-app
 
 # Start local development
 cd my-app
-npx vibecarbon up
+vibecarbon up
 
 # Deploy an environment
-npx vibecarbon deploy
+vibecarbon deploy
 
 # Tear down an environment
-npx vibecarbon destroy
+vibecarbon destroy
 ```
 
 ---
@@ -80,7 +112,7 @@ npx vibecarbon destroy
 
 ```text
 USAGE
-  npx vibecarbon <command> [options]
+  vibecarbon <command> [options]
 
 DEV COMMANDS
   create <project-name>    Create a new Vibecarbon project
@@ -192,7 +224,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 
 ```mermaid
 flowchart LR
-    CLI(["npx vibecarbon deploy"])
+    CLI(["vibecarbon deploy"])
     CLI --> C["compose<br/>one server · free"]
     CLI --> CH["compose-ha<br/>primary + standby · streaming replication"]
     CLI --> K["k8s<br/>k3s cluster · autoscaling workers"]
@@ -265,7 +297,7 @@ _Latest green CI runs: Hetzner Cloud `a0fc2ef` (2026-08-23) · DigitalOcean `fd4
 
 The CLI is Fair Source under the [Functional Source License 1.1 with MIT future license](./LICENSE). **Building from source is free for any non-competing use, and every release converts to the MIT license two years after publication.**
 
-Using the distributed `npx vibecarbon` package requires a license for advanced deploy modes:
+Using the distributed `vibecarbon` package requires a license for advanced deploy modes:
 
 | Tier | Price | Who |
 |------|-------|-----|

@@ -27,7 +27,7 @@ Each environment is bound to one cloud provider, picked the first time you deplo
 `-provider` selects the cloud for a **new** environment; existing environments keep the provider they were first deployed with. It is required alongside `-y` when you create a new environment non-interactively — otherwise the deploy prompt asks. `-region` takes the provider's own region id, so the value is only meaningful next to the provider it belongs to:
 
 ```bash
-npx vibecarbon deploy prod -provider digitalocean -region nyc3 -mode compose -y
+vibecarbon deploy prod -provider digitalocean -region nyc3 -mode compose -y
 ```
 
 Database backups are written to the S3-compatible object storage of the same provider: Hetzner Object Storage, DigitalOcean Spaces, Linode Object Storage, Vultr Object Storage, or Scaleway Object Storage.
@@ -90,10 +90,10 @@ For production deployments with auto-scaling and monitoring (requires a Fulleren
 
 ```bash
 # Bare command opens a guided prompt for env, mode, region, etc.
-npx vibecarbon deploy
+vibecarbon deploy
 
 # Or seed env + mode for a scripted deploy
-npx vibecarbon deploy prod -mode k8s
+vibecarbon deploy prod -mode k8s
 ```
 
 This command:
@@ -119,7 +119,7 @@ k8s/
 
 Worker nodes are bounds-controlled at deploy time. The default is `min=1, max=3` (cluster-autoscaler scales 0..(max-min) workers on top of the static floor). Worker bounds and server types are configured interactively during `vibecarbon deploy` or in `.vibecarbon.json`; they don't have CLI flags (the design principle is "things you set once and forget belong in the config file").
 
-To re-tune bounds or worker server types on an existing cluster, run `npx vibecarbon scale`, and the wizard walks you through what's changeable for your topology. Power users can seed a server-type change with `-type`, using a type id from their own provider's catalog (e.g. `npx vibecarbon scale prod -type cx33 -y` on Hetzner). Pod-level autoscaling (HPA) is configured for the app and rest services and scales pods within the existing worker pool based on CPU.
+To re-tune bounds or worker server types on an existing cluster, run `vibecarbon scale`, and the wizard walks you through what's changeable for your topology. Power users can seed a server-type change with `-type`, using a type id from their own provider's catalog (e.g. `vibecarbon scale prod -type cx33 -y` on Hetzner). Pod-level autoscaling (HPA) is configured for the app and rest services and scales pods within the existing worker pool based on CPU.
 
 > **Note**: k3s masters have no `NoSchedule` taint by default, so all application pods run on the master node when no workers are present.
 
@@ -128,7 +128,7 @@ To re-tune bounds or worker server types on an existing cluster, run `npx vibeca
 **Compose HA**: multi-region Docker Compose with PostgreSQL streaming replication:
 
 ```bash
-npx vibecarbon deploy prod -mode compose-ha
+vibecarbon deploy prod -mode compose-ha
 ```
 
 This adds:
@@ -139,7 +139,7 @@ This adds:
 **Kubernetes HA**: full K8s clusters per region (Hetzner-only today):
 
 ```bash
-npx vibecarbon deploy prod -mode k8s-ha
+vibecarbon deploy prod -mode k8s-ha
 ```
 
 This additionally includes:
@@ -219,16 +219,16 @@ Create and manage database backups with the CLI:
 
 ```bash
 # Interactive: prompts for env and action
-npx vibecarbon backup
+vibecarbon backup
 
 # Create a backup for a specific env
-npx vibecarbon backup prod
+vibecarbon backup prod
 
 # List existing backups
-npx vibecarbon backup prod -l
+vibecarbon backup prod -l
 
 # Restore from a backup (interactive picker)
-npx vibecarbon restore prod
+vibecarbon restore prod
 ```
 
 Backups include the full PostgreSQL database (schema, data, and auth tables).
@@ -238,7 +238,7 @@ Backups include the full PostgreSQL database (schema, data, and auth tables).
 Add the observability stack for metrics, dashboards, and log aggregation:
 
 ```bash
-npx vibecarbon add observability
+vibecarbon add observability
 ```
 
 This enables:

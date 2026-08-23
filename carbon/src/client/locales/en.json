@@ -333,8 +333,8 @@
       "label": "Optimized for the tools you use"
     },
     "workflow": {
-      "headline": "Three commands to production.",
-      "subheading": "Provision, deploy, and scale from the CLI",
+      "headline": "Launch in minutes.",
+      "subheading": "Deploy, scale, backup, restore, and failover with simple cli commands.",
       "create": {
         "label": "Create",
         "description": "A full-stack app with auth, teams, an admin panel, uploads, blog, and docs working on the first run. Billing, email, OAuth, analytics, and more languages are ready to wire up."
@@ -422,7 +422,7 @@
       },
       "q4": {
         "question": "How does deployment work?",
-        "answer": "Run \"npx vibecarbon deploy\" to provision a VPS, install your stack (Docker Compose or Kubernetes, depending on deploy mode), configure Traefik, deploy your app with auto-HTTPS, and set up automated backups, all in one command."
+        "answer": "Run \"vibecarbon deploy\" to provision a VPS, install your stack (Docker Compose or Kubernetes, depending on deploy mode), configure Traefik, deploy your app with auto-HTTPS, and set up automated backups, all in one command."
       },
       "q5": {
         "question": "How does pricing work?",

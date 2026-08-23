@@ -5,7 +5,7 @@ This guide explains the differences between local development and production dep
 ## Deploying to production
 
 ```bash
-npx vibecarbon deploy
+vibecarbon deploy
 ```
 
 is the supported path to production. It provisions servers on your chosen cloud provider via Pulumi, configures DNS and TLS, syncs environment variables and secrets, sets up S3-compatible backup storage, and starts the services — all from one command.
@@ -248,7 +248,7 @@ docker compose ps
 psql postgres://postgres:password@localhost:5432/postgres
 ```
 
-Once the production stack checks out locally, deploy it with `npx vibecarbon deploy` (see [Deploying to production](#deploying-to-production) above). For what that command does under the hood, see [Under the hood / manual operation](#under-the-hood--manual-operation).
+Once the production stack checks out locally, deploy it with `vibecarbon deploy` (see [Deploying to production](#deploying-to-production) above). For what that command does under the hood, see [Under the hood / manual operation](#under-the-hood--manual-operation).
 
 ## Monitoring Production
 
@@ -337,7 +337,7 @@ http:
 **Option 2: Add Redis for Shared State**
 Add the Redis service and configure the rate limiter to use it:
 ```bash
-npx vibecarbon add redis
+vibecarbon add redis
 ```
 Then update the rate limiter configuration to use Redis as the backing store.
 
@@ -369,7 +369,7 @@ For very large deployments, consider external managed PostgreSQL:
 
 ## Under the hood / manual operation
 
-`npx vibecarbon deploy` is the recommended way to get the production stack onto a server — it provisions the machine, wires up DNS/TLS, syncs secrets, and starts the services for you. This section shows what it's doing under the hood, useful for debugging a deploy or for air-gapped/manual operation. It is not the recommended path.
+`vibecarbon deploy` is the recommended way to get the production stack onto a server — it provisions the machine, wires up DNS/TLS, syncs secrets, and starts the services for you. This section shows what it's doing under the hood, useful for debugging a deploy or for air-gapped/manual operation. It is not the recommended path.
 
 ```bash
 # SSH to your production server

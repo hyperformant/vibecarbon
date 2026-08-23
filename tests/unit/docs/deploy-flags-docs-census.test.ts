@@ -92,11 +92,8 @@ describe('deploy flag table documents the flags deploy parses', () => {
     // to script a deploy needs both the provider binding and the mode, and
     // -provider is the one that is REQUIRED with -y on a new environment.
     const agents = readFileSync(join(ROOT, 'AGENTS.md'), 'utf-8');
-    const line = agents.split('\n').find((l) => l.startsWith('npx vibecarbon deploy'));
-    expect(
-      line,
-      'AGENTS.md: no "npx vibecarbon deploy" line in the command inventory',
-    ).toBeTruthy();
+    const line = agents.split('\n').find((l) => l.startsWith('vibecarbon deploy'));
+    expect(line, 'AGENTS.md: no "vibecarbon deploy" line in the command inventory').toBeTruthy();
     for (const flag of ['-provider', '-mode']) {
       expect(
         line as string,

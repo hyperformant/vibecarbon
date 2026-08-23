@@ -167,7 +167,7 @@ function CreateVisual() {
             className="font-mono text-sm mb-4 flex items-center gap-2"
           >
             <span className="text-primary">$</span>
-            <span className="text-foreground">npx vibecarbon create</span>
+            <span className="text-foreground">vibecarbon create</span>
           </motion.div>
 
           {/* File structure */}
@@ -575,7 +575,7 @@ export function WorkflowSection() {
             step={1}
             title={t('landing.workflow.create.label')}
             subtitle={t('landing.workflow.create.description')}
-            command="npx vibecarbon create"
+            command="vibecarbon create"
             visual={<CreateVisual />}
             color="teal"
           />
@@ -584,7 +584,7 @@ export function WorkflowSection() {
             step={2}
             title={t('landing.workflow.develop.label')}
             subtitle={t('landing.workflow.develop.description')}
-            command="npx vibecarbon up"
+            command="vibecarbon up"
             visual={<BuildVisual />}
             color="magenta"
           />
@@ -593,7 +593,7 @@ export function WorkflowSection() {
             step={3}
             title={t('landing.workflow.deploy.label')}
             subtitle={t('landing.workflow.deploy.description')}
-            command="npx vibecarbon deploy"
+            command="vibecarbon deploy"
             visual={<DeployVisual />}
             color="teal"
           />

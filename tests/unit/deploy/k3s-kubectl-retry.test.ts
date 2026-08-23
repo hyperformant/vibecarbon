@@ -131,6 +131,31 @@ describe('KUBECTL_TRANSIENT_PATTERN', () => {
     }
   });
 
+  it('matches the apiserver→webhook broken-pipe (DO k8s restore re-deploy, run 32659821814)', () => {
+    // The apiserver's own transport to the (admission-proven) cert-manager
+    // webhook dropped mid-write and surfaced through kubectl as a server-side
+    // InternalError. The ladder existed at the apply site and never engaged:
+    // no pattern knew the `broken pipe` spelling. Verbatim capture:
+    const stderr =
+      'Error from server (InternalError): error when creating ' +
+      '"/tmp/vibecarbon-e2e-56f929b0/citest-k8s/k8s/infra/cert-manager-resources": ' +
+      'Internal error occurred: failed calling webhook "webhook.cert-manager.io": ' +
+      'failed to call webhook: Post "https://cert-manager-webhook.cert-manager.svc:443/validate?timeout=30s": ' +
+      'write tcp 127.0.0.1:39360->127.0.0.1:6443: write: broken pipe';
+    expect(KUBECTL_TRANSIENT_PATTERN.test(stderr)).toBe(true);
+  });
+
+  it('does NOT blanket-match webhook failures — a webhook 500 stays fatal', () => {
+    // Only the transport spelling is transient. A webhook that answers with
+    // an error is a real regression (admission was already proven upstream).
+    for (const sig of [
+      'failed calling webhook "webhook.cert-manager.io": received 500 Internal Server Error',
+      'admission webhook "webhook.cert-manager.io" denied the request: spec.acme.solvers: Invalid value',
+    ]) {
+      expect(KUBECTL_TRANSIENT_PATTERN.test(sig)).toBe(false);
+    }
+  });
+
   it('does not match a regular kubectl 404 / not-found error', () => {
     expect(
       KUBECTL_TRANSIENT_PATTERN.test('Error from server (NotFound): deployment "foo" not found'),

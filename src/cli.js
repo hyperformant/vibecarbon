@@ -6,10 +6,10 @@
  * A unified CLI for creating and managing Vibecarbon applications.
  *
  * Usage:
- *   npx vibecarbon create [app-name]      # Create new project
- *   npx vibecarbon deploy                 # Deploy to cloud
- *   npx vibecarbon destroy                # Tear down environment
- *   npx vibecarbon -h                     # Show help
+ *   vibecarbon create [app-name]      # Create new project
+ *   vibecarbon deploy                 # Deploy to cloud
+ *   vibecarbon destroy                # Tear down environment
+ *   vibecarbon -h                     # Show help
  */
 
 import dns from 'node:dns';
@@ -137,7 +137,7 @@ function showHelp() {
 ${c.bold('Vibecarbon CLI')} ${c.dim(`v${VERSION}`)}
 
 ${c.bold('USAGE')}
-  ${c.info('npx vibecarbon')} <command> [flags]
+  ${c.info('vibecarbon')} <command> [flags]
 
 ${c.bold('DEV COMMANDS')}
   ${c.info('create')} <project-name>    Create a new Vibecarbon project
@@ -408,7 +408,7 @@ async function main() {
 }
 
 // Only run when executed directly (not when imported by tests).
-// realpathSync resolves symlinks on both sides so `npx vibecarbon` works
+// realpathSync resolves symlinks on both sides so `vibecarbon` works
 // even though process.argv[1] points to the bin symlink, not cli.js itself.
 const isEntryPoint = (() => {
   try {

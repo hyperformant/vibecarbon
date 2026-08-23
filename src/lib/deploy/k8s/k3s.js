@@ -388,7 +388,15 @@ export const KUBECTL_TRANSIENT_PATTERN =
   // traefik→apiserver refused loop, rolloutApp's refused loop) — every other
   // SSH-side classifier in the tree already carries it; kubectl was the lone
   // holdout.
-  /http2: client connection lost|connection reset by peer|context deadline exceeded|connection timed out|connection refused|EOF|i\/o timeout|TLS handshake|unexpected error when reading response body/i;
+  //
+  // `broken pipe` (2026-08-23, DO k8s restore re-deploy, run 32659821814):
+  // the apiserver's own transport to the ADMISSION-PROVEN cert-manager
+  // webhook dropped mid-write (`write tcp 127.0.0.1:...->127.0.0.1:6443:
+  // write: broken pipe`) and surfaced through kubectl as a server-side
+  // InternalError. The ladder wrapped that apply and never engaged — no
+  // pattern knew the spelling. Transport spelling only: a webhook that
+  // ANSWERS with an error (500 / denied) stays fatal.
+  /http2: client connection lost|connection reset by peer|context deadline exceeded|connection timed out|connection refused|EOF|i\/o timeout|TLS handshake|unexpected error when reading response body|broken pipe/i;
 
 /**
  * The retry classifiers' haystack: message + stdout + stderr joined.

@@ -57,7 +57,7 @@ describe('detectPackageManager', () => {
 
   it('defaults to npm when no detection', () => {
     // npm ships with Node, so it is the only fallback that is guaranteed
-    // installed on a machine that could run `npx vibecarbon` at all.
+    // installed on a machine that could run `vibecarbon` at all.
     expect(detectPackageManager(scratch)).toBe('npm');
   });
 });
