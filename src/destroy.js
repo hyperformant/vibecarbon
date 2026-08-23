@@ -915,8 +915,13 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
       const PURGE_TIMEOUT_MS = 180_000;
       const result = await Promise.race([
         s3Provider.emptyAndDeleteBucket(bucketName),
-        new Promise((_, reject) =>
-          setTimeout(
+        new Promise((_, reject) => {
+          // Detach the timer from the event loop so a fast purge win doesn't
+          // leave it holding the process open — handle-probe evidence
+          // (2026-08-23 matrix) showed every destroy lingering ~175s past its
+          // completion banner on exactly this handle. A detached timer still
+          // fires if the purge genuinely hangs; it just stops blocking exit.
+          const t = setTimeout(
             () =>
               reject(
                 new Error(
@@ -924,8 +929,9 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
                 ),
               ),
             PURGE_TIMEOUT_MS,
-          ),
-        ),
+          );
+          if (typeof t?.unref === 'function') t.unref();
+        }),
       ]);
       spinner.stop(
         result.deleted
