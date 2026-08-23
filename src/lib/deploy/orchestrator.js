@@ -396,6 +396,55 @@ export async function executeDeployment(args, gatheredConfig) {
   // Spinner: on a resumed deploy the three bucketExists HEAD probes are the
   // only work here, but they're still network round-trips — cover them so the
   // resume path doesn't sit on a bare cursor.
+  const saveSkeletonEnv = () => {
+    const existingEnv = projectConfig.environments?.[environment] ?? {};
+    const skeletonEnv = {
+      ...existingEnv,
+      envName: environment,
+      status: 'deploying',
+      deployMode,
+      provider: config.provider,
+      region,
+      ...(secondaryRegion ? { secondaryRegion } : {}),
+      ...(domain ? { domain } : {}),
+      ...(dnsProvider ? { dnsProvider } : {}),
+      s3: {
+        bucket: s3Config.bucket,
+        region: s3Config.region,
+        endpoint: s3Config.endpoint,
+        stateBucket: s3Config.stateBucket,
+      },
+      backupS3: backupS3Config?.bucket
+        ? {
+            bucket: backupS3Config.bucket,
+            region: backupS3Config.region,
+            endpoint: backupS3Config.endpoint,
+          }
+        : existingEnv.backupS3,
+      ...(deployMode === 'compose-ha' || (deployMode === 'kubernetes' && secondaryRegion)
+        ? {
+            ha: {
+              ...(existingEnv.ha ?? {}),
+              enabled: true,
+              ...(secondaryRegion ? { failoverRegion: secondaryRegion } : {}),
+            },
+          }
+        : {}),
+      lastAttempt: new Date().toISOString(),
+    };
+    projectConfig.environments = projectConfig.environments ?? {};
+    projectConfig.environments[environment] = skeletonEnv;
+    saveProjectConfig(projectConfig);
+  };
+  // FIRST skeleton save BEFORE any S3 work: bucket creation itself mutates
+  // provider state (and can partially succeed), and a failure inside s3-setup
+  // used to exit before the post-s3 skeleton save ever ran — leaving an env
+  // entry with NO deployMode, which crashed `vibecarbon destroy` at planning
+  // ("Unknown deployMode: undefined", DO run 32670715722) so teardown never
+  // ran at all. Region/endpoint fields may still be provisional here; the
+  // post-s3 call re-persists the corrected values.
+  saveSkeletonEnv();
+
   s3Spinner.start('Verifying S3 buckets');
   const skipS3Setup = await state.shouldSkipWithVerify('s3-setup', s3Inputs, verifyBucketsExist);
   s3Spinner.stop(skipS3Setup ? 'S3 buckets ready' : 'S3 setup needed');
@@ -621,46 +670,7 @@ export async function executeDeployment(args, gatheredConfig) {
   // Subsequent saves (mid-flight from compose/ha.js + k8s/ha, plus the
   // final save at the end of executeDeployment) merge with on-disk state,
   // so the skeleton is non-destructive — they layer on top of it.
-  {
-    const existingEnv = projectConfig.environments?.[environment] ?? {};
-    const skeletonEnv = {
-      ...existingEnv,
-      envName: environment,
-      status: 'deploying',
-      deployMode,
-      provider: config.provider,
-      region,
-      ...(secondaryRegion ? { secondaryRegion } : {}),
-      ...(domain ? { domain } : {}),
-      ...(dnsProvider ? { dnsProvider } : {}),
-      s3: {
-        bucket: s3Config.bucket,
-        region: s3Config.region,
-        endpoint: s3Config.endpoint,
-        stateBucket: s3Config.stateBucket,
-      },
-      backupS3: backupS3Config?.bucket
-        ? {
-            bucket: backupS3Config.bucket,
-            region: backupS3Config.region,
-            endpoint: backupS3Config.endpoint,
-          }
-        : existingEnv.backupS3,
-      ...(deployMode === 'compose-ha' || (deployMode === 'kubernetes' && secondaryRegion)
-        ? {
-            ha: {
-              ...(existingEnv.ha ?? {}),
-              enabled: true,
-              ...(secondaryRegion ? { failoverRegion: secondaryRegion } : {}),
-            },
-          }
-        : {}),
-      lastAttempt: new Date().toISOString(),
-    };
-    projectConfig.environments = projectConfig.environments ?? {};
-    projectConfig.environments[environment] = skeletonEnv;
-    saveProjectConfig(projectConfig);
-  }
+  saveSkeletonEnv();
 
   const tracker = createTracker('deploy', {
     environment: config.environment,

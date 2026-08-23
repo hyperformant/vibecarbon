@@ -99,5 +99,15 @@ export function planDestroy(tier, _config) {
     // DESTROY_STRATEGIES table shared destroyK8sTier across k8s and k8s-ha.
     return [defineStep({ name: 'destroy-k8s-infra', effect: 'destroyK8sInfra' }), ...k8sTail()];
   }
+  if (tier === 'unrecorded') {
+    // Deploy never reached provisioning (no deployMode ever persisted): no
+    // remote teardown to run, no buckets recorded. Remove the local env entry
+    // and finish cleanly — the caller warns the operator before running this.
+    return [
+      defineStep({ name: 'update-project-config', effect: 'updateProjectConfig' }),
+      defineStep({ name: 'cleanup-local-files', effect: 'cleanupLocalFiles' }),
+      defineStep({ name: 'finish-outro', effect: 'finishOutro' }),
+    ];
+  }
   throw new Error(`planDestroy: unknown/unsupported tier ${tier}`);
 }

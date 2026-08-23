@@ -81,6 +81,21 @@ import { recordLeakedVolumes } from './lib/volume-ledger.js';
  * @returns {{ tier: string, stackEnvs: string[], hasPulumiStack: boolean, clusterNames: string[], ownedIps: string[] }}
  */
 export function planDestroyTargets(envConfig, projectConfig, environment) {
+  // No recorded deployMode = deploy never reached provisioning (the
+  // orchestrator's first skeleton save now precedes ALL env-scoped resource
+  // creation, S3 included). There is no tier to tear down; plan the
+  // local-cleanup-only sequence instead of crashing at resolveTier — a crash
+  // here meant teardown never ran AT ALL (DO run 32670715722, "Unknown
+  // deployMode: undefined"). A garbled non-empty mode still throws loudly.
+  if (envConfig?.deployMode === undefined) {
+    return {
+      tier: 'unrecorded',
+      stackEnvs: [],
+      hasPulumiStack: false,
+      clusterNames: [],
+      ownedIps: [],
+    };
+  }
   const tier = resolveTier(envConfig);
   const stackEnvs = pulumiStackEnvs(tier, environment);
   const hasPulumiStack = isK8sTier(tier);
@@ -3320,6 +3335,14 @@ ${c.danger('WARNING: All data on these servers will be permanently lost!')}
   // ctx so the effects (thin wrappers over the hardened tier helpers) read them.
   const plan = planDestroyTargets(envConfig, projectConfig, envName);
   const isK8s = isK8sTier(plan.tier);
+  if (plan.tier === 'unrecorded') {
+    p.log.warn(
+      `No deployment is recorded for "${envName}" — its deploy never reached provisioning. ` +
+        'Removing the local environment entry only. If a partial deploy may have created ' +
+        'cloud resources, verify in the provider console (nothing env-scoped is created ' +
+        'before the deploy record exists).',
+    );
+  }
 
   const ctx = {
     plan,

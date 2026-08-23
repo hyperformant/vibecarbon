@@ -206,3 +206,13 @@ describe('planDestroy — purity + validity', () => {
     expect(() => planDestroy('nope', {})).toThrow('planDestroy: unknown/unsupported tier nope');
   });
 });
+
+describe('planDestroy(unrecorded)', () => {
+  // Deploy never reached provisioning: no tier teardown to run, no buckets
+  // recorded, nothing remote to reap — but the local env entry must still be
+  // removed and the operator must get a completion, not a stack trace.
+  it('plans ONLY local cleanup — no remote teardown, no bucket deletes', () => {
+    const steps = planDestroy('unrecorded', {}).map((s) => s.name);
+    expect(steps).toEqual(['update-project-config', 'cleanup-local-files', 'finish-outro']);
+  });
+});

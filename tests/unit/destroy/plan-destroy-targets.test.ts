@@ -98,4 +98,18 @@ describe('planDestroyTargets', () => {
   it('throws on unknown deployMode (delegates to resolveTier)', () => {
     expect(() => planDestroyTargets({ deployMode: 'nope' }, projectConfig, 'e1')).toThrow();
   });
+
+  // A deploy that dies before its first skeleton save leaves an env entry
+  // with NO deployMode. DO run 32670715722: destroy crashed at planning
+  // ("Unknown deployMode: undefined") and teardown never ran. A garbled
+  // RECORDED mode stays a loud throw (above) — only the deploy-never-started
+  // shape degrades to local-cleanup-only.
+  it('UNDEFINED deployMode (deploy never reached provisioning) plans local cleanup, not a crash', () => {
+    const plan = planDestroyTargets({}, projectConfig, 'e1');
+    expect(plan.tier).toBe('unrecorded');
+    expect(plan.stackEnvs).toEqual([]);
+    expect(plan.hasPulumiStack).toBe(false);
+    expect(plan.clusterNames).toEqual([]);
+    expect(plan.ownedIps).toEqual([]);
+  });
 });
