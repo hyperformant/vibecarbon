@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Launch in minutes with auth, billing, email, templates, and more.</strong></p>
 
-<p align="center">Deploy, scale, backup, restore, and failover with simple commands.</p>
+<p align="center">Deploy, scale, backup, restore, and failover with simple CLI commands.</p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/npm/v/vibecarbon?color=0a7ea4&label=npm" alt="npm version" /></a>
