@@ -37,6 +37,38 @@ const RENDER_POLL_DEADLINE_MS = 30_000;
 // Below this many chars of rendered text, treat the page as blank/crashed.
 const MIN_RENDERED_TEXT = 200;
 
+/**
+ * Playwright wordings that mean "a navigation destroyed the world we were
+ * measuring" — as opposed to a real page failure. Captured live: DO
+ * compose-ha verify-scale, run 32665738019.
+ */
+export const NAVIGATION_RACE_RE =
+  /Execution context was destroyed|Cannot find context with specified id|Frame was detached/;
+
+/**
+ * Run `attempt` and, when it dies to a navigation race, re-run it on the new
+ * document — the navigation landing is exactly the condition the measurement
+ * was waiting for. Bounded to `attempts`; any other error (and a race that
+ * persists through the final attempt) rethrows, so this cannot creep into an
+ * absorber: the caller's render assertions remain the gate.
+ */
+export async function withNavigationRetry<T>(
+  attempt: () => Promise<T>,
+  { attempts = 3, beforeRetry }: { attempts?: number; beforeRetry?: () => Promise<void> } = {},
+): Promise<{ value: T; navigationRaces: number }> {
+  let navigationRaces = 0;
+  for (let i = 1; ; i++) {
+    try {
+      return { value: await attempt(), navigationRaces };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (i >= attempts || !NAVIGATION_RACE_RE.test(msg)) throw err;
+      navigationRaces++;
+      await beforeRetry?.();
+    }
+  }
+}
+
 function pass(details: Record<string, unknown>, start: number): VerificationResult {
   return {
     checkName: 'frontend_render',
@@ -196,31 +228,47 @@ export async function runFrontendSmokeChecks(domain: string): Promise<Verificati
       .goto(`https://${domain}/`, { waitUntil: 'networkidle', timeout: RENDER_POLL_DEADLINE_MS })
       .catch(() => {});
 
-    // Condition wait: real content rendered OR the ErrorBoundary tripped.
-    await page
-      .waitForFunction(
-        (min) => {
+    // Condition wait + measurement, together retried on a navigation race:
+    // the absorbed goto above can leave its navigation IN FLIGHT, and on a
+    // slow post-scale page it commits exactly as the measurement runs (DO
+    // compose-ha verify-scale, run 32665738019: `Execution context was
+    // destroyed, most likely because of a navigation`). The navigation
+    // landing IS the awaited condition — re-run the wait + measurement on
+    // the new document. Bounded; non-race errors rethrow immediately; the
+    // render assertions below stay the real gate.
+    const measured = await withNavigationRetry(
+      async () => {
+        // Condition wait: real content rendered OR the ErrorBoundary tripped.
+        await page
+          .waitForFunction(
+            (min) => {
+              const root = document.getElementById('root');
+              const txt = (root?.innerText ?? '').replace(/\s+/g, ' ').trim();
+              return txt.includes('Something went wrong') || txt.length >= min;
+            },
+            MIN_RENDERED_TEXT,
+            { timeout: RENDER_POLL_DEADLINE_MS, polling: RENDER_POLL_INTERVAL_MS },
+          )
+          .catch(() => {});
+
+        return page.evaluate(() => {
           const root = document.getElementById('root');
           const txt = (root?.innerText ?? '').replace(/\s+/g, ' ').trim();
-          return txt.includes('Something went wrong') || txt.length >= min;
-        },
-        MIN_RENDERED_TEXT,
-        { timeout: RENDER_POLL_DEADLINE_MS, polling: RENDER_POLL_INTERVAL_MS },
-      )
-      .catch(() => {});
-
-    const info = await page.evaluate(() => {
-      const root = document.getElementById('root');
-      const txt = (root?.innerText ?? '').replace(/\s+/g, ' ').trim();
-      const h1 = document.querySelector('h1');
-      return {
-        textLen: txt.length,
-        errorBoundaryShown: txt.includes('Something went wrong'),
-        title: document.title,
-        h1: (h1 instanceof HTMLElement ? h1.innerText : '').trim().slice(0, 80),
-        hasNav: !!document.querySelector('nav'),
-      };
-    });
+          const h1 = document.querySelector('h1');
+          return {
+            textLen: txt.length,
+            errorBoundaryShown: txt.includes('Something went wrong'),
+            title: document.title,
+            h1: (h1 instanceof HTMLElement ? h1.innerText : '').trim().slice(0, 80),
+            hasNav: !!document.querySelector('nav'),
+          };
+        });
+      },
+      {
+        beforeRetry: () => page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {}),
+      },
+    );
+    const info = measured.value;
 
     const crashMarkers = consoleErrors.filter((e) =>
       /Minified React error|Element type is invalid|ErrorBoundary caught|#306/i.test(e),
@@ -234,6 +282,10 @@ export async function runFrontendSmokeChecks(domain: string): Promise<Verificati
       h1: info.h1,
       hasNav: info.hasNav,
       consoleErrorCount: consoleErrors.length,
+      // Non-zero when the measurement was re-run because an in-flight
+      // navigation committed mid-evaluate; kept visible so a chronic racer
+      // shows up in the record even while passing.
+      navigationRaces: measured.navigationRaces,
     };
 
     if (crashMarkers.length > 0) {
