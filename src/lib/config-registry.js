@@ -91,6 +91,13 @@ export const CONFIG_KEYS = [
   { key: 'VITE_PLAUSIBLE_DOMAIN', class: 'client-build', feature: 'analytics' },
   { key: 'VITE_PLAUSIBLE_SCRIPT_URL', class: 'client-build', feature: 'analytics' },
 
+  // ---- Landing (client-side, baked at build time) ----
+  // Opt-in gate for the GitHub stars button. Empty (the generated-app
+  // default) = the button renders nothing and NOTHING is fetched — a
+  // customer's site must not phone home to GitHub (nav-no-phone-home
+  // contract). vibecarbon.com sets its public repo URL.
+  { key: 'VITE_GITHUB_REPO_URL', class: 'client-build', feature: 'landing' },
+
   // ---- Providers: cloud/DNS operator credentials ----
   // Never deployed to a server (see the 'operator-secret' class note above).
   // NOT included: DOCKER_HUB_* — operator-shell-level env var, outside the

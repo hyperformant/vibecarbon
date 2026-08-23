@@ -126,6 +126,7 @@ VITE_OBSERVABILITY_ENABLED="false"
 # Analytics (Plausible - leave empty to disable)
 VITE_PLAUSIBLE_DOMAIN=""
 VITE_PLAUSIBLE_SCRIPT_URL=""
+VITE_GITHUB_REPO_URL=""
 
 # Observability
 GRAFANA_ADMIN_USER="admin"

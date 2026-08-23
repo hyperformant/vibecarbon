@@ -19,6 +19,10 @@ vi.mock('@/components/auth/AuthProvider', () => ({ useAuth: () => ({ user: null 
 vi.mock('@/hooks/api', () => ({
   useAuthSettings: () => ({ data: undefined }),
   useDocsVisibility: () => docsVisibilityMock(),
+  // GitHubStarsButton deps: unconfigured here, so it renders nothing —
+  // the gate itself is exercised in nav-no-phone-home.test.tsx.
+  getGitHubRepoUrl: () => '',
+  useGitHubStars: () => ({ data: undefined }),
 }));
 
 import { Nav } from '@/components/Nav';

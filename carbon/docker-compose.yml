@@ -62,6 +62,7 @@ services:
         VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
         VITE_PLAUSIBLE_DOMAIN: ${VITE_PLAUSIBLE_DOMAIN:-}
         VITE_PLAUSIBLE_SCRIPT_URL: ${VITE_PLAUSIBLE_SCRIPT_URL:-}
+        VITE_GITHUB_REPO_URL: ${VITE_GITHUB_REPO_URL:-}
     container_name: ${PROJECT_NAME}-app
     restart: unless-stopped
     # Make every configure-managed runtime key (billing/OAuth/SMTP) available to

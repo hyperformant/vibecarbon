@@ -111,6 +111,7 @@ jobs:
             VITE_PUBLIC_URL=${{ vars.VITE_PUBLIC_URL }}
             VITE_PLAUSIBLE_DOMAIN=${{ vars.VITE_PLAUSIBLE_DOMAIN }}
             VITE_PLAUSIBLE_SCRIPT_URL=${{ vars.VITE_PLAUSIBLE_SCRIPT_URL }}
+            VITE_GITHUB_REPO_URL=${{ vars.VITE_GITHUB_REPO_URL }}
           # GHA cache keyed on Dockerfile + lockfile. `mode=max` caches every
           # layer including intermediate ones, so re-builds with an unchanged
           # install step reuse the `npm ci` layer (biggest single layer).

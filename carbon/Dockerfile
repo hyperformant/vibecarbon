@@ -32,6 +32,7 @@ ARG VITE_ROUTING_MODE
 # Analytics (optional — empty by default, no tracking unless configured)
 ARG VITE_PLAUSIBLE_DOMAIN
 ARG VITE_PLAUSIBLE_SCRIPT_URL
+ARG VITE_GITHUB_REPO_URL
 # Public canonical URL (apex domain) for og: tags + sitemap. Set at deploy from
 # the real domain; defaults to localhost for local builds.
 ARG VITE_PUBLIC_URL
@@ -81,6 +82,7 @@ ENV VITE_OBSERVABILITY_ENABLED=$VITE_OBSERVABILITY_ENABLED
 ENV VITE_ROUTING_MODE=$VITE_ROUTING_MODE
 ENV VITE_PLAUSIBLE_DOMAIN=$VITE_PLAUSIBLE_DOMAIN
 ENV VITE_PLAUSIBLE_SCRIPT_URL=$VITE_PLAUSIBLE_SCRIPT_URL
+ENV VITE_GITHUB_REPO_URL=$VITE_GITHUB_REPO_URL
 RUN npm run build:client
 RUN npm run build:server
 
