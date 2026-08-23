@@ -158,7 +158,7 @@ export async function buildRemote(ip, sshKeyPath, imageTag, cwd, buildArgs = {})
   // pinned host (MITM on an established env fails); GlobalKnownHostsFile=
   // /dev/null ignores the system file and never touches ~/.ssh/known_hosts.
   const sshWrapper = `#!/bin/bash
-exec /usr/bin/ssh -i "$VIBECARBON_SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$VIBECARBON_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$@"
+exec /usr/bin/ssh -i "$VIBECARBON_SSH_KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$VIBECARBON_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ControlMaster=auto -o ControlPath="$VIBECARBON_SSH_MUX/%C" -o ControlPersist=60s "$@"
 `;
   writeFileSync(sshWrapperPath, sshWrapper, { mode: 0o755 });
 
@@ -169,6 +169,15 @@ exec /usr/bin/ssh -i "$VIBECARBON_SSH_KEY" -o StrictHostKeyChecking=accept-new -
     PATH: `${tempBinDir}:${process.env.PATH}`, // Prepend our wrapper
     VIBECARBON_SSH_KEY: sshKeyPath,
     VIBECARBON_KNOWN_HOSTS: knownHostsPathForKey(sshKeyPath),
+    // Multiplex every ssh the build spawns over ONE master connection.
+    // BuildKit dials several concurrent sessions (dial-stdio per stream,
+    // worker listing) on top of our probe — a burst of unauthenticated
+    // connects that a fresh sshd's MaxStartups (default 10:30:100) starts
+    // dropping, exactly the captured failure: `kex_exchange_identification:
+    // read: Connection reset by peer` (linode 32640636398, taken by the
+    // exhaustion diagnostics). With a mux, the burst authenticates once.
+    // Scoped to tempBinDir so cleanup removes the socket with the wrapper.
+    VIBECARBON_SSH_MUX: tempBinDir,
   };
 
   try {

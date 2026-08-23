@@ -80,3 +80,22 @@ describe('remote-build transport exhaustion diagnostics', () => {
     expect(logged).toContain('build-session-specific');
   }, 60_000);
 });
+
+describe('ssh wrapper connection discipline', () => {
+  it('multiplexes via ControlMaster — the MaxStartups-burst countermeasure', async () => {
+    // The captured kex_exchange_identification reset (linode 32640636398) is
+    // the signature of a fresh sshd dropping a burst of unauthenticated
+    // connects. The wrapper must carry ControlMaster/ControlPath so
+    // BuildKit's parallel dials share one authenticated connection.
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/lib/deploy/remote-build.js', 'utf-8');
+    const wrapper = src.slice(
+      src.indexOf('const sshWrapper'),
+      src.indexOf('writeFileSync(sshWrapperPath'),
+    );
+    expect(wrapper).toMatch(/ControlMaster=auto/);
+    expect(wrapper).toMatch(/ControlPath=/);
+    expect(wrapper).toMatch(/BatchMode=yes/);
+    expect(src, 'mux dir must be provided to the wrapper env').toMatch(/VIBECARBON_SSH_MUX/);
+  });
+});

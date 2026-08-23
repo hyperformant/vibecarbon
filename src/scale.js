@@ -664,7 +664,13 @@ async function scaleServers(ctx) {
         // the browser throws "Missing Supabase environment variables". Deploy
         // (orchestrator.js) and HA (ha.js) already do this — scale did not.
         const scaleBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
-        const built = await perfAsync('scale.sideloadImage', () =>
+        // Perf label renamed 2026-08-23: this wrapped buildRemote under the
+        // name 'scale.sideloadImage', which made the 08-23 RCA read DO's
+        // successful native build as a sideload and manufacture a
+        // provider divergence that did not exist. The label now says what
+        // runs. (Perf history: entries before this date under
+        // scale.sideloadImage on the direct path were builds.)
+        const built = await perfAsync('scale.remoteBuildImage', () =>
           buildRemote(newIp, sshKeyPath, oldAppImage, process.cwd(), scaleBuildArgs),
         );
         // buildRemote returns false on failure (after its own retries). The app
