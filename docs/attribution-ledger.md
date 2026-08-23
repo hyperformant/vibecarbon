@@ -46,6 +46,25 @@ design (an earlier ledger) says the class-level answer may be our concurrency.
 MaxStartups drops vs genuine timeouts across a matrix night; correlate blip timestamps
 with our own fan-out phases from the perf markers.
 
+**SETTLED 2026-08-23 — OURS, root-fixed.** The experiment above was answered by
+a different route: making the remote-build retry ladder capture ssh evidence at
+exhaustion produced `kex_exchange_identification: read: Connection reset by
+peer` on its first live outing, and the same signature then appeared on three
+independent subsystems in one leg (BuildKit dial-stdio, the admin-user tunnel,
+a verification check's own probe) — sshd refusing a connection BURST at the
+door, exactly the MaxStartups mechanism the two proven-ours family members
+already pointed at. Root fix: every provisioned node now installs
+`/etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf` (MaxStartups 100:30:200,
+MaxSessions 64; census-walked), and the build wrapper multiplexes via
+ControlMaster. Verification: the provider that failed four consecutive runs on
+three distinct ssh-death signatures went fully green on the first
+sshd-provisioned leg, every historically-failing step passing.
+
+Owed to close the registry side: the transport retry ladders still exist, and
+an `ours` class may not carry mitigation sites (rule R7). Removing the ladders
+is deliberate follow-up work — after a few more green nights prove the fix
+holds — at which point the registry attribution flips with them.
+
 ### 3. `provider-api-network-transients`
 
 **Claim:** generic fetch/HTTP 5xx/socket errors against provider APIs are provider-side
