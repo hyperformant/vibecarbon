@@ -137,3 +137,32 @@ interface, so vibecarbon.com's implementation does not get unwound.
 Catalog sync for Paddle and Polar. The provider-agnostic write seam
 (`write-catalog.js`) already exists; only Stripe has a reader today, and adding
 others is independent of this work.
+
+## Implementation notes from the reference implementation
+
+vibecarbon.com shipped this design on 2026-08-23 (live, verified end-to-end
+against a real paid session). Findings the template generalisation must carry:
+
+- **Thread the event id, not the session id, into the purchase record.** The
+  event is what providers redeliver; `checkout.session.completed` retried with
+  the same `event.id` hits the UNIQUE constraint (Postgres 23505) and is a
+  no-op. Webhook tests must pin this — breaking it turned one test red in the
+  reference suite.
+- **Record before delivering, and never fail the webhook on delivery.** Once
+  ACKed, the provider never redelivers. A delivery failure stores
+  `fulfillment_error`, leaves `fulfilled_at` null, and still returns 200 —
+  failing the webhook would replay the whole event when only the email needs
+  retrying. A paid session with NO email is the one case that must fail the
+  webhook (nothing to fulfil to; let the provider retry).
+- **Migrations must be DROP-first idempotent.** The deploy re-applies the whole
+  migrations directory and `CREATE POLICY` has no `IF NOT EXISTS`; omitting the
+  `DROP POLICY IF EXISTS` convention aborted a production deploy. Prove
+  idempotency by applying the migration twice in one transaction.
+- **A deterministic fulfilment payload makes the success page instant.** The
+  redirect lands ~a minute before the webhook. Because the key derives from
+  (tier, email), a `session-fulfillment` endpoint can serve it from the paid
+  session directly — gate on `payment_status === 'paid'`, map Stripe's
+  `resource_missing` to 404, and treat the email as the durable copy.
+- **Verify the deployed surface, not the deploy exit code.** The first "live"
+  claim was disproven by one curl: a known API route returned JSON while the
+  new route returned the SPA shell — the running build predated the change.
