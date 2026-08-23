@@ -288,7 +288,7 @@
     "hero": {
       "badge": "Fully Automated · Self-Hosted",
       "headline1": "Professional-Grade",
-      "subheading": "Full-stack SaaS starter with the most powerful DevOps CLI ever. Built for AI-driven development.",
+      "subheading": "Launch full-stack web apps in minutes. Auth, billing, templates, email, and powerful cloud-agnostic DevOps automation built-in.",
       "getUpdates": "Get Updates"
     },
     "pillars": {
@@ -334,7 +334,7 @@
     },
     "workflow": {
       "headline": "Launch in minutes.",
-      "subheading": "Deploy, scale, backup, restore, and failover with simple cli commands.",
+      "subheading": "Deploy, scale, backup, restore, and failover with simple CLI commands.",
       "create": {
         "label": "Create",
         "description": "A full-stack app with auth, teams, an admin panel, uploads, blog, and docs working on the first run. Billing, email, OAuth, analytics, and more languages are ready to wire up."

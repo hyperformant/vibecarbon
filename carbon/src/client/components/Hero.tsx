@@ -504,7 +504,7 @@ export default function Hero() {
             className="text-4xl md:text-6xl lg:text-7xl font-black tracking-tight mb-6"
           >
             <span className="block text-foreground">{t('landing.hero.headline1')}</span>
-            <span className="block text-primary pb-2">Vibecoding</span>
+            <span className="block text-primary pb-2">Architecture</span>
           </motion.h1>
 
           <motion.p

@@ -106,7 +106,7 @@ export default function VibecarbonHome() {
   return (
     <ScrollytellingProvider>
       <div className="relative min-h-screen">
-        <SEO description="Vibecarbon is the full-stack SaaS starter with the most powerful DevOps CLI ever — production deploys on the provider you choose. Built for AI-driven development." />
+        <SEO description="Vibecarbon launches full-stack web apps in minutes — auth, billing, templates, email, and powerful cloud-agnostic DevOps automation built-in." />
         <FilmGrainOverlay opacity={0.025} />
 
         <ScrollSection id="hero" disableEffects>
