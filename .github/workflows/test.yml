@@ -239,7 +239,7 @@ jobs:
   #
   # The root repo uses pnpm; the template uses npm (decision 2026-07-30 —
   # npm ships with Node, so a generated project needs nothing installed
-  # beyond what `npx vibecarbon` already required). Do not "unify" these.
+  # beyond what running the `vibecarbon` CLI already required). Do not "unify" these.
   template:
     name: Template Tests (carbon)
     runs-on: ubuntu-latest
