@@ -101,8 +101,8 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
       { name: 'PostgreSQL', imgs: [postgresqlLogo] },
       { name: 'Supavisor', icon: IconPlugConnected },
       { name: 'Edge Functions', icon: IconFunction },
-      { name: 'OpenAPI + Swagger docs', imgs: [swaggerLogo], badge: 'optional' },
-      { name: 'Redis', imgs: [redisLogo], badge: 'add-on' },
+      { name: 'OpenAPI + Swagger docs', imgs: [swaggerLogo] },
+      { name: 'Redis', imgs: [redisLogo] },
     ],
   },
   {
@@ -132,7 +132,7 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
       { name: 'Pulumi', imgs: [pulumiLogo] },
       { name: 'Flux GitOps', imgs: [fluxLogo] },
       { name: 'WAL-G backups', icon: IconDeviceSdCard },
-      { name: 'Grafana & Prometheus', imgs: [grafanaLogo, prometheusLogo], badge: 'add-on' },
+      { name: 'Grafana & Prometheus', imgs: [grafanaLogo, prometheusLogo] },
     ],
   },
   {
