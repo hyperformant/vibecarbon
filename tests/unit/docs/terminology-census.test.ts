@@ -522,7 +522,9 @@ describe('terminology census', () => {
 
   it("banner-generator.py's COPY block names no provider and no banned framing; README's banner alt matches the script's ALT string", () => {
     const bannerText = readFileSync(join(ROOT, 'scripts', 'banner-generator.py'), 'utf-8');
-    const start = bannerText.indexOf('HEAD_A, HEAD_B');
+    const start = bannerText.indexOf(
+      '# ---------------------------------------------------------------- copy',
+    );
     const end = bannerText.indexOf(
       '# ---------------------------------------------------------------- theme tokens',
     );
@@ -535,9 +537,9 @@ describe('terminology census', () => {
       /open[- ]source|\bDiamond\b|reference[- ]provider|servers? you own|two cloud|hyperscaler|answers to you|scaled at cost|visible all the way down|GDPR|SOC ?2|HIPAA|PCI[- ]DSS|ISO ?27001|CCPA/i,
     );
 
-    // ALT is built from concatenated Python string literals across three
-    // lines; extract and join them the same way Python's implicit
-    // concatenation would, then compare against README's rendered alt text.
+    // ALT is a parenthesized Python string literal (possibly concatenated
+    // across lines); extract and join the pieces the same way Python's
+    // implicit concatenation would, then compare against README's alt text.
     const altAssignment = bannerText.match(/ALT = \(([\s\S]*?)\)/);
     expect(altAssignment).not.toBeNull();
     const scriptAlt = [...(altAssignment as RegExpMatchArray)[1].matchAll(/"([^"]*)"/g)]

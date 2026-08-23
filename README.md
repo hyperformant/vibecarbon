@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-dark.svg">
-    <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-light.svg" alt="Vibecarbon - Idea to production SaaS. Deployment modes: compose, compose-ha, k8s, k8s-ha." width="820" />
+    <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/banner-light.svg" alt="Vibecarbon" width="200" />
   </picture>
 </p>
 
