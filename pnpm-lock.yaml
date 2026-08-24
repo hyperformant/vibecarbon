@@ -44,7 +44,7 @@ importers:
         version: 6.3.0(typescript@7.0.2)
       '@pulumi/pulumi':
         specifier: ^3.248.0
-        version: 3.258.0(typescript@7.0.2)
+        version: 3.259.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.54.0
         version: 1.54.0(typescript@7.0.2)
@@ -785,8 +785,8 @@ packages:
   '@pulumi/linode@6.3.0':
     resolution: {integrity: sha512-PT/YTupp2qo/V0My4a4Am1sHvjg7xOrn5KOZc3LuPubAHid0pZTrJBZhtOEGd65faDTBsGXy5XM2kUxOgQ0W9w==}
 
-  '@pulumi/pulumi@3.258.0':
-    resolution: {integrity: sha512-IUds2PGz92YiaOSvegK6p5JjPdu0we+IcS9iClyaXRWWjxn7Po+omRoe/NJ58A0fpZFIZUUKM8+Lg7gYd1RczA==}
+  '@pulumi/pulumi@3.259.0':
+    resolution: {integrity: sha512-DRc1bDHWTofZGkKcs/bx98LujCZJNoKRkOdeEhQZNz7wPUX/obhuzmWJezew2FUCEAy1xXHtQj1CTcANHoLn3A==}
     engines: {node: '>=22'}
     peerDependencies:
       ts-node: '>= 7.0.1 < 12'
@@ -1406,6 +1406,10 @@ packages:
 
   content-type@2.0.0:
     resolution: {integrity: sha512-j/O/d7GcZCyNl7/hwZAb606rzqkyvaDctLmckbxLzHvFBzTJHuGEdodATcP3yIRoDrLHkIATJuvzbFlp/ki2cQ==}
+    engines: {node: '>=18'}
+
+  content-type@2.1.0:
+    resolution: {integrity: sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag==}
     engines: {node: '>=18'}
 
   conventional-changelog-angular@8.3.1:
@@ -2197,9 +2201,9 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
-  negotiator@1.0.0:
-    resolution: {integrity: sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg==}
-    engines: {node: '>= 0.6'}
+  negotiator@1.1.0:
+    resolution: {integrity: sha512-NMPBRMJgiQHjbd8phG3Vebdx4kZ1H121rbl5IkMqeOsahptB9BKo/d7oJ3zTXqTgagn2bWlNSXkh0QUGM31RYg==}
+    engines: {node: '>=18'}
 
   neo-async@2.6.2:
     resolution: {integrity: sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw==}
@@ -3391,7 +3395,7 @@ snapshots:
 
   '@ediri/vultr@2.27.1(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.258.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3867,7 +3871,7 @@ snapshots:
 
   '@pulumi/digitalocean@4.79.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.258.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3875,7 +3879,7 @@ snapshots:
 
   '@pulumi/hcloud@1.41.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.258.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3883,13 +3887,13 @@ snapshots:
 
   '@pulumi/linode@6.3.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.258.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
       - typescript
 
-  '@pulumi/pulumi@3.258.0(typescript@7.0.2)':
+  '@pulumi/pulumi@3.259.0(typescript@7.0.2)':
     dependencies:
       '@grpc/grpc-js': 1.14.4
       '@logdna/tail-file': 2.2.0
@@ -3923,7 +3927,7 @@ snapshots:
 
   '@pulumiverse/scaleway@1.54.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.258.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -4515,6 +4519,8 @@ snapshots:
       proto-list: 1.2.4
 
   content-type@2.0.0: {}
+
+  content-type@2.1.0: {}
 
   conventional-changelog-angular@8.3.1:
     dependencies:
@@ -5187,7 +5193,7 @@ snapshots:
       minipass-fetch: 5.0.2
       minipass-flush: 1.0.7
       minipass-pipeline: 1.2.4
-      negotiator: 1.0.0
+      negotiator: 1.1.0
       proc-log: 6.1.0
       ssri: 13.0.1
     transitivePeerDependencies:
@@ -5283,7 +5289,9 @@ snapshots:
 
   nanoid@3.3.18: {}
 
-  negotiator@1.0.0: {}
+  negotiator@1.1.0:
+    dependencies:
+      content-type: 2.1.0
 
   neo-async@2.6.2: {}
 
