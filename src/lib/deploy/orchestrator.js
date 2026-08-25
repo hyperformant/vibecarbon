@@ -26,6 +26,7 @@ import { useDnsChallenge } from './acme.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { assertNoComposeHaRoleSwap } from './compose/ha-role-swap.js';
+import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
@@ -1505,6 +1506,9 @@ export async function executeDeployment(args, gatheredConfig) {
       cleanEnv: true,
     }).trim();
   } catch {}
+  // Whether uncommitted edits were part of this build — read back by the next
+  // deploy's Changes summary so "same commit as live" can be qualified.
+  const deployedDirty = workingTreeDirty();
 
   // Persist backupS3 alongside the storage-s3 block. The backup + restore
   // commands both read it via loadBackupS3Config() from .vibecarbon.json
@@ -1701,6 +1705,7 @@ export async function executeDeployment(args, gatheredConfig) {
         }),
         deployedAt: new Date().toISOString(),
         deployedCommit,
+        ...(deployedDirty !== null && { deployedDirty }),
         s3: {
           bucket: s3Config.bucket,
           region: s3Config.region,

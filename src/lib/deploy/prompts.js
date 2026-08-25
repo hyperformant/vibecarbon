@@ -27,6 +27,7 @@ import {
 import { deriveProjectBucketName } from '../providers/s3-base.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
+import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
 import { resolveTier } from './tier-registry.js';
 import {
   DEFAULT_WORKER_MAX,
@@ -758,6 +759,11 @@ export async function gatherDeploymentConfig(args) {
 
   const branchName = getBranchName(config.environment);
 
+  // What this run actually ships vs. what's live — identical redeploys, big
+  // jumps, and uncommitted edits are all invisible otherwise. Best-effort:
+  // empty outside a git repo.
+  const deltaLines = formatDeployDeltaLines(collectDeployDelta(envConfig));
+
   if (!args.yes && !resuming) {
     // note() pads the box with a blank row top and bottom itself — leading or
     // trailing newlines in the content double them up.
@@ -767,6 +773,7 @@ export async function gatherDeploymentConfig(args) {
         `Region:   ${c.bold(region)}${ha ? ` + ${secondaryRegion}` : ''}`,
         `Stack:    ${c.bold(isComposeDeploy ? 'Docker Compose' : 'Kubernetes (k3s)')}`,
         `Domain:   ${c.bold(domain || 'None')}`,
+        ...(deltaLines.length ? ['', ...deltaLines] : []),
       ].join('\n'),
       'Deployment Summary',
     );
@@ -780,6 +787,10 @@ export async function gatherDeploymentConfig(args) {
     if (!confirmed) {
       exitDeclined();
     }
+  } else if (deltaLines.length) {
+    // --yes and resumed runs skip the interactive summary, but the operator
+    // (and the deploy log) still deserve to see what this run ships.
+    p.note(deltaLines.join('\n'), 'Changes');
   }
 
   return {
