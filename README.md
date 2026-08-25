@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-<p align="center"><strong>Launch full-stack web apps in minutes.</strong></p>
+<p align="center"><strong>Build things new.</strong></p>
 
-<p align="center">Auth, billing, security, AI-guardrails, and powerful automations built-in.</p>
+<p align="center">Full-stack apps in minutes. Auth, billing, security, AI-guardrails, and powerful automations built-in.</p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/npm/v/vibecarbon?color=0a7ea4&label=npm" alt="npm version" /></a>
