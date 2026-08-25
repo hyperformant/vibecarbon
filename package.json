@@ -1,7 +1,7 @@
 {
   "name": "vibecarbon",
   "version": "0.41.0",
-  "description": "Create and manage production-ready Vibecarbon applications",
+  "description": "Launch full-stack web apps in minutes — auth, billing, security, AI-guardrails, and powerful automations built-in.",
   "type": "module",
   "bin": {
     "vibecarbon": "./src/cli.js"
