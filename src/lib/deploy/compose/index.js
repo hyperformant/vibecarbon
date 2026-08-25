@@ -1046,13 +1046,16 @@ export async function runMigrations(ip, sshKeyPath, projectName) {
   // A failed migration MUST fail the deploy — silently shipping an empty schema
   // is far worse than a deploy the operator can see failed and retry. Errors
   // propagate (no 2>/dev/null, no `|| true`); sshRunAsync throws on non-zero.
+  // --single-transaction: each FILE is atomic, so a mid-file failure leaves no
+  // partial schema (2026-08-25 vibecarbon.com: 00008 failed at cron.schedule
+  // AFTER its tables had already been created — see docs/rca/).
   await sshRunAsync(
     ip,
     sshKeyPath,
     `cd ${remoteDir} && ` +
       `for f in $(ls supabase/migrations/ 2>/dev/null | sort); do ` +
       `echo "[migrate] applying $f"; ` +
-      `cat "supabase/migrations/$f" | docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 || ` +
+      `cat "supabase/migrations/$f" | docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction || ` +
       `{ echo "[migrate] FAILED applying $f" >&2; exit 1; }; ` +
       `done`,
     { timeout: 300_000 },

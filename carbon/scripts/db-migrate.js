@@ -16,7 +16,7 @@ export function buildMigrateScript() {
   // Single quiet psql invocation, parameterised by the shell var "$f" / a path.
   const psql = (file) =>
     `PGOPTIONS="-c client_min_messages=warning" ` +
-    `psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q -f ${file} >/dev/null`;
+    `psql -U postgres -d postgres -v ON_ERROR_STOP=1 --single-transaction -q -f ${file} >/dev/null`;
 
   return [
     'set -e',

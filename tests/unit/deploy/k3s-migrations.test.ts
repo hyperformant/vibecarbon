@@ -100,6 +100,7 @@ describe('applyMigrations (PR 1C)', () => {
       'postgres',
       '-v',
       'ON_ERROR_STOP=1',
+      '--single-transaction',
     ]);
     // Second migration call uses the same argv — the SQL is piped via stdin.
     expect(secondArgv).toEqual(firstArgv);

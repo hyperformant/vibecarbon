@@ -2900,6 +2900,9 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
           'postgres',
           '-v',
           'ON_ERROR_STOP=1',
+          // Each migration file is atomic — a mid-file failure must not leave
+          // partial schema behind (see docs/rca/2026-08-25-migration-drift.md).
+          '--single-transaction',
         ],
         { env, input: sql, silent: true },
       );
