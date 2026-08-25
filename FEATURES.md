@@ -351,6 +351,7 @@
 - Build-time sitemap generation (`sitemap.xml`) with static and dynamic routes (blog, changelog, docs)
 - Build-time RSS feed generation (`rss.xml`) for blog posts
 - RSS auto-discovery via `<link rel="alternate">` in HTML head
+- AI-crawlable pages out of the box (GEO): build-time `llms.txt` + `llms-full.txt` (llmstxt.org convention), per-page markdown mirrors at `/{docs,blog,changelog}/<slug>.md`, and per-route `<title>`/meta/Open Graph/canonical/JSON-LD plus rendered content HTML injected into the SPA shell by the Hono server — so GPTBot, ClaudeBot, PerplexityBot, and Bingbot see real content without JavaScript, no prerendering or SSR framework
 - Heading anchor links in MDX content for deep-linking
 
 ## Onboarding

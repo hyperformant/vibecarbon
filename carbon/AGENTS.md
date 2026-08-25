@@ -56,7 +56,7 @@ src/
 │   ├── index.ts             # App entry, middleware, route mounting
 │   ├── routes/              # health.ts, v1/, webhooks/, _internal/
 │   ├── emails/              # React Email templates
-│   └── lib/                 # supabase.ts, env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts
+│   └── lib/                 # supabase.ts, env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
 ├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
 content/                     # MDX content (blog/, changelog/, docs/)
 supabase/migrations/         # SQL migrations (run with npm run db:migrate)

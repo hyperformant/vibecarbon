@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
@@ -141,5 +141,66 @@ describe('Generated Project Lint and Build', () => {
 
   it('generates server build output', () => {
     expect(existsSync(join(projectDir(), 'dist/server/index.js'))).toBe(true);
+  });
+
+  // `build:client` also runs scripts/generate-seo.ts. Everything it produces is
+  // consumed by something that degrades quietly when it is absent — the server
+  // falls back to the plain SPA shell, and llms.txt just 404s — so a build that
+  // silently stopped emitting these would look completely healthy. Assert the
+  // artifacts, not the exit code.
+  describe('AI-search / SEO artifacts', () => {
+    const distFile = (rel: string) => readFileSync(join(projectDir(), 'dist', rel), 'utf-8');
+
+    it('generates llms.txt with a heading and a link to the full text', () => {
+      const llms = distFile('client/llms.txt');
+      expect(llms.startsWith('# ')).toBe(true);
+      expect(llms).toContain('/llms-full.txt');
+    });
+
+    it('generates llms-full.txt containing the docs bodies', () => {
+      const full = distFile('client/llms-full.txt');
+      expect(full).toContain('full documentation');
+      expect(full.length).toBeGreaterThan(distFile('client/llms.txt').length);
+    });
+
+    it('generates a per-page markdown mirror for each docs page', () => {
+      // llms.txt links every page as `<route>.md`; those links must resolve.
+      expect(existsSync(join(projectDir(), 'dist/client/docs/getting-started.md'))).toBe(true);
+    });
+
+    it('generates a route-meta manifest that parses', () => {
+      const manifest = JSON.parse(distFile('seo/route-meta.json')) as {
+        siteUrl: string;
+        routes: Record<string, { title: string; description: string; html?: string }>;
+      };
+      expect(typeof manifest.siteUrl).toBe('string');
+      expect(Object.keys(manifest.routes).length).toBeGreaterThan(0);
+    });
+
+    it('includes homepage metadata with crawler-visible content', () => {
+      const { routes } = JSON.parse(distFile('seo/route-meta.json')) as {
+        routes: Record<string, { title: string; description: string; html?: string }>;
+      };
+      expect(routes['/'].title).toBeTruthy();
+      expect(routes['/'].description).toBeTruthy();
+      // The homepage is the one route whose only crawler-visible body is this
+      // block — a manifest entry without it is worse than no entry at all.
+      expect(routes['/'].html).toContain('<h1>');
+    });
+
+    it('includes metadata for docs pages generated from content/', () => {
+      const { routes } = JSON.parse(distFile('seo/route-meta.json')) as {
+        routes: Record<string, { title: string; html?: string }>;
+      };
+      expect(routes['/docs/getting-started']).toBeDefined();
+      expect(routes['/docs/getting-started'].html).toContain('<article>');
+    });
+
+    it('keeps the route-meta manifest out of the publicly served client dir', () => {
+      // dist/client is the serveStatic root; the manifest is a server-side
+      // input and has no business being fetchable.
+      expect(existsSync(join(projectDir(), 'dist/client/route-meta.json'))).toBe(false);
+      expect(existsSync(join(projectDir(), 'dist/client/seo'))).toBe(false);
+    });
   });
 });

@@ -14,7 +14,18 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Public routes that should be indexed
-const PUBLIC_ROUTES = ['/', '/login', '/signup', '/blog', '/changelog', '/docs'];
+const PUBLIC_ROUTES = [
+  '/',
+  '/pricing',
+  '/contact',
+  '/login',
+  '/signup',
+  '/blog',
+  '/changelog',
+  '/docs',
+  '/privacy',
+  '/terms',
+];
 
 function loadSiteUrl(): string {
   // Production builds receive the apex URL as VITE_PUBLIC_URL (a build arg);

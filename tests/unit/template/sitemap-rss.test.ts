@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -11,7 +13,31 @@ import { describe, expect, it } from 'vitest';
 // SITEMAP FUNCTIONS (mirror generate-sitemap.ts)
 // ============================================================================
 
-const PUBLIC_ROUTES = ['/', '/login', '/signup', '/blog', '/changelog', '/docs'];
+const SITEMAP_SCRIPT = join(import.meta.dirname, '../../../carbon/scripts/generate-sitemap.ts');
+
+/**
+ * Read the route list out of the template script instead of re-declaring it.
+ *
+ * A local copy silently rotted: the script grew /pricing, /contact, /privacy
+ * and /terms while this file kept asserting a 6-entry list, so every sitemap
+ * assertion below stayed green against routes the template no longer had.
+ * Parsing the declaration means the same drift now shows up as a real diff in
+ * what these tests exercise — and `covers the routes the app actually serves`
+ * below fails loudly if a route is dropped from the script.
+ */
+function readPublicRoutes(): string[] {
+  const source = readFileSync(SITEMAP_SCRIPT, 'utf-8');
+  const block = source.match(/const PUBLIC_ROUTES = \[([\s\S]*?)\];/);
+  if (!block) {
+    throw new Error(
+      `Could not find the PUBLIC_ROUTES declaration in ${SITEMAP_SCRIPT}. These tests parse ` +
+        'it from source so the list cannot drift; update this parser if the declaration moved.',
+    );
+  }
+  return Array.from(block[1].matchAll(/'([^']+)'/g), (m) => m[1]);
+}
+
+const PUBLIC_ROUTES = readPublicRoutes();
 
 function generateSitemap(
   siteUrl: string,
@@ -112,6 +138,33 @@ ${items}
 // ============================================================================
 
 describe('Sitemap generation', () => {
+  describe('PUBLIC_ROUTES', () => {
+    it('parses a non-empty list of absolute paths out of the template script', () => {
+      expect(PUBLIC_ROUTES.length).toBeGreaterThan(0);
+      for (const route of PUBLIC_ROUTES) {
+        expect(route.startsWith('/')).toBe(true);
+      }
+    });
+
+    it('covers the routes the app actually serves', () => {
+      // Two-way pin: adding a route to generate-sitemap.ts flows into every
+      // assertion below automatically, while REMOVING one of these — which
+      // would de-index a live page — fails here instead of passing silently.
+      expect(PUBLIC_ROUTES).toEqual([
+        '/',
+        '/pricing',
+        '/contact',
+        '/login',
+        '/signup',
+        '/blog',
+        '/changelog',
+        '/docs',
+        '/privacy',
+        '/terms',
+      ]);
+    });
+  });
+
   describe('generateSitemap', () => {
     it('generates valid XML', () => {
       const sitemap = generateSitemap('https://example.com', [], [], []);
@@ -175,7 +228,7 @@ describe('Sitemap generation', () => {
     it('handles all content types together', () => {
       const sitemap = generateSitemap('https://example.com', ['post-1'], ['v1'], ['intro']);
       const urlCount = (sitemap.match(/<url>/g) || []).length;
-      expect(urlCount).toBe(PUBLIC_ROUTES.length + 3); // 6 public + 1 blog + 1 changelog + 1 doc
+      expect(urlCount).toBe(PUBLIC_ROUTES.length + 3); // public + 1 blog + 1 changelog + 1 doc
     });
   });
 

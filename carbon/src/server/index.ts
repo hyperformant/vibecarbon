@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import { createMiddleware } from 'hono/factory';
@@ -12,6 +12,7 @@ import { env } from './lib/env';
 import { decodeAalFromJwt } from './lib/jwt';
 import { logger } from './lib/logger';
 import { createRateLimiter } from './lib/rate-limiter';
+import { createSeoShell } from './lib/seo';
 import { getSupabaseClient } from './lib/supabase';
 import { servicesStatusRoutes } from './routes/_internal/services-status';
 import { verifyRoleRoutes } from './routes/_internal/verify-role';
@@ -540,6 +541,21 @@ if (process.env.NODE_ENV !== 'production') {
 // ============================================================================
 
 if (process.env.NODE_ENV === 'production') {
+  // Serve the SPA shell with per-route title/meta, JSON-LD, and content HTML
+  // spliced in (built by scripts/generate-seo.ts) so crawlers that don't
+  // execute JS see real content; hydration replaces it for browsers.
+  const seoShell = createSeoShell();
+  const serveSeoShell = (c: Context) => {
+    const html = seoShell.render(c.req.path);
+    if (html === null) return c.notFound();
+    c.header('Cache-Control', 'no-cache');
+    return c.html(html);
+  };
+
+  // Must come before the '/*' static middleware, whose directory-index
+  // resolution would otherwise serve the raw index.html for '/'.
+  app.get('/', serveSeoShell);
+
   // Static assets with cache headers
   app.use(
     '/assets/*',
@@ -561,20 +577,16 @@ if (process.env.NODE_ENV === 'production') {
       root: './dist/client',
       onFound: (path, c) => {
         if (path.endsWith('.html')) c.header('Cache-Control', 'no-cache');
+        // hono's mime map has no `md` entry (falls through to octet-stream,
+        // a download) — the llms.txt markdown mirrors should display as text.
+        if (path.endsWith('.md')) c.header('Content-Type', 'text/markdown; charset=utf-8');
       },
     })
   );
 
-  // SPA fallback - serve index.html for client-side routing (always revalidate)
-  app.get(
-    '/*',
-    serveStatic({
-      path: './dist/client/index.html',
-      onFound: (_path, c) => {
-        c.header('Cache-Control', 'no-cache');
-      },
-    })
-  );
+  // SPA fallback - serve the (possibly SEO-injected) shell for client-side
+  // routing (always revalidate).
+  app.get('/*', serveSeoShell);
 } else {
   // Development: redirect root to API docs (frontend served by Vite dev server).
   // With the API docs turned off there is nothing to redirect to, so say so

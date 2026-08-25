@@ -1,0 +1,66 @@
+---
+title: "SEO & AI Search"
+description: "Serve real HTML to AI crawlers and search engines, and publish llms.txt artifacts for AI agents."
+order: 10
+---
+
+## Overview
+
+AI crawlers — **GPTBot** (ChatGPT), **ClaudeBot**, **PerplexityBot** — and **Bingbot** fetch raw HTML and never execute JavaScript. A plain single-page app returns an empty `<div id="root">`, so to those crawlers every page on your site looks blank.
+
+Your app solves this without prerendering React. In production, the server injects per-route content and metadata into the SPA shell at request time:
+
+- `<title>`, `<meta name="description">`, and the matching Open Graph / Twitter tags
+- `<link rel="canonical">`
+- JSON-LD structured data (`TechArticle` for docs pages, `BlogPosting` for blog posts)
+- The page's actual content as HTML, spliced into `#root`
+
+Browsers get the same document, then React hydrates and replaces `#root` — so the SPA behaves exactly as before. Only the first raw HTML response differs.
+
+## Generated Artifacts
+
+`npm run build` runs `scripts/generate-seo.ts`, which reads your MDX in `content/` and emits:
+
+| Path | Contents |
+|------|----------|
+| `/llms.txt` | Index of your docs, blog, and changelog for AI agents ([llmstxt.org](https://llmstxt.org) convention) |
+| `/llms-full.txt` | Every docs and blog page concatenated into one markdown file |
+| `/docs/<slug>.md` | Per-page markdown mirror (also `/blog/<slug>.md`, `/changelog/<slug>.md`) |
+
+The markdown mirrors are what the links in `llms.txt` point at, so an agent that follows the index lands on clean markdown rather than HTML.
+
+The same script writes the route metadata the server injects, so all four outputs stay in sync with your content automatically. Adding an MDX file is enough — nothing needs registering.
+
+## Customizing
+
+### Per-page title and description
+
+The `title` and `description` in each MDX file's frontmatter are the single source for both the client-side `<SEO>` component and the server-injected metadata:
+
+```mdx
+---
+title: "Billing"
+description: "Set up plans, checkout, and the customer portal."
+order: 11
+---
+```
+
+Write descriptions as one plain sentence — they appear in search results, in `llms.txt`, and in the injected `<meta>` tags.
+
+### Homepage summary
+
+The homepage has no MDX file, so its crawler-visible summary is a block of HTML in `scripts/generate-seo.ts`. Edit it when you change your hero copy so the two don't drift apart.
+
+### robots.txt
+
+`src/client/public/robots.txt` allows all crawlers, including the AI ones, and disallows only the authenticated routes (`/dashboard`, `/settings`, `/admin`, `/api/`). Blocking an AI crawler here removes you from that assistant's answers — leave the wildcard rule alone unless that's what you want.
+
+The build rewrites the `Sitemap:` line to your real site URL and generates `sitemap.xml` alongside it.
+
+## Getting Indexed
+
+On-site markup only matters once crawlers find you.
+
+- **Submit your sitemap to [Bing Webmaster Tools](https://www.bing.com/webmasters).** ChatGPT retrieves pages through Bing's index, so Bing coverage is the practical prerequisite for showing up there.
+- **Submit it to [Google Search Console](https://search.google.com/search-console)** as well, for Google and Gemini.
+- **Third-party mentions outweigh on-site tweaks.** Assistants cite what other sites say about you — documentation on your own domain rarely moves the needle by itself.
