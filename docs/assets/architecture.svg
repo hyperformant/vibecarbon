@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="512" viewBox="0 0 880 512" role="img" aria-label="vibecarbon deploy fans out to four scenarios — compose, compose-ha, k8s, and k8s-ha — all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway">
+<!-- Architecture graphic: one command, four deploy scenarios, five providers.
+     Hand-authored. Provider marks are simple-icons (CC0) path data. -->
+<defs>
+  <linearGradient id="arch-bg" x1="0" y1="0" x2="0" y2="512" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#0E1A1D"/>
+    <stop offset="1" stop-color="#070C0E"/>
+  </linearGradient>
+  <linearGradient id="arch-teal" x1="0" y1="0" x2="880" y2="0" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#5EEAD4"/>
+    <stop offset="1" stop-color="#0D9488"/>
+  </linearGradient>
+  <linearGradient id="arch-hex" x1="0" y1="331" x2="0" y2="359" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#5EEAD4"/>
+    <stop offset="1" stop-color="#0D9488"/>
+  </linearGradient>
+  <linearGradient id="arch-lattice-fade" x1="0" y1="0" x2="0" y2="512" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#FFFFFF" stop-opacity="1"/>
+    <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.35"/>
+    <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+  </linearGradient>
+  <mask id="arch-lattice-mask">
+    <rect x="0" y="0" width="880" height="512" fill="url(#arch-lattice-fade)"/>
+  </mask>
+  <pattern id="arch-lattice" width="45.03" height="78" patternUnits="userSpaceOnUse">
+    <g fill="none" stroke="#5EEAD4" stroke-opacity="0.05" stroke-width="1">
+      <path d="M0 -26 L22.52 -13 L22.52 13 L0 26 L-22.52 13 L-22.52 -13 Z"/>
+      <path d="M45.03 -26 L67.55 -13 L67.55 13 L45.03 26 L22.52 13 L22.52 -13 Z"/>
+      <path d="M22.52 13 L45.03 26 L45.03 52 L22.52 65 L0 52 L0 26 Z"/>
+      <path d="M0 52 L22.52 65 L22.52 91 L0 104 L-22.52 91 L-22.52 65 Z"/>
+      <path d="M45.03 52 L67.55 65 L67.55 91 L45.03 104 L22.52 91 L22.52 65 Z"/>
+    </g>
+  </pattern>
+  <filter id="arch-glow" x="-60%" y="-60%" width="220%" height="220%">
+    <feDropShadow dx="0" dy="0" stdDeviation="9" flood-color="#2DD4BF" flood-opacity="0.35"/>
+  </filter>
+</defs>
+
+<!-- panel -->
+<rect x="0.5" y="0.5" width="879" height="511" rx="16" fill="url(#arch-bg)" stroke="#1E3236"/>
+<rect x="0.5" y="0.5" width="879" height="511" rx="16" fill="url(#arch-lattice)" mask="url(#arch-lattice-mask)"/>
+
+<!-- tier 1: one command -->
+<text x="440" y="40" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" letter-spacing="3" fill="#2DD4BF">ONE COMMAND</text>
+<rect x="315" y="54" width="250" height="44" rx="22" fill="#0D9488" fill-opacity="0.12" stroke="url(#arch-teal)" stroke-width="1.5" filter="url(#arch-glow)"/>
+<text x="440" y="82" text-anchor="middle" font-family="ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace" font-size="16" font-weight="600"><tspan fill="#2DD4BF">$ </tspan><tspan fill="#EEF3F4">vibecarbon deploy</tspan></text>
+
+<!-- fan-out connectors -->
+<g fill="none" stroke-width="1.5" stroke-opacity="0.55">
+  <path d="M440 98 C440 128 131 132 131 162" stroke="#5EEAD4"/>
+  <path d="M440 98 C440 128 337 132 337 162" stroke="#2DD4BF"/>
+  <path d="M440 98 C440 128 543 132 543 162" stroke="#14B8A6"/>
+  <path d="M440 98 C440 128 749 132 749 162" stroke="#0D9488"/>
+</g>
+<circle cx="131" cy="164" r="3" fill="#5EEAD4"/>
+<circle cx="337" cy="164" r="3" fill="#2DD4BF"/>
+<circle cx="543" cy="164" r="3" fill="#14B8A6"/>
+<circle cx="749" cy="164" r="3" fill="#0D9488"/>
+
+<!-- tier 2: four scenarios -->
+<text x="440" y="152" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" letter-spacing="3" fill="#2DD4BF">FOUR SCENARIOS</text>
+
+<g font-family="ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace">
+  <!-- compose -->
+  <rect x="36" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
+  <rect x="48" y="170" width="166" height="3" rx="1.5" fill="#5EEAD4"/>
+  <text x="131" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">compose</text>
+  <text x="131" y="240" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one server</text>
+  <text x="131" y="260" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">free</text>
+
+  <!-- compose-ha -->
+  <rect x="242" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
+  <rect x="254" y="170" width="166" height="3" rx="1.5" fill="#2DD4BF"/>
+  <text x="337" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">compose-ha</text>
+  <text x="337" y="240" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">primary + standby</text>
+  <text x="337" y="260" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">streaming replication</text>
+  <rect x="390" y="182" width="30" height="18" rx="9" fill="none" stroke="#2DD4BF" stroke-opacity="0.7"/>
+  <text x="405" y="195" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9" font-weight="700" letter-spacing="1" fill="#2DD4BF">HA</text>
+
+  <!-- k8s -->
+  <rect x="448" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
+  <rect x="460" y="170" width="166" height="3" rx="1.5" fill="#14B8A6"/>
+  <text x="543" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s</text>
+  <text x="543" y="240" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">k3s cluster</text>
+  <text x="543" y="260" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">autoscaling workers</text>
+
+  <!-- k8s-ha -->
+  <rect x="654" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
+  <rect x="666" y="170" width="166" height="3" rx="1.5" fill="#0D9488"/>
+  <text x="749" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s-ha</text>
+  <text x="749" y="240" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">multi-region</text>
+  <text x="749" y="260" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one-command failover</text>
+  <rect x="802" y="182" width="30" height="18" rx="9" fill="none" stroke="#14B8A6" stroke-opacity="0.7"/>
+  <text x="817" y="195" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9" font-weight="700" letter-spacing="1" fill="#14B8A6">HA</text>
+</g>
+
+<!-- convergence into the carbon node -->
+<g fill="none" stroke-width="1.5" stroke-opacity="0.55">
+  <path d="M131 294 C131 318 440 312 440 330" stroke="#5EEAD4"/>
+  <path d="M337 294 C337 318 440 314 440 330" stroke="#2DD4BF"/>
+  <path d="M543 294 C543 318 440 314 440 330" stroke="#14B8A6"/>
+  <path d="M749 294 C749 318 440 312 440 330" stroke="#0D9488"/>
+</g>
+<path d="M440 332 L451.3 338.5 L451.3 351.5 L440 358 L428.7 351.5 L428.7 338.5 Z" fill="url(#arch-hex)" filter="url(#arch-glow)"/>
+<line x1="440" y1="358" x2="440" y2="380" stroke="#2DD4BF" stroke-width="1.5" stroke-opacity="0.55"/>
+
+<!-- tier 3: five providers -->
+<text x="440" y="398" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" letter-spacing="3" fill="#2DD4BF">FIVE PROVIDERS</text>
+
+<g font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" font-weight="500">
+  <!-- Hetzner -->
+  <rect x="139" y="410" width="108" height="36" rx="18" fill="#0F1D20" stroke="#1F3A3D"/>
+  <g transform="translate(152 419) scale(0.75)"><path fill="#D50C2D" d="M0 0v24h24V0H0zm4.602 4.025h2.244c.509 0 .716.215.716.717v5.64h8.883v-5.64c0-.509.215-.717.717-.717h2.229c.5 0 .71.23.724.717v14.516c0 .509-.215.717-.717.717h-2.23c-.51 0-.717-.215-.717-.717v-5.735H7.562v5.735c0 .516-.215.717-.716.717H4.602c-.51 0-.717-.208-.717-.717V4.742c0-.509.207-.717.717-.717z"/></g>
+  <text x="178" y="433" fill="#DCE7E6">Hetzner</text>
+
+  <!-- DigitalOcean -->
+  <rect x="259" y="410" width="140" height="36" rx="18" fill="#0F1D20" stroke="#1F3A3D"/>
+  <g transform="translate(272 419) scale(0.75)"><path fill="#0080FF" d="M12.04 0C5.408-.02.005 5.37.005 11.992h4.638c0-4.923 4.882-8.731 10.064-6.855a6.95 6.95 0 014.147 4.148c1.889 5.177-1.924 10.055-6.84 10.064v-4.61H7.391v4.623h4.61V24c7.86 0 13.967-7.588 11.397-15.83-1.115-3.59-3.985-6.446-7.575-7.575A12.8 12.8 0 0012.039 0zM7.39 19.362H3.828v3.564H7.39zm-3.563 0v-2.978H.85v2.978z"/></g>
+  <text x="298" y="433" fill="#DCE7E6">DigitalOcean</text>
+
+  <!-- Linode -->
+  <rect x="411" y="410" width="100" height="36" rx="18" fill="#0F1D20" stroke="#1F3A3D"/>
+  <g transform="translate(424 419) scale(0.75)"><path fill="#00A95C" d="M22.006 10.684a.15.15 0 0 0-.07-.15l-3.261-1.821a.14.14 0 0 0-.14 0l-2.771 1.69a.17.17 0 0 0-.07.13v1.451l-1.13-.74a.14.14 0 0 0-.15 0l-1.62 1-.071-1.64a.19.19 0 0 0-.07-.12l-1.65-1.09 1.51-.781a.16.16 0 0 0 .08-.14l-.27-6.272a.16.16 0 0 0-.08-.13L8 0h-.1L2.08 1.81A.16.16 0 0 0 2 2l1.27 6.233a.22.22 0 0 0 0 .08l1.83 1.38-1.26.6a.16.16 0 0 0-.08.17l1 4.702a.18.18 0 0 0 0 .07L6 16.375l-.8.49a.15.15 0 0 0-.06.16l.75 3.642a.11.11 0 0 0 0 .07l3.002 3.221a.14.14 0 0 0 .2 0l3.921-3.121a.16.16 0 0 0 .06-.12l-.07-2.12 1.32 1.1a.14.14 0 0 0 .18 0l3.142-2.511a.24.24 0 0 0 .06-.11l.09-1.57 1 .67a.14.14 0 0 0 .17 0l2.571-2.001a.14.14 0 0 0 .05-.1zm-9.623.15l.07 1.57.12 2.781-4.231 2.871-.66-4.532zm-.35-8.423l.25 5.912-5.002 2.59-.9-6.321zM3.54 8.123L2.33 2.26l3.74 2.32.931 6.203-1.58-1.2zM5 15.055l-.88-4.261 3.281 2.74.6 4.382-1.68-1.62zm1.14 5.512l-.65-3.141 2.892 2.85.47 3.162zm3.002 3l-.49-3.33 4.001-2.871.14 3.28zm3.861-5.36v-1.081a.16.16 0 0 0-.05-.11l-1.13-.92 1-.7a.14.14 0 0 0 .06-.12v-.261l1.39 1.06v3.211zm4.442-1.201l-2.861 2.28v-3.22l3.07-2.201zm1.29-1.21l-.9-.631.09-1.59a.11.11 0 0 0 0-.06.1.1 0 0 0 0-.05l-1.93-1.27v-1.391l3 1.89zm2.55-1.861l-2.28 1.81.26-3.06 2.431-1.681z"/></g>
+  <text x="450" y="433" fill="#DCE7E6">Linode</text>
+
+  <!-- Vultr -->
+  <rect x="523" y="410" width="92" height="36" rx="18" fill="#0F1D20" stroke="#1F3A3D"/>
+  <g transform="translate(536 419) scale(0.75)"><path fill="#007BFC" d="M8.36 2.172A1.194 1.194 0 007.348 1.6H1.2A1.2 1.2 0 000 2.8a1.211 1.211 0 00.182.64l11.6 18.4a1.206 1.206 0 002.035 0l3.075-4.874a1.229 1.229 0 00.182-.64 1.211 1.211 0 00-.182-.642zm10.349 8.68a1.206 1.206 0 002.035 0L21.8 9.178l2.017-3.2a1.211 1.211 0 00.183-.64 1.229 1.229 0 00-.183-.64l-1.6-2.526a1.206 1.206 0 00-1.016-.571h-6.148a1.2 1.2 0 00-1.201 1.2 1.143 1.143 0 00.188.64z"/></g>
+  <text x="562" y="433" fill="#DCE7E6">Vultr</text>
+
+  <!-- Scaleway -->
+  <rect x="627" y="410" width="114" height="36" rx="18" fill="#0F1D20" stroke="#1F3A3D"/>
+  <g transform="translate(640 419) scale(0.75)"><path fill="#A26BFA" d="M16.605 11.11v5.72a1.77 1.77 0 01-1.54 1.69h-4a1.43 1.43 0 01-1.31-1.22 1.09 1.09 0 010-.18 1.37 1.37 0 011.37-1.36h1.74a1 1 0 001-1v-3.62a1.4 1.4 0 011.18-1.39h.17a1.37 1.37 0 011.39 1.36zm-6.46 1.74V9.26a1 1 0 011-1h1.85a1.37 1.37 0 001.37-1.37 1 1 0 000-.17 1.45 1.45 0 00-1.41-1.2h-3.96a1.81 1.81 0 00-1.58 1.66v5.7a1.37 1.37 0 001.37 1.37h.21a1.4 1.4 0 001.15-1.4zm12-4.29V20a4.53 4.53 0 01-4.15 4h-7.58a8.57 8.57 0 01-8.56-8.57V4.54A4.54 4.54 0 016.395 0h7.18a8.56 8.56 0 018.56 8.56zm-2.74 0a5.83 5.83 0 00-5.82-5.82h-7.19a1.79 1.79 0 00-1.8 1.8v10.89a5.83 5.83 0 005.82 5.8h7.44a1.79 1.79 0 001.54-1.48z"/></g>
+  <text x="666" y="433" fill="#DCE7E6">Scaleway</text>
+</g>
+
+<!-- footer -->
+<text x="440" y="480" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#7C9693">automated SSL + backups in every mode · picked per environment · switch anytime</text>
+</svg>
