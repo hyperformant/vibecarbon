@@ -87,20 +87,20 @@ Vibecarbon handles Docker Compose and Kubernetes, high availability with one-com
 **Zero → production in five commands:**
 
 ```bash
-# 1️⃣  Install the CLI globally
+# 1. Install the CLI globally
 npm install -g vibecarbon
 
-# 2️⃣  Create a new project
+# 2. Create a new project
 vibecarbon create my-app
 
-# 3️⃣  Start local development
+# 3. Start local development
 cd my-app
 vibecarbon up
 
-# 4️⃣  Deploy an environment
+# 4. Deploy an environment
 vibecarbon deploy
 
-# 5️⃣  Tear down an environment
+# 5. Tear down an environment
 vibecarbon destroy
 ```
 
@@ -119,42 +119,42 @@ vibecarbon <command> [options]
 
 | Command | What it does |
 | :------ | :----------- |
-| `create <project-name>` | Create a new Vibecarbon project |
-| `up` | Start the local development environment |
-| `down` | Stop the local development environment |
-| `status` | Show project and deployment status |
-| `reset` | Reset the local environment — **removes all data** |
-| `configure` | Configure external services and settings — billing, OAuth, SMTP, CI/CD, globalization, and more |
-| `add <feature>` | Add features (observability, redis) |
-| `remove <feature>` | Remove features from a project |
-| `upgrade` | Upgrade infrastructure files to the latest template |
+| **`create <project-name>`** | Create a new Vibecarbon project |
+| **`up`** | Start the local development environment |
+| **`down`** | Stop the local development environment |
+| **`status`** | Show project and deployment status |
+| **`reset`** | Reset the local environment — **removes all data** |
+| **`configure`** | Configure external services and settings — billing, OAuth, SMTP, CI/CD, globalization, and more |
+| **`add <feature>`** | Add features (observability, redis) |
+| **`remove <feature>`** | Remove features from a project |
+| **`upgrade`** | Upgrade infrastructure files to the latest template |
 
 ### Deploy — take an environment to the cloud (and back)
 
 | Command | What it does |
 | :------ | :----------- |
-| `deploy [environment]` | Deploy an environment — interactive picker for mode and region |
-| `destroy [environment]` | Tear down a cloud environment |
-| `backup [environment]` | Create, list, or download database backups |
-| `restore [environment]` | Restore the database from a backup |
-| `failover [environment]` | Initiate failover to the standby region |
-| `scale [environment]` | Scale worker nodes and instance sizes |
+| **`deploy [environment]`** | Deploy an environment — interactive picker for mode and region |
+| **`destroy [environment]`** | Tear down a cloud environment |
+| **`backup [environment]`** | Create, list, or download database backups |
+| **`restore [environment]`** | Restore the database from a backup |
+| **`failover [environment]`** | Initiate failover to the standby region |
+| **`scale [environment]`** | Scale worker nodes and instance sizes |
 
 ### License — unlock HA + Kubernetes
 
 | Command | What it does |
 | :------ | :----------- |
-| `activate [key]` | Activate a Fullerene license key (unlocks HA + k8s modes) |
-| `deactivate` | Deactivate the current license |
+| **`activate [key]`** | Activate a Fullerene license key (unlocks HA + k8s modes) |
+| **`deactivate`** | Deactivate the current license |
 
 ### Debug — look under the hood
 
 | Command | What it does |
 | :------ | :----------- |
-| `shell [environment]` | Interactive bash with `KUBECONFIG` + cloud creds exported |
-| `diagnose [environment]` | Dump full cluster state to `~/.vibecarbon/diag-*` |
-| `console <node>` | Open Hetzner's web VNC console for a node |
-| `access [subcommand]` | Manage the SSH + k8s-API operator-CIDR allowlist |
+| **`shell [environment]`** | Interactive bash with `KUBECONFIG` + cloud creds exported |
+| **`diagnose [environment]`** | Dump full cluster state to `~/.vibecarbon/diag-*` |
+| **`console <node>`** | Open Hetzner's web VNC console for a node |
+| **`access [subcommand]`** | Manage the SSH + k8s-API operator-CIDR allowlist |
 
 > [!WARNING]
 > `reset` and `destroy` are destructive — both are confirmation-gated, but read the prompt before you say yes.
