@@ -64,3 +64,16 @@ On-site markup only matters once crawlers find you.
 - **Submit your sitemap to [Bing Webmaster Tools](https://www.bing.com/webmasters).** ChatGPT retrieves pages through Bing's index, so Bing coverage is the practical prerequisite for showing up there.
 - **Submit it to [Google Search Console](https://search.google.com/search-console)** as well, for Google and Gemini.
 - **Third-party mentions outweigh on-site tweaks.** Assistants cite what other sites say about you — documentation on your own domain rarely moves the needle by itself.
+
+## AI Visibility dashboard
+
+Once the crawlers arrive, **Admin → AI Visibility** shows what they did. The server classifies every document request by user agent against a built-in crawler registry — GPTBot, OAI-SearchBot, ClaudeBot, PerplexityBot, Bingbot, Googlebot, Amazonbot, CCBot, and friends — and records the hit. Asset and API requests are skipped, so the numbers reflect pages, markdown mirrors, and `llms.txt` rather than JavaScript bundles.
+
+The page answers the two questions worth acting on:
+
+- **Is anything crawling you at all?** Totals per crawler and per category (AI search, AI training, search engine), plus a daily trend chart.
+- **What are they actually fetching?** A most-crawled-pages table. If your pricing page never appears but your changelog does, that's a content gap, not a markup bug.
+
+Only the crawler name, the requested path, a truncated user-agent string, and a timestamp are stored — **no IP addresses**, so this adds no personal-data surface. Raw hits are kept for 90 days and rolled up nightly into a daily table that's retained indefinitely; both jobs run on `pg_cron` and can be triggered by hand from **Admin → Jobs** (`rollup-crawler-hits` and `cleanup-crawler-hits`).
+
+An empty dashboard usually means the site isn't reachable yet rather than that something is broken — crawlers can only visit a public domain, and `robots.txt` has to let them in.

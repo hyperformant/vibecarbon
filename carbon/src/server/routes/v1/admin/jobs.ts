@@ -120,24 +120,71 @@ jobsRoutes.post('/trigger', async (c) => {
       'cleanup-login-attempts',
       'cleanup-expired-notifications',
       'cleanup-job-history',
+      'rollup-crawler-hits',
+      'cleanup-crawler-hits',
     ];
 
     if (!allowedJobs.includes(body.jobName)) {
       return c.json({ error: 'Unknown job name' }, 400);
     }
 
-    // Execute the job's SQL directly
+    // Execute the job's SQL directly.
+    //
+    // supabase-js RESOLVES with `{ error }` instead of throwing, so every branch
+    // must capture it. Without this the `await` swallows the failure, the catch
+    // below never fires, and a permission-denied RPC or a blocked DELETE gets
+    // written to cron_job_history as 'succeeded' and reported to the admin as a
+    // successful run — the job silently never happens.
+    let jobError: unknown = null;
+
     if (body.jobName === 'cleanup-login-attempts') {
-      await adminDb.rpc('cleanup_old_login_attempts', { p_retention_hours: 24 });
+      jobError = (await adminDb.rpc('cleanup_old_login_attempts', { p_retention_hours: 24 })).error;
     } else if (body.jobName === 'cleanup-expired-notifications') {
-      await adminDb
-        .from('notifications')
-        .delete()
-        .not('expires_at', 'is', null)
-        .lt('expires_at', new Date().toISOString());
+      jobError = (
+        await adminDb
+          .from('notifications')
+          .delete()
+          .not('expires_at', 'is', null)
+          .lt('expires_at', new Date().toISOString())
+      ).error;
     } else if (body.jobName === 'cleanup-job-history') {
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      await adminDb.from('cron_job_history').delete().lt('created_at', thirtyDaysAgo);
+      jobError = (await adminDb.from('cron_job_history').delete().lt('created_at', thirtyDaysAgo))
+        .error;
+    } else if (body.jobName === 'rollup-crawler-hits') {
+      // Aggregation can't be expressed through PostgREST — the same idempotent
+      // SECURITY DEFINER function the nightly cron job runs (migration 00008).
+      // Null p_day = yesterday (UTC).
+      jobError = (await adminDb.rpc('rollup_crawler_hits', { p_day: null })).error;
+    } else if (body.jobName === 'cleanup-crawler-hits') {
+      // Mirrors the scheduled job in 00008: prune raw hits at 90 days AND the
+      // rollup at 400, so a manual run does the same work as the nightly one.
+      const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+      const fourHundredDaysAgo = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const rawResult = await adminDb.from('crawler_hits').delete().lt('hit_at', ninetyDaysAgo);
+      const dailyResult = await adminDb
+        .from('crawler_hits_daily')
+        .delete()
+        .lt('day', fourHundredDaysAgo);
+      jobError = rawResult.error ?? dailyResult.error;
+    }
+
+    if (jobError) {
+      // Record the real outcome, then surface it. An admin who clicks "run now"
+      // must not be told it worked when it did not.
+      await adminDb.from('cron_job_history').insert({
+        job_name: body.jobName,
+        status: 'failed',
+        finished_at: new Date().toISOString(),
+        result: 'Manually triggered by admin',
+        error:
+          typeof jobError === 'object' && jobError !== null && 'message' in jobError
+            ? String((jobError as { message: unknown }).message)
+            : 'Unknown error',
+      });
+      return c.json({ error: sanitizeError(jobError, 'Failed to trigger job') }, 500);
     }
 
     // Log the manual trigger

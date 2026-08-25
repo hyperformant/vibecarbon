@@ -14,11 +14,13 @@ import { logger } from './lib/logger';
 import { createRateLimiter } from './lib/rate-limiter';
 import { createSeoShell } from './lib/seo';
 import { getSupabaseClient } from './lib/supabase';
+import { crawlerTracking } from './middleware/crawler-tracking';
 import { servicesStatusRoutes } from './routes/_internal/services-status';
 import { verifyRoleRoutes } from './routes/_internal/verify-role';
 import { healthRoutes } from './routes/health';
 import { v1Routes } from './routes/v1';
 import { adminContactRoutes } from './routes/v1/admin/contact';
+import { crawlerRoutes } from './routes/v1/admin/crawlers';
 import { jobsRoutes } from './routes/v1/admin/jobs';
 import { adminNewsletterRoutes } from './routes/v1/admin/newsletter';
 import { authRoutes } from './routes/v1/auth';
@@ -104,6 +106,12 @@ app.use('*', timeout(30000));
 
 // Request logging
 app.use('*', honoLogger());
+
+// AI Visibility: record AI/search-crawler document fetches (fire-and-forget,
+// never awaited). Deliberately registered here — on '*' and BEFORE the /api/*
+// limiters — because crawlers fetch '/', '/docs/*', '/llms.txt' and the .md
+// mirrors, never the API. The middleware itself filters out API/asset paths.
+app.use('*', crawlerTracking);
 
 // Rate limiting for API routes (100 requests per minute per IP)
 app.use('/api/v1/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
@@ -229,6 +237,7 @@ app.route('/api/v1/admin/stats', statsRoutes);
 app.route('/api/v1/admin/performance', performanceRoutes);
 
 app.route('/api/v1/admin/jobs', jobsRoutes);
+app.route('/api/v1/admin/crawlers', crawlerRoutes);
 app.route('/api/v1/admin/contact', adminContactRoutes);
 app.route('/api/v1/admin/newsletter', adminNewsletterRoutes);
 app.route('/api/v1/contact', contactRoutes);

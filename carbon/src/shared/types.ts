@@ -305,6 +305,59 @@ export type Database = {
         };
         Relationships: [];
       };
+      // AI Visibility: raw crawler hits (migration 00008). Written only by the
+      // server's service_role client; pruned after 90 days by pg_cron.
+      crawler_hits: {
+        Row: {
+          id: number;
+          crawler: string;
+          path: string;
+          user_agent: string | null;
+          hit_at: string;
+        };
+        Insert: {
+          // `id` is GENERATED ALWAYS AS IDENTITY — never supplied by a caller.
+          crawler: string;
+          path: string;
+          user_agent?: string | null;
+          hit_at?: string;
+        };
+        Update: {
+          crawler?: string;
+          path?: string;
+          user_agent?: string | null;
+          hit_at?: string;
+        };
+        Relationships: [];
+      };
+      // AI Visibility: per-day (crawler, path) rollup, pruned after 400 days.
+      crawler_hits_daily: {
+        Row: {
+          day: string;
+          crawler: string;
+          path: string;
+          hits: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          day: string;
+          crawler: string;
+          path: string;
+          hits?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          day?: string;
+          crawler?: string;
+          path?: string;
+          hits?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -313,6 +366,11 @@ export type Database = {
       cleanup_old_login_attempts: {
         Args: { p_retention_hours: number };
         Returns: undefined;
+      };
+      rollup_crawler_hits: {
+        /** Null rolls up yesterday (UTC). Returns the number of rows upserted. */
+        Args: { p_day: string | null };
+        Returns: number;
       };
     };
     Enums: {
@@ -334,5 +392,7 @@ export type Notification = Database['public']['Tables']['notifications']['Row'];
 export type NotificationDismissal = Database['public']['Tables']['notification_dismissals']['Row'];
 export type FailedLoginAttempt = Database['public']['Tables']['failed_login_attempts']['Row'];
 export type AppSetting = Database['public']['Tables']['app_settings']['Row'];
+export type CrawlerHit = Database['public']['Tables']['crawler_hits']['Row'];
+export type CrawlerHitDaily = Database['public']['Tables']['crawler_hits_daily']['Row'];
 export type InsertOrganization = Database['public']['Tables']['organizations']['Insert'];
 export type InsertMembership = Database['public']['Tables']['memberships']['Insert'];

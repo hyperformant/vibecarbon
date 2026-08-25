@@ -88,6 +88,7 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 | `GET/POST /api/v1/admin/notifications` | Manage notifications (super admin) |
 | `GET /api/v1/admin/stats` | Platform-wide stats (super admin) |
 | `GET /api/v1/admin/performance` | Service performance/health checks (super admin) |
+| `GET /api/v1/admin/crawlers` | AI/search crawler analytics, `?days=1..365` (super admin) |
 | `GET /api/v1/admin/jobs` | Background jobs and execution history (super admin) |
 | `POST /api/v1/admin/jobs/trigger` | Manually trigger a background job (super admin) |
 | `GET/PATCH/DELETE /api/v1/admin/contact` | Manage contact submissions (super admin) |
@@ -237,6 +238,8 @@ still untranslated. English cannot be removed: it is i18next's `fallbackLng`.
 | `cron_job_history` | Background job execution history (pg_cron) |
 | `contact_submissions` | Contact form submissions (name, email, subject, message, status) |
 | `newsletter_subscribers` | Newsletter subscribers (email, status: pending/active/unsubscribed) |
+| `crawler_hits` | AI/search crawler page fetches (crawler, bucketed path, UA, no IPs; pruned after 90 days) |
+| `crawler_hits_daily` | Per-day (crawler, path) hit rollup, pruned after 400 days |
 
 RLS helper functions: `get_user_org_ids()`, `get_user_admin_org_ids()`, `is_super_admin()`
 

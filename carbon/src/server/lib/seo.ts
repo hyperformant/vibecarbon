@@ -1,9 +1,14 @@
 /**
  * Per-route SEO injection for the production SPA fallback.
  *
- * AI crawlers (GPTBot, ClaudeBot, PerplexityBot) and Bingbot fetch raw HTML
- * without executing JavaScript, so serving the bare SPA shell makes every
- * page look empty to them. Instead of prerendering the React app, the server
+ * AI and search crawlers fetch raw HTML without executing JavaScript, so
+ * serving the bare SPA shell makes every page look empty to them. The crawlers
+ * this app recognises (GPTBot, ClaudeBot, PerplexityBot, OAI-SearchBot,
+ * Bingbot, Googlebot and the rest) are enumerated in `lib/crawlers.ts` — that
+ * registry is the source of truth, and the middleware that records their hits
+ * for the admin "AI Visibility" page reads the same list.
+ *
+ * Instead of prerendering the React app, the server
  * splices per-route metadata and content — generated at build time by
  * scripts/generate-seo.ts from the same MDX the client renders — into the
  * shell. Hydration replaces #root, so browser users see the SPA unchanged.
@@ -71,7 +76,16 @@ export function injectSeo(shell: string, meta: RouteSeo): string {
     out = out.replace('</head>', () => `  ${headExtras.join('\n    ')}\n  </head>`);
   }
   if (meta.html) {
-    out = out.replace('<div id="root"></div>', () => `<div id="root">${meta.html}</div>`);
+    // <noscript>: browsers never paint the crawler content (no flash of
+    // unstyled text before hydration); non-JS crawlers read the text as-is.
+    // A literal </noscript> inside the content would end the element early and
+    // let the rest parse as live HTML — neutralize it (trusted MDX today, but
+    // a docs page quoting a <noscript> example must not break the page).
+    const safeHtml = meta.html.replace(/<\/noscript/gi, () => '&lt;/noscript');
+    out = out.replace(
+      '<div id="root"></div>',
+      () => `<div id="root"><noscript>${safeHtml}</noscript></div>`
+    );
   }
   return out;
 }

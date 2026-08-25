@@ -95,7 +95,7 @@ describe('injectSeo', () => {
       description: 'd',
       html: '<main><h1>Hello</h1></main>',
     });
-    expect(out).toContain('<div id="root"><main><h1>Hello</h1></main></div>');
+    expect(out).toContain('<div id="root"><noscript><main><h1>Hello</h1></main></noscript></div>');
   });
 
   // Regression: String.replace expands $-patterns ($1, $&, $`, $', $$) in
@@ -118,7 +118,9 @@ describe('injectSeo', () => {
       html: "<pre>DO $$ BEGIN END $$;</pre> tail $' marker",
     });
     expect(out).toContain('"code":"DO $$ BEGIN END $$; with $` inside"');
-    expect(out).toContain('<div id="root"><pre>DO $$ BEGIN END $$;</pre> tail $\' marker</div>');
+    expect(out).toContain(
+      "<div id=\"root\"><noscript><pre>DO $$ BEGIN END $$;</pre> tail $' marker</noscript></div>"
+    );
   });
 });
 

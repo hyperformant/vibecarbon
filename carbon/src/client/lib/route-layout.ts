@@ -31,6 +31,7 @@ const ROUTE_VARIANTS: Array<readonly [string, LayoutVariant]> = [
   ['/admin/infrastructure', 'default'],
   ['/admin/theme', 'wide'],
   ['/admin/jobs', 'default'],
+  ['/admin/crawlers', 'full'],
   ['/admin/contact', 'default'],
   ['/admin/newsletter', 'default'],
   ['/admin/settings', 'default'],

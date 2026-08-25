@@ -50,6 +50,7 @@ const AdminInfrastructure = lazy(() => import('./pages/admin/Infrastructure'));
 const AdminSettings = lazy(() => import('./pages/admin/Settings'));
 const AdminTheme = lazy(() => import('./pages/admin/Theme'));
 const AdminJobs = lazy(() => import('./pages/admin/Jobs'));
+const AdminCrawlers = lazy(() => import('./pages/admin/Crawlers'));
 const AdminContactSubmissions = lazy(() => import('./pages/admin/ContactSubmissions'));
 const AdminNewsletter = lazy(() => import('./pages/admin/Newsletter'));
 const Contact = lazy(() => import('./pages/Contact'));
@@ -241,6 +242,7 @@ export default function App() {
           <Route path="/admin/notifications" element={<AdminNotifications />} />
           <Route path="/admin/infrastructure" element={<AdminInfrastructure />} />
           <Route path="/admin/jobs" element={<AdminJobs />} />
+          <Route path="/admin/crawlers" element={<AdminCrawlers />} />
           <Route path="/admin/contact" element={<AdminContactSubmissions />} />
           <Route path="/admin/newsletter" element={<AdminNewsletter />} />
           <Route path="/admin/settings" element={<AdminSettings />} />

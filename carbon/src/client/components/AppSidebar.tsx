@@ -15,6 +15,7 @@ import {
   IconMoon as Moon,
   IconPalette as Palette,
   IconPlus as Plus,
+  IconRobot as Robot,
   IconSettings as Settings,
   IconShield as Shield,
   IconSun as Sun,
@@ -81,6 +82,7 @@ const prefetchMap: Record<string, () => Promise<unknown>> = {
   '/admin/settings': () => import('@/pages/admin/Settings'),
   '/admin/infrastructure': () => import('@/pages/admin/Infrastructure'),
   '/admin/jobs': () => import('@/pages/admin/Jobs'),
+  '/admin/crawlers': () => import('@/pages/admin/Crawlers'),
   '/admin/contact': () => import('@/pages/admin/ContactSubmissions'),
   '/admin/newsletter': () => import('@/pages/admin/Newsletter'),
 };
@@ -575,6 +577,21 @@ export function AppSidebar() {
                           <Clock className="size-4" />
                         </IconSlot>
                         <span className="group-data-[collapsible=icon]:hidden">Jobs</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        isActive={location.pathname === '/admin/crawlers'}
+                        onClick={() => navigate('/admin/crawlers')}
+                        onMouseEnter={() => prefetch('/admin/crawlers')}
+                        onFocus={() => prefetch('/admin/crawlers')}
+                        tooltip="AI Visibility"
+                        className="gap-0 p-0"
+                      >
+                        <IconSlot>
+                          <Robot className="size-4" />
+                        </IconSlot>
+                        <span className="group-data-[collapsible=icon]:hidden">AI Visibility</span>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                     <SidebarMenuItem>

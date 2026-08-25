@@ -352,6 +352,7 @@
 - Build-time RSS feed generation (`rss.xml`) for blog posts
 - RSS auto-discovery via `<link rel="alternate">` in HTML head
 - AI-crawlable pages out of the box (GEO): build-time `llms.txt` + `llms-full.txt` (llmstxt.org convention), per-page markdown mirrors at `/{docs,blog,changelog}/<slug>.md`, and per-route `<title>`/meta/Open Graph/canonical/JSON-LD plus rendered content HTML injected into the SPA shell by the Hono server — so GPTBot, ClaudeBot, PerplexityBot, and Bingbot see real content without JavaScript, no prerendering or SSR framework
+- AI Visibility admin dashboard — user-agent classified crawler hits (GPTBot, ClaudeBot, PerplexityBot, Googlebot, Bingbot, and more) grouped by AI search / AI training / search engine, with a daily trend chart, per-crawler totals, and a most-crawled-pages table; no IPs stored, 90-day raw retention with nightly `pg_cron` rollups into a permanent daily table
 - Heading anchor links in MDX content for deep-linking
 
 ## Onboarding
