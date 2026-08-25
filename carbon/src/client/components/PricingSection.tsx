@@ -339,8 +339,11 @@ function TierCard({ tier }: { tier: Tier }) {
           {/* Tagline */}
           <p className="relative z-[1] mb-6 text-sm text-muted-foreground">{tier.tagline}</p>
 
-          {/* Price */}
-          <div className="relative z-[1] mb-2">
+          {/* Price. Fixed row height (= the text-4xl/lg:text-5xl line height) with
+              bottom alignment: the Contact-us card's smaller text would otherwise
+              produce a shorter line box and pull its pill/CTA/divider up a few px
+              relative to the sibling cards. */}
+          <div className="relative z-[1] mb-2 flex h-10 items-end lg:h-12">
             {tier.originalPrice && (
               <span className="mr-2 text-base text-muted-foreground/40 line-through">
                 ${tier.originalPrice}
