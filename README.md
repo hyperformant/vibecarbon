@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center"><strong>Build things new.</strong></p>
+<p align="center"><strong>Build the next big thing.</strong></p>
 
 <p align="center">Full-stack apps in minutes. Auth, billing, security, AI-guardrails, and powerful automations built-in.</p>
 
