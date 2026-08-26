@@ -762,7 +762,13 @@ export async function gatherDeploymentConfig(args) {
   // What this run actually ships vs. what's live — identical redeploys, big
   // jumps, and uncommitted edits are all invisible otherwise. Best-effort:
   // empty outside a git repo.
-  const deltaLines = formatDeployDeltaLines(collectDeployDelta(envConfig));
+  const deltaLines = formatDeployDeltaLines(collectDeployDelta(envConfig), {
+    sha: c.boldCyan,
+    count: c.success,
+    subject: c.dim,
+    warn: c.warning,
+    alert: c.danger,
+  });
 
   if (!args.yes && !resuming) {
     // note() pads the box with a blank row top and bottom itself — leading or

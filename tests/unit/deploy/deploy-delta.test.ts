@@ -133,6 +133,30 @@ describe('formatDeployDeltaLines', () => {
     expect(lines.at(-1)).toBe('  … and 4 more');
   });
 
+  it('clips over-long subjects so columns never wrap', () => {
+    const long =
+      'copy(cta): subheading -> "Production-grade infrastructure in minutes with automated everything."';
+    const lines = formatDeployDeltaLines({
+      ...base,
+      deployed: { sha: 'aaaaaaa0000', message: long, at: null },
+      subjects: [`ccccccc ${long}`],
+      commitsAhead: 1,
+    });
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(70);
+    expect(lines[0]).toContain('…');
+  });
+
+  it('applies style hooks to shas, counts, and warnings', () => {
+    const tag = (name: string) => (s: string) => `<${name}>${s}</${name}>`;
+    const lines = formatDeployDeltaLines(
+      { ...base, dirtyCount: 2 },
+      { sha: tag('sha'), count: tag('count'), subject: tag('dim'), warn: tag('warn') },
+    );
+    expect(lines[0]).toContain('<sha>aaaaaaa</sha>');
+    expect(lines[1]).toContain('<count>(+2 commits)</count>');
+    expect(lines.at(-1)).toContain('<warn>');
+  });
+
   it('calls out a local checkout BEHIND the live commit', () => {
     const lines = formatDeployDeltaLines({ ...base, commitsAhead: 0, subjects: [] });
     expect(lines[1]).toContain('BEHIND the live commit');
