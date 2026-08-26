@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Hono } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // seo.ts imports logger (which pulls in env validation at import time) — mock
@@ -178,5 +179,72 @@ describe('createSeoShell', () => {
   it('returns null when the shell itself is unreadable', () => {
     const shell = setup({ shell: false });
     expect(shell.render('/')).toBeNull();
+  });
+
+  describe('handler', () => {
+    function mount(shell: ReturnType<typeof setup>) {
+      const app = new Hono();
+      app.get('/*', shell.handler);
+      return app;
+    }
+
+    it('serves the injected shell with an ETag and no-cache', async () => {
+      const app = mount(setup());
+      const res = await app.request('/docs/getting-started');
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain('<title>Getting Started | My SaaS</title>');
+      expect(res.headers.get('Cache-Control')).toBe('no-cache');
+      expect(res.headers.get('ETag')).toMatch(/^"[^"]+"$/);
+    });
+
+    it('returns 304 with no body when If-None-Match matches', async () => {
+      const app = mount(setup());
+      const first = await app.request('/docs/getting-started');
+      const etag = first.headers.get('ETag') as string;
+      const res = await app.request('/docs/getting-started', {
+        headers: { 'If-None-Match': etag },
+      });
+      expect(res.status).toBe(304);
+      expect(await res.text()).toBe('');
+      expect(res.headers.get('ETag')).toBe(etag);
+    });
+
+    it('matches If-None-Match lists and the * wildcard', async () => {
+      const app = mount(setup());
+      const etag = (await app.request('/docs/getting-started')).headers.get('ETag') as string;
+      const listed = await app.request('/docs/getting-started', {
+        headers: { 'If-None-Match': `"stale", ${etag}` },
+      });
+      expect(listed.status).toBe(304);
+      const wildcard = await app.request('/docs/getting-started', {
+        headers: { 'If-None-Match': '*' },
+      });
+      expect(wildcard.status).toBe(304);
+    });
+
+    it('serves 200 when If-None-Match does not match', async () => {
+      const app = mount(setup());
+      const res = await app.request('/docs/getting-started', {
+        headers: { 'If-None-Match': '"something-stale"' },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain('<title>Getting Started | My SaaS</title>');
+    });
+
+    it('gives the same route a stable ETag and distinct routes distinct ETags', async () => {
+      const app = mount(setup());
+      const a = (await app.request('/docs/getting-started')).headers.get('ETag');
+      const b = (await app.request('/docs/getting-started')).headers.get('ETag');
+      const plain = (await app.request('/dashboard')).headers.get('ETag');
+      expect(a).toBe(b);
+      expect(plain).toMatch(/^"[^"]+"$/);
+      expect(plain).not.toBe(a);
+    });
+
+    it('404s when the shell itself is unreadable', async () => {
+      const app = mount(setup({ shell: false }));
+      const res = await app.request('/');
+      expect(res.status).toBe(404);
+    });
   });
 });

@@ -9,6 +9,7 @@
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDraft } from './lib/seo-content';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -59,9 +60,10 @@ function loadPosts(): PostMeta[] {
   const files = readdirSync(blogDir).filter((f) => f.endsWith('.mdx'));
 
   return files
-    .map((file) => {
+    .map((file): PostMeta | null => {
       const content = readFileSync(resolve(blogDir, file), 'utf-8');
       const fm = parseFrontmatter(content);
+      if (isDraft(fm)) return null;
       return {
         slug: file.replace('.mdx', ''),
         title: fm.title || file.replace('.mdx', ''),
@@ -70,6 +72,7 @@ function loadPosts(): PostMeta[] {
         author: fm.author,
       };
     })
+    .filter((post): post is PostMeta => post !== null)
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 }
 

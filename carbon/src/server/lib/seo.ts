@@ -14,7 +14,9 @@
  * shell. Hydration replaces #root, so browser users see the SPA unchanged.
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import type { Context } from 'hono';
 import { logger } from './logger';
 
 export interface RouteSeo {
@@ -93,6 +95,12 @@ export function injectSeo(shell: string, meta: RouteSeo): string {
 interface SeoShell {
   /** Injected (or plain, for unknown routes) shell HTML; null if the shell itself is unreadable. */
   render(path: string): string | null;
+  /**
+   * Hono handler: serves the rendered shell with a content-hash ETag and
+   * answers If-None-Match revalidations with 304. Rendered HTML and its ETag
+   * are memoized per route (bounded: known routes + the plain shell).
+   */
+  handler(c: Context): Response | Promise<Response>;
 }
 
 /**
@@ -129,13 +137,43 @@ export function createSeoShell(
     }
   };
 
+  const rendered = new Map<string, { html: string; etag: string }>();
+
+  const renderResult = (path: string): { html: string; etag: string } | null => {
+    if (!loaded) load();
+    if (shell === null) return null;
+    const normalized = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+    const meta = routes[normalized];
+    // Unknown routes all share the plain-shell entry, so the cache stays
+    // bounded by the manifest size + 1.
+    const key = meta ? normalized : '';
+    let entry = rendered.get(key);
+    if (!entry) {
+      const html = meta ? injectSeo(shell, meta) : shell;
+      entry = { html, etag: `"${createHash('sha256').update(html).digest('hex').slice(0, 32)}"` };
+      rendered.set(key, entry);
+    }
+    return entry;
+  };
+
   return {
     render(path: string): string | null {
-      if (!loaded) load();
-      if (shell === null) return null;
-      const normalized = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
-      const meta = routes[normalized];
-      return meta ? injectSeo(shell, meta) : shell;
+      return renderResult(path)?.html ?? null;
+    },
+    handler(c: Context): Response | Promise<Response> {
+      const result = renderResult(c.req.path);
+      if (result === null) return c.notFound();
+      c.header('Cache-Control', 'no-cache');
+      c.header('ETag', result.etag);
+      const ifNoneMatch = c.req.header('If-None-Match');
+      if (
+        ifNoneMatch &&
+        (ifNoneMatch.trim() === '*' ||
+          ifNoneMatch.split(',').some((tag) => tag.trim() === result.etag))
+      ) {
+        return c.body(null, 304);
+      }
+      return c.html(result.html);
     },
   };
 }

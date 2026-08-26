@@ -28,6 +28,7 @@ import remarkGfm from 'remark-gfm';
 import remarkParse from 'remark-parse';
 import remarkRehype from 'remark-rehype';
 import { unified } from 'unified';
+import { isDraft, parseFrontmatter, substituteMdxProps } from './lib/seo-content';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -101,18 +102,36 @@ function loadSiteUrl(): string {
   return (process.env.SITE_URL || 'http://localhost:5173').replace(/\/$/, '');
 }
 
-function parseFrontmatter(content: string): { fm: Record<string, string>; body: string } {
-  const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (!match) return { fm: {}, body: content };
-  const fm: Record<string, string> = {};
-  for (const line of match[1].split('\n')) {
-    const [key, ...rest] = line.split(':');
-    if (key && rest.length) {
-      fm[key.trim()] = rest.join(':').trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  return { fm, body: content.slice(match[0].length) };
+/**
+ * Admin contact email for MDX prop substitution. Like loadSiteName, this
+ * upgrade-managed file must not carry a create-time placeholder of its own —
+ * resolve from the environment, .env.local, then the owner-editable fallback
+ * recorded in src/client/pages/Legal.tsx (which survives into the Docker
+ * build, where .env.local is absent by design).
+ */
+function loadAdminEmail(): string | null {
+  const fromEnv = process.env.VITE_ADMIN_EMAIL || process.env.ADMIN_EMAIL;
+  if (fromEnv) return fromEnv;
+  const envLocal = readIfPresent('.env.local');
+  const recorded = envLocal?.match(/^(?:VITE_)?ADMIN_EMAIL=["']?(.+?)["']?\s*$/m);
+  if (recorded) return recorded[1];
+  const legal = readIfPresent('src/client/pages/Legal.tsx');
+  const fallback = legal?.match(/VITE_ADMIN_EMAIL \?\? '([^']+)'/);
+  // In a not-yet-created template checkout the fallback is still the literal
+  // {{ADMIN_EMAIL}} placeholder — never substitute that into crawler output.
+  if (fallback && !fallback[1].includes('{{')) return fallback[1];
+  return null;
 }
+
+// The values the client passes to MDX prop expressions at render time
+// (src/client/pages/Legal.tsx) — substituted at build time here so crawlers
+// never see the raw {props.*} tokens. An unresolvable prop is omitted, which
+// leaves its token intact rather than splicing in a wrong value.
+const adminEmail = loadAdminEmail();
+const MDX_PROPS: Record<string, string> = {
+  projectName: SITE_NAME,
+  ...(adminEmail ? { adminEmail } : {}),
+};
 
 interface ContentPage {
   slug: string;
@@ -133,21 +152,23 @@ function loadDir(dir: string, routePrefix: string): ContentPage[] {
     return [];
   }
   return files
-    .map((file) => {
+    .map((file): ContentPage | null => {
       const slug = file.replace('.mdx', '');
       const raw = readFileSync(resolve(__dirname, '..', dir, file), 'utf-8');
       const { fm, body } = parseFrontmatter(raw);
+      if (isDraft(fm)) return null;
       return {
         slug,
         route: `${routePrefix}/${slug}`,
-        title: fm.title || slug,
-        description: fm.description || '',
+        title: substituteMdxProps(fm.title || slug, MDX_PROPS),
+        description: substituteMdxProps(fm.description || '', MDX_PROPS),
         date: fm.date,
         author: fm.author,
         order: Number(fm.order ?? 999),
-        body,
+        body: substituteMdxProps(body, MDX_PROPS),
       };
     })
+    .filter((page): page is ContentPage => page !== null)
     .sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
 }
 

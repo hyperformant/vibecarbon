@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { type Context, Hono } from 'hono';
+import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import { createMiddleware } from 'hono/factory';
@@ -553,17 +553,14 @@ if (process.env.NODE_ENV === 'production') {
   // Serve the SPA shell with per-route title/meta, JSON-LD, and content HTML
   // spliced in (built by scripts/generate-seo.ts) so crawlers that don't
   // execute JS see real content; hydration replaces it for browsers.
+  // The handler memoizes rendered HTML per route and serves content-hash
+  // ETags, answering If-None-Match revalidations with 304 (pairs with the
+  // no-cache policy below: cheap revalidation instead of re-download).
   const seoShell = createSeoShell();
-  const serveSeoShell = (c: Context) => {
-    const html = seoShell.render(c.req.path);
-    if (html === null) return c.notFound();
-    c.header('Cache-Control', 'no-cache');
-    return c.html(html);
-  };
 
   // Must come before the '/*' static middleware, whose directory-index
   // resolution would otherwise serve the raw index.html for '/'.
-  app.get('/', serveSeoShell);
+  app.get('/', seoShell.handler);
 
   // Static assets with cache headers
   app.use(
@@ -595,7 +592,7 @@ if (process.env.NODE_ENV === 'production') {
 
   // SPA fallback - serve the (possibly SEO-injected) shell for client-side
   // routing (always revalidate).
-  app.get('/*', serveSeoShell);
+  app.get('/*', seoShell.handler);
 } else {
   // Development: redirect root to API docs (frontend served by Vite dev server).
   // With the API docs turned off there is nothing to redirect to, so say so

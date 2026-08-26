@@ -10,6 +10,7 @@
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDraft, parseFrontmatter } from './lib/seo-content';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -41,38 +42,22 @@ function loadSiteUrl(): string {
   return (process.env.SITE_URL || 'http://localhost:5173').replace(/\/$/, '');
 }
 
-function getBlogSlugs(): string[] {
+/** Published (non-draft) slugs in a content directory. */
+function getPublishedSlugs(dir: string): string[] {
   try {
-    const blogDir = resolve(__dirname, '../content/blog');
-    return readdirSync(blogDir)
+    const contentDir = resolve(__dirname, '..', dir);
+    return readdirSync(contentDir)
       .filter((f) => f.endsWith('.mdx'))
+      .filter((f) => !isDraft(parseFrontmatter(readFileSync(resolve(contentDir, f), 'utf-8')).fm))
       .map((f) => f.replace('.mdx', ''));
   } catch {
     return [];
   }
 }
 
-function getChangelogSlugs(): string[] {
-  try {
-    const changelogDir = resolve(__dirname, '../content/changelog');
-    return readdirSync(changelogDir)
-      .filter((f) => f.endsWith('.mdx'))
-      .map((f) => f.replace('.mdx', ''));
-  } catch {
-    return [];
-  }
-}
-
-function getDocsSlugs(): string[] {
-  try {
-    const docsDir = resolve(__dirname, '../content/docs');
-    return readdirSync(docsDir)
-      .filter((f) => f.endsWith('.mdx'))
-      .map((f) => f.replace('.mdx', ''));
-  } catch {
-    return [];
-  }
-}
+const getBlogSlugs = () => getPublishedSlugs('content/blog');
+const getChangelogSlugs = () => getPublishedSlugs('content/changelog');
+const getDocsSlugs = () => getPublishedSlugs('content/docs');
 
 function generateSitemap(siteUrl: string): string {
   const today = new Date().toISOString().split('T')[0];
