@@ -31,6 +31,7 @@ const read = (relPath: string) => readFileSync(join(CARBON, relPath), 'utf-8');
 
 const seoScript = read('scripts/generate-seo.ts');
 const sitemapScript = read('scripts/generate-sitemap.ts');
+const rssScript = read('scripts/generate-rss.ts');
 const seoLib = read('src/server/lib/seo.ts');
 const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
 
@@ -78,6 +79,32 @@ describe('SEO generator wiring', () => {
     expect(seoScript).toContain(`'llms.txt'`);
     expect(seoScript).toContain(`'llms-full.txt'`);
     expect(seoLib).toContain(`shellPath = './dist/client/index.html'`);
+  });
+});
+
+describe('production build-arg parity across generators', () => {
+  // Docker builds have no .env.local; the apex URL arrives ONLY as the
+  // VITE_PUBLIC_URL build arg. A generator that skips it silently ships
+  // http://localhost:5173 links in its artifact — exactly how rss.xml went
+  // out with localhost URLs and the package.json name as the channel title
+  // while sitemap.xml and llms.txt were fine.
+  it('every generator honors the VITE_PUBLIC_URL build arg', () => {
+    for (const [name, src] of [
+      ['generate-seo.ts', seoScript],
+      ['generate-sitemap.ts', sitemapScript],
+      ['generate-rss.ts', rssScript],
+    ] as const) {
+      expect(src, `${name} must read process.env.VITE_PUBLIC_URL`).toContain(
+        'process.env.VITE_PUBLIC_URL',
+      );
+    }
+  });
+
+  it('the RSS channel title uses the display-name resolution, not the package name', () => {
+    // package.json `name` is the npm slug (kebab-case project id), never the
+    // human-facing brand. The display name lives in PROJECT_DISPLAY_NAME /
+    // the index.html <title>, same chain generate-seo.ts resolves.
+    expect(rssScript).toContain('PROJECT_DISPLAY_NAME');
   });
 });
 

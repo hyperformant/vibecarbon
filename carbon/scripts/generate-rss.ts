@@ -22,24 +22,53 @@ interface PostMeta {
 }
 
 function loadSiteUrl(): string {
+  // Production builds receive the apex URL as VITE_PUBLIC_URL (a build arg);
+  // .env.local is not present in the image. Locally, fall back to .env.local.
+  if (process.env.VITE_PUBLIC_URL) return process.env.VITE_PUBLIC_URL.replace(/\/$/, '');
   try {
     const envContent = readFileSync(resolve(__dirname, '../.env.local'), 'utf-8');
-    const match = envContent.match(/^SITE_URL=["']?(.+?)["']?\s*$/m);
+    const match = envContent.match(/^(?:VITE_PUBLIC_URL|SITE_URL)=["']?(.+?)["']?\s*$/m);
+    if (match) return match[1].replace(/\/$/, '');
+  } catch {
+    // .env.local may not exist in CI
+  }
+  return (process.env.SITE_URL || 'http://localhost:5173').replace(/\/$/, '');
+}
+
+/**
+ * Human-facing brand name for the RSS channel — package.json `name` is the
+ * npm slug, never the brand. Same resolution chain as generate-seo.ts:
+ * environment, .env.local, then the <title> in index.html (which survives
+ * into the Docker build, where .env.local is absent by design).
+ */
+function loadProjectName(): string {
+  const fromEnv = process.env.VITE_PROJECT_DISPLAY_NAME || process.env.PROJECT_DISPLAY_NAME;
+  if (fromEnv) return fromEnv;
+  try {
+    const envContent = readFileSync(resolve(__dirname, '../.env.local'), 'utf-8');
+    const match = envContent.match(
+      /^(?:PROJECT_DISPLAY_NAME|VITE_PROJECT_DISPLAY_NAME)=["']?(.+?)["']?\s*$/m
+    );
     if (match) return match[1];
   } catch {
     // .env.local may not exist in CI
   }
-  return process.env.SITE_URL || 'http://localhost:5173';
-}
-
-function loadProjectName(): string {
   try {
-    const pkgContent = readFileSync(resolve(__dirname, '../package.json'), 'utf-8');
-    const pkg = JSON.parse(pkgContent);
-    return pkg.name || 'My SaaS';
+    const indexHtml = readFileSync(resolve(__dirname, '../src/client/index.html'), 'utf-8');
+    const title = indexHtml.match(/<title>([^<]*)<\/title>/);
+    if (title?.[1]?.trim()) {
+      return title[1]
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .trim();
+    }
   } catch {
-    return 'My SaaS';
+    // index.html missing — fall through
   }
+  return 'My SaaS';
 }
 
 function parseFrontmatter(content: string): Record<string, string> {
