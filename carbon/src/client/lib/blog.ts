@@ -1,4 +1,5 @@
 import type { ComponentType } from 'react';
+import { publishedPosts } from '@/lib/published';
 
 export interface BlogPost {
   slug: string;
@@ -7,6 +8,7 @@ export interface BlogPost {
     description: string;
     date: string;
     author?: string;
+    draft?: boolean;
   };
   Component: ComponentType;
 }
@@ -19,8 +21,8 @@ const modules = import.meta.glob<{
   frontmatter: BlogPost['frontmatter'];
 }>('/../../content/blog/*.mdx', { eager: true });
 
-export const posts: BlogPost[] = Object.entries(modules)
-  .map(([filepath, mod]) => {
+export const posts: BlogPost[] = publishedPosts(
+  Object.entries(modules).map(([filepath, mod]) => {
     const slug = (filepath.split('/').pop() ?? '').replace('.mdx', '');
     return {
       slug,
@@ -28,7 +30,7 @@ export const posts: BlogPost[] = Object.entries(modules)
       Component: mod.default,
     };
   })
-  .sort((a, b) => new Date(b.frontmatter.date).getTime() - new Date(a.frontmatter.date).getTime());
+).sort((a, b) => new Date(b.frontmatter.date).getTime() - new Date(a.frontmatter.date).getTime());
 
 export function getPost(slug: string): BlogPost | undefined {
   return posts.find((p) => p.slug === slug);
