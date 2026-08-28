@@ -164,7 +164,10 @@ describe('reseedStandbyFromPrimary', () => {
 
   it('HARD-ERRORS when the standby supabase node IP is unknown (node-side swap target)', async () => {
     await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', { standbySupabaseIp: undefined }),
+      reseedStandbyFromPrimary('10.0.0.2', '/k', {
+        standbySupabaseIp: undefined,
+        standbySupabasePrivateIp: '10.0.1.2',
+      }),
     ).rejects.toThrow(/standby supabase node IP is unknown/);
   });
 
@@ -308,7 +311,17 @@ describe('reseedStandbyFromPrimary', () => {
     expect(cmds.some((c) => c.includes('pg_is_in_recovery'))).toBe(true);
   });
 
-  it('defaults the relay host to the deterministic 10.0.1.2 when the private IP is not persisted', async () => {
+  it('HARD-ERRORS when the private IP is not persisted (no 10.0.1.2 fallback)', async () => {
+    // The IaC value is only deterministic on Hetzner — DO assigns VPC
+    // addresses dynamically, so a Hetzner-shaped fallback makes the
+    // reachability probe fail closed into 'skipped' (promotion without
+    // re-seed). A missing persisted value must abort, not assume.
+    await expect(
+      reseedStandbyFromPrimary('10.0.0.2', '/k', { standbySupabaseIp: '10.0.0.8' }),
+    ).rejects.toThrow(/standbySupabasePrivateIp is required/);
+  });
+
+  it('dials the PERSISTED relay host (threaded, never assumed)', async () => {
     let stagedScript = '';
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
       async (ip: string, k: string, argv: string[], opts: { input?: string } = {}) => {
@@ -316,12 +329,13 @@ describe('reseedStandbyFromPrimary', () => {
         return happyKubectl()(ip, k, argv);
       },
     );
-    // Older configs don't persist supabasePrivateIp — the IaC value is
-    // deterministic, so the reseed falls back to it rather than failing.
     await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', { standbySupabaseIp: '10.0.0.8' }),
+      reseedStandbyFromPrimary('10.0.0.2', '/k', {
+        standbySupabaseIp: '10.0.0.8',
+        standbySupabasePrivateIp: '10.10.0.7',
+      }),
     ).resolves.toBe('reseeded');
-    expect(stagedScript).toContain('-h 10.0.1.2 -p 15433');
+    expect(stagedScript).toContain('-h 10.10.0.7 -p 15433');
   });
 
   it('scales back up and throws when the pod-gone staging vanished (swap reports SKIPPED)', async () => {

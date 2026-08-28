@@ -21,11 +21,6 @@ import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
 import { REPL_GATEWAY_PORT } from './wireguard.js';
 
-// The k8s clusters' supabase node PRIVATE IP. Deterministic in the IaC program
-// (10.0.1.2 on both clusters' 10.0.1.0/24 subnets) — the same fallback the
-// deploy-time seed uses when the value isn't threaded through outputs/config.
-const DEFAULT_SUPABASE_PRIVATE_IP = '10.0.1.2';
-
 // The supabase-db StatefulSet name (helm release `supabase`, chart `supabase`,
 // component `db` → `supabase-supabase-db`). Used by the k8s re-seed's
 // scale-to-zero quiesce.
@@ -1108,10 +1103,14 @@ $$;
  *   No longer a swap target (the swap runs in a cluster-side helper pod), but
  *   still REQUIRED as a precondition that the standby HA cluster is fully
  *   identified — a re-seed must not run against a half-identified env.
- * @param {string} [opts.standbySupabasePrivateIp='10.0.1.2'] - the standby
- *   supabase node's PRIVATE IP: the local repl-gateway relay endpoint the
- *   basebackup + primary_conninfo dial. Deterministic in the IaC program;
- *   threaded through config when persisted.
+ * @param {string} opts.standbySupabasePrivateIp - the standby supabase
+ *   node's PRIVATE IP: the local repl-gateway relay endpoint the basebackup +
+ *   primary_conninfo dial. REQUIRED — a real IaC output on every provider
+ *   (Hetzner pins it statically; DO exports the Pulumi-assigned VPC address),
+ *   persisted under envConfig.ha.*.supabasePrivateIp at deploy time. A
+ *   Hetzner-shaped fallback here would make the re-seed's reachability probe
+ *   fail closed into 'skipped' on other providers — promotion without
+ *   re-seed.
  * @returns {Promise<'reseeded'|'skipped'>} 'reseeded' on success, 'skipped' when
  *   the primary is unreachable. Throws on password-missing or a real failure —
  *   NEVER silently returns as if skipped.
@@ -1119,8 +1118,18 @@ $$;
 export async function reseedStandbyFromPrimary(
   standbyIp,
   sshKeyPath,
-  { standbySupabaseIp, standbySupabasePrivateIp = DEFAULT_SUPABASE_PRIVATE_IP } = {},
+  { standbySupabaseIp, standbySupabasePrivateIp } = {},
 ) {
+  if (!standbySupabasePrivateIp) {
+    // Same precondition class as the standbySupabaseIp check below: a
+    // missing private IP signals a half-identified HA env (or a pre-M3
+    // persisted config). Never assume an address — redeploy to persist it.
+    throw new Error(
+      're-seed aborted: standbySupabasePrivateIp is required — the standby supabase ' +
+        "node's private IP is a deploy output persisted in the environment config; " +
+        'redeploy to persist it before re-seeding',
+    );
+  }
   if (!standbySupabaseIp) {
     // Precondition: a fully-identified HA standby cluster. The PGDATA swap runs
     // in a cluster-side helper pod now (not a node-side ssh), so this IP is no

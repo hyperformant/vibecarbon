@@ -286,12 +286,30 @@ export async function prepareReplicationTransport({
   standbyIp,
   primarySupabaseIp,
   standbySupabaseIp,
-  primarySupabasePrivateIp = '10.0.1.2',
-  standbySupabasePrivateIp = '10.0.1.2',
+  primarySupabasePrivateIp,
+  standbySupabasePrivateIp,
   sshKeyPath,
 }) {
   if (!primaryIp || !standbyIp || !sshKeyPath) {
     throw new Error('prepareReplicationTransport requires primaryIp, standbyIp, and sshKeyPath');
+  }
+  // The supabase nodes' PRIVATE IPs are real IaC outputs on every provider
+  // (Hetzner pins 10.0.1.2 statically; DO exports the Pulumi-assigned VPC
+  // address). A missing value means the infra step result is incomplete —
+  // never assume a Hetzner-shaped address here: socat would bind a
+  // nonexistent IP and the egress NetworkPolicy would scope to a /32 that
+  // exists on no node.
+  if (!primarySupabasePrivateIp) {
+    throw new Error(
+      'prepareReplicationTransport: primarySupabasePrivateIp is required — the IaC program ' +
+        'outputs it; a missing value means the infra step result is incomplete',
+    );
+  }
+  if (!standbySupabasePrivateIp) {
+    throw new Error(
+      'prepareReplicationTransport: standbySupabasePrivateIp is required — the IaC program ' +
+        'outputs it; a missing value means the infra step result is incomplete',
+    );
   }
   return perfAsync('deploy.ha.replication.transportEarly', async () => {
     const khPath = knownHostsPathForKey(sshKeyPath);
@@ -366,8 +384,14 @@ export async function reestablishReplicationTransport(options) {
   }
   const primarySupabaseIp = options.primarySupabaseIp || primaryIp;
   const standbySupabaseIp = options.standbySupabaseIp || standbyIp;
-  const primarySupabasePrivateIp = options.primarySupabasePrivateIp || '10.0.1.2';
-  const standbySupabasePrivateIp = options.standbySupabasePrivateIp || '10.0.1.2';
+  // Required, never defaulted — see prepareReplicationTransport's guard for why.
+  const { primarySupabasePrivateIp, standbySupabasePrivateIp } = options;
+  if (!primarySupabasePrivateIp || !standbySupabasePrivateIp) {
+    throw new Error(
+      'reestablishReplicationTransport: primarySupabasePrivateIp and standbySupabasePrivateIp ' +
+        'are required — the IaC program outputs them; redeploy to persist them if absent',
+    );
+  }
 
   const khPath = knownHostsPathForKey(sshKeyPath);
   await seedKnownHosts(khPath, primaryIp);
@@ -728,12 +752,20 @@ export async function setupReplication(options) {
   // SSH targets for the gateway bring-up. Fall back to master IP if not provided.
   const _primarySupabaseIp = options.primarySupabaseIp || primaryIp;
   const _standbySupabaseIp = options.standbySupabaseIp || standbyIp;
-  // The supabase nodes' PRIVATE IPs. Deterministic in the IaC program
-  // (10.0.1.2 on both clusters' 10.0.1.0/24 subnets), but threaded through the
-  // deploy outputs rather than hardcoded at the use site. Used for the
-  // repl-gateway socat bind + the egress NetworkPolicy scope on each cluster.
-  const _primarySupabasePrivateIp = options.primarySupabasePrivateIp || '10.0.1.2';
-  const _standbySupabasePrivateIp = options.standbySupabasePrivateIp || '10.0.1.2';
+  // The supabase nodes' PRIVATE IPs — real IaC outputs on every provider
+  // (Hetzner pins them statically; DO exports the Pulumi-assigned VPC
+  // address), threaded through the deploy outputs. Used for the repl-gateway
+  // socat bind + the egress NetworkPolicy scope on each cluster. Required,
+  // never defaulted — a Hetzner-shaped assumption here silently breaks every
+  // other provider.
+  const _primarySupabasePrivateIp = options.primarySupabasePrivateIp;
+  const _standbySupabasePrivateIp = options.standbySupabasePrivateIp;
+  if (!_primarySupabasePrivateIp || !_standbySupabasePrivateIp) {
+    throw new Error(
+      'setupReplication: primarySupabasePrivateIp and standbySupabasePrivateIp are required — ' +
+        'the IaC program outputs them; a missing value means the infra step result is incomplete',
+    );
+  }
 
   // replPassword is generated at create time from crypto.randomBytes and is
   // restricted to base64url characters — no shell escaping needed. Read from

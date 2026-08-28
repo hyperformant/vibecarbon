@@ -2440,10 +2440,20 @@ export async function installSupabase({
   dbImageTag,
   backupBucketName,
   walgRole = 'primary',
-  supabasePrivateIp = '10.0.1.2',
+  supabasePrivateIp,
   role,
   storageClass,
 }) {
+  if (!supabasePrivateIp) {
+    // Rendered into {{REPL_RELAY_HOST}} below. A real IaC output on every
+    // provider (Hetzner pins 10.0.1.2 statically; DO exports the
+    // Pulumi-assigned VPC address) — never assume a Hetzner-shaped address:
+    // a standby's seed init would dial a relay that exists on no node.
+    throw new Error(
+      'installSupabase: supabasePrivateIp is required — the IaC program outputs it; ' +
+        'a missing value means the infra step result is incomplete',
+    );
+  }
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // Pin the provider's StorageClass on every chart PVC. Throws when it is
   // missing rather than letting the chart inherit the cluster default — see
@@ -2538,7 +2548,7 @@ export async function installSupabase({
     // OWN supabase-node private IP + the relay port (see the seed-standby
     // init in the values file). Rendered on every tier; only a standby's
     // first boot ever dials it.
-    .replace(/\{\{REPL_RELAY_HOST\}\}/g, supabasePrivateIp || '10.0.1.2')
+    .replace(/\{\{REPL_RELAY_HOST\}\}/g, supabasePrivateIp)
     .replace(/\{\{REPL_RELAY_PORT\}\}/g, String(REPL_GATEWAY_PORT));
   const tmpValues = join(tmpdir(), `vibecarbon-supabase-values-${process.pid}-${Date.now()}.yaml`);
   // SECURITY: the rendered values contain ADMIN_EMAIL/ADMIN_PASSWORD and live
@@ -5118,12 +5128,15 @@ export async function deployK3s(options) {
     // Output-driven — Hetzner's program exports the same static
     // '10.0.1.1' it always has (fixture-pinned byte-identical); DO cannot
     // pin VPC IPs so its program returns the real Pulumi-assigned address.
-    // Fallback default covers state.json step results persisted before this
-    // field existed.
-    masterPrivateIp = '10.0.1.1',
+    // NO fallback defaults: a missing value means the k3s-infra step result
+    // predates these outputs (or the program regressed) — assuming a
+    // Hetzner-shaped address silently breaks every other provider, so the
+    // guard below fails the deploy instead. Re-run the infra step
+    // (redeploy) to refresh the persisted outputs.
+    masterPrivateIp,
     floatingIp,
     supabaseIp,
-    supabasePrivateIp = '10.0.1.2',
+    supabasePrivateIp,
     workerIps,
     networkId,
     // DO-only real Pulumi output (the Vpc's actual ipRange). Fallback
@@ -5135,6 +5148,13 @@ export async function deployK3s(options) {
     // fallback there is harmless.
     vpcCidr = Provider.DEFAULT_VPC_CIDR,
   } = infraOutputs;
+  if (!masterPrivateIp || !supabasePrivateIp) {
+    throw new Error(
+      'k3s-infra step result is missing masterPrivateIp/supabasePrivateIp — the IaC ' +
+        'program outputs both; a stale persisted step result predates them. ' +
+        'Re-run the infra step (redeploy) to refresh the outputs.',
+    );
+  }
 
   // 4. Wait for cloud-init to finish + k3s to be Ready
   if (!state.shouldSkip('k3s-ready', { masterIp })) {

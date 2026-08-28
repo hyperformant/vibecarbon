@@ -131,6 +131,7 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
       domain: 'e4.example.test',
       dbImageTag: 'ghcr.io/org/postgres:17-walg1',
       storageClass: HetznerProvider.K8S_STORAGE_CLASS,
+      supabasePrivateIp: '10.0.1.2',
     });
     const helm = cmdCalls.find(([cmd, sub]) => cmd === 'helm' && sub === 'upgrade') ?? [];
     const setArg = helm.find((a, i) => helm[i - 1] === '--set' && a.includes('storageClassName'));
