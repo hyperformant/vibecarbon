@@ -795,6 +795,8 @@ function buildStateS3Config(envConfig, s3Creds) {
     region: envConfig.s3.region,
     endpoint: envConfig.s3.endpoint,
     stateBucket: envConfig.s3.stateBucket,
+    stateBucketRegion: envConfig.s3.stateBucketRegion,
+    stateEndpoint: envConfig.s3.stateEndpoint,
     accessKey: s3Creds.accessKey,
     secretKey: s3Creds.secretKey,
   };

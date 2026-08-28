@@ -2280,6 +2280,8 @@ async function destroyK8sTier({
         // back (via resolveBackendUrl's `?? bucket`) to the app bucket for
         // envs deployed before the state-bucket split.
         stateBucket: envConfig.s3.stateBucket,
+        stateBucketRegion: envConfig.s3.stateBucketRegion,
+        stateEndpoint: envConfig.s3.stateEndpoint,
       },
     );
     // Pre-Pulumi sweep: reap cluster-autoscaler-spawned workers BEFORE
@@ -2849,6 +2851,7 @@ async function removePulumiStackStateEffect(ctx) {
       endpoint: envConfig.s3.endpoint,
       stateBucket: envConfig.s3.stateBucket,
       stateBucketRegion: envConfig.s3.stateBucketRegion,
+      stateEndpoint: envConfig.s3.stateEndpoint,
     },
   );
   if (envConfig.s3 && !s3Config) {

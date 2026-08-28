@@ -201,6 +201,8 @@ export async function convergeClusterInfra({
       // the state-bucket split — resolveBackendUrl then falls back to the
       // app bucket, matching where their state actually still lives.
       stateBucket: envConfig.s3.stateBucket,
+      stateBucketRegion: envConfig.s3.stateBucketRegion,
+      stateEndpoint: envConfig.s3.stateEndpoint,
       accessKey: creds.accessKey,
       secretKey: creds.secretKey,
     };

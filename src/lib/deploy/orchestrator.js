@@ -430,6 +430,8 @@ export async function executeDeployment(args, gatheredConfig) {
         region: s3Config.region,
         endpoint: s3Config.endpoint,
         stateBucket: s3Config.stateBucket,
+        ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
+        ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
       },
       backupS3: backupS3Config?.bucket
         ? {
@@ -634,6 +636,10 @@ export async function executeDeployment(args, gatheredConfig) {
         // when it differs from the app buckets' region; that redirect was the
         // one legitimate job the old flip-through-persist was doing.
         stateBucketRegion: s3Provider.region,
+        // The matching HOST — region-scoped stores only serve a bucket at
+        // its own region's endpoint, so the backend URL needs this, not
+        // just the region param (2026-08-28: cross-region e4 404'd on it).
+        stateEndpoint: s3Provider.endpoint,
       };
       if (s3Provider.region !== appBucketRegion) {
         p.log.warn(
@@ -661,6 +667,9 @@ export async function executeDeployment(args, gatheredConfig) {
     // May differ from region when a retained state bucket lives elsewhere;
     // resolveBackendUrl prefers it for the Pulumi backend URL only.
     s3Config.stateBucketRegion = s3Result.stateBucketRegion ?? s3Result.region;
+    // Absent on step-state cached before the field existed — resolveBackendUrl
+    // then derives the host from stateBucketRegion.
+    s3Config.stateEndpoint = s3Result.stateEndpoint;
     backupS3Config.region = s3Config.region;
     backupS3Config.endpoint = s3Config.endpoint;
   }
@@ -1729,6 +1738,8 @@ export async function executeDeployment(args, gatheredConfig) {
           region: s3Config.region,
           endpoint: s3Config.endpoint,
           stateBucket: s3Config.stateBucket,
+          ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
+          ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
         },
         ...(backupS3Persist && { backupS3: backupS3Persist }),
         backup: backupConfig,

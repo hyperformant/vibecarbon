@@ -108,13 +108,22 @@ export function resolveBackendUrl(s3Config, provider) {
   }
   if (s3Config?.bucket && s3Config?.endpoint) {
     const stateBucket = s3Config.stateBucket ?? s3Config.bucket;
-    const endpointHost = s3Config.endpoint.replace(/^https?:\/\//, '');
     // The STATE bucket's own region wins when it differs from the app buckets'
     // (a retained bucket can live where an earlier run created it). Without
     // this, cross-region state buckets 404 at the backend URL — and before
     // 2026-08-15 the createBucket region-flip papered over it by corrupting
     // the app/backup config instead.
     const region = s3Config.stateBucketRegion || s3Config.region || 'nbg1';
+    // The HOST is what routes on region-scoped object stores (Hetzner, DO,
+    // Linode all serve a bucket only at its own region's hostname; the
+    // `region` query param is just the SDK signing region) — so the endpoint
+    // must follow the state bucket too. Prefer the explicit stateEndpoint;
+    // for configs persisted before it existed, derive by swapping the app
+    // region token in the host (all supported stores use `{region}.domain`).
+    let endpointHost = (s3Config.stateEndpoint || s3Config.endpoint).replace(/^https?:\/\//, '');
+    if (!s3Config.stateEndpoint && s3Config.region && region !== s3Config.region) {
+      endpointHost = endpointHost.replace(s3Config.region, region);
+    }
     // Pulumi injects `request_checksum_calculation=when_required` into any
     // s3:// URL carrying a custom `endpoint` — ours always do — and its
     // vendored gocloud implements that mode with a literal `UNSIGNED-PAYLOAD`

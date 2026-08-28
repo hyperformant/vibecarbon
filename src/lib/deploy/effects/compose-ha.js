@@ -316,6 +316,8 @@ async function haPersistPendingConfig(ctx) {
         region: s3Config.region,
         endpoint: s3Config.endpoint,
         stateBucket: s3Config.stateBucket,
+        ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
+        ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
       },
     }),
     ...(backupS3Config && { backupS3: backupS3Config }),

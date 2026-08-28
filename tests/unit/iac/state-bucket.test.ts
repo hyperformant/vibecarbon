@@ -68,6 +68,86 @@ describe('resolveBackendUrl', () => {
       resolveBackendUrl({ bucket: 'x', stateBucket: 'x-pulumi-state', endpoint: 'https://e' }),
     ).toBe('file:///tmp/custom-state');
   });
+
+  // Cross-region state bucket (2026-08-28, e4 region rotation): region-scoped
+  // stores only serve a bucket at ITS region's hostname — the query's
+  // `region` param is just the SDK signing region. Both host and region must
+  // follow the state bucket or every state op 404s NoSuchBucket.
+  it('cross-region state bucket: the HOST follows stateEndpoint, not the app endpoint', () => {
+    delete process.env.PULUMI_BACKEND_URL;
+    const url = resolveBackendUrl({
+      bucket: 'myapp-storage',
+      stateBucket: 'vc-e2e-state-local-abc123',
+      endpoint: 'https://hel1.your-objectstorage.com',
+      region: 'hel1',
+      stateBucketRegion: 'nbg1',
+      stateEndpoint: 'https://nbg1.your-objectstorage.com',
+    });
+    expect(url).toContain('endpoint=nbg1.your-objectstorage.com');
+    expect(url).toContain('region=nbg1');
+    expect(url).not.toContain('hel1');
+  });
+
+  it('cross-region without stateEndpoint (pre-field config): derives the host by swapping the region token', () => {
+    delete process.env.PULUMI_BACKEND_URL;
+    const url = resolveBackendUrl({
+      bucket: 'myapp-storage',
+      stateBucket: 'vc-e2e-state-local-abc123',
+      endpoint: 'https://hel1.your-objectstorage.com',
+      region: 'hel1',
+      stateBucketRegion: 'nbg1',
+    });
+    expect(url).toContain('endpoint=nbg1.your-objectstorage.com');
+    expect(url).toContain('region=nbg1');
+  });
+
+  it('same-region config stays byte-identical (no derivation, no stateEndpoint)', () => {
+    delete process.env.PULUMI_BACKEND_URL;
+    const url = resolveBackendUrl({
+      bucket: 'myapp-storage',
+      stateBucket: 'myapp-storage-pulumi-state',
+      endpoint: 'https://fsn1.your-objectstorage.com',
+      region: 'fsn1',
+      stateBucketRegion: 'fsn1',
+    });
+    expect(url).toContain('endpoint=fsn1.your-objectstorage.com');
+    expect(url).toContain('region=fsn1');
+  });
+});
+
+describe('state-bucket region/endpoint passthrough census', () => {
+  // Every hand-built s3-config or persist field list that names the dedicated
+  // state bucket must also carry its region AND endpoint. A member that drops
+  // them re-creates the cross-region 404 (deploy) or wrong-region purge
+  // (destroy) found 2026-08-28. Walks src/ so future field lists are drafted
+  // into the audited set automatically.
+  it('every `stateBucket: <cfg>.stateBucket` field list also carries stateBucketRegion and stateEndpoint', async () => {
+    const { readFileSync, readdirSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const srcRoot = join(new URL('../../..', import.meta.url).pathname, 'src');
+    const files = readdirSync(srcRoot, { recursive: true, withFileTypes: true })
+      .filter((d) => d.isFile() && d.name.endsWith('.js'))
+      .map((d) => join(d.parentPath, d.name));
+    const fieldListRe = /stateBucket: (envConfig\.s3|s3Config)\.stateBucket,/;
+    let hits = 0;
+    const misses: string[] = [];
+    for (const file of files) {
+      const lines = readFileSync(file, 'utf8').split('\n');
+      lines.forEach((line, i) => {
+        if (!fieldListRe.test(line)) return;
+        hits += 1;
+        const windowText = lines.slice(i, i + 6).join('\n');
+        if (!windowText.includes('stateBucketRegion') || !windowText.includes('stateEndpoint')) {
+          misses.push(`${file.replace(srcRoot, 'src')}:${i + 1}`);
+        }
+      });
+    }
+    expect(hits).toBeGreaterThanOrEqual(7); // census not vacuous
+    expect(
+      misses,
+      `field lists missing stateBucketRegion/stateEndpoint: ${misses.join(', ')}`,
+    ).toEqual([]);
+  });
 });
 
 describe('resolveStateBucketName — precedence', () => {
