@@ -145,3 +145,54 @@ describe('STALE_ATTACH_EVENT_PATTERN', () => {
     );
   });
 });
+
+describe('provider read-after-write settle (d4 run 8)', () => {
+  it('settles AFTER attachments clear when churn was observed', async () => {
+    let polls = 0;
+    const sleeps: number[] = [];
+    const kubectl = vi.fn(async () => {
+      polls += 1;
+      return polls < 2 ? VA_LIST(['pvc-data-111']) : VA_LIST([]);
+    });
+    const res = await waitForPvDetach(kubectl, {
+      pvNames: ['pvc-data-111'],
+      settleMs: 25_000,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(res).toEqual({ detached: true });
+    // One poll-gap sleep, then the settle. The csi-do-controller transcript
+    // behind this: unpublish completed and publish was called the SAME
+    // second; the driver's stale read answered "already attached" and
+    // attached nothing. VA-object-gone is not provider-state-settled.
+    expect(sleeps).toEqual([3000, 25_000]);
+  });
+
+  it('no churn observed = no settle (a clear listing costs nothing)', async () => {
+    const sleeps: number[] = [];
+    const kubectl = vi.fn(async () => VA_LIST([]));
+    await waitForPvDetach(kubectl, {
+      pvNames: ['pvc-data-111'],
+      settleMs: 25_000,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(sleeps).toEqual([]);
+  });
+
+  it('forceSettle applies the settle even when the first poll reads clear (repair path)', async () => {
+    const sleeps: number[] = [];
+    const kubectl = vi.fn(async () => VA_LIST([]));
+    await waitForPvDetach(kubectl, {
+      pvNames: ['pvc-data-111'],
+      settleMs: 25_000,
+      forceSettle: true,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(sleeps).toEqual([25_000]);
+  });
+});

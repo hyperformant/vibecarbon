@@ -333,6 +333,7 @@ describe('reseedStandbyFromPrimary', () => {
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
         standbySupabaseIp: '10.0.0.8',
         standbySupabasePrivateIp: '10.10.0.7',
+        detachSettleMs: 0,
       }),
     ).resolves.toBe('reseeded');
     expect(stagedScript).toContain('-h 10.10.0.7 -p 15433');
@@ -585,6 +586,7 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
         standbySupabaseIp: '10.0.0.8',
         standbySupabasePrivateIp: '10.10.0.7',
+        detachSettleMs: 0,
       }),
     ).resolves.toBe('reseeded');
     expect(deleted).toEqual(['csi-stale-1']);
@@ -598,6 +600,7 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
         standbySupabaseIp: '10.0.0.8',
         standbySupabasePrivateIp: '10.10.0.7',
+        detachSettleMs: 0,
       }),
     ).rejects.toThrow(/timed out waiting/);
     expect(deleted).toEqual([]);
@@ -610,6 +613,7 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
         standbySupabaseIp: '10.0.0.8',
         standbySupabasePrivateIp: '10.10.0.7',
+        detachSettleMs: 0,
       }),
     ).rejects.toThrow(/timed out waiting/);
     expect(rolloutCalls()).toBe(2);
@@ -633,6 +637,7 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
     await reseedStandbyFromPrimary('10.0.0.2', '/k', {
       standbySupabaseIp: '10.0.0.8',
       standbySupabasePrivateIp: '10.10.0.7',
+      detachSettleMs: 0,
     });
     expect(sequence.indexOf('detach-wait')).toBeGreaterThan(-1);
     expect(sequence.indexOf('detach-wait')).toBeLessThan(sequence.indexOf('swap'));

@@ -921,12 +921,35 @@ export async function listDbPvNames(kubectl) {
  */
 export async function waitForPvDetach(
   kubectl,
-  { pvNames, budgetMs = 120_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), log } = {},
+  {
+    pvNames,
+    budgetMs = 120_000,
+    // Provider read-after-write settle, applied ONLY when this wait actually
+    // observed an attachment clear (no churn = nothing to settle). d4 run 8,
+    // csi-do-controller transcript: controller_unpublish completed at
+    // :36, controller_publish called the SAME second, and the driver's
+    // stale state read answered "volume is already attached" — publish
+    // returned success WITHOUT issuing an attach while DO's API showed the
+    // volume attached to nothing. VolumeAttachment-object-gone is therefore
+    // NOT provider-state-settled; a publish issued inside DO's volume-state
+    // read-after-write window recreates the stale attachment every time
+    // (the run-8 repair loop reproduced it back-to-back). The condition is
+    // not observable through kubectl — this floor is the honest stand-in,
+    // and the signature-gated repair backstops the residual.
+    settleMs = 25_000,
+    // Callers that KNOW churn just happened (the repair deletes attachments
+    // itself before waiting) set this so the settle applies even when the
+    // first poll already reads clear.
+    forceSettle = false,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    log,
+  } = {},
 ) {
   if (!pvNames?.length) return { detached: true };
   const emit = log ?? ((m) => console.error(m));
   const started = Date.now();
   const wanted = new Set(pvNames);
+  let sawAttachment = forceSettle;
   while (Date.now() - started < budgetMs) {
     let held = [];
     try {
@@ -937,7 +960,17 @@ export async function waitForPvDetach(
       // Unreadable listing — treat as clear (fail-open; see contract above).
       return { detached: true };
     }
-    if (held.length === 0) return { detached: true };
+    if (held.length === 0) {
+      if (sawAttachment && settleMs > 0) {
+        emit(
+          `[reseed] attachments cleared; settling ${Math.round(settleMs / 1000)}s for the ` +
+            `provider's volume-state read-after-write window before the next attach.`,
+        );
+        await sleep(settleMs);
+      }
+      return { detached: true };
+    }
+    sawAttachment = true;
     await sleep(3000);
   }
   emit(
@@ -1248,7 +1281,7 @@ $$;
 export async function reseedStandbyFromPrimary(
   standbyIp,
   sshKeyPath,
-  { standbySupabaseIp, standbySupabasePrivateIp } = {},
+  { standbySupabaseIp, standbySupabasePrivateIp, detachSettleMs = 25_000 } = {},
 ) {
   if (!standbySupabasePrivateIp) {
     // Same precondition class as the standbySupabaseIp check below: a
@@ -1415,7 +1448,10 @@ export async function reseedStandbyFromPrimary(
     // helper pod re-attaches the claim — an attach overlapping the previous
     // detach is the DO-CSI stale-attachment trigger (d4 run 6; see
     // waitForPvDetach). Pod-gone (above) is not detach-done.
-    await waitForPvDetach(kubectl, { pvNames: await listDbPvNames(kubectl) });
+    await waitForPvDetach(kubectl, {
+      pvNames: await listDbPvNames(kubectl),
+      settleMs: detachSettleMs,
+    });
     const swapOut = await swapPgdataViaHelperPod(kubectl, { claimName, subPath, image });
     swapped = swapOut.includes('RESEED_SWAPPED');
     if (!swapped) {
@@ -1498,11 +1534,45 @@ export async function reseedStandbyFromPrimary(
     if (!STALE_ATTACH_EVENT_PATTERN.test(events)) throw rolloutErr;
     console.error(
       '[reseed] db rollout timed out with the stale-VolumeAttachment signature ' +
-        '(MountDevice mkfs on a missing device) — deleting the stale attachments ' +
+        '(MountDevice mkfs on a missing device) — scaling to zero, deleting the ' +
+        'stale attachments, settling past the provider read-after-write window, ' +
         'and waiting once more.',
     );
+    // ORDER MATTERS (run 8: the naive delete-VA-and-rewait repair reproduced
+    // the race back-to-back — the controller processed unpublish and publish
+    // in the SAME second and the driver's stale state read answered "already
+    // attached" without attaching). Scale to zero FIRST so no pod wants the
+    // volume and no publish can fire inside the detach's read-after-write
+    // window; then clear the attachments, settle, and only then let the
+    // StatefulSet re-attach.
+    await kubectl([
+      'scale',
+      'statefulset',
+      DB_STATEFULSET,
+      '-n',
+      'vibecarbon',
+      '--replicas=0',
+    ]).catch(() => {});
     const deleted = await deleteStaleDbVolumeAttachments(kubectl);
-    if (deleted.length === 0) throw rolloutErr;
+    if (deleted.length === 0) {
+      // No stale attachment to clear after all — restore replicas and
+      // surface the original timeout untouched.
+      await kubectl([
+        'scale',
+        'statefulset',
+        DB_STATEFULSET,
+        '-n',
+        'vibecarbon',
+        '--replicas=1',
+      ]).catch(() => {});
+      throw rolloutErr;
+    }
+    await waitForPvDetach(kubectl, {
+      pvNames: await listDbPvNames(kubectl),
+      forceSettle: true,
+      settleMs: detachSettleMs,
+    });
+    await kubectl(['scale', 'statefulset', DB_STATEFULSET, '-n', 'vibecarbon', '--replicas=1']);
     await rolloutWait();
   }
 
