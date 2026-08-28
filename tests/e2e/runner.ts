@@ -1009,6 +1009,19 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       retryEnabled && first.status !== 'pass' && first.failureCategory === 'infra';
     if (!shouldRetry) return first;
 
+    // A kept rig still owns the env prefix (server names, DNS, stacks) the
+    // retry would redeploy into — retrying against it is a guaranteed
+    // collision, not a second chance. Keep wins; say so loudly.
+    // (Discovered live 2026-08-28: e4 retry armed with --keep-on-fail.)
+    if (process.env.VC_KEEP_ON_FAILURE === '1' || process.env.VC_KEEP_ALWAYS === '1') {
+      console.log(
+        `\n[${scenario.mode}] E2E_RETRY_FLAKES retry SKIPPED: a keep flag preserved the failed ` +
+          `rig, and a retry on the same env prefix would collide with it. Destroy the rig ` +
+          `(scripts/iter-step.js ${scenario.provider}/${scenario.mode} destroy), then re-run.`,
+      );
+      return first;
+    }
+
     console.log(
       `\n[${scenario.mode}] First attempt failed with infra-category — retrying once (E2E_RETRY_FLAKES=1).`,
     );
