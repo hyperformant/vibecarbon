@@ -214,20 +214,36 @@ async function probePublicHealth(
 }
 
 /**
- * Where this environment's kubeconfig lives.
+ * Where the SERVING cluster's kubeconfig lives. Exported for unit tests.
  *
  * HA deploys split into kubeconfig-<env>-primary / -standby; standalone uses
- * just kubeconfig-<env>. Prefer primary — the user-facing cluster, whose
- * Traefik and cert-manager state is the one that decides whether the domain
- * serves. Returns the standalone path when neither exists so the caller
- * surfaces a file-not-found rather than a silent skip.
+ * just kubeconfig-<env>. The cluster that decides whether the domain serves
+ * is the one holding the PRIMARY ROLE — and stacks keep their birth names
+ * while roles flip at failover (envConfig.ha.primary.stack is the role
+ * pointer), so "prefer the -primary FILE" is only right until the first
+ * failover. d4 run 7 RCA (2026-08-28): during the post-failover reconverge,
+ * the health probe's ACME watchdog keyed off the -primary file and inspected
+ * the DEMOTED cluster — all certs Ready, nothing to repair — while the
+ * SERVING (`-standby`-named) cluster's invalid Order sat unrepairable for
+ * the probe's whole 20-minute budget. Follow the role first; fall back to
+ * the old file preference for configs that never recorded one. Returns the
+ * standalone path when nothing exists so the caller surfaces a
+ * file-not-found rather than a silent skip.
+ *
+ * @param {string} environment
+ * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
  */
-function resolveKubeconfigPath(environment) {
+export function resolveKubeconfigPath(environment, envConfig) {
+  const roleStack = envConfig?.ha?.primary?.stack;
   const candidates = [
+    ...(roleStack ? [join(process.cwd(), '.vibecarbon', `kubeconfig-${roleStack}`)] : []),
     join(process.cwd(), '.vibecarbon', `kubeconfig-${environment}-primary`),
     join(process.cwd(), '.vibecarbon', `kubeconfig-${environment}`),
   ];
-  return { path: candidates.find((c) => existsSync(c)) ?? candidates[1], candidates };
+  return {
+    path: candidates.find((c) => existsSync(c)) ?? candidates[candidates.length - 1],
+    candidates,
+  };
 }
 
 /**
@@ -1192,7 +1208,7 @@ export async function executeDeployment(args, gatheredConfig) {
       // The watchdog repairs the failure in-place (bounded), and if it
       // can't, aborts the probe with the ACME problem as the reason.
       // See src/lib/deploy/k8s/acme-order-recovery.js.
-      const { path: probeKubeconfig } = resolveKubeconfigPath(environment);
+      const { path: probeKubeconfig } = resolveKubeconfigPath(environment, envConfig);
       const acmeWatchdog = existsSync(probeKubeconfig)
         ? createAcmeIssuanceWatchdog({
             runKubectl: async (argv) =>
@@ -1240,8 +1256,10 @@ export async function executeDeployment(args, gatheredConfig) {
         // runCommandAsync (array argv, no shell) — domain and environment come
         // from validated config, but we still avoid shell-string interp.
         try {
-          const { path: kubeconfig, candidates: kubeconfigCandidates } =
-            resolveKubeconfigPath(environment);
+          const { path: kubeconfig, candidates: kubeconfigCandidates } = resolveKubeconfigPath(
+            environment,
+            envConfig,
+          );
           // Run each tool via runCommandAsync. Capture stderr alongside stdout
           // (kubectl prints errors to stderr; without merging we get the
           // useless first line of err.message — observed 2026-04-26 run #5
