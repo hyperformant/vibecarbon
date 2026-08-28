@@ -208,7 +208,8 @@ The `carbon/k8s/base/` kustomization ships with placeholder-looking values that 
 
 Known deploy-time patches:
 - `Certificate.spec.dnsNames: [app.example.com]` → real domain (cert-manager refuses ACME orders for IANA-reserved `app.example.com`) — PR 1AQ
-- `Certificate.spec.issuerRef.name: letsencrypt-prod-manual` → `letsencrypt-{prod,staging}-{cloudflare,hetzner,manual}` based on `dnsProvider` × `ACME_CA_SERVER` (see `pickIssuerName` in `src/lib/deploy/k8s/k3s.js`) — PR 1AQ + 1CH
+- `Certificate.spec.issuerRef.name: letsencrypt-prod-manual` → `letsencrypt-{prod,staging}-{cloudflare,hetzner,digitalocean,manual}` based on `dnsProvider` × `ACME_CA_SERVER` (see `pickIssuerName` in `src/lib/deploy/k8s/k3s.js`) — PR 1AQ + 1CH. **Single-issuer policy (d4, 2026-08-28):** on a PILOT-STANDBY deploy the issuerRef is redirected to `vibecarbon-standby-selfsigned` instead, with the real issuer stamped in the `vibecarbon.dev/promote-issuer` annotation (both roles carry the annotation); `vibecarbon failover`'s promote step re-points it — see `src/lib/deploy/k8s/acme-issuer-policy.js`
+- `Deployment cert-manager` (upstream manifest, `kubectl patch --type=json` on args) → `--dns01-recursive-nameservers-only` + `--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53` — anycast authoritative fleets serve fresh records minutes late from some POPs, parking the DNS-01 self-check; idempotent test-and-set (d4, 2026-08-28)
 - `ConfigMap vibecarbon-config.SITE_URL: https://app.example.com` → `https://${domain}` — PR 1AQ
 - `Deployment app.image: ghcr.io/<owner>/<repo>:main` → sideloaded `vibecarbon-local/<project>:<tag>` — pre-existing, set in `applyK3sManifests` step 6
 - `CronJob backup.image: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}-backup:latest` → sideloaded `vibecarbon-local/<project>-backup:<tag>` + `imagePullPolicy=IfNotPresent` — PR 1AS
@@ -228,7 +229,7 @@ Every such image is mirrored into `ghcr.io/hyperformant/<name>` (flat, upstream'
 
 **When you add a new resource under `carbon/k8s/base/`:** if it contains an image, hostname, ClusterIssuer name, or owner-scoped value that won't be reachable from a fresh cluster, add a corresponding `kubectl patch` step in `applyK3sManifests`. For images that aren't in containerd yet, also build + sideload to every node in `deployK3s` (mirror the app-image flow at step 7 / backup-image flow at step 7b) — Deployment patches alone don't help if the image isn't reachable.
 
-**When debugging an ImagePullBackOff or ACME failure on k8s:** first check whether a placeholder slipped through to runtime — grep the live cluster for `app.example.com` / `ghcr.io/{{` / a bare `letsencrypt-prod` (without the provider suffix — that means the `pickIssuerName` patch was skipped) etc.
+**When debugging an ImagePullBackOff or ACME failure on k8s:** first check whether a placeholder slipped through to runtime — grep the live cluster for `app.example.com` / `ghcr.io/{{` / a bare `letsencrypt-prod` (without the provider suffix — that means the `pickIssuerName` patch was skipped) etc. A standby-role cluster whose Certificate references `vibecarbon-standby-selfsigned` is BY DESIGN (single-issuer policy), not a leaked placeholder; and a Certificate parked `pending`/`invalid` is the ACME watchdog's territory (`acme-order-recovery.js`) — check its `[acme-watchdog]` log lines before hand-repairing.
 
 ## Agent Team Workflow
 

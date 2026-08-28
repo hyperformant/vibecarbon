@@ -195,7 +195,7 @@ The static floor is what your project quota is reserved for; CA scales additiona
 
 **HA mode symmetry**
 
-In `--ha` mode both clusters use the same `--min-workers/--max-workers` bounds — the standby is kept failover-ready (its scaler doesn't bring up additional workers while the cluster is dormant, but the bounds are pre-configured so failover is instant).
+In `--ha` mode both clusters use the same `--min-workers/--max-workers` bounds — the standby is kept failover-ready (its scaler doesn't bring up additional workers while the cluster is dormant, but the bounds are pre-configured so failover is instant). While dormant, the standby's TLS certificate is intentionally self-signed (only the primary holds a Let's Encrypt certificate — two clusters requesting certificates for the same names interfere on some DNS providers); failover re-points the standby's certificate at the real issuer as part of promotion, so the promoted cluster serves a trusted certificate within a couple of minutes.
 
 **Hetzner project quota**
 
@@ -217,7 +217,7 @@ Cloudflare DNS health checks monitor both regions every 60 seconds. When the pri
 vibecarbon failover prod
 ```
 
-This promotes the standby database to primary, scales up services in the standby region, and updates DNS to point to the new primary.
+This promotes the standby database to primary, scales up services in the standby region, switches the promoted cluster's TLS certificate onto the real ACME issuer, and updates DNS to point to the new primary.
 
 ### Manual Failover (kubectl)
 

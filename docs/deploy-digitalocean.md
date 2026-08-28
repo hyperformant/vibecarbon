@@ -3,7 +3,7 @@
 Deploying to DigitalOcean is fully automated by the CLI. You do not create Droplets, configure Cloud Firewalls, edit compose files, or set up replication by hand — one command provisions the infrastructure, deploys the app, and wires DNS + TLS:
 
 ```bash
-vibecarbon deploy -mode compose  # or -mode compose-ha / k8s
+vibecarbon deploy -mode compose  # or -mode compose-ha / k8s / k8s-ha
 ```
 
 This guide covers setup prerequisites, cloud resource handling, and operational procedures for DigitalOcean deployments.
@@ -29,7 +29,7 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 3. **Spaces Access Key & Secret Key** — Control Panel → API → Spaces Access Keys. Used for the dedicated Pulumi state bucket and `wal-g` S3 database backups.
 4. **A domain** you control, for the application URL and Let's Encrypt TLS certificates.
 5. **Docker running locally** — images are built on your machine and pushed over SSH (`local` build mode).
-6. **A Fullerene license for advanced modes** — single-server Docker Compose deploys are free on Graphite; `compose-ha` and `k8s` require a Fullerene license.
+6. **A Fullerene license for advanced modes** — single-server Docker Compose deploys are free on Graphite; `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license.
 
 ---
 
@@ -40,8 +40,9 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 | `compose` | Single Droplet running the full stack under Docker Compose |
 | `compose-ha` | Primary + standby Droplets in two regions, encrypted WireGuard replication mesh, Postgres streaming replication, manual one-command failover (`vibecarbon failover` repoints DNS) |
 | `k8s` | k3s cluster (master Droplet + worker Droplets + dedicated Supabase Droplet) with DO CSI volumes |
+| `k8s-ha` | Two k3s clusters in two regions (primary + pilot-light standby with a zeroed app tier), WireGuard replication transport, Postgres streaming replication, one-command failover |
 
-> `k8s-ha` (pilot-light standby cluster) is fully supported: the standby is the same k8s stack provisioned in a second region (`-standby-region`), with failover as a DNS flip between the two clusters' own reserved IPs.
+> `k8s-ha` (pilot-light standby cluster) is fully supported: the standby is the same k8s stack provisioned in a second region (`-standby-region`), with failover as a DNS flip between the two clusters' own reserved IPs. The dormant standby serves a self-signed certificate by design (single-issuer policy — DigitalOcean's DNS-01 solver keys challenge records by name, so only the primary-role cluster holds an active Let's Encrypt certificate); promotion re-points it automatically.
 
 Server sizes can be selected interactively during deploy or pre-configured in `.vibecarbon.json`:
 - Standard Droplets: `s-2vcpu-4gb` (minimum for compose/k3s nodes — the 4 GB floor is enforced by the size picker)
@@ -85,7 +86,7 @@ A deployment executes the following steps:
 | Check health & replication | `vibecarbon status <env>` |
 | Scale worker nodes | `vibecarbon scale <env>` |
 | Database backup / restore | `vibecarbon backup <env>` / `vibecarbon restore <env>` |
-| Failover HA standby (compose-ha) | `vibecarbon failover <env>` |
+| Failover HA standby (compose-ha, k8s-ha) | `vibecarbon failover <env>` |
 | Manage operator IP allowlist | `vibecarbon access` |
 | Teardown resources | `vibecarbon destroy <env>` |
 
