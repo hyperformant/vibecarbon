@@ -205,9 +205,31 @@ export async function awaitPostgresAccepting({
     budgetMs,
     sleep,
     nowFn,
+    // `-h 127.0.0.1` (TCP), NEVER the default Unix socket — the condition
+    // must discriminate the REAL server from the docker-entrypoint's
+    // first-boot TEMPORARY one. That temp server (initdb flow: start temp →
+    // run init scripts → stop temp → start real) listens ONLY on the Unix
+    // socket, so a socket probe passes against it and the caller's next
+    // psql lands in the temp-shutdown gap (d4 run 2 RCA, 2026-08-28: the
+    // restore-path standby booted UNSEEDED by design, the socket gate passed
+    // at 05:29:38 against the temp server, ALTER SYSTEM hit "No such file or
+    // directory" in the 300ms gap before the real server's 05:29:41.8
+    // startup). Only the real server binds TCP.
     attempt: () =>
       exec(
-        ['kubectl', '-n', namespace, 'exec', dbPod, '--', 'pg_isready', '-U', 'supabase_admin'],
+        [
+          'kubectl',
+          '-n',
+          namespace,
+          'exec',
+          dbPod,
+          '--',
+          'pg_isready',
+          '-h',
+          '127.0.0.1',
+          '-U',
+          'supabase_admin',
+        ],
         { env, silent: true },
       ),
   });

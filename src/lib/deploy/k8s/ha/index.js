@@ -616,7 +616,12 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            'kubectl exec -n vibecarbon supabase-supabase-db-0 -- pg_isready -U supabase_admin 2>/dev/null && echo IS_READY || echo NOT_READY',
+            // -h 127.0.0.1 (TCP): discriminates the real server from the
+            // docker-entrypoint's socket-only first-boot temp server — see
+            // awaitPostgresAccepting (readiness.js) for the d4 run-2 RCA.
+            // This pod restarts with existing PGDATA (no init flow), so the
+            // socket form was safe here, but TCP is the uniform condition.
+            'kubectl exec -n vibecarbon supabase-supabase-db-0 -- pg_isready -h 127.0.0.1 -U supabase_admin 2>/dev/null && echo IS_READY || echo NOT_READY',
           ],
           { silent: true, ignoreError: true },
         );

@@ -162,6 +162,31 @@ describe('awaitPostgresAccepting', () => {
     expect(exec).toHaveBeenCalledTimes(3);
   });
 
+  it('probes over TCP, never the Unix socket — the first-boot temp server is socket-only', async () => {
+    // d4 run 2 RCA (2026-08-28, timestamped in the standby db log): when the
+    // chart's initdb runs (first boot — e.g. a restore-path standby whose
+    // seed exited UNSEEDED by design), the docker-entrypoint starts a
+    // TEMPORARY postgres that listens ONLY on the Unix socket, runs the init
+    // scripts, then stops it before starting the real server. A socket
+    // pg_isready passes against that temp server, and the very next psql
+    // lands in the shutdown gap — exit 2, deploy dead. The real server is
+    // the only one listening on TCP, so TCP is the condition that actually
+    // discriminates "serving" from "mid-init".
+    const exec = vi.fn(async (argv: string[]) => {
+      const i = argv.indexOf('-h');
+      expect(i).toBeGreaterThan(-1);
+      expect(argv[i + 1]).toBe('127.0.0.1');
+      return 'accepting connections';
+    });
+    await awaitPostgresAccepting({
+      env: {},
+      dbPod: 'supabase-supabase-db-0',
+      exec,
+      sleep: noSleep,
+    });
+    expect(exec).toHaveBeenCalledTimes(1);
+  });
+
   it('surfaces the real failure at exhaustion', async () => {
     const exec = vi.fn(async () => {
       throw new Error('error: unable to upgrade connection: container not found ("supabase-db")');
@@ -179,5 +204,57 @@ describe('awaitPostgresAccepting', () => {
         budgetMs: 60_000,
       }),
     ).rejects.toThrow(/container not found/);
+  });
+});
+
+/**
+ * Family census — "socket pg_isready against a db that can be in the
+ * docker-entrypoint first-boot flow" (d4 run 2 RCA, 2026-08-28).
+ *
+ * The temp init server is socket-only; only the real server binds TCP. Every
+ * k8s-path pg_isready that can meet a FIRST-BOOT db must probe TCP. Members
+ * that probe a db with existing PGDATA (no init flow) are recorded here with
+ * their reason rather than left to memory; compose-path members
+ * (docker compose exec ... pg_isready) live behind their own gate + retry
+ * machinery and months of green across five providers — recorded as
+ * class-adjacent, to be normalized with compose maintenance, not tonight's
+ * k8s fix.
+ */
+import { readFileSync as readSrc } from 'node:fs';
+import { join as joinPath } from 'node:path';
+
+describe('pg_isready TCP census (k8s path)', () => {
+  const root = joinPath(__dirname, '../../..');
+  it('every kubectl-exec pg_isready in the k8s deploy path carries -h (TCP)', () => {
+    const files = [
+      'src/lib/deploy/k8s/readiness.js',
+      'src/lib/deploy/k8s/ha/index.js',
+      'src/lib/deploy/replication.js',
+    ];
+    for (const rel of files) {
+      const src = readSrc(joinPath(root, rel), 'utf8');
+      // Every pg_isready occurrence in CODE must be followed by a -h flag
+      // before the argv/command ends. Walk occurrences, not files.
+      const lines = src.split('\n');
+      lines.forEach((line, i) => {
+        if (!line.includes('pg_isready') || line.trimStart().startsWith('//')) return;
+        if (line.trimStart().startsWith('*') || line.includes('does NOT authenticate')) return;
+        // The flag may be on the same line (shell string) or within the next
+        // few argv lines (array form).
+        const window = lines.slice(i, i + 4).join('\n');
+        expect(window, `${rel}:${i + 1} pg_isready without -h (TCP)`).toMatch(/-h/);
+      });
+    }
+  });
+
+  it('recorded socket-safe members (existing-PGDATA probes) are the only exceptions', () => {
+    // restore.js:~181 (post-wal-g-restore replay wait) and failover.js:~203
+    // (established primary probe) meet only non-empty-PGDATA servers — the
+    // entrypoint skips the init flow there, so no temp server can exist.
+    // This test documents the disposition; if either file grows a first-boot
+    // window, move it into the census above.
+    for (const rel of ['src/restore.js', 'src/failover.js']) {
+      expect(readSrc(joinPath(root, rel), 'utf8')).toContain('pg_isready');
+    }
   });
 });
