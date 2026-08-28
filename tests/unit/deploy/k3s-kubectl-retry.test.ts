@@ -338,3 +338,27 @@ describe('census: every psql-over-kubectl call site opts into the lifecycle ladd
     ).toEqual([]);
   });
 });
+
+describe('rollout-status transient coverage census (d4 run 4, 2026-08-28)', () => {
+  // kubectl's internal watch retries only survive drops on an ESTABLISHED
+  // connection; a transient failure on the initial connect ("Unable to
+  // connect to the server: net/http: TLS handshake timeout", 13s into a 300s
+  // budget) exits kubectl immediately. A deploy-gating rollout wait on bare
+  // runCommandAsync turns that blip into a failed deploy — the
+  // cluster-autoscaler wait was the last such holdout. Every deploy-gating
+  // `rollout status` must ride runKubectlWithRetry (or its own
+  // transient-classified ladder, like rolloutApp's streaming variant, or be
+  // explicitly non-fatal via ignoreError).
+  it('k3s.js has no bare runCommandAsync rollout-status gate', () => {
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/k3s.js'), 'utf8');
+    const lines = src.split('\n');
+    lines.forEach((line, i) => {
+      if (!line.includes('runCommandAsync(')) return;
+      const window = lines.slice(i, i + 12).join('\n');
+      if (!(window.includes("'rollout'") && window.includes("'status'"))) return;
+      expect(window, `k3s.js:${i + 1} bare runCommandAsync rollout-status gate`).toContain(
+        'ignoreError: true',
+      );
+    });
+  });
+});

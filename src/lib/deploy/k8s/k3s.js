@@ -446,9 +446,15 @@ export function kubectlErrorHaystack(err) {
  * transient errors throw on the first attempt with stderr tail attached
  * for debuggability.
  *
- * Don't use this for `kubectl wait` / `kubectl rollout status` /
- * `kubectl logs --follow`. They have their own --timeout and piping
- * their stdio through buffered spawnSync would hide live progress.
+ * `kubectl rollout status` / `kubectl wait` callers: fine, and since d4 run
+ * 4 (2026-08-28) REQUIRED for deploy-gating waits — kubectl's own watch
+ * retries only cover drops on an ESTABLISHED connection; a transient failure
+ * on the initial connect (observed: `Unable to connect to the server:
+ * net/http: TLS handshake timeout`, 13s into a 300s budget on a busy fresh
+ * apiserver) exits kubectl immediately, and a bare runCommandAsync call
+ * turns that blip into a failed deploy. The trade is buffered progress
+ * (bytes land at completion instead of live) — the deploy log still gets
+ * everything. Only `kubectl logs --follow` stays out (unbounded stream).
  *
  * @param {string[]} args kubectl argv
  * @param {{env: NodeJS.ProcessEnv, input?: string, captureStdout?: boolean, description?: string}} options
@@ -4555,20 +4561,17 @@ export async function applyK3sManifests({
       // "rollout status timed out" — that is how the 2026-07-31 registry.k8s.io
       // 403 was finally identified.
       try {
-        const ok = await runCommandAsync(
-          [
-            'kubectl',
-            '-n',
-            'kube-system',
-            'rollout',
-            'status',
-            'deploy/cluster-autoscaler',
-            '--timeout=300s',
-          ],
-          { silent: false, env },
+        // Through the retry wrapper, NOT bare runCommandAsync (d4 run 4,
+        // 2026-08-28): kubectl's internal watch retries only survive drops on
+        // an established connection — a transient `TLS handshake timeout` on
+        // the INITIAL connect exited kubectl 13s into the 300s budget and
+        // failed the deploy while the pod went Ready seconds later. The
+        // classifier already knew the spelling; this call was the last
+        // rollout-status holdout outside the wrapper.
+        await runKubectlWithRetry(
+          ['-n', 'kube-system', 'rollout', 'status', 'deploy/cluster-autoscaler', '--timeout=300s'],
+          { env, description: 'applyK3sManifests: cluster-autoscaler rollout status' },
         );
-        if (ok === false)
-          throw new Error('cluster-autoscaler rollout status failed (timeout 300s)');
       } catch (err) {
         // Capture runs through runDeployDiagnostic (silent:true + re-emit) so
         // every byte lands in ~/.vibecarbon/logs/<env>-<ts>.log. The previous
