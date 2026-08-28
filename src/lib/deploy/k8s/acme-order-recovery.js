@@ -161,6 +161,79 @@ export function findTerminalAcmeFailures(items) {
 }
 
 /**
+ * How long a DNS-01 Challenge may sit `pending` with its record `presented`
+ * before the watchdog treats it as stalled. Normal issuance against our
+ * 30s-TTL zones validates in well under 2 minutes (every green d1–d4/e1–e4
+ * run); 5 minutes is far outside that band while still shorter than any
+ * probe budget that would otherwise burn.
+ */
+export const CHALLENGE_STALL_MS = 5 * 60_000;
+
+/**
+ * Find DNS-01 Challenges parked in a LIVE state cert-manager will not leave
+ * without help: `pending` + `presented: true` past CHALLENGE_STALL_MS.
+ *
+ * The class instance (d4 run 3, 2026-08-28, live zone dumps): two clusters
+ * issued for the same names around a failover, and the sibling cluster's
+ * name-keyed present/cleanup removed this cluster's `_acme-challenge` TXT
+ * record. cert-manager believes the record is presented and polls
+ * propagation forever — it NEVER re-presents on its own — so the Challenge
+ * is as permanently stuck as an errored Order while reading as perfectly
+ * healthy. Same "validation gate with no recovery" class as the terminal
+ * finder above, in a state that finder deliberately skips.
+ *
+ * Walks ownership upward (Challenge → Order → CertificateRequest →
+ * Certificate) so a finding carries the Certificate identity the watchdog's
+ * ownership filter and budget are keyed on. A Certificate that is Ready is
+ * never reported — its old challenges are history, not an outage.
+ *
+ * @param {Array<Record<string, any>>} items - from
+ *   `kubectl get certificate,certificaterequest,order,challenge -A -o json`
+ * @param {number} [nowMs]
+ * @returns {Array<{type: 'stalled-challenge', namespace: string, certificate: string,
+ *   challenge: string, dnsName: string|null, ageMs: number}>}
+ */
+export function findStalledAcmeChallenges(items, nowMs = Date.now()) {
+  const byKind = (kind) =>
+    (items || []).filter((i) => i?.kind === kind && i?.metadata?.name && i?.metadata?.namespace);
+  const certificates = byKind('Certificate');
+  const requests = byKind('CertificateRequest');
+  const orders = byKind('Order');
+  const challenges = byKind('Challenge');
+
+  const findings = [];
+  for (const ch of challenges) {
+    if (ch?.status?.state !== 'pending' || ch?.status?.presented !== true) continue;
+    const created = Date.parse(ch?.metadata?.creationTimestamp ?? '');
+    if (!Number.isFinite(created)) continue;
+    const ageMs = nowMs - created;
+    if (ageMs < CHALLENGE_STALL_MS) continue;
+
+    const ns = ch.metadata.namespace;
+    const orderName = ownerNamed(ch, 'Order');
+    const order = orders.find((o) => o.metadata.namespace === ns && o.metadata.name === orderName);
+    const reqName = order ? ownerNamed(order, 'CertificateRequest') : null;
+    const req = requests.find((r) => r.metadata.namespace === ns && r.metadata.name === reqName);
+    const certName = req ? ownerNamed(req, 'Certificate') : null;
+    if (!certName) continue; // foreign shape — never guess at ownership
+    const cert = certificates.find(
+      (c) => c.metadata.namespace === ns && c.metadata.name === certName,
+    );
+    if (condition(cert, 'Ready')?.status === 'True') continue;
+
+    findings.push({
+      type: 'stalled-challenge',
+      namespace: ns,
+      certificate: certName,
+      challenge: ch.metadata.name,
+      dnsName: ch?.spec?.dnsName ?? null,
+      ageMs,
+    });
+  }
+  return findings;
+}
+
+/**
  * Un-stick one finding.
  *
  * Two steps, both idempotent, in this order:
@@ -292,6 +365,7 @@ export function createAcmeIssuanceWatchdog({
   log = () => {},
   repairable = DEPLOY_OWNED_CERTIFICATES,
   abortOn = PROBED_APEX_CERTIFICATE,
+  nowFn = Date.now,
 }) {
   /** @type {Map<string, number>} */
   const attempts = new Map();
@@ -310,22 +384,25 @@ export function createAcmeIssuanceWatchdog({
 
   async function pollOnce() {
     let findings;
+    let stalled;
     try {
       const raw = await runKubectl([
         'get',
-        'certificate,certificaterequest,order',
+        'certificate,certificaterequest,order,challenge',
         '--all-namespaces',
         '-o',
         'json',
       ]);
-      findings = findTerminalAcmeFailures(JSON.parse(raw)?.items ?? []);
+      const items = JSON.parse(raw)?.items ?? [];
+      findings = findTerminalAcmeFailures(items);
+      stalled = findStalledAcmeChallenges(items, nowFn());
     } catch (err) {
       // No kubeconfig, API server not reachable, malformed JSON — none of
       // these are a reason to fail a deploy that might still converge.
       safeLog(`[acme-watchdog] state check skipped: ${errorText(err).split('\n')[0]}`);
       return { action: 'none' };
     }
-    if (findings.length === 0) return { action: 'none' };
+    if (findings.length === 0 && stalled.length === 0) return { action: 'none' };
 
     // Foreign Certificates: report once, never touch. If one of these is
     // racing us for a shared ACME order, this line is the evidence.
@@ -338,8 +415,44 @@ export function createAcmeIssuanceWatchdog({
       );
     }
 
+    // Stalled-pending challenges: bounce (delete) so the controller
+    // recreates + RE-PRESENTS the DNS record — the recovery for a record
+    // that vanished from the zone under a still-"presented" Challenge.
+    // Shares the per-Certificate budget with terminal repairs, and NEVER
+    // aborts: a stalled challenge is live, not terminal, so the probe keeps
+    // its own schedule either way.
+    let bounced = 0;
+    for (const s of stalled.filter((x) => owned.has(keyOf(x)))) {
+      const key = keyOf(s);
+      const used = attempts.get(key) ?? 0;
+      if (used >= maxRecoveries) continue;
+      attempts.set(key, used + 1);
+      bounced++;
+      safeLog(
+        `[acme-watchdog] challenge ${s.namespace}/${s.challenge} (${s.dnsName ?? 'unknown name'}) ` +
+          `has been pending with its record presented for ${Math.round(s.ageMs / 60000)}m — ` +
+          `cert-manager never re-presents on its own, so the record may be gone from the zone ` +
+          `(cross-issuer cleanup class, d4 2026-08-28). Bouncing it to force a fresh present ` +
+          `(attempt ${used + 1}/${maxRecoveries}).`,
+      );
+      try {
+        await runKubectl([
+          '-n',
+          s.namespace,
+          'delete',
+          'challenge',
+          s.challenge,
+          '--ignore-not-found',
+        ]);
+      } catch (err) {
+        safeLog(`[acme-watchdog] challenge bounce failed: ${errorText(err).split('\n')[0]}`);
+      }
+    }
+
     const ours = findings.filter((f) => owned.has(keyOf(f)));
-    if (ours.length === 0) return { action: 'none' };
+    if (ours.length === 0) {
+      return bounced > 0 ? { action: 'recovered', findings: stalled } : { action: 'none' };
+    }
 
     // Abort only for the Certificate that actually terminates the probed
     // apex, and only once it has spent its whole repair budget.

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createAcmeIssuanceWatchdog,
   DEPLOY_OWNED_CERTIFICATES,
+  findStalledAcmeChallenges,
   findTerminalAcmeFailures,
   PROBED_APEX_CERTIFICATE,
   recoverTerminalAcmeFailure,
@@ -506,5 +507,151 @@ describe('createAcmeIssuanceWatchdog', () => {
     expect((await poll()).action).toBe('recovered');
     expect((await poll()).action).toBe('recovered');
     expect((await poll()).action).toBe('abort');
+  });
+});
+
+/**
+ * Stalled-pending challenges (d4 run 3 RCA, 2026-08-28): a DNS-01 Challenge
+ * can sit `pending` with `presented: true` FOREVER when its TXT record is no
+ * longer in the zone — observed live when two clusters issued for the same
+ * names around a failover and the sibling cluster's name-keyed
+ * present/cleanup removed this cluster's record. cert-manager never
+ * re-presents on its own (it only polls propagation), so this is the same
+ * "validation gate with no recovery" class as the terminal-order case, in a
+ * LIVE state the terminal finder deliberately skips. Recovery = delete the
+ * Challenge CR; the controller recreates it from the live Order and
+ * re-presents the record. Idempotent, and bounded by the same per-Certificate
+ * budget as terminal repairs.
+ */
+function challenge(
+  name: string,
+  owner: string,
+  {
+    namespace = 'vibecarbon',
+    state = 'pending',
+    presented = true,
+    ageMs = 10 * 60_000,
+    dnsName = 'd4.do.appcarbon.dev',
+    nowMs = 1_800_000_000_000,
+  }: {
+    namespace?: string;
+    state?: string;
+    presented?: boolean;
+    ageMs?: number;
+    dnsName?: string;
+    nowMs?: number;
+  } = {},
+) {
+  return {
+    kind: 'Challenge',
+    metadata: {
+      name,
+      namespace,
+      creationTimestamp: new Date(nowMs - ageMs).toISOString(),
+      ownerReferences: [{ kind: 'Order', name: owner }],
+    },
+    spec: { dnsName },
+    status: { state, presented },
+  };
+}
+
+const NOW = 1_800_000_000_000;
+
+function stalledFixture() {
+  return [
+    certificate('vibecarbon-tls'),
+    certificateRequest('vibecarbon-tls-1', 'vibecarbon-tls', {
+      reason: 'Pending',
+      status: 'False',
+    }),
+    order('vibecarbon-tls-1-2807941578', 'vibecarbon-tls-1', { state: 'pending', reason: '' }),
+    challenge('vibecarbon-tls-1-2807941578-2884079384', 'vibecarbon-tls-1-2807941578'),
+  ];
+}
+
+describe('findStalledAcmeChallenges', () => {
+  it('reports a pending+presented challenge older than the stall budget, mapped to its Certificate', () => {
+    const findings = findStalledAcmeChallenges(stalledFixture(), NOW);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      namespace: 'vibecarbon',
+      certificate: 'vibecarbon-tls',
+      challenge: 'vibecarbon-tls-1-2807941578-2884079384',
+      dnsName: 'd4.do.appcarbon.dev',
+    });
+  });
+
+  it('ignores young challenges — normal propagation must never be bounced', () => {
+    const items = [
+      ...stalledFixture().slice(0, 3),
+      challenge('vibecarbon-tls-1-2807941578-2884079384', 'vibecarbon-tls-1-2807941578', {
+        ageMs: 60_000,
+      }),
+    ];
+    expect(findStalledAcmeChallenges(items, NOW)).toHaveLength(0);
+  });
+
+  it('ignores unpresented and non-pending challenges (cert-manager is still driving those)', () => {
+    const base = stalledFixture().slice(0, 3);
+    const unpresented = challenge('c1', 'vibecarbon-tls-1-2807941578', { presented: false });
+    const valid = challenge('c2', 'vibecarbon-tls-1-2807941578', { state: 'valid' });
+    expect(findStalledAcmeChallenges([...base, unpresented, valid], NOW)).toHaveLength(0);
+  });
+
+  it('ignores challenges whose Certificate is already Ready (stale history, not an outage)', () => {
+    const items = [certificate('vibecarbon-tls', { ready: true }), ...stalledFixture().slice(1)];
+    expect(findStalledAcmeChallenges(items, NOW)).toHaveLength(0);
+  });
+});
+
+describe('watchdog bounce of stalled challenges', () => {
+  function kubectlFor(items: unknown[]) {
+    return vi.fn(async (argv: string[]) => {
+      if (argv[0] === 'get') return JSON.stringify({ items });
+      return '';
+    });
+  }
+
+  it('deletes the stalled challenge (budgeted) and reports recovered', async () => {
+    const runKubectl = kubectlFor(stalledFixture());
+    const poll = createAcmeIssuanceWatchdog({ runKubectl, nowFn: () => NOW });
+    const res = await poll();
+    expect(res.action).toBe('recovered');
+    const del = runKubectl.mock.calls.find((c) => c[0].includes('delete'));
+    expect(del?.[0]).toEqual([
+      '-n',
+      'vibecarbon',
+      'delete',
+      'challenge',
+      'vibecarbon-tls-1-2807941578-2884079384',
+      '--ignore-not-found',
+    ]);
+  });
+
+  it('never bounces more than maxRecoveries times per certificate', async () => {
+    const runKubectl = kubectlFor(stalledFixture());
+    const poll = createAcmeIssuanceWatchdog({ runKubectl, maxRecoveries: 2, nowFn: () => NOW });
+    await poll();
+    await poll();
+    const third = await poll();
+    // Budget spent on a non-terminal state: the probe keeps its own schedule;
+    // a stalled challenge must never abort the deploy.
+    expect(third.action).toBe('none');
+    const deletes = runKubectl.mock.calls.filter((c) => c[0].includes('delete'));
+    expect(deletes).toHaveLength(2);
+  });
+
+  it('does not touch foreign (non-deploy-owned) stalled challenges', async () => {
+    const items = [
+      certificate('user-cert'),
+      certificateRequest('user-cert-1', 'user-cert', { reason: 'Pending', status: 'False' }),
+      order('user-cert-1-1', 'user-cert-1', { state: 'pending', reason: '' }),
+      challenge('user-cert-1-1-2', 'user-cert-1-1'),
+    ];
+    const runKubectl = kubectlFor(items);
+    const poll = createAcmeIssuanceWatchdog({ runKubectl, nowFn: () => NOW });
+    const res = await poll();
+    expect(res.action).toBe('none');
+    expect(runKubectl.mock.calls.some((c) => c[0].includes('delete'))).toBe(false);
   });
 });

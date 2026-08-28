@@ -3797,6 +3797,67 @@ export async function applyK3sManifests({
       { env, description: `applyK3sManifests: pin ${certDeploy} to control-plane` },
     );
   }
+  // 1c. Point the DNS-01 SELF-CHECK at public recursive resolvers instead of
+  //     the zone's authoritative servers. cert-manager's default self-check
+  //     dials the authoritative NS directly from the pod; both Hetzner DNS
+  //     and DigitalOcean DNS are served through ANYCAST fleets, and the POP
+  //     a given region's egress lands on can lag a freshly-written record by
+  //     many minutes (d4 run 3, 2026-08-28: the TXT was visible from every
+  //     external vantage and via the cluster's own CoreDNS, while the sfo3
+  //     pod's direct query to the same anycast IP returned empty — the
+  //     issuance sat "not yet propagated" indefinitely). Let's Encrypt
+  //     validates from ITS OWN vantage, not ours, so gating issuance on the
+  //     one stale POP we happen to egress through is strictly worse than
+  //     gating on a public recursive answer. Idempotent test-and-set: args
+  //     are only appended when absent, so warm re-deploys never duplicate.
+  await perfAsync(`deploy.${perfPrefix}.certManager.recursiveNameservers`, async () => {
+    const dnsFlags = [
+      '--dns01-recursive-nameservers=1.1.1.1:53,8.8.8.8:53',
+      '--dns01-recursive-nameservers-only',
+    ];
+    const raw = await runKubectlWithRetry(
+      ['-n', 'cert-manager', 'get', 'deployment', 'cert-manager', '-o', 'json'],
+      { env, captureStdout: true, description: 'applyK3sManifests: read cert-manager args' },
+    );
+    let dep;
+    try {
+      dep = JSON.parse(raw?.toString() ?? '{}');
+    } catch {
+      // Unreadable deployment JSON — skip the patch rather than fail the
+      // deploy: without the flags cert-manager falls back to its default
+      // (authoritative-direct) self-check, which is the pre-fix behavior,
+      // not an outage. The next deploy retries.
+      progressLog('[k3s] cert-manager args unreadable, skipping recursive-nameserver patch.');
+      return;
+    }
+    const containers = dep?.spec?.template?.spec?.containers ?? [];
+    const idx = containers.findIndex((c) => c?.name === 'cert-manager-controller');
+    const controllerIdx = idx >= 0 ? idx : 0;
+    const existing = containers[controllerIdx]?.args ?? [];
+    const missing = dnsFlags.filter((f) => !existing.includes(f));
+    if (missing.length === 0) {
+      progressLog('[k3s] cert-manager recursive-nameserver flags already present.');
+      return;
+    }
+    const ops = missing.map((value) => ({
+      op: 'add',
+      path: `/spec/template/spec/containers/${controllerIdx}/args/-`,
+      value,
+    }));
+    await runKubectlWithRetry(
+      [
+        '-n',
+        'cert-manager',
+        'patch',
+        'deployment',
+        'cert-manager',
+        '--type=json',
+        '-p',
+        JSON.stringify(ops),
+      ],
+      { env, description: 'applyK3sManifests: cert-manager recursive-nameserver self-check' },
+    );
+  });
   // 2. Wait for cert-manager to be ready before applying ClusterIssuers.
   // Fan out the three deploys in parallel: kubectl wait blocks per-arg
   // sequentially, and the cainjector + webhook usually become Available

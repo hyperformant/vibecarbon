@@ -213,11 +213,23 @@ classes:
       Upstream cert-manager#8960 / PR#8968 matched by pinned-source read of
       v1.20.2; watchdog + terminal classification landed 33c68884. Our
       duplicate-order trigger (grafana-tls dnsNames) root-fixed in the same
-      change.
+      change. Extended 2026-08-28 (d4 run 3, live zone dumps + per-cluster
+      dig transcripts): a pending Challenge with `presented: true` whose TXT
+      record is no longer in the zone is the SAME no-recovery class in a
+      live state — cert-manager only polls propagation and never re-presents
+      (pkg/controller/acmechallenges has no re-Present path for a presented
+      challenge). Trigger observed: two clusters issuing for the same names
+      around a failover, cert-manager's core DO solver keying records by
+      NAME. The watchdog's bounded challenge bounce (delete → controller
+      recreates → fresh Present) is the recovery; the self-check half
+      (anycast POP staleness) is root-addressed by the
+      --dns01-recursive-nameservers-only config in the same change.
     sites:
       - site: "src/lib/deploy/k8s/acme-order-recovery.js :: createAcmeIssuanceWatchdog"
         detectable: false
-        notes: bounded in-place repair of terminal Orders; fails open
+        notes: >-
+          bounded in-place repair of terminal Orders + bounded bounce of
+          stalled-pending presented Challenges; fails open
 
   - class: provider-provisioning-slowness
     attribution: external-asserted
