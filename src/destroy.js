@@ -36,6 +36,7 @@ import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import {
   isComposeTier,
+  isHATier,
   isK8sTier,
   pulumiStackEnvs,
   resolveTier,
@@ -1957,6 +1958,54 @@ export async function resolveDestroyS3Config(Provider, projectName, s3Fields, op
 }
 
 /**
+ * The DO k8s backstop's per-stack target list. Exported for unit testing.
+ *
+ * One entry per Pulumi stack (single k8s: the environment itself; k8s-ha:
+ * `<env>-primary` + `<env>-standby`), carrying the literal resource names the
+ * DO k8s program creates for that stack (digitalocean-k8s.js:
+ * `${clusterName}-firewall` / `${clusterName}-network` /
+ * `${clusterName}-${region}-key`) plus the reserved-IP address persisted for
+ * that stack. Deriving these from the USER-FACING environment instead (the
+ * pre-d4 shape) named a cluster that never existed on k8s-ha — both real
+ * per-stack firewalls/VPCs and BOTH reserved IPs leaked every HA destroy.
+ *
+ * - `sshKeyName` is null on HA: both clusters share one key created OUTSIDE
+ *   Pulumi (`${project}-${env}-ha-key`), swept by its own block.
+ * - `floatingIp` follows the STACK identity: failover swaps roles under
+ *   `envConfig.ha.{primary,standby}.stack`, so match by `.stack` first and
+ *   fall back to the role suffix for pre-swap configs that never persisted it.
+ *
+ * @param {{plan: {tier: string, stackEnvs: string[]}, envConfig: object, projectConfig: {projectName: string}}} args
+ * @returns {Array<{stackEnv: string, firewallName: string, sshKeyName: string|null, floatingIp: string|null, networkName: string}>}
+ */
+export function planDoK8sBackstopTargets({ plan, envConfig, projectConfig }) {
+  const isHA = isHATier(plan.tier);
+  const haEntries = [envConfig.ha?.primary, envConfig.ha?.standby].filter(Boolean);
+  return plan.stackEnvs.map((stackEnv) => {
+    const clusterName = `${projectConfig.projectName}-${stackEnv}`;
+    let floatingIp = null;
+    if (isHA) {
+      const byStack = haEntries.find((e) => e.stack === stackEnv);
+      const byRoleSuffix = stackEnv.endsWith('-primary')
+        ? envConfig.ha?.primary
+        : stackEnv.endsWith('-standby')
+          ? envConfig.ha?.standby
+          : null;
+      floatingIp = byStack?.floatingIp ?? byRoleSuffix?.floatingIp ?? null;
+    } else {
+      floatingIp = envConfig.floatingIp ?? null;
+    }
+    return {
+      stackEnv,
+      firewallName: `${clusterName}-firewall`,
+      sshKeyName: !isHA && envConfig.region ? `${clusterName}-${envConfig.region}-key` : null,
+      floatingIp,
+      networkName: `${clusterName}-network`,
+    };
+  });
+}
+
+/**
  * k8s / k8s-ha: Cloudflare + Hetzner DNS, then Pulumi-managed infra teardown
  * (volume pre-scan, CCM LB cleanup, CSI release, CA-worker sweep, `pulumi
  * destroy` per stack, orphan sweep, HA shared-key delete), then orphaned CSI
@@ -2416,126 +2465,133 @@ async function destroyK8sTier({
     // Pulumi step above was verified or not. Hetzner's k8s Pulumi destroy has
     // never been observed to leak these, so it gets none of this — only the
     // ownedIps fix above (its k8s DNS record was the actual gap there).
-    // k8s-ha is Hetzner-only (assertTierSupported), so `environment` here
-    // is always the single DO cluster's own stack name — no HA fan-out.
+    // One pass per Pulumi STACK: k8s-ha is two stacks (`<env>-primary` /
+    // `<env>-standby`), each with its own firewall/VPC/reserved IP — deriving
+    // one cluster name from the user-facing environment here (the pre-d4
+    // shape) named a cluster that never existed on HA and leaked all of them.
+    // Target list + naming is planDoK8sBackstopTargets (exported, unit-pinned);
+    // single k8s stays byte-identical to the old single-target behavior.
     if (providerIdFor(envConfig) === 'digitalocean' && providerToken) {
-      const doClusterName = `${projectConfig.projectName}-${environment}`;
-
-      // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
-      const doFwName = `${doClusterName}-firewall`;
-      s.start(`Verifying DO firewall is gone: ${doFwName}`);
-      try {
-        const result = await provider.deleteFirewallByName(doFwName);
-        if (result.deleted) {
-          results.firewalls.push(doFwName);
-          s.stop('Firewall deleted (backstop)');
-        } else if (result.apiError) {
-          s.stop(`Firewall backstop failed: ${result.apiError.message}`);
-          results.leaks.leak({
+      for (const target of planDoK8sBackstopTargets({ plan, envConfig, projectConfig })) {
+        // Firewall — literal name from digitalocean-k8s.js: `${clusterName}-firewall`.
+        const doFwName = target.firewallName;
+        s.start(`Verifying DO firewall is gone: ${doFwName}`);
+        try {
+          const result = await provider.deleteFirewallByName(doFwName);
+          if (result.deleted) {
+            results.firewalls.push(doFwName);
+            s.stop('Firewall deleted (backstop)');
+          } else if (result.apiError) {
+            s.stop(`Firewall backstop failed: ${result.apiError.message}`);
+            results.leaks.leak({
+              resourceClass: 'firewall',
+              resource: doFwName,
+              reason: `backstop delete did not complete: ${result.apiError.message}`,
+              hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,
+            });
+          } else {
+            s.stop('Firewall already gone (Pulumi)');
+          }
+        } catch (error) {
+          s.stop(`Firewall backstop check failed: ${error.message}`);
+          results.leaks.unverified({
             resourceClass: 'firewall',
             resource: doFwName,
-            reason: `backstop delete did not complete: ${result.apiError.message}`,
+            reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
             hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,
           });
-        } else {
-          s.stop('Firewall already gone (Pulumi)');
         }
-      } catch (error) {
-        s.stop(`Firewall backstop check failed: ${error.message}`);
-        results.leaks.unverified({
-          resourceClass: 'firewall',
-          resource: doFwName,
-          reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-          hint: `Delete it via the ${Provider.NAME} console — a leaked firewall makes the next deploy fail with "name is already used (uniqueness_error)".`,
-        });
-      }
 
-      // SSH key — literal name from digitalocean-k8s.js:
-      // `${clusterName}-${config.location}-key` (config.location === envConfig.region).
-      const doSshKeyName = envConfig.region ? `${doClusterName}-${envConfig.region}-key` : null;
-      if (doSshKeyName) {
-        s.start(`Verifying DO SSH key is gone: ${doSshKeyName}`);
-        try {
-          const deleted = await provider.deleteSSHKeyByName(doSshKeyName);
-          if (deleted) results.sshKeys.push(doSshKeyName);
-          s.stop(deleted ? 'SSH key deleted (backstop)' : 'SSH key already gone (Pulumi)');
-        } catch (error) {
-          s.stop(`SSH key backstop check failed: ${error.message}`);
-          results.leaks.unverified({
-            resourceClass: 'ssh-key',
-            resource: doSshKeyName,
-            reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-            hint: `Delete it via the ${Provider.NAME} console — a leaked key blocks the next deploy's key registration by name.`,
-          });
+        // SSH key — literal name from digitalocean-k8s.js:
+        // `${clusterName}-${config.location}-key` (config.location ===
+        // envConfig.region). Null on HA: both clusters share one key created
+        // OUTSIDE Pulumi, swept by the dedicated block below.
+        const doSshKeyName = target.sshKeyName;
+        if (doSshKeyName) {
+          s.start(`Verifying DO SSH key is gone: ${doSshKeyName}`);
+          try {
+            const deleted = await provider.deleteSSHKeyByName(doSshKeyName);
+            if (deleted) results.sshKeys.push(doSshKeyName);
+            s.stop(deleted ? 'SSH key deleted (backstop)' : 'SSH key already gone (Pulumi)');
+          } catch (error) {
+            s.stop(`SSH key backstop check failed: ${error.message}`);
+            results.leaks.unverified({
+              resourceClass: 'ssh-key',
+              resource: doSshKeyName,
+              reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
+              hint: `Delete it via the ${Provider.NAME} console — a leaked key blocks the next deploy's key registration by name.`,
+            });
+          }
         }
-      }
 
-      // Reserved IP — unnamed on DO; attribution is the address persisted
-      // into envConfig.floatingIp at deploy time (orchestrator.js). Also
-      // feeds plan.ownedIps above so the DNS record finally matches.
-      //
-      // This backstop is not belt-and-braces here, it is THE mechanism: the
-      // reserved IP is the one resource `pulumi destroy` has been observed to
-      // leave behind every time. The upstream provider defects that explain it
-      // (a Delete that never unassigns + an assignment resource that deletes
-      // itself from state on refresh) are written up at the
-      // `digitalocean.ReservedIp` construction site in
-      // src/lib/iac/programs/digitalocean-k8s.js. By the time this runs the
-      // droplets are gone, so the IP is unassigned and a plain DELETE works.
-      if (envConfig.floatingIp) {
-        s.start(`Verifying DO reserved IP is gone: ${envConfig.floatingIp}`);
-        try {
-          const deleted = await provider.deleteReservedIpByAddress(envConfig.floatingIp);
-          s.stop(deleted ? 'Reserved IP released (backstop)' : 'Reserved IP backstop failed');
-          if (!deleted) {
-            results.leaks.leak({
+        // Reserved IP — unnamed on DO; attribution is the address persisted
+        // at deploy time (orchestrator.js): envConfig.floatingIp for single
+        // k8s, envConfig.ha.{primary,standby}.floatingIp per stack for HA.
+        // Also feeds plan.ownedIps above so the DNS record finally matches.
+        //
+        // This backstop is not belt-and-braces here, it is THE mechanism: the
+        // reserved IP is the one resource `pulumi destroy` has been observed to
+        // leave behind every time. The upstream provider defects that explain it
+        // (a Delete that never unassigns + an assignment resource that deletes
+        // itself from state on refresh) are written up at the
+        // `digitalocean.ReservedIp` construction site in
+        // src/lib/iac/programs/digitalocean-k8s.js. By the time this runs the
+        // droplets are gone, so the IP is unassigned and a plain DELETE works.
+        if (target.floatingIp) {
+          s.start(`Verifying DO reserved IP is gone: ${target.floatingIp}`);
+          try {
+            const deleted = await provider.deleteReservedIpByAddress(target.floatingIp);
+            s.stop(deleted ? 'Reserved IP released (backstop)' : 'Reserved IP backstop failed');
+            if (!deleted) {
+              results.leaks.leak({
+                resourceClass: 'reserved-ip',
+                resource: target.floatingIp,
+                reason: 'backstop delete did not release it',
+                hint: `Delete it via the ${Provider.NAME} console (Networking → Reserved IPs); it continues to incur a small charge until released.`,
+              });
+            }
+          } catch (error) {
+            s.stop(`Reserved IP backstop check failed: ${error.message}`);
+            results.leaks.unverified({
               resourceClass: 'reserved-ip',
-              resource: envConfig.floatingIp,
-              reason: 'backstop delete did not release it',
+              resource: target.floatingIp,
+              reason: `backstop check threw: ${error.message}, could not confirm it is released`,
               hint: `Delete it via the ${Provider.NAME} console (Networking → Reserved IPs); it continues to incur a small charge until released.`,
             });
           }
-        } catch (error) {
-          s.stop(`Reserved IP backstop check failed: ${error.message}`);
-          results.leaks.unverified({
-            resourceClass: 'reserved-ip',
-            resource: envConfig.floatingIp,
-            reason: `backstop check threw: ${error.message}, could not confirm it is released`,
-            hint: `Delete it via the ${Provider.NAME} console (Networking → Reserved IPs); it continues to incur a small charge until released.`,
-          });
         }
-      }
 
-      // VPC LAST — DO refuses to delete a non-empty VPC (still-attached
-      // droplets/load balancers/etc respond non-2xx). By this point Pulumi
-      // + every sweep above should have cleared every member; a refusal
-      // here is therefore a genuine ordering bug elsewhere, not a
-      // not-found — surface it loudly rather than swallow it.
-      const doNetworkName = `${doClusterName}-network`;
-      s.start(`Verifying DO VPC is gone: ${doNetworkName}`);
-      try {
-        const result = await provider.deleteNetworkByName(doNetworkName);
-        if (result.deleted) {
-          s.stop('VPC deleted (backstop)');
-        } else if (result.apiError) {
-          s.stop(`VPC backstop failed: ${result.apiError.message}`);
-          results.leaks.leak({
+        // VPC LAST — DO refuses to delete a non-empty VPC (still-attached
+        // droplets/load balancers/etc respond non-2xx). By this point Pulumi
+        // + every sweep above should have cleared every member; a refusal
+        // here is therefore a genuine ordering bug elsewhere, not a
+        // not-found — surface it loudly rather than swallow it.
+        const doNetworkName = target.networkName;
+        s.start(`Verifying DO VPC is gone: ${doNetworkName}`);
+        try {
+          const result = await provider.deleteNetworkByName(doNetworkName);
+          if (result.deleted) {
+            s.stop('VPC deleted (backstop)');
+          } else if (result.apiError) {
+            s.stop(`VPC backstop failed: ${result.apiError.message}`);
+            results.leaks.leak({
+              resourceClass: 'network',
+              resource: doNetworkName,
+              reason: `delete refused (likely still has members): ${result.apiError.message}`,
+              hint: `Check the ${Provider.NAME} console for leftover droplets/load balancers/database clusters in this VPC, delete them, then delete the VPC manually.`,
+            });
+          } else {
+            s.stop('VPC already gone (Pulumi)');
+          }
+        } catch (error) {
+          s.stop(`VPC backstop check failed: ${error.message}`);
+          results.leaks.unverified({
             resourceClass: 'network',
             resource: doNetworkName,
-            reason: `delete refused (likely still has members): ${result.apiError.message}`,
-            hint: `Check the ${Provider.NAME} console for leftover droplets/load balancers/database clusters in this VPC, delete them, then delete the VPC manually.`,
+            reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
+            hint: `Check the ${Provider.NAME} console for a surviving VPC and any droplets/load balancers still inside it.`,
           });
-        } else {
-          s.stop('VPC already gone (Pulumi)');
         }
-      } catch (error) {
-        s.stop(`VPC backstop check failed: ${error.message}`);
-        results.leaks.unverified({
-          resourceClass: 'network',
-          resource: doNetworkName,
-          reason: `backstop check threw: ${error.message}, could not confirm it is gone`,
-          hint: `Check the ${Provider.NAME} console for a surviving VPC and any droplets/load balancers still inside it.`,
-        });
       }
     }
 
