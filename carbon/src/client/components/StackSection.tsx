@@ -1,11 +1,16 @@
 import type { TablerIcon as IconComponent } from '@tabler/icons-react';
 import {
   IconBucket,
+  IconCertificate,
+  IconComponents,
   IconDeviceSdCard,
   IconFunction,
   IconKey,
   IconMail,
+  IconMarkdown,
   IconPlugConnected,
+  IconRouter,
+  IconShieldLock,
 } from '@tabler/icons-react';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -22,10 +27,7 @@ import framerLogo from '../assets/logos/tech-framer.svg';
 import grafanaLogo from '../assets/logos/tech-grafana.svg';
 import honoLogo from '../assets/logos/tech-hono.svg';
 import i18nextLogo from '../assets/logos/tech-i18next.svg';
-import kongLogo from '../assets/logos/tech-kong.svg';
 import kubernetesLogo from '../assets/logos/tech-kubernetes.svg';
-import letsencryptLogo from '../assets/logos/tech-letsencrypt.svg';
-import mdxLogo from '../assets/logos/tech-mdx.svg';
 import postgresqlLogo from '../assets/logos/tech-postgresql.svg';
 import prometheusLogo from '../assets/logos/tech-prometheus.svg';
 import pulumiLogo from '../assets/logos/tech-pulumi.svg';
@@ -34,7 +36,6 @@ import reactHookFormLogo from '../assets/logos/tech-reacthookform.svg';
 import reactQueryLogo from '../assets/logos/tech-reactquery.svg';
 import reactRouterLogo from '../assets/logos/tech-reactrouter.svg';
 import redisLogo from '../assets/logos/tech-redis.svg';
-import shadcnLogo from '../assets/logos/tech-shadcnui.svg';
 import stripeLogo from '../assets/logos/tech-stripe.svg';
 import supabaseLogo from '../assets/logos/tech-supabase.svg';
 import swaggerLogo from '../assets/logos/tech-swagger.svg';
@@ -42,7 +43,6 @@ import tailwindLogo from '../assets/logos/tech-tailwindcss.svg';
 import traefikLogo from '../assets/logos/tech-traefikproxy.svg';
 import typescriptLogo from '../assets/logos/tech-typescript.svg';
 import viteLogo from '../assets/logos/tech-vite.svg';
-import wireguardLogo from '../assets/logos/tech-wireguard.svg';
 import zodLogo from '../assets/logos/tech-zod.svg';
 
 /**
@@ -67,12 +67,10 @@ function depthColor(i: number, count: number) {
 
 /** A chip is either an icon-fronted feature name or a brand-marked product
  *  (one or two SVG urls); `badge` renders a muted mono affix (e.g. "add-on").
- *  `imgClass` compensates for brand fills that vanish on the dark theme:
- *  neutral-black marks invert to white, dark-navy ones get brightened. */
-type Chip = (
-  | { name: string; icon: IconComponent }
-  | { name: string; imgs: string[]; imgClass?: string }
-) & {
+ *  Brand marks ship at their official colors, unmodified — a mark whose
+ *  official color doesn't survive both themes gets a Tabler feature icon
+ *  instead, never a recolored logo. */
+type Chip = ({ name: string; icon: IconComponent } | { name: string; imgs: string[] }) & {
   badge?: string;
 };
 
@@ -84,11 +82,11 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
       { name: 'TypeScript', imgs: [typescriptLogo] },
       { name: 'React Router 8', imgs: [reactRouterLogo] },
       { name: 'Tailwind CSS', imgs: [tailwindLogo] },
-      { name: 'Shadcn UI', imgs: [shadcnLogo], imgClass: 'dark:invert' },
+      { name: 'Shadcn UI', icon: IconComponents },
       { name: 'TanStack Query', imgs: [reactQueryLogo] },
       { name: 'Zod + React Hook Form', imgs: [zodLogo, reactHookFormLogo] },
       { name: 'Framer Motion', imgs: [framerLogo] },
-      { name: 'MDX', imgs: [mdxLogo], imgClass: 'dark:invert' },
+      { name: 'MDX', icon: IconMarkdown },
       { name: 'i18next', imgs: [i18nextLogo] },
       { name: 'Vite 8', imgs: [viteLogo] },
     ],
@@ -118,10 +116,10 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
     key: 'edge',
     tech: [
       { name: 'Traefik', imgs: [traefikLogo] },
-      { name: 'Kong gateway', imgs: [kongLogo], imgClass: 'dark:brightness-200' },
-      { name: "Let's Encrypt TLS", imgs: [letsencryptLogo], imgClass: 'dark:brightness-200' },
+      { name: 'Kong gateway', icon: IconRouter },
+      { name: "Let's Encrypt TLS", icon: IconCertificate },
       { name: 'Cloudflare DNS', imgs: [cloudflareLogo] },
-      { name: 'WireGuard', imgs: [wireguardLogo], imgClass: 'dark:brightness-200' },
+      { name: 'WireGuard', icon: IconShieldLock },
     ],
   },
   {
@@ -217,7 +215,7 @@ export function StackSection() {
                               src={img}
                               alt=""
                               aria-hidden="true"
-                              className={`size-4 shrink-0 ${item.imgClass ?? ''}`}
+                              className="size-4 shrink-0"
                             />
                           ))
                         ) : (
