@@ -21,6 +21,10 @@ import { spinner } from './lib/cli/progress.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import {
+  PROMOTABLE_CERTIFICATES,
+  PROMOTE_ISSUER_ANNOTATION,
+} from './lib/deploy/k8s/acme-issuer-policy.js';
+import {
   getReplPasswordFromSecret,
   isStandbyPromoted,
   isStandbyStreaming,
@@ -425,6 +429,72 @@ export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
  * @param {number|'up'} replicas
  * @param {string} label
  */
+/**
+ * Single-ACME-issuer policy, promote half — see
+ * src/lib/deploy/k8s/acme-issuer-policy.js for the full account.
+ *
+ * For each deploy-owned Certificate on the promoted cluster: read the
+ * `vibecarbon.dev/promote-issuer` annotation (stamped by the deploy) and,
+ * when the live issuerRef differs, patch it to the annotated ACME issuer —
+ * making the promoted cluster the environment's sole ACME solver.
+ *
+ * Best-effort BY CONTRACT: this runs after the point of no return (standby
+ * promoted, DNS about to flip), and a promoted site serving on the
+ * self-signed cert is strictly better than an aborted failover. Not-found
+ * certificates (a pilot-standby never installs observability) are skipped
+ * quietly; every other failure warns loudly and continues — the reconverge
+ * redeploy repairs issuer ownership.
+ *
+ * @param {object} args
+ * @param {string} args.promotedIp - promoted cluster master IP (kubectl target)
+ * @param {string} args.sshKeyPath
+ * @param {{kubectl?: Function, warn?: (msg: string) => void}} [args.deps]
+ * @returns {Promise<{patched: string[]}>} `ns/name` keys actually re-pointed
+ */
+export async function promoteAcmeIssuer({ promotedIp, sshKeyPath, deps = {} }) {
+  const { kubectl = sshKubectl, warn = (m) => p.log.warn(m) } = deps;
+  const patched = [];
+  for (const { namespace, name } of PROMOTABLE_CERTIFICATES) {
+    try {
+      const raw = await kubectl(promotedIp, sshKeyPath, [
+        'get',
+        'certificate',
+        name,
+        '-n',
+        namespace,
+        '-o',
+        'json',
+      ]);
+      const cert = JSON.parse(String(raw));
+      const target = cert?.metadata?.annotations?.[PROMOTE_ISSUER_ANNOTATION];
+      const current = cert?.spec?.issuerRef?.name;
+      // No annotation = a pre-policy cluster (or a hand-managed cert): its
+      // issuerRef was never redirected, so there is nothing to promote.
+      if (!target || target === current) continue;
+      await kubectl(promotedIp, sshKeyPath, [
+        'patch',
+        'certificate',
+        name,
+        '-n',
+        namespace,
+        '--type=merge',
+        '-p',
+        JSON.stringify({ spec: { issuerRef: { name: target, kind: 'ClusterIssuer' } } }),
+      ]);
+      patched.push(`${namespace}/${name}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/not found|no objects passed/i.test(msg)) continue;
+      warn(
+        `promote-issuer: could not re-point ${namespace}/${name} at its ACME issuer ` +
+          `(${msg.split('\n')[0]}). The site serves on the standby self-signed cert until ` +
+          `the next deploy reconverges issuer ownership.`,
+      );
+    }
+  }
+  return { patched };
+}
+
 async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
   for (const dep of deployments) {
     const ns = dep.namespace || 'vibecarbon';
@@ -1379,6 +1449,7 @@ export async function failoverHA(
     restoreWalgRole = restorePromotedWalgRole,
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
+    promoteIssuer = promoteAcmeIssuer,
   } = deps;
 
   const servers = identify(envName, envConfig, projectConfig);
@@ -1592,6 +1663,24 @@ export async function failoverHA(
   s.start('Scaling up the promoted app tier');
   await scale(servers.standby.ip, sshKeyPath, scaleUpList, 'up', 'scale up promoted app tier');
   s.stop('Promoted app tier scaled up');
+
+  // STEP 5b — Single-ACME-issuer policy, promote half (d4 2026-08-28): the
+  // pilot-standby deploy pointed this cluster's Certificate at the local
+  // self-signed issuer so two clusters never solve DNS-01 for the same names
+  // (cert-manager's DO solver keys challenge records by NAME — concurrent
+  // issuers live-lock). Patch issuerRef back to the ACME issuer stamped in
+  // the promote annotation NOW, so real-cert issuance overlaps the rollout
+  // gate below and this cluster becomes the SOLE ACME solver. Runs before
+  // the gate on purpose; best-effort inside (a promoted site serving on the
+  // self-signed cert is strictly better than an aborted failover, and the
+  // reconverge redeploy repairs issuer ownership).
+  s.start('Promoting ACME issuer on the promoted cluster');
+  const promoted = await promoteIssuer({ promotedIp: servers.standby.ip, sshKeyPath });
+  s.stop(
+    promoted.patched.length > 0
+      ? `ACME issuer promoted (${promoted.patched.join(', ')})`
+      : 'ACME issuer already in place',
+  );
 
   // STEP 6 — Readiness gate: rollout-status each scaled deployment on the
   // promoted cluster, then gate on the public API actually serving. Best-effort;

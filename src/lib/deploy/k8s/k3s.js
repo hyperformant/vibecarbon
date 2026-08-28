@@ -67,6 +67,7 @@ import {
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
 import { REPL_GATEWAY_PORT } from '../wireguard.js';
+import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
   awaitCertManagerAdmission,
   awaitControlPlaneServing,
@@ -4387,6 +4388,21 @@ export async function applyK3sManifests({
   // covers *.${domain} so every IngressRoute subdomain is included without
   // separate per-router ACME orders. Manual (HTTP-01) falls back to apex-only.
   const dnsNames = certificateDnsNames(domain, issuerName);
+  // Single-ACME-issuer policy (d4 2026-08-28 — acme-issuer-policy.js): a
+  // pilot-standby's Certificate references the local self-signed issuer so
+  // two clusters never solve DNS-01 for the same names concurrently
+  // (cert-manager's DO solver keys challenge records by name; concurrent
+  // issuers live-lock). The REAL issuer name rides along in the promote
+  // annotation on BOTH roles — the failover promote step (and every
+  // reconverge redeploy, via this same branch under the swapped role)
+  // re-points issuerRef from it.
+  const effectiveIssuer = pilotStandby ? STANDBY_SELFSIGNED_ISSUER : issuerName;
+  if (pilotStandby) {
+    console.error(
+      `[pilot-standby] certificate issuerRef -> ${STANDBY_SELFSIGNED_ISSUER} ` +
+        `(single-ACME-issuer policy; promote annotation carries ${issuerName})`,
+    );
+  }
   await runKubectlWithRetry(
     [
       '-n',
@@ -4397,7 +4413,8 @@ export async function applyK3sManifests({
       '--type=merge',
       '-p',
       JSON.stringify({
-        spec: { dnsNames, issuerRef: { name: issuerName, kind: 'ClusterIssuer' } },
+        metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
+        spec: { dnsNames, issuerRef: { name: effectiveIssuer, kind: 'ClusterIssuer' } },
       }),
     ],
     { env, description: 'applyK3sManifests: kubectl patch certificate/vibecarbon-tls' },
@@ -4489,6 +4506,11 @@ export async function applyK3sManifests({
         '--type=merge',
         '-p',
         JSON.stringify({
+          // Primary-only path (a pilot-standby skips observability entirely),
+          // so the issuerRef stays ACME; the promote annotation still rides
+          // along so promoteAcmeIssuer treats every deploy-owned Certificate
+          // uniformly.
+          metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
           spec: {
             dnsNames: observabilityCertificateDnsNames(domain),
             issuerRef: { name: issuerName, kind: 'ClusterIssuer' },

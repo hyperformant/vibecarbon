@@ -22,3 +22,6 @@ resources:
   - cluster-issuers-cloudflare.yaml
   - cluster-issuers-hetzner.yaml
   - cluster-issuers-digitalocean.yaml
+  # Non-ACME: the pilot-standby's contention-free issuer (single-ACME-issuer
+  # policy — see cluster-issuer-standby-selfsigned.yaml's header).
+  - cluster-issuer-standby-selfsigned.yaml

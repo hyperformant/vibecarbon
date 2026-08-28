@@ -1,0 +1,22 @@
+# Local self-signed ClusterIssuer for the single-ACME-issuer policy
+# (d4 2026-08-28 — see src/lib/deploy/k8s/acme-issuer-policy.js).
+#
+# A k8s-ha environment is two clusters holding Certificates for the SAME
+# dns names on one shared zone; two clusters solving ACME DNS-01
+# concurrently clobber each other's challenge records on solvers that key
+# records by name (cert-manager's core DigitalOcean solver). So only the
+# PRIMARY-role cluster references an ACME issuer: `applyK3sManifests`
+# patches a pilot-standby's Certificates onto THIS issuer instead (instant
+# local issuance, zero ACME traffic), stashing the real issuer name in the
+# `vibecarbon.dev/promote-issuer` annotation, and `vibecarbon failover`'s
+# promote step patches issuerRef back — the promoted cluster becomes the
+# environment's sole ACME solver.
+#
+# Applied on every cluster alongside the ACME issuers; inert unless a
+# Certificate references it. Single-cluster (non-HA) deploys never do.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vibecarbon-standby-selfsigned
+spec:
+  selfSigned: {}

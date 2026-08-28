@@ -551,6 +551,11 @@ async function runFailoverHA(opts: RunOpts) {
       order.push('rollout');
       order.push('apiProbe');
     },
+    promoteIssuer: async (a: { promotedIp: string }) => {
+      captured.promoteIssuerIp = a.promotedIp;
+      order.push('promoteIssuer');
+      return { patched: ['vibecarbon/vibecarbon-tls'] };
+    },
     swapRoles: (envName: string) => {
       captured.swapEnv = envName;
       order.push('saveConfig');
@@ -599,6 +604,7 @@ describe('failoverHA step order', () => {
       'promote',
       'walgRole',
       'scaleUp',
+      'promoteIssuer',
       'rollout',
       'apiProbe',
       'dns',

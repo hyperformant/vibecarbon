@@ -705,6 +705,60 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(patchedDnsNames('grafana-tls')).not.toEqual(patchedDnsNames('vibecarbon-tls'));
   });
 
+  it('single-ACME-issuer policy: a pilot-standby cert references the self-signed issuer, the promote annotation carries the real one', async () => {
+    // d4 runs 3/5 RCA (2026-08-28): two clusters solving DNS-01 for the same
+    // names live-lock on cert-manager's name-keyed DO solver. The standby
+    // must not be an active ACME issuer; the annotation is what the failover
+    // promote (and every reconverge under the swapped role) re-points from.
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir({ withStandbyOverlay: true });
+
+    await applyK3sManifests({
+      ...baseArgs(projectDir),
+      dnsProvider: 'hetzner',
+      dnsToken: 'hetzner-dns-token',
+      role: 'standby',
+    });
+
+    const argv = cmdCalls.find(
+      (a) => a.includes('patch') && a.includes('certificate') && a.includes('vibecarbon-tls'),
+    );
+    if (!argv) throw new Error('no patch found for certificate/vibecarbon-tls');
+    const body = JSON.parse(argv[argv.length - 1]);
+    expect(body.spec.issuerRef).toEqual({
+      name: 'vibecarbon-standby-selfsigned',
+      kind: 'ClusterIssuer',
+    });
+    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe(
+      'letsencrypt-prod-hetzner',
+    );
+  });
+
+  it('single-ACME-issuer policy: a primary cert keeps the ACME issuerRef AND carries the annotation', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir();
+
+    await applyK3sManifests({
+      ...baseArgs(projectDir),
+      dnsProvider: 'hetzner',
+      dnsToken: 'hetzner-dns-token',
+      role: 'primary',
+    });
+
+    const argv = cmdCalls.find(
+      (a) => a.includes('patch') && a.includes('certificate') && a.includes('vibecarbon-tls'),
+    );
+    if (!argv) throw new Error('no patch found for certificate/vibecarbon-tls');
+    const body = JSON.parse(argv[argv.length - 1]);
+    expect(body.spec.issuerRef).toEqual({
+      name: 'letsencrypt-prod-hetzner',
+      kind: 'ClusterIssuer',
+    });
+    expect(body.metadata.annotations['vibecarbon.dev/promote-issuer']).toBe(
+      'letsencrypt-prod-hetzner',
+    );
+  });
+
   it('patches exactly the Certificates the ACME watchdog is allowed to repair', async () => {
     // Cross-file pin. DEPLOY_OWNED_CERTIFICATES is a hand-written allowlist of
     // `<namespace>/<name>` keys, and the watchdog silently degrades to
