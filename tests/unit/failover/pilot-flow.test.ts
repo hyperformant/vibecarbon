@@ -444,6 +444,8 @@ interface RunOpts {
   catchUpThrows?: boolean;
   /** The wal-g write-guard move could not be proven on the promoted cluster. */
   walgRoleFails?: boolean;
+  /** Live stack outputs the preflight stub reports (freshness refresh). */
+  standbyOutputs?: Record<string, unknown>;
 }
 
 /**
@@ -460,13 +462,20 @@ async function runFailoverHA(opts: RunOpts) {
     provisionThrows,
     catchUpThrows = false,
     walgRoleFails = false,
+    standbyOutputs,
   } = opts;
   const order: string[] = [];
   let thrown: unknown;
   const captured: Record<string, unknown> = {};
   const servers = {
     primary: { ip: '10.0.0.1', floatingIp: '10.0.0.1', region: 'nbg1' },
-    standby: { ip: '10.0.0.9', floatingIp: '10.0.0.99', supabaseIp: '10.0.0.10', region: 'ash' },
+    standby: {
+      ip: '10.0.0.9',
+      floatingIp: '10.0.0.99',
+      supabaseIp: '10.0.0.10',
+      supabasePrivateIp: '10.0.1.2',
+      region: 'ash',
+    },
   };
   const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
     order.push(`exit(${code})`);
@@ -484,6 +493,7 @@ async function runFailoverHA(opts: RunOpts) {
         scaleUpList: SCALE_UP_LIST,
         standbyStack: 'e4-standby',
         creds: { apiToken: 'threaded-token' },
+        ...(standbyOutputs ? { standbyOutputs } : {}),
       };
     },
     provision: async (a: { deps?: { creds?: unknown } }) => {
@@ -510,7 +520,10 @@ async function runFailoverHA(opts: RunOpts) {
         captured.scaleDown = { list, replicas };
       }
     },
-    reseedPromote: async () => {
+    reseedPromote: async (srv: {
+      standby: { supabasePrivateIp?: string; supabaseIp?: string };
+    }) => {
+      captured.reseedStandby = { ...srv.standby };
       if (alreadyPromoted) {
         order.push('alreadyPromoted');
         return { alreadyPromoted: true as const };
@@ -710,6 +723,30 @@ describe('failoverHA step order', () => {
     expect(order).toEqual(['preflight', 'provision', 'exit(1)']);
   });
 
+  it('prefers the LIVE stack-output supabasePrivateIp over the persisted one', async () => {
+    // DO assigns VPC addresses dynamically — a droplet replacement hands out
+    // a new private IP and the persisted value silently rots. The preflight
+    // already reads the standby stack's outputs; the reseed must dial the
+    // fresh address, not the deploy-time snapshot.
+    const { captured } = await runFailoverHA({
+      primaryReachable: true,
+      standbyOutputs: { supabasePrivateIp: '10.10.0.42' },
+    });
+    expect((captured.reseedStandby as { supabasePrivateIp?: string }).supabasePrivateIp).toBe(
+      '10.10.0.42',
+    );
+  });
+
+  it('keeps the persisted supabasePrivateIp when the stack outputs lack it', async () => {
+    const { captured } = await runFailoverHA({
+      primaryReachable: true,
+      standbyOutputs: { workerIps: [] },
+    });
+    expect((captured.reseedStandby as { supabasePrivateIp?: string }).supabasePrivateIp).toBe(
+      '10.0.1.2',
+    );
+  });
+
   it('persists the role swap only at the very end (after dns)', async () => {
     const { order, captured } = await runFailoverHA({ primaryReachable: true });
     expect(order[order.length - 1]).toBe('saveConfig');
@@ -766,10 +803,13 @@ describe('preflightPilotFailover exit branches', () => {
       },
       {
         resolveCreds: async () => creds,
-        readStackOutputs: async () => ({ workerIps: [] }),
+        readStackOutputs: async () => ({ workerIps: [], supabasePrivateIp: '10.10.0.9' }),
       },
     );
     expect(out).toMatchObject({ standbyStack: 'e4-standby', scaleUpList: SCALE_UP_LIST, creds });
+    // The stack read doubles as the freshness source: outputs surface so the
+    // caller can prefer the live supabasePrivateIp over the persisted one.
+    expect(out.standbyOutputs).toMatchObject({ supabasePrivateIp: '10.10.0.9' });
   });
 });
 

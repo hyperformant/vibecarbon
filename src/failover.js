@@ -848,12 +848,13 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
   const s = spinner();
   s.start(`Verifying standby stack state (${standbyStack})`);
   let creds;
+  let standbyOutputs;
   try {
     const projectConfig = loadProjectConfig();
     creds = await resolveCreds({ envConfig, projectConfig });
     const getStackOutputs =
       readStackOutputs ?? (await import('./lib/iac/index.js')).getStackOutputs;
-    await getStackOutputs(standbyStack, async () => ({}), {
+    standbyOutputs = await getStackOutputs(standbyStack, async () => ({}), {
       provider: providerIdFor(envConfig),
       providerToken: creds.apiToken,
       s3Config: buildStateS3Config(envConfig, creds.s3Creds),
@@ -870,7 +871,11 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
     process.exit(1);
   }
 
-  return { workerSpec, scaleUpList, standbyStack, creds };
+  // The probe read doubles as a freshness source: the outputs are the LIVE
+  // infra truth (private IPs are DHCP-assigned on DO and rot across node
+  // replacement), so surface them for the caller to prefer over the
+  // deploy-time persisted snapshot.
+  return { workerSpec, scaleUpList, standbyStack, creds, standbyOutputs: standbyOutputs ?? {} };
 }
 
 /**
@@ -1444,7 +1449,27 @@ export async function failoverHA(
   // standby state backend BEFORE mutating anything. Resolves the converge creds
   // ONCE and returns them (threaded into provisioning below so an operator
   // without a creds file is prompted at most once). Exits 1 on either blocker.
-  const { workerSpec, scaleUpList, creds } = await preflight(envName, envConfig);
+  const { workerSpec, scaleUpList, creds, standbyOutputs } = await preflight(envName, envConfig);
+
+  // Freshness refresh: prefer the LIVE stack output over the persisted
+  // deploy-time snapshot for the standby supabase node's private IP — the
+  // re-seed dials it, and on DO it is DHCP-assigned (a droplet replacement
+  // hands out a new one, silently rotting the persisted value). Hetzner pins
+  // it statically, so fresh === persisted there and this is a no-op.
+  const freshSupabasePrivateIp = standbyOutputs?.supabasePrivateIp;
+  if (freshSupabasePrivateIp) {
+    if (
+      servers.standby.supabasePrivateIp &&
+      servers.standby.supabasePrivateIp !== freshSupabasePrivateIp
+    ) {
+      p.log.warn(
+        `Standby supabase private IP moved since deploy ` +
+          `(${servers.standby.supabasePrivateIp} → ${freshSupabasePrivateIp}); ` +
+          `using the live stack output.`,
+      );
+    }
+    servers.standby.supabasePrivateIp = freshSupabasePrivateIp;
+  }
 
   // STEP 2 — Provision standby worker capacity (0→N). The ONLY step that adds
   // cloud capacity, and it runs FIRST: on ANY failure here (an
