@@ -14,7 +14,10 @@
  */
 import * as pulumi from '@pulumi/pulumi';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { buildDigitalOceanK8sProgram } from '../../../src/lib/iac/programs/digitalocean-k8s.js';
+import {
+  buildDigitalOceanK8sProgram,
+  vpcCidrForCluster,
+} from '../../../src/lib/iac/programs/digitalocean-k8s.js';
 import { DigitalOceanProvider } from '../../../src/lib/providers/digitalocean.js';
 
 type CapturedResource = { type: string; name: string; inputs: Record<string, unknown> };
@@ -202,14 +205,17 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     expect((outputs.workerIps as string[]).length).toBe(2);
   });
 
-  it('vpcCidr is the Vpc.ipRange actually used — the config default when vpcIpRange is omitted (M3 Task 9c)', () => {
+  it('vpcCidr is the Vpc.ipRange actually used — the per-cluster derived range when vpcIpRange is omitted', () => {
     // baseConfig never sets vpcIpRange, so this pins the SAME default value
-    // buildDigitalOceanK8sProgram falls back to internally, proving the
+    // buildDigitalOceanK8sProgram falls back to internally
+    // (vpcCidrForCluster — DO enforces account-wide CIDR uniqueness, so the
+    // default is derived per cluster, never a fixed literal), proving the
     // output is the value actually applied to the Vpc resource, not a
     // separately-typed literal.
     const vpc = byType('digitalocean:index/vpc:Vpc')[0];
     expect(outputs.vpcCidr).toBe(vpc.inputs.ipRange);
-    expect(outputs.vpcCidr).toBe('10.10.0.0/20');
+    expect(outputs.vpcCidr).toBe(vpcCidrForCluster(CLUSTER_NAME));
+    expect(outputs.vpcCidr).not.toBe('10.10.0.0/20');
   });
 
   it('masterPrivateIp/supabasePrivateIp are the REAL Pulumi-resolved addresses, not Hetzner-style hardcoded literals', () => {
@@ -326,7 +332,8 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
   it('scopes internal cluster traffic (tcp/udp/icmp) to the VPC CIDR, not 0.0.0.0/0', () => {
     const firewall = byType('digitalocean:index/firewall:Firewall')[0];
     const rules = firewall.inputs.inboundRules as Array<Record<string, unknown>>;
-    const vpcCidr = '10.10.0.0/20';
+    // The internal rules must scope to the SAME derived range the Vpc uses.
+    const vpcCidr = vpcCidrForCluster(CLUSTER_NAME);
 
     const internalTcp = rules.find((r) => r.protocol === 'tcp' && r.portRange === '1-65535');
     const internalUdp = rules.find((r) => r.protocol === 'udp' && r.portRange === '1-65535');

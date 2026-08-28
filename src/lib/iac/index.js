@@ -688,6 +688,16 @@ async function upStackImpl(stackName, program, options = {}) {
       // fails loudly with its cause named by classifyStateError; only the
       // history-write adjudication above survives, because that failure is
       // evidenced EXTERNAL weather on a completed update.
+      //
+      // Before rethrowing, put the COMPLETE failure text in the deploy log:
+      // callers compress to one line for the console (summarizePulumiError),
+      // and a resource-level Diagnostics block that reaches no log at all is
+      // an un-RCA-able failure (d4 run 1, 2026-08-28: both HA stacks died as
+      // bare "error: update failed" while the causal 422 lived only in the
+      // discarded message body). Bounded — the interesting lines lead.
+      for (const line of (err?.message || String(err)).split('\n').slice(0, 120)) {
+        progressLog(`[pulumi:error] ${line}`);
+      }
       throw err;
     }
   }

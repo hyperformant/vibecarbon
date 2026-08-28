@@ -47,16 +47,34 @@ describe('HetznerProvider — inherits the no-op default (byte-identical render 
 });
 
 describe('DigitalOceanProvider — S3-egress VPC allowance override', () => {
-  it('DEFAULT_VPC_CIDR matches buildDigitalOceanK8sProgram’s internal vpcIpRange default exactly', async () => {
-    // Cross-checked against the real Pulumi program's default (not
-    // hand-copied) — see tests/unit/iac/digitalocean-k8s.test.ts's
-    // "vpcCidr is the Vpc.ipRange actually used" pin for the program side
-    // of this same contract.
-    const { buildDigitalOceanK8sProgram } = await import(
-      '../../../src/lib/iac/programs/digitalocean-k8s.js'
-    );
-    expect(typeof buildDigitalOceanK8sProgram).toBe('function');
+  it('DEFAULT_VPC_CIDR is the FIXED-ERA literal; the program default is now derived OUTSIDE it', async () => {
+    // Since the d4 lift the program derives a per-cluster range
+    // (vpcCidrForCluster — DO enforces account-wide CIDR uniqueness), so the
+    // static is no longer "the program default": it is the resume-compat
+    // value for stacks provisioned in the fixed-literal era, and every
+    // derived range must live in a DIFFERENT space so the two populations
+    // can never collide.
+    const { vpcCidrForCluster } = await import('../../../src/lib/iac/programs/digitalocean-k8s.js');
     expect(DigitalOceanProvider.DEFAULT_VPC_CIDR).toBe('10.10.0.0/20');
+    for (const name of ['proj-e3', 'proj-d4-primary', 'proj-d4-standby', 'x-y-z']) {
+      expect(vpcCidrForCluster(name)).toMatch(/^10\.(12[89]|1[3-8][0-9]|19[01])\.\d+\.0\/20$/);
+      expect(vpcCidrForCluster(name)).not.toBe(DigitalOceanProvider.DEFAULT_VPC_CIDR);
+    }
+  });
+
+  it('vpcCidrForCluster is deterministic and separates the HA stack pair', async () => {
+    const { vpcCidrForCluster } = await import('../../../src/lib/iac/programs/digitalocean-k8s.js');
+    // Convergence contract: same cluster name → same range on every re-run
+    // (a moving range would REPLACE the VPC under a live cluster).
+    expect(vpcCidrForCluster('proj-d4-primary')).toBe(vpcCidrForCluster('proj-d4-primary'));
+    // The account-wide-uniqueness fix: the two HA stacks (and any two
+    // environments) get distinct ranges.
+    expect(vpcCidrForCluster('proj-d4-primary')).not.toBe(vpcCidrForCluster('proj-d4-standby'));
+    // Third-octet blocks stay /20-aligned.
+    for (const name of ['proj-d4-primary', 'proj-d4-standby']) {
+      const third = Number(vpcCidrForCluster(name).split('.')[2]);
+      expect(third % 16).toBe(0);
+    }
   });
 
   it('getS3EgressExtraCidrs(vpcCidr) returns exactly [vpcCidr] for a real CIDR', () => {

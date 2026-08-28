@@ -283,14 +283,16 @@ export class DigitalOceanProvider extends BaseProvider {
   static K8S_STORAGE_CLASS = 'do-block-storage';
 
   /**
-   * MUST match `buildDigitalOceanK8sProgram`'s (`iac/programs/
-   * digitalocean-k8s.js`) internal `vpcIpRange` default literal EXACTLY —
-   * same "duplicated-with-a-must-match-contract" convention as K8S_IMAGE
-   * above vs. COMPOSE_IMAGE. Used ONLY as `deployK3s`'s (deploy/k8s/k3s.js)
-   * resume-compat fallback for a `k3s-infra` step result persisted before
-   * M3 Task 9c added the `vpcCidr` Pulumi output field — a genuinely fresh
-   * (or freshly re-provisioned) deploy always gets the REAL value straight
-   * off that output instead. See base.js's DEFAULT_VPC_CIDR doc.
+   * The FIXED-ERA VPC range — the literal every DO k8s stack provisioned
+   * before the d4 lift (2026-08-28) actually holds. Used ONLY as
+   * `deployK3s`'s (deploy/k8s/k3s.js) resume-compat fallback for a
+   * `k3s-infra` step result persisted before M3 Task 9c added the `vpcCidr`
+   * Pulumi output field — and every such stack IS a fixed-era stack, so this
+   * value is correct for exactly the population the fallback serves. Fresh
+   * deploys never read it: the program now derives a per-cluster range
+   * (`vpcCidrForCluster` in `iac/programs/digitalocean-k8s.js` — DO enforces
+   * VPC CIDR uniqueness account-wide, so a fixed default capped an account
+   * at one cluster) and exports the real value as the `vpcCidr` output.
    * @type {string}
    */
   static DEFAULT_VPC_CIDR = '10.10.0.0/20';

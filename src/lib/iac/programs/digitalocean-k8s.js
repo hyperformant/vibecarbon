@@ -103,12 +103,22 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  * @property {number} minWorkers   Static floor of worker droplets (provisioned by Pulumi). Default 1.
  * @property {number} maxWorkers   Upper bound for cluster-autoscaler. Not consumed by Pulumi; flows to the CA Deployment in applyK3sManifests. Default 3.
  * @property {string} k3sVersion
- * @property {string} [vpcIpRange]  Default '10.10.0.0/20' — deliberately NOT
+ * @property {string} [vpcIpRange]  Default: `vpcCidrForCluster(clusterName)`
+ *                                  — a deterministic per-cluster /20 (see
+ *                                  that function's doc). Deliberately NOT
  *                                  Hetzner's '10.0.0.0/8': DO's Vpc.ipRange
  *                                  must be between /16 and /24 (DO API
  *                                  constraint), and a region-scoped VPC has
- *                                  no need for an /8-sized range in the
- *                                  first place.
+ *                                  no need for an /8-sized range. And NOT a
+ *                                  fixed literal: DO enforces VPC CIDR
+ *                                  uniqueness ACCOUNT-wide, not per-region
+ *                                  (verified live 2026-08-28: creating a
+ *                                  second 10.10.0.0/20 VPC in a DIFFERENT
+ *                                  region 422s with "overlaps with another
+ *                                  VPC network in your account") — a fixed
+ *                                  default meant a k8s-ha standby stack, or
+ *                                  ANY second k8s environment on one DO
+ *                                  account, could never provision.
  * @property {string} [image]      Base droplet image slug. Defaults to
  *                                  `DigitalOceanProvider.K8S_IMAGE` — kept as
  *                                  a config field (not a re-typed literal)
@@ -129,6 +139,45 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  *                                     kube-system Secret that the DO CCM and
  *                                     CSI driver both read on boot.
  */
+
+/**
+ * Deterministic per-cluster VPC /20, chosen from the 1024 /20 blocks inside
+ * 10.128.0.0/10 by an FNV-1a hash of the cluster name.
+ *
+ * WHY DERIVED — DO enforces VPC CIDR uniqueness across the whole ACCOUNT,
+ * not per region (live-verified 2026-08-28, d4 run 1: the standby stack's
+ * VPC create 422'd "overlaps with another VPC network in your account"
+ * against the primary's identical range in a different region). A fixed
+ * default therefore caps an account at ONE vibecarbon k8s cluster — k8s-ha
+ * (two stacks) could never provision, and neither could a second k8s
+ * environment.
+ *
+ * WHY THIS SPACE — 10.128.0.0/10 avoids everything else in play: k3s pod
+ * 10.42.0.0/16 + service 10.43.0.0/16, the WireGuard transport 10.99.0.0/30,
+ * DO's own auto-generated default-VPC ranges (observed in 10.100–10.126),
+ * and the legacy fixed 10.10.0.0/20 that pre-derive stacks still hold.
+ *
+ * WHY A HASH — the value must be CONVERGENT: every re-run of the program for
+ * the same cluster (deploy, scale converge, failover reconverge) must
+ * produce the same range, or Pulumi would replace the VPC under a live
+ * cluster. Two clusters colliding on a block (birthday over 1024 slots)
+ * fails loudly with DO's overlap 422 — rename the environment or pass
+ * `vpcIpRange` explicitly.
+ *
+ * @param {string} clusterName - `${projectName}-${environment}` (stack env)
+ * @returns {string} e.g. "10.153.64.0/20"
+ */
+export function vpcCidrForCluster(clusterName) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < clusterName.length; i++) {
+    h ^= clusterName.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  const idx = h % 1024; // 1024 /20 blocks in 10.128.0.0/10
+  const secondOctet = 128 + (idx >> 4); // 128..191
+  const thirdOctet = (idx & 15) * 16; // 0,16,...,240
+  return `10.${secondOctet}.${thirdOctet}.0/20`;
+}
 
 /**
  * Build an inline Pulumi program for the given cluster config.
@@ -159,7 +208,7 @@ export function buildDigitalOceanK8sProgram(config) {
   const allowedSshIps = config.allowedSshIps;
   const allowedK8sApiIps = config.allowedK8sApiIps;
   const k3sToken = config.k3sToken ?? randomBytes(32).toString('hex');
-  const vpcIpRange = config.vpcIpRange ?? '10.10.0.0/20';
+  const vpcIpRange = config.vpcIpRange ?? vpcCidrForCluster(clusterName);
   const image = config.image ?? DigitalOceanProvider.K8S_IMAGE;
   const minWorkers = config.minWorkers ?? 1;
   const clusterTag = `cluster:${clusterName}`;
