@@ -1438,7 +1438,7 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
       await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db pg_isready -U postgres`,
+        `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres`,
         { timeout: 10_000 },
       );
       // Second check: promoted (no longer in recovery)
@@ -1774,7 +1774,7 @@ export async function createAdminUser(
         await sshRunAsync(
           serverIp,
           sshKeyPath,
-          `cd ${remoteDir} && docker compose exec -T db pg_isready -U postgres -t 3`,
+          `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres -t 3`,
           { silent: true },
         ),
       );

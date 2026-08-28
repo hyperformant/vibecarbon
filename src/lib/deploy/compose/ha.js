@@ -407,7 +407,7 @@ END $$;
     const ready = await sshRun(
       primaryIp,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db pg_isready -U postgres`,
+      `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres`,
       { timeout: 10_000 },
     );
     if (ready !== false) return;
@@ -790,7 +790,7 @@ async function isPrimaryReachable(primaryIp, sshKeyPath, remoteDir) {
     const result = await sshRun(
       primaryIp,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db pg_isready -U postgres -t 3`,
+      `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres -t 3`,
       { timeout: 10_000 },
     );
     return result?.includes('accepting connections') ?? false;

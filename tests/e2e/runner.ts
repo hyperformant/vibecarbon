@@ -102,6 +102,7 @@ import { setupE2EEnv } from './utils/e2e-env.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import { overrideDnsProvider, resolveBaseDomain } from './utils/scenario-overrides.js';
+import { sweepStaleScratchRepos } from './utils/scratch-repo-sweep.js';
 
 // Establish the harness environment before anything below reads a token or
 // opens a socket: public-DNS pinning, ssh-askpass guards, the staging ACME
@@ -667,6 +668,12 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       // exit codes meaningful for CI.
       throw new Error('Preflight failed — at least one infra dependency is down.');
     }
+    // Hygiene, not a gate: delete machine-named scratch repos (vc-e2e-*)
+    // whose last push is older than the kept-rig doctrine's useful life —
+    // teardown-repo only deletes on green runs, and the failed/kept-run
+    // leftovers had accumulated to 99 repos by the 2026-08-28 audit. Fails
+    // open by contract (see scratch-repo-sweep.ts).
+    await sweepStaleScratchRepos({});
   }
 
   // The effective feature set for this run — CLI override wins over the

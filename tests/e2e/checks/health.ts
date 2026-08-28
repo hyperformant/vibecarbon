@@ -597,30 +597,40 @@ async function checkRestApi(domain: string, anonKey?: string): Promise<Verificat
   };
 }
 
-async function checkSslValid(domain: string): Promise<VerificationResult> {
+// Internal sentinel union for checkSslValid: 'retry' means "cert error on the
+// TRUSTED attempt" — it never leaves the function (the loop maps it to a real
+// pass/fail before returning). Exported shape only via the deps seam.
+type SslAttemptResult = Omit<VerificationResult, 'status'> & {
+  status: VerificationResult['status'] | 'retry';
+};
+
+export async function checkSslValid(
+  domain: string,
+  deps: {
+    attemptFn?: (rejectUnauthorized: boolean) => Promise<SslAttemptResult>;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<VerificationResult> {
   const start = process.hrtime();
 
   // Resolve IP via custom DNS (like other checks) to bypass stale system DNS cache.
   const ip = await resolveCheckIp(domain);
 
   // First try with full CA validation. Since the harness trusts the Let's
-  // Encrypt STAGING roots explicitly (tests/e2e/utils/e2e-env.js), this first
-  // attempt now covers BOTH production and staging chains — before that, every
-  // staging rig fell through to the untrusted retry below.
+  // Encrypt STAGING roots explicitly (tests/e2e/utils/e2e-env.js), the
+  // trusted attempt covers BOTH production and staging chains.
   //
-  // The untrusted retry is a RESIDUAL: with staging trusted, reaching it means
-  // the certificate is genuinely not trustworthy (self-signed default cert,
-  // wrong host, expired), and we still report a pass with a note. Making it a
-  // failure is the right end state, but it needs a live rig to calibrate the
-  // retry budget against real DNS-01 issuance latency — verify-deploy can run
-  // before the ACME order settles, because the deploy's own public probe
-  // tolerates an untrusted cert. Left as-is rather than turned red blind.
-  // Internal sentinel union: 'retry' means "cert error — try again without CA
-  // validation"; it never leaves this function (the loop below maps it to a
-  // real pass/fail before returning).
-  type SslAttemptResult = Omit<VerificationResult, 'status'> & {
-    status: VerificationResult['status'] | 'retry';
-  };
+  // AN UNTRUSTED CERT IS A FAILURE (d4 runs 5 and 7, 2026-08-28): with
+  // staging trusted, the only things that reach the untrusted path are the
+  // Traefik default cert and the pilot-standby's self-signed cert — and the
+  // old pass-with-a-note branch let verify-failover GRADE GREEN twice while
+  // the promoted cluster served exactly those. The insecure attempt below
+  // survives only as DIAGNOSTICS (it reads the served cert's identity for
+  // the failure message); it can never produce a pass. Budget calibration
+  // (the reason this stayed tolerant until now) came from run 11b: with the
+  // single-ACME-issuer promote in place, the post-failover issuance lands
+  // inside ~2 minutes; 180s of trusted retries clears it with margin while
+  // staying well inside the verify step's 600s budget.
   const attempt = (rejectUnauthorized: boolean) =>
     new Promise<SslAttemptResult>((resolve) => {
       const req = https.request(
@@ -678,34 +688,45 @@ async function checkSslValid(domain: string): Promise<VerificationResult> {
       req.end();
     });
 
-  // Retry up to 6 times (60s total) — cert-manager may still be issuing the certificate.
-  const MAX_SSL_RETRIES = 6;
-  const SSL_RETRY_DELAY_MS = 10_000;
+  // 12 x 15s = 180s of TRUSTED retries — covers the post-failover ACME
+  // issuance window (run 11b: ~2 min) with margin, inside the verify step's
+  // 600s budget. There is no untrusted pass path.
+  const MAX_SSL_RETRIES = 12;
+  const SSL_RETRY_DELAY_MS = 15_000;
+  const attemptFn = deps.attemptFn ?? attempt;
+  const sleepFn = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
+  let lastServed: SslAttemptResult['details'] | undefined;
   for (let retryNum = 0; retryNum <= MAX_SSL_RETRIES; retryNum++) {
-    // Try production CA validation first
-    const result = await attempt(true);
+    const result = await attemptFn(true);
     if (result.status === 'pass') return { ...result, status: 'pass' };
 
-    // If cert error (not timeout), retry without CA validation — handles staging certs
     if (result.status === 'retry') {
-      const retryResult = await attempt(false);
-      if (retryResult.status === 'pass') {
-        retryResult.details = {
-          ...retryResult.details,
-          note: 'staging/self-signed cert (trusted CA validation failed)',
-        };
-        return { ...retryResult, status: 'pass' };
-      }
+      // DIAGNOSTICS ONLY: read what the endpoint is actually serving so the
+      // failure names the cert (TRAEFIK DEFAULT CERT / the standby
+      // self-signed) instead of a bare handshake error. Never a pass.
+      const served = await attemptFn(false);
+      if (served.status === 'pass') lastServed = served.details;
     }
 
-    // On timeout, retry after delay (cert may still be provisioning)
     if (retryNum < MAX_SSL_RETRIES) {
-      await new Promise((resolve) => setTimeout(resolve, SSL_RETRY_DELAY_MS));
+      await sleepFn(SSL_RETRY_DELAY_MS);
     } else {
-      // The 'retry' sentinel must never escape: on budget exhaustion a
-      // cert-error attempt IS a failure.
-      return { ...result, status: result.status === 'retry' ? 'fail' : result.status };
+      if (result.status === 'retry') {
+        return {
+          checkName: 'ssl_valid',
+          status: 'fail',
+          responseTimeMs: result.responseTimeMs,
+          errorMessage:
+            `certificate not trusted after ${Math.round((MAX_SSL_RETRIES * SSL_RETRY_DELAY_MS) / 1000)}s ` +
+            `of trusted retries (staging roots ARE in the trust store, so this is a real ` +
+            `defect — Traefik default or standby self-signed cert). ` +
+            `Served: subject=${lastServed?.subject ?? 'unknown'} issuer=${lastServed?.issuer ?? 'unknown'}. ` +
+            `Underlying: ${result.errorMessage ?? 'unknown'}`,
+          details: lastServed,
+        };
+      }
+      return { ...result, status: result.status };
     }
   }
 

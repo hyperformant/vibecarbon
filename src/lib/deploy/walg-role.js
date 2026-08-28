@@ -196,7 +196,7 @@ export function composeDbRecreateShell(remoteDir) {
     // The recreate returns as soon as the container is CREATED. Everything after
     // this (the audit, the app-tier restart) needs a database that answers.
     'for i in $(seq 1 45); do',
-    '  if docker compose exec -T db pg_isready -U supabase_admin >/dev/null 2>&1; then',
+    '  if docker compose exec -T db pg_isready -h 127.0.0.1 -U supabase_admin >/dev/null 2>&1; then',
     `    echo "[walg-role] db accepting connections; ${WALG_ROLE_ENV}=$(docker compose exec -T db printenv ${WALG_ROLE_ENV} 2>/dev/null | tr -d "[:space:]"); published:$PORTS_AFTER"`,
     '    exit 0',
     '  fi',

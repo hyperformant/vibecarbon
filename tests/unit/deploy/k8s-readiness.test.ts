@@ -212,13 +212,11 @@ describe('awaitPostgresAccepting', () => {
  * docker-entrypoint first-boot flow" (d4 run 2 RCA, 2026-08-28).
  *
  * The temp init server is socket-only; only the real server binds TCP. Every
- * k8s-path pg_isready that can meet a FIRST-BOOT db must probe TCP. Members
- * that probe a db with existing PGDATA (no init flow) are recorded here with
- * their reason rather than left to memory; compose-path members
- * (docker compose exec ... pg_isready) live behind their own gate + retry
- * machinery and months of green across five providers — recorded as
- * class-adjacent, to be normalized with compose maintenance, not tonight's
- * k8s fix.
+ * pg_isready that can meet a FIRST-BOOT db must probe TCP — k8s AND compose
+ * (the compose db image runs the same docker-entrypoint init flow; its
+ * members were normalized 2026-08-28 after the k8s fix). Members that probe
+ * a db with existing PGDATA (no init flow) are recorded here with their
+ * reason rather than left to memory.
  */
 import { readFileSync as readSrc } from 'node:fs';
 import { join as joinPath } from 'node:path';
@@ -230,6 +228,10 @@ describe('pg_isready TCP census (k8s path)', () => {
       'src/lib/deploy/k8s/readiness.js',
       'src/lib/deploy/k8s/ha/index.js',
       'src/lib/deploy/replication.js',
+      'src/lib/deploy/compose/index.js',
+      'src/lib/deploy/compose/ha.js',
+      'src/lib/deploy/effects/compose-ha.js',
+      'src/lib/deploy/walg-role.js',
     ];
     for (const rel of files) {
       const src = readSrc(joinPath(root, rel), 'utf8');
