@@ -524,3 +524,118 @@ describe('reseedAndPromoteOrAbort — skip re-seed when standby already streamin
     expect(ssh.sshRun).not.toHaveBeenCalled();
   });
 });
+
+describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 6)', () => {
+  const STALE_EVENT = JSON.stringify({
+    items: [
+      {
+        reason: 'FailedMount',
+        message:
+          'MountVolume.MountDevice failed for volume "pvc-x" : rpc error: formatting disk ' +
+          'failed: exit status 1 cmd: mkfs.ext4 -F /dev/disk/by-id/x output: "The file ' +
+          '/dev/disk/by-id/x does not exist and no size was specified."',
+      },
+    ],
+  });
+  const PVC_LIST = JSON.stringify({
+    items: [{ metadata: { name: 'data-supabase-supabase-db-0' }, spec: { volumeName: 'pvc-x' } }],
+  });
+  const VA_LIST = JSON.stringify({
+    items: [
+      { metadata: { name: 'csi-stale-1' }, spec: { source: { persistentVolumeName: 'pvc-x' } } },
+    ],
+  });
+
+  function kubectlWith(opts: { staleEvents: boolean; rolloutFailsTimes: number }) {
+    let rolloutCalls = 0;
+    let rolloutFailed = false;
+    let vaDeleted = false;
+    const deleted: string[] = [];
+    const fn = vi.fn(async (ip: string, k: string, argv: string[]) => {
+      const cmd = argv.join(' ');
+      if (cmd.includes('rollout status')) {
+        rolloutCalls += 1;
+        if (rolloutCalls <= opts.rolloutFailsTimes) {
+          rolloutFailed = true;
+          throw new Error('error: timed out waiting for the condition');
+        }
+        return '';
+      }
+      if (cmd.includes('get events')) return opts.staleEvents ? STALE_EVENT : '{"items":[]}';
+      if (cmd.includes('get pvc')) return PVC_LIST;
+      // The stale attachment materializes only in the wedged window (after
+      // the rollout timeout, before the repair) — the PREVENTION waits during
+      // the swap see a clear listing, mirroring a run where detach settles.
+      if (cmd.includes('get volumeattachment'))
+        return rolloutFailed && !vaDeleted ? VA_LIST : '{"items":[]}';
+      if (cmd.includes('delete volumeattachment')) {
+        vaDeleted = true;
+        deleted.push(argv[2]);
+        return '';
+      }
+      return happyKubectl()(ip, k, argv);
+    });
+    return { fn, deleted, rolloutCalls: () => rolloutCalls };
+  }
+
+  it('repairs ONCE and re-waits when the timeout carries the mkfs-on-missing-device signature', async () => {
+    const { fn, deleted, rolloutCalls } = kubectlWith({ staleEvents: true, rolloutFailsTimes: 1 });
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
+    await expect(
+      reseedStandbyFromPrimary('10.0.0.2', '/k', {
+        standbySupabaseIp: '10.0.0.8',
+        standbySupabasePrivateIp: '10.10.0.7',
+      }),
+    ).resolves.toBe('reseeded');
+    expect(deleted).toEqual(['csi-stale-1']);
+    expect(rolloutCalls()).toBe(2);
+  });
+
+  it('a timeout WITHOUT the signature rethrows untouched — no blind retry', async () => {
+    const { fn, deleted } = kubectlWith({ staleEvents: false, rolloutFailsTimes: 99 });
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
+    await expect(
+      reseedStandbyFromPrimary('10.0.0.2', '/k', {
+        standbySupabaseIp: '10.0.0.8',
+        standbySupabasePrivateIp: '10.10.0.7',
+      }),
+    ).rejects.toThrow(/timed out waiting/);
+    expect(deleted).toEqual([]);
+  });
+
+  it('repair is one-shot: a second timeout after the repair is the final verdict', async () => {
+    const { fn, rolloutCalls } = kubectlWith({ staleEvents: true, rolloutFailsTimes: 99 });
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
+    await expect(
+      reseedStandbyFromPrimary('10.0.0.2', '/k', {
+        standbySupabaseIp: '10.0.0.8',
+        standbySupabasePrivateIp: '10.10.0.7',
+      }),
+    ).rejects.toThrow(/timed out waiting/);
+    expect(rolloutCalls()).toBe(2);
+  });
+
+  it('the detach-settle wait runs BEFORE the helper-pod swap and before the scale-up', async () => {
+    const sequence: string[] = [];
+    const fn = vi.fn(async (ip: string, k: string, argv: string[]) => {
+      const cmd = argv.join(' ');
+      if (cmd.includes('get volumeattachment')) {
+        sequence.push('detach-wait');
+        return '{"items":[]}';
+      }
+      if (cmd.includes('get pvc')) return PVC_LIST;
+      if (cmd.includes('apply') || cmd.includes('get pod vibecarbon-pgdata-swap'))
+        sequence.push('swap');
+      if (cmd.includes('--replicas=1')) sequence.push('scale-up');
+      return happyKubectl()(ip, k, argv);
+    });
+    (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
+    await reseedStandbyFromPrimary('10.0.0.2', '/k', {
+      standbySupabaseIp: '10.0.0.8',
+      standbySupabasePrivateIp: '10.10.0.7',
+    });
+    expect(sequence.indexOf('detach-wait')).toBeGreaterThan(-1);
+    expect(sequence.indexOf('detach-wait')).toBeLessThan(sequence.indexOf('swap'));
+    expect(sequence.lastIndexOf('detach-wait')).toBeLessThan(sequence.indexOf('scale-up'));
+  });
+});

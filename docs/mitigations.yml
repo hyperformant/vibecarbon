@@ -231,6 +231,34 @@ classes:
           bounded in-place repair of terminal Orders + bounded bounce of
           stalled-pending presented Challenges; fails open
 
+  - class: do-csi-stale-volumeattachment
+    attribution: external-proven
+    evidence: >-
+      Run 5038f1d1-5690-4579-9aea-c40560073182 (e2e.db, 2026-08-28,
+      digitalocean/k8s-ha restore re-seed; driver
+      https://github.com/digitalocean/csi-digitalocean): kubelet
+      looped "MountVolume.MountDevice failed ... mkfs.ext4 ... does not exist
+      and no size was specified" while the VolumeAttachment objects read
+      attached:true and DigitalOcean's own API showed both volumes attached
+      to NO droplet (droplet_ids: []) — the CSI controller recorded an attach
+      that never held at the provider. Discriminating experiment PERFORMED
+      live on the kept rig: a pod bounce did NOT heal it (fresh attach reused
+      the stale record, both PVCs then wedged); deleting the VolumeAttachments
+      forced a real ControllerPublishVolume and the pod went Ready in 150s.
+      Trigger amplitude is ours (the re-seed's four attach/detach transitions
+      on one volume in ~2 min) and is separately narrowed at the root by the
+      detach-settle waits (waitForPvDetach) at both churn points; the
+      recovery below covers the provider-side residual only.
+    sites:
+      - site: "src/lib/deploy/replication.js :: reseedStandbyFromPrimary rollout-wait stale-attachment repair"
+        detectable: false
+        notes: >-
+          one-shot signature-gated repair, not a retry ladder (the census
+          detector has no pattern for it): fires only when the rollout
+          timeout coincides with the mkfs-on-missing-device event signature
+          (STALE_ATTACH_EVENT_PATTERN); a timeout without the signature
+          rethrows untouched
+
   - class: provider-provisioning-slowness
     attribution: external-asserted
     evidence: >-

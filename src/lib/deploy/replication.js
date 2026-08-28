@@ -857,6 +857,136 @@ export async function swapPgdataViaHelperPod(
 }
 
 /**
+ * The kubelet event signature of a STALE VolumeAttachment (d4 run 6,
+ * 2026-08-28, DigitalOcean CSI): the k8s VolumeAttachment says
+ * `attached: true` while the provider API shows the volume attached to NO
+ * droplet, so the node's device file never appears and NodeStageVolume
+ * probes it as an unformatted disk — `mkfs.ext4` against a path that does
+ * not exist, forever. Live-verified both ways on the kept rig: a pod bounce
+ * did NOT heal it (fresh attach "succeeded" into the same stale record);
+ * deleting the VolumeAttachment forced a real ControllerPublishVolume and
+ * the pod went Ready in 150s.
+ */
+export const STALE_ATTACH_EVENT_PATTERN =
+  /MountVolume\.MountDevice failed[\s\S]*?(does not exist and no size was specified|formatting disk failed)/;
+
+/**
+ * PersistentVolume names bound to the db StatefulSet's claims
+ * (`<template>-<sts>-0` naming). Fail-open: unreadable/unparseable output →
+ * empty list, so every caller degrades to "nothing to wait for / repair"
+ * rather than failing a reseed over a diagnostic read.
+ *
+ * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
+ * @returns {Promise<string[]>}
+ */
+export async function listDbPvNames(kubectl) {
+  try {
+    const raw = await kubectl(['get', 'pvc', '-n', 'vibecarbon', '-o', 'json']);
+    const items = JSON.parse(String(raw))?.items ?? [];
+    return items
+      .filter((c) => String(c?.metadata?.name ?? '').endsWith(`-${DB_STATEFULSET}-0`))
+      .map((c) => c?.spec?.volumeName)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Wait until no VolumeAttachment references the given PVs.
+ *
+ * WHY (d4 run 6 RCA): the k8s re-seed puts the SAME volume through four
+ * attach/detach transitions in ~2 minutes (db scale-to-zero → helper-pod
+ * attach → helper delete → db scale-up). On DigitalOcean's CSI an attach
+ * issued while the previous detach is still settling can be recorded as
+ * attached without ever holding at the provider — the stale-attachment state
+ * documented on STALE_ATTACH_EVENT_PATTERN. Waiting for the attachment
+ * objects to actually clear between transitions removes the overlap the race
+ * needs. Hetzner's CSI tolerates the overlap; the wait is a no-op cost there
+ * (attachments clear in seconds).
+ *
+ * Best-effort BY CONTRACT: budget lapse or unreadable listings resolve
+ * `{detached: false}` with a log line, never throw — the recovery branch in
+ * reseedStandbyFromPrimary backstops the residual, and a reseed must not die
+ * on a diagnostic read. Local-path clusters have no attachments at all and
+ * resolve on the first poll.
+ *
+ * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
+ * @param {object} opts
+ * @param {string[]} opts.pvNames
+ * @param {number} [opts.budgetMs]
+ * @param {(ms: number) => Promise<void>} [opts.sleep]
+ * @param {(msg: string) => void} [opts.log]
+ * @returns {Promise<{detached: boolean}>}
+ */
+export async function waitForPvDetach(
+  kubectl,
+  { pvNames, budgetMs = 120_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), log } = {},
+) {
+  if (!pvNames?.length) return { detached: true };
+  const emit = log ?? ((m) => console.error(m));
+  const started = Date.now();
+  const wanted = new Set(pvNames);
+  while (Date.now() - started < budgetMs) {
+    let held = [];
+    try {
+      const raw = await kubectl(['get', 'volumeattachment', '-o', 'json']);
+      const items = JSON.parse(String(raw))?.items ?? [];
+      held = items.filter((a) => wanted.has(a?.spec?.source?.persistentVolumeName));
+    } catch {
+      // Unreadable listing — treat as clear (fail-open; see contract above).
+      return { detached: true };
+    }
+    if (held.length === 0) return { detached: true };
+    await sleep(3000);
+  }
+  emit(
+    `[reseed] volume attachments for ${pvNames.join(', ')} did not clear within ` +
+      `${Math.round(budgetMs / 1000)}s — continuing; the stale-attachment recovery ` +
+      `backstops a wedged reattach.`,
+  );
+  return { detached: false };
+}
+
+/**
+ * One-shot repair for the stale-VolumeAttachment state: delete every
+ * attachment referencing the db PVs so the attach/detach controller re-issues
+ * a REAL provider attach. Returns the names it deleted (possibly empty).
+ * Fail-open like the reads above.
+ *
+ * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
+ * @param {{log?: (msg: string) => void}} [opts]
+ * @returns {Promise<string[]>}
+ */
+export async function deleteStaleDbVolumeAttachments(kubectl, { log } = {}) {
+  const emit = log ?? ((m) => console.error(m));
+  const pvNames = await listDbPvNames(kubectl);
+  if (pvNames.length === 0) return [];
+  let stale = [];
+  try {
+    const raw = await kubectl(['get', 'volumeattachment', '-o', 'json']);
+    const items = JSON.parse(String(raw))?.items ?? [];
+    stale = items
+      .filter((a) => pvNames.includes(a?.spec?.source?.persistentVolumeName))
+      .map((a) => a?.metadata?.name)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+  const deleted = [];
+  for (const name of stale) {
+    try {
+      await kubectl(['delete', 'volumeattachment', name, '--ignore-not-found']);
+      deleted.push(name);
+      emit(`[reseed] deleted stale VolumeAttachment ${name} to force a real provider attach`);
+    } catch {
+      // Best-effort — the retried rollout wait is the verdict either way.
+    }
+  }
+  return deleted;
+}
+
+/**
  * Poll a "read the standby's replication state on the primary" closure until it
  * reports `streaming`, or the attempt budget lapses. Injected `readState`
  * (returns pg_stat_replication.state, or '' when no replica is connected) keeps
@@ -1281,6 +1411,11 @@ export async function reseedStandbyFromPrimary(
     // local-path AND CSI). No secrets in the swap script (the conninfo password
     // is already inside the staged postgresql.auto.conf, written in-pod).
     const kubectl = (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts);
+    // Let the scaled-to-zero db pod's volume DETACH actually finish before the
+    // helper pod re-attaches the claim — an attach overlapping the previous
+    // detach is the DO-CSI stale-attachment trigger (d4 run 6; see
+    // waitForPvDetach). Pod-gone (above) is not detach-done.
+    await waitForPvDetach(kubectl, { pvNames: await listDbPvNames(kubectl) });
     const swapOut = await swapPgdataViaHelperPod(kubectl, { claimName, subPath, image });
     swapped = swapOut.includes('RESEED_SWAPPED');
     if (!swapped) {
@@ -1294,6 +1429,14 @@ export async function reseedStandbyFromPrimary(
       );
     }
   } finally {
+    // Let the helper pod's volume DETACH settle before the StatefulSet
+    // re-attaches the same claim — the second half of the churn window the
+    // DO-CSI stale-attachment race needs (d4 run 6). Best-effort like
+    // everything else in this finally.
+    await (async () => {
+      const kubectl = (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts);
+      await waitForPvDetach(kubectl, { pvNames: await listDbPvNames(kubectl) });
+    })().catch(() => {});
     // Always bring the StatefulSet back (even on failure — the old PGDATA is
     // intact and boots the previous standby state). Best-effort: the throw in
     // flight is the actionable signal.
@@ -1315,12 +1458,53 @@ export async function reseedStandbyFromPrimary(
   // containers; ~5 min observed live 2026-07-07), so 120s intermittently
   // fails healthy reseeds. The explicit client cap keeps kubectl's own
   // timeout error (naming the stuck sts) as the surfaced failure.
-  await sshKubectl(
-    standbyIp,
-    sshKeyPath,
-    ['rollout', 'status', `statefulset/${DB_STATEFULSET}`, '-n', 'vibecarbon', '--timeout=300s'],
-    { timeout: 310_000 },
-  );
+  //
+  // ONE stale-attachment repair on timeout (d4 run 6, mitigations.yml
+  // `do-csi-stale-volumeattachment`): when the wait dies AND the db pod's
+  // events carry the mkfs-on-missing-device signature, the attachment record
+  // is provably stale (provider shows the volume attached to nothing; a pod
+  // bounce does NOT heal it) — delete the attachments to force a real
+  // provider attach and run the SAME wait once more. A timeout WITHOUT the
+  // signature rethrows untouched: this is a targeted repair for one
+  // evidenced state, not a blind retry.
+  const rolloutWait = () =>
+    sshKubectl(
+      standbyIp,
+      sshKeyPath,
+      ['rollout', 'status', `statefulset/${DB_STATEFULSET}`, '-n', 'vibecarbon', '--timeout=300s'],
+      { timeout: 310_000 },
+    );
+  try {
+    await rolloutWait();
+  } catch (rolloutErr) {
+    const kubectl = (argv, opts) => sshKubectl(standbyIp, sshKeyPath, argv, opts);
+    let events = '';
+    try {
+      events = String(
+        await kubectl([
+          'get',
+          'events',
+          '-n',
+          'vibecarbon',
+          '--field-selector',
+          `involvedObject.name=${pod}`,
+          '-o',
+          'json',
+        ]),
+      );
+    } catch {
+      // Unreadable events — no evidence, no repair.
+    }
+    if (!STALE_ATTACH_EVENT_PATTERN.test(events)) throw rolloutErr;
+    console.error(
+      '[reseed] db rollout timed out with the stale-VolumeAttachment signature ' +
+        '(MountDevice mkfs on a missing device) — deleting the stale attachments ' +
+        'and waiting once more.',
+    );
+    const deleted = await deleteStaleDbVolumeAttachments(kubectl);
+    if (deleted.length === 0) throw rolloutErr;
+    await rolloutWait();
+  }
 
   // The swap went in — the standby MUST boot into recovery (standby.signal +
   // primary_conninfo were verified in staging). If it never does, fail loudly
