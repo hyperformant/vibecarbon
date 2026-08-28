@@ -263,7 +263,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean is fully supported for compose, compose-ha, and k8s, with the same CLI, the same lifecycle, and the same e2e gate. Linode, Vultr, and Scaleway are supported for `compose` and `compose-ha`, with the same CLI and e2e gate — the remaining tiers aren't built for them yet. k8s-ha (pilot-light standby) is Hetzner-only today.
+DigitalOcean is fully supported for all four modes — compose, compose-ha, k8s, and k8s-ha — with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose` and `compose-ha`, with the same CLI and e2e gate — the remaining tiers aren't built for them yet.
 
 ### Integration Guides
 
@@ -289,6 +289,7 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | DigitalOcean | `compose` | 8m 7s | 1m 22s | 2.6s | 8m 53s | 7m 12s | 38.5s | — |
 | | `compose-ha` | 10m 49s | 2m 25s | 3.1s | 11m 48s | 7m 43s | 41.2s | — |
 | | `k8s` | 8m 10s | 2m 6s | 27.3s | 10m 0s | 4m 46s | 1m 57s | — |
+| | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
 | Linode | `compose` | 7m 46s | 14.9s | 2.1s | 8m 0s | 6m 59s | 28.6s | — |
 | | `compose-ha` | 10m 6s | 50.2s | 1.7s | 11m 11s | 7m 26s | 30.5s | 49.1s |
 | Vultr | `compose` | 5m 8s | 15.3s | 4.2s | 11m 8s | 9m 6s | 39.2s | — |
@@ -299,7 +300,7 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 _Latest green CI runs: Hetzner Cloud `a0fc2ef` (2026-08-23) · DigitalOcean `fd40094` (2026-08-15) · Linode `d85ff7a` (2026-08-23) · Vultr `59915e3` (2026-08-23) · Scaleway `6ce67f3` (2026-08-23) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
-`k8s-ha` (pilot-light multi-region with one-command failover) is Hetzner-only today.
+`k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner and DigitalOcean today.
 
 ---
 

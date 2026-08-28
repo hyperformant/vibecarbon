@@ -3,9 +3,9 @@
  *
  * Provides a unified interface for accessing cloud providers.
  * Providers differ only by which deploy tiers they implement, never by
- * standing: Hetzner covers all four, DigitalOcean covers compose/compose-ha/
- * k8s, and Linode/Vultr/Scaleway are compose-only (see assertTierSupported
- * below). No provider is a default or gates a release.
+ * standing: Hetzner and DigitalOcean cover all four, and
+ * Linode/Vultr/Scaleway are compose-only (see assertTierSupported below).
+ * No provider is a default or gates a release.
  *
  * To add a new provider:
  * 1. Create a new provider class extending BaseProvider
@@ -120,11 +120,17 @@ export function assertTierSupported(ProviderClass, tier) {
   if (ProviderClass.SUPPORTED_TIERS.includes(tier)) return;
 
   const supported = ProviderClass.SUPPORTED_TIERS.join(', ');
-  const k8sHaHetznerOnlyNote =
-    ProviderClass !== HetznerProvider && tier === 'k8s-ha' ? ' (k8s-ha is Hetzner-only)' : '';
+  // Derived from the registry, never hand-listed: the note names exactly the
+  // providers whose SUPPORTED_TIERS carry the requested tier, so a future
+  // tier lift updates the message for free.
+  const supportingProviders = Object.values(PROVIDERS)
+    .filter((P) => P.SUPPORTED_TIERS.includes(tier))
+    .map((P) => P.NAME)
+    .join(', ');
+  const tierAvailabilityNote = supportingProviders ? ` (${tier}: ${supportingProviders} only)` : '';
 
   throw new Error(
-    `${ProviderClass.NAME} does not support the '${tier}' deploy tier. Supported: ${supported}.${k8sHaHetznerOnlyNote}`,
+    `${ProviderClass.NAME} does not support the '${tier}' deploy tier. Supported: ${supported}.${tierAvailabilityNote}`,
   );
 }
 

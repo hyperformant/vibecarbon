@@ -385,10 +385,10 @@
   - Dynamic server type fetching from Hetzner API
   - Guided API token setup
   - Hetzner S3 Object Storage for backups
-- DigitalOcean fully supported for compose, compose-ha, and k8s, with the same CLI, lifecycle, and e2e gate as Hetzner
+- DigitalOcean fully supported for all four modes — compose, compose-ha, k8s, and k8s-ha — with the same CLI, lifecycle, and e2e gate as Hetzner
   - Interactive region selection, guided API token + Spaces key setup
   - DigitalOcean Spaces object storage for backups
-  - k8s-ha stays Hetzner-only; requesting it on DigitalOcean fails loudly with the capability-gate error: `DigitalOcean does not support the 'k8s-ha' deploy tier. Supported: compose, compose-ha, k8s. (k8s-ha is Hetzner-only)`
+  - Requesting a tier a provider hasn't built fails loudly with the capability-gate error, e.g. on Linode: `Linode does not support the 'k8s' deploy tier. Supported: compose, compose-ha. (k8s: Hetzner Cloud, DigitalOcean only)`
 - Linode supported for compose and compose-ha, with the same CLI, lifecycle, and e2e gate as Hetzner; k8s is not supported on Linode
   - Interactive region selection, guided API token + Object Storage key setup
   - Linode Object Storage for backups

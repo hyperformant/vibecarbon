@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   assertTierSupported,
-  DigitalOceanProvider,
+  LinodeProvider,
   PROVIDERS,
 } from '../../../src/lib/providers/index.js';
 
@@ -290,12 +290,19 @@ describe('terminology census', () => {
     ).toEqual([]);
   });
 
-  it('states the k8s-ha Hetzner-only caveat wherever DO mode support is enumerated', () => {
-    for (const rel of ['README.md', 'FEATURES.md', 'docs/deploy-digitalocean.md']) {
-      const text = read(rel);
-      if (/compose-ha.*k8s/is.test(text) && /DigitalOcean/i.test(text)) {
-        expect(text, rel).toMatch(/k8s-ha[^.\n]*Hetzner-only/i);
-      }
+  it('never claims k8s-ha is Hetzner-only — DO supports it since the d4 lift (2026-08-27)', () => {
+    // Inverted caveat census: the docs used to be REQUIRED to carry the
+    // "k8s-ha ... Hetzner-only" caveat wherever DO mode support was
+    // enumerated; a stale survivor now under-advertises DO and contradicts
+    // SUPPORTED_TIERS, so the same walk bans the phrase everywhere.
+    for (const rel of [
+      'README.md',
+      'FEATURES.md',
+      'docs/deploy-digitalocean.md',
+      'docs/technical.md',
+      'carbon/README.md',
+    ]) {
+      expect(read(rel), rel).not.toMatch(/k8s-ha[^.\n]*Hetzner-only/i);
     }
   });
 
@@ -564,15 +571,16 @@ describe('terminology census', () => {
     }
   });
 
-  it('FEATURES.md quotes the real DigitalOcean k8s-ha capability-gate error byte-identically', () => {
+  it('FEATURES.md quotes the real Linode k8s capability-gate error byte-identically', () => {
     // Mirror-with-drift-guard: import the real provider + guard function
     // (src/lib/providers/index.js) and trigger the actual thrown error,
     // rather than duplicating its format string — so a future wording
     // change to assertTierSupported() fails this test instead of silently
-    // leaving FEATURES.md stale.
+    // leaving FEATURES.md stale. (Linode/k8s carries the example since the
+    // d4 lift removed DO's k8s-ha gate.)
     let message = '';
     try {
-      assertTierSupported(DigitalOceanProvider, 'k8s-ha');
+      assertTierSupported(LinodeProvider, 'k8s');
     } catch (err) {
       message = (err as Error).message;
     }

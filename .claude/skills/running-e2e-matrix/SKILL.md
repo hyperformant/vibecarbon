@@ -19,7 +19,7 @@ The e2e matrix is the only test suite that provisions real Hetzner infrastructur
 | Run DigitalOcean's default scenarios (opt-in, never in the bare matrix) | `pnpm test:e2e:batch -- --provider digitalocean` — requires `DIGITALOCEAN_API_TOKEN`, `DIGITALOCEAN_ACCESS_KEY`, `DIGITALOCEAN_SECRET_KEY` | 30–60 min |
 | Run every provider's default scenarios | `pnpm test:e2e:batch -- --provider all` | ~3 hr + DO scenarios |
 
-Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **Bare invocation (no `--scenario`/`--provider`) = the Hetzner four** (`compose`, `compose-ha`, `k8s`, `k8s-ha` — the release-gating provider's defaults); `--provider digitalocean` runs DO's three (no `k8s-ha` — DO has no standby/failover story yet). See `tests/e2e/selection.ts` for the full grammar.
+Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **Bare invocation (no `--scenario`/`--provider`) = the Hetzner four** (`compose`, `compose-ha`, `k8s`, `k8s-ha` — the release-gating provider's defaults); `--provider digitalocean` runs DO's four (d1–d4; `digitalocean/k8s-ha` is d4, the DO pilot-light standby + failover scenario since 2026-08-27). See `tests/e2e/selection.ts` for the full grammar.
 
 ## Serial execution
 

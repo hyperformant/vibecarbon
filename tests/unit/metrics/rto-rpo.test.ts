@@ -136,7 +136,12 @@ describe('collectRtoRpoFigures', () => {
     const db = new E2EDb(':memory:');
     const { runId } = seed(db, { mode: 'compose-ha' });
     const result = collectRtoRpoFigures(db, runId, 'k8s-ha');
-    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('no k8s-ha') });
+    // Provider-qualified since d4: the guarantees pipeline only accepts the
+    // GUARANTEE_PROVIDER's (hetzner's) k8s-ha row, never DO's by sort order.
+    expect(result).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('no hetzner k8s-ha'),
+    });
   });
 
   it('refuses a non-green scenario', () => {

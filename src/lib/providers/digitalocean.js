@@ -9,11 +9,12 @@
  * unimplemented here — they inherit BaseProvider's abstract throws until B3.
  *
  * DigitalOcean is fully supported and proves the BaseProvider contract is
- * genuinely cloud-agnostic: it supports `compose`/`compose-ha`/`k8s`
- * (see SUPPORTED_TIERS below) — `k8s-ha` remains Hetzner-only (no DO
- * standby/failover story yet). `getK8sProgram` (M3 Task 5) is a real
- * dynamic-import dispatch to `iac/programs/digitalocean-k8s.js`, same shape
- * as `getComposeProgram`.
+ * genuinely cloud-agnostic: it supports all four tiers —
+ * `compose`/`compose-ha`/`k8s`/`k8s-ha` (see SUPPORTED_TIERS below).
+ * `getK8sProgram` (M3 Task 5) is a real dynamic-import dispatch to
+ * `iac/programs/digitalocean-k8s.js`, same shape as `getComposeProgram`;
+ * `k8s-ha` (d4, 2026-08-27) reuses that same program twice — one stack per
+ * region — under the provider-generic HA fan-out in effects/k8s-ha.js.
  *
  * API Documentation: https://docs.digitalocean.com/reference/api/
  */
@@ -162,10 +163,11 @@ export class DigitalOceanProvider extends BaseProvider {
   // console rename never causes a second project.
   static PROJECT_ID_ENV = 'DIGITALOCEAN_PROJECT_ID';
 
-  // M3 Task 6 — k8s lifted in alongside compose/compose-ha. k8s-ha is NOT
-  // included: DO has no pilot-light standby story for k8s yet (getDefault-
-  // StandbyRegion below is only ever reached via compose-ha for DO today).
-  static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s'];
+  // M3 Task 6 lifted k8s; d4 (2026-08-27) lifted k8s-ha — the pilot-light
+  // standby is the SAME digitalocean-k8s.js program instantiated in the
+  // standby region (getDefaultStandbyRegion below picks it), with failover
+  // as a pure DNS flip between the two clusters' own reserved IPs.
+  static SUPPORTED_TIERS = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 
   // Droplet regions WITH Spaces availability only — keeps backup/S3 traffic
   // in-region (a region that can host a droplet but not a Spaces bucket

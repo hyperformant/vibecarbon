@@ -206,17 +206,18 @@ export const testConfig = {
         ] as const,
       },
       // DigitalOcean is fully supported — see
-      // DigitalOceanProvider.SUPPORTED_TIERS (compose/compose-ha/k8s; k8s-ha
-      // stays Hetzner-only, no DO standby/failover story yet). Regions are
+      // DigitalOceanProvider.SUPPORTED_TIERS (all four tiers since the d4
+      // lift, 2026-08-27). Regions are
       // the subset of DigitalOceanProvider.REGIONS that also carry Spaces
       // (object storage) — keeps backup/S3 traffic in-region. Droplet
       // type-pair is DO's uniform Basic line (DEFAULT_TYPE → next size up);
       // DO's Basic droplets are available uniformly across regions, unlike
       // Hetzner's per-DC capacity flux, so a single pair is sufficient (no
       // fallback tiers). This ONE pair backs every DO reference scenario —
-      // d1/d2 (compose/compose-ha) and now d3 (k8s), which blanket-applies
-      // it to master/supabase/worker exactly like the hetzner k8s entries
-      // (e3/e4) blanket-apply their single typePair across those same roles.
+      // d1/d2 (compose/compose-ha), d3 (k8s) and d4 (k8s-ha) — the k8s
+      // tiers blanket-apply it to master/supabase/worker exactly like the
+      // hetzner k8s entries (e3/e4) blanket-apply their single typePair
+      // across those same roles.
       digitalocean: {
         regions: ['nyc3', 'sfo3', 'ams3', 'fra1'] as const,
         typePairs: [['s-2vcpu-4gb', 's-4vcpu-8gb']] as const,
@@ -320,10 +321,7 @@ export const testConfig = {
           'DIGITALOCEAN_ACCESS_KEY',
           'DIGITALOCEAN_SECRET_KEY',
         ],
-        // k8s-ha deliberately absent — DO has no standby/failover story yet
-        // (DigitalOceanProvider.SUPPORTED_TIERS stops at k8s).
-        //
-        // All three run on NATIVE DigitalOcean DNS (do.appcarbon.dev). That
+        // All four run on NATIVE DigitalOcean DNS (do.appcarbon.dev). That
         // costs no extra credential — the DO DNS backend authenticates with
         // the same DIGITALOCEAN_API_TOKEN as DO compute, already in
         // requiredEnv above — and it means `--provider digitalocean` exercises
@@ -333,8 +331,14 @@ export const testConfig = {
           { mode: 'compose' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd1' },
           { mode: 'compose-ha' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd2' },
           { mode: 'k8s' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd3' },
+          // d4 (2026-08-27): the k8s-ha reference scenario. Same nyc3↔sfo3
+          // standby pairing the capacity resolver already hands d2
+          // (DigitalOceanProvider.HA_REGIONS); failover is a DNS flip on
+          // native DO DNS, so the flip exercises the SAME provider that owns
+          // the compute — the self-contained default, like Hetzner's e4.
+          { mode: 'k8s-ha' as const, dnsProvider: 'digitalocean' as const, envPrefix: 'd4' },
         ],
-        defaultSelection: ['compose', 'compose-ha', 'k8s'],
+        defaultSelection: ['compose', 'compose-ha', 'k8s', 'k8s-ha'],
       },
       // Compose + compose-ha (2026-08 expansion PR 1 + tier-parity wave 1 —
       // LinodeProvider.SUPPORTED_TIERS stops at `compose-ha`; 4-mode headroom

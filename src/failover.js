@@ -1003,7 +1003,7 @@ async function _provisionStandbyCapacityImpl({
             `${type}'s vCPU and RAM), but that is a replacement, not a resize.`,
         `Servers cannot be rescaled across architectures, so the permanent fix is to ` +
           `replace this environment's nodes: deploy fresh on x86 types and ` +
-          `\`vibecarbon restore\` from a backup. See docs/deploy-hetzner.md ` +
+          `\`vibecarbon restore\` from a backup. See docs/deploy-${providerIdFor(envConfig)}.md ` +
           `("x86-64 only").`,
       ];
       for (const line of logLines) p.log.error(line);

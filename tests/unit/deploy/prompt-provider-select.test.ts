@@ -5,8 +5,8 @@
  * check and the post-select re-check in gatherDeploymentConfig — see its
  * "Resolved once per flow" comment). Also pins the gate interaction with
  * resolveDeployMode (A2's SUPPORTED_TIERS mode filter), which must use the
- * POST-SELECT provider so selecting DigitalOcean hides kubernetes-ha (no
- * k8s-ha tier — Hetzner-only) while still showing kubernetes (M3 Task 6).
+ * POST-SELECT provider so selecting a compose-only provider (Linode) hides
+ * the k8s modes while Hetzner and DigitalOcean keep all four (d4 lift).
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -241,7 +241,7 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
     clackMock.select.mockReset();
   });
 
-  it('shows kubernetes but hides kubernetes-ha once digitalocean is selected (M3 Task 6: DO supports k8s, not k8s-ha)', async () => {
+  it('keeps all four deploy-mode options for digitalocean (d4 lift: DO supports k8s-ha)', async () => {
     clackMock.select.mockResolvedValueOnce('digitalocean'); // provider select
     const { envConfig } = await resolveProvider(noFlags, {});
     expect(envConfig.provider).toBe('digitalocean');
@@ -252,8 +252,7 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
 
     const modeCall = clackMock.select.mock.calls[1][0];
     const modeValues = modeCall.options.map((o: { value: string }) => o.value);
-    expect(modeValues).toEqual(['compose', 'compose-ha', 'kubernetes']);
-    expect(modeValues).not.toContain('kubernetes-ha');
+    expect(modeValues).toEqual(['compose', 'compose-ha', 'kubernetes', 'kubernetes-ha']);
   });
 
   it('keeps all four deploy-mode options for hetzner', async () => {

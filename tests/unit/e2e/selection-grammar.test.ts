@@ -30,27 +30,29 @@ describe('resolveSelection — defaults', () => {
     ]);
   });
 
-  it('--provider digitalocean = DO defaults (3, no k8s-ha)', () => {
+  it('--provider digitalocean = DO defaults (all 4 since the d4 lift)', () => {
     expect(modes(resolveSelection({ providers: ['digitalocean'] }))).toEqual([
       'digitalocean/compose',
       'digitalocean/compose-ha',
       'digitalocean/k8s',
+      'digitalocean/k8s-ha',
     ]);
   });
 
-  it('--provider all = every provider defaults, hetzner first (13 total)', () => {
-    // 4 hetzner + 3 digitalocean + 2 linode + 2 vultr + 2 scaleway
-    // (2026-08 expansion PRs 1-3 + tier-parity wave 1).
+  it('--provider all = every provider defaults, hetzner first (14 total)', () => {
+    // 4 hetzner + 4 digitalocean (d4 lift 2026-08-27) + 2 linode + 2 vultr
+    // + 2 scaleway (2026-08 expansion PRs 1-3 + tier-parity wave 1).
     const sel = resolveSelection({ providers: ['all'] });
-    expect(sel).toHaveLength(13);
+    expect(sel).toHaveLength(14);
     expect(sel[0]).toMatchObject({ provider: 'hetzner', mode: 'compose' });
     expect(sel[6]).toMatchObject({ provider: 'digitalocean', mode: 'k8s' });
-    expect(sel[7]).toMatchObject({ provider: 'linode', mode: 'compose' });
-    expect(sel[8]).toMatchObject({ provider: 'linode', mode: 'compose-ha' });
-    expect(sel[9]).toMatchObject({ provider: 'vultr', mode: 'compose' });
-    expect(sel[10]).toMatchObject({ provider: 'vultr', mode: 'compose-ha' });
-    expect(sel[11]).toMatchObject({ provider: 'scaleway', mode: 'compose' });
-    expect(sel[12]).toMatchObject({ provider: 'scaleway', mode: 'compose-ha' });
+    expect(sel[7]).toMatchObject({ provider: 'digitalocean', mode: 'k8s-ha' });
+    expect(sel[8]).toMatchObject({ provider: 'linode', mode: 'compose' });
+    expect(sel[9]).toMatchObject({ provider: 'linode', mode: 'compose-ha' });
+    expect(sel[10]).toMatchObject({ provider: 'vultr', mode: 'compose' });
+    expect(sel[11]).toMatchObject({ provider: 'vultr', mode: 'compose-ha' });
+    expect(sel[12]).toMatchObject({ provider: 'scaleway', mode: 'compose' });
+    expect(sel[13]).toMatchObject({ provider: 'scaleway', mode: 'compose-ha' });
   });
 });
 
@@ -146,7 +148,7 @@ describe('resolveSelection — explicit tokens', () => {
 
   it('provider all + exclude', () => {
     const sel = resolveSelection({ providers: ['all'], exclude: ['digitalocean/compose-ha'] });
-    expect(sel).toHaveLength(12);
+    expect(sel).toHaveLength(13);
   });
 });
 
@@ -165,8 +167,9 @@ describe('resolveSelection — loud failures (no legacy forms)', () => {
   });
 
   it('mode unsupported by provider throws naming supported modes', () => {
-    expect(() => resolveSelection({ include: ['digitalocean/k8s-ha'] })).toThrow(
-      /does not support k8s-ha.*compose, compose-ha, k8s/,
+    // linode carries the negative case now that DO supports all four tiers.
+    expect(() => resolveSelection({ include: ['linode/k8s'] })).toThrow(
+      /does not support k8s.*compose, compose-ha/,
     );
   });
 

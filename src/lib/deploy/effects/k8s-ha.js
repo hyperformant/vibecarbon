@@ -411,8 +411,10 @@ async function haK8sProvisionClusters(ctx) {
 }
 
 /**
- * Open the WireGuard tunnel port (UDP 51821) in BOTH clusters' Hetzner Cloud
- * firewalls, each admitting its PEER supabase node's PUBLIC IP — the
+ * Open the WireGuard tunnel port (UDP 51821) in BOTH clusters' cloud
+ * firewalls (provider-routed: findFirewallByName →
+ * buildReplicationFirewallRules → setFirewallRules, implemented by every HA
+ * provider), each admitting its PEER supabase node's PUBLIC IP — the
  * WG endpoints are the supabase nodes' public IPs, and the firewall's default
  * udp rule only admits the private range. Symmetric on both clusters: the
  * standby streams from the primary at deploy time, and the post-failover

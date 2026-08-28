@@ -56,6 +56,7 @@ describe('remapEnvPrefix', () => {
     // Pinned because this is a deliberate (if slightly odd-looking)
     // outcome, not an oversight.
     expect(remapEnvPrefix('d1', withNs('ci'))).toBe('cid1');
+    expect(remapEnvPrefix('d4', withNs('ci'))).toBe('cid4');
     expect(remapEnvPrefix('l1', withNs('ci'))).toBe('cil1');
     expect(remapEnvPrefix('v1', withNs('ci'))).toBe('civ1');
     expect(remapEnvPrefix('s1', withNs('ci'))).toBe('cis1');

@@ -33,13 +33,19 @@ describe('e2e provider registry', () => {
     expect(providers.hetzner.defaultSelection).toEqual(['compose', 'compose-ha', 'k8s', 'k8s-ha']);
   });
 
-  it('digitalocean supports three modes (no k8s-ha) and defaults to all three', () => {
+  it('digitalocean supports all four modes and defaults to all four (d4 lift, 2026-08-27)', () => {
     expect(providers.digitalocean.scenarios.map((s) => s.mode)).toEqual([
       'compose',
       'compose-ha',
       'k8s',
+      'k8s-ha',
     ]);
-    expect(providers.digitalocean.defaultSelection).toEqual(['compose', 'compose-ha', 'k8s']);
+    expect(providers.digitalocean.defaultSelection).toEqual([
+      'compose',
+      'compose-ha',
+      'k8s',
+      'k8s-ha',
+    ]);
     expect(providers.digitalocean.requiredEnv).toContain('DIGITALOCEAN_API_TOKEN');
   });
 

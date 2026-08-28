@@ -557,12 +557,12 @@ current pricing for the server types you select at deploy time.
 
 Mode support by provider (same facts as the README architecture diagram):
 
-| Deploy mode | Hetzner | DigitalOcean | Linode | Vultr |
-|---|:---:|:---:|:---:|:---:|
-| `compose` | ✅ | ✅ | ✅ | ✅ |
-| `compose-ha` | ✅ | ✅ | — | — |
-| `k8s` | ✅ | ✅ | — | — |
-| `k8s-ha` | ✅ | — | — | — |
+| Deploy mode | Hetzner | DigitalOcean | Linode | Vultr | Scaleway |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `compose` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `compose-ha` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `k8s` | ✅ | ✅ | — | — | — |
+| `k8s-ha` | ✅ | ✅ | — | — | — |
 
 Every cell that ships runs the same CLI, the same lifecycle commands, and the same e2e gate. A dash is a mode not yet built for that provider: requesting it fails at deploy-mode selection with an explicit capability-gate error (`assertTierSupported()` in `src/lib/providers/index.js`).
 

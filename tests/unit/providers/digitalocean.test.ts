@@ -51,8 +51,13 @@ describe('DigitalOceanProvider — identity/credentials statics (exact values)',
     expect(DigitalOceanProvider.S3_REGION_ENV).toBe('DIGITALOCEAN_STORAGE_REGION');
   });
 
-  it('pins SUPPORTED_TIERS to compose/compose-ha/k8s (k8s-ha is Hetzner-only)', () => {
-    expect(DigitalOceanProvider.SUPPORTED_TIERS).toEqual(['compose', 'compose-ha', 'k8s']);
+  it('pins SUPPORTED_TIERS to all four tiers (d4 lift, 2026-08-27)', () => {
+    expect(DigitalOceanProvider.SUPPORTED_TIERS).toEqual([
+      'compose',
+      'compose-ha',
+      'k8s',
+      'k8s-ha',
+    ]);
   });
 
   it('pins the 10-region REGIONS map (Spaces-capable regions only)', () => {

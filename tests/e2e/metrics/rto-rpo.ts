@@ -47,11 +47,20 @@ export const RTO_RPO_END_MARKER = '<!-- END:rto-rpo-figures -->';
 
 /**
  * Keep in sync with the Hetzner registry entry's scenario list
- * (`testConfig.e2e.providers.hetzner.scenarios` in tests/config.ts) — the
- * only provider k8s-ha (and therefore this RTO/RPO figures pipeline) exists
- * for.
+ * (`testConfig.e2e.providers.hetzner.scenarios` in tests/config.ts).
+ *
+ * The published RTO/RPO guarantees stay HETZNER-SOURCED (see
+ * GUARANTEE_PROVIDER below): they are the numbers docs/technical.md's
+ * guarantees block advertises, measured on the release-matrix provider's
+ * intra-EU pairing. DO's d4 produces its own figures (coast-to-coast
+ * nyc3↔sfo3 — a different latency regime) which must never silently replace
+ * the published ones; blessing a second provider's figures is a deliberate
+ * docs decision, not a db race.
  */
 const ALL_MATRIX_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
+
+/** The provider whose green runs feed the published guarantees block. */
+const GUARANTEE_PROVIDER = 'hetzner';
 
 /** Perf-substep names emitted by src/failover.js (perfTimer call sites). */
 export const FAILOVER_SUBSTEP_PROVISION = 'failover.provisionWorkers';
@@ -103,8 +112,13 @@ export function collectRtoRpoFigures(db: E2EDb, runId: string, mode = 'k8s-ha'):
   const details = db.getRunDetails(runId);
   if (!details) return { ok: false, reason: `run ${runId} not found in this db` };
 
-  const scenario = details.scenarios.find((sc) => sc.mode === mode);
-  if (!scenario) return { ok: false, reason: `run has no ${mode} scenario` };
+  // Provider-qualified, not mode-only: since d4, a db can hold BOTH a
+  // hetzner and a digitalocean k8s-ha row, and the published guarantees must
+  // never pick up the wrong provider's latency regime by sort order.
+  const scenario = details.scenarios.find(
+    (sc) => sc.mode === mode && sc.provider === GUARANTEE_PROVIDER,
+  );
+  if (!scenario) return { ok: false, reason: `run has no ${GUARANTEE_PROVIDER} ${mode} scenario` };
   if (!isGreenStatus(scenario.status)) {
     return { ok: false, reason: `${mode} scenario status is '${scenario.status}', not green` };
   }

@@ -64,7 +64,7 @@ const PROVIDERS: ProviderRow[] = [
     id: 'digitalocean',
     name: 'DigitalOcean',
     logo: digitaloceanLogo,
-    tiers: { compose: 'yes', 'compose-ha': 'yes', k8s: 'yes', 'k8s-ha': 'soon' },
+    tiers: { compose: 'yes', 'compose-ha': 'yes', k8s: 'yes', 'k8s-ha': 'yes' },
   },
   {
     id: 'linode',

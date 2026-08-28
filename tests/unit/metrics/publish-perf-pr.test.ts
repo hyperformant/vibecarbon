@@ -42,7 +42,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const HETZNER_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
-const DO_MODES = ['compose', 'compose-ha', 'k8s'] as const;
+const DO_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'] as const;
 const CURATED_STEPS = ['deploy', 'warm-deploy', 'backup', 'restore', 'scale', 'destroy'] as const;
 
 function createTestRun(db: E2EDb): string {

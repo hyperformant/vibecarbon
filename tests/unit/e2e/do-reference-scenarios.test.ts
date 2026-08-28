@@ -15,9 +15,9 @@ import { testConfig } from '../../config.js';
 describe('providers.digitalocean (DO opt-in reference scenarios)', () => {
   const scenarios = testConfig.e2e.providers.digitalocean.scenarios;
 
-  it('has exactly three entries — k8s-ha deliberately absent, DO has no standby/failover story yet', () => {
-    expect(scenarios).toHaveLength(3);
-    expect(scenarios.map((s) => s.envPrefix)).toEqual(['d1', 'd2', 'd3']);
+  it('has exactly four entries — full tier parity with Hetzner since the d4 lift (2026-08-27)', () => {
+    expect(scenarios).toHaveLength(4);
+    expect(scenarios.map((s) => s.envPrefix)).toEqual(['d1', 'd2', 'd3', 'd4']);
   });
 
   it('d1 is the compose reference scenario', () => {
@@ -44,6 +44,14 @@ describe('providers.digitalocean (DO opt-in reference scenarios)', () => {
     });
   });
 
+  it('d4 is the k8s-ha reference scenario — same dnsProvider shape, so the failover DNS flip exercises native DO DNS', () => {
+    expect(scenarios[3]).toEqual({
+      mode: 'k8s-ha',
+      dnsProvider: 'digitalocean',
+      envPrefix: 'd4',
+    });
+  });
+
   it('every DO scenario is on native DigitalOcean DNS — no extra credential beyond DIGITALOCEAN_API_TOKEN', () => {
     // The DO DNS backend authenticates with the SAME token as DO compute,
     // so a DO-only run needs no Cloudflare credential at all. A scenario
@@ -63,7 +71,7 @@ describe('providers.digitalocean (DO opt-in reference scenarios)', () => {
 });
 
 describe('capacityPreferences.digitalocean', () => {
-  it('has one blanket typePair backing every DO reference scenario (d1/d2/d3 all share it)', () => {
+  it('has one blanket typePair backing every DO reference scenario (d1–d4 all share it)', () => {
     expect(testConfig.e2e.capacityPreferences.digitalocean.typePairs).toEqual([
       ['s-2vcpu-4gb', 's-4vcpu-8gb'],
     ]);

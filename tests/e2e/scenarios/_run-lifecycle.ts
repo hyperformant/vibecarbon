@@ -1827,7 +1827,7 @@ export async function runLifecycle(
               skipReason:
                 config.mode === 'compose-ha'
                   ? null
-                  : `${config.mode} failover reassigns a floating IP — the A record never changes, so there is no DNS flip to verify`,
+                  : `${config.mode} failover repoints the A record at the promoted cluster's own ingress IP (floating/reserved) — the harness doesn't track that IP, and the serving checks already prove the domain resolves to the promoted cluster end-to-end`,
             }),
           );
         }
