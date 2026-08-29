@@ -5,7 +5,11 @@
  * Uses the same API token as server operations — no additional credentials needed.
  *
  * The Cloud API uses `/zones/{id}/rrsets` for record management (not `/records`).
- * Updates are performed via delete + create (PUT on rrsets returns 422).
+ * Updates are ATOMIC via POST .../rrsets/{name}/{type}/actions/set_records —
+ * never delete + create when the rrset exists (that gap had authoritative
+ * NODATA mid-rewrite, which downstream resolvers negative-cache for the SOA
+ * minimum TTL). PUT on rrsets is not the update endpoint (422); delete +
+ * create survives only as the fallback for a failed action or a TTL change.
  *
  * API Documentation: https://docs.hetzner.cloud/
  */
@@ -177,11 +181,42 @@ export async function createDNSRecord(apiToken, zoneId, config) {
   const zoneName = await zoneNameForId(apiToken, zoneId);
   const relativeName = fqdnToRelative(name, zoneName);
 
-  // Delete existing rrset if present (PUT is not supported, so we delete + create)
   const existing = await getRrsets(apiToken, zoneId);
   const match = existing.find((r) => r.type === type && r.name === relativeName);
 
   if (match) {
+    // ATOMIC in-place replace via the set_records action. The old path here
+    // was delete + create ("PUT is not supported") — but PUT's 422 says
+    // "can't update records with THIS endpoint" because the update lives at
+    // POST .../rrsets/{name}/{type}/actions/set_records (live-verified
+    // 2026-08-29: 201, command set_rrset_records, value replaced, TTL kept).
+    // The delete+create window had the authoritative servers answering
+    // NODATA for the name mid-rewrite, and any resolver that queried inside
+    // it cached that nothing-answer for the zone's SOA minimum TTL (3600s) —
+    // e4 2026-08-29: an intermediary resolver poisoned mid-verify broke the
+    // browser check for an hour against a healthy deploy. Atomic replace
+    // closes the window; delete + create remains only as the fallback when
+    // the action itself fails (and for a TTL change, which set_records
+    // does not touch).
+    const canSetInPlace = (match.ttl ?? ttl) === ttl;
+    if (canSetInPlace) {
+      const setResponse = await fetchWithRetry(
+        `${API_BASE}/zones/${zoneId}/rrsets/${relativeName}/${type}/actions/set_records`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ records: [{ value }] }),
+        },
+      );
+      if (setResponse.ok) {
+        const data = await setResponse.json().catch(() => ({}));
+        return data.rrset ?? { name: relativeName, type, ttl, records: [{ value }] };
+      }
+      // Fall through to delete + create — better a brief gap than a failure.
+    }
     const delResponse = await fetchWithRetry(
       `${API_BASE}/zones/${zoneId}/rrsets/${relativeName}/${type}`,
       {

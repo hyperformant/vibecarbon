@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { type Browser, chromium } from 'playwright-core';
 import type { VerificationResult } from '../scenarios/types.js';
 import { chromeHostResolverRules } from '../utils/dns-pin.js';
+import { resolveCheckIp } from './health.js';
 
 // Condition-based render wait: poll for real content until the SPA hydrates, a
 // crash shows, or the deadline elapses — a just-scaled/slow-starting deploy
@@ -182,8 +183,21 @@ export async function runFrontendSmokeChecks(domain: string): Promise<Verificati
   // it gets the same pin via `--host-resolver-rules`, which remaps the address
   // ONLY: the navigation URL, the `Host` header and the TLS SNI all remain the
   // domain, so the promoted node still has to route by name and serve a cert
-  // valid for it. Null (the normal case) leaves the browser on the OS resolver.
-  const hostResolverRules = chromeHostResolverRules(domain);
+  // valid for it.
+  //
+  // Without a pin, the browser must STILL not sit on the OS resolver: the
+  // scenario domain flips between existing and absent across runs, and an
+  // intermediary resolver that cached NODATA/NXDOMAIN during a record gap
+  // serves it for the zone's SOA minimum TTL (an hour on Hetzner DNS) — e4
+  // 2026-08-29: every dnsSafeFetch check passed while the browser rendered a
+  // blank page, failing verify-deploy against a healthy deploy. Map the
+  // address to the public-DNS view via the same resolver the fetch checks
+  // use; Host header and SNI still remain the domain.
+  let hostResolverRules = chromeHostResolverRules(domain);
+  if (!hostResolverRules) {
+    const ip = await resolveCheckIp(domain).catch(() => null);
+    if (ip) hostResolverRules = `MAP ${domain} ${ip}`;
+  }
   const launchArgs = ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'];
   if (hostResolverRules) {
     launchArgs.push(`--host-resolver-rules=${hostResolverRules}`);
