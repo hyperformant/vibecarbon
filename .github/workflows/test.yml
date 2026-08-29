@@ -54,6 +54,11 @@ on:
 # tests/unit/lib/pnpm-version-pins.test.ts fails if a literal `version:` input,
 # or an env-var indirection standing in for one, comes back.
 
+# Least-privilege default (OpenSSF Scorecard Token-Permissions): every job
+# here only reads the repo; nothing writes.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint

@@ -51,6 +51,8 @@ const NODE_MAJOR = read('.nvmrc').trim();
 // Every workflow in the repo, including the template's — carbon/.github/
 // ships into generated projects, so its pins are customer-facing.
 const WORKFLOWS = [
+  // CodeQL runs prebuilt analysis actions only — no setup-node, no Node pin.
+  join('.github', 'workflows', 'codeql.yml'),
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
   join('.github', 'workflows', 'e2e-us-perf.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),

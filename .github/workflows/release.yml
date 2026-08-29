@@ -27,6 +27,12 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Least-privilege default (OpenSSF Scorecard Token-Permissions). The release
+# job REPLACES this wholesale with its own block below — job-level permissions
+# do not merge with this default.
+permissions:
+  contents: read
+
 jobs:
   release:
     name: Semantic Release
