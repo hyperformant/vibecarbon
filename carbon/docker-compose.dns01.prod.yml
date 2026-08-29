@@ -41,7 +41,12 @@ services:
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
       - "--certificatesresolvers.letsencrypt.acme.email={{ADMIN_EMAIL}}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
-      - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+      # ACME_DISARMED_CA_SERVER first (compose-ha single-active-issuer
+      # policy, src/lib/deploy/acme-role.js): set on the STANDBY node only,
+      # pointing lego at a reserved-.invalid host so it never reaches a CA
+      # and never writes challenge TXT records. Empty/unset falls through
+      # to the real ACME_CA_SERVER (staging in e2e) or the prod default.
+      - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_DISARMED_CA_SERVER:-${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}}"
       - "--log.level=WARN"
     environment:
       ACME_DNS_PROVIDER: ${ACME_DNS_PROVIDER:-}

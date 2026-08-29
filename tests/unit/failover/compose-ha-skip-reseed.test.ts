@@ -158,13 +158,31 @@ describe('failoverComposeHA — standby already streaming', () => {
   // re-rendered WALG_ROLE, so the PROMOTED node kept the standby write-guard —
   // wal-archive.sh and compose-backup.sh both no-op'd and the new primary
   // archived nothing until some later deploy happened to rewrite the roles.
-  it('moves the wal-g write-guard onto the promoted node and demotes the old primary', async () => {
+  it('moves the wal-g write-guard AND the active ACME issuer onto the promoted node, demoting both on the old primary', async () => {
+    // The ACME merges are the compose-ha single-active-issuer policy
+    // (acme-role.js): the promoted node's disarm key is EMPTIED (falls
+    // through to the real CA) and the retired node's is set to the
+    // reserved-.invalid sentinel, so the swapped pair never runs two armed
+    // solvers against one `_acme-challenge` TXT name (runs
+    // 33273372657/33276113128).
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
     expect(envMerges).toEqual([
       { ip: '2.2.2.2', updates: { WALG_ROLE: 'primary' } },
+      { ip: '2.2.2.2', updates: { ACME_DISARMED_CA_SERVER: '' } },
       { ip: '1.1.1.1', updates: { WALG_ROLE: 'standby' } },
+      {
+        ip: '1.1.1.1',
+        updates: { ACME_DISARMED_CA_SERVER: 'https://acme-disarmed.invalid/directory' },
+      },
     ]);
+  });
+
+  it('recreates traefik on both nodes so the re-armed/disarmed caserver takes (command env is create-time)', async () => {
+    await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
+
+    const traefikRecreates = sshCalls.filter((c) => c.command.includes('up -d --no-deps traefik'));
+    expect(traefikRecreates.map((c) => c.ip).sort()).toEqual(['1.1.1.1', '2.2.2.2']);
   });
 
   it('demotes the old primary only AFTER its app tier is stopped', async () => {

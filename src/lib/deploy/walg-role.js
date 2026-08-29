@@ -59,9 +59,10 @@ export const WALG_ROLE_ENV = 'WALG_ROLE';
 /**
  * The compose label that records the `-f` set a container was CREATED with.
  * Set by Compose v2+ on every container it creates, as comma-separated absolute
- * paths. Verified against Docker Compose v5.3.1.
+ * paths. Verified against Docker Compose v5.3.1. Exported for acme-role.js's
+ * traefik recreate, which derives its `-f` set the same way.
  */
-const COMPOSE_CONFIG_FILES_LABEL = 'com.docker.compose.project.config_files';
+export const COMPOSE_CONFIG_FILES_LABEL = 'com.docker.compose.project.config_files';
 
 /**
  * Go template emitting one `<container-port>-><host-port>` token per PUBLISHED
@@ -70,7 +71,7 @@ const COMPOSE_CONFIG_FILES_LABEL = 'com.docker.compose.project.config_files';
  * that matters. Single-quoted at the use site so the remote shell does not
  * expand `$p` / `$c` as its own variables.
  */
-const PUBLISHED_PORTS_TEMPLATE =
+export const PUBLISHED_PORTS_TEMPLATE =
   '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{$p}}->{{.HostPort}} {{end}}{{end}}';
 
 /**

@@ -25,6 +25,7 @@ import {
   resolveDnsToken,
 } from '../../dns-provider.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import {
   buildNodePgdataSwapScript,
   buildPrimaryConninfo,
@@ -1608,6 +1609,24 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     sshKeyPath,
     projectName,
   });
+  // Step 1a3: Arm the promoted node's ACME issuer (single-active-issuer
+  // policy — it was deployed as the standby with a disarmed caserver, so
+  // until this lands the domain would serve the Traefik default cert after
+  // the DNS flip). Runs THIS early on purpose: issuance (DNS-01 propagation
+  // included) overlaps the app-tier restart, API gate, and DNS flip below.
+  // Best-effort like the write-guard — a failed re-arm degrades TLS, it
+  // must never abort a DR flip (armComposeAcme warns with the manual fix).
+  s.start("Arming the promoted node's ACME issuer");
+  const acmeArmed = await armComposeAcme({
+    promotedIp: standbyServer.ip,
+    sshKeyPath,
+    projectName,
+  });
+  s.stop(
+    acmeArmed
+      ? 'Promoted node ACME issuer armed (certificate issuance underway)'
+      : 'Promoted node ACME issuer NOT armed — domain serves an untrusted cert (see warning)',
+  );
   s.stop(
     backupHealth.ok
       ? 'wal-g write-guard moved, new primary is archiving'
@@ -1725,6 +1744,15 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
   // was still serving traffic (DNS has not flipped yet either). Best-effort.
   s.start("Demoting the old primary's wal-g write-guard");
   const demoted = await demoteComposeWalgRole({
+    oldPrimaryIp: primaryServer.ip,
+    sshKeyPath,
+    projectName,
+  });
+  // Step 2c: Disarm the retired node's ACME issuer — the swapped pair must
+  // never run two armed solvers against one `_acme-challenge` TXT name (the
+  // dual-solver clobbering class, acme-role.js). Best-effort for the same
+  // reason the demote is.
+  await disarmComposeAcme({
     oldPrimaryIp: primaryServer.ip,
     sshKeyPath,
     projectName,

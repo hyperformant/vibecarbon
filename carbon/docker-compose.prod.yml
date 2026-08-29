@@ -127,7 +127,10 @@ services:
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
       - "--certificatesresolvers.letsencrypt.acme.email={{ADMIN_EMAIL}}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
-      - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+      # ACME_DISARMED_CA_SERVER first — compose-ha single-active-issuer
+      # policy (src/lib/deploy/acme-role.js): set on the STANDBY node only;
+      # empty/unset falls through to ACME_CA_SERVER or the prod default.
+      - "--certificatesresolvers.letsencrypt.acme.caserver=${ACME_DISARMED_CA_SERVER:-${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}}"
       - "--log.level=WARN"
     ports:
       - "80:80"

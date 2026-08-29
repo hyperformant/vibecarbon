@@ -33,6 +33,7 @@ import { knownHostsPathForKey, seedKnownHosts } from '../../host-keys.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
+import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import {
   buildReplicationOverlay,
   configurePrimaryReplication,
@@ -501,9 +502,23 @@ async function haMergeWalgRole(ctx) {
   const { primary, standby, sshKeyPath } = ctx;
   const haSshOpts = pinnedSshOptsString(sshKeyPath);
   const haRemoteDir = `/opt/${projectName}`;
+  // ACME_DISARM_ENV rides the same per-node merge (single-active-issuer
+  // policy, acme-role.js): the standby's Traefik caserver dials the
+  // reserved-.invalid sentinel — zero ACME traffic, zero `_acme-challenge`
+  // TXT writes — so only the primary ever solves the domain's challenges.
+  // Explicitly EMPTY on the primary (falls through to the real CA) so a
+  // re-deploy over a node that once held the standby role converges it.
+  // This runs before start-compose-stack, so the first `up` already
+  // interpolates the right caserver — no recreate needed at deploy time.
   await Promise.all([
-    mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, { WALG_ROLE: 'primary' }),
-    mergeRemoteDotenv(standby.ip, haSshOpts, haRemoteDir, { WALG_ROLE: 'standby' }),
+    mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, {
+      WALG_ROLE: 'primary',
+      [ACME_DISARM_ENV]: '',
+    }),
+    mergeRemoteDotenv(standby.ip, haSshOpts, haRemoteDir, {
+      WALG_ROLE: 'standby',
+      [ACME_DISARM_ENV]: ACME_DISARMED_CA_SERVER,
+    }),
   ]);
 }
 
