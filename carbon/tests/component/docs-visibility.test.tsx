@@ -93,7 +93,11 @@ describe('Nav docs links', () => {
 describe('Footer docs column', () => {
   it('renders the Docs column when user docs are enabled', () => {
     setVisibility(true, true);
-    render(<Footer />);
+    render(
+      <MemoryRouter>
+        <Footer />
+      </MemoryRouter>
+    );
     expect(screen.getByRole('heading', { name: 'Docs' })).toBeInTheDocument();
   });
 
@@ -101,14 +105,22 @@ describe('Footer docs column', () => {
     // Every link in the default Docs column points at /docs, so filtering the
     // links alone would leave a bare heading over empty space.
     setVisibility(false, true);
-    const { container } = render(<Footer />);
+    const { container } = render(
+      <MemoryRouter>
+        <Footer />
+      </MemoryRouter>
+    );
     expect(screen.queryByRole('heading', { name: 'Docs' })).not.toBeInTheDocument();
     expect(renderedHrefs(container).filter((h) => h.startsWith('/docs'))).toHaveLength(0);
   });
 
   it('leaves non-docs columns untouched', () => {
     setVisibility(false, false);
-    render(<Footer />);
+    render(
+      <MemoryRouter>
+        <Footer />
+      </MemoryRouter>
+    );
     expect(screen.getByRole('heading', { name: 'Product' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Legal' })).toBeInTheDocument();
   });
