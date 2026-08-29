@@ -169,6 +169,55 @@ classes:
       - site: "tests/e2e/checks/app-api.ts :: RETRY_DELAY_MS"
       - site: "tests/e2e/checks/feature-functions.ts :: RETRY_DELAY_MS"
 
+  - class: operator-resolver-staleness
+    attribution: external-proven
+    rootFix: "landed: 3f9d235"
+    evidence: >-
+      Intermediary resolvers between the operator and the authoritative fleet
+      hold negative state (NXDOMAIN/NODATA) for the zone's SOA minimum TTL
+      (3600s on Hetzner DNS) after any query that lands in a window where the
+      record does not answer, and nothing operator-side can flush them.
+      Live-proven 2026-08-29 (e4 regressions 5 and 7): local router served
+      NOERROR/0-answers for e4.carbonstack.dev while 1.1.1.1 served the
+      record, for the better part of an hour, twice — failing first the
+      deploy's public health probe (118 ENOTFOUND attempts) and then the
+      browser verify check (blank page; every dnsSafeFetch check green).
+      OUR amplifier — hetzner-dns createDNSRecord rewriting existing rrsets
+      as DELETE+POST, which had the authoritative fleet itself answering
+      NODATA mid-rewrite — was root-fixed the same night (3f9d235, atomic
+      set_records). What remains is genuinely external: resolvers customers
+      and operators sit behind cache negative answers from legitimately
+      record-less windows (before a first deploy; after a destroy), so every
+      consumer that must see a freshly written record pins its resolution to
+      public DNS instead of trusting the OS resolver.
+    sites:
+      - site: "src/lib/deploy/public-dns-lookup.js :: makePublicDnsLookup"
+        detectable: false
+        notes: >-
+          not a retry ladder — the deploy health probe's undici
+          connect.lookup resolves via explicit 1.1.1.1/8.8.8.8 with a
+          system-resolver fallback for egress-filtered networks; replaced
+          the dns.setServers call that had been a documented no-op since
+          matrix #3 (setServers never affects fetch's dns.lookup path)
+      - site: "tests/e2e/checks/frontend-smoke.ts :: normal-case --host-resolver-rules pin"
+        detectable: false
+        notes: >-
+          Chromium owns its resolver stack; without a failover pin it now
+          maps the domain to the public-DNS-resolved IP (Host/SNI stay the
+          domain) instead of sitting on the OS resolver
+      - site: "tests/e2e/checks/supavisor-pooler.ts :: external dial resolveCheckIp"
+        detectable: false
+        notes: >-
+          raw TCP dial has no Host/SNI to preserve; dials the
+          public-DNS-resolved address with fallback to the name
+      - site: "tests/e2e/runner.ts :: resolvectl flush-caches at scenario start"
+        detectable: false
+        notes: >-
+          harness hygiene for the consumers that cannot be pinned
+          (psql/openssl child processes); unprivileged, fail-open, clears
+          only the LOCAL systemd-resolved layer — the router layer above it
+          is why the pins exist
+
   - class: wan-transfer-transients
     attribution: external-asserted
     evidence: >-

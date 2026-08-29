@@ -101,6 +101,7 @@ import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { setupE2EEnv } from './utils/e2e-env.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
+import { decideFlakeRetry } from './utils/retry-policy.js';
 import { overrideDnsProvider, resolveBaseDomain } from './utils/scenario-overrides.js';
 import { sweepStaleScratchRepos } from './utils/scratch-repo-sweep.js';
 
@@ -1020,16 +1021,18 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
    */
   const runScenario = async (scenario: (typeof scenarios)[number]): Promise<ScenarioResult> => {
     const first = await runScenarioOnce(scenario, 1);
-    const retryEnabled = process.env.E2E_RETRY_FLAKES === '1';
-    const shouldRetry =
-      retryEnabled && first.status !== 'pass' && first.failureCategory === 'infra';
-    if (!shouldRetry) return first;
-
-    // A kept rig still owns the env prefix (server names, DNS, stacks) the
-    // retry would redeploy into — retrying against it is a guaranteed
-    // collision, not a second chance. Keep wins; say so loudly.
-    // (Discovered live 2026-08-28: e4 retry armed with --keep-on-fail.)
-    if (process.env.VC_KEEP_ON_FAILURE === '1' || process.env.VC_KEEP_ALWAYS === '1') {
+    // Decision extracted pure (tests/e2e/utils/retry-policy.ts) — the
+    // keep-blocks-retry rule was shipped untested 2026-08-28 and that gap
+    // is exactly how no-op mitigations survive.
+    const decision = decideFlakeRetry({
+      status: first.status,
+      failureCategory: first.failureCategory,
+    });
+    if (decision === 'no-retry') return first;
+    if (decision === 'blocked-by-keep') {
+      // A kept rig still owns the env prefix (server names, DNS, stacks) the
+      // retry would redeploy into — retrying against it is a guaranteed
+      // collision, not a second chance. Keep wins; say so loudly.
       console.log(
         `\n[${scenario.mode}] E2E_RETRY_FLAKES retry SKIPPED: a keep flag preserved the failed ` +
           `rig, and a retry on the same env prefix would collide with it. Destroy the rig ` +
