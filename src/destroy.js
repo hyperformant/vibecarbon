@@ -1014,6 +1014,25 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
   // the normal app-bucket path deletes; there is no separate bucket to keep.
   if (!stateBucket || stateBucket === envConfig.s3?.bucket) return;
 
+  // A PINNED state bucket (project-level `stateBucket` in .vibecarbon.json)
+  // is by definition shareable — one named bucket serving several
+  // environments, projects, or operators. `-purge` on ONE environment must
+  // not delete state the others still depend on, and re-creating a pinned
+  // bucket minutes later puts every subsequent deploy in the fresh-bucket
+  // read-after-write window the pin exists to avoid (e4 2026-08-29: a purge
+  // deleted the shared pin, the next run's concurrent HA stack-ups hit a
+  // minutes-old recreation, and the primary's post-up state read came back
+  // without outputs). Purge keeps its "leave nothing behind" meaning for the
+  // per-project DERIVED bucket below; a pin is kept and named.
+  if (projectConfig.stateBucket && projectConfig.stateBucket === stateBucket) {
+    spinner.start('Pulumi state bucket');
+    spinner.stop(
+      `Pulumi state bucket kept (pinned): ${stateBucket} — a pinned bucket may serve other ` +
+        'environments or projects; delete it manually if nothing uses it anymore.',
+    );
+    return;
+  }
+
   // -purge means "leave nothing behind" — with backups it already deletes the
   // backup bucket, and the state bucket follows the same rule. This is the ONE
   // deletion path for the retained bucket (review finding, 2026-08-15: there

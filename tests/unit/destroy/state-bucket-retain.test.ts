@@ -93,6 +93,49 @@ describe('retainStateBucket', () => {
     expect(defaultPath).not.toMatch(/emptyAndDeleteBucket|promptObjectStorageCredentials/);
   });
 
+  it('keeps a PINNED bucket even behind -purge (a pin is shareable across envs/projects)', async () => {
+    // The project-level `stateBucket` pin exists so several environments,
+    // projects, or operators can share one long-lived bucket — the e2e
+    // harness's warm state bucket is exactly this. Purging one environment
+    // must not delete state the others depend on, and the delete/recreate
+    // cycle it causes is the fresh-bucket read-after-write hazard this file's
+    // header documents (and e4 2026-08-29 reproduced: post-purge recreation,
+    // concurrent HA stack-ups, primary's post-up state read missing outputs).
+    const leaks = { leak: vi.fn(), unverified: vi.fn(), risk: vi.fn(), foreign: vi.fn() };
+    const spinner = spinnerStub();
+    await retainStateBucket(
+      { s3: { bucket: 'proj-storage', stateBucket: 'vc-e2e-state-local-6586f2' } },
+      { projectName: 'proj', stateBucket: 'vc-e2e-state-local-6586f2' },
+      { purgeBackups: true },
+      spinner,
+      leaks,
+    );
+    const out = spinner.messages.join('\n');
+    expect(out).toMatch(/kept \(pinned\)/i);
+    expect(out).not.toMatch(/purged|purging/i);
+    expect(leaks.leak).not.toHaveBeenCalled();
+    expect(leaks.unverified).not.toHaveBeenCalled();
+  });
+
+  it('still purges a non-pinned (derived) bucket behind -purge — the pin guard is not a blanket keep', async () => {
+    // Guard precision: -purge keeps its "leave nothing behind" meaning for a
+    // bucket only this project derives its name for. The pin-keep branch must
+    // trigger ONLY on an exact projectConfig.stateBucket match.
+    const spinner = spinnerStub();
+    // No credentials resolvable in the unit environment: the purge path
+    // stops at promptObjectStorageCredentials → null and records a leak —
+    // which is exactly the proof it ENTERED the purge path instead of keeping.
+    const leaks = { leak: vi.fn(), unverified: vi.fn(), risk: vi.fn(), foreign: vi.fn() };
+    await retainStateBucket(
+      { s3: { bucket: 'proj-storage', stateBucket: 'proj-storage-pulumi-state-a1b2c3' } },
+      { projectName: 'proj', stateBucket: 'some-other-pin' },
+      { purgeBackups: true },
+      spinner,
+      leaks,
+    );
+    expect(spinner.messages.join('\n')).not.toMatch(/kept \(pinned\)/i);
+  });
+
   it('records nothing in the leak ledger on the keep path', async () => {
     // A retained bucket is an intended outcome. All four ledger severities
     // mean something it is not (leak/unverified feed `survivors` and fail the
