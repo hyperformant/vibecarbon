@@ -145,10 +145,13 @@ function BlogFooter() {
 }
 
 function formatDate(dateStr: string): string {
+  // Frontmatter dates are calendar dates; a bare YYYY-MM-DD parses as UTC
+  // midnight, so render in UTC or every viewer west of UTC sees the prior day.
   return new Date(dateStr).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'long',
     day: 'numeric',
+    timeZone: 'UTC',
   });
 }
 
