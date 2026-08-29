@@ -79,6 +79,15 @@ export const createAdminUserStep = () =>
 /** Gate deploy success on the app's own /api/health probe. */
 export const verifyHealthStep = () => defineStep({ name: 'verify-health', effect: 'verifyHealth' });
 
+/**
+ * Gate deploy success on the domain serving a TRUSTED TLS certificate (the
+ * ssl_valid contract, enforced at the source). Shared verbatim by the
+ * compose-ha plan — the effect reads the primary's identity from either ctx
+ * shape. Skipped when the deploy has no domain to probe.
+ */
+export const verifyTlsReadyStep = () =>
+  defineStep({ name: 'verify-tls', effect: 'verifyTlsReady', when: (ctx) => Boolean(ctx.domain) });
+
 /** Install the scheduled wal-g backup cron on the VPS (shipped-bug guard). */
 export const setupBackupCronStep = () =>
   defineStep({ name: 'setup-backup-cron', effect: 'setupBackupCron' });

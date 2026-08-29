@@ -50,6 +50,7 @@ import {
   transferImageStep,
   updateDnsStep,
   verifyHealthStep,
+  verifyTlsReadyStep,
 } from './steps.js';
 
 /**
@@ -71,6 +72,7 @@ export function planDeploy(tier, _config) {
       runMigrationsStep(),
       createAdminUserStep(),
       verifyHealthStep(),
+      verifyTlsReadyStep(),
       setupBackupCronStep(),
     ];
   }
@@ -99,6 +101,9 @@ export function planDeploy(tier, _config) {
       haWriteReplicationOverlayStep(),
       haConfigureReplicationStep(),
       haVerifyStreamingStep(),
+      // Shared with single compose (same step name, same effect): the TLS
+      // gate must precede finalize-config, which persists status:'deployed'.
+      verifyTlsReadyStep(),
       haSetupBackupCronStep(),
       haFinalizeConfigStep(),
     ];

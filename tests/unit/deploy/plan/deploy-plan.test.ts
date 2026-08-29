@@ -22,6 +22,7 @@ const EXPECTED_COMPOSE_SEQUENCE = [
   'run-migrations',
   'create-admin-user',
   'verify-health',
+  'verify-tls',
   'setup-backup-cron',
 ];
 
@@ -316,6 +317,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'write-replication-overlay',
   'configure-replication',
   'verify-streaming',
+  'verify-tls',
   'setup-backup-cron',
   'finalize-config',
 ];

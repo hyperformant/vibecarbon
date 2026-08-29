@@ -639,14 +639,41 @@ async function captureFailureDiagnostics(
     }
   }
 
-  // 4. Compose state — config.serverIps[0] would be ideal, but we don't have
-  //    direct access here. The deploy log (~/.vibecarbon/logs/<env>-<ts>.log)
-  //    captures container output via the orchestrator; this is a hint.
+  // 4. Compose state: Traefik logs from every node, over SSH. Bought by the
+  //    2026-08-29 DO reds (run 33252884427): both compose modes failed
+  //    ssl_valid on un-issued apex certs and the dumps held ZERO ACME
+  //    detail — the one log that names the cause (lego's, inside the
+  //    traefik container) wasn't captured anywhere, so "propagation vs
+  //    rate limit vs bad token" was unrecoverable from artifacts. App
+  //    container output still lives in the deploy logger's
+  //    ~/.vibecarbon/logs/<env>-<ts>.log.
   if (config.mode === 'compose' || config.mode === 'compose-ha') {
-    sections.push([
-      'hint',
-      'compose container logs are captured in the matching ~/.vibecarbon/logs/<env>-<ts>.log file via the deploy logger',
-    ]);
+    const { getServerIps, getSshKeyPath, e2eSshOpts } = await import('../utils/ssh.js');
+    // Named nodeIps/nodeKey (not serverIps/sshKeyPath): the verify block's
+    // handle-backfill census anchors on `serverIps = getServerIps(...)` and
+    // this earlier, diagnostics-local read must not become its first match
+    // (verify-ssh-handle-backfill.test.ts).
+    const nodeIps = getServerIps(config.projectDir, config.envPrefix);
+    const nodeKey = getSshKeyPath(config.projectDir, config.envPrefix);
+    if (nodeIps.length === 0 || !nodeKey) {
+      sections.push([
+        'traefik logs',
+        `(skipped: no server IPs or ssh key resolvable from ${config.projectDir})`,
+      ]);
+    } else {
+      for (const [i, ip] of nodeIps.entries()) {
+        sections.push([
+          `traefik logs (node ${i}: ${ip})`,
+          safeRun('ssh', [
+            '-i',
+            nodeKey,
+            ...e2eSshOpts(10),
+            `root@${ip}`,
+            `cd /opt/${config.projectName} && docker compose logs --tail=60 traefik 2>&1 | tail -40`,
+          ]),
+        ]);
+      }
+    }
   }
 
   // Write all sections to the diagnostic file.

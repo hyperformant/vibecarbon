@@ -534,6 +534,71 @@ async function verifyHealth(ctx) {
 }
 
 /**
+ * TLS-ready gate (shared by compose and compose-ha — it reads the primary's
+ * identity from either ctx shape): the deploy is not done until the domain
+ * serves a certificate the platform trust store accepts. Traefik/lego ACME
+ * runs asynchronously from start-compose-stack onward; before this gate the
+ * deploy could report success while the apex still served the Traefik
+ * self-signed default (or, on compose-ha, an apex-less wildcard) — a
+ * browser security warning presented as a successful deploy (DigitalOcean
+ * DNS-01 propagation, run 33252884427). On failure the Traefik log tail is
+ * fetched into the error so the ACME cause travels with the failure.
+ * Manual-DNS deploys degrade to a warning instead: issuance can't complete
+ * before the customer points the domain (see tls-ready.js).
+ */
+async function verifyTlsReady(ctx) {
+  const { domain, dnsProvider, sshKeyPath, projectConfig } = ctx;
+  const ip = ctx.serverIp ?? ctx.primary?.ip ?? null;
+  const managedDns = Boolean(dnsProvider) && dnsProvider !== 'manual';
+  const { TLS_READY_MANUAL_BUDGET_MS, assertTlsReadyOrDegraded, waitForTrustedTls } = await import(
+    '../tls-ready.js'
+  );
+  const tlsSpinner = spinner({ indicator: 'timer' });
+  tlsSpinner.start(`Waiting for ${domain} to serve a trusted TLS certificate`);
+  const result = await perfAsync('deploy.tls.ready', () =>
+    waitForTrustedTls(domain, {
+      ...(managedDns ? {} : { budgetMs: TLS_READY_MANUAL_BUDGET_MS }),
+      onProgress: (msg) => tlsSpinner.message(msg),
+    }),
+  );
+  if (result.trusted) {
+    tlsSpinner.stop(
+      `TLS certificate trusted (issued within ${Math.round(result.elapsedMs / 1000)}s)`,
+    );
+    return;
+  }
+  tlsSpinner.stop('Domain is not serving a trusted TLS certificate', managedDns ? 1 : 0);
+  // Name the cause in the failure itself: the ACME error lives in Traefik's
+  // log, which was previously nowhere in any failure surface.
+  let traefikLogTail = '';
+  if (ip && sshKeyPath) {
+    const { sshRunAsync } = await import('../compose/index.js');
+    traefikLogTail =
+      (await sshRunAsync(
+        ip,
+        sshKeyPath,
+        `cd /opt/${projectConfig.projectName} && docker compose logs --tail=60 traefik 2>&1 | tail -40`,
+        { timeout: 15_000, ignoreError: true },
+      )) || '';
+  }
+  const { degraded, reason } = assertTlsReadyOrDegraded({
+    trusted: false,
+    managedDns,
+    reason: result.reason,
+    served: result.served,
+    traefikLogTail,
+    fixHint: managedDns
+      ? `Check Traefik's ACME DNS-01 solver for ${dnsProvider} (token validity, zone ownership) in the log tail below.`
+      : '',
+  });
+  if (degraded) {
+    p.log.warn(
+      `TLS is not trusted yet (manual DNS — Traefik finishes issuance once the domain points here): ${reason}`,
+    );
+  }
+}
+
+/**
  * Install the scheduled wal-g backup cron on the VPS. Shipped-bug guard: a
  * fresh compose deploy used to collect backupConfig but never schedule a
  * backup. A cron-install failure must NOT fail an already-healthy deploy —
@@ -565,6 +630,7 @@ export const EFFECTS = {
   runMigrations,
   createAdminUser,
   verifyHealth,
+  verifyTlsReady,
   setupBackupCron,
   // compose-ha deploy tier (fan-out over primary + standby)
   ...COMPOSE_HA_EFFECTS,

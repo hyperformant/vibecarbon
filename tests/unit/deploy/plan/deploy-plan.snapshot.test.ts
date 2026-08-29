@@ -21,6 +21,7 @@ describe('compose deploy plan snapshot', () => {
         "run-migrations",
         "create-admin-user",
         "verify-health",
+        "verify-tls",
         "setup-backup-cron",
       ]
     `);
@@ -47,6 +48,7 @@ describe('compose deploy plan snapshot', () => {
         "write-replication-overlay",
         "configure-replication",
         "verify-streaming",
+        "verify-tls",
         "setup-backup-cron",
         "finalize-config",
       ]
