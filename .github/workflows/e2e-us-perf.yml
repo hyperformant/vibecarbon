@@ -122,6 +122,15 @@ jobs:
       cancel-in-progress: false
     env:
       E2E_NAMESPACE: ci
+      # One retry for scenarios that fail with failureCategory=infra (the
+      # runner's retry-on-flake wrapper; off by default for local runs). CI
+      # is unattended, so a genuinely-external transient — an LE staging
+      # "503 rateLimited: Service busy" killed run 33277797672's compose-ha
+      # at the restore re-deploy after everything else went green — should
+      # cost a retry, not a red row. Only infra-category failures retry;
+      # code/regression/unknown failures still fail the leg on the first
+      # attempt, so real bugs cannot hide behind this.
+      E2E_RETRY_FLAKES: '1'
       # The ONE long-lived Pulumi state bucket each leg reuses across runs
       # (per provider — same name, each provider's own storage namespace).
       # Salted via an e2e-infra variable because bucket names are GLOBAL per
