@@ -26,6 +26,8 @@ interface FooterColumnProps {
 
 interface FooterProps {
   logo?: ReactNode;
+  /** Short brand line under the logo — fills the brand column naturally. */
+  description?: ReactNode;
   columns?: FooterColumnProps[];
   copyright?: string;
   policies?: FooterLink[];
@@ -62,6 +64,7 @@ const DEFAULT_COLUMNS: FooterColumnProps[] = [
 
 export default function FooterSection({
   logo = <Wordmark size="sm" />,
+  description,
   columns = DEFAULT_COLUMNS,
   copyright = `© ${new Date().getFullYear()} ${PROJECT_DISPLAY_NAME}. All rights reserved.`,
   policies = [
@@ -88,8 +91,11 @@ export default function FooterSection({
       <div className="max-w-container mx-auto">
         <Footer>
           <FooterContent>
-            <FooterColumn className="col-span-2 sm:col-span-3 md:col-span-1">
-              <div className="flex items-center gap-2">{logo}</div>
+            <FooterColumn className="col-span-2 gap-3 sm:col-span-3 md:col-span-1 lg:col-span-2">
+              <div className="flex items-center gap-2 pt-1">{logo}</div>
+              {description && (
+                <p className="text-muted-foreground max-w-xs text-sm">{description}</p>
+              )}
             </FooterColumn>
             {visibleColumns.map((column) => (
               <FooterColumn key={column.title}>
