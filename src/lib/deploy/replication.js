@@ -26,6 +26,21 @@ import { REPL_GATEWAY_PORT } from './wireguard.js';
 // scale-to-zero quiesce.
 const DB_STATEFULSET = 'supabase-supabase-db';
 
+/**
+ * Shared budget for every db-StatefulSet boot/rollout wait (the deploy-side
+ * reseed standbyBoot + dbHostPort recreate in k8s/ha/index.js, and the
+ * failover/restore-side reseed wait below). 600s, raised from 300s
+ * 2026-08-29: DigitalOcean CSI detach/attach settle pushed a HEALTHY
+ * standby boot past 300s (run 33252884427 — the rollout wait timed out and
+ * the failure diagnostics a minute later showed the pod Ready); Hetzner
+ * CSI reattach was already documented as "minutes" beside those waits. Any
+ * SSH client timeout wrapping a wait on this budget must exceed it, or the
+ * transport kills kubectl before kubectl can name the stuck sts
+ * (reseed-standby.test.ts pins that; db-sts-boot-timeout-census.test.ts
+ * drafts new waits into this budget).
+ */
+export const DB_STS_BOOT_TIMEOUT_S = 600;
+
 // Staging subdir INSIDE PGDATA for the swap:false re-seed — on the PVC
 // filesystem so the node-side promotion is an atomic same-fs rename.
 const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
@@ -1507,8 +1522,15 @@ export async function reseedStandbyFromPrimary(
     sshKubectl(
       standbyIp,
       sshKeyPath,
-      ['rollout', 'status', `statefulset/${DB_STATEFULSET}`, '-n', 'vibecarbon', '--timeout=300s'],
-      { timeout: 310_000 },
+      [
+        'rollout',
+        'status',
+        `statefulset/${DB_STATEFULSET}`,
+        '-n',
+        'vibecarbon',
+        `--timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
+      ],
+      { timeout: (DB_STS_BOOT_TIMEOUT_S + 10) * 1000 },
     );
   try {
     await rolloutWait();

@@ -211,8 +211,13 @@ describe('reseedStandbyFromPrimary', () => {
     // error surfaces instead of a generic SSH kill. (An earlier 300s was
     // silently capped by sshRun's 120s default; the pinned 120s that
     // replaced it then flaked on healthy post-swap boots — perf slices
-    // measured 165.8s on a green rig, run 29378289779 — so the budget is
-    // back to 300s WITH the matching explicit client cap.)
+    // measured 165.8s on a green rig, run 29378289779 — so the budget went
+    // back to 300s WITH the matching explicit client cap. Raised to 600s
+    // 2026-08-29: DigitalOcean CSI detach/attach settle pushed a healthy
+    // standby boot past 300s on the deploy-side reseed — run 33252884427
+    // timed out at 300s with the pod Ready ~1 min later — and this
+    // failover-side wait boots the same db StatefulSet through the same
+    // CSI path, so both budgets live in DB_STS_BOOT_TIMEOUT_S.)
     const calls: Array<{ argv: string[]; opts?: { timeout?: number } }> = [];
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
       async (ip: string, k: string, argv: string[], opts: { timeout?: number } = {}) => {
@@ -227,11 +232,11 @@ describe('reseedStandbyFromPrimary', () => {
     );
     expect(status).toBeTruthy();
     const timeoutArg = status?.argv.find((a) => a.startsWith('--timeout='));
-    expect(timeoutArg).toBe('--timeout=300s');
+    expect(timeoutArg).toBe('--timeout=600s');
     const clientTimeout = status?.opts?.timeout ?? 0;
-    expect(clientTimeout).toBe(310_000);
+    expect(clientTimeout).toBe(610_000);
     // The invariant itself, independent of the concrete numbers.
-    expect(clientTimeout).toBeGreaterThan(300 * 1000);
+    expect(clientTimeout).toBeGreaterThan(600 * 1000);
   });
 
   it('reseeds via stage → scale-0 → helper-pod swap → scale-1 → recovery confirm', async () => {

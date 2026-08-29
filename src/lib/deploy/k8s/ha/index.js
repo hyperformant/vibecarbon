@@ -32,6 +32,7 @@ import {
   buildPrimaryConninfo,
   buildReplicationHbaLines,
   buildStagedBasebackupScript,
+  DB_STS_BOOT_TIMEOUT_S,
   parsePgdataClaimFromPodJson,
   REPL_PORT,
   swapPgdataViaHelperPod,
@@ -529,7 +530,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        'kubectl rollout status statefulset/supabase-supabase-db -n vibecarbon --timeout=180s',
+        `kubectl rollout status statefulset/supabase-supabase-db -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
       ],
       { silent: true },
     );
@@ -1094,14 +1095,17 @@ export async function setupReplication(options) {
   });
   // Standby boot on the (possibly swapped) PGDATA — on csi.hetzner.cloud PVCs
   // this is minutes (volume reattach + init containers), so it gets its own
-  // slice separate from the swap itself.
+  // slice separate from the swap itself. Budget is the shared
+  // DB_STS_BOOT_TIMEOUT_S: at the old 300s, DigitalOcean's CSI
+  // detach/attach settle failed a HEALTHY boot here (run 33252884427 — the
+  // wait timed out, the pod was Ready a minute later).
   await perfAsync('deploy.ha.replication.reseed.standbyBoot', () =>
     runCommandAsync(
       [
         'ssh',
         ...sshOpts,
         `root@${standbyIp}`,
-        `kubectl rollout status statefulset/${dbSts} -n vibecarbon --timeout=300s`,
+        `kubectl rollout status statefulset/${dbSts} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
       ],
       { silent: true },
     ),
