@@ -14,6 +14,7 @@
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/badge/npm-provenance%20attested-0a7ea4" alt="npm provenance attested (SLSA build provenance via Trusted Publishing)" /></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/hyperformant/vibecarbon"><img src="https://api.scorecard.dev/projects/github.com/hyperformant/vibecarbon/badge" alt="OpenSSF Scorecard" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--MIT-blue" alt="License: FSL-1.1-MIT" /></a>
+  <a href="https://discord.gg/up8Z9sX6M6"><img src="https://img.shields.io/badge/discord-join%20the%20community-5865F2" alt="Join the vibecarbon Discord" /></a>
 </p>
 
 <p align="center">
@@ -322,6 +323,7 @@ See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT]
 
 ## Support
 
+- Discord: [join the community](https://discord.gg/up8Z9sX6M6) for help, showcase, and announcements
 - GitHub Issues: [Report bugs or request features](https://github.com/hyperformant/vibecarbon/issues)
 - GitHub: [github.com/hyperformant/vibecarbon](https://github.com/hyperformant/vibecarbon)
 
