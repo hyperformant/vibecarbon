@@ -30,6 +30,8 @@ Vibecarbon is a full-stack SaaS starter that combines React 19, Vite, Tailwind v
 
 Skip the choice between vendor lock-in and DIY infrastructure. Ship an application with authentication, billing, teams, email, blog, docs, and i18n already wired up, then put it in production without a dedicated DevOps engineer.
 
+It's built for the way software gets written now: AI agents work inside mandatory guardrails — row-level security on every table, secret scanning before anything is committed, confirmation gates on destructive operations — so building fast never has to mean shipping leaks.
+
 Vibecarbon handles Docker Compose and Kubernetes, high availability with one-command failover, worker scaling, and automated backups. The complete stack stays self-contained under one flag you chose, yours to keep, move, or delete. Choose the provider underneath, and choose again whenever you want: your infrastructure choice stays reversible.
 
 ---
