@@ -39,6 +39,18 @@ const isBareStepWrapper = (l: string) => /^Error: \[step:[a-z-]+\] code: -?\d+$/
 // is Pulumi's generic footer, never the signal.
 const isPulumiDiagnosticLine = (l: string) =>
   /(^|\s)error:\s\S/.test(l) && !/^Error:/.test(l) && !/error: update failed/.test(l);
+// Structured-abort follow-on field (verify-tls / replication hard-gate).
+const isReasonLine = (l: string) => /^Reason:\s\S/.test(l);
+
+/**
+ * Last ACME urn error in the stream, trimmed to the urn code + CA's human
+ * text (the full log line drags a request URL and container prefix along;
+ * the classifiable words all sit after the urn).
+ */
+function lastAcmeUrnSnippet(s: string): string | null {
+  const matches = s.match(/urn:ietf:params:acme:error:[^"\\\n]{0,160}/g);
+  return matches && matches.length > 0 ? matches[matches.length - 1] : null;
+}
 
 export function extractDeployFailureDetail(stdout?: string, stderr?: string): string {
   const out = (stdout || '').replace(ANSI_RE, '').trim();
@@ -59,6 +71,20 @@ export function extractDeployFailureDetail(stdout?: string, stderr?: string): st
       lastMatchingLine(out, isPulumiDiagnosticLine) ||
       lastMatchingLine(err, isPulumiDiagnosticLine);
     if (diagnostic) errorLine = `${diagnostic} | ${errorLine}`;
+  }
+  // Multi-line structured aborts (the verify-tls gate; the replication
+  // hard-gate has the same shape): the `Error:` first line is deliberately
+  // generic while every CLASSIFIABLE wording lives on follow-on lines — a
+  // `  Reason: …` field and, for the TLS gate, an ACME urn error inside the
+  // embedded Traefik log tail. Extracting line one alone is how run
+  // 33273372657's LE-staging "503 rateLimited" and 33266321881's
+  // propagation timeout both classified [unknown] — the exact failure mode
+  // this module's Error: tier was built to prevent, one line deeper.
+  if (errorLine) {
+    const reasonLine = lastMatchingLine(out, isReasonLine) || lastMatchingLine(err, isReasonLine);
+    if (reasonLine) errorLine = `${errorLine} | ${reasonLine}`;
+    const acme = lastAcmeUrnSnippet(out) || lastAcmeUrnSnippet(err);
+    if (acme) errorLine = `${errorLine} | ${acme}`;
   }
   if (errorLine) return perfLine ? `${errorLine} | ${perfLine}` : errorLine;
   if (perfLine) return perfLine;

@@ -103,3 +103,52 @@ describe('extractDeployFailureDetail', () => {
     expect(extractDeployFailureDetail(stdout, '')).toContain('i/o timeout');
   });
 });
+
+describe('verify-tls multi-line abort (runs 33266321881 / 33273372657)', () => {
+  // The TLS gate throws ONE multi-line Error whose first line is generic
+  // ("does not serve a trusted TLS certificate") while every classifiable
+  // wording lives on FOLLOW-ON lines: the `Reason:` field and, inside the
+  // embedded Traefik log tail, the ACME urn error. The Error:-line tier
+  // extracted only line one, so an LE-staging 503 rateLimited (33273372657)
+  // and a plain propagation timeout (33266321881) both summarized and
+  // classified as [unknown].
+  const gateAbort = [
+    'Deploy log saved under /home/runner/.vibecarbon/logs/',
+    'Error: [step:verify-tls] Deploy aborted: the domain does not serve a trusted TLS certificate, so browsers would show a security warning.',
+    "  Reason: Hostname/IP does not match certificate's altnames: Host: cid2.do.appcarbon.dev. is not in the cert's altnames: DNS:*.cid2.do.appcarbon.dev.",
+    '  Served: subject="*.cid2.do.appcarbon.dev" issuer="(STAGING) Dastardly Durum YR1".',
+    '  Traefik/ACME log tail:',
+    '    traefik | ERR Unable to obtain ACME certificate for domains error="unable to generate a certificate for the domains [cid2.do.appcarbon.dev]: error: one or more domains had a problem:\\n[cid2.do.appcarbon.dev] acme: error: 503 :: POST :: https://acme-staging-v02.api.letsencrypt.org/acme/authz/331645773/4166442713 :: urn:ietf:params:acme:error:rateLimited :: Service busy; retry later.\\n"',
+    '  Certificate issuance is retried automatically by Traefik; re-run `vibecarbon deploy` once the cause above is fixed (the deploy is idempotent).',
+    '[perf] deploy.ha.compose.full 1375199ms (failed)',
+  ].join('\n');
+
+  it('carries the Reason: line into the detail', () => {
+    const detail = extractDeployFailureDetail(gateAbort, '');
+    expect(detail).toContain('does not serve a trusted TLS certificate');
+    expect(detail).toContain("Reason: Hostname/IP does not match certificate's altnames");
+  });
+
+  it('carries the embedded ACME urn error into the detail, and it classifies as infra', () => {
+    const detail = extractDeployFailureDetail(gateAbort, '');
+    expect(detail).toContain('urn:ietf:params:acme:error:rateLimited');
+    const { category, reason } = classifyFailure({
+      errorMessage: `Deploy exited with code 1: ${detail.slice(-1000)}`,
+    });
+    expect(category).toBe('infra');
+    expect(reason).toMatch(/rate limit/i);
+  });
+
+  it('the self-signed morning shape (33266321881 compose) classifies as infra TLS, not unknown', () => {
+    const morning = [
+      'Error: [step:verify-tls] Deploy aborted: the domain does not serve a trusted TLS certificate, so browsers would show a security warning.',
+      '  Reason: self-signed certificate; if the root CA is installed locally, try running Node.js with --use-system-ca.',
+      '  Served: subject="TRAEFIK DEFAULT CERT" issuer="TRAEFIK DEFAULT CERT".',
+    ].join('\n');
+    const detail = extractDeployFailureDetail(morning, '');
+    const { category } = classifyFailure({
+      errorMessage: `Deploy exited with code 1: ${detail.slice(-1000)}`,
+    });
+    expect(category).toBe('infra');
+  });
+});
