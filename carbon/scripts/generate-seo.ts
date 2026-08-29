@@ -422,7 +422,11 @@ function buildLlmsFullTxt(
 
 const siteUrl = loadSiteUrl();
 const docs = loadDir('content/docs', '/docs');
-const blog = loadDir('content/blog', '/blog');
+// Blog sorts newest-first (matching the client page); docs keep their
+// explicit `order` frontmatter from loadDir.
+const blog = loadDir('content/blog', '/blog').sort(
+  (a, b) => new Date(b.date ?? 0).getTime() - new Date(a.date ?? 0).getTime()
+);
 const changelog = loadDir('content/changelog', '/changelog');
 const legal = loadDir('content/docs/legal', '/legal');
 
