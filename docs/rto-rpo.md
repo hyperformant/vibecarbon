@@ -3,19 +3,19 @@
 How the published RTO/RPO guarantees in [docs/technical.md](./technical.md#guarantees-k8s-ha)
 are measured, what each figure maps to in the e2e metrics database, and how to
 refresh them after a record run. The published block is rendered by
-`pnpm test:e2e:rto-rpo` (`tests/e2e/metrics/rto-rpo.ts`) — never edited by hand.
+`pnpm test:e2e:rto-rpo` (`tests/e2e/metrics/rto-rpo.ts`), never edited by hand.
 
 ## Where the measurements come from
 
 Every e2e run records into `tests/results/e2e.db` (SQLite; schema in
 `tests/e2e/metrics/db.ts`):
 
-- **`steps`** — wall-clock per lifecycle step (`failover`, `verify-failover`, …)
+- **`steps`**: wall-clock per lifecycle step (`failover`, `verify-failover`, …)
   per scenario (`mode` = `k8s-ha`, `compose-ha`, …).
-- **`perf_substep`** — sub-stage timings parsed from the CLI's
+- **`perf_substep`**: sub-stage timings parsed from the CLI's
   `[perf] <name> <ms>ms` stderr lines (`VIBECARBON_PERF=1`, forced on by the
   e2e harness), keyed to the parent step.
-- **`verifications`** — named post-step checks
+- **`verifications`**: named post-step checks
   (`tests/e2e/checks/`), including the replication/continuity battery.
 
 CI record runs (the **E2E US Perf Run** workflow) upload `e2e.db` as an
@@ -23,7 +23,7 @@ artifact, so figures can be rendered from the exact db that produced the
 README perf table.
 
 The e2e `failover` step runs `vibecarbon failover` against a **healthy
-primary**, i.e. the **planned-switchover** path — with **real** standby worker
+primary**, i.e. the **planned-switchover** path, with **real** standby worker
 provisioning (pilot-light), the quiesce, the WAL catch-up gate, promotion,
 app-tier scale-up, the readiness gate, and the DNS flip. That is the
 customer-identical path (no shortcuts, per house e2e rules).
@@ -44,19 +44,19 @@ Notes:
 
 - **`cli.failover.total`** (also in `perf_substep`) is the CLI-internal
   wall-clock; the step duration is the harness-observed one (slightly larger:
-  process spawn + teardown). The step duration is published — it is the
+  process spawn + teardown). The step duration is published: it is the
   outside view.
 - The IaC layer nests its own markers inside provisioning
   (`scale.k8s.<env>-standby.upStack` etc.). They are *components of*
-  `failover.provisionWorkers` — never add them to the total.
+  `failover.provisionWorkers`. Never add them to the total.
 
 ## What each guarantee means
 
 **Planned-switchover RTO.** The customer-visible outage opens at the quiesce
-step — *after* provisioning has already secured capacity — and closes when
+step (*after* provisioning has already secured capacity) and closes when
 the promoted app tier serves and DNS propagates. It is bounded by
 `failover total − failover.provisionWorkers` (the bound also contains the
-pre-quiesce preflight, so it errs high — the honest direction for a
+pre-quiesce preflight, so it errs high, the honest direction for a
 guarantee) **plus DNS propagation**, itself bounded by the 60s record TTL the
 failover flip writes.
 
@@ -65,19 +65,19 @@ the command runs. The command-side recovery is the same dominant cost
 structure as the measured planned path (provisioning + promotion + scale-up +
 gate + DNS; it *skips* quiesce and the catch-up gate, and adds a best-effort
 old-primary scale-down), so the measured planned wall-clock is published as
-the command-side figure, plus failure-detection time (operator-dependent —
+the command-side figure, plus failure-detection time (operator-dependent:
 failover is deliberately manual) and DNS propagation. The e2e cannot ethically
 measure detection time; it is named, not numbered.
 
 **Planned RPO = 0.** By construction (quiesce-before-promote plus the
-pre-promotion WAL catch-up gate in `src/failover.js` —
+pre-promotion WAL catch-up gate in `src/failover.js`:
 `waitForStandbyCaughtUp` refuses to promote a standby that has not replayed
 the primary's final LSN) and evidenced per run: the e2e writes a marker row on
 the old primary immediately before failover and asserts it survived onto the
 promoted primary (`replication_failover_continuity`). The renderer **refuses
 to publish** figures from any run where that check is missing or failed.
 
-**Unplanned RPO = replication lag at failure.** Not a per-run e2e figure — it
+**Unplanned RPO = replication lag at failure.** Not a per-run e2e figure: it
 is whatever WAL was in flight when the primary died. It is evidenced two ways:
 
 - *Mechanism*: the e2e `replication_streaming` and
@@ -85,7 +85,7 @@ is whatever WAL was in flight when the primary died. It is evidenced two ways:
   budget on every green run.
 - *Operations*: `vibecarbon status <env>` prints a live replication-lag line
   (primary `pg_stat_replication` byte lag via `pg_wal_lsn_diff`, plus the
-  standby's last-replay position) — that number *is* the unplanned RPO
+  standby's last-replay position). That number *is* the unplanned RPO
   exposure at any moment, and monitoring it is the published guidance.
 
 ## Rendering and publishing
@@ -110,7 +110,7 @@ then commit.
 3. House marketing rule: **HA claims stay pinned to the latest green e2e
    matrix.** A green single-scenario run may render figures (mirroring the
    README perf-table row-patch precedent), but the output flags it and the
-   provenance line says so — confirm the latest full matrix is green before
+   provenance line says so. Confirm the latest full matrix is green before
    shipping the claim.
 
 ## Instrumentation gaps (owed to the failover path owners)
@@ -140,13 +140,13 @@ measures the runner's own cache:
 - **Does the promoted node serve?** The step's HTTP checks run under a
   resolution pin (`tests/e2e/utils/dns-pin.ts`, `compose-ha` only) that dials
   the promoted node's IP directly while keeping the domain in the `Host` header
-  and the TLS SNI — so name-based routing and certificate validity are still
+  and the TLS SNI, so name-based routing and certificate validity are still
   fully asserted, but a mid-TTL cache cannot redirect a check onto the retired
   node. Before the pin, that is exactly what happened (hetzner/compose-ha,
   2026-08-11): the battery split, some checks reaching the promoted node and
   passing while others hit the stopped app tier on the demoted one.
 - **Did the flip publish?** The `dns_failover_flip` verification queries the
-  zone's **authoritative nameservers** — which hold no cache of their own zone —
+  zone's **authoritative nameservers** (which hold no cache of their own zone)
   and asserts the A record now carries the promoted IP. It self-skips on
   `k8s-ha`, whose failover reassigns a floating IP and never rewrites DNS.
 
@@ -159,12 +159,12 @@ customer cold path, and pinning it would hide an unpublished record.
 
 `vibecarbon failover` on a `compose-ha` environment promotes the standby,
 repoints DNS, and records the swap by flipping the `role` field on the two
-`servers[]` entries. The Pulumi stacks keep their birth identity — the promoted
-node is still stack `<env>-standby`, the retired node still `<env>-primary` —
+`servers[]` entries. The Pulumi stacks keep their birth identity (the promoted
+node is still stack `<env>-standby`, the retired node still `<env>-primary`),
 and **compose-HA deploy resolves the pair from those stack names, not from the
 roles**. `vibecarbon deploy` therefore REFUSES a swapped compose-HA environment
 (`src/lib/deploy/compose/ha-role-swap.js`); running it would repoint DNS at the
-retired node and re-seed — wipe — the promoted primary's database. There is no
+retired node and re-seed (wipe) the promoted primary's database. There is no
 bypass flag, and no automated failback: restoring HA symmetry needs role-aware
 compose-HA redeploy support, which does not exist yet.
 
@@ -176,14 +176,14 @@ What the environment's DR posture actually is while it sits in that state:
   succeeded**. Failover moves the wal-g write-guard onto it
   (`restoreComposeWalgRole`) and a promoted Postgres archives on the new
   timeline under the same `WALG_S3_PREFIX`, so base backups and WAL archiving
-  are continuous across the failover — RPO for a *further* loss is then still
+  are continuous across the failover: RPO for a *further* loss is then still
   bounded by the archiving cadence, recoverable via `vibecarbon restore <env>`.
   That move is proven, not assumed: `vibecarbon failover` exits **non-zero** if
   it did not land, so a failover that reported success is your evidence. A
-  failover that exited non-zero is not — treat the environment as unbacked-up
+  failover that exited non-zero is not: treat the environment as unbacked-up
   until you have verified it.
 - `restore`, `scale` and `status` resolve the node by `role`, so they follow the
-  promotion correctly. `deploy` does not — it is the blocked path. `backup`
+  promotion correctly. `deploy` does not: it is the blocked path. `backup`
   resolves `servers[0]` (`serverIp: 'first'`), which post-failover is the
   **retired** node, so take on-demand backups against the promoted node until
   that path is role-aware. Do not assume a `backup create` against the retired
@@ -201,7 +201,7 @@ step.
 
 ## Current datapoint
 
-First CI record run, 2026-07-18 — **E2E US Perf Run** (GitHub Actions run
+First CI record run, 2026-07-18: **E2E US Perf Run** (GitHub Actions run
 29629518169, artifact `e2e-us-perf-29`), `k8s-ha` single-scenario, ash→hil:
 failover step **3m 25s** (204,626 ms) including real worker provisioning
 (2m 23s), promotion 8.1s, remainder 54s, outage-side bound **1m 2s**,
@@ -215,10 +215,10 @@ command above.
 
 For when a region or cluster is lost outright (no standby to fail over to), or
 when seeding a brand-new environment from a production backup. This path is
-**k8s / k8s-ha only** — for restoring into an *existing* environment (any mode,
+**k8s / k8s-ha only**. For restoring into an *existing* environment (any mode,
 including compose), use `vibecarbon restore` instead.
 
-### Step 1 — confirm what's in S3
+### Step 1: confirm what's in S3
 
 List the wal-g base backups available for the environment (read-only, no
 changes):
@@ -231,7 +231,7 @@ The newest base backup plus the continuous WAL archive after it define your
 recovery window: `latest` replays to the end of the WAL stream; a PITR
 timestamp can land anywhere inside the window.
 
-### Step 2 — stand up a fresh cluster seeded from the backup
+### Step 2: stand up a fresh cluster seeded from the backup
 
 ```bash
 # Replay everything (latest base backup + all archived WAL):
@@ -252,7 +252,7 @@ vibecarbon deploy <env> -mode k8s -restore 2026-08-05T14:30:00Z -y
    retries for stale storage frontends).
 3. It then configures archive recovery: `restore_command = 'wal-g wal-fetch …'`
    pulls WAL segments back from S3, `recovery.signal` puts Postgres into
-   archive recovery pinned to the base backup's own timeline, and — for PITR —
+   archive recovery pinned to the base backup's own timeline, and (for PITR)
    `recovery_target_time` stops replay at the requested instant. On reaching
    the target (or the end of WAL), Postgres promotes to read-write.
 4. Database migrations are **skipped** (`-restore` implies it): the restored

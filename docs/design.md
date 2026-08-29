@@ -9,13 +9,13 @@ Business vision and brand design guidelines.
 - **Project Name:** Vibecarbon
 - **Primary Tagline:** "Professional Grade Vibecoding"
 - **Subhead:** "Full-stack, Security hardened, Auto-everything Apps in less than 5 minutes."
-- **Vision:** Sovereign, agnostic, grounded, agentic software architectures and tooling for developers and vibecoders — own it, move freely, stand on something real, build with agents.
+- **Vision:** Sovereign, agnostic, grounded, agentic software architectures and tooling for developers and vibecoders: own it, move freely, stand on something real, build with agents.
 - **Mission:** Eliminate the tradeoff between easy-to-start managed platforms and the control/cost-savings of self-hosting. Vibecarbon allows developers to own their infrastructure without needing a DevOps team or deep technical expertise.
 - **Values**
     - Self-contained, Cloud agnostic, Portable
     - Fully automated: CICD, Scaling, Failover, Backups
     - Opinionated, but modular core stack
-- **Pricing Strategy:** Fair Source CLI (FSL-1.1-MIT — each release converts to the MIT license two years after publication) with one-time license tiers: Graphite (free — local dev + single-server production deploys), Fullerene ($149, advanced deploy modes for your own products), Agency (contact us — deploy for clients and enterprise: white-label/resale work). Generated project code is MIT — users own their apps.
+- **Pricing Strategy:** Fair Source CLI (FSL-1.1-MIT: each release converts to the MIT license two years after publication) with one-time license tiers: Graphite (free, local dev + single-server production deploys), Fullerene ($149, advanced deploy modes for your own products), Agency (contact us, deploy for clients and enterprise: white-label/resale work). Generated project code is MIT: users own their apps.
 
 ---
 
@@ -35,7 +35,7 @@ Business vision and brand design guidelines.
 
 ### Typography
 
-- **Body, UI, and headlines:** *Noto Sans Variable*. Headings use refined weights, tightened letter-spacing, and balanced wrapping rather than a separate display face (`--font-display` resolves to the body face; the Bricolage Grotesque display font was dropped 2026-07-01). Inter-class fonts at default weights are an explicit anti-"vibecoded" tell — do not reintroduce them.
+- **Body, UI, and headlines:** *Noto Sans Variable*. Headings use refined weights, tightened letter-spacing, and balanced wrapping rather than a separate display face (`--font-display` resolves to the body face; the Bricolage Grotesque display font was dropped 2026-07-01). Inter-class fonts at default weights are an explicit anti-"vibecoded" tell. Do not reintroduce them.
 - **Technical/Data:** *JetBrains Mono*, tabular "ledger numerals". Used for code blocks, KPI/data values, statistics, and technical labeling.
 
 ---

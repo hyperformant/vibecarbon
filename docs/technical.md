@@ -367,7 +367,7 @@ All admin dashboards are protected by a unified Single Sign-On (SSO) system usin
 | Traefik Dashboard | http://traefik.localhost | https://traefik.yourdomain.com |
 | Grafana | http://grafana.localhost | https://grafana.yourdomain.com |
 
-(n8n and Metabase are parked add-ons — their dashboards only exist on projects that installed them before parking; same URL pattern as above.)
+(n8n and Metabase are parked add-ons: their dashboards only exist on projects that installed them before parking; same URL pattern as above.)
 
 #### Built-in Admin Pages
 
@@ -534,7 +534,7 @@ vibecarbon deploy prod -y
 
 **x86-64 (amd64) only.** Vibecarbon builds and publishes every image for
 `linux/amd64` and provisions only x86 server types. Hetzner's ARM line (`CAX*`)
-is not supported and is rejected by `deploy`, `scale`, and `failover` — see
+is not supported and is rejected by `deploy`, `scale`, and `failover`. See
 [deploy-hetzner.md](./deploy-hetzner.md#x86-64-only) for the rationale and the
 migration path for an environment that predates this.
 
@@ -596,14 +596,14 @@ Both `k8s-ha` and `compose-ha` run two regions with Postgres streaming
 replication and manual, one-command failover, but their standby
 architectures are not the same:
 
-- **`k8s-ha`** uses a cost-optimized **pilot-light standby** — described in
-  full below — with a 2-node idle floor, a cold (`replicas: 0`) app tier, and
+- **`k8s-ha`** uses a cost-optimized **pilot-light standby** (described in
+  full below) with a 2-node idle floor, a cold (`replicas: 0`) app tier, and
   failover that provisions app-tier capacity via the IaC layer before
   promoting.
 - **`compose-ha`** keeps its existing **always-warm standby**: two always-on
   VPSs, both running the full stack, with continuous streaming replication.
   Its failover path (`failoverComposeHA`) promotes the standby database, moves
-  the wal-g write-guard (see below), and repoints DNS — there is no idle floor,
+  the wal-g write-guard (see below), and repoints DNS. There is no idle floor,
   no worker provisioning, and no `-server-type` step, because nothing on the
   standby is cold.
 
@@ -617,9 +617,9 @@ The standby cluster is deployed as a cost-optimized, non-serving replica designe
 
 **Idle State:**
 - **2 nodes only:** master (control plane, ingress, cert-manager, replication gateway, in-cluster registry) + dedicated supabase node (the streaming replica database)
-- Same server types as the primary's master and supabase nodes — cost savings come from eliminating workers and the warm app tier, not from downsizing
+- Same server types as the primary's master and supabase nodes: cost savings come from eliminating workers and the warm app tier, not from downsizing
 - **Cold app tier, declaratively:** All app-tier workloads (the app Deployment, `auth`, `rest`, `realtime`, `storage`, `meta`, `kong`, `studio`, `imgproxy`, cluster-autoscaler) are set to `replicas: 0`; the only active workloads are the db StatefulSet and replication gateway
-- **Seeded on first boot:** The standby database is initialized by a seed container running `pg_basebackup` at deploy time, booting as a live streaming replica — the 200s stage/swap/reboot reseed cycle is eliminated
+- **Seeded on first boot:** The standby database is initialized by a seed container running `pg_basebackup` at deploy time, booting as a live streaming replica. The 200s stage/swap/reboot reseed cycle is eliminated
 
 **Deploy as role reconciler:**
 Re-running `vibecarbon deploy` after any failover converges each cluster to its current role:
@@ -630,19 +630,19 @@ Re-running `vibecarbon deploy` after any failover converges each cluster to its 
 
 | Scenario | RPO | RTO | Notes |
 |---|---|---|---|
-| **Planned switchover** | **Zero** — quiesce-before-promote, enforced by a pre-promotion WAL catch-up gate and evidenced per run by the e2e continuity check | Outage-side ≈ **1m 2s** measured¹ + DNS propagation (≤ 60s record TTL); full operation **3m 25s** measured¹ | Provisioning happens before the outage window opens |
-| **Unplanned failover** | Replication lag at failure — seconds when healthy, visible live in `vibecarbon status` | Command-side ≈ **3m 25s** measured¹ (provisioning inside the outage) + failure-detection time + DNS propagation | Clean abort + convergent retry on provisioning failure |
+| **Planned switchover** | **Zero**: quiesce-before-promote, enforced by a pre-promotion WAL catch-up gate and evidenced per run by the e2e continuity check | Outage-side ≈ **1m 2s** measured¹ + DNS propagation (≤ 60s record TTL); full operation **3m 25s** measured¹ | Provisioning happens before the outage window opens |
+| **Unplanned failover** | Replication lag at failure: seconds when healthy, visible live in `vibecarbon status` | Command-side ≈ **3m 25s** measured¹ (provisioning inside the outage) + failure-detection time + DNS propagation | Clean abort + convergent retry on provisioning failure |
 | **Idle** | — | — | Standby ≈ 2 small nodes; no warm app tier; no crash-loop fragility |
 
 ¹ Single datapoint from the first CI record run (2026-07-18); breakdown and
 provenance in the measured-figures block below. These are measured figures,
-**not guaranteed Service Level Objectives** — your times vary with region
+**not guaranteed Service Level Objectives**. Your times vary with region
 capacity, image sizes, and DNS caching.
 
 **Publication gate (house rule):** HA claims stay pinned to the **latest
 green e2e matrix**. The measured-figures block is refreshed only from a green
 `k8s-ha` run whose `failover` and `verify-failover` steps and
-`replication_failover_continuity` check all passed — the renderer
+`replication_failover_continuity` check all passed. The renderer
 (`pnpm test:e2e:rto-rpo`) refuses anything less, and flags single-scenario
 runs so the publisher confirms the latest full matrix before shipping the
 claim.
@@ -674,9 +674,9 @@ pnpm test:e2e:rto-rpo -- --run latest --db <path-to-e2e.db> \
   --regions "<primary→standby>" --gh-run <actions-run-id> --write
 ```
 
-which re-renders the block above in place. The full metric mapping — which
+which re-renders the block above in place. The full metric mapping (which
 `steps` / `perf_substep` / `verifications` rows back each figure, with the
-equivalent raw SQL — lives in [docs/rto-rpo.md](./rto-rpo.md).
+equivalent raw SQL) lives in [docs/rto-rpo.md](./rto-rpo.md).
 
 ### Observability & Operations (k8s-ha)
 
@@ -690,27 +690,27 @@ vibecarbon failover <env>
 
 Follows the ordering principle **secure capacity first, cross the point of
 no return last**: provisions workers via the IaC layer first (0 → N,
-capacity secured before anything irreversible happens), then — in planned
-mode — quiesces the old primary, reseeds and promotes the standby database,
+capacity secured before anything irreversible happens), then, in planned
+mode, quiesces the old primary, reseeds and promotes the standby database,
 moves the wal-g write-guard, scales up the app tier, and repoints DNS.
 (Unplanned mode skips the quiesce step; the primary is already unreachable.)
 The command:
-- Is fully convergent — rerunning it resumes instead of duplicating
+- Is fully convergent: rerunning it resumes instead of duplicating
 - Accepts `-server-type <id>` to retry provisioning on different hardware during capacity events
 - Fails gracefully: provisioning failures abort cleanly with the primary untouched (convergent re-run is safe)
 
 **The wal-g write-guard moves with the role (both HA modes).** `WALG_ROLE` is
 the backup write-guard: `standby` makes WAL archiving and base backups no-op so
 only one node ever writes the single canonical `WALG_S3_PREFIX`. It is rendered
-at deploy time, so failover re-renders it directly — `primary` onto the promoted
-node and, best-effort, `standby` onto the demoted one — and then recreates the
+at deploy time, so failover re-renders it directly (`primary` onto the promoted
+node and, best-effort, `standby` onto the demoted one) and then recreates the
 database container, because container environment is fixed at container-create
 time (writing `.env` or patching a StatefulSet alone changes nothing in the
 running process). The failover then re-runs the deploy-time backup audit against
 the promoted node in `requirePrimary` mode, where a lingering
 `WALG_ROLE=standby` is a failure rather than the legitimate skip it is at deploy
 time. If that cannot be proven, the failover still completes (promotion, DNS and
-the persisted role swap all stand — an aborted post-promotion failover would be
+the persisted role swap all stand: an aborted post-promotion failover would be
 worse) but the command exits non-zero with the remediation, so dead backups are
 never reported as a clean success.
 
@@ -720,9 +720,9 @@ never reported as a clean success.
 
 ### Error Handling (k8s-ha)
 
-- **Seed init failure at deploy** (primary unreachable, bad credentials): the db pod fails its init container, the deploy verification fails, and the deploy fails loud. Retry `vibecarbon deploy` — no partial states to clean.
+- **Seed init failure at deploy** (primary unreachable, bad credentials): the db pod fails its init container, the deploy verification fails, and the deploy fails loud. Retry `vibecarbon deploy`: no partial states to clean.
 - **Provisioning failure at failover:** The provisioning step attempts to converge workers to 0 on abort; if that also fails, the exact resource state is reported. The primary is untouched. Re-run `vibecarbon failover` (optionally with a different `-server-type`) to retry.
-- **Promotion failure:** The existing abort-before-anything-moves check stands — if promotion is not confirmed, the failover stops before any other resource moves.
+- **Promotion failure:** The existing abort-before-anything-moves check stands. If promotion is not confirmed, the failover stops before any other resource moves.
 - Every failure path reports what state the world is in and what the operator's next command should be.
 
 ---

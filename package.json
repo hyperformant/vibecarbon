@@ -1,7 +1,7 @@
 {
   "name": "vibecarbon",
   "version": "0.41.0",
-  "description": "Full-stack apps in minutes — auth, billing, security, AI-guardrails, and powerful automations built-in.",
+  "description": "Launch full-stack apps in minutes on the VPS provider of your choice. Auth, billing, and AI-guardrails built-in. Automated backup, restore, scale, replication, and failover.",
   "type": "module",
   "bin": {
     "vibecarbon": "./src/cli.js"

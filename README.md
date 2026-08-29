@@ -7,7 +7,7 @@
 
 <p align="center"><strong>Build the next big thing.</strong></p>
 
-<p align="center">Full-stack apps in minutes. Auth, billing, security, AI-guardrails, and powerful automations built-in.</p>
+<p align="center">Launch full-stack apps in minutes on the VPS provider of your choice. Auth, billing, and AI-guardrails built-in. Automated backup, restore, scale, replication, and failover.</p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/npm/v/vibecarbon?color=0a7ea4&label=npm" alt="npm version" /></a>
@@ -30,7 +30,7 @@ Vibecarbon is a full-stack SaaS starter that combines React 19, Vite, Tailwind v
 
 Skip the choice between vendor lock-in and DIY infrastructure. Ship an application with authentication, billing, teams, email, blog, docs, and i18n already wired up, then put it in production without a dedicated DevOps engineer.
 
-It's built for the way software gets written now: AI agents work inside mandatory guardrails — row-level security on every table, secret scanning before anything is committed, confirmation gates on destructive operations — so building fast never has to mean shipping leaks.
+It's built for the way software gets written now: AI agents work inside mandatory guardrails (row-level security on every table, secret scanning before anything is committed, confirmation gates on destructive operations), so building fast never has to mean shipping leaks.
 
 Vibecarbon handles Docker Compose and Kubernetes, high availability with one-command failover, worker scaling, and automated backups. The complete stack stays self-contained under one flag you chose, yours to keep, move, or delete. Choose the provider underneath, and choose again whenever you want: your infrastructure choice stays reversible.
 
@@ -109,7 +109,7 @@ vibecarbon destroy
 ```
 
 > [!TIP]
-> Every command takes `-h` for detailed usage — try `vibecarbon deploy -h`.
+> Every command takes `-h` for detailed usage: try `vibecarbon deploy -h`.
 
 ---
 
@@ -119,7 +119,7 @@ vibecarbon destroy
 vibecarbon <command> [options]
 ```
 
-### Dev — create, run, and evolve your project
+### Dev: create, run, and evolve your project
 
 | Command | What it does |
 | :------ | :----------- |
@@ -127,31 +127,31 @@ vibecarbon <command> [options]
 | **`up`** | Start the local development environment |
 | **`down`** | Stop the local development environment |
 | **`status`** | Show project and deployment status |
-| **`reset`** | Reset the local environment — **removes all data** |
-| **`configure`** | Configure external services and settings — billing, OAuth, SMTP, CI/CD, globalization, and more |
+| **`reset`** | Reset the local environment (**removes all data**) |
+| **`configure`** | Configure external services and settings: billing, OAuth, SMTP, CI/CD, globalization, and more |
 | **`add <feature>`** | Add features (observability, redis) |
 | **`remove <feature>`** | Remove features from a project |
 | **`upgrade`** | Upgrade infrastructure files to the latest template |
 
-### Deploy — take an environment to the cloud (and back)
+### Deploy: take an environment to the cloud (and back)
 
 | Command | What it does |
 | :------ | :----------- |
-| **`deploy [environment]`** | Deploy an environment — interactive picker for mode and region |
+| **`deploy [environment]`** | Deploy an environment (interactive picker for mode and region) |
 | **`destroy [environment]`** | Tear down a cloud environment |
 | **`backup [environment]`** | Create, list, or download database backups |
 | **`restore [environment]`** | Restore the database from a backup |
 | **`failover [environment]`** | Initiate failover to the standby region |
 | **`scale [environment]`** | Scale worker nodes and instance sizes |
 
-### License — unlock HA + Kubernetes
+### License: unlock HA + Kubernetes
 
 | Command | What it does |
 | :------ | :----------- |
 | **`activate [key]`** | Activate a Fullerene license key (unlocks HA + k8s modes) |
 | **`deactivate`** | Deactivate the current license |
 
-### Debug — look under the hood
+### Debug: look under the hood
 
 | Command | What it does |
 | :------ | :----------- |
@@ -161,7 +161,7 @@ vibecarbon <command> [options]
 | **`access [subcommand]`** | Manage the SSH + k8s-API operator-CIDR allowlist |
 
 > [!WARNING]
-> `reset` and `destroy` are destructive — both are confirmation-gated, but read the prompt before you say yes.
+> `reset` and `destroy` are destructive. Both are confirmation-gated, but read the prompt before you say yes.
 
 ---
 
@@ -242,7 +242,7 @@ Same family, different starting point. If your app already exists, those tools a
 One CLI, four deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/architecture.svg" alt="vibecarbon deploy fans out to four scenarios — compose (one server, free), compose-ha (primary + standby, streaming replication), k8s (k3s cluster, autoscaling workers), and k8s-ha (multi-region, one-command failover) — all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway" width="880" />
+  <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/architecture.svg" alt="vibecarbon deploy fans out to four scenarios: compose (one server, free), compose-ha (primary + standby, streaming replication), k8s (k3s cluster, autoscaling workers), and k8s-ha (multi-region, one-command failover), all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway" width="880" />
 </p>
 
 ---
@@ -263,7 +263,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean is fully supported for all four modes — compose, compose-ha, k8s, and k8s-ha — with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose` and `compose-ha`, with the same CLI and e2e gate — the remaining tiers aren't built for them yet.
+DigitalOcean is fully supported for all four modes (compose, compose-ha, k8s, and k8s-ha) with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose` and `compose-ha`, with the same CLI and e2e gate. The remaining tiers aren't built for them yet.
 
 ### Integration Guides
 

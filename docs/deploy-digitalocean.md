@@ -1,6 +1,6 @@
 # Vibecarbon: DigitalOcean Deployment
 
-Deploying to DigitalOcean is fully automated by the CLI. You do not create Droplets, configure Cloud Firewalls, edit compose files, or set up replication by hand — one command provisions the infrastructure, deploys the app, and wires DNS + TLS:
+Deploying to DigitalOcean is fully automated by the CLI. You do not create Droplets, configure Cloud Firewalls, edit compose files, or set up replication by hand. One command provisions the infrastructure, deploys the app, and wires DNS + TLS:
 
 ```bash
 vibecarbon deploy -mode compose  # or -mode compose-ha / k8s / k8s-ha
@@ -24,12 +24,12 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 
 ## Prerequisites
 
-1. **A DigitalOcean account** — [sign up](https://cloud.digitalocean.com/registrations/new)
-2. **A DigitalOcean Personal Access Token** — Control Panel → API → Tokens/Keys (Read & Write). Stored as `DIGITALOCEAN_TOKEN` or `DO_TOKEN`.
-3. **Spaces Access Key & Secret Key** — Control Panel → API → Spaces Access Keys. Used for the dedicated Pulumi state bucket and `wal-g` S3 database backups.
+1. **A DigitalOcean account**: [sign up](https://cloud.digitalocean.com/registrations/new)
+2. **A DigitalOcean Personal Access Token**: Control Panel → API → Tokens/Keys (Read & Write). Stored as `DIGITALOCEAN_TOKEN` or `DO_TOKEN`.
+3. **Spaces Access Key & Secret Key**: Control Panel → API → Spaces Access Keys. Used for the dedicated Pulumi state bucket and `wal-g` S3 database backups.
 4. **A domain** you control, for the application URL and Let's Encrypt TLS certificates.
-5. **Docker running locally** — images are built on your machine and pushed over SSH (`local` build mode).
-6. **A Fullerene license for advanced modes** — single-server Docker Compose deploys are free on Graphite; `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license.
+5. **Docker running locally**: images are built on your machine and pushed over SSH (`local` build mode).
+6. **A Fullerene license for advanced modes**: single-server Docker Compose deploys are free on Graphite; `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license.
 
 ---
 
@@ -42,10 +42,10 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 | `k8s` | k3s cluster (master Droplet + worker Droplets + dedicated Supabase Droplet) with DO CSI volumes |
 | `k8s-ha` | Two k3s clusters in two regions (primary + pilot-light standby with a zeroed app tier), WireGuard replication transport, Postgres streaming replication, one-command failover |
 
-> `k8s-ha` (pilot-light standby cluster) is fully supported: the standby is the same k8s stack provisioned in a second region (`-standby-region`), with failover as a DNS flip between the two clusters' own reserved IPs. The dormant standby serves a self-signed certificate by design (single-issuer policy — DigitalOcean's DNS-01 solver keys challenge records by name, so only the primary-role cluster holds an active Let's Encrypt certificate); promotion re-points it automatically.
+> `k8s-ha` (pilot-light standby cluster) is fully supported: the standby is the same k8s stack provisioned in a second region (`-standby-region`), with failover as a DNS flip between the two clusters' own reserved IPs. The dormant standby serves a self-signed certificate by design (single-issuer policy: DigitalOcean's DNS-01 solver keys challenge records by name, so only the primary-role cluster holds an active Let's Encrypt certificate); promotion re-points it automatically.
 
 Server sizes can be selected interactively during deploy or pre-configured in `.vibecarbon.json`:
-- Standard Droplets: `s-2vcpu-4gb` (minimum for compose/k3s nodes — the 4 GB floor is enforced by the size picker)
+- Standard Droplets: `s-2vcpu-4gb` (minimum for compose/k3s nodes: the 4 GB floor is enforced by the size picker)
 - Larger workloads: `s-4vcpu-8gb` for PostgreSQL / Supabase nodes
 
 ---

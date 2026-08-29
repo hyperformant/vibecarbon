@@ -1,8 +1,8 @@
-# Asserted-Attribution Burn-Down — proof debts for every unproven "external" claim
+# Asserted-Attribution Burn-Down: proof debts for every unproven "external" claim
 
 From the three-way attribution audit (48 commits, 13 RCA docs, 62
-mitigation sites). Of 25 external attributions in commit history, 15 were **asserted** —
-from error text, timing adjacency, or "recurrence stopped after retry" — and five asserted
+mitigation sites). Of 25 external attributions in commit history, 15 were **asserted**
+(from error text, timing adjacency, or "recurrence stopped after retry"), and five asserted
 claims have already flipped to *ours* once evidence arrived (5a82331d, 8e45726c, 3dd719ac,
 0fbb296f, d592ec6f). This spec is the proof-debt ledger that
 `docs/mitigations.yml` (enforced by `tests/unit/lib/mitigation-attribution-census.test.ts`)
@@ -21,18 +21,18 @@ residual. Classes below are frozen at their audited size by the census.
 
 ## Debts
 
-### 1. `fresh-server-dns-settle` — highest priority (self-flagged)
+### 1. `fresh-server-dns-settle`: highest priority (self-flagged)
 
 **Claim:** fresh servers need ~30s for public DNS resolution to settle; the
 `DNS_NOT_SETTLED_RETRY_DELAYS_MS` ladder (45s cumulative) rides it out.
-**Why asserted:** the sizing commit (3dd719ac) itself retracts its citation — the ~30s
+**Why asserted:** the sizing commit (3dd719ac) itself retracts its citation: the ~30s
 figure belongs to the private-NIC (enp7s0) dhcpcd race, a different interface and
 subsystem than the public DNS failures it was sized against. "Pending a dedicated RCA"
 that never ran.
 **Experiment:** on the next kept rig, at first boot poll `resolvectl status` +
 `getent hosts` against both interfaces every 2s and log timestamps; correlate with
 cloud-init phase. One evening on a kept rig answers which subsystem, what window, and
-whether the ladder shape is right — or whether our cloud-init ordering (ours) delays
+whether the ladder shape is right, or whether our cloud-init ordering (ours) delays
 resolver readiness.
 
 ### 2. `ssh-transport-blips`
@@ -40,18 +40,18 @@ resolver readiness.
 **Claim:** scp/ssh "banner exchange" and connection-timeout blips are network transients.
 **Why asserted:** evidence is error text plus same-environment adjacency (c0773fb0). Two
 family members are already *proven ours* (MaxStartups penalty under our verify fan-out;
-CPU-starved sshd under our concurrent reconcile, 7d045250) — the open uplink-semaphore
+CPU-starved sshd under our concurrent reconcile, 7d045250). The open uplink-semaphore
 design (an earlier ledger) says the class-level answer may be our concurrency.
 **Experiment:** stamp `sshd_config` `LogLevel VERBOSE` on one e2e rig and count
 MaxStartups drops vs genuine timeouts across a matrix night; correlate blip timestamps
 with our own fan-out phases from the perf markers.
 
-**SETTLED 2026-08-23 — OURS, root-fixed.** The experiment above was answered by
+**SETTLED 2026-08-23: OURS, root-fixed.** The experiment above was answered by
 a different route: making the remote-build retry ladder capture ssh evidence at
 exhaustion produced `kex_exchange_identification: read: Connection reset by
 peer` on its first live outing, and the same signature then appeared on three
 independent subsystems in one leg (BuildKit dial-stdio, the admin-user tunnel,
-a verification check's own probe) — sshd refusing a connection BURST at the
+a verification check's own probe): sshd refusing a connection BURST at the
 door, exactly the MaxStartups mechanism the two proven-ours family members
 already pointed at. Root fix: every provisioned node now installs
 `/etc/ssh/sshd_config.d/99-vibecarbon-concurrency.conf` (MaxStartups 100:30:200,
@@ -62,13 +62,13 @@ sshd-provisioned leg, every historically-failing step passing.
 
 Owed to close the registry side: the transport retry ladders still exist, and
 an `ours` class may not carry mitigation sites (rule R7). Removing the ladders
-is deliberate follow-up work — after a few more green nights prove the fix
-holds — at which point the registry attribution flips with them.
+is deliberate follow-up work (after a few more green nights prove the fix
+holds), at which point the registry attribution flips with them.
 
 ### 3. `provider-api-network-transients`
 
 **Claim:** generic fetch/HTTP 5xx/socket errors against provider APIs are provider-side
-blips. **Why asserted:** the founding taxonomy (6afff1d7) was a-priori — no incident
+blips. **Why asserted:** the founding taxonomy (6afff1d7) was a-priori, with no incident
 corpus; the widest consumer (`fetchWithRetry`, 119 call sites) has never had its retry
 outcomes measured; 8f7b4190's "Hetzner unreachable >50s" evidence was circular.
 **Experiment:** log every retry fire with reason + outcome (the perf-sample-history
@@ -80,7 +80,7 @@ succeed are dead weight; reasons that cluster on our fan-out phases are ours.
 
 **Claim:** wal-g audit blips absorbed by `WALG_AUDIT_RETRY_DELAYS_MS` are storage-side.
 **Why asserted:** inferred from wordings; never isolated from the known staleness class
-(now proven) or from our own restore-path bucket recreation (b924bac2 — ours).
+(now proven) or from our own restore-path bucket recreation (b924bac2, ours).
 **Experiment:** the state-op counter from the Pulumi serialization experiment (§3 of the
 the state-backend consistency spec) covers this: if wal-g blips track our state-op volume, they are the same
 class and ours to reduce.
@@ -107,7 +107,7 @@ provider infrastructure.
 ### 7. `hetzner-quota-release-lag` → folded into `quota-churn-under-parallel-load` (ours)
 
 The `RESOURCE_LIMIT_DELAYS_MS` ladder in hetzner.js rides out 30–90s Primary-IP release
-lag **under our own parallel teardown** — the commit says so (iter-reliab).
+lag **under our own parallel teardown**. The commit says so (iter-reliab).
 Registered as `ours` from day one; the open question is only whether serial-matrix
 discipline (already standing advice) makes the ladder dead code. Count its fires.
 
