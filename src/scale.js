@@ -1864,6 +1864,15 @@ async function scaleVerifyK8sReady(ctx) {
             '--for=condition=Ready',
             'pods',
             '--all',
+            // Completed CronJob pods (the in-cluster backup job) never
+            // report Ready, and `wait --all` blocks on them for the whole
+            // budget — a time-of-day flake that fires only when a run
+            // crosses the backup schedule during scale (e4 2026-08-29:
+            // every pod 1/1 Running, one backup-* 0/1 Completed, 10-min
+            // timeout). Terminal-phase pods are done, not not-ready.
+            // phase!=Succeeded/Failed rather than phase=Running so Pending
+            // pods still coming up are correctly waited on.
+            '--field-selector=status.phase!=Succeeded,status.phase!=Failed',
             `--timeout=${WAIT_TIMEOUT_SEC}s`,
           ],
           { silent: true },
