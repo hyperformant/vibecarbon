@@ -56,11 +56,22 @@
     "supabase",
     "saas",
     "starter",
-    "boilerplate"
+    "boilerplate",
+    "saas-starter",
+    "starter-kit",
+    "self-hosted",
+    "fair-source",
+    "devops",
+    "kubernetes",
+    "docker-compose",
+    "cli",
+    "full-stack",
+    "postgres",
+    "ai-guardrails"
   ],
   "author": "Brandon Powers",
   "license": "FSL-1.1-MIT",
-  "homepage": "https://vibecarbon.com",
+  "homepage": "https://vibecarbon.com?utm_source=npm&utm_medium=listing&utm_campaign=launch2026",
   "repository": {
     "type": "git",
     "url": "https://github.com/hyperformant/vibecarbon.git"
