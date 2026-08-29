@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Link } from 'react-router';
 
 import { PROJECT_DISPLAY_NAME, Wordmark } from '@/components/Logo';
 import { useDocsVisibility } from '@/hooks/api';
@@ -28,6 +29,8 @@ interface FooterProps {
   columns?: FooterColumnProps[];
   copyright?: string;
   policies?: FooterLink[];
+  /** Extra content on the right side of the bottom bar (e.g. a studio credit). */
+  bottomExtra?: ReactNode;
   className?: string;
 }
 
@@ -65,6 +68,7 @@ export default function FooterSection({
     { text: 'Privacy Policy', href: '/privacy' },
     { text: 'Terms of Service', href: '/terms' },
   ],
+  bottomExtra,
   className,
 }: FooterProps) {
   const docsVisibility = useDocsVisibility();
@@ -90,15 +94,27 @@ export default function FooterSection({
             {visibleColumns.map((column) => (
               <FooterColumn key={column.title}>
                 <h3 className="text-md pt-1 font-semibold">{column.title}</h3>
-                {column.links.map((link) => (
-                  <a
-                    key={`${link.href}-${link.text}`}
-                    href={link.href}
-                    className="text-muted-foreground text-sm"
-                  >
-                    {link.text}
-                  </a>
-                ))}
+                {column.links.map((link) =>
+                  link.href.startsWith('/') && !link.href.startsWith('//') ? (
+                    <Link
+                      key={`${link.href}-${link.text}`}
+                      to={link.href}
+                      className="text-muted-foreground hover:text-foreground text-sm transition-colors"
+                    >
+                      {link.text}
+                    </Link>
+                  ) : (
+                    <a
+                      key={`${link.href}-${link.text}`}
+                      href={link.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-muted-foreground hover:text-foreground text-sm transition-colors"
+                    >
+                      {link.text}
+                    </a>
+                  )
+                )}
               </FooterColumn>
             ))}
           </FooterContent>
@@ -110,6 +126,7 @@ export default function FooterSection({
                   {policy.text}
                 </a>
               ))}
+              {bottomExtra}
             </div>
           </FooterBottom>
         </Footer>

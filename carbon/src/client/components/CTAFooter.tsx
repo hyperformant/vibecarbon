@@ -8,24 +8,14 @@ interface CTAFooterProps {
   gradient?: string;
   /** CTA content rendered above the footer links */
   children: ReactNode;
-  /** Footer link elements */
-  footerLinks: ReactNode;
-  /**
-   * 'row' (default): wordmark + links on one line — right for a handful of
-   * links. 'columns': footerLinks renders as a full-width block (link
-   * columns), with the wordmark and bottomRow on a separate baseline below.
-   */
-  layout?: 'row' | 'columns';
-  /** Extra content on the baseline row (columns layout only). */
-  bottomRow?: ReactNode;
+  /** Footer link elements; omit to render the CTA band with no link row. */
+  footerLinks?: ReactNode;
 }
 
 export function CTAFooter({
   gradient = 'bg-gradient-to-br from-primary via-primary/80 to-primary/60',
   children,
   footerLinks,
-  layout = 'row',
-  bottomRow,
 }: CTAFooterProps) {
   const ref = useRef<HTMLElement>(null);
   const prefersReducedMotion = useReducedMotion();
@@ -50,16 +40,9 @@ export function CTAFooter({
         {children}
       </div>
 
-      {/* Footer */}
-      {layout === 'columns' ? (
-        <div className="relative mx-auto max-w-7xl px-6 pt-4 pb-10">
-          {footerLinks}
-          <div className="mt-12 flex flex-col items-center justify-between gap-4 border-t border-white/10 pt-8 sm:flex-row">
-            <Wordmark size="sm" forceTheme="dark" />
-            {bottomRow}
-          </div>
-        </div>
-      ) : (
+      {/* Footer link row — only when the page brings links (a page using the
+          standalone FooterSection omits this entirely). */}
+      {footerLinks && (
         <div className="relative mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 px-6 py-8 sm:flex-row">
           <Wordmark size="sm" forceTheme="dark" />
           {footerLinks}
