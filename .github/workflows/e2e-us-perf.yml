@@ -588,6 +588,13 @@ jobs:
       - name: File or update the e2e-red issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job deliberately has NO checkout (it only consumes the API
+          # and artifacts), so `gh issue`/`gh label` cannot infer the repo
+          # from git context — without GH_REPO they die with "failed to run
+          # git: fatal: not a git repository". Run 33252884427's escalation
+          # was lost to exactly that: the DO leg went red and the issue
+          # never appeared.
+          GH_REPO: ${{ github.repository }}
           # Dispatch inputs enter via env, never interpolated into the
           # script body — `scenarios` is free text from the dispatch form.
           INPUT_PROVIDER: ${{ inputs.provider }}

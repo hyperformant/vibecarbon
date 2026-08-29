@@ -109,4 +109,13 @@ describe('e2e-us-perf.yml red-leg escalation (the `escalate` job)', () => {
     expect(JSON.stringify(step?.env ?? {})).toContain('inputs.scenarios');
     expect(step?.run).not.toContain('${{');
   });
+
+  it('pins GH_REPO — the job has no checkout, so gh cannot infer the repo from git', () => {
+    // Run 33252884427: the first real red this job ever saw died at
+    // `gh issue list` with "failed to run git: fatal: not a git repository"
+    // and the escalation was lost. GH_REPO is how repo context reaches gh
+    // in a checkout-less job.
+    const step = loadJobs().escalate.steps?.find((s) => s.run?.includes('gh issue'));
+    expect(String(step?.env?.GH_REPO ?? '')).toContain('github.repository');
+  });
 });
