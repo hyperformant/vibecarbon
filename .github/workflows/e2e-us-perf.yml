@@ -551,3 +551,97 @@ jobs:
           # Pulumi honors GITHUB_TOKEN for exactly this.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx tsx tests/e2e/metrics/publish-perf-pr.ts ci-results/
+
+  escalate:
+    name: Escalate red legs
+    needs: matrix
+    # For a matrix job, `needs.matrix.result` is the AGGREGATE — 'failure'
+    # whenever ANY leg failed (fail-fast: false never converts a red leg to
+    # 'cancelled'). That aggregate is exactly the escalation trigger; the
+    # per-leg attribution comes from the jobs API inside the step.
+    #
+    # Why this job exists: this workflow is dispatch-only, so a red run is a
+    # red row in a tab nobody revisits. On 2026-08-23 the DigitalOcean leg
+    # failed four consecutive dispatches (~5.5 hours of someone actively
+    # iterating — runs 32653854612..32670715722) and produced zero durable
+    # artifacts: no issue, no note, nothing. The investigation evaporated
+    # with that session, and the reds sat undiscovered for six days. This
+    # job makes that structurally impossible: every completed run with a
+    # failed E2E leg files (or comments on) the open `e2e-red` issue, with
+    # each red leg's scenario-level log tail baked in.
+    if: always() && needs.matrix.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      # Same-run artifact download (download-artifact@v8) and the
+      # runs/<id>/jobs listing both authenticate with GITHUB_TOKEN.
+      actions: read
+    steps:
+      # The legs' own artifacts carry the tee'd ci-batch-<provider>.log —
+      # already secret-scrubbed by the legs' scrub step, so tails are safe
+      # to paste into a public issue.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: e2e-results-*
+          path: ci-results/
+
+      - name: File or update the e2e-red issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Dispatch inputs enter via env, never interpolated into the
+          # script body — `scenarios` is free text from the dispatch form.
+          INPUT_PROVIDER: ${{ inputs.provider }}
+          INPUT_SCENARIOS: ${{ inputs.scenarios }}
+          INPUT_REGIONS: ${{ inputs.regions }}
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # Leg names are `E2E (<provider>)` (the matrix job's `name:`) —
+          # anything else (publish-perf, this job) is not a leg.
+          failed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --paginate --jq '.jobs[] | select(.conclusion == "failure") | .name' \
+            | sed -n 's/^E2E (\(.*\))$/\1/p')
+          if [ -z "$failed" ]; then
+            echo "aggregate result is failure but no E2E leg concluded 'failure' — nothing leg-shaped to escalate"
+            exit 0
+          fi
+          body=$(mktemp)
+          {
+            echo "**Red leg(s):** $(echo "$failed" | paste -sd, -)"
+            echo "**Run:** ${run_url}"
+            echo "**Ref:** \`${GITHUB_REF_NAME}\` @ ${GITHUB_SHA}"
+            echo "**Dispatch:** provider=\`${INPUT_PROVIDER}\` scenarios=\`${INPUT_SCENARIOS:-(provider defaults)}\` regions=\`${INPUT_REGIONS}\`"
+            echo
+            for p in $failed; do
+              echo "### ${p} — log tail"
+              # find, not a fixed path: download-artifact nests each
+              # artifact under its own name, and publish-perf-pr.ts's
+              # flattened-layout fallback exists because that nesting has
+              # shifted across action majors before.
+              log=$(find ci-results -name "ci-batch-${p}.log" -print -quit || true)
+              if [ -n "$log" ]; then
+                echo '````'
+                tail -n 60 "$log"
+                echo '````'
+              else
+                echo "_no ci-batch log artifact for this leg (died before the runner tee started?) — see the run's job log._"
+              fi
+              echo
+            done
+          } > "$body"
+          # One open e2e-red issue at a time: repeat reds comment on it
+          # (four reds in a day = one issue + three comments, a durable
+          # timeline), not four fresh issues.
+          gh label create e2e-red \
+            --description "Automated: an e2e dispatch completed with a failed leg" \
+            --color b60205 2>/dev/null || true
+          existing=$(gh issue list --label e2e-red --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$body"
+            echo "commented on open e2e-red issue #${existing}"
+          else
+            gh issue create \
+              --title "e2e-us-perf: red leg(s) in dispatched run" \
+              --label e2e-red --body-file "$body"
+          fi
