@@ -56,6 +56,8 @@ const WORKFLOWS = [
   join('.github', 'workflows', 'publish-db-image.yml'),
   join('.github', 'workflows', 'publish-images.yml'),
   join('.github', 'workflows', 'release.yml'),
+  // Scorecard runs prebuilt analysis actions only — no setup-node, no Node pin.
+  join('.github', 'workflows', 'scorecard.yml'),
   join('.github', 'workflows', 'test.yml'),
   join('carbon', '.github', 'workflows', 'deploy.yml'),
   join('carbon', '.github', 'workflows', 'vibecarbon-build.yml'),

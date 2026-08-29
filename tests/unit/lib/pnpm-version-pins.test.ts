@@ -83,6 +83,8 @@ const NON_PNPM_WORKFLOWS = [
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),
   join('.github', 'workflows', 'publish-images.yml'),
+  // Scorecard runs prebuilt analysis actions only — no Node, no pnpm.
+  join('.github', 'workflows', 'scorecard.yml'),
 ];
 
 /**
