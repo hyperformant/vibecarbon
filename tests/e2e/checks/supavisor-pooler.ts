@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import net from 'node:net';
 import type { VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
+import { resolveCheckIp } from './health.js';
 
 /**
  * Remote probe body, wrapped in single quotes by the compose exec wrapper —
@@ -163,13 +164,20 @@ export async function runSupavisorPoolerChecks(
   }
 
   // --- External reachability through the operator-scoped firewall ---------
+  // Dial the public-DNS-resolved address, not the name: a raw TCP dial has
+  // no Host/SNI to preserve, and net.connect-by-name sits on the OS
+  // resolver, which is not trustworthy for a record the run just created
+  // (e4 2026-08-29: an intermediary resolver cached NODATA mid-run for the
+  // zone's SOA minimum TTL). Fall back to the name if public DNS is
+  // unreachable — same policy as dnsSafeFetch.
+  const dialHost = (await resolveCheckIp(domain).catch(() => null)) ?? domain;
   for (const port of [5432, 6543] as const) {
     const dialElapsed = timer();
     let status: 'pass' | 'fail' = 'pass';
     let errorMessage: string | undefined;
     let answer: string | undefined;
     try {
-      answer = await dialTcp(domain, port);
+      answer = await dialTcp(dialHost, port);
       if (answer !== 'S' && answer !== 'N') {
         status = 'fail';
         errorMessage = `unexpected SSLRequest answer byte ${JSON.stringify(answer)} from ${domain}:${port}`;
