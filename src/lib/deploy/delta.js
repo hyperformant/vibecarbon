@@ -47,8 +47,7 @@ export function collectDeployDelta(envConfig) {
 
   const currentMessage = tryGit(['log', '--format=%s', '-1', 'HEAD']);
   const dirtyOutput = tryGit(['status', '--porcelain']);
-  const dirtyCount =
-    dirtyOutput === null ? null : dirtyOutput === '' ? 0 : dirtyOutput.split('\n').length;
+  const dirtyCount = dirtyOutput === null ? null : shipDirtyLines(dirtyOutput).length;
 
   let deployedMessage = null;
   let commitsAhead = null;
@@ -165,7 +164,29 @@ export function formatDeployDeltaLines(delta, style = {}) {
 }
 
 /** True when the working tree has uncommitted changes; null when unknowable. */
+/**
+ * Porcelain lines for files that actually ride along in a build. The CLI's own
+ * state — .vibecarbon.json and .vibecarbon/ — is excluded: the deploy itself
+ * rewrites .vibecarbon.json on completion (deployedAt/deployedCommit), so
+ * counting it would make every deploy after the first warn about "uncommitted
+ * files", and both paths are dockerignored — they never ship in the build
+ * these signals describe. Parsed by path, not column position: tryGit trims
+ * the output, which strips the FIRST line's leading status space.
+ */
+function shipDirtyLines(porcelain) {
+  return porcelain.split('\n').filter((line) => {
+    if (line.trim() === '') return false;
+    // "XY path", "XY \"quoted path\"", or a rename "XY old -> new" — the
+    // status columns are 1-2 non-space chars once trimming has collapsed them.
+    const path = line
+      .trim()
+      .replace(/^[^\s]{1,2}\s+/, '')
+      .replace(/^"/, '');
+    return !(path === '.vibecarbon.json' || path.startsWith('.vibecarbon/'));
+  });
+}
+
 export function workingTreeDirty() {
   const out = tryGit(['status', '--porcelain']);
-  return out === null ? null : out !== '';
+  return out === null ? null : shipDirtyLines(out).length > 0;
 }

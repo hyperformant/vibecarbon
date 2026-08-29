@@ -57,6 +57,34 @@ describe('collectDeployDelta', () => {
     expect(delta?.subjects).toHaveLength(3);
   });
 
+  it('excludes CLI-managed state (.vibecarbon.json, .vibecarbon/) from the dirty count', () => {
+    // The deploy itself rewrites .vibecarbon.json (deployedAt/deployedCommit),
+    // so counting it makes the ride-along warning fire on EVERY deploy after
+    // the first — and both paths are dockerignored, so they never ship in the
+    // build the warning is about.
+    gitResponds({
+      'rev-parse HEAD': 'ccccccc1111',
+      'log --format=%s -1 HEAD': 'head subject',
+      'status --porcelain': ' M .vibecarbon.json\n M .vibecarbon/known_hosts_prod\n M a.ts',
+      'log --format=%s -1 aaaaaaa0000': 'live subject',
+      'rev-list --count': '1',
+      'log --format=%h %s': 'ccccccc new one',
+    });
+    const delta = collectDeployDelta({ deployedCommit: 'aaaaaaa0000' });
+    expect(delta?.dirtyCount).toBe(1);
+  });
+
+  it('a tree dirty ONLY by CLI state counts as clean', () => {
+    gitResponds({
+      'rev-parse HEAD': 'ccccccc1111',
+      'log --format=%s -1 HEAD': 'head subject',
+      'status --porcelain': ' M .vibecarbon.json',
+      'log --format=%s -1 aaaaaaa0000': 'live subject',
+      'rev-list --count': '0',
+    });
+    expect(collectDeployDelta({ deployedCommit: 'aaaaaaa0000' })?.dirtyCount).toBe(0);
+  });
+
   it('degrades when the live commit is not in local history', () => {
     gitResponds({
       'rev-parse HEAD': 'ccccccc1111',
