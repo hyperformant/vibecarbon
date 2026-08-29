@@ -3,7 +3,6 @@
  * Logic for executing the deployment after configuration is gathered
  */
 
-import dns from 'node:dns';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
@@ -77,24 +76,18 @@ async function probePublicHealth(
   let lastErrorMessage = null;
   let lastErrorCause = null;
   // The probe runs IMMEDIATELY after we (re)write the DNS record, so the
-  // system resolver may still have a cached NXDOMAIN or a prior placeholder
-  // IP. Fetch then fails for the entire probe budget while curl (run once
-  // in the diagnostic dump much later) gets a fresh getaddrinfo and
-  // succeeds — the symptom that surfaced as "TypeError: fetch failed (121
-  // attempts)" while the diagnostic curl returned `{"status":"ok"}` in
-  // matrix #3 (k8s + k8s-ha). Pin the resolver to public DNS for the
-  // probe so we always see the freshest record. setServers is per-process
-  // and doesn't affect anything else in this orchestrator instance.
-  try {
-    dns.setDefaultResultOrder('verbatim');
-    dns.setServers(['1.1.1.1', '8.8.8.8']);
-  } catch {
-    // setServers can throw if called with an empty list or invalid IPs;
-    // both are caller errors, not runtime concerns. Fall through and use
-    // whatever resolver is currently configured.
-  }
-  // Lazy-load undici only when we need a custom-trust dispatcher — keeps the
-  // happy path zero-cost and avoids a hard dep on undici internals.
+  // system resolver may hold a stale entry for the name — worst of all a
+  // NEGATIVE one: any query made while the record didn't exist (a prior
+  // teardown window, a failure diagnostic's curl) is cached as NXDOMAIN for
+  // the zone's SOA minimum TTL (an hour on Hetzner DNS) by systemd-resolved
+  // and most home routers, and the probe then ENOTFOUNDs for its whole
+  // budget against a healthy deploy (e4 2026-08-28: 118 attempts while
+  // 1.1.1.1 served the record the entire time). `dns.setServers` CANNOT fix
+  // this — it only redirects `dns.resolve*()`, while fetch resolves via
+  // `dns.lookup()`/getaddrinfo (the probe carried exactly that no-op "fix"
+  // from matrix #3 until 2026-08-28). The real seam is the socket
+  // connector's `lookup` option: pin the probe's resolution to public DNS,
+  // with a system-resolver fallback for egress-filtered networks.
   //
   // CRITICAL: when we use undici's Agent we MUST also use undici's `fetch`,
   // not Node 24's `globalThis.fetch`. Node 24 ships its own bundled undici;
@@ -109,14 +102,15 @@ async function probePublicHealth(
   // LE staging roots (src/lib/deploy/staging-ca.js) — never a verification
   // opt-out, which would also wave through self-signed/expired/wrong-host
   // chains, the exact misconfigurations this probe exists to catch.
-  let dispatcher = null;
-  let fetchFn = fetch;
+  const undici = await import('undici');
+  const { makePublicDnsLookup } = await import('./public-dns-lookup.js');
+  const connectOpts = { lookup: makePublicDnsLookup() };
   if ((process.env.ACME_CA_SERVER || '').includes('staging')) {
-    const undici = await import('undici');
     const { stagingProbeCa } = await import('./staging-ca.js');
-    dispatcher = new undici.Agent({ connect: { ca: stagingProbeCa() } });
-    fetchFn = undici.fetch;
+    connectOpts.ca = stagingProbeCa();
   }
+  const dispatcher = new undici.Agent({ connect: connectOpts });
+  const fetchFn = undici.fetch;
   // Periodic progress logging: every 5 attempts, write a one-line summary
   // of the most recent failure class + lastStatus to stderr. Without this,
   // the only signal we get from a 5-min probe is the FINAL outcome — which

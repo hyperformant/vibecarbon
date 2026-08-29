@@ -882,6 +882,22 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     console.log(`  Scenario: ${mode} on ${dnsProvider} (${domain})`);
     console.log(`${'='.repeat(60)}\n`);
 
+    // Best-effort local resolver cache flush. The scenario's domain flips
+    // between existing and NXDOMAIN across runs, and systemd-resolved
+    // negative-caches NXDOMAIN for the zone's SOA minimum TTL (an hour on
+    // Hetzner DNS) — a stale entry seeded by a prior run's teardown window
+    // or failure diagnostics then breaks every system-resolver consumer
+    // (browser checks, psql, openssl) for the whole scenario. The deploy's
+    // own probe pins public DNS; the rest of the harness needs this flush.
+    // `resolvectl flush-caches` works unprivileged; absent/failing (macOS,
+    // no systemd) is fine — fail open.
+    try {
+      const { execFileSync } = await import('node:child_process');
+      execFileSync('resolvectl', ['flush-caches'], { stdio: 'ignore', timeout: 5_000 });
+    } catch {
+      /* no resolvectl or no systemd-resolved — nothing to flush */
+    }
+
     const scenarioConfig: ScenarioConfig = {
       mode: mode as DeployMode,
       dnsProvider,
