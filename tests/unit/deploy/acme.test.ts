@@ -64,10 +64,11 @@ describe('dnsChallengeEnv', () => {
     });
   });
 
-  it('selects DO_AUTH_TOKEN for digitalocean', () => {
+  it('selects DO_AUTH_TOKEN for digitalocean (plus its lego propagation tuning)', () => {
     expect(dnsChallengeEnv('digitalocean', 'do-tok')).toEqual({
       ACME_DNS_PROVIDER: 'digitalocean',
       DO_AUTH_TOKEN: 'do-tok',
+      DO_PROPAGATION_TIMEOUT: '300',
     });
   });
 
@@ -93,9 +94,15 @@ describe('dnsChallengeEnv', () => {
   });
 
   it('omits the token key when the token is missing (no literal undefined in .env)', () => {
-    for (const provider of Object.keys(LEGO_TOKEN_ENV)) {
-      expect(dnsChallengeEnv(provider)).toEqual({ ACME_DNS_PROVIDER: provider });
-      expect(dnsChallengeEnv(provider, '')).toEqual({ ACME_DNS_PROVIDER: provider });
+    for (const [provider, tokenEnvVar] of Object.entries(LEGO_TOKEN_ENV)) {
+      for (const token of [undefined, '']) {
+        const env = dnsChallengeEnv(provider, token) as Record<string, string>;
+        expect(env.ACME_DNS_PROVIDER).toBe(provider);
+        // The point of this test: no token key, ever, when no token was given.
+        // (A row's lego tuning keys may still be present — they're constants,
+        // not credentials.)
+        expect(env).not.toHaveProperty(tokenEnvVar);
+      }
     }
   });
 
@@ -116,10 +123,32 @@ describe('DNS01_PROVIDERS lego contract (census)', () => {
       // against go-acme.github.io/lego/dns/), so no translation layer exists.
       expect(env.ACME_DNS_PROVIDER).toBe(provider);
       expect(env[tokenEnvVar]).toBe('tok');
-      // Exactly two keys: the selector and this provider's token. No other
-      // provider's token leaks into the server .env.
-      expect(Object.keys(env).sort()).toEqual(['ACME_DNS_PROVIDER', tokenEnvVar].sort());
+      // Exactly the selector, this provider's token, and this provider's own
+      // lego tuning keys (if any). No other provider's token or tuning leaks
+      // into the server .env.
+      const tuningKeys = Object.keys(DNS01_PROVIDERS[provider].legoTuningEnv ?? {});
+      expect(Object.keys(env).sort()).toEqual(
+        ['ACME_DNS_PROVIDER', tokenEnvVar, ...tuningKeys].sort(),
+      );
     }
+  });
+
+  it("digitalocean tunes lego's propagation window — DO's authoritative anycast outlives the 60s default", () => {
+    // Run 33266321881: lego's per-attempt propagation wait (DO_PROPAGATION_TIMEOUT,
+    // default 60s per go-acme.github.io/lego/dns/digitalocean/) expired before
+    // DO's OWN authoritative nameservers served the challenge TXT
+    // ("NS ns1.digitalocean.com:53 did not return the expected TXT record").
+    // Each failed attempt then rewrites the TXT value, so issuance churns
+    // instead of converging — and stale values at anycast POPs 403 the next
+    // attempt ("Incorrect TXT record ... found"). A longer per-attempt wait
+    // lets one attempt outlive the anycast convergence.
+    const env = dnsChallengeEnv('digitalocean', 'tok') as Record<string, string>;
+    expect(env.DO_PROPAGATION_TIMEOUT).toBe('300');
+  });
+
+  it('providers without tuning rows stay token-only (hetzner converges inside lego defaults)', () => {
+    const env = dnsChallengeEnv('hetzner', 'tok') as Record<string, string>;
+    expect(Object.keys(env).sort()).toEqual(['ACME_DNS_PROVIDER', 'HETZNER_API_TOKEN'].sort());
   });
 
   it('the Traefik DNS-01 override passes every token env var through to the container', () => {
@@ -135,6 +164,12 @@ describe('DNS01_PROVIDERS lego contract (census)', () => {
       // Absent vars interpolate to empty, so passing all of them through is
       // safe — only the selected provider's is ever populated.
       expect(override).toContain(`${row.tokenEnvVar}: \${${row.tokenEnvVar}:-}`);
+      // Same contract for a row's lego tuning vars: dnsChallengeEnv writing a
+      // tuning value into the server .env is inert unless the override
+      // forwards it into the traefik container.
+      for (const tuningVar of Object.keys(row.legoTuningEnv ?? {})) {
+        expect(override).toContain(`${tuningVar}: \${${tuningVar}:-}`);
+      }
     }
   });
 });

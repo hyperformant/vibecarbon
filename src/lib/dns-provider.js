@@ -43,6 +43,11 @@
  *   Third-party cert-manager webhook chart this provider's DNS-01 solver
  *   needs (k3s.js `applyK3sManifests` install block), or `null` when the
  *   solver ships in cert-manager core (no extra chart to install).
+ * @property {Record<string, string>} [legoTuningEnv] - Extra lego env vars
+ *   this provider's DNS-01 solver needs beyond the token (e.g. a longer
+ *   propagation window for slow authoritative anycast). Merged verbatim by
+ *   `dnsChallengeEnv`; every key must also be forwarded by the compose
+ *   DNS-01 override's `environment:` block (drift-guarded in acme.test.ts).
  */
 
 /**
@@ -111,6 +116,16 @@ export const DNS01_PROVIDERS = {
     // DigitalOcean's DNS-01 solver ships in cert-manager core
     // (dns01.digitalocean.tokenSecretRef) — no extra webhook chart.
     webhook: null,
+    // lego's per-attempt propagation wait defaults to 60s
+    // (DO_PROPAGATION_TIMEOUT, go-acme.github.io/lego/dns/digitalocean/) —
+    // and DO's OWN authoritative anycast nameservers routinely take longer
+    // than that to serve a freshly written TXT record (run 33266321881:
+    // "NS ns1.digitalocean.com:53 did not return the expected TXT record",
+    // repeating). Each expired attempt rewrites the challenge value, so
+    // issuance churns instead of converging, and stale values cached at
+    // anycast POPs 403 the NEXT attempt ("Incorrect TXT record ... found").
+    // 300s lets a single attempt outlive the observed convergence lag.
+    legoTuningEnv: { DO_PROPAGATION_TIMEOUT: '300' },
   },
   // linode, vultr and scaleway are compose-only tiers: there is no k8s deploy
   // mode for any of them, so cert-manager never sees them and none ships a

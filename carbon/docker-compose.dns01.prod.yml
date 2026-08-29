@@ -48,6 +48,10 @@ services:
       CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:-}
       HETZNER_API_TOKEN: ${HETZNER_API_TOKEN:-}
       DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:-}
+      # DigitalOcean lego tuning (DNS01_PROVIDERS legoTuningEnv): DO's
+      # authoritative anycast outlives lego's 60s default propagation wait,
+      # churning challenge TXT values — see the registry row's rationale.
+      DO_PROPAGATION_TIMEOUT: ${DO_PROPAGATION_TIMEOUT:-}
       LINODE_TOKEN: ${LINODE_TOKEN:-}
       VULTR_API_KEY: ${VULTR_API_KEY:-}
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}

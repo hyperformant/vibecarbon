@@ -57,5 +57,10 @@ export function dnsChallengeEnv(dnsProvider, dnsToken) {
   // The table key IS lego's provider code for every row (see DNS01_PROVIDERS).
   const env = { ACME_DNS_PROVIDER: dnsProvider };
   if (dnsToken) env[row.tokenEnvVar] = dnsToken;
+  // Provider-specific lego tuning (e.g. DigitalOcean's propagation window —
+  // see that row's rationale). Registry-owned so the values live beside the
+  // provider they compensate for; acme.test.ts drift-guards the override
+  // file's passthrough of every tuning var.
+  if (row.legoTuningEnv) Object.assign(env, row.legoTuningEnv);
   return env;
 }
