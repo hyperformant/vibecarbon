@@ -8,7 +8,7 @@
 # `kubectl apply -f -` ONLY when ProviderClass.getS3EgressExtraCidrs(vpcCidr)
 # returns a non-empty list — on Hetzner that call always returns [], so this
 # file is never read, let alone applied, and carbon/k8s/base's OTHER manifests
-# (network-policies.yaml, app/network-policy.yaml, registry/local-registry.yaml)
+# (network-policies.yaml, app/network-policy.yaml)
 # stay byte-identical for every provider. Mirrors
 # carbon/k8s/base/repl-gateway/repl-gateway.yaml's "outside base, rendered +
 # applied at deploy time, NEVER at runtime" idiom.
@@ -16,13 +16,13 @@
 # RCA (M3 Task 9c, DO kept rig d3, 2026-07-29): on DigitalOcean, same-region
 # Spaces endpoints resolve INSIDE pods to a VPC-internal gateway address
 # (observed: nyc3.digitaloceanspaces.com -> 10.10.15.254, the top of the
-# cluster VPC's 10.10.0.0/20). The S3-purposed egress rules in app-policy,
-# registry-policy, and supabase-db-s3-egress (carbon/k8s/base/{app,registry}/
-# *.yaml, carbon/k8s/base/network-policies.yaml) all allow TCP 443 to
+# cluster VPC's 10.10.0.0/20). The S3-purposed egress rules in app-policy
+# and supabase-db-s3-egress (carbon/k8s/base/app/*.yaml,
+# carbon/k8s/base/network-policies.yaml) all allow TCP 443 to
 # `0.0.0.0/0 except [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]` — which cuts
-# that gateway address off, so every S3-dependent pod on DO (the local
-# registry, wal-g backups/restores, the app's own storage calls) fails to
-# reach it. Hetzner is unaffected — its Object Storage endpoints resolve to
+# that gateway address off, so every S3-dependent pod on DO (wal-g
+# backups/restores, the app's own storage calls) fails to reach it. (The
+# in-cluster registry left this family 2026-08-30 — filesystem-backed, no S3.) Hetzner is unaffected — its Object Storage endpoints resolve to
 # public IPs — which is why this never fired there.
 #
 # Why the cluster's VPC CIDR and not the literal gateway IP: DO does not
@@ -63,27 +63,10 @@ spec:
         - protocol: TCP
           port: 443
 ---
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: registry-s3-vpc-egress
-  namespace: vibecarbon
-  labels:
-    app.kubernetes.io/part-of: vibecarbon
-spec:
-  podSelector:
-    matchLabels:
-      app: local-registry
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - ipBlock:
-            cidr: __VPC_CIDR__
-      ports:
-        - protocol: TCP
-          port: 443
----
+# (registry-s3-vpc-egress REMOVED 2026-08-30: the in-cluster registry is
+# filesystem-backed — no S3, no egress at all. See
+# registry/local-registry.yaml and
+# tests/unit/template/registry-no-object-storage.test.ts.)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -19,69 +19,47 @@ spec:
       labels:
         app: local-registry
     spec:
-      # Run only on master node — hostPort exposes 5000 on master's private IP for SSH tunnel access.
-      # S3 backend stores all image layers externally; this affinity is for stable hostPort placement.
+      # Run only on master node — hostPort exposes 5000 on master's private IP
+      # for SSH tunnel access, and the hostPath volume below rides the same pin.
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
           effect: NoSchedule
+      # The hostPath volume is created root-owned; the registry runs as 1000.
+      # One-shot chown as root before the registry starts (the main container
+      # keeps runAsNonRoot).
+      initContainers:
+        - name: chown-storage
+          image: registry:2
+          command: ["/bin/sh", "-c", "chown -R 1000:1000 /var/lib/registry && chmod 700 /var/lib/registry"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: registry-storage
+              mountPath: /var/lib/registry
       containers:
         - name: registry
           image: registry:2
-          # Strip https:// prefix from S3_ENDPOINT — registry:2 needs a bare hostname.
-          # REGISTRY_STORAGE_S3_SECURE=true controls HTTPS separately.
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              if [ -z "$REGISTRY_STORAGE_S3_REGION" ]; then
-                # S3 not configured — fall back to local filesystem storage.
-                # Unset all S3 env vars so registry:2 uses its default filesystem driver.
-                unset REGISTRY_STORAGE \
-                      REGISTRY_STORAGE_S3_ACCESSKEY \
-                      REGISTRY_STORAGE_S3_SECRETKEY \
-                      REGISTRY_STORAGE_S3_REGION \
-                      REGISTRY_STORAGE_S3_BUCKET \
-                      REGISTRY_STORAGE_S3_REGIONENDPOINT \
-                      REGISTRY_STORAGE_S3_ROOTDIRECTORY \
-                      REGISTRY_STORAGE_S3_SECURE \
-                      REGISTRY_STORAGE_S3_V4AUTH
-              else
-                # S3 configured — strip https:// prefix from endpoint (registry:2 needs bare hostname).
-                REGISTRY_STORAGE_S3_REGIONENDPOINT="${REGISTRY_STORAGE_S3_REGIONENDPOINT#https://}"
-                REGISTRY_STORAGE_S3_REGIONENDPOINT="${REGISTRY_STORAGE_S3_REGIONENDPOINT#http://}"
-                export REGISTRY_STORAGE_S3_REGIONENDPOINT
-              fi
-              exec /entrypoint.sh /etc/docker/registry/config.yml
+          # ROOT FIX (2026-08-30, run 33332292268): image layers live on the
+          # MASTER NODE DISK, never object storage. The registry is a
+          # transport cache — every deploy (each k8s-ha cluster separately,
+          # every restore re-deploy) builds and pushes its own image, and
+          # nodes pull through this pod regardless of backend — so the old S3
+          # backend bought no durability anyone consumed while coupling every
+          # k8s deploy to the one backend with documented read-after-write
+          # weather ("s3aws: NoSuchBucket" completing an upload mid-push →
+          # docker push 500s → deploy dead; the class the walg/pulumi
+          # surfaces already document). Filesystem is registry:2's default
+          # driver when no REGISTRY_STORAGE env is set. Enforced by
+          # tests/unit/template/registry-no-object-storage.test.ts.
           securityContext:
             runAsUser: 1000
             runAsNonRoot: true
             allowPrivilegeEscalation: false
           env:
-            - name: REGISTRY_STORAGE
-              value: s3
-            - name: REGISTRY_STORAGE_S3_ACCESSKEY
-              valueFrom:
-                secretKeyRef: { name: vibecarbon-secrets, key: S3_ACCESS_KEY }
-            - name: REGISTRY_STORAGE_S3_SECRETKEY
-              valueFrom:
-                secretKeyRef: { name: vibecarbon-secrets, key: S3_SECRET_KEY }
-            - name: REGISTRY_STORAGE_S3_REGION
-              valueFrom:
-                secretKeyRef: { name: vibecarbon-secrets, key: S3_REGION }
-            - name: REGISTRY_STORAGE_S3_BUCKET
-              valueFrom:
-                secretKeyRef: { name: vibecarbon-secrets, key: S3_BUCKET }
-            - name: REGISTRY_STORAGE_S3_REGIONENDPOINT
-              valueFrom:
-                secretKeyRef: { name: vibecarbon-secrets, key: S3_ENDPOINT }
-            - name: REGISTRY_STORAGE_S3_ROOTDIRECTORY
-              value: registry/
-            - name: REGISTRY_STORAGE_S3_SECURE
-              value: "true"
-            - name: REGISTRY_STORAGE_S3_V4AUTH
-              value: "true"
             - name: REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR
               value: inmemory
             - name: REGISTRY_STORAGE_DELETE_ENABLED
@@ -94,7 +72,7 @@ spec:
               hostPort: 5000
               protocol: TCP
           volumeMounts:
-            - name: registry-tmp
+            - name: registry-storage
               mountPath: /var/lib/registry
           resources:
             requests:
@@ -102,9 +80,8 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              # 1Gi headroom: registry:2 with the S3 driver buffers
-              # multipart uploads in memory, and large image layers
-              # (the backup image is ~300MB) can spike past 512Mi.
+              # 1Gi headroom: large image layers (the backup image is
+              # ~300MB) stream through memory during pushes.
               memory: 1Gi
           readinessProbe:
             httpGet:
@@ -113,8 +90,8 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             # Default timeoutSeconds=1 is hostile to a registry busy
-            # streaming a layer to S3 — give it 10s before we declare
-            # the probe failed and pull it from the Service.
+            # writing a large layer to disk — give it 10s before we
+            # declare the probe failed and pull it from the Service.
             timeoutSeconds: 10
             failureThreshold: 5
           livenessProbe:
@@ -130,8 +107,13 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 6
       volumes:
-        - name: registry-tmp
-          emptyDir: {}       # temp only; all image layers stored in S3
+        - name: registry-storage
+          # Master node disk. Survives pod restarts (the old emptyDir did
+          # not); a master REPLACEMENT loses it, and that is fine — replacing
+          # the master means re-deploying, which rebuilds and re-pushes.
+          hostPath:
+            path: /var/lib/vibecarbon-registry
+            type: DirectoryOrCreate
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -152,24 +134,9 @@ spec:
     - ports:
         - port: 5000
           protocol: TCP
-  egress:
-    # Allow DNS resolution (required to resolve S3 endpoint hostnames)
-    - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    # Allow S3 access (Hetzner Object Storage and compatible providers)
-    - ports:
-        - port: 443
-          protocol: TCP
-      to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
+  # Egress declared with NO rules = default-deny: the filesystem-backed
+  # registry makes no outbound calls at all (no S3, and therefore no DNS).
+  egress: []
 ---
 # ClusterIP Service for in-cluster push paths (e.g., a CI pod inside the
 # cluster running `docker push` to localhost:5000 via kube-proxy). Kubelet
