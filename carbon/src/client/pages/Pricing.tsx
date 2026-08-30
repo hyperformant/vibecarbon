@@ -10,7 +10,7 @@ import { IconArrowRight as ArrowRight, IconCheck as Check, IconX as X } from '@t
 import { Link } from 'react-router';
 import { Nav } from '@/components/Nav';
 import { SEO } from '@/components/SEO';
-import { SiteFooter } from '@/components/SiteFooter';
+import FooterSection from '@/components/sections/footer';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -140,7 +140,7 @@ export default function Pricing() {
         </div>
       </div>
 
-      <SiteFooter />
+      <FooterSection />
     </div>
   );
 }

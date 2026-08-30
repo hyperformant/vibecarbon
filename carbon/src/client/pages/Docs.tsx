@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
 import { Nav } from '@/components/Nav';
 import { SEO } from '@/components/SEO';
-import { SiteFooter } from '@/components/SiteFooter';
+import FooterSection from '@/components/sections/footer';
 import { Button } from '@/components/ui/button';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import {
@@ -331,7 +331,7 @@ export function DocsPage() {
         </div>
       </div>
 
-      <DocsFooter />
+      <FooterSection />
     </div>
   );
 }
@@ -340,18 +340,4 @@ export function DocsPage() {
 export default function DocsRoute() {
   const { slug } = useParams<{ slug: string }>();
   return slug ? <DocsPage /> : <DocsIndex />;
-}
-
-function DocsFooter() {
-  return (
-    <SiteFooter
-      links={[
-        { to: '/', label: 'Home' },
-        { to: '/docs', label: 'Docs' },
-        { to: '/blog', label: 'Blog' },
-        { to: '/privacy', label: 'Privacy' },
-        { to: '/terms', label: 'Terms' },
-      ]}
-    />
-  );
 }

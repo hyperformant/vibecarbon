@@ -329,7 +329,7 @@
 - Graceful shutdown on SIGINT/SIGTERM (10-second drain timeout)
 - Periodic maintenance via pg_cron (login attempt cleanup, notification cleanup, job history pruning)
 
-## UI Components (60)
+## UI Components (59)
 
 - Built on Shadcn UI patterns with Radix UI, Base UI, and CVA for variants
 - Styled with Tailwind CSS v4

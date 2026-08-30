@@ -7,7 +7,7 @@ import { Link, useParams } from 'react-router';
 import { PROJECT_DISPLAY_NAME } from '@/components/Logo';
 import { Nav } from '@/components/Nav';
 import { SEO } from '@/components/SEO';
-import { SiteFooter } from '@/components/SiteFooter';
+import FooterSection from '@/components/sections/footer';
 import { Button } from '@/components/ui/button';
 import { entries, getEntry } from '@/lib/changelog';
 
@@ -57,7 +57,7 @@ export function ChangelogIndex() {
         </div>
       </main>
 
-      <ChangelogFooter />
+      <FooterSection />
     </div>
   );
 }
@@ -126,20 +126,8 @@ export function ChangelogEntry() {
         </div>
       </main>
 
-      <ChangelogFooter />
+      <FooterSection />
     </div>
-  );
-}
-
-function ChangelogFooter() {
-  return (
-    <SiteFooter
-      links={[
-        { to: '/', label: 'Home' },
-        { to: '/blog', label: 'Blog' },
-        { to: '/changelog', label: 'Changelog' },
-      ]}
-    />
   );
 }
 

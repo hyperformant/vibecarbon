@@ -7,7 +7,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Nav } from '@/components/Nav';
 import { SEO } from '@/components/SEO';
-import { SiteFooter } from '@/components/SiteFooter';
+import FooterSection from '@/components/sections/footer';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -148,7 +148,7 @@ export default function Contact() {
         )}
       </div>
 
-      <SiteFooter />
+      <FooterSection />
     </div>
   );
 }

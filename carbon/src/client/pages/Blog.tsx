@@ -7,7 +7,7 @@ import { Link, useParams } from 'react-router';
 import { PROJECT_DISPLAY_NAME } from '@/components/Logo';
 import { Nav } from '@/components/Nav';
 import { SEO } from '@/components/SEO';
-import { SiteFooter } from '@/components/SiteFooter';
+import FooterSection from '@/components/sections/footer';
 import { Button } from '@/components/ui/button';
 import { getPost, posts } from '@/lib/blog';
 
@@ -58,7 +58,7 @@ export function BlogIndex() {
         </div>
       </main>
 
-      <BlogFooter />
+      <FooterSection />
     </div>
   );
 }
@@ -128,19 +128,8 @@ export function BlogPost() {
         </div>
       </main>
 
-      <BlogFooter />
+      <FooterSection />
     </div>
-  );
-}
-
-function BlogFooter() {
-  return (
-    <SiteFooter
-      links={[
-        { to: '/', label: 'Home' },
-        { to: '/blog', label: 'Blog' },
-      ]}
-    />
   );
 }
 
