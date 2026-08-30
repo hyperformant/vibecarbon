@@ -39,6 +39,11 @@ services:
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=${ACME_DNS_PROVIDER}"
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+      # Settle floor before lego's propagation check (0s unless the provider's
+      # legoTuningEnv sets it — DigitalOcean: 90s, see the registry row): on
+      # anycast authoritative DNS, lego's vantage converging does not mean the
+      # CA's validation vantage has — give the record wall-time in the zone.
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.propagation.delaybeforechecks=${ACME_DNS_DELAY_BEFORE_CHECKS:-0s}"
       - "--certificatesresolvers.letsencrypt.acme.email={{ADMIN_EMAIL}}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
       # ACME_DISARMED_CA_SERVER first (compose-ha single-active-issuer
@@ -57,6 +62,7 @@ services:
       # authoritative anycast outlives lego's 60s default propagation wait,
       # churning challenge TXT values — see the registry row's rationale.
       DO_PROPAGATION_TIMEOUT: ${DO_PROPAGATION_TIMEOUT:-}
+      ACME_DNS_DELAY_BEFORE_CHECKS: ${ACME_DNS_DELAY_BEFORE_CHECKS:-}
       LINODE_TOKEN: ${LINODE_TOKEN:-}
       VULTR_API_KEY: ${VULTR_API_KEY:-}
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}

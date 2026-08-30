@@ -69,6 +69,7 @@ describe('dnsChallengeEnv', () => {
       ACME_DNS_PROVIDER: 'digitalocean',
       DO_AUTH_TOKEN: 'do-tok',
       DO_PROPAGATION_TIMEOUT: '300',
+      ACME_DNS_DELAY_BEFORE_CHECKS: '90s',
     });
   });
 
@@ -144,6 +145,22 @@ describe('DNS01_PROVIDERS lego contract (census)', () => {
     // lets one attempt outlive the anycast convergence.
     const env = dnsChallengeEnv('digitalocean', 'tok') as Record<string, string>;
     expect(env.DO_PROPAGATION_TIMEOUT).toBe('300');
+    // Settle FLOOR before lego's own propagation check (Traefik
+    // dnschallenge.propagation.delayBeforeChecks): run 33283466928 showed
+    // lego's anycast POP converging fast while LE's validation POP still
+    // answered "No TXT record found" — the record needs wall-time in the
+    // zone, not just visibility from one vantage.
+    expect(env.ACME_DNS_DELAY_BEFORE_CHECKS).toBe('90s');
+  });
+
+  it("the DNS-01 override's Traefik command consults the delay-before-checks var", () => {
+    const override = readFileSync(
+      join(__dirname, '../../..', 'carbon', DNS01_OVERRIDE_FILE),
+      'utf-8',
+    );
+    expect(override).toContain(
+      'acme.dnschallenge.propagation.delaybeforechecks=${ACME_DNS_DELAY_BEFORE_CHECKS:-0s}',
+    );
   });
 
   it('providers without tuning rows stay token-only (hetzner converges inside lego defaults)', () => {

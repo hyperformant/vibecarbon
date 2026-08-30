@@ -87,6 +87,16 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
       /rateLimited|429\s+(too many|rate.?limit)|too many (certificates|requests)|rate[ _-]?limit(?:ed|ing)?[\s_](exceed|reach|hit|exceeds|throttl)/i,
     reason: 'rate limit',
   },
+  // LE validation seeing a missing/mismatched challenge TXT despite lego's
+  // own authoritative pre-check passing — DO anycast POP divergence between
+  // lego's vantage and LE's (run 33283466928, observed under a SINGLE armed
+  // solver, so it is provider-side propagation, not our dual-issuer race —
+  // that class is closed by acme-role.js). The urn context is required so a
+  // sentence merely mentioning TXT records cannot match.
+  {
+    pattern: /urn:ietf:params:acme:error:unauthorized :: (No|Incorrect) TXT record/i,
+    reason: 'ACME DNS-01 propagation (anycast lag)',
+  },
   // Network / DNS / TLS / generic fetch noise
   {
     pattern: /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|ENETUNREACH|EAI_AGAIN/i,

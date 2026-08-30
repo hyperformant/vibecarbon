@@ -344,6 +344,25 @@ classes:
 # i.e. everything eligible for the runner's E2E_RETRY_FLAKES auto-retry —
 # maps to a class above. The census fails if a reason maps to an 'ours'
 # class: our own defects must never auto-retry.
+  - class: dns-anycast-propagation-divergence
+    attribution: external-proven
+    evidence: >-
+      DigitalOcean authoritative DNS is anycast and its POPs converge minutes
+      apart, in BOTH directions of the DNS-01 dance. Run 33266321881: lego's
+      own propagation check against ns1-3.digitalocean.com failed past its
+      60s window ("did not return the expected TXT record") while the API
+      write had succeeded. Run 33283466928: with a SINGLE armed solver
+      (acme-role.js single-active-issuer policy — our own dual-solver
+      contribution root-fixed first), lego's 300s authoritative check
+      PASSED and Let's Encrypt validation still answered "No TXT record
+      found" — divergence between lego's vantage POP and the CA's.
+      Mitigations: DO_PROPAGATION_TIMEOUT=300 plus a 90s
+      propagation.delayBeforeChecks settle floor (dns-provider.js
+      legoTuningEnv → docker-compose.dns01.prod.yml), giving each record
+      wall-time in the zone before any validation is triggered. Residual
+      misses are retried by E2E_RETRY_FLAKES via this mapping.
+    sites: []
+
 flakeRetry:
   - { reason: "k3s install timeout", class: provider-provisioning-slowness }
   - { reason: "Hetzner capacity", class: hetzner-capacity }
@@ -358,3 +377,4 @@ flakeRetry:
   - { reason: "Docker Hub transient", class: provider-rate-limits }
   - { reason: "SSH connection blip", class: ssh-transport-blips }
   - { reason: "LE cert pending", class: acme-issuance-pending }
+  - { reason: "ACME DNS-01 propagation (anycast lag)", class: dns-anycast-propagation-divergence }

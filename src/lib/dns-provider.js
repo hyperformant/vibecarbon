@@ -125,7 +125,14 @@ export const DNS01_PROVIDERS = {
     // issuance churns instead of converging, and stale values cached at
     // anycast POPs 403 the NEXT attempt ("Incorrect TXT record ... found").
     // 300s lets a single attempt outlive the observed convergence lag.
-    legoTuningEnv: { DO_PROPAGATION_TIMEOUT: '300' },
+    // ACME_DNS_DELAY_BEFORE_CHECKS is OUR interpolation var, not lego's: the
+    // dns01 override's Traefik command feeds it to
+    // dnschallenge.propagation.delayBeforeChecks. It is a settle FLOOR
+    // before lego's own check even starts — run 33283466928 showed lego's
+    // anycast POP converging fast while LE's validation POP still answered
+    // "No TXT record found"; the record needs wall-time in the zone, not
+    // just visibility from one vantage.
+    legoTuningEnv: { DO_PROPAGATION_TIMEOUT: '300', ACME_DNS_DELAY_BEFORE_CHECKS: '90s' },
   },
   // linode, vultr and scaleway are compose-only tiers: there is no k8s deploy
   // mode for any of them, so cert-manager never sees them and none ships a

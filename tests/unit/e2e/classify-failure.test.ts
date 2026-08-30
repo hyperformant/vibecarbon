@@ -139,6 +139,26 @@ describe('classifyFailure', () => {
     expect(result.category).toBe('infra');
   });
 
+  it('flags an LE-validation TXT mismatch (with acme urn context) as infra — DO anycast lag', () => {
+    // Run 33283466928: SINGLE armed solver (issuer policy in place), lego's
+    // own authoritative check passed, and LE validation still saw no record
+    // — DO anycast POP divergence between lego's vantage and LE's. With the
+    // single-issuer policy shipped, this wording class is provider-side
+    // propagation, not our race. The urn context is required: a bare
+    // "No TXT record" sentence without it stays unknown.
+    const result = classifyFailure({
+      errorMessage:
+        'Deploy exited with code 1: Error: [step:verify-tls] Deploy aborted ... | ' +
+        'urn:ietf:params:acme:error:unauthorized :: No TXT record found at _acme-challenge.cid2.do.appcarbon.dev',
+    });
+    expect(result.category).toBe('infra');
+    expect(result.reason).toMatch(/DNS-01 propagation/i);
+    expect(
+      classifyFailure({ errorMessage: 'expected No TXT record found in mock zone fixture' })
+        .category,
+    ).toBe('unknown');
+  });
+
   it("flags Let's Encrypt rate limit as infra", () => {
     const result = classifyFailure({
       errorMessage: '429 urn:ietf:params:acme:error:rateLimited: too many certificates',
