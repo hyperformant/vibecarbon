@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/npm/v/vibecarbon?color=0a7ea4&label=npm" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/vibecarbon"><img src="https://img.shields.io/badge/npm-provenance%20attested-0a7ea4" alt="npm provenance attested (SLSA build provenance via Trusted Publishing)" /></a>
-  <a href="https://scorecard.dev/viewer/?uri=github.com/hyperformant/vibecarbon"><img src="https://api.scorecard.dev/projects/github.com/hyperformant/vibecarbon/badge" alt="OpenSSF Scorecard" /></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/hyperformant/vibecarbon"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.scorecard.dev%2Fprojects%2Fgithub.com%2Fhyperformant%2Fvibecarbon&query=%24.score&label=openssf%20scorecard&color=informational" alt="OpenSSF Scorecard" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--MIT-blue" alt="License: FSL-1.1-MIT" /></a>
   <a href="https://discord.gg/up8Z9sX6M6"><img src="https://img.shields.io/badge/discord-join%20the%20community-5865F2" alt="Join the vibecarbon Discord" /></a>
 </p>
