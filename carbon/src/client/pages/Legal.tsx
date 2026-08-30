@@ -3,7 +3,7 @@ import { Navigate, useLocation, useParams } from 'react-router';
 import { PROJECT_DISPLAY_NAME } from '@/components/Logo';
 import { Nav } from '@/components/Nav';
 import { SEO } from '@/components/SEO';
-import { SiteFooter } from '@/components/SiteFooter';
+import FooterSection from '@/components/sections/footer';
 import type { MdxProps } from '@/lib/docs';
 
 // Raw {{PLACEHOLDER}} tokens inside MDX bodies are parsed as JSX expressions
@@ -79,7 +79,7 @@ export default function LegalRoute() {
         </article>
       </div>
 
-      <SiteFooter />
+      <FooterSection />
     </div>
   );
 }
