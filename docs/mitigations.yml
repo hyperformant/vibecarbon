@@ -363,6 +363,34 @@ classes:
       misses are retried by E2E_RETRY_FLAKES via this mapping.
     sites: []
 
+  - class: supabase-boot-ddl-deadlock
+    attribution: external-asserted
+    evidence: >-
+      Run 33287840597 (hetzner k8s-ha restore's re-deploy, 2026-08-30
+      03:5xZ): applyMigrations' --single-transaction psql died with
+      "ERROR: deadlock detected / Process 71 waits for AccessExclusiveLock
+      on relation 16524 ... blocked by process 55" while applying policies
+      on storage.objects — the relations supabase-storage's own first-boot
+      DDL migrates concurrently. The storage-schema readiness probe
+      (buckets.public queryable) proves schema EXISTENCE, not lock
+      quiescence, and full serialization is circular: our migrations
+      REQUIRE the services' boot DDL to have run. Deadlock retry is
+      Postgres's documented contract for 40P01 (the file's transaction
+      rolled back completely, so the re-run is byte-identical to attempt
+      1); a failure surviving the ladder stays loudly fatal.
+    proofDebtSpec: docs/attribution-ledger.md
+    frozenSites: 3
+    sites:
+      - site: "src/lib/deploy/migration-deadlock.js :: MIGRATION_DEADLOCK_DELAYS_MS"
+      - site: "src/lib/deploy/migration-deadlock.js :: MIGRATION_DEADLOCK_PATTERN"
+        detectable: false
+        notes: the 40P01 spelling gate — nothing but "deadlock detected" retries
+      - site: "src/lib/deploy/migration-deadlock.js :: composeMigrationsRetryShell"
+        detectable: false
+        notes: >-
+          the same ladder rendered as the compose transports' remote shell
+          loop (attempt bound derived from MIGRATION_DEADLOCK_DELAYS_MS)
+
 flakeRetry:
   - { reason: "k3s install timeout", class: provider-provisioning-slowness }
   - { reason: "Hetzner capacity", class: hetzner-capacity }

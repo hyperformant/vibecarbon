@@ -111,6 +111,18 @@ lag **under our own parallel teardown**. The commit says so (iter-reliab).
 Registered as `ours` from day one; the open question is only whether serial-matrix
 discipline (already standing advice) makes the ladder dead code. Count its fires.
 
+### 8. `supabase-boot-ddl-deadlock`
+
+**Claim:** the 40P01 at migration apply (run 33287840597, hetzner k8s-ha restore's
+re-deploy) is our `--single-transaction` DDL racing a Supabase service's own first-boot
+DDL on the same relations (the failing statement sat among `storage.objects` policies).
+**Why asserted:** the deadlock DETAIL names only pids, not roles — process 55's identity
+is inferred from the relation and the boot window, not observed.
+**Experiment:** on the next 40P01 at migration apply, capture `pg_stat_activity` +
+`pg_locks` for the blocking pid before retrying. A supabase service role
+(`supabase_storage_admin` / `supabase_auth_admin`) confirms external; any other role
+reopens the class as ours and the retry ladder comes out in favor of a root fix.
+
 ## Not debts (proven, for contrast)
 
 `pulumi-state-backend-consistency` (request-id-bearing error bodies, upstream stack

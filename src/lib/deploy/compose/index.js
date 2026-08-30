@@ -25,6 +25,7 @@ import {
   sshRunScript,
 } from '../../ssh.js';
 import { postAdminUser, waitForGotrueHealth } from '../admin-user.js';
+import { composeMigrationsRetryShell } from '../migration-deadlock.js';
 // DNS_NOT_SETTLED_RETRY_DELAYS_MS: shared with remote-build.js's own
 // DNS-not-settled ladder so the two can't drift apart — see that file's
 // docstring on the constant for the sizing rationale.
@@ -1048,18 +1049,13 @@ export async function runMigrations(ip, sshKeyPath, projectName) {
   // propagate (no 2>/dev/null, no `|| true`); sshRunAsync throws on non-zero.
   // --single-transaction: each FILE is atomic, so a mid-file failure leaves no
   // partial schema (2026-08-25 vibecarbon.com: 00008 failed at cron.schedule
-  // AFTER its tables had already been created — see docs/rca/).
-  await sshRunAsync(
-    ip,
-    sshKeyPath,
-    `cd ${remoteDir} && ` +
-      `for f in $(ls supabase/migrations/ 2>/dev/null | sort); do ` +
-      `echo "[migrate] applying $f"; ` +
-      `cat "supabase/migrations/$f" | docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction || ` +
-      `{ echo "[migrate] FAILED applying $f" >&2; exit 1; }; ` +
-      `done`,
-    { timeout: 300_000 },
-  );
+  // AFTER its tables had already been created — see docs/rca/). The loop is
+  // built by composeMigrationsRetryShell so a boot-window deadlock retries
+  // the (rolled-back) file instead of failing the deploy — see
+  // migration-deadlock.js for the class.
+  await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && ${composeMigrationsRetryShell()}`, {
+    timeout: 300_000,
+  });
 
   // Ground-truth RLS audit: refuse to finish the deploy if any public table
   // reached the live schema without row-level security (see rls-audit.js).
