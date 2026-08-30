@@ -110,10 +110,14 @@ spec:
                     wal-g backup-push "$PGDATA"
                     # Sweep sentinel-less orphans (interrupted pushes) before
                     # retention — `delete retain` hard-crashes on a backup
-                    # whose stop-sentinel never got written, and retries can't
-                    # heal a permanently missing object (2026-08-30 RCA).
-                    # Safe under concurrencyPolicy: Forbid — no concurrent
-                    # push can look like an orphan mid-flight.
+                    # whose stop-sentinel never got written, and retries
+                    # cannot heal a permanently missing object (2026-08-30
+                    # RCA). Safe under concurrencyPolicy: Forbid — no
+                    # concurrent push can look like an orphan mid-flight.
+                    # NO APOSTROPHES in this wrapper, comments included — a
+                    # single quote ends the bash -c string (enforced by
+                    # tests/unit/template/embedded-shell-syntax.test.ts;
+                    # run 33319907805 is the day one broke every backup).
                     wal-g delete garbage BACKUPS --confirm
                     wal-g delete retain FULL '"${RETAIN}"' --confirm
                   '
