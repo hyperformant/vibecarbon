@@ -42,11 +42,11 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           SELF_CHECK: ${{ github.job }}
         run: |
-          # Gate on the PR's other checks (Test Suite) before merging. main
-          # has no required status checks (they would also block direct
-          # pushes), so without this the merge lands the moment this job
-          # runs — minutes before the Test Suite finishes — and a red bump
-          # could reach main unverified.
+          # Gate on the PR's other checks (Test Suite) before merging. main's
+          # ruleset now requires the core checks too, but this poll predates
+          # it and stays: `gh pr merge` without --auto fails outright while
+          # required checks are pending (the poll waits instead), and it also
+          # covers checks the ruleset doesn't list as required.
           deadline=$((SECONDS + 1800))
           grace=$((SECONDS + 180))
           while :; do
