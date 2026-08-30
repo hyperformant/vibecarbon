@@ -10,7 +10,7 @@
 # bare `alpine:3.23` that the node binary is COPY'd into, so this must stay
 # pinned to the SAME alpine as that stage or the binary hits a musl/libstdc++
 # mismatch at runtime.
-ARG NODE_IMAGE=node:24-alpine3.23
+ARG NODE_IMAGE=node:24-alpine3.23@sha256:0388af2af070cd4736a1567cfed02469ba117848845b4165d87a333edb53d2ca
 
 # Base image can be overridden for Turbo Layer Caching
 # Default is the standard node image
@@ -94,7 +94,7 @@ RUN npm init -y > /dev/null 2>&1 && \
     npm install --no-package-lock pino@10
 
 # Production stage — minimal Alpine with just the node binary
-FROM alpine:3.23 AS runner
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS runner
 
 RUN apk add --no-cache libstdc++ && \
     addgroup -g 1001 -S hono && \

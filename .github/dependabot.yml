@@ -94,3 +94,27 @@ updates:
     groups:
       all-actions:
         patterns: ["*"]
+
+  # Docker base-image digests (FROM/ARG lines are pinned by sha256 for the
+  # OpenSSF Scorecard Pinned-Dependencies check; these entries keep the
+  # digests moving when upstream retags).
+  - package-ecosystem: docker
+    directories:
+      - /carbon
+      - /carbon/db
+      - /docker/carbon-autoscaler
+      - /docker/postgres-walg
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(docker-deps)
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      all-docker:
+        patterns: ["*"]

@@ -1,3 +1,8 @@
+> **This file is frozen at v0.41.0.** Release notes for later versions live on
+> the [GitHub Releases page](https://github.com/hyperformant/vibecarbon/releases) —
+> semantic-release no longer commits to `main` (its version-bump push conflicted
+> with branch protection), so the changelog moved where the API can write.
+
 # [0.41.0](https://github.com/hyperformant/vibecarbon/compare/v0.40.0...v0.41.0) (2026-08-23)
 
 

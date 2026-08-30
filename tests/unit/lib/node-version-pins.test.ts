@@ -352,7 +352,9 @@ describe('Dockerfiles pin the same Node major', () => {
     // A mismatch builds fine and dies at runtime on musl/libstdc++.
     const dockerfile = read('carbon', 'Dockerfile');
     const nodeAlpine = dockerfile.match(/^ARG NODE_IMAGE=node:\d+-alpine([\d.]+)/m)?.[1];
-    const runnerAlpine = dockerfile.match(/^FROM alpine:([\d.]+) AS runner/m)?.[1];
+    const runnerAlpine = dockerfile.match(
+      /^FROM alpine:([\d.]+)(?:@sha256:[0-9a-f]{64})? AS runner/m,
+    )?.[1];
     expect(nodeAlpine).toBeDefined();
     expect(runnerAlpine).toBe(nodeAlpine);
   });
