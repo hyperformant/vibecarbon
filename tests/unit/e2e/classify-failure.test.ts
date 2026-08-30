@@ -354,6 +354,33 @@ describe('5xx patterns require a real status code, not any three digits', () => 
     }
   });
 
+  it("flags lego's vultr authoritative-check timeout as infra — negative-cache poisoning", () => {
+    // Run 33287840597 (vultr compose-ha) + scripts/acme-iso probes: Vultr's
+    // authoritative frontends negatively cache a name queried before its
+    // record lands, so lego's own propagation check starves against its own
+    // poisoned entry — wrong sibling token, or plain NXDOMAIN. The tuning
+    // row (VULTR_PROPAGATION_TIMEOUT/delay floor) is the mitigation;
+    // residual stragglers on churned names are retryable weather. The
+    // pattern is pinned to vultr's NS names so DO's equivalent wording
+    // stays with its own anycast class.
+    for (const msg of [
+      'propagation: time limit exceeded: last error: authoritative nameservers: NS ns1.vultr.com.:53 did not return the expected TXT record [fqdn: _acme-challenge.civ2.threvidence.com., value: 0ksJ…]: GXNfi0w4…',
+      'authoritative nameservers: NS ns1.vultr.com.:53 returned NXDOMAIN for _acme-challenge.isov1050.threvidence.com.',
+    ]) {
+      const result = classifyFailure({ errorMessage: msg });
+      expect(result.category, msg).toBe('infra');
+      expect(result.reason, msg).toMatch(/DNS-01 propagation/i);
+    }
+    // The same lego wording against another provider's NS stays unknown here
+    // (DO's own class matches on the acme urn context instead).
+    expect(
+      classifyFailure({
+        errorMessage:
+          'NS ns1.digitalocean.com.:53 did not return the expected TXT record [fqdn: x]',
+      }).category,
+    ).toBe('unknown');
+  });
+
   it('classifies object-storage staleness 404s as S3 transient (2026-08-30 backup RCA)', () => {
     // Run 33287840597, hetzner compose backup: a stale storage frontend
     // answered NoSuchBucket for a bucket the same run had written minutes

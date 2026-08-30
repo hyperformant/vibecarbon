@@ -65,4 +65,9 @@ services:
       ACME_DNS_DELAY_BEFORE_CHECKS: ${ACME_DNS_DELAY_BEFORE_CHECKS:-}
       LINODE_TOKEN: ${LINODE_TOKEN:-}
       VULTR_API_KEY: ${VULTR_API_KEY:-}
+      # Vultr lego tuning (DNS01_PROVIDERS legoTuningEnv): the zone's
+      # authoritative frontends negatively cache queried-before-created
+      # names, so lego's first check must wait out record publication —
+      # see the registry row's rationale.
+      VULTR_PROPAGATION_TIMEOUT: ${VULTR_PROPAGATION_TIMEOUT:-}
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}

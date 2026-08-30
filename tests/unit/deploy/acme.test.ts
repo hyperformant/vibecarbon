@@ -80,10 +80,12 @@ describe('dnsChallengeEnv', () => {
     });
   });
 
-  it('selects VULTR_API_KEY for vultr', () => {
+  it('selects VULTR_API_KEY for vultr (plus its negative-cache tuning row)', () => {
     expect(dnsChallengeEnv('vultr', 'vu-tok')).toEqual({
       ACME_DNS_PROVIDER: 'vultr',
       VULTR_API_KEY: 'vu-tok',
+      VULTR_PROPAGATION_TIMEOUT: '300',
+      ACME_DNS_DELAY_BEFORE_CHECKS: '60s',
     });
   });
 
@@ -161,6 +163,23 @@ describe('DNS01_PROVIDERS lego contract (census)', () => {
     expect(override).toContain(
       'acme.dnschallenge.propagation.delaybeforechecks=${ACME_DNS_DELAY_BEFORE_CHECKS:-0s}',
     );
+  });
+
+  it("vultr floors lego's first check past the zone's negative-cache poisoning window", () => {
+    // 2026-08-30 RCA (run 33287840597 vultr compose-ha; scripts/acme-iso
+    // trials + direct API/dig probes on threvidence.com): Vultr's
+    // authoritative frontends NEGATIVELY CACHE a name queried before its
+    // record lands. An unqueried record serves in <=5s; one pre-creation
+    // query makes the same record invisible for minutes. lego at
+    // delayBeforeChecks=0s queries the instant it presents — poisoning its
+    // own challenge name, then polling the poisoned cache until timeout
+    // ("NS ns1.vultr.com:53 returned NXDOMAIN for _acme-challenge...", or
+    // a concurrent order's stale token). The floor means the FIRST query
+    // happens after the record is live, so no negative entry ever forms;
+    // the 300s window covers cache-expiry stragglers on churned names.
+    const env = dnsChallengeEnv('vultr', 'tok') as Record<string, string>;
+    expect(env.VULTR_PROPAGATION_TIMEOUT).toBe('300');
+    expect(env.ACME_DNS_DELAY_BEFORE_CHECKS).toBe('60s');
   });
 
   it('providers without tuning rows stay token-only (hetzner converges inside lego defaults)', () => {

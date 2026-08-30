@@ -363,6 +363,27 @@ classes:
       misses are retried by E2E_RETRY_FLAKES via this mapping.
     sites: []
 
+  - class: vultr-dns-negative-cache-poisoning
+    attribution: external-proven
+    evidence: >-
+      Direct probes on the threvidence.com zone, 2026-08-30 ~15:0x-15:3xZ:
+      a TXT record created WITHOUT any prior query serves from
+      ns1.vultr.com in <=5s (records d9a48ee6, c94211a5, 085779f2 —
+      1-label, 2-label, and _acme-challenge.* names alike); the identical
+      create preceded by ONE dig of the not-yet-existing name (record
+      ef1dbe24, _acme-challenge.primed1788103268) stays invisible for 60s+
+      — the authoritative frontend negatively caches the miss. lego at
+      delayBeforeChecks=0 queries the instant it presents, poisoning its
+      own challenge name; its 60s default window then starves against the
+      cached miss ("NS ns1.vultr.com:53 returned NXDOMAIN", harness trials
+      isov1050/isov4b51/isov5b51) or, with apex+wildcard orders sharing a
+      name, the sibling's stale token (run 33287840597 vultr compose-ha).
+      Mitigation: vultr legoTuningEnv (dns-provider.js) — 60s
+      delayBeforeChecks floor so the first query lands after publication,
+      VULTR_PROPAGATION_TIMEOUT=300 for cache-expiry stragglers on churned
+      names. Residual misses retried by E2E_RETRY_FLAKES via this mapping.
+    sites: []
+
   - class: supabase-boot-ddl-deadlock
     attribution: external-asserted
     evidence: >-
@@ -406,3 +427,4 @@ flakeRetry:
   - { reason: "SSH connection blip", class: ssh-transport-blips }
   - { reason: "LE cert pending", class: acme-issuance-pending }
   - { reason: "ACME DNS-01 propagation (anycast lag)", class: dns-anycast-propagation-divergence }
+  - { reason: "ACME DNS-01 propagation (NS negative cache)", class: vultr-dns-negative-cache-poisoning }

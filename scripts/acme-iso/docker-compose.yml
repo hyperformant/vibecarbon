@@ -12,7 +12,7 @@ services:
       - "--entrypoints.web.address=:8080"
       - "--entrypoints.websecure.address=:8443"
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=digitalocean"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=${ACME_DNS_PROVIDER:-digitalocean}"
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge.propagation.delaybeforechecks=${ACME_DNS_DELAY_BEFORE_CHECKS:-0s}"
       - "--certificatesresolvers.letsencrypt.acme.email=admin@appcarbon.dev"
@@ -22,6 +22,14 @@ services:
     environment:
       DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:-}
       DO_PROPAGATION_TIMEOUT: ${DO_PROPAGATION_TIMEOUT:-}
+      VULTR_API_KEY: ${VULTR_API_KEY:-}
+      VULTR_PROPAGATION_TIMEOUT: ${VULTR_PROPAGATION_TIMEOUT:-}
+      HETZNER_API_KEY: ${HETZNER_API_KEY:-}
+      HETZNER_PROPAGATION_TIMEOUT: ${HETZNER_PROPAGATION_TIMEOUT:-}
     volumes:
-      - ./letsencrypt:/letsencrypt
+      # ACME_STORE_DIR must live OUTSIDE the repo tree: the container writes
+      # acme.json as root:600, and a root-owned file inside the repo breaks
+      # every census test that walks the tree (EACCES) plus the next trial's
+      # cleanup. trial.sh points this at a per-trial temp dir.
+      - ${ACME_STORE_DIR:-/tmp/acme-iso-manual}:/letsencrypt
       - ./volumes/traefik:/etc/traefik/dynamic:ro

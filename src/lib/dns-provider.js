@@ -159,6 +159,20 @@ export const DNS01_PROVIDERS = {
       'Vultr DNS-01 requires a Vultr API key with DNS write access. ' +
       "Set VULTR_API_KEY in your shell or the project's .env.local.",
     webhook: null,
+    // Vultr's authoritative frontends NEGATIVELY CACHE a name that was
+    // queried before its record landed (proven 2026-08-30 by direct probes
+    // on threvidence.com: an unqueried TXT record serves in <=5s; the same
+    // create preceded by ONE dig stays invisible for minutes). lego's
+    // default delayBeforeChecks=0s queries the instant it presents, poisons
+    // its own challenge name, then polls the poisoned cache until its 60s
+    // default window dies — "NS ns1.vultr.com:53 returned NXDOMAIN for
+    // _acme-challenge...", or, with the apex+wildcard orders sharing one
+    // name, the sibling order's stale token (run 33287840597 vultr
+    // compose-ha). The 60s floor makes the FIRST query land after the
+    // record is live so no negative entry ever forms; 300s covers
+    // cache-expiry stragglers on freshly churned names (failover re-arm,
+    // retried deploys reuse the same challenge names).
+    legoTuningEnv: { VULTR_PROPAGATION_TIMEOUT: '300', ACME_DNS_DELAY_BEFORE_CHECKS: '60s' },
   },
   scaleway: {
     // lego reads SCW_SECRET_KEY (verified against
