@@ -78,3 +78,6 @@ scripts/generate-license-keypair.js
 
 # Font cache for scripts/banner-generator.py — fetched on demand, never vendored
 .banner-fonts/
+
+# acme-iso harness: per-trial rendered configs (from *.tpl)
+scripts/acme-iso/volumes/traefik/*.yml
