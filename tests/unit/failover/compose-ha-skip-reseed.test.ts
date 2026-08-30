@@ -90,12 +90,26 @@ vi.mock('node:fs', async (orig) => {
   return { ...actual, existsSync: () => true };
 });
 
+// The post-flip TLS gate would otherwise open a real socket to the test domain.
+vi.mock('../../../src/lib/deploy/tls-ready.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    waitForTrustedTls: vi.fn(async () => ({ trusted: true, elapsedMs: 1 })),
+  };
+});
+
 const { failoverComposeHA } = await import('../../../src/lib/deploy/compose/ha.js');
+const { waitForTrustedTls } = await import('../../../src/lib/deploy/tls-ready.js');
 const { saveProjectConfig } = await import('../../../src/lib/config.js');
 
 const envConfig = {
   deployMode: 'compose-ha',
   domain: 'app.example.com',
+  // Managed DNS so the post-flip TLS gate is reachable; no token in the test
+  // env, so the DNS flip itself takes its warn branch without touching the
+  // network.
+  dns: { provider: 'digitalocean', zoneId: 'zone-1' },
   servers: [
     { role: 'primary', ip: '1.1.1.1', region: 'nbg1' },
     { role: 'standby', ip: '2.2.2.2', region: 'ash' },
@@ -176,6 +190,19 @@ describe('failoverComposeHA — standby already streaming', () => {
         updates: { ACME_DISARMED_CA_SERVER: 'https://acme-disarmed.invalid/directory' },
       },
     ]);
+  });
+
+  it('gates failover completion on the domain serving trusted TLS (post-DNS-flip)', async () => {
+    // Run 33279912405 attempt 2: the arm/disarm both landed (traefik
+    // recreated on both nodes) but verify-failover's 180s ssl_valid budget
+    // expired while the promoted node's fresh DNS-01 issuance was still in
+    // flight. Same rule as deploy: a failover is not done until the domain
+    // serves trusted TLS — the failover CLI waits (warn-don't-abort: DR
+    // completion beats cert perfection) so downstream checks start AFTER
+    // issuance in the normal case.
+    await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
+
+    expect(waitForTrustedTls).toHaveBeenCalledWith('app.example.com', expect.anything());
   });
 
   it('recreates traefik on both nodes so the re-armed/disarmed caserver takes (command env is create-time)', async () => {

@@ -33,6 +33,7 @@ import {
   buildStagedBasebackupScript,
   REPL_PORT,
 } from '../replication.js';
+import { waitForTrustedTls } from '../tls-ready.js';
 import { mergeRemoteDotenv, pinnedSshOptsString, readReplPassword } from '../utils.js';
 import {
   assertWalgBackupsWorking,
@@ -1795,6 +1796,33 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     p.log.info(c.bold('Update DNS to complete failover:'));
     p.log.message(`  ${c.dim('Domain'.padEnd(14))} ${c.bold(domain)}`);
     p.log.message(`  ${c.dim('New IP'.padEnd(14))} ${c.bold(standbyServer.ip)} (promoted standby)`);
+  }
+
+  // Step 3b: TLS gate — the deploy rule, applied to failover: it is not done
+  // until the domain serves a trusted certificate. The promoted node was
+  // deployed with a DISARMED issuer (single-active-issuer policy), so its
+  // ACME issuance only began at the arm in step 1a3; on slow DNS-01
+  // (DigitalOcean anycast) that can outlive downstream checks that assume
+  // the cert exists — run 33279912405's verify-failover expired mid-issuance.
+  // Warn-don't-abort: the DR flip is complete and the site serves; a pending
+  // cert is degraded TLS, not a failed failover. Managed DNS only — on
+  // manual DNS the operator hasn't repointed the domain yet.
+  if (hasAutomatedDns(envConfig.dns?.provider) && envConfig.domain) {
+    s.start(`Waiting for ${envConfig.domain} to serve a trusted TLS certificate`);
+    const tls = await waitForTrustedTls(envConfig.domain, {
+      onProgress: (msg) => s.message(msg),
+    });
+    if (tls.trusted) {
+      s.stop(`TLS certificate trusted (issued within ${Math.round(tls.elapsedMs / 1000)}s)`);
+    } else {
+      s.stop('Domain not yet serving a trusted TLS certificate', 1);
+      p.log.warn(
+        `The failover is complete and the site is serving, but ${envConfig.domain} still ` +
+          `presents an untrusted certificate (${tls.reason}). Traefik on the promoted node ` +
+          `retries issuance automatically; if this persists, check its logs ` +
+          `(docker compose logs traefik) for the ACME error.`,
+      );
+    }
   }
 
   // Update config: swap primary/standby roles so subsequent commands reflect reality
