@@ -59,9 +59,17 @@ describe('local e2e runs never publish performance surfaces', () => {
     expect(pkg).not.toContain('publish-perf-pr');
     const offenders: string[] = [];
     const { readdirSync } = require('node:fs') as typeof import('node:fs');
-    for (const f of readdirSync(join(ROOT, 'scripts'))) {
-      if (read(join('scripts', f)).includes('publish-perf-pr')) offenders.push(`scripts/${f}`);
-    }
+    // Recursive: scripts/ gained subdirectories (scripts/acme-iso) — a
+    // helper nested one level down is exactly as locally-runnable as a
+    // top-level one, so the census walks files at every depth.
+    const walk = (rel: string): void => {
+      for (const entry of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
+        const childRel = join(rel, entry.name);
+        if (entry.isDirectory()) walk(childRel);
+        else if (read(childRel).includes('publish-perf-pr')) offenders.push(childRel);
+      }
+    };
+    walk('scripts');
     expect(offenders, 'local scripts must not invoke the stat-PR publisher').toEqual([]);
     // Sanity: the allowed CI call site still exists (otherwise this census
     // is guarding a publisher nothing runs).

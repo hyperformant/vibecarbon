@@ -1,0 +1,27 @@
+# ACME DNS-01 isolation harness — replicates the EXACT resolver config the
+# compose template ships (docker-compose.dns01.prod.yml + tls-default.yml)
+# for a throwaway subdomain, locally: no droplets, no inbound connectivity
+# (DNS-01 validates via TXT records only). Measures issuance end-to-end
+# against LE staging on DigitalOcean DNS.
+services:
+  traefik:
+    image: traefik:v3.6.11
+    command:
+      - "--providers.docker=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--entrypoints.web.address=:8080"
+      - "--entrypoints.websecure.address=:8443"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=digitalocean"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.propagation.delaybeforechecks=${ACME_DNS_DELAY_BEFORE_CHECKS:-0s}"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@appcarbon.dev"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+      - "--log.level=INFO"
+    environment:
+      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:-}
+      DO_PROPAGATION_TIMEOUT: ${DO_PROPAGATION_TIMEOUT:-}
+    volumes:
+      - ./letsencrypt:/letsencrypt
+      - ./volumes/traefik:/etc/traefik/dynamic:ro
