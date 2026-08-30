@@ -287,18 +287,18 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | | `compose-ha` | 7m 8s | 2m 7s | 12.0s | 7m 8s | 4m 39s | 42.8s | 36.8s |
 | | `k8s` | 7m 9s | 6.8s | 29.1s | 15m 29s | 2m 33s | 1m 55s | — |
 | | `k8s-ha` | 9m 40s | 41.1s | 27.5s | 13m 33s | 5m 33s | 2m 5s | 2m 57s |
-| DigitalOcean | `compose` | 8m 7s | 1m 22s | 2.6s | 8m 53s | 7m 12s | 38.5s | — |
-| | `compose-ha` | 10m 49s | 2m 25s | 3.1s | 11m 48s | 7m 43s | 41.2s | — |
-| | `k8s` | 8m 10s | 2m 6s | 27.3s | 10m 0s | 4m 46s | 1m 57s | — |
-| | `k8s-ha` | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| Linode | `compose` | 7m 46s | 14.9s | 2.1s | 8m 0s | 6m 59s | 28.6s | — |
-| | `compose-ha` | 10m 6s | 50.2s | 1.7s | 11m 11s | 7m 26s | 30.5s | 49.1s |
+| DigitalOcean | `compose` | 9m 40s | 24.7s | 2.3s | 10m 26s | 7m 40s | 41.6s | — |
+| | `compose-ha` | 13m 19s | 1m 50s | 2.1s | 15m 19s | 9m 14s | 47.3s | 2m 17s |
+| | `k8s` | 9m 51s | 8.8s | 36.7s | 8m 38s | 4m 44s | 2m 10s | — |
+| | `k8s-ha` | 11m 26s | 56.3s | 28.6s | 11m 3s | 8m 16s | 2m 20s | 5m 12s |
+| Linode | `compose` | 7m 42s | 13.0s | 1.8s | 7m 56s | 7m 45s | 27.9s | — |
+| | `compose-ha` | 10m 54s | 50.8s | 2.0s | 10m 31s | 7m 1s | 31.1s | 48.9s |
 | Vultr | `compose` | 5m 8s | 15.3s | 4.2s | 11m 8s | 9m 6s | 39.2s | — |
 | | `compose-ha` | 10m 59s | 1m 17s | 5.3s | 10m 50s | 9m 38s | 46.4s | 49.0s |
-| Scaleway | `compose` | 7m 16s | 30.7s | 5.2s | 7m 30s | 5m 33s | 55.1s | — |
-| | `compose-ha` | 11m 15s | 2m 59s | 4.1s | 12m 19s | 4m 37s | 1m 20s | 1m 4s |
+| Scaleway | `compose` | 7m 3s | 24.9s | 3.5s | 7m 4s | 4m 35s | 43.5s | — |
+| | `compose-ha` | 9m 43s | 2m 17s | 3.2s | 11m 18s | 4m 46s | 1m 54s | 57.6s |
 
-_Latest green CI runs: Hetzner Cloud `a0fc2ef` (2026-08-23) · DigitalOcean `fd40094` (2026-08-15) · Linode `d85ff7a` (2026-08-23) · Vultr `59915e3` (2026-08-23) · Scaleway `6ce67f3` (2026-08-23) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `a0fc2ef` (2026-08-23) · DigitalOcean `eb61a83` (2026-08-30) · Linode `890325b` (2026-08-30) · Vultr `59915e3` (2026-08-23) · Scaleway `d50493f` (2026-08-30) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner and DigitalOcean today.
