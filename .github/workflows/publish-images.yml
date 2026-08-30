@@ -15,13 +15,19 @@ on:
       - 'scripts/mirror-matrix.mjs'
       - '.github/workflows/publish-images.yml'
   workflow_dispatch: {}
+# Job-scoped writes only (OpenSSF Scorecard Token-Permissions: any
+# top-level write zeroes the check). A job-level block replaces this
+# wholesale, so jobs re-declare contents: read. mirror-matrix stays on
+# the read-only default — it only computes the matrix.
 permissions:
   contents: read
-  packages: write   # push to ghcr
 jobs:
   publish:
     runs-on: ubuntu-latest
     environment: e2e-infra
+    permissions:
+      contents: read
+      packages: write   # push to ghcr
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: ref
@@ -194,6 +200,9 @@ jobs:
     needs: mirror-matrix
     runs-on: ubuntu-latest
     environment: e2e-infra
+    permissions:
+      contents: read
+      packages: write   # push mirrored manifests to ghcr
     strategy:
       # Every image is independent. One package failing (a bad tag, a transient
       # upstream 5xx) must not cancel the other legs — a partially-mirrored set
