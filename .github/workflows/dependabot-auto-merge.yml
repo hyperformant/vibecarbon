@@ -4,23 +4,27 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
-permissions:
-  contents: write
-  pull-requests: write
-  # A top-level permissions block zeroes every unlisted scope, so the
-  # check-runs poll below 403s without this — silently, for 30 min, then
-  # exits 1. Broke every non-major bump from 2026-07-13 until 2026-08-12.
-  checks: read
+# Write scopes live on the job, not here: a top-level write block zeroes the
+# repo's OpenSSF Scorecard Token-Permissions check, and no other job exists
+# to inherit them anyway.
+permissions: {}
 
 jobs:
   auto-merge:
     if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: write
+      pull-requests: write
+      # A permissions block zeroes every unlisted scope, so the check-runs
+      # poll below 403s without this — silently, for 30 min, then exits 1.
+      # Broke every non-major bump from 2026-07-13 until 2026-08-12.
+      checks: read
     steps:
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v3
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 

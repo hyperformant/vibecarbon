@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM supabase/postgres:15.8.1.085
+FROM supabase/postgres:15.8.1.085@sha256:af083ef64d0408c8f098ee6f5c364a59b26f36fbc0f3a334a62c5c1d57362e9b
 
 # Install WAL-G. This image IS the backup tooling now (both compose
 # and k8s): wal-g runs co-located with PGDATA in this container for continuous

@@ -228,7 +228,9 @@ describe('workflows derive pnpm instead of pinning it', () => {
   it('every workflow is on the same pnpm/action-setup major', () => {
     const majors = new Set(
       registered.flatMap((relPath) =>
-        [...read(relPath).matchAll(/pnpm\/action-setup@v(\d+)/g)].map((m) => m[1]),
+        [...read(relPath).matchAll(/pnpm\/action-setup@(?:[0-9a-f]{40}\s*#\s*)?v(\d+)/g)].map(
+          (m) => m[1],
+        ),
       ),
     );
     expect([...majors]).toHaveLength(1);
