@@ -39,8 +39,14 @@
  *     bites on the initial LIST ("Selecting the latest backup"), before a
  *     single byte has been fetched.
  *   - `backup-push` writes a NEW base backup whose sentinel is written last,
- *     so a failed push leaves nothing selectable; the `delete retain` in the
- *     same script prunes to the retention count either way.
+ *     so a failed push leaves nothing selectable. It DOES leave a
+ *     sentinel-less orphan that `delete retain` hard-crashes on ("object
+ *     …_backup_stop_sentinel.json not found in storage") — a PERMANENT
+ *     failure this retry ladder cannot heal (proven 2026-08-30: all five
+ *     attempts died on the same orphan). The backup scripts therefore run
+ *     `wal-g delete garbage BACKUPS --confirm` before `delete retain`
+ *     (census: tests/unit/deploy/walg-retention-orphan-sweep.test.ts), which
+ *     makes each retry attempt self-healing again.
  *
  * WHAT MUST STAY FATAL
  * --------------------

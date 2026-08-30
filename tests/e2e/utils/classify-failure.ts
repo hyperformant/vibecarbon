@@ -119,8 +119,16 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   // Anything that no longer matches falls through to `unknown`, which the
   // runner deliberately does NOT auto-retry — the right home for an error
   // we have not positively identified as somebody else's outage.
+  //
+  // The 404 half (2026-08-30 backup RCA, run 33287840597): Hetzner Object
+  // Storage staleness also answers NoSuchBucket for a bucket the same run
+  // wrote minutes earlier, and wal-g renders the same 404 as
+  // `object '…' not found in storage` (the exact spellings
+  // src/lib/deploy/walg-staleness.js retries in-product). Both are
+  // token-bounded — no `.*` to wander into bucket names.
   {
-    pattern: /\bS3\b.{0,80}\b5\d\d\b|RequestTimeout|SlowDown|InternalError/i,
+    pattern:
+      /\bS3\b.{0,80}\b5\d\d\b|RequestTimeout|SlowDown|InternalError|NoSuchBucket|object '[^']*' not found in storage/i,
     reason: 'S3 transient',
   },
   // Docker Hub / registry transient. Same bounding as the S3 rule above —

@@ -108,6 +108,13 @@ spec:
                         ;;
                     esac
                     wal-g backup-push "$PGDATA"
+                    # Sweep sentinel-less orphans (interrupted pushes) before
+                    # retention — `delete retain` hard-crashes on a backup
+                    # whose stop-sentinel never got written, and retries can't
+                    # heal a permanently missing object (2026-08-30 RCA).
+                    # Safe under concurrencyPolicy: Forbid — no concurrent
+                    # push can look like an orphan mid-flight.
+                    wal-g delete garbage BACKUPS --confirm
                     wal-g delete retain FULL '"${RETAIN}"' --confirm
                   '
               resources:

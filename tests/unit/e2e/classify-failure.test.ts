@@ -354,6 +354,23 @@ describe('5xx patterns require a real status code, not any three digits', () => 
     }
   });
 
+  it('classifies object-storage staleness 404s as S3 transient (2026-08-30 backup RCA)', () => {
+    // Run 33287840597, hetzner compose backup: a stale storage frontend
+    // answered NoSuchBucket for a bucket the same run had written minutes
+    // earlier, and wal-g's own rendering of the same 404 wedged retention.
+    // Both are the documented pulumi-state-backend-consistency weather (see
+    // src/lib/deploy/walg-staleness.js) — retryable, and with the orphan
+    // sweep (walg-retention-orphan-sweep.test.ts) a retry can now succeed.
+    for (const msg of [
+      "failed to upload 'backups/x/walg/basebackups_005/base_1/files_metadata.json' to bucket 'x-backups': NoSuchBucket: ",
+      "ERROR: 2026/08/30 02:36:25.545992 object 'base_000000020000000000000014_backup_stop_sentinel.json' not found in storage",
+    ]) {
+      const result = classifyFailure({ errorMessage: msg });
+      expect(result.reason, msg).toMatch(/S3 transient/i);
+      expect(result.category, msg).toBe('infra');
+    }
+  });
+
   it('the Docker Hub rule is bounded the same way', () => {
     expect(
       classifyFailure({

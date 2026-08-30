@@ -66,7 +66,17 @@ docker compose exec -T db bash -c '
     echo "supabase-db is in recovery (standby) — skipping base backup."
     exit 0
   fi
-  wal-g backup-push "$PGDATA" && wal-g delete retain FULL "'"${RETAIN}"'" --confirm
+  # `delete garbage BACKUPS` sweeps sentinel-less orphans (an interrupted
+  # backup-push writes its stop-sentinel LAST, so a mid-upload failure leaves
+  # data files with no sentinel) BEFORE retention runs — `delete retain`
+  # hard-crashes on such an orphan ("object …_backup_stop_sentinel.json not
+  # found in storage") on every run until someone deletes it by hand
+  # (2026-08-30 RCA: a stale-storage-frontend window orphaned one push and
+  # wedged all five retry attempts). Safe under the flock above: no concurrent
+  # push on this host can look like an orphan mid-flight.
+  wal-g backup-push "$PGDATA" \
+    && wal-g delete garbage BACKUPS --confirm \
+    && wal-g delete retain FULL "'"${RETAIN}"'" --confirm
 '
 
 echo "=== Backup completed at $(date) ==="
