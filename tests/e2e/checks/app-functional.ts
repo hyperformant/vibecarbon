@@ -532,6 +532,25 @@ async function runDbChecks(domain: string, serviceRoleKey: string): Promise<Veri
 // ---------------------------------------------------------------------------
 
 /**
+ * Every spelling of "object not found" the storage download path produces —
+ * the trigger for storage_download's DIAGNOSTIC retry (which fails either
+ * way; it exists to name the failure mode, not absorb it).
+ *
+ * Two observed spellings, one per occurrence of the post-restore
+ * read-after-write race:
+ *  - outer HTTP 404 (2026-08-23, run 32614839037) — Kong/storage passthrough.
+ *  - outer HTTP 400 with storage-api's JSON envelope
+ *    `{"statusCode":"404","error":"Not found",…}` (2026-08-30, run
+ *    33324819789) — the trigger keyed on outer 404 alone MISSED this one,
+ *    so that run produced zero discriminating evidence. Body match is pinned
+ *    to the envelope shape, not prose mentioning 404.
+ */
+export function isStorageNotFoundResponse(status: number, body: string): boolean {
+  if (status === 404) return true;
+  return status === 400 && /"statusCode"\s*:\s*"?404"?/.test(body);
+}
+
+/**
  * Create `test-bucket` if it is not already there, so the storage checks
  * below have the precondition they need.
  *
@@ -693,8 +712,12 @@ async function runStorageChecks(
       // but its message now names which failure mode occurred, which is the
       // evidence the next occurrence needs. An absorbing retry here would be
       // an unregistered mitigation hiding an `ours` bug (mitigation policy).
+      // Occurrence #2 (2026-08-30, run 33324819789, same step): storage-api
+      // rendered the miss as outer 400 + body statusCode "404", the old
+      // `status === 404` trigger missed it, and we got no evidence — hence
+      // isStorageNotFoundResponse, which pins BOTH spellings.
       let retryNote = '';
-      if (res.status === 404) {
+      if (isStorageNotFoundResponse(res.status, body)) {
         await new Promise((r) => setTimeout(r, 2000));
         try {
           const again = await safeFetch(publicUrl, { method: 'GET', headers: authHeaders });
