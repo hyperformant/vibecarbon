@@ -1147,7 +1147,7 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     );
   }
 
-  it('DO-like ProviderClass + vpcCidr: applies EXACTLY the 4 S3-purposed additive policies, pinned to the SAME vpcCidr value the deploy used', async () => {
+  it('DO-like ProviderClass + vpcCidr: applies EXACTLY the 3 S3-purposed additive policies, pinned to the SAME vpcCidr value the deploy used', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
 
@@ -1162,15 +1162,15 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     const yaml = hit.data;
 
     expect(yaml).toContain('name: app-s3-vpc-egress');
-    expect(yaml).toContain('name: registry-s3-vpc-egress');
     expect(yaml).toContain('name: supabase-db-s3-vpc-egress');
     expect(yaml).not.toContain('__VPC_CIDR__');
 
     // Pinned against the SAME variable the deploy call used (TEST_VPC_CIDR),
     // not a hand-copied literal — one occurrence per policy.
     const cidrMatches = yaml.match(/cidr: 10\.20\.0\.0\/16/g);
-    // 4 since 2026-08-21 — storage joined when it was first wired to S3.
-    expect(cidrMatches?.length).toBe(4);
+    // 3 since 2026-08-30 — the registry's arm left with its S3 backend
+    // (filesystem now); storage joined 2026-08-21. app + storage + db.
+    expect(cidrMatches?.length).toBe(3);
 
     // Near-miss rejection — scoped to exactly the 3 S3-purposed policies;
     // the audited-and-left-alone policies (Task 9c report) must gain no
@@ -1185,7 +1185,6 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     expect(policyNames.sort()).toEqual(
       [
         'app-s3-vpc-egress',
-        'registry-s3-vpc-egress',
         'supabase-db-s3-vpc-egress',
         // Added 2026-08-21 with the storage service's first working S3 wiring.
         'supabase-storage-s3-vpc-egress',

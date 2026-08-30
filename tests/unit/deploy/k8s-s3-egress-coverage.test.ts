@@ -91,7 +91,10 @@ describe('k8s S3 egress coverage', () => {
       'utf8',
     );
     const cidrs = [...raw.matchAll(/cidr: (\S+)/g)].map((m) => m[1]);
-    expect(cidrs.length).toBeGreaterThanOrEqual(4);
+    // 3 arms since 2026-08-30: the registry left the S3-egress family when
+    // its backend moved to the master's filesystem (see
+    // registry-no-object-storage.test.ts) — app, storage, and db remain.
+    expect(cidrs.length).toBeGreaterThanOrEqual(3);
     for (const c of cidrs) expect(c).toBe('__VPC_CIDR__');
   });
 });
