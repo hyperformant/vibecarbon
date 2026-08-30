@@ -7,13 +7,18 @@ on:
       - 'src/lib/images.js'
       - '.github/workflows/publish-db-image.yml'
   workflow_dispatch: {}
+# Job-scoped writes only (OpenSSF Scorecard Token-Permissions: any
+# top-level write zeroes the check). A job-level block replaces this
+# wholesale, so jobs re-declare contents: read.
 permissions:
   contents: read
-  packages: write   # push to ghcr
 jobs:
   publish:
     runs-on: ubuntu-latest
     environment: e2e-infra
+    permissions:
+      contents: read
+      packages: write   # push to ghcr
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: ref
