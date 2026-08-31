@@ -48,6 +48,19 @@ export function detectPackageManager(cwd = process.cwd()) {
 // ============================================================================
 
 /**
+ * Whether a project manifest (.vibecarbon.json) exists in cwd. Callers that
+ * need to distinguish "no project here" from "project with defaults" (e.g.
+ * deciding whether to lazily persist a generated id) should use this rather
+ * than re-deriving the manifest path themselves.
+ *
+ * @param {string} [cwd] - Working directory (defaults to process.cwd())
+ * @returns {boolean}
+ */
+export function manifestExists(cwd = process.cwd()) {
+  return existsSync(join(cwd, '.vibecarbon.json'));
+}
+
+/**
  * Load the project manifest (.vibecarbon.json)
  * This tracks which services have been added to the project
  *
