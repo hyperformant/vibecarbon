@@ -70,6 +70,14 @@ const OWNED_IMAGES = [
     // absent label reads as "unknown" — which is the truth. See the Dockerfile.
     declaresLicense: false,
   },
+  {
+    dockerfile: join('docker', 'wal-g', 'Dockerfile'),
+    packageName: 'wal-g',
+    // Entirely upstream wal-g source (Apache-2.0) compiled by us — but the
+    // static binary embeds dozens of Go module licenses, so the same
+    // "absent reads as unknown" reasoning as postgres-walg applies.
+    declaresLicense: false,
+  },
 ] as const;
 
 /** Collapse backslash continuations so each entry is one logical instruction. */

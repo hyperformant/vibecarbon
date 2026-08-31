@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'docker/wal-g/**'
       - 'docker/postgres-walg/**'
       - 'src/lib/images.js'
       - '.github/workflows/publish-db-image.yml'
@@ -13,7 +14,51 @@ on:
 permissions:
   contents: read
 jobs:
+  # The static wal-g binary image publishes FIRST: the db image below (and
+  # carbon/db/Dockerfile on every target server) COPY --froms it, so `needs:`
+  # in this one workflow is what serializes a same-push bump of both — two
+  # workflows racing the same push was the alternative, and the db leg would
+  # lose it.
+  #
+  # multi-arch (amd64 + arm64) with NO QEMU: docker/wal-g/Dockerfile builds
+  # on $BUILDPLATFORM and cross-compiles per TARGETARCH, so both platforms
+  # are native-speed `go build`s. arm64's consumer is local dev — an Apple
+  # Silicon machine building carbon/db pulls this image. Guarded by
+  # tests/unit/deploy/workflow-platforms.test.ts.
+  #
+  # The ghcr package must be PUBLIC: target servers pull it anonymously
+  # during compose builds (same rule as ghcr.io/hyperformant/postgres).
+  publish-walg:
+    runs-on: ubuntu-latest
+    environment: e2e-infra
+    permissions:
+      contents: read
+      packages: write   # push to ghcr
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: ref
+        name: Resolve wal-g version from docker/wal-g/Dockerfile
+        run: |
+          V=$(grep -oP 'ARG WALG_VERSION=v\K[0-9.]+' docker/wal-g/Dockerfile)
+          echo "image=ghcr.io/hyperformant/wal-g:$V" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: docker/wal-g
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.ref.outputs.image }}
+      # The Dockerfile's own smoke stage already executed the amd64 binary
+      # in-build; this proves the PUBLISHED manifest resolves and runs.
+      - name: Smoke-test the published amd64 binary
+        run: docker run --rm --entrypoint /usr/local/bin/wal-g ${{ steps.ref.outputs.image }} --version
   publish:
+    needs: publish-walg
     runs-on: ubuntu-latest
     environment: e2e-infra
     permissions:

@@ -40,7 +40,7 @@ const FIXTURE = `
 image:
   db:
     repository: supabase/postgres
-    tag: 15.8.1.085
+    tag: 17.6.1.167
   studio:
     repository: supabase/studio
     tag: 2025.06.30-sha-6f5982d

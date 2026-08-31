@@ -55,7 +55,7 @@ secret:
       database: DB_NAME
 
 # Override the db image with vibecarbon's wal-g-equipped build (carbon/db/
-# Dockerfile: FROM supabase/postgres + wal-g v3.0.5). The stock chart image
+# Dockerfile: FROM supabase/postgres + wal-g v3.0.9). The stock chart image
 # has no wal-g, which is why k8s historically had no WAL archiving / PITR.
 # Built + sideloaded to the supabase node by deployK3s (k3s-db-build /
 # k3s-db-sideload); IfNotPresent so the sideloaded image is used, not pulled.
