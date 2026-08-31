@@ -10,13 +10,22 @@ describe('sanitizeText', () => {
     );
   });
 
-  it('redacts IPv4 and IPv6 addresses', () => {
+  it('redacts the bare username after the home directory is gone', () => {
+    expect(sanitizeText('user alice not found in cluster', home)).toBe(
+      'user [user] not found in cluster',
+    );
+  });
+
+  it('redacts IPv4 and IPv6 addresses, including compressed IPv6 forms', () => {
     expect(sanitizeText('connect ETIMEDOUT 65.108.12.34:6443', home)).toBe(
       'connect ETIMEDOUT [ip]:6443',
     );
     expect(sanitizeText('listen on 2a01:4f9:c012:7c2::1 failed', home)).toBe(
       'listen on [ip] failed',
     );
+    expect(sanitizeText('connect to ::1 refused', home)).toBe('connect to [ip] refused');
+    expect(sanitizeText('bind fe80::1 failed', home)).toBe('bind [ip] failed');
+    expect(sanitizeText('route 2001:db8:: unreachable', home)).toBe('route [ip] unreachable');
   });
 
   it('redacts long hex/base64 runs and token= / key=-shaped substrings', () => {
@@ -28,6 +37,15 @@ describe('sanitizeText', () => {
     );
     expect(sanitizeText('S3_SECRET_KEY=AbCdEfGh12345678IjKlMnOp', home)).toBe(
       'S3_SECRET_KEY=[redacted]',
+    );
+  });
+
+  it('redacts Bearer tokens and Authorization values regardless of digit content', () => {
+    expect(sanitizeText('failed: Bearer abcdefghijklmnopqrstuvwxyz', home)).toBe(
+      'failed: Bearer [redacted]',
+    );
+    expect(sanitizeText('Authorization: abcdefghijklmnopqrstuvwxyz', home)).toBe(
+      'Authorization: [redacted]',
     );
   });
 
@@ -95,5 +113,22 @@ describe('sanitizeError', () => {
     expect(out.error_name).toBe('Error');
     expect(out.stack).toBe('(no stack)');
     expect(out.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('keeps in-package frames when packageRoot itself lives under node_modules (npm/pnpm installs)', () => {
+    const npmOpts = {
+      homeDir: '/home/alice',
+      packageRoot: '/home/alice/project/node_modules/vibecarbon',
+    };
+    const err = new Error('boom');
+    err.name = 'DeployError';
+    err.stack = [
+      'DeployError: boom',
+      '    at run (/home/alice/project/node_modules/vibecarbon/src/cli.js:10:2)',
+      '    at dep (/home/alice/project/node_modules/vibecarbon/node_modules/dep/index.js:5:1)',
+    ].join('\n');
+    const out = sanitizeError(err, npmOpts);
+    expect(out.stack).toBe('at run (src/cli.js:10:2)');
+    expect(out.stack).not.toContain('node_modules');
   });
 });
