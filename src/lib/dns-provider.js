@@ -99,6 +99,21 @@ export const DNS01_PROVIDERS = {
       version: '0.7.0',
       releaseName: 'cert-manager-webhook-hetzner',
     },
+    // TIMEOUT-ONLY latency insurance — deliberately NO delay floor.
+    // 2026-08-31 (run 33341893276, compose + compose-ha verify-tls,
+    // apex-missing-from-cert): Hetzner DNS propagation is normally 10-40s
+    // (months of green; harness trial isohz1 issued at 46s on defaults an
+    // hour later) but degrades in windows — direct probes during the window
+    // measured one record visible at 20s and its twin at 90s+, past lego's
+    // 60s default, so the slower of the two concurrent orders (apex +
+    // wildcard) times out and the domain serves a wildcard-only cert.
+    // Distinct mechanism from the vultr row above: NO query-before-create
+    // poisoning (a deliberately pre-queried name propagated normally), so a
+    // settle floor would tax EVERY issuance (harness: 87s floored vs 46s
+    // default) for nothing. A longer per-attempt window costs zero when the
+    // zone is fast — lego proceeds the moment its poll sees the record —
+    // and turns a degraded window from a failed deploy into a slower one.
+    legoTuningEnv: { HETZNER_PROPAGATION_TIMEOUT: '300' },
   },
   digitalocean: {
     // lego reads DO_AUTH_TOKEN, which is NOT the env var the rest of the CLI

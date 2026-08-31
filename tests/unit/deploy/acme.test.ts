@@ -57,10 +57,11 @@ describe('dnsChallengeEnv', () => {
     });
   });
 
-  it('selects the (consolidated Cloud) token env var for hetzner', () => {
+  it('selects the (consolidated Cloud) token env var for hetzner (plus its latency-insurance row)', () => {
     expect(dnsChallengeEnv('hetzner', 'hz-tok')).toEqual({
       ACME_DNS_PROVIDER: 'hetzner',
       HETZNER_API_TOKEN: 'hz-tok',
+      HETZNER_PROPAGATION_TIMEOUT: '300',
     });
   });
 
@@ -182,9 +183,24 @@ describe('DNS01_PROVIDERS lego contract (census)', () => {
     expect(env.ACME_DNS_DELAY_BEFORE_CHECKS).toBe('60s');
   });
 
-  it('providers without tuning rows stay token-only (hetzner converges inside lego defaults)', () => {
+  it('hetzner carries timeout-only insurance — latency windows, no settle floor', () => {
+    // 2026-08-31 RCA (run 33341893276 compose/compose-ha verify-tls,
+    // apex-missing-from-cert): Hetzner DNS propagation is normally 10-40s
+    // (months of green; harness trial isohz1 issued at 46s on DEFAULTS an
+    // hour after the failures) but degrades in windows — direct probes
+    // during the window measured one record at 20s and its twin at 90s+,
+    // past lego's 60s default. Distinct mechanism from vultr: NO
+    // query-before-create poisoning (a primed name propagated fine), so no
+    // delay floor — a floor taxes EVERY issuance (harness: 87s tuned vs 46s
+    // default) while a longer TIMEOUT costs nothing when the zone is fast
+    // (lego proceeds the moment the record is visible) and turns a degraded
+    // window from a failed deploy into a slower one.
     const env = dnsChallengeEnv('hetzner', 'tok') as Record<string, string>;
-    expect(Object.keys(env).sort()).toEqual(['ACME_DNS_PROVIDER', 'HETZNER_API_TOKEN'].sort());
+    expect(Object.keys(env).sort()).toEqual(
+      ['ACME_DNS_PROVIDER', 'HETZNER_API_TOKEN', 'HETZNER_PROPAGATION_TIMEOUT'].sort(),
+    );
+    expect(env.HETZNER_PROPAGATION_TIMEOUT).toBe('300');
+    expect(env.ACME_DNS_DELAY_BEFORE_CHECKS).toBeUndefined();
   });
 
   it('the Traefik DNS-01 override passes every token env var through to the container', () => {
