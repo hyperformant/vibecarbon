@@ -7,10 +7,10 @@
 # tests/unit/lib/node-version-pins.test.ts asserts this tag's major matches it.
 #
 # The alpine minor is load-bearing, not cosmetic: the runner stage below is a
-# bare `alpine:3.23` that the node binary is COPY'd into, so this must stay
+# bare `alpine:3.24` that the node binary is COPY'd into, so this must stay
 # pinned to the SAME alpine as that stage or the binary hits a musl/libstdc++
 # mismatch at runtime.
-ARG NODE_IMAGE=node:24-alpine3.23@sha256:0388af2af070cd4736a1567cfed02469ba117848845b4165d87a333edb53d2ca
+ARG NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
 
 # Base image can be overridden for Turbo Layer Caching
 # Default is the standard node image
@@ -94,7 +94,7 @@ RUN npm init -y > /dev/null 2>&1 && \
     npm install --no-package-lock pino@10
 
 # Production stage — minimal Alpine with just the node binary
-FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS runner
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runner
 
 RUN apk add --no-cache libstdc++ && \
     addgroup -g 1001 -S hono && \
