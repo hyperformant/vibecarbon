@@ -43,8 +43,8 @@ importers:
         specifier: ^6.4.0
         version: 6.4.0(typescript@7.0.2)
       '@pulumi/pulumi':
-        specifier: ^3.248.0
-        version: 3.259.0(typescript@7.0.2)
+        specifier: ^3.260.0
+        version: 3.260.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.54.0
         version: 1.54.0(typescript@7.0.2)
@@ -782,8 +782,8 @@ packages:
   '@pulumi/linode@6.4.0':
     resolution: {integrity: sha512-tXkJUDkMXYNEtObY3ueEa4XpF0+12maZB8gGjfce302tR+hcgo3O86RMEmETtc8bfd0mjtbIBhA5hQOeJ5lQ7A==}
 
-  '@pulumi/pulumi@3.259.0':
-    resolution: {integrity: sha512-DRc1bDHWTofZGkKcs/bx98LujCZJNoKRkOdeEhQZNz7wPUX/obhuzmWJezew2FUCEAy1xXHtQj1CTcANHoLn3A==}
+  '@pulumi/pulumi@3.260.0':
+    resolution: {integrity: sha512-lLDISSiEToYj1/bT3dmzju9gyLrP7EcVHKo3IZ6pQY2uMfApyAeabOapDFJlrWvQedtpqIKBR7y5nNm6M91gJg==}
     engines: {node: '>=22'}
     peerDependencies:
       ts-node: '>= 7.0.1 < 12'
@@ -935,8 +935,8 @@ packages:
     resolution: {integrity: sha512-qRsxPnCrbC/puegGxKuynfnxgLiHqWStrSjxkoB4YKqq3Z3s4cyZyj42ZdWFAEblNP65C+rBH8EuREHIXoi83g==}
     engines: {node: ^20.17.0 || >=22.9.0}
 
-  '@sigstore/protobuf-specs@0.5.1':
-    resolution: {integrity: sha512-/ScWUhhoFasJsSRGTVBwId1loQjjnjAfE4djL6ZhrXRpNCmPTnUKF5Jokd58ILseOMjzET3UrMOtJPS9sYeI0g==}
+  '@sigstore/protobuf-specs@0.5.2':
+    resolution: {integrity: sha512-SQqvFMt4V78fdjcDdYX6HbiVSOR4QK3ZgwCa2KOsopAgPIHy1rU5UDUmzLl02r5oyyaYcYHR1hpwDRk/yUe+Mw==}
     engines: {node: ^18.17.0 || >=20.5.0}
 
   '@sigstore/sign@4.1.1':
@@ -2377,6 +2377,10 @@ packages:
     resolution: {integrity: sha512-I4Prw6ivkd6p8PiYR1tXASOAOBzIJwu0TB7fqaX0c/8c3QAehNYmX57EijyGGGBt3c/BIowGwV03RVBtXvHEVg==}
     engines: {node: '>=18'}
 
+  p-map@7.0.7:
+    resolution: {integrity: sha512-VaWRu2i4FJNRtiRWCuuQRgfQ1B7a6+gMSrO+3j0EQi/k0ULfS9kosRxGoiqwzIjZTDI02tGfk5mXXltLg6QtfQ==}
+    engines: {node: '>=18'}
+
   p-reduce@3.0.0:
     resolution: {integrity: sha512-xsrIUgI0Kn6iyDYm9StOpOeK29XM1aboGji26+QEortiFST1hGZaUQOLhtEbqHErPpGW/aSz6allwK2qcptp0Q==}
     engines: {node: '>=12'}
@@ -3367,7 +3371,7 @@ snapshots:
 
   '@ediri/vultr@2.27.1(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.260.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3843,7 +3847,7 @@ snapshots:
 
   '@pulumi/digitalocean@4.79.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.260.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3851,7 +3855,7 @@ snapshots:
 
   '@pulumi/hcloud@1.41.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.260.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3859,13 +3863,13 @@ snapshots:
 
   '@pulumi/linode@6.4.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.260.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
       - typescript
 
-  '@pulumi/pulumi@3.259.0(typescript@7.0.2)':
+  '@pulumi/pulumi@3.260.0(typescript@7.0.2)':
     dependencies:
       '@grpc/grpc-js': 1.14.4
       '@logdna/tail-file': 2.2.0
@@ -3899,7 +3903,7 @@ snapshots:
 
   '@pulumiverse/scaleway@1.54.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.259.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.260.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -4029,18 +4033,18 @@ snapshots:
 
   '@sigstore/bundle@4.0.0':
     dependencies:
-      '@sigstore/protobuf-specs': 0.5.1
+      '@sigstore/protobuf-specs': 0.5.2
 
   '@sigstore/core@3.2.1': {}
 
-  '@sigstore/protobuf-specs@0.5.1': {}
+  '@sigstore/protobuf-specs@0.5.2': {}
 
   '@sigstore/sign@4.1.1':
     dependencies:
       '@gar/promise-retry': 1.0.3
       '@sigstore/bundle': 4.0.0
       '@sigstore/core': 3.2.1
-      '@sigstore/protobuf-specs': 0.5.1
+      '@sigstore/protobuf-specs': 0.5.2
       make-fetch-happen: 15.0.6
       proc-log: 6.1.0
     transitivePeerDependencies:
@@ -4048,7 +4052,7 @@ snapshots:
 
   '@sigstore/tuf@4.0.2':
     dependencies:
-      '@sigstore/protobuf-specs': 0.5.1
+      '@sigstore/protobuf-specs': 0.5.2
       tuf-js: 4.1.0
     transitivePeerDependencies:
       - supports-color
@@ -4057,7 +4061,7 @@ snapshots:
     dependencies:
       '@sigstore/bundle': 4.0.0
       '@sigstore/core': 3.2.1
-      '@sigstore/protobuf-specs': 0.5.1
+      '@sigstore/protobuf-specs': 0.5.2
 
   '@simple-libs/stream-utils@1.2.0': {}
 
@@ -4367,7 +4371,7 @@ snapshots:
       minipass-collect: 2.0.1
       minipass-flush: 1.0.7
       minipass-pipeline: 1.2.4
-      p-map: 7.0.6
+      p-map: 7.0.7
       ssri: 13.0.1
 
   call-bind-apply-helpers@1.0.2:
@@ -5363,6 +5367,8 @@ snapshots:
 
   p-map@7.0.6: {}
 
+  p-map@7.0.7: {}
+
   p-reduce@3.0.0: {}
 
   p-timeout@6.1.4: {}
@@ -5669,7 +5675,7 @@ snapshots:
     dependencies:
       '@sigstore/bundle': 4.0.0
       '@sigstore/core': 3.2.1
-      '@sigstore/protobuf-specs': 0.5.1
+      '@sigstore/protobuf-specs': 0.5.2
       '@sigstore/sign': 4.1.1
       '@sigstore/tuf': 4.0.2
       '@sigstore/verify': 3.1.1

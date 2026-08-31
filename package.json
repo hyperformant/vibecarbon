@@ -88,7 +88,7 @@
     "@pulumi/digitalocean": "^4.75.0",
     "@pulumi/hcloud": "^1.39.0",
     "@pulumi/linode": "^6.4.0",
-    "@pulumi/pulumi": "^3.248.0",
+    "@pulumi/pulumi": "^3.260.0",
     "@pulumiverse/scaleway": "^1.54.0",
     "bcryptjs": "^3.0.3",
     "opentype.js": "^2.0.0",
