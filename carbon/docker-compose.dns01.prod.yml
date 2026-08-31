@@ -57,6 +57,9 @@ services:
       ACME_DNS_PROVIDER: ${ACME_DNS_PROVIDER:-}
       CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:-}
       HETZNER_API_TOKEN: ${HETZNER_API_TOKEN:-}
+      # Hetzner lego tuning (DNS01_PROVIDERS legoTuningEnv): propagation
+      # latency insurance for degraded windows — see the registry row.
+      HETZNER_PROPAGATION_TIMEOUT: ${HETZNER_PROPAGATION_TIMEOUT:-}
       DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:-}
       # DigitalOcean lego tuning (DNS01_PROVIDERS legoTuningEnv): DO's
       # authoritative anycast outlives lego's 60s default propagation wait,
