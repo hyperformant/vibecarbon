@@ -59,6 +59,7 @@ export const COMMAND_GATES = {
   diagnose: 'free',
   console: 'free',
   access: 'free',
+  telemetry: 'free',
 };
 
 /**

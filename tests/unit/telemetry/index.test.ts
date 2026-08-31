@@ -2,7 +2,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { recordCommandStart, reportCrash } from '../../../src/lib/telemetry/index.js';
+import {
+  recordCommandStart,
+  reportCrash,
+  settlePendingTelemetry,
+} from '../../../src/lib/telemetry/index.js';
 
 let stateDir: string;
 let cwd: string;
@@ -97,14 +101,72 @@ describe('reportCrash', () => {
   });
 
   it('resolves even when fetch hangs (2s cap)', async () => {
-    fetchImpl.mockImplementation(() => new Promise(() => {}));
+    // Real fetch() eventually settles a hung request once its AbortSignal
+    // fires (post()'s own signal or, before that, this abort listener) —
+    // mimic that here rather than a promise that never settles at all,
+    // which would otherwise leak into pendingPosts across tests.
+    fetchImpl.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        }),
+    );
     const start = Date.now();
     await reportCrash('deploy', new Error('boom'), opts());
     expect(Date.now() - start).toBeLessThan(2500);
+    // reportCrash's own 2s race gave up on the post but left it running,
+    // same as it always has — clean it up the way cli.js's finally block
+    // does in real usage, so it doesn't linger into later tests/assertions.
+    await settlePendingTelemetry({ graceMs: 0 });
   }, 4000);
 
   it('does nothing when analytics is disabled', async () => {
     await reportCrash('deploy', new Error('boom'), { ...opts(), env: { CI: '1' } });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('settlePendingTelemetry', () => {
+  it('aborts a hung post within ~graceMs and resolves', async () => {
+    fetchImpl.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        }),
+    );
+    recordCommandStart('deploy', opts());
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+
+    const start = Date.now();
+    await settlePendingTelemetry({ graceMs: 50 });
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it('resolves promptly (without waiting the full grace) when the post already finished', async () => {
+    recordCommandStart('deploy', opts());
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    // Let the fast, already-resolved fetch settle before we call settle.
+    await new Promise((r) => setTimeout(r, 10));
+
+    const start = Date.now();
+    await settlePendingTelemetry({ graceMs: 250 });
+    expect(Date.now() - start).toBeLessThan(200);
+  });
+
+  it('is a no-op (resolves immediately) when nothing is in flight', async () => {
+    const start = Date.now();
+    await settlePendingTelemetry();
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+
+  it('never rejects', async () => {
+    fetchImpl.mockImplementation(() => new Promise(() => {}));
+    recordCommandStart('deploy', opts());
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    await expect(settlePendingTelemetry({ graceMs: 10 })).resolves.toBeUndefined();
   });
 });

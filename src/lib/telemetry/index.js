@@ -16,6 +16,11 @@ function apiBase(env) {
   return env.VIBECARBON_API_BASE || 'https://vibecarbon.com';
 }
 
+// In-flight telemetry POSTs, so the process can settle them (or abort them)
+// before exit instead of leaving undici holding the event loop open for up
+// to the 3s per-request timeout — see settlePendingTelemetry().
+const pendingPosts = new Set();
+
 /**
  * Project context from .vibecarbon.json: id (lazily created), provider,
  * deploy target. All null outside a project.
@@ -56,12 +61,49 @@ function buildPayload(command, { cwd, stateDir }) {
 }
 
 function post(path, payload, { env, fetchImpl }) {
-  return fetchImpl(`${apiBase(env)}${path}`, {
+  const controller = new AbortController();
+  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(3000)]);
+  const promise = fetchImpl(`${apiBase(env)}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(3000),
+    signal,
   });
+  const entry = { promise, controller };
+  pendingPosts.add(entry);
+  const untrack = () => pendingPosts.delete(entry);
+  promise.then(untrack, untrack);
+  return promise;
+}
+
+/**
+ * Let any in-flight telemetry POSTs (event or crash) finish, or abort them
+ * once `graceMs` elapses — whichever comes first. Called from cli.js right
+ * before exit so an unreachable telemetry host can never add up to 3s of
+ * hang to an otherwise-instant command. Never throws/rejects.
+ *
+ * @param {{ graceMs?: number }} [opts]
+ * @returns {Promise<void>}
+ */
+export async function settlePendingTelemetry({ graceMs = 250 } = {}) {
+  try {
+    if (pendingPosts.size === 0) return;
+    const entries = [...pendingPosts];
+    await Promise.race([
+      Promise.allSettled(entries.map((entry) => entry.promise)),
+      new Promise((resolve) => {
+        // .unref() so this grace timer can't itself hold the process open
+        // past a natural exit — see race-timer-loop-hold-census.test.ts.
+        const t = setTimeout(resolve, graceMs);
+        if (typeof t?.unref === 'function') t.unref();
+      }),
+    ]);
+    for (const entry of entries) {
+      if (pendingPosts.has(entry)) entry.controller.abort();
+    }
+  } catch {
+    // never break the exit path
+  }
 }
 
 /**

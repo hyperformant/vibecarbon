@@ -20,6 +20,8 @@ import { c } from './lib/colors.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
+import { recordCommandStart, reportCrash, settlePendingTelemetry } from './lib/telemetry/index.js';
+import { getUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
 import { VERSION } from './lib/version.js';
 
 // Prefer IPv4 to avoid timeouts on systems with broken IPv6 connectivity.
@@ -130,6 +132,7 @@ export const KNOWN_COMMANDS = [
   'diagnose',
   'console',
   'access',
+  'telemetry',
 ];
 
 function showHelp() {
@@ -149,6 +152,7 @@ ${c.bold('DEV COMMANDS')}
   ${c.info('remove')} [feature]         Remove features from a project
   ${c.info('configure')}                Configure external services and project settings (billing, OAuth, SMTP, CI/CD, globalization, etc.)
   ${c.info('upgrade')}                  Upgrade infrastructure files to latest template
+  ${c.info('telemetry')} [on|off]       Control anonymous usage analytics (status by default)
 
 ${c.bold('DEPLOY COMMANDS')}
   ${c.info('deploy')} [env]             Deploy an environment
@@ -265,146 +269,166 @@ async function main() {
 
   const commandTimer = perfTimer(`cli.${command}.total`);
 
-  switch (command) {
-    case 'create': {
-      // Dynamically import and run the create command
-      const createModule = await import('./create.js');
-      await createModule.run(subcommandArgs);
-      break;
-    }
+  // Anonymous usage event + async update-check refresh. Both are
+  // fire-and-forget, throw-proof, and disabled in CI — see
+  // src/lib/telemetry/ and https://vibecarbon.com/docs/telemetry
+  if (command !== 'telemetry') recordCommandStart(command);
+  refreshUpdateCache();
 
-    case 'add': {
-      // Dynamically import and run the add command
-      const addModule = await import('./add.js');
-      await addModule.run(subcommandArgs);
-      break;
-    }
+  try {
+    switch (command) {
+      case 'create': {
+        // Dynamically import and run the create command
+        const createModule = await import('./create.js');
+        await createModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'remove': {
-      // Dynamically import and run the remove command
-      const removeModule = await import('./remove.js');
-      await removeModule.run(subcommandArgs);
-      break;
-    }
+      case 'add': {
+        // Dynamically import and run the add command
+        const addModule = await import('./add.js');
+        await addModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'up': {
-      const upModule = await import('./up.js');
-      await upModule.run(subcommandArgs);
-      break;
-    }
+      case 'remove': {
+        // Dynamically import and run the remove command
+        const removeModule = await import('./remove.js');
+        await removeModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'down': {
-      const downModule = await import('./down.js');
-      await downModule.run(subcommandArgs);
-      break;
-    }
+      case 'up': {
+        const upModule = await import('./up.js');
+        await upModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'reset': {
-      const resetModule = await import('./reset.js');
-      await resetModule.run(subcommandArgs);
-      break;
-    }
+      case 'down': {
+        const downModule = await import('./down.js');
+        await downModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'deploy': {
-      // Dynamically import and run the deploy command
-      const deployModule = await import('./deploy.js');
-      await deployModule.run(subcommandArgs);
-      break;
-    }
+      case 'reset': {
+        const resetModule = await import('./reset.js');
+        await resetModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'destroy': {
-      // Dynamically import and run the destroy command
-      const destroyModule = await import('./destroy.js');
-      await destroyModule.run(subcommandArgs);
-      break;
-    }
+      case 'deploy': {
+        // Dynamically import and run the deploy command
+        const deployModule = await import('./deploy.js');
+        await deployModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'status': {
-      const statusModule = await import('./status.js');
-      await statusModule.run(subcommandArgs);
-      break;
-    }
+      case 'destroy': {
+        // Dynamically import and run the destroy command
+        const destroyModule = await import('./destroy.js');
+        await destroyModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'backup': {
-      const backupModule = await import('./backup.js');
-      await backupModule.run(subcommandArgs);
-      break;
-    }
+      case 'status': {
+        const statusModule = await import('./status.js');
+        await statusModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'restore': {
-      const restoreModule = await import('./restore.js');
-      await restoreModule.run(subcommandArgs);
-      break;
-    }
+      case 'backup': {
+        const backupModule = await import('./backup.js');
+        await backupModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'failover': {
-      const failoverModule = await import('./failover.js');
-      await failoverModule.run(subcommandArgs);
-      break;
-    }
+      case 'restore': {
+        const restoreModule = await import('./restore.js');
+        await restoreModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'scale': {
-      const scaleModule = await import('./scale.js');
-      await scaleModule.run(subcommandArgs);
-      break;
-    }
+      case 'failover': {
+        const failoverModule = await import('./failover.js');
+        await failoverModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'upgrade': {
-      const upgradeModule = await import('./upgrade.js');
-      await upgradeModule.run(subcommandArgs);
-      break;
-    }
+      case 'scale': {
+        const scaleModule = await import('./scale.js');
+        await scaleModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'configure': {
-      const configureModule = await import('./configure.js');
-      await configureModule.run(subcommandArgs);
-      break;
-    }
+      case 'upgrade': {
+        const upgradeModule = await import('./upgrade.js');
+        await upgradeModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'activate': {
-      const activateModule = await import('./activate.js');
-      await activateModule.runActivate(subcommandArgs);
-      break;
-    }
+      case 'configure': {
+        const configureModule = await import('./configure.js');
+        await configureModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'deactivate': {
-      const activateModule = await import('./activate.js');
-      await activateModule.runDeactivate(subcommandArgs);
-      break;
-    }
+      case 'activate': {
+        const activateModule = await import('./activate.js');
+        await activateModule.runActivate(subcommandArgs);
+        break;
+      }
 
-    case 'shell': {
-      const shellModule = await import('./shell.js');
-      await shellModule.run(subcommandArgs);
-      break;
-    }
+      case 'deactivate': {
+        const activateModule = await import('./activate.js');
+        await activateModule.runDeactivate(subcommandArgs);
+        break;
+      }
 
-    case 'diagnose': {
-      const diagnoseModule = await import('./diagnose.js');
-      await diagnoseModule.run(subcommandArgs);
-      break;
-    }
+      case 'shell': {
+        const shellModule = await import('./shell.js');
+        await shellModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'console': {
-      const consoleModule = await import('./console.js');
-      await consoleModule.run(subcommandArgs);
-      break;
-    }
+      case 'diagnose': {
+        const diagnoseModule = await import('./diagnose.js');
+        await diagnoseModule.run(subcommandArgs);
+        break;
+      }
 
-    case 'access': {
-      const accessModule = await import('./access.js');
-      await accessModule.run(subcommandArgs);
-      break;
-    }
+      case 'console': {
+        const consoleModule = await import('./console.js');
+        await consoleModule.run(subcommandArgs);
+        break;
+      }
 
-    default: {
-      console.error(c.error(`Unknown command: ${command}`));
-      console.log(`\nRun ${c.info('vibecarbon -h')} for usage information.`);
-      process.exit(1);
+      case 'access': {
+        const accessModule = await import('./access.js');
+        await accessModule.run(subcommandArgs);
+        break;
+      }
+
+      case 'telemetry': {
+        const telemetryModule = await import('./telemetry.js');
+        await telemetryModule.run(subcommandArgs);
+        break;
+      }
+
+      default: {
+        console.error(c.error(`Unknown command: ${command}`));
+        console.log(`\nRun ${c.info('vibecarbon -h')} for usage information.`);
+        process.exit(1);
+      }
     }
+  } catch (error) {
+    await reportCrash(command, error);
+    throw error; // preserve today's failure behavior exactly
+  } finally {
+    const notice = getUpdateNotice();
+    if (notice && process.stdout.isTTY) console.log(`\n${notice}`);
+    await settlePendingTelemetry();
+    commandTimer.end();
   }
-
-  commandTimer.end();
 }
 
 // Only run when executed directly (not when imported by tests).
