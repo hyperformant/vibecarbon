@@ -74,20 +74,57 @@ describe('refreshUpdateCache', () => {
     expect(fetchImpl.mock.calls[0][0]).toBe('http://localhost:3000/api/v1/cli/version');
   });
 
-  it('resolves silently on network failure and non-200', async () => {
-    await expect(
-      refreshUpdateCache({
-        env: {},
-        stateDir: dir,
-        fetchImpl: vi.fn().mockRejectedValue(new Error('offline')),
-      }),
-    ).resolves.toBeUndefined();
-    await expect(
-      refreshUpdateCache({
-        env: {},
-        stateDir: dir,
-        fetchImpl: vi.fn().mockResolvedValue(new Response('nope', { status: 503 })),
-      }),
-    ).resolves.toBeUndefined();
+  it('resolves silently on network failure and non-200, and persists attempt time', async () => {
+    const fetchImpl1 = vi.fn().mockRejectedValue(new Error('offline'));
+    await refreshUpdateCache({
+      env: {},
+      stateDir: dir,
+      fetchImpl: fetchImpl1,
+    });
+    expect(fetchImpl1).toHaveBeenCalledTimes(1);
+    const cache1 = JSON.parse(readFileSync(cachePath(), 'utf-8'));
+    expect(cache1.checkedAt).toBeDefined();
+    expect(cache1.latestVersion).toBeUndefined();
+
+    const fetchImpl2 = vi.fn().mockResolvedValue(new Response('nope', { status: 503 }));
+    await refreshUpdateCache({
+      env: {},
+      stateDir: dir,
+      fetchImpl: fetchImpl2,
+    });
+    expect(fetchImpl2).not.toHaveBeenCalled(); // Should not refetch within 24h
+  });
+
+  it('preserves prior latestVersion when fetch fails', async () => {
+    writeCache('0.99.0', 25 * 60 * 60 * 1000); // 25h old, stale
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('offline'));
+    await refreshUpdateCache({ env: {}, stateDir: dir, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const cache = JSON.parse(readFileSync(cachePath(), 'utf-8'));
+    expect(cache.latestVersion).toBe('0.99.0'); // Prior version preserved
+    expect(cache.checkedAt).toBeDefined(); // New timestamp
+    const notice = getUpdateNotice({ currentVersion: '0.41.0', stateDir: dir });
+    expect(notice).toContain('0.99.0'); // Notice still works
+  });
+
+  it('failed attempt prevents refetch within 24h', async () => {
+    const fetchImpl1 = vi.fn().mockRejectedValue(new Error('offline'));
+    await refreshUpdateCache({
+      env: {},
+      stateDir: dir,
+      fetchImpl: fetchImpl1,
+    });
+    expect(fetchImpl1).toHaveBeenCalledTimes(1);
+
+    // Immediate second call should not fetch again
+    const fetchImpl2 = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ latest: '0.42.0' }), { status: 200 }));
+    await refreshUpdateCache({
+      env: {},
+      stateDir: dir,
+      fetchImpl: fetchImpl2,
+    });
+    expect(fetchImpl2).not.toHaveBeenCalled();
   });
 });

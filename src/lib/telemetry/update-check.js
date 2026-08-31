@@ -40,6 +40,7 @@ export function getUpdateNotice({ currentVersion = VERSION, stateDir = DEFAULT_D
 
 /**
  * Refresh the cached latest-version if stale. Never throws, never rejects.
+ * Persists attempt time on success or failure to throttle outage retries.
  *
  * @param {{ env?: NodeJS.ProcessEnv, stateDir?: string, fetchImpl?: typeof fetch }} [opts]
  * @returns {Promise<void>}
@@ -52,25 +53,35 @@ export async function refreshUpdateCache({
   try {
     if (env.CI !== undefined && env.CI !== '' && env.CI !== '0') return;
     const file = join(stateDir, FILE_NAME);
+    let priorLatestVersion;
     try {
       const cache = JSON.parse(readFileSync(file, 'utf-8'));
       if (Date.now() - Date.parse(cache.checkedAt) < TTL_MS) return;
+      priorLatestVersion = cache.latestVersion;
     } catch {
       // missing/corrupt cache — proceed to fetch
     }
     const base = env.VIBECARBON_API_BASE || 'https://vibecarbon.com';
-    const res = await fetchImpl(`${base}/api/v1/cli/version`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok) return;
-    const { latest } = await res.json();
-    if (typeof latest !== 'string') return;
+    let latestVersion = priorLatestVersion;
+    try {
+      const res = await fetchImpl(`${base}/api/v1/cli/version`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok) {
+        const { latest } = await res.json();
+        if (typeof latest === 'string') {
+          latestVersion = latest;
+        }
+      }
+    } catch {
+      // Network error, timeout, bad JSON — latestVersion stays as prior or undefined
+    }
+    // Always persist checkedAt on every attempt (success or failure) to throttle retries.
     if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    writeFileSync(
-      file,
-      `${JSON.stringify({ latestVersion: latest, checkedAt: new Date().toISOString() }, null, 2)}\n`,
-    );
+    const cacheData = { checkedAt: new Date().toISOString() };
+    if (latestVersion !== undefined) cacheData.latestVersion = latestVersion;
+    writeFileSync(file, `${JSON.stringify(cacheData, null, 2)}\n`);
   } catch {
-    // Offline, timeout, bad JSON, read-only disk — all fine, try next time.
+    // read-only disk, mkdirSync failure, etc. — all fine, try next time.
   }
 }
