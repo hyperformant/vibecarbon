@@ -13,7 +13,7 @@ Complete technical reference for developing with Vibecarbon.
 | **Frontend** | React 19 + Vite + Shadcn UI | Ultra-fast development with modern styling |
 | **Backend** | Hono 4 + Node.js | Lightweight API framework (~13KB) with full type safety |
 | **Auth & API** | Supabase (GoTrue, PostgREST, Realtime, Storage) | Authentication, auto-generated REST API, WebSocket subscriptions |
-| **Database** | PostgreSQL 15 | Database with Row Level Security |
+| **Database** | PostgreSQL 17 | Database with Row Level Security |
 | **Gateway** | Kong | API Gateway with rate limiting and routing |
 | **Orchestration** | Docker Compose + Kubernetes | Container orchestration with auto-scaling |
 | **Proxy** | Traefik | Reverse proxy with automatic HTTPS |

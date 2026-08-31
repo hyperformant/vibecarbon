@@ -68,7 +68,7 @@ flowchart TD
     KONG --> STORE
     STUDIO --> META["meta<br/>postgres-meta"]
 
-    subgraph PG["db · PostgreSQL 15"]
+    subgraph PG["db · PostgreSQL 17"]
         DB[("Tables + migrations")]
         RLS["RLS policies<br/>per-table · per-role"]
         FN["Helper functions<br/>auth.uid · org membership"]
