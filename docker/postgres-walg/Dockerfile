@@ -5,7 +5,7 @@
 # Ubuntu 20.04 (glibc 2.31) on both arches, so the ubuntu-20.04 wal-g build is
 # correct for amd64 AND arm64. (RCA 2026-05-30: the 22.04 build dies with
 # "GLIBC_2.3x not found".)
-FROM supabase/postgres:15.8.1.085@sha256:af083ef64d0408c8f098ee6f5c364a59b26f36fbc0f3a334a62c5c1d57362e9b
+FROM supabase/postgres:17.6.1.167@sha256:6942962433a569e87f228b4d4ab7e11db5deca64e43babb3a038443ad6c4f1bb
 
 ARG TARGETARCH
 # BUMP TRAP — upstream RENAMED these release assets. Verified against the
