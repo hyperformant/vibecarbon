@@ -111,7 +111,7 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.10",
+    "@biomejs/biome": "^2.5.11",
     "@semantic-release/github": "^12.0.9",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.4.0",
