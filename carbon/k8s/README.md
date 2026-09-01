@@ -1,6 +1,6 @@
 # Vibecarbon Kubernetes Deployment (Fullerene Tier)
 
-> **Note**: Kubernetes, Kubernetes HA, and Compose HA deploy modes require a Vibecarbon Fullerene license — only single-server Compose deploys are free. For the full deployment flow and provider options, see the [deployment guide](../content/docs/deployment.mdx) (rendered at `/docs/deployment`).
+> **Note**: Kubernetes, Kubernetes HA, and Compose HA deploy modes require a Vibecarbon Fullerene license — only single-server Compose deploys run without one. For the full deployment flow and provider options, see the [deployment guide](../content/docs/deployment.mdx) (rendered at `/docs/deployment`).
 
 This directory contains Kubernetes manifests for deploying Vibecarbon with enterprise-grade autoscaling and high availability.
 
