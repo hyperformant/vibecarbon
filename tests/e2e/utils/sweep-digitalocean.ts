@@ -23,6 +23,7 @@
  * never deleted — better a loud leak than a cross-run data loss.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { isBucketAlreadyGone } from './bucket-already-gone.js';
 
 /**
  * Buckets that must NEVER be swept, no matter what prefix matches them.
@@ -432,10 +433,16 @@ export async function sweepOrphanedDigitalOceanResources(
           console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
           counts.s3Buckets++;
         } catch (err) {
-          enumFailed = true;
-          console.warn(
-            `${tag} [sweep]   FAILED ${name}: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          if (isBucketAlreadyGone(err)) {
+            // Stale listing: destroy already removed it. Goal state, not an
+            // enumeration failure — see bucket-already-gone.ts.
+            console.log(`${tag} [sweep]   ${name} already gone (stale listing) — already clean`);
+          } else {
+            enumFailed = true;
+            console.warn(
+              `${tag} [sweep]   FAILED ${name}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
         }
       }
     }

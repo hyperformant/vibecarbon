@@ -10,6 +10,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -1430,6 +1431,11 @@ ${runCmd} test:prepush
     {
       version: '1',
       projectName,
+      // Anonymous per-project id for usage telemetry (see
+      // src/lib/telemetry/index.js) — generated once here rather than
+      // lazily on first command so it's part of the baseline the user's
+      // initial commit captures, like bucketSalt above.
+      projectId: randomUUID(),
       bucketSalt: generateBucketSalt(),
       stateBucketGeneration: generateBucketSalt(),
       // Rotated by a verified purge-destroy so a redeploy derives a FRESH

@@ -339,6 +339,29 @@ Files are classified into three categories:
 
 ---
 
+## telemetry
+
+Control anonymous usage analytics. `vibecarbon` sends command names,
+versions, and (when inside a project) the provider and deploy mode — never
+arguments, paths, or personal data — to help prioritize development. The
+version update check is separate and always runs (it carries no data).
+
+```bash
+# Show whether analytics is on, and why (default with no subcommand)
+vibecarbon telemetry
+
+# Opt out
+vibecarbon telemetry off
+
+# Opt back in
+vibecarbon telemetry on
+```
+
+Analytics is also disabled automatically when `DO_NOT_TRACK` or `CI` is set
+in the environment, or when `VIBECARBON_TELEMETRY_DISABLED=1` is set.
+
+---
+
 # Deploy
 
 Cloud infrastructure primitives. `destroy` is always free. `deploy`, `backup`,
