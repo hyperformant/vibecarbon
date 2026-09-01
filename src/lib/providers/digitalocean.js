@@ -246,6 +246,15 @@ export class DigitalOceanProvider extends BaseProvider {
   // reached the ready marker within the 180s Hetzner-calibrated budget.
   static CLOUD_INIT_READY_TIMEOUT_MS = 600_000;
 
+  // Overrides BaseProvider's 300s waitForServer budget. RCA 2026-09-01 (d2
+  // compose-ha scale, PG17 cert run): a routine nyc3 droplet was still not
+  // active+addressed at the 300s ceiling — it went active moments after the
+  // scale aborted and had to be swept as an orphan. Same doctrine (and same
+  // 600s answer) as Vultr's WAIT_FOR_SERVER_TIMEOUT_MS and the cloud-init
+  // budget above: a provider whose ROUTINE boot approaches the shared ceiling
+  // owns a wider one.
+  static WAIT_FOR_SERVER_TIMEOUT_MS = 600_000;
+
   /**
    * Kubernetes cluster-addon asset identity for DO's CCM/CSI (M3 Task 1) —
    * see base.js's K8S_ASSETS doc for the field-by-consumer breakdown.
@@ -941,7 +950,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @param {number} [timeout=300000]
    * @returns {Promise<object>}
    */
-  async waitForServer(serverId, timeout = 300000) {
+  async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
     const startTime = Date.now();
     const pollInterval = 5000;
 

@@ -139,6 +139,20 @@ export class BaseProvider {
   static CLOUD_INIT_READY_TIMEOUT_MS = 180_000;
 
   /**
+   * waitForServer's create→ready budget. 300s is calibrated for providers
+   * whose servers go active in seconds-to-a-minute (Hetzner, Linode,
+   * Scaleway). A provider whose routine boot approaches this ceiling MUST
+   * override it rather than let ordinary variance become a hard timeout —
+   * Vultr did (OS readiness ~295s observed, run 31663154544) and
+   * DigitalOcean did (droplet still not active at 300s during the d2
+   * compose-ha scale, 2026-09-01; the droplet went active moments later and
+   * had to be swept as an orphan). Same doctrine as
+   * CLOUD_INIT_READY_TIMEOUT_MS above.
+   * @type {number}
+   */
+  static WAIT_FOR_SERVER_TIMEOUT_MS = 300_000;
+
+  /**
    * Kubernetes cluster-addon asset identity — pure string data (C7c). The
    * daemonset name, label selectors, and deployment name this provider's
    * CCM/CSI addons register under, plus the env var name its CCM expects
@@ -551,7 +565,9 @@ export class BaseProvider {
   /**
    * Wait for a server to become ready/running
    * @param {string|number} serverId - Server ID
-   * @param {number} [timeout=300000] - Timeout in milliseconds
+   * @param {number} [timeout] - Timeout in milliseconds; subclasses default it
+   *   to `this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS` so the budget is
+   *   provider-owned.
    * @returns {Promise<object>} Server details when ready
    */
   async waitForServer(_serverId, _timeout = 300000) {

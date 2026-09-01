@@ -875,7 +875,7 @@ export class LinodeProvider extends BaseProvider {
    * @param {number} [timeout=300000]
    * @returns {Promise<object>}
    */
-  async waitForServer(serverId, timeout = 300000) {
+  async waitForServer(serverId, timeout = this.constructor.WAIT_FOR_SERVER_TIMEOUT_MS) {
     const startTime = Date.now();
     const pollInterval = 5000;
 
