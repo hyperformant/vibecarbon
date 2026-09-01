@@ -24,9 +24,14 @@ const ROOT = process.cwd();
 const CLI_DOC = join(ROOT, 'carbon', 'content', 'docs', 'cli.mdx');
 const doc = readFileSync(CLI_DOC, 'utf-8');
 
-/** Commands the CLI actually dispatches, read from its switch. */
+/**
+ * Commands the CLI actually dispatches, read from its switch. Matches any
+ * leading indentation — the switch lives inside a try block (for crash
+ * reporting; see src/lib/telemetry/), so its cases are nested one level
+ * deeper than a bare top-level switch would be.
+ */
 const dispatched = [
-  ...readFileSync(join(ROOT, 'src', 'cli.js'), 'utf-8').matchAll(/^ {4}case '([a-z-]+)':/gm),
+  ...readFileSync(join(ROOT, 'src', 'cli.js'), 'utf-8').matchAll(/^\s+case '([a-z-]+)':/gm),
 ]
   .map((m) => m[1])
   .sort();

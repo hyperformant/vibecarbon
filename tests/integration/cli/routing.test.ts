@@ -74,6 +74,7 @@ describe('KNOWN_COMMANDS registry', () => {
     'diagnose',
     'console',
     'access',
+    'telemetry',
   ];
 
   it('contains all expected commands', () => {
@@ -104,6 +105,7 @@ describe('Command module exports', () => {
     ['scale', '../../../src/scale.js'],
     ['upgrade', '../../../src/upgrade.js'],
     ['configure', '../../../src/configure.js'],
+    ['telemetry', '../../../src/telemetry.js'],
   ];
 
   // Activate module has runActivate and runDeactivate instead of run
