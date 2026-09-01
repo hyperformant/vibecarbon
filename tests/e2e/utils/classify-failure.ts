@@ -88,13 +88,18 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: 'rate limit',
   },
   // LE validation seeing a missing/mismatched challenge TXT despite lego's
-  // own authoritative pre-check passing — DO anycast POP divergence between
-  // lego's vantage and LE's (run 33283466928, observed under a SINGLE armed
-  // solver, so it is provider-side propagation, not our dual-issuer race —
-  // that class is closed by acme-role.js). The urn context is required so a
-  // sentence merely mentioning TXT records cannot match.
+  // own authoritative pre-check passing — anycast POP divergence between
+  // lego's vantage and LE's (DO: run 33283466928; hetzner: run 33435737752,
+  // both observed under a SINGLE armed solver, so it is provider-side
+  // propagation, not our dual-issuer race — that class is closed by
+  // acme-role.js). The urn context is required so a sentence merely
+  // mentioning TXT records cannot match. The bounded `.{0,60}?` infix
+  // admits LE's "During secondary validation: " prefix (emitted when only
+  // REMOTE perspectives fail — the purest vantage-divergence spelling; it
+  // escaped the original pattern and hard-failed run 33435737752 as
+  // [unknown]) without letting the urn anchor drift a sentence away.
   {
-    pattern: /urn:ietf:params:acme:error:unauthorized :: (No|Incorrect) TXT record/i,
+    pattern: /urn:ietf:params:acme:error:unauthorized :: .{0,60}?(No|Incorrect) TXT record/i,
     reason: 'ACME DNS-01 propagation (anycast lag)',
   },
   // lego's OWN authoritative pre-check starving against Vultr's
@@ -108,6 +113,18 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   {
     pattern: /NS ns\d\.vultr\.com\S* (?:did not return the expected TXT record|returned NXDOMAIN)/i,
     reason: 'ACME DNS-01 propagation (NS negative cache)',
+  },
+  // A helm --wait expiring on a pod whose NODE is NotReady: the host died
+  // or lost its kubelet mid-deploy (RCA 2026-09-01, k8s-ha standby, PG17
+  // cert: worker dark — kubelet 502, SSH timeout — while Hetzner's API
+  // still said "running"; the db pod froze in Init and the run
+  // hard-failed [unknown]). BOTH halves are required: the pod clause comes
+  // from summarizeSupabasePods, the node clause from
+  // summarizeNotReadyNodes — a stuck pod on healthy nodes stays unknown,
+  // because that is OUR bug until proven otherwise.
+  {
+    pattern: /never became Ready[\s\S]{0,400}?Node\(s\) NotReady:/,
+    reason: 'k8s node NotReady (host died)',
   },
   // Network / DNS / TLS / generic fetch noise
   {

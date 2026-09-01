@@ -159,6 +159,64 @@ describe('classifyFailure', () => {
     ).toBe('unknown');
   });
 
+  it("flags the 'During secondary validation:' infix spelling as the same infra class", () => {
+    // Run 33435737752 (hetzner compose, 2026-08-31): LE prepends
+    // "During secondary validation: " when only its REMOTE perspectives
+    // fail — the primary validator saw the record, distant vantages saw a
+    // missing/stale one. Exactly the vantage-divergence mechanism this
+    // class attributes, but the infix escaped the pattern and the run
+    // hard-failed [unknown] instead of retrying. Fourth member of the
+    // "classifier missed the backend's actual wording" family.
+    const result = classifyFailure({
+      errorMessage:
+        'Deploy exited with code 1: Error: [step:verify-tls] Deploy aborted ... | ' +
+        'urn:ietf:params:acme:error:unauthorized :: During secondary validation: Incorrect TXT record',
+    });
+    expect(result.category).toBe('infra');
+    expect(result.reason).toMatch(/DNS-01 propagation/i);
+    // The urn anchor still gates: infix wording without the urn stays unknown.
+    expect(
+      classifyFailure({ errorMessage: 'During secondary validation: Incorrect TXT record' })
+        .category,
+    ).toBe('unknown');
+  });
+
+  it('flags a helm-wait pod stuck on a NotReady NODE as infra — host died', () => {
+    // RCA 2026-09-01 (PG17 cert, k8s-ha standby): worker went dark
+    // mid-deploy (kubelet 502, SSH timeout, provider API "running"), db
+    // pod froze in Init, run hard-failed [unknown]. Both clauses required.
+    const withNode = classifyFailure({
+      errorMessage:
+        'HA deploy failed — standby: installSupabase: helm upgrade --install failed ... ' +
+        '0/1 Supabase pods are Ready; 1 never became Ready: supabase-supabase-db-0 (Pending). ' +
+        'Node(s) NotReady: testapp-e4-standby-supabase (Ready=Unknown) — the pod may be stuck ' +
+        'because its HOST died or lost its kubelet, not because of the workload.',
+    });
+    expect(withNode.category).toBe('infra');
+    expect(withNode.reason).toMatch(/node NotReady/i);
+    // A stuck pod on HEALTHY nodes stays unknown — that is our bug until
+    // proven otherwise.
+    expect(
+      classifyFailure({
+        errorMessage:
+          '0/1 Supabase pods are Ready; 1 never became Ready: supabase-supabase-db-0 (Pending).',
+      }).category,
+    ).toBe('unknown');
+  });
+
+  it('classifies a verification failure THROUGH its carried detail lines (storage staleness)', () => {
+    // The verification throw now carries bounded [fail] detail lines (run
+    // 33435737752: the bare "N verification(s) failed: <names>" hid the
+    // NoSuchBucket spelling from this very classifier).
+    const result = classifyFailure({
+      errorMessage:
+        '1 verification(s) failed: storage_upload\n' +
+        '[fail] storage_upload: Upload returned 400: {"statusCode":"404","error":"UnknownError","message":"NoSuchBucket"}',
+    });
+    expect(result.category).toBe('infra');
+    expect(result.reason).toBe('S3 transient');
+  });
+
   it("flags Let's Encrypt rate limit as infra", () => {
     const result = classifyFailure({
       errorMessage: '429 urn:ietf:params:acme:error:rateLimited: too many certificates',

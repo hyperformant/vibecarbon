@@ -57,11 +57,12 @@ describe('dnsChallengeEnv', () => {
     });
   });
 
-  it('selects the (consolidated Cloud) token env var for hetzner (plus its latency-insurance row)', () => {
+  it('selects the (consolidated Cloud) token env var for hetzner (plus its propagation tuning)', () => {
     expect(dnsChallengeEnv('hetzner', 'hz-tok')).toEqual({
       ACME_DNS_PROVIDER: 'hetzner',
       HETZNER_API_TOKEN: 'hz-tok',
       HETZNER_PROPAGATION_TIMEOUT: '300',
+      ACME_DNS_DELAY_BEFORE_CHECKS: '90s',
     });
   });
 
@@ -183,24 +184,31 @@ describe('DNS01_PROVIDERS lego contract (census)', () => {
     expect(env.ACME_DNS_DELAY_BEFORE_CHECKS).toBe('60s');
   });
 
-  it('hetzner carries timeout-only insurance — latency windows, no settle floor', () => {
-    // 2026-08-31 RCA (run 33341893276 compose/compose-ha verify-tls,
-    // apex-missing-from-cert): Hetzner DNS propagation is normally 10-40s
-    // (months of green; harness trial isohz1 issued at 46s on DEFAULTS an
-    // hour after the failures) but degrades in windows — direct probes
-    // during the window measured one record at 20s and its twin at 90s+,
-    // past lego's 60s default. Distinct mechanism from vultr: NO
-    // query-before-create poisoning (a primed name propagated fine), so no
-    // delay floor — a floor taxes EVERY issuance (harness: 87s tuned vs 46s
-    // default) while a longer TIMEOUT costs nothing when the zone is fast
-    // (lego proceeds the moment the record is visible) and turns a degraded
-    // window from a failed deploy into a slower one.
+  it('hetzner carries the 300s window AND the 90s settle floor (unwound 2026-09-01)', () => {
+    // UNWIND of the 2026-08-31 timeout-only decision (run 33341893276).
+    // That RCA correctly proved hetzner has NO vultr-style
+    // query-before-create poisoning and then rejected the settle floor —
+    // but it evaluated the floor against the wrong mechanism. The floor's
+    // proven role (DO, run 33283466928) is bridging lego's vantage to LE's
+    // remote validators; hetzner's own characterization showed that
+    // exposure (twin records visible 20s vs 90s+ apart across the anycast
+    // NS in degraded windows), and the first post-fix dispatches
+    // (33435737752) failed on exactly the vantage-divergence spellings
+    // ("No TXT record found" / "During secondary validation: Incorrect
+    // TXT record") with the 300s window active. The floor costs ~40s per
+    // COLD compose issuance and nothing on warm deploys; a lost deploy to
+    // a degraded window costs the run.
     const env = dnsChallengeEnv('hetzner', 'tok') as Record<string, string>;
     expect(Object.keys(env).sort()).toEqual(
-      ['ACME_DNS_PROVIDER', 'HETZNER_API_TOKEN', 'HETZNER_PROPAGATION_TIMEOUT'].sort(),
+      [
+        'ACME_DNS_PROVIDER',
+        'HETZNER_API_TOKEN',
+        'HETZNER_PROPAGATION_TIMEOUT',
+        'ACME_DNS_DELAY_BEFORE_CHECKS',
+      ].sort(),
     );
     expect(env.HETZNER_PROPAGATION_TIMEOUT).toBe('300');
-    expect(env.ACME_DNS_DELAY_BEFORE_CHECKS).toBeUndefined();
+    expect(env.ACME_DNS_DELAY_BEFORE_CHECKS).toBe('90s');
   });
 
   it('the Traefik DNS-01 override passes every token env var through to the container', () => {

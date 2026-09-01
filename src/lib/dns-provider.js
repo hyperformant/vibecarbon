@@ -99,21 +99,32 @@ export const DNS01_PROVIDERS = {
       version: '0.7.0',
       releaseName: 'cert-manager-webhook-hetzner',
     },
-    // TIMEOUT-ONLY latency insurance — deliberately NO delay floor.
-    // 2026-08-31 (run 33341893276, compose + compose-ha verify-tls,
-    // apex-missing-from-cert): Hetzner DNS propagation is normally 10-40s
-    // (months of green; harness trial isohz1 issued at 46s on defaults an
-    // hour later) but degrades in windows — direct probes during the window
-    // measured one record visible at 20s and its twin at 90s+, past lego's
-    // 60s default, so the slower of the two concurrent orders (apex +
-    // wildcard) times out and the domain serves a wildcard-only cert.
-    // Distinct mechanism from the vultr row above: NO query-before-create
-    // poisoning (a deliberately pre-queried name propagated normally), so a
-    // settle floor would tax EVERY issuance (harness: 87s floored vs 46s
-    // default) for nothing. A longer per-attempt window costs zero when the
-    // zone is fast — lego proceeds the moment its poll sees the record —
-    // and turns a degraded window from a failed deploy into a slower one.
-    legoTuningEnv: { HETZNER_PROPAGATION_TIMEOUT: '300' },
+    // 300s window + 90s settle floor — the same pair as digitalocean, for
+    // the same mechanism (LE-vantage propagation divergence).
+    //
+    // History, because this row has been wrong once already: 2026-08-31
+    // (run 33341893276) shipped TIMEOUT-ONLY insurance and deliberately
+    // rejected the floor — hetzner has NO vultr-style query-before-create
+    // poisoning (a deliberately pre-queried name propagated normally), and
+    // the floor was judged a pure tax (harness: 87s floored vs 46s
+    // default). That rejection evaluated the floor against the WRONG
+    // mechanism. The floor's proven role (DO row below, run 33283466928)
+    // is bridging the gap between lego's vantage and LE's validators —
+    // lego proceeds the moment ITS poll sees the record, which says
+    // nothing about what LE's remote perspectives see. Hetzner's own
+    // characterization showed exactly that exposure: normal propagation is
+    // 10-40s, but in degraded windows direct probes measured one record
+    // visible at 20s and its twin at 90s+ across the anycast NS. The very
+    // next dispatched runs (33435737752, 2026-08-31) failed on the
+    // vantage-divergence spellings — "No TXT record found" and "During
+    // secondary validation: Incorrect TXT record" — with the 300s window
+    // active and no floor. 90s of wall-time in the zone before lego's
+    // check even starts is the cost of never losing a cold deploy to a
+    // degraded window; warm deploys re-use certs and pay nothing.
+    legoTuningEnv: {
+      HETZNER_PROPAGATION_TIMEOUT: '300',
+      ACME_DNS_DELAY_BEFORE_CHECKS: '90s',
+    },
   },
   digitalocean: {
     // lego reads DO_AUTH_TOKEN, which is NOT the env var the rest of the CLI

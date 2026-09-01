@@ -667,11 +667,34 @@ async function runStorageChecks(
       // read as one. That old skip is precisely how this surface stayed
       // unexercised on every provider for months.
       const missing = body.includes('Bucket not found') || res.status === 404;
+      // DIAGNOSTIC retry, sibling of storage_download's (#29) and
+      // storage_delete's: on the not-found envelope (covers the S3
+      // stale-frontend NoSuchBucket rendered as 400 + statusCode "404" —
+      // run 33435737752, post-restore verify) probe the IDENTICAL upload
+      // once after 2s. It fails either way; it exists to name the failure
+      // mode — and the attestation carries the classifiable spelling into
+      // the thrown step error.
+      let retryNote = '';
+      if (missing || isStorageNotFoundResponse(res.status, body)) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const again = await safeFetch(objectUrl, {
+            method: 'POST',
+            headers: { ...authHeaders, 'Content-Type': 'text/plain' },
+            body: content,
+          });
+          retryNote = again.ok
+            ? ' S3-BACKEND BLIP: the identical upload succeeded on a 2s-later retry — stale storage frontend (ensureTestBucket had just seen the bucket), not a broken upload path.'
+            : ` Retry after 2s also failed (${again.status}) — the upload path itself is failing.`;
+        } catch (retryErr) {
+          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
+        }
+      }
       results.push(
         result('storage_upload', 'fail', uploadStart, {
           errorMessage: missing
-            ? `test-bucket vanished between creation and upload (${res.status}): ${body}`
-            : `Upload returned ${res.status}: ${body}`,
+            ? `test-bucket vanished between creation and upload (${res.status}): ${body}${retryNote}`
+            : `Upload returned ${res.status}: ${body}${retryNote}`,
         }),
       );
       results.push(skip('storage_download', 'Skipped because upload failed'));
