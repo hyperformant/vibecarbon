@@ -29,7 +29,7 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 3. **Spaces Access Key & Secret Key**: Control Panel → API → Spaces Access Keys. Used for the dedicated Pulumi state bucket and `wal-g` S3 database backups.
 4. **A domain** you control, for the application URL and Let's Encrypt TLS certificates.
 5. **Docker running locally**: images are built on your machine and pushed over SSH (`local` build mode).
-6. **A Fullerene license for advanced modes**: single-server Docker Compose deploys are free on Graphite; `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license.
+6. **A Fullerene license for advanced modes**: single-server Docker Compose deploys need no license (Graphite); `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license.
 
 ---
 
