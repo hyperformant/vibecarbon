@@ -45,6 +45,7 @@
  * unattached pvc-* volume is REPORTED, never deleted.
  */
 import type { SweepBreakdown } from '../metrics/db.js';
+import { isBucketAlreadyGone } from './bucket-already-gone.js';
 
 /**
  * Buckets that must never be swept regardless of prefix. Deliberately
@@ -488,10 +489,16 @@ export async function sweepOrphanedScalewayResources(
         console.log(`${tag} [sweep]   deleted ${name} (${objectsRemoved} obj)`);
         counts.s3Buckets++;
       } catch (err) {
-        enumFailed = true;
-        console.warn(
-          `${tag} [sweep]   FAILED ${name}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        if (isBucketAlreadyGone(err)) {
+          // Stale listing: destroy already removed it. Goal state, not an
+          // enumeration failure — see bucket-already-gone.ts.
+          console.log(`${tag} [sweep]   ${name} already gone (stale listing) — already clean`);
+        } else {
+          enumFailed = true;
+          console.warn(
+            `${tag} [sweep]   FAILED ${name}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }
   }

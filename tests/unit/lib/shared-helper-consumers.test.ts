@@ -74,6 +74,17 @@ const REGISTRY = [
     deepTests: ['tests/unit/deploy/registry-push.test.ts'],
   },
   {
+    helper: 'isBucketAlreadyGone',
+    definition: 'tests/e2e/utils/bucket-already-gone.ts',
+    consumers: [
+      'tests/e2e/utils/sweep-digitalocean.ts', // Spaces bucket delete
+      'tests/e2e/utils/sweep-vultr.ts', // Object Storage bucket delete
+      'tests/e2e/utils/sweep-linode.ts', // Object Storage bucket delete
+      'tests/e2e/utils/sweep-scaleway.ts', // Object Storage bucket delete
+    ],
+    deepTests: ['tests/unit/e2e/bucket-already-gone.test.ts'],
+  },
+  {
     helper: 'e2eCliEnv',
     definition: 'tests/e2e/utils/e2e-env.js',
     consumers: [
