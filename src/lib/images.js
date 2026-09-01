@@ -11,9 +11,9 @@
 // so k3s/compose nodes pull without a secret. Single source of truth for the
 // tag — bump here + the Dockerfile to cut a new version.
 export const DB_IMAGE = 'ghcr.io/hyperformant/postgres';
-export const DB_IMAGE_TAG = '15.8.1.085-walg3.0.5';
+export const DB_IMAGE_TAG = '17.6.1.167-walg3.0.9';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:15.8.1.085-walg3.0.5" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.6.1.167-walg3.0.9" */
 export function dbImageRef() {
   return `${DB_IMAGE}:${DB_IMAGE_TAG}`;
 }

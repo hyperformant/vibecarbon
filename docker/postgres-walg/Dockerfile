@@ -1,56 +1,45 @@
 # syntax=docker/dockerfile:1
-# Pre-published, multi-arch supabase/postgres + wal-g. Built ONCE per version
-# (see README) and pulled by every deploy — never built per-project.
-# wal-g build MUST match the base glibc: supabase/postgres:15.8.1.085 is
-# Ubuntu 20.04 (glibc 2.31) on both arches, so the ubuntu-20.04 wal-g build is
-# correct for amd64 AND arm64. (RCA 2026-05-30: the 22.04 build dies with
-# "GLIBC_2.3x not found".)
-FROM supabase/postgres:15.8.1.085@sha256:af083ef64d0408c8f098ee6f5c364a59b26f36fbc0f3a334a62c5c1d57362e9b
+# Pre-published supabase/postgres + wal-g. Built ONCE per version (see
+# README) and pulled by every k8s deploy — never built per-project.
+#
+# The base moved to supabase's Alpine/Nix image at PG17 (353MB compressed
+# vs 649MB for the Ubuntu-era 15.x pin). The Nix-built postgres carries its
+# own libc inside /nix, and the wal-g binary is fully static, so there is
+# no glibc/musl matching left to do — that retired the RCA 2026-05-30
+# glibc-pin guard and the upstream release-asset BUMP TRAP together. wal-g
+# now comes from vibecarbon's own single build point (docker/wal-g/,
+# published as ghcr.io/hyperformant/wal-g), version-locked with
+# carbon/db/Dockerfile and src/lib/images.js's DB_IMAGE_TAG suffix —
+# guarded by tests/unit/deploy/walg-dockerfile-arch.test.ts.
+FROM ghcr.io/hyperformant/wal-g:3.0.9 AS walg
 
-ARG TARGETARCH
-# BUMP TRAP — upstream RENAMED these release assets. Verified against the
-# GitHub Releases API 2026-07-30:
-#   v3.0.5, v3.0.7 ship  wal-g-pg-ubuntu-20.04-{amd64,aarch64}
-#   v3.0.8         ships wal-g-pg-20.04-{amd64,aarch64}   <- no `ubuntu-`
-# Bumping WALG_VERSION to v3.0.8+ ALONE 404s on the curl below; the WALG_ASSET
-# pattern must change in the same commit (and in the lockstep copy at
-# carbon/db/Dockerfile). v3.0.7 needs no other change.
-ARG WALG_VERSION=v3.0.5
-RUN set -eux; \
-    case "${TARGETARCH}" in \
-      amd64) WALG_ASSET="wal-g-pg-ubuntu-20.04-amd64" ;; \
-      arm64) WALG_ASSET="wal-g-pg-ubuntu-20.04-aarch64" ;; \
-      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
-    curl -fL "https://github.com/wal-g/wal-g/releases/download/${WALG_VERSION}/${WALG_ASSET}.tar.gz" | tar -xz; \
-    mv "${WALG_ASSET}" /usr/local/bin/wal-g; \
-    chmod +x /usr/local/bin/wal-g; \
-    /usr/local/bin/wal-g --version; \
-    apt-get purge -y --auto-remove curl; \
-    rm -rf /var/lib/apt/lists/*
+FROM supabase/postgres:17.6.1.167@sha256:6942962433a569e87f228b4d4ab7e11db5deca64e43babb3a038443ad6c4f1bb
+
+COPY --from=walg /usr/local/bin/wal-g /usr/local/bin/wal-g
+# The load-bearing exec: deploy only asserts archive_mode=on, never that
+# wal-g runs, so this is the only place a broken binary fails loudly.
+RUN wal-g --version
 
 # OCI metadata — see docker/carbon-autoscaler/Dockerfile for the full rationale.
 # Short version: `org.opencontainers.image.description` is the ONLY input to a
 # ghcr package page's description, and LABEL sits last because it is config
 # metadata, not a layer, so editing the prose cannot invalidate the wal-g
-# download above.
+# layers above.
 #
 # The prose names NO version numbers, and no angle brackets. No versions,
-# because both of them already appear twice in this file (the `FROM` tag and
-# `ARG WALG_VERSION`) and a third time in the published tag — a fourth copy in
-# a label is a fourth thing to forget. Describing how to READ the tag is
-# drift-proof and more useful anyway. No angle brackets, because a
-# `<placeholder>` in the description is at the mercy of whatever ghcr does with
-# HTML-looking text on the page, and a silently swallowed word is worse than a
-# clumsier sentence.
+# because both of them already appear in this file (the two `FROM` pins) and
+# again in the published tag — another copy in a label is another thing to
+# forget. Describing how to READ the tag is drift-proof and more useful
+# anyway. No angle brackets, because a `<placeholder>` in the description is
+# at the mercy of whatever ghcr does with HTML-looking text on the page, and
+# a silently swallowed word is worse than a clumsier sentence.
 #
 # No `org.opencontainers.image.licenses`: this image is overwhelmingly upstream
 # bits (PostgreSQL, the supabase extension set, wal-g) under a mix of licenses,
-# and our contribution is the single RUN layer above. Any one SPDX expression
-# here would be a compliance claim we cannot actually back, and an absent label
-# reads as "unknown", which is the truth. carbon-autoscaler, which IS our code
-# end to end, does declare one.
+# and our contribution is the two COPY/RUN layers above. Any one SPDX
+# expression here would be a compliance claim we cannot actually back, and an
+# absent label reads as "unknown", which is the truth. carbon-autoscaler,
+# which IS our code end to end, does declare one.
 #
 # Guarded by tests/unit/deploy/oci-image-metadata.test.ts.
 LABEL org.opencontainers.image.title="postgres" \

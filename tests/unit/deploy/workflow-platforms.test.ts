@@ -15,16 +15,18 @@
  *   - Removing `linux/amd64`, or re-adding docker/setup-qemu-action, also
  *     fails here.
  *
- * DELIBERATELY NOT COVERED: the db image's LOCAL-DEV path. A developer running
- * the generated project's compose stack (including on an Apple Silicon Mac)
- * never pulls ghcr.io/hyperformant/postgres — carbon/docker-compose.yml's `db`
+ * THE ONE arm64 IMAGE: ghcr.io/hyperformant/wal-g. A developer running the
+ * generated project's compose stack (including on an Apple Silicon Mac) never
+ * pulls ghcr.io/hyperformant/postgres — carbon/docker-compose.yml's `db`
  * service is `build: {context: ./db}` with `pull_policy: build`, so it builds
- * from carbon/db/Dockerfile for the host arch. That Dockerfile's TARGETARCH
- * case statement (and docker/postgres-walg/Dockerfile's) MUST keep its arm64
- * branch — it is what makes arm64 local dev work, and its `wal-g --version`
- * line is what catches a wrong-arch binary on amd64 too. Publishing a single
- * platform while keeping arch-correct Dockerfiles is intentional, not
- * inconsistent. See the `arm64 build support` block at the bottom.
+ * from carbon/db/Dockerfile for the host arch. Since the PG17/Alpine move,
+ * that build's FIRST step is pulling ghcr.io/hyperformant/wal-g, which
+ * therefore MUST publish linux/arm64 — the one image with an arm64 consumer.
+ * Its Dockerfile cross-compiles (GOARCH from TARGETARCH on $BUILDPLATFORM),
+ * so even that multi-arch publish needs no QEMU, and the no-QEMU guard below
+ * stays absolute. The in-consumer `wal-g --version` exec is what catches a
+ * wrong-arch binary at build time. See the `arm64 build support` block at the
+ * bottom.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,6 +41,16 @@ const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
  * this test failed, change the reasoning first — not just the string.
  */
 const PUBLISHED_IMAGES = [
+  {
+    workflow: '.github/workflows/publish-db-image.yml',
+    image: 'ghcr.io/hyperformant/wal-g (static wal-g binary)',
+    platforms: 'linux/amd64,linux/arm64',
+    consumers:
+      'BOTH consumer Dockerfiles COPY --from this image: docker/postgres-walg (built amd64 in ' +
+      'CI) AND carbon/db, which builds on target servers (x86-64) and on developer machines — ' +
+      'Apple Silicon included. That local-dev pull is the arm64 consumer. The Dockerfile ' +
+      'cross-compiles on $BUILDPLATFORM, so no QEMU even for this multi-arch publish.',
+  },
   {
     workflow: '.github/workflows/publish-db-image.yml',
     image: 'ghcr.io/hyperformant/postgres (supabase/postgres + wal-g)',
@@ -69,72 +81,86 @@ const PUBLISHED_IMAGES = [
   },
 ] as const;
 
-describe.each(PUBLISHED_IMAGES)(
-  '$workflow publishes $platforms',
-  ({ workflow, image, platforms, consumers }) => {
-    const wf = read(workflow);
-    // Comments are ALLOWED to name arm64 and setup-qemu-action — that is where
-    // the reasoning for their absence lives. Only executable YAML is checked.
-    const code = wf
+// A workflow may publish more than one image (publish-db-image.yml builds the
+// wal-g binary image, then the db image that COPY --froms it — `needs:` inside
+// ONE workflow is what serializes that dependency), so assertions run per
+// workflow over the multiset of its images' intended platform lists.
+const WORKFLOWS = [...new Set(PUBLISHED_IMAGES.map((p) => p.workflow))].map((workflow) => ({
+  workflow,
+  images: PUBLISHED_IMAGES.filter((p) => p.workflow === workflow),
+}));
+
+describe.each(WORKFLOWS)('$workflow publishes its intended platforms', ({ workflow, images }) => {
+  const wf = read(workflow);
+  // Comments are ALLOWED to name arm64 and setup-qemu-action — that is where
+  // the reasoning for their absence lives. Only executable YAML is checked.
+  const code = wf
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  const why = `\n\n${images
+    .map((i) => `Image: ${i.image}\nConsumers: ${i.consumers}\nIntended platforms: ${i.platforms}`)
+    .join('\n\n')}`;
+
+  it('pins exactly the intended platform list per published image', () => {
+    const found = [...code.matchAll(/^\s*platforms:\s*(\S.*?)\s*$/gm)].map((m) => m[1]);
+    const intended = images.map((i) => i.platforms);
+    expect(
+      found.sort(),
+      `${workflow} must declare exactly one \`platforms:\` line per published image.${why}`,
+    ).toEqual(intended.sort());
+  });
+
+  it('does not set up QEMU (nothing is ever emulated — multi-arch cross-compiles)', () => {
+    // setup-qemu-action only exists to register binfmt handlers for foreign
+    // architectures. Even the multi-arch wal-g image needs none: its
+    // Dockerfile builds on $BUILDPLATFORM and targets GOARCH directly.
+    expect(
+      code,
+      `${workflow} re-added docker/setup-qemu-action. QEMU is only needed to EMULATE a ` +
+        `foreign architecture — every multi-arch image this repo publishes cross-compiles ` +
+        `instead.${why}`,
+    ).not.toMatch(/setup-qemu-action/);
+  });
+
+  it('references arm64 nowhere but intended platforms lines', () => {
+    const withoutPlatformLines = code
       .split('\n')
-      .filter((line) => !/^\s*#/.test(line))
+      .filter((line) => !/^\s*platforms:/.test(line))
       .join('\n');
-    const why = `\n\nImage: ${image}\nConsumers: ${consumers}\nIntended platforms: ${platforms}`;
+    const anyArmIntended = images.some((i) => i.platforms.includes('arm64'));
+    expect(
+      withoutPlatformLines,
+      `${workflow} references arm64 outside a \`platforms:\` line${
+        anyArmIntended ? '' : ' (and none of its images intend arm64 at all)'
+      }.${why}`,
+    ).not.toMatch(/arm64|aarch64/);
+  });
+});
 
-    it('pins exactly the intended platform list', () => {
-      const found = [...code.matchAll(/^\s*platforms:\s*(\S.*?)\s*$/gm)].map((m) => m[1]);
-      expect(found, `${workflow} must declare exactly one \`platforms:\` line.${why}`).toHaveLength(
-        1,
-      );
-      expect(
-        found[0],
-        `${workflow} publishes "${found[0]}" but should publish "${platforms}".${why}`,
-      ).toBe(platforms);
-    });
+describe('arm64 build support survives in the wal-g delivery chain', () => {
+  // arm64 local dev works because carbon/db/Dockerfile pulls the multi-arch
+  // ghcr.io/hyperformant/wal-g image (carbon/docker-compose.yml's db service
+  // uses `build: {context: ./db}` with `pull_policy: build`, so an Apple
+  // Silicon developer builds it natively). A future "consistency" cleanup
+  // that drops linux/arm64 from that image's publish — or the TARGETARCH
+  // cross-compile that makes it QEMU-free — breaks ARM laptops silently.
+  // The publish-platform half is pinned by the PUBLISHED_IMAGES entry above;
+  // these pin the Dockerfile half. (Deeper build-shape guards live in
+  // tests/unit/deploy/walg-dockerfile-arch.test.ts.)
+  it('docker/wal-g/Dockerfile cross-compiles from TARGETARCH', () => {
+    const dockerfile = read('docker/wal-g/Dockerfile');
+    expect(dockerfile).toMatch(/ARG TARGETARCH/);
+    expect(dockerfile).toMatch(/GOARCH=\$\{?TARGETARCH\}?/);
+  });
 
-    it('does not set up QEMU (nothing is emulated in an amd64-only build)', () => {
-      // setup-qemu-action only exists to register binfmt handlers for foreign
-      // architectures. On an amd64-only build it is dead weight on every run.
-      expect(
-        code,
-        `${workflow} re-added docker/setup-qemu-action. QEMU is only needed to build a ` +
-          `foreign architecture — if you added it back, you almost certainly also added an ` +
-          `arm64 platform that nothing pulls.${why}`,
-      ).not.toMatch(/setup-qemu-action/);
-    });
-
-    it('has no stray arm64 reference in a build input', () => {
-      expect(code, `${workflow} references arm64 outside a comment.${why}`).not.toMatch(
-        /arm64|aarch64/,
-      );
-    });
-  },
-);
-
-describe('arm64 build support survives in the Dockerfiles', () => {
-  // The publish workflows go single-platform; the Dockerfiles do NOT. Their
-  // TARGETARCH branches are what let a developer build the db image natively
-  // on an arm64 laptop, and the `wal-g --version` exec is what catches a
-  // wrong-arch or glibc-mismatched binary on amd64 too. A future "consistency"
-  // cleanup that strips these because publishing is amd64-only would break
-  // arm64 local dev silently — hence this guard.
   it.each(['carbon/db/Dockerfile', 'docker/postgres-walg/Dockerfile'])(
-    '%s still selects the wal-g asset from TARGETARCH, arm64 branch included',
+    '%s executes wal-g --version at build time',
     (path) => {
-      const dockerfile = read(path);
-      expect(dockerfile).toMatch(/ARG TARGETARCH/);
-      expect(dockerfile).toMatch(/amd64\)\s*WALG_ASSET=/);
-      expect(
-        dockerfile,
-        `${path} lost its arm64 branch. Publishing is amd64-only, but this Dockerfile is ` +
-          `BUILT locally — carbon/docker-compose.yml's db service uses \`build: {context: ./db}\` ` +
-          `with \`pull_policy: build\`, so an Apple Silicon developer builds arm64 here. ` +
-          `Removing this branch breaks local dev on ARM laptops.`,
-      ).toMatch(/arm64\)\s*WALG_ASSET=/);
       // Executing the binary during the build is the only place a wrong-arch
-      // or glibc-mismatched wal-g fails loudly instead of shipping a database
-      // with silently dead backups behind green health checks.
-      expect(dockerfile).toMatch(/wal-g --version/);
+      // wal-g fails loudly instead of shipping a database with silently dead
+      // backups behind green health checks.
+      expect(read(path)).toMatch(/wal-g --version/);
     },
   );
 });

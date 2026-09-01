@@ -360,10 +360,19 @@ async function haSeedKnownHosts(ctx) {
 
 /** cloud-init + firewall + auto-updates on both servers (parallel). */
 async function haSetupServers(ctx) {
-  const { primary, standby, sshKeyPath } = ctx;
+  const { primary, standby, sshKeyPath, envConfig } = ctx;
   ctx.onProgress('Configuring servers...');
+  // Provider-owned readiness budget (BaseProvider.CLOUD_INIT_READY_TIMEOUT_MS),
+  // resolved the same way the single-server path does. Omitting it fell back to
+  // setupServer's Hetzner-calibrated 180s default, which aborted a DO standby
+  // whose cloud-init (docker-ce install) legitimately finished at 313s — the
+  // compose-HA sibling of the d1 RCA that added DO's 600s override.
+  const timeoutMs = providerFor(envConfig).CLOUD_INIT_READY_TIMEOUT_MS;
   await perfAsync('deploy.ha.compose.cloudInitReady.both', () =>
-    Promise.all([setupServer(primary.ip, sshKeyPath), setupServer(standby.ip, sshKeyPath)]),
+    Promise.all([
+      setupServer(primary.ip, sshKeyPath, timeoutMs),
+      setupServer(standby.ip, sshKeyPath, timeoutMs),
+    ]),
   );
 }
 

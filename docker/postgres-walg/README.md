@@ -4,13 +4,14 @@ Pre-published for **linux/amd64 only**. Built once per version; k8s deploys
 PULL it (compose builds `carbon/db/` instead — it never pulls this).
 
 vibecarbon standardizes on x86-64 servers (decision 2026-07-30), and this
-image's only consumer is the supabase db pod on a k3s node. The `Dockerfile`
-nonetheless keeps its arm64 `TARGETARCH` branch: it is shared with
-`carbon/db/Dockerfile`, which IS built on arm64 hosts during local
-development. Publishing one platform while the Dockerfile stays arch-correct
-is intentional — do not "simplify" the `TARGETARCH` case away.
+image's only consumer is the supabase db pod on a k3s node. Arch handling
+lives one level down since the PG17 move: the wal-g binary comes from the
+multi-arch `ghcr.io/hyperformant/wal-g` image (see `docker/wal-g/`), so
+docker resolves the right platform per build — there is no `TARGETARCH`
+plumbing left in this Dockerfile or `carbon/db/Dockerfile` (which IS built
+on arm64 hosts during local development).
 
-Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>` e.g. `15.8.1.085-walg3.0.5`.
+Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>` e.g. `17.6.1.167-walg3.0.9`.
 
 The tag names the two upstream versions this image composes and nothing else,
 so a change that leaves both of them alone — the OCI `LABEL` block at the
@@ -25,7 +26,9 @@ edit is a bad deal. Layers are untouched by a metadata-only republish, so a node
 that already cached the old digest keeps running identical bits.
 
 ## Bump procedure
-1. Edit `Dockerfile` (base `FROM` and/or `WALG_VERSION`).
+1. Edit `Dockerfile` (base `FROM` and/or the `FROM ghcr.io/hyperformant/wal-g:<v>`
+   pin — whose version is set by `ARG WALG_VERSION` in `docker/wal-g/Dockerfile`;
+   bump all three together, plus the same pin in `carbon/db/Dockerfile`).
 2. Update `src/lib/images.js` (`DB_IMAGE_TAG`).
 3. Push a commit touching `docker/postgres-walg/**` or `src/lib/images.js`;
    `.github/workflows/publish-db-image.yml` builds amd64 and pushes.

@@ -122,9 +122,10 @@ function jobRunCommands(relPath: string, jobId: string): string[] {
 }
 
 // Dockerfiles that pin a `node:` base image, and those that deliberately
-// don't (both DB images are FROM supabase/postgres). Listing the second group
-// is what makes the inventory meaningful: adding Node to one of them, or
-// adding a new Dockerfile entirely, has to be triaged here.
+// don't (both DB images are FROM supabase/postgres; docker/wal-g is a Go
+// build). Listing the second group is what makes the inventory meaningful:
+// adding Node to one of them, or adding a new Dockerfile entirely, has to be
+// triaged here.
 const NODE_DOCKERFILES = [
   join('carbon', 'Dockerfile'),
   join('docker', 'carbon-autoscaler', 'Dockerfile'),
@@ -132,6 +133,7 @@ const NODE_DOCKERFILES = [
 const NON_NODE_DOCKERFILES = [
   join('carbon', 'db', 'Dockerfile'),
   join('docker', 'postgres-walg', 'Dockerfile'),
+  join('docker', 'wal-g', 'Dockerfile'),
 ];
 
 // Only genuinely irrelevant trees are skipped. Dot-directories are NOT

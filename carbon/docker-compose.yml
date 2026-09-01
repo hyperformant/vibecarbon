@@ -181,11 +181,12 @@ services:
       # pg_promote() call can connect to the standby (psql connections
       # otherwise return "database is not accepting connections / Hot
       # standby mode is disabled" and pg_promote can't be invoked).
-      # No-op on the primary — hot_standby only affects standbys. PG15
-      # default is on, but supabase/postgres:15.8.1.085 ships with it
-      # off, so set it explicitly. RCA: compose-ha 2026-05-01 fanout13
-      # failover — pg_promote retried 5 times against an unreachable
-      # standby psql before aborting.
+      # No-op on the primary — hot_standby only affects standbys. The PG
+      # default is on, but supabase's image config has shipped it off
+      # (seen on 15.8.1.085), so set it explicitly rather than trusting
+      # the image. RCA: compose-ha 2026-05-01 fanout13 failover —
+      # pg_promote retried 5 times against an unreachable standby psql
+      # before aborting.
       - hot_standby=on
       - -c
       # Explicit connection ceiling (image default is 100). Real consumers —
