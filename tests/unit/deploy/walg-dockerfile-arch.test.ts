@@ -107,9 +107,11 @@ describe.each(WALG_CONSUMERS)('%s takes wal-g from the published static image', 
   const instructions = logicalInstructions(dockerfile);
 
   it(`is FROM ${PG_BASE} (Alpine/Nix base) by digest`, () => {
-    expect(dockerfile).toMatch(
-      new RegExp(`^FROM ${PG_BASE.replace(/[/.]/g, '\\$&')}@sha256:[0-9a-f]{64}`, 'm'),
-    );
+    // Full regex-metachar escape (CodeQL js/incomplete-sanitization flagged
+    // the earlier dot/slash-only version — moot for this constant input, but
+    // complete is complete).
+    const pgBaseLiteral = PG_BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    expect(dockerfile).toMatch(new RegExp(`^FROM ${pgBaseLiteral}@sha256:[0-9a-f]{64}`, 'm'));
   });
 
   it(`COPYies the binary from the pinned ${WALG_IMAGE} stage`, () => {
