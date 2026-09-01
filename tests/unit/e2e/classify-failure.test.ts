@@ -159,6 +159,28 @@ describe('classifyFailure', () => {
     ).toBe('unknown');
   });
 
+  it("flags the 'During secondary validation:' infix spelling as the same infra class", () => {
+    // Run 33435737752 (hetzner compose, 2026-08-31): LE prepends
+    // "During secondary validation: " when only its REMOTE perspectives
+    // fail — the primary validator saw the record, distant vantages saw a
+    // missing/stale one. Exactly the vantage-divergence mechanism this
+    // class attributes, but the infix escaped the pattern and the run
+    // hard-failed [unknown] instead of retrying. Fourth member of the
+    // "classifier missed the backend's actual wording" family.
+    const result = classifyFailure({
+      errorMessage:
+        'Deploy exited with code 1: Error: [step:verify-tls] Deploy aborted ... | ' +
+        'urn:ietf:params:acme:error:unauthorized :: During secondary validation: Incorrect TXT record',
+    });
+    expect(result.category).toBe('infra');
+    expect(result.reason).toMatch(/DNS-01 propagation/i);
+    // The urn anchor still gates: infix wording without the urn stays unknown.
+    expect(
+      classifyFailure({ errorMessage: 'During secondary validation: Incorrect TXT record' })
+        .category,
+    ).toBe('unknown');
+  });
+
   it("flags Let's Encrypt rate limit as infra", () => {
     const result = classifyFailure({
       errorMessage: '429 urn:ietf:params:acme:error:rateLimited: too many certificates',

@@ -88,13 +88,18 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: 'rate limit',
   },
   // LE validation seeing a missing/mismatched challenge TXT despite lego's
-  // own authoritative pre-check passing — DO anycast POP divergence between
-  // lego's vantage and LE's (run 33283466928, observed under a SINGLE armed
-  // solver, so it is provider-side propagation, not our dual-issuer race —
-  // that class is closed by acme-role.js). The urn context is required so a
-  // sentence merely mentioning TXT records cannot match.
+  // own authoritative pre-check passing — anycast POP divergence between
+  // lego's vantage and LE's (DO: run 33283466928; hetzner: run 33435737752,
+  // both observed under a SINGLE armed solver, so it is provider-side
+  // propagation, not our dual-issuer race — that class is closed by
+  // acme-role.js). The urn context is required so a sentence merely
+  // mentioning TXT records cannot match. The bounded `.{0,60}?` infix
+  // admits LE's "During secondary validation: " prefix (emitted when only
+  // REMOTE perspectives fail — the purest vantage-divergence spelling; it
+  // escaped the original pattern and hard-failed run 33435737752 as
+  // [unknown]) without letting the urn anchor drift a sentence away.
   {
-    pattern: /urn:ietf:params:acme:error:unauthorized :: (No|Incorrect) TXT record/i,
+    pattern: /urn:ietf:params:acme:error:unauthorized :: .{0,60}?(No|Incorrect) TXT record/i,
     reason: 'ACME DNS-01 propagation (anycast lag)',
   },
   // lego's OWN authoritative pre-check starving against Vultr's
