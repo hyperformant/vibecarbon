@@ -2402,6 +2402,57 @@ export function summarizeSupabasePods(raw) {
 }
 
 /**
+ * `kubectl get nodes` shaped like `supabasePodListArgs` — name + the Ready
+ * condition. Read alongside the pods when helm's `--wait` fails: a pod
+ * stuck Pending/Init means one thing on a healthy cluster and something
+ * entirely different when its HOST is gone.
+ *
+ * @returns {string[]}
+ */
+export function clusterNodeListArgs() {
+  return [
+    'kubectl',
+    'get',
+    'nodes',
+    '-o',
+    'custom-columns=NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status',
+    '--no-headers',
+  ];
+}
+
+/**
+ * One clause naming any NotReady nodes, or '' when every node is Ready.
+ *
+ * WHY (RCA 2026-09-01, k8s-ha standby, PG17 cert run): the supabase worker
+ * node went dark mid-deploy — kubelet stopped answering, SSH timed out,
+ * Hetzner's API still said "running". The db pod froze in Init, helm's
+ * wait expired, and the step classified [unknown] because the error only
+ * described the POD. Naming the dead node makes the failure classifiable
+ * as infrastructure (see classify-failure.ts) so the flake retry can
+ * re-roll the deploy instead of hard-failing the run.
+ *
+ * @param {string} raw - `kubectl get nodes … --no-headers` stdout
+ * @returns {string}
+ */
+export function summarizeNotReadyNodes(raw) {
+  const notReady = String(raw ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, ready = '<none>'] = line.split(/\s+/);
+      return { name, ready };
+    })
+    .filter((n) => n.ready !== 'True');
+  if (notReady.length === 0) return '';
+  const named = notReady.map((n) => `${n.name} (Ready=${n.ready})`).join(', ');
+  return (
+    ` Node(s) NotReady: ${named} — the pod may be stuck because its HOST ` +
+    `died or lost its kubelet, not because of the workload.`
+  );
+}
+
+/**
  * Read the release's pods so the helm-failure error can say what actually
  * happened instead of asserting a state it never checked.
  *
@@ -2416,7 +2467,19 @@ export function summarizeSupabasePods(raw) {
 async function describeSupabasePods(env) {
   try {
     const raw = await runCommandAsync(supabasePodListArgs(), { env, silent: true });
-    return summarizeSupabasePods(raw);
+    const podSummary = summarizeSupabasePods(raw);
+    // Node readiness rides along, best-effort: a stuck pod on a dead node
+    // is an infrastructure event, and only the node line makes it read as
+    // one (see summarizeNotReadyNodes). A failure to list nodes never
+    // replaces the pod summary we already have.
+    let nodeSummary = '';
+    try {
+      const nodesRaw = await runCommandAsync(clusterNodeListArgs(), { env, silent: true });
+      nodeSummary = summarizeNotReadyNodes(nodesRaw);
+    } catch {
+      // pod summary alone is still the truth we came for
+    }
+    return `${podSummary}${nodeSummary}`;
   } catch (err) {
     const detail = String(err?.message ?? err)
       .trim()

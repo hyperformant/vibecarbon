@@ -341,3 +341,32 @@ describe('summarizeSupabasePods', () => {
     expect(out).toMatch(/more/);
   });
 });
+
+describe('summarizeNotReadyNodes', () => {
+  // RCA 2026-09-01 (PG17 cert, k8s-ha standby): a stuck pod on a DEAD node
+  // read as [unknown] because the helm error only described the pod. The
+  // node clause is what lets classify-failure attribute provider-host-failure
+  // — and it must stay SILENT on healthy clusters so a stuck pod on Ready
+  // nodes remains our bug.
+  it('is empty when every node is Ready', async () => {
+    const { summarizeNotReadyNodes } = await k3sPromise;
+    expect(summarizeNotReadyNodes('master True\nworker True')).toBe('');
+    expect(summarizeNotReadyNodes('')).toBe('');
+    expect(summarizeNotReadyNodes(undefined as unknown as string)).toBe('');
+  });
+
+  it('names each NotReady node with its Ready condition value', async () => {
+    const { summarizeNotReadyNodes } = await k3sPromise;
+    const out = summarizeNotReadyNodes('master True\nworker Unknown\nother False');
+    expect(out).toMatch(/Node\(s\) NotReady:/);
+    expect(out).toMatch(/worker \(Ready=Unknown\)/);
+    expect(out).toMatch(/other \(Ready=False\)/);
+    expect(out).not.toMatch(/master/);
+    expect(out).toMatch(/HOST/);
+  });
+
+  it('treats a missing Ready condition (<none>) as NotReady', async () => {
+    const { summarizeNotReadyNodes } = await k3sPromise;
+    expect(summarizeNotReadyNodes('n1 <none>')).toMatch(/n1 \(Ready=<none>\)/);
+  });
+});

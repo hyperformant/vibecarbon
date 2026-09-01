@@ -324,6 +324,26 @@ classes:
       2026-04-28 incident.
     sites: []
 
+  - class: provider-host-failure
+    attribution: external-proven
+    evidence: >-
+      A provisioned host going dark mid-deploy while the provider API still
+      reports it running. 2026-09-01, e2e run 07ffb0d6-11ae-4db0-bbdc-d9cf73f91906
+      (PG17 cert, hetzner k8s-ha standby worker
+      testapp-k8s-ha-1788223963488-r9p4ie-e4-standby-supabase, hel1): node
+      NotReady in k3s, kubelet unreachable from the
+      master (proxy 502 dialing :10250), SSH to the public IP timed out
+      during banner exchange, Hetzner Cloud API status "running"
+      throughout — a kernel/host wedge, not anything the workload did. The
+      db pod froze in Init and helm's --wait expired. Detection is
+      evidence-gated: summarizeNotReadyNodes (k3s.js) appends the NotReady
+      node clause to the helm-failure error, and the classifier requires
+      BOTH the stuck-pod and NotReady-node clauses before attributing here
+      — a stuck pod on healthy nodes stays [unknown] (ours until proven
+      otherwise). Retry is the only remedy: the rebuilt deploy lands on a
+      fresh host.
+    sites: []
+
   - class: provider-api-outages
     attribution: external-proven
     evidence: >-
@@ -361,6 +381,14 @@ classes:
       legoTuningEnv → docker-compose.dns01.prod.yml), giving each record
       wall-time in the zone before any validation is triggered. Residual
       misses are retried by E2E_RETRY_FLAKES via this mapping.
+      2026-09-01: hetzner joined this class — its anycast NS showed the
+      same divergence in degraded windows (twin records 20s vs 90s+,
+      run 33341893276 probes) and post-timeout-only-fix dispatches
+      (33435737752) failed on the vantage-divergence spellings, including
+      LE's "During secondary validation:" prefix (remote perspectives
+      only). Same mitigation pair applied to the hetzner legoTuningEnv row;
+      harness-proven (split-shape trial, apex+wildcard at +123s with the
+      90s floor).
     sites: []
 
   - class: vultr-dns-negative-cache-poisoning
@@ -427,4 +455,5 @@ flakeRetry:
   - { reason: "SSH connection blip", class: ssh-transport-blips }
   - { reason: "LE cert pending", class: acme-issuance-pending }
   - { reason: "ACME DNS-01 propagation (anycast lag)", class: dns-anycast-propagation-divergence }
+  - { reason: "k8s node NotReady (host died)", class: provider-host-failure }
   - { reason: "ACME DNS-01 propagation (NS negative cache)", class: vultr-dns-negative-cache-poisoning }

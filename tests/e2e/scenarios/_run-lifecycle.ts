@@ -2271,7 +2271,23 @@ export async function runLifecycle(
             const detail = f.errorMessage || JSON.stringify(f.details || {});
             console.error(`${tag} [fail] ${f.checkName}: ${detail}`);
           }
-          throw new Error(`${unexpectedFailures.length} verification(s) failed: ${failNames}`);
+          // The per-check details travel IN the thrown error, bounded, not
+          // just to the console: classifyFailure only sees err.message, and
+          // a bare "N verification(s) failed: <names>" hides every
+          // classifiable spelling (run 33435737752: storage_upload's
+          // NoSuchBucket staleness — already an [infra: S3 transient]
+          // pattern — read as [unknown] and hard-failed the leg). Same bug
+          // shape de488eb fixed for verify-tls aborts, at the verification
+          // surface.
+          const detailLines = unexpectedFailures
+            .map(
+              (f) =>
+                `[fail] ${f.checkName}: ${(f.errorMessage || JSON.stringify(f.details || {})).slice(0, 400)}`,
+            )
+            .join('\n');
+          throw new Error(
+            `${unexpectedFailures.length} verification(s) failed: ${failNames}\n${detailLines}`,
+          );
         }
       }),
     );
@@ -4011,7 +4027,18 @@ EOF`;
                     `${tag} [fail] ${f.checkName}: ${f.errorMessage || JSON.stringify(f.details || {})}`,
                   );
                 }
-                throw new Error(`${failures.length} pilot-light verification(s) failed: ${names}`);
+                // Bounded per-check details travel in the error for the
+                // classifier — same rule as the main verification throw
+                // above (names alone hide every classifiable spelling).
+                const detailLines = failures
+                  .map(
+                    (f) =>
+                      `[fail] ${f.checkName}: ${(f.errorMessage || JSON.stringify(f.details || {})).slice(0, 400)}`,
+                  )
+                  .join('\n');
+                throw new Error(
+                  `${failures.length} pilot-light verification(s) failed: ${names}\n${detailLines}`,
+                );
               }
 
               console.log(

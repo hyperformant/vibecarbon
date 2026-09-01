@@ -114,6 +114,18 @@ export const INFRA_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     pattern: /NS ns\d\.vultr\.com\S* (?:did not return the expected TXT record|returned NXDOMAIN)/i,
     reason: 'ACME DNS-01 propagation (NS negative cache)',
   },
+  // A helm --wait expiring on a pod whose NODE is NotReady: the host died
+  // or lost its kubelet mid-deploy (RCA 2026-09-01, k8s-ha standby, PG17
+  // cert: worker dark — kubelet 502, SSH timeout — while Hetzner's API
+  // still said "running"; the db pod froze in Init and the run
+  // hard-failed [unknown]). BOTH halves are required: the pod clause comes
+  // from summarizeSupabasePods, the node clause from
+  // summarizeNotReadyNodes — a stuck pod on healthy nodes stays unknown,
+  // because that is OUR bug until proven otherwise.
+  {
+    pattern: /never became Ready[\s\S]{0,400}?Node\(s\) NotReady:/,
+    reason: 'k8s node NotReady (host died)',
+  },
   // Network / DNS / TLS / generic fetch noise
   {
     pattern: /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|ENETUNREACH|EAI_AGAIN/i,
