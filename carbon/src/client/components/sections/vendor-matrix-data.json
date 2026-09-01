@@ -2,44 +2,44 @@
   "providers": {
     "hetzner": {
       "run": {
-        "id": "a0fc2ef",
-        "date": "2026-08-23",
+        "id": "357e223",
+        "date": "2026-09-01",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 290787,
-          "warm-deploy": 15825,
-          "scale": 260461,
-          "backup": 26361,
-          "destroy": 24868,
-          "restore": 267642
+          "deploy": 339326,
+          "warm-deploy": 15403,
+          "scale": 246232,
+          "backup": 16969,
+          "destroy": 33468,
+          "restore": 330468
         },
         "compose-ha": {
-          "deploy": 428086,
-          "warm-deploy": 126793,
-          "scale": 278600,
-          "backup": 12047,
-          "destroy": 42768,
-          "restore": 428353,
-          "failover": 36818
+          "deploy": 439882,
+          "warm-deploy": 135173,
+          "scale": 242591,
+          "backup": 16885,
+          "destroy": 42746,
+          "restore": 464195,
+          "failover": 44463
         },
         "k8s": {
-          "deploy": 429499,
-          "warm-deploy": 6821,
-          "scale": 153473,
-          "backup": 29060,
-          "destroy": 115025,
-          "restore": 928609
+          "deploy": 441446,
+          "warm-deploy": 6855,
+          "scale": 196581,
+          "backup": 34130,
+          "destroy": 114239,
+          "restore": 483326
         },
         "k8s-ha": {
-          "deploy": 580275,
-          "warm-deploy": 41084,
-          "scale": 333217,
-          "backup": 27524,
-          "destroy": 124735,
-          "restore": 812686,
-          "failover": 176998
+          "deploy": 494269,
+          "warm-deploy": 43958,
+          "scale": 284813,
+          "backup": 32651,
+          "destroy": 142112,
+          "restore": 599988,
+          "failover": 206385
         }
       }
     },
@@ -88,27 +88,27 @@
     },
     "linode": {
       "run": {
-        "id": "890325b",
-        "date": "2026-08-30",
+        "id": "6ff5472",
+        "date": "2026-09-01",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 462131,
-          "warm-deploy": 13035,
-          "scale": 464611,
-          "backup": 1756,
-          "destroy": 27946,
-          "restore": 476096
+          "deploy": 439349,
+          "warm-deploy": 16622,
+          "scale": 408443,
+          "backup": 4012,
+          "destroy": 29609,
+          "restore": 465211
         },
         "compose-ha": {
-          "deploy": 654130,
-          "warm-deploy": 50808,
-          "scale": 421111,
-          "backup": 2016,
-          "destroy": 31073,
-          "restore": 630843,
-          "failover": 48872
+          "deploy": 591166,
+          "warm-deploy": 67606,
+          "scale": 380318,
+          "backup": 3748,
+          "destroy": 33763,
+          "restore": 601633,
+          "failover": 53293
         }
       }
     },
@@ -140,27 +140,27 @@
     },
     "scaleway": {
       "run": {
-        "id": "d50493f",
-        "date": "2026-08-30",
+        "id": "45d325c",
+        "date": "2026-09-01",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 423422,
-          "warm-deploy": 24920,
-          "scale": 275216,
-          "backup": 3504,
-          "destroy": 43518,
-          "restore": 423988
+          "deploy": 390714,
+          "warm-deploy": 23957,
+          "scale": 253699,
+          "backup": 4619,
+          "destroy": 38797,
+          "restore": 383895
         },
         "compose-ha": {
-          "deploy": 583087,
-          "warm-deploy": 137254,
-          "scale": 285715,
-          "backup": 3205,
-          "destroy": 114056,
-          "restore": 678180,
-          "failover": 57620
+          "deploy": 547850,
+          "warm-deploy": 118194,
+          "scale": 259983,
+          "backup": 6969,
+          "destroy": 52210,
+          "restore": 599206,
+          "failover": 58328
         }
       }
     }
