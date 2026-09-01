@@ -139,6 +139,12 @@ async function validateScalewaySecretKey(secretKey) {
           'minutes to apply',
       };
     }
+    // A 5xx is the PROVIDER's outage, not the operator's credential: treat it
+    // like the network-error catch below (proceed with the env token; real
+    // API calls fail honestly later if the outage persists). Live RCA
+    // 2026-09-01 (run 33557406486): a Vultr API 502 on this preflight read
+    // as "token invalid", and the non-TTY destroy died trying to prompt.
+    if (res.status >= 500) return { valid: true, unreachable: true };
     return { valid: false, error: `Scaleway API returned status ${res.status}` };
   } catch {
     return { valid: true, unreachable: true };
