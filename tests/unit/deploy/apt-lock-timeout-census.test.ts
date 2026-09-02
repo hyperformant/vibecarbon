@@ -164,3 +164,45 @@ describe('the shared apt constant', () => {
     expect(Number.isFinite(APT_LOCK_TIMEOUT_SECONDS)).toBe(true);
   });
 });
+
+describe('outer ssh timeouts outlast the inner apt lock budget', () => {
+  // The lock budget is only real if the transport lets apt use it: sshRun's
+  // 120s default killed the wireguard-tools install at ~197s of silent
+  // lock-wait while apt was lawfully inside its 300s window (reproduced
+  // three times on vultr restore re-deploys, 2026-09-01/02 — the re-deploy
+  // reaches WG setup while first-boot unattended-upgrades still holds
+  // dpkg). Same meta-class as the seed-standby-vs-helm-wait and
+  // cloud-init-budget bounds: an inner budget exceeding its outer timeout
+  // is a bound that does not exist.
+  it('every file mixing sshRun with aptGet passes a timeout derived from the budget', () => {
+    const files = execFileSyncLike();
+    for (const rel of files) {
+      const src = readFileSync(join(ROOT, rel), 'utf-8');
+      expect(
+        src.includes('APT_LOCK_TIMEOUT_SECONDS +'),
+        `${rel} runs aptGet over sshRun without an APT_LOCK_TIMEOUT_SECONDS-derived outer timeout ` +
+          `— sshRun's 120s default kills apt mid-lock-wait`,
+      ).toBe(true);
+    }
+  });
+
+  /** Every src file that both calls sshRun and builds an aptGet command. */
+  function execFileSyncLike(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          if (!['node_modules', 'dist', '.git', 'coverage'].includes(entry.name)) {
+            walk(join(dir, entry.name));
+          }
+        } else if (entry.name.endsWith('.js')) {
+          const rel = join(dir, entry.name);
+          const src = readFileSync(join(ROOT, rel), 'utf-8');
+          if (/\bsshRun\(/.test(src) && /\baptGet\(/.test(src)) out.push(rel);
+        }
+      }
+    };
+    walk('src');
+    return out;
+  }
+});
