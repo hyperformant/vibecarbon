@@ -13,7 +13,7 @@
  */
 
 import { sshRun } from '../ssh.js';
-import { aptGet } from './apt.js';
+import { APT_LOCK_TIMEOUT_SECONDS, aptGet } from './apt.js';
 
 export const WG_PORT = 51821; // NOT 51820 — flannel-wg owns that in k3s
 export const WG_SUBNET_CIDR = '10.99.0.0/30';
@@ -218,18 +218,32 @@ export async function exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPat
     // only the second one made it into the step summary. The lock timeout
     // is the actual fix -- see apt.js; this node booted a minute or two
     // ago, so unattended-upgrades is very often still holding dpkg.
-    await sshRun(ip, sshKeyPath, [
-      'bash',
-      '-c',
-      'set -e; ' +
-        'if ! command -v wg >/dev/null 2>&1; then ' +
-        `DEBIAN_FRONTEND=noninteractive ${aptGet('update -qq')}; ` +
-        `DEBIAN_FRONTEND=noninteractive ${aptGet('install -y -qq wireguard-tools')}; ` +
-        'command -v wg >/dev/null 2>&1 || { ' +
-        'echo "wireguard-tools installed but wg is still not on PATH" >&2; exit 1; }; ' +
-        'fi; ' +
-        `umask 077; [ -f ${WG_KEY_PATH} ] || wg genkey > ${WG_KEY_PATH}`,
-    ]);
+    //
+    // The OUTER ssh timeout must exceed that INNER apt lock budget, or the
+    // budget is unreachable: sshRun's 120s default killed this command at
+    // ~197s of silent lock-wait while apt was still lawfully inside its
+    // 300s window (reproduced three times on vultr restore re-deploys,
+    // 2026-09-01/02 — the re-deploy reaches this step while first-boot
+    // unattended-upgrades still holds dpkg; fresh deploys pass because the
+    // lock has cleared by the time WG setup runs). 120s of headroom covers
+    // the update + install themselves after the lock clears.
+    await sshRun(
+      ip,
+      sshKeyPath,
+      [
+        'bash',
+        '-c',
+        'set -e; ' +
+          'if ! command -v wg >/dev/null 2>&1; then ' +
+          `DEBIAN_FRONTEND=noninteractive ${aptGet('update -qq')}; ` +
+          `DEBIAN_FRONTEND=noninteractive ${aptGet('install -y -qq wireguard-tools')}; ` +
+          'command -v wg >/dev/null 2>&1 || { ' +
+          'echo "wireguard-tools installed but wg is still not on PATH" >&2; exit 1; }; ' +
+          'fi; ' +
+          `umask 077; [ -f ${WG_KEY_PATH} ] || wg genkey > ${WG_KEY_PATH}`,
+      ],
+      { timeout: (APT_LOCK_TIMEOUT_SECONDS + 120) * 1000 },
+    );
   }
 
   // 2. Read back ONLY the public key from each node (private key stays on-node).
