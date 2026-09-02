@@ -287,18 +287,18 @@ The rows are every provider and deploy scenario the CLI supports. An absent row 
 | | `compose-ha` | 7m 20s | 2m 15s | 16.9s | 7m 44s | 4m 3s | 42.7s | 44.5s |
 | | `k8s` | 7m 21s | 6.9s | 34.1s | 8m 3s | 3m 17s | 1m 54s | — |
 | | `k8s-ha` | 8m 14s | 44.0s | 32.7s | 10m 0s | 4m 45s | 2m 22s | 3m 26s |
-| DigitalOcean | `compose` | 9m 40s | 24.7s | 2.3s | 10m 26s | 7m 40s | 41.6s | — |
-| | `compose-ha` | 13m 19s | 1m 50s | 2.1s | 15m 19s | 9m 14s | 47.3s | 2m 17s |
-| | `k8s` | 9m 51s | 8.8s | 36.7s | 8m 38s | 4m 44s | 2m 10s | — |
-| | `k8s-ha` | 11m 26s | 56.3s | 28.6s | 11m 3s | 8m 16s | 2m 20s | 5m 12s |
+| DigitalOcean | `compose` | 10m 50s | 24.1s | 5.4s | 9m 12s | 9m 28s | 38.8s | — |
+| | `compose-ha` | 12m 18s | 1m 6s | 5.6s | 18m 31s | 9m 51s | 44.2s | 2m 54s |
+| | `k8s` | 8m 9s | 6.4s | 34.8s | 7m 28s | 4m 26s | 1m 51s | — |
+| | `k8s-ha` | 9m 22s | 1m 4s | 27.7s | 12m 29s | 10m 49s | 2m 5s | 7m 41s |
 | Linode | `compose` | 7m 19s | 16.6s | 4.0s | 7m 45s | 6m 48s | 29.6s | — |
 | | `compose-ha` | 9m 51s | 1m 8s | 3.7s | 10m 2s | 6m 20s | 33.8s | 53.3s |
-| Vultr | `compose` | 9m 19s | 18.1s | 6.4s | 9m 4s | 8m 57s | 35.6s | — |
-| | `compose-ha` | 13m 46s | 1m 9s | 7.3s | 11m 55s | 8m 17s | 33.5s | 1m 54s |
+| Vultr | `compose` | 7m 58s | 24.7s | 4.3s | 6m 23s | 7m 25s | 38.0s | — |
+| | `compose-ha` | 8m 8s | 1m 10s | 3.2s | 10m 40s | 5m 28s | 37.0s | 1m 34s |
 | Scaleway | `compose` | 6m 31s | 24.0s | 4.6s | 6m 24s | 4m 14s | 38.8s | — |
 | | `compose-ha` | 9m 8s | 1m 58s | 7.0s | 9m 59s | 4m 20s | 52.2s | 58.3s |
 
-_Latest green CI runs: Hetzner Cloud `357e223` (2026-09-01) · DigitalOcean `eb61a83` (2026-08-30) · Linode `6ff5472` (2026-09-01) · Vultr `af04b00` (2026-08-30) · Scaleway `45d325c` (2026-09-01) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
+_Latest green CI runs: Hetzner Cloud `357e223` (2026-09-01) · DigitalOcean `48e8713` (2026-09-02) · Linode `6ff5472` (2026-09-01) · Vultr `c023f94` (2026-09-02) · Scaleway `45d325c` (2026-09-01) · GitHub-hosted runner · methodology: [docs/tests.md](./docs/tests.md)._
 <!-- END:perf-table -->
 
 `k8s-ha` (pilot-light multi-region with one-command failover) runs on Hetzner and DigitalOcean today.
