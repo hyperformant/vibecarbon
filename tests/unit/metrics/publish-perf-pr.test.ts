@@ -31,6 +31,7 @@ import {
 import {
   collectAndRender,
   discoverLegArtifacts,
+  mergePendingPerfData,
   type SurfacePaths,
   updateLeg,
 } from '../../e2e/metrics/publish-perf-pr.js';
@@ -441,5 +442,138 @@ describe('collectAndRender', () => {
     expect(readFileSync(paths.readmePath, 'utf8')).toContain(
       '| Hetzner Cloud | `compose` | 1m 0s |',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pending-branch carry-forward. The collector force-pushes `perf-table-update`
+// from a fresh `main` checkout every run. Two green runs for DIFFERENT
+// providers before the first PR merges therefore used to clobber each other:
+// run 33581640475 (digitalocean) rewrote the branch run 33577936158 (vultr)
+// had just published, and the Vultr numbers vanished from PR #47. The fix:
+// seed the merge from the pending branch's data file, newest run per
+// provider winning, so the branch always accumulates every unmerged green leg.
+// ---------------------------------------------------------------------------
+
+function entry(id: string, date: string, deployMs: number) {
+  return {
+    run: { id, date, origin: 'GitHub-hosted runner' },
+    scenarios: { compose: { deploy: deployMs } },
+  };
+}
+
+describe('mergePendingPerfData', () => {
+  it('returns main unchanged when there is no pending branch data', () => {
+    const main: PerfData = { providers: { vultr: entry('aaaaaaa', '2026-08-30', 1) } };
+    expect(mergePendingPerfData(main, null)).toEqual(main);
+  });
+
+  it('carries forward a provider that only the pending branch has measured', () => {
+    const main: PerfData = { providers: { hetzner: entry('hhhhhhh', '2026-09-01', 1) } };
+    const pending: PerfData = { providers: { vultr: entry('vvvvvvv', '2026-09-02', 2) } };
+    expect(mergePendingPerfData(main, pending).providers).toEqual({
+      hetzner: entry('hhhhhhh', '2026-09-01', 1),
+      vultr: entry('vvvvvvv', '2026-09-02', 2),
+    });
+  });
+
+  it("prefers the pending branch's entry when its run is newer than main's", () => {
+    const main: PerfData = { providers: { vultr: entry('aaaaaaa', '2026-08-30', 1) } };
+    const pending: PerfData = { providers: { vultr: entry('bbbbbbb', '2026-09-02', 2) } };
+    expect(mergePendingPerfData(main, pending).providers.vultr).toEqual(
+      entry('bbbbbbb', '2026-09-02', 2),
+    );
+  });
+
+  it("keeps main's entry when the pending branch is stale (older run)", () => {
+    const main: PerfData = { providers: { vultr: entry('aaaaaaa', '2026-09-02', 1) } };
+    const pending: PerfData = { providers: { vultr: entry('bbbbbbb', '2026-08-30', 2) } };
+    expect(mergePendingPerfData(main, pending).providers.vultr).toEqual(
+      entry('aaaaaaa', '2026-09-02', 1),
+    );
+  });
+
+  it("keeps main's entry when the pending branch carries the very same run (already merged)", () => {
+    const main: PerfData = { providers: { vultr: entry('aaaaaaa', '2026-09-02', 1) } };
+    const pending: PerfData = { providers: { vultr: entry('aaaaaaa', '2026-09-02', 999) } };
+    expect(mergePendingPerfData(main, pending).providers.vultr).toEqual(
+      entry('aaaaaaa', '2026-09-02', 1),
+    );
+  });
+
+  it('prefers the pending branch on a same-day tie between two distinct runs', () => {
+    const main: PerfData = { providers: { vultr: entry('aaaaaaa', '2026-09-02', 1) } };
+    const pending: PerfData = { providers: { vultr: entry('bbbbbbb', '2026-09-02', 2) } };
+    expect(mergePendingPerfData(main, pending).providers.vultr).toEqual(
+      entry('bbbbbbb', '2026-09-02', 2),
+    );
+  });
+});
+
+describe('collectAndRender with a pending perf-table-update branch', () => {
+  it("a later run for another provider keeps the pending branch's unmerged numbers (PR #47 regression)", () => {
+    const onMain: PerfData = {
+      providers: { vultr: entry('af04b00', '2026-08-30', 559_000) },
+    };
+    const pending: PerfData = {
+      providers: { vultr: entry('c023f94', '2026-09-02', 403_000) },
+    };
+    const root = mkdtempSync(join(tmpdir(), 'vc-legs-pending-'));
+    const { dbPath, db } = makeLegDb(root, 'hetzner');
+    const runId = createTestRun(db);
+    for (const mode of HETZNER_MODES) seedScenario(db, runId, 'hetzner', mode);
+    db.completeRun(runId, 'pass');
+    db.close();
+
+    const paths = makeSurfacePaths(onMain);
+    const result = collectAndRender(paths, [{ provider: 'hetzner', dbPath }], { pending });
+
+    const data = loadPerfData(paths.dataPath);
+    expect(data.providers.vultr).toEqual(entry('c023f94', '2026-09-02', 403_000));
+    expect(Object.keys(data.providers)).toEqual(['hetzner', 'vultr']);
+    expect(result.changedFiles.sort()).toEqual(
+      [paths.dataPath, paths.readmePath, paths.carbonDataPath].sort(),
+    );
+    const readme = readFileSync(paths.readmePath, 'utf8');
+    expect(readme).toContain('| Vultr | `compose` | 6m 43s |');
+    expect(readme).toContain('Vultr `c023f94` (2026-09-02)');
+  });
+
+  it('pending data alone (no green leg this run) still publishes, so a stale branch is never regressed', () => {
+    const onMain: PerfData = {
+      providers: { vultr: entry('af04b00', '2026-08-30', 559_000) },
+    };
+    const pending: PerfData = {
+      providers: { vultr: entry('c023f94', '2026-09-02', 403_000) },
+    };
+    const root = mkdtempSync(join(tmpdir(), 'vc-legs-pending-only-'));
+    const { dbPath, db } = makeLegDb(root, 'hetzner');
+    const runId = createTestRun(db);
+    seedScenario(db, runId, 'hetzner', 'compose', { status: 'fail' });
+    db.completeRun(runId, 'fail');
+    db.close();
+
+    const paths = makeSurfacePaths(onMain);
+    const result = collectAndRender(paths, [{ provider: 'hetzner', dbPath }], { pending });
+
+    expect(loadPerfData(paths.dataPath).providers.vultr).toEqual(
+      entry('c023f94', '2026-09-02', 403_000),
+    );
+    expect(result.changedFiles).toContain(paths.dataPath);
+  });
+
+  it('a stale pending branch does not overwrite a newer entry already on main', () => {
+    const onMain: PerfData = {
+      providers: { vultr: entry('c023f94', '2026-09-02', 403_000) },
+    };
+    const pending: PerfData = {
+      providers: { vultr: entry('af04b00', '2026-08-30', 559_000) },
+    };
+    const paths = makeSurfacePaths(onMain);
+    const result = collectAndRender(paths, [], { pending });
+    expect(loadPerfData(paths.dataPath).providers.vultr).toEqual(
+      entry('c023f94', '2026-09-02', 403_000),
+    );
+    expect(result.changedFiles).toEqual([]);
   });
 });

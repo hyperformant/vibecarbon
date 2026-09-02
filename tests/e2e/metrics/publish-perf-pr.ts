@@ -47,14 +47,16 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { E2EDb } from './db.js';
 import {
   loadPerfData,
+  type PerfData,
   patchInlinePerfMarkers,
   patchReadmeUnifiedPerfTable,
+  serializePerfData,
   syncCarbonPerfData,
   updatePerfDataFromRun,
 } from './perf-data.js';
@@ -217,6 +219,38 @@ export interface CollectorResult {
 }
 
 /**
+ * Fold the data file from a still-open `perf-table-update` branch into
+ * main's copy, newest run per provider winning. `publishPr` force-pushes
+ * that branch from a fresh `main` checkout every run, so without this seed
+ * two green runs for DIFFERENT providers before the first PR merges clobber
+ * each other: run 33581640475 (digitalocean) rewrote the branch run
+ * 33577936158 (vultr) had published an hour earlier, and PR #47 lost the
+ * Vultr numbers. Provenance is per provider (`run.id` + `run.date`), which
+ * is what makes an entry-level merge well-defined:
+ *   - provider only on the pending branch     → carried forward
+ *   - pending run date newer than main's      → pending wins
+ *   - pending run date older                  → main wins (stale branch)
+ *   - same run id on both                     → main wins (already merged;
+ *                                               nothing new on the branch)
+ *   - same day, different run ids             → pending wins: the branch
+ *     entry was written after main's was read, so it is the later publish.
+ */
+export function mergePendingPerfData(main: PerfData, pending: PerfData | null): PerfData {
+  if (!pending) return main;
+  const providers = { ...main.providers };
+  for (const [provider, pendingEntry] of Object.entries(pending.providers)) {
+    const mainEntry = providers[provider];
+    if (!mainEntry) {
+      providers[provider] = pendingEntry;
+      continue;
+    }
+    if (pendingEntry.run.id === mainEntry.run.id) continue;
+    if (pendingEntry.run.date >= mainEntry.run.date) providers[provider] = pendingEntry;
+  }
+  return { providers };
+}
+
+/**
  * Merge every leg into the data file, sequentially, then re-render every
  * surface ONCE from the merged result: the unified README table, the inline
  * headline markers, and the carbon component's byte-identical data copy.
@@ -226,12 +260,20 @@ export interface CollectorResult {
 export function collectAndRender(
   paths: SurfacePaths,
   legs: LegArtifact[],
-  opts: { origin?: string } = {},
+  opts: { origin?: string; pending?: PerfData | null } = {},
 ): CollectorResult {
   const files = [paths.dataPath, paths.readmePath, paths.carbonDataPath];
   const before = new Map(
     files.map((f) => [f, existsSync(f) ? readFileSync(f, 'utf8') : null] as const),
   );
+
+  // Seed from the pending branch AFTER the byte snapshot, so carried-forward
+  // entries count as a change to publish (and land in the same commit as the
+  // surfaces rendered from them) rather than as pre-existing bytes.
+  if (opts.pending) {
+    const seeded = mergePendingPerfData(loadPerfData(paths.dataPath), opts.pending);
+    writeFileSync(paths.dataPath, serializePerfData(seeded));
+  }
 
   const results = legs.map((leg) => updateLeg(paths.dataPath, leg, opts));
 
@@ -252,6 +294,28 @@ export function collectAndRender(
 // existing sweep/scrub steps in this same workflow).
 // ---------------------------------------------------------------------------
 
+/**
+ * Read `docs/perf-data.json` as it stands on the remote `perf-table-update`
+ * branch, or null when the branch does not exist (no PR pending) or the file
+ * cannot be read from it. Fed to `mergePendingPerfData` so an unmerged
+ * green leg from an earlier run survives this run's force-push.
+ */
+function readPendingBranchData(branch: string, dataRelPath: string): PerfData | null {
+  const git = (cmdArgs: string[]) =>
+    execFileSync('git', cmdArgs, { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    git(['fetch', '--quiet', 'origin', branch]);
+  } catch {
+    return null;
+  }
+  try {
+    const raw = git(['show', `origin/${branch}:${dataRelPath}`]).toString('utf8');
+    return JSON.parse(raw) as PerfData;
+  } catch {
+    return null;
+  }
+}
+
 function commitMessage(): string {
   const runUrl =
     process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
@@ -268,16 +332,21 @@ function commitMessage(): string {
  * from a fresh `main` checkout each run, so there is at most one open
  * perf-table PR at a time rather than one per run number — `gh pr create`
  * failing because that PR already exists is the expected, harmless outcome
- * of a second green run before the first PR merged; the force-push above
- * already carried the new numbers onto it.
+ * of a second green run before the first PR merged. The force-push carries
+ * the new numbers onto it AND, via `readPendingBranchData` +
+ * `mergePendingPerfData` in main(), whatever unmerged numbers the previous
+ * run had already put there (a second green run for a different provider
+ * used to erase the first's — PR #47).
  *
  * No `--no-verify` on the commit — the repo's pre-commit hook (lint + full
  * unit suite) runs exactly as it would for a human commit. That hook is
  * exactly what would have caught the sweep-pagination E2E_NAMESPACE=ci
  * regression class before it reached main.
  */
+const PERF_BRANCH = 'perf-table-update';
+
 function publishPr(changedFiles: string[]): void {
-  const branch = 'perf-table-update';
+  const branch = PERF_BRANCH;
   const relFiles = changedFiles.map((f) => relative(PROJECT_ROOT, f));
   // Callers only reach here after main() has confirmed GITHUB_REF_NAME ===
   // 'main' — hardcoded rather than re-read so this function can't drift
@@ -342,7 +411,14 @@ async function main(): Promise<void> {
   // merge settles for the host class alone.
   const origin = 'GitHub-hosted runner';
 
-  const result = collectAndRender(paths, legs, { origin });
+  const pending = readPendingBranchData(PERF_BRANCH, relative(PROJECT_ROOT, paths.dataPath));
+  console.log(
+    pending
+      ? `Seeding from pending ${PERF_BRANCH} branch: ${Object.keys(pending.providers).join(', ') || 'no providers'}`
+      : `No pending ${PERF_BRANCH} branch to carry forward.`,
+  );
+
+  const result = collectAndRender(paths, legs, { origin, pending });
   for (const leg of result.legs) {
     if (leg.runId == null) {
       console.log(`[${leg.provider}] no run recorded in this leg's db — skipped`);
