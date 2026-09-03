@@ -18,7 +18,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -27,8 +27,12 @@ import { writePnpmWorkspaceSettings } from '../../../src/lib/package-manager.js'
 const REPO_ROOT = resolve(__dirname, '../../..');
 const CARBON = join(REPO_ROOT, 'carbon');
 
+// Resolved from OUTSIDE the repo on purpose: the temp project below has no
+// `packageManager` pin (carbon/package.json carries none), so the pnpm that
+// resolves it is whatever is on PATH — not the repo's own pinned version.
+// Reporting the repo's pin here would label a pnpm 11 resolution "pnpm 10".
 const pnpmVersion = (() => {
-  const r = spawnSync('pnpm', ['--version'], { encoding: 'utf-8' });
+  const r = spawnSync('pnpm', ['--version'], { cwd: tmpdir(), encoding: 'utf-8' });
   return r.status === 0 ? r.stdout.trim() : null;
 })();
 
@@ -44,6 +48,18 @@ beforeAll(() => {
   // The fix: pins out of package.json (ignored by pnpm 11) and into
   // pnpm-workspace.yaml (read by pnpm 10.5+ and 11).
   expect(writePnpmWorkspaceSettings(projectDir)).toBe(true);
+
+  // Level the field with npm before comparing. pnpm 11 defaults
+  // `minimumReleaseAge` to 1440 minutes (pnpm 10: 0), so for a day after any
+  // publish pnpm resolves an override floor like `>=3.1.2` one version BELOW
+  // what npm resolves — and the parity assertion below reads that as "the
+  // override did not apply". 2026-09-02: fast-uri 4.1.4 published 11:07Z; a
+  // same-day `npm audit fix` locked 4.1.4 while pnpm 11 still returned 4.1.3,
+  // red for ~24h with every pin correctly in place (#49). This guard is about
+  // whether the pins APPLY on the pnpm side, not about release-age policy, so
+  // the gate is switched off here only. The template's generated
+  // pnpm-workspace.yaml (what users get) is untouched and keeps pnpm's default.
+  appendFileSync(join(projectDir, 'pnpm-workspace.yaml'), '\nminimumReleaseAge: 0\n');
 
   const r = spawnSync('pnpm', ['install', '--lockfile-only', '--ignore-scripts'], {
     cwd: projectDir,
