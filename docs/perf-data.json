@@ -114,27 +114,27 @@
     },
     "vultr": {
       "run": {
-        "id": "c023f94",
-        "date": "2026-09-02",
+        "id": "7471b45",
+        "date": "2026-09-03",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 478310,
-          "warm-deploy": 24715,
-          "scale": 444560,
-          "backup": 4291,
-          "destroy": 37982,
-          "restore": 383455
+          "deploy": 411881,
+          "warm-deploy": 20879,
+          "scale": 461939,
+          "backup": 5204,
+          "destroy": 45359,
+          "restore": 469609
         },
         "compose-ha": {
-          "deploy": 488059,
-          "warm-deploy": 70032,
-          "scale": 328120,
-          "backup": 3203,
-          "destroy": 37009,
-          "restore": 640023,
-          "failover": 94303
+          "deploy": 888452,
+          "warm-deploy": 118021,
+          "scale": 516063,
+          "backup": 4567,
+          "destroy": 48785,
+          "restore": 712017,
+          "failover": 110716
         }
       }
     },
