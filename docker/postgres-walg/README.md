@@ -11,7 +11,7 @@ docker resolves the right platform per build — there is no `TARGETARCH`
 plumbing left in this Dockerfile or `carbon/db/Dockerfile` (which IS built
 on arm64 hosts during local development).
 
-Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>` e.g. `17.6.1.167-walg3.0.9`.
+Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>` e.g. `17.6.1.168-walg3.0.9`.
 
 The tag names the two upstream versions this image composes and nothing else,
 so a change that leaves both of them alone — the OCI `LABEL` block at the
