@@ -96,7 +96,7 @@
     "stripe": "^22.6.0",
     "tailwind-merge": "^3.6.0",
     "vaul": "^1.1.2",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "overrides": {
     "dompurify": "^3.4.0",
