@@ -88,27 +88,27 @@
     },
     "linode": {
       "run": {
-        "id": "6ff5472",
-        "date": "2026-09-01",
+        "id": "e3a088c",
+        "date": "2026-09-03",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 439349,
-          "warm-deploy": 16622,
-          "scale": 408443,
-          "backup": 4012,
-          "destroy": 29609,
-          "restore": 465211
+          "deploy": 440908,
+          "warm-deploy": 13054,
+          "scale": 404225,
+          "backup": 3617,
+          "destroy": 27982,
+          "restore": 455571
         },
         "compose-ha": {
-          "deploy": 591166,
-          "warm-deploy": 67606,
-          "scale": 380318,
-          "backup": 3748,
-          "destroy": 33763,
-          "restore": 601633,
-          "failover": 53293
+          "deploy": 576931,
+          "warm-deploy": 49210,
+          "scale": 388176,
+          "backup": 3560,
+          "destroy": 29986,
+          "restore": 586268,
+          "failover": 50086
         }
       }
     },
@@ -140,27 +140,27 @@
     },
     "scaleway": {
       "run": {
-        "id": "45d325c",
-        "date": "2026-09-01",
+        "id": "f61829b",
+        "date": "2026-09-03",
         "origin": "GitHub-hosted runner"
       },
       "scenarios": {
         "compose": {
-          "deploy": 390714,
-          "warm-deploy": 23957,
-          "scale": 253699,
-          "backup": 4619,
-          "destroy": 38797,
-          "restore": 383895
+          "deploy": 389919,
+          "warm-deploy": 27055,
+          "scale": 253139,
+          "backup": 2906,
+          "destroy": 41129,
+          "restore": 408211
         },
         "compose-ha": {
-          "deploy": 547850,
-          "warm-deploy": 118194,
-          "scale": 259983,
-          "backup": 6969,
-          "destroy": 52210,
-          "restore": 599206,
-          "failover": 58328
+          "deploy": 562612,
+          "warm-deploy": 140266,
+          "scale": 305327,
+          "backup": 5986,
+          "destroy": 60377,
+          "restore": 568666,
+          "failover": 60505
         }
       }
     }
