@@ -53,7 +53,7 @@
     "stripe:listen": "stripe listen --forward-to localhost:3000/api/webhooks/stripe"
   },
   "dependencies": {
-    "@base-ui/react": "^1.7.0",
+    "@base-ui/react": "^1.8.0",
     "@fontsource-variable/noto-sans": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@hono/node-server": "^2.1.1",
