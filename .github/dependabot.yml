@@ -17,6 +17,14 @@ updates:
     labels:
       - dependencies
     groups:
+      # vitest and @vitest/* must move together: @vitest/coverage-v8 declares
+      # an EXACT `vitest` peer, so a split bump fails the strict `npm ci`
+      # (#61 + #65 each red on their own, superseded by #69). Listed first,
+      # with explicit patterns and no update-types filter, so it claims the
+      # pair at every semver level before the broader groups below.
+      vitest:
+        applies-to: version-updates
+        patterns: ["vitest", "@vitest/*"]
       production-patches:
         applies-to: version-updates
         dependency-type: production
@@ -65,6 +73,10 @@ updates:
       - dependencies
       - template
     groups:
+      # Same lockstep rule as the root block: vitest + @vitest/* in one PR.
+      vitest:
+        applies-to: version-updates
+        patterns: ["vitest", "@vitest/*"]
       template-patches:
         applies-to: version-updates
         update-types: [patch]
