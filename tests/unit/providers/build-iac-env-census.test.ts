@@ -78,6 +78,7 @@ describe('no direct [X.CLI_TOKEN_ENV] env construction outside base.js', () => {
     expect(CONSTRUCTION_PATTERN.test('env[Provider.CLI_TOKEN_ENV] = token;')).toBe(true);
     expect(CONSTRUCTION_PATTERN.test('{ [this.CLI_TOKEN_ENV]: token }')).toBe(true);
     expect(CONSTRUCTION_PATTERN.test('{ [ProviderClass.CLI_TOKEN_ENV]: t }')).toBe(true);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: sample source string fed to the regex as INPUT — the point is that it must not match
     expect(CONSTRUCTION_PATTERN.test('`${Provider.CLI_TOKEN_ENV}=<set>`')).toBe(false);
     expect(CONSTRUCTION_PATTERN.test('Provider.CLI_TOKEN_ENV === name')).toBe(false);
   });

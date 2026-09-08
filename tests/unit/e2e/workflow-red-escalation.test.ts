@@ -93,6 +93,7 @@ describe('e2e-us-perf.yml red-leg escalation (the `escalate` job)', () => {
     const jobs = loadJobs();
     const script = jobs.escalate.steps?.map((s) => s.run ?? '').join('\n') ?? '';
     // Leg-name parse ↔ matrix job name template.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions ${{ }} expression from the workflow YAML, asserted verbatim
     expect(jobs.matrix.name).toBe('E2E (${{ matrix.provider }})');
     expect(script).toContain('E2E (');
     // Log lookup ↔ the tee filename in the matrix run step.
