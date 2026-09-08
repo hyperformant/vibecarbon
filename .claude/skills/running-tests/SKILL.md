@@ -94,8 +94,8 @@ A regression test for the bug you just fixed is the floor, not the goal. Before 
 
 ## Coverage and CI
 
-- `pnpm test:coverage` — V8 coverage; thresholds in `vitest.config.ts` are `60% statements / 50% branches / 60% functions / 60% lines`. Coverage `include:` is scoped to a few top-level CLI entrypoints; coverage misses on `src/lib/` are expected, not a regression.
-- `pnpm test:ci` — junit reporter, writes `test-results.xml`. CI uses this; you generally won't.
+- `pnpm test:coverage` — V8 coverage over `src/**/*.js`. **Informational only:** there are no thresholds and nothing in `.github/workflows` runs `--coverage`, so a coverage regression cannot fail a build. (An earlier `include:` named three files deleted in a refactor, so the report measured nothing and its thresholds passed vacuously — both were removed rather than left as decoration.) If you want a real gate, add thresholds in `vitest.config.ts` *and* wire `--coverage` into CI in the same change.
+- **CI runs `pnpm test:unit` and `pnpm test:integration` directly** (`.github/workflows/test.yml`). There is no separate CI script: the junit reporter switches on by itself when `CI` is set, via `reporters:` in `vitest.config.ts`.
 
 ## What this skill does not cover
 

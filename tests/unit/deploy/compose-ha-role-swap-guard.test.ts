@@ -289,7 +289,9 @@ describe('compose-HA role-swap detector — tier census', () => {
   // post-failover config MUST stay deployable — that reconverge deploy is a
   // green e2e step.
   it('does not fire on a post-failover k8s-HA config (it has its own reconverge path)', () => {
-    const k8sHa = structuredClone(HEALTHY_BY_TIER['k8s-ha']) as Record<string, any>;
+    const k8sHa = structuredClone(HEALTHY_BY_TIER['k8s-ha']) as {
+      ha: { primary: unknown; standby: unknown };
+    };
     [k8sHa.ha.primary, k8sHa.ha.standby] = [k8sHa.ha.standby, k8sHa.ha.primary];
     expect(detect(k8sHa)).toBeNull();
   });

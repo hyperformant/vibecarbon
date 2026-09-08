@@ -107,14 +107,19 @@ export default defineConfig({
         },
       },
       {
+        extends: true,
         test: {
           name: 'loadtest',
-          globals: true,
-          environment: 'node',
-          root: '.',
+          // Performance benchmarks against a deployed target.
           include: ['tests/loadtest/**/*.perf.test.ts'],
-          exclude: ['node_modules', 'carbon'],
-          setupFiles: ['tests/setup/global-setup.ts'],
+          exclude: [
+            'tests/unit/**',
+            'tests/integration/**',
+            'tests/e2e/**',
+            'tests/_shared/**',
+          ],
+          // Benchmarks are wall-clock measurements: they must not contend with
+          // each other for CPU, and they outlast any default timeout.
           testTimeout: 120_000,
           fileParallelism: false,
         },
