@@ -163,6 +163,7 @@ describe('DNS01_PROVIDERS lego contract (census)', () => {
       'utf-8',
     );
     expect(override).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: Traefik flag text carrying a shell-style default, asserted verbatim against the generated config
       'acme.dnschallenge.propagation.delaybeforechecks=${ACME_DNS_DELAY_BEFORE_CHECKS:-0s}',
     );
   });

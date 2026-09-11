@@ -35,7 +35,6 @@
     "test:modules": "vitest run --project integration tests/integration/modules",
     "test:coverage": "vitest run --coverage",
     "test:loadtest": "tsx tests/loadtest/cli.ts",
-    "test:ci": "vitest run --reporter=junit --outputFile=test-results.xml",
     "test:e2e": "REAL_INFRA=true NODE_EXTRA_CA_CERTS=tests/e2e/certs/letsencrypt-staging-roots.pem tsx tests/e2e/runner.ts",
     "test:e2e:batch": "REAL_INFRA=true NODE_EXTRA_CA_CERTS=tests/e2e/certs/letsencrypt-staging-roots.pem tsx tests/e2e/runner.ts --batch",
     "test:e2e:expanded": "REAL_INFRA=true NODE_EXTRA_CA_CERTS=tests/e2e/certs/letsencrypt-staging-roots.pem tsx tests/e2e/runner.ts --batch --expanded",

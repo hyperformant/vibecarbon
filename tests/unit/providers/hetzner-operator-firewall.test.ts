@@ -16,6 +16,9 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+/** The Hetzner firewall rule shape named in the header above. */
+type HetznerRule = { direction: string; port: string; source_ips: string[] };
+
 const fetchWithRetryMock = vi.fn();
 vi.mock('../../../src/lib/fetch-retry.js', () => ({
   fetchWithRetry: (...args: unknown[]) => fetchWithRetryMock(...args),
@@ -217,7 +220,9 @@ describe('HetznerProvider.applyOperatorCidrs (C9)', () => {
 
     const setBody = JSON.parse(fetchWithRetryMock.mock.calls[1][1].body);
     const byPort = Object.fromEntries(
-      setBody.rules.filter((r: any) => r.direction === 'in').map((r: any) => [r.port, r]),
+      setBody.rules
+        .filter((r: HetznerRule) => r.direction === 'in')
+        .map((r: HetznerRule) => [r.port, r]),
     );
     expect(byPort['5432'].source_ips).toEqual(cidrs);
     expect(byPort['6543'].source_ips).toEqual(cidrs);

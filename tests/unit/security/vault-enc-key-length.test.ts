@@ -44,7 +44,7 @@ describe('VAULT_ENC_KEY is 32 bytes', () => {
       const dir = mkdtempSync(join(tmpdir(), 'vc-vault-heal-'));
       writeFileSync(
         join(dir, '.env.local'),
-        ['PROJECT_NAME=demo', ...(vaultLine ? [vaultLine] : [])].join('\n') + '\n',
+        `${['PROJECT_NAME=demo', ...(vaultLine ? [vaultLine] : [])].join('\n')}\n`,
       );
       return dir;
     };

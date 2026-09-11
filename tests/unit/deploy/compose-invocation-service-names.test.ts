@@ -87,6 +87,7 @@ describe('bare docker-compose invocations never name overlay-only services', () 
       offenders,
       'Bare `docker compose` resolves names against docker-compose.yml only — an overlay-only ' +
         'service makes the whole command fail instantly. Address containers by name ' +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: placeholder inside human-readable guidance text, not a JS template placeholder
         '(docker restart ${PROJECT_NAME}-<svc>) or use the baked reconcile flags.',
     ).toEqual([]);
   });

@@ -38,8 +38,10 @@ export function buildPoolerProbeCommand(projectName: string, postgresPassword: s
     `postgres://postgres.${projectName}:${postgresPassword}@supavisor:${port}/postgres`;
   const probe =
     `s_out=$(PGCONNECT_TIMEOUT=10 psql "${url(5432)}" -tAc "select 1" 2>&1 | tr -d "\\n"); ` +
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion inside a shell script string, not a JS template placeholder
     'echo "SESSION_OUT=${s_out}"; ' +
     `t_out=$(PGCONNECT_TIMEOUT=10 psql "${url(6543)}" -tAc "select 1" 2>&1 | tr -d "\\n"); ` +
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion inside a shell script string, not a JS template placeholder
     'echo "TRANSACTION_OUT=${t_out}"; ' +
     'exit 0';
   return `cd /opt/${projectName} && docker compose exec -T db bash -c '${probe}'`;

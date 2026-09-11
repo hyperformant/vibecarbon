@@ -166,6 +166,7 @@ describe('deleteApexAndWildcard wiring (registry-driven destroy call sites)', ()
       expect(body, `${id}: missing deleteApexAndWildcard export`).toBeDefined();
       const fnBody = body.split(/\nexport /)[0];
       expect(fnBody, `${id}: pair helper must target the wildcard record`).toContain(
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source text the product must contain, asserted verbatim
         '`*.${domain}`',
       );
       expect(fnBody, `${id}: pair helper must be ownership-filtered`).toContain('ownedIps');

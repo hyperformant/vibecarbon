@@ -28,9 +28,13 @@ const SRC_DIR = fileURLToPath(new URL('../../../src', import.meta.url));
 
 /** The name head every environment-scoped resource literal starts with. */
 const HEADS = [
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source-text prefix this census greps for — interpolating it would search for the wrong string
   '`${projectName}-${environment}',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source-text prefix this census greps for — interpolating it would search for the wrong string
   '`${projectConfig.projectName}-${environment}',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source-text prefix this census greps for — interpolating it would search for the wrong string
   '`${projectName}-${envName}',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source-text prefix this census greps for — interpolating it would search for the wrong string
   '`${projectName}-${stackEnv}',
 ];
 
@@ -95,6 +99,7 @@ function normalizeSuffix(suffix: string): string {
   while (i < suffix.length) {
     const c = suffix[i];
     if (c === '$' && suffix[i + 1] === '{') {
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the normalized placeholder sentinel this parser emits, compared literally below
       if (depth === 0) out += '${}';
       depth += 1;
       i += 2;
@@ -209,6 +214,7 @@ describe('environment server-name family census', () => {
       .map(([suffix]) => suffix);
     for (const suffix of serverSuffixes) {
       const isReplacement = suffix.endsWith('-new');
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: normalized placeholder sentinels emitted by the parser above, compared literally
       const isPermanent = ['', '${}', '-${}', '-primary', '-standby'].includes(suffix);
       expect(isReplacement || isPermanent, `server suffix ${JSON.stringify(suffix)}`).toBe(true);
     }

@@ -96,7 +96,7 @@ function tlsHandshake(domain, { ca, rejectUnauthorized, timeoutMs }) {
         const peer = socket.getPeerCertificate();
         socket.destroy();
         resolve(
-          peer && peer.subject
+          peer?.subject
             ? {
                 subject: peer.subject.CN ?? JSON.stringify(peer.subject),
                 issuer: peer.issuer?.CN ?? JSON.stringify(peer.issuer ?? {}),

@@ -73,6 +73,7 @@ const EXCEPTIONS: Array<{ file: string; pathPrefix: string; reason: string }> = 
   },
   {
     file: 'src/lib/providers/linode.js',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source-text path prefix this sweep matches against the product source
     pathPrefix: '/networking/firewalls/${firewallId}/rules',
     reason:
       "Singleton resource: one firewall's complete ruleset object " +
