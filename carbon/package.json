@@ -109,7 +109,8 @@
     "protobufjs@<7.5.6": "^7.5.6",
     "@protobufjs/utf8@<1.1.1": "^1.1.1",
     "@hono/node-server@<2.0.5": ">=2.0.5",
-    "toml@<4.2.0": ">=4.2.0"
+    "toml@<4.2.0": ">=4.2.0",
+    "@ai-sdk/provider-utils@<4.0.33": ">=4.0.33 <5"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -134,7 +135,8 @@
       "protobufjs@<7.5.6": "^7.5.6",
       "@protobufjs/utf8@<1.1.1": "^1.1.1",
       "@hono/node-server@<2.0.5": ">=2.0.5",
-      "toml@<4.2.0": ">=4.2.0"
+      "toml@<4.2.0": ">=4.2.0",
+      "@ai-sdk/provider-utils@<4.0.33": ">=4.0.33 <5"
     },
     "peerDependencyRules": {
       "allowedVersions": {
