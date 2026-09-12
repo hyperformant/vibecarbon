@@ -132,9 +132,12 @@ export function verifySignature(parsedKey, { publicKeyPem = PUBLIC_KEY_PEM } = {
 /**
  * Validate a complete license key
  * @param {string} key - The license key string
+ * @param {{ publicKeyPem?: string }} [options] - passthrough to
+ *   verifySignature; tests inject an ephemeral keypair here. Production
+ *   callers pass nothing and get the embedded key.
  * @returns {object} Complete validation result
  */
-export function validateLicenseKey(key) {
+export function validateLicenseKey(key, { publicKeyPem } = {}) {
   // Parse the key
   const parsed = parseLicenseKey(key);
   if (!parsed.valid) {
@@ -142,7 +145,7 @@ export function validateLicenseKey(key) {
   }
 
   // Verify signature
-  const signatureResult = verifySignature(parsed);
+  const signatureResult = verifySignature(parsed, { publicKeyPem });
   if (!signatureResult.valid) {
     return signatureResult;
   }

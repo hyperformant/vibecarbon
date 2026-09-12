@@ -83,4 +83,42 @@ describe('vibecarbon deactivate', () => {
       throw new Error(`parser error:\n${r.stderr}`);
     }
   });
+
+  it('-all removes both the project and legacy license files', () => {
+    const legacyPath = join(testHome, '.vibecarbon', 'license');
+    writeFileSync(legacyPath, JSON.stringify({ key: testLicenseKey(), activatedAt: '2026-01-01' }));
+    const projectLicensePath = join(project, '.vibecarbon.license');
+    writeFileSync(
+      projectLicensePath,
+      `${JSON.stringify(
+        {
+          key: 'vc-f-deadbeef-fakefakefake',
+          format: 'v2',
+          tier: 'fullerene',
+          customerId: 'deadbeef',
+          projectId: '00000000-0000-0000-0000-000000000000',
+          paidThrough: '2026-12-31',
+          activatedAt: '2026-01-01T00:00:00.000Z',
+          source: 'manual',
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    expect(existsSync(legacyPath)).toBe(true);
+    expect(existsSync(projectLicensePath)).toBe(true);
+
+    const r = runCli('deactivate', ['-y', '-all'], {
+      cwd: project,
+      env: { HOME: testHome },
+      timeoutMs: 10_000,
+    });
+    if (/unknown.*flag/i.test(r.stderr)) {
+      throw new Error(`parser error:\n${r.stderr}`);
+    }
+    if (/needs an interactive terminal/i.test(r.stdout + r.stderr)) return;
+    expect(r.exitCode).toBe(0);
+    expect(existsSync(legacyPath)).toBe(false);
+    expect(existsSync(projectLicensePath)).toBe(false);
+  });
 });

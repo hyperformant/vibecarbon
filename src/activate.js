@@ -42,6 +42,11 @@ const DEACTIVATE_SPEC = {
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
     { name: 'y', boolean: true, description: 'Skip confirmation prompt' },
+    {
+      name: 'all',
+      boolean: true,
+      description: 'Remove both the project and legacy license files',
+    },
   ],
 };
 
@@ -119,10 +124,18 @@ export async function runActivate(args) {
 
   p.log.success(`Welcome to ${c.success(result.tierName)}!`);
 
-  p.note(
-    `Tier: ${result.tierName}\nExpires: Never\nFeatures: ${result.features.join(', ')}`,
-    'License Details',
-  );
+  // B4 finishes the activate UX for v2 (per-project) keys; this just makes
+  // sure the new fields show up when a v2 activation lands one of these.
+  const detailLines = [`Tier: ${result.tierName}`];
+  if (result.format === 'v2') {
+    detailLines.push(`Project: ${result.projectId}`);
+    detailLines.push(`Paid through: ${result.paidThrough}`);
+  } else {
+    detailLines.push('Expires: Never');
+  }
+  detailLines.push(`Features: ${result.features.join(', ')}`);
+
+  p.note(detailLines.join('\n'), 'License Details');
 
   p.outro('You can now deploy, backup, scale, and operate your production stack.');
 }
@@ -164,7 +177,7 @@ export async function runDeactivate(args) {
     }
   }
 
-  const result = deactivateLicense();
+  const result = deactivateLicense({ all: !!values.all });
 
   if (!result.success) {
     p.log.error(c.error(`Error: ${result.error}`));

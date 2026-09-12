@@ -63,6 +63,9 @@ docker-compose.dev-init.yml
 # Vibecarbon infra state — deploy keys, kubeconfig, terraform state, certs.
 # Never commit any of these; several contain live credentials.
 .vibecarbon/
+# NOTE: .vibecarbon.license (the per-project license file, a sibling of
+# .vibecarbon.json) is NOT matched by .vibecarbon/ above and is committed
+# to git on purpose — it's shared by everyone working on the project.
 *.key
 *.tfstate
 *.tfstate.*
