@@ -297,6 +297,33 @@ describe('create-vibecarbon E2E', () => {
         expect(pkg.devDependencies?.[dep], `missing devDep ${dep}`).toBeDefined();
       }
     });
+
+    it('ships the Claude Code agent team the hooks and AGENTS.md promise', () => {
+      // The definitions used to be read from the CLI repo's own
+      // .claude/agents/, which package.json `files` does not publish — so an
+      // installed vibecarbon produced a project with gate hooks and an
+      // "Agent Orchestration" doc section for a team that was not on disk.
+      // They now come from carbon/.claude/agents/, which ships.
+      const agents = [
+        'backend-engineer',
+        'frontend-engineer',
+        'lead-coordinator',
+        'security-reviewer',
+        'test-maintainer',
+      ];
+      for (const agent of agents) {
+        const path = join(projectDir(), '.claude', 'agents', `${agent}.md`);
+        expect(existsSync(path), `missing .claude/agents/${agent}.md`).toBe(true);
+        expect(readFileSync(path, 'utf-8')).toMatch(new RegExp(`^name: ${agent}$`, 'm'));
+      }
+      // The e2e-perf-optimizer reads the CLI's real-infra metrics db; a
+      // generated app has no such tier.
+      expect(existsSync(join(projectDir(), '.claude/agents/e2e-perf-optimizer.md'))).toBe(false);
+      // The hooks and settings that gate them ship alongside.
+      expect(existsSync(join(projectDir(), '.claude/settings.json'))).toBe(true);
+      expect(existsSync(join(projectDir(), '.claude/hooks/teammate-idle-gate.sh'))).toBe(true);
+      expect(existsSync(join(projectDir(), '.claude/hooks/task-completed-gate.sh'))).toBe(true);
+    });
   });
 
   describe('project creation initializes git by default', () => {
