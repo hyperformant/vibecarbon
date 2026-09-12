@@ -1640,6 +1640,17 @@ SMTP_SENDER_NAME=${escapeDotenv(variables.PROJECT_DISPLAY_NAME)}
 GOTRUE_MAILER_AUTOCONFIRM="true"
 
 # =============================================================================
+# ANALYTICS (optional - Plausible)
+# =============================================================================
+# Off until \`vibecarbon configure\` -> Analytics sets the domain. Both keys are
+# written here even when unused: src/client/index.html reads them as %VITE_*%
+# tokens, and Vite warns "is not defined in env variables" on every \`up\` and
+# image build for a token whose key is ABSENT — an empty value is silent.
+# The inline tag renders nothing while the domain is empty.
+VITE_PLAUSIBLE_DOMAIN=""
+VITE_PLAUSIBLE_SCRIPT_URL="https://plausible.io/js/script.js"
+
+# =============================================================================
 # OPTIONAL SERVICES (for admin dashboard visibility)
 # =============================================================================
 # These control which services appear in the admin dashboard
