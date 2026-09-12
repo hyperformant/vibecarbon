@@ -13,7 +13,10 @@ const STAMP_SCRIPT = join(repoRoot, 'scripts', 'stamp-release-date.js');
 /** True when `git` is on PATH — the temp-repo test skips itself without it. */
 function gitAvailable() {
   try {
-    execFileSync('git', ['--version'], { stdio: 'ignore' });
+    // env: gitSafeEnv() here too — not because `--version` reads repo state,
+    // but so this helper can never become an unscrubbed git spawn by later
+    // edit (e.g. someone changing it to `git status` to probe more).
+    execFileSync('git', ['--version'], { stdio: 'ignore', env: gitSafeEnv() });
     return true;
   } catch {
     return false;
@@ -101,6 +104,31 @@ describe('getReleaseDate / getReleaseDateSource', () => {
     const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8'));
     expect(pkg).not.toHaveProperty('releaseDate');
   });
+
+  it.skipIf(!gitAvailable())(
+    'with no options, resolves DEFAULT_PKG and DEFAULT_REPO_ROOT against the real checkout',
+    () => {
+      // Every other test injects `pkg`/`repoRoot` explicitly, so none of them
+      // exercise the module's own defaults: the createRequire(...) package
+      // load, or the 3-level walk from src/lib/licensing/ back up to the
+      // repo root. Calling with NO options is the only way to cover that
+      // path. This checkout is a git worktree (`.git` is a file, not a
+      // directory) with no `releaseDate` in package.json (see the test
+      // above), so the 'git' branch is what should fire.
+      const realPkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8'));
+      expect(realPkg.name).toBe('vibecarbon');
+      expect(existsSync(join(repoRoot, '.git'))).toBe(true);
+
+      const expected = execFileSync('git', ['-C', repoRoot, 'log', '-1', '--format=%cs'], {
+        env: gitSafeEnv(),
+      })
+        .toString()
+        .trim();
+
+      expect(getReleaseDateSource()).toBe('git');
+      expect(getReleaseDate()).toBe(expected);
+    },
+  );
 });
 
 describe('scripts/stamp-release-date.js', () => {
