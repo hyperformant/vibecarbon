@@ -213,6 +213,52 @@ describe('per-project license storage', () => {
     });
   });
 
+  describe('malformed .vibecarbon.json manifest', () => {
+    // Before per-project licensing, getLicense() never touched the
+    // manifest at all, so a corrupt one had zero effect on license
+    // resolution. It must still have zero effect now: the legacy-key path
+    // is entirely independent of the manifest, and a malformed manifest
+    // must degrade to "no project" (projectId null) rather than throw.
+    beforeEach(() => {
+      writeFileSync(join(projectDir, '.vibecarbon.json'), '{ not valid json');
+    });
+
+    it('a valid legacy key still resolves, untouched by the corrupt manifest', () => {
+      activateLicense(validKey(), { projectDir, stateDir, publicKeyPem });
+
+      expect(() => getLicense({ projectDir, stateDir, publicKeyPem })).not.toThrow();
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      expect(license.active).toBe(true);
+      expect(license.format).toBe('v1');
+      expect(license.slot).toBe('legacy');
+    });
+
+    it('a project key with no legacy key falls back to no-license, never throws', () => {
+      writeProjectLicenseFile({
+        key: validKey(),
+        format: 'v2',
+        tier: 'fullerene',
+        customerId,
+        projectId: PROJECT_ID,
+        paidThrough: '2026-12-31',
+        activatedAt: '2026-01-01T00:00:00.000Z',
+        source: 'manual',
+      });
+
+      expect(() => getLicense({ projectDir, stateDir, publicKeyPem })).not.toThrow();
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      expect(license.active).toBe(false);
+      expect(license.tier).toBe('graphite');
+      expect(license.slot).toBeNull();
+    });
+
+    it('hasStoredLicense/listStoredLicenses/deactivateLicense never throw either', () => {
+      expect(() => hasStoredLicense({ projectDir, stateDir })).not.toThrow();
+      expect(() => listStoredLicenses({ projectDir, stateDir })).not.toThrow();
+      expect(() => deactivateLicense({ projectDir, stateDir })).not.toThrow();
+    });
+  });
+
   describe('hasStoredLicense', () => {
     it('is true when only the project file exists', () => {
       expect(hasStoredLicense({ projectDir, stateDir })).toBe(false);

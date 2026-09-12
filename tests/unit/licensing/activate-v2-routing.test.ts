@@ -118,4 +118,29 @@ describe('activateLicense v2 routing (mocked validator, no real v2 parser yet)',
     expect(result.error).toMatch(/this key is for project/i);
     expect(existsSync(join(projectDir, '.vibecarbon.license'))).toBe(false);
   });
+
+  it('a malformed manifest yields a clean failure, never throws', () => {
+    // The manifest file exists (manifestExists() is true) but isn't valid
+    // JSON, so loadManifest() would throw if that were ever unguarded.
+    writeFileSync(join(projectDir, '.vibecarbon.json'), '{ not valid json');
+    vi.mocked(validateLicenseKey).mockReturnValue({
+      valid: true,
+      format: 'v2',
+      tier: 'graphene',
+      customerId: 'a1b2c3d4',
+      projectId: PROJECT_ID,
+      paidThrough: '2026-12-31',
+      isLifetime: false,
+      verified: true,
+    });
+
+    let result: ReturnType<typeof activateLicense> | undefined;
+    expect(() => {
+      result = activateLicense('vc2-fake-for-mock', { projectDir, stateDir });
+    }).not.toThrow();
+
+    expect(result?.success).toBe(false);
+    expect(typeof result?.error).toBe('string');
+    expect(existsSync(join(projectDir, '.vibecarbon.license'))).toBe(false);
+  });
 });

@@ -107,13 +107,23 @@ function normalizeProjectId(id) {
 
 /**
  * The current project's id, from .vibecarbon.json, normalized — or null
- * when projectDir isn't a Vibecarbon project (or has no projectId yet).
+ * when projectDir isn't a Vibecarbon project, has no projectId yet, OR its
+ * manifest is unreadable/malformed JSON. loadManifest() does an unguarded
+ * JSON.parse; before per-project licensing, getLicense() never touched the
+ * manifest at all, so a corrupt .vibecarbon.json must still degrade to "no
+ * project" here rather than crash license resolution for everyone,
+ * including the legacy-key path, which has nothing to do with the
+ * manifest.
  */
 function currentManifestProjectId(projectDir) {
   if (!manifestExists(projectDir)) {
     return null;
   }
-  return normalizeProjectId(loadManifest(projectDir)?.projectId);
+  try {
+    return normalizeProjectId(loadManifest(projectDir)?.projectId);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -355,7 +365,11 @@ export function activateLicense(
       };
     }
 
-    const currentProjectId = normalizeProjectId(loadManifest(projectDir)?.projectId);
+    // currentManifestProjectId() re-checks manifestExists and swallows a
+    // corrupt/unreadable manifest into null (never throws), so a malformed
+    // .vibecarbon.json here just falls into the mismatch error below
+    // instead of crashing activation.
+    const currentProjectId = currentManifestProjectId(projectDir);
     const keyProjectId = normalizeProjectId(validation.projectId);
 
     if (!keyProjectId || keyProjectId !== currentProjectId) {
