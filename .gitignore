@@ -46,9 +46,12 @@ Thumbs.db
 *.swp
 *.swo
 
-# Claude Code (keep agent definitions, exclude local config)
-.claude/settings.local.json
-.claude/agent-memory/
+# Claude Code (keep agent definitions, exclude local config). `**/` so the
+# patterns also cover carbon/ — the template ships no .gitignore of its own
+# (npm strips the name from tarballs; it is carbon/_gitignore, see
+# src/lib/template-paths.js), so the checkout relies on this file for it.
+**/.claude/settings.local.json
+**/.claude/agent-memory/
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 

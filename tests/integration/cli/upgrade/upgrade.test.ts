@@ -101,7 +101,7 @@ describe('vibecarbon upgrade', () => {
     expect(
       existsSync(`${target}.upgrade-backup`),
       'expected upgrade -force to back up the locally-modified docker-compose.yml — if the ' +
-        'sidecar naming changed, update this test AND carbon/.gitignore together',
+        'sidecar naming changed, update this test AND carbon/_gitignore together',
     ).toBe(true);
 
     // The invariant: every untracked-and-un-ignored file upgrade leaves
@@ -120,7 +120,7 @@ describe('vibecarbon upgrade', () => {
     expect(
       workArtifacts,
       'upgrade left non-template files a customer `git add -A` would commit — and the secret ' +
-        'scanner only gates tracked content. Either gitignore the artifact (carbon/.gitignore + ' +
+        'scanner only gates tracked content. Either gitignore the artifact (carbon/_gitignore + ' +
         'REQUIRED_IGNORES in tests/unit/security/gitignore-invariants.test.ts) or stop writing ' +
         'it into the project.',
     ).toEqual([]);

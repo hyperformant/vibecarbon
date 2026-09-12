@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildGitAddArgv, validateGitignore } from '../../../src/lib/project.js';
+import { templatePathFor } from '../../../src/lib/template-paths.js';
 
 const REQUIRED_IGNORES = [
   '.vibecarbon/',
@@ -17,9 +18,12 @@ const REQUIRED_IGNORES = [
 ];
 
 describe('C-2: template .gitignore invariants', () => {
-  const templateGitignore = readFileSync(join(process.cwd(), 'carbon', '.gitignore'), 'utf-8');
+  const templateGitignore = readFileSync(
+    join(process.cwd(), 'carbon', templatePathFor('.gitignore')),
+    'utf-8',
+  );
 
-  it.each(REQUIRED_IGNORES)('carbon/.gitignore ignores %s', (pattern) => {
+  it.each(REQUIRED_IGNORES)('carbon/_gitignore (shipped as .gitignore) ignores %s', (pattern) => {
     const lines = templateGitignore
       .split('\n')
       .map((l) => l.trim())
@@ -30,7 +34,7 @@ describe('C-2: template .gitignore invariants', () => {
 
 describe('C-2: validateGitignore helper', () => {
   it('returns empty list when all required patterns are present', () => {
-    const path = join(process.cwd(), 'carbon', '.gitignore');
+    const path = join(process.cwd(), 'carbon', templatePathFor('.gitignore'));
     expect(validateGitignore(path)).toEqual([]);
   });
 
