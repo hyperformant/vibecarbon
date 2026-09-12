@@ -1,26 +1,30 @@
 /**
  * License tier definitions for Vibecarbon
  *
- * Graphite tier: Free — single-server Compose production deploys + local dev
- * Fullerene tier: Advanced deploy modes (Compose HA, Kubernetes, Kubernetes
- *   HA) + GitOps CI/CD, for your own products
- * Agency tier: Contact-us channel — deploy for clients and enterprise
- *   (client/white-label/reseller rights), custom terms. No self-serve
- *   checkout.
+ * Graphite tier: Free, no key — single-server Compose production deploys +
+ *   local dev.
+ * Graphene tier: Per-project subscription — Kubernetes deploys.
+ * Fullerene tier: Per-project subscription — any HA deploy mode (Compose HA,
+ *   Kubernetes HA) + GitOps CI/CD.
+ *
+ * The Agency tier has been retired; there is no contact-us / custom-terms
+ * channel any more.
  */
 
 export const TIERS = {
   graphite: {
+    id: 'graphite',
     name: 'Graphite',
     displayName: 'Vibecarbon Graphite',
+    tagline: 'Go live.',
     features: ['local-dev', 'docker-compose', 'all-addons'],
-    maxServers: 1,
     license: 'FSL-1.1-MIT',
     deployFlags: [],
     // Pricing
     price: 0,
-    originalPrice: 0,
-    discountPercent: 0,
+    billing: 'free',
+    annualPrice: null,
+    deployTiers: ['compose'],
     // Marketing
     marketingFeatures: [
       'Create projects',
@@ -33,9 +37,34 @@ export const TIERS = {
       'Community support',
     ],
   },
+  graphene: {
+    id: 'graphene',
+    name: 'Graphene',
+    displayName: 'Vibecarbon Graphene',
+    tagline: 'Scale on demand.',
+    features: ['docker-compose', 'kubernetes', 'autoscaling', 'advanced-monitoring', 'all-addons'],
+    license: 'FSL-1.1-MIT',
+    deployFlags: ['--k8s'],
+    // Pricing
+    price: 19,
+    billing: 'per-project-monthly',
+    annualPrice: 190,
+    deployTiers: ['k8s'],
+    // Marketing
+    marketingFeatures: [
+      'Kubernetes deploys',
+      'Autoscaling',
+      'Full Vibecarbon stack',
+      'All add-ons (observability, n8n, metabase, redis, CI/CD)',
+      'Advanced monitoring & alerting',
+      'Email support',
+    ],
+  },
   fullerene: {
+    id: 'fullerene',
     name: 'Fullerene',
     displayName: 'Vibecarbon Fullerene',
+    tagline: 'Enterprise resiliency.',
     features: [
       'docker-compose',
       'kubernetes',
@@ -47,63 +76,30 @@ export const TIERS = {
       'advanced-monitoring',
       'all-addons',
     ],
-    maxServers: Infinity,
     license: 'FSL-1.1-MIT',
     deployFlags: ['--ha', '--k8s'],
     // Pricing
-    price: 149,
-    originalPrice: 299,
-    discountPercent: 50,
-    badge: 'One-Time Purchase',
+    price: 39,
+    billing: 'per-project-monthly',
+    annualPrice: 390,
+    deployTiers: ['k8s-ha', 'compose-ha'],
     // Marketing
     marketingFeatures: [
-      'Advanced deploy modes: Compose HA, Kubernetes, Kubernetes HA',
+      'Advanced deploy modes: Compose HA, Kubernetes HA',
       'High availability, multi-region, and one-command failover',
       'GitOps CI/CD (`configure cicd`)',
       'Full Vibecarbon stack',
       'All add-ons (observability, n8n, metabase, redis, CI/CD)',
       'Advanced monitoring & alerting',
-      'Unlimited servers & projects',
       'Email support',
       'For your own products',
-    ],
-  },
-  agency: {
-    name: 'Agency',
-    displayName: 'Vibecarbon Agency',
-    features: [
-      'docker-compose',
-      'kubernetes',
-      'autoscaling',
-      'single-vps',
-      'ha',
-      'multi-region',
-      'failover',
-      'advanced-monitoring',
-      'all-addons',
-      'client-deploys',
-    ],
-    maxServers: Infinity,
-    license: 'FSL-1.1-MIT + Commercial Agreement',
-    deployFlags: ['--ha', '--k8s'],
-    // Pricing — contact-us channel, no self-serve checkout
-    price: null,
-    contact: true,
-    // Marketing
-    marketingFeatures: [
-      'Deploy for clients and enterprise',
-      'Embed, white-label, or resell Vibecarbon-powered services',
-      'Custom terms',
-      'All deployment modes (Compose, Compose HA, Kubernetes, Kubernetes HA)',
-      'Full Vibecarbon stack',
-      'Priority support',
     ],
   },
 };
 
 /**
  * Get tier by name
- * @param {string} tierName - The tier name (graphite, fullerene, agency)
+ * @param {string} tierName - The tier name (graphite, graphene, fullerene)
  * @returns {object|null} The tier configuration or null if not found
  */
 export function getTier(tierName) {
@@ -128,7 +124,7 @@ export function hasFeature(tierName, feature) {
  * @returns {number} -1 if A < B, 0 if equal, 1 if A > B
  */
 export function compareTiers(tierA, tierB) {
-  const order = { graphite: 0, fullerene: 1, agency: 2 };
+  const order = { graphite: 0, graphene: 1, fullerene: 2 };
   const a = order[tierA] ?? -1;
   const b = order[tierB] ?? -1;
   if (a < b) return -1;
