@@ -1054,18 +1054,18 @@ async function bootstrap(cliArgs) {
     variables,
   );
 
-  // Claude Code subagents — copy from repo root, stripping auto-generated memory footer
-  const agentsSourceDir = join(__dirname, '..', '.claude', 'agents');
+  // Claude Code subagents — the agent team AGENTS.md documents and .claude/hooks
+  // gates. The source is carbon/.claude/agents/, NOT the repo-root .claude/agents/:
+  // package.json `files` ships only src/, carbon/ and services/, so a repo-root copy
+  // is absent from the installed package and every generated project would land with
+  // hooks and docs for a team that does not exist on disk.
+  const agentsSourceDir = join(TEMPLATE_DIR, '.claude', 'agents');
   if (existsSync(agentsSourceDir)) {
     const agentsDestDir = join(projectDir, '.claude', 'agents');
     mkdirSync(agentsDestDir, { recursive: true });
     for (const file of readdirSync(agentsSourceDir)) {
       if (!file.endsWith('.md')) continue;
-      let content = readFileSync(join(agentsSourceDir, file), 'utf-8');
-      // Strip the auto-generated "Persistent Agent Memory" section — Claude Code
-      // re-injects it at runtime based on the `memory:` frontmatter field
-      content = content.replace(/\n# Persistent Agent Memory[\s\S]*$/, '\n');
-      writeFileSync(join(agentsDestDir, file), content);
+      copyTemplate(join('.claude', 'agents', file), join(agentsDestDir, file), variables);
     }
   }
 

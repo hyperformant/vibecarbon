@@ -285,18 +285,18 @@ This project uses Claude Code's agent teams with a **lead-coordinator** that orc
 | Agent | Role | Quality Gate |
 |-------|------|-------------|
 | `lead-coordinator` | Decomposes tasks, delegates, synthesizes results | — |
-| `backend-engineer` | Backend APIs, database, Docker/K8s, server logic | `npm run lint` + `npm run typecheck` on idle |
-| `frontend-engineer` | Frontend pages, components, layouts, styling | `npm run lint` + `npm run typecheck` on idle |
+| `backend-engineer` | Backend APIs, database, Docker/K8s, server logic | `npm run lint` + `npm run typecheck` + `npm run test:security` on idle |
+| `frontend-engineer` | Frontend pages, components, layouts, styling | `npm run lint` + `npm run typecheck` + `npm run test:security` on idle |
 | `security-reviewer` | Security audit after backend/infra changes | — |
-| `test-maintainer` | Test writing after any meaningful code change | `npm run test:unit` on task complete |
+| `test-maintainer` | Test writing after any meaningful code change | `npm test` on task complete |
 
 **Typical workflow**: Use the lead-coordinator for complex multi-step tasks. It decomposes the work, spawns specialists in dependency order (migrations -> API -> security review -> frontend -> tests), and synthesizes results. For simple single-domain tasks, invoke the specialist directly.
 
 **Quality gates** are enforced via hooks in `.claude/hooks/`:
-- `teammate-idle-gate.sh` — lint + typecheck before backend/frontend engineers go idle
-- `task-completed-gate.sh` — unit tests must pass before QA marks a task complete
+- `teammate-idle-gate.sh` — lint + typecheck + security invariants before backend/frontend engineers go idle
+- `task-completed-gate.sh` — the full test suite must pass before QA marks a task complete
 
-**Configuration**: `.claude/settings.json` registers the hooks and the `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var required for agent teams.
+**Configuration**: the agent definitions live in `.claude/agents/`, one `.md` per agent — edit them to teach the team about your project. `.claude/settings.json` registers the hooks and the `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var required for agent teams, and each agent keeps notes under `.claude/agent-memory/<agent>/`.
 
 ## Important Notes
 
