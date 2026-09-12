@@ -35,8 +35,10 @@ const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 const packageJson = JSON.parse(read('package.json'));
 
-/** package.json's canonical repo URL, in the form ghcr matches on. */
-const SOURCE_URL = packageJson.repository.url.replace(/\.git$/, '');
+/** package.json's canonical repo URL, in the form ghcr matches on: npm's
+ * normalized `git+https://...git` with the `git+` scheme prefix and `.git`
+ * suffix stripped. */
+const SOURCE_URL = packageJson.repository.url.replace(/^git\+/, '').replace(/\.git$/, '');
 const LICENSE = packageJson.license;
 
 /** The ghcr package name is the last path segment of the image ref. */
