@@ -4,7 +4,7 @@
   "description": "Launch full-stack apps in minutes on the VPS provider of your choice. Auth, billing, and AI-guardrails built-in. Automated backup, restore, scale, replication, and failover.",
   "type": "module",
   "bin": {
-    "vibecarbon": "./src/cli.js"
+    "vibecarbon": "src/cli.js"
   },
   "packageManager": "pnpm@10.32.1",
   "engines": {
@@ -73,7 +73,7 @@
   "homepage": "https://vibecarbon.com?utm_source=npm&utm_medium=listing&utm_campaign=launch2026",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hyperformant/vibecarbon.git"
+    "url": "git+https://github.com/hyperformant/vibecarbon.git"
   },
   "bugs": {
     "url": "https://github.com/hyperformant/vibecarbon/issues"
