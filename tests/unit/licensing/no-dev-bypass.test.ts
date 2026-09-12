@@ -87,6 +87,24 @@ describe('no local bypass of signature verification', () => {
     expect(offenders).toEqual([]);
   });
 
+  it('no module under src/lib/licensing/ reads a RELEASE/DATE-shaped env var', () => {
+    // release-date.js compares the CLI's own release date against a
+    // license's paid-through date — an env var here would be exactly the
+    // kind of one-variable bypass this file already guards against for
+    // license keys (e.g. a fake stamp granting extra runway past expiry).
+    // Its inputs are injectable function options, never environment.
+    const offenders: string[] = [];
+
+    for (const file of readdirSync(LICENSING_DIR).filter((f) => f.endsWith('.js'))) {
+      const source = codeOnly(readFileSync(join(LICENSING_DIR, file), 'utf-8'));
+      for (const match of source.matchAll(/process\.env\.([A-Z0-9_]+)/g)) {
+        if (/RELEASE|DATE/i.test(match[1])) offenders.push(`${file}: ${match[0]}`);
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
   it('no module-level kill switch survives in src/lib/licensing/', () => {
     // LICENSING_DISABLED was a `const ... = false` that returned a valid
     // Fullerene result before parsing ever ran — one character from granting
