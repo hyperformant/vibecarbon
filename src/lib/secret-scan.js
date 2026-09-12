@@ -480,7 +480,9 @@ const MAX_FILE_BYTES = 1_048_576;
  * of `git add .env`).
  *
  * Mirrors the .env stanza scaffolded by `vibecarbon create` into
- * carbon/.gitignore: `.env`, `.env.local`, `.env.*.local`, `!.env.example`.
+ * carbon/_gitignore (shipped as .gitignore; npm drops the dotted name from
+ * tarballs, see src/lib/template-paths.js): `.env`, `.env.local`,
+ * `.env.*.local`, `!.env.example`.
  *
  * @param {string} basename
  * @returns {boolean}

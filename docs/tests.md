@@ -58,7 +58,7 @@ describe('vibecarbon add observability', () => {
 
 ### Harness primitives
 
-- **`buildFixture({ mode, git, envs, withDeployedState, files })`**: synthesizes a vibecarbon project in a temp dir. Mode-specific scaffolding (compose vs k8s), `.gitignore` mirrors `carbon/.gitignore`, optional pre-populated `.vibecarbon/<env>.json` for post-deploy commands.
+- **`buildFixture({ mode, git, envs, withDeployedState, files })`**: synthesizes a vibecarbon project in a temp dir. Mode-specific scaffolding (compose vs k8s), `.gitignore` mirrors `carbon/_gitignore`, optional pre-populated `.vibecarbon/<env>.json` for post-deploy commands.
 - **`installStubs({ hetzner, cloudflare })`**: overrides `globalThis.fetch` with HTTP fakes. Hetzner modes: `success` / `capacity-exhausted` / `rate-limited` / `not-found`. Cloudflare: `success` / `rate-limited`. Unmatched URLs throw: no silent prod hits. (In-process only; child-process exec stubbing is deferred.)
 - **`runCli(verb, flags, opts)`**: spawns `node src/cli.js <verb> <flags...>` via `spawnSync`. ANSI is stripped from stdout/stderr. Sets `HOME` to a per-process tmp with a fake Fullerene license activated, so paid-tier commands reach their flag-parsing logic. Returns `{ exitCode, stdout, stderr }`.
 - **`assertSuccess` / `assertExitWith` / `assertFileWritten` / `assertFileMissing`**: throw plain `Error` with the relevant slice of `RunResult` so failures are legible without digging through raw stdio.
@@ -320,7 +320,7 @@ Concretely, before the fix merges:
 | Adding a provider method or static | Extend `provider-contract.test.ts` (+ `EXPECTED` table), not a one-provider test |
 | Declaring support (engine, platform, tier, region) | Name the CI leg / e2e scenario that executes the claim, or don't declare it |
 | Adding a fallback / degraded path | Summary marks the run degraded + unit test asserts the loud path |
-| Writing a new file into a user project | Pattern in `carbon/.gitignore` + `REQUIRED_IGNORES` (gitignore-invariants), or intended-tracked; the upgrade "stays clean" test enforces behaviorally |
+| Writing a new file into a user project | Pattern in `carbon/_gitignore` (shipped as `.gitignore`) + `REQUIRED_IGNORES` (gitignore-invariants), or intended-tracked; the upgrade "stays clean" test enforces behaviorally |
 | Adding a prompt/picker | Options from an exported pure builder, unit-tested over the full catalog |
 | Adding a step gate / resumable state | Unit test pins that the gate digest covers every behavior-changing input |
 | Converging siblings on a shared helper | Add the registry row in `shared-helper-consumers.test.ts` |

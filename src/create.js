@@ -49,6 +49,7 @@ import {
   hashPassword,
 } from './lib/secrets.js';
 import { escapeDotenv } from './lib/shell.js';
+import { projectPathFor, templatePathFor } from './lib/template-paths.js';
 import { createTracker } from './lib/tracker.js';
 import { getUpgradeableFiles } from './lib/upgrade-policy.js';
 import {
@@ -350,7 +351,7 @@ async function ensurePackageManagerInstalled(pm, skipPrompts = false) {
 }
 
 function copyTemplate(templatePath, destPath, variables) {
-  const fullTemplatePath = join(TEMPLATE_DIR, templatePath);
+  const fullTemplatePath = join(TEMPLATE_DIR, templatePathFor(templatePath));
 
   if (!existsSync(fullTemplatePath)) {
     return false;
@@ -409,7 +410,7 @@ function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCo
   const entries = readdirSync(fullTemplatePath, { withFileTypes: true });
 
   for (const entry of entries) {
-    const destPath = join(destDir, entry.name);
+    const destPath = join(destDir, projectPathFor(entry.name));
 
     if (exclude.includes(entry.name)) continue;
 

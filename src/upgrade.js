@@ -47,6 +47,7 @@ import {
 } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { generatePassword } from './lib/secrets.js';
+import { templatePathFor } from './lib/template-paths.js';
 import { getFilePolicy, getUpgradeableFiles } from './lib/upgrade-policy.js';
 import { VERSION } from './lib/version.js';
 
@@ -226,7 +227,7 @@ function reconstructVariables(cwd) {
  * @returns {string} - Resolved content
  */
 function resolveTemplate(templateRelPath, variables) {
-  const fullPath = join(TEMPLATE_DIR, templateRelPath);
+  const fullPath = join(TEMPLATE_DIR, templatePathFor(templateRelPath));
   let content = readFileSync(fullPath, 'utf-8');
 
   for (const [key, placeholder] of Object.entries(PLACEHOLDERS)) {
@@ -367,7 +368,7 @@ async function main(cliArgs) {
   for (const relPath of upgradeableFiles) {
     const policy = getFilePolicy(relPath);
     const projectFilePath = join(cwd, relPath);
-    const templateFilePath = join(TEMPLATE_DIR, relPath);
+    const templateFilePath = join(TEMPLATE_DIR, templatePathFor(relPath));
     const fileExists = existsSync(projectFilePath);
 
     // Skip optional-feature files that don't exist in the project yet.
@@ -392,7 +393,7 @@ async function main(cliArgs) {
     let newContent;
     try {
       if (RAW_COPY_FILES.has(relPath)) {
-        newContent = readFileSync(join(TEMPLATE_DIR, relPath), 'utf-8');
+        newContent = readFileSync(join(TEMPLATE_DIR, templatePathFor(relPath)), 'utf-8');
       } else {
         newContent = resolveTemplate(relPath, variables);
       }

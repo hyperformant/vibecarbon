@@ -4,6 +4,7 @@
 
 import { readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { projectPathFor } from './template-paths.js';
 
 // Files that can be auto-replaced when unmodified by the user
 const SAFE_PATTERNS = [
@@ -189,7 +190,7 @@ function walkDir(rootDir) {
  * @returns {string[]} - Array of relative file paths
  */
 export function getUpgradeableFiles(templateDir) {
-  const allFiles = walkDir(templateDir);
+  const allFiles = walkDir(templateDir).map(projectPathFor);
   return allFiles.filter((f) => {
     const policy = getFilePolicy(f);
     return policy === 'safe' || policy === 'merge';
