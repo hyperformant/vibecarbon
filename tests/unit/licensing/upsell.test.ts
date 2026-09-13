@@ -62,7 +62,7 @@ describe('buildProvisionUpsell — frame', () => {
 
   it('says what stays free, including every non-provisioning operation', () => {
     expect(render()).toContain(
-      'Single-server Compose is free. Redeploying, backing up, restoring, failing over, ' +
+      'Single-server Compose needs no key. Redeploying, backing up, restoring, failing over, ' +
         'and scaling an existing environment never requires a license.',
     );
   });

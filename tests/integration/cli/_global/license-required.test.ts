@@ -187,7 +187,7 @@ describe('vibecarbon — the license gates provisioning only', () => {
           `Deploy mode: ${modeLabel}`,
         );
         expect(result.plain, `-mode ${mode}: must say what stays free`).toContain(
-          'Single-server Compose is free.',
+          'Single-server Compose needs no key.',
         );
         expect(result.plain, `-mode ${mode}: subscribe link must carry the tier`).toContain(
           'https://vibecarbon.com/pricing?project=',

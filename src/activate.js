@@ -293,6 +293,11 @@ export async function runDeactivate(args) {
     process.exit(1);
   }
 
-  p.log.success(c.success(result.message));
-  p.outro('You are now using the Graphite tier.');
+  // Default (non -all) removes only the project file, and a legacy key may
+  // still be sitting in the other slot — re-read rather than assume
+  // Graphite, or a Fullerene holder gets told they just lost their tier.
+  const remaining = getLicense();
+  const tierName = remaining.active ? remaining.name : 'Graphite';
+  p.log.success(c.success(`License deactivated. Using ${tierName} tier.`));
+  p.outro(`You are now using the ${tierName} tier.`);
 }

@@ -2,11 +2,11 @@
  * Pure entitlement evaluator: does a license entitle a project to provision
  * a given deploy tier?
  *
- * No I/O, no environment reads, no imports beyond tiers.js. Nothing calls
- * this module yet — it is wired into the deploy gate by a later task.
+ * No I/O, no environment reads, no imports beyond tiers.js. Called from the
+ * provisioning gate in index.js (resolveVerdict) and from upsell.js.
  *
  * The `license` shape this module reads is a contract with the per-project
- * license storage a later task adds:
+ * license storage index.js's getLicense() returns:
  *   - active: boolean
  *   - tier: string (one of the TIERS keys in tiers.js)
  *   - format: 'v1' | 'v2'

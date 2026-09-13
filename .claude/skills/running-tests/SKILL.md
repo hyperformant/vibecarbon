@@ -1,6 +1,6 @@
 ---
 name: running-tests
-description: Use when running vibecarbon's test suite — picking between unit, integration, or e2e, filtering an integration subtree (cli/docker/template/modules), running the pre-push gate, or diagnosing a vitest failure. Triggers on phrases like `pnpm test`, `test:unit`, `test:integration`, `test:cli`, `test:template`, `test:docker`, `test:modules`, `test:prepush`, "run the tests", "rerun a single test file", "why is integration slow", "ETIMEDOUT in vitest", "should this be a unit or integration test". For real-infra e2e specifics (REAL_INFRA, `--scenario`, `--keep`, kept-rig iteration), defer to the [[running-e2e-matrix]] skill — this one only orients on which tier to run.
+description: Use when running vibecarbon's test suite, picking between unit, integration, or e2e, filtering an integration subtree (cli/docker/template/modules), running the pre-push gate, or diagnosing a vitest failure. Triggers on phrases like `pnpm test`, `test:unit`, `test:integration`, `test:cli`, `test:template`, `test:docker`, `test:modules`, `test:prepush`, "run the tests", "rerun a single test file", "why is integration slow", "ETIMEDOUT in vitest", "should this be a unit or integration test". For real-infra e2e specifics (REAL_INFRA, `--scenario`, `--keep`, kept-rig iteration), defer to the [[running-e2e-matrix]] skill, this one only orients on which tier to run.
 ---
 
 # Running Vibecarbon Tests

@@ -4,7 +4,9 @@ import { parseLicenseKey, validateLicenseKey } from '../../../src/lib/licensing/
 describe('License Validator', () => {
   describe('parseLicenseKey', () => {
     it('parses a valid Fullerene license key', () => {
-      const result = parseLicenseKey('vc-f-a7f2b9c1-x8kd9mwp2v4n');
+      const result = parseLicenseKey(
+        'vc-f-a7f2b9c1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      );
 
       expect(result.valid).toBe(true);
       expect(result.tier).toBe('fullerene');
@@ -14,7 +16,9 @@ describe('License Validator', () => {
     });
 
     it('keys are case-insensitive', () => {
-      const result = parseLicenseKey('VC-F-A7F2B9C1-X8KD9MWP2V4N');
+      const result = parseLicenseKey(
+        'VC-F-A7F2B9C1-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      );
 
       expect(result.valid).toBe(true);
       expect(result.tier).toBe('fullerene');
@@ -59,7 +63,9 @@ describe('License Validator', () => {
 
   describe('validateLicenseKey', () => {
     it('validates key format correctly for Fullerene', () => {
-      const parsed = parseLicenseKey('vc-f-a7f2b9c1-x8kd9mwp2v4n');
+      const parsed = parseLicenseKey(
+        'vc-f-a7f2b9c1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      );
       expect(parsed.valid).toBe(true);
       expect(parsed.tier).toBe('fullerene');
       expect(parsed.isLifetime).toBe(true);
@@ -137,7 +143,9 @@ describe('License Validator', () => {
 
   describe('v1 fixtures stay unchanged under the dispatching parser', () => {
     it('still parses a valid Fullerene v1 key', () => {
-      const result = parseLicenseKey('vc-f-a7f2b9c1-x8kd9mwp2v4n');
+      const result = parseLicenseKey(
+        'vc-f-a7f2b9c1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      );
       expect(result.valid).toBe(true);
       expect(result.format).toBe('v1');
       expect(result.tier).toBe('fullerene');

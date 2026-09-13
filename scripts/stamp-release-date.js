@@ -42,7 +42,7 @@ const pkg = JSON.parse(raw);
 
 if (pkg.releaseDate && pkg.releaseDate !== today) {
   console.error(
-    `package.json already has releaseDate "${pkg.releaseDate}", which does not match today's UTC date "${today}". Refusing to overwrite — this step should only ever run once, right before publish.`,
+    `package.json already has releaseDate "${pkg.releaseDate}", which does not match today's UTC date "${today}". Refusing to overwrite, since this step should only ever run once, right before publish.`,
   );
   process.exit(1);
 }

@@ -45,6 +45,23 @@ function codeOnly(source: string): string {
 /** A key that parses cleanly but carries a signature no private key produced. */
 const UNSIGNED_KEY = `vc-f-a1b2c3d4-${'0'.repeat(128)}`;
 
+/**
+ * Matches both `process.env.FOO` and a `FOO` read off any bare `env`
+ * identifier — the latter catches a function parameter defaulted to
+ * `process.env` (e.g. `{ env = process.env } = {}`) and then read as
+ * `env.FOO`, which `process\.env\.` alone would miss entirely.
+ */
+const ENV_READ_RE = /\b(?:process\.env|env)\.([A-Z0-9_]+)/g;
+
+/**
+ * The one env read this directory is allowed: refresh.js's
+ * `env.VIBECARBON_API_BASE`, which only redirects which host the refresh
+ * request goes to. It changes no entitlement input — never the key, the
+ * tier, the projectId, or the paidThrough date read back from the
+ * response — so it is not an escape hatch.
+ */
+const ALLOWED_ENV_READS = new Set(['VIBECARBON_API_BASE']);
+
 describe('no local bypass of signature verification', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -79,7 +96,7 @@ describe('no local bypass of signature verification', () => {
 
     for (const file of readdirSync(LICENSING_DIR).filter((f) => f.endsWith('.js'))) {
       const source = codeOnly(readFileSync(join(LICENSING_DIR, file), 'utf-8'));
-      for (const match of source.matchAll(/process\.env\.([A-Z0-9_]+)/g)) {
+      for (const match of source.matchAll(ENV_READ_RE)) {
         if (/LICENSE|LICENC/i.test(match[1])) offenders.push(`${file}: ${match[0]}`);
       }
     }
@@ -97,8 +114,26 @@ describe('no local bypass of signature verification', () => {
 
     for (const file of readdirSync(LICENSING_DIR).filter((f) => f.endsWith('.js'))) {
       const source = codeOnly(readFileSync(join(LICENSING_DIR, file), 'utf-8'));
-      for (const match of source.matchAll(/process\.env\.([A-Z0-9_]+)/g)) {
+      for (const match of source.matchAll(ENV_READ_RE)) {
         if (/RELEASE|DATE/i.test(match[1])) offenders.push(`${file}: ${match[0]}`);
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('no module under src/lib/licensing/ reads an env var outside the explicit allowlist', () => {
+    // The general form of the two checks above: ANY environment read in this
+    // directory is a candidate escape hatch, not just one shaped like
+    // LICENSE or RELEASE/DATE. Every name found here must be justified in
+    // ALLOWED_ENV_READS above, with a comment explaining why it cannot
+    // change entitlement.
+    const offenders: string[] = [];
+
+    for (const file of readdirSync(LICENSING_DIR).filter((f) => f.endsWith('.js'))) {
+      const source = codeOnly(readFileSync(join(LICENSING_DIR, file), 'utf-8'));
+      for (const match of source.matchAll(ENV_READ_RE)) {
+        if (!ALLOWED_ENV_READS.has(match[1])) offenders.push(`${file}: ${match[0]}`);
       }
     }
 

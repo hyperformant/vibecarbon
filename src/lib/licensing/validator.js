@@ -97,7 +97,9 @@ function parseV1(parts, originalKey) {
     return { valid: false, error: 'Invalid customer ID format' };
   }
 
-  if (!signature || signature.length < 10) {
+  // Ed25519 signatures are always 64 bytes, hex-encoded to exactly 128
+  // lowercase hex characters, for both key formats.
+  if (!signature || !/^[a-f0-9]{128}$/.test(signature)) {
     return { valid: false, error: 'Invalid signature' };
   }
 
@@ -152,7 +154,9 @@ function parseV2(parts, originalKey) {
     return { valid: false, error: 'Invalid paid-through date' };
   }
 
-  if (!signature || signature.length < 10) {
+  // Ed25519 signatures are always 64 bytes, hex-encoded to exactly 128
+  // lowercase hex characters, for both key formats.
+  if (!signature || !/^[a-f0-9]{128}$/.test(signature)) {
     return { valid: false, error: 'Invalid signature' };
   }
 

@@ -141,7 +141,7 @@ export function buildProvisionUpsell({
   if (deployTier) lines.push(`Deploy mode: ${deployTierLabel(deployTier)}`);
 
   lines.push(
-    'Single-server Compose is free. Redeploying, backing up, restoring, failing over, ' +
+    'Single-server Compose needs no key. Redeploying, backing up, restoring, failing over, ' +
       'and scaling an existing environment never requires a license.',
   );
 
