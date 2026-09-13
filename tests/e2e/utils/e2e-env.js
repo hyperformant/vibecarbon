@@ -326,7 +326,7 @@ export function assertLicenseActive(env = process.env) {
     : `Set VIBECARBON_TEST_LICENSE_KEY (shell or tests/.env.e2e), then:\n` +
       `  node src/cli.js activate "$VIBECARBON_TEST_LICENSE_KEY"\n\n` +
       `Mint one with:\n` +
-      `  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js --email you@example.com`;
+      `  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com`;
 
   throw new Error(
     `[e2e-env] No active Vibecarbon license at ~/.vibecarbon/license.\n` +
