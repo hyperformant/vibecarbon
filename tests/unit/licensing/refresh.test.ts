@@ -14,7 +14,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { derivePublicKeyPem, mintV2Key } from '../../../scripts/generate-license.js';
+import { derivePublicKeyPem, mintV1Key, mintV2Key } from '../../../scripts/generate-license.js';
 import { activateLicense, getLicense } from '../../../src/lib/licensing/index.js';
 import { refreshLicense } from '../../../src/lib/licensing/refresh.js';
 import { VERSION } from '../../../src/lib/version.js';
@@ -228,6 +228,21 @@ describe('refreshLicense — a returned key that fails any check is rejected, an
     seedStoredKey();
     const before = fileBytes();
     const fetchImpl = okFetch({ nope: true });
+
+    const result = await refreshLicense({ projectDir, stateDir, fetchImpl, publicKeyPem });
+
+    expect(result).toEqual({ ok: false, reason: 'invalid' });
+    expect(fileBytes()).toBe(before);
+  });
+
+  it('D1: a genuinely-signed v1 key in the 200 body is rejected, never activated', async () => {
+    // A refresh response must hand back a v2 key scoped to this project. A
+    // v1 (legacy, lifetime, global) key would still verify, so the format
+    // check has to be explicit rather than relying on validation failing.
+    seedStoredKey();
+    const before = fileBytes();
+    const v1Key = mintV1Key(privateKeyPem, { customerId: CUSTOMER_ID });
+    const fetchImpl = okFetch({ key: v1Key });
 
     const result = await refreshLicense({ projectDir, stateDir, fetchImpl, publicKeyPem });
 

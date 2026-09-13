@@ -11,9 +11,9 @@
  *   v1 (-legacy): the old lifetime, global key. Always Fullerene.
  *     vc-f-<customerId>-<signature>
  *
- * signedMessage/parseLicenseKey/validateLicenseKey are imported from
- * validator.js rather than reimplemented here, so minting and verifying can
- * never drift apart. Every minted key is round-tripped through
+ * signedMessage/validateLicenseKey are imported from validator.js rather
+ * than reimplemented here, so minting and verifying can never drift apart.
+ * Every minted key is round-tripped through
  * validateLicenseKey (against the public key derived from the same private
  * key) before it is ever printed; a key that fails that check is never
  * shown.
@@ -43,7 +43,7 @@
  */
 
 import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
-import { parseLicenseKey, signedMessage, validateLicenseKey } from '../src/lib/licensing/validator.js';
+import { signedMessage, validateLicenseKey } from '../src/lib/licensing/validator.js';
 
 const V2_TIER_CHARS = { graphene: 'g', fullerene: 'f' };
 
@@ -333,10 +333,6 @@ function main() {
     process.exit(1);
   }
 }
-
-// Re-exported for a test that wants to inspect the minted key directly
-// without a second import of validator.js.
-export { parseLicenseKey };
 
 // Only run the CLI behavior when invoked directly (`node
 // scripts/generate-license.js`), not when imported by a test.
