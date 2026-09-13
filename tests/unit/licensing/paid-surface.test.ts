@@ -41,6 +41,16 @@ describe('paid-surface manifest', () => {
     }
   });
 
+  it('no licensing module is itself paid surface', () => {
+    // The gate has to run for everyone, including someone with no license at
+    // all. If a future split ever moved src/lib/licensing/ behind the
+    // license-authenticated registry, the code that decides whether you may
+    // fetch it would live inside the thing you cannot fetch.
+    const licensingPaths = allSurfacePaths().filter((p) => p.startsWith('src/lib/licensing/'));
+    expect(licensingPaths, 'src/lib/licensing/ must stay free code').toEqual([]);
+    expect(PAID_ENTRY_POINTS.filter((p) => p.startsWith('src/lib/licensing/'))).toEqual([]);
+  });
+
   it('every entry point is inside the declared surface', () => {
     // An entry point that isn't part of PAID_SURFACE would be a
     // contradiction: the guard would never treat it as an in-surface

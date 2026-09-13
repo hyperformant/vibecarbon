@@ -249,7 +249,6 @@ export async function run(args) {
   // runComposeRestore) the re-seed source, so they stay consistent with the
   // standby selection.
   const { envName, envConfig, serverIp } = await resolveEnvContext({
-    command: 'restore',
     actionVerb: 'restore',
     envRequirement: 'name an environment to restore',
     values,

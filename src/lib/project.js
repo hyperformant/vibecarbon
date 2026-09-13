@@ -3,6 +3,7 @@
  * Shared across CLI commands (add.js, s3.js, deploy.js, etc.)
  */
 
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeSecretFile } from './command.js';
@@ -84,6 +85,42 @@ export function loadManifest(cwd = process.cwd()) {
 export function saveManifest(manifest, cwd = process.cwd()) {
   const manifestPath = join(cwd, '.vibecarbon.json');
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+/**
+ * The project's stable id, backfilling one into `.vibecarbon.json` when the
+ * project doesn't have one yet.
+ *
+ * The id identifies a project to per-project licensing (a v2 key is issued
+ * for exactly one id) and to telemetry. It is created lazily, on first need,
+ * rather than at `create` time, so projects scaffolded before ids existed
+ * pick one up silently.
+ *
+ * `projectConfig` is whatever the caller already loaded (a manifest from
+ * loadManifest, or the richer object from loadProjectConfig). It is only
+ * READ for an id and, when one is minted, updated in place so the caller
+ * sees it. The write itself always goes through a fresh loadManifest, so a
+ * synthesized field the caller carries (loadProjectConfig fills in
+ * `projectName`, and can carry `secrets` when there is no manifest at all)
+ * can never leak into `.vibecarbon.json`.
+ *
+ * @param {object} [projectConfig] - Already-loaded project config or manifest
+ * @param {string} [cwd] - Working directory (defaults to process.cwd())
+ * @returns {string} The project id
+ */
+export function ensureProjectId(projectConfig, cwd = process.cwd()) {
+  if (projectConfig?.projectId) return projectConfig.projectId;
+
+  // loadManifest returns the empty-project default when no file exists, so
+  // this also covers a hand-made project that has docker-compose.yml but no
+  // manifest: saveManifest creates one carrying just the id.
+  const manifest = loadManifest(cwd);
+  if (!manifest.projectId) {
+    manifest.projectId = randomUUID();
+    saveManifest(manifest, cwd);
+  }
+  if (projectConfig) projectConfig.projectId = manifest.projectId;
+  return manifest.projectId;
 }
 
 // ============================================================================

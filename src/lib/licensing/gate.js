@@ -9,14 +9,14 @@
  * (enforced by tests/unit/licensing/command-gates.test.ts).
  *
  * Classifications:
- *   'paid'     — requires an active Fullerene license regardless of
- *                deploy mode, gated in cli.js pre-dispatch (after the
- *                project guard). Currently unused: licensing moved from
- *                command-based to deploy-mode-based (single-server Compose
- *                is free; Compose HA / Kubernetes / Kubernetes HA require a
- *                license — see 'mode' below), but the classification and
- *                the cli.js chokepoint stay in place so a future
- *                command-wide paid feature has somewhere to plug in.
+ *   'paid'     — requires an active subscription regardless of deploy mode,
+ *                gated in cli.js pre-dispatch (after the project guard).
+ *                Currently unused: licensing moved from command-based to
+ *                deploy-mode-based (single-server Compose is free;
+ *                provisioning Kubernetes needs Graphene, and either HA mode
+ *                needs Fullerene — see 'mode' below), but the
+ *                classification and the cli.js chokepoint stay in place so a
+ *                future command-wide paid feature has somewhere to plug in.
  *   'free'     — never gated. destroy is deliberately free: teardown is
  *                never held hostage to a license. upgrade is a local
  *                template refresh — mode-agnostic, free for everyone.
@@ -29,13 +29,31 @@
  *                user asking for CI/CD saw a paywall for a feature that is
  *                free in every mode. Kept as a classification so a genuine
  *                sub-flow gate has a name if one ever appears.
- *   'mode'     — the command gates itself once its deploy-mode tier is
- *                known. Deploy mode is per-environment and, for `deploy`,
- *                not knowable pre-dispatch (the architecture can be chosen
- *                interactively mid-command), so these commands call
- *                requirePaidTier() in-flow right after resolving the tier
- *                — see src/lib/licensing/index.js.
+ *   'mode'     — the command gates PROVISIONING of a new environment
+ *                in-flow, once its deploy-mode tier is known. Deploy mode is
+ *                per-environment and, for `deploy`, not knowable
+ *                pre-dispatch (the architecture can be chosen interactively
+ *                mid-command), so the command calls
+ *                requireProvisionEntitlement() in-flow right after resolving
+ *                the tier. See src/lib/licensing/index.js.
+ *
+ * `deploy` is the only 'mode' command. backup, restore, failover and scale
+ * act exclusively on an environment that already exists, and operating an
+ * environment you already provisioned is free at every tier: a subscription
+ * buys the ability to stand a paid deploy mode UP, never the right to keep
+ * one running. Paywalling disaster recovery would be the worst possible
+ * moment to ask someone for money.
  */
+
+import { TIERS as DEPLOY_TIERS } from '../deploy/tier-registry.js';
+import { requiredTierFor } from './entitlement.js';
+
+/**
+ * The license tier a deploy tier needs, re-exported from the entitlement
+ * evaluator so gate consumers have one import for the whole taxonomy. Fails
+ * closed: an unknown or missing deploy tier requires Fullerene.
+ */
+export { requiredTierFor };
 
 export const COMMAND_GATES = {
   create: 'free',
@@ -47,10 +65,10 @@ export const COMMAND_GATES = {
   deploy: 'mode',
   destroy: 'free',
   status: 'free',
-  backup: 'mode',
-  restore: 'mode',
-  failover: 'mode',
-  scale: 'mode',
+  backup: 'free',
+  restore: 'free',
+  failover: 'free',
+  scale: 'free',
   upgrade: 'free',
   configure: 'free',
   activate: 'free',
@@ -63,28 +81,17 @@ export const COMMAND_GATES = {
 };
 
 /**
- * Deploy-mode tiers (see src/lib/deploy/tier-registry.js) that require an
- * active Fullerene license. Single-server Compose is the only free
- * tier.
- */
-export const PAID_TIERS = new Set(['compose-ha', 'k8s', 'k8s-ha']);
-
-/**
- * Whether a resolved deploy-mode tier requires a paid license.
- * Fails closed: an unrecognized or missing tier is treated as paid, so a
- * corrupt `.vibecarbon.json` or a new tier added without updating this set
- * can never silently deploy for free.
+ * Deploy-mode tiers (see src/lib/deploy/tier-registry.js) that need a paid
+ * subscription to provision. Derived from the entitlement evaluator rather
+ * than listed by hand, so the two can never disagree: a tier is paid exactly
+ * when the license tier it requires is above Graphite.
  *
- * @param {string} tier - A tier id from src/lib/deploy/tier-registry.js
- * @returns {boolean}
+ * Read by tests/unit/docs/cli-docs-census.test.ts, which checks the User
+ * Docs CLI reference names every paid deploy mode.
  */
-export function isPaidTier(tier) {
-  // The only free tier is single-server Compose. Every tier in PAID_TIERS
-  // requires a license, and so does anything else (unknown/missing/corrupt
-  // deployMode) — fail closed rather than silently deploy for free.
-  if (tier === 'compose') return false;
-  return true;
-}
+export const PAID_TIERS = new Set(
+  DEPLOY_TIERS.filter((tier) => requiredTierFor(tier) !== 'graphite'),
+);
 
 /**
  * Whether this invocation must hold a paid license.

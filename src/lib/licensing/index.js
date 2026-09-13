@@ -21,24 +21,18 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { c } from '../colors.js';
-import { loadManifest, manifestExists } from '../project.js';
-import { isPaidTier } from './gate.js';
+import { ensureProjectId, loadManifest, manifestExists } from '../project.js';
+import { VERSION } from '../version.js';
+import { evaluateEntitlement } from './entitlement.js';
+import { getReleaseDate } from './release-date.js';
 import { getTier, TIERS } from './tiers.js';
+import { printProvisionUpsell } from './upsell.js';
 import { validateLicenseKey } from './validator.js';
 
 // Default license storage location. Overridable per-call via `stateDir` so
 // tests never touch the real ~/.vibecarbon.
 const CONFIG_DIR = join(homedir(), '.vibecarbon');
 const PROJECT_LICENSE_FILENAME = '.vibecarbon.license';
-
-// Display names for deploy-mode tiers, used only to name the mode in the
-// upsell message below — not a tier/pricing definition (that lives in
-// tiers.js and is out of scope for this gate).
-const TIER_LABELS = {
-  'compose-ha': 'Docker Compose HA',
-  k8s: 'Kubernetes',
-  'k8s-ha': 'Kubernetes HA',
-};
 
 function resolveStateDir(stateDir) {
   return stateDir || CONFIG_DIR;
@@ -491,64 +485,111 @@ export function deactivateLicense({ projectDir = process.cwd(), stateDir, all = 
 }
 
 /**
- * Guard function: require any paid license or exit with upgrade message
- * @param {string} commandName - The command that requires a license
- * @param {string} [tier] - The resolved deploy-mode tier that triggered the
- *   gate, when known (see requirePaidTier). Names the specific mode in the
- *   upsell instead of the generic message, and makes clear that
- *   single-server Compose stays free. Omitted by command-wide callers
- *   (e.g. `configure cicd`) that aren't gating a deploy-mode tier.
+ * The verdict seam.
+ *
+ * Everything the gate decides funnels through this one call, so a later task
+ * can insert an online refresh for a v2 key whose paid-through date has
+ * lapsed (fetch a renewed key, re-store it, re-evaluate) without touching
+ * any call site. `fetchImpl` and `env` are threaded here for exactly that
+ * and are unused today: the evaluation is currently pure.
+ *
+ * @param {object} args
+ * @returns {Promise<object>} an evaluateEntitlement() verdict
  */
-export function requireLicense(commandName, tier) {
-  const license = getLicense();
+async function resolveVerdict({ license, deployTier, projectId, releaseDate }) {
+  return evaluateEntitlement({ license, deployTier, projectId, releaseDate });
+}
 
-  if (license.active) return;
+/**
+ * Guard: require an entitlement to PROVISION `deployTier` for this project,
+ * or print the upsell and exit non-zero.
+ *
+ * Only provisioning consults the license. Redeploying, backing up,
+ * restoring, failing over and scaling an environment that already exists
+ * never call this — see src/lib/licensing/gate.js for why, and
+ * isProvisioningDeploy() in src/lib/deploy/prompts.js for how `deploy`
+ * decides which of the two it is doing.
+ *
+ * Exits 1 rather than 0 on refusal: a gated command run without an
+ * entitlement is a failed invocation, not a silent no-op. Scripted and CI
+ * callers must see a real failure.
+ *
+ * @param {object} options
+ * @param {string} options.deployTier - The resolved deploy tier being provisioned
+ *   (resolveTier(...) from src/lib/deploy/tier-registry.js)
+ * @param {object} [options.projectConfig] - The already-loaded project config;
+ *   its project id is backfilled when missing (see ensureProjectId)
+ * @param {string} [options.projectDir]
+ * @param {string} [options.stateDir]
+ * @param {Function} [options.fetchImpl] - Reserved for the refresh seam above
+ * @param {object} [options.env] - Reserved for the refresh seam above
+ * @returns {Promise<void>}
+ */
+export async function requireProvisionEntitlement({
+  deployTier,
+  projectConfig,
+  projectDir = process.cwd(),
+  stateDir,
+  fetchImpl,
+  env,
+} = {}) {
+  const projectId = ensureProjectId(projectConfig, projectDir);
+  const license = getLicense({ projectDir, stateDir });
+  const releaseDate = getReleaseDate();
 
-  console.log('');
-  console.log(`  ${c.warning('License required')}`);
-  console.log('');
-  if (tier) {
-    const tierLabel = TIER_LABELS[tier] || tier;
-    const line =
-      commandName === 'deploy'
-        ? `Single-server Compose deploys are free; ${c.bold(tierLabel)} requires ${c.bold('Fullerene')} — ${c.success('$149 one-time')}.`
-        : `${c.bold(commandName)} on ${c.bold(tierLabel)} requires ${c.bold('Fullerene')} — ${c.success('$149 one-time')}.`;
-    console.log(`  ${c.dim(line)}`);
-  } else {
-    console.log(
-      `  ${c.dim(`The ${c.bold(commandName)} command requires a license.`)} ${c.dim('(create, up, down, reset, status, and single-server Compose deploys are always free)')}`,
-    );
-  }
-  console.log('');
-  console.log(
-    `  ${c.bold('Vibecarbon Fullerene')} — ${c.success('$149 one-time')}${c.dim(', all deploy modes, HA, GitOps CI/CD')}`,
+  const verdict = await resolveVerdict({
+    license,
+    deployTier,
+    projectId,
+    releaseDate,
+    projectDir,
+    stateDir,
+    fetchImpl,
+    env,
+  });
+
+  if (verdict.ok) return;
+
+  printProvisionUpsell(
+    {
+      verdict,
+      deployTier,
+      projectName: projectConfig?.projectName,
+      projectId,
+      version: VERSION,
+      releaseDate,
+    },
+    { c },
   );
-  console.log(`  ${c.dim('Agencies & client work: see TERMS or contact us.')}`);
-  console.log('');
-  console.log(`  ${c.dim('Purchase:')} ${c.info('https://vibecarbon.com/#pricing')}`);
-  console.log(`  ${c.dim('Activate:')} ${c.info('vibecarbon activate <key>')}`);
-  console.log(`  ${c.dim('Terms:')}    ${c.dim('TERMS.md or https://vibecarbon.com/terms')}`);
-  console.log('');
-  // Exit non-zero: a gated command run without a license is a failed
-  // invocation, not a success. Exiting 0 made scripted/CI `deploy`, `scale`,
-  // `backup`, etc. look like they succeeded while doing nothing (the test
-  // harnesses had to activate a license to dodge this). Callers and CI now
-  // see a real failure.
   process.exit(1);
 }
 
 /**
- * Guard function for deploy-mode-gated commands (deploy/backup/restore/
- * failover/scale): single-server Compose is free, every other tier
- * requires a paid license. Fails closed via isPaidTier — an unknown or
- * missing tier is treated as paid.
+ * Guard for the command-wide 'paid' classification in gate.js: require any
+ * active license, or print the upsell and exit non-zero.
+ *
+ * No command is classified 'paid' today, but the cli.js pre-dispatch
+ * chokepoint stays wired up so a future command-wide paid feature has
+ * somewhere to plug in. It renders through the same upsell as the
+ * provisioning gate, so upsell copy exists in exactly one place.
  *
  * @param {string} commandName - The command that requires a license
- * @param {string} tier - The resolved deploy-mode tier (resolveTier(envConfig))
  */
-export function requirePaidTier(commandName, tier) {
-  if (!isPaidTier(tier)) return;
-  requireLicense(commandName, tier);
+export function requireLicense(commandName) {
+  const license = getLicense();
+
+  if (license.active) return;
+
+  printProvisionUpsell(
+    {
+      commandName,
+      projectId: license.projectId,
+      version: VERSION,
+      releaseDate: getReleaseDate(),
+    },
+    { c },
+  );
+  process.exit(1);
 }
 
 // Re-export tier utilities

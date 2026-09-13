@@ -410,7 +410,7 @@ export function e2eCliEnv(extra = {}, base = process.env) {
     ALLOWED_SSH_IPS: '0.0.0.0/0,::/0',
     // NOTE: no license variable is set here, deliberately. Licensing is
     // deploy-mode-based — compose-ha/k8s/k8s-ha scenarios hit
-    // requirePaidTier() in deploy/backup/restore/failover/scale — and the
+    // requireProvisionEntitlement() when `deploy` provisions them — and the
     // harness satisfies that the way a customer does: a genuine Ed25519-signed
     // key activated at ~/.vibecarbon/license, asserted by
     // assertLicenseActive() in setupE2EEnv() below.

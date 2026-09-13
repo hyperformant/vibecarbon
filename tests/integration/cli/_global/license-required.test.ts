@@ -1,37 +1,40 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { COMMAND_GATES } from '../../../../src/lib/licensing/gate.js';
+import { testLicenseKey } from '../../_harness/index.js';
 
 const REPO_ROOT = resolve(__dirname, '../../../..');
 const CLI = join(REPO_ROOT, 'src', 'cli.js');
 
-// Licensing is deploy-mode-based, not command-based: single-server Compose
-// is free, and Compose HA / Kubernetes / Kubernetes HA require a license.
-// deploy/backup/restore/failover/scale (COMMAND_GATES = 'mode') each gate
-// themselves in-flow, immediately after their deploy-mode tier is known
-// (requirePaidTier() — see src/lib/licensing/index.js), rather than
-// pre-dispatch in cli.js. A gated invocation without a license must exit
-// NON-ZERO — a command that silently does nothing is a failed invocation,
-// not a success (see src/lib/licensing/index.js requireLicense()).
+// Licensing gates PROVISIONING, and nothing else.
 //
-// These run inside minimal project fixtures (so assertInProjectDir passes)
-// with an isolated empty HOME (so no license is found), exercising
-// requirePaidTier()'s requireLicense() exit path directly.
+// `deploy` consults the license only when it is standing a NEW environment
+// up in a paid deploy mode (requireProvisionEntitlement() — see
+// src/lib/licensing/index.js, and isProvisioningDeploy() in
+// src/lib/deploy/prompts.js). Redeploying an environment that already
+// exists, and every one of backup / restore / failover / scale, is free at
+// every deploy mode: a subscription buys the ability to stand a paid mode
+// up, never the right to keep one running.
+//
+// Provisioning Kubernetes needs Graphene ($19/project/month); either HA mode
+// needs Fullerene ($39/project/month). A refusal exits NON-ZERO — a command
+// that silently does nothing is a failed invocation, not a success.
+//
+// These run inside minimal project fixtures (so assertInProjectDir passes).
+// Most run with an isolated EMPTY HOME, i.e. one with no
+// ~/.vibecarbon/license, so nothing on the developer's machine can make a
+// refusal disappear. The last case deliberately does the opposite: it plants
+// the harness's genuine legacy key and proves it still entitles everything.
 
-/** Every command classified 'mode' — derived so a reclassification in
- * gate.js without a matching fixture here fails loudly. */
-const MODE_COMMANDS = Object.entries(COMMAND_GATES)
-  .filter(([, gate]) => gate === 'mode')
-  .map(([cmd]) => cmd)
-  .sort();
+/** Every command that used to gate on its deploy mode. All free now. */
+const OPERATE_COMMANDS = ['backup', 'deploy', 'failover', 'restore', 'scale'] as const;
 
-// argv for each mode-gated command against a single pre-existing "prod"
-// environment. `-l` (list) on backup/restore avoids the interactive
-// action prompt so the process reaches the gate deterministically.
-const MODE_ARGV: Record<string, string[]> = {
+// argv for each command against a single pre-existing "prod" environment.
+// `-l` (list) on backup/restore avoids the interactive action prompt so the
+// process reaches (and passes) the gate deterministically.
+const OPERATE_ARGV: Record<string, string[]> = {
   backup: ['backup', 'prod', '-l'],
   deploy: ['deploy', 'prod'],
   failover: ['failover', 'prod'],
@@ -48,6 +51,20 @@ function writeProject(dir: string, envConfig?: Record<string, unknown>): void {
   writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
 }
 
+/** A HOME carrying the harness's genuine legacy (lifetime) Fullerene key. */
+function writeLegacyLicense(home: string): void {
+  const key = testLicenseKey();
+  mkdirSync(join(home, '.vibecarbon'), { recursive: true });
+  writeFileSync(
+    join(home, '.vibecarbon', 'license'),
+    JSON.stringify(
+      { key, customerId: key.split('-')[2], activatedAt: '2026-01-01T00:00:00.000Z' },
+      null,
+      2,
+    ),
+  );
+}
+
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI codes requires matching them
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 function stripAnsi(s: string): string {
@@ -55,16 +72,19 @@ function stripAnsi(s: string): string {
 }
 
 function run(argv: string[], cwd: string, home: string) {
-  return spawnSync(process.execPath, [CLI, ...argv], {
+  const result = spawnSync(process.execPath, [CLI, ...argv], {
     cwd,
     encoding: 'utf-8',
-    // Isolated HOME with no ~/.vibecarbon/license → Graphite (unlicensed).
     env: { ...process.env, HOME: home, NO_COLOR: '1', FORCE_COLOR: '0' },
-    timeout: 15000,
+    timeout: 30000,
   });
+  return {
+    ...result,
+    plain: stripAnsi(`${result.stdout || ''}\n${result.stderr || ''}`),
+  };
 }
 
-describe('vibecarbon — mode-gated commands without a license', () => {
+describe('vibecarbon — the license gates provisioning only', () => {
   let proj: string;
   let home: string;
 
@@ -78,15 +98,12 @@ describe('vibecarbon — mode-gated commands without a license', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('has an argv fixture for every mode-gated command', () => {
-    expect(Object.keys(MODE_ARGV).sort()).toEqual(MODE_COMMANDS);
-  });
-
-  describe('paid modes: refuse with "License required"', () => {
-    // compose-ha and kubernetes+ha resolve to the 'compose-ha' and 'k8s-ha'
-    // tiers (see src/lib/deploy/tier-registry.js) — both PAID_TIERS.
-    const PAID_FIXTURES: Record<string, Record<string, unknown>> = {
+  // (a) An environment that already exists is never gated, at any tier.
+  describe('an existing environment is free to operate, in every deploy mode', () => {
+    const DEPLOYED_FIXTURES: Record<string, Record<string, unknown>> = {
+      compose: { deployMode: 'compose', status: 'deployed', servers: [{ ip: '10.0.0.1' }] },
       'compose-ha': { deployMode: 'compose-ha', status: 'deployed', servers: [{ ip: '10.0.0.1' }] },
+      kubernetes: { deployMode: 'kubernetes', status: 'deployed', servers: [{ ip: '10.0.0.1' }] },
       'kubernetes+ha': {
         deployMode: 'kubernetes',
         // Real persisted shape (see orchestrator.js) — ha is always an
@@ -97,109 +114,123 @@ describe('vibecarbon — mode-gated commands without a license', () => {
       },
     };
 
-    // Tier labels the upsell names for each fixture (src/lib/licensing/index.js
-    // TIER_LABELS) — used below to assert the per-command phrasing.
-    const TIER_LABEL_BY_FIXTURE: Record<string, string> = {
-      'compose-ha': 'Docker Compose HA',
-      'kubernetes+ha': 'Kubernetes HA',
-    };
-
-    for (const [fixtureName, envConfig] of Object.entries(PAID_FIXTURES)) {
-      for (const name of MODE_COMMANDS) {
-        it(`${name} (${fixtureName}) → emits "License required" and exits non-zero`, () => {
+    for (const [fixtureName, envConfig] of Object.entries(DEPLOYED_FIXTURES)) {
+      for (const name of OPERATE_COMMANDS) {
+        it(`${name} (${fixtureName}, deployed) → never says "License required"`, () => {
           writeProject(proj, envConfig);
-          const result = run(MODE_ARGV[name], proj, home);
-          const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
-          const plain = stripAnsi(combined);
+          const result = run(OPERATE_ARGV[name], proj, home);
           expect(
-            result.status,
-            `${name}: expected non-zero exit. status=${result.status} output:\n${combined}`,
-          ).not.toBe(0);
-          expect(combined, `${name}: missing "License required"`).toContain('License required');
-
-          // Diamond retired — the upsell must only ever mention Fullerene.
-          expect(plain, `${name}: must not mention the retired Diamond tier`).not.toContain(
-            'Diamond',
+            result.signal,
+            `${name}: process was killed (likely hung)\n${result.plain}`,
+          ).toBeNull();
+          expect(result.plain, `${name}: unexpectedly emitted "License required"`).not.toContain(
+            'License required',
           );
-          expect(plain, `${name}: missing Fullerene mention`).toContain('Fullerene');
-          // Agency is a contact-us channel, not a self-serve upsell price.
-          expect(plain, `${name}: missing Agency contact-us line`).toContain(
-            'Agencies & client work',
-          );
-
-          const tierLabel = TIER_LABEL_BY_FIXTURE[fixtureName];
-          if (name === 'deploy') {
-            expect(plain, `${name}: missing free-single-server framing`).toContain(
-              'Single-server Compose deploys are free',
-            );
-            expect(plain, `${name}: missing mode-specific requirement`).toContain(
-              `${tierLabel} requires Fullerene`,
-            );
-          } else {
-            // Fix for Task 1 reviewer's minor: the message must not say
-            // "deploys are free" verbatim for non-deploy commands like
-            // scale/backup/restore/failover — phrase as "<command> on
-            // <mode> requires Fullerene" instead.
-            expect(plain, `${name}: wrongly uses deploy-only framing`).not.toContain(
-              'deploys are free',
-            );
-            expect(
-              plain,
-              `${name}: missing "<command> on <mode> requires Fullerene" phrasing`,
-            ).toContain(`${name} on ${tierLabel} requires Fullerene`);
-          }
         });
       }
     }
   });
 
-  describe('free mode: never mentions "License required"', () => {
-    for (const name of MODE_COMMANDS) {
-      it(`${name} (compose) → no "License required"`, () => {
-        writeProject(proj, {
-          deployMode: 'compose',
-          status: 'deployed',
-          servers: [{ ip: '10.0.0.1' }],
-        });
-        const result = run(MODE_ARGV[name], proj, home);
-        const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
-        expect(result.signal, `${name}: process was killed (likely hung)\n${combined}`).toBeNull();
-        expect(combined, `${name}: unexpectedly emitted "License required"`).not.toContain(
-          'License required',
+  // (b) Provisioning a paid mode refuses, naming the tier its price buys.
+  describe('provisioning a paid deploy mode refuses, by required tier', () => {
+    // -mode flag, tier name, price, deploy-mode proof line
+    const PROVISION_CASES: Array<[string, string, string, string]> = [
+      ['k8s', 'Graphene', '$19', 'Kubernetes'],
+      ['k8s-ha', 'Fullerene', '$39', 'Kubernetes HA'],
+      ['compose-ha', 'Fullerene', '$39', 'Compose HA'],
+    ];
+
+    for (const [mode, tierName, price, modeLabel] of PROVISION_CASES) {
+      it(`deploy -mode ${mode} on a fresh project → refuses, names ${tierName} and ${price}`, () => {
+        writeProject(proj); // no environments key at all
+        // -provider is required for a NEW env under -y (2026-08-08, PR 2
+        // opening commit) — without it the provider-explicitness error would
+        // fire before this test's subject (the license gate) is reached.
+        const result = run(
+          ['deploy', 'prod', '-provider', 'hetzner', '-mode', mode, '-y'],
+          proj,
+          home,
         );
+
+        expect(
+          result.status,
+          `-mode ${mode}: expected non-zero exit. status=${result.status}\n${result.plain}`,
+        ).not.toBe(0);
+        expect(result.plain).toContain('License required');
+        expect(result.plain, `-mode ${mode}: must name the required tier`).toContain(tierName);
+        expect(result.plain, `-mode ${mode}: must name the subscription price`).toContain(
+          `${price} per project per month`,
+        );
+        expect(result.plain, `-mode ${mode}: must name the deploy mode`).toContain(
+          `Deploy mode: ${modeLabel}`,
+        );
+        expect(result.plain, `-mode ${mode}: must say what stays free`).toContain(
+          'Single-server Compose is free.',
+        );
+        expect(result.plain, `-mode ${mode}: subscribe link must carry the tier`).toContain(
+          'https://vibecarbon.com/pricing?project=',
+        );
+
+        // Retired copy: no one-time price, no agency channel, no em dash.
+        expect(result.plain).not.toContain('$149');
+        expect(result.plain).not.toContain('one-time');
+        expect(result.plain).not.toContain('Agencies');
+        expect(result.plain).not.toContain('Diamond');
+        const upsell = result.plain.slice(result.plain.indexOf('License required'));
+        expect(upsell, `-mode ${mode}: no em dash in user-facing copy`).not.toContain('—');
       });
     }
+  });
 
-    it('fresh project, no environments yet: `deploy -y` defaults to compose — no "License required"', () => {
-      writeProject(proj); // no environments key at all
-      // -provider is required for a NEW env under -y (2026-08-08, PR 2
-      // opening commit) — without it the provider-explicitness error would
-      // fire before this test's subject (the license gate) is ever reached.
-      const result = run(['deploy', 'prod', '-provider', 'hetzner', '-y'], proj, home);
-      const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
-      expect(result.signal, `deploy -y: process was killed (likely hung)\n${combined}`).toBeNull();
-      expect(combined, 'deploy -y: unexpectedly emitted "License required"').not.toContain(
-        'License required',
-      );
-    });
+  // (c) Free tier: provisioning single-server Compose never gates.
+  it('deploy -y on a fresh project defaults to compose → no "License required"', () => {
+    writeProject(proj); // no environments key at all
+    const result = run(['deploy', 'prod', '-provider', 'hetzner', '-y'], proj, home);
+    expect(
+      result.signal,
+      `deploy -y: process was killed (likely hung)\n${result.plain}`,
+    ).toBeNull();
+    expect(result.plain, 'deploy -y: unexpectedly emitted "License required"').not.toContain(
+      'License required',
+    );
+  });
 
-    it('`deploy prod -mode k8s -y` on a fresh project refuses — -mode picks a paid tier explicitly', () => {
-      writeProject(proj); // no environments key at all
-      // -provider hetzner: see the sibling case above — reach the license
-      // gate, not the provider-explicitness error.
-      const result = run(
-        ['deploy', 'prod', '-provider', 'hetzner', '-mode', 'k8s', '-y'],
-        proj,
-        home,
-      );
-      const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
-      expect(
-        result.status,
-        `deploy -mode k8s -y: expected non-zero exit. status=${result.status} output:\n${combined}`,
-      ).not.toBe(0);
-      expect(combined, 'deploy -mode k8s -y: missing "License required"').toContain(
-        'License required',
-      );
-    });
+  // (d) A resumed first deploy is still provisioning: the skeleton save
+  // persists deployMode long before anything is actually stood up.
+  it('resuming an unfinished first deploy (status: deploying) still refuses', () => {
+    writeProject(proj, { deployMode: 'kubernetes', status: 'deploying' });
+    const result = run(['deploy', 'prod', '-y'], proj, home);
+
+    expect(
+      result.status,
+      `resume: expected non-zero exit. status=${result.status}\n${result.plain}`,
+    ).not.toBe(0);
+    expect(result.plain).toContain('License required');
+    expect(result.plain).toContain('Graphene');
+    expect(result.plain).toContain('Deploy mode: Kubernetes');
+  });
+
+  // (e) The legacy lifetime key keeps entitling everything, everywhere.
+  it('a legacy lifetime key in HOME clears the gate for k8s-ha provisioning', () => {
+    writeProject(proj);
+    writeLegacyLicense(home);
+
+    const result = run(
+      ['deploy', 'prod', '-provider', 'hetzner', '-mode', 'k8s-ha', '-y'],
+      proj,
+      home,
+    );
+    expect(
+      result.signal,
+      `legacy key: process was killed (likely hung)\n${result.plain}`,
+    ).toBeNull();
+    expect(result.plain, 'legacy key: must clear the gate').not.toContain('License required');
+    // Proves the run got PAST the gate rather than dying before it: an
+    // unlicensed run of this exact argv refuses (see the case above), so
+    // reaching any later stage at all is the entitlement working.
+    expect(
+      result.plain.trim().length,
+      'legacy key: expected output from the deploy flow',
+    ).toBeGreaterThan(0);
   });
 });

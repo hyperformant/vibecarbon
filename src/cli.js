@@ -253,10 +253,12 @@ async function main() {
   // COMMAND_GATES is gated HERE, pre-dispatch, so it can never ship
   // unguarded (COMMAND_GATES must classify every KNOWN_COMMAND — enforced
   // by tests/unit/licensing/command-gates.test.ts). No command is
-  // currently 'paid' — licensing is deploy-mode-based (deploy/backup/
-  // restore/failover/scale gate themselves in-flow via requirePaidTier()
-  // once their deploy mode is known; see src/lib/licensing/gate.js) — but
-  // this chokepoint stays wired up for a future command-wide paid feature.
+  // currently 'paid' — licensing follows the deploy tier, and only when
+  // PROVISIONING: `deploy` gates itself in-flow via
+  // requireProvisionEntitlement() once its deploy mode is known, and
+  // backup/restore/failover/scale never gate at all (see
+  // src/lib/licensing/gate.js) — but this chokepoint stays wired up for a
+  // future command-wide paid feature.
   // Ordering contract: the canonical "not in a project" refusal must win
   // over the license upsell (all paid commands are project-scoped), and
   // -h/-v invocations are never gated — shouldGate() handles the bypass.

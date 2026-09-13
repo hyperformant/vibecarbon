@@ -72,7 +72,6 @@ describe('resolveDeployMode', () => {
 
   it.each([
     ['compose', { deployMode: 'compose', ha: false }],
-    ['compose-ha', { deployMode: 'compose-ha', ha: true }],
     ['kubernetes', { deployMode: 'kubernetes', ha: false }],
     ['kubernetes-ha', { deployMode: 'kubernetes', ha: true }],
   ])('maps the interactive selection %s', async (selected, expected) => {
@@ -80,6 +79,42 @@ describe('resolveDeployMode', () => {
     const result = await resolveDeployMode(noFlags, {});
     expect(result).toEqual(expected);
     expect(clackMock.select).toHaveBeenCalledTimes(1);
+    clackMock.select.mockClear();
+  });
+
+  it('does not offer compose-ha in the picker', async () => {
+    // compose-ha stays a supported mode (existing environments keep working,
+    // the flag below still resolves, the e2e matrix still runs it) but it is
+    // no longer RECOMMENDED: Kubernetes HA is the HA answer the picker leads
+    // with. See src/lib/deploy/prompts.js MODE_OPTION_TIER.
+    clackMock.select.mockResolvedValueOnce('compose');
+    await resolveDeployMode(noFlags, {});
+
+    const options = clackMock.select.mock.calls[0][0].options as { value: string }[];
+    expect(options.map((o) => o.value)).toEqual(['compose', 'kubernetes', 'kubernetes-ha']);
+    clackMock.select.mockClear();
+  });
+
+  it('still resolves compose-ha when it is passed explicitly by flag', async () => {
+    const result = await resolveDeployMode({ ...noFlags, compose: true, ha: true }, {});
+    expect(result).toEqual({ deployMode: 'compose-ha', ha: true });
+    expect(clackMock.select).not.toHaveBeenCalled();
+  });
+
+  it('labels each picker choice with the benefit and the tier that unlocks it', async () => {
+    clackMock.select.mockResolvedValueOnce('compose');
+    await resolveDeployMode(noFlags, {});
+
+    const options = clackMock.select.mock.calls[0][0].options as {
+      value: string;
+      hint: string;
+    }[];
+    const hintFor = (value: string) => options.find((o) => o.value === value)?.hint ?? '';
+    expect(hintFor('compose')).toContain('Go live, Graphite');
+    expect(hintFor('kubernetes')).toContain('Scale on demand, Graphene');
+    expect(hintFor('kubernetes-ha')).toContain('Enterprise resiliency, Fullerene');
+    // The old copy paywalled Kubernetes at the wrong tier.
+    for (const o of options) expect(o.hint).not.toContain('requires Fullerene');
     clackMock.select.mockClear();
   });
 

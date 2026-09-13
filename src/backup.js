@@ -352,7 +352,6 @@ export async function run(args) {
   // their own TTY gate after the action is known, so the failure message
   // names exactly the flag the operator missed for *this* invocation.
   const { envName, envConfig, serverIp } = await resolveEnvContext({
-    command: 'backup',
     actionVerb: 'back up',
     envRequirement: 'name an environment to back up',
     values,

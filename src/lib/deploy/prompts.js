@@ -16,7 +16,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from '../dns-provider.js';
-import { requirePaidTier } from '../licensing/index.js';
+import { requireProvisionEntitlement } from '../licensing/index.js';
 import {
   getObjectStorageProvider,
   listProviders,
@@ -45,9 +45,15 @@ export { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN };
 // below — the option values themselves predate the tier-id vocabulary
 // ('kubernetes'/'kubernetes-ha' vs 'k8s'/'k8s-ha') so they don't line up
 // 1:1.
+//
+// compose-ha is deliberately absent: it remains a fully supported deploy
+// mode (existing environments keep working, `-mode compose-ha` still
+// resolves below, the e2e matrix still runs it) but it is no longer
+// RECOMMENDED, so the picker does not offer it. Kubernetes HA is the HA
+// answer we lead with; Compose HA is for providers without Kubernetes and
+// is selected explicitly.
 const MODE_OPTION_TIER = {
   compose: 'compose',
-  'compose-ha': 'compose-ha',
   kubernetes: 'k8s',
   'kubernetes-ha': 'k8s-ha',
 };
@@ -195,22 +201,17 @@ export async function resolveDeployMode(args, envConfig) {
     {
       value: 'compose',
       label: 'Docker Compose (Fast)',
-      hint: '1 VPS - Best for startups and internal tools',
-    },
-    {
-      value: 'compose-ha',
-      label: 'Docker Compose HA (Auto Failover)',
-      hint: '2 VPS - Simple failover without K8s complexity - requires Fullerene',
+      hint: '1 VPS - Best for startups and internal tools - Go live, Graphite',
     },
     {
       value: 'kubernetes',
       label: 'Kubernetes (Auto Scaling)',
-      hint: 'k3s + Autoscaling - Best for high-traffic apps - requires Fullerene',
+      hint: 'k3s + Autoscaling - Best for high-traffic apps - Scale on demand, Graphene',
     },
     {
       value: 'kubernetes-ha',
       label: 'Kubernetes HA (Auto Scaling + Failover)',
-      hint: 'Multi-region cluster - Maximum availability - requires Fullerene',
+      hint: 'Multi-region cluster - Maximum availability - Enterprise resiliency, Fullerene',
     },
   ];
   const options = allOptions.filter((opt) =>
@@ -227,8 +228,37 @@ export async function resolveDeployMode(args, envConfig) {
   }
 
   if (mode === 'kubernetes-ha') return { deployMode: 'kubernetes', ha: true };
-  if (mode === 'compose-ha') return { deployMode: 'compose-ha', ha: true };
   return { deployMode: mode, ha: false };
+}
+
+/**
+ * Whether this `deploy` invocation is PROVISIONING a new environment, as
+ * opposed to redeploying one that already exists.
+ *
+ * This is the whole behavioural rule of per-project licensing: a
+ * subscription buys the ability to stand a paid deploy mode UP. Once an
+ * environment exists, redeploying it (and backing it up, restoring it,
+ * failing it over, scaling it) is free forever, so a lapsed subscription can
+ * never strand a running production system.
+ *
+ * Two shapes count as provisioning:
+ *   - No `deployMode` persisted: a brand-new environment.
+ *   - `status: 'deploying'`: a first deploy that never finished. The
+ *     skeleton save writes `deployMode` early, BEFORE anything is actually
+ *     provisioned, so a resume would otherwise read as an existing
+ *     environment and walk straight past the gate.
+ *
+ * Called with the post-resolveProvider envConfig binding, which is the
+ * PERSISTED state of the environment — the skeleton save that records this
+ * run's deployMode happens later in the flow, after the gate.
+ *
+ * Fails closed: a missing envConfig is treated as provisioning.
+ *
+ * @param {{deployMode?: string, status?: string}} [envConfig]
+ * @returns {boolean}
+ */
+export function isProvisioningDeploy(envConfig) {
+  return !envConfig?.deployMode || envConfig.status === 'deploying';
 }
 
 /**
@@ -398,9 +428,16 @@ export async function gatherDeploymentConfig(args) {
   // Gate immediately after the deploy mode is known — for `deploy` this can
   // only happen mid-command (the architecture may be chosen interactively
   // above), so the upsell must live here rather than pre-dispatch. Fires
-  // before any region/DNS/credential prompts so an unlicensed operator
-  // never gets deep into the flow before hitting the wall.
-  requirePaidTier('deploy', resolveTier({ deployMode, ha }));
+  // before any region/DNS/credential prompts so an operator without an
+  // entitlement never gets deep into the flow before hitting the wall.
+  //
+  // Only PROVISIONING consults the license. Redeploying an environment that
+  // already exists is free at every tier, so the gate is skipped entirely
+  // for it — see isProvisioningDeploy above.
+  const deployTier = resolveTier({ deployMode, ha });
+  if (isProvisioningDeploy(envConfig)) {
+    await requireProvisionEntitlement({ deployTier, projectConfig });
+  }
 
   const isComposeDeploy = deployMode === 'compose' || deployMode === 'compose-ha';
   const config = {

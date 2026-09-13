@@ -241,7 +241,7 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
     clackMock.select.mockReset();
   });
 
-  it('keeps all four deploy-mode options for digitalocean (d4 lift: DO supports k8s-ha)', async () => {
+  it('offers every recommended deploy mode for digitalocean (d4 lift: DO supports k8s-ha)', async () => {
     clackMock.select.mockResolvedValueOnce('digitalocean'); // provider select
     const { envConfig } = await resolveProvider(noFlags, {});
     expect(envConfig.provider).toBe('digitalocean');
@@ -252,10 +252,11 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
 
     const modeCall = clackMock.select.mock.calls[1][0];
     const modeValues = modeCall.options.map((o: { value: string }) => o.value);
-    expect(modeValues).toEqual(['compose', 'compose-ha', 'kubernetes', 'kubernetes-ha']);
+    // compose-ha is supported but not recommended, so the picker omits it.
+    expect(modeValues).toEqual(['compose', 'kubernetes', 'kubernetes-ha']);
   });
 
-  it('keeps all four deploy-mode options for hetzner', async () => {
+  it('offers every recommended deploy mode for hetzner', async () => {
     clackMock.select.mockResolvedValueOnce('hetzner'); // provider select
     const { envConfig } = await resolveProvider(noFlags, {});
 
@@ -265,7 +266,6 @@ describe('gate interaction: resolveDeployMode filters by the POST-SELECT provide
     const modeCall = clackMock.select.mock.calls[1][0];
     expect(modeCall.options.map((o: { value: string }) => o.value)).toEqual([
       'compose',
-      'compose-ha',
       'kubernetes',
       'kubernetes-ha',
     ]);
