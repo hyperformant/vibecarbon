@@ -322,7 +322,7 @@ describe('terminology census', () => {
       expect(read(rel), `${rel}: Agency`).not.toMatch(/\bAgency\b/);
     }
     // The locale FAQ (not the template's own SaaS pricing cards, which
-    // legitimately reuse tier-shaped placeholder copy for the demo product —
+    // legitimately reuse tier-shaped placeholder copy for the demo product.
     // see the pricing-object carve-out in the file-level comment above)
     // states Vibecarbon's own license model and must not resurrect Agency.
     for (const f of LOCALE_FILES) {
@@ -362,7 +362,7 @@ describe('terminology census', () => {
     }
     // Scoped to the FAQ, not the whole locale file: the template's own SaaS
     // pricing cards (carbon/src/client/locales/en.json's "pricing" object)
-    // are a separate, deliberately untouched surface — the generated app's
+    // are a separate, deliberately untouched surface. The generated app's
     // own demo product copy, not a statement of Vibecarbon's license model.
     for (const f of LOCALE_FILES) {
       const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
