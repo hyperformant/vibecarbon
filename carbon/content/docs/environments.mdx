@@ -66,7 +66,7 @@ vibecarbon deploy staging -provider digitalocean -region nyc3 -mode compose -y
 
 `-provider` selects the cloud for a **new** environment, and `-region` takes that provider's own region ids. An environment keeps the provider it was first deployed with, so later deploys of the same environment don't repeat the flag. See [Choosing a provider](/docs/deployment#choosing-a-provider) for which modes and regions each cloud offers.
 
-Available modes: `compose`, `compose-ha` (multi-region with streaming replication), `k8s`, and `k8s-ha`. `compose` is free on Graphite; `compose-ha`, `k8s`, and `k8s-ha` require a Fullerene license. Mode availability varies by provider — `k8s-ha` is Hetzner-only today.
+Available modes: `compose`, `k8s`, and `k8s-ha`. `compose` is free on Graphite; `k8s` requires Graphene; `k8s-ha` requires Fullerene, which also covers Compose HA (`-mode compose-ha`, for providers without Kubernetes). Mode availability varies by provider; `k8s-ha` is Hetzner-only today.
 
 To re-tune bounds or worker server types on an existing cluster, run `vibecarbon scale`, and the wizard walks you through what's changeable. Power users can seed a server-type change with `-type`, using an id from that environment's provider catalog (e.g. `vibecarbon scale prod -type cx33 -y` on Hetzner).
 

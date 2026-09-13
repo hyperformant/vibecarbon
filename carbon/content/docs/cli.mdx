@@ -46,12 +46,13 @@ paid for being that command.
 | Deploy scenario | License |
 |-----------------|---------|
 | Single-server Docker Compose | None, always free |
-| Compose HA, Kubernetes, Kubernetes HA | Fullerene |
+| Kubernetes | Graphene |
+| Kubernetes HA | Fullerene (also covers Compose HA) |
 
-Only the commands that act on a deployed environment consult it at all:
-`deploy`, `backup`, `restore`, `failover`, and `scale`, each once it knows
-which scenario it is working on. Every other command, including all of
-`configure`, is free in every mode.
+Only provisioning a **new** environment into a paid deploy mode consults it.
+Redeploying an existing environment, and running `backup`, `restore`,
+`failover`, or `scale` on it, never requires a key. Every other command,
+including all of `configure`, is free in every mode.
 
 Run `vibecarbon activate <key>` to activate a license.
 
@@ -301,7 +302,7 @@ cluster, so there is nothing for it to do on Compose.
 
 Pre-conditions: the `gh` CLI must be authenticated. For stage 2 the cluster
 must already be deployed (`vibecarbon deploy <env>` with `-mode k8s` or
-`-mode k8s-ha`), which itself requires Fullerene.
+`-mode k8s-ha`), which itself requires Graphene (k8s) or Fullerene (k8s-ha).
 
 After stage 2, future commits to `main` reconcile through Flux automatically.
 The deploy path itself stays local-first: `vibecarbon deploy` continues to
@@ -365,8 +366,10 @@ in the environment, or when `VIBECARBON_TELEMETRY_DISABLED=1` is set.
 # Deploy
 
 Cloud infrastructure primitives. `destroy` is always free. `deploy`, `backup`,
-`restore`, `failover`, and `scale` are free on single-server Docker Compose;
-a Fullerene license is required for Compose HA, Kubernetes, or Kubernetes HA.
+`restore`, `failover`, and `scale` are free on single-server Docker Compose,
+and free on every existing environment: only provisioning a *new*
+environment into Kubernetes requires Graphene, or Kubernetes HA requires
+Fullerene, which also covers Compose HA.
 
 ## deploy
 
@@ -694,7 +697,7 @@ firewall entirely.
 
 ## activate
 
-Activate a license key (Fullerene tier; Agency customers also receive a Fullerene-tier key).
+Activate a license key (Graphene or Fullerene).
 
 ```bash
 # Prompts for key
@@ -704,7 +707,7 @@ vibecarbon activate
 vibecarbon activate vc-xxxxxxxx-signature...
 ```
 
-License keys start with `vc-`. Purchase a license at
+License keys start with `vc-` (legacy) or `vc2-` (current). Subscribe at
 [vibecarbon.com/#pricing](https://vibecarbon.com/#pricing).
 
 ---

@@ -40,6 +40,13 @@ const ROOT = join(import.meta.dirname, '..', '..', '..');
 //   third-party tools by their real licensing. The one ban that does reach
 //   it — named-framework compliance — is pinned by its own targeted check
 //   below, so the whole-file exemption doesn't leave that family unguarded.
+// - carbon/src/client/locales/en.json's "pricing" object (tier cards,
+//   taglines, CTAs, units): the generated app's own demo SaaS pricing page
+//   for the user's product, not a statement of Vibecarbon's license model.
+//   It reuses tier-shaped placeholder copy (including the retired Agency
+//   name) as example content and is deliberately left alone; only its "faq"
+//   object states Vibecarbon's own licensing and is checked directly by the
+//   pricing/tier assertions below.
 const SURFACES = [
   'README.md',
   'FEATURES.md',
@@ -306,38 +313,64 @@ describe('terminology census', () => {
     }
   });
 
-  it('tier naming is exactly Graphite / Fullerene / Agency where tiers appear', () => {
+  it('tier naming is Graphite / Graphene / Fullerene, never Agency, where tiers appear', () => {
     const readme = read('README.md');
     expect(readme).toMatch(/Graphite/);
+    expect(readme).toMatch(/Graphene/);
     expect(readme).toMatch(/Fullerene/);
-    expect(readme).toMatch(/\$149/);
+    for (const rel of SURFACES) {
+      expect(read(rel), `${rel}: Agency`).not.toMatch(/\bAgency\b/);
+    }
+    // The locale FAQ (not the template's own SaaS pricing cards, which
+    // legitimately reuse tier-shaped placeholder copy for the demo product —
+    // see the pricing-object carve-out in the file-level comment above)
+    // states Vibecarbon's own license model and must not resurrect Agency.
+    for (const f of LOCALE_FILES) {
+      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
+      const faqText = JSON.stringify(json.faq ?? {});
+      expect(faqText, `locales/${f} faq: Agency`).not.toMatch(/\bAgency\b/);
+    }
   });
 
-  it('launch pricing is phrased "retail $299", never "was $299"', () => {
-    // $299 is the standing retail price, not a price that was ever charged and
-    // then cut. "was $299" is a false scarcity claim about our own history —
-    // the kind of thing a consumer-protection regulator reads literally.
-    let qualifying = 0;
-    for (const rel of SURFACES) {
+  it('per-project subscription prices ($19 Graphene, $39 Fullerene) are stated in README and TERMS', () => {
+    for (const rel of ['README.md', 'TERMS.md']) {
       const text = read(rel);
-      if (!text.includes('$149') || !text.includes('$299')) continue;
-      qualifying++;
-      const hits = contextHits(text, /was \$299/gi);
-      expect(hits, `${rel}: ${hits.join(' | ')} — say "retail $299", not "was $299"`).toEqual([]);
-      expect(
-        text,
-        `${rel} pairs $149 with $299 but never says "retail $299" — the discount needs its ` +
-          'anchor spelled out, or the two numbers read as an unexplained contradiction.',
-      ).toContain('retail $299');
+      expect(text, `${rel}: $19 per project`).toMatch(/\$19 per project per month/);
+      expect(text, `${rel}: $39 per project`).toMatch(/\$39 per project per month/);
     }
-    // Every assertion above sits behind a `continue`: if the price pairing ever
-    // vanished from all surfaces this test would pass while checking nothing.
-    // README.md and TERMS.md both carry it today.
-    expect(
-      qualifying,
-      'No SURFACE pairs $149 with $299 any more. If pricing copy moved, move this guard with it ' +
-        'rather than leaving it green and inert.',
-    ).toBeGreaterThan(0);
+  });
+
+  it('the three tier taglines appear verbatim in README and TERMS', () => {
+    for (const rel of ['README.md', 'TERMS.md']) {
+      const text = read(rel);
+      expect(text, `${rel}: Go live.`).toContain('Go live.');
+      expect(text, `${rel}: Scale on demand.`).toContain('Scale on demand.');
+      expect(text, `${rel}: Enterprise resiliency.`).toContain('Enterprise resiliency.');
+    }
+  });
+
+  it('retired one-time/legacy pricing language ("one-time", "$149", "retail $299") never appears in SURFACES or the locale FAQ', () => {
+    const patterns: Array<[string, RegExp]> = [
+      ['one-time', /one-time/i],
+      ['$149', /\$149\b/],
+      ['retail $299', /retail \$299/i],
+    ];
+    for (const rel of SURFACES) {
+      for (const [label, pattern] of patterns) {
+        expect(read(rel), `${rel}: ${label}`).not.toMatch(pattern);
+      }
+    }
+    // Scoped to the FAQ, not the whole locale file: the template's own SaaS
+    // pricing cards (carbon/src/client/locales/en.json's "pricing" object)
+    // are a separate, deliberately untouched surface — the generated app's
+    // own demo product copy, not a statement of Vibecarbon's license model.
+    for (const f of LOCALE_FILES) {
+      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
+      const faqText = JSON.stringify(json.faq ?? {});
+      for (const [label, pattern] of patterns) {
+        expect(faqText, `locales/${f} faq: ${label}`).not.toMatch(pattern);
+      }
+    }
   });
 
   // Was a blanket ban while the repo was still moving orgs. The move has

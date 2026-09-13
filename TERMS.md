@@ -1,6 +1,6 @@
 # Vibecarbon Usage Terms
 
-**Effective date:** 2026-04-14
+**Effective date:** 2026-09-12
 
 These terms govern use of the **Vibecarbon distributed package** (`npm install -g vibecarbon`, `npx vibecarbon`). They do not apply to the CLI source code, which is released under the Functional Source License 1.1 with MIT future license (FSL-1.1-MIT) and may be built and used freely for any non-competing purpose.
 
@@ -8,73 +8,60 @@ These terms govern use of the **Vibecarbon distributed package** (`npm install -
 
 ## 1. Two-Track Model
 
-Vibecarbon operates on two parallel tracks:
-
-**Source code (FSL-1.1-MIT):** The CLI source code is Fair Source. Anyone may clone, build, modify, and run Vibecarbon from source for any purpose except offering a product or service that competes with Vibecarbon, at no cost. Each release irrevocably converts to the MIT license two years after publication.
-
-**Distributed package:** The pre-built `vibecarbon` npm package includes license enforcement based on deploy mode, and on deploy mode only. Single-server Docker Compose deploys (including `deploy`, `backup`, `restore`, `failover`, and `scale` on that mode) are free, and `upgrade` is free for every tier. Advanced deploy modes (Compose HA, Kubernetes, Kubernetes HA) require a valid license key. No command requires a license for being that command.
+The CLI source code is Fair Source (FSL-1.1-MIT): free to clone, build, modify, and run for any non-competing purpose, and each release converts to the MIT license two years after publication. The distributed `vibecarbon` npm package enforces a license only when provisioning a new environment into a paid deploy mode.
 
 ---
 
 ## 2. License Tiers
 
-### Graphite (Free)
-No license key required. Includes:
-- `create`, `up`, `down`, `reset`, `status`, `add`, `remove`, `destroy`, `upgrade` (always free, on every tier)
-- Single-server Docker Compose production deploys, including `deploy`, `backup`, `restore`, `failover`, and `scale` on that mode
-- GitHub Actions CI/CD (build and deploy workflows), in every deploy mode
-- All optional add-ons (observability, redis)
-- Unlimited local projects
+| Tier | Tagline | What it is for | Price | Deploy mode |
+|------|---------|-----------------|-------|--------------|
+| **Graphite** | Go live. | Local development and single-server production | Free, no key | Compose |
+| **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
+| **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
 
-### Fullerene: $149 (retail $299), one-time purchase
-Advanced deploy modes for your own products. Includes all Graphite features, plus:
-- Compose HA, Kubernetes, and Kubernetes HA deploy modes (`deploy`, `backup`, `restore`, `failover`, and `scale` on those modes)
-- Flux GitOps, which runs on those Kubernetes modes
-- Unlimited servers and projects
-
-Fullerene covers deploying infrastructure for your own commercial products, SaaS applications, and startups. The test is whether you are deploying for your own benefit. It does **not** cover deploying infrastructure on behalf of others.
-
-### Agency: Contact us
-Deploy for clients and enterprise. A contact-us sales channel, priced per conversation and sold via signed agreement, with no self-serve checkout. Includes all Fullerene deploy modes, plus a contractual grant of the rights the public license withholds, authorizing:
-- Deploying infrastructure for clients, employers, or third-party organizations
-- White-labeling or building apps on behalf of an enterprise
-- Agency workflows where infrastructure is owned or operated by someone other than the license holder
-- Embedding Vibecarbon in your own product, or offering Vibecarbon-powered deployment as a commercial service to others (what the public FSL license defines as Competing Use)
-
-Agency customers receive a Fullerene-tier license key; the additional rights are contractual, granted by the signed agreement rather than the key.
-
-**The test:** Is this infrastructure for your own product? Fullerene. Someone else's? Agency.
+Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. `create`, `up`, `down`, `reset`, `status`, `add`, `remove`, `destroy`, and `upgrade` are free on every tier. Subscribe at **https://vibecarbon.com/#pricing**.
 
 ---
 
-## 3. Generated Project Code
+## 3. Per-Project Rule
+
+A subscription is per project. Only provisioning a new environment into a paid deploy mode is checked. Redeploy, backup, restore, failover, and scale never require a key. A key may be used by anyone working on that project, client work included.
+
+---
+
+## 4. Updates and Lapse
+
+A key covers every CLI release published on or before its paid-through date. If you stop paying, you keep using those releases on that project. The key keeps working until the paid-through date plus a short grace period ends. Nothing is revoked at that point either: existing deployments keep running, because the license gates the CLI, not your own cloud account. Once the grace period ends, provisioning a new environment into a paid deploy mode on that project requires a current key again.
+
+---
+
+## 5. Legacy Keys
+
+Keys bought before subscriptions (the legacy Fullerene license) are lifetime: every mode, every project. They need no renewal and never lapse.
+
+---
+
+## 6. Generated Project Code
 
 Code generated by Vibecarbon (`carbon/` template output) is released under the MIT License. You own it outright. No attribution, no runtime dependency on Vibecarbon, no restrictions on commercial use of the generated output. The generated code is not subject to these terms.
 
 ---
 
-## 4. Restrictions
+## 7. Restrictions
 
 You may not:
-- Use the distributed package's advanced deploy modes without a valid license key
-- Share, resell, or transfer license keys
-- Reverse-engineer or remove license enforcement mechanisms from the distributed package
-
-You may:
-- Build from source and use freely for any non-competing purpose under FSL-1.1-MIT
-- Use the generated MIT-licensed project code without restriction
-- Run unlimited projects and deployments within your licensed tier
+- Remove or disable license enforcement from the distributed package
+- Use one project's subscription key for a different project
 
 ---
 
-## 5. Warranty Disclaimer
+## 8. Competing Use
+
+Embedding Vibecarbon in a competing product is Competing Use under the Functional Source License (see `LICENSE`); direct questions to **hello@vibecarbon.com**.
+
+---
+
+## 9. Warranty Disclaimer
 
 The software is provided "as is", without warranty of any kind. In no event shall the authors be liable for any claim, damages, or other liability arising from use of the software.
-
----
-
-## 6. Contact
-
-Questions about licensing: **hello@vibecarbon.com**
-Purchase a license: **https://vibecarbon.com/#pricing**
-Agency & custom terms: **hello@vibecarbon.com**

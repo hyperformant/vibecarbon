@@ -15,7 +15,7 @@ Business vision and brand design guidelines.
     - Self-contained, Cloud agnostic, Portable
     - Fully automated: CICD, Scaling, Failover, Backups
     - Opinionated, but modular core stack
-- **Pricing Strategy:** Fair Source CLI (FSL-1.1-MIT: each release converts to the MIT license two years after publication) with one-time license tiers: Graphite (free, local dev + single-server production deploys), Fullerene ($149, advanced deploy modes for your own products), Agency (contact us, deploy for clients and enterprise: white-label/resale work). Generated project code is MIT: users own their apps.
+- **Pricing Strategy:** Fair Source CLI (FSL-1.1-MIT: each release converts to the MIT license two years after publication) with per-project subscriptions: Graphite (free, local dev + single-server production deploys), Graphene ($19 per project per month, Kubernetes), Fullerene ($39 per project per month, Kubernetes HA; also covers Compose HA). Generated project code is MIT: users own their apps.
 
 ---
 

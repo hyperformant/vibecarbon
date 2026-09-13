@@ -240,10 +240,10 @@ Same family, different starting point. If your app already exists, those tools a
 
 ## Architecture
 
-One CLI, four deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on.
+One CLI, three deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on. Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with `-mode compose-ha`.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/architecture.svg" alt="vibecarbon deploy fans out to four scenarios: compose (one server), compose-ha (primary + standby, streaming replication), k8s (k3s cluster, autoscaling workers), and k8s-ha (multi-region, one-command failover), all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway" width="880" />
+  <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/architecture.svg" alt="vibecarbon deploy fans out to three scenarios: compose (one server), k8s (k3s cluster, autoscaling workers), and k8s-ha (multi-region, one-command failover), all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway" width="880" />
 </p>
 
 ---
@@ -264,7 +264,7 @@ One CLI, four deploy modes, picked per environment. Every mode includes automate
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean is fully supported for all four modes (compose, compose-ha, k8s, and k8s-ha) with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose` and `compose-ha`, with the same CLI and e2e gate. The remaining tiers aren't built for them yet.
+DigitalOcean is fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining tiers aren't built for them yet. Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with `-mode compose-ha`.
 
 ### Integration Guides
 
@@ -309,15 +309,15 @@ _Latest green CI runs: Hetzner Cloud `357e223` (2026-09-01) · DigitalOcean `48e
 
 The CLI is Fair Source under the [Functional Source License 1.1 with MIT future license](./LICENSE). **Building from source is free for any non-competing use, and every release converts to the MIT license two years after publication.**
 
-Using the distributed `vibecarbon` package requires a license for advanced deploy modes:
+Using the distributed `vibecarbon` package is a per-project subscription:
 
-| Tier | Price | Who |
-|------|-------|-----|
-| **Graphite** | Free | Local dev, all add-ons, GitHub Actions CI/CD, single-server Compose production deploys, and `upgrade` (free on every tier) |
-| **Fullerene** | $149 (retail $299) | Compose HA, Kubernetes, Kubernetes HA, and Flux GitOps on them, for your own products |
-| **Agency** | Contact us | Deploy for clients and enterprise, white-label or resell |
+| Tier | Tagline | What it is for | Price | Deploy mode |
+|------|---------|-----------------|-------|--------------|
+| **Graphite** | Go live. | Local dev, all add-ons, GitHub Actions CI/CD, single-server production, and `upgrade` (free on every tier) | Free, no key | Compose |
+| **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
+| **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
 
-See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
+Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. A subscription is checked only when provisioning a new environment into a paid deploy mode; redeploy, backup, restore, failover, and scale never require a key. Keys bought before subscriptions (the legacy Fullerene license) are lifetime: every mode, every project. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
 
 ---
 

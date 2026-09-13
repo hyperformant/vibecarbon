@@ -56,7 +56,7 @@ Integration tests use a shared CLI harness at `tests/integration/_harness/`. Rea
 - `tests/integration/_harness/real-project.ts` — `realProject()` materializes a real `vibecarbon create` output (cloned from a per-process cache on the second call onward).
 - `tests/integration/_harness/build-fixture.ts` — `buildFixture()` synthesizes a minimal project (faster, used when you don't need a full create).
 - `tests/integration/_harness/install-stubs.ts` — `installStubs({ hetzner, cloudflare })` overrides `globalThis.fetch`. Modes: `success` / `capacity-exhausted` / `rate-limited` / `not-found` (hetzner); `success` / `rate-limited` (cloudflare). Unmatched URLs throw — no silent prod hits.
-- `tests/integration/_harness/run-cli.ts` — `runCli(verb, flags, opts)` spawns `node src/cli.js`, strips ANSI, returns `{ exitCode, stdout, stderr }`. Sets `HOME` to a per-process tmp with a fake Fullerene license activated, so paid-tier commands reach their flag-parsing logic.
+- `tests/integration/_harness/run-cli.ts` — `runCli(verb, flags, opts)` spawns `node src/cli.js`, strips ANSI, returns `{ exitCode, stdout, stderr }`. Sets `HOME` to a per-process tmp with a legacy lifetime test key activated, so paid-tier commands reach their flag-parsing logic.
 - `tests/integration/_harness/assertions.ts` — `assertSuccess`, `assertExitWith`, `assertFileWritten`, `assertFileMissing`. Throw plain `Error` with a relevant slice of the run result.
 
 The harness is in-process — it stubs `fetch`, not subprocess execs. If your CLI path shells out to something real (e.g. `pulumi`, `docker`, `kubectl`), the integration test will hit the real binary. For pure cloud HTTP, the stubs are sufficient.
