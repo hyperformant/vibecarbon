@@ -326,6 +326,71 @@ describe('per-project license storage', () => {
       expect(license.slot).toBe('project');
     });
 
+    it('C1: an edited file paidThrough cannot outlive the signed date', () => {
+      // The key is signed paidThrough 2026-01-31. If getLicense trusted the
+      // file's own paidThrough field, editing it to 2099-12-31 would keep
+      // a lapsed subscription looking current forever.
+      writeProjectLicenseFile({
+        key: signV2Key(privateKey, {
+          customerId,
+          projectId: PROJECT_ID,
+          paidThrough: '2026-01-31',
+        }),
+        format: 'v2',
+        tier: 'fullerene',
+        customerId,
+        projectId: PROJECT_ID,
+        paidThrough: '2099-12-31',
+        activatedAt: '2026-01-01T00:00:00.000Z',
+        source: 'manual',
+      });
+
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      expect(license.paidThrough).toBe('2026-01-31');
+
+      const verdict = evaluateEntitlement({
+        license,
+        deployTier: 'k8s',
+        projectId: PROJECT_ID,
+        releaseDate: '2026-09-13',
+      });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.reason).toBe('lapsed');
+    });
+
+    it('C1: an edited file projectId cannot claim a key signed for another project', () => {
+      // The key is signed for otherProjectId. If getLicense trusted the
+      // file's own projectId field, editing it to PROJECT_ID would let a
+      // key bought for one project provision a different one.
+      const otherProjectId = '99999999-9999-9999-9999-999999999999';
+      writeProjectLicenseFile({
+        key: signV2Key(privateKey, {
+          customerId,
+          projectId: otherProjectId,
+          paidThrough: '2026-12-31',
+        }),
+        format: 'v2',
+        tier: 'fullerene',
+        customerId,
+        projectId: PROJECT_ID,
+        paidThrough: '2026-12-31',
+        activatedAt: '2026-01-01T00:00:00.000Z',
+        source: 'manual',
+      });
+
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      expect(license.active).toBe(false);
+
+      const verdict = evaluateEntitlement({
+        license,
+        deployTier: 'k8s-ha',
+        projectId: PROJECT_ID,
+        releaseDate: '2026-09-13',
+      });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.reason).toBe('wrong-project');
+    });
+
     it('a corrupt project file yields no-license but hasStoredLicense stays true', () => {
       writeFileSync(join(projectDir, '.vibecarbon.license'), '{ this is not json');
 

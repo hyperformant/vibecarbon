@@ -215,9 +215,15 @@ function buildLicenseResult({
  * and its `projectId` matches this project's manifest. Otherwise, no
  * license (Graphite).
  *
- * A v2-shaped key found in the LEGACY slot (validator.js defaults to
- * format 'v1' until B4's parser ships) is never treated as global — it
+ * A v2-shaped key found in the LEGACY slot is never treated as global — it
  * only counts for its own project, same as the project slot.
+ *
+ * Entitlement fields (`projectId`, `paidThrough`, `tier`) are ALWAYS derived
+ * from the verified `validation`, never from the stored file's own fields.
+ * The stored file is untrusted input: only `key` is cryptographically
+ * checked, so `activatedAt`/`source` may be read from it for display, but
+ * nothing that feeds evaluateEntitlement() may come from anywhere but a key
+ * that just verified.
  *
  * @param {{ projectDir?: string, stateDir?: string, publicKeyPem?: string }} [options]
  * @returns {object} License information with tier and features
@@ -267,29 +273,25 @@ export function getLicense({ projectDir = process.cwd(), stateDir, publicKeyPem 
 
   const projectPath = projectLicensePath(projectDir);
   const projectStored = readJsonFileOrNull(projectPath);
-  if (projectStored?.key && projectStored.format === 'v2') {
-    const storedProjectId = normalizeProjectId(projectStored.projectId);
-    if (storedProjectId && storedProjectId === currentProjectId) {
-      const validation = validateLicenseKey(projectStored.key, { publicKeyPem });
-      if (validation.valid) {
+  if (projectStored?.key) {
+    const validation = validateLicenseKey(projectStored.key, { publicKeyPem });
+    if (validation.valid && validation.format === 'v2') {
+      const keyProjectId = normalizeProjectId(validation.projectId);
+      if (keyProjectId && keyProjectId === currentProjectId) {
         return buildLicenseResult({
           validation,
           stored: projectStored,
           format: 'v2',
-          projectId: storedProjectId,
-          paidThrough: projectStored.paidThrough ?? null,
+          projectId: keyProjectId,
+          paidThrough: validation.paidThrough,
           slot: 'project',
           storedAt: projectPath,
         });
       }
-    } else {
       // Routing is unchanged: this key still grants nothing. The id named
       // comes from the SIGNED key, not the file's own projectId field, so an
       // edited file cannot choose what the upsell prints.
-      const validation = validateLicenseKey(projectStored.key, { publicKeyPem });
-      if (validation.valid) {
-        mismatchedProjectId ??= normalizeProjectId(validation.projectId);
-      }
+      mismatchedProjectId ??= keyProjectId;
     }
   }
 
