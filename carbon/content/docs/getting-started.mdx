@@ -83,12 +83,14 @@ Deploying on a single Docker Compose server requires no license. Kubernetes and 
 
 Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
 
-If you're deploying single-server Docker Compose, skip straight to `deploy`; no license needed. Kubernetes and Kubernetes HA need a subscription key; activate it first:
+If you're deploying single-server Docker Compose, skip straight to `deploy`; no license needed. Kubernetes and Kubernetes HA need a subscription key; run `activate` from inside this project's directory first:
 
 ```bash
 vibecarbon activate <your-key>
 vibecarbon deploy
 ```
+
+Activating writes `.vibecarbon.license` into the project. Commit it and share it with your team; anyone working on this project can then deploy without activating separately. A key covers every CLI release published on or before its paid-through date, so if a subscription lapses, deploys keep working until a newer release ships. Run `vibecarbon activate -refresh` to pull a renewed key once you've resubscribed.
 
 The bare `deploy` command opens a guided prompt that walks you through environment selection, mode (`compose`, `k8s`, or `k8s-ha`; `compose-ha` is also available, pass it explicitly with `-mode compose-ha`), region, and other settings. Behind the scenes it builds your app, pushes container images, and applies your infrastructure configuration. Traefik handles SSL certificates automatically via Let's Encrypt.
 

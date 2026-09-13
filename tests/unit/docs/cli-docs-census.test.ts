@@ -23,6 +23,7 @@ import { COMMAND_GATES, PAID_TIERS } from '../../../src/lib/licensing/gate.js';
 const ROOT = process.cwd();
 const CLI_DOC = join(ROOT, 'carbon', 'content', 'docs', 'cli.mdx');
 const doc = readFileSync(CLI_DOC, 'utf-8');
+const readme = readFileSync(join(ROOT, 'README.md'), 'utf-8');
 
 /**
  * Commands the CLI actually dispatches, read from its switch. Matches any
@@ -93,5 +94,15 @@ describe('CLI reference states licensing by scenario, not by command', () => {
       `These rows gate a COMMAND rather than a deploy scenario: ${offenders.join(', ')}. ` +
         'Licensing follows the deploy tier; rewrite the row in terms of the scenario.',
     ).toEqual([]);
+  });
+
+  it('documents activate -refresh and the committed .vibecarbon.license file', () => {
+    for (const [name, text] of [
+      ['cli.mdx', doc],
+      ['README.md', readme],
+    ] as const) {
+      expect(text, `${name} is missing 'activate -refresh'`).toContain('activate -refresh');
+      expect(text, `${name} is missing '.vibecarbon.license'`).toContain('.vibecarbon.license');
+    }
   });
 });

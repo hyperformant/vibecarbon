@@ -217,7 +217,7 @@ export async function runActivate(args) {
     s.stop('License validation failed');
     p.log.error(c.error(`Error: ${result.error}`));
     p.log.info('');
-    p.log.info(`${c.dim('Purchase a license at')} ${c.info('https://vibecarbon.com/#pricing')}`);
+    p.log.info(`${c.dim('Subscribe at')} ${c.info('https://vibecarbon.com/pricing')}`);
     process.exit(1);
   }
 

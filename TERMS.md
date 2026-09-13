@@ -20,7 +20,7 @@ The CLI source code is Fair Source (FSL-1.1-MIT): free to clone, build, modify, 
 | **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
 | **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
 
-Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. `create`, `up`, `down`, `reset`, `status`, `add`, `remove`, `destroy`, and `upgrade` are free on every tier. Subscribe at **https://vibecarbon.com/#pricing**.
+Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. `create`, `up`, `down`, `reset`, `status`, `add`, `remove`, `destroy`, and `upgrade` are free on every tier. Subscribe at **https://vibecarbon.com/pricing**.
 
 ---
 
@@ -32,7 +32,7 @@ A subscription is per project. Only provisioning a new environment into a paid d
 
 ## 4. Updates and Lapse
 
-A key covers every CLI release published on or before its paid-through date. If you stop paying, you keep using those releases on that project. The key keeps working until the paid-through date plus a short grace period ends. Nothing is revoked at that point either: existing deployments keep running, because the license gates the CLI, not your own cloud account. Once the grace period ends, provisioning a new environment into a paid deploy mode on that project requires a current key again.
+A key covers every CLI release published on or before its paid-through date. That date already includes 14 days of grace past the end of the billing period it paid for, so there is no separate grace period on top of it. If you stop paying, releases published on or before the paid-through date keep provisioning on that project, indefinitely; only a release published after that date needs a current key. Nothing is ever revoked from a project already provisioned: existing deployments keep running, because the license gates the CLI, not your own cloud account.
 
 ---
 

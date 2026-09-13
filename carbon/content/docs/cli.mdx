@@ -697,7 +697,11 @@ firewall entirely.
 
 ## activate
 
-Activate a license key (Graphene or Fullerene).
+Activate a license key (Graphene or Fullerene). A `vc2-` key is scoped to
+one project, so run `activate` from inside that project's directory; it
+writes `.vibecarbon.license`, which should be committed and shared with
+your team so anyone working on the project can deploy without activating
+separately.
 
 ```bash
 # Prompts for key
@@ -705,10 +709,20 @@ vibecarbon activate
 
 # Key seeded
 vibecarbon activate vc-xxxxxxxx-signature...
+
+# Pull a renewed key for this project's stored license
+vibecarbon activate -refresh
 ```
 
-License keys start with `vc-` (legacy) or `vc2-` (current). Subscribe at
-[vibecarbon.com/#pricing](https://vibecarbon.com/#pricing).
+| Flag | Description |
+|------|-------------|
+| `-refresh` | Ask vibecarbon.com for a renewed key covering this project's stored license, and store it if it verifies |
+
+License keys start with `vc-` (legacy) or `vc2-` (current). A key covers
+every CLI release published on or before its paid-through date, so a
+lapsed subscription keeps working on that project until a newer release
+ships. Subscribe at
+[vibecarbon.com/pricing](https://vibecarbon.com/pricing).
 
 ---
 
@@ -722,11 +736,15 @@ vibecarbon deactivate
 
 # Skip confirmation
 vibecarbon deactivate -y
+
+# Remove both the project key and the legacy key
+vibecarbon deactivate -all
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-y` | Skip confirmation prompt |
+| `-all` | Remove every stored license, project and legacy |
 
 ---
 

@@ -149,8 +149,8 @@ vibecarbon <command> [options]
 
 | Command | What it does |
 | :------ | :----------- |
-| **`activate [key]`** | Activate a Fullerene license key (unlocks HA + k8s modes) |
-| **`deactivate`** | Deactivate the current license |
+| **`activate [key]`** | Activate a Graphene or Fullerene license key for this project (unlocks Kubernetes and/or HA modes); `-refresh` pulls a renewed key |
+| **`deactivate`** | Deactivate the current license; `-all` removes every stored key |
 
 ### Debug: look under the hood
 
@@ -240,7 +240,7 @@ Same family, different starting point. If your app already exists, those tools a
 
 ## Architecture
 
-One CLI, three deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on. Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with `-mode compose-ha`.
+One CLI, three deploy modes, picked per environment. Every mode includes automated SSL and backups; monitoring dashboards are an optional add-on. Compose HA gives the same high-availability architecture as Kubernetes HA without needing a Kubernetes cluster, so it runs on every provider, including ones with no Kubernetes support at all; select it explicitly with `-mode compose-ha`.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/hyperformant/vibecarbon/main/docs/assets/architecture.svg" alt="vibecarbon deploy fans out to three scenarios: compose (one server), k8s (k3s cluster, autoscaling workers), and k8s-ha (multi-region, one-command failover), all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway" width="880" />
@@ -264,7 +264,7 @@ One CLI, three deploy modes, picked per environment. Every mode includes automat
 | [DigitalOcean](./docs/deploy-digitalocean.md) | Droplets and Spaces, with Americas, Europe, and Asia-Pacific regions |
 | [Kubernetes README](./carbon/k8s/README.md) | K8s autoscaling, worker bounds configuration, HA cluster setup |
 
-DigitalOcean is fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining tiers aren't built for them yet. Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with `-mode compose-ha`.
+DigitalOcean is fully supported for `compose`, `k8s`, and `k8s-ha` with the same CLI, the same lifecycle, and the same e2e gate as Hetzner. Linode, Vultr, and Scaleway are supported for `compose`, with the same CLI and e2e gate. The remaining tiers aren't built for them yet, though Compose HA is available on every provider regardless (see Architecture above).
 
 ### Integration Guides
 
@@ -317,7 +317,7 @@ Using the distributed `vibecarbon` package is a per-project subscription:
 | **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
 | **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
 
-Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. A subscription is checked only when provisioning a new environment into a paid deploy mode; redeploy, backup, restore, failover, and scale never require a key. Keys bought before subscriptions (the legacy Fullerene license) are lifetime: every mode, every project. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
+Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. A subscription is checked only when provisioning a new environment into a paid deploy mode; redeploy, backup, restore, failover, and scale never require a key. Run `vibecarbon activate <key>` from inside the project directory the key was issued for; it writes `.vibecarbon.license`, which should be committed and shared with your team. A key covers every CLI release published on or before its paid-through date, so a lapsed subscription keeps working on that project until a newer release ships; `vibecarbon activate -refresh` pulls a renewed key once you've resubscribed. Keys bought before subscriptions (the legacy Fullerene license) are lifetime: every mode, every project. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
 
 ---
 
