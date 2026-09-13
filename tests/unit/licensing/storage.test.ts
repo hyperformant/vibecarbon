@@ -3,17 +3,16 @@
  * the new `<projectDir>/.vibecarbon.license` project slot, and the routing
  * between them.
  *
- * v2 keys cannot be parsed until B4 (validator.js only understands v1
- * keys). So the "valid" cases below hand-write the project-slot FILE with
- * the real B4 JSON shape (`format: "v2"`, `projectId`, `paidThrough`, ...)
- * but put a genuinely-signed V1-shaped key string in its `key` field,
+ * B4 shipped the real v2 parser, so the "valid" project-slot cases below
+ * write a genuinely-signed v2 key (`vc2-...`) into the file's `key` field,
  * validated via an injected `publicKeyPem` against an ephemeral keypair
- * (see signature-verification.test.ts). Routing off the project slot is
- * driven by the STORED FILE's own `format`/`projectId` fields, not by
- * anything validateLicenseKey derives — that's exactly what lets this
- * round-trip today without a real v2 parser. The "ignored / corrupt" cases
- * don't need a valid key at all, so those hand-write `format: "v2"` files
- * with garbage or mismatched content directly.
+ * (see signature-verification.test.ts). getLicense()'s routing off the
+ * project slot is still driven by the STORED FILE's own `projectId`/
+ * `paidThrough` fields, not by anything validateLicenseKey derives from the
+ * key string — validateLicenseKey is only asked whether the key is
+ * cryptographically valid at all. The "ignored / corrupt" cases don't need
+ * a valid key at all, so those hand-write `format: "v2"` files with garbage
+ * or mismatched content directly.
  */
 import { sign as edSign, generateKeyPairSync } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -27,6 +26,7 @@ import {
   hasStoredLicense,
   listStoredLicenses,
 } from '../../../src/lib/licensing/index.js';
+import { signedMessage } from '../../../src/lib/licensing/validator.js';
 
 function makeKeypair() {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -40,6 +40,23 @@ function signKey(privateKey: ReturnType<typeof makeKeypair>['privateKey'], custo
   const message = `f-${customerId}`;
   const signatureHex = edSign(null, Buffer.from(message), privateKey).toString('hex');
   return `vc-f-${customerId}-${signatureHex}`;
+}
+
+/** Mint a genuine `vc2-...` key so project-slot round trips exercise the real B4 parser. */
+function signV2Key(
+  privateKey: ReturnType<typeof makeKeypair>['privateKey'],
+  {
+    tierChar = 'f',
+    customerId,
+    projectId,
+    paidThrough,
+  }: { tierChar?: string; customerId: string; projectId: string; paidThrough: string },
+) {
+  const projectId32 = projectId.replace(/-/g, '').toLowerCase();
+  const yyyymmdd = paidThrough.replace(/-/g, '');
+  const message = signedMessage({ format: 'v2', tierChar, customerId, projectId, paidThrough });
+  const signatureHex = edSign(null, Buffer.from(message), privateKey).toString('hex');
+  return `vc2-${tierChar}-${customerId}-${projectId32}-${yyyymmdd}-${signatureHex}`;
 }
 
 describe('per-project license storage', () => {
@@ -69,6 +86,11 @@ describe('per-project license storage', () => {
 
   function validKey() {
     return signKey(privateKey, customerId);
+  }
+
+  /** A genuine v2 key for PROJECT_ID, fullerene, paid through 2026-12-31. */
+  function validV2Key() {
+    return signV2Key(privateKey, { customerId, projectId: PROJECT_ID, paidThrough: '2026-12-31' });
   }
 
   function writeProjectLicenseFile(data: Record<string, unknown>) {
@@ -111,7 +133,7 @@ describe('per-project license storage', () => {
     it('legacy wins when both slots exist', () => {
       activateLicense(validKey(), { projectDir, stateDir, publicKeyPem });
       writeProjectLicenseFile({
-        key: validKey(),
+        key: validV2Key(),
         format: 'v2',
         tier: 'fullerene',
         customerId,
@@ -130,7 +152,7 @@ describe('per-project license storage', () => {
   describe('project slot', () => {
     it('round trips: written via activateLicense-style file, read back active/v2', () => {
       writeProjectLicenseFile({
-        key: validKey(),
+        key: validV2Key(),
         format: 'v2',
         tier: 'fullerene',
         customerId,
@@ -171,7 +193,7 @@ describe('per-project license storage', () => {
 
     it('projectId comparison is case-insensitive', () => {
       writeProjectLicenseFile({
-        key: validKey(),
+        key: validV2Key(),
         format: 'v2',
         tier: 'fullerene',
         customerId,
@@ -235,7 +257,7 @@ describe('per-project license storage', () => {
 
     it('a project key with no legacy key falls back to no-license, never throws', () => {
       writeProjectLicenseFile({
-        key: validKey(),
+        key: validV2Key(),
         format: 'v2',
         tier: 'fullerene',
         customerId,
@@ -263,7 +285,7 @@ describe('per-project license storage', () => {
     it('is true when only the project file exists', () => {
       expect(hasStoredLicense({ projectDir, stateDir })).toBe(false);
       writeProjectLicenseFile({
-        key: validKey(),
+        key: validV2Key(),
         format: 'v2',
         tier: 'fullerene',
         customerId,
@@ -289,7 +311,7 @@ describe('per-project license storage', () => {
     function seedBoth() {
       activateLicense(validKey(), { projectDir, stateDir, publicKeyPem });
       writeProjectLicenseFile({
-        key: validKey(),
+        key: validV2Key(),
         format: 'v2',
         tier: 'fullerene',
         customerId,

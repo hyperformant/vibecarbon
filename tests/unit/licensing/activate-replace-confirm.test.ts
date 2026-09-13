@@ -32,25 +32,39 @@ const licensingMock = vi.hoisted(() => ({
   getLicense: vi.fn(),
   activateLicense: vi.fn(),
   deactivateLicense: vi.fn(),
+  listStoredLicenses: vi.fn(),
 }));
 vi.mock('../../../src/lib/licensing/index.js', () => licensingMock);
 vi.mock('../../../src/lib/cli/intro.js', () => ({ introCommand: vi.fn() }));
 
 import { runActivate } from '../../../src/activate.js';
 
-/** An operator who already holds a working license. */
-function withActiveLicense() {
-  licensingMock.getLicense.mockReturnValue({
-    active: true,
-    displayName: 'Fullerene',
-    customerId: 'cus_123',
-  });
+// A well-formed v1 key. Its content is never validated in these tests -
+// activateLicense is mocked - only its `vc-` prefix matters, since that is
+// what activate.js reads to decide which stored slot to check.
+const V1_KEY = `vc-f-cafebabe-${'a'.repeat(128)}`;
+
+/**
+ * An operator who already holds a working legacy (v1) license: entering
+ * another v1 key targets the SAME (legacy) slot, so "Replace?" applies.
+ */
+function withActiveLegacyLicense() {
+  licensingMock.listStoredLicenses.mockReturnValue([
+    {
+      slot: 'legacy',
+      path: '/fake/.vibecarbon/license',
+      valid: true,
+      format: 'v1',
+      tier: 'fullerene',
+      customerId: 'cus_123',
+    },
+  ]);
 }
 
 describe('activate — "Replace with a new license key?"', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    withActiveLicense();
+    withActiveLegacyLicense();
   });
 
   it('an explicit "no" KEEPS the license and succeeds (exit 0, no exit call)', async () => {
@@ -59,7 +73,7 @@ describe('activate — "Replace with a new license key?"', () => {
       throw new Error('unexpected process.exit');
     }) as never);
 
-    await expect(runActivate([])).resolves.toBeUndefined();
+    await expect(runActivate([V1_KEY])).resolves.toBeUndefined();
 
     expect(exitSpy).not.toHaveBeenCalled();
     expect(clackMock.outro).toHaveBeenCalledWith('Keeping current license.');
@@ -74,7 +88,7 @@ describe('activate — "Replace with a new license key?"', () => {
       throw new Error(`process.exit(${code})`);
     }) as never);
 
-    await expect(runActivate([])).rejects.toThrow('process.exit(130)');
+    await expect(runActivate([V1_KEY])).rejects.toThrow('process.exit(130)');
 
     expect(exitSpy).toHaveBeenCalledWith(130);
     expect(clackMock.cancel).toHaveBeenCalled();

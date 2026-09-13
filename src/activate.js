@@ -19,7 +19,11 @@ import {
   deactivateLicense,
   getLicense,
   hasStoredLicense,
+  listStoredLicenses,
 } from './lib/licensing/index.js';
+import { getReleaseDate } from './lib/licensing/release-date.js';
+import { getTier } from './lib/licensing/tiers.js';
+import { VERSION } from './lib/version.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string }} */
 const ACTIVATE_SPEC = {
@@ -29,7 +33,7 @@ const ACTIVATE_SPEC = {
     {
       name: 'key',
       optional: true,
-      description: 'License key (vc-...). Prompts if omitted.',
+      description: 'License key (vc-... or vc2-...). Prompts if omitted.',
     },
   ],
   flags: [{ name: 'h', boolean: true, description: 'Show this help' }],
@@ -60,41 +64,20 @@ export async function runActivate(args) {
 
   introCommand('activate');
 
-  // Check if already activated
-  const currentLicense = getLicense();
-  if (currentLicense.active) {
-    p.log.info(`You already have an active ${c.success(currentLicense.displayName)} license.`);
-    p.log.info(`Customer ID: ${c.dim(currentLicense.customerId)}`);
-    const proceed = await p.confirm({
-      message: 'Replace with a new license key?',
-      initialValue: false,
-    });
-    // The two answers genuinely differ here, unlike the other confirm sites.
-    // An explicit "no" is the SUCCESS path: the operator has a working
-    // license and chose to keep it, so the command's purpose is already
-    // satisfied — exit 0 is correct. Ctrl-C/ESC is not an answer at all, and
-    // must not be reported as "kept your license on purpose".
-    if (p.isCancel(proceed)) {
-      exitCancelled();
-    }
-    if (!proceed) {
-      p.outro('Keeping current license.');
-      return;
-    }
-  }
-
-  // Get key from args or prompt
+  // Get key from args or prompt. Needed up front now: which slot a key
+  // targets (legacy vs project) decides whether "already active" even
+  // applies, so that check happens below, once the key is in hand.
   let licenseKey = /** @type {string|undefined} */ (positional.key);
 
   if (!licenseKey) {
     const inputKey = await p.text({
       message: 'Enter your license key:',
-      placeholder: 'vc-xxxxxxxx-signature...',
+      placeholder: 'vc-... or vc2-...',
       validate: (value) => {
         if (!value) return 'License key is required';
         const trimmed = value.trim().toLowerCase();
-        if (!trimmed.startsWith('vc-')) {
-          return 'Invalid key format. Expected vc-...';
+        if (!/^vc2?-/.test(trimmed)) {
+          return 'Invalid key format. Expected vc-... or vc2-...';
         }
         return undefined;
       },
@@ -105,6 +88,62 @@ export async function runActivate(args) {
     }
 
     licenseKey = inputKey;
+  }
+
+  // A cheap prefix read, not a validation: activateLicense() below is the
+  // single source of truth for whether the key is actually good. This only
+  // decides which stored slot (legacy or project) the "already active"
+  // check below should look at.
+  const trimmedKey = (licenseKey || '').trim().toLowerCase();
+  const enteredFormat = trimmedKey.startsWith('vc2-')
+    ? 'v2'
+    : trimmedKey.startsWith('vc-')
+      ? 'v1'
+      : null;
+
+  const stored = listStoredLicenses();
+  const legacyEntry = stored.find((entry) => entry.slot === 'legacy' && entry.valid);
+  const projectEntry = stored.find((entry) => entry.slot === 'project' && entry.valid);
+
+  // A v2 key activated while only the (global, lifetime) legacy key is on
+  // file is not a conflict: the legacy key keeps covering every project
+  // exactly as before, and this key gets stored alongside it for this
+  // project. No "Replace?" prompt needed.
+  if (enteredFormat === 'v2' && legacyEntry && !projectEntry) {
+    p.log.info(
+      'Your lifetime license already covers every project. This key will also be stored for this project.',
+    );
+  }
+
+  // "Replace?" only makes sense when the SAME slot the new key targets is
+  // already occupied: a legacy key over a legacy key, or a project key over
+  // a project key for this same project.
+  const existingEntry =
+    enteredFormat === 'v1' ? legacyEntry : enteredFormat === 'v2' ? projectEntry : null;
+
+  if (existingEntry) {
+    const tierDef = getTier(existingEntry.tier);
+    const displayName = tierDef ? tierDef.displayName : existingEntry.tier;
+    const subject =
+      enteredFormat === 'v2' ? `${displayName} license for this project` : `${displayName} license`;
+    p.log.info(`You already have an active ${c.success(subject)}.`);
+    p.log.info(`Customer ID: ${c.dim(existingEntry.customerId)}`);
+    const proceed = await p.confirm({
+      message: 'Replace with a new license key?',
+      initialValue: false,
+    });
+    // The two answers genuinely differ here, unlike the other confirm sites.
+    // An explicit "no" is the SUCCESS path: the operator has a working
+    // license and chose to keep it, so the command's purpose is already
+    // satisfied, so exit 0 is correct. Ctrl-C/ESC is not an answer at all,
+    // and must not be reported as "kept your license on purpose".
+    if (p.isCancel(proceed)) {
+      exitCancelled();
+    }
+    if (!proceed) {
+      p.outro('Keeping current license.');
+      return;
+    }
   }
 
   const s = spinner();
@@ -124,8 +163,6 @@ export async function runActivate(args) {
 
   p.log.success(`Welcome to ${c.success(result.tierName)}!`);
 
-  // B4 finishes the activate UX for v2 (per-project) keys; this just makes
-  // sure the new fields show up when a v2 activation lands one of these.
   const detailLines = [`Tier: ${result.tierName}`];
   if (result.format === 'v2') {
     detailLines.push(`Project: ${result.projectId}`);
@@ -133,6 +170,16 @@ export async function runActivate(args) {
   } else {
     detailLines.push('Expires: Never');
   }
+
+  const releaseDate = getReleaseDate();
+  detailLines.push(`This CLI: v${VERSION} (released ${releaseDate})`);
+
+  if (result.format === 'v2' && result.paidThrough && releaseDate > result.paidThrough) {
+    detailLines.push(
+      'This key does not cover this CLI release. Renew, or run the CLI version you paid for.',
+    );
+  }
+
   detailLines.push(`Features: ${result.features.join(', ')}`);
 
   p.note(detailLines.join('\n'), 'License Details');

@@ -70,4 +70,80 @@ describe('License Validator', () => {
       expect(result.valid).toBe(false);
     });
   });
+
+  describe('parseLicenseKey (v2)', () => {
+    const PROJECT_ID32 = '11112222333344445555666677778888';
+    const SIG = 'a'.repeat(128);
+
+    it('parses a valid Graphene v2 key (happy path)', () => {
+      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-20271231-${SIG}`);
+
+      expect(result.valid).toBe(true);
+      expect(result.format).toBe('v2');
+      expect(result.tier).toBe('graphene');
+      expect(result.tierChar).toBe('g');
+      expect(result.customerId).toBe('a7f2b9c1');
+      expect(result.projectId).toBe('11112222-3333-4444-5555-666677778888');
+      expect(result.paidThrough).toBe('2027-12-31');
+      expect(result.isLifetime).toBe(false);
+    });
+
+    it('parses a valid Fullerene v2 key, still reporting tier fullerene', () => {
+      const result = parseLicenseKey(`vc2-f-a7f2b9c1-${PROJECT_ID32}-20271231-${SIG}`);
+
+      expect(result.valid).toBe(true);
+      expect(result.format).toBe('v2');
+      expect(result.tier).toBe('fullerene');
+      expect(result.isLifetime).toBe(false);
+    });
+
+    it('rejects a key with too few parts (5)', () => {
+      // Missing the date segment.
+      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-${SIG}`);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a key with too many parts (7)', () => {
+      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-20271231-extra-${SIG}`);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects an invalid v2 tier character', () => {
+      const result = parseLicenseKey(`vc2-x-a7f2b9c1-${PROJECT_ID32}-20271231-${SIG}`);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects an invalid calendar date (month 13)', () => {
+      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-20271301-${SIG}`);
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a dashed projectId inside the key (collides with the separator)', () => {
+      const dashed = '11112222-3333-4444-5555-666677778888';
+      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${dashed}-20271231-${SIG}`);
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts uppercase input, case-insensitively', () => {
+      const result = parseLicenseKey(
+        `VC2-G-A7F2B9C1-${PROJECT_ID32.toUpperCase()}-20271231-${SIG.toUpperCase()}`,
+      );
+      expect(result.valid).toBe(true);
+      expect(result.tier).toBe('graphene');
+      expect(result.projectId).toBe('11112222-3333-4444-5555-666677778888');
+      expect(result.paidThrough).toBe('2027-12-31');
+    });
+  });
+
+  describe('v1 fixtures stay unchanged under the dispatching parser', () => {
+    it('still parses a valid Fullerene v1 key', () => {
+      const result = parseLicenseKey('vc-f-a7f2b9c1-x8kd9mwp2v4n');
+      expect(result.valid).toBe(true);
+      expect(result.format).toBe('v1');
+      expect(result.tier).toBe('fullerene');
+      expect(result.isLifetime).toBe(true);
+      expect(result.projectId).toBeNull();
+      expect(result.paidThrough).toBeNull();
+    });
+  });
 });
