@@ -20,10 +20,12 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { spinner } from '../cli/progress.js';
 import { c } from '../colors.js';
 import { ensureProjectId, loadManifest, manifestExists } from '../project.js';
 import { VERSION } from '../version.js';
 import { evaluateEntitlement } from './entitlement.js';
+import { refreshLicense } from './refresh.js';
 import { getReleaseDate } from './release-date.js';
 import { getTier, TIERS } from './tiers.js';
 import { printProvisionUpsell } from './upsell.js';
@@ -315,6 +317,10 @@ export function listStoredLicenses({ projectDir = process.cwd(), stateDir } = {}
       projectId: normalizeProjectId(validation.projectId ?? legacyStored.projectId),
       valid: validation.valid,
       ...validation,
+      // The raw stored string, whatever it is — validation doesn't carry it,
+      // and refresh.js needs the actual key text to prove possession, not
+      // just whether it currently verifies.
+      key: legacyStored.key,
     });
   }
 
@@ -330,6 +336,7 @@ export function listStoredLicenses({ projectDir = process.cwd(), stateDir } = {}
       projectId: normalizeProjectId(validation.projectId ?? projectStored.projectId),
       valid: validation.valid,
       ...validation,
+      key: projectStored.key,
     });
   }
 
@@ -516,17 +523,74 @@ export function deactivateLicense({ projectDir = process.cwd(), stateDir, all = 
 /**
  * The verdict seam.
  *
- * Everything the gate decides funnels through this one call, so a later task
- * can insert an online refresh for a v2 key whose paid-through date has
- * lapsed (fetch a renewed key, re-store it, re-evaluate) without touching
- * any call site. `fetchImpl` and `env` are threaded here for exactly that
- * and are unused today: the evaluation is currently pure.
+ * Everything the gate decides funnels through this one call. When the pure
+ * evaluation refuses because a v2 key is lapsed or too low a tier, this asks
+ * vibecarbon.com for a renewed key (refreshLicense — proves possession of
+ * the stored key, verifies the answer offline, and only then writes it),
+ * then re-evaluates against whatever is on disk afterward. A v1 (legacy,
+ * lifetime) license is never refreshed: it can be neither lapsed nor
+ * tier-too-low (isLifetime always covers every release, and v1 only ever
+ * issued Fullerene, the top tier), so this check is belt-and-suspenders,
+ * not load-bearing.
+ *
+ * Failure of the refresh itself never blocks anything further: it just
+ * leaves the original verdict in place, with `refreshOffline: true` added
+ * when the reason was specifically an unreachable server, so the upsell can
+ * say so.
  *
  * @param {object} args
- * @returns {Promise<object>} an evaluateEntitlement() verdict
+ * @returns {Promise<object>} an evaluateEntitlement() verdict, possibly with
+ *   `refreshOffline: true`
  */
-async function resolveVerdict({ license, deployTier, projectId, releaseDate }) {
-  return evaluateEntitlement({ license, deployTier, projectId, releaseDate });
+async function resolveVerdict({
+  license,
+  deployTier,
+  projectId,
+  releaseDate,
+  projectDir,
+  stateDir,
+  fetchImpl,
+  env,
+  publicKeyPem,
+}) {
+  const verdict = evaluateEntitlement({ license, deployTier, projectId, releaseDate });
+  if (verdict.ok) return verdict;
+
+  const refreshable =
+    (verdict.reason === 'lapsed' || verdict.reason === 'tier-too-low') && license?.format === 'v2';
+  if (!refreshable) return verdict;
+
+  const s = spinner();
+  s.start('Checking vibecarbon.com for a renewed key');
+  const refreshResult = await refreshLicense({
+    projectDir,
+    stateDir,
+    env,
+    fetchImpl,
+    publicKeyPem,
+  });
+  s.stop(
+    refreshResult.ok ? 'Renewed key applied.' : 'No renewed key available.',
+    refreshResult.ok ? 0 : 1,
+  );
+
+  const refreshedLicense = getLicense({ projectDir, stateDir, publicKeyPem });
+  const refreshedVerdict = evaluateEntitlement({
+    license: refreshedLicense,
+    deployTier,
+    projectId,
+    releaseDate,
+  });
+
+  if (refreshedVerdict.ok) return refreshedVerdict;
+  if (
+    refreshedVerdict.reason === 'lapsed' &&
+    !refreshResult.ok &&
+    refreshResult.reason === 'offline'
+  ) {
+    return { ...refreshedVerdict, refreshOffline: true };
+  }
+  return refreshedVerdict;
 }
 
 /**
@@ -550,8 +614,10 @@ async function resolveVerdict({ license, deployTier, projectId, releaseDate }) {
  *   its project id is backfilled when missing (see ensureProjectId)
  * @param {string} [options.projectDir]
  * @param {string} [options.stateDir]
- * @param {Function} [options.fetchImpl] - Reserved for the refresh seam above
- * @param {object} [options.env] - Reserved for the refresh seam above
+ * @param {Function} [options.fetchImpl] - Used by the refresh seam (see resolveVerdict)
+ * @param {object} [options.env] - Used by the refresh seam (see resolveVerdict)
+ * @param {string} [options.publicKeyPem] - Test-only injection point, threaded through
+ *   to getLicense/refreshLicense; production callers never pass this.
  * @returns {Promise<void>}
  */
 export async function requireProvisionEntitlement({
@@ -561,9 +627,10 @@ export async function requireProvisionEntitlement({
   stateDir,
   fetchImpl,
   env,
+  publicKeyPem,
 } = {}) {
   const projectId = ensureProjectId(projectConfig, projectDir);
-  const license = getLicense({ projectDir, stateDir });
+  const license = getLicense({ projectDir, stateDir, publicKeyPem });
   const releaseDate = getReleaseDate();
 
   const verdict = await resolveVerdict({
@@ -575,6 +642,7 @@ export async function requireProvisionEntitlement({
     stateDir,
     fetchImpl,
     env,
+    publicKeyPem,
   });
 
   if (verdict.ok) return;

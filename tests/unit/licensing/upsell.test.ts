@@ -143,7 +143,7 @@ describe('buildProvisionUpsell — reasons', () => {
     );
   });
 
-  it('lapsed pairs the paid-through date with this release and offers a pinned install', () => {
+  it('lapsed pairs the paid-through date with this release and points at a pinned-install source, never this VERSION', () => {
     const out = render({
       verdict: {
         ok: false,
@@ -154,9 +154,45 @@ describe('buildProvisionUpsell — reasons', () => {
     });
     expect(out).toContain(
       'Your Fullerene subscription for this project is paid through 2026-03-01; ' +
-        'vibecarbon v9.9.9 was released 2026-09-13. Renew, or keep using the release you ' +
-        'paid for: npm i -g vibecarbon@9.9.9.',
+        'vibecarbon v9.9.9 was released 2026-09-13. Renew, or install a release published on ' +
+        'or before 2026-03-01. npm view vibecarbon time lists release dates.',
     );
+    // The controller ruling this replaced: the CLI cannot know offline which
+    // past releases still fall within paidThrough, so it must never pin the
+    // CURRENT (unrenewed) version as if it were still covered.
+    expect(out).not.toContain('npm i -g vibecarbon@9.9.9');
+    expect(out).not.toContain('keep using the release you paid for');
+  });
+
+  it('lapsed gains the offline line only when refreshOffline is set', () => {
+    const base = {
+      ok: false,
+      requiredTier: 'fullerene',
+      reason: 'lapsed',
+      license: { tier: 'fullerene', projectId: PROJECT.projectId, paidThrough: '2026-03-01' },
+    };
+    const withoutOffline = render({ verdict: base });
+    expect(withoutOffline).not.toContain('Could not reach vibecarbon.com');
+
+    const withOffline = render({ verdict: { ...base, refreshOffline: true } });
+    expect(withOffline).toContain(
+      'Could not reach vibecarbon.com. If you renewed, run vibecarbon activate <key> from your email.',
+    );
+  });
+
+  it('refreshOffline is ignored on every reason other than lapsed', () => {
+    for (const reason of ['no-license', 'wrong-project', 'tier-too-low']) {
+      const out = render({
+        verdict: {
+          ok: false,
+          requiredTier: 'fullerene',
+          reason,
+          refreshOffline: true,
+          license: { tier: 'graphene', projectId: PROJECT.projectId, paidThrough: '2026-03-01' },
+        },
+      });
+      expect(out, `reason=${reason}`).not.toContain('Could not reach vibecarbon.com');
+    }
   });
 });
 

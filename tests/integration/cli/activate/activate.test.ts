@@ -62,6 +62,23 @@ describe('vibecarbon activate', () => {
     expect(existsSync(join(testHome, '.vibecarbon', 'license'))).toBe(false);
   });
 
+  it('-refresh outside a Vibecarbon project exits non-zero with a clear message', () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), 'vc-refresh-outside-'));
+    try {
+      const r = runCli('activate', ['-refresh'], { cwd: outsideDir, env: { HOME: testHome } });
+      expect(r.exitCode).not.toBe(0);
+      expect(r.stdout + r.stderr).toMatch(/inside a Vibecarbon project/i);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('-refresh with no project license key stored exits non-zero with a clear message', () => {
+    const r = runCli('activate', ['-refresh'], { cwd: project, env: { HOME: testHome } });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stdout + r.stderr).toMatch(/No project license key is stored/i);
+  });
+
   it('rejects a malformed key', () => {
     const r = runCli('activate', ['totally-not-a-key'], {
       cwd: project,

@@ -76,12 +76,15 @@ function reasonLine(verdict, { deployTier, projectId, version, releaseDate }) {
         `this project is ${projectId}. Each project has its own subscription.`
       );
     case 'lapsed':
-      // The CLI knows the release it IS, never the newest release the
-      // subscription covered, so the pinned install names this version.
+      // The CLI knows only the release it IS, never the last release its
+      // subscription covered — it cannot tell offline which past releases
+      // would still be within paidThrough — so it can't name a version to
+      // pin to. It can only point at the boundary date and where release
+      // dates are published.
       return (
         `Your ${heldName} subscription for this project is paid through ${license.paidThrough}; ` +
-        `vibecarbon v${version} was released ${releaseDate}. Renew, or keep using the release ` +
-        `you paid for: npm i -g vibecarbon@${version}.`
+        `vibecarbon v${version} was released ${releaseDate}. Renew, or install a release ` +
+        `published on or before ${license.paidThrough}. npm view vibecarbon time lists release dates.`
       );
     default:
       return null;
@@ -100,8 +103,11 @@ function subscribeUrl(projectId, requiredTier) {
  * blank line; the caller owns indentation and color.
  *
  * @param {object} options
- * @param {{ok?: boolean, requiredTier?: string, reason?: string, license?: object|null}} [options.verdict]
+ * @param {{ok?: boolean, requiredTier?: string, reason?: string, license?: object|null, refreshOffline?: boolean}} [options.verdict]
  *   The evaluateEntitlement() verdict that refused this provision.
+ *   `refreshOffline` is set only by the refresh seam (index.js), only on a
+ *   verdict that is STILL 'lapsed' after an unreachable-server refresh
+ *   attempt.
  * @param {string|null} [options.deployTier] - The deploy tier being provisioned.
  *   Omitted by the command-wide gate, which has no deploy mode in play.
  * @param {string} [options.commandName] - Set only by the command-wide gate,
@@ -141,6 +147,18 @@ export function buildProvisionUpsell({
 
   const reason = reasonLine(resolved, { deployTier, projectId, version, releaseDate });
   if (reason) lines.push(reason);
+
+  // Set by the refresh seam (src/lib/licensing/index.js) only when the
+  // verdict is STILL 'lapsed' after an attempted refresh that failed to
+  // reach the server. A key that refreshed clean, or one that refreshed and
+  // still came back lapsed for a real reason (not-renewed / not-found),
+  // never carries this — telling someone "you might already be fine" would
+  // be wrong in both of those cases.
+  if (resolved.reason === 'lapsed' && resolved.refreshOffline) {
+    lines.push(
+      'Could not reach vibecarbon.com. If you renewed, run vibecarbon activate <key> from your email.',
+    );
+  }
 
   lines.push('');
   if (projectId) lines.push(`Project: ${projectName || 'this project'} (id ${projectId})`);
