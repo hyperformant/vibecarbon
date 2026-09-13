@@ -46,16 +46,31 @@ export { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN };
 // ('kubernetes'/'kubernetes-ha' vs 'k8s'/'k8s-ha') so they don't line up
 // 1:1.
 //
-// compose-ha is deliberately absent: it remains a fully supported deploy
-// mode (existing environments keep working, `-mode compose-ha` still
-// resolves below, the e2e matrix still runs it) but it is no longer
-// RECOMMENDED, so the picker does not offer it. Kubernetes HA is the HA
-// answer we lead with; Compose HA is for providers without Kubernetes and
-// is selected explicitly.
+// compose-ha stays in the map, but the picker only offers it on a provider
+// that has no Kubernetes tier at all — see COMPOSE_HA_OPTION below.
 const MODE_OPTION_TIER = {
   compose: 'compose',
+  'compose-ha': 'compose-ha',
   kubernetes: 'k8s',
   'kubernetes-ha': 'k8s-ha',
+};
+
+// Compose HA is a fully supported deploy mode (existing environments keep
+// working, `-mode compose-ha` still resolves, resolveTier still prices it at
+// Fullerene, the e2e matrix still runs it) but it is no longer RECOMMENDED:
+// Kubernetes HA is the HA answer we lead with, so the picker hides Compose
+// HA wherever Kubernetes HA is on offer.
+//
+// "Wherever" is per provider, not global. Vultr and Scaleway declare
+// SUPPORTED_TIERS = ['compose', 'compose-ha'] (no Kubernetes tiers built
+// yet), so hiding it unconditionally would leave their operators a
+// one-option select and put the only HA mode they can run behind a flag
+// they were never shown. On a provider with no Kubernetes tier, Compose HA
+// IS the HA answer, so it is listed.
+const COMPOSE_HA_OPTION = {
+  value: 'compose-ha',
+  label: 'Docker Compose HA (Auto Failover)',
+  hint: '2 VPS - Simple failover without K8s complexity - Enterprise resiliency, Fullerene',
 };
 
 /**
@@ -214,7 +229,15 @@ export async function resolveDeployMode(args, envConfig) {
       hint: 'Multi-region cluster - Maximum availability - Enterprise resiliency, Fullerene',
     },
   ];
-  const options = allOptions.filter((opt) =>
+  // Compose HA is offered only when this provider has no Kubernetes tier at
+  // all; it slots in right after plain Compose so the list still reads
+  // simplest-to-most-capable.
+  const supportsK8s = Provider.SUPPORTED_TIERS.some((tier) => tier === 'k8s' || tier === 'k8s-ha');
+  const offered = supportsK8s
+    ? allOptions
+    : [allOptions[0], COMPOSE_HA_OPTION, ...allOptions.slice(1)];
+
+  const options = offered.filter((opt) =>
     Provider.SUPPORTED_TIERS.includes(MODE_OPTION_TIER[opt.value]),
   );
 
@@ -228,6 +251,7 @@ export async function resolveDeployMode(args, envConfig) {
   }
 
   if (mode === 'kubernetes-ha') return { deployMode: 'kubernetes', ha: true };
+  if (mode === 'compose-ha') return { deployMode: 'compose-ha', ha: true };
   return { deployMode: mode, ha: false };
 }
 

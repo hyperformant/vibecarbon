@@ -68,9 +68,12 @@ function reasonLine(verdict, { deployTier, projectId, version, releaseDate }) {
         `${deployTierLabel(deployTier)} needs ${requiredName}.`
       );
     case 'wrong-project':
+      // An ACTIVE license that fails the project check carries the id on
+      // `projectId`; a key that only sits on disk (getLicense never activates
+      // one for another project) carries it on `storedProjectId`.
       return (
-        `The stored key is for project ${license.projectId}; this project is ${projectId}. ` +
-        'Each project has its own subscription.'
+        `The stored key is for project ${license.projectId ?? license.storedProjectId}; ` +
+        `this project is ${projectId}. Each project has its own subscription.`
       );
     case 'lapsed':
       // The CLI knows the release it IS, never the newest release the

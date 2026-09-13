@@ -14,6 +14,8 @@
  *     deploy tier, every project, forever)
  *   - projectId: string | null
  *   - paidThrough: 'YYYY-MM-DD' | null
+ *   - storedProjectId: string | null (only ever set on an INACTIVE result:
+ *     a valid v2 key sits on disk but belongs to another project)
  * A missing license, or one with `active: false`, is treated as no license.
  */
 import { compareTiers } from './tiers.js';
@@ -81,7 +83,11 @@ export function evaluateEntitlement({ license, deployTier, projectId, releaseDat
   }
 
   if (!license?.active) {
-    return { ok: false, requiredTier, reason: 'no-license', license: license ?? null };
+    // A valid key IS on disk, just for another project. Saying "no license"
+    // here would send someone to buy a second subscription for a key they
+    // already hold, so name the mismatch instead.
+    const reason = license?.storedProjectId ? 'wrong-project' : 'no-license';
+    return { ok: false, requiredTier, reason, license: license ?? null };
   }
 
   if (license.isLifetime) {

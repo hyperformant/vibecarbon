@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { evaluateEntitlement } from '../../../src/lib/licensing/entitlement.js';
 import {
   activateLicense,
   deactivateLicense,
@@ -26,6 +27,7 @@ import {
   hasStoredLicense,
   listStoredLicenses,
 } from '../../../src/lib/licensing/index.js';
+import { buildProvisionUpsell } from '../../../src/lib/licensing/upsell.js';
 import { signedMessage } from '../../../src/lib/licensing/validator.js';
 
 function makeKeypair() {
@@ -189,6 +191,122 @@ describe('per-project license storage', () => {
       expect(license.active).toBe(false);
       expect(license.tier).toBe('graphite');
       expect(license.slot).toBeNull();
+    });
+
+    it('a VALID project key for another project is reported as a mismatch, never as active', () => {
+      const otherProjectId = '99999999-9999-9999-9999-999999999999';
+      writeProjectLicenseFile({
+        key: signV2Key(privateKey, {
+          customerId,
+          projectId: otherProjectId,
+          paidThrough: '2026-12-31',
+        }),
+        format: 'v2',
+        tier: 'fullerene',
+        customerId,
+        projectId: otherProjectId,
+        paidThrough: '2026-12-31',
+        activatedAt: '2026-01-01T00:00:00.000Z',
+        source: 'manual',
+      });
+
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      // Routing is unchanged: the key grants nothing.
+      expect(license.active).toBe(false);
+      expect(license.tier).toBe('graphite');
+      expect(license.slot).toBeNull();
+      expect(license.projectId).toBeNull();
+      // ...but the gate can now say WHICH project it belongs to.
+      expect(license.storedProjectId).toBe(otherProjectId);
+    });
+
+    it('names the id from the SIGNED key, not the file field an operator can edit', () => {
+      const signedFor = '99999999-9999-9999-9999-999999999999';
+      writeProjectLicenseFile({
+        key: signV2Key(privateKey, {
+          customerId,
+          projectId: signedFor,
+          paidThrough: '2026-12-31',
+        }),
+        format: 'v2',
+        tier: 'fullerene',
+        customerId,
+        // A lie: neither this project, nor the project the key is signed for.
+        projectId: '77777777-7777-7777-7777-777777777777',
+        paidThrough: '2026-12-31',
+        activatedAt: '2026-01-01T00:00:00.000Z',
+        source: 'manual',
+      });
+
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      expect(license.active).toBe(false);
+      expect(license.storedProjectId).toBe(signedFor);
+    });
+
+    it('an UNSIGNED project key for another project stays a plain no-license', () => {
+      // Nothing verifiable on disk, so there is no id worth naming and the
+      // upsell must not print whatever the file happens to say.
+      writeProjectLicenseFile({
+        key: 'vc2-f-a1b2c3d4-99999999999999999999999999999999-20261231-beef',
+        format: 'v2',
+        tier: 'fullerene',
+        customerId,
+        projectId: '99999999-9999-9999-9999-999999999999',
+        paidThrough: '2026-12-31',
+        activatedAt: '2026-01-01T00:00:00.000Z',
+        source: 'manual',
+      });
+
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      expect(license.active).toBe(false);
+      expect(license.storedProjectId).toBeNull();
+    });
+
+    it('drives the real gate to wrong-project, naming both ids in the upsell', () => {
+      // The end-to-end path the provisioning gate walks: real getLicense ->
+      // real evaluateEntitlement -> real upsell. Before this, a checked-in
+      // .vibecarbon.license from another project produced the generic
+      // "no license" upsell, which would send the operator to buy a second
+      // subscription for a key they already hold.
+      const otherProjectId = '99999999-9999-9999-9999-999999999999';
+      writeProjectLicenseFile({
+        key: signV2Key(privateKey, {
+          customerId,
+          projectId: otherProjectId,
+          paidThrough: '2026-12-31',
+        }),
+        format: 'v2',
+        tier: 'fullerene',
+        customerId,
+        projectId: otherProjectId,
+        paidThrough: '2026-12-31',
+        activatedAt: '2026-01-01T00:00:00.000Z',
+        source: 'manual',
+      });
+
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      const verdict = evaluateEntitlement({
+        license,
+        deployTier: 'k8s',
+        projectId: PROJECT_ID,
+        releaseDate: '2026-09-13',
+      });
+      expect(verdict.ok).toBe(false);
+      expect(verdict.reason).toBe('wrong-project');
+      expect(verdict.requiredTier).toBe('graphene');
+
+      const upsell = buildProvisionUpsell({
+        verdict,
+        deployTier: 'k8s',
+        projectName: 'lictest',
+        projectId: PROJECT_ID,
+        version: '9.9.9',
+        releaseDate: '2026-09-13',
+      }).join('\n');
+      expect(upsell).toContain(
+        `The stored key is for project ${otherProjectId}; this project is ${PROJECT_ID}. ` +
+          'Each project has its own subscription.',
+      );
     });
 
     it('projectId comparison is case-insensitive', () => {

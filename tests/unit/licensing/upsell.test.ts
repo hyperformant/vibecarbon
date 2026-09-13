@@ -126,6 +126,23 @@ describe('buildProvisionUpsell — reasons', () => {
     );
   });
 
+  it('wrong-project reads storedProjectId when the key is on disk but inactive', () => {
+    // The shape the real gate produces: getLicense never activates a key for
+    // another project, so the id it found rides on storedProjectId.
+    const out = render({
+      verdict: {
+        ok: false,
+        requiredTier: 'fullerene',
+        reason: 'wrong-project',
+        license: { tier: 'graphite', active: false, projectId: null, storedProjectId: 'other-id' },
+      },
+    });
+    expect(out).toContain(
+      `The stored key is for project other-id; this project is ${PROJECT.projectId}. ` +
+        'Each project has its own subscription.',
+    );
+  });
+
   it('lapsed pairs the paid-through date with this release and offers a pinned install', () => {
     const out = render({
       verdict: {

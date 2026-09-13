@@ -1,8 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mintV2Key } from '../../../../scripts/generate-license.js';
+import { loadE2EEnvFile } from '../../../e2e/utils/e2e-env-file.js';
 import { testLicenseKey } from '../../_harness/index.js';
 
 const REPO_ROOT = resolve(__dirname, '../../../..');
@@ -63,6 +65,26 @@ function writeLegacyLicense(home: string): void {
       2,
     ),
   );
+}
+
+/**
+ * The Ed25519 signing key, when this machine has it.
+ *
+ * A v2 key must verify against the PUBLIC key compiled into validator.js,
+ * and the spawned CLI has no way to be handed a different one: `publicKeyPem`
+ * is a function argument, and no environment variable may influence the gate
+ * (tests/unit/licensing/no-dev-bypass.test.ts). So the only way to plant a
+ * genuinely valid v2 key for the real CLI is to sign one, which needs the
+ * private key. Case (f) below is skipped where it is absent (CI holds
+ * VIBECARBON_TEST_LICENSE_KEY, not the signing key); the same path is covered
+ * unconditionally at the unit level against the real getLicense +
+ * evaluateEntitlement + upsell in tests/unit/licensing/storage.test.ts.
+ */
+function signingKeyOrNull(): string | null {
+  if (!process.env.VIBECARBON_LICENSE_PRIVATE_KEY) {
+    loadE2EEnvFile(join(REPO_ROOT, 'tests', '.env.e2e'), process.env);
+  }
+  return process.env.VIBECARBON_LICENSE_PRIVATE_KEY || null;
 }
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI codes requires matching them
@@ -233,4 +255,64 @@ describe('vibecarbon — the license gates provisioning only', () => {
       'legacy key: expected output from the deploy flow',
     ).toBeGreaterThan(0);
   });
+
+  // (f) A `.vibecarbon.license` checked in from ANOTHER project must be named
+  // as such. Saying "no license" there would send someone to buy a second
+  // subscription for a key they already hold.
+  const signingKey = signingKeyOrNull();
+  it.skipIf(!signingKey)(
+    'a valid v2 key for a different project refuses, printing both project ids',
+    () => {
+      writeProject(proj);
+      // The gate backfills this project's own id into .vibecarbon.json on
+      // first run, so only the FOREIGN key has to be minted up front.
+      const otherProjectId = '99999999-9999-9999-9999-999999999999';
+      const key = mintV2Key(signingKey as string, {
+        tier: 'fullerene',
+        customerId: 'a1b2c3d4',
+        projectId: otherProjectId,
+        paidThrough: '2030-12-31',
+      });
+      writeFileSync(
+        join(proj, '.vibecarbon.license'),
+        `${JSON.stringify(
+          {
+            key,
+            format: 'v2',
+            tier: 'fullerene',
+            customerId: 'a1b2c3d4',
+            projectId: otherProjectId,
+            paidThrough: '2030-12-31',
+            activatedAt: '2026-01-01T00:00:00.000Z',
+            source: 'manual',
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const result = run(
+        ['deploy', 'prod', '-provider', 'hetzner', '-mode', 'k8s', '-y'],
+        proj,
+        home,
+      );
+
+      expect(
+        result.status,
+        `wrong-project: expected non-zero exit. status=${result.status}\n${result.plain}`,
+      ).not.toBe(0);
+      expect(result.plain).toContain('License required');
+      expect(result.plain, "must name the key's project").toContain(
+        `The stored key is for project ${otherProjectId}`,
+      );
+      // The id the gate backfilled into .vibecarbon.json is this project's.
+      const thisProjectId = JSON.parse(
+        readFileSync(join(proj, '.vibecarbon.json'), 'utf-8'),
+      ).projectId;
+      expect(thisProjectId, 'the gate must have backfilled a project id').toBeTruthy();
+      expect(result.plain, 'must name this project too').toContain(
+        `this project is ${thisProjectId}. Each project has its own subscription.`,
+      );
+    },
+  );
 });

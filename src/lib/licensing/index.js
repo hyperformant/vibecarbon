@@ -149,10 +149,19 @@ function writeProjectLicenseFile(data, projectDir) {
   writeFileSync(projectLicensePath(projectDir), `${JSON.stringify(ordered, null, 2)}\n`);
 }
 
-function noLicenseResult() {
+/**
+ * @param {string|null} [storedProjectId] - When a cryptographically VALID v2
+ *   key was found on disk but belongs to a different project, that key's own
+ *   project id. Purely informational: the result stays inactive and Graphite,
+ *   exactly as if no key existed. It lets the provisioning gate say "the
+ *   stored key is for project a, this project is b" instead of the generic
+ *   "no license" — see evaluateEntitlement's 'wrong-project' reason.
+ */
+function noLicenseResult(storedProjectId = null) {
   return {
     tier: 'graphite',
     ...TIERS.graphite,
+    storedProjectId,
     active: false,
     customerId: undefined,
     activatedAt: undefined,
@@ -180,6 +189,8 @@ function buildLicenseResult({
   return {
     tier: validation.tier,
     ...tierDef,
+    // Only meaningful on an inactive result — see noLicenseResult().
+    storedProjectId: null,
     active: true,
     customerId: validation.customerId ?? stored.customerId,
     activatedAt: stored.activatedAt,
@@ -212,6 +223,15 @@ function buildLicenseResult({
 export function getLicense({ projectDir = process.cwd(), stateDir, publicKeyPem } = {}) {
   const currentProjectId = currentManifestProjectId(projectDir);
 
+  // A valid v2 key found on disk that belongs to SOME OTHER project. It
+  // never grants anything (the fall-through below is unchanged), but the
+  // provisioning gate can name it instead of claiming there is no key at
+  // all — the common shape is a `.vibecarbon.license` copied or forked in
+  // from another project, where "no license" would be actively misleading.
+  // Recorded only for a key that verifies, so a hand-written file can never
+  // put arbitrary text on an operator's screen.
+  let mismatchedProjectId = null;
+
   const legacyPath = legacyLicensePath(stateDir);
   const legacyStored = readJsonFileOrNull(legacyPath);
   if (legacyStored?.key) {
@@ -239,6 +259,7 @@ export function getLicense({ projectDir = process.cwd(), stateDir, publicKeyPem 
           storedAt: legacyPath,
         });
       }
+      mismatchedProjectId ??= keyProjectId;
     }
   }
 
@@ -259,10 +280,18 @@ export function getLicense({ projectDir = process.cwd(), stateDir, publicKeyPem 
           storedAt: projectPath,
         });
       }
+    } else {
+      // Routing is unchanged: this key still grants nothing. The id named
+      // comes from the SIGNED key, not the file's own projectId field, so an
+      // edited file cannot choose what the upsell prints.
+      const validation = validateLicenseKey(projectStored.key, { publicKeyPem });
+      if (validation.valid) {
+        mismatchedProjectId ??= normalizeProjectId(validation.projectId);
+      }
     }
   }
 
-  return noLicenseResult();
+  return noLicenseResult(mismatchedProjectId);
 }
 
 /**

@@ -82,16 +82,44 @@ describe('resolveDeployMode', () => {
     clackMock.select.mockClear();
   });
 
-  it('does not offer compose-ha in the picker', async () => {
+  it('does not offer compose-ha on a provider that has Kubernetes', async () => {
     // compose-ha stays a supported mode (existing environments keep working,
     // the flag below still resolves, the e2e matrix still runs it) but it is
-    // no longer RECOMMENDED: Kubernetes HA is the HA answer the picker leads
-    // with. See src/lib/deploy/prompts.js MODE_OPTION_TIER.
+    // no longer RECOMMENDED: where Kubernetes HA is on offer, that is the HA
+    // answer the picker leads with. See src/lib/deploy/prompts.js.
     clackMock.select.mockResolvedValueOnce('compose');
-    await resolveDeployMode(noFlags, {});
+    await resolveDeployMode(noFlags, {}); // no provider -> hetzner, all four tiers
 
     const options = clackMock.select.mock.calls[0][0].options as { value: string }[];
     expect(options.map((o) => o.value)).toEqual(['compose', 'kubernetes', 'kubernetes-ha']);
+    clackMock.select.mockClear();
+  });
+
+  it.each(['vultr', 'scaleway'])(
+    'offers Compose HA on %s, which declares no Kubernetes tier',
+    async (provider) => {
+      // Vultr and Scaleway are SUPPORTED_TIERS = ['compose', 'compose-ha'].
+      // Hiding compose-ha there would leave a one-option select and put the
+      // only HA mode they can run behind a flag nobody was shown.
+      clackMock.select.mockResolvedValueOnce('compose');
+      await resolveDeployMode(noFlags, { provider });
+
+      const options = clackMock.select.mock.calls[0][0].options as {
+        value: string;
+        hint: string;
+      }[];
+      expect(options.map((o) => o.value)).toEqual(['compose', 'compose-ha']);
+      expect(options.find((o) => o.value === 'compose-ha')?.hint).toContain(
+        'Enterprise resiliency, Fullerene',
+      );
+      clackMock.select.mockClear();
+    },
+  );
+
+  it('maps a compose-ha picker selection on a compose-only provider', async () => {
+    clackMock.select.mockResolvedValueOnce('compose-ha');
+    const result = await resolveDeployMode(noFlags, { provider: 'vultr' });
+    expect(result).toEqual({ deployMode: 'compose-ha', ha: true });
     clackMock.select.mockClear();
   });
 
