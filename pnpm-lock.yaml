@@ -44,7 +44,7 @@ importers:
         version: 6.4.0(typescript@7.0.2)
       '@pulumi/pulumi':
         specifier: ^3.260.0
-        version: 3.261.0(typescript@7.0.2)
+        version: 3.262.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.54.0
         version: 1.54.0(typescript@7.0.2)
@@ -782,8 +782,8 @@ packages:
   '@pulumi/linode@6.4.0':
     resolution: {integrity: sha512-tXkJUDkMXYNEtObY3ueEa4XpF0+12maZB8gGjfce302tR+hcgo3O86RMEmETtc8bfd0mjtbIBhA5hQOeJ5lQ7A==}
 
-  '@pulumi/pulumi@3.261.0':
-    resolution: {integrity: sha512-gZDiCmaBKxXpIagOytLTOc/GOWYMj/8OgW/X78RN7ngv7+N550+tWIu9dETPrz7NmWVWfeXdjGeRmH+GxuaPxg==}
+  '@pulumi/pulumi@3.262.0':
+    resolution: {integrity: sha512-fsYlQ5sr0g5DCxW25LTLwBsSkgkTMxXDfKdZGGvb880zXEQZd509uUSgUTX608fca9FAxjfflPNGYKgB9ps3ow==}
     engines: {node: '>=22'}
     peerDependencies:
       ts-node: '>= 7.0.1 < 12'
@@ -1508,6 +1508,9 @@ packages:
   es-module-lexer@2.3.2:
     resolution: {integrity: sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==}
 
+  es-module-lexer@3.0.2:
+    resolution: {integrity: sha512-BuIB67FngDSyQ/dpQNOZybwdEBDUGJQvOqwWr4ha/ufYiqzuEwPkKO2zLhRAgay28tStRIHUeWmszZAJo3GCOg==}
+
   es-object-atoms@1.1.2:
     resolution: {integrity: sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==}
     engines: {node: '>= 0.4'}
@@ -1775,8 +1778,8 @@ packages:
     resolution: {integrity: sha512-YVt14UZCgsX1vZQ3gKjkWVdBdHQ6eu3MPU1TBgL1H5orXe2+jWD006WCPPtOuwlQm10NuzOW5WawiF1Q9veW8g==}
     engines: {node: '>=18.20'}
 
-  import-in-the-middle@3.4.0:
-    resolution: {integrity: sha512-Xfjwfarhe+LGmoaof+sexeNo3sGRysb5x56WrZLwHtmqT0OilSKtVWkv0lrCcMgSKyKP9oBogBAisHZvtJH0aw==}
+  import-in-the-middle@3.5.1:
+    resolution: {integrity: sha512-mPKuL8bPQzecui2KK6Gb+M8JvJoHnhS1FeYGa22QopBmlevF5F0FE6ued/B5EgHDeIoMTONIpDWWFKUPOG0DBQ==}
     engines: {node: '>=18'}
 
   import-meta-resolve@4.2.0:
@@ -3337,7 +3340,7 @@ snapshots:
 
   '@ediri/vultr@2.27.1(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.261.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3691,7 +3694,7 @@ snapshots:
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/api-logs': 0.220.0
-      import-in-the-middle: 3.4.0
+      import-in-the-middle: 3.5.1
       require-in-the-middle: 8.0.1
     transitivePeerDependencies:
       - supports-color
@@ -3813,7 +3816,7 @@ snapshots:
 
   '@pulumi/digitalocean@4.79.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.261.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3821,7 +3824,7 @@ snapshots:
 
   '@pulumi/hcloud@1.41.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.261.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3829,13 +3832,13 @@ snapshots:
 
   '@pulumi/linode@6.4.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.261.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
       - typescript
 
-  '@pulumi/pulumi@3.261.0(typescript@7.0.2)':
+  '@pulumi/pulumi@3.262.0(typescript@7.0.2)':
     dependencies:
       '@grpc/grpc-js': 1.14.4
       '@logdna/tail-file': 2.2.0
@@ -3869,7 +3872,7 @@ snapshots:
 
   '@pulumiverse/scaleway@1.54.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.261.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -4516,6 +4519,8 @@ snapshots:
 
   es-module-lexer@2.3.2: {}
 
+  es-module-lexer@3.0.2: {}
+
   es-object-atoms@1.1.2:
     dependencies:
       es-errors: 1.3.0
@@ -4841,10 +4846,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  import-in-the-middle@3.4.0:
+  import-in-the-middle@3.5.1:
     dependencies:
       cjs-module-lexer: 2.2.1
-      es-module-lexer: 2.3.2
+      es-module-lexer: 3.0.2
       module-details-from-path: 1.0.4
 
   import-meta-resolve@4.2.0: {}
