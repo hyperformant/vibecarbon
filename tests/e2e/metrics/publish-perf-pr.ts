@@ -321,7 +321,7 @@ function commitMessage(): string {
     process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
       ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
       : null;
-  const lines = ['docs(perf): refresh performance data from CI US-region run'];
+  const lines = ['docs(perf): refresh performance data from CI perf run'];
   if (runUrl) lines.push('', runUrl);
   return lines.join('\n');
 }
@@ -442,7 +442,7 @@ async function main(): Promise<void> {
   // Branch dispatches must never publish numbers from unmerged code — the
   // same invariant the deleted workflow step enforced with
   // `if: success() && github.ref == 'refs/heads/main'` (docs/tests.md's "CI
-  // US-region perf runs" section states this as a guarantee). Legs run on
+  // perf runs" section states this as a guarantee). Legs run on
   // whatever ref was dispatched; only the PUBLISH step is main-gated.
   // GITHUB_REF_NAME is the dispatch ref for a workflow_dispatch run; unset
   // (e.g. a local invocation outside CI) is treated the same as "not

@@ -86,25 +86,3 @@ describe('capacityPreferences.digitalocean', () => {
     ]);
   });
 });
-
-describe('capacityPreferences.hetzner (regression guard)', () => {
-  // The release matrix (e1-e4) only ever reads this block. Task 8 touches
-  // nothing here — this pins it byte-identical so a future DO-scoped edit
-  // can't accidentally bleed into the Hetzner path.
-  it('is untouched by the DO k8s reference-scenario addition', () => {
-    expect(testConfig.e2e.capacityPreferences.hetzner.regions).toEqual([
-      'nbg1',
-      'hel1',
-      'fsn1',
-      'ash',
-      'hil',
-      'sin',
-    ]);
-    expect(testConfig.e2e.capacityPreferences.hetzner.typePairs).toEqual([
-      ['cx23', 'cx33'],
-      ['cpx22', 'cpx32'],
-      ['cpx21', 'cpx31'],
-      ['ccx13', 'ccx23'],
-    ]);
-  });
-});

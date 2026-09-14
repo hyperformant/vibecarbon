@@ -120,6 +120,35 @@ describe('resolveCapacity', () => {
     });
   });
 
+  it('prefers the cheapest type-pair in ANY listed region over a pricier pair in an earlier region', async () => {
+    // Hetzner's 2026-06-15 repricing made the pair ladder a price ladder
+    // (cx ~$0.01/h, cpx22 ~$0.04/h). A region-major walk would take nbg1's
+    // cpx22 here just because nbg1 is listed first; the cheaper cx pair is
+    // sitting in hel1. Type-major wins — same walk the HA pair resolver
+    // has always done.
+    const prefs: CapacityPreferences = {
+      regions: ['nbg1', 'hel1', 'fsn1'],
+      typePairs: [
+        ['cx23', 'cx33'],
+        ['cpx22', 'cpx32'],
+      ],
+    };
+    const fetchFn = makeFetch(
+      [
+        { name: 'nbg1-dc3', loc: 'nbg1', available: [45, 46] }, // cpx22+cpx32 only
+        { name: 'hel1-dc2', loc: 'hel1', available: [114, 115] }, // cx23+cx33
+      ],
+      STD_TYPE_IDS,
+    );
+    const r = await resolveCapacity(prefs, 't', { fetchFn });
+    expect(r).toEqual({
+      region: 'hel1',
+      serverType: 'cx23',
+      scaleToType: 'cx33',
+      datacenter: 'hel1-dc2',
+    });
+  });
+
   it('honors excludeRegions (used by the HA pair resolver to push standby elsewhere)', async () => {
     const prefs: CapacityPreferences = {
       regions: ['nbg1', 'fsn1'],

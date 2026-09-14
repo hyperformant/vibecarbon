@@ -696,9 +696,11 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
     './utils/region-resolver.js'
   );
   // E2E_REGIONS (Hetzner location names) only ever applied to the Hetzner
-  // block — same override this env var has always driven. The
+  // block — same override this env var has always driven. Unset in CI by
+  // default (the config's EU/cheapest-first list is the single source);
+  // a dispatch passes it only for a deliberate US perf record run. The
   // DigitalOcean block has no override knob (DO scenarios are opt-in
-  // reference runs, not the perf-tracked CI matrix E2E_REGIONS targets).
+  // reference runs).
   const hetznerCapacityPrefs = overrideRegions(
     config.capacityPreferences.hetzner,
     process.env.E2E_REGIONS,

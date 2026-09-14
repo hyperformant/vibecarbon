@@ -18,7 +18,7 @@ Every e2e run records into `tests/results/e2e.db` (SQLite; schema in
 - **`verifications`**: named post-step checks
   (`tests/e2e/checks/`), including the replication/continuity battery.
 
-CI record runs (the **E2E US Perf Run** workflow) upload `e2e.db` as an
+CI record runs (the **E2E Perf Run** workflow, `e2e-us-perf.yml`) upload `e2e.db` as an
 artifact, so figures can be rendered from the exact db that produced the
 README perf table.
 
