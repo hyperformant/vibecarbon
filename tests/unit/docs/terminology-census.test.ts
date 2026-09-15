@@ -302,12 +302,17 @@ describe('terminology census', () => {
     // "k8s-ha ... Hetzner-only" caveat wherever DO mode support was
     // enumerated; a stale survivor now under-advertises DO and contradicts
     // SUPPORTED_TIERS, so the same walk bans the phrase everywhere.
+    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
+    const mdxFiles = readdirSync(mdxDir)
+      .filter((f) => f.endsWith('.mdx'))
+      .map((f) => join('carbon', 'content', 'docs', f));
     for (const rel of [
       'README.md',
       'FEATURES.md',
       'docs/deploy-digitalocean.md',
       'docs/technical.md',
       'carbon/README.md',
+      ...mdxFiles,
     ]) {
       expect(read(rel), rel).not.toMatch(/k8s-ha[^.\n]*Hetzner-only/i);
     }
