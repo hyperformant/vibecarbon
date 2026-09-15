@@ -73,7 +73,8 @@ const SPEC = {
     {
       name: 'source',
       value: '<file>',
-      description: 'Backup filename (required for non-interactive download)',
+      description:
+        'Backup filename for -action download (legacy backup-pod dumps only — k8s without object storage; wal-g environments restore with `vibecarbon restore`)',
     },
   ],
   examples: [
@@ -81,8 +82,8 @@ const SPEC = {
     { command: 'vibecarbon backup prod -l', description: 'list backups for prod' },
     { command: 'vibecarbon backup prod', description: 'env seeded; prompts for action' },
     {
-      command: 'vibecarbon backup -env prod -action download -source myapp_20260507.tar.gz',
-      description: 'scripted download',
+      command: 'vibecarbon backup prod -action create -y',
+      description: 'scripted base backup (wal-g → object storage)',
     },
   ],
 };
@@ -90,7 +91,11 @@ const SPEC = {
 const ACTION_CHOICES = [
   { value: 'create', label: 'Create a new backup', hint: 'triggers a fresh dump' },
   { value: 'list', label: 'List existing backups', hint: 'read-only' },
-  { value: 'download', label: 'Download a backup', hint: 'fetch a file locally' },
+  {
+    value: 'download',
+    label: 'Download a backup',
+    hint: 'legacy backup-pod dumps only (k8s without object storage)',
+  },
 ];
 
 // ============================================================================
@@ -453,10 +458,8 @@ export async function run(args) {
       source: /** @type {string} */ (values.source),
       isCompose,
       useS3,
-      s3Config,
       serverIp,
       sshKeyPath,
-      projectName,
     });
     p.outro('');
     return;
@@ -549,41 +552,42 @@ async function runList({ s, isCompose, serverIp, sshKeyPath, projectName, envNam
   await printWalgBackupList({ spinner: s, serverIp, sshKeyPath, projectName, isCompose, envName });
 }
 
-async function runDownload({
+/**
+ * `-action download`. Only one environment shape still has downloadable
+ * backup FILES: k8s with no object storage, whose backup pod writes
+ * `*_full.tar.gz` dumps. Every wal-g environment (compose always; k8s with
+ * S3) archives base backups + WAL under `walg/` — there is no file to fetch,
+ * `backups/<name>` never exists, and a dump could not be restored anyway
+ * (restore is wal-g-native and pulls from S3). Refuse those up front rather
+ * than failing on a filename-format check or a 404, and name what works.
+ *
+ * `deps` is a test seam (the pod helper is a module-level import).
+ */
+export async function runDownload({
   s,
   source,
   isCompose,
   useS3,
-  s3Config,
   serverIp,
   sshKeyPath,
-  projectName,
+  deps = {},
 }) {
+  const { downloadPod = downloadPodBackup } = deps;
+  if (isCompose || useS3) {
+    p.log.error(
+      'This environment backs up with wal-g (base backups + WAL in object storage); there ' +
+        'is no backup file to download, and a downloaded dump could not be restored. Use ' +
+        '`vibecarbon backup <env> -l` to list restore points and `vibecarbon restore <env> ' +
+        '-source latest|<ISO-8601 timestamp>` to restore one.',
+    );
+    process.exit(1);
+  }
   s.start(`Downloading ${source}`);
   try {
-    if (isCompose) {
-      const localPath = join(process.cwd(), source);
-      if (useS3) {
-        await downloadS3Backup(s3Config, `backups/${source}`, localPath);
-      } else {
-        await scpDownload(serverIp, sshKeyPath, `/opt/${projectName}/backups/${source}`, localPath);
-      }
-      s.stop('Download complete');
-      p.log.success(`Saved to ${c.bold(localPath)}`);
-      return;
-    }
-
-    // K8s
-    if (useS3) {
-      const localPath = join(process.cwd(), source);
-      await downloadS3Backup(s3Config, `backups/${source}`, localPath);
-      s.stop('Download complete');
-      p.log.success(`Saved to ${c.bold(localPath)}`);
-    } else {
-      const localPath = await downloadPodBackup(serverIp, sshKeyPath, source);
-      s.stop('Download complete');
-      p.log.success(`Saved to ${c.bold(localPath)}`);
-    }
+    // k8s without object storage: legacy backup-pod dump.
+    const localPath = await downloadPod(serverIp, sshKeyPath, source);
+    s.stop('Download complete');
+    p.log.success(`Saved to ${c.bold(localPath)}`);
   } catch (error) {
     s.stop('Download failed');
     p.log.error(error.message);
