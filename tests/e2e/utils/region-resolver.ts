@@ -6,9 +6,10 @@
  * day; one bad slot in `hel1` for cx33 (the scale target) used to fail
  * an entire scenario at the `scale` step even though `nbg1` had headroom
  * the whole time. This resolver queries `/v1/datacenters` once at
- * preflight and picks the first region in the operator's preferred order
- * where BOTH `serverType` and `scaleToType` of some preferred type-pair
- * are currently available.
+ * preflight and picks the first preferred type-pair for which some region,
+ * in the operator's preferred order, has BOTH `serverType` and
+ * `scaleToType` currently available (type-pairs are a price ladder, so
+ * pair preference outranks region preference).
  *
  * Scenarios declare preferences instead of literals — see
  * `CapacityPreferences` below. The runner calls `resolveCapacity` per
@@ -153,14 +154,19 @@ async function resolveHetznerCapacity(
   const { datacenters, nameToId } = await loadHetznerInventory(token, options.fetchFn ?? fetch);
   const excluded = new Set(options.excludeRegions ?? []);
 
-  for (const region of prefs.regions) {
-    if (excluded.has(region)) continue;
-    const dcsForRegion = datacenters.filter((dc) => dc.location.name === region);
-    if (dcsForRegion.length === 0) continue;
-    for (const [deployType, scaleType] of prefs.typePairs) {
-      const deployId = nameToId.get(deployType);
-      const scaleId = nameToId.get(scaleType);
-      if (deployId == null || scaleId == null) continue;
+  // Type-pair-major, region-minor — the same walk resolveHetznerCapacityPair
+  // does. `typePairs` is a PRICE ladder (cx ~$0.01/h → cpx22 ~$0.04/h → ccx
+  // ~$0.08/h after Hetzner's 2026-06-15 repricing), so the cheapest pair in
+  // any listed region must beat a pricier pair in an earlier-listed one.
+  // Region order still breaks ties within a pair.
+  for (const [deployType, scaleType] of prefs.typePairs) {
+    const deployId = nameToId.get(deployType);
+    const scaleId = nameToId.get(scaleType);
+    if (deployId == null || scaleId == null) continue;
+    for (const region of prefs.regions) {
+      if (excluded.has(region)) continue;
+      const dcsForRegion = datacenters.filter((dc) => dc.location.name === region);
+      if (dcsForRegion.length === 0) continue;
       for (const dc of dcsForRegion) {
         const avail = new Set(dc.server_types.available);
         if (avail.has(deployId) && avail.has(scaleId)) {
@@ -322,10 +328,11 @@ async function resolveDigitalOceanCapacityPair(
 
 /**
  * Apply the `E2E_REGIONS` env override (comma-separated Hetzner location
- * names) to a scenario's capacity preferences. Used by CI to pin the matrix
- * to US regions (`ash,hil`) so perf numbers are measured runner→US-DC
- * instead of operator-uplink→EU. Returns the input unchanged when the
- * override is absent or empty — local runs are unaffected.
+ * names) to a scenario's capacity preferences. The CI `regions` dispatch
+ * input feeds this; its default is EMPTY so the config's EU/cheapest-first
+ * list applies everywhere, and a deliberate US perf record run passes
+ * `ash,hil` explicitly. Returns the input unchanged when the override is
+ * absent or empty.
  */
 /**
  * Linode counterpart to the walks above. Linode's type catalog is GLOBAL —

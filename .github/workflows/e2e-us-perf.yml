@@ -1,11 +1,21 @@
-name: E2E US Perf Run
+name: E2E Perf Run
 
-# On-demand e2e perf matrix from a GitHub-hosted runner against Hetzner US
-# regions (and, opt-in, DigitalOcean). Rationale: perf-table numbers
-# measured from an operator laptop inherit the local uplink (a degraded
-# Wi-Fi link inflated the 2026-07-08 table 20-40x on sideload-bearing
-# cells); Azure-US → Hetzner-US is datacenter-class and reproducible. Spec:
-# the ci-us-perf-run-design spec
+# On-demand e2e perf matrix from a GitHub-hosted runner (and, opt-in, the
+# other providers). Rationale: perf-table numbers measured from an operator
+# laptop inherit the local uplink (a degraded Wi-Fi link inflated the
+# 2026-07-08 table 20-40x on sideload-bearing cells); a GitHub-hosted runner
+# → provider DC is datacenter-class and reproducible. Spec: the
+# ci-us-perf-run-design spec.
+#
+# Regions: the Hetzner leg lands wherever tests/config.ts
+# capacityPreferences.hetzner says — EU locations, cheapest type-pair first
+# — because Hetzner's 2026-06-15 repricing made US CPX ~3x the EU cx line
+# and every short-lived matrix VM bills a full hour (the "US" in this file's
+# name is historical: until 2026-09 the `regions` input defaulted to
+# `ash,hil`). Numbers recorded since then are runner(US) → EU-DC; pass
+# `regions: ash,hil` at dispatch for a deliberate US record run. The
+# filename is load-bearing (artifact names, release.yml/test.yml,
+# sweep-*-ci.ts, several unit tests), so it stays.
 #
 # Topology: one job per provider (`matrix`, fail-fast: false — so a
 # DigitalOcean regression never cancels a green Hetzner leg or vice versa),
@@ -90,9 +100,9 @@ on:
         required: false
         default: ''
       regions:
-        description: 'Comma-separated Hetzner locations (E2E_REGIONS) — only meaningful on the Hetzner leg'
+        description: "Comma-separated Hetzner locations (E2E_REGIONS) — only meaningful on the Hetzner leg. Empty = tests/config.ts capacityPreferences.hetzner (EU, cheapest-first). Pass 'ash,hil' for a deliberate US perf record run."
         required: false
-        default: 'ash,hil'
+        default: ''
 
 permissions:
   contents: read
