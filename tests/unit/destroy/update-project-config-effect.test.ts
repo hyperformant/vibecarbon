@@ -74,6 +74,52 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
   });
 
   // The reproduced-incident / genuine-failure case: the entry MUST survive.
+  it("records the destroyed environment's identity under destroyedEnvironments.<env> so a redeploy needs no hand-typed block", async () => {
+    // Region-move runbook, 2026-09-15: after destroy the operator had to
+    // re-type provider/domain/DNS zone/backup bucket/schedule into
+    // .vibecarbon.json before `deploy -y` could run. Those fields describe
+    // WHAT the env is, not what exists; keep them somewhere `deploy` reads
+    // and nothing else treats as "a deployed environment" (access, console,
+    // status, operator-ip all key off presence in `environments`).
+    const ctx = makeCtx({ pulumiDestroyFailed: false });
+    ctx.projectConfig.environments.prod = {
+      deployMode: 'kubernetes',
+      status: 'deployed',
+      provider: 'hetzner',
+      domain: 'app.example.com',
+      dnsProvider: 'cloudflare',
+      dns: { provider: 'cloudflare', zoneId: 'z1' },
+      backupS3: { bucket: 'proj-backups', region: 'fsn1', endpoint: 'https://fsn1.x' },
+      region: 'ash',
+      serverType: 'cpx21',
+      servers: [{ ip: '1.2.3.4' }],
+      s3: { bucket: 'proj-storage-7b6f58' },
+    } as never;
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+    const saved = saveProjectConfigMock.mock.calls[0][0];
+    expect(saved.environments.prod).toBeUndefined();
+    expect(saved.destroyedEnvironments.prod).toMatchObject({
+      deployMode: 'kubernetes',
+      provider: 'hetzner',
+      domain: 'app.example.com',
+      dnsProvider: 'cloudflare',
+      dns: { provider: 'cloudflare', zoneId: 'z1' },
+      backupS3: { bucket: 'proj-backups', region: 'fsn1', endpoint: 'https://fsn1.x' },
+      region: 'ash',
+      serverType: 'cpx21',
+    });
+    expect(saved.destroyedEnvironments.prod.destroyedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    for (const k of ['status', 'servers', 's3']) {
+      expect(saved.destroyedEnvironments.prod).not.toHaveProperty(k);
+    }
+  });
+
+  it('does not record an identity when the destroy is unverified (the live entry is kept instead)', async () => {
+    const ctx = makeCtx({ pulumiDestroyFailed: true });
+    await DESTROY_EFFECTS.updateProjectConfig(ctx);
+    expect(ctx.projectConfig).not.toHaveProperty('destroyedEnvironments');
+  });
+
   it('keeps the environment entry and never calls saveProjectConfig when pulumiDestroyFailed is true', async () => {
     const ctx = makeCtx({ pulumiDestroyFailed: true });
 

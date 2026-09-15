@@ -11,6 +11,7 @@ import { c } from '../colors.js';
 import { runCommand, runCommandAsync } from '../command.js';
 import { loadProjectConfig, registerProject, saveProjectConfig } from '../config.js';
 import { getDnsProvider, hasAutomatedDns } from '../dns-provider.js';
+import { clearDestroyedRecord } from '../env-identity.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
 import { perfAsync, perfTimer } from '../perf.js';
 import { runProjectAssignment } from '../project-assignment.js';
@@ -1746,7 +1747,9 @@ export async function executeDeployment(args, gatheredConfig) {
       },
     },
   };
-  saveProjectConfig(finalConfig);
+  // The environment is live again: drop the identity `destroy` recorded for
+  // this name (if any) so it never outlives the rebuild it was kept for.
+  saveProjectConfig(clearDestroyedRecord(finalConfig, environment));
   registerProject(projectConfig.projectName, process.cwd());
 
   // File this environment's resources into the dedicated cloud project on

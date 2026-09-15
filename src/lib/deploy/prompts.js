@@ -16,6 +16,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from '../dns-provider.js';
+import { resolveEnvSeed } from '../env-identity.js';
 import { requireDeployEntitlement } from '../licensing/index.js';
 import {
   getObjectStorageProvider,
@@ -393,7 +394,23 @@ export async function gatherDeploymentConfig(args) {
 
   const services = projectConfig.services || {};
   const environment = normalizeEnvName(args.env || 'prod');
-  let envConfig = projectConfig.environments?.[environment] || {};
+  // A name that was destroyed seeds from the identity destroy recorded
+  // (placement, domain, DNS, backup bucket, sizing) — a rebuild or a region
+  // move starts from what the env was instead of a hand-typed block. Flags
+  // still override (args.X wins in every chain below), and the record is
+  // cleared once the deploy finalizes (orchestrator).
+  const seed = resolveEnvSeed(projectConfig, environment);
+  let envConfig = seed.envConfig;
+  if (seed.fromDestroyed) {
+    const when = seed.fromDestroyed.destroyedAt
+      ? ` (destroyed ${seed.fromDestroyed.destroyedAt.slice(0, 10)})`
+      : '';
+    p.log.info(
+      `Re-using the settings of the previous ${c.bold(environment)} environment${when}: ` +
+        `${[envConfig.domain, envConfig.region, envConfig.serverType].filter(Boolean).join(', ')}. ` +
+        'Flags such as -region / -server-type override them.',
+    );
+  }
   const resuming = envConfig.status === 'deploying';
 
   // Resolved once per flow — see providerFor() in lib/providers/index.js.

@@ -228,11 +228,18 @@ warm state backend. (CLIs before that field existed derived a fresh
 `…-pulumi-state-…` name on redeploy and left the kept one behind; if you find
 one, delete it by hand.)
 
-**2. Re-seed the environment block.** `destroy` removes
-`environments.<env>` from `.vibecarbon.json` entirely. Put it back with the
-identity/DNS/backup fields you want to keep and the new placement (`region`
-and `serverType` can also be given as `deploy -region … -server-type …`;
-without either a scripted compose deploy takes the region's *medium-tier*
+**2. (Older CLIs only) Re-seed the environment block.** `destroy` removes
+`environments.<env>` from `.vibecarbon.json` and records what the
+environment *was* — provider, domain, DNS zone, backup bucket and schedule,
+region, server types — under `destroyedEnvironments.<env>`. A later
+`deploy <env>` seeds from that record (it says so: "Re-using the settings of
+the previous prod environment…"), flags override it, and it is cleared once
+the environment is live again. So step 2 is normally nothing: go straight to
+step 3 with the new placement on the command line.
+
+If your CLI predates `destroyedEnvironments`, put the block back by hand
+with the fields you want to keep and the new placement (without
+`serverType` a scripted compose deploy takes the region's *medium-tier*
 default, not the cheapest type):
 
 ```json
