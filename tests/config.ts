@@ -186,22 +186,30 @@ export const testConfig = {
     // 'digitalocean'.
     capacityPreferences: {
       hetzner: {
-        regions: ['nbg1', 'hel1', 'fsn1', 'ash', 'hil', 'sin'] as const,
+        // EU only. Hetzner's 2026-06-15 repricing raised CPX ~3x in the US
+        // locations, and `ash`/`hil` carry no cx line at all; `sin` is the
+        // same shape (CPX/CCX-only) with a price uplift on top. Every VM the
+        // matrix spawns is billed at least one full hour, so where it lands
+        // is the cost driver — see tests/unit/e2e/hetzner-capacity-cost-
+        // guard.test.ts. A US perf record run is still possible by passing
+        // `regions: ash,hil` at workflow dispatch (E2E_REGIONS); it is just
+        // no longer the default anywhere.
+        regions: ['nbg1', 'hel1', 'fsn1'] as const,
         // Pairs are amd64-only — the platform is x86-64 by decision, so an ARM
         // (cax) fallback is not an option to add here (the deploy would be
         // rejected at the type guard, and the sideloaded image is amd64
-        // regardless). Order = (cx old shared) → (cpx new shared) → (cpx old
-        // shared) → (ccx dedicated, LAST). cpx21/31 were once omitted as
-        // "sold out almost continuously" (2026-04 EU inventory), but that was
-        // EU-specific: on 2026-07-10 both were in stock in ash+hil while
-        // cpx22/32 were not, and the resolver's only remaining option — ccx —
-        // draws from the separate (much lower) dedicated-core project quota,
-        // which killed compose-ha scale + k8s-ha deploy in the CI US matrix.
-        // Exhaust every shared-core line before touching dedicated.
+        // regardless). Order = cheapest first: (cx Intel shared, ~$0.01/h)
+        // → (cpx22/32 current AMD shared) → (ccx dedicated, LAST — it draws
+        // from the separate, much lower dedicated-core quota, and costs ~8x
+        // cx). The legacy cpx21/31 pair is gone: retired in every EU
+        // location, and post-repricing it costs MORE than its cpx22/32
+        // successor (Aug 2026 invoice: $0.0601/h vs $0.0368/h). The single-
+        // scenario resolver walks these type-major (cheapest pair in ANY
+        // listed region before stepping up a tier), same as the HA pair
+        // resolver always has.
         typePairs: [
           ['cx23', 'cx33'],
           ['cpx22', 'cpx32'],
-          ['cpx21', 'cpx31'],
           ['ccx13', 'ccx23'],
         ] as const,
       },

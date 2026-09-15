@@ -83,9 +83,9 @@ Every published performance surface renders from one checked-in file, `docs/perf
 
 **`docs/perf-data.json` is machine-owned; hand edits don't stick.** `updatePerfDataFromRun` merges a run's providers into it one at a time: a provider's entry updates only when every scenario in its registry list is green this run *and* the run covers the whole list. Partial coverage (e.g. a single `--scenario hetzner/k8s-ha` run) leaves that provider's existing entry untouched, independent of any sibling provider. Only green steps contribute numbers.
 
-**Writers.** The batch runner (`pnpm test:e2e:batch`) calls `updatePerfDataFromRun` at the end of a run, but only under `GITHUB_ACTIONS`: a laptop-measured run never touches the file (the 2026-08-08 numbers policy). The **E2E US Perf Run** workflow (`.github/workflows/e2e-us-perf.yml`) runs one job per selected provider against its own checkout, uploads each leg's `e2e.db`, and a collector job, `tests/e2e/metrics/publish-perf-pr.ts`, merges every leg into the shared data file sequentially (safe without a db merge, since a leg's db only ever carries rows for the one provider it ran), then re-renders all three surfaces once and opens/updates a perf PR from `main`.
+**Writers.** The batch runner (`pnpm test:e2e:batch`) calls `updatePerfDataFromRun` at the end of a run, but only under `GITHUB_ACTIONS`: a laptop-measured run never touches the file (the 2026-08-08 numbers policy). The **E2E Perf Run** workflow (`.github/workflows/e2e-us-perf.yml`) runs one job per selected provider against its own checkout, uploads each leg's `e2e.db`, and a collector job, `tests/e2e/metrics/publish-perf-pr.ts`, merges every leg into the shared data file sequentially (safe without a db merge, since a leg's db only ever carries rows for the one provider it ran), then re-renders all three surfaces once and opens/updates a perf PR from `main`.
 
-**Anomaly guard.** `detectPerfAnomalies` (`tests/e2e/metrics/reporter.ts`) flags a green cell that is still anomalously slow: the current value against the **median of that same provider's last 5 green runs** (mode + dnsProvider + step, excluding this run); a cell over **1.3×** that median excludes its *whole* provider from the pass, keeping the previously recorded fast numbers (cells with fewer than 2 prior green runs are never flagged: no baseline yet; `--force-perf-table` records anyway). The batch runner wires this guard ahead of its own `updatePerfDataFromRun` call (`excludeProviders`); the CI US Perf collector does not re-run it and merges every leg's green coverage unconditionally.
+**Anomaly guard.** `detectPerfAnomalies` (`tests/e2e/metrics/reporter.ts`) flags a green cell that is still anomalously slow: the current value against the **median of that same provider's last 5 green runs** (mode + dnsProvider + step, excluding this run); a cell over **1.3×** that median excludes its *whole* provider from the pass, keeping the previously recorded fast numbers (cells with fewer than 2 prior green runs are never flagged: no baseline yet; `--force-perf-table` records anyway). The batch runner wires this guard ahead of its own `updatePerfDataFromRun` call (`excludeProviders`); the CI perf collector does not re-run it and merges every leg's green coverage unconditionally.
 
 ### RTO/RPO figures (HA guarantees)
 
@@ -101,11 +101,25 @@ continuity evidence, no figures) and flags non-full-matrix sources per the
 HA-claims-pinned-to-green-matrix rule. Full methodology and the metric-to-SQL
 mapping: [docs/rto-rpo.md](./rto-rpo.md).
 
-### CI US-region perf runs
+### CI perf runs
 
 The perf table can also be measured from CI, removing the operator's uplink
-from the numbers: the **E2E US Perf Run** workflow (`workflow_dispatch`) runs
-against Hetzner US regions (default `ash,hil`) and, opt-in, DigitalOcean.
+from the numbers: the **E2E Perf Run** workflow
+(`.github/workflows/e2e-us-perf.yml`, `workflow_dispatch`) runs against
+Hetzner and, opt-in, the other providers.
+
+The Hetzner leg lands wherever `tests/config.ts`
+`capacityPreferences.hetzner` says: EU locations only (`nbg1`, `hel1`,
+`fsn1`), cheapest viable type-pair first (`cx23/cx33` → `cpx22/cpx32` →
+`ccx13/ccx23`). Hetzner's 2026-06-15 repricing put US CPX at ~3x the EU cx
+line, the legacy `cpx21/31` pair above its `cpx22/32` successor, and every
+short-lived matrix VM bills a full hour — so the matrix stays in the EU on
+the cheapest shared line (`tests/unit/e2e/hetzner-capacity-cost-guard.test.ts`
+pins this). Numbers recorded since 2026-09 are therefore runner (US) → EU
+DC; the `regions` dispatch input (default empty) exists for a deliberate US
+record run (`ash,hil`). The "US" in the workflow filename is historical —
+it is referenced by artifact names, `release.yml`/`test.yml`, the
+`sweep-*-ci.ts` scripts and several unit tests, so it was not renamed.
 
 Topology: one `matrix` job instance per selected provider (`fail-fast:
 false`, its own concurrency group per provider so re-dispatching one
