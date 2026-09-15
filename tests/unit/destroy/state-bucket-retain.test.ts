@@ -45,6 +45,50 @@ describe('retainStateBucket', () => {
     expect(spinner.messages.join('\n')).toMatch(/kept/i);
   });
 
+  it('records the kept bucket on the project config so the next deploy reuses it', async () => {
+    // Keeping the bucket is only half the promise ("next deploy resumes a warm
+    // state backend"). The derived name embeds the app bucket name, which
+    // destroy rotates, so without a handoff the next deploy derived a fresh
+    // name and the kept bucket was orphaned — one leaked bucket per
+    // destroy→deploy cycle (vibecarbon-web 2026-09-15). updateProjectConfig
+    // persists this object, so the mutation is what carries the name over.
+    const spinner = spinnerStub();
+    const cfg: Record<string, unknown> = { projectName: 'proj' };
+    await retainStateBucket(envConfig, cfg, {}, spinner, { leak: vi.fn(), unverified: vi.fn() });
+    expect(cfg.retainedStateBucket).toBe('proj-storage-pulumi-state-a1b2c3');
+    expect(spinner.messages.join('\n')).toMatch(/next deploy/i);
+  });
+
+  it('does not record a retained bucket when the bucket is a project pin (the pin already resolves it)', async () => {
+    const spinner = spinnerStub();
+    const cfg: Record<string, unknown> = {
+      projectName: 'proj',
+      stateBucket: 'proj-storage-pulumi-state-a1b2c3',
+    };
+    await retainStateBucket(envConfig, cfg, {}, spinner, { leak: vi.fn(), unverified: vi.fn() });
+    expect(cfg.retainedStateBucket).toBeUndefined();
+  });
+
+  it('clears a previously retained name on the -purge path (nothing left to reuse)', async () => {
+    // No credentials in the unit environment, so the purge branch stops at
+    // promptObjectStorageCredentials → null and records a leak; the retained
+    // name must still be dropped, since a purge means the operator wants
+    // nothing carried forward — a stale name would point the next deploy at a
+    // bucket that is gone or about to be.
+    const spinner = spinnerStub();
+    const cfg: Record<string, unknown> = {
+      projectName: 'proj',
+      retainedStateBucket: 'proj-storage-pulumi-state-a1b2c3',
+    };
+    await retainStateBucket(envConfig, cfg, { purgeBackups: true }, spinner, {
+      leak: vi.fn(),
+      unverified: vi.fn(),
+      risk: vi.fn(),
+      foreign: vi.fn(),
+    });
+    expect(cfg.retainedStateBucket).toBeUndefined();
+  });
+
   it('no-ops for a pre-split env whose state lived in the app bucket', async () => {
     // That bucket is removed by the normal app-bucket path; there is no
     // separate bucket to keep, and claiming one was kept would be a lie.

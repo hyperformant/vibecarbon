@@ -1041,6 +1041,10 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
   // redeploy after -purge is a fresh project start, not a same-name recreate
   // racing acked writes.
   if (args?.purgeBackups) {
+    // A purge carries nothing forward: drop any retained name whether or not
+    // the delete below succeeds, so the next deploy never resolves to a
+    // bucket that is gone (or about to be) and derives a fresh one instead.
+    delete projectConfig.retainedStateBucket;
     const region = envConfig.s3?.stateBucketRegion || envConfig.s3?.region || 'fsn1';
     const Provider = providerFor(envConfig);
     spinner.start(`Purging Pulumi state bucket: ${stateBucket}`);
@@ -1083,10 +1087,18 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
     return;
   }
 
+  // Keeping the bucket is only useful if the next deploy finds it. The
+  // derived state-bucket name embeds the app bucket name, and
+  // updateProjectConfig rotates storageBucketGeneration below, so a redeploy
+  // would derive a NEW name and this bucket would just be orphaned — one
+  // leaked bucket per destroy→deploy cycle (vibecarbon-web 2026-09-15).
+  // Record the kept name; resolveStateBucketName reads it ahead of
+  // derivation, and updateProjectConfig persists this same object.
+  projectConfig.retainedStateBucket = stateBucket;
   spinner.start('Pulumi state bucket');
   spinner.stop(
-    `Pulumi state bucket kept for reuse: ${stateBucket} (next deploy resumes a warm state ` +
-      'backend; delete with -purge)',
+    `Pulumi state bucket kept for reuse: ${stateBucket} (recorded as retainedStateBucket; ` +
+      'the next deploy resumes this warm state backend; delete with -purge)',
   );
   // Deliberately NOT a ledger entry. All four severities mean something this
   // is not: leak/unverified feed `survivors` and fail the exit code, `foreign`
@@ -1316,8 +1328,9 @@ async function updateProjectConfigEffect(ctx) {
   // warm bucket and sending every redeploy to a brand-new one.
   //
   // `storageBucketGeneration` IS rotated — precisely when this destroy
-  // actually DELETED the storage bucket (purge path; results.s3Bucket is the
-  // deleted name). The storage bucket cannot be retained across `-purge`
+  // actually DELETED the storage bucket (results.s3Bucket is the deleted
+  // name — which is every destroy that had one, not only -purge; the app
+  // bucket is always deleted, -purge governs the backup + state buckets). The storage bucket cannot be retained across `-purge`
   // (purge means the data is deleted), so the redeploy-side of the hazard is
   // closed by naming instead: the next deploy derives a FRESH bucket name
   // rather than recreating the deleted one and riding Hetzner's
