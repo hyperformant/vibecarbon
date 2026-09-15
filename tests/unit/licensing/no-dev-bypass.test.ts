@@ -63,8 +63,14 @@ const ENV_READ_RE = /\b(?:process\.env|env)\.([A-Z0-9_]+)/g;
  */
 const ALLOWED_ENV_READS = new Set(['VIBECARBON_API_BASE']);
 
-/** Any read of the wall clock: `Date.now()` or a bare `new Date()`. */
-const CLOCK_READ_RE = /\bDate\.now\s*\(|\bnew Date\s*\(\s*\)/g;
+/**
+ * Any construction of a Date, or a read of `Date.now()`. Widened from the
+ * original `new Date()`-only (empty parens) match: `new Date(someMs)` reads
+ * the wall clock exactly as much as `new Date()` does when `someMs` traces
+ * back to an uncontrolled source, so a narrower regex would miss that
+ * variant of the same bypass entirely.
+ */
+const CLOCK_READ_RE = /\bDate\.now\s*\(|\bnew Date\s*\(/g;
 
 /**
  * The clock reads this directory may hold, and why each is safe:
@@ -77,9 +83,21 @@ const CLOCK_READ_RE = /\bDate\.now\s*\(|\bnew Date\s*\(\s*\)/g;
  *     machine clock can only end a grace period sooner or later; it can
  *     never manufacture a subscription, because `now` is never consulted
  *     without a verified verdict, and `activatedAt` feeds no decision.
- * entitlement.js, which owns the decision table, must hold none.
+ *   - entitlement.js (1): utcMsToYmd()'s `new Date(ms)` formats an ALREADY-
+ *     COMPUTED epoch millisecond value (from ymdToUtcMs() arithmetic over a
+ *     verified periodEnd) back into 'YYYY-MM-DD'. It never reads the machine
+ *     clock; `ms` never comes from `Date.now()` anywhere in this file.
+ *   - validator.js (1): isRealCalendarDate()'s `new Date(Date.UTC(year,
+ *     month - 1, day))` builds a Date purely to reject an impossible
+ *     calendar date (e.g. Feb 30) parsed OUT of a token/key string. `year`,
+ *     `month`, `day` are parsed input, never the machine clock.
  */
-const ALLOWED_CLOCK_READS: Record<string, number> = { 'check.js': 1, 'index.js': 3 };
+const ALLOWED_CLOCK_READS: Record<string, number> = {
+  'check.js': 1,
+  'index.js': 3,
+  'entitlement.js': 1,
+  'validator.js': 1,
+};
 
 describe('no local bypass of signature verification', () => {
   afterEach(() => {
@@ -141,9 +159,15 @@ describe('no local bypass of signature verification', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('entitlement.js, the decision table, reads no clock at all', () => {
+  it('entitlement.js, the decision table, reads no clock beyond the one allowed formatting call', () => {
+    // Not a literal zero: utcMsToYmd()'s `new Date(ms)` formats an already-
+    // computed epoch value, never the machine clock (see
+    // ALLOWED_CLOCK_READS's comment above). The budget check above already
+    // enforces this count; this test pins the actual source text so a
+    // SECOND, genuine clock read next to it cannot hide behind the same
+    // budget slot.
     const source = codeOnly(readFileSync(join(LICENSING_DIR, 'entitlement.js'), 'utf-8'));
-    expect([...source.matchAll(CLOCK_READ_RE)].map((m) => m[0])).toEqual([]);
+    expect([...source.matchAll(CLOCK_READ_RE)].map((m) => m[0])).toEqual(['new Date(']);
   });
 
   it('no module under src/lib/licensing/ reads an env var outside the explicit allowlist', () => {
