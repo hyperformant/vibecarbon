@@ -26,13 +26,15 @@ Compose HA is also covered under Fullerene, for providers without Kubernetes; se
 
 ## 3. Per-Project Rule
 
-A subscription is per project. Only provisioning a new environment into a paid deploy mode is checked. Redeploy, backup, restore, failover, and scale never require a key. A key may be used by anyone working on that project, client work included.
+A subscription is per project. It is checked on every deploy to a Kubernetes or HA environment, provisioning or redeploy alike. Backup, restore, failover, and scale never require a key. A key may be used by anyone working on that project, client work included.
 
 ---
 
-## 4. Updates and Lapse
+## 4. Subscription Status and Grace
 
-A key covers every CLI release published on or before its paid-through date. That date already includes 14 days of grace past the end of the billing period it paid for, so there is no separate grace period on top of it. If you stop paying, releases published on or before the paid-through date keep provisioning on that project, indefinitely; only a release published after that date needs a current key. Nothing is ever revoked from a project already provisioned: existing deployments keep running, because the license gates the CLI, not your own cloud account.
+Every deploy to a Kubernetes or HA environment checks the project's subscription with vibecarbon.com. The key itself never changes; the check reports whether the subscription is active, past due, or ended. If vibecarbon.com cannot be reached, the CLI uses the last verdict it stored on that machine, or deploys with a warning when it has none.
+
+A subscription that ends, or whose payment fails, keeps deploying for 30 days after the paid period. Each deploy in that window says how many days remain and where to fix it. After the 30 days, deploys to that project's Kubernetes and HA environments pause until the subscription is renewed or the payment is updated. Backup, restore, failover, and scale never pause, and nothing running is touched.
 
 ---
 

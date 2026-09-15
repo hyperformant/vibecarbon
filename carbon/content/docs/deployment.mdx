@@ -17,12 +17,12 @@ Each environment is bound to one cloud provider, picked the first time you deplo
 | Provider | `-provider` | Deploy modes | Region examples | API token |
 |----------|-------------|--------------|-----------------|-----------|
 | Hetzner Cloud | `hetzner` | `compose`, `k8s`, `k8s-ha` | `fsn1`, `nbg1`, `hel1`, `ash`, `hil` | `HETZNER_API_TOKEN` |
-| DigitalOcean | `digitalocean` | `compose`, `k8s` | `nyc3`, `sfo3`, `ams3`, `fra1`, `lon1` | `DIGITALOCEAN_API_TOKEN` |
+| DigitalOcean | `digitalocean` | `compose`, `k8s`, `k8s-ha` | `nyc3`, `sfo3`, `ams3`, `fra1`, `lon1` | `DIGITALOCEAN_API_TOKEN` |
 | Linode | `linode` | `compose` | `us-iad`, `us-ord`, `fr-par`, `gb-lon` | `LINODE_API_TOKEN` |
 | Vultr | `vultr` | `compose` | `ewr`, `ord`, `ams`, `lhr`, `sgp` | `VULTR_API_TOKEN` |
 | Scaleway | `scaleway` | `compose` | `fr-par-1`, `fr-par-2`, `nl-ams-1`, `nl-ams-2` | `SCALEWAY_SECRET_KEY` |
 
-Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with `-mode compose-ha`. `k8s-ha` (multi-region Kubernetes with one-command failover) is Hetzner-only today.
+Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with `-mode compose-ha`. `k8s-ha` (multi-region Kubernetes with one-command failover) runs on Hetzner and DigitalOcean.
 
 `-provider` selects the cloud for a **new** environment; existing environments keep the provider they were first deployed with. It is required alongside `-y` when you create a new environment non-interactively — otherwise the deploy prompt asks. `-region` takes the provider's own region id, so the value is only meaningful next to the provider it belongs to:
 
@@ -125,7 +125,7 @@ To re-tune bounds or worker server types on an existing cluster, run `vibecarbon
 
 ### High Availability
 
-**Kubernetes HA**: full K8s clusters per region (Hetzner-only today):
+**Kubernetes HA**: full K8s clusters per region (Hetzner and DigitalOcean):
 
 ```bash
 vibecarbon deploy prod -mode k8s-ha

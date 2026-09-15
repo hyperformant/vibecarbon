@@ -96,13 +96,19 @@ describe('CLI reference states licensing by scenario, not by command', () => {
     ).toEqual([]);
   });
 
-  it('documents activate -refresh and the committed .vibecarbon.license file', () => {
+  it('documents the deploy-time check, the 30-day grace, and the committed .vibecarbon.license file', () => {
     for (const [name, text] of [
       ['cli.mdx', doc],
       ['README.md', readme],
     ] as const) {
-      expect(text, `${name} is missing 'activate -refresh'`).toContain('activate -refresh');
       expect(text, `${name} is missing '.vibecarbon.license'`).toContain('.vibecarbon.license');
+      expect(text, `${name} is missing '30 days'`).toContain('30 days');
+      expect(text, `${name} is missing 'every deploy'`).toContain('every deploy');
+      expect(text, `${name} still has 'activate -refresh'`).not.toContain('activate -refresh');
+      expect(text, `${name} still has 'paid-through'`).not.toContain('paid-through');
+      expect(text, `${name} still has 'published on or before'`).not.toContain(
+        'published on or before',
+      );
     }
   });
 });

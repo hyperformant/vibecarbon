@@ -418,7 +418,7 @@
       },
       "q3": {
         "question": "What cloud providers are supported?",
-        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider: Hetzner runs Compose, Kubernetes, and Kubernetes HA; DigitalOcean runs Compose and Kubernetes; Linode, Vultr, and Scaleway run Compose. Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with -mode compose-ha. Kubernetes HA (multi-region pilot-light standby) is Hetzner-only today. The provider is a per-environment setting: pick one, and pick again whenever you want."
+        "answer": "Hetzner Cloud, DigitalOcean, Linode, Vultr, and Scaleway: the same CLI, the same lifecycle, the same test coverage. Mode support varies by provider: Hetzner and DigitalOcean run Compose, Kubernetes, and Kubernetes HA; Linode, Vultr, and Scaleway run Compose. Compose HA is also available on every provider for high availability without Kubernetes; select it explicitly with -mode compose-ha. The provider is a per-environment setting: pick one, and pick again whenever you want."
       },
       "q4": {
         "question": "How does deployment work?",
@@ -426,7 +426,7 @@
       },
       "q5": {
         "question": "How does pricing work?",
-        "answer": "Graphite is free forever: create projects, develop locally, and deploy in production on a single server, with every add-on included. Graphene is $19 per project per month ($190 per year) and unlocks Kubernetes. Fullerene is $39 per project per month ($390 per year) and unlocks Kubernetes HA, which also covers Compose HA. A subscription is per project: only provisioning a new environment into a paid deploy mode is checked, and redeploying, backing up, restoring, failing over, or scaling an existing environment never requires a key. Either way, it deploys to your own cloud account."
+        "answer": "Graphite is free forever: create projects, develop locally, and deploy in production on a single server, with every add-on included. Graphene is $19 per project per month ($190 per year) and unlocks Kubernetes. Fullerene is $39 per project per month ($390 per year) and unlocks Kubernetes HA, which also covers Compose HA. A subscription is per project: it is checked on every deploy to a Kubernetes or HA environment, and backup, restore, failover, and scale never require a key. Either way, it deploys to your own cloud account."
       },
       "q6": {
         "question": "How many projects can I create with one license?",
@@ -443,6 +443,10 @@
       "q9": {
         "question": "Do I need DevOps experience to deploy?",
         "answer": "No. The CLI handles provisioning, SSL, scaling, backups, and monitoring. You need an account with a supported provider, a domain, and SMTP credentials for email. That's it. All the Kubernetes manifests and Docker Compose files live in your project if you want to understand or customize what's being set up."
+      },
+      "q10": {
+        "question": "What if I cancel or a payment fails?",
+        "answer": "You get 30 days after the paid period ends. Every deploy in that window tells you how long is left and where to fix it. After that, deploys to your paid-mode environments pause until you renew. Backup, restore, failover, and scale never pause, and your running app is untouched."
       }
     },
     "newsletter": {

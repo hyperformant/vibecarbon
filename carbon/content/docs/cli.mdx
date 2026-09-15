@@ -49,10 +49,14 @@ paid for being that command.
 | Kubernetes | Graphene |
 | Kubernetes HA | Fullerene (also covers Compose HA) |
 
-Only provisioning a **new** environment into a paid deploy mode consults it.
-Redeploying an existing environment, and running `backup`, `restore`,
-`failover`, or `scale` on it, never requires a key. Every other command,
+The subscription is checked on every deploy to a Kubernetes or HA
+environment. A lapsed subscription keeps deploying for 30 days with a
+warning, then pauses those deploys until renewed. Backup, restore,
+failover, and scale never require a subscription. Every other command,
 including all of `configure`, is free in every mode.
+
+Activation writes `.vibecarbon.license` into the project; commit it and
+share it with your team. The key never rotates.
 
 Run `vibecarbon activate <key>` to activate a license.
 
@@ -410,10 +414,10 @@ confirmations.
 | `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3, or PITR to an ISO-8601 timestamp. Skips migrations; the restored DB is authoritative. K8s modes only. |
 | `-allow-degraded` | HA only: finish even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy fails unless replication is confirmed streaming. |
 
-Provider support varies by mode: `compose` runs on all five providers,
-`compose-ha` and `k8s` on Hetzner and DigitalOcean, and `k8s-ha` is
-Hetzner-only today. See [Deployment](/docs/deployment#choosing-a-provider) for
-the full matrix and the API token each provider reads.
+Provider support varies by mode: `compose` runs on all five providers, and
+`compose-ha`, `k8s`, and `k8s-ha` run on Hetzner and DigitalOcean. See
+[Deployment](/docs/deployment#choosing-a-provider) for the full matrix and
+the API token each provider reads.
 
 > Server types, worker bounds, domain, DNS provider, S3 credentials, and backup
 > schedules are configured interactively or via `.vibecarbon.json`, and they don't
@@ -709,19 +713,12 @@ vibecarbon activate
 
 # Key seeded
 vibecarbon activate vc-xxxxxxxx-signature...
-
-# Pull a renewed key for this project's stored license
-vibecarbon activate -refresh
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-refresh` | Ask vibecarbon.com for a renewed key covering this project's stored license, and store it if it verifies |
-
-License keys start with `vc-` (legacy) or `vc2-` (current). A key covers
-every CLI release published on or before its paid-through date, so a
-lapsed subscription keeps working on that project until a newer release
-ships. Subscribe at
+License keys start with `vc-` (legacy) or `vc2-` (current). The key never
+rotates; the subscription is checked on every deploy to a Kubernetes or HA
+environment. A lapsed subscription keeps deploying for 30 days with a
+warning, then pauses those deploys until renewed. Subscribe at
 [vibecarbon.com/pricing](https://vibecarbon.com/pricing).
 
 ---

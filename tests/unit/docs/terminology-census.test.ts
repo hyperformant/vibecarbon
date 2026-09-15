@@ -349,6 +349,24 @@ describe('terminology census', () => {
     }
   });
 
+  it('never says "paid-through" or "release published", terms the deploy-time check replaced', () => {
+    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
+    const mdxFiles = readdirSync(mdxDir)
+      .filter((f) => f.endsWith('.mdx'))
+      .map((f) => join('carbon', 'content', 'docs', f));
+    const pattern = /paid-through|release published/gi;
+    for (const rel of [...SURFACES, ...mdxFiles]) {
+      const hits = contextHits(read(rel), pattern);
+      expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
+    }
+    for (const f of LOCALE_FILES) {
+      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
+      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
+      const hits = contextHits(faqText, pattern);
+      expect(hits, `locales/${f} faq: ${hits.join(' | ')}`).toEqual([]);
+    }
+  });
+
   it('retired one-time/legacy pricing language ("one-time", "$149", "retail $299") never appears in SURFACES or the locale FAQ', () => {
     const patterns: Array<[string, RegExp]> = [
       ['one-time', /one-time/i],

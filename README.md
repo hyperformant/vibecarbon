@@ -149,7 +149,7 @@ vibecarbon <command> [options]
 
 | Command | What it does |
 | :------ | :----------- |
-| **`activate [key]`** | Activate a Graphene or Fullerene license key for this project (unlocks Kubernetes and/or HA modes); `-refresh` pulls a renewed key |
+| **`activate [key]`** | Activate a Graphene or Fullerene project key (unlocks Kubernetes and HA deploys for this project) |
 | **`deactivate`** | Deactivate the current license; `-all` removes every stored key |
 
 ### Debug: look under the hood
@@ -317,7 +317,7 @@ Using the distributed `vibecarbon` package is a per-project subscription:
 | **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
 | **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
 
-Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. A subscription is checked only when provisioning a new environment into a paid deploy mode; redeploy, backup, restore, failover, and scale never require a key. Run `vibecarbon activate <key>` from inside the project directory the key was issued for; it writes `.vibecarbon.license`, which should be committed and shared with your team. A key covers every CLI release published on or before its paid-through date, so a lapsed subscription keeps working on that project until a newer release ships; `vibecarbon activate -refresh` pulls a renewed key once you've resubscribed. Keys bought before subscriptions (the legacy Fullerene license) are lifetime: every mode, every project. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
+Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. The subscription is checked on every deploy to a Kubernetes or HA environment. A lapsed subscription keeps deploying for 30 days with a warning, then pauses those deploys until renewed. Backup, restore, failover, and scale never require a subscription. Run `vibecarbon activate <key>` from inside the project directory the key was issued for; it writes `.vibecarbon.license`, which should be committed and shared with your team. The key never rotates. Keys bought before subscriptions (the legacy Fullerene license) are lifetime: every mode, every project. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
 
 ---
 

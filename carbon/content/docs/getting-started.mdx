@@ -90,7 +90,7 @@ vibecarbon activate <your-key>
 vibecarbon deploy
 ```
 
-Activating writes `.vibecarbon.license` into the project. Commit it and share it with your team; anyone working on this project can then deploy without activating separately. A key covers every CLI release published on or before its paid-through date, so if a subscription lapses, deploys keep working until a newer release ships. Run `vibecarbon activate -refresh` to pull a renewed key once you've resubscribed.
+Activating writes `.vibecarbon.license` into the project; commit it and share it with your team. The key never rotates. The subscription is checked on every deploy to a Kubernetes or HA environment. A lapsed subscription keeps deploying for 30 days with a warning, then pauses those deploys until renewed. Backup, restore, failover, and scale never require a subscription.
 
 The bare `deploy` command opens a guided prompt that walks you through environment selection, mode (`compose`, `k8s`, or `k8s-ha`; `compose-ha` is also available, pass it explicitly with `-mode compose-ha`), region, and other settings. Behind the scenes it builds your app, pushes container images, and applies your infrastructure configuration. Traefik handles SSL certificates automatically via Let's Encrypt.
 
