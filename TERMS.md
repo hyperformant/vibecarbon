@@ -8,7 +8,7 @@ These terms govern use of the **Vibecarbon distributed package** (`npm install -
 
 ## 1. Two-Track Model
 
-The CLI source code is Fair Source (FSL-1.1-MIT): free to clone, build, modify, and run for any non-competing purpose, and each release converts to the MIT license two years after publication. The distributed `vibecarbon` npm package enforces a license only when provisioning a new environment into a paid deploy mode.
+The CLI source code is Fair Source (FSL-1.1-MIT): free to clone, build, modify, and run for any non-competing purpose, and each release converts to the MIT license two years after publication. The distributed `vibecarbon` npm package enforces a license on every deploy to a Kubernetes or HA environment.
 
 ---
 
