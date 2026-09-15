@@ -17,6 +17,7 @@ export function FAQSection() {
     { question: t('landing.faq.q7.question'), answer: t('landing.faq.q7.answer') },
     { question: t('landing.faq.q8.question'), answer: t('landing.faq.q8.answer') },
     { question: t('landing.faq.q9.question'), answer: t('landing.faq.q9.answer') },
+    { question: t('landing.faq.q10.question'), answer: t('landing.faq.q10.answer') },
   ];
 
   return (
