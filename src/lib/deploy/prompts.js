@@ -550,9 +550,9 @@ export async function gatherDeploymentConfig(args) {
     // `args.serverType` acts as a blanket fallback for all three node roles
     // when a role-specific value isn't set. Matches the compose case's simpler
     // mental model and lets e2e pin the whole cluster to a single known-good
-    // SKU. (There is no `-type` deploy flag — see src/deploy.js's SPEC; these
-    // arrive from `.vibecarbon.json` / the interactive prompt / a programmatic
-    // caller. `scale` is the command that takes `-type`.)
+    // SKU. (`args.serverType` comes from `deploy -server-type <id>` or a
+    // programmatic caller; the per-role values from `.vibecarbon.json` / the
+    // interactive prompt. `scale` is the command that takes `-type`.)
     const blanket = args.serverType || envConfig.serverType;
     masterServerType =
       args.masterServerType || envConfig.masterServerType || blanket || regionDefaults.masterType;

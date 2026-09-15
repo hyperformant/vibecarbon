@@ -230,9 +230,10 @@ one, delete it by hand.)
 
 **2. Re-seed the environment block.** `destroy` removes
 `environments.<env>` from `.vibecarbon.json` entirely. Put it back with the
-identity/DNS/backup fields you want to keep and the new placement — without
-`serverType` a scripted compose deploy takes the region's *medium-tier*
-default, not the cheapest type:
+identity/DNS/backup fields you want to keep and the new placement (`region`
+and `serverType` can also be given as `deploy -region … -server-type …`;
+without either a scripted compose deploy takes the region's *medium-tier*
+default, not the cheapest type):
 
 ```json
 "environments": {
@@ -255,10 +256,12 @@ default, not the cheapest type:
 Leave `servers`, `s3`, `status`, `deployedAt`, `deployedCommit` and
 `lastAttempt` out — deploy writes them.
 
-**3. Deploy.** Fully scripted from the block above:
+**3. Deploy.** Fully scripted from the block above (or with the placement
+on the command line):
 
 ```bash
 vibecarbon deploy <env> -y
+vibecarbon deploy <env> -y -region fsn1 -server-type cpx22
 ```
 
 Provisioning, DNS, the certificate, the image push and the stack come up in

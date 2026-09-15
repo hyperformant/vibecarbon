@@ -393,6 +393,9 @@ vibecarbon deploy prod -mode k8s-ha -region hel1 -y
 # Scripted single-server deploy to a new DigitalOcean environment
 vibecarbon deploy prod -provider digitalocean -region nyc3 -mode compose -y
 
+# Scripted compose deploy at an explicit placement (no region default)
+vibecarbon deploy prod -region fsn1 -server-type cpx22 -y
+
 # Redo a previously-failed deploy from scratch
 vibecarbon deploy prod -full
 ```
@@ -411,6 +414,7 @@ confirmations.
 | `-region <id>` | Primary region (provider-specific, e.g. `hel1` on Hetzner, `nyc3` on DigitalOcean) |
 | `-standby-region <id>` | HA standby/failover region (defaults to a same-continent partner of `-region`) |
 | `-mode <mode>` | Deploy mode: `compose`, `compose-ha`, `k8s`, or `k8s-ha` |
+| `-server-type <id>` | Server type (provider-specific, e.g. `cpx22`). Compose: the whole box; k8s: blanket for master/supabase/worker unless `.vibecarbon.json` sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
 | `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3, or PITR to an ISO-8601 timestamp. Skips migrations; the restored DB is authoritative. K8s modes only. |
 | `-allow-degraded` | HA only: finish even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy fails unless replication is confirmed streaming. |
