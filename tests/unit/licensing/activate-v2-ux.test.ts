@@ -1,11 +1,15 @@
 /**
- * B4's per-project activate UX: the "already active" check keyed off which
+ * The per-project activate UX: the "already active" check keyed off which
  * SLOT the entered key targets (legacy vs project), and the post-activation
- * detail block (Project/Paid through for v2, the CLI's own release date,
- * and the "does not cover this release" warning).
+ * detail block.
  *
- * activateLicense/listStoredLicenses/getReleaseDate are mocked; the real
- * validator/crypto path is covered elsewhere (validator.test.ts,
+ * A v2 key carries no tier and no date, so activation can only report which
+ * project the key is for and that the subscription is checked at deploy
+ * time. Anything more would be the CLI guessing at billing state it has not
+ * asked the server about.
+ *
+ * activateLicense/listStoredLicenses are mocked; the real validator/crypto
+ * path is covered elsewhere (validator.test.ts,
  * signature-verification.test.ts, storage.test.ts). This file is purely
  * about what activate.js DOES with those results.
  */
@@ -30,9 +34,6 @@ const licensingMock = vi.hoisted(() => ({
 }));
 vi.mock('../../../src/lib/licensing/index.js', () => licensingMock);
 
-const releaseDateMock = vi.hoisted(() => ({ getReleaseDate: vi.fn() }));
-vi.mock('../../../src/lib/licensing/release-date.js', () => releaseDateMock);
-
 vi.mock('../../../src/lib/cli/intro.js', () => ({ introCommand: vi.fn() }));
 
 import { runActivate } from '../../../src/activate.js';
@@ -49,7 +50,6 @@ function noStoredLicenses() {
 beforeEach(() => {
   vi.clearAllMocks();
   noStoredLicenses();
-  releaseDateMock.getReleaseDate.mockReturnValue('2026-01-01');
 });
 
 describe('activate — per-slot "already active" handling', () => {
@@ -65,13 +65,11 @@ describe('activate — per-slot "already active" handling', () => {
     ]);
     licensingMock.activateLicense.mockReturnValue({
       success: true,
-      tier: 'graphene',
-      tierName: 'Vibecarbon Graphene',
-      features: ['kubernetes'],
+      tier: null,
+      tierName: 'Project license',
       isLifetime: false,
       format: 'v2',
       projectId: PROJECT_ID,
-      paidThrough: '2027-12-31',
       slot: 'project',
     });
 
@@ -99,13 +97,11 @@ describe('activate — per-slot "already active" handling', () => {
     clackMock.confirm.mockResolvedValue(true);
     licensingMock.activateLicense.mockReturnValue({
       success: true,
-      tier: 'graphene',
-      tierName: 'Vibecarbon Graphene',
-      features: ['kubernetes'],
+      tier: null,
+      tierName: 'Project license',
       isLifetime: false,
       format: 'v2',
       projectId: PROJECT_ID,
-      paidThrough: '2027-12-31',
       slot: 'project',
     });
 
@@ -161,7 +157,7 @@ describe('activate — per-slot "already active" handling', () => {
 });
 
 describe('activate — post-activation detail block', () => {
-  it('v1: shows Tier, Expires: Never, and This CLI, no coverage warning', async () => {
+  it('v1: shows Tier, Expires: Never, and this CLI version', async () => {
     licensingMock.activateLicense.mockReturnValue({
       success: true,
       tier: 'fullerene',
@@ -171,7 +167,6 @@ describe('activate — post-activation detail block', () => {
       format: 'v1',
       slot: 'legacy',
     });
-    releaseDateMock.getReleaseDate.mockReturnValue('2026-06-15');
 
     await runActivate([V1_KEY]);
 
@@ -179,53 +174,72 @@ describe('activate — post-activation detail block', () => {
     const [details] = clackMock.note.mock.calls[0];
     expect(details).toContain('Tier: Vibecarbon Fullerene');
     expect(details).toContain('Expires: Never');
-    expect(details).toContain(`This CLI: v${VERSION} (released 2026-06-15)`);
-    expect(details).not.toContain('does not cover this CLI release');
+    expect(details).toContain(`This CLI: v${VERSION}`);
   });
 
-  it('v2: shows Project, Paid through, and This CLI, with a coverage warning when the release is newer', async () => {
+  it('v2: shows the project and defers the subscription state to deploy time', async () => {
     licensingMock.activateLicense.mockReturnValue({
       success: true,
-      tier: 'graphene',
-      tierName: 'Vibecarbon Graphene',
-      features: ['kubernetes'],
+      tier: null,
+      tierName: 'Project license',
       isLifetime: false,
       format: 'v2',
       projectId: PROJECT_ID,
-      paidThrough: '2026-01-01',
       slot: 'project',
     });
-    releaseDateMock.getReleaseDate.mockReturnValue('2026-06-15');
 
     await runActivate([V2_KEY]);
 
     const [details] = clackMock.note.mock.calls[0];
-    expect(details).toContain('Tier: Vibecarbon Graphene');
+    expect(details).toContain('Tier: Project license');
     expect(details).toContain(`Project: ${PROJECT_ID}`);
-    expect(details).toContain('Paid through: 2026-01-01');
-    expect(details).toContain(`This CLI: v${VERSION} (released 2026-06-15)`);
-    expect(details).toContain(
-      'This key does not cover this CLI release. Renew, or run the CLI version you paid for.',
-    );
+    expect(details).toContain('Subscription status is checked when you deploy.');
+    expect(details).toContain(`This CLI: v${VERSION}`);
   });
 
-  it('v2: no coverage warning when the release date is on or before paidThrough', async () => {
+  it('v2: never claims a paid-through date or a release the key does not cover', async () => {
+    // The key no longer rotates and carries no date, so any such line would
+    // be the CLI inventing billing state it has not asked the server about.
     licensingMock.activateLicense.mockReturnValue({
       success: true,
-      tier: 'graphene',
-      tierName: 'Vibecarbon Graphene',
-      features: ['kubernetes'],
+      tier: null,
+      tierName: 'Project license',
       isLifetime: false,
       format: 'v2',
       projectId: PROJECT_ID,
-      paidThrough: '2027-01-01',
       slot: 'project',
     });
-    releaseDateMock.getReleaseDate.mockReturnValue('2026-06-15');
 
     await runActivate([V2_KEY]);
 
     const [details] = clackMock.note.mock.calls[0];
+    expect(details).not.toContain('Paid through');
     expect(details).not.toContain('does not cover this CLI release');
+    expect(details).not.toContain('released');
+  });
+});
+
+describe('activate: the retired -refresh flag', () => {
+  it('-refresh is rejected as an unknown flag and exits 1', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+
+    await expect(runActivate(['-refresh'])).rejects.toThrow('process.exit(1)');
+
+    expect(licensingMock.activateLicense).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+  });
+
+  it('the help text no longer advertises it', async () => {
+    const logged: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    });
+
+    await runActivate(['-h']);
+
+    expect(logged.join('\n')).not.toMatch(/refresh/i);
+    logSpy.mockRestore();
   });
 });

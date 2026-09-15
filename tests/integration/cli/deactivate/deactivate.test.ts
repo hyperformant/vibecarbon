@@ -90,14 +90,11 @@ describe('vibecarbon deactivate', () => {
     const projectLicensePath = join(project, '.vibecarbon.license');
     writeFileSync(
       projectLicensePath,
+      // The real project-file shape: the key, and nothing else that could
+      // drift from it.
       `${JSON.stringify(
         {
-          key: 'vc-f-deadbeef-fakefakefake',
-          format: 'v2',
-          tier: 'fullerene',
-          customerId: 'deadbeef',
-          projectId: '00000000-0000-0000-0000-000000000000',
-          paidThrough: '2026-12-31',
+          key: 'vc2-deadbeef-fakefakefake',
           activatedAt: '2026-01-01T00:00:00.000Z',
           source: 'manual',
         },

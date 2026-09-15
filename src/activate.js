@@ -21,21 +21,8 @@ import {
   hasStoredLicense,
   listStoredLicenses,
 } from './lib/licensing/index.js';
-import { refreshLicense } from './lib/licensing/refresh.js';
-import { getReleaseDate } from './lib/licensing/release-date.js';
 import { getTier } from './lib/licensing/tiers.js';
-import { manifestExists } from './lib/project.js';
 import { VERSION } from './lib/version.js';
-
-/** refreshLicense()'s failure reasons, worded for an operator reading them
- *  directly (never an em dash — see the marketing-copy rule). */
-const REFRESH_FAILURE_MESSAGES = {
-  'no-key': 'No project license key is stored here. Run vibecarbon activate <key> first.',
-  'not-renewed': 'This project subscription has not been renewed yet.',
-  'not-found': 'vibecarbon.com does not recognize the stored license key.',
-  invalid: 'vibecarbon.com returned a key that could not be verified.',
-  offline: 'Could not reach vibecarbon.com. Check your connection and try again.',
-};
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string }} */
 const ACTIVATE_SPEC = {
@@ -48,14 +35,7 @@ const ACTIVATE_SPEC = {
       description: 'License key (vc-... or vc2-...). Prompts if omitted.',
     },
   ],
-  flags: [
-    { name: 'h', boolean: true, description: 'Show this help' },
-    {
-      name: 'refresh',
-      boolean: true,
-      description: 'Refresh the stored project key from vibecarbon.com',
-    },
-  ],
+  flags: [{ name: 'h', boolean: true, description: 'Show this help' }],
 };
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string }} */
@@ -74,57 +54,14 @@ const DEACTIVATE_SPEC = {
 };
 
 /**
- * `vibecarbon activate -refresh`: ask vibecarbon.com for the current key
- * covering this project's stored v2 license (see refreshLicense), and print
- * the old/new paid-through dates or the reason it could not refresh.
- * Requires a Vibecarbon project with a project-slot key already stored;
- * either miss prints a clear message and exits 1.
- */
-async function runActivateRefresh() {
-  if (!manifestExists()) {
-    p.log.error(c.error('Run vibecarbon activate -refresh inside a Vibecarbon project.'));
-    process.exit(1);
-  }
-
-  const projectEntry = listStoredLicenses().find((entry) => entry.slot === 'project' && entry.key);
-  if (!projectEntry) {
-    p.log.error(c.error(REFRESH_FAILURE_MESSAGES['no-key']));
-    process.exit(1);
-  }
-
-  const oldPaidThrough = getLicense().paidThrough ?? projectEntry.paidThrough ?? 'unknown';
-
-  const s = spinner();
-  s.start('Checking vibecarbon.com for a renewed key');
-  const result = await refreshLicense();
-
-  if (!result.ok) {
-    s.stop('Could not refresh the license key', 1);
-    p.log.error(
-      c.error(REFRESH_FAILURE_MESSAGES[result.reason] ?? 'Could not refresh the license key.'),
-    );
-    process.exit(1);
-  }
-
-  s.stop('License key refreshed!');
-  p.log.success(`Paid through: ${oldPaidThrough} to ${result.paidThrough}`);
-  p.outro('You can now deploy, backup, scale, and operate your production stack.');
-}
-
-/**
  * Activate a license key (Fullerene)
  * @param {string[]} args - CLI arguments (first positional arg is the key)
  */
 export async function runActivate(args) {
-  const { values, positional, handled } = parseFlagsOrExit(args, ACTIVATE_SPEC);
+  const { positional, handled } = parseFlagsOrExit(args, ACTIVATE_SPEC);
   if (handled) return;
 
   introCommand('activate');
-
-  if (values.refresh) {
-    await runActivateRefresh();
-    return;
-  }
 
   // Get key from args or prompt. Needed up front now: which slot a key
   // targets (legacy vs project) decides whether "already active" even
@@ -227,22 +164,20 @@ export async function runActivate(args) {
 
   const detailLines = [`Tier: ${result.tierName}`];
   if (result.format === 'v2') {
+    // A v2 key is stable and carries no tier or date: the plan and whether
+    // it is paid up are a signed verdict the deploy gate fetches. Printing
+    // anything more here would be the CLI guessing at billing state.
     detailLines.push(`Project: ${result.projectId}`);
-    detailLines.push(`Paid through: ${result.paidThrough}`);
+    detailLines.push('Subscription status is checked when you deploy.');
   } else {
     detailLines.push('Expires: Never');
   }
 
-  const releaseDate = getReleaseDate();
-  detailLines.push(`This CLI: v${VERSION} (released ${releaseDate})`);
+  detailLines.push(`This CLI: v${VERSION}`);
 
-  if (result.format === 'v2' && result.paidThrough && releaseDate > result.paidThrough) {
-    detailLines.push(
-      'This key does not cover this CLI release. Renew, or run the CLI version you paid for.',
-    );
+  if (result.features?.length) {
+    detailLines.push(`Features: ${result.features.join(', ')}`);
   }
-
-  detailLines.push(`Features: ${result.features.join(', ')}`);
 
   p.note(detailLines.join('\n'), 'License Details');
 

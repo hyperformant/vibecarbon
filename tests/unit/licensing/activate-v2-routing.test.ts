@@ -1,11 +1,10 @@
 /**
  * activateLicense's v2 (project-scoped) routing branch.
  *
- * validator.js cannot parse a real v2 key until B4, so there's no way to
- * produce a `{ valid: true, format: 'v2', projectId }` validation result
- * from a real key today. This mocks validateLicenseKey (only for this
- * file) to exercise the routing skeleton activateLicense already has to
- * carry per the storage contract, without implementing any v2 parsing.
+ * validateLicenseKey is mocked (only for this file) so the routing can be
+ * driven directly, without minting a key per case; the real parser and the
+ * real crypto are covered in validator.test.ts, signature-verification.test.ts
+ * and storage.test.ts.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,10 +47,9 @@ describe('activateLicense v2 routing (mocked validator, no real v2 parser yet)',
     vi.mocked(validateLicenseKey).mockReturnValue({
       valid: true,
       format: 'v2',
-      tier: 'graphene',
+      tier: null,
       customerId: 'a1b2c3d4',
       projectId: PROJECT_ID,
-      paidThrough: '2026-12-31',
       isLifetime: false,
       verified: true,
     });
@@ -61,17 +59,18 @@ describe('activateLicense v2 routing (mocked validator, no real v2 parser yet)',
     expect(result.success).toBe(true);
     expect(result.format).toBe('v2');
     expect(result.projectId).toBe(PROJECT_ID);
+    // A v2 key names no tier: which plan this project is on arrives as a
+    // signed verdict at deploy time, so there is nothing to display here.
+    expect(result.tier).toBeNull();
+    expect(result.tierName).toBe('Project license');
 
     const path = join(projectDir, '.vibecarbon.license');
     expect(existsSync(path)).toBe(true);
+    // Only the key is load-bearing; anything else in the file would be a
+    // second, editable copy of a fact that is already signed.
     const stored = JSON.parse(readFileSync(path, 'utf-8'));
     expect(stored).toEqual({
       key: 'vc2-fake-for-mock',
-      format: 'v2',
-      tier: 'graphene',
-      customerId: 'a1b2c3d4',
-      projectId: PROJECT_ID,
-      paidThrough: '2026-12-31',
       activatedAt: stored.activatedAt,
       source: 'manual',
     });
@@ -81,10 +80,9 @@ describe('activateLicense v2 routing (mocked validator, no real v2 parser yet)',
     vi.mocked(validateLicenseKey).mockReturnValue({
       valid: true,
       format: 'v2',
-      tier: 'graphene',
+      tier: null,
       customerId: 'a1b2c3d4',
       projectId: PROJECT_ID,
-      paidThrough: '2026-12-31',
       isLifetime: false,
       verified: true,
     });
@@ -104,10 +102,9 @@ describe('activateLicense v2 routing (mocked validator, no real v2 parser yet)',
     vi.mocked(validateLicenseKey).mockReturnValue({
       valid: true,
       format: 'v2',
-      tier: 'graphene',
+      tier: null,
       customerId: 'a1b2c3d4',
       projectId: '99999999-9999-9999-9999-999999999999',
-      paidThrough: '2026-12-31',
       isLifetime: false,
       verified: true,
     });
@@ -126,10 +123,9 @@ describe('activateLicense v2 routing (mocked validator, no real v2 parser yet)',
     vi.mocked(validateLicenseKey).mockReturnValue({
       valid: true,
       format: 'v2',
-      tier: 'graphene',
+      tier: null,
       customerId: 'a1b2c3d4',
       projectId: PROJECT_ID,
-      paidThrough: '2026-12-31',
       isLifetime: false,
       verified: true,
     });
