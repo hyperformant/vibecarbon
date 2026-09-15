@@ -44,12 +44,19 @@ function fetchReturning(token: string, cancelAtPeriodEnd = false) {
   }));
 }
 
-/** A fetch stub answering 404: the server knows the endpoint, not this key. */
+/**
+ * A fetch stub answering 404 with the app's own error shape: the server
+ * knows the endpoint, not this key. `{ error: '<string>' }` is what turns a
+ * non-ok response into a genuine 'rejected' (see check.js's I2 ruling);
+ * a bare `{}` body would now read as an outage ('unreachable'), not a
+ * refusal.
+ */
 function fetchRejecting() {
   return vi.fn(async () => ({
     ok: false,
     status: 404,
-    json: async () => ({}),
+    json: async () => ({ error: 'not_found' }),
+    text: async () => JSON.stringify({ error: 'not_found' }),
   }));
 }
 
@@ -277,5 +284,36 @@ describe('requireDeployEntitlement seam', () => {
     expect(spinnerOutput()).toContain('Subscription check refused this key');
     expect(spinnerOutput()).not.toContain('Subscription check skipped');
     expect(existsSync(cachePath())).toBe(false);
+  });
+
+  it('12: an uppercase manifest projectId still matches the stored license and the live verdict', async () => {
+    // .vibecarbon.json can carry the id in whatever case it was written
+    // with; license.projectId and every verdict.projectId are always
+    // lowercase. Without normalizing the manifest's id before comparing,
+    // this false-blocks as 'wrong-project' even though it is the same
+    // project (I1). PROJECT_ID is all-digit hex, so it needs a hex-letter
+    // id here for .toUpperCase() to actually change anything.
+    const mixedCaseId = 'aabbccdd-2222-4333-8444-555555555555';
+    writeFileSync(
+      join(projectDir, '.vibecarbon.json'),
+      `${JSON.stringify({ version: '1', projectId: mixedCaseId.toUpperCase(), services: {} }, null, 2)}\n`,
+    );
+    const key = mintV2Key(privateKeyPem, { customerId: CUSTOMER_ID, projectId: mixedCaseId });
+    expect(activateLicense(key, { projectDir, stateDir, publicKeyPem }).success).toBe(true);
+    const token = signVerdictToken(privateKeyPem, {
+      projectId: mixedCaseId,
+      status: 'active',
+      tier: 'graphene',
+      periodEnd: '2026-09-30',
+      issued: NOW,
+    });
+    const fetchImpl = fetchReturning(token);
+
+    await expect(
+      gate({ fetchImpl, projectConfig: { projectName: 'lictest' } }),
+    ).resolves.toBeUndefined();
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(output()).toBe('');
   });
 });

@@ -160,9 +160,14 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
  * @param {object} options
  * @param {{kind: string, daysLeft?: number, periodEnd?: string, tier?: string, detail?: string}} options.warning
  * @param {string|null} [options.projectId]
+ * @param {string|null} [options.requiredTier] - The tier the deploy actually
+ *   needs (verdict.requiredTier from evaluateDeployEntitlement). Only the
+ *   'canceled' renew link uses this: it must point at the tier this
+ *   environment requires, not `warning.tier` (the tier the project HELD,
+ *   which the canceled check runs before confirming is even sufficient).
  * @returns {string[]}
  */
-export function buildDeployWarning({ warning, projectId = null }) {
+export function buildDeployWarning({ warning, projectId = null, requiredTier = null }) {
   const days = warning.daysLeft === 0 ? 'through today' : `for ${warning.daysLeft} more days`;
   switch (warning.kind) {
     case 'past-due':
@@ -173,7 +178,7 @@ export function buildDeployWarning({ warning, projectId = null }) {
     case 'canceled':
       return [
         `This project's ${tierName(warning.tier)} subscription ended on ${warning.periodEnd}. Deploys keep working ${days}.`,
-        `Renew: ${subscribeUrl(projectId, warning.tier)}`,
+        `Renew: ${subscribeUrl(projectId, requiredTier ?? warning.tier)}`,
       ];
     case 'unverified':
       return [

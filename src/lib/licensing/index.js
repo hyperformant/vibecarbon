@@ -566,7 +566,13 @@ export async function requireDeployEntitlement({
   const requiredTier = requiredTierFor(deployTier);
   if (requiredTier === 'graphite') return;
 
-  const projectId = ensureProjectId(projectConfig, projectDir);
+  // ensureProjectId() returns whatever case the manifest happens to carry
+  // (or projectConfig.projectId verbatim); license.projectId and every
+  // verdict.projectId are always lowercase (normalizeProjectId() in
+  // getLicense(), .toLowerCase() in checkLicense()/verifyVerdictToken()).
+  // Without normalizing here too, a mixed-case manifest id compares unequal
+  // to both and false-blocks an otherwise valid, matching license.
+  const projectId = normalizeProjectId(ensureProjectId(projectConfig, projectDir));
   const license = getLicense({ projectDir, stateDir, publicKeyPem });
 
   // Only a v2 project key has a subscription to check. No key at all is
@@ -590,7 +596,11 @@ export async function requireDeployEntitlement({
 
   const verdict = evaluateDeployEntitlement({ license, deployTier, projectId, check, now });
   if (verdict.ok) {
-    if (verdict.warning) printDeployWarning({ warning: verdict.warning, projectId }, { c });
+    if (verdict.warning)
+      printDeployWarning(
+        { warning: verdict.warning, projectId, requiredTier: verdict.requiredTier },
+        { c },
+      );
     return;
   }
 

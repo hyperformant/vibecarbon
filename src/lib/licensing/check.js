@@ -9,6 +9,17 @@
  * verifyVerdictToken(). The cache file's JSON mirror is never read for
  * entitlement; an edited file simply fails verification and is ignored.
  *
+ * rejected vs unreachable: a non-ok response is `rejected` (hard block, no
+ * cache fallback) ONLY when its body parses as JSON and carries a string
+ * `error` field, the app's own error shape for "the server answered and
+ * does not recognize this key" (`{ error: 'invalid_key' | 'bad_signature' |
+ * 'lifetime_key' | 'not_found' | ... }`). Any other non-ok response, an
+ * HTML 403 from a WAF, an empty 408, an edge 400, 429, any 5xx, is
+ * `unreachable` and falls back to the cache (or warns). The body is read
+ * once via `res.text()` and parsed defensively; a body that isn't JSON, or
+ * is JSON without an `error` string, never throws and never counts as a
+ * refusal.
+ *
  * Never throws.
  */
 
@@ -99,12 +110,25 @@ export async function checkLicense({
     });
   }
 
-  if (res.status === 429 || res.status >= 500) {
-    return fallback({ stateDir, projectId: pid, publicKeyPem, unreachable: `HTTP ${res.status}` });
-  }
   if (!res.ok) {
-    // 400/401/404: the server answered and does not recognize this key.
-    return { source: 'rejected', verdict: null };
+    // The server answered with an error status. Only a body shaped like the
+    // app's own error response ({ error: '<string>' }) counts as a genuine
+    // refusal ('rejected', no cache fallback). Anything else, an HTML body
+    // from a WAF, an empty body, a 429/5xx with no parseable JSON, is an
+    // outage from this client's point of view, not an answer: 'unreachable',
+    // fall back to the cache.
+    let errorField;
+    try {
+      const text = await res.text();
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.error === 'string') errorField = parsed.error;
+    } catch {
+      // Non-JSON or unreadable body: falls through to unreachable below.
+    }
+    if (errorField !== undefined) {
+      return { source: 'rejected', verdict: null };
+    }
+    return fallback({ stateDir, projectId: pid, publicKeyPem, unreachable: `HTTP ${res.status}` });
   }
 
   let body;

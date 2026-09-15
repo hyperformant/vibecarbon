@@ -228,10 +228,27 @@ describe('buildDeployWarning - warning kinds', () => {
     const lines = buildDeployWarning({
       warning: { kind: 'canceled', daysLeft: 17, tier: 'fullerene', periodEnd: '2026-09-01' },
       projectId: DEPLOY_PROJECT_ID,
+      requiredTier: 'fullerene',
     });
     expect(lines).toEqual([
       "This project's Fullerene subscription ended on 2026-09-01. Deploys keep working for 17 more days.",
       `Renew: https://vibecarbon.com/pricing?project=${DEPLOY_PROJECT_ID}&tier=fullerene`,
+    ]);
+  });
+
+  it('canceled: the renew link points at the tier the deploy actually needs, not the tier the project held', () => {
+    // The canceled check runs before the tier-sufficiency check
+    // (entitlement.js's M-canceled fix aside, a canceled warning is only
+    // reachable when the held tier DOES satisfy the deploy, but it need not
+    // equal it): held Fullerene, deploying into a Graphene-required mode.
+    const lines = buildDeployWarning({
+      warning: { kind: 'canceled', daysLeft: 17, tier: 'fullerene', periodEnd: '2026-09-01' },
+      projectId: DEPLOY_PROJECT_ID,
+      requiredTier: 'graphene',
+    });
+    expect(lines).toEqual([
+      "This project's Fullerene subscription ended on 2026-09-01. Deploys keep working for 17 more days.",
+      `Renew: https://vibecarbon.com/pricing?project=${DEPLOY_PROJECT_ID}&tier=graphene`,
     ]);
   });
 
@@ -450,16 +467,22 @@ describe('deploy gate copy hygiene', () => {
       );
     }
 
-    const warnings = [
+    const warnings: Array<{ requiredTier?: string; [key: string]: unknown }> = [
       { kind: 'past-due', daysLeft: 17, tier: 'graphene', periodEnd: '2026-08-01' },
       { kind: 'past-due', daysLeft: 0, tier: 'graphene', periodEnd: '2026-08-01' },
-      { kind: 'canceled', daysLeft: 17, tier: 'fullerene', periodEnd: '2026-09-01' },
+      {
+        kind: 'canceled',
+        daysLeft: 17,
+        tier: 'fullerene',
+        periodEnd: '2026-09-01',
+        requiredTier: 'fullerene',
+      },
       { kind: 'unverified', detail: 'ECONNREFUSED' },
       { kind: 'stale', tier: 'graphene', periodEnd: '2026-07-01' },
       { kind: 'ending', tier: 'graphene', periodEnd: '2026-09-30' },
     ];
-    for (const warning of warnings) {
-      out.push(...buildDeployWarning({ warning, projectId: DEPLOY_PROJECT_ID }));
+    for (const { requiredTier, ...warning } of warnings) {
+      out.push(...buildDeployWarning({ warning, projectId: DEPLOY_PROJECT_ID, requiredTier }));
     }
 
     return out.filter((line) => line !== '');

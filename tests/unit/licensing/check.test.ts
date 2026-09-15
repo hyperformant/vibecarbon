@@ -39,6 +39,19 @@ function jsonResponse(status, body) {
     ok: status >= 200 && status < 300,
     status,
     json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+/** A fetchImpl stub for a non-JSON (e.g. WAF/proxy) error body. */
+function htmlResponse(status, html = '<html><body>blocked</body></html>') {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => {
+      throw new Error('not json');
+    },
+    text: async () => html,
   };
 }
 
@@ -133,7 +146,7 @@ describe('checkLicense', () => {
     expect(cached?.cancelAtPeriodEnd).toBe(true);
   });
 
-  it('5. 401 is rejected, writes nothing, and leaves an existing cache untouched', async () => {
+  it('5. 401 with the app error shape is rejected, writes nothing, and leaves an existing cache untouched', async () => {
     const goodToken = signVerdictToken(privateKeyPem, verdictFields());
     const goodFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token: goodToken }));
     await checkLicense({
@@ -145,7 +158,7 @@ describe('checkLicense', () => {
     });
     const before = readFileSync(cachePathFor(stateDir, PROJECT_ID), 'utf8');
 
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, {}));
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { error: 'bad_signature' }));
     const result = await checkLicense({
       key: 'vc2-key',
       projectId: PROJECT_ID,
@@ -157,6 +170,83 @@ describe('checkLicense', () => {
     expect(result).toEqual({ source: 'rejected', verdict: null });
     const after = readFileSync(cachePathFor(stateDir, PROJECT_ID), 'utf8');
     expect(after).toBe(before);
+  });
+
+  it('5b. 404 with { error: "not_found" } is rejected', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(404, { error: 'not_found' }));
+    const result = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl,
+      publicKeyPem,
+    });
+
+    expect(result).toEqual({ source: 'rejected', verdict: null });
+  });
+
+  it('5c. 400 with an empty body (no error field) is unreachable, not rejected', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(400, {}));
+    const result = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl,
+      publicKeyPem,
+    });
+
+    expect(result.source).toBe('none');
+    expect(result.verdict).toBeNull();
+    expect(result.unreachable).toBe('HTTP 400');
+  });
+
+  it('5d. 403 with an HTML body falls back to a valid cache, and is unreachable without one', async () => {
+    const token = signVerdictToken(privateKeyPem, verdictFields());
+    const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
+    await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl: seedFetch,
+      publicKeyPem,
+    });
+
+    const cachedResult = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl: vi.fn().mockResolvedValue(htmlResponse(403)),
+      publicKeyPem,
+    });
+    expect(cachedResult.source).toBe('cache');
+    expect(cachedResult.verdict).toMatchObject({ status: 'active', tier: 'graphene' });
+
+    const otherStateDir = mkdtempSync(join(tmpdir(), 'vibecarbon-check-'));
+    const noCacheResult = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir: otherStateDir,
+      fetchImpl: vi.fn().mockResolvedValue(htmlResponse(403)),
+      publicKeyPem,
+    });
+    expect(noCacheResult.source).toBe('none');
+    expect(noCacheResult.verdict).toBeNull();
+    expect(noCacheResult.unreachable).toBe('HTTP 403');
+  });
+
+  it('5e. 404 with an HTML body is unreachable, not rejected', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(htmlResponse(404));
+    const result = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl,
+      publicKeyPem,
+    });
+
+    expect(result.source).toBe('none');
+    expect(result.verdict).toBeNull();
+    expect(result.unreachable).toBe('HTTP 404');
   });
 
   describe('6. transient failures fall back to cache when present, else unreachable/none', () => {
