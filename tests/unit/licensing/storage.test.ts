@@ -47,18 +47,12 @@ function signKey(privateKey: ReturnType<typeof makeKeypair>['privateKey'], custo
 /** Mint a genuine `vc2-...` key so project-slot round trips exercise the real B4 parser. */
 function signV2Key(
   privateKey: ReturnType<typeof makeKeypair>['privateKey'],
-  {
-    tierChar = 'f',
-    customerId,
-    projectId,
-    paidThrough,
-  }: { tierChar?: string; customerId: string; projectId: string; paidThrough: string },
+  { customerId, projectId }: { customerId: string; projectId: string },
 ) {
   const projectId32 = projectId.replace(/-/g, '').toLowerCase();
-  const yyyymmdd = paidThrough.replace(/-/g, '');
-  const message = signedMessage({ format: 'v2', tierChar, customerId, projectId, paidThrough });
+  const message = signedMessage({ format: 'v2', customerId, projectId });
   const signatureHex = edSign(null, Buffer.from(message), privateKey).toString('hex');
-  return `vc2-${tierChar}-${customerId}-${projectId32}-${yyyymmdd}-${signatureHex}`;
+  return `vc2-${customerId}-${projectId32}-${signatureHex}`;
 }
 
 describe('per-project license storage', () => {
@@ -92,7 +86,7 @@ describe('per-project license storage', () => {
 
   /** A genuine v2 key for PROJECT_ID, fullerene, paid through 2026-12-31. */
   function validV2Key() {
-    return signV2Key(privateKey, { customerId, projectId: PROJECT_ID, paidThrough: '2026-12-31' });
+    return signV2Key(privateKey, { customerId, projectId: PROJECT_ID });
   }
 
   function writeProjectLicenseFile(data: Record<string, unknown>) {
@@ -166,11 +160,11 @@ describe('per-project license storage', () => {
 
       const license = getLicense({ projectDir, stateDir, publicKeyPem });
       expect(license.active).toBe(true);
-      expect(license.tier).toBe('fullerene');
+      expect(license.tier).toBeNull();
       expect(license.format).toBe('v2');
       expect(license.isLifetime).toBe(false);
       expect(license.projectId).toBe(PROJECT_ID);
-      expect(license.paidThrough).toBe('2026-12-31');
+      expect(license.paidThrough).toBeNull();
       expect(license.slot).toBe('project');
       expect(license.storedAt).toBe(join(projectDir, '.vibecarbon.license'));
     });
@@ -199,7 +193,6 @@ describe('per-project license storage', () => {
         key: signV2Key(privateKey, {
           customerId,
           projectId: otherProjectId,
-          paidThrough: '2026-12-31',
         }),
         format: 'v2',
         tier: 'fullerene',
@@ -226,7 +219,6 @@ describe('per-project license storage', () => {
         key: signV2Key(privateKey, {
           customerId,
           projectId: signedFor,
-          paidThrough: '2026-12-31',
         }),
         format: 'v2',
         tier: 'fullerene',
@@ -273,7 +265,6 @@ describe('per-project license storage', () => {
         key: signV2Key(privateKey, {
           customerId,
           projectId: otherProjectId,
-          paidThrough: '2026-12-31',
         }),
         format: 'v2',
         tier: 'fullerene',
@@ -326,38 +317,6 @@ describe('per-project license storage', () => {
       expect(license.slot).toBe('project');
     });
 
-    it('C1: an edited file paidThrough cannot outlive the signed date', () => {
-      // The key is signed paidThrough 2026-01-31. If getLicense trusted the
-      // file's own paidThrough field, editing it to 2099-12-31 would keep
-      // a lapsed subscription looking current forever.
-      writeProjectLicenseFile({
-        key: signV2Key(privateKey, {
-          customerId,
-          projectId: PROJECT_ID,
-          paidThrough: '2026-01-31',
-        }),
-        format: 'v2',
-        tier: 'fullerene',
-        customerId,
-        projectId: PROJECT_ID,
-        paidThrough: '2099-12-31',
-        activatedAt: '2026-01-01T00:00:00.000Z',
-        source: 'manual',
-      });
-
-      const license = getLicense({ projectDir, stateDir, publicKeyPem });
-      expect(license.paidThrough).toBe('2026-01-31');
-
-      const verdict = evaluateEntitlement({
-        license,
-        deployTier: 'k8s',
-        projectId: PROJECT_ID,
-        releaseDate: '2026-09-13',
-      });
-      expect(verdict.ok).toBe(false);
-      expect(verdict.reason).toBe('lapsed');
-    });
-
     it('C1: an edited file projectId cannot claim a key signed for another project', () => {
       // The key is signed for otherProjectId. If getLicense trusted the
       // file's own projectId field, editing it to PROJECT_ID would let a
@@ -367,7 +326,6 @@ describe('per-project license storage', () => {
         key: signV2Key(privateKey, {
           customerId,
           projectId: otherProjectId,
-          paidThrough: '2026-12-31',
         }),
         format: 'v2',
         tier: 'fullerene',

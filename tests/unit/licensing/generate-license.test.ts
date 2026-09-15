@@ -11,12 +11,11 @@ import {
   emailToCustomerId,
   mintV1Key,
   mintV2Key,
-  monthsAheadUTC,
   parseArgs,
-  resolvePaidThrough,
   run,
+  signVerdictToken,
 } from '../../../scripts/generate-license.js';
-import { validateLicenseKey } from '../../../src/lib/licensing/validator.js';
+import { validateLicenseKey, verifyVerdictToken } from '../../../src/lib/licensing/validator.js';
 
 function ephemeralPrivateKeyPem() {
   const { privateKey } = generateKeyPairSync('ed25519');
@@ -27,79 +26,27 @@ const PROJECT_ID = '11111111-2222-3333-4444-555555555555';
 
 describe('parseArgs', () => {
   it('accepts single-dash flags', () => {
-    const opts = parseArgs([
-      '-legacy',
-      '-tier',
-      'fullerene',
-      '-project',
-      PROJECT_ID,
-      '-months',
-      '1',
-    ]);
+    const opts = parseArgs(['-legacy', '-project', PROJECT_ID, '-customer', 'a1b2c3d4']);
     expect(opts.legacy).toBe(true);
-    expect(opts.tier).toBe('fullerene');
     expect(opts.project).toBe(PROJECT_ID);
-    expect(opts.months).toBe('1');
+    expect(opts.customer).toBe('a1b2c3d4');
   });
 
   it('also accepts double-dash flags (back-compat with older docs/scripts)', () => {
-    const opts = parseArgs([
-      '--tier',
-      'graphene',
-      '--email',
-      'user@acme.com',
-      '--paid-through',
-      '2027-01-31',
-    ]);
-    expect(opts.tier).toBe('graphene');
+    const opts = parseArgs(['--project', PROJECT_ID, '--email', 'user@acme.com']);
+    expect(opts.project).toBe(PROJECT_ID);
     expect(opts.email).toBe('user@acme.com');
-    expect(opts.paidThrough).toBe('2027-01-31');
   });
 
-  it('defaults to v2/graphene, no legacy', () => {
+  it('defaults to v2, no legacy', () => {
     const opts = parseArgs([]);
     expect(opts.legacy).toBe(false);
-    expect(opts.tier).toBe('graphene');
-  });
-});
-
-describe('monthsAheadUTC', () => {
-  it('adds whole calendar months in UTC', () => {
-    const now = new Date(Date.UTC(2026, 0, 15)); // 2026-01-15
-    expect(monthsAheadUTC(1, now)).toBe('2026-02-15');
-    expect(monthsAheadUTC(12, now)).toBe('2027-01-15');
   });
 
-  it('clamps to the last day of a shorter target month (Jan 31 + 1 month)', () => {
-    const nonLeapJan31 = new Date(Date.UTC(2027, 0, 31)); // 2027 is not a leap year
-    expect(monthsAheadUTC(1, nonLeapJan31)).toBe('2027-02-28');
-
-    const leapJan31 = new Date(Date.UTC(2028, 0, 31)); // 2028 is a leap year
-    expect(monthsAheadUTC(1, leapJan31)).toBe('2028-02-29');
-  });
-});
-
-describe('resolvePaidThrough', () => {
-  const now = new Date(Date.UTC(2026, 0, 15));
-
-  it('uses -paid-through verbatim when given', () => {
-    expect(resolvePaidThrough({ paidThrough: '2027-06-30', months: null }, now)).toBe('2027-06-30');
-  });
-
-  it('derives from -months when given', () => {
-    expect(resolvePaidThrough({ paidThrough: null, months: '2' }, now)).toBe('2026-03-15');
-  });
-
-  it('throws when neither is given', () => {
-    expect(() => resolvePaidThrough({ paidThrough: null, months: null }, now)).toThrow(
-      /paid-through.*or.*-months.*required/i,
-    );
-  });
-
-  it('throws when both are given', () => {
-    expect(() => resolvePaidThrough({ paidThrough: '2027-06-30', months: '2' }, now)).toThrow(
-      /only one/i,
-    );
+  it('rejects the retired -tier/-paid-through/-months flags as unknown', () => {
+    expect(() => parseArgs(['-tier', 'graphene'])).toThrow(/unknown flag/i);
+    expect(() => parseArgs(['-paid-through', '2027-01-31'])).toThrow(/unknown flag/i);
+    expect(() => parseArgs(['-months', '1'])).toThrow(/unknown flag/i);
   });
 });
 
@@ -121,31 +68,34 @@ describe('minting round-trips against the matching public key', () => {
     expect(result.isLifetime).toBe(true);
   });
 
-  it('mintV2Key produces a key that validates as v2 with the right project/paidThrough', () => {
-    const key = mintV2Key(privateKeyPem, {
-      tier: 'graphene',
-      customerId: 'a1b2c3d4',
-      projectId: PROJECT_ID,
-      paidThrough: '2027-12-31',
-    });
+  it('mintV2Key produces a 4-part key that validates as v2 with no tier or date', () => {
+    const key = mintV2Key(privateKeyPem, { customerId: 'a1b2c3d4', projectId: PROJECT_ID });
+    expect(key.split('-')).toHaveLength(4);
     const result = validateLicenseKey(key, { publicKeyPem });
     expect(result.valid).toBe(true);
     expect(result.format).toBe('v2');
-    expect(result.tier).toBe('graphene');
+    expect(result.tier).toBeNull();
     expect(result.projectId).toBe(PROJECT_ID);
-    expect(result.paidThrough).toBe('2027-12-31');
+    expect(result.paidThrough).toBeNull();
     expect(result.isLifetime).toBe(false);
   });
 
   it('a v2 key does NOT validate against an unrelated public key', () => {
-    const key = mintV2Key(privateKeyPem, {
-      tier: 'fullerene',
-      customerId: 'a1b2c3d4',
-      projectId: PROJECT_ID,
-      paidThrough: '2027-12-31',
-    });
+    const key = mintV2Key(privateKeyPem, { customerId: 'a1b2c3d4', projectId: PROJECT_ID });
     const otherPublicKeyPem = derivePublicKeyPem(ephemeralPrivateKeyPem());
     expect(validateLicenseKey(key, { publicKeyPem: otherPublicKeyPem }).valid).toBe(false);
+  });
+
+  it('signVerdictToken produces a token that verifies via verifyVerdictToken', () => {
+    const fields = {
+      projectId: PROJECT_ID,
+      status: 'active',
+      tier: 'graphene',
+      periodEnd: '2026-09-30',
+      issued: '2026-09-14',
+    };
+    const token = signVerdictToken(privateKeyPem, fields);
+    expect(verifyVerdictToken(token, { publicKeyPem })).toEqual({ valid: true, ...fields });
   });
 });
 
@@ -156,23 +106,20 @@ describe('run() end to end', () => {
     privateKeyPem = ephemeralPrivateKeyPem();
   });
 
-  it('mints and prints a v2 key from -months, and returns a valid validation result', () => {
+  it('mints and prints a v2 key from -project and -email, with no paid-through', () => {
     const lines: string[] = [];
-    const now = new Date(Date.UTC(2026, 0, 15));
-    const result = run(['-project', PROJECT_ID, '-months', '1', '-email', 'user@acme.com'], {
+    const result = run(['-project', PROJECT_ID, '-email', 'a@b.co'], {
       privateKeyPem,
       log: (s) => lines.push(s),
-      now,
     });
 
     expect(result.printed).toBe(true);
     expect(result.validation.valid).toBe(true);
     expect(result.validation.format).toBe('v2');
-    expect(result.validation.paidThrough).toBe('2026-02-15');
+    expect(result.validation.tier).toBeNull();
     const output = lines.join('\n');
-    expect(output).toContain('Tier:       Graphene');
     expect(output).toContain(`Project:    ${PROJECT_ID}`);
-    expect(output).toContain('Paid through: 2026-02-15');
+    expect(output).not.toContain('Paid through:');
     expect(output).toContain(result.key);
     expect(output).toContain(`vibecarbon activate ${result.key}`);
   });
@@ -194,14 +141,6 @@ describe('run() end to end', () => {
     expect(output).not.toContain('Project:');
   });
 
-  it('-legacy ignores -tier and always mints fullerene', () => {
-    const result = run(['-legacy', '-tier', 'graphene', '-customer', 'cafebabe'], {
-      privateKeyPem,
-      log: () => {},
-    });
-    expect(result.validation.tier).toBe('fullerene');
-  });
-
   it('requires -customer or -email', () => {
     expect(() => run(['-legacy'], { privateKeyPem, log: () => {} })).toThrow(
       /-customer.*or.*-email/i,
@@ -218,6 +157,21 @@ describe('run() end to end', () => {
     } finally {
       if (originalEnv !== undefined) process.env.VIBECARBON_LICENSE_PRIVATE_KEY = originalEnv;
     }
+  });
+
+  it('rejects the retired -paid-through and -tier flags as unknown', () => {
+    expect(() =>
+      run(['-paid-through', '2027-01-31', '-legacy', '-customer', 'cafebabe'], {
+        privateKeyPem,
+        log: () => {},
+      }),
+    ).toThrow(/unknown flag/i);
+    expect(() =>
+      run(['-tier', 'graphene', '-legacy', '-customer', 'cafebabe'], {
+        privateKeyPem,
+        log: () => {},
+      }),
+    ).toThrow(/unknown flag/i);
   });
 
   it('never prints a key that fails its own round-trip validation', async () => {

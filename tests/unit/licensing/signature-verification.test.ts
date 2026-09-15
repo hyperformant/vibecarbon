@@ -10,12 +10,18 @@
  */
 
 import { sign as edSign, generateKeyPairSync } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  derivePublicKeyPem,
+  mintV1Key,
+  mintV2Key,
+  signVerdictToken,
+} from '../../../scripts/generate-license.js';
 import {
   parseLicenseKey,
-  signedMessage,
   validateLicenseKey,
   verifySignature,
+  verifyVerdictToken,
 } from '../../../src/lib/licensing/validator.js';
 
 // A signature has to survive parseLicenseKey (>=10 chars, lowercase hex);
@@ -26,6 +32,13 @@ function makeKeypair() {
     publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
     privateKey,
   };
+}
+
+// mintV2Key/signVerdictToken need a PEM-encoded private key (not a KeyObject),
+// so this pairs with derivePublicKeyPem the same way generate-license.test.ts does.
+function ephemeralPrivateKeyPem() {
+  const { privateKey } = generateKeyPairSync('ed25519');
+  return privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 }
 
 function signKey(privateKey: ReturnType<typeof makeKeypair>['privateKey'], customerId: string) {
@@ -83,109 +96,87 @@ describe('verifySignature (real Ed25519 path)', () => {
   });
 });
 
-describe('verifySignature (real Ed25519 path, v2)', () => {
-  const customerId = 'a1b2c3d4';
-  const projectId32 = '11112222333344445555666677778888';
-  const projectId = '11112222-3333-4444-5555-666677778888';
-  const paidThrough = '2027-12-31';
-  const yyyymmdd = '20271231';
+describe('v2 key signature', () => {
+  const PROJECT_ID = '11111111-2222-3333-4444-555555555555';
+  let privateKeyPem: string;
+  let publicKeyPem: string;
+  let otherPublicKeyPem: string;
 
-  function signV2Key(
-    privateKey: ReturnType<typeof makeKeypair>['privateKey'],
-    overrides: {
-      tierChar?: string;
-      customerId?: string;
-      projectId32?: string;
-      yyyymmdd?: string;
-    } = {},
-  ) {
-    const tierChar = overrides.tierChar ?? 'g';
-    const cid = overrides.customerId ?? customerId;
-    const pid32 = overrides.projectId32 ?? projectId32;
-    const date = overrides.yyyymmdd ?? yyyymmdd;
-    const message = signedMessage({
-      format: 'v2',
-      tierChar,
-      customerId: cid,
-      projectId: pid32, // signedMessage strips dashes, so a bare 32-hex works too
-      paidThrough: `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`,
-    });
-    const signatureHex = edSign(null, Buffer.from(message), privateKey).toString('hex');
-    return `vc2-${tierChar}-${cid}-${pid32}-${date}-${signatureHex}`;
-  }
-
-  it('accepts a v2 key signed by the matching private key', () => {
-    const { publicKeyPem, privateKey } = makeKeypair();
-    const parsed = parseLicenseKey(signV2Key(privateKey));
-    expect(parsed.valid).toBe(true);
-    expect(parsed.projectId).toBe(projectId);
-    expect(parsed.paidThrough).toBe(paidThrough);
-    const result = verifySignature(parsed, { publicKeyPem });
-    expect(result.valid).toBe(true);
-    expect(result.verified).toBe(true);
+  beforeEach(() => {
+    privateKeyPem = ephemeralPrivateKeyPem();
+    publicKeyPem = derivePublicKeyPem(privateKeyPem);
+    otherPublicKeyPem = derivePublicKeyPem(ephemeralPrivateKeyPem());
   });
 
-  it('rejects when the tier char is tampered after signing', () => {
-    const { publicKeyPem, privateKey } = makeKeypair();
-    const key = signV2Key(privateKey, { tierChar: 'g' });
-    const tampered = key.replace('vc2-g-', 'vc2-f-');
-    const parsed = parseLicenseKey(tampered);
-    expect(parsed.valid).toBe(true); // parses fine, 'f' is a valid v2 tier char
-    const result = verifySignature(parsed, { publicKeyPem });
-    expect(result.valid).toBe(false);
+  it('accepts a key minted by the generator and rejects every tampered field', () => {
+    const key = mintV2Key(privateKeyPem, { customerId: 'a1b2c3d4', projectId: PROJECT_ID });
+    expect(validateLicenseKey(key, { publicKeyPem }).valid).toBe(true);
+    const [, cid, pid32, sig] = key.split('-');
+    expect(validateLicenseKey(`vc2-ffffffff-${pid32}-${sig}`, { publicKeyPem }).valid).toBe(false);
+    expect(validateLicenseKey(`vc2-${cid}-${'0'.repeat(32)}-${sig}`, { publicKeyPem }).valid).toBe(
+      false,
+    );
+    expect(validateLicenseKey(key, { publicKeyPem: otherPublicKeyPem }).valid).toBe(false);
   });
 
-  it('rejects when the paid-through date is tampered after signing', () => {
-    const { publicKeyPem, privateKey } = makeKeypair();
-    const key = signV2Key(privateKey);
-    const tampered = key.replace(`-${yyyymmdd}-`, '-20271230-');
-    const parsed = parseLicenseKey(tampered);
-    expect(parsed.valid).toBe(true);
-    const result = verifySignature(parsed, { publicKeyPem });
-    expect(result.valid).toBe(false);
+  it('a v1 signature can never be replayed as v2 (message prefix differs)', () => {
+    const v1 = mintV1Key(privateKeyPem, { customerId: 'a1b2c3d4' });
+    const v1sig = v1.split('-')[3];
+    expect(
+      validateLicenseKey(`vc2-a1b2c3d4-${PROJECT_ID.replace(/-/g, '')}-${v1sig}`, { publicKeyPem })
+        .valid,
+    ).toBe(false);
+  });
+});
+
+describe('verdict token signature', () => {
+  const PROJECT_ID = '11111111-2222-3333-4444-555555555555';
+  const fields = {
+    projectId: PROJECT_ID,
+    status: 'active',
+    tier: 'graphene',
+    periodEnd: '2026-09-30',
+    issued: '2026-09-14',
+  };
+  let privateKeyPem: string;
+  let publicKeyPem: string;
+
+  beforeEach(() => {
+    privateKeyPem = ephemeralPrivateKeyPem();
+    publicKeyPem = derivePublicKeyPem(privateKeyPem);
   });
 
-  it('rejects when the projectId is tampered after signing', () => {
-    const { publicKeyPem, privateKey } = makeKeypair();
-    const key = signV2Key(privateKey);
-    const tamperedProjectId32 = `${'9'.repeat(8)}${projectId32.slice(8)}`;
-    const tampered = key.replace(projectId32, tamperedProjectId32);
-    const parsed = parseLicenseKey(tampered);
-    expect(parsed.valid).toBe(true);
-    const result = verifySignature(parsed, { publicKeyPem });
-    expect(result.valid).toBe(false);
+  it('verifies a token signed by the generator and returns only signed fields', () => {
+    const token = signVerdictToken(privateKeyPem, fields);
+    expect(verifyVerdictToken(token, { publicKeyPem })).toEqual({ valid: true, ...fields });
   });
 
-  it('rejects a v1 signature transplanted into a v2 shell (the leading 2- guards against replay)', () => {
-    const { publicKeyPem, privateKey } = makeKeypair();
-    // Sign the v1 message for the same tier char and customer id...
-    const v1Message = `g-${customerId}`;
-    const v1SignatureHex = edSign(null, Buffer.from(v1Message), privateKey).toString('hex');
-    // ...then splice that signature into an otherwise well-formed v2 key.
-    const transplanted = `vc2-g-${customerId}-${projectId32}-${yyyymmdd}-${v1SignatureHex}`;
-    const parsed = parseLicenseKey(transplanted);
-    expect(parsed.valid).toBe(true);
-    const result = verifySignature(parsed, { publicKeyPem });
-    expect(result.valid).toBe(false);
-  });
+  it.each(['status', 'tier', 'periodEnd', 'issued', 'projectId'] as const)(
+    'rejects a tampered %s',
+    (field) => {
+      const token = signVerdictToken(privateKeyPem, fields);
+      const parts = token.split('-');
+      const idx = { projectId: 1, status: 2, tier: 3, periodEnd: 4, issued: 5 }[field];
+      const replacement = {
+        projectId: '0'.repeat(32),
+        status: 'canceled',
+        tier: 'fullerene',
+        periodEnd: '20991231',
+        issued: '20991231',
+      }[field];
+      parts[idx] = replacement;
+      expect(verifyVerdictToken(parts.join('-'), { publicKeyPem }).valid).toBe(false);
+    },
+  );
 
-  it('the embedded production key rejects a well-formed but bogus v2 signature', () => {
-    const bogus = `vc2-g-${customerId}-${projectId32}-${yyyymmdd}-${'0'.repeat(128)}`;
-    const parsed = parseLicenseKey(bogus);
-    expect(parsed.valid).toBe(true);
-    const result = verifySignature(parsed);
-    expect(result.valid).toBe(false);
-  });
-
-  it('validateLicenseKey accepts a genuinely signed v2 key end to end', () => {
-    const { publicKeyPem, privateKey } = makeKeypair();
-    const key = signV2Key(privateKey);
-    const result = validateLicenseKey(key, { publicKeyPem });
-    expect(result.valid).toBe(true);
-    expect(result.verified).toBe(true);
-    expect(result.format).toBe('v2');
-    expect(result.tier).toBe('graphene');
-    expect(result.projectId).toBe(projectId);
-    expect(result.paidThrough).toBe(paidThrough);
+  it('a v2 key signature cannot be replayed as a verdict', () => {
+    const key = mintV2Key(privateKeyPem, { customerId: 'a1b2c3d4', projectId: PROJECT_ID });
+    const sig = key.split('-')[3];
+    const pid32 = PROJECT_ID.replace(/-/g, '');
+    expect(
+      verifyVerdictToken(`vcv-${pid32}-active-fullerene-20991231-20260914-${sig}`, {
+        publicKeyPem,
+      }).valid,
+    ).toBe(false);
   });
 });

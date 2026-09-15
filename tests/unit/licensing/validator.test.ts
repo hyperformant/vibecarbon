@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { parseLicenseKey, validateLicenseKey } from '../../../src/lib/licensing/validator.js';
+import {
+  parseLicenseKey,
+  parseVerdictToken,
+  validateLicenseKey,
+} from '../../../src/lib/licensing/validator.js';
 
 describe('License Validator', () => {
   describe('parseLicenseKey', () => {
@@ -77,67 +81,71 @@ describe('License Validator', () => {
     });
   });
 
-  describe('parseLicenseKey (v2)', () => {
-    const PROJECT_ID32 = '11112222333344445555666677778888';
-    const SIG = 'a'.repeat(128);
+  describe('v2 key parsing (stable project credential)', () => {
+    const sig = 'a'.repeat(128);
+    const pid32 = '11111111222233334444555555555555';
 
-    it('parses a valid Graphene v2 key (happy path)', () => {
-      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-20271231-${SIG}`);
-
-      expect(result.valid).toBe(true);
-      expect(result.format).toBe('v2');
-      expect(result.tier).toBe('graphene');
-      expect(result.tierChar).toBe('g');
-      expect(result.customerId).toBe('a7f2b9c1');
-      expect(result.projectId).toBe('11112222-3333-4444-5555-666677778888');
-      expect(result.paidThrough).toBe('2027-12-31');
-      expect(result.isLifetime).toBe(false);
+    it('parses vc2-<customer>-<project32>-<sig> into customerId and hyphenated projectId', () => {
+      const r = parseLicenseKey(`vc2-a1b2c3d4-${pid32}-${sig}`);
+      expect(r.valid).toBe(true);
+      expect(r.format).toBe('v2');
+      expect(r.customerId).toBe('a1b2c3d4');
+      expect(r.projectId).toBe('11111111-2222-3333-4444-555555555555');
+      expect(r.tier).toBeNull();
+      expect(r.paidThrough).toBeNull();
+      expect(r.isLifetime).toBe(false);
     });
 
-    it('parses a valid Fullerene v2 key, still reporting tier fullerene', () => {
-      const result = parseLicenseKey(`vc2-f-a7f2b9c1-${PROJECT_ID32}-20271231-${SIG}`);
-
-      expect(result.valid).toBe(true);
-      expect(result.format).toBe('v2');
-      expect(result.tier).toBe('fullerene');
-      expect(result.isLifetime).toBe(false);
+    it('rejects the retired 6-part dated form', () => {
+      const r = parseLicenseKey(`vc2-g-a1b2c3d4-${pid32}-20270131-${sig}`);
+      expect(r.valid).toBe(false);
+      expect(r.error).toBe('Invalid license key format');
     });
 
-    it('rejects a key with too few parts (5)', () => {
-      // Missing the date segment.
-      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-${SIG}`);
-      expect(result.valid).toBe(false);
+    it('rejects a hyphenated projectId (wrong part count)', () => {
+      const r = parseLicenseKey(`vc2-a1b2c3d4-11111111-2222-3333-4444-555555555555-${sig}`);
+      expect(r.valid).toBe(false);
     });
 
-    it('rejects a key with too many parts (7)', () => {
-      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-20271231-extra-${SIG}`);
-      expect(result.valid).toBe(false);
+    it('rejects a non-128-hex signature', () => {
+      expect(parseLicenseKey(`vc2-a1b2c3d4-${pid32}-${'a'.repeat(127)}`).valid).toBe(false);
+      expect(parseLicenseKey(`vc2-a1b2c3d4-${pid32}-${'z'.repeat(128)}`).valid).toBe(false);
+    });
+  });
+
+  describe('verdict token parsing', () => {
+    const sig = 'b'.repeat(128);
+    const pid32 = '11111111222233334444555555555555';
+
+    it('parses every field', () => {
+      const r = parseVerdictToken(`vcv-${pid32}-past_due-graphene-20260930-20260914-${sig}`);
+      expect(r).toMatchObject({
+        valid: true,
+        projectId: '11111111-2222-3333-4444-555555555555',
+        status: 'past_due',
+        tier: 'graphene',
+        periodEnd: '2026-09-30',
+        issued: '2026-09-14',
+      });
     });
 
-    it('rejects an invalid v2 tier character', () => {
-      const result = parseLicenseKey(`vc2-x-a7f2b9c1-${PROJECT_ID32}-20271231-${SIG}`);
-      expect(result.valid).toBe(false);
+    it('accepts none/none', () => {
+      const r = parseVerdictToken(`vcv-${pid32}-none-none-20260914-20260914-${sig}`);
+      expect(r.valid).toBe(true);
+      expect(r.status).toBe('none');
+      expect(r.tier).toBe('none');
     });
 
-    it('rejects an invalid calendar date (month 13)', () => {
-      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${PROJECT_ID32}-20271301-${SIG}`);
-      expect(result.valid).toBe(false);
-    });
-
-    it('rejects a dashed projectId inside the key (collides with the separator)', () => {
-      const dashed = '11112222-3333-4444-5555-666677778888';
-      const result = parseLicenseKey(`vc2-g-a7f2b9c1-${dashed}-20271231-${SIG}`);
-      expect(result.valid).toBe(false);
-    });
-
-    it('accepts uppercase input, case-insensitively', () => {
-      const result = parseLicenseKey(
-        `VC2-G-A7F2B9C1-${PROJECT_ID32.toUpperCase()}-20271231-${SIG.toUpperCase()}`,
-      );
-      expect(result.valid).toBe(true);
-      expect(result.tier).toBe('graphene');
-      expect(result.projectId).toBe('11112222-3333-4444-5555-666677778888');
-      expect(result.paidThrough).toBe('2027-12-31');
+    it.each([
+      [`vcv-${pid32}-paused-graphene-20260930-20260914-${sig}`, 'Invalid verdict status'],
+      [`vcv-${pid32}-active-graphite-20260930-20260914-${sig}`, 'Invalid verdict tier'],
+      [`vcv-${pid32}-active-graphene-20260230-20260914-${sig}`, 'Invalid verdict date'],
+      [`vcv-${pid32}-active-graphene-20260930-${sig}`, 'Invalid verdict token format'],
+      [`vcv-${pid32}-active-graphene-20260930-20260914-${'b'.repeat(100)}`, 'Invalid signature'],
+    ])('rejects %s', (token, error) => {
+      const r = parseVerdictToken(token);
+      expect(r.valid).toBe(false);
+      expect(r.error).toBe(error);
     });
   });
 

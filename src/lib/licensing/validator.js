@@ -9,27 +9,35 @@
  *     tier: f (Fullerene) — the only tier v1 ever issued.
  *
  *   v2 (per-project, subscription):
- *     vc2-<tier>-<customer_id>-<project_id_32hex>-<yyyymmdd>-<signature>
- *     signed message: 2-<tier>-<customer_id>-<project_id_32hex>-<yyyymmdd>
- *     tier: g (Graphene) | f (Fullerene)
+ *     vc2-<customer_id>-<project_id_32hex>-<signature>
+ *     signed message: 2-<customer_id>-<project_id_32hex>
+ *     Carries no tier and no date. Tier and subscription status live on
+ *     vibecarbon.com and reach the CLI as a signed verdict token (below),
+ *     so the key never rotates and a committed .vibecarbon.license stays
+ *     stable for the life of the project.
+ *
+ *   verdict token (server -> CLI, cached per machine):
+ *     vcv-<project_id_32hex>-<status>-<tier>-<yyyymmdd periodEnd>-<yyyymmdd issued>-<signature>
+ *     signed message: v-<project_id_32hex>-<status>-<tier>-<periodEnd>-<issued>
+ *     status: active | past_due | canceled | none.  tier: graphene | fullerene | none.
  *
  * - customer_id: 8-character hex identifier.
  * - project_id_32hex: the project's UUID with hyphens stripped, lowercase.
  *   Re-hyphenated to canonical 8-4-4-4-12 for `projectId` on parse. A
  *   dashed projectId inside the key would collide with the `-` separator,
  *   so it splits into the wrong number of parts and is rejected.
- * - yyyymmdd: the paid-through date, must be a real calendar date. Parses
- *   to `paidThrough: 'YYYY-MM-DD'`.
  * - signature: Ed25519 signature encoded as lowercase hex.
- * - The leading `2-` in the v2 signed message means a v1 signature can
- *   never be replayed as v2, or vice versa.
+ * - The leading `2-` in the v2 signed message (and `v-` in the verdict
+ *   message) keeps a v1 signature, a v2 signature, and a verdict signature
+ *   from ever being replayed as one another.
  *
  * Keys are case-insensitive on input (lowercased before parsing) and
  * whitespace-trimmed.
  *
- * Licenses never expire for v1 (isLifetime: true). v2 licenses expire at
- * paidThrough; v2 Fullerene still reports tier: 'fullerene' — what
- * distinguishes legacy is `format`/`isLifetime`, not the tier char.
+ * Licenses never expire for v1 (isLifetime: true). v2 carries no
+ * paidThrough of its own: entitlement (tier/status/periodEnd) comes only
+ * from a verified verdict token, never from the key or the wall clock
+ * alone.
  */
 
 import { createPublicKey, verify } from 'node:crypto';
@@ -53,10 +61,13 @@ MCowBQYDK2VwAyEAUrn80IKtISxTCpGjc5rf2ZZhhhu+SktK4L2GEWrjT6Q=
 // a customer walks. tests/unit/licensing/no-dev-bypass.test.ts fails if a
 // switch reappears in this directory.
 
-// Tier character mappings, one table per format — v1 only ever issued
-// Fullerene; v2 also issues Graphene.
+// Tier character mapping for v1, the only format that still carries a tier
+// char in the key itself — v2 tier lives in the verdict token instead.
 const V1_TIER_MAP = { f: 'fullerene' };
-const V2_TIER_MAP = { g: 'graphene', f: 'fullerene' };
+
+const VERDICT_STATUSES = new Set(['active', 'past_due', 'canceled', 'none']);
+const VERDICT_TIERS = new Set(['graphene', 'fullerene', 'none']);
+const SIG_RE = /^[a-f0-9]{128}$/;
 
 /** Re-hyphenate a bare 32-hex-char id into canonical 8-4-4-4-12 lowercase. */
 function reHyphenateProjectId(pid32) {
@@ -75,6 +86,16 @@ function isRealCalendarDate(year, month, day) {
   return (
     date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
   );
+}
+
+/** Parse an 8-digit yyyymmdd into 'YYYY-MM-DD', or null if malformed/not a real date. */
+function parseYmd(yyyymmdd) {
+  if (!/^\d{8}$/.test(yyyymmdd)) return null;
+  const year = Number(yyyymmdd.slice(0, 4));
+  const month = Number(yyyymmdd.slice(4, 6));
+  const day = Number(yyyymmdd.slice(6, 8));
+  if (!isRealCalendarDate(year, month, day)) return null;
+  return `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`;
 }
 
 /**
@@ -99,7 +120,7 @@ function parseV1(parts, originalKey) {
 
   // Ed25519 signatures are always 64 bytes, hex-encoded to exactly 128
   // lowercase hex characters, for both key formats.
-  if (!signature || !/^[a-f0-9]{128}$/.test(signature)) {
+  if (!signature || !SIG_RE.test(signature)) {
     return { valid: false, error: 'Invalid signature' };
   }
 
@@ -117,57 +138,29 @@ function parseV1(parts, originalKey) {
   };
 }
 
-/**
- * Parse a v2 key:
- * vc2-<tierChar>-<customerId>-<projectId32>-<yyyymmdd>-<signature>. Must
- * split into exactly 6 parts — a dashed projectId would produce more parts
- * and is rejected here, not specially detected.
- */
+/** vc2-<customerId>-<projectId32>-<signature>: exactly 4 parts. */
 function parseV2(parts, originalKey) {
-  if (parts.length !== 6) {
+  if (parts.length !== 4) {
     return { valid: false, error: 'Invalid license key format' };
   }
-
-  const [, tierChar, customerId, projectId32, yyyymmdd, signature] = parts;
-
-  const tier = V2_TIER_MAP[tierChar];
-  if (!tier) {
-    return { valid: false, error: 'Invalid license tier' };
-  }
-
+  const [, customerId, projectId32, signature] = parts;
   if (!/^[a-f0-9]{8}$/.test(customerId)) {
     return { valid: false, error: 'Invalid customer ID format' };
   }
-
   if (!/^[a-f0-9]{32}$/.test(projectId32)) {
     return { valid: false, error: 'Invalid project ID format' };
   }
-
-  if (!/^\d{8}$/.test(yyyymmdd)) {
-    return { valid: false, error: 'Invalid paid-through date' };
-  }
-
-  const year = Number(yyyymmdd.slice(0, 4));
-  const month = Number(yyyymmdd.slice(4, 6));
-  const day = Number(yyyymmdd.slice(6, 8));
-  if (!isRealCalendarDate(year, month, day)) {
-    return { valid: false, error: 'Invalid paid-through date' };
-  }
-
-  // Ed25519 signatures are always 64 bytes, hex-encoded to exactly 128
-  // lowercase hex characters, for both key formats.
-  if (!signature || !/^[a-f0-9]{128}$/.test(signature)) {
+  if (!signature || !SIG_RE.test(signature)) {
     return { valid: false, error: 'Invalid signature' };
   }
-
   return {
     valid: true,
     format: 'v2',
-    tier,
-    tierChar,
+    tier: null,
+    tierChar: null,
     customerId,
     projectId: reHyphenateProjectId(projectId32),
-    paidThrough: `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`,
+    paidThrough: null,
     isLifetime: false,
     signature,
     originalKey: originalKey.trim(),
@@ -199,23 +192,62 @@ export function parseLicenseKey(key) {
 }
 
 /**
- * The single source of truth for what gets signed, for both formats.
+ * Parse a verdict token. Pure shape check; verifyVerdictToken() is the
+ * only thing that makes its fields trustworthy.
+ * @param {string} token
+ * @returns {object}
+ */
+export function parseVerdictToken(token) {
+  if (!token || typeof token !== 'string') {
+    return { valid: false, error: 'Verdict token is required' };
+  }
+  const parts = token.trim().toLowerCase().split('-');
+  if (parts.length !== 7 || parts[0] !== 'vcv') {
+    return { valid: false, error: 'Invalid verdict token format' };
+  }
+  const [, projectId32, status, tier, periodEndRaw, issuedRaw, signature] = parts;
+  if (!/^[a-f0-9]{32}$/.test(projectId32)) {
+    return { valid: false, error: 'Invalid project ID format' };
+  }
+  if (!VERDICT_STATUSES.has(status)) return { valid: false, error: 'Invalid verdict status' };
+  if (!VERDICT_TIERS.has(tier)) return { valid: false, error: 'Invalid verdict tier' };
+  const periodEnd = parseYmd(periodEndRaw);
+  const issued = parseYmd(issuedRaw);
+  if (!periodEnd || !issued) return { valid: false, error: 'Invalid verdict date' };
+  if (!signature || !SIG_RE.test(signature)) return { valid: false, error: 'Invalid signature' };
+  return {
+    valid: true,
+    format: 'verdict',
+    projectId: reHyphenateProjectId(projectId32),
+    status,
+    tier,
+    periodEnd,
+    issued,
+    signature,
+  };
+}
+
+/**
+ * The single source of truth for what gets signed, for every format.
  * Imported by scripts/generate-license.js so minting and verifying can
  * never drift apart.
- * @param {{ format: string, tierChar: string, customerId: string, projectId?: string, paidThrough?: string }} parsed
+ * @param {{ format: string, tierChar?: string, customerId?: string, projectId?: string, status?: string, tier?: string, periodEnd?: string, issued?: string }} parsed
  * @returns {string}
  */
 export function signedMessage(parsed) {
+  if (parsed.format === 'verdict') {
+    const projectId32 = parsed.projectId.replace(/-/g, '');
+    return `v-${projectId32}-${parsed.status}-${parsed.tier}-${parsed.periodEnd.replace(/-/g, '')}-${parsed.issued.replace(/-/g, '')}`;
+  }
   if (parsed.format === 'v2') {
     const projectId32 = parsed.projectId.replace(/-/g, '');
-    const yyyymmdd = parsed.paidThrough.replace(/-/g, '');
-    return `2-${parsed.tierChar}-${parsed.customerId}-${projectId32}-${yyyymmdd}`;
+    return `2-${parsed.customerId}-${projectId32}`;
   }
   return `${parsed.tierChar}-${parsed.customerId}`;
 }
 
 /**
- * Verify the cryptographic signature of a license key.
+ * Verify the cryptographic signature of a license key or verdict token.
  *
  * Parameterized purely for testability: production callers pass no options and
  * get the embedded public key. Tests inject an ephemeral keypair
@@ -224,7 +256,7 @@ export function signedMessage(parsed) {
  * returns valid without a signature that verifies — see the note at the top of
  * this file.
  *
- * @param {object} parsedKey - Parsed license key from parseLicenseKey()
+ * @param {object} parsedKey - Parsed license key or verdict token
  * @param {{ publicKeyPem?: string }} [options]
  * @returns {object} Verification result
  */
@@ -249,6 +281,23 @@ export function verifySignature(parsedKey, { publicKeyPem = PUBLIC_KEY_PEM } = {
   } catch (error) {
     return { valid: false, error: `Signature verification failed: ${error.message}` };
   }
+}
+
+/**
+ * Verify a verdict token and return ONLY its signed fields. Callers must
+ * never read status/tier/periodEnd from anywhere else (the cache file's JSON
+ * mirror is for display).
+ * @param {string} token
+ * @param {{ publicKeyPem?: string }} [options]
+ * @returns {object} `{ valid: true, projectId, status, tier, periodEnd, issued } | { valid: false, error }`
+ */
+export function verifyVerdictToken(token, { publicKeyPem } = {}) {
+  const parsed = parseVerdictToken(token);
+  if (!parsed.valid) return parsed;
+  const sig = verifySignature(parsed, { publicKeyPem });
+  if (!sig.valid) return { valid: false, error: sig.error };
+  const { projectId, status, tier, periodEnd, issued } = parsed;
+  return { valid: true, projectId, status, tier, periodEnd, issued };
 }
 
 /**
