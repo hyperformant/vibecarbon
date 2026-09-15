@@ -169,9 +169,118 @@ Run `vibecarbon deploy -h` for all flags (regions, disaster-recovery
 | Promote the standby region (HA) | `vibecarbon failover <env>` |
 | Localize connectivity failures | `vibecarbon diagnose <env>` |
 | Tear everything down | `vibecarbon destroy <env>` |
+| Move to another region / server type | replace + restore — [see below](#moving-to-a-different-region-or-server-type) |
 
 Scheduled backups are installed automatically at deploy time (wal-g archiving
 to your Object Storage bucket).
+
+## Moving to a different region or server type
+
+Hetzner cannot move a server between locations, and a rescale only works
+within the same architecture and to a *larger* disk. Everything else — a new
+location, a cheaper generation, a smaller box — is the same **replace +
+restore** used for the ARM migration above. Budget 15–25 minutes of downtime
+for a single-server compose environment (DNS is unproxied, so nothing serves
+the site while the old server is gone and the new one is not yet up).
+
+Since Hetzner's 2026-06-15 repricing this is worth doing: US locations
+(`ash`, `hil`) carry no `cx` line and price CPX at ~3x the EU rate, and the
+legacy `cpx*1` generation now costs *more* than its `cpx*2` successor. Pick
+by live price and availability — `vibecarbon deploy` only offers types the
+API reports as orderable, and the `cx` line is frequently sold out in every
+EU location, in which case `cpx22` is the cheapest box you can actually get.
+
+**Before you start**, from the working tree you deploy from (it needs
+`.env`, `.env.local` and `.vibecarbon/` — all three are gitignored, so a
+fresh clone or worktree has none of them; a deploy without `.env` provisions
+the server and then fails at `start-compose-stack` with `JWT_SECRET missing`):
+
+```bash
+vibecarbon status                # healthy, and note the deployed commit
+vibecarbon backup <env>          # fresh wal-g base backup
+vibecarbon backup <env> -l       # it is at the top of the list
+```
+
+Deploy the **same commit that is live** — an infrastructure move should not
+ship application changes as a side effect. If your branch is ahead, do the
+move from a detached worktree at the deployed commit and copy the three
+gitignored items in.
+
+**1. Destroy the old environment.** Production environments require a typed
+confirmation even with `-y`, so run this from a real terminal:
+
+```bash
+vibecarbon destroy <env>         # type "<project>-<env>" when asked; say Yes
+                                 # to the offered pre-destroy backup
+```
+
+The backup bucket is preserved (only `-purge` deletes it). The app storage
+bucket *is* deleted and `storageBucketGeneration` is rotated, so the redeploy
+derives a fresh bucket name — anything in Supabase Storage (user uploads,
+avatars) does not come back with the database restore; copy it out first if
+you need it. The Pulumi state bucket is kept but, because its name follows
+the storage bucket's, the redeploy creates a new one; delete the old
+`…-pulumi-state-…` bucket by hand once you are done.
+
+**2. Re-seed the environment block.** `destroy` removes
+`environments.<env>` from `.vibecarbon.json` entirely. Put it back with the
+identity/DNS/backup fields you want to keep and the new placement — without
+`serverType` a scripted compose deploy takes the region's *medium-tier*
+default, not the cheapest type:
+
+```json
+"environments": {
+  "prod": {
+    "provider": "hetzner",
+    "envName": "prod",
+    "deployMode": "compose",
+    "domain": "app.example.com",
+    "dnsProvider": "cloudflare",
+    "dns": { "provider": "cloudflare", "zoneId": "…" },
+    "backupS3": { "bucket": "<project>-<salt>-backups", "region": "fsn1",
+                  "endpoint": "https://fsn1.your-objectstorage.com" },
+    "backup": { "schedule": "0 */6 * * *", "retentionDays": 30 },
+    "region": "fsn1",
+    "serverType": "cpx22"
+  }
+}
+```
+
+Leave `servers`, `s3`, `status`, `deployedAt`, `deployedCommit` and
+`lastAttempt` out — deploy writes them.
+
+**3. Deploy.** Fully scripted from the block above:
+
+```bash
+vibecarbon deploy <env> -y
+```
+
+Provisioning, DNS, the certificate, the image push and the stack come up in
+a few minutes; the environment ends healthy on an **empty** database.
+Deploys resume, so if a step fails, fix the cause and re-run the same command.
+
+**4. Restore.** Check that `latest` is still the pre-destroy backup — the new
+server archives into the same bucket on the configured schedule, so do this
+before its first scheduled base backup lands (or pass the pre-destroy
+timestamp as `-source` for a point-in-time restore instead):
+
+```bash
+vibecarbon restore <env> -l
+vibecarbon restore <env> -source latest    # type "<env>" to confirm
+```
+
+**5. Verify** — don't trust `pg_stat_user_tables.n_live_tup` right after a
+restore (planner statistics are not part of a base backup and read 0 until
+autovacuum runs); compare real `COUNT(*)`s against numbers you took before
+step 1, then:
+
+```bash
+vibecarbon status <env>          # new region/type, healthy
+vibecarbon backup <env>          # proves wal-g archives from the new server
+vibecarbon backup <env> -l       # the new backup is on a new timeline (base_00000002…)
+```
+
+Commit the updated `.vibecarbon.json`.
 
 ## High availability
 
