@@ -192,8 +192,9 @@ EU location, in which case `cpx22` is the cheapest box you can actually get.
 
 **Before you start**, from the working tree you deploy from (it needs
 `.env`, `.env.local` and `.vibecarbon/` — all three are gitignored, so a
-fresh clone or worktree has none of them; a deploy without `.env` provisions
-the server and then fails at `start-compose-stack` with `JWT_SECRET missing`):
+fresh clone or worktree has none of them; a deploy without `.env` stops at
+preflight with "The compose stack cannot start: these keys are empty or
+missing in .env" before anything is provisioned):
 
 ```bash
 vibecarbon status                # healthy, and note the deployed commit
@@ -207,20 +208,25 @@ move from a detached worktree at the deployed commit and copy the three
 gitignored items in.
 
 **1. Destroy the old environment.** Production environments require a typed
-confirmation even with `-y`, so run this from a real terminal:
+confirmation even with `-y`. Interactively, type it when asked; from a script
+or a runner with no TTY, pass it as `-confirm` (without it the command exits
+1 instead of hanging on a prompt it cannot read):
 
 ```bash
-vibecarbon destroy <env>         # type "<project>-<env>" when asked; say Yes
-                                 # to the offered pre-destroy backup
+vibecarbon destroy <env>                          # type "<project>-<env>" when asked;
+                                                  # say Yes to the offered pre-destroy backup
+vibecarbon destroy <env> -y -confirm <project>-<env>   # scripted
 ```
 
 The backup bucket is preserved (only `-purge` deletes it). The app storage
 bucket *is* deleted and `storageBucketGeneration` is rotated, so the redeploy
 derives a fresh bucket name — anything in Supabase Storage (user uploads,
 avatars) does not come back with the database restore; copy it out first if
-you need it. The Pulumi state bucket is kept but, because its name follows
-the storage bucket's, the redeploy creates a new one; delete the old
-`…-pulumi-state-…` bucket by hand once you are done.
+you need it. The Pulumi state bucket is kept and recorded as
+`retainedStateBucket` in `.vibecarbon.json`, so the redeploy resumes the same
+warm state backend. (CLIs before that field existed derived a fresh
+`…-pulumi-state-…` name on redeploy and left the kept one behind; if you find
+one, delete it by hand.)
 
 **2. Re-seed the environment block.** `destroy` removes
 `environments.<env>` from `.vibecarbon.json` entirely. Put it back with the
@@ -266,7 +272,8 @@ timestamp as `-source` for a point-in-time restore instead):
 
 ```bash
 vibecarbon restore <env> -l
-vibecarbon restore <env> -source latest    # type "<env>" to confirm
+vibecarbon restore <env> -source latest                  # type "<env>" to confirm
+vibecarbon restore <env> -y -source latest -confirm <env>   # scripted
 ```
 
 **5. Verify** — don't trust `pg_stat_user_tables.n_live_tup` right after a
