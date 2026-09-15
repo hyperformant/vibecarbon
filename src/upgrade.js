@@ -36,6 +36,7 @@ import {
   adaptDockerfileForPackageManager,
   getPackageManagerVersion,
   MIN_PNPM_MAJOR,
+  seedLockfileFromTemplate,
   writePnpmWorkspaceSettings,
 } from './lib/package-manager.js';
 import {
@@ -718,8 +719,15 @@ async function main(cliArgs) {
       bun: ['bun', 'install'],
     }[pm] || ['npm', 'install'];
 
+    // npm: start from the template's verified lock rather than re-resolving
+    // the bumped subtrees against the project's stale one — that is where
+    // ERESOLVE lives, and the Docker `npm ci` dies the same way mid-deploy
+    // (see seedLockfileFromTemplate). The install below then only adds what
+    // the project carries beyond the template.
+    const seeded = pm === 'npm' && seedLockfileFromTemplate(TEMPLATE_DIR, cwd);
+
     const s2 = spinner();
-    s2.start('Regenerating lockfile…');
+    s2.start(seeded ? 'Regenerating lockfile from the template’s…' : 'Regenerating lockfile…');
     try {
       // cleanEnv: a wrapper package manager's injected npm_config_* would
       // otherwise reach this install — see PM_RUN_CONTEXT_RE in lib/command.js.

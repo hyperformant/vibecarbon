@@ -152,4 +152,64 @@ describe('writeTemplateLockfile', () => {
   it('reports false when the template ships no lockfile, so create can fall back', () => {
     expect(writeTemplateLockfile(join(REPO_ROOT, 'src'), REPO_ROOT, 'x')).toBe(false);
   });
+
+  it('stamps the project version on both root fields when given one (upgrade path)', () => {
+    // `upgrade` seeds an EXISTING project's lock from the template's; that
+    // project has its own version, and a root version that disagrees with
+    // package.json is one more thing for `npm ci` to reject.
+    const projectDir = join(REPO_ROOT, 'node_modules', '.tmp-lockfile-version-test');
+    const { mkdirSync, rmSync } = require('node:fs');
+    mkdirSync(projectDir, { recursive: true });
+    try {
+      expect(writeTemplateLockfile(TEMPLATE_DIR, projectDir, 'my-app', { version: '3.2.1' })).toBe(
+        true,
+      );
+      const written = readJson(join(projectDir, 'package-lock.json'));
+      expect(written.version).toBe('3.2.1');
+      expect(written.packages[''].version).toBe('3.2.1');
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('seedLockfileFromTemplate (upgrade)', () => {
+  // vibecarbon-web, 2026-09-15: `upgrade` bumped @vitejs/plugin-react
+  // 6.0.5→6.1.1 and its `npm install` against the project's STALE lock hit
+  // ERESOLVE (the optional @rolldown/plugin-babel peer chain wants
+  // @babel/core 8); the Docker `npm ci` then died the same way mid-deploy.
+  // A from-scratch resolve is not an option either — npm 11's
+  // allow-remote=none refuses tailwind's tarball-URL optional dep. The
+  // template's lockfile already resolves the exact dependency set the
+  // upgrade just wrote, so start from it and let `npm install` only add
+  // whatever the project carries beyond the template.
+  it('writes the template lock under the project name AND version from package.json', async () => {
+    const { seedLockfileFromTemplate } = await import('../../../src/lib/package-manager.js');
+    const { mkdirSync, rmSync, writeFileSync } = require('node:fs');
+    const projectDir = join(REPO_ROOT, 'node_modules', '.tmp-seed-test');
+    mkdirSync(projectDir, { recursive: true });
+    try {
+      writeFileSync(
+        join(projectDir, 'package.json'),
+        JSON.stringify({ name: 'site', version: '0.7.0', dependencies: {} }),
+      );
+      expect(seedLockfileFromTemplate(TEMPLATE_DIR, projectDir)).toBe(true);
+      const written = readJson(join(projectDir, 'package-lock.json'));
+      expect(written.name).toBe('site');
+      expect(written.version).toBe('0.7.0');
+      expect(written.packages[''].name).toBe('site');
+      expect(written.packages[''].version).toBe('0.7.0');
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('upgrade.js seeds from the template before regenerating an npm lockfile (static)', () => {
+    const src = readFileSync(join(REPO_ROOT, 'src', 'upgrade.js'), 'utf-8');
+    const seed = src.indexOf("pm === 'npm' && seedLockfileFromTemplate(TEMPLATE_DIR, cwd)");
+    const regen = src.indexOf('Regenerating lockfile');
+    expect(seed).toBeGreaterThan(-1);
+    expect(regen).toBeGreaterThan(-1);
+    expect(seed).toBeLessThan(regen); // seeded BEFORE the install that regenerates
+  });
 });
