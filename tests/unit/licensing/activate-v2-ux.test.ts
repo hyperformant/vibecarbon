@@ -31,13 +31,39 @@ const licensingMock = vi.hoisted(() => ({
   activateLicense: vi.fn(),
   deactivateLicense: vi.fn(),
   listStoredLicenses: vi.fn(),
+  hasStoredLicense: vi.fn(),
 }));
 vi.mock('../../../src/lib/licensing/index.js', () => licensingMock);
 
 vi.mock('../../../src/lib/cli/intro.js', () => ({ introCommand: vi.fn() }));
 
-import { runActivate } from '../../../src/activate.js';
+import { runActivate, runDeactivate } from '../../../src/activate.js';
 import { VERSION } from '../../../src/lib/version.js';
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI codes requires matching them
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+/** Every string the command put in front of an operator, colors removed. */
+function everythingSaid(): string[] {
+  const said: string[] = [];
+  for (const fn of [
+    clackMock.log.info,
+    clackMock.log.success,
+    clackMock.log.warn,
+    clackMock.log.error,
+    clackMock.outro,
+    clackMock.note,
+  ]) {
+    for (const call of fn.mock.calls) {
+      for (const arg of call) if (typeof arg === 'string') said.push(arg);
+    }
+  }
+  for (const call of clackMock.confirm.mock.calls) {
+    const message = (call[0] as { message?: string } | undefined)?.message;
+    if (typeof message === 'string') said.push(message);
+  }
+  return said.map((line) => line.replace(ANSI_RE, ''));
+}
 
 const PROJECT_ID = '11111111-2222-3333-4444-555555555555';
 const V2_KEY = `vc2-g-a1b2c3d4-${'1'.repeat(32)}-20271231-${'a'.repeat(128)}`;
@@ -89,7 +115,7 @@ describe('activate — per-slot "already active" handling', () => {
         slot: 'project',
         valid: true,
         format: 'v2',
-        tier: 'graphene',
+        tier: null,
         customerId: 'projcust',
         projectId: PROJECT_ID,
       },
@@ -119,7 +145,7 @@ describe('activate — per-slot "already active" handling', () => {
         slot: 'project',
         valid: true,
         format: 'v2',
-        tier: 'graphene',
+        tier: null,
         customerId: 'projcust',
         projectId: PROJECT_ID,
       },
@@ -241,5 +267,83 @@ describe('activate: the retired -refresh flag', () => {
 
     expect(logged.join('\n')).not.toMatch(/refresh/i);
     logSpy.mockRestore();
+  });
+});
+
+// A v2 project key carries no tier, so every tier-derived field on it reads
+// null or undefined. Before this, the two prompts below rendered "an active
+// null license" and "Deactivate your undefined license?".
+describe('a project license is named, never rendered as null or undefined', () => {
+  const V2_PROJECT_ENTRY = {
+    slot: 'project',
+    valid: true,
+    format: 'v2',
+    tier: null,
+    customerId: 'projcust',
+    projectId: PROJECT_ID,
+  };
+
+  it('activate: the Replace prompt names the existing project license', async () => {
+    licensingMock.listStoredLicenses.mockReturnValue([V2_PROJECT_ENTRY]);
+    clackMock.confirm.mockResolvedValue(false);
+
+    await runActivate([V2_KEY]);
+
+    const said = everythingSaid();
+    expect(said).toContain('You already have an active Project license for this project.');
+    for (const line of said) {
+      expect(line, `"${line}" leaked a placeholder`).not.toMatch(/\bnull\b|\bundefined\b/);
+    }
+  });
+
+  it('activate: a legacy key is still named by its tier', async () => {
+    licensingMock.listStoredLicenses.mockReturnValue([
+      { slot: 'legacy', valid: true, format: 'v1', tier: 'fullerene', customerId: 'legacycust' },
+    ]);
+    clackMock.confirm.mockResolvedValue(false);
+
+    await runActivate([V1_KEY]);
+
+    expect(everythingSaid()).toContain('You already have an active Vibecarbon Fullerene license.');
+  });
+
+  it('deactivate: the confirm prompt names the project license', async () => {
+    licensingMock.hasStoredLicense.mockReturnValue(true);
+    licensingMock.getLicense
+      .mockReturnValueOnce({ active: true, format: 'v2', tier: null, projectId: PROJECT_ID })
+      .mockReturnValueOnce({ active: false, tier: 'graphite', name: 'Graphite' });
+    clackMock.confirm.mockResolvedValue(true);
+    licensingMock.deactivateLicense.mockReturnValue({ success: true, removed: ['/tmp/x'] });
+
+    await runDeactivate([]);
+
+    const said = everythingSaid();
+    expect(said).toContain(
+      'Deactivate your Project license? You will revert to the Graphite tier.',
+    );
+    for (const line of said) {
+      expect(line, `"${line}" leaked a placeholder`).not.toMatch(/\bnull\b|\bundefined\b/);
+    }
+  });
+
+  it('deactivate: a legacy license is still named by its tier', async () => {
+    licensingMock.hasStoredLicense.mockReturnValue(true);
+    licensingMock.getLicense
+      .mockReturnValueOnce({
+        active: true,
+        format: 'v1',
+        tier: 'fullerene',
+        displayName: 'Vibecarbon Fullerene',
+        name: 'Fullerene',
+      })
+      .mockReturnValueOnce({ active: false, tier: 'graphite', name: 'Graphite' });
+    clackMock.confirm.mockResolvedValue(true);
+    licensingMock.deactivateLicense.mockReturnValue({ success: true, removed: ['/tmp/x'] });
+
+    await runDeactivate([]);
+
+    expect(everythingSaid()).toContain(
+      'Deactivate your Vibecarbon Fullerene license? You will revert to the Graphite tier.',
+    );
   });
 });

@@ -507,6 +507,20 @@ function todayUtc() {
 }
 
 /**
+ * How each checkLicense() outcome reads on the spinner: `[message, code]`,
+ * where code 1 is clack's failure styling. A cached verdict is a real answer
+ * and reads as one; only 'none' (nothing reached, nothing cached) and
+ * 'rejected' (the server answered and does not know this key) are failures,
+ * and they are different failures, so they say different things.
+ */
+const CHECK_STOP = {
+  live: ['Subscription checked', 0],
+  cache: ['Subscription check used the cached verdict', 0],
+  none: ['Subscription check skipped', 1],
+  rejected: ['Subscription check refused this key', 1],
+};
+
+/**
  * Guard for every deploy into a paid mode: verify the project's subscription
  * with vibecarbon.com (or the cached verdict), warn inside grace, refuse
  * after it. Compose deploys and legacy lifetime keys return immediately.
@@ -570,10 +584,8 @@ export async function requireDeployEntitlement({
       fetchImpl,
       publicKeyPem,
     });
-    s.stop(
-      check.source === 'live' ? 'Subscription checked' : 'Subscription check skipped',
-      check.source === 'live' ? 0 : 1,
-    );
+    const [stopMessage, stopCode] = CHECK_STOP[check.source] ?? CHECK_STOP.none;
+    s.stop(stopMessage, stopCode);
   }
 
   const verdict = evaluateDeployEntitlement({ license, deployTier, projectId, check, now });

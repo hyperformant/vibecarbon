@@ -44,6 +44,15 @@ function fetchReturning(token: string, cancelAtPeriodEnd = false) {
   }));
 }
 
+/** A fetch stub answering 404: the server knows the endpoint, not this key. */
+function fetchRejecting() {
+  return vi.fn(async () => ({
+    ok: false,
+    status: 404,
+    json: async () => ({}),
+  }));
+}
+
 function fetchThatThrows() {
   return vi.fn(async () => {
     const err = new Error('connect ECONNREFUSED');
@@ -58,6 +67,7 @@ describe('requireDeployEntitlement seam', () => {
   let privateKeyPem: string;
   let publicKeyPem: string;
   let logged: string[];
+  let written: string[];
   let exitSpy: ReturnType<typeof vi.spyOn>;
 
   const projectConfig = () => ({ projectName: 'lictest', projectId: PROJECT_ID });
@@ -90,6 +100,11 @@ describe('requireDeployEntitlement seam', () => {
     return logged.join('\n');
   }
 
+  /** The spinner's own lines: clack writes them straight to stdout. */
+  function spinnerOutput() {
+    return written.join('');
+  }
+
   function cachePath() {
     return join(stateDir, 'license-checks', `${PROJECT_ID}.json`);
   }
@@ -103,9 +118,14 @@ describe('requireDeployEntitlement seam', () => {
     );
     ({ privateKeyPem, publicKeyPem } = makeKeypair());
     logged = [];
+    written = [];
     vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       logged.push(args.map(String).join(' '));
     });
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as never);
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit(${code})`);
     }) as never);
@@ -137,6 +157,7 @@ describe('requireDeployEntitlement seam', () => {
     expect(output()).not.toContain('Could not reach vibecarbon.com');
     expect(existsSync(cachePath())).toBe(true);
     expect(JSON.parse(readFileSync(cachePath(), 'utf-8')).token).toBe(verdict());
+    expect(spinnerOutput()).toContain('Subscription checked');
   });
 
   it('2: past_due inside the grace window warns and proceeds', async () => {
@@ -188,6 +209,10 @@ describe('requireDeployEntitlement seam', () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(output()).not.toContain('Could not reach vibecarbon.com to verify');
     expect(output()).not.toContain('License required');
+    // A cached verdict is a real answer, so the spinner must not report the
+    // check as skipped.
+    expect(spinnerOutput()).toContain('Subscription check used the cached verdict');
+    expect(spinnerOutput()).not.toContain('Subscription check skipped');
   });
 
   it('7: an edited cache file is ignored, so the run falls back to the warning', async () => {
@@ -202,6 +227,7 @@ describe('requireDeployEntitlement seam', () => {
 
     expect(exitSpy).not.toHaveBeenCalled();
     expect(output()).toContain('Could not reach vibecarbon.com to verify');
+    expect(spinnerOutput()).toContain('Subscription check skipped');
   });
 
   it('8: a compose deploy with no key never reaches the network', async () => {
@@ -237,5 +263,19 @@ describe('requireDeployEntitlement seam', () => {
 
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(output()).toContain('License required');
+  });
+
+  it('11: a server that does not recognize the key blocks and says so', async () => {
+    activateV2();
+    const fetchImpl = fetchRejecting();
+
+    await expect(gate({ fetchImpl })).rejects.toThrow('process.exit(1)');
+
+    expect(output()).toContain('License required');
+    // A refusal is not an outage: the spinner must not call it skipped, and
+    // nothing may be cached from it.
+    expect(spinnerOutput()).toContain('Subscription check refused this key');
+    expect(spinnerOutput()).not.toContain('Subscription check skipped');
+    expect(existsSync(cachePath())).toBe(false);
   });
 });

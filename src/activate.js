@@ -54,6 +54,34 @@ const DEACTIVATE_SPEC = {
 };
 
 /**
+ * What a v2 project key is called on screen. It carries no tier: which plan
+ * the project is on lives on vibecarbon.com and arrives as a signed verdict
+ * at deploy time, so tiers.js has nothing to look up for it. The same string
+ * activateLicense() returns as `tierName`.
+ */
+const PROJECT_LICENSE_NAME = 'Project license';
+
+/**
+ * The name to print for a stored license.
+ *
+ * Accepts either a getLicense() result (which spreads the tiers.js entry, so
+ * `displayName` and `name` are already on it) or a listStoredLicenses()
+ * entry (which does not, so the tier is looked up). For a v2 key every
+ * tier-derived field reads null or undefined, which is how "an active null
+ * license" and "Deactivate your undefined license?" reached the screen.
+ *
+ * @param {{format?: string, tier?: string|null, displayName?: string, name?: string}} [license]
+ * @param {'displayName'|'name'} [field] - Which tiers.js name to read.
+ * @returns {string}
+ */
+function licenseName(license, field = 'displayName') {
+  if (license?.format === 'v2') return PROJECT_LICENSE_NAME;
+  return (
+    license?.[field] || getTier(license?.tier)?.[field] || license?.tier || PROJECT_LICENSE_NAME
+  );
+}
+
+/**
  * Activate a license key (Fullerene)
  * @param {string[]} args - CLI arguments (first positional arg is the key)
  */
@@ -121,10 +149,13 @@ export async function runActivate(args) {
     enteredFormat === 'v1' ? legacyEntry : enteredFormat === 'v2' ? projectEntry : null;
 
   if (existingEntry) {
-    const tierDef = getTier(existingEntry.tier);
-    const displayName = tierDef ? tierDef.displayName : existingEntry.tier;
-    const subject =
-      enteredFormat === 'v2' ? `${displayName} license for this project` : `${displayName} license`;
+    // "Project license" is already a noun phrase; "Vibecarbon Fullerene" is
+    // not, so only the tier-named form takes the trailing word.
+    const noun =
+      existingEntry.format === 'v2'
+        ? licenseName(existingEntry)
+        : `${licenseName(existingEntry)} license`;
+    const subject = existingEntry.slot === 'project' ? `${noun} for this project` : noun;
     p.log.info(`You already have an active ${c.success(subject)}.`);
     p.log.info(`Customer ID: ${c.dim(existingEntry.customerId)}`);
     const proceed = await p.confirm({
@@ -206,7 +237,8 @@ export async function runDeactivate(args) {
   const yes = !!values.y;
 
   if (!yes) {
-    const subject = license.active ? `your ${license.displayName} license` : 'the stored license';
+    const noun = license.format === 'v2' ? licenseName(license) : `${licenseName(license)} license`;
+    const subject = license.active ? `your ${noun}` : 'the stored license';
     const confirm = await p.confirm({
       message: `Deactivate ${subject}? You will revert to the Graphite tier.`,
     });
@@ -232,7 +264,7 @@ export async function runDeactivate(args) {
   // still be sitting in the other slot — re-read rather than assume
   // Graphite, or a Fullerene holder gets told they just lost their tier.
   const remaining = getLicense();
-  const tierName = remaining.active ? remaining.name : 'Graphite';
+  const tierName = remaining.active ? licenseName(remaining, 'name') : 'Graphite';
   p.log.success(c.success(`License deactivated. Using ${tierName} tier.`));
   p.outro(`You are now using the ${tierName} tier.`);
 }
