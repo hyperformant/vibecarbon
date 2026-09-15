@@ -9,16 +9,20 @@
  * verifyVerdictToken(). The cache file's JSON mirror is never read for
  * entitlement; an edited file simply fails verification and is ignored.
  *
- * rejected vs unreachable: a non-ok response is `rejected` (hard block, no
- * cache fallback) ONLY when its body parses as JSON and carries a string
- * `error` field, the app's own error shape for "the server answered and
- * does not recognize this key" (`{ error: 'invalid_key' | 'bad_signature' |
- * 'lifetime_key' | 'not_found' | ... }`). Any other non-ok response, an
- * HTML 403 from a WAF, an empty 408, an edge 400, 429, any 5xx, is
- * `unreachable` and falls back to the cache (or warns). The body is read
- * once via `res.text()` and parsed defensively; a body that isn't JSON, or
- * is JSON without an `error` string, never throws and never counts as a
- * refusal.
+ * rejected vs unreachable: 429 and any 5xx are ALWAYS `unreachable`
+ * (fall back to the cache, or warn), whatever the body says. A rate
+ * limiter or our own 500 handler can emit JSON shaped exactly like the
+ * app's error response without meaning "this key is invalid"; treating it
+ * as a refusal would hard-block a paying customer during an outage or a
+ * rate-limit blip. Every other non-ok status (400/401/403/404/408/...) is
+ * `rejected` (hard block, no cache fallback) ONLY when its body parses as
+ * JSON and carries a string `error` field, the app's own error shape for
+ * "the server answered and does not recognize this key" (`{ error:
+ * 'invalid_key' | 'bad_signature' | 'lifetime_key' | 'not_found' | ...
+ * }`). Anything else there, an HTML 403 from a WAF, an empty 408, is also
+ * `unreachable`. The body is read once via `res.text()` and parsed
+ * defensively; a body that isn't JSON, or is JSON without an `error`
+ * string, never throws and never counts as a refusal.
  *
  * Never throws.
  */
@@ -111,12 +115,28 @@ export async function checkLicense({
   }
 
   if (!res.ok) {
-    // The server answered with an error status. Only a body shaped like the
-    // app's own error response ({ error: '<string>' }) counts as a genuine
-    // refusal ('rejected', no cache fallback). Anything else, an HTML body
-    // from a WAF, an empty body, a 429/5xx with no parseable JSON, is an
-    // outage from this client's point of view, not an answer: 'unreachable',
-    // fall back to the cache.
+    // 429 and any 5xx are ALWAYS an outage from this client's point of
+    // view, whatever the body says. A rate limiter or a 500 handler can
+    // easily emit JSON shaped like the app's own error response (e.g.
+    // { error: 'rate_limited' } or { error: 'internal' }) without meaning
+    // "this key is invalid" the way a 400/401/404 refusal does; treating
+    // that as 'rejected' would hard-block a paying customer, bypassing the
+    // cache, during our own outage or a rate-limit blip. So these two never
+    // reach the body sniff below.
+    if (res.status === 429 || res.status >= 500) {
+      return fallback({
+        stateDir,
+        projectId: pid,
+        publicKeyPem,
+        unreachable: `HTTP ${res.status}`,
+      });
+    }
+    // Every other non-ok status (400/401/403/404/408/...): only a body
+    // shaped like the app's own error response ({ error: '<string>' })
+    // counts as a genuine refusal ('rejected', no cache fallback). Anything
+    // else, an HTML body from a WAF, an empty body, is an outage from this
+    // client's point of view, not an answer: 'unreachable', fall back to
+    // the cache.
     let errorField;
     try {
       const text = await res.text();

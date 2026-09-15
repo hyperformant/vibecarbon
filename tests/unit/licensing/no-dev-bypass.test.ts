@@ -159,15 +159,23 @@ describe('no local bypass of signature verification', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('entitlement.js, the decision table, reads no clock beyond the one allowed formatting call', () => {
+  it('entitlement.js, the decision table, holds exactly one clock-shaped call, and it is new Date(ms), never the wall clock', () => {
     // Not a literal zero: utcMsToYmd()'s `new Date(ms)` formats an already-
     // computed epoch value, never the machine clock (see
-    // ALLOWED_CLOCK_READS's comment above). The budget check above already
-    // enforces this count; this test pins the actual source text so a
-    // SECOND, genuine clock read next to it cannot hide behind the same
-    // budget slot.
+    // ALLOWED_CLOCK_READS's comment above). The budget check above only
+    // pins a COUNT (1), which a wall-clock `new Date()` swapped in for
+    // `new Date(ms)` would satisfy just as well, unseen. Pin the actual
+    // call text instead: the one allowed match must be `new Date(ms)`
+    // specifically, and removing exactly that text must leave zero
+    // remaining CLOCK_READ_RE matches, so a second, real clock read
+    // anywhere else in the file cannot hide behind the same budget slot.
     const source = codeOnly(readFileSync(join(LICENSING_DIR, 'entitlement.js'), 'utf-8'));
-    expect([...source.matchAll(CLOCK_READ_RE)].map((m) => m[0])).toEqual(['new Date(']);
+    const ALLOWED_CALL_RE = /\bnew Date\s*\(\s*ms\s*\)/g;
+
+    expect([...source.matchAll(ALLOWED_CALL_RE)].map((m) => m[0])).toEqual(['new Date(ms)']);
+
+    const withAllowedCallRemoved = source.replace(ALLOWED_CALL_RE, '');
+    expect([...withAllowedCallRemoved.matchAll(CLOCK_READ_RE)].map((m) => m[0])).toEqual([]);
   });
 
   it('no module under src/lib/licensing/ reads an env var outside the explicit allowlist', () => {

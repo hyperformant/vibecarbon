@@ -1041,10 +1041,11 @@ export async function run(args) {
   // flags plus the resolved `tier` so each strategy dispatches on tier /
   // isHATier(tier) instead of re-deriving deployMode+ha.
   //
-  // No license gate here: scale only ever acts on an environment that
-  // already exists, and operating an existing environment is free at every
-  // deploy mode. The license is consulted only when PROVISIONING a new
-  // environment (see src/lib/licensing/gate.js).
+  // No license gate here: operating an existing environment (scale, backup,
+  // restore, failover) never consults the license, in every deploy mode.
+  // Only `deploy` into a Kubernetes or HA environment does, and it does so
+  // on every run, provisioning and redeploy alike (see
+  // src/lib/licensing/gate.js).
   const tier = resolveTier(envConfig);
 
   await SCALE_STRATEGIES[tier](environment, envConfig, projectConfig, { ...parsed, tier });

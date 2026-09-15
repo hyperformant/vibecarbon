@@ -6,7 +6,7 @@
  */
 
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -247,6 +247,76 @@ describe('checkLicense', () => {
     expect(result.source).toBe('none');
     expect(result.verdict).toBeNull();
     expect(result.unreachable).toBe('HTTP 404');
+  });
+
+  it('5f. 503 with a JSON error body is still unreachable, not rejected: falls back to cache when present', async () => {
+    const token = signVerdictToken(privateKeyPem, verdictFields());
+    const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
+    await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl: seedFetch,
+      publicKeyPem,
+    });
+
+    const result = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl: vi.fn().mockResolvedValue(jsonResponse(503, { error: 'internal' })),
+      publicKeyPem,
+    });
+
+    expect(result.source).toBe('cache');
+    expect(result.verdict).toMatchObject({ status: 'active', tier: 'graphene' });
+  });
+
+  it('5g. 503 with a JSON error body, no cache: none, nothing cached', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(503, { error: 'internal' }));
+    const result = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl,
+      publicKeyPem,
+    });
+
+    expect(result).toEqual({ source: 'none', verdict: null, unreachable: 'HTTP 503' });
+    expect(existsSync(cachePathFor(stateDir, PROJECT_ID))).toBe(false);
+  });
+
+  it('5h. 429 with a JSON error body is still unreachable, not rejected: falls back to cache when present, else none, nothing cached', async () => {
+    const token = signVerdictToken(privateKeyPem, verdictFields());
+    const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
+    await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl: seedFetch,
+      publicKeyPem,
+    });
+
+    const cachedResult = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir,
+      fetchImpl: vi.fn().mockResolvedValue(jsonResponse(429, { error: 'rate_limited' })),
+      publicKeyPem,
+    });
+    expect(cachedResult.source).toBe('cache');
+    expect(cachedResult.verdict).toMatchObject({ status: 'active', tier: 'graphene' });
+
+    const otherStateDir = mkdtempSync(join(tmpdir(), 'vibecarbon-check-'));
+    const noCacheResult = await checkLicense({
+      key: 'vc2-key',
+      projectId: PROJECT_ID,
+      stateDir: otherStateDir,
+      fetchImpl: vi.fn().mockResolvedValue(jsonResponse(429, { error: 'rate_limited' })),
+      publicKeyPem,
+    });
+    expect(noCacheResult).toEqual({ source: 'none', verdict: null, unreachable: 'HTTP 429' });
+    expect(existsSync(cachePathFor(otherStateDir, PROJECT_ID))).toBe(false);
   });
 
   describe('6. transient failures fall back to cache when present, else unreachable/none', () => {
