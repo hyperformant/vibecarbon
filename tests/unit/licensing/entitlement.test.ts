@@ -187,6 +187,15 @@ describe('evaluateDeployEntitlement', () => {
     expect(result).toMatchObject({ ok: true, warning: { kind: 'canceled' } });
   });
 
+  it('canceled graphene at k8s-ha (tier below required) inside grace -> tier-too-low, grace never widens entitlement', () => {
+    const result = ev({
+      deployTier: 'k8s-ha',
+      check: live({ status: 'canceled', tier: 'graphene', periodEnd: '2026-09-01' }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'tier-too-low', requiredTier: 'fullerene' });
+    expect(result).not.toHaveProperty('warning');
+  });
+
   it('verdict status none -> no-license', () => {
     const result = ev({
       check: live({ status: 'none', tier: 'none', periodEnd: NOW }),

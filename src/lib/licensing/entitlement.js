@@ -128,6 +128,12 @@ export function evaluateDeployEntitlement({ license, deployTier, projectId, chec
   const base = { periodEnd: verdict.periodEnd, tier: verdict.tier };
 
   if (verdict.status === 'canceled') {
+    // Grace never widens entitlement: a canceled subscription that was
+    // already below the required tier is 'tier-too-low', not a grace-period
+    // warning, even inside the 30 days.
+    if (!tierSatisfies(verdict.tier, requiredTier)) {
+      return { ok: false, requiredTier, reason: 'tier-too-low', license, verdict };
+    }
     return inGrace
       ? { ok: true, requiredTier, warning: { kind: 'canceled', daysLeft: left, ...base } }
       : { ok: false, requiredTier, reason: 'canceled', license, verdict };
