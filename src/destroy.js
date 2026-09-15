@@ -52,7 +52,7 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { perfAsync } from './lib/perf.js';
-import { requiresProdTypeToConfirm } from './lib/prod-confirm.js';
+import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
   getObjectStorageProvider,
@@ -175,6 +175,12 @@ const SPEC = {
       boolean: true,
       description: 'Also delete the backup S3 bucket (default: preserved)',
     },
+    {
+      name: 'confirm',
+      value: '<value>',
+      description:
+        'Production only: supply the type-to-confirm value on the command line (scripts / no TTY)',
+    },
   ],
   examples: [
     { command: 'vibecarbon destroy', description: 'prompts for env' },
@@ -186,6 +192,10 @@ const SPEC = {
     {
       command: 'vibecarbon destroy prod -y -purge',
       description: 'also delete the backup bucket',
+    },
+    {
+      command: 'vibecarbon destroy prod -y -confirm myapp-prod',
+      description: 'scripted production destroy (the typed confirmation as a flag)',
     },
   ],
 };
@@ -3034,6 +3044,7 @@ async function main(argv = []) {
     yes: !!values.y,
     destroyOrphans: !!values.orphans,
     purgeBackups: !!values.purge,
+    confirm: values.confirm ?? undefined,
   };
 
   // Check if current working directory exists
@@ -3291,17 +3302,26 @@ ${c.danger('WARNING: All data on these servers will be permanently lost!')}
   // (even with -y). Protects against `destroy prod -y` typos in CI/scripts.
   if (!args.yes || needsProdConfirm) {
     const confirmSlug = `${projectConfig.projectName}-${envName}`;
-    if (args.yes && needsProdConfirm) {
-      p.log.warn(
-        `Destroying a production environment still requires type-to-confirm, even with -y.`,
-      );
-    }
-    const doubleConfirm = await p.text({
-      message: `Type "${confirmSlug}" to confirm:`,
-      validate: (v) => (v !== confirmSlug ? `Please type "${confirmSlug}" to confirm` : undefined),
-    });
-    if (p.isCancel(doubleConfirm)) {
-      exitCancelled();
+    if (needsProdConfirm) {
+      // Shared helper: owns the -y warning, the `-confirm <slug>` escape
+      // hatch for scripts, and the off-TTY fail-fast (a prompt with no stdin
+      // used to hang here — vibecarbon-web prod move, 2026-09-15).
+      await confirmProdOrExit(envName, {
+        confirmValue: confirmSlug,
+        actionLabel: 'destroy',
+        yes: args.yes,
+        confirm: args.confirm,
+      });
+    } else {
+      // Non-production, interactive (-y skips this branch entirely).
+      const doubleConfirm = await p.text({
+        message: `Type "${confirmSlug}" to confirm:`,
+        validate: (v) =>
+          v !== confirmSlug ? `Please type "${confirmSlug}" to confirm` : undefined,
+      });
+      if (p.isCancel(doubleConfirm)) {
+        exitCancelled();
+      }
     }
   }
 
