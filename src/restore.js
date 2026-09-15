@@ -673,6 +673,28 @@ export async function runK8sRestore({
     });
     // 4. Confirm postgres accepts connections post-recovery.
     await perfAsync('restore.verifyPostgres', async () => verifyPostgres(serverIp, sshKeyPath));
+    // 4b. Rebuild planner statistics before the app comes back. A base backup
+    //     carries none: until autovacuum runs, n_live_tup reads 0 for every
+    //     table and the first queries plan blind — which looks exactly like
+    //     data loss to whoever verifies the restore (vibecarbon-web
+    //     2026-09-15; same step in restoreCompose). Best-effort: the restore
+    //     itself has already succeeded.
+    await perfAsync('restore.analyze', async () => {
+      try {
+        const pod = await getPostgresPod(serverIp, sshKeyPath);
+        await sshKubectl(
+          serverIp,
+          sshKeyPath,
+          ['exec', '-n', 'vibecarbon', pod, '--', 'psql', '-U', 'postgres', '-q', '-c', 'ANALYZE'],
+          { timeout: 300_000 },
+        );
+      } catch (err) {
+        p.log.warn(
+          `ANALYZE after restore failed (${err instanceof Error ? err.message : String(err)}); ` +
+            'planner statistics will rebuild on the next autovacuum.',
+        );
+      }
+    });
   } finally {
     // 5. Always clear the marker so an unrelated future pod restart does NOT
     //    re-fetch and wipe live data. Runs even if the restore failed.

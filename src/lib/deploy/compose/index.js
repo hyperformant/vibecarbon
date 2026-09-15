@@ -1460,7 +1460,28 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     await new Promise((r) => setTimeout(r, RESTORE_PROMOTE_POLL_MS));
   }
 
-  // 6. Bring the app back up
+  // 6. Rebuild planner statistics. A base backup carries none: until
+  //    autovacuum runs, `pg_stat_user_tables.n_live_tup` reads 0 for every
+  //    table and the first queries plan blind — which looks exactly like data
+  //    loss to whoever is verifying the restore (vibecarbon-web prod move,
+  //    2026-09-15: every n_live_tup was 0; every COUNT(*) was intact).
+  //    Best-effort: a failure here must not fail a restore that has already
+  //    promoted, so it is logged and the app still comes back.
+  try {
+    await sshRunAsync(
+      ip,
+      sshKeyPath,
+      `cd ${remoteDir} && docker compose exec -T db psql -U postgres -q -c 'ANALYZE'`,
+      { timeout: 300_000 },
+    );
+  } catch (err) {
+    console.warn(
+      `[restore] ANALYZE after restore failed (${err instanceof Error ? err.message : String(err)}); ` +
+        'planner statistics will rebuild on the next autovacuum.',
+    );
+  }
+
+  // 7. Bring the app back up
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start app`);
 }
 
