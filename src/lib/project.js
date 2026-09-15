@@ -196,6 +196,64 @@ export function findEnvDrift(cwd = process.cwd()) {
 }
 
 /**
+ * Keys the shipped compose stack refuses to start without, for projects whose
+ * `docker-compose.prod.yml` cannot be read. Mirrors the `${KEY:?…}` markers
+ * in carbon/docker-compose.prod.yml; the live file is authoritative when
+ * present (see findMissingRequiredEnv).
+ */
+export const COMPOSE_REQUIRED_ENV_FALLBACK = Object.freeze([
+  'DB_ENC_KEY',
+  'JWT_SECRET',
+  'PG_META_CRYPTO_KEY',
+  'POSTGRES_PASSWORD',
+  'REALTIME_SECRET',
+  'VAULT_ENC_KEY',
+]);
+
+/**
+ * Keys that `docker compose up` will REFUSE to start without, and that are
+ * empty or absent in `.env` — the file a deploy ships as the server's runtime
+ * baseline.
+ *
+ * Compose marks a hard-required variable as `${KEY:?message}`; the shipped
+ * stack uses that for the secrets `vibecarbon create` writes (JWT_SECRET,
+ * POSTGRES_PASSWORD, …). This reads exactly those markers out of the
+ * project's `docker-compose.prod.yml`, so the preflight and the runtime agree
+ * by construction. `${KEY:-default}` and bare `${KEY}` are not required and
+ * are ignored.
+ *
+ * Why a hard preflight and not the findEnvDrift warning: a missing `.env`
+ * (fresh clone, second worktree — it is gitignored) used to be WARNED about
+ * at step 0 and then fail at `start-compose-stack`, after the server was
+ * provisioned, the image pushed and DNS repointed (vibecarbon-web prod move,
+ * 2026-09-15: five minutes and a billed VM-hour into an outage). The compose
+ * error was going to happen anyway; failing here just happens before
+ * anything is created.
+ *
+ * @param {string} [cwd] - Working directory (defaults to process.cwd())
+ * @returns {string[]} - Sorted key names, empty when the stack can start
+ */
+export function findMissingRequiredEnv(cwd = process.cwd()) {
+  const composePath = join(cwd, 'docker-compose.prod.yml');
+  let required;
+  if (existsSync(composePath)) {
+    const compose = readFileSync(composePath, 'utf-8');
+    required = new Set();
+    for (const m of compose.matchAll(/\$\{([A-Z][A-Z0-9_]*):\?/g)) required.add(m[1]);
+  } else {
+    required = new Set(COMPOSE_REQUIRED_ENV_FALLBACK);
+  }
+  const envPath = join(cwd, '.env');
+  const base = existsSync(envPath) ? parseDotenv(readFileSync(envPath, 'utf-8')) : {};
+  return [...required]
+    .filter((key) => {
+      const val = base[key];
+      return val === undefined || val.trim() === '';
+    })
+    .sort();
+}
+
+/**
  * Append a section of environment variables to .env.local and .env
  *
  * @param {string} sectionName - Name for the section header (e.g., 'N8N', 'S3 STORAGE')
