@@ -462,16 +462,60 @@ export const LOCKFILE_NAMES = {
  * @param {string} projectName - becomes the lockfile's root name
  * @returns {boolean} false if the template ships no lockfile (caller falls back)
  */
-export function writeTemplateLockfile(templateDir, projectDir, projectName) {
+export function writeTemplateLockfile(templateDir, projectDir, projectName, { version } = {}) {
   const source = join(templateDir, 'package-lock.json');
   if (!existsSync(source)) return false;
 
   const lock = JSON.parse(readFileSync(source, 'utf-8'));
   lock.name = projectName;
   if (lock.packages?.['']) lock.packages[''].name = projectName;
+  // `upgrade` seeds an existing project whose version is its own; a root
+  // version that disagrees with package.json is one more thing for `npm ci`
+  // to reject. `create` leaves it (the template's 0.1.0 is the new project's).
+  if (version) {
+    lock.version = version;
+    if (lock.packages?.['']) lock.packages[''].version = version;
+  }
 
   writeFileSync(join(projectDir, 'package-lock.json'), `${JSON.stringify(lock, null, 2)}\n`);
   return true;
+}
+
+/**
+ * Seed an EXISTING npm project's package-lock.json from the template's, under
+ * the project's own name and version — the `upgrade` counterpart of what
+ * `create` does with writeTemplateLockfile.
+ *
+ * Why not just `npm install` against the project's current lock: an upgrade
+ * bumps template dependencies, and npm then re-resolves the changed subtrees
+ * against everything the stale lock already pinned. That is where ERESOLVE
+ * lives — vibecarbon-web 2026-09-15: @vitejs/plugin-react 6.0.5→6.1.1 pulled
+ * the optional @rolldown/plugin-babel peer chain, which wanted @babel/core 8
+ * against the lock's 7, and the upgrade's install AND the Docker `npm ci` both
+ * died on it. A from-scratch resolve (no lock) is no escape on npm 11: its
+ * allow-remote=none default refuses tailwind's tarball-URL optional dep.
+ *
+ * The template's lock already resolves the exact dependency set the upgrade
+ * just merged in (template versions win on shared keys), and it is verified
+ * against `npm ci` before it ships. Start from it; the follow-up
+ * `npm install` then only has to add whatever the project carries beyond the
+ * template, which is incremental and small. Project-only dependencies are
+ * re-resolved by that install — the price of a clean base.
+ *
+ * @param {string} templateDir
+ * @param {string} projectDir
+ * @returns {boolean} false when the template ships no lockfile or the project
+ *   has no readable package.json (caller falls back to a plain install)
+ */
+export function seedLockfileFromTemplate(templateDir, projectDir) {
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(join(projectDir, 'package.json'), 'utf-8'));
+  } catch {
+    return false;
+  }
+  if (!pkg?.name) return false;
+  return writeTemplateLockfile(templateDir, projectDir, pkg.name, { version: pkg.version });
 }
 
 /**
