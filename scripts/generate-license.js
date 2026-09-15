@@ -6,7 +6,7 @@
  * formats validator.js understands:
  *
  *   v2 (default): a per-project, per-customer key. Carries no tier and no
- *     date — those live on vibecarbon.com and reach the CLI as a signed
+ *     date: those live on vibecarbon.com and reach the CLI as a signed
  *     verdict token (signVerdictToken below mints one for tests/diagnosis).
  *     vc2-<customerId>-<projectId32>-<signature>
  *   v1 (-legacy): the old lifetime, global key. Always Fullerene.
@@ -72,7 +72,7 @@ Environment:
 /**
  * Parse argv. Accepts both `-flag` and `--flag` spellings for every named
  * option (see the module doc comment for why). Any other flag-shaped
- * argument (leading `-`) is rejected — this is what turns a retired flag
+ * argument (leading `-`) is rejected: this is what turns a retired flag
  * like `-tier` or `-paid-through` into a loud error instead of being
  * silently ignored.
  * @param {string[]} args

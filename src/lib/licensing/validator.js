@@ -62,7 +62,7 @@ MCowBQYDK2VwAyEAUrn80IKtISxTCpGjc5rf2ZZhhhu+SktK4L2GEWrjT6Q=
 // switch reappears in this directory.
 
 // Tier character mapping for v1, the only format that still carries a tier
-// char in the key itself — v2 tier lives in the verdict token instead.
+// char in the key itself. v2 tier lives in the verdict token instead.
 const V1_TIER_MAP = { f: 'fullerene' };
 
 const VERDICT_STATUSES = new Set(['active', 'past_due', 'canceled', 'none']);
