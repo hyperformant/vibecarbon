@@ -227,15 +227,35 @@ async function main(values, positional) {
     await refuseIfSecretsPresent('deploy');
   }
 
-  // 0d. Warn about env-file drift before any prompt or provisioning work.
-  // The deploy ships `.env` to the server; a runtime key that only lives in
-  // `.env.local` (hand-migrated env, `configure` never run) deploys as blank
-  // and fails at feature-use time, not deploy time. Warning only — a key can
-  // legitimately be local-first mid-setup — but it must be loud and name the
-  // keys (vibecarbon.com 2026-08-22: STRIPE_/SMTP_ shipped empty this way).
+  // 0d. Env-file preflight before any prompt or provisioning work. The deploy
+  // ships `.env` to the server; a runtime key that only lives in `.env.local`
+  // (hand-migrated env, `configure` never run) deploys as blank. Two tiers:
+  // keys compose itself requires stop the deploy here; everything else is a
+  // loud warning naming the keys — a key can legitimately be local-first
+  // mid-setup (vibecarbon.com 2026-08-22: STRIPE_/SMTP_ shipped empty).
   {
-    const { findEnvDrift } = await import('./lib/project.js');
-    const drifted = findEnvDrift(process.cwd());
+    const { findEnvDrift, findMissingRequiredEnv } = await import('./lib/project.js');
+    // 0d-i. HARD STOP for keys the compose stack refuses to start without
+    // (`${KEY:?}` in docker-compose.prod.yml — JWT_SECRET, POSTGRES_PASSWORD,
+    // …). A missing `.env` is the usual cause: it is gitignored, so a fresh
+    // clone or a second worktree has none. Warning here and failing at
+    // `start-compose-stack` meant a server was provisioned, the image pushed
+    // and DNS repointed first (vibecarbon-web prod move, 2026-09-15). The
+    // stack was never going to start; stop before anything is created.
+    const missing = findMissingRequiredEnv(process.cwd());
+    if (missing.length > 0) {
+      p.log.error(
+        `The compose stack cannot start: these keys are empty or missing in .env:\n  ${missing.join(', ')}\n` +
+          'Deploys ship .env to the server as its runtime baseline (.env.local never leaves ' +
+          'this machine). If you are deploying from a fresh clone or another worktree, copy ' +
+          '.env (and .vibecarbon/) from the checkout you last deployed from; otherwise run ' +
+          '`vibecarbon configure`, which writes both files. Nothing was provisioned.',
+      );
+      process.exit(1);
+    }
+    // 0d-ii. Warn about the softer drift: keys set in .env.local but not in
+    // .env that the stack CAN start without and the app fails on later.
+    const drifted = findEnvDrift(process.cwd()).filter((k) => !missing.includes(k));
     if (drifted.length > 0) {
       p.log.warn(
         `These keys are set in .env.local but empty or missing in .env:\n  ${drifted.join(', ')}\n` +

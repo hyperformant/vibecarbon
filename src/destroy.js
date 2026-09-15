@@ -52,7 +52,7 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { perfAsync } from './lib/perf.js';
-import { requiresProdTypeToConfirm } from './lib/prod-confirm.js';
+import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
   getObjectStorageProvider,
@@ -175,6 +175,12 @@ const SPEC = {
       boolean: true,
       description: 'Also delete the backup S3 bucket (default: preserved)',
     },
+    {
+      name: 'confirm',
+      value: '<value>',
+      description:
+        'Production only: supply the type-to-confirm value on the command line (scripts / no TTY)',
+    },
   ],
   examples: [
     { command: 'vibecarbon destroy', description: 'prompts for env' },
@@ -186,6 +192,10 @@ const SPEC = {
     {
       command: 'vibecarbon destroy prod -y -purge',
       description: 'also delete the backup bucket',
+    },
+    {
+      command: 'vibecarbon destroy prod -y -confirm myapp-prod',
+      description: 'scripted production destroy (the typed confirmation as a flag)',
     },
   ],
 };
@@ -1041,6 +1051,10 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
   // redeploy after -purge is a fresh project start, not a same-name recreate
   // racing acked writes.
   if (args?.purgeBackups) {
+    // A purge carries nothing forward: drop any retained name whether or not
+    // the delete below succeeds, so the next deploy never resolves to a
+    // bucket that is gone (or about to be) and derives a fresh one instead.
+    delete projectConfig.retainedStateBucket;
     const region = envConfig.s3?.stateBucketRegion || envConfig.s3?.region || 'fsn1';
     const Provider = providerFor(envConfig);
     spinner.start(`Purging Pulumi state bucket: ${stateBucket}`);
@@ -1083,10 +1097,18 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
     return;
   }
 
+  // Keeping the bucket is only useful if the next deploy finds it. The
+  // derived state-bucket name embeds the app bucket name, and
+  // updateProjectConfig rotates storageBucketGeneration below, so a redeploy
+  // would derive a NEW name and this bucket would just be orphaned — one
+  // leaked bucket per destroy→deploy cycle (vibecarbon-web 2026-09-15).
+  // Record the kept name; resolveStateBucketName reads it ahead of
+  // derivation, and updateProjectConfig persists this same object.
+  projectConfig.retainedStateBucket = stateBucket;
   spinner.start('Pulumi state bucket');
   spinner.stop(
-    `Pulumi state bucket kept for reuse: ${stateBucket} (next deploy resumes a warm state ` +
-      'backend; delete with -purge)',
+    `Pulumi state bucket kept for reuse: ${stateBucket} (recorded as retainedStateBucket; ` +
+      'the next deploy resumes this warm state backend; delete with -purge)',
   );
   // Deliberately NOT a ledger entry. All four severities mean something this
   // is not: leak/unverified feed `survivors` and fail the exit code, `foreign`
@@ -1316,8 +1338,9 @@ async function updateProjectConfigEffect(ctx) {
   // warm bucket and sending every redeploy to a brand-new one.
   //
   // `storageBucketGeneration` IS rotated — precisely when this destroy
-  // actually DELETED the storage bucket (purge path; results.s3Bucket is the
-  // deleted name). The storage bucket cannot be retained across `-purge`
+  // actually DELETED the storage bucket (results.s3Bucket is the deleted
+  // name — which is every destroy that had one, not only -purge; the app
+  // bucket is always deleted, -purge governs the backup + state buckets). The storage bucket cannot be retained across `-purge`
   // (purge means the data is deleted), so the redeploy-side of the hazard is
   // closed by naming instead: the next deploy derives a FRESH bucket name
   // rather than recreating the deleted one and riding Hetzner's
@@ -3021,6 +3044,7 @@ async function main(argv = []) {
     yes: !!values.y,
     destroyOrphans: !!values.orphans,
     purgeBackups: !!values.purge,
+    confirm: values.confirm ?? undefined,
   };
 
   // Check if current working directory exists
@@ -3278,17 +3302,26 @@ ${c.danger('WARNING: All data on these servers will be permanently lost!')}
   // (even with -y). Protects against `destroy prod -y` typos in CI/scripts.
   if (!args.yes || needsProdConfirm) {
     const confirmSlug = `${projectConfig.projectName}-${envName}`;
-    if (args.yes && needsProdConfirm) {
-      p.log.warn(
-        `Destroying a production environment still requires type-to-confirm, even with -y.`,
-      );
-    }
-    const doubleConfirm = await p.text({
-      message: `Type "${confirmSlug}" to confirm:`,
-      validate: (v) => (v !== confirmSlug ? `Please type "${confirmSlug}" to confirm` : undefined),
-    });
-    if (p.isCancel(doubleConfirm)) {
-      exitCancelled();
+    if (needsProdConfirm) {
+      // Shared helper: owns the -y warning, the `-confirm <slug>` escape
+      // hatch for scripts, and the off-TTY fail-fast (a prompt with no stdin
+      // used to hang here — vibecarbon-web prod move, 2026-09-15).
+      await confirmProdOrExit(envName, {
+        confirmValue: confirmSlug,
+        actionLabel: 'destroy',
+        yes: args.yes,
+        confirm: args.confirm,
+      });
+    } else {
+      // Non-production, interactive (-y skips this branch entirely).
+      const doubleConfirm = await p.text({
+        message: `Type "${confirmSlug}" to confirm:`,
+        validate: (v) =>
+          v !== confirmSlug ? `Please type "${confirmSlug}" to confirm` : undefined,
+      });
+      if (p.isCancel(doubleConfirm)) {
+        exitCancelled();
+      }
     }
   }
 

@@ -79,13 +79,19 @@ const SPEC = {
       value: '<latest|ISO-timestamp|file>',
       description: 'Restore point: `latest`, an ISO-8601 timestamp (PITR), or a local file path',
     },
+    {
+      name: 'confirm',
+      value: '<value>',
+      description:
+        'Production only: supply the type-to-confirm value on the command line (scripts / no TTY)',
+    },
   ],
   examples: [
     { command: 'vibecarbon restore', description: 'prompts for env and restore point' },
     { command: 'vibecarbon restore prod -l', description: 'list available backups for prod' },
     {
-      command: 'vibecarbon restore prod -y -source latest',
-      description: 'restore the most-recent backup, non-interactively',
+      command: 'vibecarbon restore prod -y -source latest -confirm prod',
+      description: 'restore the most-recent backup, non-interactively (prod needs -confirm)',
     },
     {
       command: 'vibecarbon restore prod -source 2026-06-22T14:30:00Z',
@@ -372,7 +378,11 @@ export async function run(args) {
   // database. This is deliberately OUTSIDE the `!values.y` block above (the
   // soft y/N confirm is skippable with -y; this hard gate is not). Mirrors
   // destroy's prod guard; shared helper so failover can reuse it.
-  await confirmProdOrExit(envName, { actionLabel: 'restore', yes: !!values.y });
+  await confirmProdOrExit(envName, {
+    actionLabel: 'restore',
+    yes: !!values.y,
+    confirm: values.confirm ?? undefined,
+  });
 
   // Dispatch by mode
   const tracker = createTracker('restore', { environment: envName });

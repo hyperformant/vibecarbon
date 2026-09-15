@@ -42,4 +42,9 @@ describe('restore prod confirm', () => {
     expect(closeIdx).toBeGreaterThan(gateIdx);
     expect(confirmIdx).toBeGreaterThan(closeIdx);
   });
+
+  it('passes the -confirm flag through so a scripted restore can satisfy the gate', () => {
+    expect(restoreSrc).toMatch(/confirmProdOrExit\(envName,\s*\{[^}]*confirm:\s*values\.confirm/s);
+    expect(restoreSrc).toMatch(/name:\s*'confirm',\s*value:/);
+  });
 });

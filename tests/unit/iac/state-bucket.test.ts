@@ -179,6 +179,41 @@ describe('resolveStateBucketName — precedence', () => {
     );
   });
 
+  it('a bucket retained by destroy wins over derivation (survives the storage-generation rotation)', () => {
+    // destroy KEEPS the state bucket but also rotates storageBucketGeneration,
+    // and the derived state-bucket name embeds the app bucket name — so a
+    // redeploy after destroy used to derive a NEW name and the kept bucket
+    // was simply orphaned (vibecarbon-web 2026-09-15:
+    // …-storage-7b6f58-pulumi-state-c86bb1 left behind, …-d7f3af-… created).
+    // destroy now records the kept name; the next deploy resolves to it.
+    expect(
+      resolveStateBucketName({
+        retained: 'myapp-a5acfe-storage-7b6f58-pulumi-state-c86bb1',
+        appBucket: 'myapp-a5acfe-storage-d7f3af',
+        generation: 'c86bb1',
+      }),
+    ).toBe('myapp-a5acfe-storage-7b6f58-pulumi-state-c86bb1');
+  });
+
+  it('a persisted env bucket and a project pin both outrank a retained bucket', () => {
+    expect(
+      resolveStateBucketName({
+        envStateBucket: 'live-env-state',
+        retained: 'kept-by-destroy',
+        appBucket,
+        generation: 'a1b2c3',
+      }),
+    ).toBe('live-env-state');
+    expect(
+      resolveStateBucketName({
+        projectPin: 'pinned-state',
+        retained: 'kept-by-destroy',
+        appBucket,
+        generation: 'a1b2c3',
+      }),
+    ).toBe('pinned-state');
+  });
+
   it('gives every scenario the same bucket when they share one pin', () => {
     // What lets the e2e harness reuse one long-lived bucket across scenarios
     // instead of creating a brand-new one per run. Safe because Pulumi keys

@@ -359,6 +359,10 @@ export async function executeDeployment(args, gatheredConfig) {
   //      in one bucket safely — which is also what lets the e2e harness point
   //      every scenario at a single long-lived bucket instead of creating a
   //      brand-new one per run.
+  //   2b. The bucket the last destroy KEPT (`retainedStateBucket`). destroy
+  //      retains the state bucket but rotates storageBucketGeneration, and
+  //      the derived name embeds the app bucket name — so without this the
+  //      redeploy derived a fresh name and the kept bucket was orphaned.
   //   3. Derivation from the app bucket, for everyone else.
   //
   // `stateBucketGeneration` is still embedded by the derivation but is no
@@ -371,6 +375,7 @@ export async function executeDeployment(args, gatheredConfig) {
   const stateBucket = resolveStateBucketName({
     envStateBucket: s3Config.stateBucket,
     projectPin: projectConfig.stateBucket,
+    retained: projectConfig.retainedStateBucket,
     appBucket: s3Config.bucket,
     generation: projectConfig.stateBucketGeneration,
   });

@@ -52,7 +52,12 @@ Pulumi state bucket is KEPT on destroy (announced in its own step line, deleted
 only with `-purge`). Recreating a just-deleted same-name bucket is how acked
 state writes were lost on 2026-08-07, and a warm bucket is what a redeploy
 resumes against; a kept-by-design bucket is neither a leak, unverified,
-foreign, nor a predicted leak, so it takes none of those labels.
+foreign, nor a predicted leak, so it takes none of those labels. The kept
+name is recorded as project-level `retainedStateBucket` in `.vibecarbon.json`
+(the derived name embeds the app bucket name, which destroy rotates, so
+without the record the next deploy would derive a fresh bucket and orphan the
+kept one); `resolveStateBucketName` reads it after the operator pin and before
+derivation, and `-purge` clears it.
 
 | Code | Meaning | Scripted caller should |
 | --- | --- | --- |

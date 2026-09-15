@@ -895,16 +895,28 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
  *      long-lived bucket rather than creating a brand-new one per run — a fresh
  *      bucket is the worst window for state-backend staleness and throttling,
  *      and a real customer's bucket is warm by the time it matters.
- *   3. Derivation from the app bucket name.
+ *   3. `retained` — the bucket the last `destroy` KEPT (project-level
+ *      `retainedStateBucket`). Derivation embeds the app bucket name, which
+ *      destroy rotates, so without this handoff every destroy→deploy cycle
+ *      derived a fresh name and orphaned the kept bucket (vibecarbon-web
+ *      2026-09-15). Recorded by retainStateBucket, cleared by `-purge`.
+ *   4. Derivation from the app bucket name.
  *
  * @param {object} args
  * @param {string} [args.envStateBucket]
  * @param {string} [args.projectPin]
+ * @param {string} [args.retained]
  * @param {string} args.appBucket
  * @param {string} [args.generation]
  * @returns {string}
  */
-export function resolveStateBucketName({ envStateBucket, projectPin, appBucket, generation }) {
+export function resolveStateBucketName({
+  envStateBucket,
+  projectPin,
+  retained,
+  appBucket,
+  generation,
+}) {
   if (envStateBucket) return envStateBucket;
   if (projectPin !== undefined && projectPin !== null) {
     // Validate the pin HERE, before the deploy creates the app and backup
@@ -926,6 +938,7 @@ export function resolveStateBucketName({ envStateBucket, projectPin, appBucket, 
     }
     return pin;
   }
+  if (retained) return retained;
   return deriveStateBucketName(appBucket, generation);
 }
 
