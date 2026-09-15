@@ -40,7 +40,15 @@
  */
 
 import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
-import { signedMessage, validateLicenseKey } from '../src/lib/licensing/validator.js';
+import {
+  signedMessage,
+  validateLicenseKey,
+  VERDICT_STATUSES,
+  VERDICT_TIERS,
+} from '../src/lib/licensing/validator.js';
+
+/** 'YYYY-MM-DD', the only date shape signVerdictToken accepts. */
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function showHelp() {
   console.log(`
@@ -169,6 +177,22 @@ export function mintV2Key(privateKeyPem, { customerId, projectId }) {
  * @param {{ projectId: string, status: string, tier: string, periodEnd: string, issued: string }} fields  dates YYYY-MM-DD
  */
 export function signVerdictToken(privateKeyPem, { projectId, status, tier, periodEnd, issued }) {
+  if (!VERDICT_STATUSES.has(status)) {
+    throw new Error(
+      `signVerdictToken: invalid status ${JSON.stringify(status)}; must be one of ${[...VERDICT_STATUSES].join(', ')}`,
+    );
+  }
+  if (!VERDICT_TIERS.has(tier)) {
+    throw new Error(
+      `signVerdictToken: invalid tier ${JSON.stringify(tier)}; must be one of ${[...VERDICT_TIERS].join(', ')}`,
+    );
+  }
+  if (!YMD_RE.test(periodEnd)) {
+    throw new Error(`signVerdictToken: periodEnd must be 'YYYY-MM-DD', got ${JSON.stringify(periodEnd)}`);
+  }
+  if (!YMD_RE.test(issued)) {
+    throw new Error(`signVerdictToken: issued must be 'YYYY-MM-DD', got ${JSON.stringify(issued)}`);
+  }
   const parsed = { format: 'verdict', projectId: projectId.toLowerCase(), status, tier, periodEnd, issued };
   const message = signedMessage(parsed);
   const signature = sign(null, Buffer.from(message), createPrivateKey(privateKeyPem));

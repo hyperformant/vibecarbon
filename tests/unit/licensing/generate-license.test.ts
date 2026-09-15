@@ -97,6 +97,28 @@ describe('minting round-trips against the matching public key', () => {
     const token = signVerdictToken(privateKeyPem, fields);
     expect(verifyVerdictToken(token, { publicKeyPem })).toEqual({ valid: true, ...fields });
   });
+
+  it('signVerdictToken refuses an invalid status, tier, or malformed date rather than minting a token that would silently fail verification', () => {
+    const base = {
+      projectId: PROJECT_ID,
+      status: 'active',
+      tier: 'graphene',
+      periodEnd: '2026-09-30',
+      issued: '2026-09-14',
+    };
+    expect(() => signVerdictToken(privateKeyPem, { ...base, status: 'refunded' })).toThrow(
+      /invalid status/i,
+    );
+    expect(() => signVerdictToken(privateKeyPem, { ...base, tier: 'agency' })).toThrow(
+      /invalid tier/i,
+    );
+    expect(() => signVerdictToken(privateKeyPem, { ...base, periodEnd: '09/30/2026' })).toThrow(
+      /periodEnd/,
+    );
+    expect(() => signVerdictToken(privateKeyPem, { ...base, issued: '2026-9-14' })).toThrow(
+      /issued/,
+    );
+  });
 });
 
 describe('run() end to end', () => {

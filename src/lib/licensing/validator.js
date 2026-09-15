@@ -65,8 +65,11 @@ MCowBQYDK2VwAyEAUrn80IKtISxTCpGjc5rf2ZZhhhu+SktK4L2GEWrjT6Q=
 // char in the key itself. v2 tier lives in the verdict token instead.
 const V1_TIER_MAP = { f: 'fullerene' };
 
-const VERDICT_STATUSES = new Set(['active', 'past_due', 'canceled', 'none']);
-const VERDICT_TIERS = new Set(['graphene', 'fullerene', 'none']);
+// Exported so scripts/generate-license.js's signVerdictToken can validate
+// against the exact same sets it is verified against here, rather than
+// keeping a second hand-copied list that could drift.
+export const VERDICT_STATUSES = new Set(['active', 'past_due', 'canceled', 'none']);
+export const VERDICT_TIERS = new Set(['graphene', 'fullerene', 'none']);
 const SIG_RE = /^[a-f0-9]{128}$/;
 
 /** Re-hyphenate a bare 32-hex-char id into canonical 8-4-4-4-12 lowercase. */
