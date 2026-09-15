@@ -369,11 +369,12 @@ in the environment, or when `VIBECARBON_TELEMETRY_DISABLED=1` is set.
 
 # Deploy
 
-Cloud infrastructure primitives. `destroy` is always free. `deploy`, `backup`,
-`restore`, `failover`, and `scale` are free on single-server Docker Compose,
-and free on every existing environment: only provisioning a *new*
-environment into Kubernetes requires Graphene, or Kubernetes HA requires
-Fullerene, which also covers Compose HA.
+Cloud infrastructure primitives. `destroy` is always free, in every deploy
+mode. `backup`, `restore`, `failover`, `scale`, `configure`, and `up` never
+require a license either. `deploy` needs no key on single-server Docker
+Compose; deploying to a Kubernetes or HA environment checks the project's
+subscription on every run, first deploy and redeploy alike (Graphene for
+Kubernetes, Fullerene for Kubernetes HA, which also covers Compose HA).
 
 ## deploy
 

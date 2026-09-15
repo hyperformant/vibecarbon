@@ -332,7 +332,7 @@ describe('terminology census', () => {
     // states Vibecarbon's own license model and must not resurrect Agency.
     for (const f of LOCALE_FILES) {
       const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
-      const faqText = JSON.stringify(json.faq ?? {});
+      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
       expect(faqText, `locales/${f} faq: Agency`).not.toMatch(/\bAgency\b/);
     }
   });
@@ -372,6 +372,29 @@ describe('terminology census', () => {
     }
   });
 
+  it('never claims only provisioning a new environment is gated, or that every existing environment is free', () => {
+    // The deploy-time check runs on every deploy to a paid mode, redeploy
+    // included (see entitlement.js/index.js). These phrasings all describe
+    // the retired "only provisioning is gated" model and must not survive
+    // in prose anywhere the docs describe what's checked.
+    const mdxDir = join(ROOT, 'carbon', 'content', 'docs');
+    const mdxFiles = readdirSync(mdxDir)
+      .filter((f) => f.endsWith('.mdx'))
+      .map((f) => join('carbon', 'content', 'docs', f));
+    const pattern =
+      /only provisioning|provisioning a new [^.]{0,60}(requires|needs)|only when provisioning|free on every existing environment/gi;
+    for (const rel of [...SURFACES, ...mdxFiles]) {
+      const hits = contextHits(read(rel), pattern);
+      expect(hits, `${rel}: ${hits.join(' | ')}`).toEqual([]);
+    }
+    for (const f of LOCALE_FILES) {
+      const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
+      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
+      const hits = contextHits(faqText, pattern);
+      expect(hits, `locales/${f} faq: ${hits.join(' | ')}`).toEqual([]);
+    }
+  });
+
   it('retired one-time/legacy pricing language ("one-time", "$149", "retail $299") never appears in SURFACES or the locale FAQ', () => {
     const patterns: Array<[string, RegExp]> = [
       ['one-time', /one-time/i],
@@ -389,7 +412,7 @@ describe('terminology census', () => {
     // own demo product copy, not a statement of Vibecarbon's license model.
     for (const f of LOCALE_FILES) {
       const json = JSON.parse(readFileSync(join(LOCALE_DIR, f), 'utf-8'));
-      const faqText = JSON.stringify(json.faq ?? {});
+      const faqText = JSON.stringify(json.landing?.faq ?? json.faq ?? {});
       for (const [label, pattern] of patterns) {
         expect(faqText, `locales/${f} faq: ${label}`).not.toMatch(pattern);
       }
