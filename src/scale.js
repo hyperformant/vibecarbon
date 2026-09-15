@@ -53,7 +53,6 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { convergeClusterInfra } from './lib/iac/converge-cluster.js';
-import { requirePaidTier } from './lib/licensing/index.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { runProjectAssignment } from './lib/project-assignment.js';
@@ -1041,12 +1040,13 @@ export async function run(args) {
   // Dispatch to the tier's scale strategy. The 4th arg carries the parsed
   // flags plus the resolved `tier` so each strategy dispatches on tier /
   // isHATier(tier) instead of re-deriving deployMode+ha.
+  //
+  // No license gate here: operating an existing environment (scale, backup,
+  // restore, failover) never consults the license, in every deploy mode.
+  // Only `deploy` into a Kubernetes or HA environment does, and it does so
+  // on every run, provisioning and redeploy alike (see
+  // src/lib/licensing/gate.js).
   const tier = resolveTier(envConfig);
-
-  // Gate immediately once the environment's deploy mode tier is known,
-  // before any scale work. Single-server Compose is free; every other
-  // mode requires a paid license.
-  requirePaidTier('scale', tier);
 
   await SCALE_STRATEGIES[tier](environment, envConfig, projectConfig, { ...parsed, tier });
 }

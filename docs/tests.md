@@ -60,7 +60,7 @@ describe('vibecarbon add observability', () => {
 
 - **`buildFixture({ mode, git, envs, withDeployedState, files })`**: synthesizes a vibecarbon project in a temp dir. Mode-specific scaffolding (compose vs k8s), `.gitignore` mirrors `carbon/_gitignore`, optional pre-populated `.vibecarbon/<env>.json` for post-deploy commands.
 - **`installStubs({ hetzner, cloudflare })`**: overrides `globalThis.fetch` with HTTP fakes. Hetzner modes: `success` / `capacity-exhausted` / `rate-limited` / `not-found`. Cloudflare: `success` / `rate-limited`. Unmatched URLs throw: no silent prod hits. (In-process only; child-process exec stubbing is deferred.)
-- **`runCli(verb, flags, opts)`**: spawns `node src/cli.js <verb> <flags...>` via `spawnSync`. ANSI is stripped from stdout/stderr. Sets `HOME` to a per-process tmp with a fake Fullerene license activated, so paid-tier commands reach their flag-parsing logic. Returns `{ exitCode, stdout, stderr }`.
+- **`runCli(verb, flags, opts)`**: spawns `node src/cli.js <verb> <flags...>` via `spawnSync`. ANSI is stripped from stdout/stderr. Sets `HOME` to a per-process tmp with a legacy lifetime test key activated, so paid-tier commands reach their flag-parsing logic. Returns `{ exitCode, stdout, stderr }`.
 - **`assertSuccess` / `assertExitWith` / `assertFileWritten` / `assertFileMissing`**: throw plain `Error` with the relevant slice of `RunResult` so failures are legible without digging through raw stdio.
 
 ## Cross-tier shared helpers

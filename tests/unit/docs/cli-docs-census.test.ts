@@ -23,6 +23,7 @@ import { COMMAND_GATES, PAID_TIERS } from '../../../src/lib/licensing/gate.js';
 const ROOT = process.cwd();
 const CLI_DOC = join(ROOT, 'carbon', 'content', 'docs', 'cli.mdx');
 const doc = readFileSync(CLI_DOC, 'utf-8');
+const readme = readFileSync(join(ROOT, 'README.md'), 'utf-8');
 
 /**
  * Commands the CLI actually dispatches, read from its switch. Matches any
@@ -93,5 +94,21 @@ describe('CLI reference states licensing by scenario, not by command', () => {
       `These rows gate a COMMAND rather than a deploy scenario: ${offenders.join(', ')}. ` +
         'Licensing follows the deploy tier; rewrite the row in terms of the scenario.',
     ).toEqual([]);
+  });
+
+  it('documents the deploy-time check, the 30-day grace, and the committed .vibecarbon.license file', () => {
+    for (const [name, text] of [
+      ['cli.mdx', doc],
+      ['README.md', readme],
+    ] as const) {
+      expect(text, `${name} is missing '.vibecarbon.license'`).toContain('.vibecarbon.license');
+      expect(text, `${name} is missing '30 days'`).toContain('30 days');
+      expect(text, `${name} is missing 'every deploy'`).toContain('every deploy');
+      expect(text, `${name} still has 'activate -refresh'`).not.toContain('activate -refresh');
+      expect(text, `${name} still has 'paid-through'`).not.toContain('paid-through');
+      expect(text, `${name} still has 'published on or before'`).not.toContain(
+        'published on or before',
+      );
+    }
   });
 });

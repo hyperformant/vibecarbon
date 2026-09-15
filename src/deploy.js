@@ -209,11 +209,12 @@ async function main(values, positional) {
   assertInProjectDir();
 
   // 0b. The license gate for deploy is mode-based, not command-based: a
-  // single-server Compose deploy is free, so it can't be gated here
-  // pre-dispatch (before the mode is even known — `deploy` can resolve the
+  // single-server Compose deploy is free, and every deploy into a paid mode
+  // checks this project's subscription. It can't be gated here pre-dispatch
+  // (before the mode is even known, since `deploy` can resolve the
   // architecture interactively). gatherDeploymentConfig() below calls
-  // requirePaidTier() immediately after resolveDeployMode(), before any
-  // region/DNS/credential prompts.
+  // requireDeployEntitlement() immediately after resolveDeployMode(), before
+  // any region/DNS/credential prompts.
 
   // 0c. Refuse to deploy if the working tree contains likely secrets.
   // We push the project's tracked files to GitHub during deploy (CI,

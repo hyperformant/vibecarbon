@@ -20,17 +20,18 @@ const REPO_ROOT = resolve(__dirname, '../../..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
 
 /**
- * The real, Ed25519-signed Fullerene key these tests activate.
+ * The real, Ed25519-signed legacy lifetime key these tests activate. It
+ * covers every project and never lapses.
  *
  * This used to be the literal `vc-f-deadbeef-fakefakefakefakefake` paired
  * with VIBECARBON_DEV_LICENSE=true, which made validateLicenseKey skip
  * signature verification. That switch shipped inside the npm package (the
- * tarball is src/ verbatim, no build step), so it doubled as a free Fullerene
+ * tarball is src/ verbatim, no build step), so it doubled as a free lifetime
  * grant for any customer who opened validator.js. It is gone; the harness now
  * activates a genuine key, which is also the path a customer walks.
  *
  * Mint one with:
- *   VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js --email you@example.com
+ *   VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com
  */
 export function testLicenseKey(): string {
   if (!process.env.VIBECARBON_TEST_LICENSE_KEY) {
@@ -47,14 +48,14 @@ export function testLicenseKey(): string {
         'Set it in your shell or in tests/.env.e2e:\n' +
         '  VIBECARBON_TEST_LICENSE_KEY=vc-f-...\n\n' +
         'Mint one with:\n' +
-        '  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js --email you@example.com',
+        '  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com',
     );
   }
   return key;
 }
 
 /**
- * Per-process fake HOME with a Fullerene-tier license activated, so tests
+ * Per-process fake HOME with a legacy lifetime license activated, so tests
  * reach the off-TTY guard / arg-parse logic that's actually under test
  * instead of stopping at requireLicense().
  */
@@ -118,7 +119,7 @@ export function runCli(verb: string, flags: string[], opts: RunOptions = {}): Ru
       ...process.env,
       NO_COLOR: '1',
       FORCE_COLOR: '0',
-      // Point HOME at a per-process tmp with a real Fullerene license
+      // Point HOME at a per-process tmp with a real legacy lifetime license
       // activated, so paid commands clear requireLicense() and tests reach
       // the off-TTY/arg-parse logic actually under test.
       HOME: getFakeHome(),

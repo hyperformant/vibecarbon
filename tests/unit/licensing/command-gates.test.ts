@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { KNOWN_COMMANDS } from '../../../src/cli.js';
 import {
   COMMAND_GATES,
-  isPaidTier,
   PAID_TIERS,
+  requiredTierFor,
   shouldGate,
 } from '../../../src/lib/licensing/gate.js';
 
@@ -13,14 +13,17 @@ import {
 // explicit gating decision fails this suite.
 //
 // Classifications:
-//   'paid'     — requires an active Fullerene license regardless of
-//                deploy mode (gated in cli.js pre-dispatch, after the
-//                project guard). Currently unused — see 'mode' below.
-//   'free'     — never gated
-//   'internal' — the command gates a sub-flow itself (e.g. configure only
-//                gates its `cicd` flow, which is reachable interactively)
-//   'mode'     — the command gates itself in-flow once its deploy-mode tier
-//                is known (requirePaidTier() — see src/lib/licensing/index.js)
+//   'paid':     requires an active Fullerene license regardless of
+//               deploy mode (gated in cli.js pre-dispatch, after the
+//               project guard). Currently unused, see 'mode' below.
+//   'free':     never gated
+//   'internal': the command gates a sub-flow itself (e.g. configure only
+//               gates its `cicd` flow, which is reachable interactively)
+//   'mode':     the command gates itself in-flow once its deploy-mode tier
+//               is known (requireDeployEntitlement(); see
+//               src/lib/licensing/index.js). Only `deploy` does: the gate
+//               fires on every deploy into a paid mode, and backup /
+//               restore / failover / scale never check at all.
 
 describe('COMMAND_GATES completeness', () => {
   it('classifies every KNOWN_COMMAND exactly (no missing, no extras)', () => {
@@ -42,12 +45,21 @@ describe('COMMAND_GATES completeness', () => {
     expect(paid).toEqual([]);
   });
 
-  it('gates exactly the mode-based command set', () => {
+  it('gates exactly one command in-flow: deploy, the only mode-aware command', () => {
     const mode = Object.entries(COMMAND_GATES)
       .filter(([, gate]) => gate === 'mode')
       .map(([cmd]) => cmd)
       .sort();
-    expect(mode).toEqual(['backup', 'deploy', 'failover', 'restore', 'scale']);
+    expect(mode).toEqual(['deploy']);
+  });
+
+  it('operating an existing environment is free, whatever its deploy mode', () => {
+    // The product rule the per-project subscription move pinned: a
+    // subscription buys deploys into a paid mode, never the right to run
+    // disaster recovery on what is already standing.
+    for (const cmd of ['backup', 'restore', 'failover', 'scale']) {
+      expect(COMMAND_GATES[cmd], `${cmd} must stay free`).toBe('free');
+    }
   });
 
   it('upgrade is free — a local template refresh, mode-agnostic', () => {
@@ -77,32 +89,44 @@ describe('COMMAND_GATES completeness', () => {
   });
 });
 
-describe('PAID_TIERS / isPaidTier', () => {
-  it('single-server Compose is the only free tier', () => {
-    expect(isPaidTier('compose')).toBe(false);
+describe('PAID_TIERS / requiredTierFor', () => {
+  it('single-server Compose needs no subscription', () => {
+    expect(requiredTierFor('compose')).toBe('graphite');
   });
 
-  it('Compose HA, Kubernetes, and Kubernetes HA all require a license', () => {
-    expect(isPaidTier('compose-ha')).toBe(true);
-    expect(isPaidTier('k8s')).toBe(true);
-    expect(isPaidTier('k8s-ha')).toBe(true);
-  });
-
-  it('PAID_TIERS is exactly compose-ha, k8s, k8s-ha', () => {
-    expect([...PAID_TIERS].sort()).toEqual(['compose-ha', 'k8s', 'k8s-ha']);
+  it('Kubernetes needs Graphene; both HA modes need Fullerene', () => {
+    expect(requiredTierFor('k8s')).toBe('graphene');
+    expect(requiredTierFor('k8s-ha')).toBe('fullerene');
+    expect(requiredTierFor('compose-ha')).toBe('fullerene');
   });
 
   it('fails closed on unknown, missing, or corrupt tiers', () => {
-    expect(isPaidTier('bogus')).toBe(true);
-    expect(isPaidTier('')).toBe(true);
-    expect(isPaidTier(undefined as unknown as string)).toBe(true);
-    expect(isPaidTier(null as unknown as string)).toBe(true);
+    // A corrupt `.vibecarbon.json` or a deploy tier added without updating
+    // the map must never provision for free.
+    expect(requiredTierFor('bogus')).toBe('fullerene');
+    expect(requiredTierFor('')).toBe('fullerene');
+    expect(requiredTierFor(undefined as unknown as string)).toBe('fullerene');
+    expect(requiredTierFor(null as unknown as string)).toBe('fullerene');
+  });
+
+  it('PAID_TIERS is every deploy tier that needs a subscription', () => {
+    expect([...PAID_TIERS].sort()).toEqual(['compose-ha', 'k8s', 'k8s-ha']);
+  });
+
+  it('PAID_TIERS is derived from requiredTierFor, not typed out twice', () => {
+    for (const tier of PAID_TIERS) {
+      expect(requiredTierFor(tier), `${tier} is in PAID_TIERS`).not.toBe('graphite');
+    }
+    expect(PAID_TIERS.has('compose')).toBe(false);
   });
 });
 
 describe('shouldGate', () => {
-  it('does not pre-dispatch-gate mode-based commands — they gate in-flow after resolving tier', () => {
+  it('does not pre-dispatch-gate deploy — it gates in-flow after resolving its tier', () => {
     expect(shouldGate('deploy', ['prod'])).toBe(false);
+  });
+
+  it('does not gate the commands that only operate an existing environment', () => {
     expect(shouldGate('backup', ['prod', '-l'])).toBe(false);
     expect(shouldGate('restore', ['prod'])).toBe(false);
     expect(shouldGate('failover', ['prod'])).toBe(false);

@@ -46,12 +46,17 @@ paid for being that command.
 | Deploy scenario | License |
 |-----------------|---------|
 | Single-server Docker Compose | None, always free |
-| Compose HA, Kubernetes, Kubernetes HA | Fullerene |
+| Kubernetes | Graphene |
+| Kubernetes HA | Fullerene (also covers Compose HA) |
 
-Only the commands that act on a deployed environment consult it at all:
-`deploy`, `backup`, `restore`, `failover`, and `scale`, each once it knows
-which scenario it is working on. Every other command, including all of
-`configure`, is free in every mode.
+The subscription is checked on every deploy to a Kubernetes or HA
+environment. A lapsed subscription keeps deploying for 30 days with a
+warning, then pauses those deploys until renewed. Backup, restore,
+failover, and scale never require a subscription. Every other command,
+including all of `configure`, is free in every mode.
+
+Activation writes `.vibecarbon.license` into the project; commit it and
+share it with your team. The key never rotates.
 
 Run `vibecarbon activate <key>` to activate a license.
 
@@ -301,7 +306,7 @@ cluster, so there is nothing for it to do on Compose.
 
 Pre-conditions: the `gh` CLI must be authenticated. For stage 2 the cluster
 must already be deployed (`vibecarbon deploy <env>` with `-mode k8s` or
-`-mode k8s-ha`), which itself requires Fullerene.
+`-mode k8s-ha`), which itself requires Graphene (k8s) or Fullerene (k8s-ha).
 
 After stage 2, future commits to `main` reconcile through Flux automatically.
 The deploy path itself stays local-first: `vibecarbon deploy` continues to
@@ -364,9 +369,12 @@ in the environment, or when `VIBECARBON_TELEMETRY_DISABLED=1` is set.
 
 # Deploy
 
-Cloud infrastructure primitives. `destroy` is always free. `deploy`, `backup`,
-`restore`, `failover`, and `scale` are free on single-server Docker Compose;
-a Fullerene license is required for Compose HA, Kubernetes, or Kubernetes HA.
+Cloud infrastructure primitives. `destroy` is always free, in every deploy
+mode. `backup`, `restore`, `failover`, `scale`, `configure`, and `up` never
+require a license either. `deploy` needs no key on single-server Docker
+Compose; deploying to a Kubernetes or HA environment checks the project's
+subscription on every run, first deploy and redeploy alike (Graphene for
+Kubernetes, Fullerene for Kubernetes HA, which also covers Compose HA).
 
 ## deploy
 
@@ -407,10 +415,10 @@ confirmations.
 | `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3, or PITR to an ISO-8601 timestamp. Skips migrations; the restored DB is authoritative. K8s modes only. |
 | `-allow-degraded` | HA only: finish even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy fails unless replication is confirmed streaming. |
 
-Provider support varies by mode: `compose` runs on all five providers,
-`compose-ha` and `k8s` on Hetzner and DigitalOcean, and `k8s-ha` is
-Hetzner-only today. See [Deployment](/docs/deployment#choosing-a-provider) for
-the full matrix and the API token each provider reads.
+Provider support varies by mode: `compose` runs on all five providers, and
+`compose-ha`, `k8s`, and `k8s-ha` run on Hetzner and DigitalOcean. See
+[Deployment](/docs/deployment#choosing-a-provider) for the full matrix and
+the API token each provider reads.
 
 > Server types, worker bounds, domain, DNS provider, S3 credentials, and backup
 > schedules are configured interactively or via `.vibecarbon.json`, and they don't
@@ -694,7 +702,11 @@ firewall entirely.
 
 ## activate
 
-Activate a license key (Fullerene tier; Agency customers also receive a Fullerene-tier key).
+Activate a license key (Graphene or Fullerene). A `vc2-` key is scoped to
+one project, so run `activate` from inside that project's directory; it
+writes `.vibecarbon.license`, which should be committed and shared with
+your team so anyone working on the project can deploy without activating
+separately.
 
 ```bash
 # Prompts for key
@@ -704,8 +716,11 @@ vibecarbon activate
 vibecarbon activate vc-xxxxxxxx-signature...
 ```
 
-License keys start with `vc-`. Purchase a license at
-[vibecarbon.com/#pricing](https://vibecarbon.com/#pricing).
+License keys start with `vc-` (legacy) or `vc2-` (current). The key never
+rotates; the subscription is checked on every deploy to a Kubernetes or HA
+environment. A lapsed subscription keeps deploying for 30 days with a
+warning, then pauses those deploys until renewed. Subscribe at
+[vibecarbon.com/pricing](https://vibecarbon.com/pricing).
 
 ---
 
@@ -719,11 +734,15 @@ vibecarbon deactivate
 
 # Skip confirmation
 vibecarbon deactivate -y
+
+# Remove both the project key and the legacy key
+vibecarbon deactivate -all
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-y` | Skip confirmation prompt |
+| `-all` | Remove every stored license, project and legacy |
 
 ---
 

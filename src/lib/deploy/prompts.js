@@ -16,7 +16,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from '../dns-provider.js';
-import { requirePaidTier } from '../licensing/index.js';
+import { requireDeployEntitlement } from '../licensing/index.js';
 import {
   getObjectStorageProvider,
   listProviders,
@@ -45,11 +45,32 @@ export { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN };
 // below — the option values themselves predate the tier-id vocabulary
 // ('kubernetes'/'kubernetes-ha' vs 'k8s'/'k8s-ha') so they don't line up
 // 1:1.
+//
+// compose-ha stays in the map, but the picker only offers it on a provider
+// that has no Kubernetes tier at all — see COMPOSE_HA_OPTION below.
 const MODE_OPTION_TIER = {
   compose: 'compose',
   'compose-ha': 'compose-ha',
   kubernetes: 'k8s',
   'kubernetes-ha': 'k8s-ha',
+};
+
+// Compose HA is a fully supported deploy mode (existing environments keep
+// working, `-mode compose-ha` still resolves, resolveTier still prices it at
+// Fullerene, the e2e matrix still runs it) but it is no longer RECOMMENDED:
+// Kubernetes HA is the HA answer we lead with, so the picker hides Compose
+// HA wherever Kubernetes HA is on offer.
+//
+// "Wherever" is per provider, not global. Vultr and Scaleway declare
+// SUPPORTED_TIERS = ['compose', 'compose-ha'] (no Kubernetes tiers built
+// yet), so hiding it unconditionally would leave their operators a
+// one-option select and put the only HA mode they can run behind a flag
+// they were never shown. On a provider with no Kubernetes tier, Compose HA
+// IS the HA answer, so it is listed.
+const COMPOSE_HA_OPTION = {
+  value: 'compose-ha',
+  label: 'Docker Compose HA (Auto Failover)',
+  hint: '2 VPS - Simple failover without K8s complexity - Enterprise resiliency, Fullerene',
 };
 
 /**
@@ -195,25 +216,28 @@ export async function resolveDeployMode(args, envConfig) {
     {
       value: 'compose',
       label: 'Docker Compose (Fast)',
-      hint: '1 VPS - Best for startups and internal tools',
-    },
-    {
-      value: 'compose-ha',
-      label: 'Docker Compose HA (Auto Failover)',
-      hint: '2 VPS - Simple failover without K8s complexity - requires Fullerene',
+      hint: '1 VPS - Best for startups and internal tools - Go live, Graphite',
     },
     {
       value: 'kubernetes',
       label: 'Kubernetes (Auto Scaling)',
-      hint: 'k3s + Autoscaling - Best for high-traffic apps - requires Fullerene',
+      hint: 'k3s + Autoscaling - Best for high-traffic apps - Scale on demand, Graphene',
     },
     {
       value: 'kubernetes-ha',
       label: 'Kubernetes HA (Auto Scaling + Failover)',
-      hint: 'Multi-region cluster - Maximum availability - requires Fullerene',
+      hint: 'Multi-region cluster - Maximum availability - Enterprise resiliency, Fullerene',
     },
   ];
-  const options = allOptions.filter((opt) =>
+  // Compose HA is offered only when this provider has no Kubernetes tier at
+  // all; it slots in right after plain Compose so the list still reads
+  // simplest-to-most-capable.
+  const supportsK8s = Provider.SUPPORTED_TIERS.some((tier) => tier === 'k8s' || tier === 'k8s-ha');
+  const offered = supportsK8s
+    ? allOptions
+    : [allOptions[0], COMPOSE_HA_OPTION, ...allOptions.slice(1)];
+
+  const options = offered.filter((opt) =>
     Provider.SUPPORTED_TIERS.includes(MODE_OPTION_TIER[opt.value]),
   );
 
@@ -395,12 +419,11 @@ export async function gatherDeploymentConfig(args) {
 
   const { deployMode, ha } = await resolveDeployMode(args, envConfig);
 
-  // Gate immediately after the deploy mode is known — for `deploy` this can
-  // only happen mid-command (the architecture may be chosen interactively
-  // above), so the upsell must live here rather than pre-dispatch. Fires
-  // before any region/DNS/credential prompts so an unlicensed operator
-  // never gets deep into the flow before hitting the wall.
-  requirePaidTier('deploy', resolveTier({ deployMode, ha }));
+  // Gate immediately after the deploy mode is known, before any region, DNS
+  // or credential prompt. Every deploy into a paid mode checks the project's
+  // subscription (live, or the cached verdict); Compose returns at once.
+  const deployTier = resolveTier({ deployMode, ha });
+  await requireDeployEntitlement({ deployTier, projectConfig });
 
   const isComposeDeploy = deployMode === 'compose' || deployMode === 'compose-ha';
   const config = {

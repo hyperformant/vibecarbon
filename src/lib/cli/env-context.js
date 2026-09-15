@@ -1,8 +1,14 @@
 /**
  * Shared env-resolution preamble for env-scoped deploy-side commands
  * (backup / restore / failover): env seed → TTY guard → env picker →
- * per-mode license gate → (optionally) target server IP. Collapses the
- * near-verbatim ~40-line block each of those commands used to copy.
+ * (optionally) target server IP. Collapses the near-verbatim ~40-line block
+ * each of those commands used to copy.
+ *
+ * No license gate lives here any more. Operating an existing environment
+ * (scale, backup, restore, failover) never consults the license, in every
+ * deploy mode. Only `deploy` into a Kubernetes or HA environment does, and
+ * it does so on every run, provisioning and redeploy alike (see
+ * src/lib/licensing/gate.js).
  *
  * Callers run `assertInProjectDir()` first and pass its return value as
  * `projectConfig` — this helper never reloads the config (the old copies
@@ -10,14 +16,11 @@
  */
 
 import * as p from '@clack/prompts';
-import { resolveTier } from '../deploy/tier-registry.js';
-import { requirePaidTier } from '../licensing/index.js';
 import { selectEnvironment } from './select-environment.js';
 import { requireTTYOrFlags } from './tty-guard.js';
 
 /**
  * @param {object} opts
- * @param {string} opts.command - command name for the license gate (e.g. 'backup')
  * @param {string} opts.actionVerb - verb for the env picker prompt (e.g. 'back up')
  * @param {string} opts.envRequirement - TTY-guard description of the env
  *   requirement (e.g. 'name an environment to back up')
@@ -36,7 +39,6 @@ import { requireTTYOrFlags } from './tty-guard.js';
  * @returns {Promise<{envName: string, envConfig: object, serverIp?: string}>}
  */
 export async function resolveEnvContext({
-  command,
   actionVerb,
   envRequirement,
   values,
@@ -68,11 +70,6 @@ export async function resolveEnvContext({
     actionVerb,
     seed: envSeed,
   });
-
-  // Gate immediately once the environment's deploy mode is known — before
-  // any paid work. Single-server Compose is free; every other mode
-  // requires a paid license.
-  requirePaidTier(command, resolveTier(envConfig));
 
   if (!serverIp) return { envName, envConfig };
 

@@ -1828,7 +1828,6 @@ export async function run(args) {
   // check below). Single-server Compose stays free — it only ever reaches
   // failoverSingleServer(), a printed recovery guide.
   const { envName, envConfig } = await resolveEnvContext({
-    command: 'failover',
     actionVerb: 'fail over',
     envRequirement: 'name an environment to fail over',
     values,

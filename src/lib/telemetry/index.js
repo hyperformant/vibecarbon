@@ -5,9 +5,8 @@
  * Wire contract: vibecarbon-web /api/v1/telemetry/{events,errors}.
  */
 
-import { randomUUID } from 'node:crypto';
 import { c } from '../colors.js';
-import { loadManifest, manifestExists, saveManifest } from '../project.js';
+import { ensureProjectId, loadManifest, manifestExists } from '../project.js';
 import { VERSION } from '../version.js';
 import { sanitizeError } from './sanitize.js';
 import { getTelemetryState, isAnalyticsDisabled, markNoticeShown } from './state.js';
@@ -31,14 +30,12 @@ function projectContext(cwd) {
       return { project_id: null, provider: null, deploy_target: null };
     }
     const manifest = loadManifest(cwd);
-    if (!manifest.projectId) {
-      manifest.projectId = randomUUID();
-      saveManifest(manifest, cwd);
-    }
+    // Lazy backfill, shared with the licensing gate — see ensureProjectId().
+    const projectId = ensureProjectId(manifest, cwd);
     const envs = manifest.environments || {};
     const envCfg = envs.prod || envs[Object.keys(envs)[0]] || {};
     return {
-      project_id: manifest.projectId,
+      project_id: projectId,
       provider: envCfg.provider || null,
       deploy_target: envCfg.deployMode || null,
     };

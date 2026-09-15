@@ -551,16 +551,16 @@ current pricing for the server types you select at deploy time.
 | Option | Tier | Description |
 |--------|------|-------------|
 | Single VPS | Graphite (free) | Docker Compose on a single VPS |
-| Compose HA | Fullerene | Primary + standby VPS with PG streaming replication + one-command failover |
-| Single K8s | Fullerene | Single-region k3s cluster |
+| Single K8s | Graphene | Single-region k3s cluster |
 | Multi-Region K8s HA | Fullerene | k3s primary + standby clusters with PG streaming replication + one-command failover |
+
+Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`.
 
 Mode support by provider (same facts as the README architecture diagram):
 
 | Deploy mode | Hetzner | DigitalOcean | Linode | Vultr | Scaleway |
 |---|:---:|:---:|:---:|:---:|:---:|
 | `compose` | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `compose-ha` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `k8s` | ✅ | ✅ | — | — | — |
 | `k8s-ha` | ✅ | ✅ | — | — | — |
 
@@ -580,7 +580,7 @@ Kubernetes deployments additionally include:
 | Option | Best For | Guide |
 |--------|----------|-------|
 | Hetzner Cloud | Cost-effective hosting (single-node + HA) | [deploy-hetzner.md](./deploy-hetzner.md) |
-| DigitalOcean | Compose, Compose HA, and Kubernetes | [deploy-digitalocean.md](./deploy-digitalocean.md) |
+| DigitalOcean | Compose and Kubernetes | [deploy-digitalocean.md](./deploy-digitalocean.md) |
 
 ### Integration Guides
 

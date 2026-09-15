@@ -326,7 +326,7 @@ export function assertLicenseActive(env = process.env) {
     : `Set VIBECARBON_TEST_LICENSE_KEY (shell or tests/.env.e2e), then:\n` +
       `  node src/cli.js activate "$VIBECARBON_TEST_LICENSE_KEY"\n\n` +
       `Mint one with:\n` +
-      `  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js --email you@example.com`;
+      `  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com`;
 
   throw new Error(
     `[e2e-env] No active Vibecarbon license at ~/.vibecarbon/license.\n` +
@@ -409,8 +409,8 @@ export function e2eCliEnv(extra = {}, base = process.env) {
     // deploys go through the interactive auto-detect path.
     ALLOWED_SSH_IPS: '0.0.0.0/0,::/0',
     // NOTE: no license variable is set here, deliberately. Licensing is
-    // deploy-mode-based — compose-ha/k8s/k8s-ha scenarios hit
-    // requirePaidTier() in deploy/backup/restore/failover/scale — and the
+    // deploy-mode-based, so compose-ha/k8s/k8s-ha scenarios hit
+    // requireDeployEntitlement() every time `deploy` runs, and the
     // harness satisfies that the way a customer does: a genuine Ed25519-signed
     // key activated at ~/.vibecarbon/license, asserted by
     // assertLicenseActive() in setupE2EEnv() below.

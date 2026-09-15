@@ -62,6 +62,18 @@ describe('vibecarbon activate', () => {
     expect(existsSync(join(testHome, '.vibecarbon', 'license'))).toBe(false);
   });
 
+  it('-refresh is gone: a project key is stable, so there is nothing to refresh', () => {
+    const r = runCli('activate', ['-refresh'], { cwd: project, env: { HOME: testHome } });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stdout + r.stderr).toMatch(/unknown flag: -refresh/i);
+  });
+
+  it('-h no longer advertises a refresh flag', () => {
+    const r = runCli('activate', ['-h'], { cwd: project, env: { HOME: testHome } });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout + r.stderr).not.toMatch(/refresh/i);
+  });
+
   it('rejects a malformed key', () => {
     const r = runCli('activate', ['totally-not-a-key'], {
       cwd: project,

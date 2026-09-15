@@ -39,10 +39,10 @@ For exact, up-to-date figures, see
 4. **A domain** you control, for the app URL and TLS certificates.
 5. **Docker running locally**: images are built on your machine and pushed to
    the servers over SSH (local-first deploys; no registry or CI required).
-6. **A Fullerene license, for advanced deploy modes**: single-server Docker
-   Compose deploys need no license (Graphite, forever). Compose HA,
-   Kubernetes, and Kubernetes HA require a Fullerene license ($149
-   one-time). Local development (`create`, `up`, `down`) needs no license.
+6. **A license, for Kubernetes and Kubernetes HA**: single-server Docker
+   Compose deploys need no license (Graphite, forever). Kubernetes needs a
+   Graphene subscription; Kubernetes HA needs Fullerene, which also covers
+   Compose HA. Local development (`create`, `up`, `down`) needs no license.
 
 ## Deployment modes
 
