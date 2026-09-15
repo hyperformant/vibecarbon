@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   coversRelease,
+  daysLeft,
+  evaluateDeployEntitlement,
   evaluateEntitlement,
+  graceEndOf,
   requiredTierFor,
   TIER_FOR_DEPLOY_TIER,
   tierSatisfies,
@@ -342,5 +345,193 @@ describe('evaluateEntitlement', () => {
         }
       });
     }
+  });
+});
+
+describe('evaluateDeployEntitlement', () => {
+  const PID = '11111111-2222-3333-4444-555555555555';
+  const NOW = '2026-09-14';
+  const v2 = {
+    active: true,
+    format: 'v2',
+    isLifetime: false,
+    projectId: PID,
+    tier: null,
+    storedProjectId: null,
+  };
+  const live = (verdict: object) => ({
+    source: 'live',
+    verdict: { projectId: PID, issued: NOW, ...verdict },
+  });
+  const cached = (verdict: object) => ({
+    source: 'cache',
+    verdict: { projectId: PID, issued: '2026-08-01', ...verdict },
+  });
+  const ev = (args: Partial<Parameters<typeof evaluateDeployEntitlement>[0]>) =>
+    evaluateDeployEntitlement({
+      license: v2,
+      deployTier: 'k8s',
+      projectId: PID,
+      check: { source: 'none', verdict: null },
+      now: NOW,
+      ...args,
+    });
+
+  it('compose never checks, even with check.source rejected', () => {
+    const result = ev({
+      deployTier: 'compose',
+      license: null,
+      check: { source: 'rejected', verdict: null },
+    });
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty('warning');
+  });
+
+  it('legacy lifetime key proceeds for k8s-ha with check.source none, no warning', () => {
+    const legacy = {
+      active: true,
+      format: 'v1',
+      isLifetime: true,
+      projectId: null,
+      storedProjectId: null,
+    };
+    const result = ev({ deployTier: 'k8s-ha', license: legacy });
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty('warning');
+  });
+
+  it('no license, k8s -> no-license', () => {
+    const result = ev({ license: null });
+    expect(result).toMatchObject({ ok: false, reason: 'no-license', requiredTier: 'graphene' });
+  });
+
+  it('stored key for another project -> wrong-project', () => {
+    const result = ev({ license: { active: false, storedProjectId: 'some-other-project' } });
+    expect(result).toMatchObject({ ok: false, reason: 'wrong-project', requiredTier: 'graphene' });
+  });
+
+  it('active graphene, periodEnd within grace, k8s -> ok, no warning', () => {
+    const result = ev({
+      check: live({ status: 'active', tier: 'graphene', periodEnd: '2026-09-30' }),
+    });
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty('warning');
+  });
+
+  it('active graphene with cancelAtPeriodEnd -> ok, warning ending', () => {
+    const result = ev({
+      check: {
+        ...live({ status: 'active', tier: 'graphene', periodEnd: '2026-09-30' }),
+        cancelAtPeriodEnd: true,
+      },
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      warning: { kind: 'ending', periodEnd: '2026-09-30' },
+    });
+  });
+
+  it('active graphene, k8s-ha -> tier-too-low', () => {
+    const result = ev({
+      deployTier: 'k8s-ha',
+      check: live({ status: 'active', tier: 'graphene', periodEnd: '2026-09-30' }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'tier-too-low', requiredTier: 'fullerene' });
+  });
+
+  it('past_due graphene inside grace -> ok, warning past-due with days left', () => {
+    const result = ev({
+      check: live({ status: 'past_due', tier: 'graphene', periodEnd: '2026-09-01' }),
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      warning: { kind: 'past-due', daysLeft: 17, periodEnd: '2026-09-01' },
+    });
+  });
+
+  it('past_due graphene past grace -> block past-due', () => {
+    const result = ev({
+      check: live({ status: 'past_due', tier: 'graphene', periodEnd: '2026-08-01' }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'past-due' });
+  });
+
+  it('canceled graphene inside grace -> ok, warning canceled with days left', () => {
+    const result = ev({
+      check: live({ status: 'canceled', tier: 'graphene', periodEnd: '2026-09-01' }),
+    });
+    expect(result).toMatchObject({ ok: true, warning: { kind: 'canceled', daysLeft: 17 } });
+  });
+
+  it('canceled graphene past grace -> block canceled', () => {
+    const result = ev({
+      check: live({ status: 'canceled', tier: 'graphene', periodEnd: '2026-08-01' }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'canceled' });
+  });
+
+  it('canceled fullerene at k8s (tier above required) inside grace still warns canceled', () => {
+    const result = ev({
+      check: live({ status: 'canceled', tier: 'fullerene', periodEnd: '2026-09-01' }),
+    });
+    expect(result).toMatchObject({ ok: true, warning: { kind: 'canceled' } });
+  });
+
+  it('verdict status none -> no-license', () => {
+    const result = ev({
+      check: live({ status: 'none', tier: 'none', periodEnd: NOW }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'no-license' });
+  });
+
+  it('verdict for another projectId -> no-license', () => {
+    const result = ev({
+      check: live({
+        projectId: 'some-other-project',
+        status: 'active',
+        tier: 'graphene',
+        periodEnd: '2026-09-30',
+      }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'no-license' });
+  });
+
+  it('check.source rejected -> no-license', () => {
+    const result = ev({ check: { source: 'rejected', verdict: null } });
+    expect(result).toMatchObject({ ok: false, reason: 'no-license' });
+  });
+
+  it('check.source none with unreachable -> ok, warning unverified', () => {
+    const result = ev({ check: { source: 'none', verdict: null, unreachable: 'ECONNREFUSED' } });
+    expect(result).toMatchObject({
+      ok: true,
+      warning: { kind: 'unverified', detail: 'ECONNREFUSED' },
+    });
+  });
+
+  it('cached active past grace -> ok, warning stale', () => {
+    const result = ev({
+      check: cached({ status: 'active', tier: 'graphene', periodEnd: '2026-07-01' }),
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      warning: { kind: 'stale', periodEnd: '2026-07-01' },
+    });
+  });
+
+  it('boundary: past_due exactly at grace end -> ok, daysLeft 0', () => {
+    const result = ev({
+      check: live({ status: 'past_due', tier: 'graphene', periodEnd: '2026-08-15' }),
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      warning: { kind: 'past-due', daysLeft: 0 },
+    });
+  });
+
+  it('graceEndOf and daysLeft', () => {
+    expect(graceEndOf('2026-01-31')).toBe('2026-03-02');
+    expect(daysLeft('2026-09-14', '2026-09-14')).toBe(0);
+    expect(daysLeft('2026-09-10', '2026-09-14')).toBe(0);
   });
 });
