@@ -393,6 +393,9 @@ vibecarbon deploy prod -mode k8s-ha -region hel1 -y
 # Scripted single-server deploy to a new DigitalOcean environment
 vibecarbon deploy prod -provider digitalocean -region nyc3 -mode compose -y
 
+# Scripted compose deploy at an explicit placement (no region default)
+vibecarbon deploy prod -region fsn1 -server-type cpx22 -y
+
 # Redo a previously-failed deploy from scratch
 vibecarbon deploy prod -full
 ```
@@ -411,6 +414,7 @@ confirmations.
 | `-region <id>` | Primary region (provider-specific, e.g. `hel1` on Hetzner, `nyc3` on DigitalOcean) |
 | `-standby-region <id>` | HA standby/failover region (defaults to a same-continent partner of `-region`) |
 | `-mode <mode>` | Deploy mode: `compose`, `compose-ha`, `k8s`, or `k8s-ha` |
+| `-server-type <id>` | Server type (provider-specific, e.g. `cpx22`). Compose: the whole box; k8s: blanket for master/supabase/worker unless `.vibecarbon.json` sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
 | `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3, or PITR to an ISO-8601 timestamp. Skips migrations; the restored DB is authoritative. K8s modes only. |
 | `-allow-degraded` | HA only: finish even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy fails unless replication is confirmed streaming. |
@@ -444,6 +448,9 @@ vibecarbon destroy prod -y
 
 # Also delete the backup S3 bucket
 vibecarbon destroy prod -y -purge
+
+# Scripted production destroy (the typed confirmation as a flag)
+vibecarbon destroy prod -y -confirm myapp-prod
 ```
 
 The following are deleted from the environment's cloud provider: servers and
@@ -452,20 +459,29 @@ keys only) — plus DNS records and health checks at whichever DNS provider the
 environment uses, and GitHub environment secrets.
 
 > Production environments (`prod` or `production`) require a type-to-confirm
-> prompt **even with `-y`**. This is a hard guard that can't be bypassed.
+> prompt **even with `-y`**. This is a hard guard that can't be bypassed —
+> scripts supply the value with `-confirm <project>-<env>`; without it, and
+> with no terminal to type in, the command exits instead of waiting.
+
+The Pulumi state bucket is kept and recorded as `retainedStateBucket` in
+`.vibecarbon.json` so a redeploy resumes the same warm state backend; `-purge`
+deletes it along with the backup bucket.
 
 | Flag | Description |
 |------|-------------|
 | `-y` | Skip confirmation prompts (does not skip prod type-to-confirm) |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-orphans` | Destroy stray Pulumi stacks not tracked in config |
-| `-purge` | Also delete the backup S3 bucket (default: preserved) |
+| `-purge` | Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved) |
+| `-confirm <value>` | Production only: the type-to-confirm value (`<project>-<env>`) on the command line |
 
 ---
 
 ## backup
 
-Create or manage database backups.
+Create or manage database backups. Backups are wal-g base backups plus
+continuous WAL archiving into your object-storage bucket; `create` pushes a
+fresh base backup, `list` shows the restore points.
 
 ```bash
 # Interactive: prompts for env and action
@@ -477,8 +493,8 @@ vibecarbon backup prod
 # List backups for prod
 vibecarbon backup prod -l
 
-# Scripted download
-vibecarbon backup -env prod -action download -source myapp_20260507.tar.gz
+# Scripted base backup
+vibecarbon backup prod -action create -y
 ```
 
 | Flag | Description |
@@ -488,41 +504,47 @@ vibecarbon backup -env prod -action download -source myapp_20260507.tar.gz
 | `-l` | List backups (read-only; equivalent to `-action list`) |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-action <verb>` | Action seed: `create`, `list`, or `download` |
-| `-source <file>` | Backup filename (required for non-interactive download) |
+| `-source <file>` | Backup filename for `-action download` — legacy backup-pod dumps only (k8s without object storage). wal-g environments have no file to download; restore with `vibecarbon restore`. |
 
 ---
 
 ## restore
 
-Restore a database from a backup.
+Restore the database to a point in time. Restore is wal-g-native: it fetches
+the latest base backup from object storage and replays WAL either to the
+present (`latest`) or to an ISO-8601 instant (point-in-time recovery). There
+is no "restore this file" — backups are not files.
 
 ```bash
-# Interactive: prompts for env and backup
+# Interactive: prompts for env and restore point
 vibecarbon restore
 
-# List available backups for prod
+# List restore points for prod
 vibecarbon restore prod -l
 
-# Restore a specific backup from S3
-vibecarbon restore prod -source myapp_20260507.tar.gz
-
-# Restore from a local file
-vibecarbon restore prod -source ./backup.tar.gz -y
-
-# Restore the most-recent S3 backup, non-interactively
+# Latest base backup + all WAL, non-interactively
 vibecarbon restore prod -y -source latest
+
+# Point-in-time recovery
+vibecarbon restore prod -source 2026-06-22T14:30:00Z
+
+# Scripted production restore (the typed confirmation as a flag)
+vibecarbon restore prod -y -source latest -confirm prod
 ```
 
-`-source` accepts a local file path, an S3 backup name, or the literal
-`latest` to fetch the most recent S3 backup.
+Restoring a production environment asks you to type its name to confirm,
+even with `-y`; `-confirm <env>` supplies it for scripts (without it, and
+with no terminal, the command exits instead of waiting). Planner statistics
+are rebuilt (`ANALYZE`) once the restored cluster promotes.
 
 | Flag | Description |
 |------|-------------|
 | `-h` | Show this help |
 | `-y` | Skip confirmation prompts |
-| `-l` | List available backups (read-only; does not restore) |
+| `-l` | List restore points (read-only; does not restore) |
 | `-env <name>` | Environment seed (alternative to positional) |
-| `-source <file-or-name-or-latest>` | Local file path, S3 backup name, or `latest` |
+| `-source <latest\|ISO-timestamp>` | Restore point: `latest` or an ISO-8601 timestamp (PITR) |
+| `-confirm <value>` | Production only: the type-to-confirm value on the command line |
 
 ---
 

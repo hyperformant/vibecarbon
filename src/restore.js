@@ -17,7 +17,6 @@
  */
 
 import { existsSync } from 'node:fs';
-import { basename } from 'node:path';
 import * as p from '@clack/prompts';
 import { identifyServers } from './failover.js';
 import { formatInstant } from './lib/backup-format.js';
@@ -46,7 +45,6 @@ import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
-import { validateBackupFilename } from './lib/validators.js';
 import { listWalgBackups, printWalgBackupList } from './lib/walg-backups.js';
 
 // ============================================================================
@@ -76,8 +74,9 @@ const SPEC = {
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
       name: 'source',
-      value: '<latest|ISO-timestamp|file>',
-      description: 'Restore point: `latest`, an ISO-8601 timestamp (PITR), or a local file path',
+      value: '<latest|ISO-timestamp>',
+      description:
+        'Restore point: `latest` (newest base backup + all WAL) or an ISO-8601 timestamp (PITR)',
     },
     {
       name: 'confirm',
@@ -96,10 +95,6 @@ const SPEC = {
     {
       command: 'vibecarbon restore prod -source 2026-06-22T14:30:00Z',
       description: 'point-in-time recovery to a specific moment (wal-g WAL replay)',
-    },
-    {
-      command: 'vibecarbon restore prod -source ./backup.tar.gz -y',
-      description: 'restore from a local file, skipping confirmation',
     },
   ],
 };
@@ -209,30 +204,43 @@ export async function verifyPostgres(ip, sshKeyPath, opts = {}) {
 // SOURCE INTERPRETATION
 // ============================================================================
 
+// ISO-8601 datetime for point-in-time recovery. MUST stay in sync with
+// composeRestoreScript's ISO_DATETIME_RE (compose/index.js) and the k8s
+// walg-restore init container, which reject any other target format.
+const RESTORE_PITR_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$/;
+
 /**
- * The `-source` flag accepts either a local file path or an S3 backup
- * name. Existence on disk is the signal: if the value resolves to a
- * file we treat it as upload-and-restore; otherwise we validate as an
- * S3 backup name and restore from S3.
+ * Resolve `-source` into a wal-g restore POINT.
+ *
+ * Restore is wal-g-native for compose and k8s: it always fetches the latest
+ * base backup and replays WAL either to the present (`latest`) or to an
+ * ISO-8601 instant (PITR). There is no "restore this file": the legacy
+ * `backups/*_full.tar.gz` objects are not wal-g backups and local dumps
+ * cannot be loaded (runComposeRestore / runK8sRestore reject `kind: local`).
+ * Until 2026-09-15 this special-cased `latest` and sent everything else
+ * through the tar.gz filename validator — so the advertised PITR form exited
+ * with "Backup filename must match <safe-name>.(tar|sql)[.gz]", and a local
+ * path got as far as the SSH step before failing. Reject the unsupported
+ * shapes here, naming the two that work.
  *
  * @param {string} source
- * @returns {{ kind: 'local', path: string, name: string } | { kind: 's3', name: string }}
+ * @returns {{ kind: 's3', name: string }}
  */
-function classifySource(source) {
-  if (existsSync(source)) {
-    return { kind: 'local', path: source, name: basename(source) };
-  }
-  // Not a local path — assume S3 backup name. Validate format up front
-  // so downstream code can trust it.
-  const err = validateBackupFilename(source);
-  if (err) {
-    p.log.error(`Invalid -source: ${err}`);
-    p.log.info(
-      `Expected a local file path or S3 backup name (e.g. myapp_20260507_120000_full.tar.gz)`,
-    );
-    process.exit(1);
-  }
-  return { kind: 's3', name: source };
+
+export function resolveRestoreTarget(source) {
+  if (source === 'latest') return { kind: 's3', name: 'latest' };
+  if (RESTORE_PITR_RE.test(source)) return { kind: 's3', name: source };
+  const why = existsSync(source)
+    ? 'Local backup files cannot be restored'
+    : /\.(tar|sql)(\.gz)?$/.test(source)
+      ? 'Backup files cannot be restored by name'
+      : `"${source}" is not a restore point`;
+  p.log.error(
+    `${why}: restore is wal-g-based and pulls from S3. ` +
+      'Pass `-source latest` for the most recent base backup plus all WAL, or an ISO-8601 ' +
+      'timestamp (e.g. 2026-06-22T14:30:00Z) for point-in-time recovery.',
+  );
+  process.exit(1);
 }
 
 // ============================================================================
@@ -334,7 +342,7 @@ export async function run(args) {
   const wantsLatest = values.source === 'latest';
   let chosenSource;
   if (!wantsLatest && values.source) {
-    chosenSource = classifySource(/** @type {string} */ (values.source));
+    chosenSource = resolveRestoreTarget(/** @type {string} */ (values.source));
   } else if (wantsLatest) {
     chosenSource = { kind: 's3', name: 'latest' };
   } else {
@@ -432,11 +440,6 @@ export async function run(args) {
 async function runList({ isCompose, envName, projectName, serverIp, sshKeyPath }) {
   await printWalgBackupList({ serverIp, sshKeyPath, projectName, isCompose, envName });
 }
-
-// ISO-8601 datetime for point-in-time recovery. MUST stay in sync with
-// composeRestoreScript's ISO_DATETIME_RE (compose/index.js) and the k8s
-// walg-restore init container, which reject any other target format.
-const RESTORE_PITR_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$/;
 
 async function pickInteractiveSource({
   isCompose,
@@ -673,6 +676,28 @@ export async function runK8sRestore({
     });
     // 4. Confirm postgres accepts connections post-recovery.
     await perfAsync('restore.verifyPostgres', async () => verifyPostgres(serverIp, sshKeyPath));
+    // 4b. Rebuild planner statistics before the app comes back. A base backup
+    //     carries none: until autovacuum runs, n_live_tup reads 0 for every
+    //     table and the first queries plan blind — which looks exactly like
+    //     data loss to whoever verifies the restore (vibecarbon-web
+    //     2026-09-15; same step in restoreCompose). Best-effort: the restore
+    //     itself has already succeeded.
+    await perfAsync('restore.analyze', async () => {
+      try {
+        const pod = await getPostgresPod(serverIp, sshKeyPath);
+        await sshKubectl(
+          serverIp,
+          sshKeyPath,
+          ['exec', '-n', 'vibecarbon', pod, '--', 'psql', '-U', 'postgres', '-q', '-c', 'ANALYZE'],
+          { timeout: 300_000 },
+        );
+      } catch (err) {
+        p.log.warn(
+          `ANALYZE after restore failed (${err instanceof Error ? err.message : String(err)}); ` +
+            'planner statistics will rebuild on the next autovacuum.',
+        );
+      }
+    });
   } finally {
     // 5. Always clear the marker so an unrelated future pod restart does NOT
     //    re-fetch and wipe live data. Runs even if the restore failed.

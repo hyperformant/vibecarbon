@@ -1,40 +1,24 @@
 # Roadmap
 
-Last updated: 2026-09-15
+Last updated: 2026-09-15 (evening)
 
 One line per item. Status is claimed here and checked against branches, PRs
 and specs by the project-manager pass; when they disagree, the repo wins.
 
 ## Now (in review)
 
-- **Env preflight, state-bucket handoff, `-confirm`** — PR #98. Deploy stops
-  before provisioning when `.env` lacks compose-required keys; `destroy`
-  records the kept Pulumi state bucket as `retainedStateBucket` so the next
-  deploy reuses it; `-confirm <value>` on destroy/restore/failover for
-  scripted production runs, fail-fast off a TTY.
-- **Region-move runbook** — PR #97. `docs/deploy-hetzner.md` § "Moving to a
-  different region or server type".
+- **Follow-ups from the region move** — PR #100. `deploy -server-type <id>`;
+  `destroy` records the environment's identity under
+  `destroyedEnvironments.<env>` and `deploy` seeds a same-named env from it
+  (a sibling key, not a stub — every other command treats presence in
+  `environments` as "deployed"); `restore -source` is `latest` or an
+  ISO-8601 timestamp (the PITR form was rejected by the legacy filename
+  validator) and `backup -action download` refuses wal-g environments up
+  front; `ANALYZE` after restore on compose and k8s.
 
 ## Next
 
-- **`deploy -server-type <id>`** — scripted compose deploys with no
-  `serverType` in the env block take the region's *medium-tier* default
-  (`cpx32`/`cx33`, ~2x the price of `cpx22`); the only override is editing
-  `.vibecarbon.json`. Add the flag (name matches `failover -server-type`;
-  `scale -type` means "scale *to*", so it stays).
-- **`destroy` keeps a `status: "destroyed"` stub** — today it deletes
-  `environments.<env>` entirely, so a manual destroy→deploy needs the
-  identity/DNS/backup block re-typed by hand (see the runbook). Keep those
-  fields, strip runtime ones, have `deploy` treat the stub as fresh and
-  `destroy` on a stub say "already destroyed".
-- **Trim the wal-g-incompatible backup surface** — `backup -action download`
-  and `restore -source <file>` only handle legacy `backups/*.tar.gz` dumps
-  that wal-g never writes; `runComposeRestore` throws on a local file. Either
-  remove them from help for wal-g environments, or implement a real
-  round-trip (pg_dump over SSH → local `.sql.gz` → restore).
-- **`ANALYZE` after restore** — planner stats are not part of a base backup;
-  `pg_stat_user_tables.n_live_tup` reads 0 for every table until autovacuum
-  runs, which looks like data loss to anyone verifying a restore.
+- (none — the four region-move follow-ups moved to Now with PR #100)
 
 ## Later
 
@@ -56,6 +40,9 @@ and specs by the project-manager pass; when they disagree, the repo wins.
 
 ## Recently shipped
 
+- 2026-09-15 — **Env preflight, state-bucket handoff, `-confirm`** (PR #98).
+- 2026-09-15 — **Region-move runbook** (PR #97), `docs/ROADMAP.md` seeded
+  (PR #99).
 - 2026-09-15 — **e2e matrix in EU on the cheapest shared line** (PR #95):
   `capacityPreferences.hetzner` → `nbg1/hel1/fsn1`, `cx23 → cpx22 → ccx13`,
   type-pair-major resolver, CI `regions` default un-pinned from `ash,hil`.

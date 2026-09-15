@@ -97,6 +97,12 @@ const SPEC = {
       description: 'Deploy mode',
     },
     {
+      name: 'server-type',
+      value: '<id>',
+      description:
+        'Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/supabase/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default.',
+    },
+    {
       name: 'full',
       boolean: true,
       description: 'Clear resume state and redo every step from scratch',
@@ -116,6 +122,10 @@ const SPEC = {
   ],
   examples: [
     { command: 'vibecarbon deploy', description: 'prompts for env (defaults to prod)' },
+    {
+      command: 'vibecarbon deploy prod -region fsn1 -server-type cpx22 -y',
+      description: 'scripted compose deploy at an explicit placement',
+    },
     { command: 'vibecarbon deploy prod', description: 'env seeded; prompts for the rest' },
     {
       command: 'vibecarbon deploy prod -mode k8s-ha -region hel1 -y',
@@ -158,11 +168,16 @@ function buildLegacyArgs(values, positional) {
     // HA standby region — settable via -standby-region, else the interactive
     // prompt / saved config / same-continent default fill it in.
     secondaryRegion: values['standby-region'] || null,
-    // Everything below is no longer settable via CLI flag; the
-    // interactive prompt + `.vibecarbon.json` cover these. Defaults
-    // keep gatherDeploymentConfig's `args.X || envConfig.X || …`
-    // chains working unchanged.
-    serverType: null,
+    // Server type is settable again (2026-09-15): a -y compose deploy with
+    // no serverType in the env block took the region's MEDIUM-tier default
+    // (cpx32/cx33, ~2x cpx22) and the only override was editing
+    // .vibecarbon.json — see the region-move runbook in docs/deploy-hetzner.md.
+    // Name matches `failover -server-type`; `scale -type` means "scale TO".
+    serverType: values['server-type'] || null,
+    // Everything below is not settable via CLI flag; the interactive
+    // prompt + `.vibecarbon.json` cover these. Defaults keep
+    // gatherDeploymentConfig's `args.X || envConfig.X || …` chains working
+    // unchanged.
     masterServerType: null,
     workerServerType: null,
     supabaseServerType: null,
@@ -356,6 +371,7 @@ export async function run(args) {
 export {
   buildComposeTypeOptions,
   buildK8sProfileOptions,
+  buildLegacyArgs,
   COMPOSE_MIN_RAM_GB,
   checkDependency,
   checkExistingRepo,

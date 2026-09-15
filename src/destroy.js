@@ -51,6 +51,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from './lib/dns-provider.js';
+import { envIdentityOf } from './lib/env-identity.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -1326,6 +1327,18 @@ async function updateProjectConfigEffect(ctx) {
   spinner.start('Updating project configuration');
   const updatedConfig = { ...projectConfig };
   if (updatedConfig.environments) {
+    // Keep what the environment WAS (placement, domain, DNS, backup bucket,
+    // sizing) under a sibling key `deploy` reads when this name is deployed
+    // again — a destroy→deploy move no longer needs a hand-typed block. A
+    // sibling key rather than a stub in `environments`: every other command
+    // treats presence there as "deployed" (see lib/env-identity.js).
+    const identity = envIdentityOf(updatedConfig.environments[environment]);
+    if (Object.keys(identity).length > 0) {
+      updatedConfig.destroyedEnvironments = {
+        ...(updatedConfig.destroyedEnvironments ?? {}),
+        [environment]: { ...identity, destroyedAt: new Date().toISOString() },
+      };
+    }
     delete updatedConfig.environments[environment];
   }
   // `stateBucketGeneration` is deliberately NOT rotated here any more. It was

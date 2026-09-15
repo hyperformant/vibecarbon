@@ -57,7 +57,12 @@ name is recorded as project-level `retainedStateBucket` in `.vibecarbon.json`
 (the derived name embeds the app bucket name, which destroy rotates, so
 without the record the next deploy would derive a fresh bucket and orphan the
 kept one); `resolveStateBucketName` reads it after the operator pin and before
-derivation, and `-purge` clears it.
+derivation, and `-purge` clears it. destroy also records the environment's
+identity (provider, domain, DNS, backup bucket, region, server types — see
+`lib/env-identity.js`) under `destroyedEnvironments.<env>`; `deploy` seeds a
+same-named environment from it and clears it once the env is live. A sibling
+key, not a stub in `environments`: every other command treats presence there
+as "deployed".
 
 | Code | Meaning | Scripted caller should |
 | --- | --- | --- |

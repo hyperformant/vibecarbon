@@ -243,3 +243,27 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
     expect(reseedStandbyFromPrimary).not.toHaveBeenCalled();
   });
 });
+
+describe('runK8sRestore — planner statistics', () => {
+  it('runs ANALYZE in the db pod after postgres is ready and before the app scales back up', async () => {
+    // Same reasoning as the compose path (compose-restore-analyze.test.ts):
+    // a base backup carries no statistics, so n_live_tup reads 0 everywhere
+    // until autovacuum runs — indistinguishable from data loss to whoever
+    // verifies the restore.
+    const s = makeSpinner();
+    await runK8sRestore({
+      ...baseArgs,
+      s,
+      envConfig: { deployMode: 'kubernetes' },
+    });
+    const calls = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls.map(([, , argv]) =>
+      (argv as string[]).join(' '),
+    );
+    const analyzeIdx = calls.findIndex((c) => /exec .*psql.* ANALYZE/.test(c));
+    const readyIdx = calls.findIndex((c) => c.includes('pg_isready'));
+    const scaleUpIdx = calls.findIndex((c) => /scale .*--replicas=[1-9]/.test(c));
+    expect(analyzeIdx, `no ANALYZE in:\n${calls.join('\n')}`).toBeGreaterThan(-1);
+    expect(analyzeIdx).toBeGreaterThan(readyIdx);
+    if (scaleUpIdx > -1) expect(analyzeIdx).toBeLessThan(scaleUpIdx);
+  });
+});

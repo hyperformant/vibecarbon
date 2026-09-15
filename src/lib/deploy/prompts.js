@@ -16,6 +16,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from '../dns-provider.js';
+import { resolveEnvSeed } from '../env-identity.js';
 import { requireDeployEntitlement } from '../licensing/index.js';
 import {
   getObjectStorageProvider,
@@ -393,7 +394,23 @@ export async function gatherDeploymentConfig(args) {
 
   const services = projectConfig.services || {};
   const environment = normalizeEnvName(args.env || 'prod');
-  let envConfig = projectConfig.environments?.[environment] || {};
+  // A name that was destroyed seeds from the identity destroy recorded
+  // (placement, domain, DNS, backup bucket, sizing) — a rebuild or a region
+  // move starts from what the env was instead of a hand-typed block. Flags
+  // still override (args.X wins in every chain below), and the record is
+  // cleared once the deploy finalizes (orchestrator).
+  const seed = resolveEnvSeed(projectConfig, environment);
+  let envConfig = seed.envConfig;
+  if (seed.fromDestroyed) {
+    const when = seed.fromDestroyed.destroyedAt
+      ? ` (destroyed ${seed.fromDestroyed.destroyedAt.slice(0, 10)})`
+      : '';
+    p.log.info(
+      `Re-using the settings of the previous ${c.bold(environment)} environment${when}: ` +
+        `${[envConfig.domain, envConfig.region, envConfig.serverType].filter(Boolean).join(', ')}. ` +
+        'Flags such as -region / -server-type override them.',
+    );
+  }
   const resuming = envConfig.status === 'deploying';
 
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
@@ -550,9 +567,9 @@ export async function gatherDeploymentConfig(args) {
     // `args.serverType` acts as a blanket fallback for all three node roles
     // when a role-specific value isn't set. Matches the compose case's simpler
     // mental model and lets e2e pin the whole cluster to a single known-good
-    // SKU. (There is no `-type` deploy flag — see src/deploy.js's SPEC; these
-    // arrive from `.vibecarbon.json` / the interactive prompt / a programmatic
-    // caller. `scale` is the command that takes `-type`.)
+    // SKU. (`args.serverType` comes from `deploy -server-type <id>` or a
+    // programmatic caller; the per-role values from `.vibecarbon.json` / the
+    // interactive prompt. `scale` is the command that takes `-type`.)
     const blanket = args.serverType || envConfig.serverType;
     masterServerType =
       args.masterServerType || envConfig.masterServerType || blanket || regionDefaults.masterType;

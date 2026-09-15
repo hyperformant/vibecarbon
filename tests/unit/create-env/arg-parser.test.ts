@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SPEC } from '../../../src/deploy.js';
+import { buildLegacyArgs, SPEC } from '../../../src/deploy.js';
 import { parseFlags } from '../../../src/lib/cli/parse-flags.js';
 import {
   itParsesBooleanFlags,
@@ -28,6 +28,18 @@ describe('deploy SPEC + parseFlags integration', () => {
   it('parses -region <id>', () => {
     expect(parseFlags(['-region', 'fsn1'], SPEC).values.region).toBe('fsn1');
     expect(parseFlags(['-region', 'hel1'], SPEC).values.region).toBe('hel1');
+  });
+
+  it('parses -server-type <id> and buildLegacyArgs hands it to the prompt chain as serverType', () => {
+    // A -y compose deploy with no serverType in the env block takes the
+    // region's MEDIUM-tier default (cpx32/cx33, ~2x the price of cpx22) and
+    // the only override was editing .vibecarbon.json (2026-09-15 prod move).
+    // Flag name matches `failover -server-type` — `scale -type` means
+    // "scale TO type" and keeps its own spelling.
+    expect(parseFlags(['-server-type', 'cpx22'], SPEC).values['server-type']).toBe('cpx22');
+    const { values, positional } = parseFlags(['prod', '-server-type', 'cpx22'], SPEC);
+    expect(buildLegacyArgs(values, positional).serverType).toBe('cpx22');
+    expect(buildLegacyArgs(parseFlags([], SPEC).values, {}).serverType).toBeNull();
   });
 
   it('parses -mode <enum> against the four declared modes', () => {
