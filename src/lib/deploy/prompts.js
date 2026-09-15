@@ -16,7 +16,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from '../dns-provider.js';
-import { requireProvisionEntitlement } from '../licensing/index.js';
+import { requireDeployEntitlement } from '../licensing/index.js';
 import {
   getObjectStorageProvider,
   listProviders,
@@ -256,36 +256,6 @@ export async function resolveDeployMode(args, envConfig) {
 }
 
 /**
- * Whether this `deploy` invocation is PROVISIONING a new environment, as
- * opposed to redeploying one that already exists.
- *
- * This is the whole behavioural rule of per-project licensing: a
- * subscription buys the ability to stand a paid deploy mode UP. Once an
- * environment exists, redeploying it (and backing it up, restoring it,
- * failing it over, scaling it) is free forever, so a lapsed subscription can
- * never strand a running production system.
- *
- * Two shapes count as provisioning:
- *   - No `deployMode` persisted: a brand-new environment.
- *   - `status: 'deploying'`: a first deploy that never finished. The
- *     skeleton save writes `deployMode` early, BEFORE anything is actually
- *     provisioned, so a resume would otherwise read as an existing
- *     environment and walk straight past the gate.
- *
- * Called with the post-resolveProvider envConfig binding, which is the
- * PERSISTED state of the environment — the skeleton save that records this
- * run's deployMode happens later in the flow, after the gate.
- *
- * Fails closed: a missing envConfig is treated as provisioning.
- *
- * @param {{deployMode?: string, status?: string}} [envConfig]
- * @returns {boolean}
- */
-export function isProvisioningDeploy(envConfig) {
-  return !envConfig?.deployMode || envConfig.status === 'deploying';
-}
-
-/**
  * Helper: fetch DNS zones with retry on transient network errors
  */
 async function fetchZonesWithRetry(fetchFn, providerLabel) {
@@ -449,19 +419,11 @@ export async function gatherDeploymentConfig(args) {
 
   const { deployMode, ha } = await resolveDeployMode(args, envConfig);
 
-  // Gate immediately after the deploy mode is known — for `deploy` this can
-  // only happen mid-command (the architecture may be chosen interactively
-  // above), so the upsell must live here rather than pre-dispatch. Fires
-  // before any region/DNS/credential prompts so an operator without an
-  // entitlement never gets deep into the flow before hitting the wall.
-  //
-  // Only PROVISIONING consults the license. Redeploying an environment that
-  // already exists is free at every tier, so the gate is skipped entirely
-  // for it — see isProvisioningDeploy above.
+  // Gate immediately after the deploy mode is known, before any region, DNS
+  // or credential prompt. Every deploy into a paid mode checks the project's
+  // subscription (live, or the cached verdict); Compose returns at once.
   const deployTier = resolveTier({ deployMode, ha });
-  if (isProvisioningDeploy(envConfig)) {
-    await requireProvisionEntitlement({ deployTier, projectConfig });
-  }
+  await requireDeployEntitlement({ deployTier, projectConfig });
 
   const isComposeDeploy = deployMode === 'compose' || deployMode === 'compose-ha';
   const config = {

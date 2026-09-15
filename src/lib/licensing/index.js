@@ -13,8 +13,10 @@
  *     so everyone working on the project shares it.
  *
  * The legacy slot is strictly broader (global, never expires), so it
- * always wins when it holds a valid v1 key — see getLicense() below for
- * the full precedence rule.
+ * always wins when it holds a valid v1 key. It honors NOTHING else: a v2
+ * key parked there is ignored by getLicense(), because a project key is
+ * scoped to one project and the global slot cannot express that. See
+ * getLicense() below for the full precedence rule.
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -23,12 +25,10 @@ import { join } from 'node:path';
 import { spinner } from '../cli/progress.js';
 import { c } from '../colors.js';
 import { ensureProjectId, loadManifest, manifestExists } from '../project.js';
-import { VERSION } from '../version.js';
-import { evaluateEntitlement } from './entitlement.js';
-import { refreshLicense } from './refresh.js';
-import { getReleaseDate } from './release-date.js';
+import { checkLicense } from './check.js';
+import { evaluateDeployEntitlement, requiredTierFor } from './entitlement.js';
 import { getTier, TIERS } from './tiers.js';
-import { printProvisionUpsell } from './upsell.js';
+import { printDeployUpsell, printDeployWarning } from './upsell.js';
 import { validateLicenseKey } from './validator.js';
 
 // Default license storage location. Overridable per-call via `stateDir` so
@@ -132,19 +132,19 @@ function writeLegacyLicenseFile(data, stateDir) {
 }
 
 /**
- * Write the project license file: `{ key, format: "v2", tier, customerId,
- * projectId, paidThrough, activatedAt, source }`, 2-space indent, trailing
- * newline. Tracked in git on purpose (see carbon/_gitignore), so no
- * restrictive file mode.
+ * Write the project license file: `{ key, activatedAt, source }`, 2-space
+ * indent, trailing newline. Tracked in git on purpose (see
+ * carbon/_gitignore), so no restrictive file mode.
+ *
+ * Nothing but the key is load-bearing. The tier, the project id and the
+ * subscription's state are all derived from signed material at read time
+ * (the key itself, and the verdict the deploy gate fetches), so mirroring
+ * them into the file would only create a second, editable copy of facts
+ * that are already authoritative elsewhere.
  */
 function writeProjectLicenseFile(data, projectDir) {
   const ordered = {
     key: data.key,
-    format: 'v2',
-    tier: data.tier,
-    customerId: data.customerId,
-    projectId: data.projectId,
-    paidThrough: data.paidThrough,
     activatedAt: data.activatedAt,
     source: data.source,
   };
@@ -155,9 +155,9 @@ function writeProjectLicenseFile(data, projectDir) {
  * @param {string|null} [storedProjectId] - When a cryptographically VALID v2
  *   key was found on disk but belongs to a different project, that key's own
  *   project id. Purely informational: the result stays inactive and Graphite,
- *   exactly as if no key existed. It lets the provisioning gate say "the
- *   stored key is for project a, this project is b" instead of the generic
- *   "no license" — see evaluateEntitlement's 'wrong-project' reason.
+ *   exactly as if no key existed. It lets the deploy gate say "the stored
+ *   key belongs to project a" instead of the generic "no license". See
+ *   evaluateDeployEntitlement's 'wrong-project' reason.
  */
 function noLicenseResult(storedProjectId = null) {
   return {
@@ -170,7 +170,7 @@ function noLicenseResult(storedProjectId = null) {
     format: null,
     isLifetime: false,
     projectId: null,
-    paidThrough: null,
+    key: undefined,
     verified: undefined,
     slot: null,
     storedAt: null,
@@ -178,15 +178,7 @@ function noLicenseResult(storedProjectId = null) {
   };
 }
 
-function buildLicenseResult({
-  validation,
-  stored,
-  format,
-  projectId,
-  paidThrough,
-  slot,
-  storedAt,
-}) {
+function buildLicenseResult({ validation, stored, format, projectId, slot, storedAt }) {
   const tierDef = getTier(validation.tier) || {};
   return {
     tier: validation.tier,
@@ -199,7 +191,10 @@ function buildLicenseResult({
     format,
     isLifetime: format === 'v1',
     projectId: format === 'v2' ? (projectId ?? null) : null,
-    paidThrough: format === 'v2' ? (paidThrough ?? null) : null,
+    // The raw key, because the deploy-time check posts it to prove
+    // possession. It is the string that just verified, not whatever else
+    // the file happens to hold.
+    key: stored.key,
     verified: validation.verified,
     slot,
     storedAt,
@@ -215,15 +210,17 @@ function buildLicenseResult({
  * and its `projectId` matches this project's manifest. Otherwise, no
  * license (Graphite).
  *
- * A v2-shaped key found in the LEGACY slot is never treated as global — it
- * only counts for its own project, same as the project slot.
+ * A v2-shaped key found in the LEGACY slot is ignored outright. That slot
+ * is the global, lifetime one; a project key cannot be global, and honoring
+ * it there would mean two places to look for the same project's key.
+ * listStoredLicenses() still reports it so activate/deactivate can see it.
  *
- * Entitlement fields (`projectId`, `paidThrough`, `tier`) are ALWAYS derived
- * from the verified `validation`, never from the stored file's own fields.
- * The stored file is untrusted input: only `key` is cryptographically
- * checked, so `activatedAt`/`source` may be read from it for display, but
- * nothing that feeds evaluateEntitlement() may come from anywhere but a key
- * that just verified.
+ * Entitlement fields (`projectId`, `tier`) are ALWAYS derived from the
+ * verified `validation`, never from the stored file's own fields. The stored
+ * file is untrusted input: only `key` is cryptographically checked, so
+ * `activatedAt`/`source` may be read from it for display, but nothing that
+ * feeds evaluateDeployEntitlement() may come from anywhere but a key that
+ * just verified.
  *
  * @param {{ projectDir?: string, stateDir?: string, publicKeyPem?: string }} [options]
  * @returns {object} License information with tier and features
@@ -233,7 +230,7 @@ export function getLicense({ projectDir = process.cwd(), stateDir, publicKeyPem 
 
   // A valid v2 key found on disk that belongs to SOME OTHER project. It
   // never grants anything (the fall-through below is unchanged), but the
-  // provisioning gate can name it instead of claiming there is no key at
+  // deploy gate can name it instead of claiming there is no key at
   // all — the common shape is a `.vibecarbon.license` copied or forked in
   // from another project, where "no license" would be actively misleading.
   // Recorded only for a key that verifies, so a hand-written file can never
@@ -244,30 +241,17 @@ export function getLicense({ projectDir = process.cwd(), stateDir, publicKeyPem 
   const legacyStored = readJsonFileOrNull(legacyPath);
   if (legacyStored?.key) {
     const validation = validateLicenseKey(legacyStored.key, { publicKeyPem });
-    if (validation.valid) {
-      const format = validation.format ?? 'v1';
-      if (format === 'v1') {
-        return buildLicenseResult({
-          validation,
-          stored: legacyStored,
-          format,
-          slot: 'legacy',
-          storedAt: legacyPath,
-        });
-      }
-      const keyProjectId = normalizeProjectId(validation.projectId);
-      if (keyProjectId && keyProjectId === currentProjectId) {
-        return buildLicenseResult({
-          validation,
-          stored: legacyStored,
-          format,
-          projectId: keyProjectId,
-          paidThrough: validation.paidThrough,
-          slot: 'legacy',
-          storedAt: legacyPath,
-        });
-      }
-      mismatchedProjectId ??= keyProjectId;
+    // v1 only. A v2 key here is not a mismatch to report either: it is
+    // simply in the wrong file, and naming another project would be
+    // misleading when the key may well be this project's own.
+    if (validation.valid && (validation.format ?? 'v1') === 'v1') {
+      return buildLicenseResult({
+        validation,
+        stored: legacyStored,
+        format: 'v1',
+        slot: 'legacy',
+        storedAt: legacyPath,
+      });
     }
   }
 
@@ -283,7 +267,6 @@ export function getLicense({ projectDir = process.cwd(), stateDir, publicKeyPem 
           stored: projectStored,
           format: 'v2',
           projectId: keyProjectId,
-          paidThrough: validation.paidThrough,
           slot: 'project',
           storedAt: projectPath,
         });
@@ -320,8 +303,8 @@ export function listStoredLicenses({ projectDir = process.cwd(), stateDir } = {}
       valid: validation.valid,
       ...validation,
       // The raw stored string, whatever it is — validation doesn't carry it,
-      // and refresh.js needs the actual key text to prove possession, not
-      // just whether it currently verifies.
+      // and a caller needs the actual key text (to post it, or to clear the
+      // file) rather than just whether it currently verifies.
       key: legacyStored.key,
     });
   }
@@ -413,10 +396,6 @@ export function activateLicense(
 
     const licenseData = {
       key: key.trim(),
-      tier: validation.tier,
-      customerId: validation.customerId,
-      projectId: keyProjectId,
-      paidThrough: validation.paidThrough ?? null,
       activatedAt: new Date().toISOString(),
       source,
     };
@@ -427,18 +406,19 @@ export function activateLicense(
       return { success: false, error: `Failed to save license: ${error.message}` };
     }
 
-    const tier = getTier(validation.tier);
-
+    // A v2 key names no tier: which plan this project is on lives on
+    // vibecarbon.com and arrives as a signed verdict at deploy time. So
+    // there is nothing to look up in tiers.js here, and nothing honest to
+    // print beyond "this is a project license".
     return {
       success: true,
-      tier: validation.tier,
-      tierName: tier.displayName,
-      features: tier.features,
+      tier: null,
+      tierName: 'Project license',
       isLifetime: false,
       format: 'v2',
       projectId: keyProjectId,
-      paidThrough: licenseData.paidThrough,
       slot: 'project',
+      path: projectLicensePath(projectDir),
     };
   }
 
@@ -522,107 +502,44 @@ export function deactivateLicense({ projectDir = process.cwd(), stateDir, all = 
   }
 }
 
-/**
- * The verdict seam.
- *
- * Everything the gate decides funnels through this one call. When the pure
- * evaluation refuses because a v2 key is lapsed or too low a tier, this asks
- * vibecarbon.com for a renewed key (refreshLicense — proves possession of
- * the stored key, verifies the answer offline, and only then writes it),
- * then re-evaluates against whatever is on disk afterward. A v1 (legacy,
- * lifetime) license is never refreshed: it can be neither lapsed nor
- * tier-too-low (isLifetime always covers every release, and v1 only ever
- * issued Fullerene, the top tier), so this check is belt-and-suspenders,
- * not load-bearing.
- *
- * Failure of the refresh itself never blocks anything further: it just
- * leaves the original verdict in place, with `refreshOffline: true` added
- * when the reason was specifically an unreachable server, so the upsell can
- * say so.
- *
- * @param {object} args
- * @returns {Promise<object>} an evaluateEntitlement() verdict, possibly with
- *   `refreshOffline: true`
- */
-async function resolveVerdict({
-  license,
-  deployTier,
-  projectId,
-  releaseDate,
-  projectDir,
-  stateDir,
-  fetchImpl,
-  env,
-  publicKeyPem,
-}) {
-  const verdict = evaluateEntitlement({ license, deployTier, projectId, releaseDate });
-  if (verdict.ok) return verdict;
-
-  const refreshable =
-    (verdict.reason === 'lapsed' || verdict.reason === 'tier-too-low') && license?.format === 'v2';
-  if (!refreshable) return verdict;
-
-  const s = spinner();
-  s.start('Checking vibecarbon.com for a renewed key');
-  const refreshResult = await refreshLicense({
-    projectDir,
-    stateDir,
-    env,
-    fetchImpl,
-    publicKeyPem,
-  });
-  s.stop(
-    refreshResult.ok ? 'Renewed key applied.' : 'No renewed key available.',
-    refreshResult.ok ? 0 : 1,
-  );
-
-  const refreshedLicense = getLicense({ projectDir, stateDir, publicKeyPem });
-  const refreshedVerdict = evaluateEntitlement({
-    license: refreshedLicense,
-    deployTier,
-    projectId,
-    releaseDate,
-  });
-
-  if (refreshedVerdict.ok) return refreshedVerdict;
-  if (
-    refreshedVerdict.reason === 'lapsed' &&
-    !refreshResult.ok &&
-    refreshResult.reason === 'offline'
-  ) {
-    return { ...refreshedVerdict, refreshOffline: true };
-  }
-  return refreshedVerdict;
+function todayUtc() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 /**
- * Guard: require an entitlement to PROVISION `deployTier` for this project,
- * or print the upsell and exit non-zero.
+ * Guard for every deploy into a paid mode: verify the project's subscription
+ * with vibecarbon.com (or the cached verdict), warn inside grace, refuse
+ * after it. Compose deploys and legacy lifetime keys return immediately.
  *
- * Only provisioning consults the license. Redeploying, backing up,
- * restoring, failing over and scaling an environment that already exists
- * never call this — see src/lib/licensing/gate.js for why, and
- * isProvisioningDeploy() in src/lib/deploy/prompts.js for how `deploy`
- * decides which of the two it is doing.
+ * This runs on EVERY deploy whose resolved tier costs money, first one and
+ * redeploy alike. A subscription is a subscription: the previous rule, which
+ * only checked when standing a new environment up, meant a cancelled plan
+ * kept shipping releases to production indefinitely.
+ *
+ * What stays free is unchanged and deliberate: single-server Compose, and
+ * backup / restore / failover / scale in every mode. Asking someone for
+ * money in the middle of a disaster recovery is the worst possible moment.
  *
  * Exits 1 rather than 0 on refusal: a gated command run without an
  * entitlement is a failed invocation, not a silent no-op. Scripted and CI
  * callers must see a real failure.
  *
  * @param {object} options
- * @param {string} options.deployTier - The resolved deploy tier being provisioned
+ * @param {string} options.deployTier - The resolved deploy tier
  *   (resolveTier(...) from src/lib/deploy/tier-registry.js)
  * @param {object} [options.projectConfig] - The already-loaded project config;
  *   its project id is backfilled when missing (see ensureProjectId)
  * @param {string} [options.projectDir]
  * @param {string} [options.stateDir]
- * @param {Function} [options.fetchImpl] - Used by the refresh seam (see resolveVerdict)
- * @param {object} [options.env] - Used by the refresh seam (see resolveVerdict)
- * @param {string} [options.publicKeyPem] - Test-only injection point, threaded through
- *   to getLicense/refreshLicense; production callers never pass this.
+ * @param {Function} [options.fetchImpl] - Injection point for the check client
+ * @param {object} [options.env] - Injection point for the check client
+ * @param {string} [options.publicKeyPem] - Test-only injection point, threaded
+ *   through to getLicense/checkLicense; production callers never pass this.
+ * @param {string} [options.now] - 'YYYY-MM-DD', UTC. Only ever compared
+ *   against a server-signed periodEnd.
  * @returns {Promise<void>}
  */
-export async function requireProvisionEntitlement({
+export async function requireDeployEntitlement({
   deployTier,
   projectConfig,
   projectDir = process.cwd(),
@@ -630,34 +547,43 @@ export async function requireProvisionEntitlement({
   fetchImpl,
   env,
   publicKeyPem,
+  now = todayUtc(),
 } = {}) {
+  const requiredTier = requiredTierFor(deployTier);
+  if (requiredTier === 'graphite') return;
+
   const projectId = ensureProjectId(projectConfig, projectDir);
   const license = getLicense({ projectDir, stateDir, publicKeyPem });
-  const releaseDate = getReleaseDate();
 
-  const verdict = await resolveVerdict({
-    license,
-    deployTier,
-    projectId,
-    releaseDate,
-    projectDir,
-    stateDir,
-    fetchImpl,
-    env,
-    publicKeyPem,
-  });
-
-  if (verdict.ok) return;
-
-  printProvisionUpsell(
-    {
-      verdict,
-      deployTier,
-      projectName: projectConfig?.projectName,
+  // Only a v2 project key has a subscription to check. No key at all is
+  // decided offline (there is nothing to ask about), and a v1 lifetime key
+  // is entitled to everything forever, so neither path touches the network.
+  let check = { source: 'none', verdict: null };
+  if (license.active && license.format === 'v2') {
+    const s = spinner();
+    s.start("Checking this project's subscription");
+    check = await checkLicense({
+      key: license.key,
       projectId,
-      version: VERSION,
-      releaseDate,
-    },
+      stateDir,
+      env,
+      fetchImpl,
+      publicKeyPem,
+    });
+    s.stop(
+      check.source === 'live' ? 'Subscription checked' : 'Subscription check skipped',
+      check.source === 'live' ? 0 : 1,
+    );
+  }
+
+  const verdict = evaluateDeployEntitlement({ license, deployTier, projectId, check, now });
+  if (verdict.ok) {
+    if (verdict.warning) printDeployWarning({ warning: verdict.warning, projectId }, { c });
+    return;
+  }
+
+  printDeployUpsell(
+    { verdict, deployTier, projectName: projectConfig?.projectName, projectId },
     { c },
   );
   process.exit(1);
@@ -669,23 +595,21 @@ export async function requireProvisionEntitlement({
  *
  * No command is classified 'paid' today, but the cli.js pre-dispatch
  * chokepoint stays wired up so a future command-wide paid feature has
- * somewhere to plug in. It renders through the same upsell as the
- * provisioning gate, so upsell copy exists in exactly one place.
+ * somewhere to plug in. It renders through the same upsell as the deploy
+ * gate, so upsell copy exists in exactly one place.
  *
- * @param {string} commandName - The command that requires a license
+ * @param {string} _commandName - The command that requires a license. Kept
+ *   in the signature (cli.js passes it) but not printed: the deploy upsell
+ *   frames the refusal around the environment, and there is no second
+ *   wording to maintain until a command is actually classified 'paid'.
  */
-export function requireLicense(commandName) {
+export function requireLicense(_commandName) {
   const license = getLicense();
 
   if (license.active) return;
 
-  printProvisionUpsell(
-    {
-      commandName,
-      projectId: license.projectId,
-      version: VERSION,
-      releaseDate: getReleaseDate(),
-    },
+  printDeployUpsell(
+    { verdict: { reason: 'no-license', requiredTier: 'fullerene' }, projectId: license.projectId },
     { c },
   );
   process.exit(1);

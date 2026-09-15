@@ -1,34 +1,30 @@
 /**
- * Pure entitlement evaluator: does a license entitle a project to provision
- * a given deploy tier?
+ * Pure entitlement evaluator: does a license entitle a project to deploy
+ * into a given deploy tier?
  *
  * No I/O, no environment reads, no imports beyond tiers.js, no clock reads
  * (every date this module touches is a 'YYYY-MM-DD' string passed in by the
- * caller). Called from the provisioning gate in index.js (resolveVerdict)
- * and from upsell.js.
+ * caller). Called from the deploy gate in index.js
+ * (requireDeployEntitlement) and from upsell.js.
  *
  * The `license` shape this module reads is a contract with the per-project
  * license storage index.js's getLicense() returns:
  *   - active: boolean
- *   - tier: string (one of the TIERS keys in tiers.js)
+ *   - tier: string | null (one of the TIERS keys in tiers.js for a v1 key;
+ *     null for a v2 key, which carries no tier: the tier lives on the
+ *     signed verdict)
  *   - format: 'v1' | 'v2'
  *   - isLifetime: boolean (true for a legacy v1 key, which covers every
  *     deploy tier, every project, forever)
  *   - projectId: string | null
- *   - paidThrough: 'YYYY-MM-DD' | null
  *   - storedProjectId: string | null (only ever set on an INACTIVE result:
  *     a valid v2 key sits on disk but belongs to another project)
  * A missing license, or one with `active: false`, is treated as no license.
  *
- * The deploy-time gate's contract lives in `evaluateDeployEntitlement`
- * below: given the stored license, the deploy tier, and the result of a
- * live/cached license check (a signed verdict from
- * validator.js's verifyVerdictToken, or null), it decides proceed / warn /
- * block with a 30-day grace after `periodEnd`. `coversRelease` and
- * `evaluateEntitlement` below are the release-date-based predecessor of
- * that contract. They stay exported and unchanged for now because
- * index.js's resolveVerdict still calls evaluateEntitlement; retired by
- * the deploy-time gate, removed in the same change that rewires index.js.
+ * The whole contract lives in `evaluateDeployEntitlement` below: given the
+ * stored license, the deploy tier, and the result of a live/cached license
+ * check (a signed verdict from validator.js's verifyVerdictToken, or null),
+ * it decides proceed / warn / block with a 30-day grace after `periodEnd`.
  */
 import { compareTiers } from './tiers.js';
 
@@ -61,66 +57,6 @@ export function tierSatisfies(licenseTier, requiredTier) {
   const known =
     licenseTier === 'graphite' || licenseTier === 'graphene' || licenseTier === 'fullerene';
   return known && compareTiers(licenseTier, requiredTier) >= 0;
-}
-
-// Retired by the deploy-time gate; removed in the same change that rewires index.js.
-/**
- * Whether a license's paid-through date covers a given release date. A
- * lifetime license covers every release, forever. Otherwise this is a plain
- * string comparison of two 'YYYY-MM-DD' dates — inclusive of the boundary
- * day.
- * @param {{ isLifetime: boolean, paidThrough: string | null }} license
- * @param {string} releaseDate
- * @returns {boolean}
- */
-export function coversRelease(license, releaseDate) {
-  if (license.isLifetime) return true;
-  if (!license.paidThrough) return false;
-  return releaseDate <= license.paidThrough;
-}
-
-// Retired by the deploy-time gate; removed in the same change that rewires index.js.
-/**
- * @param {{
- *   license: { active: boolean, tier: string, format: 'v1' | 'v2', isLifetime: boolean, projectId: string | null, paidThrough: string | null } | null | undefined,
- *   deployTier: string,
- *   projectId: string,
- *   releaseDate: string,
- * }} args
- * @returns {{ ok: true, requiredTier: string } | { ok: false, requiredTier: string, reason: 'no-license' | 'wrong-project' | 'tier-too-low' | 'lapsed', license: object | null }}
- */
-export function evaluateEntitlement({ license, deployTier, projectId, releaseDate }) {
-  const requiredTier = requiredTierFor(deployTier);
-
-  if (requiredTier === 'graphite') {
-    return { ok: true, requiredTier };
-  }
-
-  if (!license?.active) {
-    // A valid key IS on disk, just for another project. Saying "no license"
-    // here would send someone to buy a second subscription for a key they
-    // already hold, so name the mismatch instead.
-    const reason = license?.storedProjectId ? 'wrong-project' : 'no-license';
-    return { ok: false, requiredTier, reason, license: license ?? null };
-  }
-
-  if (license.isLifetime) {
-    return { ok: true, requiredTier };
-  }
-
-  if (license.projectId !== projectId) {
-    return { ok: false, requiredTier, reason: 'wrong-project', license };
-  }
-
-  if (!tierSatisfies(license.tier, requiredTier)) {
-    return { ok: false, requiredTier, reason: 'tier-too-low', license };
-  }
-
-  if (!coversRelease(license, releaseDate)) {
-    return { ok: false, requiredTier, reason: 'lapsed', license };
-  }
-
-  return { ok: true, requiredTier };
 }
 
 export const LICENSE_GRACE_DAYS = 30;

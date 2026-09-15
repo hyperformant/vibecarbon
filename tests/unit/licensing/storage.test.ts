@@ -3,23 +3,25 @@
  * the new `<projectDir>/.vibecarbon.license` project slot, and the routing
  * between them.
  *
- * B4 shipped the real v2 parser, so the "valid" project-slot cases below
- * write a genuinely-signed v2 key (`vc2-...`) into the file's `key` field,
- * validated via an injected `publicKeyPem` against an ephemeral keypair
- * (see signature-verification.test.ts). getLicense()'s routing off the
- * project slot is still driven by the STORED FILE's own `projectId`/
- * `paidThrough` fields, not by anything validateLicenseKey derives from the
- * key string — validateLicenseKey is only asked whether the key is
- * cryptographically valid at all. The "ignored / corrupt" cases don't need
- * a valid key at all, so those hand-write `format: "v2"` files with garbage
- * or mismatched content directly.
+ * The "valid" project-slot cases write a genuinely-signed v2 key
+ * (`vc2-...`) into the file's `key` field, validated via an injected
+ * `publicKeyPem` against an ephemeral keypair (see
+ * signature-verification.test.ts). Routing is driven ONLY by what
+ * validateLicenseKey derives from the key string; the stored file's own
+ * fields are display data and are never trusted. The "ignored / corrupt"
+ * cases don't need a valid key at all, so those hand-write files with
+ * garbage or mismatched content directly.
+ *
+ * A v2 key carries no tier and no date: the subscription's status is a
+ * signed verdict fetched at deploy time (see deploy-gate-seam.test.ts), so
+ * nothing here asserts a paid-through date.
  */
 import { sign as edSign, generateKeyPairSync } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { evaluateEntitlement } from '../../../src/lib/licensing/entitlement.js';
+import { evaluateDeployEntitlement } from '../../../src/lib/licensing/entitlement.js';
 import {
   activateLicense,
   deactivateLicense,
@@ -27,7 +29,7 @@ import {
   hasStoredLicense,
   listStoredLicenses,
 } from '../../../src/lib/licensing/index.js';
-import { buildProvisionUpsell } from '../../../src/lib/licensing/upsell.js';
+import { buildDeployUpsell } from '../../../src/lib/licensing/upsell.js';
 import { signedMessage } from '../../../src/lib/licensing/validator.js';
 
 function makeKeypair() {
@@ -84,7 +86,7 @@ describe('per-project license storage', () => {
     return signKey(privateKey, customerId);
   }
 
-  /** A genuine v2 key for PROJECT_ID, fullerene, paid through 2026-12-31. */
+  /** A genuine v2 key for PROJECT_ID. */
   function validV2Key() {
     return signV2Key(privateKey, { customerId, projectId: PROJECT_ID });
   }
@@ -122,6 +124,32 @@ describe('per-project license storage', () => {
       expect(license.projectId).toBeNull();
       expect(license.slot).toBe('legacy');
       expect(license.storedAt).toBe(join(stateDir, 'license'));
+      expect(license.key).toBe(validKey());
+    });
+
+    it('a v2 key parked in the legacy slot grants nothing, but stays removable', () => {
+      // The legacy slot is the global, lifetime slot and only v1 keys live
+      // there. A v2 key that lands in it (hand-copied, or written by an
+      // older CLI) must not be honored for this project or any other:
+      // project keys belong in .vibecarbon.license. listStoredLicenses still
+      // has to report it, or activate/deactivate UX would claim there is
+      // nothing on disk while the file sits there.
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(
+        join(stateDir, 'license'),
+        JSON.stringify({ key: validV2Key(), activatedAt: '2026-01-01T00:00:00.000Z' }),
+      );
+
+      const license = getLicense({ projectDir, stateDir, publicKeyPem });
+      expect(license.active).toBe(false);
+      expect(license.tier).toBe('graphite');
+      expect(license.slot).toBeNull();
+
+      const legacyEntry = listStoredLicenses({ projectDir, stateDir }).find(
+        (e: { slot: string }) => e.slot === 'legacy',
+      );
+      expect(legacyEntry).toBeDefined();
+      expect(legacyEntry?.key).toBe(validV2Key());
     });
   });
 
@@ -164,9 +192,11 @@ describe('per-project license storage', () => {
       expect(license.format).toBe('v2');
       expect(license.isLifetime).toBe(false);
       expect(license.projectId).toBe(PROJECT_ID);
-      expect(license.paidThrough).toBeNull();
       expect(license.slot).toBe('project');
       expect(license.storedAt).toBe(join(projectDir, '.vibecarbon.license'));
+      // The deploy-time check posts the key itself, so an active result has
+      // to carry the raw string, not just the fields derived from it.
+      expect(license.key).toBe(validV2Key());
     });
 
     it('a project key for a different projectId is ignored (falls back to no-license)', () => {
@@ -254,12 +284,12 @@ describe('per-project license storage', () => {
       expect(license.storedProjectId).toBeNull();
     });
 
-    it('drives the real gate to wrong-project, naming both ids in the upsell', () => {
-      // The end-to-end path the provisioning gate walks: real getLicense ->
-      // real evaluateEntitlement -> real upsell. Before this, a checked-in
-      // .vibecarbon.license from another project produced the generic
-      // "no license" upsell, which would send the operator to buy a second
-      // subscription for a key they already hold.
+    it('drives the real gate to wrong-project, naming the other project in the upsell', () => {
+      // The end-to-end path the deploy gate walks: real getLicense -> real
+      // evaluateDeployEntitlement -> real upsell. A checked-in
+      // .vibecarbon.license from another project must not produce the
+      // generic "no license" upsell, which would send the operator to buy a
+      // second subscription for a key they already hold.
       const otherProjectId = '99999999-9999-9999-9999-999999999999';
       writeProjectLicenseFile({
         key: signV2Key(privateKey, {
@@ -276,27 +306,25 @@ describe('per-project license storage', () => {
       });
 
       const license = getLicense({ projectDir, stateDir, publicKeyPem });
-      const verdict = evaluateEntitlement({
+      const verdict = evaluateDeployEntitlement({
         license,
         deployTier: 'k8s',
         projectId: PROJECT_ID,
-        releaseDate: '2026-09-13',
+        check: { source: 'none', verdict: null },
+        now: '2026-09-15',
       });
       expect(verdict.ok).toBe(false);
       expect(verdict.reason).toBe('wrong-project');
       expect(verdict.requiredTier).toBe('graphene');
 
-      const upsell = buildProvisionUpsell({
+      const upsell = buildDeployUpsell({
         verdict,
         deployTier: 'k8s',
         projectName: 'lictest',
         projectId: PROJECT_ID,
-        version: '9.9.9',
-        releaseDate: '2026-09-13',
       }).join('\n');
       expect(upsell).toContain(
-        `The stored key is for project ${otherProjectId}; this project is ${PROJECT_ID}. ` +
-          'Each project has its own subscription.',
+        `The stored key belongs to project ${otherProjectId}. Each project has its own subscription.`,
       );
     });
 
@@ -339,11 +367,12 @@ describe('per-project license storage', () => {
       const license = getLicense({ projectDir, stateDir, publicKeyPem });
       expect(license.active).toBe(false);
 
-      const verdict = evaluateEntitlement({
+      const verdict = evaluateDeployEntitlement({
         license,
         deployTier: 'k8s-ha',
         projectId: PROJECT_ID,
-        releaseDate: '2026-09-13',
+        check: { source: 'none', verdict: null },
+        now: '2026-09-15',
       });
       expect(verdict.ok).toBe(false);
       expect(verdict.reason).toBe('wrong-project');

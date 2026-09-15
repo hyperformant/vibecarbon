@@ -12,13 +12,10 @@ const CLI = join(REPO_ROOT, 'src', 'cli.js');
 
 // Licensing gates PROVISIONING, and nothing else.
 //
-// `deploy` consults the license only when it is standing a NEW environment
-// up in a paid deploy mode (requireProvisionEntitlement() — see
-// src/lib/licensing/index.js, and isProvisioningDeploy() in
-// src/lib/deploy/prompts.js). Redeploying an environment that already
-// exists, and every one of backup / restore / failover / scale, is free at
-// every deploy mode: a subscription buys the ability to stand a paid mode
-// up, never the right to keep one running.
+// `deploy` consults the license whenever its resolved mode costs money
+// (requireDeployEntitlement(); see src/lib/licensing/index.js). Every one
+// of backup / restore / failover / scale is free at every deploy mode: a
+// subscription buys deploys, never the right to run disaster recovery.
 //
 // Provisioning Kubernetes needs Graphene ($19/project/month); either HA mode
 // needs Fullerene ($39/project/month). A refusal exits NON-ZERO — a command
@@ -78,7 +75,7 @@ function writeLegacyLicense(home: string): void {
  * private key. Case (f) below is skipped where it is absent (CI holds
  * VIBECARBON_TEST_LICENSE_KEY, not the signing key); the same path is covered
  * unconditionally at the unit level against the real getLicense +
- * evaluateEntitlement + upsell in tests/unit/licensing/storage.test.ts.
+ * evaluateDeployEntitlement + upsell in tests/unit/licensing/storage.test.ts.
  */
 function signingKeyOrNull(): string | null {
   if (!process.env.VIBECARBON_LICENSE_PRIVATE_KEY) {

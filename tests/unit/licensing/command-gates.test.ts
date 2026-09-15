@@ -13,18 +13,17 @@ import {
 // explicit gating decision fails this suite.
 //
 // Classifications:
-//   'paid'     — requires an active Fullerene license regardless of
-//                deploy mode (gated in cli.js pre-dispatch, after the
-//                project guard). Currently unused — see 'mode' below.
-//   'free'     — never gated
-//   'internal' — the command gates a sub-flow itself (e.g. configure only
-//                gates its `cicd` flow, which is reachable interactively)
-//   'mode'     — the command gates itself in-flow once its deploy-mode tier
-//                is known (requireProvisionEntitlement() — see
-//                src/lib/licensing/index.js). Only `deploy` does: the gate
-//                fires on PROVISIONING a new environment, and backup /
-//                restore / failover / scale only ever act on one that
-//                already exists.
+//   'paid':     requires an active Fullerene license regardless of
+//               deploy mode (gated in cli.js pre-dispatch, after the
+//               project guard). Currently unused, see 'mode' below.
+//   'free':     never gated
+//   'internal': the command gates a sub-flow itself (e.g. configure only
+//               gates its `cicd` flow, which is reachable interactively)
+//   'mode':     the command gates itself in-flow once its deploy-mode tier
+//               is known (requireDeployEntitlement(); see
+//               src/lib/licensing/index.js). Only `deploy` does: the gate
+//               fires on every deploy into a paid mode, and backup /
+//               restore / failover / scale never check at all.
 
 describe('COMMAND_GATES completeness', () => {
   it('classifies every KNOWN_COMMAND exactly (no missing, no extras)', () => {
@@ -46,7 +45,7 @@ describe('COMMAND_GATES completeness', () => {
     expect(paid).toEqual([]);
   });
 
-  it('gates exactly one command in-flow: deploy, which can provision', () => {
+  it('gates exactly one command in-flow: deploy, the only mode-aware command', () => {
     const mode = Object.entries(COMMAND_GATES)
       .filter(([, gate]) => gate === 'mode')
       .map(([cmd]) => cmd)
@@ -55,9 +54,9 @@ describe('COMMAND_GATES completeness', () => {
   });
 
   it('operating an existing environment is free, whatever its deploy mode', () => {
-    // The product rule the per-project subscription move pinned: you pay to
-    // PROVISION a paid environment, never to keep running one. A regression
-    // here would re-paywall disaster recovery.
+    // The product rule the per-project subscription move pinned: a
+    // subscription buys deploys into a paid mode, never the right to run
+    // disaster recovery on what is already standing.
     for (const cmd of ['backup', 'restore', 'failover', 'scale']) {
       expect(COMMAND_GATES[cmd], `${cmd} must stay free`).toBe('free');
     }

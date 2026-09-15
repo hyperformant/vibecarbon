@@ -1,7 +1,7 @@
 /**
- * Central license gate — the single pre-dispatch chokepoint for
- * command-wide paid commands, plus the deploy-mode tier taxonomy consulted
- * by the in-flow gates.
+ * Central license gate: the single pre-dispatch chokepoint for command-wide
+ * paid commands, plus the deploy-mode tier taxonomy consulted by the in-flow
+ * gate.
  *
  * cli.js consults COMMAND_GATES before routing to a command module, so a
  * command-wide paid command can never ship unguarded: every command
@@ -9,40 +9,39 @@
  * (enforced by tests/unit/licensing/command-gates.test.ts).
  *
  * Classifications:
- *   'paid'     — requires an active subscription regardless of deploy mode,
- *                gated in cli.js pre-dispatch (after the project guard).
- *                Currently unused: licensing moved from command-based to
- *                deploy-mode-based (single-server Compose is free;
- *                provisioning Kubernetes needs Graphene, and either HA mode
- *                needs Fullerene — see 'mode' below), but the
- *                classification and the cli.js chokepoint stay in place so a
- *                future command-wide paid feature has somewhere to plug in.
- *   'free'     — never gated. destroy is deliberately free: teardown is
- *                never held hostage to a license. upgrade is a local
- *                template refresh — mode-agnostic, free for everyone.
- *   'internal' — the command gates a sub-flow itself. No command uses this
- *                today: `configure cicd` used to, until it became clear the
- *                gate was redundant. Its Flux stage only runs on k8s/k8s-ha
- *                environments, which already required Fullerene at deploy
- *                time, so the scenario gate had fired long before. Worse, the
- *                check ran before the deploy mode was known, so a Compose
- *                user asking for CI/CD saw a paywall for a feature that is
- *                free in every mode. Kept as a classification so a genuine
- *                sub-flow gate has a name if one ever appears.
- *   'mode'     — the command gates PROVISIONING of a new environment
- *                in-flow, once its deploy-mode tier is known. Deploy mode is
- *                per-environment and, for `deploy`, not knowable
- *                pre-dispatch (the architecture can be chosen interactively
- *                mid-command), so the command calls
- *                requireProvisionEntitlement() in-flow right after resolving
- *                the tier. See src/lib/licensing/index.js.
+ *   'paid':     requires an active subscription regardless of deploy mode,
+ *               gated in cli.js pre-dispatch (after the project guard).
+ *               Currently unused: licensing moved from command-based to
+ *               deploy-mode-based (single-server Compose is free; Kubernetes
+ *               needs Graphene, and either HA mode needs Fullerene, see
+ *               'mode' below). The classification and the cli.js chokepoint
+ *               stay in place so a future command-wide paid feature has
+ *               somewhere to plug in.
+ *   'free':     never gated. destroy is deliberately free: teardown is never
+ *               held hostage to a license. upgrade is a local template
+ *               refresh, mode-agnostic, free for everyone.
+ *   'internal': the command gates a sub-flow itself. No command uses this
+ *               today: `configure cicd` used to, until it became clear the
+ *               gate was redundant. Its Flux stage only runs on k8s/k8s-ha
+ *               environments, which already required Fullerene at deploy
+ *               time, so the scenario gate had fired long before. Worse, the
+ *               check ran before the deploy mode was known, so a Compose
+ *               user asking for CI/CD saw a paywall for a feature that is
+ *               free in every mode. Kept as a classification so a genuine
+ *               sub-flow gate has a name if one ever appears.
+ *   'mode':     the command gates itself in-flow, once its deploy-mode tier
+ *               is known. Deploy mode is per-environment and, for `deploy`,
+ *               not knowable pre-dispatch (the architecture can be chosen
+ *               interactively mid-command), so the command calls
+ *               requireDeployEntitlement() in-flow right after resolving the
+ *               tier. See src/lib/licensing/index.js.
  *
- * `deploy` is the only 'mode' command. backup, restore, failover and scale
- * act exclusively on an environment that already exists, and operating an
- * environment you already provisioned is free at every tier: a subscription
- * buys the ability to stand a paid deploy mode UP, never the right to keep
- * one running. Paywalling disaster recovery would be the worst possible
- * moment to ask someone for money.
+ * `deploy` is the only 'mode' command, and it checks on EVERY deploy into a
+ * paid mode, first one and redeploy alike. backup, restore, failover and
+ * scale act exclusively on an environment that already exists and never
+ * check: a subscription buys deploys, never the right to run disaster
+ * recovery. Paywalling a restore would be the worst possible moment to ask
+ * someone for money.
  */
 
 import { TIERS as DEPLOY_TIERS } from '../deploy/tier-registry.js';

@@ -54,13 +54,32 @@ const UNSIGNED_KEY = `vc-f-a1b2c3d4-${'0'.repeat(128)}`;
 const ENV_READ_RE = /\b(?:process\.env|env)\.([A-Z0-9_]+)/g;
 
 /**
- * The one env read this directory is allowed: refresh.js's
- * `env.VIBECARBON_API_BASE`, which only redirects which host the refresh
- * request goes to. It changes no entitlement input — never the key, the
- * tier, the projectId, or the paidThrough date read back from the
- * response — so it is not an escape hatch.
+ * The one env read this directory is allowed: check.js's
+ * `env.VIBECARBON_API_BASE`, which only redirects which host the license
+ * check is posted to. It changes no entitlement input: every field the
+ * decision table reads comes out of verifyVerdictToken(), so pointing the
+ * request somewhere else yields an answer that does not verify, never a
+ * better verdict.
  */
 const ALLOWED_ENV_READS = new Set(['VIBECARBON_API_BASE']);
+
+/** Any read of the wall clock: `Date.now()` or a bare `new Date()`. */
+const CLOCK_READ_RE = /\bDate\.now\s*\(|\bnew Date\s*\(\s*\)/g;
+
+/**
+ * The clock reads this directory may hold, and why each is safe:
+ *   - check.js (1): stamps `checkedAt` into the verdict cache. Display only,
+ *     nothing reads it back, and a cached verdict is trusted solely because
+ *     its token verifies.
+ *   - index.js (3): todayUtc() supplies the DEFAULT `now` the deploy gate
+ *     compares against a SERVER-SIGNED periodEnd, plus the two `activatedAt`
+ *     stamps activateLicense writes into the stored files. Moving the
+ *     machine clock can only end a grace period sooner or later; it can
+ *     never manufacture a subscription, because `now` is never consulted
+ *     without a verified verdict, and `activatedAt` feeds no decision.
+ * entitlement.js, which owns the decision table, must hold none.
+ */
+const ALLOWED_CLOCK_READS: Record<string, number> = { 'check.js': 1, 'index.js': 3 };
 
 describe('no local bypass of signature verification', () => {
   afterEach(() => {
@@ -104,28 +123,33 @@ describe('no local bypass of signature verification', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('no module under src/lib/licensing/ reads a RELEASE/DATE-shaped env var', () => {
-    // release-date.js compares the CLI's own release date against a
-    // license's paid-through date — an env var here would be exactly the
-    // kind of one-variable bypass this file already guards against for
-    // license keys (e.g. a fake stamp granting extra runway past expiry).
-    // Its inputs are injectable function options, never environment.
+  it('no module under src/lib/licensing/ reads the clock outside the allowlist', () => {
+    // The wall clock is the one input an operator fully controls. Every
+    // entitlement decision is anchored to a server-signed periodEnd, so the
+    // clock may only ever be the `now` compared against it. A stray
+    // Date.now() inside the decision table would be the date-shaped
+    // equivalent of the env-var bypass this file already forbids.
     const offenders: string[] = [];
 
     for (const file of readdirSync(LICENSING_DIR).filter((f) => f.endsWith('.js'))) {
       const source = codeOnly(readFileSync(join(LICENSING_DIR, file), 'utf-8'));
-      for (const match of source.matchAll(ENV_READ_RE)) {
-        if (/RELEASE|DATE/i.test(match[1])) offenders.push(`${file}: ${match[0]}`);
-      }
+      const reads = [...source.matchAll(CLOCK_READ_RE)].length;
+      const allowed = ALLOWED_CLOCK_READS[file] ?? 0;
+      if (reads > allowed) offenders.push(`${file}: ${reads} clock reads, ${allowed} allowed`);
     }
 
     expect(offenders).toEqual([]);
   });
 
+  it('entitlement.js, the decision table, reads no clock at all', () => {
+    const source = codeOnly(readFileSync(join(LICENSING_DIR, 'entitlement.js'), 'utf-8'));
+    expect([...source.matchAll(CLOCK_READ_RE)].map((m) => m[0])).toEqual([]);
+  });
+
   it('no module under src/lib/licensing/ reads an env var outside the explicit allowlist', () => {
-    // The general form of the two checks above: ANY environment read in this
-    // directory is a candidate escape hatch, not just one shaped like
-    // LICENSE or RELEASE/DATE. Every name found here must be justified in
+    // The general form of the LICENSE check above: ANY environment read in
+    // this directory is a candidate escape hatch, not just one shaped like
+    // LICENSE. Every name found here must be justified in
     // ALLOWED_ENV_READS above, with a comment explaining why it cannot
     // change entitlement.
     const offenders: string[] = [];

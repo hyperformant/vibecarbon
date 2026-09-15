@@ -123,15 +123,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      # Writes `releaseDate` into THIS checkout's package.json, on disk —
-      # never committed. semantic-release's npm plugin publishes whatever is
-      # on disk at publish time, so the dirty working tree is the point.
-      # src/lib/licensing/release-date.js reads this key back as the first
-      # branch of its resolution order; without it, every install would fall
-      # through to HEAD's commit date instead of the real release date.
-      - name: Stamp release date
-        run: node scripts/stamp-release-date.js
-
       - name: Release
         run: pnpm exec semantic-release
         env:
