@@ -90,6 +90,12 @@ const SPEC = {
       value: '<id>',
       description: 'Worker server type override for pilot-light failover provisioning (e.g. cx33)',
     },
+    {
+      name: 'confirm',
+      value: '<value>',
+      description:
+        'Production only: supply the type-to-confirm value on the command line (scripts / no TTY)',
+    },
   ],
   examples: [
     { command: 'vibecarbon failover', description: 'prompts for env' },
@@ -1843,6 +1849,7 @@ export async function run(args) {
     env: envName,
     dryRun: !!values.dry,
     yes: !!values.y,
+    confirm: values.confirm ?? undefined,
     // Pilot-light failover worker server-type override. Consumed by
     // Task 10's provisioning step (provisionStandbyCapacity's
     // serverTypeOverride) — null means "use the persisted standbyWorkerSpec".
@@ -1911,7 +1918,11 @@ export async function run(args) {
   const isDestructiveFailover =
     envConfig.deployMode === 'compose-ha' || detectScenario(envConfig) !== 'single_server';
   if (!parsed.dryRun && isDestructiveFailover) {
-    await confirmProdOrExit(envName, { actionLabel: 'failover', yes: !!parsed.yes });
+    await confirmProdOrExit(envName, {
+      actionLabel: 'failover',
+      yes: !!parsed.yes,
+      confirm: parsed.confirm,
+    });
   }
 
   // Compose-HA failover uses docker compose exec instead of kubectl

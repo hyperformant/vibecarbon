@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mintV2Key } from '../../../../scripts/generate-license.js';
+// @ts-expect-error — JS module without types
+import { COMPOSE_REQUIRED_ENV_FALLBACK } from '../../../../src/lib/project.js';
 import { loadE2EEnvFile } from '../../../e2e/utils/e2e-env-file.js';
 import { testLicenseKey } from '../../_harness/index.js';
 
@@ -62,6 +64,15 @@ function writeProject(
   }
   writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify(config, null, 2));
   writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
+  // The runtime-env preflight (deploy step 0d) runs before the license gate:
+  // it is mode-independent and costs nothing, and a real project always has
+  // these keys (`create` writes them). Give the fixture the same so the
+  // refusal under test is the license one, not "the compose stack cannot
+  // start".
+  writeFileSync(
+    join(dir, '.env'),
+    `${COMPOSE_REQUIRED_ENV_FALLBACK.map((k) => `${k}=fixture`).join('\n')}\n`,
+  );
 }
 
 /** A HOME carrying the harness's genuine legacy (lifetime) Fullerene key. */

@@ -43,4 +43,9 @@ describe('failover prod confirm', () => {
     // It IS reached on the destructive, non-dry path.
     expect(preamble).toContain('isDestructiveFailover');
   });
+
+  it('passes the -confirm flag through so a scripted failover can satisfy the gate', () => {
+    expect(failoverSrc).toMatch(/confirmProdOrExit\(envName,\s*\{[^}]*confirm:\s*parsed\.confirm/s);
+    expect(failoverSrc).toMatch(/name:\s*'confirm',\s*value:/);
+  });
 });
