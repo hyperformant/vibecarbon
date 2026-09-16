@@ -12,6 +12,7 @@
 import { VERSION } from '../version.js';
 
 const KNOWN_BIND_REFUSALS = new Set([
+  'bad_signature',
   'bound_to_other_project',
   'project_already_licensed',
   'subscription_inactive',
@@ -53,7 +54,7 @@ async function post(path, body, { env = process.env, fetchImpl = fetch, timeoutM
 
 /**
  * @returns {Promise<{ ok: true, projectId: string, tier: string, status: string, periodEnd: string } |
- *   { ok: false, reason: 'bound_to_other_project' | 'project_already_licensed' | 'subscription_inactive' | 'unknown_key' | 'unreachable' | 'rejected', message?: string, switchPlan?: boolean, detail?: string }>}
+ *   { ok: false, reason: 'bound_to_other_project' | 'project_already_licensed' | 'subscription_inactive' | 'unknown_key' | 'bad_signature' | 'unreachable' | 'rejected', message?: string, switchPlan?: boolean, detail?: string }>}
  */
 export async function bindLicense({ key, projectId, env, fetchImpl, timeoutMs }) {
   const pid = projectId.toLowerCase();
@@ -85,12 +86,13 @@ export async function bindLicense({ key, projectId, env, fetchImpl, timeoutMs })
   };
 }
 
-/** @returns {Promise<{ ok: true } | { ok: false, reason: 'unknown_key' | 'unreachable' | 'rejected', detail?: string }>} */
+/** @returns {Promise<{ ok: true } | { ok: false, reason: 'unknown_key' | 'bad_signature' | 'unreachable' | 'rejected', detail?: string }>} */
 export async function requestRelease({ key, env, fetchImpl, timeoutMs }) {
   const r = await post('/api/v1/license/release', { key }, { env, fetchImpl, timeoutMs });
   if (r.kind === 'unreachable') return { ok: false, reason: 'unreachable', detail: r.detail };
   if (r.kind === 'error') {
-    if (r.body.error === 'unknown_key') return { ok: false, reason: 'unknown_key' };
+    if (r.body.error === 'unknown_key' || r.body.error === 'bad_signature')
+      return { ok: false, reason: r.body.error };
     return { ok: false, reason: 'rejected', detail: r.body.error };
   }
   return r.body.sent === true

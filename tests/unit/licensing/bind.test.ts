@@ -78,6 +78,17 @@ describe('bindLicense', () => {
         fetchImpl: fetchReturning(401, { error: 'unknown_key' }),
       }),
     ).toEqual({ ok: false, reason: 'unknown_key' });
+    // The server's other 401. A forged or mistyped key must come back as its
+    // own refusal, not as the generic 'rejected' with the reason buried in
+    // `detail` — activate turns the reason into the advice it prints.
+    expect(
+      await bindLicense({
+        key: KEY,
+        projectId: PROJECT_ID,
+        env,
+        fetchImpl: fetchReturning(401, { error: 'bad_signature' }),
+      }),
+    ).toEqual({ ok: false, reason: 'bad_signature' });
   });
 
   it('treats 429/5xx and network errors as unreachable, other JSON errors as rejected', async () => {
@@ -188,6 +199,13 @@ describe('requestRelease', () => {
         fetchImpl: fetchReturning(401, { error: 'unknown_key' }),
       }),
     ).toEqual({ ok: false, reason: 'unknown_key' });
+    expect(
+      await requestRelease({
+        key: KEY,
+        env,
+        fetchImpl: fetchReturning(401, { error: 'bad_signature' }),
+      }),
+    ).toEqual({ ok: false, reason: 'bad_signature' });
     expect(
       (await requestRelease({ key: KEY, env, fetchImpl: fetchReturning(500, {}) })).reason,
     ).toBe('unreachable');

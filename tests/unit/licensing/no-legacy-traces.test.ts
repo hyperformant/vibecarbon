@@ -115,8 +115,12 @@ function hitsFor(pattern: string): string[] {
     if ((err as { status?: number }).status !== 1) throw err;
   }
   return out.split('\n').filter((line) => {
-    if (!line || /CHANGELOG/.test(line)) return false;
-    return !RECORD_FILES.has(line.slice(0, line.indexOf(':')));
+    if (!line) return false;
+    // Anchored to the FILENAME slice, like RECORD_FILES: a bare /CHANGELOG/
+    // over the whole grep line also excused any hit whose matched TEXT
+    // happened to mention a changelog, which is a hole, not an exemption.
+    const file = line.slice(0, line.indexOf(':'));
+    return !/CHANGELOG/.test(file) && !RECORD_FILES.has(file);
   });
 }
 

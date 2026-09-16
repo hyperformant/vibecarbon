@@ -179,6 +179,8 @@ function bindErrorMessage(bound) {
       return 'This subscription is no longer active. Renew it from https://vibecarbon.com/license.';
     case 'unknown_key':
       return 'This key is not recognised by vibecarbon.com. Check the key from your purchase email.';
+    case 'bad_signature':
+      return "This key's signature is not valid. Check the key from your purchase email.";
     case 'unreachable':
       return `Activation needs a connection to vibecarbon.com (${bound.detail ?? 'unreachable'}). Nothing was changed.`;
     default:

@@ -58,6 +58,19 @@ function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
+/**
+ * What the tier just activated actually buys. Graphene does NOT cover HA —
+ * telling a Graphene customer it does sends them into a deploy that
+ * requireDeployEntitlement() refuses. An unrecognised tier says nothing
+ * about scope rather than guessing.
+ * @param {string} [tier]
+ */
+function activatedOutro(tier) {
+  if (tier === 'graphene') return 'You can now deploy to Kubernetes environments.';
+  if (tier === 'fullerene') return 'You can now deploy to Kubernetes and HA environments.';
+  return 'License activated.';
+}
+
 export async function runActivate(args) {
   const { positional, handled } = parseFlagsOrExit(args, ACTIVATE_SPEC);
   if (handled) return;
@@ -107,7 +120,7 @@ export async function runActivate(args) {
     ].join('\n'),
     'License Details',
   );
-  p.outro('You can now deploy to Kubernetes and HA environments.');
+  p.outro(activatedOutro(result.tier));
 }
 
 export async function runDeactivate(args) {

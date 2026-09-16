@@ -63,10 +63,15 @@ describe('generate-license', () => {
   });
 
   it('run requires the private key', () => {
+    // try/finally: without it a failing expect() leaves the key deleted from
+    // process.env for every case that runs after this one in the same worker.
     const saved = process.env.VIBECARBON_LICENSE_PRIVATE_KEY;
     delete process.env.VIBECARBON_LICENSE_PRIVATE_KEY;
-    expect(() => run([])).toThrow(/VIBECARBON_LICENSE_PRIVATE_KEY/);
-    if (saved) process.env.VIBECARBON_LICENSE_PRIVATE_KEY = saved;
+    try {
+      expect(() => run([])).toThrow(/VIBECARBON_LICENSE_PRIVATE_KEY/);
+    } finally {
+      if (saved) process.env.VIBECARBON_LICENSE_PRIVATE_KEY = saved;
+    }
   });
 
   it('signVerdictToken still signs unbound / wrong_project verdicts', () => {

@@ -97,7 +97,7 @@ function parseYmd(yyyymmdd) {
  * Parse a license key: vc-<licenseId>-<signature>, exactly 3 parts.
  * Pure shape check; verifySignature() is what makes it trustworthy.
  * @param {string} key
- * @returns {object} `{ valid: true, format: 'key', licenseId, signature, originalKey } | { valid: false, error }`
+ * @returns {object} `{ valid: true, format: 'key', licenseId, signature } | { valid: false, error }`
  */
 export function parseLicenseKey(key) {
   if (!key || typeof key !== 'string') {
@@ -118,7 +118,7 @@ export function parseLicenseKey(key) {
   if (!signature || !SIG_RE.test(signature)) {
     return { valid: false, error: 'Invalid signature' };
   }
-  return { valid: true, format: 'key', licenseId, signature, originalKey: key.trim() };
+  return { valid: true, format: 'key', licenseId, signature };
 }
 
 /**

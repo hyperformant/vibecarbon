@@ -116,7 +116,7 @@ describe('vibecarbon activate', () => {
       const stored = JSON.parse(readFileSync(licenseFile, 'utf-8'));
       expect(stored.key).toBe(key);
       // The binding itself lives on the server, never in the file.
-      expect(s.state.get(licenseId).projectId).toBe(PROJECT_ID);
+      expect(s.state.get(licenseId)?.projectId).toBe(PROJECT_ID);
     },
   );
 
@@ -189,7 +189,7 @@ describe('vibecarbon activate', () => {
       expect(out).toContain('Run vibecarbon deactivate in that project');
       expect(existsSync(licenseFile)).toBe(false);
       // A refused bind must not have moved the binding.
-      expect(s.state.get(licenseId).projectId).toBe(OTHER_PROJECT_ID);
+      expect(s.state.get(licenseId)?.projectId).toBe(OTHER_PROJECT_ID);
     },
   );
 

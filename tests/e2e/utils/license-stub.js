@@ -189,6 +189,14 @@ export async function startLicenseStub({ privateKeyPem }) {
     baseUrl: `http://127.0.0.1:${port}`,
     state,
     calls,
+    /**
+     * Plant a subscription row. Typed so `state.get(id)` infers `projectId`
+     * as `string | null` rather than `null` — the checked-JS inference from
+     * the destructured default alone would narrow it to the default.
+     *
+     * @param {{ licenseId: string, projectId?: string|null, tier?: string,
+     *   status?: string, periodEndYmd: string, cancelAtPeriodEnd?: boolean }} row
+     */
     seed({
       licenseId,
       projectId = null,

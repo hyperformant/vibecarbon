@@ -211,6 +211,29 @@ describe('activateLicense', () => {
     expect(r).toMatchObject({ success: false, reason: 'no-project' });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+  it('turns a bad_signature refusal into advice about the purchase email', async () => {
+    // A key that parses and verifies against the CLI's embedded public key
+    // but not against the server's — a truncated paste, or a different
+    // signing key. Without its own case it fell through to the generic
+    // 'vibecarbon.com refused this activation (bad_signature)'.
+    const refuse = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+      text: async () => JSON.stringify({ error: 'bad_signature' }),
+    })) as unknown as typeof fetch;
+    const r = await activateLicense(KEY, {
+      projectDir: dir,
+      publicKeyPem: PUB,
+      env,
+      fetchImpl: refuse,
+    });
+    expect(r).toMatchObject({ success: false, reason: 'bad_signature' });
+    expect(r.error).toBe(
+      "This key's signature is not valid. Check the key from your purchase email.",
+    );
+    expect(existsSync(licensePath(dir))).toBe(false);
+  });
   it('writes nothing when the server refuses or is unreachable', async () => {
     const refuse = vi.fn(async () => ({
       ok: false,

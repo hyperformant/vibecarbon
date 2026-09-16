@@ -56,6 +56,32 @@ describe('activate', () => {
     expect(logs.join('\n')).toMatch(/Graphene/);
     expect(logs.join('\n')).toContain('Project: p');
     expect(logs.join('\n')).toContain('commit');
+    // Graphene does not cover HA. The outro used to promise it to everyone.
+    expect(logs.join('\n')).toContain('You can now deploy to Kubernetes environments.');
+    expect(logs.join('\n')).not.toContain('and HA environments');
+  });
+
+  it('promises HA only to Fullerene, and nothing specific to an unknown tier', async () => {
+    const success = (tier: string) => ({
+      success: true,
+      projectId: 'p',
+      tier,
+      status: 'active',
+      periodEnd: '2026-10-15T00:00:00.000Z',
+      path: '/x/.vibecarbon.license',
+    });
+
+    activateLicense.mockResolvedValue(success('fullerene'));
+    await runActivate([KEY]);
+    expect(logs.join('\n')).toContain('You can now deploy to Kubernetes and HA environments.');
+
+    // A tier this CLI has never heard of (a newer plan on the server): say
+    // that it worked, claim nothing about what it covers.
+    logs.length = 0;
+    activateLicense.mockResolvedValue(success('diamond'));
+    await runActivate([KEY]);
+    expect(logs.join('\n')).toContain('License activated.');
+    expect(logs.join('\n')).not.toContain('You can now deploy');
   });
   it('exits 1 with the server reason on refusal, and hints /license on switchPlan', async () => {
     activateLicense.mockResolvedValue({

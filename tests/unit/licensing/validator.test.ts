@@ -24,6 +24,9 @@ describe('parseLicenseKey', () => {
     const parsed = parseLicenseKey(`  ${mint().toUpperCase()} `);
     expect(parsed).toMatchObject({ valid: true, format: 'key', licenseId: LICENSE_ID });
     expect((parsed as { signature: string }).signature).toHaveLength(128);
+    // The whole shape, not a subset: the result used to carry `originalKey`,
+    // which nothing read. Callers hold the key they passed in.
+    expect(Object.keys(parsed).sort()).toEqual(['format', 'licenseId', 'signature', 'valid']);
   });
 
   it('rejects the retired formats by name', () => {
