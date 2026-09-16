@@ -49,38 +49,59 @@ describe('buildDeployUpsell - block reasons', () => {
       'Single-server Compose needs no key. Backing up, restoring, failing over, and scaling never require a license.',
       '',
       `Project: ${DEPLOY_PROJECT_NAME} (id ${DEPLOY_PROJECT_ID})`,
-      `Subscribe: https://vibecarbon.com/pricing?project=${DEPLOY_PROJECT_ID}&tier=graphene`,
+      'Subscribe: https://vibecarbon.com/pricing?tier=graphene',
       'Activate:  vibecarbon activate <key>',
       'Terms: TERMS.md or https://vibecarbon.com/terms',
     ]);
   });
 
-  it('wrong-project: inserts the mismatch line after the free line', () => {
+  it('unbound: not bound to a project yet, points at activate', () => {
     const lines = buildDeployUpsell({
       verdict: {
         ok: false,
         requiredTier: 'graphene',
-        reason: 'wrong-project',
-        license: { active: false, storedProjectId: 'other-id' },
-        verdict: null,
+        reason: 'unbound',
+        license: { active: true, key: 'vc-key', licenseId: '0123456789abcdef' },
+        verdict: {
+          projectId: DEPLOY_PROJECT_ID,
+          status: 'unbound',
+          tier: 'none',
+          periodEnd: '2026-09-15',
+          issued: '2026-09-15',
+        },
       },
       deployTier: 'k8s',
       projectName: DEPLOY_PROJECT_NAME,
       projectId: DEPLOY_PROJECT_ID,
     });
-    expect(lines).toEqual([
-      'License required',
-      '',
-      'This environment needs Graphene: scale on demand. $19 per project per month.',
-      'Deploy mode: Kubernetes',
-      'Single-server Compose needs no key. Backing up, restoring, failing over, and scaling never require a license.',
-      'The stored key belongs to project other-id. Each project has its own subscription.',
-      '',
-      `Project: ${DEPLOY_PROJECT_NAME} (id ${DEPLOY_PROJECT_ID})`,
-      `Subscribe: https://vibecarbon.com/pricing?project=${DEPLOY_PROJECT_ID}&tier=graphene`,
-      'Activate:  vibecarbon activate <key>',
-      'Terms: TERMS.md or https://vibecarbon.com/terms',
-    ]);
+    const text = lines.join('\n');
+    expect(text).toContain('not bound to a project yet');
+    expect(text).toContain('vibecarbon activate <key>');
+  });
+
+  it('wrong-project: bound to a different project, points at deactivate and the license page', () => {
+    const lines = buildDeployUpsell({
+      verdict: {
+        ok: false,
+        requiredTier: 'fullerene',
+        reason: 'wrong-project',
+        license: { active: true, key: 'vc-key', licenseId: '0123456789abcdef' },
+        verdict: {
+          projectId: DEPLOY_PROJECT_ID,
+          status: 'wrong_project',
+          tier: 'none',
+          periodEnd: '2026-09-15',
+          issued: '2026-09-15',
+        },
+      },
+      deployTier: 'k8s-ha',
+      projectName: DEPLOY_PROJECT_NAME,
+      projectId: DEPLOY_PROJECT_ID,
+    });
+    const text = lines.join('\n');
+    expect(text).toContain('bound to a different project');
+    expect(text).toContain('vibecarbon deactivate');
+    expect(text).toContain('https://vibecarbon.com/license');
   });
 
   it('tier-too-low: names the held tier, points at the license page, no Subscribe line', () => {
@@ -176,7 +197,7 @@ describe('buildDeployUpsell - block reasons', () => {
       'Renew to deploy to Kubernetes HA again.',
       '',
       `Project: ${DEPLOY_PROJECT_NAME} (id ${DEPLOY_PROJECT_ID})`,
-      `Renew: https://vibecarbon.com/pricing?project=${DEPLOY_PROJECT_ID}&tier=fullerene`,
+      `Renew: https://vibecarbon.com/pricing?tier=fullerene`,
       'Terms: TERMS.md or https://vibecarbon.com/terms',
     ]);
   });
@@ -232,7 +253,7 @@ describe('buildDeployWarning - warning kinds', () => {
     });
     expect(lines).toEqual([
       "This project's Fullerene subscription ended on 2026-09-01. Deploys keep working for 17 more days.",
-      `Renew: https://vibecarbon.com/pricing?project=${DEPLOY_PROJECT_ID}&tier=fullerene`,
+      `Renew: https://vibecarbon.com/pricing?tier=fullerene`,
     ]);
   });
 
@@ -248,7 +269,7 @@ describe('buildDeployWarning - warning kinds', () => {
     });
     expect(lines).toEqual([
       "This project's Fullerene subscription ended on 2026-09-01. Deploys keep working for 17 more days.",
-      `Renew: https://vibecarbon.com/pricing?project=${DEPLOY_PROJECT_ID}&tier=graphene`,
+      `Renew: https://vibecarbon.com/pricing?tier=graphene`,
     ]);
   });
 
@@ -401,9 +422,31 @@ describe('deploy gate copy hygiene', () => {
         verdict: {
           ok: false,
           requiredTier: 'graphene',
+          reason: 'unbound',
+          license: { active: true, key: 'vc-key', licenseId: '0123456789abcdef' },
+          verdict: {
+            projectId: DEPLOY_PROJECT_ID,
+            status: 'unbound',
+            tier: 'none',
+            periodEnd: '2026-09-15',
+            issued: '2026-09-15',
+          },
+        },
+      },
+      {
+        deployTier: 'k8s',
+        verdict: {
+          ok: false,
+          requiredTier: 'graphene',
           reason: 'wrong-project',
-          license: { active: false, storedProjectId: 'other-id' },
-          verdict: null,
+          license: { active: true, key: 'vc-key', licenseId: '0123456789abcdef' },
+          verdict: {
+            projectId: DEPLOY_PROJECT_ID,
+            status: 'wrong_project',
+            tier: 'none',
+            periodEnd: '2026-09-15',
+            issued: '2026-09-15',
+          },
         },
       },
       {
@@ -507,6 +550,12 @@ describe('deploy gate copy hygiene', () => {
   it('never puts "free" next to "server" or "deploy"', () => {
     for (const line of everyDeployLine()) {
       expect(line).not.toMatch(/free\b[^.]*\b(server|deploy)|\b(server|deploy)[^.]*\bfree/i);
+    }
+  });
+
+  it('no line anywhere contains ?project= (subscribeUrl carries no project param)', () => {
+    for (const line of everyDeployLine()) {
+      expect(line).not.toContain('?project=');
     }
   });
 });

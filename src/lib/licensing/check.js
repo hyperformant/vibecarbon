@@ -102,7 +102,7 @@ export async function checkLicense({
     res = await fetchImpl(`${base}/api/v1/license/check`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key, cliVersion: VERSION }),
+      body: JSON.stringify({ key, projectId: pid, cliVersion: VERSION }),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {

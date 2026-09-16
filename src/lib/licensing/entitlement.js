@@ -10,16 +10,12 @@
  * The `license` shape this module reads is a contract with the per-project
  * license storage index.js's getLicense() returns:
  *   - active: boolean
- *   - tier: string | null (one of the TIERS keys in tiers.js for a v1 key;
- *     null for a v2 key, which carries no tier: the tier lives on the
- *     signed verdict)
- *   - format: 'v1' | 'v2'
- *   - isLifetime: boolean (true for a legacy v1 key, which covers every
- *     deploy tier, every project, forever)
- *   - projectId: string | null
- *   - storedProjectId: string | null (only ever set on an INACTIVE result:
- *     a valid v2 key sits on disk but belongs to another project)
+ *   - key: string
+ *   - licenseId: string
  * A missing license, or one with `active: false`, is treated as no license.
+ * Project binding is no longer decided from the stored license: a key
+ * carries no project id of its own, so binding lives on the signed verdict
+ * (`unbound` / `wrong_project` statuses) instead.
  *
  * The whole contract lives in `evaluateDeployEntitlement` below: given the
  * stored license, the deploy tier, and the result of a live/cached license
@@ -87,7 +83,7 @@ export function daysLeft(graceEnd, now) {
  * 'YYYY-MM-DD', passed in). See the Notion Pricing Model page, Rules.
  *
  * @param {{
- *   license: object | null,
+ *   license: { active: boolean, key: string, licenseId: string } | null,
  *   deployTier: string,
  *   projectId: string,
  *   check: { source: 'live' | 'cache' | 'none' | 'rejected', verdict: object | null, unreachable?: string, cancelAtPeriodEnd?: boolean },
@@ -99,12 +95,13 @@ export function evaluateDeployEntitlement({ license, deployTier, projectId, chec
   if (requiredTier === 'graphite') return { ok: true, requiredTier };
 
   if (!license?.active) {
-    const reason = license?.storedProjectId ? 'wrong-project' : 'no-license';
-    return { ok: false, requiredTier, reason, license: license ?? null, verdict: null };
-  }
-  if (license.isLifetime) return { ok: true, requiredTier };
-  if (license.projectId !== projectId) {
-    return { ok: false, requiredTier, reason: 'wrong-project', license, verdict: null };
+    return {
+      ok: false,
+      requiredTier,
+      reason: 'no-license',
+      license: license ?? null,
+      verdict: null,
+    };
   }
 
   const verdict = check?.verdict ?? null;
@@ -117,6 +114,14 @@ export function evaluateDeployEntitlement({ license, deployTier, projectId, chec
       requiredTier,
       warning: { kind: 'unverified', detail: check?.unreachable ?? 'unknown' },
     };
+  }
+  // Binding problems are never softened by grace: grace exists for billing
+  // hiccups, and an unbound or mis-bound key is not a billing state.
+  if (verdict.status === 'unbound') {
+    return { ok: false, requiredTier, reason: 'unbound', license, verdict };
+  }
+  if (verdict.status === 'wrong_project') {
+    return { ok: false, requiredTier, reason: 'wrong-project', license, verdict };
   }
   if (verdict.status === 'none') {
     return { ok: false, requiredTier, reason: 'no-license', license, verdict };

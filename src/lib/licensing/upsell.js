@@ -44,11 +44,8 @@ function deployTierLabel(deployTier) {
   return DEPLOY_TIER_LABELS[deployTier] || deployTier;
 }
 
-function subscribeUrl(projectId, requiredTier) {
-  const params = new URLSearchParams();
-  if (projectId) params.set('project', projectId);
-  params.set('tier', requiredTier);
-  return `${PRICING_URL}?${params}`;
+function subscribeUrl(requiredTier) {
+  return `${PRICING_URL}?tier=${requiredTier}`;
 }
 
 const TERMS_LINE = 'Terms: TERMS.md or https://vibecarbon.com/terms';
@@ -60,6 +57,8 @@ const DEPLOY_HEADLINES = [
   'Plan switch required',
   'Payment required',
   'Subscription ended',
+  'License not bound',
+  'License bound elsewhere',
 ];
 
 function projectLine(projectName, projectId) {
@@ -77,7 +76,7 @@ function tierName(id) {
  * Consumes a blocked result from `evaluateDeployEntitlement` (C2):
  * `{ ok: false, requiredTier, reason, license, verdict }`, where `verdict`
  * is the signed `{ projectId, status, tier, periodEnd, issued }` for every
- * reason except 'no-license' and 'wrong-project' (null there).
+ * reason except 'no-license' (null there).
  *
  * @param {object} options
  * @param {{requiredTier: string, reason: string, license?: object|null, verdict?: object|null}} options.verdict
@@ -128,23 +127,39 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
         `Renew to deploy to ${mode} again.`,
         '',
         ...(proj ? [proj] : []),
-        `Renew: ${subscribeUrl(projectId, requiredTier)}`,
+        `Renew: ${subscribeUrl(requiredTier)}`,
+        TERMS_LINE,
+      ];
+    case 'unbound':
+      return [
+        'License not bound',
+        '',
+        'This key is not bound to a project yet.',
+        ...(proj ? [proj] : []),
+        '',
+        'Run this inside the project:',
+        '  vibecarbon activate <key>',
+        TERMS_LINE,
+      ];
+    case 'wrong-project':
+      return [
+        'License bound elsewhere',
+        '',
+        'This key is bound to a different project. Each project has its own subscription.',
+        ...(proj ? [proj] : []),
+        '',
+        'Release it there first (vibecarbon deactivate in that project, or from',
+        `${LICENSE_URL}), then run vibecarbon activate <key> here.`,
         TERMS_LINE,
       ];
     default: {
       const lines = ['License required', '', needs];
       if (deployTier) lines.push(`Deploy mode: ${mode}`);
       lines.push(FREE_LINE);
-      if (verdict?.reason === 'wrong-project') {
-        const other = verdict.license?.storedProjectId || verdict.license?.projectId;
-        lines.push(
-          `The stored key belongs to project ${other}. Each project has its own subscription.`,
-        );
-      }
       lines.push('');
       if (proj) lines.push(proj);
       lines.push(
-        `Subscribe: ${subscribeUrl(projectId, requiredTier)}`,
+        `Subscribe: ${subscribeUrl(requiredTier)}`,
         'Activate:  vibecarbon activate <key>',
         TERMS_LINE,
       );
@@ -159,7 +174,6 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
  *
  * @param {object} options
  * @param {{kind: string, daysLeft?: number, periodEnd?: string, tier?: string, detail?: string}} options.warning
- * @param {string|null} [options.projectId]
  * @param {string|null} [options.requiredTier] - The tier the deploy actually
  *   needs (verdict.requiredTier from evaluateDeployEntitlement). Only the
  *   'canceled' renew link uses this: it must point at the tier this
@@ -167,7 +181,7 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
  *   which the canceled check runs before confirming is even sufficient).
  * @returns {string[]}
  */
-export function buildDeployWarning({ warning, projectId = null, requiredTier = null }) {
+export function buildDeployWarning({ warning, requiredTier = null }) {
   const days = warning.daysLeft === 0 ? 'through today' : `for ${warning.daysLeft} more days`;
   switch (warning.kind) {
     case 'past-due':
@@ -178,7 +192,7 @@ export function buildDeployWarning({ warning, projectId = null, requiredTier = n
     case 'canceled':
       return [
         `This project's ${tierName(warning.tier)} subscription ended on ${warning.periodEnd}. Deploys keep working ${days}.`,
-        `Renew: ${subscribeUrl(projectId, requiredTier ?? warning.tier)}`,
+        `Renew: ${subscribeUrl(requiredTier ?? warning.tier)}`,
       ];
     case 'unverified':
       return [

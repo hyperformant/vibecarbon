@@ -465,8 +465,12 @@ describe('checkLicense', () => {
     expect(url).toBe('https://vibecarbon.com/api/v1/license/check');
     expect(opts.method).toBe('POST');
     const body = JSON.parse(opts.body);
-    expect(body.key).toBe('vc2-a1b2c3d4-xyz');
     expect(typeof body.cliVersion).toBe('string');
+    expect(body).toEqual({
+      key: 'vc2-a1b2c3d4-xyz',
+      projectId: PROJECT_ID.toLowerCase(),
+      cliVersion: body.cliVersion,
+    });
     expect(opts.signal).toBeInstanceOf(AbortSignal);
   });
 
