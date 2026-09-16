@@ -180,7 +180,7 @@ describe('activateLicense', () => {
     ).toBe(false);
     expect(
       (
-        await activateLicense(`vc-f-deadbeef-${'a'.repeat(128)}`, {
+        await activateLicense(`vc-deadbeefdeadbeef-${'a'.repeat(128)}`, {
           projectDir: dir,
           publicKeyPem: PUB,
           env,

@@ -115,13 +115,14 @@ describe('test harnesses use a real signed license, not a bypass', () => {
     expect(runCli).not.toMatch(/LICENSE_(PRIVATE_)?KEY/);
   });
 
-  it('no harness still seeds the unsignable placeholder key', () => {
-    // The old fixture key parsed but carried no real signature — it only ever
-    // worked because DEV_MODE skipped verification. Matched as a quoted string
-    // literal, not as bare text, so the comments explaining why it is gone
-    // (which necessarily name it) do not trip the guard.
+  it('no harness embeds a licence key literal', () => {
+    // A hardcoded key is either unsignable (the old fixture, which only ever
+    // worked because DEV_MODE skipped verification) or a real one leaking into
+    // the repo. Neither belongs here: keys are minted per run by the stub.
+    // Matched as a quoted string literal in the CURRENT `vc-<16 hex>-` shape,
+    // not as bare text, so prose about keys does not trip the guard.
     for (const source of [runCli, e2eEnv]) {
-      expect(source).not.toMatch(/['"]vc-f-deadbeef/);
+      expect(source).not.toMatch(/['"`]vc-[0-9a-f]{16}-/);
     }
   });
 

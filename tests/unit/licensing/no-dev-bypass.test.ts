@@ -7,8 +7,8 @@
  * debug branch out. So anything that short-circuits validateLicenseKey in
  * the working tree ships to every customer, and `VIBECARBON_DEV_LICENSE=true`
  * was exactly that: a documented, one-env-var grant of Fullerene to anyone
- * who read validator.js. Test harnesses now activate a genuine signed key
- * (VIBECARBON_TEST_LICENSE_KEY) instead, which is also the path a customer
+ * who read validator.js. Test harnesses now activate a key minted for the
+ * local stub of the licence API instead, which is also the path a customer
  * walks.
  *
  * Two guards, deliberately different in kind: the behavioural one proves the
@@ -43,7 +43,7 @@ function codeOnly(source: string): string {
 }
 
 /** A key that parses cleanly but carries a signature no private key produced. */
-const UNSIGNED_KEY = `vc-f-a1b2c3d4-${'0'.repeat(128)}`;
+const UNSIGNED_KEY = `vc-a1b2c3d4a1b2c3d4-${'0'.repeat(128)}`;
 
 /**
  * Matches both `process.env.FOO` and a `FOO` read off any bare `env`

@@ -121,10 +121,11 @@ describe('vibecarbon activate', () => {
   );
 
   it('refuses a well-formed key with no valid signature before any request', async () => {
-    // This is the case that used to SUCCEED: 'vc-f-cafebabe-fakefake...'
-    // parsed cleanly and VIBECARBON_DEV_LICENSE=true waved it through without
-    // verifying anything. Activation must demand a real Ed25519 signature,
-    // and must decide that locally: a forged key never reaches the network.
+    // This is the case that used to SUCCEED: a well-formed key carrying a
+    // made-up signature parsed cleanly and VIBECARBON_DEV_LICENSE=true waved
+    // it through without verifying anything. Activation must demand a real
+    // Ed25519 signature, and must decide that locally: a forged key never
+    // reaches the network.
     const r = await runCliAsync('activate', [UNSIGNED_KEY], {
       cwd: project,
       apiBase: stub?.baseUrl,

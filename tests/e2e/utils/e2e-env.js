@@ -29,9 +29,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
-import { getLicense, validateLicenseKey } from '../../../src/lib/licensing/index.js';
 import { pmScrubbedEnv } from '../../_shared/pm-env.js';
 import { loadE2EEnvFile } from './e2e-env-file.js';
+import { signingKeyOrNull, startLicenseStub } from './license-stub.js';
 
 /** Repo root, resolved from this file (tests/e2e/utils/ → 3 up). */
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -292,48 +292,62 @@ export function disableSshAskpass(env = process.env) {
 }
 
 /**
- * Fail fast unless a genuine, signature-verified license is active.
- *
- * Paid-tier scenarios (compose-ha/k8s/k8s-ha) call gated commands that exit 1
- * with "License required", and a matrix leg that dies that way has already
- * provisioned real infrastructure — so the cheap check belongs here, before
- * anything touches the network, not 40 minutes into a deploy. Checked for
- * every run rather than only paid selections: the harness cannot see the
- * scenario selection from here, and the failure message costs one command to
- * resolve.
+ * Fail fast unless the licence signing key is present: the harness runs a
+ * local stub of vibecarbon.com's licence API and every paid-tier deploy in
+ * the matrix is checked against it. No key, no signed verdicts, and a
+ * matrix leg would die 40 minutes in with "License not bound".
  *
  * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string} The signing key, as raw PEM.
  */
-export function assertLicenseActive(env = process.env) {
-  // Deliberately checks the ACTIVATED FILE, not the env var. Every gated
-  // command runs in a spawned CLI child that reads ~/.vibecarbon/license and
-  // nothing else, so passing on a bare VIBECARBON_TEST_LICENSE_KEY would be a
-  // false green: the preflight would clear and each paid step would still exit
-  // 1. The env var only sharpens the error message below.
-  const license = getLicense();
-  if (license.active) return license;
-
-  const key = env.VIBECARBON_TEST_LICENSE_KEY;
-  const remedy = key
-    ? validateLicenseKey(key).valid
-      ? `VIBECARBON_TEST_LICENSE_KEY is set and verifies, but no license is activated.\n` +
-        `The CLI child reads the file, not the variable — activate it once:\n` +
-        `  node src/cli.js activate "$VIBECARBON_TEST_LICENSE_KEY"`
-      : `VIBECARBON_TEST_LICENSE_KEY is set but does NOT verify: ` +
-        `${validateLicenseKey(key).error}\n` +
-        `Signature verification has no bypass any more — it must be a real key ` +
-        `from scripts/generate-license.js.`
-    : `Set VIBECARBON_TEST_LICENSE_KEY (shell or tests/.env.e2e), then:\n` +
-      `  node src/cli.js activate "$VIBECARBON_TEST_LICENSE_KEY"\n\n` +
-      `Mint one with:\n` +
-      `  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com`;
-
+export function assertLicenseSigningKey(env = process.env) {
+  const key = signingKeyOrNull(env);
+  if (key) return key;
   throw new Error(
-    `[e2e-env] No active Vibecarbon license at ~/.vibecarbon/license.\n` +
-      `Paid-tier scenarios (compose-ha/k8s/k8s-ha) gate on one, and the\n` +
-      `VIBECARBON_DEV_LICENSE bypass is gone — it shipped in the npm package.\n\n` +
-      `${remedy}`,
+    '[e2e-env] VIBECARBON_LICENSE_PRIVATE_KEY is not set (shell or tests/.env.e2e).\n' +
+      "It is the same value as vibecarbon-web's LICENSE_SIGNING_PRIVATE_KEY, as raw PEM.",
   );
+}
+
+/**
+ * The licence API the harness runs against, once started. Module-level
+ * because `setupE2EEnv()` is synchronous (it is called at module load by
+ * `tests/e2e/runner.ts` and `scripts/iter-step.js`) while starting a server
+ * is not — so the stub gets its own async entry point and the child-env
+ * builder below reads it from here.
+ *
+ * @type {Awaited<ReturnType<typeof startLicenseStub>> | null}
+ */
+let licenseStub = null;
+
+/**
+ * Start the local licence API the whole run is checked against, and point
+ * every CLI child at it.
+ *
+ * The CLI walks its PRODUCTION path against this stub: `activate` binds a
+ * real Ed25519-signed key through `POST /api/v1/license/bind`, and each
+ * gated deploy asks `/check` and verifies the signed verdict it gets back.
+ * Only the host changes (`VIBECARBON_API_BASE`) — there is no test-only
+ * bypass in the licensing code to change anything else.
+ *
+ * Idempotent: a second call returns the stub already running.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Promise<Awaited<ReturnType<typeof startLicenseStub>>>}
+ */
+export async function startE2ELicenseStub(env = process.env) {
+  if (licenseStub) return licenseStub;
+  licenseStub = await startLicenseStub({ privateKeyPem: assertLicenseSigningKey(env) });
+  // Read back by `e2eCliEnv()` — both through this env (which is
+  // `process.env`, the builder's default base) and from `licenseStub`
+  // directly, so a caller passing its own base still reaches the stub.
+  env.VIBECARBON_API_BASE = licenseStub.baseUrl;
+  return licenseStub;
+}
+
+/** The running licence stub, or null before `startE2ELicenseStub()`. */
+export function getE2ELicenseStub() {
+  return licenseStub;
 }
 
 /**
@@ -357,7 +371,9 @@ export function setupE2EEnv(opts = {}) {
 
   // After loadE2EEnvFile (the key may live in tests/.env.e2e), before any
   // network work — a licence failure should cost seconds, not a provisioned rig.
-  assertLicenseActive(env);
+  // Only asserts the key is THERE; `startE2ELicenseStub()` (async, called by
+  // the runner right after this) is what puts it to work.
+  assertLicenseSigningKey(env);
 
   pinPublicDns();
   disableSshAskpass(env);
@@ -408,18 +424,22 @@ export function e2eCliEnv(extra = {}, base = process.env) {
     // scenarios is exercising the deploy flow, not firewall hardening. Real
     // deploys go through the interactive auto-detect path.
     ALLOWED_SSH_IPS: '0.0.0.0/0,::/0',
-    // NOTE: no license variable is set here, deliberately. Licensing is
-    // deploy-mode-based, so compose-ha/k8s/k8s-ha scenarios hit
-    // requireDeployEntitlement() every time `deploy` runs, and the
-    // harness satisfies that the way a customer does: a genuine Ed25519-signed
-    // key activated at ~/.vibecarbon/license, asserted by
-    // assertLicenseActive() in setupE2EEnv() below.
+    // The only licence-related variable here, and it is a HOST, not a
+    // credential: it points the CLI child's bind/check requests at the local
+    // stub of vibecarbon.com's licence API (startE2ELicenseStub() above).
+    // Licensing is deploy-mode-based, so compose-ha/k8s/k8s-ha scenarios hit
+    // requireDeployEntitlement() every time `deploy` runs, and the harness
+    // satisfies that the way a customer does: a genuine Ed25519-signed key,
+    // bound to the project by `vibecarbon activate`, re-checked against the
+    // API for a signed verdict on every gated command.
     //
-    // It used to set VIBECARBON_DEV_LICENSE=true, which skipped signature
-    // verification entirely. That switch lived in the shipped npm package
-    // (the tarball is src/ verbatim), so it was also a one-variable grant of
-    // Fullerene to any customer who read validator.js. Removed — see
-    // tests/unit/licensing/no-dev-bypass.test.ts.
+    // No key and no signing key are ever handed to a child — only the stub
+    // process holds the signing key. It used to set VIBECARBON_DEV_LICENSE=true,
+    // which skipped signature verification entirely. That switch lived in the
+    // shipped npm package (the tarball is src/ verbatim), so it was also a
+    // one-variable grant of Fullerene to any customer who read validator.js.
+    // Removed — see tests/unit/licensing/no-dev-bypass.test.ts.
+    VIBECARBON_API_BASE: licenseStub?.baseUrl,
     // `create` infers the package manager from npm_config_user_agent, and this
     // harness is launched by `pnpm test:e2e` — so spreading the raw environment
     // made every e2e project pnpm-based. The matrix then never exercised the

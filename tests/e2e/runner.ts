@@ -98,7 +98,7 @@ import type {
 import { resolveSelection, type SelectedScenario, SelectionError } from './selection.js';
 import { scenarioContext } from './utils/cli-runner.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
-import { setupE2EEnv } from './utils/e2e-env.js';
+import { setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
 import { logPreflight, runPreflight } from './utils/preflight.js';
 import { decideFlakeRetry } from './utils/retry-policy.js';
@@ -122,6 +122,17 @@ import { sweepStaleScratchRepos } from './utils/scratch-repo-sweep.js';
 // store (tests/e2e/certs/letsencrypt-staging-roots.pem), so staging chains
 // validate and genuinely bad certificates still fail.
 setupE2EEnv();
+
+// The licence API every scenario is checked against: a local stub of
+// vibecarbon.com's, signing real Ed25519 verdicts with the signing key
+// setupE2EEnv() just asserted is present. Started ONCE for the whole run and
+// pointed at by VIBECARBON_API_BASE, which e2eCliEnv() forwards to every CLI
+// child — so `activate` binds through it and each gated deploy re-checks
+// against it, exactly as a customer's CLI does against production.
+//
+// Top-level await (this file is ESM): nothing below may spawn a CLI child
+// before the stub is listening.
+await startE2ELicenseStub();
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing

@@ -43,10 +43,11 @@ MCowBQYDK2VwAyEAUrn80IKtISxTCpGjc5rf2ZZhhhu+SktK4L2GEWrjT6Q=
 // constant, either of which granted Fullerene to anyone who read this file.
 //
 // Tests do not need one. Unit tests inject an ephemeral keypair via the
-// `publicKeyPem` option below; the integration and e2e harnesses activate a
-// genuine signed key from VIBECARBON_TEST_LICENSE_KEY, which is the same path
-// a customer walks. tests/unit/licensing/no-dev-bypass.test.ts fails if a
-// switch reappears in this directory.
+// `publicKeyPem` option below; the integration and e2e harnesses run a local
+// stub of the licence API, mint a genuine signed key against it and activate
+// that, which is the same path a customer walks.
+// tests/unit/licensing/no-dev-bypass.test.ts fails if a switch reappears in
+// this directory.
 
 // Exported so scripts/generate-license.js's signVerdictToken can validate
 // against the exact same sets it is verified against here, rather than

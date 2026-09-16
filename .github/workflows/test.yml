@@ -99,25 +99,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      # tests/unit/e2e/* exercise setupE2EEnv, whose assertLicenseActive reads
-      # the ACTIVATED FILE at ~/.vibecarbon/license (not the env var) — the
-      # same materialization e2e-us-perf.yml performs, minted from the same
-      # secret. Without it those unit tests pass on operator laptops (which
-      # have an activated license) and fail only in CI.
-      - name: Materialize license
+      # No licence FILE is materialized any more: there is no global slot, and a
+      # key alone entitles nothing — the project binding lives on
+      # vibecarbon.com. The harnesses run a local stub of that API
+      # (tests/e2e/utils/license-stub.js) which signs real verdicts with this
+      # secret, so the SIGNING KEY is what CI must supply. Fail loudly when it
+      # is missing rather than 131 confusing signature failures later.
+      - name: Check licence signing key
         env:
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
         run: |
-          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
-            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — license-gated tests cannot run."
+          if [ -z "$VIBECARBON_LICENSE_PRIVATE_KEY" ]; then
+            echo "::error::VIBECARBON_LICENSE_PRIVATE_KEY secret is not set — signed-verdict tests cannot run."
             exit 1
           fi
-          mkdir -p ~/.vibecarbon
-          umask 177
-          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
-            "$VIBECARBON_TEST_LICENSE_KEY" \
-            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
-            > ~/.vibecarbon/license
 
       - name: Run unit tests
         run: pnpm test:unit
@@ -151,12 +146,14 @@ jobs:
         run: pnpm test:integration
         timeout-minutes: 10
         env:
-          # Real Ed25519-signed Fullerene key — integration tests spawn paid
-          # commands and there is no dev bypass any more (c7efe141). The
-          # harness (tests/integration/_harness/run-cli.ts) reads the env var
-          # and writes its own fake-HOME license file, so no materialize step
-          # is needed here — but it hard-fails without the variable.
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          # The Ed25519 SIGNING key — integration tests spawn paid commands
+          # and there is no dev bypass any more (c7efe141). The harness starts
+          # a local stub of vibecarbon.com's licence API
+          # (tests/e2e/utils/license-stub.js), mints a key with this secret and
+          # activates it against the stub, so the CLI walks its production
+          # bind/check path. No licence file is materialized: the binding lives
+          # on the server. Signed cases skip without the variable.
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
 
   # The engines.node MINIMUM leg — the one job here that does NOT float.
   #
@@ -209,21 +206,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      # Same contract as the unit job's materialize step above.
-      - name: Materialize license
+      # Same contract as the unit job's signing-key check above.
+      - name: Check licence signing key
         env:
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
         run: |
-          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
-            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — license-gated tests cannot run."
+          if [ -z "$VIBECARBON_LICENSE_PRIVATE_KEY" ]; then
+            echo "::error::VIBECARBON_LICENSE_PRIVATE_KEY secret is not set — signed-verdict tests cannot run."
             exit 1
           fi
-          mkdir -p ~/.vibecarbon
-          umask 177
-          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
-            "$VIBECARBON_TEST_LICENSE_KEY" \
-            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
-            > ~/.vibecarbon/license
 
       - name: Run unit tests
         run: pnpm test:unit
@@ -233,7 +224,7 @@ jobs:
         timeout-minutes: 10
         env:
           # Same contract as the integration job above.
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
 
   # carbon/ is a SEPARATE project with its own lockfile (it ships inside the
   # published CLI and is scaffolded into user projects), so the root jobs

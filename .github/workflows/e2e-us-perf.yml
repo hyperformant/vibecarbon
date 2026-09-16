@@ -204,11 +204,11 @@ jobs:
           sudo install -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-      - name: Materialize credentials
+      - name: Check licence signing key
         env:
           # Via env, never interpolated into the script body — a secret on a
           # shell command line is a secret in the process table.
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
           # Pulumi downloads third-party provider plugins (vultr, linode) from
           # github:// servers. Unauthenticated, that shares the runner IP's
           # 60/hr GitHub API budget with every other tenant — run 32614839037's
@@ -217,21 +217,19 @@ jobs:
           # Pulumi honors GITHUB_TOKEN for exactly this.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p ~/.vibecarbon
-          umask 177
-          # Real Ed25519-signed Fullerene key — the same activation path a
-          # customer walks. Signature verification has no bypass, so a missing
-          # or malformed secret fails the run at e2e preflight
-          # (assertLicenseActive in tests/e2e/utils/e2e-env.js) rather than 40
-          # minutes into the first paid deploy.
-          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
-            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — paid-tier scenarios cannot run."
+          # No licence file is written: a key entitles nothing on its own now,
+          # and the project binding lives on vibecarbon.com. The harness runs a
+          # local stub of that API which mints a key and signs verdicts with
+          # this secret, and each scenario runs `vibecarbon activate` in the
+          # project it just created — the same path a customer walks.
+          # Signature verification has no bypass, so a missing or malformed
+          # secret fails the run at e2e preflight (assertLicenseSigningKey in
+          # tests/e2e/utils/e2e-env.js) rather than 40 minutes into the first
+          # paid deploy.
+          if [ -z "$VIBECARBON_LICENSE_PRIVATE_KEY" ]; then
+            echo "::error::VIBECARBON_LICENSE_PRIVATE_KEY secret is not set — paid-tier scenarios cannot run."
             exit 1
           fi
-          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
-            "$VIBECARBON_TEST_LICENSE_KEY" \
-            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
-            > ~/.vibecarbon/license
 
       - name: Run e2e (provider leg)
         env:
@@ -527,13 +525,13 @@ jobs:
 
       # publish-perf-pr.ts commits WITHOUT --no-verify (deliberate — see its
       # module doc), so the repo's pre-commit hook runs the full unit suite
-      # here, including the license-gated tests/unit/e2e/* (assertLicenseActive
-      # reads ~/.vibecarbon/license). This job is outside the e2e-infra
-      # environment; the secret resolves at REPO level. Run 31898658781 lost
-      # its perf publish to exactly this gap.
-      - name: Materialize license
+      # here, including the licence-gated tests/unit/e2e/*
+      # (assertLicenseSigningKey reads VIBECARBON_LICENSE_PRIVATE_KEY). This job
+      # is outside the e2e-infra environment; the secret resolves at REPO
+      # level. Run 31898658781 lost its perf publish to exactly this gap.
+      - name: Check licence signing key
         env:
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
           # Pulumi downloads third-party provider plugins (vultr, linode) from
           # github:// servers. Unauthenticated, that shares the runner IP's
           # 60/hr GitHub API budget with every other tenant — run 32614839037's
@@ -542,26 +540,20 @@ jobs:
           # Pulumi honors GITHUB_TOKEN for exactly this.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -z "$VIBECARBON_TEST_LICENSE_KEY" ]; then
-            echo "::error::VIBECARBON_TEST_LICENSE_KEY secret is not set — the pre-commit unit suite cannot run."
+          if [ -z "$VIBECARBON_LICENSE_PRIVATE_KEY" ]; then
+            echo "::error::VIBECARBON_LICENSE_PRIVATE_KEY secret is not set — the pre-commit unit suite cannot run."
             exit 1
           fi
-          mkdir -p ~/.vibecarbon
-          umask 177
-          printf '{"key":"%s","customerId":"%s","activatedAt":"2026-01-01T00:00:00.000Z"}\n' \
-            "$VIBECARBON_TEST_LICENSE_KEY" \
-            "$(echo "$VIBECARBON_TEST_LICENSE_KEY" | cut -d- -f3)" \
-            > ~/.vibecarbon/license
 
       - name: Merge perf data, re-render surfaces, and open PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # The publisher pushes WITHOUT --no-verify, so husky's pre-push gate
-          # spawns the INTEGRATION suite — whose harness reads this env var
-          # directly (run-cli.ts), independent of the ~/.vibecarbon/license
-          # file the step above materialized. Run 32309395314's perf publish
-          # died on 131 integration failures for want of exactly this line.
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          # spawns the INTEGRATION suite — whose licence stub signs its verdicts
+          # with this key. The step above only CHECKS the secret; it does not
+          # export it here. Run 32309395314's perf publish died on 131
+          # integration failures for want of exactly this line.
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
           # Pulumi downloads third-party provider plugins (vultr, linode) from
           # github:// servers. Unauthenticated, that shares the runner IP's
           # 60/hr GitHub API budget with every other tenant — run 32614839037's
