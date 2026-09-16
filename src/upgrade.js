@@ -494,6 +494,19 @@ async function main(cliArgs) {
     }
 
     const storedHash = storedChecksums[relPath];
+
+    // The template's copy is the same one this project was last upgraded to
+    // (or created from), so the only difference is the user's own edit and
+    // there is no upgrade to apply. Without this, a customized file gets
+    // queued as "you modified this" on every run, with Replace as the default
+    // — and since replacing re-records the template hash, restoring the
+    // customization sets the same trap for the next upgrade. -force still
+    // resets everything below, by explicit request.
+    if (!args.force && storedHash && newHash === storedHash) {
+      unchanged.push(relPath);
+      continue;
+    }
+
     const userModified = storedHash ? currentHash !== storedHash : true;
 
     if (args.force) {

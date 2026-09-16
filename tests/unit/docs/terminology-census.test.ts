@@ -26,12 +26,10 @@ const ROOT = join(import.meta.dirname, '..', '..', '..');
 // LICENSE files exempt (legal text).
 //
 // Deliberately NOT here, do not "helpfully" add:
-// - docs/ROADMAP.md: a living tracker with dated tails — its shipped-item
-//   entries are write-once historical
-//   record (e.g. "Diamond tier retired", or citing a milestone whose actual
-//   PR title contained "reference provider"). Adding it would either force
-//   rewriting history to sound current (wrong) or drown the census in
-//   false positives on legitimate dated citations.
+// - a roadmap file: the roadmap lives in Notion (decided 2026-09-16), not in
+//   this repo. A dated tracker's shipped-item entries are write-once
+//   historical record; sweeping one would either force rewriting history to
+//   sound current (wrong) or drown the census in false positives.
 // - carbon/content/docs/analytics.mdx (part of the carbon/content/** Tier-1
 //   entry): its one "open source" hit describes third-party Plausible
 //   Analytics, not Vibecarbon — true, unrelated to the Fair Source/FSL ban.
