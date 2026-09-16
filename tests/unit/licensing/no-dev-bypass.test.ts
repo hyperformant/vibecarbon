@@ -77,12 +77,12 @@ const CLOCK_READ_RE = /\bDate\.now\s*\(|\bnew Date\s*\(/g;
  *   - check.js (1): stamps `checkedAt` into the verdict cache. Display only,
  *     nothing reads it back, and a cached verdict is trusted solely because
  *     its token verifies.
- *   - index.js (3): todayUtc() supplies the DEFAULT `now` the deploy gate
- *     compares against a SERVER-SIGNED periodEnd, plus the two `activatedAt`
- *     stamps activateLicense writes into the stored files. Moving the
- *     machine clock can only end a grace period sooner or later; it can
- *     never manufacture a subscription, because `now` is never consulted
- *     without a verified verdict, and `activatedAt` feeds no decision.
+ *   - index.js (2): todayUtc() supplies the DEFAULT `now` the deploy gate
+ *     compares against a SERVER-SIGNED periodEnd, plus the `activatedAt`
+ *     stamp activateLicense writes into the stored file. Moving the machine
+ *     clock can only end a grace period sooner or later; it can never
+ *     manufacture a subscription, because `now` is never consulted without
+ *     a verified verdict, and `activatedAt` feeds no decision.
  *   - entitlement.js (1): utcMsToYmd()'s `new Date(ms)` formats an ALREADY-
  *     COMPUTED epoch millisecond value (from ymdToUtcMs() arithmetic over a
  *     verified periodEnd) back into 'YYYY-MM-DD'. It never reads the machine
@@ -94,7 +94,7 @@ const CLOCK_READ_RE = /\bDate\.now\s*\(|\bnew Date\s*\(/g;
  */
 const ALLOWED_CLOCK_READS: Record<string, number> = {
   'check.js': 1,
-  'index.js': 3,
+  'index.js': 2,
   'entitlement.js': 1,
   'validator.js': 1,
 };
