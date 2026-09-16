@@ -172,6 +172,24 @@ describe('vibecarbon upgrade', () => {
     expect(JSON.parse(readFileSync(biomePath, 'utf-8')).root).toBe(true);
   });
 
+  it('leaves a customized file alone when the template has not changed it since the last upgrade — there is nothing to offer, so it must not be queued for review', () => {
+    // Loop seen 2026-09-16 on vibecarbon-web: AGENTS.md and the .claude/agents
+    // definitions were hand-reconciled after a 0.43.1 upgrade; 0.44.1 shipped
+    // the identical template content, yet every upgrade re-queued them as
+    // "modified by you" with Replace as the default and clobbered the
+    // customization on enter-through. Restoring the file recorded nothing
+    // new, so the next upgrade did it again. A file whose incoming template
+    // hash equals the stored checksum has no upgrade to apply.
+    const agentsPath = join(project, 'AGENTS.md');
+    writeFileSync(agentsPath, `${readFileSync(agentsPath, 'utf-8')}\n## Site-specific notes\n`);
+
+    const r = runCli('upgrade', ['-dry', '-y'], { cwd: project, timeoutMs: 60_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(r.stdout + r.stderr).not.toMatch(/AGENTS\.md/);
+  });
+
   it('refuses outside a vibecarbon project', () => {
     const r = runCli('upgrade', ['-y'], { cwd: '/tmp', timeoutMs: 15_000 });
     assertExitWith(r, 1, /Not in a Vibecarbon project/i);
