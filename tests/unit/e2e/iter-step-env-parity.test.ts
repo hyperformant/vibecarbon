@@ -30,8 +30,8 @@ describe('e2eCliEnv', () => {
     // Disposable rigs: -y deploys need an operator CIDR list.
     expect(env.ALLOWED_SSH_IPS).toBe('0.0.0.0/0,::/0');
     // No license bypass is handed to the child: the harness activates a
-    // genuine signed key (VIBECARBON_TEST_LICENSE_KEY) at ~/.vibecarbon/
-    // license instead, the same path a customer walks. The old
+    // genuine signed key and lets the CLI ask the licence API for a signed
+    // verdict, the same path a customer walks. The old
     // VIBECARBON_DEV_LICENSE=true skipped Ed25519 verification outright, and
     // it shipped in the npm tarball — see tests/unit/licensing/
     // no-dev-bypass.test.ts.
@@ -107,8 +107,10 @@ describe('test harnesses use a real signed license, not a bypass', () => {
   const runCli = read('tests', 'integration', '_harness', 'run-cli.ts');
   const e2eEnv = read('tests', 'e2e', 'utils', 'e2e-env.js');
 
-  it('the integration harness sources its key from VIBECARBON_TEST_LICENSE_KEY', () => {
-    expect(runCli).toContain('VIBECARBON_TEST_LICENSE_KEY');
+  it('the integration harness never sources a licence key', () => {
+    // A key alone entitles nothing now: the binding lives on vibecarbon.com,
+    // and tests that need a verdict point the CLI at the local stub instead.
+    expect(runCli).not.toContain('LICENSE_KEY');
   });
 
   it('no harness still seeds the unsignable placeholder key', () => {

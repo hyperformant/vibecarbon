@@ -82,13 +82,13 @@ describe('local e2e runs never publish performance surfaces', () => {
 describe('hook-bearing git publishers carry the license key', () => {
   // CLASS (run 32309395314's perf publish, 2026-08-19): a workflow step that
   // git-commits/pushes WITHOUT --no-verify runs the repo's husky hooks —
-  // pre-push spawns the INTEGRATION suite, whose harness reads
-  // process.env.VIBECARBON_TEST_LICENSE_KEY directly (run-cli.ts). The perf
-  // job materialized ~/.vibecarbon/license for the pre-commit unit suite but
+  // pre-push spawns the INTEGRATION suite, whose licence stub signs its
+  // verdicts with process.env.VIBECARBON_LICENSE_PRIVATE_KEY. The perf job
+  // materialized ~/.vibecarbon/license for the pre-commit unit suite but
   // never exported the env var to the publishing step, so the push died on
-  // 131 integration failures. The license FILE is not enough; the ENV VAR
-  // must reach the step that runs git.
-  it('every workflow step that runs a hook-bearing git publisher exports VIBECARBON_TEST_LICENSE_KEY', () => {
+  // 131 integration failures. A licence FILE is not enough; the signing-key
+  // ENV VAR must reach the step that runs git.
+  it('every workflow step that runs a hook-bearing git publisher exports VIBECARBON_LICENSE_PRIVATE_KEY', () => {
     const { readdirSync } = require('node:fs') as typeof import('node:fs');
     const dir = join(ROOT, '.github', 'workflows');
     // The publishers that git-commit/push through husky hooks. Grown, not
@@ -110,7 +110,7 @@ describe('hook-bearing git publishers carry the license key', () => {
         if (!/\brun:/.test(code) || !HOOK_BEARING.test(code)) continue;
         const label = `${f}: ${step.split('\n', 1)[0].replace(/^name:\s*/, '')}`;
         found.push(label);
-        if (!step.includes('VIBECARBON_TEST_LICENSE_KEY')) missing.push(label);
+        if (!step.includes('VIBECARBON_LICENSE_PRIVATE_KEY')) missing.push(label);
       }
     }
     // Sanity: the census must actually see both known publishers, or it is
@@ -119,7 +119,7 @@ describe('hook-bearing git publishers carry the license key', () => {
     expect(found.join('\n')).toMatch(/release/i);
     expect(
       missing,
-      'these steps run a hook-bearing git publisher without exporting VIBECARBON_TEST_LICENSE_KEY — ' +
+      'these steps run a hook-bearing git publisher without exporting VIBECARBON_LICENSE_PRIVATE_KEY — ' +
         'the pre-push integration suite will fail the push (see run 32309395314 perf publish)',
     ).toEqual([]);
   });

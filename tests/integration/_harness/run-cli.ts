@@ -11,74 +11,25 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { loadE2EEnvFile } from '../../e2e/utils/e2e-env-file.js';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
 
 /**
- * The real, Ed25519-signed legacy lifetime key these tests activate. It
- * covers every project and never lapses.
- *
- * This used to be the literal `vc-f-deadbeef-fakefakefakefakefake` paired
- * with VIBECARBON_DEV_LICENSE=true, which made validateLicenseKey skip
- * signature verification. That switch shipped inside the npm package (the
- * tarball is src/ verbatim, no build step), so it doubled as a free lifetime
- * grant for any customer who opened validator.js. It is gone; the harness now
- * activates a genuine key, which is also the path a customer walks.
- *
- * Mint one with:
- *   VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com
- */
-export function testLicenseKey(): string {
-  if (!process.env.VIBECARBON_TEST_LICENSE_KEY) {
-    // Same gitignored operator file the e2e harness reads; real env wins.
-    loadE2EEnvFile(join(REPO_ROOT, 'tests', '.env.e2e'), process.env);
-  }
-
-  const key = process.env.VIBECARBON_TEST_LICENSE_KEY;
-  if (!key) {
-    throw new Error(
-      'VIBECARBON_TEST_LICENSE_KEY is not set.\n' +
-        'Integration tests spawn paid commands (deploy/backup/restore/scale/failover)\n' +
-        'which gate on a real license — there is no dev bypass any more.\n\n' +
-        'Set it in your shell or in tests/.env.e2e:\n' +
-        '  VIBECARBON_TEST_LICENSE_KEY=vc-f-...\n\n' +
-        'Mint one with:\n' +
-        '  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com',
-    );
-  }
-  return key;
-}
-
-/**
- * Per-process fake HOME with a legacy lifetime license activated, so tests
- * reach the off-TTY guard / arg-parse logic that's actually under test
- * instead of stopping at requireLicense().
+ * Per-process fake HOME, so CLI children never read or write the developer's
+ * real ~/.vibecarbon. No licence is seeded: a key alone entitles nothing now
+ * — the binding lives on vibecarbon.com, and tests that need a verdict point
+ * the CLI at the local licence stub (see tests/e2e/utils/license-stub.js)
+ * through `apiBase`.
  */
 let FAKE_HOME: string | null = null;
 function getFakeHome(): string {
   if (FAKE_HOME) return FAKE_HOME;
-  const key = testLicenseKey();
   FAKE_HOME = mkdtempSync(join(tmpdir(), 'vibecarbon-fake-home-'));
   mkdirSync(join(FAKE_HOME, '.vibecarbon'), { recursive: true });
-  // File path is ~/.vibecarbon/license (no .json extension — see
-  // src/lib/licensing/index.js LICENSE_FILE).
-  writeFileSync(
-    join(FAKE_HOME, '.vibecarbon', 'license'),
-    JSON.stringify(
-      {
-        key,
-        customerId: key.split('-')[2],
-        activatedAt: '2026-01-01T00:00:00.000Z',
-      },
-      null,
-      2,
-    ),
-  );
   return FAKE_HOME;
 }
 
@@ -97,6 +48,12 @@ export interface RunOptions {
    * the stub log instead of going to real binaries.
    */
   execStubs?: { binPath: string };
+  /**
+   * Base URL for vibecarbon.com's licence API. Defaults to a closed port so
+   * no test ever reaches the real network by accident; point it at a
+   * startLicenseStub() baseUrl to serve real signed verdicts.
+   */
+  apiBase?: string;
 }
 
 export interface RunResult {
@@ -119,10 +76,12 @@ export function runCli(verb: string, flags: string[], opts: RunOptions = {}): Ru
       ...process.env,
       NO_COLOR: '1',
       FORCE_COLOR: '0',
-      // Point HOME at a per-process tmp with a real legacy lifetime license
-      // activated, so paid commands clear requireLicense() and tests reach
-      // the off-TTY/arg-parse logic actually under test.
+      // Point HOME at a per-process tmp so CLI children never touch the
+      // developer's real ~/.vibecarbon.
       HOME: getFakeHome(),
+      // A closed port by default: an unstubbed licence call fails fast as
+      // 'unreachable' instead of hitting production vibecarbon.com.
+      VIBECARBON_API_BASE: opts.apiBase ?? 'http://127.0.0.1:9',
       // Prepend exec stub binPath so calls to ssh/docker/kubectl/etc.
       // hit the stub log, not real binaries.
       ...(opts.execStubs ? { PATH: `${opts.execStubs.binPath}:${process.env.PATH ?? ''}` } : {}),

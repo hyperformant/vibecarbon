@@ -13,6 +13,7 @@
  *     } from '../../_harness/index.js';
  */
 
+export { signingKeyOrNull, startLicenseStub } from '../../e2e/utils/license-stub.js';
 export * from './assertions.js';
 export * from './exec-stubs.js';
 export * from './real-project.js';
