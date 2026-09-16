@@ -20,13 +20,33 @@ import { validateLicenseKey } from '../../../src/lib/licensing/validator.js';
 import { loadE2EEnvFile } from './e2e-env-file.js';
 
 const REPO_ROOT = new URL('../../..', import.meta.url).pathname;
+const DEFAULT_ENV_FILE = join(REPO_ROOT, 'tests', '.env.e2e');
 const ACTIVE = new Set(['active', 'trialing', 'past_due']);
+// What a subscription ROW may hold. Narrower than the verdict vocabulary:
+// 'unbound' / 'wrong_project' / 'none' are derived per-request by /check.
+const SEEDABLE_STATUSES = new Set(['active', 'trialing', 'past_due', 'canceled']);
+const SEEDABLE_TIERS = new Set(['graphene', 'fullerene']);
 
-export function signingKeyOrNull(env = process.env) {
-  if (!env.VIBECARBON_LICENSE_PRIVATE_KEY) {
-    loadE2EEnvFile(join(REPO_ROOT, 'tests', '.env.e2e'), env);
+/**
+ * The Ed25519 signing key the stub mints keys and verdicts with: env first,
+ * then the operator's gitignored `tests/.env.e2e`.
+ *
+ * A present-but-EMPTY value counts as absent. `loadE2EEnvFile` only fills keys
+ * that are missing from the target, so a CI job that sets
+ * `VIBECARBON_LICENSE_PRIVATE_KEY: ''` (an unset GitHub secret renders exactly
+ * that) would otherwise pin the empty string and silently skip the file
+ * fallback. Deleting the key first makes the file the fallback it looks like.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [envFilePath] - overridable so tests never read the real file.
+ * @returns {string | null}
+ */
+export function signingKeyOrNull(env = process.env, envFilePath = DEFAULT_ENV_FILE) {
+  if (!env.VIBECARBON_LICENSE_PRIVATE_KEY?.trim()) {
+    delete env.VIBECARBON_LICENSE_PRIVATE_KEY;
+    loadE2EEnvFile(envFilePath, env);
   }
-  return env.VIBECARBON_LICENSE_PRIVATE_KEY || null;
+  return env.VIBECARBON_LICENSE_PRIVATE_KEY?.trim() || null;
 }
 
 function todayYmd() {
@@ -174,6 +194,13 @@ export async function startLicenseStub({ privateKeyPem }) {
       cancelAtPeriodEnd = false,
     }) {
       if (!periodEndYmd) throw new Error('seed: periodEndYmd (YYYY-MM-DD) is required');
+      // A typo'd status would otherwise surface as a signVerdictToken throw
+      // from inside the request handler, i.e. a hung fetch, not a failed
+      // seed. Only the subscription states a ROW can hold are seedable:
+      // 'unbound'/'wrong_project'/'none' are verdicts the routes DERIVE, and
+      // tier 'none' likewise, so none of them are valid seed inputs.
+      if (!SEEDABLE_STATUSES.has(status)) throw new Error(`seed: unknown status '${status}'`);
+      if (!SEEDABLE_TIERS.has(tier)) throw new Error(`seed: unknown tier '${tier}'`);
       state.set(licenseId, {
         projectId: projectId ? projectId.toLowerCase() : null,
         tier,

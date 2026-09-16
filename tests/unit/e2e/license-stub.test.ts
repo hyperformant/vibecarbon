@@ -1,12 +1,12 @@
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { derivePublicKeyPem } from '../../../scripts/generate-license.js';
 import { bindLicense, requestRelease } from '../../../src/lib/licensing/bind.js';
 import { checkLicense } from '../../../src/lib/licensing/check.js';
-import { startLicenseStub } from '../../e2e/utils/license-stub.js';
+import { signingKeyOrNull, startLicenseStub } from '../../e2e/utils/license-stub.js';
 
 const { privateKey } = generateKeyPairSync('ed25519');
 const PEM = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
@@ -90,5 +90,61 @@ describe('license stub', () => {
     expect(
       await bindLicense({ key, projectId: PID, env: { VIBECARBON_API_BASE: stub.baseUrl } }),
     ).toMatchObject({ ok: false, reason: 'unknown_key' });
+  });
+});
+
+describe('seed validation', () => {
+  // A typo'd status would otherwise only surface as a signVerdictToken throw
+  // inside the request handler — i.e. a hung fetch, not a failed seed.
+  it('rejects a status no subscription row can hold', () => {
+    const { licenseId } = stub.mintKey();
+    expect(() => stub.seed({ licenseId, status: 'bogus', periodEndYmd: '2026-12-31' })).toThrow(
+      "seed: unknown status 'bogus'",
+    );
+    // Verdict-only vocabulary is derived by /check, never seeded.
+    expect(() => stub.seed({ licenseId, status: 'unbound', periodEndYmd: '2026-12-31' })).toThrow(
+      "seed: unknown status 'unbound'",
+    );
+  });
+
+  it('rejects a tier no subscription row can hold', () => {
+    const { licenseId } = stub.mintKey();
+    expect(() => stub.seed({ licenseId, tier: 'none', periodEndYmd: '2026-12-31' })).toThrow(
+      "seed: unknown tier 'none'",
+    );
+  });
+});
+
+describe('signingKeyOrNull', () => {
+  // Always a PLAIN OBJECT env, never process.env: signingKeyOrNull mutates
+  // what it is handed (it deletes an empty key and lets the file fill it).
+  const PEM_IN_FILE = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----';
+
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-envfile-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns an env value as-is without reading the file', () => {
+    const env = { VIBECARBON_LICENSE_PRIVATE_KEY: 'from-env' } as NodeJS.ProcessEnv;
+    // Nonexistent path: a read would be the only way this could differ.
+    expect(signingKeyOrNull(env, join(dir, 'does-not-exist'))).toBe('from-env');
+  });
+
+  it('treats a present-but-empty value as absent and falls back to the file', () => {
+    // An unset GitHub secret renders as exactly this. loadE2EEnvFile only
+    // fills ABSENT keys, so without the delete this would pin '' forever.
+    const file = join(dir, '.env.e2e');
+    writeFileSync(file, `VIBECARBON_LICENSE_PRIVATE_KEY='${PEM_IN_FILE}'\n`);
+    const env = { VIBECARBON_LICENSE_PRIVATE_KEY: '' } as NodeJS.ProcessEnv;
+    // Multi-line, so this also proves the single-quoted dotenv round-trip.
+    expect(signingKeyOrNull(env, file)).toBe(PEM_IN_FILE);
+  });
+
+  it('returns null when neither the env nor a file supplies one', () => {
+    expect(signingKeyOrNull({} as NodeJS.ProcessEnv, join(dir, 'does-not-exist'))).toBeNull();
   });
 });

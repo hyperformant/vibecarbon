@@ -107,10 +107,12 @@ describe('test harnesses use a real signed license, not a bypass', () => {
   const runCli = read('tests', 'integration', '_harness', 'run-cli.ts');
   const e2eEnv = read('tests', 'e2e', 'utils', 'e2e-env.js');
 
-  it('the integration harness never sources a licence key', () => {
+  it('the integration harness never sources a licence key or the signing key', () => {
     // A key alone entitles nothing now: the binding lives on vibecarbon.com,
     // and tests that need a verdict point the CLI at the local stub instead.
-    expect(runCli).not.toContain('LICENSE_KEY');
+    // The signing key is matched too — only the stub process may hold it, and
+    // a bare 'LICENSE_KEY' substring would not catch VIBECARBON_LICENSE_PRIVATE_KEY.
+    expect(runCli).not.toMatch(/LICENSE_(PRIVATE_)?KEY/);
   });
 
   it('no harness still seeds the unsignable placeholder key', () => {
