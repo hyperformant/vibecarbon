@@ -9,10 +9,12 @@
  * injected via `publicKeyPem`. Only `key` is cryptographically checked; the
  * file's other fields are display data and are never trusted.
  */
+import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   activateLicense,
@@ -54,6 +56,40 @@ const okBind = vi.fn(async () => ({
   text: async () => JSON.stringify(BIND_OK),
 })) as unknown as typeof fetch;
 
+const MODULE_URL = pathToFileURL(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../../src/lib/licensing/index.js'),
+).href;
+
+/**
+ * Load the licensing module in a CHILD node process under a fake HOME and
+ * report what getLicense() makes of `projectDir`, plus the homedir() that
+ * child actually saw.
+ *
+ * It has to be a child. Swapping `process.env.HOME` in-process does not
+ * work here: tests/setup/global-setup.ts's afterEach does
+ * `process.env = { ...originalEnv }`, which replaces Node's magic env object
+ * with a plain one, after which assigning HOME no longer reaches the real
+ * environment that os.homedir() reads. A HOME swap in this worker would
+ * silently do nothing and the test would pass no matter what the code did —
+ * which is exactly the hole this test exists to close.
+ */
+function probeUnderHome(home: string, projectDir: string, pubPath: string) {
+  const script = `
+    import { homedir } from 'node:os';
+    import { readFileSync } from 'node:fs';
+    import { getLicense } from ${JSON.stringify(MODULE_URL)};
+    const [projectDir, pubPath] = process.argv.slice(1);
+    const license = getLicense({ projectDir, publicKeyPem: readFileSync(pubPath, 'utf8') });
+    console.log(JSON.stringify({ home: homedir(), active: license.active }));
+  `;
+  const out = execFileSync(
+    process.execPath,
+    ['--input-type=module', '-e', script, projectDir, pubPath],
+    { encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home } },
+  );
+  return JSON.parse(out) as { home: string; active: boolean };
+}
+
 describe('getLicense', () => {
   it('is inactive with no file', () => {
     expect(getLicense({ projectDir: dir, publicKeyPem: PUB })).toMatchObject({
@@ -85,15 +121,29 @@ describe('getLicense', () => {
     writeFileSync(licensePath(dir), '{not json');
     expect(getLicense({ projectDir: dir, publicKeyPem: PUB }).active).toBe(false);
   });
-  it('never reads ~/.vibecarbon/license', () => {
+  it('never reads ~/.vibecarbon/license, and does read the project file', () => {
+    // The legacy slot was `~/.vibecarbon/license`, and its path was a
+    // MODULE-LEVEL constant computed from homedir() at import time. So the
+    // decoy has to sit at that exact path, and the module has to be loaded
+    // fresh with HOME already pointing at this fake home.
     const home = mkdtempSync(join(tmpdir(), 'vc-home-'));
-    writeFileSync(join(home, 'license'), JSON.stringify({ key: KEY }));
-    const saved = process.env.HOME;
-    process.env.HOME = home;
+    mkdirSync(join(home, '.vibecarbon'), { recursive: true });
+    writeFileSync(join(home, '.vibecarbon', 'license'), JSON.stringify({ key: KEY }));
+    const pubPath = join(home, 'public.pem');
+    writeFileSync(pubPath, PUB);
     try {
-      expect(getLicense({ projectDir: dir, publicKeyPem: PUB }).active).toBe(false);
+      const decoyOnly = probeUnderHome(home, dir, pubPath);
+      // The swap took: without this the two assertions below would be
+      // measuring the real home directory and could never fail.
+      expect(decoyOnly.home).toBe(home);
+      expect(decoyOnly.active).toBe(false);
+
+      // Positive control under the SAME fake home: the identical key in the
+      // project file IS honoured, so the refusal above is isolation from the
+      // legacy slot, not a fixture key that stopped verifying.
+      writeFileSync(licensePath(dir), JSON.stringify({ key: KEY }));
+      expect(probeUnderHome(home, dir, pubPath).active).toBe(true);
     } finally {
-      process.env.HOME = saved;
       rmSync(home, { recursive: true, force: true });
     }
   });
@@ -150,6 +200,16 @@ describe('activateLicense', () => {
     });
     expect(r).toMatchObject({ success: false, reason: 'no-project' });
     expect(r.error).toMatch(/vibecarbon create/);
+  });
+  it('refuses on a corrupt manifest, before any network call', async () => {
+    // loadManifest() JSON.parses unguarded, so this is the throw
+    // currentManifestProjectId()'s try/catch has to swallow: a broken
+    // .vibecarbon.json must read as "no project here", never crash activate.
+    writeFileSync(join(dir, '.vibecarbon.json'), '{not json');
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const r = await activateLicense(KEY, { projectDir: dir, publicKeyPem: PUB, env, fetchImpl });
+    expect(r).toMatchObject({ success: false, reason: 'no-project' });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
   it('writes nothing when the server refuses or is unreachable', async () => {
     const refuse = vi.fn(async () => ({
