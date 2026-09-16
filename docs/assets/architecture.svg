@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="512" viewBox="0 0 880 512" role="img" aria-label="vibecarbon deploy fans out to four scenarios — compose, compose-ha, k8s, and k8s-ha — all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway">
-<!-- Architecture graphic: one command, four deploy scenarios, five providers.
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="512" viewBox="0 0 880 512" role="img" aria-label="vibecarbon deploy fans out to three scenarios — compose, k8s, and k8s-ha — all landing on Hetzner, DigitalOcean, Linode, Vultr, or Scaleway">
+<!-- Architecture graphic: one command, three deploy scenarios, five providers.
      Hand-authored. Provider marks are simple-icons (CC0) path data. -->
 <defs>
   <linearGradient id="arch-bg" x1="0" y1="0" x2="0" y2="512" gradientUnits="userSpaceOnUse">
@@ -47,58 +47,49 @@
 
 <!-- fan-out connectors -->
 <g fill="none" stroke-width="1.5" stroke-opacity="0.55">
-  <path d="M440 98 C440 128 131 132 131 162" stroke="#5EEAD4"/>
-  <path d="M440 98 C440 128 337 132 337 162" stroke="#2DD4BF"/>
-  <path d="M440 98 C440 128 543 132 543 162" stroke="#14B8A6"/>
-  <path d="M440 98 C440 128 749 132 749 162" stroke="#0D9488"/>
+  <path d="M440 98 C440 128 162 132 162 162" stroke="#5EEAD4"/>
+  <path d="M440 98 L440 162" stroke="#2DD4BF"/>
+  <path d="M440 98 C440 128 718 132 718 162" stroke="#0D9488"/>
 </g>
-<circle cx="131" cy="164" r="3" fill="#5EEAD4"/>
-<circle cx="337" cy="164" r="3" fill="#2DD4BF"/>
-<circle cx="543" cy="164" r="3" fill="#14B8A6"/>
-<circle cx="749" cy="164" r="3" fill="#0D9488"/>
+<circle cx="162" cy="164" r="3" fill="#5EEAD4"/>
+<circle cx="440" cy="164" r="3" fill="#2DD4BF"/>
+<circle cx="718" cy="164" r="3" fill="#0D9488"/>
 
-<!-- tier 2: four scenarios -->
-<text x="440" y="152" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" letter-spacing="3" fill="#2DD4BF">FOUR SCENARIOS</text>
+<!-- tier 2: three scenarios -->
+<text x="440" y="152" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" font-weight="600" letter-spacing="3" fill="#2DD4BF">THREE SCENARIOS</text>
 
 <g font-family="ui-monospace,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace">
   <!-- compose -->
-  <rect x="36" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
-  <rect x="48" y="170" width="166" height="3" rx="1.5" fill="#5EEAD4"/>
-  <text x="131" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">compose</text>
-  <text x="131" y="250" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one server</text>
-
-  <!-- compose-ha -->
-  <rect x="242" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
-  <rect x="254" y="170" width="166" height="3" rx="1.5" fill="#2DD4BF"/>
-  <text x="337" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">compose-ha</text>
-  <text x="337" y="240" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">primary + standby</text>
-  <text x="337" y="260" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">streaming replication</text>
-  <rect x="390" y="182" width="30" height="18" rx="9" fill="none" stroke="#2DD4BF" stroke-opacity="0.7"/>
-  <text x="405" y="195" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9" font-weight="700" letter-spacing="1" fill="#2DD4BF">HA</text>
+  <rect x="36" y="170" width="252" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
+  <rect x="48" y="170" width="228" height="3" rx="1.5" fill="#5EEAD4"/>
+  <text x="162" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">compose</text>
+  <text x="162" y="248" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one server</text>
+  <text x="162" y="271" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#5EEAD4">Graphite · free</text>
 
   <!-- k8s -->
-  <rect x="448" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
-  <rect x="460" y="170" width="166" height="3" rx="1.5" fill="#14B8A6"/>
-  <text x="543" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s</text>
-  <text x="543" y="240" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">k3s cluster</text>
-  <text x="543" y="260" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">autoscaling workers</text>
+  <rect x="314" y="170" width="252" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
+  <rect x="326" y="170" width="228" height="3" rx="1.5" fill="#2DD4BF"/>
+  <text x="440" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s</text>
+  <text x="440" y="238" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">k3s cluster</text>
+  <text x="440" y="256" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">autoscaling workers</text>
+  <text x="440" y="277" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#2DD4BF">Graphene</text>
 
   <!-- k8s-ha -->
-  <rect x="654" y="170" width="190" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
-  <rect x="666" y="170" width="166" height="3" rx="1.5" fill="#0D9488"/>
-  <text x="749" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s-ha</text>
-  <text x="749" y="240" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">multi-region</text>
-  <text x="749" y="260" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one-command failover</text>
-  <rect x="802" y="182" width="30" height="18" rx="9" fill="none" stroke="#14B8A6" stroke-opacity="0.7"/>
-  <text x="817" y="195" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9" font-weight="700" letter-spacing="1" fill="#14B8A6">HA</text>
+  <rect x="592" y="170" width="252" height="120" rx="12" fill="#0F1D20" stroke="#1F3A3D"/>
+  <rect x="604" y="170" width="228" height="3" rx="1.5" fill="#0D9488"/>
+  <text x="718" y="212" text-anchor="middle" font-size="16" font-weight="600" fill="#EEF3F4">k8s-ha</text>
+  <text x="718" y="238" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">multi-region</text>
+  <text x="718" y="256" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9FB8B6">one-command failover</text>
+  <text x="718" y="277" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" font-weight="700" letter-spacing="0.5" fill="#0D9488">Fullerene</text>
+  <rect x="802" y="182" width="30" height="18" rx="9" fill="none" stroke="#0D9488" stroke-opacity="0.7"/>
+  <text x="817" y="195" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9" font-weight="700" letter-spacing="1" fill="#0D9488">HA</text>
 </g>
 
 <!-- convergence into the carbon node -->
 <g fill="none" stroke-width="1.5" stroke-opacity="0.55">
-  <path d="M131 294 C131 318 440 312 440 330" stroke="#5EEAD4"/>
-  <path d="M337 294 C337 318 440 314 440 330" stroke="#2DD4BF"/>
-  <path d="M543 294 C543 318 440 314 440 330" stroke="#14B8A6"/>
-  <path d="M749 294 C749 318 440 312 440 330" stroke="#0D9488"/>
+  <path d="M162 294 C162 318 440 312 440 330" stroke="#5EEAD4"/>
+  <path d="M440 294 L440 330" stroke="#2DD4BF"/>
+  <path d="M718 294 C718 318 440 312 440 330" stroke="#0D9488"/>
 </g>
 <path d="M440 332 L451.3 338.5 L451.3 351.5 L440 358 L428.7 351.5 L428.7 338.5 Z" fill="url(#arch-hex)" filter="url(#arch-glow)"/>
 <line x1="440" y1="358" x2="440" y2="380" stroke="#2DD4BF" stroke-width="1.5" stroke-opacity="0.55"/>
@@ -134,5 +125,5 @@
 </g>
 
 <!-- footer -->
-<text x="440" y="480" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#7C9693">automated SSL + backups in every mode · picked per environment · switch anytime</text>
+<text x="440" y="480" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#7C9693">automated SSL + backups in every mode · k8s and k8s-ha on Hetzner and DigitalOcean today, more soon · switch anytime</text>
 </svg>
