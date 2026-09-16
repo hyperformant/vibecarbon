@@ -117,6 +117,7 @@ describe('evaluateDeployEntitlement', () => {
       },
     });
     expect(r).toMatchObject({ ok: false, reason: 'unbound', requiredTier: 'graphene' });
+    expect(r).not.toHaveProperty('warning');
   });
 
   it('wrong_project verdict blocks with reason wrong-project, no grace', () => {
@@ -137,6 +138,7 @@ describe('evaluateDeployEntitlement', () => {
       },
     });
     expect(r).toMatchObject({ ok: false, reason: 'wrong-project', requiredTier: 'fullerene' });
+    expect(r).not.toHaveProperty('warning');
   });
 
   it('active graphene, periodEnd within grace, k8s -> ok, no warning', () => {
