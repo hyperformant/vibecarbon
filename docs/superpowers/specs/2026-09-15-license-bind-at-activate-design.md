@@ -16,7 +16,7 @@ Nobody has purchased a licence on any version, so there is nothing to stay compa
 | Question | Decision |
 |---|---|
 | Does a licence belong to an account? | Yes. Stripe Checkout still collects only an email. The purchase email carries a Supabase magic link; the account is created on first click. No signup wall before payment. |
-| Moving a subscription to another project | Release + rebind, self-serve from the CLI (`deactivate`) or the dashboard (later workstream). One project at a time. |
+| Moving a subscription to another project | Release + rebind, self-serve. `deactivate` from the CLI triggers a release link to the buyer's email (the key alone never releases; see §2a); the dashboard (later workstream) releases directly. Every bind and release is announced to the buyer by email. One project at a time. |
 | Key shape | One project-less key. Binding is server state only ("option B"). The CLI never infers the project from the key. |
 | Backwards compatibility | None. Clean sweep of v1 and v2 code, fixtures, env vars, and docs. |
 
@@ -49,6 +49,10 @@ The table has no real rows, so this is a redefinition, not an evolution:
 
 Lookup index becomes `(license_id)` (covered by the unique constraint) plus the existing unfulfilled index. `customer_hash`'s lookup index is dropped with the column.
 
+### `license_release_tokens` (new, same migration)
+
+`nonce TEXT PRIMARY KEY`, `license_id TEXT NOT NULL REFERENCES license_subscriptions(license_id)`, `issued_at TIMESTAMPTZ NOT NULL`, `used_at TIMESTAMPTZ NULL`. Rows exist only to make a token single-use; a nightly delete of rows older than 24 h keeps it small. RLS enabled, no policies (server-only via the admin client).
+
 ## 2. API (vibecarbon-web, `src/server/routes/v1/license.ts`)
 
 Every route takes the key as proof. The server verifies the signature, extracts `licenseId`, and loads the row by `license_id`. A key that verifies but has no row is `401 { error: 'unknown_key' }` (same class of refusal as a bad signature).
@@ -56,14 +60,26 @@ Every route takes the key as proof. The server verifies the signature, extracts 
 | Route | Body | Behaviour |
 |---|---|---|
 | `POST /bind` **new** | `{ key, projectId, cliVersion }` | `project_id IS NULL` → set `project_id`, `bound_at`; `200 { projectId, tier, status, periodEnd }`. Already bound to **this** project → same `200` (idempotent; re-running `activate` in a fresh clone is harmless). Bound to **another** project → `409 { error: 'bound_to_other_project' }` (the other project id is **not** returned). Another active subscription already bound to this project → `409 { error: 'project_already_licensed', switchPlan: boolean }` (this check moves here from checkout). Row status not `active`/`past_due` → `403 { error: 'subscription_inactive' }`. |
-| `POST /release` **new** | `{ key }` | Sets `project_id = NULL`, `bound_at = NULL`. `200 { released: true }`. Idempotent (already unbound → same response). Works whatever the subscription status, so a lapsed key can still be cleaned up. |
+| `POST /release` **new** | `{ key }` | Does **not** release. Emails the buyer a one-time release link and answers `200 { sent: true }` (same shape as `/portal`, for the same reason: the key is proof, not authority; see §2a). Already unbound → still `200 { sent: true }` with a "nothing to release" email, so the response never reveals binding state. Works whatever the subscription status, so a lapsed key can still be cleaned up. |
+| `GET /release/confirm?t=<token>` **new** | — | The emailed link. `t` is a signed, single-use token (`licenseId`, `projectId` at issue time, `exp` = issue + 1 h, random nonce) verified with the licence signing key and burned in a `license_release_tokens` table on use. Valid → `project_id = NULL`, `bound_at = NULL`, redirect to `/license?released=1`. Expired, reused, or the binding changed since issue → redirect to `/license?released=0&reason=<expired\|used\|stale>`. No JSON body: this is a browser destination. |
 | `POST /check` **changed** | `{ key, projectId, cliVersion }` | `projectId` is now **required** (the server used to read it out of the key). Unbound row → verdict `status: 'unbound'`. Bound to a different project → `status: 'wrong_project'`. Otherwise unchanged: `active` / `past_due` / `canceled`, tier, `periodEnd`, `cancelAtPeriodEnd`. The signed verdict token embeds the **requested** `projectId` in every case so the CLI's cache (keyed by project) stays consistent; for `unbound`/`wrong_project` the tier is `'none'`. |
 | `POST /status` **new** | `{ key }` | Browser-facing read for the `/license` page: `200 { tier, status, periodEnd, cancelAtPeriodEnd, projectId: uuid \| null }`. No verdict token, no `projectId` input, never used by the CLI. Exists so `/check` can keep `projectId` required. |
 | `POST /resend`, `POST /portal` | unchanged | Already work from the key alone. `/resend` mails the key; `/portal` mails a Customer Portal link. Both keep emailing rather than returning, for the reasons in `License.tsx`'s header comment. |
 
 `VerdictStatus` (`src/server/billing/license-catalog.ts`) becomes `'active' | 'past_due' | 'canceled' | 'unbound' | 'wrong_project' | 'none'`. `'none'` remains "no row" (used only when the key is unknown, which is already a 401, so in practice the CLI sees it only from a hand-built token — keep it for the type's completeness and the existing tests).
 
-Rate limiting: `/bind` and `/release` join the existing per-key limiter (`lastSentAt` map) with the same window as `/resend`.
+### 2a. Why release is confirmed by email, and why every bind/release is announced
+
+The key is a bearer string that the design tells buyers to **commit** to their repository. That is only safe while the key can *prove* things, never *do* things — the existing `/resend` and `/portal` routes email the buyer rather than act for exactly this reason (`License.tsx` header comment). A `/release` that acted on the key alone would let anyone who can read the repo (public repo, fork, ex-contractor, leaked CI log) unbind the subscription — blocking every deploy — and then `/bind` it to their own project, taking the paid plan with them. Brute force is not the threat (the Ed25519 signature makes guessing a key infeasible); leakage is.
+
+Two controls, both in this workstream:
+
+- **Preventive** — release requires clicking a link that only the buyer's inbox receives (or an authenticated dashboard session, later spec). A leaked key can still *check* and *bind-if-unbound*, which is what a legitimate clone needs, but cannot move or kill a binding.
+- **Detective** — every successful `/bind` and every successful release confirmation sends the buyer a notification email: which project id, when, from which IP/country and CLI version, and a "wasn't you? release it and rotate: `/license`" line. A thief binding a *released* key (the residual case) is announced within seconds.
+
+The residual exposure — a leaked committed key lets someone deploy a clone of the same project id on the buyer's subscription — exists today with v2 and is unchanged here. Moving the key out of git (`VIBECARBON_LICENSE_KEY` secret in CI) is the follow-up that closes it; noted under Out of scope.
+
+Rate limiting: `/bind`, `/release`, and `/release/confirm` join the existing per-key limiter (`lastSentAt` map) with the same window as `/resend`; `/release/confirm` additionally rate-limits per IP because it takes no key.
 
 Removed: `POST /billing/license-checkout` no longer accepts or validates `projectId`; the `project_already_licensed` check leaves it. `cancelUrl` drops `?project=`.
 
@@ -88,7 +104,9 @@ One file, `.vibecarbon.license` in the project root, committed to git. `src/lib/
 
 ### `deactivate [key]`
 
-Reads the key from `.vibecarbon.license` (or the positional argument, for the deleted-repo case), `POST /release`, then deletes the file if it exists. Network failure → "Could not reach vibecarbon.com; the key is still bound. Nothing was removed." exit 1. Idempotent when no file and no bind.
+Reads the key from `.vibecarbon.license` (or the positional argument, for the deleted-repo case) and `POST /release`. On `200 { sent: true }` it prints "Check <the address that bought this licence>: click the link within an hour to release this key from its project. Nothing changes until you do." and **leaves `.vibecarbon.license` in place** — the file is harmless once the key is unbound (`/check` answers `unbound`, and `activate` overwrites it), and deleting it before the buyer confirms would strand a project whose release was never clicked. `deactivate -rm` deletes the local file without contacting the server, for the "I already confirmed / I just want this gone" case. Network failure → "Could not reach vibecarbon.com; the key is still bound." exit 1.
+
+The CLI never receives a release result: confirmation happens in the buyer's browser, and the next `activate` (anywhere) or `/check` reflects it.
 
 ### Deploy-time check (`src/lib/licensing/check.js`, `entitlement.js`, `gate.js`, `upsell.js`)
 
@@ -129,6 +147,11 @@ The harness currently gets past `requireLicense()` with a real legacy lifetime k
 
 Contains, in order: the key; the exact command `vibecarbon activate vc-…` with "run this inside your project"; a Supabase magic link (`supabaseAdmin.auth.admin.generateLink({ type: 'magiclink', email })`, the same helper `impersonation.ts:146` already uses) whose redirect is `/dashboard`; the `/license` self-serve link. The magic-link callback (`AuthCallback.tsx` → existing auth route) additionally runs `UPDATE license_subscriptions SET user_id = auth.uid() WHERE email = <verified email> AND user_id IS NULL`. That single statement is the entirety of account plumbing in this workstream; the dashboard itself is a separate spec.
 
+### Release and notification emails (`src/server/emails/templates.ts`)
+
+- **Release confirmation**: "Someone ran `vibecarbon deactivate` for licence …<last 4 of licenseId>, bound to project `<uuid>`. Click to release it (link expires in one hour). If this wasn't you, ignore this email — nothing changes." Single button to `/api/v1/license/release/confirm?t=…`.
+- **Bound / released notifications**: sent after every successful `/bind` and every successful confirm. Project id, UTC timestamp, requester IP + coarse geo, CLI version, and "Wasn't you? Release it from `/license` and contact support." No links that act; only `/license`.
+
 ### Success page (`src/client/pages/Checkout.tsx`)
 
 No longer derives the key. Shows "Your licence key is on its way to *email*", the `activate` instructions, and a "Didn't get it? Resend" link to `/license`.
@@ -154,14 +177,19 @@ Behaviour unchanged. The status result gains one line: "Bound to project `<uuid>
 | Deploy with key bound to another project | `/check` verdict | block, `deactivate` hint, no grace |
 | Deploy offline with cached verdict | CLI cache | unchanged 30-day grace |
 | Stripe webhook retry after insert | fulfilment | idempotent on `provider_subscription_id` (unchanged) |
-| Buyer deletes the repo without deactivating | dashboard (later) or `deactivate <key>` from anywhere | release |
+| Buyer deletes the repo without deactivating | dashboard (later) or `deactivate <key>` from anywhere | release email → confirm |
+| Release link clicked twice / after 1 h / after the binding changed | `/release/confirm` | no change, `/license?released=0&reason=…` |
+| Leaked committed key, attacker calls `/release` | `/release` | only the buyer gets the email; nothing changes |
+| Leaked key, attacker `/bind`s after a genuine release | `/bind` | succeeds (residual), buyer receives the bind notification and can release from `/license` |
 
 ## 6. Testing
 
 **vibecarbon-web**
 - `license-mint.test.ts`: mint/parse/verify the new key; rejects malformed, wrong-length, or tampered keys; the key is stable across re-mint for the same `licenseId`.
 - `/bind` state machine: unbound → bound; same project → idempotent 200; other project → 409; project already licensed → 409 with `switchPlan`; inactive → 403; unknown key → 401.
-- `/release`: bound → released; already released → 200; unknown → 401.
+- `/release`: always `200 { sent: true }` for a known key (bound or not) and never mutates the row; sends exactly one email; unknown → 401.
+- `/release/confirm`: valid token releases and burns the nonce; second use → `reason=used`; past `exp` → `reason=expired`; binding changed since issue → `reason=stale`; tampered signature → 400.
+- Notifications: a successful `/bind` and a successful confirm each send the buyer one email containing the project id, timestamp, IP, and CLI version.
 - `/check`: `projectId` required (400 when missing); `unbound` and `wrong_project` verdicts carry tier `none` and the requested `projectId`; active bound key unchanged.
 - `/status`: returns binding without a project id.
 - Fulfilment: inserts `project_id = NULL`, `license_id` present; email contains key, command, magic link.
@@ -171,7 +199,7 @@ Behaviour unchanged. The status result gains one line: "Bound to project `<uuid>
 **vibecarbon (CLI)**
 - validator: accepts the new format only; rejects `vc-f-…` and `vc2-…` explicitly.
 - `activate`: each row of the `/bind` outcome table; offline writes nothing; no `.vibecarbon.json` → create hint; idempotent re-activate.
-- `deactivate`: releases then deletes; positional key with no file; offline leaves the file.
+- `deactivate`: posts the key and leaves the file; prints the check-your-email line; positional key with no file; `-rm` deletes locally without a request; offline → error, file untouched.
 - `check.js`: sends `projectId`; cache/fallback tests unchanged.
 - `entitlement.js`: `unbound` and `wrong_project` block without grace; existing rows unchanged.
 - Harness: stub server signs verifiable verdicts; a paid command reaches its arg-parse logic with a stub-bound key; the no-local-bypass census (`a4c099e`) still passes.
@@ -186,4 +214,4 @@ Behaviour unchanged. The status result gains one line: "Bound to project `<uuid>
 
 ## Out of scope
 
-The project dashboard (viewing projects, releasing bindings in the browser, changing plans, account management) is the next spec; this design only guarantees it has `user_id` and `license_id` to build on. Stripe-side cleanup of the legacy lifetime product is a manual step for the user.
+The project dashboard (viewing projects, releasing bindings in the browser, changing plans, account management) is the next spec; this design only guarantees it has `user_id` and `license_id` to build on. Stripe-side cleanup of the legacy lifetime product is a manual step for the user. Moving `.vibecarbon.license` out of git in favour of a `VIBECARBON_LICENSE_KEY` secret (closing the residual leaked-key exposure described in §2a) is a follow-up, not part of this change.
