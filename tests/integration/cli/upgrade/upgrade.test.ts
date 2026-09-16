@@ -158,6 +158,20 @@ describe('vibecarbon upgrade', () => {
     expect(readFileSync(`${pkgPath}.upgrade-backup`, 'utf-8')).toContain('pnpm@9.9.9');
   });
 
+  it('keeps biome.json rooted after -force — carbon/biome.json ships "root": false for its own nested-monorepo reasons, but a scaffolded project has no parent config and Biome 2.x silently no-ops without one', () => {
+    // create.js's makeBiomeConfigRoot() flips this at generation time
+    // (fixture already has it true); upgrade re-pulls the raw template
+    // content, which would silently undo the flip without its own fixup.
+    const biomePath = join(project, 'biome.json');
+    expect(JSON.parse(readFileSync(biomePath, 'utf-8')).root).toBe(true);
+
+    const r = runCli('upgrade', ['-force', '-y'], { cwd: project, timeoutMs: 120_000 });
+    if (r.exitCode === null) throw new Error(`upgrade timed out:\n${r.stderr}`);
+    assertSuccess(r);
+
+    expect(JSON.parse(readFileSync(biomePath, 'utf-8')).root).toBe(true);
+  });
+
   it('refuses outside a vibecarbon project', () => {
     const r = runCli('upgrade', ['-y'], { cwd: '/tmp', timeoutMs: 15_000 });
     assertExitWith(r, 1, /Not in a Vibecarbon project/i);
