@@ -103,8 +103,12 @@ jobs:
       # key alone entitles nothing — the project binding lives on
       # vibecarbon.com. The harnesses run a local stub of that API
       # (tests/e2e/utils/license-stub.js) which signs real verdicts with this
-      # secret, so the SIGNING KEY is what CI must supply. Fail loudly when it
-      # is missing rather than 131 confusing signature failures later.
+      # secret, so the SIGNING KEY is what CI must supply.
+      #
+      # TRIPWIRE ONLY — the unit suite below does NOT need the key (it injects
+      # an ephemeral keypair). This fails fast, in the cheapest job, so the
+      # integration step here and the e2e jobs never discover the missing
+      # secret three minutes in.
       - name: Check licence signing key
         env:
           VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
@@ -206,7 +210,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      # Same contract as the unit job's signing-key check above.
+      # Same contract as the unit job's signing-key check above — tripwire
+      # only; the unit suite does not need the key, the integration step does.
       - name: Check licence signing key
         env:
           VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}

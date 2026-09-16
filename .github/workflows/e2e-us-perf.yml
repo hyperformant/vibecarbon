@@ -149,8 +149,10 @@ jobs:
       VC_E2E_STATE_BUCKET: ${{ vars.VC_E2E_STATE_BUCKET }}
       E2E_REGIONS: ${{ inputs.regions }}
       # Paid deploy modes (compose-ha/k8s/k8s-ha) hit the Fullerene license
-      # gate, satisfied by the REAL signed key materialized into
-      # ~/.vibecarbon/license below. There is no dev-license mode any more:
+      # gate, satisfied by the local licence-API stub the harness starts
+      # (tests/e2e/utils/license-stub.js), which signs verdicts with
+      # VIBECARBON_LICENSE_PRIVATE_KEY; nothing is written to HOME. There is
+      # no dev-license mode any more:
       # VIBECARBON_DEV_LICENSE skipped Ed25519 verification and shipped inside
       # the npm package, so it was also a free Fullerene grant to every
       # customer. First full-matrix dispatch failed all three paid modes at
@@ -235,6 +237,14 @@ jobs:
         env:
           PROVIDER: ${{ matrix.provider }}
           SCENARIOS: ${{ inputs.scenarios }}
+          # The step that actually runs the harness, so THIS is where the
+          # signing key has to be: the check step above only validates the
+          # secret, and a step's `env:` does not reach the next one. It used
+          # to arrive as a licence file that step wrote under HOME, which
+          # persisted across steps; nothing is written to HOME any more, so
+          # the variable itself must be exported here or
+          # assertLicenseSigningKey fails the leg at preflight.
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
           HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           # The v2 credential-profiles store is retired (A5) — every

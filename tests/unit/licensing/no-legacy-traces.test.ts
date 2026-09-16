@@ -28,6 +28,12 @@ const PATTERNS = [
   'listStoredLicenses',
   'VIBECARBON_TEST_LICENSE_KEY',
   "'\\.vibecarbon', 'license'", // join(home, '.vibecarbon', 'license'): the old global slot
+  // The same slot in prose/shell form (`~/.vibecarbon/license`). The trailing
+  // class is load-bearing: `~/.vibecarbon/license-checks/` is the LIVE
+  // per-machine verdict cache (src/lib/licensing/check.js cachePathFor), so a
+  // bare prefix match would condemn current code. The `~/` is optional so a
+  // bare `.vibecarbon/license` is caught too.
+  '\\.vibecarbon/license([^-[:alnum:]_]|$)',
   '-legacy',
   'mintV1Key',
   'mintV2Key',
@@ -56,6 +62,10 @@ const ALLOW = new Map([
     'plants the decoy the isolation test refuses to read',
   ],
   ['tests/unit/licensing/storage.test.ts::legacy slot', 'prose of that same isolation test'],
+  [
+    'tests/unit/licensing/storage.test.ts::\\.vibecarbon/license([^-[:alnum:]_]|$)',
+    'the isolation test names the slot it refuses to read, in its title and prose',
+  ],
   // parseArgs must turn a retired mint flag into a loud error rather than
   // ignoring it silently; the test names one.
   [
@@ -64,49 +74,60 @@ const ALLOW = new Map([
   ],
 ]);
 
-/** Every ALLOW key that actually matched something, filled in by the run below. */
-const allowUsed = new Set<string>();
+/**
+ * The HISTORICAL RECORD of this removal, which necessarily names what went:
+ * this census itself, the CHANGELOG, and the workstream's own plan + design
+ * spec. Editing any of them to satisfy the census would falsify the record.
+ * The two superpowers documents are pinned by exact path rather than by
+ * directory, so a NEW plan or spec that drifts back into the retired
+ * vocabulary is still caught.
+ */
+const RECORD_FILES = new Set([
+  'tests/unit/licensing/no-legacy-traces.test.ts',
+  'docs/superpowers/specs/2026-09-15-license-bind-at-activate-design.md',
+  'docs/superpowers/plans/2026-09-15-license-bind-at-activate-cli.md',
+]);
+
+/** `<file>::<pattern>` for every line the pattern matched outside the record. */
+function hitsFor(pattern: string): string[] {
+  // `grep` exits 1 on no match, which execFileSync turns into a throw.
+  let out = '';
+  try {
+    out = execFileSync(
+      'grep',
+      ['-rnE', '--exclude-dir=node_modules', '--', pattern, ...SCOPE.split(' ')],
+      { encoding: 'utf8' },
+    );
+  } catch (err) {
+    if ((err as { status?: number }).status !== 1) throw err;
+  }
+  return out.split('\n').filter((line) => {
+    if (!line || /CHANGELOG/.test(line)) return false;
+    return !RECORD_FILES.has(line.slice(0, line.indexOf(':')));
+  });
+}
+
+/** The ALLOW key a hit line would be excused by, if any. */
+const allowKey = (line: string, pattern: string) =>
+  `${line.slice(0, line.indexOf(':'))}::${pattern}`;
 
 describe('no traces of retired licence formats', () => {
   for (const pattern of PATTERNS) {
     it(`/${pattern}/ appears nowhere in ${SCOPE}`, () => {
-      // `grep` exits 1 on no match, which execFileSync turns into a throw.
-      let out = '';
-      try {
-        out = execFileSync(
-          'grep',
-          ['-rnE', '--exclude-dir=node_modules', '--', pattern, ...SCOPE.split(' ')],
-          { encoding: 'utf8' },
-        );
-      } catch (err) {
-        const e = err as { status?: number; stdout?: string };
-        if (e.status !== 1) throw err;
-      }
-      const hits = out.split('\n').filter((line) => {
-        if (!line) return false;
-        const file = line.slice(0, line.indexOf(':'));
-        if (file === 'tests/unit/licensing/no-legacy-traces.test.ts') return false;
-        // CHANGELOG and the workstream's own plan + design spec under
-        // docs/superpowers/ are the HISTORICAL RECORD of this removal: they
-        // exist to say what the retired formats were and that they went.
-        // Editing them to satisfy a census would falsify the record.
-        if (/CHANGELOG/.test(line)) return false;
-        if (file.startsWith('docs/superpowers/')) return false;
-        const key = `${file}::${pattern}`;
-        if (ALLOW.has(key)) {
-          allowUsed.add(key);
-          return false;
-        }
-        return true;
-      });
+      const hits = hitsFor(pattern).filter((line) => !ALLOW.has(allowKey(line, pattern)));
       expect(hits, hits.join('\n')).toEqual([]);
     });
   }
 
   it('every exemption still covers a live guard', () => {
     // An ALLOW entry whose guard was deleted or renamed is a hole nothing
-    // reports — it would quietly excuse a future leftover in that file.
-    const dead = [...ALLOW.keys()].filter((k) => !allowUsed.has(k));
+    // reports — it would quietly excuse a future leftover in that file. Runs
+    // its own greps rather than reading what the cases above collected, so it
+    // holds under `-t` filtering, `.only`, and any future reordering.
+    const live = new Set(
+      PATTERNS.flatMap((pattern) => hitsFor(pattern).map((line) => allowKey(line, pattern))),
+    );
+    const dead = [...ALLOW.keys()].filter((k) => !live.has(k));
     expect(
       dead,
       `these exemptions match nothing any more — delete them:\n${dead.join('\n')}`,

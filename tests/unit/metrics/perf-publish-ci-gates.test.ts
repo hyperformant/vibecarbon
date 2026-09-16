@@ -84,10 +84,10 @@ describe('hook-bearing git publishers carry the license key', () => {
   // git-commits/pushes WITHOUT --no-verify runs the repo's husky hooks —
   // pre-push spawns the INTEGRATION suite, whose licence stub signs its
   // verdicts with process.env.VIBECARBON_LICENSE_PRIVATE_KEY. The perf job
-  // materialized ~/.vibecarbon/license for the pre-commit unit suite but
-  // never exported the env var to the publishing step, so the push died on
-  // 131 integration failures. A licence FILE is not enough; the signing-key
-  // ENV VAR must reach the step that runs git.
+  // satisfied the pre-commit unit suite by another route but never exported
+  // the env var to the publishing step, so the push died on 131 integration
+  // failures. Satisfying an earlier step is not enough; the signing-key ENV
+  // VAR must reach the step that runs git.
   it('every workflow step that runs a hook-bearing git publisher exports VIBECARBON_LICENSE_PRIVATE_KEY', () => {
     const { readdirSync } = require('node:fs') as typeof import('node:fs');
     const dir = join(ROOT, '.github', 'workflows');

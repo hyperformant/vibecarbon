@@ -131,7 +131,9 @@ setupE2EEnv();
 // against it, exactly as a customer's CLI does against production.
 //
 // Top-level await (this file is ESM): nothing below may spawn a CLI child
-// before the stub is listening.
+// before the stub is listening. Never closed: the runner ends through
+// process.exit(), which takes the listening socket with it, and a close()
+// in a `finally` would only race the exit paths that already work.
 await startE2ELicenseStub();
 
 // ---------------------------------------------------------------------------

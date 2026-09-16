@@ -216,12 +216,26 @@ const { envFileKeys, tls: tlsSetup } = setupE2EEnv();
 // re-seeded from that file as ALREADY BOUND — otherwise it would answer
 // 'unknown_key' and an iterated paid step would refuse for a reason that has
 // nothing to do with what is being debugged.
+//
+// Never closed: this script runs one step and then exits through
+// process.exit() on the child's close, which takes the listening socket with
+// it. A close() here would only race that.
 const licenseStub = await startE2ELicenseStub();
 const keptLicense = getLicense({ projectDir });
 if (keptLicense.active) {
+  const boundProjectId = readManifestProjectId(projectDir);
+  if (!boundProjectId) {
+    // Seeding with projectId: null leaves the row UNBOUND, and /check derives
+    // 'unbound' from that — so say which refusal to expect rather than
+    // letting it look like a licensing bug in the step under test.
+    console.warn(
+      `[iter] no projectId in ${projectDir}/.vibecarbon.json — the licence row is ` +
+        `seeded UNBOUND; gated steps will refuse with 'unbound'`,
+    );
+  }
   licenseStub.seed({
     licenseId: keptLicense.licenseId,
-    projectId: readManifestProjectId(projectDir),
+    projectId: boundProjectId,
     tier: 'fullerene',
     periodEndYmd: '2099-12-31',
   });
