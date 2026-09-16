@@ -373,6 +373,10 @@ jobs:
           # slug). The audit is explicit that the scrub list and the
           # secret-scan credential list stay DISTINCT judgments.
           SCALEWAY_DEFAULT_PROJECT_ID: ${{ secrets.SCALEWAY_DEFAULT_PROJECT_ID }}
+          # The licence signing key. Not a provider credential, but the one
+          # secret that could mint a key this build accepts, so it is scrubbed
+          # from artifacts like the rest.
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}
           # VULTR_OBJECT_STORAGE_REGION is deliberately absent: it is a
           # cluster slug (`ewr1`), not a credential, and this scrubber
           # replaces literal VALUES — feeding it a short common token would
@@ -392,7 +396,8 @@ jobs:
                    'LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY',
                    'VULTR_API_TOKEN', 'VULTR_ACCESS_KEY',
                    'VULTR_SECRET_KEY', 'SCALEWAY_SECRET_KEY',
-                   'SCALEWAY_ACCESS_KEY', 'SCALEWAY_DEFAULT_PROJECT_ID']
+                   'SCALEWAY_ACCESS_KEY', 'SCALEWAY_DEFAULT_PROJECT_ID',
+                   'VIBECARBON_LICENSE_PRIVATE_KEY']
           secrets = [os.environ[n].encode() for n in names if os.environ.get(n)]
           for path in pathlib.Path('tests/results').rglob('*'):
               if not path.is_file():

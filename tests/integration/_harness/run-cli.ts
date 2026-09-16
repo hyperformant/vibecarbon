@@ -86,6 +86,12 @@ function childEnv(opts: RunOptions): NodeJS.ProcessEnv {
     ...process.env,
     NO_COLOR: '1',
     FORCE_COLOR: '0',
+    // The licence stub holds the signing key and signs in-process; a CLI
+    // child verifies against its EMBEDDED public key and never needs the
+    // private one. `...process.env` spreads whatever the shell or CI job
+    // exported, so blank it here. Blanked, not deleted: an empty value is
+    // unambiguous in the child.
+    VIBECARBON_LICENSE_PRIVATE_KEY: '',
     // Point HOME at a per-process tmp so CLI children never touch the
     // developer's real ~/.vibecarbon.
     HOME: getFakeHome(),

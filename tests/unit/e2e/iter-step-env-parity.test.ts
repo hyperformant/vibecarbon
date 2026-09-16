@@ -107,12 +107,18 @@ describe('test harnesses use a real signed license, not a bypass', () => {
   const runCli = read('tests', 'integration', '_harness', 'run-cli.ts');
   const e2eEnv = read('tests', 'e2e', 'utils', 'e2e-env.js');
 
-  it('the integration harness never sources a licence key or the signing key', () => {
+  it('the integration harness never READS a licence key or the signing key', () => {
     // A key alone entitles nothing now: the binding lives on vibecarbon.com,
     // and tests that need a verdict point the CLI at the local stub instead.
-    // The signing key is matched too — only the stub process may hold it, and
-    // a bare 'LICENSE_KEY' substring would not catch VIBECARBON_LICENSE_PRIVATE_KEY.
-    expect(runCli).not.toMatch(/LICENSE_(PRIVATE_)?KEY/);
+    //
+    // The guard is on a READ, not on a mention, because the harness must now
+    // NAME the signing key in order to blank it. `env.VIBECARBON_…` is how
+    // sourcing it would look; VIBECARBON_TEST_LICENSE_KEY is the retired
+    // pre-minted key, which had no use other than being sourced.
+    expect(runCli).not.toMatch(/env\.VIBECARBON_LICENSE_PRIVATE_KEY|VIBECARBON_TEST_LICENSE_KEY/);
+    // And the scrub itself is present: without it `...process.env` would hand
+    // an exported signing key to every CLI child.
+    expect(runCli).toContain("VIBECARBON_LICENSE_PRIVATE_KEY: ''");
   });
 
   it('no harness embeds a licence key literal', () => {

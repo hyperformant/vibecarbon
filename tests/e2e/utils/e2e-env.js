@@ -403,9 +403,12 @@ export function setupE2EEnv(opts = {}) {
  * `scripts/iter-step.js` so a step iterated against a kept rig runs under the
  * same env as the same step inside a full lifecycle run.
  *
- * Precedence: defaults < process.env < `extra`. The real environment
+ * Precedence: defaults < process.env < pins < `extra`. The real environment
  * overriding a default is deliberate (an operator can widen ALLOWED_SSH_IPS
  * or turn perf logging off from the shell); per-call `extra` wins over both.
+ * The two licence variables are PINS, set after the inherited spread, because
+ * a shell-exported value must not be able to send a child at production or
+ * hand it the signing key — see their comments below.
  *
  * @param {Record<string, string | undefined>} [extra] Per-call overrides.
  * @param {NodeJS.ProcessEnv} [base] Env to inherit (default `process.env`).
@@ -424,22 +427,6 @@ export function e2eCliEnv(extra = {}, base = process.env) {
     // scenarios is exercising the deploy flow, not firewall hardening. Real
     // deploys go through the interactive auto-detect path.
     ALLOWED_SSH_IPS: '0.0.0.0/0,::/0',
-    // The only licence-related variable here, and it is a HOST, not a
-    // credential: it points the CLI child's bind/check requests at the local
-    // stub of vibecarbon.com's licence API (startE2ELicenseStub() above).
-    // Licensing is deploy-mode-based, so compose-ha/k8s/k8s-ha scenarios hit
-    // requireDeployEntitlement() every time `deploy` runs, and the harness
-    // satisfies that the way a customer does: a genuine Ed25519-signed key,
-    // bound to the project by `vibecarbon activate`, re-checked against the
-    // API for a signed verdict on every gated command.
-    //
-    // No key and no signing key are ever handed to a child — only the stub
-    // process holds the signing key. It used to set VIBECARBON_DEV_LICENSE=true,
-    // which skipped signature verification entirely. That switch lived in the
-    // shipped npm package (the tarball is src/ verbatim), so it was also a
-    // one-variable grant of Fullerene to any customer who read validator.js.
-    // Removed — see tests/unit/licensing/no-dev-bypass.test.ts.
-    VIBECARBON_API_BASE: licenseStub?.baseUrl,
     // `create` infers the package manager from npm_config_user_agent, and this
     // harness is launched by `pnpm test:e2e` — so spreading the raw environment
     // made every e2e project pnpm-based. The matrix then never exercised the
@@ -449,6 +436,28 @@ export function e2eCliEnv(extra = {}, base = process.env) {
     // project's Dockerfile). Scrub it so the harness tests the default.
     // A scenario wanting pnpm/bun must pass `-pm` explicitly, which wins.
     ...pmScrubbedEnv(base),
+    // AFTER the spread, both of them, because both must beat the inherited
+    // environment rather than lose to it.
+    //
+    // VIBECARBON_API_BASE is the only licence-related variable a child gets,
+    // and it is a HOST, not a credential: it points the child's bind/check
+    // requests at the local stub of vibecarbon.com's licence API
+    // (startE2ELicenseStub() above). Licensing is deploy-mode-based, so
+    // compose-ha/k8s/k8s-ha scenarios hit requireDeployEntitlement() every
+    // time `deploy` runs, and the harness satisfies that the way a customer
+    // does: a genuine Ed25519-signed key, bound to the project by `vibecarbon
+    // activate`, re-checked against the API for a signed verdict on every
+    // gated command. It FAILS CLOSED — with no stub running the child gets a
+    // closed port and the call fails as 'unreachable', where an inherited or
+    // shell-exported value could have sent a real request to production.
+    VIBECARBON_API_BASE: licenseStub?.baseUrl ?? 'http://127.0.0.1:9',
+    // The signing key mints keys and verdicts; only the STUB, in this
+    // process, ever needs it. `...pmScrubbedEnv(base)` spreads the whole
+    // parent environment, so without this blank a shell or CI job that
+    // exported it would hand the private key to every CLI child — and the
+    // CLI verifies against its embedded public key, so no child has any use
+    // for it. Blanked rather than deleted: an empty value is unambiguous.
+    VIBECARBON_LICENSE_PRIVATE_KEY: '',
     ...extra,
   };
 

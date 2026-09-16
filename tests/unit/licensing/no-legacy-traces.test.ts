@@ -73,6 +73,12 @@ const ALLOW = new Map([
     'tests/unit/licensing/storage.test.ts::\\.vibecarbon/license([^-[:alnum:]_]|$)',
     'the isolation test names the slot it refuses to read, in its title and prose',
   ],
+  // The harness guard forbids run-cli.ts SOURCING a key; it names the retired
+  // pre-minted variable because that is half of what it forbids.
+  [
+    'tests/unit/e2e/iter-step-env-parity.test.ts::VIBECARBON_TEST_LICENSE_KEY',
+    'pins the integration harness never sourcing the retired pre-minted key',
+  ],
   // parseArgs must turn a retired mint flag into a loud error rather than
   // ignoring it silently; the test names one.
   [

@@ -144,6 +144,11 @@ const SCRUBBED_CREDENTIALS = [
   'SCW_DEFAULT_PROJECT_ID',
   'PULUMI_ACCESS_TOKEN',
   'SSH_AUTH_SOCK',
+  // Not a provider credential, and the reason it is here is different: a CLI
+  // child verifies verdicts against its embedded PUBLIC key, so the signing
+  // key buys it nothing — but anything holding it could mint a key this
+  // build accepts. Only the stub process may have it.
+  'VIBECARBON_LICENSE_PRIVATE_KEY',
 ];
 
 function gateChildEnv(home: string, apiBase: string): NodeJS.ProcessEnv {
@@ -513,6 +518,26 @@ describe('vibecarbon: the license gates every deploy into a paid mode', () => {
     } finally {
       if (planted === undefined) delete process.env.HETZNER_API_TOKEN;
       else process.env.HETZNER_API_TOKEN = planted;
+    }
+  });
+
+  // (10) Same proof for the licence signing key, which is not a provider
+  // credential but is the one secret that could MINT a key this build
+  // accepts. The stub signs in-process; nothing it spawns has any use for it.
+  it('blanks the licence signing key in the children it spawns', async () => {
+    const planted = process.env.VIBECARBON_LICENSE_PRIVATE_KEY;
+    process.env.VIBECARBON_LICENSE_PRIVATE_KEY = 'fake';
+    try {
+      const result = await spawnCaptured(
+        process.execPath,
+        ['-e', 'console.log(JSON.stringify(process.env.VIBECARBON_LICENSE_PRIVATE_KEY))'],
+        { cwd: proj, home, apiBase: UNREACHABLE_API },
+      );
+
+      expect(result.plain.trim(), `child env leaked the signing key\n${result.plain}`).toBe('""');
+    } finally {
+      if (planted === undefined) delete process.env.VIBECARBON_LICENSE_PRIVATE_KEY;
+      else process.env.VIBECARBON_LICENSE_PRIVATE_KEY = planted;
     }
   });
 });
