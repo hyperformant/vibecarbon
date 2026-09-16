@@ -39,7 +39,14 @@ const PATTERNS = [
   'mintV2Key',
   'storedProjectId',
 ];
-const SCOPE = 'src scripts tests docs README.md TERMS.md .github carbon/README.md';
+/**
+ * Everything the sweep has to hold across, including the two documents that
+ * SHIP: `carbon/content` is the User Docs the npm tarball carries (`files:
+ * [src, carbon, services]`), so a retired flow described there reaches every
+ * customer, and `AGENTS.md` is what an agent reads before touching this repo.
+ */
+const SCOPE =
+  'src scripts tests docs README.md TERMS.md AGENTS.md .github carbon/README.md carbon/content';
 
 /**
  * The only places allowed to NAME a retired thing: guards whose entire job is

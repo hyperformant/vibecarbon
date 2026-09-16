@@ -724,47 +724,58 @@ firewall entirely.
 
 ## activate
 
-Activate a license key (Graphene or Fullerene). A `vc2-` key is scoped to
-one project, so run `activate` from inside that project's directory; it
-writes `.vibecarbon.license`, which should be committed and shared with
-your team so anyone working on the project can deploy without activating
-separately.
+Activate a license key (Graphene or Fullerene). A key looks like
+`vc-<id>-<signature>` and is not tied to a project when you buy it:
+`activate` binds it to the project in the current directory through
+vibecarbon.com, so run it from inside that project's directory. It writes
+`.vibecarbon.license`, which should be committed and shared with your team
+so anyone working on the project can deploy without activating separately.
 
 ```bash
 # Prompts for key
 vibecarbon activate
 
 # Key seeded
-vibecarbon activate vc-xxxxxxxx-signature...
+vibecarbon activate vc-xxxxxxxxxxxxxxxx-signature...
 ```
 
-License keys start with `vc-` (legacy) or `vc2-` (current). The key never
-rotates; the subscription is checked on every deploy to a Kubernetes or HA
-environment. A lapsed subscription keeps deploying for 30 days with a
-warning, then pauses those deploys until renewed. Subscribe at
+A key holds one project at a time; to move it to another project, release
+it first with [`deactivate`](#deactivate). The key never rotates; the
+subscription is checked on every deploy to a Kubernetes or HA environment.
+A lapsed subscription keeps deploying for 30 days with a warning, then
+pauses those deploys until renewed. Subscribe at
 [vibecarbon.com/pricing](https://vibecarbon.com/pricing).
 
 ---
 
 ## deactivate
 
-Remove the current license and revert to the Graphite (free) tier.
+Release the key from this project so it can be activated somewhere else.
+Vibecarbon emails a release link to the address that bought the key.
+Nothing changes until you click it; the link works once and expires after
+an hour.
 
 ```bash
-# Interactive: prompts for confirmation
+# Interactive: prompts for confirmation, then emails the link
 vibecarbon deactivate
 
 # Skip confirmation
 vibecarbon deactivate -y
 
-# Remove both the project key and the legacy key
-vibecarbon deactivate -all
+# From any directory, when there is no .vibecarbon.license to read
+vibecarbon deactivate vc-xxxxxxxxxxxxxxxx-signature...
+
+# Remove only the local file; nothing is sent, the key stays bound
+vibecarbon deactivate -rm
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-y` | Skip confirmation prompt |
-| `-all` | Remove every stored license, project and legacy |
+| `-rm` | Remove the local `.vibecarbon.license` only; no request is sent |
+
+Clicking the link unbinds the key. The local `.vibecarbon.license` stays
+where it is until you remove it with `deactivate -rm`.
 
 ---
 
