@@ -169,8 +169,8 @@ ${c.bold('DEBUG COMMANDS')}
   ${c.info('access')} [subcommand]      Manage SSH + k8s-API operator-CIDR allowlist
 
 ${c.bold('LICENSE COMMANDS')}
-  ${c.info('activate')} [key]           Activate a license key
-  ${c.info('deactivate')}               Remove the current license
+  ${c.info('activate')} [key]           Bind a license key to this project
+  ${c.info('deactivate')}               Release the license from this project (confirmed by email)
 
 ${c.bold('GLOBAL FLAGS')}
   ${c.dim('-h')}    Show help for a command
