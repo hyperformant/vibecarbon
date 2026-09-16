@@ -1,16 +1,20 @@
 /**
  * Spawn the vibecarbon CLI as a child process and capture its result.
  *
- * The harness deliberately uses spawnSync (not exec) so child stdio is
+ * The harness deliberately uses spawn/spawnSync (not exec) so child stdio is
  * piped — no shell-quoting hazards. ANSI is stripped from stdout/stderr
  * for stable assertions across local + CI.
+ *
+ * `runCli` is the synchronous default. `runCliAsync` is the same call without
+ * blocking the event loop, which is mandatory for any test that points the
+ * CLI at the in-process licence stub — see its doc comment.
  *
  * NO_COLOR=1 + FORCE_COLOR=0 forces clack/pico-colors to emit plain
  * text; otherwise some prompt screens still color even when stdout
  * isn't a TTY.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -65,35 +69,89 @@ export interface RunResult {
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping is intentional.
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
+function stripAnsi(s: string | undefined): string {
+  return (s ?? '').replace(ANSI_RE, '');
+}
+
+/**
+ * Top-level flags like -h / -v are passed alone — they don't take a verb. For
+ * everything else, prepend the verb.
+ */
+function argvFor(verb: string, flags: string[]): string[] {
+  return verb === '-h' || verb === '-v' ? [verb] : [verb, ...flags];
+}
+
+function childEnv(opts: RunOptions): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    NO_COLOR: '1',
+    FORCE_COLOR: '0',
+    // Point HOME at a per-process tmp so CLI children never touch the
+    // developer's real ~/.vibecarbon.
+    HOME: getFakeHome(),
+    // A closed port by default: an unstubbed licence call fails fast as
+    // 'unreachable' instead of hitting production vibecarbon.com.
+    VIBECARBON_API_BASE: opts.apiBase ?? 'http://127.0.0.1:9',
+    // Prepend exec stub binPath so calls to ssh/docker/kubectl/etc.
+    // hit the stub log, not real binaries.
+    ...(opts.execStubs ? { PATH: `${opts.execStubs.binPath}:${process.env.PATH ?? ''}` } : {}),
+    ...(opts.env ?? {}),
+  };
+}
+
 export function runCli(verb: string, flags: string[], opts: RunOptions = {}): RunResult {
-  // Top-level flags like -h / -v are passed alone — they don't take
-  // a verb. For everything else, prepend the verb.
-  const argv = verb === '-h' || verb === '-v' ? [verb] : [verb, ...flags];
-  const result = spawnSync(process.execPath, [CLI_PATH, ...argv], {
+  const result = spawnSync(process.execPath, [CLI_PATH, ...argvFor(verb, flags)], {
     cwd: opts.cwd ?? process.cwd(),
     encoding: 'utf-8',
-    env: {
-      ...process.env,
-      NO_COLOR: '1',
-      FORCE_COLOR: '0',
-      // Point HOME at a per-process tmp so CLI children never touch the
-      // developer's real ~/.vibecarbon.
-      HOME: getFakeHome(),
-      // A closed port by default: an unstubbed licence call fails fast as
-      // 'unreachable' instead of hitting production vibecarbon.com.
-      VIBECARBON_API_BASE: opts.apiBase ?? 'http://127.0.0.1:9',
-      // Prepend exec stub binPath so calls to ssh/docker/kubectl/etc.
-      // hit the stub log, not real binaries.
-      ...(opts.execStubs ? { PATH: `${opts.execStubs.binPath}:${process.env.PATH ?? ''}` } : {}),
-      ...(opts.env ?? {}),
-    },
+    env: childEnv(opts),
     input: opts.stdin,
     timeout: opts.timeoutMs ?? 60_000,
   });
 
   return {
     exitCode: result.status,
-    stdout: (result.stdout ?? '').replace(ANSI_RE, ''),
-    stderr: (result.stderr ?? '').replace(ANSI_RE, ''),
+    stdout: stripAnsi(result.stdout),
+    stderr: stripAnsi(result.stderr),
   };
+}
+
+/**
+ * runCli, asynchronously. Same argv, env, HOME and ANSI handling; the only
+ * difference is that this one does not block the event loop.
+ *
+ * That difference is load-bearing for anything pointed at the licence stub.
+ * `startLicenseStub()` listens IN THIS PROCESS, and spawnSync parks the event
+ * loop for the whole child run — so the stub can never accept the child's
+ * connection, the CLI's fetch times out, and the stub records no call at all.
+ * Every case that passes `apiBase: stub.baseUrl` must therefore await this
+ * instead of calling runCli.
+ */
+export function runCliAsync(
+  verb: string,
+  flags: string[],
+  opts: RunOptions = {},
+): Promise<RunResult> {
+  return new Promise((resolveResult) => {
+    const child = spawn(process.execPath, [CLI_PATH, ...argvFor(verb, flags)], {
+      cwd: opts.cwd ?? process.cwd(),
+      env: childEnv(opts),
+      timeout: opts.timeoutMs ?? 60_000,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdin.end(opts.stdin ?? '');
+
+    child.on('close', (code) => {
+      resolveResult({ exitCode: code, stdout: stripAnsi(stdout), stderr: stripAnsi(stderr) });
+    });
+  });
 }
