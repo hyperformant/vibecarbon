@@ -130,6 +130,46 @@ describe('bindLicense', () => {
       'https://vibecarbon.com/api/v1/license/bind',
     );
   });
+
+  it('rejects a 2xx response naming a different project than requested', async () => {
+    const OTHER_PROJECT_ID = '22222222-2222-4222-8222-222222222222';
+    const fetchImpl = fetchReturning(200, {
+      projectId: OTHER_PROJECT_ID,
+      tier: 'graphene',
+      status: 'active',
+      periodEnd: 'x',
+    });
+    expect(await bindLicense({ key: KEY, projectId: PROJECT_ID, env, fetchImpl })).toEqual({
+      ok: false,
+      reason: 'rejected',
+      detail: 'bind response named a different project',
+    });
+  });
+
+  it('treats a non-2xx, non-429/5xx response with an unparsable body as unreachable', async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: false,
+      status: 403,
+      json: async () => {
+        throw new Error('not json');
+      },
+      text: async () => '<html>forbidden</html>',
+    })) as unknown as typeof fetch;
+    expect(await bindLicense({ key: KEY, projectId: PROJECT_ID, env, fetchImpl })).toEqual({
+      ok: false,
+      reason: 'unreachable',
+      detail: 'HTTP 403',
+    });
+  });
+
+  it('treats a non-2xx JSON body without a string error field as unreachable', async () => {
+    const fetchImpl = fetchReturning(400, { message: 'x' });
+    expect(await bindLicense({ key: KEY, projectId: PROJECT_ID, env, fetchImpl })).toEqual({
+      ok: false,
+      reason: 'unreachable',
+      detail: 'HTTP 400',
+    });
+  });
 });
 
 describe('requestRelease', () => {
@@ -160,5 +200,14 @@ describe('requestRelease', () => {
         })
       ).reason,
     ).toBe('rejected');
+  });
+
+  it('treats a sent-less 2xx body as rejected', async () => {
+    const fetchImpl = fetchReturning(200, {});
+    expect(await requestRelease({ key: KEY, env, fetchImpl })).toEqual({
+      ok: false,
+      reason: 'rejected',
+      detail: 'no sent flag',
+    });
   });
 });
