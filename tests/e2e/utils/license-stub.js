@@ -31,22 +31,26 @@ const SEEDABLE_TIERS = new Set(['graphene', 'fullerene']);
  * The Ed25519 signing key the stub mints keys and verdicts with: env first,
  * then the operator's gitignored `tests/.env.e2e`.
  *
- * A present-but-EMPTY value counts as absent. `loadE2EEnvFile` only fills keys
- * that are missing from the target, so a CI job that sets
+ * A present-but-EMPTY value counts as absent, so a CI job that sets
  * `VIBECARBON_LICENSE_PRIVATE_KEY: ''` (an unset GitHub secret renders exactly
- * that) would otherwise pin the empty string and silently skip the file
- * fallback. Deleting the key first makes the file the fallback it looks like.
+ * that) falls through to the file rather than pinning the empty string.
+ *
+ * The file is read into a SCRATCH object, never into `env`. `tests/.env.e2e`
+ * is the operator's credential file — it also carries `HETZNER_API_TOKEN` and
+ * friends — and loading it into the caller's environment would side-load every
+ * one of those into whatever this process later spawns. One key is asked for;
+ * one key is returned.
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {string} [envFilePath] - overridable so tests never read the real file.
  * @returns {string | null}
  */
 export function signingKeyOrNull(env = process.env, envFilePath = DEFAULT_ENV_FILE) {
-  if (!env.VIBECARBON_LICENSE_PRIVATE_KEY?.trim()) {
-    delete env.VIBECARBON_LICENSE_PRIVATE_KEY;
-    loadE2EEnvFile(envFilePath, env);
-  }
-  return env.VIBECARBON_LICENSE_PRIVATE_KEY?.trim() || null;
+  const fromEnv = env.VIBECARBON_LICENSE_PRIVATE_KEY?.trim();
+  if (fromEnv) return fromEnv;
+  const scratch = {};
+  loadE2EEnvFile(envFilePath, scratch);
+  return scratch.VIBECARBON_LICENSE_PRIVATE_KEY?.trim() || null;
 }
 
 function todayYmd() {

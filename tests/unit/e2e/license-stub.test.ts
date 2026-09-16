@@ -116,8 +116,8 @@ describe('seed validation', () => {
 });
 
 describe('signingKeyOrNull', () => {
-  // Always a PLAIN OBJECT env, never process.env: signingKeyOrNull mutates
-  // what it is handed (it deletes an empty key and lets the file fill it).
+  // Always a PLAIN OBJECT env, never process.env: the point of these cases is
+  // what the passed env looks like AFTER the call.
   const PEM_IN_FILE = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----';
 
   let dir: string;
@@ -135,8 +135,7 @@ describe('signingKeyOrNull', () => {
   });
 
   it('treats a present-but-empty value as absent and falls back to the file', () => {
-    // An unset GitHub secret renders as exactly this. loadE2EEnvFile only
-    // fills ABSENT keys, so without the delete this would pin '' forever.
+    // An unset GitHub secret renders as exactly this.
     const file = join(dir, '.env.e2e');
     writeFileSync(file, `VIBECARBON_LICENSE_PRIVATE_KEY='${PEM_IN_FILE}'\n`);
     const env = { VIBECARBON_LICENSE_PRIVATE_KEY: '' } as NodeJS.ProcessEnv;
@@ -146,5 +145,20 @@ describe('signingKeyOrNull', () => {
 
   it('returns null when neither the env nor a file supplies one', () => {
     expect(signingKeyOrNull({} as NodeJS.ProcessEnv, join(dir, 'does-not-exist'))).toBeNull();
+  });
+
+  it('reads the one key it was asked for, side-loading nothing else from the file', () => {
+    // tests/.env.e2e is the operator's CREDENTIAL file. Loading it into the
+    // caller's env would hand every provider token in it to whatever that
+    // process later spawns — the signing key is the only thing asked for.
+    const file = join(dir, '.env.e2e');
+    writeFileSync(
+      file,
+      `HETZNER_API_TOKEN='live'\nVIBECARBON_LICENSE_PRIVATE_KEY='${PEM_IN_FILE}'\n`,
+    );
+    const env = {} as NodeJS.ProcessEnv;
+    expect(signingKeyOrNull(env, file)).toBe(PEM_IN_FILE);
+    expect(Object.keys(env)).not.toContain('HETZNER_API_TOKEN');
+    expect(env).toEqual({});
   });
 });
