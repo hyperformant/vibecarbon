@@ -92,7 +92,7 @@ describe('vibecarbon deactivate', () => {
     assertExitWith(r, 0, 'Release the license key from this project');
     const out = `${r.stdout}\n${r.stderr}`;
     expect(out).toContain('-rm');
-    // -all removed both a project file and a legacy HOME file. There is only
+    // -all removed both a project file and a global HOME file. There is only
     // one storage slot now, so the flag has nothing left to mean.
     expect(out).not.toContain('-all');
   });

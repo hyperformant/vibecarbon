@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -116,31 +116,62 @@ interface GateRun {
 }
 
 /**
- * Spawn the CLI and collect its output.
+ * Provider and secret-store credentials, blanked in every child this file
+ * spawns.
+ *
+ * A licence-gate test must never be ABLE to create infrastructure. Several
+ * cases here deliberately CLEAR the gate — free Compose (1) and (5), the
+ * operate commands (8), and the bound-key case (6) — and a cleared gate means
+ * `deploy` carries on into provisioning. Inheriting the developer's (or CI's)
+ * live token would then buy real servers, and the 30s child timeout would kill
+ * the run mid-flight and orphan them. Blanking rather than deleting is
+ * deliberate: an empty value is unambiguous in the child, where a deleted one
+ * is indistinguishable from "this machine never had it".
+ */
+const SCRUBBED_CREDENTIALS = [
+  'HETZNER_API_TOKEN',
+  'HCLOUD_TOKEN',
+  'HETZNER_ACCESS_KEY',
+  'HETZNER_SECRET_KEY',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'CLOUDFLARE_API_TOKEN',
+  'DIGITALOCEAN_TOKEN',
+  'LINODE_TOKEN',
+  'VULTR_API_KEY',
+  'SCW_ACCESS_KEY',
+  'SCW_SECRET_KEY',
+  'SCW_DEFAULT_PROJECT_ID',
+  'PULUMI_ACCESS_TOKEN',
+  'SSH_AUTH_SOCK',
+];
+
+function gateChildEnv(home: string, apiBase: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    ...Object.fromEntries(SCRUBBED_CREDENTIALS.map((name) => [name, ''])),
+    HOME: home,
+    NO_COLOR: '1',
+    FORCE_COLOR: '0',
+    VIBECARBON_API_BASE: apiBase,
+  };
+}
+
+/**
+ * Spawn a child under this file's env and collect its output.
  *
  * Asynchronous on purpose: the licence stub listens IN THIS PROCESS, and
  * spawnSync would park the event loop for the whole child run, so the stub
  * could never answer and every stubbed case would fail as a timeout. See
  * runCliAsync in tests/integration/_harness/run-cli.ts.
  */
-function run(
-  argv: string[],
-  cwd: string,
-  home: string,
-  apiBase: string = UNREACHABLE_API,
+function spawnCaptured(
+  command: string,
+  args: string[],
+  { cwd, home, apiBase }: { cwd: string; home: string; apiBase: string },
 ): Promise<GateRun> {
-  return new Promise((done) => {
-    const child = spawn(process.execPath, [CLI, ...argv], {
-      cwd,
-      env: {
-        ...process.env,
-        HOME: home,
-        NO_COLOR: '1',
-        FORCE_COLOR: '0',
-        VIBECARBON_API_BASE: apiBase,
-      },
-      timeout: 30000,
-    });
+  return new Promise((done, fail) => {
+    const child = spawn(command, args, { cwd, env: gateChildEnv(home, apiBase), timeout: 30000 });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf-8');
@@ -151,11 +182,41 @@ function run(
     child.stderr.on('data', (chunk: string) => {
       stderr += chunk;
     });
+    // A child that exits before reading stdin makes the write fail with EPIPE,
+    // which is an unhandled 'error' on the stream, not a rejected write.
+    child.stdin.on('error', () => {});
     child.stdin.end('');
+    // Spawn itself failing (a bad path, a fork limit) is a harness fault, not
+    // a CLI outcome: surface it instead of hanging until the suite timeout.
+    child.on('error', fail);
     child.on('close', (status, signal) => {
       done({ status, signal, plain: stripAnsi(`${stdout}\n${stderr}`) });
     });
   });
+}
+
+/** Run the CLI itself. */
+function run(
+  argv: string[],
+  cwd: string,
+  home: string,
+  apiBase: string = UNREACHABLE_API,
+): Promise<GateRun> {
+  return spawnCaptured(process.execPath, [CLI, ...argv], { cwd, home, apiBase });
+}
+
+/**
+ * The verdict token cached for a project, or null when nothing was cached.
+ *
+ * A refusal still caches: `unbound` / `wrong_project` are server-signed
+ * verdicts like any other, and caching them is what keeps a later offline
+ * deploy refused instead of falling open. What must never appear is an
+ * entitling verdict the server did not give.
+ */
+function cachedVerdictToken(home: string, projectId: string): string | null {
+  const path = join(home, '.vibecarbon', 'license-checks', `${projectId.toLowerCase()}.json`);
+  if (!existsSync(path)) return null;
+  return JSON.parse(readFileSync(path, 'utf-8')).token ?? null;
 }
 
 describe('vibecarbon: the license gates every deploy into a paid mode', () => {
@@ -293,15 +354,20 @@ describe('vibecarbon: the license gates every deploy into a paid mode', () => {
         s.baseUrl,
       );
 
+      expect(
+        result.signal,
+        `bound key: process was killed (likely hung)\n${result.plain}`,
+      ).toBeNull();
       expect(result.plain, 'bound key: the live check must have answered').toContain(
         'Subscription checked',
       );
       expect(result.plain, 'bound key: must clear the gate').not.toContain('License required');
       // A live verdict is cached per machine so the next deploy survives an
       // outage.
-      expect(existsSync(join(home, '.vibecarbon', 'license-checks', `${PROJECT_ID}.json`))).toBe(
-        true,
-      );
+      expect(
+        cachedVerdictToken(home, PROJECT_ID),
+        'bound key: the live verdict must have been cached',
+      ).toContain('-active-');
     },
   );
 
@@ -333,6 +399,16 @@ describe('vibecarbon: the license gates every deploy into a paid mode', () => {
     expect(result.plain).toContain('License not bound');
     expect(result.plain).toContain('vibecarbon activate <key>');
     expect(result.plain, 'unbound is not "go buy a license"').not.toContain('License required');
+    // The refusal itself may be cached (it is a signed verdict), but what is
+    // cached must be the refusal, never anything that would entitle a later
+    // offline deploy.
+    const token = cachedVerdictToken(home, PROJECT_ID);
+    if (token !== null) {
+      expect(token, 'unbound: only the unbound verdict may be cached').toContain('-unbound-');
+      expect(token, 'unbound: a refusal must never cache an entitling verdict').not.toContain(
+        '-active-',
+      );
+    }
   });
 
   it.skipIf(!signingKey)(
@@ -360,6 +436,16 @@ describe('vibecarbon: the license gates every deploy into a paid mode', () => {
       expect(result.status, `wrong project: expected non-zero exit\n${result.plain}`).not.toBe(0);
       expect(result.plain).toContain('License bound elsewhere');
       expect(result.plain, 'mis-bound is not "go buy a license"').not.toContain('License required');
+      const token = cachedVerdictToken(home, PROJECT_ID);
+      if (token !== null) {
+        expect(token, 'wrong project: only the wrong_project verdict may be cached').toContain(
+          '-wrong_project-',
+        );
+        expect(
+          token,
+          'wrong project: a refusal must never cache an entitling verdict',
+        ).not.toContain('-active-');
+      }
     },
   );
 
@@ -404,6 +490,29 @@ describe('vibecarbon: the license gates every deploy into a paid mode', () => {
           'License required',
         );
       });
+    }
+  });
+
+  // (9) The guard on everything above: several cases here clear the gate and
+  // let `deploy` walk on into provisioning, so a leaked provider token would
+  // make a test able to buy real servers. Proven against the same env builder
+  // the CLI children get, with a live-looking token planted on the parent.
+  it('blanks every provider credential in the children it spawns', async () => {
+    const planted = process.env.HETZNER_API_TOKEN;
+    process.env.HETZNER_API_TOKEN = 'live-token-that-must-not-reach-the-child';
+    try {
+      const result = await spawnCaptured(
+        process.execPath,
+        ['-e', 'console.log(JSON.stringify(process.env.HETZNER_API_TOKEN))'],
+        { cwd: proj, home, apiBase: UNREACHABLE_API },
+      );
+
+      // '""' is the empty string, not the absent one: the scrub overwrote the
+      // parent's value rather than the child simply never having seen it.
+      expect(result.plain.trim(), `child env leaked a credential\n${result.plain}`).toBe('""');
+    } finally {
+      if (planted === undefined) delete process.env.HETZNER_API_TOKEN;
+      else process.env.HETZNER_API_TOKEN = planted;
     }
   });
 });

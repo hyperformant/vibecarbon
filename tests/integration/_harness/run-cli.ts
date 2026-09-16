@@ -131,7 +131,7 @@ export function runCliAsync(
   flags: string[],
   opts: RunOptions = {},
 ): Promise<RunResult> {
-  return new Promise((resolveResult) => {
+  return new Promise((resolveResult, rejectResult) => {
     const child = spawn(process.execPath, [CLI_PATH, ...argvFor(verb, flags)], {
       cwd: opts.cwd ?? process.cwd(),
       env: childEnv(opts),
@@ -148,8 +148,16 @@ export function runCliAsync(
     child.stderr.on('data', (chunk: string) => {
       stderr += chunk;
     });
+    // A CLI that exits before reading stdin (a flag error, `-h`) makes the
+    // write fail with EPIPE, which arrives as an unhandled 'error' on the
+    // stream and would take the whole test process down.
+    child.stdin.on('error', () => {});
     child.stdin.end(opts.stdin ?? '');
 
+    // Spawn itself failing (a bad path, a fork limit) is a harness fault, not
+    // a CLI outcome: surface it instead of hanging until the test times out.
+    // A no-op once 'close' has already settled the promise.
+    child.on('error', rejectResult);
     child.on('close', (code) => {
       resolveResult({ exitCode: code, stdout: stripAnsi(stdout), stderr: stripAnsi(stderr) });
     });
