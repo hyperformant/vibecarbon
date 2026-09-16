@@ -130,7 +130,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # semantic-release runs git through a pnpm-installed checkout, so
           # husky hooks can fire; the pre-push gate spawns the integration
-          # suite, whose harness reads this env var directly. Same class as
-          # the e2e-us-perf publish step (run 32309395314) — inoculated here
-          # before it costs a release.
-          VIBECARBON_TEST_LICENSE_KEY: ${{ secrets.VIBECARBON_TEST_LICENSE_KEY }}
+          # suite, whose licence stub signs its verdicts with this key. Same
+          # class as the e2e-us-perf publish step (run 32309395314) —
+          # inoculated here before it costs a release.
+          VIBECARBON_LICENSE_PRIVATE_KEY: ${{ secrets.VIBECARBON_LICENSE_PRIVATE_KEY }}

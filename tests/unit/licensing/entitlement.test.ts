@@ -63,11 +63,8 @@ describe('evaluateDeployEntitlement', () => {
   const NOW = '2026-09-14';
   const v2 = {
     active: true,
-    format: 'v2',
-    isLifetime: false,
-    projectId: PID,
-    tier: null,
-    storedProjectId: null,
+    key: 'vc-0123456789abcdef-sig',
+    licenseId: '0123456789abcdef',
   };
   const live = (verdict: object) => ({
     source: 'live',
@@ -97,27 +94,51 @@ describe('evaluateDeployEntitlement', () => {
     expect(result).not.toHaveProperty('warning');
   });
 
-  it('legacy lifetime key proceeds for k8s-ha with check.source none, no warning', () => {
-    const legacy = {
-      active: true,
-      format: 'v1',
-      isLifetime: true,
-      projectId: null,
-      storedProjectId: null,
-    };
-    const result = ev({ deployTier: 'k8s-ha', license: legacy });
-    expect(result.ok).toBe(true);
-    expect(result).not.toHaveProperty('warning');
-  });
-
   it('no license, k8s -> no-license', () => {
     const result = ev({ license: null });
     expect(result).toMatchObject({ ok: false, reason: 'no-license', requiredTier: 'graphene' });
   });
 
-  it('stored key for another project -> wrong-project', () => {
-    const result = ev({ license: { active: false, storedProjectId: 'some-other-project' } });
-    expect(result).toMatchObject({ ok: false, reason: 'wrong-project', requiredTier: 'graphene' });
+  it('unbound verdict blocks with reason unbound, no grace', () => {
+    const r = evaluateDeployEntitlement({
+      license: v2,
+      deployTier: 'k8s',
+      projectId: PID,
+      now: '2026-09-15',
+      check: {
+        source: 'live',
+        verdict: {
+          projectId: PID,
+          status: 'unbound',
+          tier: 'none',
+          periodEnd: '2026-09-15',
+          issued: '2026-09-15',
+        },
+      },
+    });
+    expect(r).toMatchObject({ ok: false, reason: 'unbound', requiredTier: 'graphene' });
+    expect(r).not.toHaveProperty('warning');
+  });
+
+  it('wrong_project verdict blocks with reason wrong-project, no grace', () => {
+    const r = evaluateDeployEntitlement({
+      license: v2,
+      deployTier: 'k8s-ha',
+      projectId: PID,
+      now: '2026-09-15',
+      check: {
+        source: 'cache',
+        verdict: {
+          projectId: PID,
+          status: 'wrong_project',
+          tier: 'none',
+          periodEnd: '2026-09-15',
+          issued: '2026-09-15',
+        },
+      },
+    });
+    expect(r).toMatchObject({ ok: false, reason: 'wrong-project', requiredTier: 'fullerene' });
+    expect(r).not.toHaveProperty('warning');
   });
 
   it('active graphene, periodEnd within grace, k8s -> ok, no warning', () => {

@@ -103,14 +103,33 @@ honest test of whether this seam is any good.
 Key format is fixed by the shipped CLI, whose validator embeds the public half:
 
 ```
-customerId = sha256(email.toLowerCase().trim()).slice(0, 8)
-message    = "<tierChar>-<customerId>"          // fullerene -> "f"
-key        = "vc-<tierChar>-<customerId>-<ed25519 sig hex>"
+message = "<license_id 16 hex>"
+key     = "vc-<license_id 16 hex>-<ed25519 sig hex>"
 ```
 
-The key is **deterministic from (tier, email)**: re-minting a purchase yields
-the identical key, so fulfilment retries are naturally idempotent and no key
-storage is required to reissue.
+The key carries **nothing but its own identity** — no tier, no email, no
+project, no expiry. Everything that could change over the life of a
+subscription lives in the `licenses` row on vibecarbon.com, so the key never
+has to be reissued. One subscription, one key, one row.
+
+The whole lifecycle is four moves (see
+[the design spec](../superpowers/specs/2026-09-15-license-bind-at-activate-design.md)):
+
+1. **Mint** — `fulfillPurchase` signs a fresh `license_id` and stores the row
+   (tier, status, period end, `project_id = null`). Idempotent on the
+   subscription id, so a fulfilment retry returns the same key.
+2. **Activate / bind** — `vibecarbon activate <key>` inside a project posts
+   `POST /api/v1/license/bind` with the key and the project id from
+   `.vibecarbon.json`. The server sets `project_id`, emails the buyer that the
+   key is now bound, and the CLI writes `.vibecarbon.license`.
+3. **Check** — every gated deploy posts `POST /api/v1/license/check` with the
+   key and the project id and gets back a **signed verdict token**
+   (`status`, `tier`, `periodEnd`), cached per machine. Entitlement comes only
+   from a verified verdict: an unbound key or the wrong project is a refusal,
+   not a local guess.
+4. **Deactivate / release** — `vibecarbon deactivate` asks the server to email
+   the buyer a release link; following it clears `project_id` and the key can
+   be activated on another project. `-rm` only deletes the local file.
 
 ```ts
 return {
@@ -120,6 +139,9 @@ return {
   ],
 };
 ```
+
+The copy says "run this **inside your project**": a key that is never bound
+entitles nothing, so the instruction is part of the product, not a nicety.
 
 **Blast radius to accept deliberately:** server-side minting puts
 `VIBECARBON_LICENSE_PRIVATE_KEY` on the vibecarbon.com host. That key is what

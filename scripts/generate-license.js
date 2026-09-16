@@ -2,75 +2,34 @@
 /**
  * License Key Generator for Vibecarbon
  *
- * Mints cryptographically signed license keys using Ed25519, in both
- * formats validator.js understands:
+ * Mints a key the published CLI accepts: vc-<licenseId>-<signature>, Ed25519
+ * over the bare licenseId. The key names no project; vibecarbon.com binds it
+ * at `vibecarbon activate`. In production the licenseId is minted by
+ * fulfilment and stored on the subscription row; this script exists for the
+ * test harness and for support.
  *
- *   v2 (default): a per-project, per-customer key. Carries no tier and no
- *     date: those live on vibecarbon.com and reach the CLI as a signed
- *     verdict token (signVerdictToken below mints one for tests/diagnosis).
- *     vc2-<customerId>-<projectId32>-<signature>
- *   v1 (-legacy): the old lifetime, global key. Always Fullerene.
- *     vc-f-<customerId>-<signature>
+ * Usage:
+ *   VIBECARBON_LICENSE_PRIVATE_KEY="..." node scripts/generate-license.js [--license-id <16hex>]
  *
- * signedMessage/validateLicenseKey are imported from validator.js rather
- * than reimplemented here, so minting and verifying can never drift apart.
- * Every minted key is round-tripped through
- * validateLicenseKey (against the public key derived from the same private
- * key) before it is ever printed; a key that fails that check is never
- * shown.
- *
- * Usage (single-dash flags; a double-dash spelling of each is also
- * accepted, since older docs/scripts still call this with --project etc.):
- *
- *   VIBECARBON_LICENSE_PRIVATE_KEY="..." node scripts/generate-license.js \
- *     -project 11111111-2222-3333-4444-555555555555 -email user@acme.com
- *
- *   VIBECARBON_LICENSE_PRIVATE_KEY="..." node scripts/generate-license.js -legacy -email user@acme.com
- *
- * Environment:
- *   VIBECARBON_LICENSE_PRIVATE_KEY - Ed25519 private key in PEM format (required)
- *
- * Options:
- *   -legacy                 Mint a v1 (legacy, lifetime) key instead of v2.
- *                            -project is not used.
- *   -customer <id>           8-character hex customer ID
- *   -email <email>           Customer email (generates ID from hash, alternative to -customer)
- *   -project <uuid>          Project UUID this key is scoped to (required for v2)
- *   -help                    Show this help message
+ * Also exports signVerdictToken(), used by the test licence-API stub.
  */
-
-import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
-import {
-  signedMessage,
-  validateLicenseKey,
-  VERDICT_STATUSES,
-  VERDICT_TIERS,
-} from '../src/lib/licensing/validator.js';
+import { createPrivateKey, createPublicKey, randomBytes, sign } from 'node:crypto';
+import { signedMessage, validateLicenseKey, VERDICT_STATUSES, VERDICT_TIERS } from '../src/lib/licensing/validator.js';
 
 /** 'YYYY-MM-DD', the only date shape signVerdictToken accepts. */
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+const LICENSE_ID_RE = /^[0-9a-f]{16}$/;
 
 function showHelp() {
   console.log(`
 Vibecarbon License Generator
 
 Usage:
-  VIBECARBON_LICENSE_PRIVATE_KEY="..." node scripts/generate-license.js [options]
+  VIBECARBON_LICENSE_PRIVATE_KEY="..." node scripts/generate-license.js [--license-id <16hex>]
 
 Options:
-  -legacy                 Mint a v1 (legacy, lifetime) key instead of v2.
-                           -project is not used.
-  -customer <id>           8-character hex customer ID
-  -email <email>           Customer email (generates ID from hash, alternative to -customer)
-  -project <uuid>          Project UUID this key is scoped to (required for v2)
-  -help                    Show this help message
-
-Examples:
-  # v2 key, scoped to a project
-  node scripts/generate-license.js -project <uuid> -email user@acme.com
-
-  # Legacy (v1) lifetime key
-  node scripts/generate-license.js -legacy -email user@acme.com
+  --license-id <16hex>    Mint this specific license ID instead of a random one.
+  -h, --help              Show this help message
 
 Environment:
   VIBECARBON_LICENSE_PRIVATE_KEY must be set to the Ed25519 private key in PEM format.
@@ -78,58 +37,23 @@ Environment:
 }
 
 /**
- * Parse argv. Accepts both `-flag` and `--flag` spellings for every named
- * option (see the module doc comment for why). Any other flag-shaped
- * argument (leading `-`) is rejected: this is what turns a retired flag
- * like `-tier` or `-paid-through` into a loud error instead of being
- * silently ignored.
+ * Parse argv. Any other flag-shaped argument is rejected: this is what turns
+ * a retired flag into a loud error instead of being silently ignored.
  * @param {string[]} args
  */
 export function parseArgs(args) {
-  const parsed = {
-    legacy: false,
-    customer: null,
-    email: null,
-    project: null,
-    help: false,
-  };
-
-  /** True when `arg` is `-name` or `--name`. */
-  const is = (arg, name) => arg === `-${name}` || arg === `--${name}`;
-
+  const opts = { help: false, licenseId: undefined };
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    const nextArg = args[i + 1];
-
-    if (is(arg, 'help') || arg === '-h') {
-      parsed.help = true;
-    } else if (is(arg, 'legacy')) {
-      parsed.legacy = true;
-    } else if (is(arg, 'customer')) {
-      parsed.customer = nextArg;
-      i++;
-    } else if (is(arg, 'email')) {
-      parsed.email = nextArg;
-      i++;
-    } else if (is(arg, 'project')) {
-      parsed.project = nextArg;
-      i++;
-    } else {
-      throw new Error(`Unknown flag: ${arg}`);
-    }
+    const a = args[i];
+    if (a === '-h' || a === '--help') opts.help = true;
+    else if (a === '--license-id' || a === '-license-id') opts.licenseId = args[++i];
+    else throw new Error(`Unknown option: ${a}`);
   }
-
-  return parsed;
+  return opts;
 }
 
-/**
- * Generate a deterministic 8-character hex customer ID from an email address
- * Uses SHA-256 hash, takes first 8 characters of hex encoding
- */
-export function emailToCustomerId(email) {
-  const normalized = email.toLowerCase().trim();
-  const hash = createHash('sha256').update(normalized).digest('hex');
-  return hash.slice(0, 8);
+export function randomLicenseId() {
+  return randomBytes(8).toString('hex');
 }
 
 /** Derive the Ed25519 public key (PEM, spki) for a private key (PEM, pkcs8). */
@@ -140,35 +64,17 @@ export function derivePublicKeyPem(privateKeyPem) {
 }
 
 /**
- * Mint a v1 (legacy) key: vc-f-<customerId>-<signature>.
+ * Mint a key: vc-<licenseId>-<signature>, Ed25519 over the bare licenseId.
  * @param {string} privateKeyPem
- * @param {{ customerId: string }} opts
+ * @param {{ licenseId: string }} opts
  */
-export function mintV1Key(privateKeyPem, { customerId }) {
-  if (!/^[a-f0-9]{8}$/.test(customerId)) {
-    throw new Error('Customer ID must be exactly 8 lowercase hex characters');
+export function mintKey(privateKeyPem, { licenseId }) {
+  if (!LICENSE_ID_RE.test(licenseId ?? '')) {
+    throw new Error(`licenseId must be 16 lowercase hex, got ${licenseId}`);
   }
-  const tierChar = 'f';
-  const message = signedMessage({ format: 'v1', tierChar, customerId });
+  const message = signedMessage({ format: 'key', licenseId });
   const signature = sign(null, Buffer.from(message), createPrivateKey(privateKeyPem));
-  return `vc-${tierChar}-${customerId}-${signature.toString('hex')}`;
-}
-
-/**
- * Mint a v2 key: vc2-<customerId>-<projectId32>-<signature>. No tier, no
- * date: both live on vibecarbon.com and arrive as a signed verdict.
- */
-export function mintV2Key(privateKeyPem, { customerId, projectId }) {
-  if (!/^[a-f0-9]{8}$/.test(customerId)) {
-    throw new Error('Customer ID must be exactly 8 lowercase hex characters');
-  }
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId || '')) {
-    throw new Error('-project must be a UUID (8-4-4-4-12 hex)');
-  }
-  const normalizedProjectId = projectId.toLowerCase();
-  const message = signedMessage({ format: 'v2', customerId, projectId: normalizedProjectId });
-  const signature = sign(null, Buffer.from(message), createPrivateKey(privateKeyPem));
-  return `vc2-${customerId}-${normalizedProjectId.replace(/-/g, '')}-${signature.toString('hex')}`;
+  return `vc-${licenseId}-${signature.toString('hex')}`;
 }
 
 /**
@@ -200,14 +106,10 @@ export function signVerdictToken(privateKeyPem, { projectId, status, tier, perio
   return `vcv-${pid32}-${status}-${tier}-${periodEnd.replace(/-/g, '')}-${issued.replace(/-/g, '')}-${signature.toString('hex')}`;
 }
 
-function capitalize(word) {
-  return word.charAt(0).toUpperCase() + word.slice(1);
-}
-
 /**
- * Run the generator end to end (parse -> resolve customer -> mint ->
- * round-trip validate -> print). Split out from `main()` so tests can call
- * it directly against an ephemeral keypair instead of spawning a process.
+ * Run the generator end to end (parse -> mint -> round-trip validate ->
+ * print). Split out from `main()` so tests can call it directly against an
+ * ephemeral keypair instead of spawning a process.
  * @param {string[]} args
  * @param {{ privateKeyPem?: string, log?: (s: string) => void }} [options]
  */
@@ -219,30 +121,17 @@ export function run(args, { privateKeyPem, log = console.log } = {}) {
     return { printed: false };
   }
 
-  const resolvedPrivateKeyPem = privateKeyPem ?? process.env.VIBECARBON_LICENSE_PRIVATE_KEY;
-  if (!resolvedPrivateKeyPem) {
-    throw new Error(
-      'VIBECARBON_LICENSE_PRIVATE_KEY environment variable is required (Ed25519 private key, PEM format)',
-    );
+  const pem = privateKeyPem ?? process.env.VIBECARBON_LICENSE_PRIVATE_KEY;
+  if (!pem) {
+    throw new Error('VIBECARBON_LICENSE_PRIVATE_KEY environment variable is required (Ed25519 private key, PEM format)');
   }
 
-  let customerId = opts.customer;
-  const customerEmail = opts.email;
-  if (!customerId && !customerEmail) {
-    throw new Error('-customer <id> or -email <email> is required');
-  }
-  if (customerEmail) {
-    customerId = emailToCustomerId(customerEmail);
-  }
-
-  const key = opts.legacy
-    ? mintV1Key(resolvedPrivateKeyPem, { customerId })
-    : mintV2Key(resolvedPrivateKeyPem, { customerId, projectId: opts.project });
+  const licenseId = opts.licenseId ?? randomLicenseId();
+  const key = mintKey(pem, { licenseId });
 
   // Round-trip through the same parser/verifier a customer's CLI runs, so a
   // key that would not actually activate is never handed out.
-  const publicKeyPem = derivePublicKeyPem(resolvedPrivateKeyPem);
-  const validation = validateLicenseKey(key, { publicKeyPem });
+  const validation = validateLicenseKey(key, { publicKeyPem: derivePublicKeyPem(pem) });
   if (!validation.valid) {
     throw new Error(`Refusing to print a key that fails validation: ${validation.error}`);
   }
@@ -251,22 +140,12 @@ export function run(args, { privateKeyPem, log = console.log } = {}) {
   log('License Key Generated Successfully');
   log('===================================');
   log('');
-  if (customerEmail) {
-    log(`Email:      ${customerEmail}`);
-  }
-  log(`Customer:   ${validation.customerId}`);
-  if (validation.format === 'v2') {
-    log('Format:     v2');
-    log(`Project:    ${validation.projectId}`);
-  } else {
-    log(`Tier:       ${capitalize(validation.tier)}`);
-    log('Expires:    Never');
-  }
+  log(`License ID: ${validation.licenseId}`);
   log('');
   log('License Key:');
   log(key);
   log('');
-  log('Activation:');
+  log('Activation (inside the project):');
   log(`  vibecarbon activate ${key}`);
   log('');
 

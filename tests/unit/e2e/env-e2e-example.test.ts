@@ -71,9 +71,9 @@ describe('tests/.env.e2e.example is value-free', () => {
         'SCALEWAY_DEFAULT_PROJECT_ID',
         'DOCKER_HUB_USERNAME',
         'DOCKER_HUB_TOKEN',
-        // Not a provider credential: the real signed Fullerene key the test
-        // harnesses activate, now that no dev bypass exists.
-        'VIBECARBON_TEST_LICENSE_KEY',
+        // Not a provider credential: the Ed25519 signing key the local
+        // licence-API stub signs real verdict tokens with.
+        'VIBECARBON_LICENSE_PRIVATE_KEY',
       ].sort(),
     );
   });

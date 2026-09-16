@@ -57,6 +57,7 @@ import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failu
 import {
   DESTROY_EXIT_LEAKED,
   extractLeakReport,
+  runActivate,
   runAddFeatures,
   runBackup,
   runCreate,
@@ -74,6 +75,7 @@ import {
   isClusterScopedStep,
 } from '../utils/cluster-diagnostics.js';
 import { type ResolutionPin, withResolutionPin } from '../utils/dns-pin.js';
+import { getE2ELicenseStub } from '../utils/e2e-env.js';
 import { extractDeployFailureDetail } from '../utils/extract-failure-detail.js';
 import { sharedStateBucketName } from '../utils/namespace.js';
 import { fetchServerTypes } from '../utils/server-types.js';
@@ -2677,6 +2679,32 @@ EOF`;
                 `STDOUT tail: ${(result.stdout || '').slice(-2000) || '(empty)'}`,
             );
           }
+          // Bind a licence to the project the way a customer does, before
+          // anything gated runs. compose-ha/k8s/k8s-ha deploys ask the API
+          // whether THIS project id is bound and refuse on an unbound key —
+          // 40 minutes into a leg that has already provisioned real
+          // infrastructure. runner.ts started the stub; a missing one means
+          // this scenario was entered without it, which is a harness bug, not
+          // a scenario failure.
+          const licenseStub = getE2ELicenseStub();
+          if (!licenseStub) {
+            throw new Error(
+              'No licence stub is running — startE2ELicenseStub() must be awaited ' +
+                'before any scenario (see tests/e2e/runner.ts).',
+            );
+          }
+          const activated = await runActivate(licenseStub, {
+            cwd: config.projectDir,
+            timeout: TIMEOUTS.create,
+          });
+          if (activated.exitCode !== 0) {
+            throw new Error(
+              `Activate exited with code ${activated.exitCode}.\n` +
+                `STDERR: ${(activated.stderr || '').slice(-1000) || '(empty)'}\n` +
+                `STDOUT tail: ${(activated.stdout || '').slice(-2000) || '(empty)'}`,
+            );
+          }
+
           const pinned = pinSharedStateBucket(config.projectDir);
           if (pinned) console.log(`[state] pinned Pulumi state bucket: ${pinned}`);
 

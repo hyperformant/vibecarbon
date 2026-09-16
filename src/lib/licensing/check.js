@@ -18,7 +18,7 @@
  * `rejected` (hard block, no cache fallback) ONLY when its body parses as
  * JSON and carries a string `error` field, the app's own error shape for
  * "the server answered and does not recognize this key" (`{ error:
- * 'invalid_key' | 'bad_signature' | 'lifetime_key' | 'not_found' | ...
+ * 'invalid_key' | 'bad_signature' | 'unknown_key' | 'not_found' | ...
  * }`). Anything else there, an HTML 403 from a WAF, an empty 408, is also
  * `unreachable`. The body is read once via `res.text()` and parsed
  * defensively; a body that isn't JSON, or is JSON without an `error`
@@ -102,7 +102,7 @@ export async function checkLicense({
     res = await fetchImpl(`${base}/api/v1/license/check`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key, cliVersion: VERSION }),
+      body: JSON.stringify({ key, projectId: pid, cliVersion: VERSION }),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {

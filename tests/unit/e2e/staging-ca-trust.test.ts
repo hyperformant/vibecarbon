@@ -188,9 +188,19 @@ describe('trustLetsEncryptStagingRoots', () => {
   });
 });
 
+/**
+ * setupE2EEnv() fails fast when the licence signing key is absent — the
+ * harness cannot sign a verdict without it, so a matrix leg would die deep
+ * into a paid-tier deploy. These cases are about TLS, not licensing, so they
+ * supply an ephemeral placeholder: assertLicenseSigningKey() only asserts the
+ * variable is PRESENT, and nothing here starts the stub that would sign with
+ * it. A real key must never be needed to run the unit suite.
+ */
+const SIGNING_KEY_PRESENT = { VIBECARBON_LICENSE_PRIVATE_KEY: 'not-a-real-signing-key' };
+
 describe('setupE2EEnv', () => {
   it('establishes staging ACME + ssh-askpass guards without touching verification', () => {
-    const env: NodeJS.ProcessEnv = { DISPLAY: ':0' };
+    const env: NodeJS.ProcessEnv = { DISPLAY: ':0', ...SIGNING_KEY_PRESENT };
     setupE2EEnv({ env, applyInProcess: false, warn: () => {} });
 
     expect(env.ACME_CA_SERVER).toBe(ACME_STAGING_DIRECTORY);
@@ -205,7 +215,7 @@ describe('setupE2EEnv', () => {
   it('warns loudly when the operator has verification switched off', () => {
     const warnings: string[] = [];
     setupE2EEnv({
-      env: { NODE_TLS_REJECT_UNAUTHORIZED: '0' },
+      env: { NODE_TLS_REJECT_UNAUTHORIZED: '0', ...SIGNING_KEY_PRESENT },
       applyInProcess: false,
       warn: (m) => warnings.push(m),
     });
@@ -244,7 +254,7 @@ describe.skipIf(childSkipReason)(suite('child processes', childSkipReason), () =
 
 /** A fresh env with only the harness setup applied — never `process.env`. */
 function setupChildEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
+  const env: NodeJS.ProcessEnv = { ...SIGNING_KEY_PRESENT };
   setupE2EEnv({ env, applyInProcess: false, warn: () => {} });
   return env;
 }

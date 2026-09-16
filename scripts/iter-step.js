@@ -34,7 +34,22 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { e2eCliEnv, REPO_ROOT, setupE2EEnv } from '../tests/e2e/utils/e2e-env.js';
+import { getLicense } from '../src/lib/licensing/index.js';
+import {
+  e2eCliEnv,
+  REPO_ROOT,
+  setupE2EEnv,
+  startE2ELicenseStub,
+} from '../tests/e2e/utils/e2e-env.js';
+
+/** The kept project's id from its `.vibecarbon.json`, or null. */
+function readManifestProjectId(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).projectId ?? null;
+  } catch {
+    return null;
+  }
+}
 
 const VALID_STEPS = new Set([
   'deploy',
@@ -194,6 +209,43 @@ const cliArgs = step === 'status' ? ['status', ...stepArgs] : [step, envPrefix, 
 // failed for want of the runner's TLS setup, which cost real debugging time
 // during the M3 battery until someone prefixed the env by hand.
 const { envFileKeys, tls: tlsSetup } = setupE2EEnv();
+
+// ...and the same licence API: a local stub of vibecarbon.com's, which every
+// gated command asks whether this project is entitled. A kept rig's project
+// already holds the key the original run bound to it, so the fresh stub is
+// re-seeded from that file as ALREADY BOUND — otherwise it would answer
+// 'unknown_key' and an iterated paid step would refuse for a reason that has
+// nothing to do with what is being debugged.
+//
+// Never closed: this script runs one step and then exits through
+// process.exit() on the child's close, which takes the listening socket with
+// it. A close() here would only race that.
+const licenseStub = await startE2ELicenseStub();
+const keptLicense = getLicense({ projectDir });
+if (keptLicense.active) {
+  const boundProjectId = readManifestProjectId(projectDir);
+  if (!boundProjectId) {
+    // Seeding with projectId: null leaves the row UNBOUND, and /check derives
+    // 'unbound' from that — so say which refusal to expect rather than
+    // letting it look like a licensing bug in the step under test.
+    console.warn(
+      `[iter] no projectId in ${projectDir}/.vibecarbon.json — the licence row is ` +
+        `seeded UNBOUND; gated steps will refuse with 'unbound'`,
+    );
+  }
+  licenseStub.seed({
+    licenseId: keptLicense.licenseId,
+    projectId: boundProjectId,
+    tier: 'fullerene',
+    periodEndYmd: '2099-12-31',
+  });
+} else {
+  // Not fatal: the free-tier steps (status, backup, restore) are ungated, and
+  // a deploy that needs the binding will say so itself.
+  console.warn(
+    `[iter] no verified licence in ${projectDir} — gated steps (k8s/ha deploys) will refuse`,
+  );
+}
 
 console.log(`[iter] scenario=${provider}/${mode} step=${step} env=${envPrefix}`);
 console.log(`[iter] projectDir=${projectDir}`);

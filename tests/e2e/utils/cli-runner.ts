@@ -267,6 +267,39 @@ export function runCreate(
 }
 
 /**
+ * The slice of the licence stub (tests/e2e/utils/license-stub.js) this module
+ * needs. Declared structurally because that module is plain JS — see its
+ * header for why the harness runs against a stub rather than production.
+ */
+export interface LicenseStub {
+  mintKey(licenseId?: string): { key: string; licenseId: string };
+  seed(row: {
+    licenseId: string;
+    projectId?: string | null;
+    tier?: string;
+    status?: string;
+    periodEndYmd: string;
+    cancelAtPeriodEnd?: boolean;
+  }): void;
+}
+
+/**
+ * Mint a key in the stub (bound to nothing), then bind it to the freshly
+ * created project with the real CLI.
+ *
+ * A key on its own entitles nothing: every gated command asks the API whether
+ * the key is bound to THIS project and acts on the signed verdict. So the
+ * matrix has to walk the customer's first step — `vibecarbon activate` inside
+ * the new project — or every paid-tier deploy refuses with "License not
+ * bound". One key per project: each scenario mints its own.
+ */
+export async function runActivate(stub: LicenseStub, options: RunOptions): Promise<CliResult> {
+  const { key, licenseId } = stub.mintKey();
+  stub.seed({ licenseId, tier: 'fullerene', periodEndYmd: '2099-12-31' });
+  return runCli(`activate ${key}`, options);
+}
+
+/**
  * Run vibecarbon add with one or more features.
  *
  * Features are passed as space-separated arguments after `add`.

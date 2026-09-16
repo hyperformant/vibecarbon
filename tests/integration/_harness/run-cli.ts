@@ -1,84 +1,39 @@
 /**
  * Spawn the vibecarbon CLI as a child process and capture its result.
  *
- * The harness deliberately uses spawnSync (not exec) so child stdio is
+ * The harness deliberately uses spawn/spawnSync (not exec) so child stdio is
  * piped — no shell-quoting hazards. ANSI is stripped from stdout/stderr
  * for stable assertions across local + CI.
+ *
+ * `runCli` is the synchronous default. `runCliAsync` is the same call without
+ * blocking the event loop, which is mandatory for any test that points the
+ * CLI at the in-process licence stub — see its doc comment.
  *
  * NO_COLOR=1 + FORCE_COLOR=0 forces clack/pico-colors to emit plain
  * text; otherwise some prompt screens still color even when stdout
  * isn't a TTY.
  */
 
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { loadE2EEnvFile } from '../../e2e/utils/e2e-env-file.js';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli.js');
 
 /**
- * The real, Ed25519-signed legacy lifetime key these tests activate. It
- * covers every project and never lapses.
- *
- * This used to be the literal `vc-f-deadbeef-fakefakefakefakefake` paired
- * with VIBECARBON_DEV_LICENSE=true, which made validateLicenseKey skip
- * signature verification. That switch shipped inside the npm package (the
- * tarball is src/ verbatim, no build step), so it doubled as a free lifetime
- * grant for any customer who opened validator.js. It is gone; the harness now
- * activates a genuine key, which is also the path a customer walks.
- *
- * Mint one with:
- *   VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com
- */
-export function testLicenseKey(): string {
-  if (!process.env.VIBECARBON_TEST_LICENSE_KEY) {
-    // Same gitignored operator file the e2e harness reads; real env wins.
-    loadE2EEnvFile(join(REPO_ROOT, 'tests', '.env.e2e'), process.env);
-  }
-
-  const key = process.env.VIBECARBON_TEST_LICENSE_KEY;
-  if (!key) {
-    throw new Error(
-      'VIBECARBON_TEST_LICENSE_KEY is not set.\n' +
-        'Integration tests spawn paid commands (deploy/backup/restore/scale/failover)\n' +
-        'which gate on a real license — there is no dev bypass any more.\n\n' +
-        'Set it in your shell or in tests/.env.e2e:\n' +
-        '  VIBECARBON_TEST_LICENSE_KEY=vc-f-...\n\n' +
-        'Mint one with:\n' +
-        '  VIBECARBON_LICENSE_PRIVATE_KEY=... node scripts/generate-license.js -legacy --email you@example.com',
-    );
-  }
-  return key;
-}
-
-/**
- * Per-process fake HOME with a legacy lifetime license activated, so tests
- * reach the off-TTY guard / arg-parse logic that's actually under test
- * instead of stopping at requireLicense().
+ * Per-process fake HOME, so CLI children never read or write the developer's
+ * real ~/.vibecarbon. No licence is seeded: a key alone entitles nothing now
+ * — the binding lives on vibecarbon.com, and tests that need a verdict point
+ * the CLI at the local licence stub (see tests/e2e/utils/license-stub.js)
+ * through `apiBase`.
  */
 let FAKE_HOME: string | null = null;
 function getFakeHome(): string {
   if (FAKE_HOME) return FAKE_HOME;
-  const key = testLicenseKey();
   FAKE_HOME = mkdtempSync(join(tmpdir(), 'vibecarbon-fake-home-'));
   mkdirSync(join(FAKE_HOME, '.vibecarbon'), { recursive: true });
-  // File path is ~/.vibecarbon/license (no .json extension — see
-  // src/lib/licensing/index.js LICENSE_FILE).
-  writeFileSync(
-    join(FAKE_HOME, '.vibecarbon', 'license'),
-    JSON.stringify(
-      {
-        key,
-        customerId: key.split('-')[2],
-        activatedAt: '2026-01-01T00:00:00.000Z',
-      },
-      null,
-      2,
-    ),
-  );
   return FAKE_HOME;
 }
 
@@ -97,6 +52,12 @@ export interface RunOptions {
    * the stub log instead of going to real binaries.
    */
   execStubs?: { binPath: string };
+  /**
+   * Base URL for vibecarbon.com's licence API. Defaults to a closed port so
+   * no test ever reaches the real network by accident; point it at a
+   * startLicenseStub() baseUrl to serve real signed verdicts.
+   */
+  apiBase?: string;
 }
 
 export interface RunResult {
@@ -108,33 +69,103 @@ export interface RunResult {
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping is intentional.
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
+function stripAnsi(s: string | undefined): string {
+  return (s ?? '').replace(ANSI_RE, '');
+}
+
+/**
+ * Top-level flags like -h / -v are passed alone — they don't take a verb. For
+ * everything else, prepend the verb.
+ */
+function argvFor(verb: string, flags: string[]): string[] {
+  return verb === '-h' || verb === '-v' ? [verb] : [verb, ...flags];
+}
+
+function childEnv(opts: RunOptions): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    NO_COLOR: '1',
+    FORCE_COLOR: '0',
+    // The licence stub holds the signing key and signs in-process; a CLI
+    // child verifies against its EMBEDDED public key and never needs the
+    // private one. `...process.env` spreads whatever the shell or CI job
+    // exported, so blank it here. Blanked, not deleted: an empty value is
+    // unambiguous in the child.
+    VIBECARBON_LICENSE_PRIVATE_KEY: '',
+    // Point HOME at a per-process tmp so CLI children never touch the
+    // developer's real ~/.vibecarbon.
+    HOME: getFakeHome(),
+    // A closed port by default: an unstubbed licence call fails fast as
+    // 'unreachable' instead of hitting production vibecarbon.com.
+    VIBECARBON_API_BASE: opts.apiBase ?? 'http://127.0.0.1:9',
+    // Prepend exec stub binPath so calls to ssh/docker/kubectl/etc.
+    // hit the stub log, not real binaries.
+    ...(opts.execStubs ? { PATH: `${opts.execStubs.binPath}:${process.env.PATH ?? ''}` } : {}),
+    ...(opts.env ?? {}),
+  };
+}
+
 export function runCli(verb: string, flags: string[], opts: RunOptions = {}): RunResult {
-  // Top-level flags like -h / -v are passed alone — they don't take
-  // a verb. For everything else, prepend the verb.
-  const argv = verb === '-h' || verb === '-v' ? [verb] : [verb, ...flags];
-  const result = spawnSync(process.execPath, [CLI_PATH, ...argv], {
+  const result = spawnSync(process.execPath, [CLI_PATH, ...argvFor(verb, flags)], {
     cwd: opts.cwd ?? process.cwd(),
     encoding: 'utf-8',
-    env: {
-      ...process.env,
-      NO_COLOR: '1',
-      FORCE_COLOR: '0',
-      // Point HOME at a per-process tmp with a real legacy lifetime license
-      // activated, so paid commands clear requireLicense() and tests reach
-      // the off-TTY/arg-parse logic actually under test.
-      HOME: getFakeHome(),
-      // Prepend exec stub binPath so calls to ssh/docker/kubectl/etc.
-      // hit the stub log, not real binaries.
-      ...(opts.execStubs ? { PATH: `${opts.execStubs.binPath}:${process.env.PATH ?? ''}` } : {}),
-      ...(opts.env ?? {}),
-    },
+    env: childEnv(opts),
     input: opts.stdin,
     timeout: opts.timeoutMs ?? 60_000,
   });
 
   return {
     exitCode: result.status,
-    stdout: (result.stdout ?? '').replace(ANSI_RE, ''),
-    stderr: (result.stderr ?? '').replace(ANSI_RE, ''),
+    stdout: stripAnsi(result.stdout),
+    stderr: stripAnsi(result.stderr),
   };
+}
+
+/**
+ * runCli, asynchronously. Same argv, env, HOME and ANSI handling; the only
+ * difference is that this one does not block the event loop.
+ *
+ * That difference is load-bearing for anything pointed at the licence stub.
+ * `startLicenseStub()` listens IN THIS PROCESS, and spawnSync parks the event
+ * loop for the whole child run — so the stub can never accept the child's
+ * connection, the CLI's fetch times out, and the stub records no call at all.
+ * Every case that passes `apiBase: stub.baseUrl` must therefore await this
+ * instead of calling runCli.
+ */
+export function runCliAsync(
+  verb: string,
+  flags: string[],
+  opts: RunOptions = {},
+): Promise<RunResult> {
+  return new Promise((resolveResult, rejectResult) => {
+    const child = spawn(process.execPath, [CLI_PATH, ...argvFor(verb, flags)], {
+      cwd: opts.cwd ?? process.cwd(),
+      env: childEnv(opts),
+      timeout: opts.timeoutMs ?? 60_000,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    // A CLI that exits before reading stdin (a flag error, `-h`) makes the
+    // write fail with EPIPE, which arrives as an unhandled 'error' on the
+    // stream and would take the whole test process down.
+    child.stdin.on('error', () => {});
+    child.stdin.end(opts.stdin ?? '');
+
+    // Spawn itself failing (a bad path, a fork limit) is a harness fault, not
+    // a CLI outcome: surface it instead of hanging until the test times out.
+    // A no-op once 'close' has already settled the promise.
+    child.on('error', rejectResult);
+    child.on('close', (code) => {
+      resolveResult({ exitCode: code, stdout: stripAnsi(stdout), stderr: stripAnsi(stderr) });
+    });
+  });
 }

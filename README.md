@@ -149,8 +149,8 @@ vibecarbon <command> [options]
 
 | Command | What it does |
 | :------ | :----------- |
-| **`activate [key]`** | Activate a Graphene or Fullerene project key (unlocks Kubernetes and HA deploys for this project) |
-| **`deactivate`** | Deactivate the current license; `-all` removes every stored key |
+| **`activate [key]`** | Bind a Graphene or Fullerene key to this project (unlocks Kubernetes and HA deploys). Run inside the project. |
+| **`deactivate [key]`** | Release the key from this project; confirmed by a link emailed to the buyer. `-rm` removes only the local file |
 
 ### Debug: look under the hood
 
@@ -317,7 +317,7 @@ Using the distributed `vibecarbon` package is a per-project subscription:
 | **Graphene** | Scale on demand. | Production that needs to scale | $19 per project per month ($190 per year) | Kubernetes |
 | **Fullerene** | Enterprise resiliency. | Production that must survive a region failure | $39 per project per month ($390 per year) | Kubernetes HA |
 
-Compose HA is also covered under Fullerene, for providers without Kubernetes; select it explicitly with `-mode compose-ha`. The subscription is checked on every deploy to a Kubernetes or HA environment. A lapsed subscription keeps deploying for 30 days with a warning, then pauses those deploys until renewed. Backup, restore, failover, and scale never require a subscription. Run `vibecarbon activate <key>` from inside the project directory the key was issued for; it writes `.vibecarbon.license`, which should be committed and shared with your team. The key never rotates. Keys bought before subscriptions (the legacy Fullerene license) are lifetime: every mode, every project. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
+The subscription is checked on every deploy to a Kubernetes or HA environment. A lapsed subscription keeps deploying for 30 days with a warning, then pauses those deploys until renewed. Backup, restore, failover, and scale never require a subscription. Run `vibecarbon activate <key>` inside the project; it binds the key to that project on vibecarbon.com and writes `.vibecarbon.license`, which should be committed and shared with your team. A key is bound to one project at a time: `vibecarbon deactivate` emails the buyer a release link, after which the key can be activated elsewhere. Every bind and release is announced to the buyer by email. See [TERMS.md](./TERMS.md) for full usage terms. Generated project code is [MIT](./carbon/LICENSE), so you own your app outright.
 
 ---
 

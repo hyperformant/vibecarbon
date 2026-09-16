@@ -13,6 +13,29 @@ Vibecarbon's test suite is organized into 4 tiers. Each tier has a one-sentence 
 
 `unit` + `integration` run on every push. `loadtest` is on-demand against a running target. `e2e` requires `REAL_INFRA=true` and credentials in `tests/.env.e2e` (gitignored; copy `tests/.env.e2e.example` and fill in the values you need; real shell/CI env vars still win over the file).
 
+### Licensing in the test suites
+
+A key entitles nothing on its own: the project binding lives on vibecarbon.com,
+and every gated command acts on a **signed verdict** from its licence API. So
+no suite stores a pre-minted key, and none is checked in. Instead the
+integration and e2e harnesses start a local stub of that API
+(`tests/e2e/utils/license-stub.js`), which signs real Ed25519 keys and verdicts
+with **`VIBECARBON_LICENSE_PRIVATE_KEY`** — the same value as vibecarbon.com's
+`LICENSE_SIGNING_PRIVATE_KEY`, as raw PEM, from your shell or `tests/.env.e2e`.
+Only `VIBECARBON_API_BASE` changes for the CLI under test; there is no
+test-only bypass in the licensing code, so the CLI walks its production
+bind/check path.
+
+Consequences worth knowing:
+
+- **Unit tests never need the key** — they inject an ephemeral keypair.
+- **Integration**: the signed cases skip (loudly) when the variable is absent,
+  so the suite still runs on a machine without it.
+- **e2e**: `setupE2EEnv()` hard-fails without it, before anything touches the
+  network — a missing key must cost seconds, not a provisioned rig. Each
+  scenario then mints its own key and runs `vibecarbon activate` in the project
+  it just created, exactly as a customer does.
+
 **What gates a release:** the `Test Suite` workflow (unit + integration + lint + the carbon template job); semantic-release fires on its success. **e2e is NOT a release gate**; it runs manually via `workflow_dispatch` (see below), so "e2e green on real infra" is a point-in-time result, not a property of every published version. Restore any "all green" claim only after a fresh full-matrix record run on the shipping commit.
 
 ## Integration sub-trees
@@ -60,7 +83,7 @@ describe('vibecarbon add observability', () => {
 
 - **`buildFixture({ mode, git, envs, withDeployedState, files })`**: synthesizes a vibecarbon project in a temp dir. Mode-specific scaffolding (compose vs k8s), `.gitignore` mirrors `carbon/_gitignore`, optional pre-populated `.vibecarbon/<env>.json` for post-deploy commands.
 - **`installStubs({ hetzner, cloudflare })`**: overrides `globalThis.fetch` with HTTP fakes. Hetzner modes: `success` / `capacity-exhausted` / `rate-limited` / `not-found`. Cloudflare: `success` / `rate-limited`. Unmatched URLs throw: no silent prod hits. (In-process only; child-process exec stubbing is deferred.)
-- **`runCli(verb, flags, opts)`**: spawns `node src/cli.js <verb> <flags...>` via `spawnSync`. ANSI is stripped from stdout/stderr. Sets `HOME` to a per-process tmp with a legacy lifetime test key activated, so paid-tier commands reach their flag-parsing logic. Returns `{ exitCode, stdout, stderr }`.
+- **`runCli(verb, flags, opts)`**: spawns `node src/cli.js <verb> <flags...>` via `spawnSync`. ANSI is stripped from stdout/stderr. Sets `HOME` to a per-process tmp and points `VIBECARBON_API_BASE` at a closed port by default, so an unlicensed run is a refusal and never a silent production request. Returns `{ exitCode, stdout, stderr }`.
 - **`assertSuccess` / `assertExitWith` / `assertFileWritten` / `assertFileMissing`**: throw plain `Error` with the relevant slice of `RunResult` so failures are legible without digging through raw stdio.
 
 ## Cross-tier shared helpers

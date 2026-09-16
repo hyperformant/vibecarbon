@@ -1,31 +1,35 @@
 /**
  * The deploy gate end to end, with only the network stubbed.
  *
- * Real activateLicense, real getLicense, real checkLicense, real signed
- * verdict cache, real evaluateDeployEntitlement, real upsell and warning
- * copy. The keys and verdict tokens are minted against an ephemeral Ed25519
- * pair (scripts/generate-license.js), injected via `publicKeyPem`, so no
+ * Real getLicense, real checkLicense, real signed verdict cache, real
+ * evaluateDeployEntitlement, real upsell and warning copy. The keys and
+ * verdict tokens are minted against an ephemeral Ed25519 pair
+ * (scripts/generate-license.js), injected via `publicKeyPem`, so no
  * production secret is needed and no assertion depends on the wall clock:
  * `now` is passed explicitly wherever a date decides the outcome.
+ *
+ * The stored key is written to <projectDir>/.vibecarbon.license directly
+ * rather than through activateLicense(): activating is now an online
+ * operation (POST /bind) and stubbing it here would only test bind.js a
+ * second time. What this file is a seam for is the gate.
  *
  * This replaces the provision/refresh seam: the gate no longer asks for a
  * renewed key, it asks vibecarbon.com whether the subscription is current.
  */
 import { generateKeyPairSync } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   derivePublicKeyPem,
-  mintV1Key,
-  mintV2Key,
+  mintKey,
   signVerdictToken,
 } from '../../../scripts/generate-license.js';
-import { activateLicense, requireDeployEntitlement } from '../../../src/lib/licensing/index.js';
+import { licensePath, requireDeployEntitlement } from '../../../src/lib/licensing/index.js';
 
 const PROJECT_ID = '11111111-2222-4333-8444-555555555555';
-const CUSTOMER_ID = 'a1b2c3d4';
+const LICENSE_ID = '0123456789abcdef';
 const NOW = '2026-09-15';
 
 function makeKeypair() {
@@ -144,15 +148,22 @@ describe('requireDeployEntitlement seam', () => {
     rmSync(projectDir, { recursive: true, force: true });
   });
 
-  function activateV2() {
-    const key = mintV2Key(privateKeyPem, { customerId: CUSTOMER_ID, projectId: PROJECT_ID });
-    const result = activateLicense(key, { projectDir, stateDir, publicKeyPem });
-    expect(result.success).toBe(true);
+  /**
+   * The stored license: one genuinely-signed, project-less key in the
+   * project's own file. It names no project and no plan, so every fixture
+   * below differs only in what the server's verdict says.
+   */
+  function storeKey() {
+    const key = mintKey(privateKeyPem, { licenseId: LICENSE_ID });
+    writeFileSync(
+      licensePath(projectDir),
+      `${JSON.stringify({ key, activatedAt: '2026-09-01T00:00:00.000Z', source: 'manual' }, null, 2)}\n`,
+    );
     return key;
   }
 
   it('1: an active graphene subscription clears a k8s deploy and caches the verdict', async () => {
-    activateV2();
+    storeKey();
     const fetchImpl = fetchReturning(verdict());
 
     await expect(gate({ fetchImpl })).resolves.toBeUndefined();
@@ -168,7 +179,7 @@ describe('requireDeployEntitlement seam', () => {
   });
 
   it('2: past_due inside the grace window warns and proceeds', async () => {
-    activateV2();
+    storeKey();
     // periodEnd + 30 days = 2026-10-01, so 2026-09-15 leaves 16 days.
     const fetchImpl = fetchReturning(verdict({ status: 'past_due', periodEnd: '2026-09-01' }));
 
@@ -179,7 +190,7 @@ describe('requireDeployEntitlement seam', () => {
   });
 
   it('3: canceled past the grace window blocks with Subscription ended', async () => {
-    activateV2();
+    storeKey();
     const fetchImpl = fetchReturning(verdict({ status: 'canceled', periodEnd: '2026-01-01' }));
 
     await expect(gate({ fetchImpl })).rejects.toThrow('process.exit(1)');
@@ -188,7 +199,7 @@ describe('requireDeployEntitlement seam', () => {
   });
 
   it('4: a graphene verdict cannot deploy k8s-ha', async () => {
-    activateV2();
+    storeKey();
     const fetchImpl = fetchReturning(verdict({ tier: 'graphene' }));
 
     await expect(gate({ fetchImpl, deployTier: 'k8s-ha' })).rejects.toThrow('process.exit(1)');
@@ -197,7 +208,7 @@ describe('requireDeployEntitlement seam', () => {
   });
 
   it('5: an unreachable server with no cache warns and proceeds', async () => {
-    activateV2();
+    storeKey();
     const fetchImpl = fetchThatThrows();
 
     await expect(gate({ fetchImpl })).resolves.toBeUndefined();
@@ -207,7 +218,7 @@ describe('requireDeployEntitlement seam', () => {
   });
 
   it('6: an unreachable server falls back to the cached verdict silently', async () => {
-    activateV2();
+    storeKey();
     await gate({ fetchImpl: fetchReturning(verdict()) });
     logged = [];
 
@@ -223,7 +234,7 @@ describe('requireDeployEntitlement seam', () => {
   });
 
   it('7: an edited cache file is ignored, so the run falls back to the warning', async () => {
-    activateV2();
+    storeKey();
     await gate({ fetchImpl: fetchReturning(verdict()) });
     const stored = JSON.parse(readFileSync(cachePath(), 'utf-8'));
     stored.token = stored.token.replace('-active-', '-canceled-');
@@ -247,22 +258,6 @@ describe('requireDeployEntitlement seam', () => {
     expect(output()).toBe('');
   });
 
-  it('9: a legacy lifetime key clears k8s-ha without any check', async () => {
-    const v1 = mintV1Key(privateKeyPem, { customerId: CUSTOMER_ID });
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(
-      join(stateDir, 'license'),
-      JSON.stringify({ key: v1, tier: 'fullerene', customerId: CUSTOMER_ID }),
-    );
-    const fetchImpl = fetchReturning(verdict());
-
-    await expect(gate({ fetchImpl, deployTier: 'k8s-ha' })).resolves.toBeUndefined();
-
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(exitSpy).not.toHaveBeenCalled();
-    expect(output()).toBe('');
-  });
-
   it('10: no key at all blocks a k8s deploy without asking the server', async () => {
     const fetchImpl = fetchReturning(verdict());
 
@@ -273,7 +268,7 @@ describe('requireDeployEntitlement seam', () => {
   });
 
   it('11: a server that does not recognize the key blocks and says so', async () => {
-    activateV2();
+    storeKey();
     const fetchImpl = fetchRejecting();
 
     await expect(gate({ fetchImpl })).rejects.toThrow('process.exit(1)');
@@ -290,16 +285,15 @@ describe('requireDeployEntitlement seam', () => {
     // .vibecarbon.json can carry the id in whatever case it was written
     // with; license.projectId and every verdict.projectId are always
     // lowercase. Without normalizing the manifest's id before comparing,
-    // this false-blocks as 'wrong-project' even though it is the same
-    // project (I1). PROJECT_ID is all-digit hex, so it needs a hex-letter
-    // id here for .toUpperCase() to actually change anything.
+    // this false-blocks even though it is the same project (I1).
+    // PROJECT_ID is all-digit hex, so it needs a hex-letter id here for
+    // .toUpperCase() to actually change anything.
     const mixedCaseId = 'aabbccdd-2222-4333-8444-555555555555';
     writeFileSync(
       join(projectDir, '.vibecarbon.json'),
       `${JSON.stringify({ version: '1', projectId: mixedCaseId.toUpperCase(), services: {} }, null, 2)}\n`,
     );
-    const key = mintV2Key(privateKeyPem, { customerId: CUSTOMER_ID, projectId: mixedCaseId });
-    expect(activateLicense(key, { projectDir, stateDir, publicKeyPem }).success).toBe(true);
+    storeKey();
     const token = signVerdictToken(privateKeyPem, {
       projectId: mixedCaseId,
       status: 'active',

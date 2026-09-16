@@ -124,16 +124,16 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
   const exampleKeys = Object.keys(parseDotenv(readFileSync(examplePath, 'utf-8')));
 
   // DOCKER_HUB_* are operator-shell-level (deliberately NOT in the registry —
-  // see config-registry.js's providers block). VIBECARBON_TEST_LICENSE_KEY is
-  // test-harness-only: it is consumed by tests/integration/_harness/run-cli.ts
-  // and activated for e2e, never read by the product, so registering it would
+  // see config-registry.js's providers block). VIBECARBON_LICENSE_PRIVATE_KEY
+  // is test-harness-only: it is consumed by tests/e2e/utils/license-stub.js to
+  // sign verdict tokens, never read by the product, so registering it would
   // add a credential to the CLI's config surface that no command uses. Every
   // OTHER key in the example is an operator-secret and must be registry-backed,
   // and vice-versa.
   const NON_REGISTRY_EXAMPLE_KEYS = new Set([
     'DOCKER_HUB_USERNAME',
     'DOCKER_HUB_TOKEN',
-    'VIBECARBON_TEST_LICENSE_KEY',
+    'VIBECARBON_LICENSE_PRIVATE_KEY',
   ]);
 
   it('.env.e2e.example carries no legacy spelling', () => {

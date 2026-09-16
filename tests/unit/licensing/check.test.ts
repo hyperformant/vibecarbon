@@ -75,7 +75,7 @@ describe('checkLicense', () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
 
     const result = await checkLicense({
-      key: 'vc2-a1b2c3d4-11111111222233334444555555555555-sig',
+      key: 'vc-a1b2c3d4a1b2c3d4-sig',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -97,7 +97,7 @@ describe('checkLicense', () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
 
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -114,7 +114,7 @@ describe('checkLicense', () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
 
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -132,7 +132,7 @@ describe('checkLicense', () => {
       .mockResolvedValue(jsonResponse(200, { token, cancelAtPeriodEnd: true }));
 
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -150,7 +150,7 @@ describe('checkLicense', () => {
     const goodToken = signVerdictToken(privateKeyPem, verdictFields());
     const goodFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token: goodToken }));
     await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: goodFetch,
@@ -160,7 +160,7 @@ describe('checkLicense', () => {
 
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { error: 'bad_signature' }));
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -175,7 +175,7 @@ describe('checkLicense', () => {
   it('5b. 404 with { error: "not_found" } is rejected', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(404, { error: 'not_found' }));
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -188,7 +188,7 @@ describe('checkLicense', () => {
   it('5c. 400 with an empty body (no error field) is unreachable, not rejected', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(400, {}));
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -204,7 +204,7 @@ describe('checkLicense', () => {
     const token = signVerdictToken(privateKeyPem, verdictFields());
     const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
     await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: seedFetch,
@@ -212,7 +212,7 @@ describe('checkLicense', () => {
     });
 
     const cachedResult = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: vi.fn().mockResolvedValue(htmlResponse(403)),
@@ -223,7 +223,7 @@ describe('checkLicense', () => {
 
     const otherStateDir = mkdtempSync(join(tmpdir(), 'vibecarbon-check-'));
     const noCacheResult = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir: otherStateDir,
       fetchImpl: vi.fn().mockResolvedValue(htmlResponse(403)),
@@ -237,7 +237,7 @@ describe('checkLicense', () => {
   it('5e. 404 with an HTML body is unreachable, not rejected', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(htmlResponse(404));
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -253,7 +253,7 @@ describe('checkLicense', () => {
     const token = signVerdictToken(privateKeyPem, verdictFields());
     const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
     await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: seedFetch,
@@ -261,7 +261,7 @@ describe('checkLicense', () => {
     });
 
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: vi.fn().mockResolvedValue(jsonResponse(503, { error: 'internal' })),
@@ -275,7 +275,7 @@ describe('checkLicense', () => {
   it('5g. 503 with a JSON error body, no cache: none, nothing cached', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(503, { error: 'internal' }));
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -290,7 +290,7 @@ describe('checkLicense', () => {
     const token = signVerdictToken(privateKeyPem, verdictFields());
     const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
     await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: seedFetch,
@@ -298,7 +298,7 @@ describe('checkLicense', () => {
     });
 
     const cachedResult = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: vi.fn().mockResolvedValue(jsonResponse(429, { error: 'rate_limited' })),
@@ -309,7 +309,7 @@ describe('checkLicense', () => {
 
     const otherStateDir = mkdtempSync(join(tmpdir(), 'vibecarbon-check-'));
     const noCacheResult = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir: otherStateDir,
       fetchImpl: vi.fn().mockResolvedValue(jsonResponse(429, { error: 'rate_limited' })),
@@ -355,7 +355,7 @@ describe('checkLicense', () => {
         const token = signVerdictToken(privateKeyPem, verdictFields());
         const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
         await checkLicense({
-          key: 'vc2-key',
+          key: 'vc-key',
           projectId: PROJECT_ID,
           stateDir,
           fetchImpl: seedFetch,
@@ -363,7 +363,7 @@ describe('checkLicense', () => {
         });
 
         const result = await checkLicense({
-          key: 'vc2-key',
+          key: 'vc-key',
           projectId: PROJECT_ID,
           stateDir,
           fetchImpl: makeFetch(),
@@ -376,7 +376,7 @@ describe('checkLicense', () => {
 
       it(`${name}: without a cache returns none with unreachable ${unreachable}`, async () => {
         const result = await checkLicense({
-          key: 'vc2-key',
+          key: 'vc-key',
           projectId: PROJECT_ID,
           stateDir,
           fetchImpl: makeFetch(),
@@ -394,7 +394,7 @@ describe('checkLicense', () => {
     const token = signVerdictToken(privateKeyPem, verdictFields());
     const seedFetch = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
     await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: seedFetch,
@@ -409,7 +409,7 @@ describe('checkLicense', () => {
 
     const offlineFetch = vi.fn().mockRejectedValue(new Error('offline'));
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: offlineFetch,
@@ -436,7 +436,7 @@ describe('checkLicense', () => {
 
     const offlineFetch = vi.fn().mockRejectedValue(new Error('offline'));
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl: offlineFetch,
@@ -452,7 +452,7 @@ describe('checkLicense', () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
 
     await checkLicense({
-      key: 'vc2-a1b2c3d4-xyz',
+      key: 'vc-a1b2c3d4a1b2c3d4-xyz',
       projectId: PROJECT_ID,
       stateDir,
       env: {},
@@ -465,8 +465,12 @@ describe('checkLicense', () => {
     expect(url).toBe('https://vibecarbon.com/api/v1/license/check');
     expect(opts.method).toBe('POST');
     const body = JSON.parse(opts.body);
-    expect(body.key).toBe('vc2-a1b2c3d4-xyz');
     expect(typeof body.cliVersion).toBe('string');
+    expect(body).toEqual({
+      key: 'vc-a1b2c3d4a1b2c3d4-xyz',
+      projectId: PROJECT_ID.toLowerCase(),
+      cliVersion: body.cliVersion,
+    });
     expect(opts.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -475,7 +479,7 @@ describe('checkLicense', () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { token }));
 
     await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       env: { VIBECARBON_API_BASE: 'http://localhost:9999' },
@@ -497,7 +501,7 @@ describe('checkLicense', () => {
     });
 
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir,
       fetchImpl,
@@ -517,7 +521,7 @@ describe('checkLicense', () => {
     writeFileSync(brokenStateDir, 'not a directory');
 
     const result = await checkLicense({
-      key: 'vc2-key',
+      key: 'vc-key',
       projectId: PROJECT_ID,
       stateDir: brokenStateDir,
       fetchImpl,

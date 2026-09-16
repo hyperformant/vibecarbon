@@ -30,8 +30,8 @@ describe('e2eCliEnv', () => {
     // Disposable rigs: -y deploys need an operator CIDR list.
     expect(env.ALLOWED_SSH_IPS).toBe('0.0.0.0/0,::/0');
     // No license bypass is handed to the child: the harness activates a
-    // genuine signed key (VIBECARBON_TEST_LICENSE_KEY) at ~/.vibecarbon/
-    // license instead, the same path a customer walks. The old
+    // genuine signed key and lets the CLI ask the licence API for a signed
+    // verdict, the same path a customer walks. The old
     // VIBECARBON_DEV_LICENSE=true skipped Ed25519 verification outright, and
     // it shipped in the npm tarball — see tests/unit/licensing/
     // no-dev-bypass.test.ts.
@@ -107,17 +107,28 @@ describe('test harnesses use a real signed license, not a bypass', () => {
   const runCli = read('tests', 'integration', '_harness', 'run-cli.ts');
   const e2eEnv = read('tests', 'e2e', 'utils', 'e2e-env.js');
 
-  it('the integration harness sources its key from VIBECARBON_TEST_LICENSE_KEY', () => {
-    expect(runCli).toContain('VIBECARBON_TEST_LICENSE_KEY');
+  it('the integration harness never READS a licence key or the signing key', () => {
+    // A key alone entitles nothing now: the binding lives on vibecarbon.com,
+    // and tests that need a verdict point the CLI at the local stub instead.
+    //
+    // The guard is on a READ, not on a mention, because the harness must now
+    // NAME the signing key in order to blank it. `env.VIBECARBON_…` is how
+    // sourcing it would look; VIBECARBON_TEST_LICENSE_KEY is the retired
+    // pre-minted key, which had no use other than being sourced.
+    expect(runCli).not.toMatch(/env\.VIBECARBON_LICENSE_PRIVATE_KEY|VIBECARBON_TEST_LICENSE_KEY/);
+    // And the scrub itself is present: without it `...process.env` would hand
+    // an exported signing key to every CLI child.
+    expect(runCli).toContain("VIBECARBON_LICENSE_PRIVATE_KEY: ''");
   });
 
-  it('no harness still seeds the unsignable placeholder key', () => {
-    // The old fixture key parsed but carried no real signature — it only ever
-    // worked because DEV_MODE skipped verification. Matched as a quoted string
-    // literal, not as bare text, so the comments explaining why it is gone
-    // (which necessarily name it) do not trip the guard.
+  it('no harness embeds a licence key literal', () => {
+    // A hardcoded key is either unsignable (the old fixture, which only ever
+    // worked because DEV_MODE skipped verification) or a real one leaking into
+    // the repo. Neither belongs here: keys are minted per run by the stub.
+    // Matched as a quoted string literal in the CURRENT `vc-<16 hex>-` shape,
+    // not as bare text, so prose about keys does not trip the guard.
     for (const source of [runCli, e2eEnv]) {
-      expect(source).not.toMatch(/['"]vc-f-deadbeef/);
+      expect(source).not.toMatch(/['"`]vc-[0-9a-f]{16}-/);
     }
   });
 
