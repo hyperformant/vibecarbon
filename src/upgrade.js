@@ -403,6 +403,17 @@ async function main(cliArgs) {
       continue;
     }
 
+    // carbon/biome.json ships "root": false — it's a nested config inside THIS
+    // monorepo. create.js's makeBiomeConfigRoot() flips that to true for a
+    // scaffolded standalone project (no parent config above it, and Biome 2.x
+    // silently ignores a non-root config with nothing rooting it, falling back
+    // to defaults that scan gitignored dist/ / .claude/ / .vibecarbon/ and
+    // break the pre-commit lint hook). Upgrade re-pulls the raw template
+    // content above, so without this it would undo that flip on every run.
+    if (relPath === 'biome.json') {
+      newContent = newContent.replace(/"root"\s*:\s*false/, '"root": true');
+    }
+
     // Smart-merge package.json: update template dep versions, add new template deps,
     // preserve user-added deps and fields, merge pnpm config (overrides, etc.)
     if (relPath === 'package.json') {
