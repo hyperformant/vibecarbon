@@ -139,7 +139,7 @@ The harness currently gets past `requireLicense()` with a real legacy lifetime k
 
 ### Fulfilment (`src/server/billing/fulfillment.ts`, `license.ts`)
 
-- One `mintLicenseKey({ privateKeyPem, licenseId })`. `mintLicenseKeyV2`, `customerIdFromEmail`, `compactProjectId`, `rehyphenateProjectId`, `buildV2Message`, `formatV2Key`, `parseV2Key`, and the v1 `TIER_CHARS` map are deleted. `parseLicenseKey(key) → { licenseId } | null` and `verifyLicenseKey` are the only parsing surface.
+- One `mintLicenseKey({ privateKeyPem, licenseId })`. `mintLicenseKeyV2`, `customerIdFromEmail`, `buildV2Message`, `formatV2Key`, `parseV2Key`, and the v1 `TIER_CHARS` map are deleted (`compactProjectId`/`rehyphenateProjectId` stay: the verdict and release tokens carry a project id). `parseLicenseKey(key) → { licenseId } | null` and `verifyLicenseKey` are the only parsing surface.
 - On `checkout.session.completed`: mint `licenseId`, mint the key, insert the row with `project_id = NULL`, send the purchase email. Deterministic re-minting is gone, so fulfilment stores nothing extra: the key is re-derivable from the stored `licenseId` + private key whenever `/resend` needs it.
 - `license-catalog.ts`: delete `LEGACY_LIFETIME_FULLERENE`, `FULLERENE_PRICE_ID`, and the one-time-purchase branch. Remove `FULLERENE_PRICE_ID` from `.env`, `.env.local`, `.env.example`, and the Stripe product if the user wants (out of scope for code).
 
