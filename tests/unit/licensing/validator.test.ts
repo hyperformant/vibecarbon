@@ -117,4 +117,17 @@ describe('verdict tokens', () => {
       projectId: PROJECT_ID,
     });
   });
+  it('verifies an unbound verdict signed over v-… with the injected pair', () => {
+    const pid32 = PROJECT_ID.replace(/-/g, '');
+    const msg = `v-${pid32}-unbound-none-20260915-20260915`;
+    const sig = sign(null, Buffer.from(msg), privateKey).toString('hex');
+    const token = `vcv-${pid32}-unbound-none-20260915-20260915-${sig}`;
+    expect(verifyVerdictToken(token, { publicKeyPem: PUBLIC_PEM })).toMatchObject({
+      valid: true,
+      status: 'unbound',
+      tier: 'none',
+      projectId: PROJECT_ID,
+    });
+    expect(verifyVerdictToken(token).valid).toBe(false);
+  });
 });
