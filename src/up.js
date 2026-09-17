@@ -374,7 +374,42 @@ export async function run(args = []) {
     env: gitSafeEnv(),
   });
 
+  waitForDevTree(child);
+}
+
+/**
+ * Hand the terminal to the dev-server tree and exit only after it has.
+ *
+ * cli.js installs a global SIGINT handler that exits at once — right for a
+ * CLI stuck in a retry loop, wrong here. `up` is the shell's foreground job,
+ * so the prompt returns the moment it exits, while dev.js underneath is
+ * still shutting the API down. Its last log lines then print over the
+ * prompt (tsx's spinner even clears the line), which reads as a hang and
+ * invites a second Ctrl+C. The tty already delivers Ctrl+C to the whole
+ * foreground group, so the child sees it without our help; all we must do is
+ * stay alive until it has finished. SIGTERM is different: it comes from a
+ * `kill`, reaches only us, and has to be forwarded.
+ *
+ * `graceMs` bounds the wait after a signal so a wedged tree cannot hold the
+ * terminal hostage (dev.js force-kills its own children after 5s, so a
+ * healthy tree is long gone by then).
+ */
+export function waitForDevTree(child, { exit = process.exit, graceMs = 10_000 } = {}) {
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
+
+  let giveUp;
+  const boundTheWait = () => {
+    giveUp ??= setTimeout(() => exit(130), graceMs);
+  };
+  process.on('SIGINT', boundTheWait);
+  process.on('SIGTERM', () => {
+    child.kill('SIGTERM');
+    boundTheWait();
+  });
+
   child.on('close', (code) => {
-    process.exit(code ?? 0);
+    clearTimeout(giveUp);
+    exit(code ?? 0);
   });
 }
