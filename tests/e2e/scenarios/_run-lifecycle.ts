@@ -4173,7 +4173,10 @@ EOF`;
           `${tag}     cd ${config.projectDir} && vibecarbon scale ${config.envPrefix} -y\n` +
           `${tag}     cd ${config.projectDir} && vibecarbon backup ${config.envPrefix} -y\n` +
           `${tag}   When done:\n` +
-          `${tag}     cd ${config.projectDir} && vibecarbon destroy ${config.envPrefix} -y && gh repo delete ${config.testRepoSlug ?? '<slug>'} --yes`,
+          `${tag}     cd ${config.projectDir} && vibecarbon destroy ${config.envPrefix} -y -purge && gh repo delete ${config.testRepoSlug ?? '<slug>'} --yes\n` +
+          `${tag}     (-purge is required here: plain destroy preserves the backup bucket by design ` +
+          `for production recovery, and the orphan sweep that would otherwise catch it is the very ` +
+          `thing --keep skips — without -purge it leaks forever)`,
       );
       // Sentinel file so iter scripts can find the rig without grepping logs.
       // Layout: one file per scenario under
