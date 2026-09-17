@@ -144,6 +144,7 @@ async function announceWhenReady() {
 }
 
 const children = [];
+const names = new Map();
 
 // A package manager exports its own config as npm_config_* env vars; the
 // nested `npx` then warns "Unknown env config …". Silence npm's own warnings
@@ -158,6 +159,7 @@ const server = spawn('npx', ['tsx', 'watch', '--env-file=.env.local', 'src/serve
   env: childEnv,
 });
 children.push(server);
+names.set(server, 'API');
 
 // Spawn client process
 const client = spawn('npx', ['vite'], {
@@ -167,46 +169,98 @@ const client = spawn('npx', ['vite'], {
   env: childEnv,
 });
 children.push(client);
+names.set(client, 'Vite');
 
 // Track if we're shutting down
 let shuttingDown = false;
+// Set once we have told the user we are waiting on a child; only then does a
+// further Ctrl+C mean "stop waiting". `npm run` relays SIGINT to its child,
+// so one keypress reaches us twice within a few ms — that must not force-kill.
+let forceArmed = false;
 
 // Print the URL banner once both servers are up (fire-and-forget).
 announceWhenReady();
 
-function shutdown(exitCode = 0) {
+// How long to let the children finish their own graceful shutdown (the API
+// closes open connections, tsx/Vite tear down their watchers) before we
+// force-kill them.
+const SHUTDOWN_GRACE_MS = 5000;
+
+const isAlive = (child) => child.exitCode === null && child.signalCode === null;
+
+function waitForExit(child) {
+  if (!isAlive(child)) return Promise.resolve();
+  return new Promise((resolve) => child.once('exit', () => resolve()));
+}
+
+function killChild(child, signal) {
+  if (!isAlive(child)) return;
+  if (isWindows) {
+    spawn('taskkill', ['/pid', child.pid, '/f', '/t']);
+    return;
+  }
+  // Kill the entire process group (negative PID)
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    // Fallback: kill just the process
+    try {
+      child.kill(signal);
+    } catch {
+      // Process already dead
+    }
+  }
+}
+
+function forceKill() {
+  for (const child of children) {
+    if (!isAlive(child)) continue;
+    console.log(`  ${names.get(child)} did not exit in time, force-killing.`);
+    killChild(child, 'SIGKILL');
+  }
+}
+
+async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
 
   console.log('\n  Shutting down...');
 
-  // Kill all child process groups
-  for (const child of children) {
-    if (child.exitCode === null) {
-      if (isWindows) {
-        spawn('taskkill', ['/pid', child.pid, '/f', '/t']);
-      } else {
-        // Kill the entire process group (negative PID)
-        try {
-          process.kill(-child.pid, 'SIGTERM');
-        } catch {
-          // Fallback: kill just the process
-          try {
-            child.kill('SIGTERM');
-          } catch {
-            // Process already dead
-          }
-        }
-      }
+  for (const child of children) killChild(child, 'SIGTERM');
+
+  // Wait for the children to actually exit before we do. If we exit first the
+  // shell prompt comes back while the API is still mid-shutdown, and its last
+  // log lines print over the prompt — which looks like a hung process.
+  const allExited = Promise.all(children.map(waitForExit));
+
+  // A slow child is indistinguishable from a hang unless we say so. Name it,
+  // so the user knows what's happening (and what to report if it recurs).
+  const nag = setTimeout(() => {
+    for (const child of children) {
+      if (isAlive(child)) console.log(`  Waiting for ${names.get(child)} to exit...`);
     }
+    forceArmed = true;
+  }, 1000);
+
+  const timedOut = await Promise.race([
+    allExited.then(() => false),
+    delay(SHUTDOWN_GRACE_MS).then(() => true),
+  ]);
+  clearTimeout(nag);
+  if (timedOut) {
+    forceKill();
+    await Promise.race([allExited, delay(1000)]);
   }
 
-  // Exit immediately - don't wait
   process.exit(exitCode);
 }
 
-// Handle signals
-process.on('SIGINT', () => shutdown(0));
+// Handle signals. A further Ctrl+C once we have said we are waiting on the
+// children means "stop being polite": force-kill whatever is left.
+process.on('SIGINT', () => {
+  if (!shuttingDown) shutdown(0);
+  else if (forceArmed) forceKill();
+});
 process.on('SIGTERM', () => shutdown(0));
 
 // If either child exits while the session is meant to be running, take the
