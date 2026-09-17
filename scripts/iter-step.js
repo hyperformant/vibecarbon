@@ -14,8 +14,13 @@
  *      tests/results/iter-<provider>-<mode>-<step>-<ts>.log, and exits
  *      non-zero on failure so xargs / shell loops can react.
  *   3. When done debugging, tear the rig down:
- *        node scripts/iter-step.js hetzner/k8s-ha destroy
- *      (or run `vibecarbon destroy` directly + `gh repo delete ...`).
+ *        node scripts/iter-step.js hetzner/k8s-ha destroy -purge
+ *      (or run `vibecarbon destroy -purge` directly + `gh repo delete ...`).
+ *      -purge is required — plain destroy preserves the backup bucket by
+ *      design (production recovery), and nothing else cleans it up for a
+ *      kept rig: the orphan sweep that normally would is exactly what
+ *      --keep skipped in step 1. Forgetting it leaks a backup bucket per
+ *      abandoned rig, silently and indefinitely.
  *
  * The first argument is a QUALIFIED scenario token, the same `provider/mode`
  * identity the selection grammar uses (`--scenario hetzner/k8s-ha`). It is

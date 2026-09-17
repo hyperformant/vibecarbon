@@ -51,8 +51,10 @@ pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --skip-steps failover,verify-fa
 # 2. Iterate the failing step against the surviving rig (each call ~1–10 min).
 node scripts/iter-step.js hetzner/k8s-ha failover
 
-# 3. When green, tear it down.
-node scripts/iter-step.js hetzner/k8s-ha destroy
+# 3. When green, tear it down. -purge is required: plain destroy preserves
+#    the backup bucket by design, and --keep already skipped the orphan
+#    sweep that would otherwise catch it — omit -purge and it leaks forever.
+node scripts/iter-step.js hetzner/k8s-ha destroy -purge
 ```
 
 `iter-step.js` takes a **qualified** scenario token (`provider/mode`, the same identity `--scenario` uses) — a bare mode is rejected rather than guessed at, since both providers can keep a rig of the same mode at once. Valid steps: `deploy | failover | scale | backup | restore | destroy | status | diagnose`.
@@ -112,7 +114,7 @@ pnpm test:e2e:batch -- --scenario hetzner/k8s-ha
 # Single scenario, keep infra on any outcome, iterate the failing step
 pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --skip-steps failover --keep
 node scripts/iter-step.js hetzner/k8s-ha failover
-node scripts/iter-step.js hetzner/k8s-ha destroy
+node scripts/iter-step.js hetzner/k8s-ha destroy -purge
 
 # Skip already-green scenarios
 pnpm test:e2e:batch -- --except hetzner/compose,hetzner/k8s
