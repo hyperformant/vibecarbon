@@ -207,145 +207,140 @@ function parseKongHostPort(output) {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
-async function checkDockerContainers(projectName) {
-  const services = [
-    {
-      name: 'PostgreSQL',
-      container: 'db',
-      healthUrl: 'http://localhost:8000/rest/v1/',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'Kong Gateway',
-      container: 'kong',
-      healthUrl: 'http://localhost:8000/',
-      acceptCodes: [404],
-    },
-    {
-      name: 'Auth (GoTrue)',
-      container: 'auth',
-      healthUrl: 'http://localhost:8000/auth/v1/health',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'REST (PostgREST)',
-      container: 'rest',
-      healthUrl: 'http://localhost:8000/rest/v1/',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'Realtime',
-      container: 'realtime',
-      healthUrl: 'http://localhost:8000/realtime/v1/',
-      acceptCodes: [200, 401, 403, 426],
-    },
-    {
-      name: 'Storage',
-      container: 'storage',
-      healthUrl: 'http://localhost:8000/storage/v1/status',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'Studio',
-      container: 'studio',
-      healthUrl: 'http://studio.localhost/',
-      acceptCodes: [200, 307],
-    },
-    {
-      name: 'Meta',
-      container: 'meta',
-      healthUrl: 'http://localhost:8000/pg/',
-      acceptCodes: [200, 401],
-    },
-  ];
+/**
+ * Health of this project's local Docker stack, from Docker's point of view.
+ *
+ * Enumerates `docker ps -a` for containers prefixed `${projectName}-` so the
+ * table shows the whole stack — core services, `vibecarbon add` add-ons, and
+ * containers that have exited (which the old running-only listing hid, e.g.
+ * a kong that lost its port bind). Health comes from the compose healthcheck
+ * verdict in Docker's status string; the two core services without one
+ * (rest, meta) are probed through Kong on the host port THIS project's kong
+ * container bound, never a fixed :8000 that another project's gateway may
+ * own.
+ *
+ * @param {string|undefined} projectName
+ * @param {{runCommand?: typeof runCommand, fetch?: typeof fetch, timeoutMs?: number}} [deps]
+ * @returns {Promise<Array<{name: string, container: string, health: string, label: string, detail: string, latencyMs: number}>>}
+ */
+async function checkDockerContainers(projectName, deps = {}) {
+  const { runCommand: _run = runCommand, fetch: _fetch = fetch, timeoutMs = 2000 } = deps;
+  if (!projectName) return [];
+  const prefix = `${projectName}-`;
 
-  // Get list of running containers
-  let runningContainers = new Set();
+  let listing = '';
   try {
-    const output =
-      runCommand(['docker', 'ps', '--format', '{{.Names}}'], {
-        silent: true,
-        encoding: 'utf-8',
-        timeout: 5000,
-        ignoreError: true,
-      }) || '';
-    const prefix = projectName ? `${projectName}-` : null;
-    runningContainers = new Set(
-      output
-        .split('\n')
-        .map((name) => name.trim())
-        .filter(Boolean)
-        .filter((name) => !prefix || name.startsWith(prefix))
-        .map((name) => (prefix ? name.slice(prefix.length) : name.replace(/^[^-]+-/, ''))),
-    );
+    listing =
+      _run(
+        [
+          'docker',
+          'ps',
+          '-a',
+          '--filter',
+          `name=^${prefix}`,
+          '--format',
+          '{{.Names}}\t{{.State}}\t{{.Status}}',
+        ],
+        {
+          silent: true,
+          encoding: 'utf-8',
+          timeout: 5000,
+          ignoreError: true,
+        },
+      ) || '';
   } catch {
     return [];
   }
 
-  if (runningContainers.size === 0) return [];
+  // Docker's name filter is a substring regex; keep the JS prefix check so a
+  // sibling project like `${projectName}-v2` can't leak in via a loose match.
+  const containers = listing
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => {
+      const [fullName, state = '', status = ''] = line.split('\t');
+      return { container: fullName.slice(prefix.length), state, status };
+    });
 
-  // Check port offset from env
-  let portOffset = 0;
-  try {
-    const envFiles = ['.env.local', '.env'];
-    for (const file of envFiles) {
-      if (existsSync(file)) {
-        const content = readFileSync(file, 'utf-8');
-        const match = content.match(/^DEV_PORT_OFFSET=["']?(\d+)["']?/m);
-        if (match) {
-          portOffset = Number.parseInt(match[1], 10);
-        }
-        break;
+  if (containers.length === 0) return [];
+
+  const kongRunning = containers.some((ct) => ct.container === 'kong' && ct.state === 'running');
+  let kongPort = null;
+  if (kongRunning) {
+    try {
+      kongPort = parseKongHostPort(
+        _run(['docker', 'port', `${prefix}kong`, '8000/tcp'], {
+          silent: true,
+          encoding: 'utf-8',
+          timeout: 5000,
+          ignoreError: true,
+        }),
+      );
+    } catch {
+      kongPort = null;
+    }
+  }
+
+  const rows = await Promise.all(
+    containers.map(async ({ container, state, status }) => {
+      const name = SERVICE_DISPLAY_NAMES[container] || container;
+      const base = classifyContainer(container, state, status);
+      const probe = GATEWAY_PROBES[container];
+      if (!probe || state !== 'running') {
+        return { name, container, ...base, latencyMs: 0 };
       }
-    }
-  } catch {
-    // Use defaults
-  }
-
-  // Adjust ports if offset
-  if (portOffset > 0) {
-    for (const svc of services) {
-      svc.healthUrl = svc.healthUrl.replace(':8000', `:${8000 + portOffset}`);
-    }
-  }
-
-  // Only check services whose containers are running
-  const activeServices = services.filter((svc) => runningContainers.has(svc.container));
-
-  const results = await Promise.allSettled(
-    activeServices.map(async (svc) => {
-      const start = Date.now();
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2000);
-        const response = await fetch(svc.healthUrl, { method: 'GET', signal: controller.signal });
-        clearTimeout(timeoutId);
-        const latencyMs = Date.now() - start;
-        const isHealthy = svc.acceptCodes
-          ? svc.acceptCodes.includes(response.status)
-          : response.status >= 200 && response.status < 400;
-
+      if (kongPort === null) {
         return {
-          name: svc.name,
-          container: svc.container,
-          health: isHealthy ? 'healthy' : 'unhealthy',
+          name,
+          container,
+          health: 'unknown',
+          label: 'unknown',
+          detail: 'gateway down',
+          latencyMs: 0,
+        };
+      }
+      const start = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await _fetch(`http://localhost:${kongPort}${probe.path}`, {
+          method: 'GET',
+          signal: controller.signal,
+        });
+        const latencyMs = Date.now() - start;
+        if (probe.acceptCodes.includes(response.status)) {
+          return { name, container, health: 'healthy', label: 'healthy', detail: '', latencyMs };
+        }
+        return {
+          name,
+          container,
+          health: 'unhealthy',
+          label: 'unhealthy',
+          detail: `HTTP ${response.status}`,
           latencyMs,
         };
-      } catch {
+      } catch (err) {
         return {
-          name: svc.name,
-          container: svc.container,
+          name,
+          container,
           health: 'unhealthy',
+          label: 'unhealthy',
+          detail: err instanceof Error ? err.message : String(err),
           latencyMs: Date.now() - start,
         };
+      } finally {
+        clearTimeout(timeoutId);
       }
     }),
   );
 
-  return results.map((r) =>
-    r.status === 'fulfilled'
-      ? r.value
-      : { name: '?', container: '?', health: 'unknown', latencyMs: 0 },
+  const rank = (ct) => {
+    const i = CORE_SERVICE_ORDER.indexOf(ct);
+    return i === -1 ? CORE_SERVICE_ORDER.length : i;
+  };
+  return rows.sort(
+    (a, b) => rank(a.container) - rank(b.container) || a.container.localeCompare(b.container),
   );
 }
 
@@ -1269,6 +1264,7 @@ export async function run(args) {
 
 export {
   CORE_SERVICE_ORDER,
+  checkDockerContainers,
   classifyContainer,
   getBranchName,
   main,
