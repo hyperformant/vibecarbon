@@ -129,6 +129,84 @@ async function checkHttpEndpoint(url, timeout = 2000) {
 // Note: execSync calls below use only hardcoded commands (no user input),
 // matching the pattern in deploy.js and destroy.js throughout this codebase.
 
+// Display names for the core compose services. Anything not listed here
+// (vibecarbon add add-ons such as redis, grafana, n8n) renders under its
+// compose service name so nothing in the project's stack is ever hidden.
+const SERVICE_DISPLAY_NAMES = {
+  traefik: 'Traefik',
+  db: 'PostgreSQL',
+  kong: 'Kong Gateway',
+  auth: 'Auth (GoTrue)',
+  rest: 'REST (PostgREST)',
+  realtime: 'Realtime',
+  storage: 'Storage',
+  imgproxy: 'ImgProxy',
+  meta: 'Meta',
+  studio: 'Studio',
+  app: 'App',
+};
+
+// Core services render first, in this order; everything else follows
+// alphabetically.
+const CORE_SERVICE_ORDER = Object.keys(SERVICE_DISPLAY_NAMES);
+
+// The only core services without a compose healthcheck. They are probed
+// through Kong, on whichever host port THIS project's kong container bound.
+const GATEWAY_PROBES = {
+  rest: { path: '/rest/v1/', acceptCodes: [200, 401] },
+  meta: { path: '/pg/', acceptCodes: [200, 401] },
+};
+
+/**
+ * Derive a status row's health from Docker's own view of the container.
+ *
+ * `state` is `{{.State}}` (running / exited / restarting / created / paused /
+ * dead); `status` is `{{.Status}}`, which carries the compose healthcheck
+ * verdict as a suffix ("Up 2m (healthy)", "Up 3s (health: starting)").
+ *
+ * A running container with no healthcheck is counted healthy but labelled
+ * "running" so the table doesn't overclaim. One-shot init containers
+ * (`*-setup`) that exited 0 are "done" and excluded from the healthy total.
+ *
+ * @param {string} container compose service name (prefix already stripped)
+ * @param {string} state
+ * @param {string} status
+ * @returns {{health: 'healthy'|'unhealthy'|'starting'|'done'|'unknown', label: string, detail: string}}
+ */
+function classifyContainer(container, state, status) {
+  if (state === 'running') {
+    if (/\(healthy\)/.test(status)) return { health: 'healthy', label: 'healthy', detail: '' };
+    if (/\(unhealthy\)/.test(status))
+      return { health: 'unhealthy', label: 'unhealthy', detail: '' };
+    if (/\(health: starting\)/.test(status)) {
+      return { health: 'starting', label: 'starting', detail: '' };
+    }
+    return { health: 'healthy', label: 'running', detail: '' };
+  }
+  if (state === 'exited') {
+    const exitCode = status.match(/^Exited \((\d+)\)/)?.[1];
+    if (exitCode === '0' && container.endsWith('-setup')) {
+      return { health: 'done', label: 'done', detail: '' };
+    }
+    return { health: 'unhealthy', label: 'exited', detail: status };
+  }
+  return { health: 'unhealthy', label: state, detail: status };
+}
+
+/**
+ * Parse `docker port <container> 8000/tcp` output ("0.0.0.0:8000\n[::]:8000")
+ * into the host port. Null when the container isn't running or the output
+ * isn't a binding.
+ *
+ * @param {string|null|undefined} output
+ * @returns {number|null}
+ */
+function parseKongHostPort(output) {
+  const first = (output || '').split('\n').find((line) => line.trim());
+  const match = first?.trim().match(/:(\d+)$/);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
 async function checkDockerContainers(projectName) {
   const services = [
     {
@@ -1189,4 +1267,16 @@ export async function run(args) {
 // EXPORTS FOR TESTING
 // ============================================================================
 
-export { getBranchName, main, providerDisplayName, resolveEnvProvider, SPEC, VERSION };
+export {
+  CORE_SERVICE_ORDER,
+  classifyContainer,
+  GATEWAY_PROBES,
+  getBranchName,
+  main,
+  parseKongHostPort,
+  providerDisplayName,
+  resolveEnvProvider,
+  SERVICE_DISPLAY_NAMES,
+  SPEC,
+  VERSION,
+};
