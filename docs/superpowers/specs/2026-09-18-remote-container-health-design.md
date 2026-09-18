@@ -128,6 +128,7 @@ Rules:
 - `starting` rows are exceptions (yellow), so a rolling restart is visible without being red.
 - Exception rows use the same 28-col name padding and `●`/`○` icons as `formatDockerServiceLines`; the row formatter is extracted from it into `formatContainerRow(row, indent)` so the two blocks cannot drift.
 - Compose deploys (single server) render the same way; there is no special case.
+- After a compose-ha failover the retired node shows its app tier (`APP_TIER_RESTART_SERVICES`) as `exited` and the summary reads `1 unhealthy` until a redeploy converges it: that is the truth of the deploy (failover stops those containers and nothing restarts them), not a status bug. The e2e post-failover `verify-status` excuses exactly those rows on exactly that node.
 
 Summary block: `Environments N deployed, M unhealthy` counts an environment unhealthy when the Health probe fails **or** any server has `error` or a non-`healthy`/`done` row **or** a k8s platform namespace/node shortfall. Today only the Health probe counts.
 

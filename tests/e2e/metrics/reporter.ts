@@ -528,6 +528,11 @@ export function perfDurationSum(
   );
 }
 
+/** Same exclusion for the runner's in-memory step results (`durationMs`). */
+export function perfDurationMsSum(steps: Array<{ name: string; durationMs: number }>): number {
+  return steps.reduce((sum, s) => (NON_PERF_STEPS.has(s.name) ? sum : sum + s.durationMs), 0);
+}
+
 // Anomaly guard knobs (Option A). A green-but-slow matrix run — Hetzner
 // slowdown, S3 throttle, noisy-neighbor provision — must NOT overwrite the
 // recorded fast numbers. Before refreshing README, each curated cell is

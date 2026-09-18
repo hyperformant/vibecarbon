@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
@@ -51,7 +52,7 @@ import {
   runReplicationChecks,
   writeReplicationMarker,
 } from '../checks/replication.js';
-import { checkStatusHealth } from '../checks/status-health.js';
+import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
 import { runSupavisorPoolerChecks } from '../checks/supavisor-pooler.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
@@ -3899,14 +3900,33 @@ EOF`;
     // promoted-but-unhealthy environment fails loudly here rather than
     // silently at the next customer-visible poll. Non-perf (see
     // NON_PERF_STEPS).
+    //
+    // compose-ha: the retired node (the one that is no longer the primary
+    // after the role flip) keeps its app tier `docker stop`ped by design
+    // (failoverComposeHA step 2, APP_TIER_RESTART_SERVICES) until a redeploy
+    // converges it. `status` reports that truthfully as `exited`, so those
+    // rows are excused on that node only; its db (recreated by the wal-g
+    // demote) and everything else must still be healthy. k8s-ha scales the
+    // ex-primary's Deployments to 0, leaving no pods to excuse.
     stepDefs.push({
       name: 'verify-status',
       run: () =>
         executeStep('verify-status', 'vibecarbon status -json', async () => {
+          let retired: RetiredServer | undefined;
+          if (config.mode === 'compose-ha') {
+            const { standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
+            if (standbyIp) retired = { ip: standbyIp, allowedExited: APP_TIER_RESTART_SERVICES };
+            else
+              console.log(
+                `${tag} [verify-status] no retired-node IP in .vibecarbon.json — the old ` +
+                  'primary is held to the full health bar',
+              );
+          }
           const r = await checkStatusHealth({
             projectDir: config.projectDir,
             envName: config.envPrefix,
             timeoutMs: 180_000,
+            retired,
           });
           if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
         }),
