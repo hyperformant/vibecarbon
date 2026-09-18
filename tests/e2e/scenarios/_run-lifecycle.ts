@@ -51,6 +51,7 @@ import {
   runReplicationChecks,
   writeReplicationMarker,
 } from '../checks/replication.js';
+import { checkStatusHealth } from '../checks/status-health.js';
 import { runSupavisorPoolerChecks } from '../checks/supavisor-pooler.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
@@ -178,6 +179,7 @@ const TIMEOUTS: Record<string, number> = {
   // sits at warm-deploy's worst-case budget rather than its typical one.
   'warm-redeploy-change': 1_800_000,
   'verify-deploy': 1_800_000, // 30 min — k8s tail (ACME + rollout) past 20 min
+  'verify-status': 300_000, // 5 min — status -json polls up to 3 min for rolling pods
   // 10 parallel /api/health requests with a 15s per-request timeout. Allows
   // generous 2 min budget so a transient network blip during a single burst
   // doesn't fail the step — the assertion is "10/10 OK", not "burst finished
@@ -374,7 +376,8 @@ export interface LifecycleOptions {
    * suite — adding 25 min/scenario to PR CI was rejected per the plan.
    *
    * TODO (deferred from Phase 9):
-   *   - verify-status / verify-diagnose steps (decoration, easy adds)
+   *   - verify-status step — DONE (tests/e2e/checks/status-health.ts)
+   *   - verify-diagnose step (decoration, easy add)
    *   - configure cicd add-on flow within the e2e harness — requires
    *     Flux reconciliation polling against the project's main branch and
    *     is a separate harness piece. Leaves PR #43's e2e debt open.
@@ -2329,7 +2332,7 @@ export async function runLifecycle(
   // time to test both was rejected per the plan.
   //
   // TODO (deferred from Phase 9, see LifecycleOptions docstring):
-  //   - verify-status step (cheap — `vibecarbon status` non-zero output)
+  //   - verify-status step — DONE (tests/e2e/checks/status-health.ts)
   //   - verify-diagnose step
   //   - configure cicd add-on flow within the harness (Flux poll)
   // -------------------------------------------------------------------------
@@ -3098,6 +3101,22 @@ EOF`;
     {
       name: 'verify-deploy',
       run: () => runVerificationChecks('verify-deploy'),
+    },
+
+    // 4.0 Verify status — the CLI's own view of the environment must agree
+    // with what verify-deploy just proved from the outside: every container /
+    // pod on every server healthy. Non-perf (see NON_PERF_STEPS).
+    {
+      name: 'verify-status',
+      run: () =>
+        executeStep('verify-status', 'vibecarbon status -json', async () => {
+          const r = await checkStatusHealth({
+            projectDir: config.projectDir,
+            envName: config.envPrefix,
+            timeoutMs: 180_000,
+          });
+          if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
+        }),
     },
 
     // 4.1 Warm deploy — re-invoke `vibecarbon deploy` against the already-
@@ -3873,6 +3892,24 @@ EOF`;
     stepDefs.push({
       name: 'verify-failover',
       run: () => runVerificationChecks('verify-failover'),
+    });
+
+    // 12.1 Verify status (HA only) — same CLI-view-agrees-with-outside-view
+    // assertion as the post-deploy verify-status, re-run after failover so a
+    // promoted-but-unhealthy environment fails loudly here rather than
+    // silently at the next customer-visible poll. Non-perf (see
+    // NON_PERF_STEPS).
+    stepDefs.push({
+      name: 'verify-status',
+      run: () =>
+        executeStep('verify-status', 'vibecarbon status -json', async () => {
+          const r = await checkStatusHealth({
+            projectDir: config.projectDir,
+            envName: config.envPrefix,
+            timeoutMs: 180_000,
+          });
+          if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
+        }),
     });
 
     // 13. Reconverge deploy (k8s-ha only) — re-invoke `vibecarbon deploy`
