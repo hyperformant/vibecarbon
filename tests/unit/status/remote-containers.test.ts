@@ -163,6 +163,18 @@ describe('classifyPod', () => {
     expect(classifyPod(p)).toEqual({ health: 'starting', label: 'starting', detail: 'ready 1/2' });
   });
 
+  it('Running with no containerStatuses reported yet → starting, ready 0/0', () => {
+    // kubelet has accepted the pod as Running but hasn't populated
+    // containerStatuses yet — a brief kubelet-accepted-but-unreported window.
+    const p = pod({
+      status: {
+        phase: 'Running',
+        containerStatuses: [],
+      },
+    });
+    expect(classifyPod(p)).toEqual({ health: 'starting', label: 'starting', detail: 'ready 0/0' });
+  });
+
   it('a waiting reason becomes the label; restarts become the detail', () => {
     const p = pod({
       status: {

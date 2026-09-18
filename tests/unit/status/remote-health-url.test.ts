@@ -8,7 +8,8 @@ describe('checkRemoteHealth', () => {
       status: 200,
       json: async () => ({
         status: 'ready',
-        checks: { database: 'connected', supabase: 'connected' },
+        timestamp: '2026-09-18T00:00:00.000Z',
+        services: { database: 'connected', supabase: 'connected' },
       }),
     }));
     const out = await checkRemoteHealth('example.test', {
@@ -16,5 +17,6 @@ describe('checkRemoteHealth', () => {
     });
     expect(out.url).toBe('https://example.test/api/health/ready');
     expect(fetchSpy.mock.calls[0][0]).toBe('https://example.test/api/health/ready');
+    expect(out.data.services.database).toBe('connected');
   });
 });
