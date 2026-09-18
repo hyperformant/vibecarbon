@@ -752,6 +752,136 @@ function resolveEnvProvider(envConfig) {
     : HetznerProvider;
 }
 
+/**
+ * Is one server's container view fully healthy? Counts rows other than
+ * `done`, and for k8s also every platform namespace and every node.
+ */
+function serverContainersHealthy(sc) {
+  if (!sc || sc.error) return false;
+  const counted = sc.rows.filter((r) => r.health !== 'done');
+  if (counted.some((r) => r.health !== 'healthy')) return false;
+  for (const ns of Object.values(sc.platform || {})) if (ns.healthy !== ns.total) return false;
+  if (sc.nodes && sc.nodes.ready !== sc.nodes.total) return false;
+  return true;
+}
+
+/**
+ * The Servers block body: one line per server, then — when container data
+ * exists for it — one rollup line and only the rows that are not healthy.
+ * A healthy server costs exactly one extra line; a broken one shows what is
+ * broken.
+ *
+ * @param {Array<{id?: string, name?: string, ip?: string, serverType?: string, type?: string}>} servers
+ * @param {{serverInfo?: object, containers?: object}} checks
+ * @returns {string[]}
+ */
+function formatServerLines(servers, checks) {
+  const lines = [];
+  for (const server of servers) {
+    const serverInfo = checks.serverInfo?.[server.id];
+    const configType = server.serverType || server.type || null;
+    let statusStr;
+    if (serverInfo) {
+      const icon = serverInfo.status === 'running' ? c.success('●') : c.error('●');
+      const typeLabel = serverInfo.serverType || configType || '';
+      statusStr = `${icon} ${serverInfo.status === 'running' ? c.success('running') : c.error(serverInfo.status)}  ${c.dim(typeLabel)}`;
+    } else if (configType) {
+      statusStr = c.dim(configType);
+    } else {
+      statusStr = c.dim('–');
+    }
+    lines.push(
+      `  ${c.info((server.name || '').padEnd(16))} ${(server.ip || '').padEnd(15)} ${statusStr}`,
+    );
+
+    const sc = checks.containers?.[server.name || server.ip];
+    if (!sc) continue;
+    const noun = sc.kind === 'k8s' ? 'pods' : 'containers';
+    if (sc.error) {
+      lines.push(`    ${c.dim(noun)} ${c.error('● unreachable')}  ${c.dim(sc.error)}`);
+      continue;
+    }
+    const counted = sc.rows.filter((r) => r.health !== 'done');
+    const healthy = counted.filter((r) => r.health === 'healthy').length;
+    const parts = [`● ${healthy}/${counted.length} healthy`];
+    if (sc.nodes) parts.push(`nodes ${sc.nodes.ready}/${sc.nodes.total} ready`);
+    for (const [ns, n] of Object.entries(sc.platform || {}))
+      parts.push(`${ns} ${n.healthy}/${n.total}`);
+    const paint = serverContainersHealthy(sc) ? c.success : c.warning;
+    lines.push(`    ${c.dim(noun)} ${paint(parts.join(' · '))}`);
+
+    for (const r of sc.rows) {
+      if (r.health === 'healthy' || r.health === 'done') continue;
+      lines.push(formatContainerRow(r, '      '));
+    }
+    for (const [ns, n] of Object.entries(sc.platform || {})) {
+      if (n.healthy === n.total) continue;
+      lines.push(
+        formatContainerRow(
+          {
+            name: ns,
+            container: ns,
+            health: 'unknown',
+            label: `${n.healthy}/${n.total} healthy`,
+            detail: '',
+            latencyMs: 0,
+          },
+          '      ',
+        ),
+      );
+    }
+  }
+  return lines;
+}
+
+/**
+ * Lines for the "Health" block: header, probe URL, and a verdict line built
+ * from the real `/api/health/ready` shape (db/supabase nest under
+ * `services`, with a top-level `services`/`database`/`supabase` fallback for
+ * older payload shapes).
+ *
+ * @param {{url: string, ok: boolean, status?: number|null, latencyMs: number, data?: object|null, error?: string}} remoteHealth
+ * @returns {string[]}
+ */
+function formatHealthLines(remoteHealth) {
+  const lines = [];
+  lines.push(c.bold('Health'));
+  lines.push(`  ${c.dim(remoteHealth.url)}`);
+  if (remoteHealth.ok) {
+    const data = remoteHealth.data;
+    let details = '';
+    if (data && typeof data === 'object') {
+      const parts = [];
+      const db = data.services?.database ?? data.database;
+      const supabase = data.services?.supabase ?? data.supabase;
+      if (db) parts.push(`db: ${db}`);
+      if (supabase) parts.push(`supabase: ${supabase}`);
+      if (data.status) parts.push(data.status);
+      if (parts.length > 0) details = c.dim(`  (${parts.join(', ')})`);
+    }
+    lines.push(
+      `  ${c.success('●')} ${c.success('healthy')}  ${c.dim(`${remoteHealth.latencyMs}ms`)}${details}`,
+    );
+  } else {
+    const errMsg = remoteHealth.error || `HTTP ${remoteHealth.status}`;
+    lines.push(`  ${c.error('●')} ${c.error('unhealthy')}  ${c.dim(`(${errMsg})`)}`);
+  }
+  return lines;
+}
+
+/**
+ * Summary-block verdict for one environment: the public probe failed, or
+ * any server's containers are not fully healthy.
+ * @param {{checks?: {remoteHealth?: {ok?: boolean}, containers?: object}}} entry
+ */
+function isEnvironmentUnhealthy(entry) {
+  const checks = entry?.checks || {};
+  if (checks.remoteHealth && !checks.remoteHealth.ok) return true;
+  for (const sc of Object.values(checks.containers || {}))
+    if (!serverContainersHealthy(sc)) return true;
+  return false;
+}
+
 function renderEnvironment(envName, envConfig, checks) {
   const lines = [];
 
@@ -838,49 +968,13 @@ function renderEnvironment(envName, envConfig, checks) {
   if (servers.length > 0) {
     lines.push('');
     lines.push(c.bold('Servers'));
-    for (const server of servers) {
-      const serverInfo = checks.serverInfo?.[server.id];
-      const configType = server.serverType || server.type || null;
-      let statusStr;
-      if (serverInfo) {
-        const icon = serverInfo.status === 'running' ? c.success('\u25cf') : c.error('\u25cf');
-        const typeLabel = serverInfo.serverType || configType || '';
-        statusStr = `${icon} ${serverInfo.status === 'running' ? c.success('running') : c.error(serverInfo.status)}  ${c.dim(typeLabel)}`;
-      } else if (configType) {
-        statusStr = c.dim(configType);
-      } else {
-        statusStr = c.dim('\u2013');
-      }
-      lines.push(
-        `  ${c.info((server.name || '').padEnd(16))} ${(server.ip || '').padEnd(15)} ${statusStr}`,
-      );
-    }
+    lines.push(...formatServerLines(servers, checks));
   }
 
   // Remote health
   if (envConfig.domain && checks.remoteHealth) {
     lines.push('');
-    lines.push(c.bold('Health'));
-    lines.push(`  ${c.dim(checks.remoteHealth.url)}`);
-    if (checks.remoteHealth.ok) {
-      const data = checks.remoteHealth.data;
-      let details = '';
-      if (data && typeof data === 'object') {
-        const parts = [];
-        const db = data.services?.database ?? data.database;
-        const supabase = data.services?.supabase ?? data.supabase;
-        if (db) parts.push(`db: ${db}`);
-        if (supabase) parts.push(`supabase: ${supabase}`);
-        if (data.status) parts.push(data.status);
-        if (parts.length > 0) details = c.dim(`  (${parts.join(', ')})`);
-      }
-      lines.push(
-        `  ${c.success('\u25cf')} ${c.success('healthy')}  ${c.dim(`${checks.remoteHealth.latencyMs}ms`)}${details}`,
-      );
-    } else {
-      const errMsg = checks.remoteHealth.error || `HTTP ${checks.remoteHealth.status}`;
-      lines.push(`  ${c.error('\u25cf')} ${c.error('unhealthy')}  ${c.dim(`(${errMsg})`)}`);
-    }
+    lines.push(...formatHealthLines(checks.remoteHealth));
   }
 
   // Services
@@ -935,7 +1029,7 @@ function renderSummary(allData) {
   // Environments
   const envCount = Object.keys(allData.environments || {}).length;
   const unhealthyCount = Object.values(allData.environments || {}).filter(
-    (e) => e.checks?.remoteHealth && !e.checks.remoteHealth.ok,
+    isEnvironmentUnhealthy,
   ).length;
 
   if (envCount > 0) {
@@ -1136,19 +1230,17 @@ async function main(argv = []) {
       // Git sync
       checks.gitSync = checkGitSync(envName, envConfig);
 
-      // Real replication state for HA envs (best-effort, hard-bounded). null
-      // for non-HA or when the primary/key isn't locally reachable.
-      checks.replication = await checkReplication(envName, envConfig, projectConfig.projectName);
-
-      // Per-server container/pod health (spec: remote-container-health). Runs
-      // for every server of the env, bounded per server; null when there is
-      // nothing to query. Independent of noLocal — that flag is about THIS
-      // machine's dev stack.
-      checks.containers = await checkRemoteContainers(
-        envName,
-        envConfig,
-        projectConfig.projectName,
-      );
+      // Real replication state for HA envs (best-effort, hard-bounded) and
+      // per-server container/pod health (spec: remote-container-health) run
+      // concurrently — each is bounded at its own timeout, and stacking them
+      // serially would double an HA environment's worst case. Independent of
+      // noLocal — that flag is about THIS machine's dev stack.
+      const [replication, containers] = await Promise.all([
+        checkReplication(envName, envConfig, projectConfig.projectName),
+        checkRemoteContainers(envName, envConfig, projectConfig.projectName),
+      ]);
+      checks.replication = replication;
+      checks.containers = containers;
 
       return { envName, config: envConfig, checks };
     }),
@@ -1239,7 +1331,10 @@ export {
   checkDockerContainers,
   classifyContainer,
   formatDockerServiceLines,
+  formatHealthLines,
+  formatServerLines,
   getBranchName,
+  isEnvironmentUnhealthy,
   main,
   parseKongHostPort,
   providerDisplayName,
