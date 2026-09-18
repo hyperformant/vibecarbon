@@ -1301,10 +1301,402 @@ git commit -m "feat(cli): colour vibecarbon commands and gray comments in help E
 
 ---
 
+### Task 7: Retired-licence guard scans tracked + untracked files, never gitignored ones
+
+**Files:**
+- Modify: `tests/unit/licensing/no-legacy-traces.test.ts` (`hitsFor`, and the SCOPE/RECORD doc comment)
+
+**Why:** the guard runs plain `grep -r` over the working tree, so a gitignored local file (`tests/.env.e2e`, which legitimately holds retired names for an operator's own use) fails `pnpm test:unit` and the pre-commit hook on every developer machine that has one. Every commit on this branch needed `--no-verify` for that reason. `git grep --untracked` searches tracked and untracked files and skips gitignored ones, with the same `file:line:text` output and the same exit-1-on-no-match contract (verified on this checkout: a probe file `tests/zz-probe.tmp` is found; `tests/.env.e2e` is not).
+
+- [ ] **Step 1: Confirm the current failure**
+
+Run: `pnpm vitest run --project unit tests/unit/licensing/no-legacy-traces.test.ts`
+Expected (on a machine with `tests/.env.e2e`): 2 failures, both citing `tests/.env.e2e`.
+
+- [ ] **Step 2: Switch the sweep to git grep**
+
+Replace the `execFileSync('grep', [...])` call in `hitsFor` with:
+
+```ts
+    out = execFileSync(
+      'git',
+      ['grep', '-nE', '--untracked', '-e', pattern, '--', ...SCOPE.split(' ')],
+      { encoding: 'utf8' },
+    );
+```
+
+(`-e` is required because some patterns start with `-`.)
+
+Also add this plan to `RECORD_FILES` (it must name the guard file, whose own name matches one pattern):
+
+```ts
+  'docs/superpowers/plans/2026-09-18-status-docker-native-health.md',
+``` Update the comment above it: "`git grep` exits 1 on no match, which execFileSync turns into a throw. `--untracked` covers new files that are not yet staged; gitignored files (an operator's local `tests/.env.e2e`) are skipped, so the sweep judges what can ship, not what happens to sit in a checkout." Drop the `--exclude-dir=node_modules` reasoning if any comment mentions it (node_modules is gitignored).
+
+- [ ] **Step 3: Verify**
+
+Run: `pnpm vitest run --project unit tests/unit/licensing/no-legacy-traces.test.ts`
+Expected: all pass, including "every exemption still covers a live guard" (which calls `hitsFor` too).
+
+Sanity: `printf 'x %s x\n' "$(node -e "console.log(require('node:fs').readFileSync('tests/unit/licensing/no-legacy-traces.test.ts','utf8').match(/'(VIBECARBON_[A-Z_]+)'/)[1])")" > docs/zz-probe.md && pnpm vitest run --project unit tests/unit/licensing/no-legacy-traces.test.ts; rm docs/zz-probe.md` — expected: the probe run FAILS naming `docs/zz-probe.md` (untracked files are still swept), and passes again after removal.
+
+Run: `pnpm lint`.
+
+- [ ] **Step 4: Commit — WITHOUT `--no-verify`**
+
+```bash
+git add tests/unit/licensing/no-legacy-traces.test.ts
+git diff --cached --stat
+git commit -m "test(licensing): sweep retired names with git grep so gitignored local files cannot trip the guard" -- tests/unit/licensing/no-legacy-traces.test.ts
+```
+
+The pre-commit hook must pass on its own now; if it does not, report what it printed and stop.
+
+---
+
+### Task 8: `status` local-dev hardening (final-review and per-task minors)
+
+**Files:**
+- Modify: `src/status.js` (`classifyContainer`, `parseKongHostPort`, `checkDockerContainers`, `formatDockerServiceLines`, export list)
+- Test: `tests/unit/status/docker-services.test.ts`
+
+Each item below is one finding from the reviews; do all of them in one commit.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/unit/status/docker-services.test.ts` (inside the matching `describe` blocks; add `runCommandAsync`-style async stubs where shown):
+
+```ts
+// classifyContainer
+  it('reports a line with no state as unknown instead of an empty label', () => {
+    expect(classifyContainer('foo', '', '')).toEqual({ health: 'unknown', label: 'unknown', detail: '' });
+  });
+
+// parseKongHostPort — unchanged behaviour, explicit guard; no new test needed.
+
+// checkDockerContainers
+  it('accepts an async runCommand (the real default is runCommandAsync)', async () => {
+    const run = vi.fn(async (argv: string[]) => {
+      if (argv[1] === 'ps') return 'letsgo-db\trunning\tUp 1 hour (healthy)\n';
+      if (argv[1] === 'port') return '';
+      throw new Error(`unexpected docker call: ${argv.join(' ')}`);
+    });
+    const rows = await checkDockerContainers('letsgo', { runCommand: run, fetch: okFetch() });
+    expect(rows).toEqual([
+      { name: 'PostgreSQL', container: 'db', health: 'healthy', label: 'healthy', detail: '', latencyMs: 0 },
+    ]);
+  });
+
+  it('renders a malformed docker ps line (no tab fields) as unknown rather than crashing', async () => {
+    const rows = await checkDockerContainers('letsgo', {
+      runCommand: fakeDocker({ ps: 'letsgo-weird\n' }),
+      fetch: okFetch(),
+    });
+    expect(rows).toEqual([
+      { name: 'weird', container: 'weird', health: 'unknown', label: 'unknown', detail: '', latencyMs: 0 },
+    ]);
+  });
+
+  it('says "gateway port not published" when kong runs but 8000/tcp is not bound', async () => {
+    const ps = [
+      'letsgo-kong\trunning\tUp 1 minute (healthy)',
+      'letsgo-rest\trunning\tUp 1 minute',
+    ].join('\n');
+    const rows = await checkDockerContainers('letsgo', {
+      runCommand: fakeDocker({ ps, port: '' }),
+      fetch: okFetch(),
+    });
+    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
+      health: 'unknown',
+      label: 'unknown',
+      detail: 'gateway port not published',
+    });
+  });
+
+  it('reports a probe that exceeds timeoutMs as a timeout, not a generic error', async () => {
+    const ps = [
+      'letsgo-kong\trunning\tUp 1 minute (healthy)',
+      'letsgo-rest\trunning\tUp 1 minute',
+    ].join('\n');
+    const hangingFetch = vi.fn(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new Error('The operation was aborted')));
+        }),
+    ) as unknown as typeof fetch;
+    const rows = await checkDockerContainers('letsgo', {
+      runCommand: fakeDocker({ ps, port: '0.0.0.0:8000\n' }),
+      fetch: hangingFetch,
+      timeoutMs: 10,
+    });
+    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
+      health: 'unhealthy',
+      label: 'unhealthy',
+      detail: 'timeout after 10ms',
+    });
+  });
+
+// formatDockerServiceLines
+  it('does not claim 0/0 healthy when only one-shot jobs exist', () => {
+    const lines = formatDockerServiceLines([
+      { name: 'x-setup', container: 'x-setup', health: 'done', label: 'done', detail: '', latencyMs: 0 },
+    ]).map(stripAnsi);
+    expect(lines[0]).toBe('Docker Services               no long-running services');
+    expect(lines[1]).toBe('  x-setup                     ○ done  ');
+  });
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pnpm vitest run --project unit tests/unit/status/docker-services.test.ts`
+Expected: the six new tests fail (empty label, `'gateway down'` instead of `'gateway port not published'`, aborted-error message instead of `timeout after 10ms`, `● 0/0 healthy`; the async-stub test may pass already — that is fine).
+
+- [ ] **Step 3: Implement**
+
+In `src/status.js`:
+
+1. `classifyContainer`: first line of the body becomes
+   ```js
+   if (!state) return { health: 'unknown', label: 'unknown', detail: status || '' };
+   ```
+2. `parseKongHostPort`: replace the two-line body with an explicit guard:
+   ```js
+   const first = (output || '').split('\n').find((line) => line.trim());
+   if (!first) return null;
+   const match = first.trim().match(/:(\d+)$/);
+   return match ? Number.parseInt(match[1], 10) : null;
+   ```
+3. Import `runCommandAsync` alongside `runCommand` from `./lib/command.js` (keep `runCommand` — `checkGitSync` uses it). In `checkDockerContainers`:
+   - `const { runCommand: _run = runCommandAsync, fetch: _fetch = fetch, timeoutMs = 2000 } = deps;`
+   - Add above `if (!projectName) return [];`: `// No project name means no `${name}-*` prefix to enumerate; the old fallback (strip the first dash-segment of every container on the host) is exactly the cross-project confusion this function exists to avoid.`
+   - Both docker invocations become `await _run([...], { silent: true, timeout: 5000, ignoreError: true })` (drop the `encoding` key; `runCommandAsync` always returns a string when silent). Keep the surrounding `try/catch`. This stops the two `spawnSync` calls from blocking the event loop while `checkLocalDev`'s API/Vite `fetch` abort timers are running.
+   - Track whether the port lookup ran: replace `let kongPort = null;` block so that after it, `const gatewayDetail = kongRunning ? 'gateway port not published' : 'gateway down';` and use `detail: gatewayDetail` in the `kongPort === null` return.
+   - In the probe's `catch (err)`: `const detail = controller.signal.aborted ? \`timeout after ${timeoutMs}ms\` : err instanceof Error ? err.message : String(err);` and use `detail`.
+   - Update the function's JSDoc `deps` type: `runCommand?: typeof runCommandAsync`.
+4. `formatDockerServiceLines`: after computing `counted`, if `counted.length === 0` the summary line is `${c.dim('Docker Services'.padEnd(30))}${c.dim('no long-running services')}` (rows still follow). Structure:
+   ```js
+   const summary =
+     total === 0
+       ? c.dim('no long-running services')
+       : healthyCount === total
+         ? c.success(`● ${healthyCount}/${total} healthy`)
+         : c.warning(`● ${healthyCount}/${total} healthy`);
+   const lines = [`${c.dim('Docker Services'.padEnd(30))}${summary}`];
+   ```
+5. Export list: remove `CORE_SERVICE_ORDER` and `SERVICE_DISPLAY_NAMES` (no test imports them; grep `tests/` to confirm before removing).
+
+Run the formatter on `src/status.js`.
+
+- [ ] **Step 4: Verify**
+
+Run: `pnpm vitest run --project unit tests/unit/status/docker-services.test.ts` → all pass (36).
+Run: `pnpm lint && pnpm test:unit` → clean (Task 7 makes unit fully green locally).
+Manual: `cd ~/repos/letsgo && node ~/repos/vibecarbon/src/cli.js status` on a TTY still renders the Docker block; do not touch letsgo's containers.
+
+- [ ] **Step 5: Commit** (no `--no-verify`)
+
+```bash
+git add src/status.js tests/unit/status/docker-services.test.ts
+git diff --cached --stat
+git commit -m "fix(status): async docker calls, timeout and unpublished-port details, no 0/0 healthy claim" -- src/status.js tests/unit/status/docker-services.test.ts
+```
+
+---
+
+### Task 9: CLI polish hardening (update notice, help examples, integration harness)
+
+**Files:**
+- Modify: `src/lib/telemetry/update-check.js` (`printUpdateNotice` never throws; comment on the newline convention)
+- Modify: `src/lib/cli/help.js` (`formatExampleCommand` whitespace tolerance; new `formatExamples`; `renderHelp` uses it)
+- Modify: `src/cli.js` (`showHelp` EXAMPLES data-driven via `formatExamples`)
+- Modify: `tests/integration/_harness/assertions.ts` (`assertExitWith` matches on ANSI-stripped output)
+- Test: `tests/unit/telemetry/update-check.test.ts`, `tests/unit/lib/cli/help.test.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/unit/telemetry/update-check.test.ts`, inside `describe('printUpdateNotice')`:
+
+```ts
+  it('never throws when the sink throws (EPIPE in a finally must not mask the real error)', () => {
+    writeCache('0.99.0', 0);
+    const log = vi.fn(() => {
+      throw new Error('EPIPE');
+    });
+    expect(() => printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log })).not.toThrow();
+    expect(printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log })).toBe(false);
+  });
+```
+
+`tests/unit/lib/cli/help.test.ts` (extend the import with `formatExamples`):
+
+```ts
+describe('formatExampleCommand whitespace', () => {
+  const CYAN = '\x1b[36m';
+  const RESET = '\x1b[0m';
+  it('preserves leading and trailing whitespace around a coloured command', () => {
+    expect(formatExampleCommand('  vibecarbon up\n')).toBe(`  ${CYAN}vibecarbon${RESET} ${CYAN}up${RESET}\n`);
+  });
+});
+
+describe('formatExamples', () => {
+  it('renders comment, commands, and a trailing blank per group', () => {
+    const lines = formatExamples([
+      { description: 'Create a new project', commands: ['vibecarbon create my-app', 'cd my-app'] },
+      { commands: ['vibecarbon up'] },
+    ]).map(strip);
+    expect(lines).toEqual([
+      '  # Create a new project',
+      '  vibecarbon create my-app',
+      '  cd my-app',
+      '',
+      '  vibecarbon up',
+      '',
+    ]);
+  });
+
+  it('is what renderHelp uses for its EXAMPLES section', () => {
+    const out = renderHelp({
+      name: 'backup',
+      summary: 'x',
+      examples: [{ command: 'vibecarbon backup prod -l', description: 'list prod backups' }],
+    });
+    const expected = formatExamples([{ description: 'list prod backups', commands: ['vibecarbon backup prod -l'] }]);
+    expect(out).toContain(expected.join('\n').trimEnd());
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pnpm vitest run --project unit tests/unit/telemetry/update-check.test.ts tests/unit/lib/cli/help.test.ts`
+Expected: FAIL — `printUpdateNotice` throws; `formatExampleCommand` returns `'  vibecarbon up\n'` untouched; `formatExamples` not exported.
+
+- [ ] **Step 3: Implement**
+
+`src/lib/telemetry/update-check.js`, `printUpdateNotice` body:
+
+```js
+  if (noticePrinted || !isTTY) return false;
+  const notice = getUpdateNotice({ currentVersion, stateDir });
+  if (!notice) return false;
+  try {
+    // The string carries its own trailing "\n" on top of the one console.log
+    // adds: that is the blank line after the notice. `leadingBlank` adds the
+    // one before it for call sites with nothing above (cli.js's fallback).
+    log(`${leadingBlank ? '\n' : ''}${notice}\n`);
+  } catch {
+    // A dead stdout (EPIPE) must never surface from here: this runs inside
+    // cli.js's finally and would replace the error the user actually hit.
+    return false;
+  }
+  noticePrinted = true;
+  return true;
+```
+
+`src/lib/cli/help.js`:
+
+```js
+export function formatExampleCommand(command) {
+  const lead = command.match(/^\s*/)[0];
+  const trail = command.match(/\s*$/)[0];
+  const body = command.slice(lead.length, command.length - trail.length);
+  const match = body.match(/^vibecarbon(?:\s+(\S+))?(.*)$/);
+  if (!match) return command;
+  const [, name, rest] = match;
+  const coloured = name ? `${c.info('vibecarbon')} ${c.info(name)}${rest}` : `${c.info('vibecarbon')}${rest}`;
+  return `${lead}${coloured}${trail}`;
+}
+
+/**
+ * @typedef {object} ExampleGroup
+ * @property {string} [description] - comment line shown above the commands
+ * @property {string[]} commands - one or more invocations shown in order
+ */
+
+/**
+ * Lines for an EXAMPLES section: gray comment, coloured commands, blank line
+ * after each group. Shared by the global help and every command's help so
+ * the two can't drift.
+ *
+ * @param {ExampleGroup[]} groups
+ * @returns {string[]}
+ */
+export function formatExamples(groups) {
+  const lines = [];
+  for (const group of groups) {
+    if (group.description) lines.push(`  ${c.muted(`# ${group.description}`)}`);
+    for (const command of group.commands) lines.push(`  ${formatExampleCommand(command)}`);
+    lines.push('');
+  }
+  return lines;
+}
+```
+
+In `renderHelp`, the EXAMPLES loop becomes:
+
+```js
+  const examples = spec.examples ?? [];
+  if (examples.length > 0) {
+    lines.push(c.bold('EXAMPLES'));
+    lines.push(
+      ...formatExamples(examples.map((ex) => ({ description: ex.description, commands: [ex.command] }))),
+    );
+  }
+```
+
+`src/cli.js`: change the import to `import { formatExamples } from './lib/cli/help.js';` (drop `formatExampleCommand` if no longer used in the file). Add above `showHelp`:
+
+```js
+const GLOBAL_EXAMPLES = [
+  { description: 'Create a new project', commands: ['vibecarbon create my-app', 'cd my-app'] },
+  { description: 'Local development', commands: ['vibecarbon up'] },
+  { description: 'Add features', commands: ['vibecarbon add observability'] },
+  { description: 'Wire up external services', commands: ['vibecarbon configure'] },
+  { description: 'Deploy to production', commands: ['vibecarbon deploy prod'] },
+  { description: 'Backup and restore', commands: ['vibecarbon backup prod -l', 'vibecarbon restore prod'] },
+];
+```
+
+and replace the whole EXAMPLES block in the template literal (from the `${c.bold('EXAMPLES')}` line through the `vibecarbon restore prod` line and the blank line after it) with:
+
+```
+${c.bold('EXAMPLES')}
+${formatExamples(GLOBAL_EXAMPLES).join('\n')}
+${c.bold('DOCUMENTATION')}
+```
+
+(the group's trailing `''` supplies the blank line before DOCUMENTATION — check `node src/cli.js -h | cat -A | tail -8` shows exactly one blank line there, matching the previous output).
+
+`tests/integration/_harness/assertions.ts`: add
+
+```ts
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping is intentional.
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+```
+
+and in `assertExitWith` use `const haystack = stripAnsi(\`${r.stdout}\n${r.stderr}\`);` so substring/regex assertions match rendered text regardless of colour codes.
+
+- [ ] **Step 4: Verify**
+
+Run: `pnpm vitest run --project unit tests/unit/telemetry/update-check.test.ts tests/unit/lib/cli/help.test.ts` → pass.
+Run: `pnpm lint && pnpm test:unit && pnpm test:cli` → clean.
+Manual: `node src/cli.js -h` on a TTY renders identically to before Task 9 (same lines, same colours).
+
+- [ ] **Step 5: Commit** (no `--no-verify`)
+
+```bash
+git add src/lib/telemetry/update-check.js src/lib/cli/help.js src/cli.js tests/integration/_harness/assertions.ts tests/unit/telemetry/update-check.test.ts tests/unit/lib/cli/help.test.ts
+git diff --cached --stat
+git commit -m "refactor(cli): shared EXAMPLES formatter, throw-proof update notice, ANSI-stripped help assertions" -- src/lib/telemetry/update-check.js src/lib/cli/help.js src/cli.js tests/integration/_harness/assertions.ts tests/unit/telemetry/update-check.test.ts tests/unit/lib/cli/help.test.ts
+```
+
+---
+
 ## Self-review
 
 - Spec coverage: defect 1 (fixed port) → Task 2 `docker port` + `kongPort`; defect 2 (`-a`) → Task 2; defect 3 (Docker health) → Task 1 `classifyContainer`; defect 4 (env-port parsing) → deleted in Task 2, port now comes from Docker; defect 5 (hardcoded list / add-ons) → Task 2 enumeration + Task 3 rendering. Add-on `*-setup` one-shots → Task 1/3 `done`. Kong-down fallback → Task 2 `unknown`.
 - Task 5 (added 2026-09-18 after Tasks 1-2 started): notice placement → intro.js + two manual banner sites; banner-less commands → cli.js finally fallback; once-guard prevents double print; TTY gate preserved so -json is unaffected.
 - Task 6 (added 2026-09-18): both help surfaces (global showHelp, per-command renderHelp) share `formatExampleCommand`; `c.muted` (ANSI 90) is new because `c.dim` is not visually distinct on Brandon's terminal.
+- Tasks 7-9 (added 2026-09-18, Brandon: address every parked finding in this workstream): guard root fix; status hardening; CLI polish hardening. The `as unknown as typeof fetch` test casts are accepted as idiomatic vitest, not deferred.
 - Placeholder scan: none.
 - Type consistency: row shape `{name, container, health, label, detail, latencyMs}` is identical across Tasks 1-3; `deps` keys `runCommand`, `fetch`, `timeoutMs` match between Task 2 implementation and tests.
