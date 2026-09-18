@@ -211,6 +211,40 @@ describe('podDisplayName', () => {
       'lonely',
     );
   });
+
+  it('strips a real (non-hex) pod-template hash via the label', () => {
+    const p = pod({
+      metadata: {
+        name: 'app-5b8f9c7dxz-q2w4r',
+        namespace: 'vibecarbon',
+        labels: { 'pod-template-hash': '5b8f9c7dxz' },
+        ownerReferences: [{ kind: 'ReplicaSet', name: 'app-5b8f9c7dxz' }],
+      },
+    });
+    expect(podDisplayName(p)).toBe('app');
+  });
+
+  it('strips a non-hex hash by alphabet when the label is missing', () => {
+    const p = pod({
+      metadata: {
+        name: 'traefik-7xk9pq2mvs-abc',
+        namespace: 'vibecarbon',
+        ownerReferences: [{ kind: 'ReplicaSet', name: 'traefik-7xk9pq2mvs' }],
+      },
+    });
+    expect(podDisplayName(p)).toBe('traefik');
+  });
+
+  it('does not strip a short non-hash suffix', () => {
+    const p = pod({
+      metadata: {
+        name: 'web-abc-x',
+        namespace: 'vibecarbon',
+        ownerReferences: [{ kind: 'ReplicaSet', name: 'web-abc' }],
+      },
+    });
+    expect(podDisplayName(p)).toBe('web-abc');
+  });
 });
 
 describe('rowsFromPods', () => {
@@ -226,9 +260,9 @@ describe('rowsFromPods', () => {
       }),
       pod({
         metadata: {
-          name: 'supabase-realtime-1a2b3c-q',
+          name: 'supabase-realtime-9b7c2z-q',
           namespace: 'vibecarbon',
-          ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-realtime-1a2b3c' }],
+          ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-realtime-9b7c2z' }],
         },
         status: {
           phase: 'Running',

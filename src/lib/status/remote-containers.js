@@ -91,6 +91,11 @@ export function classifyPod(pod) {
   return { health: 'unknown', label: 'unknown', detail: '' };
 }
 
+// Kubernetes encodes the pod-template hash with a vowel-free alphabet
+// (rand.SafeEncodeString), not hex — so prefer the exact label and fall
+// back to that alphabet when the label is missing.
+const POD_TEMPLATE_HASH_RE = /-[bcdfghjklmnpqrstvwxz0-9]{5,10}$/;
+
 /**
  * Name a pod by its controller: Deployment pods drop the ReplicaSet hash
  * (`app-7d9f8b5c6-abcde` → `app`), StatefulSet pods keep their ordinal
@@ -102,8 +107,10 @@ export function classifyPod(pod) {
 export function podDisplayName(pod) {
   const name = pod?.metadata?.name || '';
   const owner = pod?.metadata?.ownerReferences?.[0];
-  if (owner?.kind === 'ReplicaSet') return owner.name.replace(/-[0-9a-f]{5,10}$/, '');
-  return name;
+  if (owner?.kind !== 'ReplicaSet') return name;
+  const hash = pod?.metadata?.labels?.['pod-template-hash'];
+  if (hash && owner.name.endsWith(`-${hash}`)) return owner.name.slice(0, -(hash.length + 1));
+  return owner.name.replace(POD_TEMPLATE_HASH_RE, '');
 }
 
 /**
