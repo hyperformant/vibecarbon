@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  checkRemoteContainers,
   classifyPod,
   nodeReadiness,
   planContainerTargets,
@@ -353,5 +354,206 @@ describe('nodeReadiness', () => {
 
   it('handles an empty list', () => {
     expect(nodeReadiness({ items: [] })).toEqual({ ready: 0, total: 0 });
+  });
+});
+
+describe('checkRemoteContainers', () => {
+  const composeHa = {
+    deployMode: 'compose-ha',
+    servers: [
+      { name: 'p', ip: '1.1.1.1', role: 'primary' },
+      { name: 's', ip: '2.2.2.2', role: 'standby' },
+    ],
+  };
+  const base = () => ({
+    getSSHKeyPath: vi.fn(() => '/tmp/key'),
+    existsSync: vi.fn(() => true),
+    sshKubectl: vi.fn(async () => '{}'),
+  });
+
+  it('returns null with no project name or no servers', async () => {
+    expect(await checkRemoteContainers('prod', composeHa, undefined, base())).toBeNull();
+    expect(
+      await checkRemoteContainers('prod', { deployMode: 'compose', servers: [] }, 'letsgo', base()),
+    ).toBeNull();
+  });
+
+  it('reports "no ssh key" for every server without touching the network', async () => {
+    const deps = { ...base(), existsSync: vi.fn(() => false), sshRun: vi.fn() };
+    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', deps);
+    expect(out).toEqual({
+      p: { kind: 'compose', ip: '1.1.1.1', rows: [], error: 'no ssh key' },
+      s: { kind: 'compose', ip: '2.2.2.2', rows: [], error: 'no ssh key' },
+    });
+    expect(deps.sshRun).not.toHaveBeenCalled();
+  });
+
+  it('compose: runs docker ps -a per server and classifies rows', async () => {
+    const sshRun = vi.fn(async (ip: string) =>
+      ip === '1.1.1.1'
+        ? 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-kong\trunning\tUp 1h (healthy)\n'
+        : 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-kong\texited\tExited (128) 3 hours ago\n',
+    );
+    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    expect(sshRun).toHaveBeenCalledTimes(2);
+    expect(sshRun.mock.calls[0][2]).toEqual([
+      'docker',
+      'ps',
+      '-a',
+      '--filter',
+      'name=^letsgo-',
+      '--format',
+      '{{.Names}}\t{{.State}}\t{{.Status}}',
+    ]);
+    expect(out!.p).toEqual({
+      kind: 'compose',
+      ip: '1.1.1.1',
+      rows: [
+        {
+          name: 'PostgreSQL',
+          container: 'db',
+          health: 'healthy',
+          label: 'healthy',
+          detail: '',
+          latencyMs: 0,
+        },
+        {
+          name: 'Kong Gateway',
+          container: 'kong',
+          health: 'healthy',
+          label: 'healthy',
+          detail: '',
+          latencyMs: 0,
+        },
+      ],
+    });
+    expect(out!.s.rows[1]).toMatchObject({
+      container: 'kong',
+      health: 'unhealthy',
+      label: 'exited',
+      detail: 'Exited (128) 3 hours ago',
+    });
+  });
+
+  it('one server failing does not affect the other', async () => {
+    const sshRun = vi.fn(async (ip: string) => {
+      if (ip === '2.2.2.2')
+        throw new Error('ssh: connect to host 2.2.2.2 port 22: Connection timed out\nmore');
+      return 'letsgo-db\trunning\tUp 1h (healthy)\n';
+    });
+    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    expect(out!.p.error).toBeUndefined();
+    expect(out!.p.rows).toHaveLength(1);
+    expect(out!.s).toEqual({
+      kind: 'compose',
+      ip: '2.2.2.2',
+      rows: [],
+      error: 'ssh: connect to host 2.2.2.2 port 22: Connection timed out',
+    });
+  });
+
+  it('a server with no ip is reported, not queried', async () => {
+    const sshRun = vi.fn();
+    const out = await checkRemoteContainers(
+      'prod',
+      { deployMode: 'compose', servers: [{ name: 'p' }] },
+      'letsgo',
+      { ...base(), sshRun },
+    );
+    expect(out).toEqual({ p: { kind: 'compose', ip: '', rows: [], error: 'no ip recorded' } });
+    expect(sshRun).not.toHaveBeenCalled();
+  });
+
+  it('bounds each server by timeoutMs', async () => {
+    const sshRun = vi.fn(() => new Promise(() => {}));
+    const out = await checkRemoteContainers(
+      'prod',
+      { deployMode: 'compose', servers: [{ name: 'p', ip: '1.1.1.1' }] },
+      'letsgo',
+      {
+        ...base(),
+        sshRun,
+        timeoutMs: 20,
+      },
+    );
+    expect(out!.p.error).toBe('ssh timeout');
+  });
+
+  it('k8s: pods + nodes on the master, app rows and platform rollups', async () => {
+    const pods = {
+      items: [
+        {
+          metadata: {
+            name: 'app-bcd12-x',
+            namespace: 'vibecarbon',
+            ownerReferences: [{ kind: 'ReplicaSet', name: 'app-bcd12' }],
+          },
+          status: {
+            phase: 'Running',
+            containerStatuses: [{ ready: true, restartCount: 0, state: { running: {} } }],
+          },
+        },
+        {
+          metadata: { name: 'source-controller-x', namespace: 'flux-system' },
+          status: {
+            phase: 'Running',
+            containerStatuses: [{ ready: true, restartCount: 0, state: { running: {} } }],
+          },
+        },
+      ],
+    };
+    const nodes = { items: [{ status: { conditions: [{ type: 'Ready', status: 'True' }] } }] };
+    const sshKubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
+      argv[1] === 'pods' ? JSON.stringify(pods) : JSON.stringify(nodes),
+    );
+    const out = await checkRemoteContainers(
+      'prod',
+      { deployMode: 'kubernetes', servers: [{ name: 'm', ip: '1.1.1.1', role: 'master' }] },
+      'letsgo',
+      {
+        ...base(),
+        sshKubectl,
+        sshRun: vi.fn(),
+      },
+    );
+    expect(sshKubectl.mock.calls.map((c) => c[2])).toEqual([
+      ['get', 'pods', '-A', '-o', 'json'],
+      ['get', 'nodes', '-o', 'json'],
+    ]);
+    expect(out!.m).toEqual({
+      kind: 'k8s',
+      ip: '1.1.1.1',
+      rows: [
+        {
+          name: 'app',
+          container: 'app',
+          health: 'healthy',
+          label: 'healthy',
+          detail: '',
+          latencyMs: 0,
+        },
+      ],
+      platform: { 'flux-system': { healthy: 1, total: 1 } },
+      nodes: { ready: 1, total: 1 },
+    });
+  });
+
+  it('k8s: unparseable kubectl output is an error row', async () => {
+    const out = await checkRemoteContainers(
+      'prod',
+      { deployMode: 'kubernetes', servers: [{ name: 'm', ip: '1.1.1.1', role: 'master' }] },
+      'letsgo',
+      {
+        ...base(),
+        sshKubectl: vi.fn(async () => 'error: You must be logged in'),
+        sshRun: vi.fn(),
+      },
+    );
+    expect(out!.m).toEqual({
+      kind: 'k8s',
+      ip: '1.1.1.1',
+      rows: [],
+      error: 'kubectl output unparseable',
+    });
   });
 });

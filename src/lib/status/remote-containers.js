@@ -11,7 +11,13 @@
  * says so, never a thrown check.
  */
 
-import { classifyContainer, rowsFromDockerPs } from './container-rows.js';
+import { existsSync as fsExistsSync } from 'node:fs';
+import {
+  getSSHKeyPath as defaultGetKey,
+  sshKubectl as defaultKubectl,
+  sshRun as defaultSsh,
+} from '../ssh.js';
+import { classifyContainer, rowsFromDockerPs, SERVICE_DISPLAY_NAMES } from './container-rows.js';
 
 export const APP_NAMESPACE = 'vibecarbon';
 
@@ -157,3 +163,109 @@ export function nodeReadiness(nodesJson) {
 
 // re-exported so Task 3 can build compose rows without a second import site
 export { classifyContainer, rowsFromDockerPs };
+
+const DOCKER_PS_ARGV = [
+  'docker',
+  'ps',
+  '-a',
+  '--filter',
+  null,
+  '--format',
+  '{{.Names}}\t{{.State}}\t{{.Status}}',
+];
+
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('ssh timeout')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function firstLine(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.split('\n')[0].trim();
+}
+
+async function collectCompose(target, projectName, keyPath, deps) {
+  const argv = DOCKER_PS_ARGV.map((a) => (a === null ? `name=^${projectName}-` : a));
+  const listing = await withTimeout(
+    deps.sshRun(target.ip, keyPath, argv, { silent: true, timeout: deps.timeoutMs }),
+    deps.timeoutMs,
+  );
+  const rows = rowsFromDockerPs(listing, projectName).map(({ container, state, status }) => ({
+    name: SERVICE_DISPLAY_NAMES[container] || container,
+    container,
+    ...classifyContainer(container, state, status),
+    latencyMs: 0,
+  }));
+  return { kind: 'compose', ip: target.ip, rows };
+}
+
+async function collectK8s(target, keyPath, deps) {
+  const run = (argv) =>
+    withTimeout(
+      deps.sshKubectl(target.ip, keyPath, argv, { silent: true, timeout: deps.timeoutMs }),
+      deps.timeoutMs,
+    );
+  const [podsRaw, nodesRaw] = await Promise.all([
+    run(['get', 'pods', '-A', '-o', 'json']),
+    run(['get', 'nodes', '-o', 'json']),
+  ]);
+  let pods;
+  let nodes;
+  try {
+    pods = JSON.parse(podsRaw);
+    nodes = JSON.parse(nodesRaw);
+  } catch {
+    throw new Error('kubectl output unparseable');
+  }
+  const { app, platform } = rowsFromPods(pods);
+  return { kind: 'k8s', ip: target.ip, rows: app, platform, nodes: nodeReadiness(nodes) };
+}
+
+/**
+ * Per-server container/pod tables for one environment. Best-effort and
+ * bounded: every server resolves to a `ServerContainers`, with `error` set
+ * instead of rows when it could not be read. Null when there is nothing to
+ * query (no servers, no project name).
+ *
+ * @param {string} envName
+ * @param {object} envConfig
+ * @param {string|undefined} projectName
+ * @param {{sshRun?: typeof defaultSsh, sshKubectl?: typeof defaultKubectl, getSSHKeyPath?: typeof defaultGetKey, existsSync?: typeof fsExistsSync, timeoutMs?: number}} [deps]
+ * @returns {Promise<Record<string, {kind: 'compose'|'k8s', ip: string, rows: object[], platform?: object, nodes?: object, error?: string}>|null>}
+ */
+export async function checkRemoteContainers(envName, envConfig, projectName, deps = {}) {
+  const d = {
+    sshRun: deps.sshRun || defaultSsh,
+    sshKubectl: deps.sshKubectl || defaultKubectl,
+    getSSHKeyPath: deps.getSSHKeyPath || defaultGetKey,
+    existsSync: deps.existsSync || fsExistsSync,
+    timeoutMs: deps.timeoutMs ?? 10_000,
+  };
+  if (!projectName) return null;
+  const targets = planContainerTargets(envConfig);
+  if (targets.length === 0) return null;
+
+  const keyPath = d.getSSHKeyPath(envName);
+  const haveKey = !!keyPath && d.existsSync(keyPath);
+
+  const results = await Promise.all(
+    targets.map(async (t) => {
+      const empty = (error) => [t.serverName, { kind: t.kind, ip: t.ip, rows: [], error }];
+      if (!t.ip) return empty('no ip recorded');
+      if (!haveKey) return empty('no ssh key');
+      try {
+        const value =
+          t.kind === 'k8s'
+            ? await collectK8s(t, keyPath, d)
+            : await collectCompose(t, projectName, keyPath, d);
+        return [t.serverName, value];
+      } catch (err) {
+        return empty(firstLine(err));
+      }
+    }),
+  );
+  return Object.fromEntries(results);
+}

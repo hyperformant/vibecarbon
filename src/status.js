@@ -28,9 +28,11 @@ import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import {
+  CORE_SERVICE_ORDER,
   classifyContainer,
   formatContainerRow,
   rowsFromDockerPs,
+  SERVICE_DISPLAY_NAMES,
 } from './lib/status/container-rows.js';
 import { VERSION } from './lib/version.js';
 
@@ -133,27 +135,6 @@ async function checkHttpEndpoint(url, timeout = 2000) {
 
 // Note: execSync calls below use only hardcoded commands (no user input),
 // matching the pattern in deploy.js and destroy.js throughout this codebase.
-
-// Display names for the core compose services. Anything not listed here
-// (vibecarbon add add-ons such as redis, grafana, n8n) renders under its
-// compose service name so nothing in the project's stack is ever hidden.
-const SERVICE_DISPLAY_NAMES = {
-  traefik: 'Traefik',
-  db: 'PostgreSQL',
-  kong: 'Kong Gateway',
-  auth: 'Auth (GoTrue)',
-  rest: 'REST (PostgREST)',
-  realtime: 'Realtime',
-  storage: 'Storage',
-  imgproxy: 'ImgProxy',
-  meta: 'Meta',
-  studio: 'Studio',
-  app: 'App',
-};
-
-// Core services render first, in this order; everything else follows
-// alphabetically.
-const CORE_SERVICE_ORDER = Object.keys(SERVICE_DISPLAY_NAMES);
 
 // Core services whose container may carry no healthcheck. Probed through Kong only when
 // Docker offers no verdict, on whichever host port THIS project's kong container bound.

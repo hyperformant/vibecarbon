@@ -7,6 +7,27 @@
 
 import { c } from '../colors.js';
 
+// Display names for the core compose services. Anything not listed here
+// (vibecarbon add add-ons such as redis, grafana, n8n) renders under its
+// compose service name so nothing in the project's stack is ever hidden.
+export const SERVICE_DISPLAY_NAMES = {
+  traefik: 'Traefik',
+  db: 'PostgreSQL',
+  kong: 'Kong Gateway',
+  auth: 'Auth (GoTrue)',
+  rest: 'REST (PostgREST)',
+  realtime: 'Realtime',
+  storage: 'Storage',
+  imgproxy: 'ImgProxy',
+  meta: 'Meta',
+  studio: 'Studio',
+  app: 'App',
+};
+
+// Core services render first, in this order; everything else follows
+// alphabetically.
+export const CORE_SERVICE_ORDER = Object.keys(SERVICE_DISPLAY_NAMES);
+
 /**
  * Derive a status row's health from Docker's own view of the container.
  *
