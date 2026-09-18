@@ -25,7 +25,7 @@ For a deployed environment, `status` reports server VM state (provider API), one
 - Transport is SSH. The deployed app's `/api/_internal/services/status` is public through Traefik but gated on a super_admin Supabase JWT the CLI does not have. `status` already SSHes to the primary for replication lag (`sshRun`, `sshKubectl`, `getSSHKeyPath(env)` in `src/lib/ssh.js`) with a hard time bound and best-effort semantics; this follows the same pattern.
 - Prod compose (`carbon/docker-compose.prod.yml`) names containers `${PROJECT_NAME}-<service>` exactly like dev, plus `socket-proxy`, `supavisor`, `functions`. So `docker ps -a --filter name=^<project>- --format '{{.Names}}\t{{.State}}\t{{.Status}}'` over SSH yields the line shape `checkDockerContainers` already parses, and `classifyContainer` applies unchanged.
 - k8s pods live in `vibecarbon` (app, Supabase chart, Traefik) plus `flux-system`, `cert-manager`, `kube-system` (autoscaler). Kubeconfig on the master is at `K3S_KUBECONFIG`; `sshKubectl` wraps it.
-- `envConfig.deployMode` ∈ `compose` | `compose-ha` | `kubernetes` | `kubernetes-ha`. `envConfig.servers[]` entries carry `{ id, name, ip, role?, serverType? }` with roles: compose none (single server); compose-ha `primary`/`standby`; kubernetes `master` + `worker` (+ optional `supabase`); kubernetes-ha `primary`/`standby` (each a cluster master).
+- `envConfig.deployMode` ∈ `compose` | `compose-ha` | `kubernetes` | `kubernetes-ha`. `envConfig.servers[]` entries carry `{ id?, name, ip, role?, serverType? }`, and `role` is NOT reliably present: compose has none (single server); kubernetes writes `master` + `worker-N` (+ optional `supabase`); compose-ha is written either by `effects/compose-ha.js` as `{ name: '<project>-<env>-primary'|'-standby', role: 'primary'|'standby' }` or by `orchestrator.js` as `{ name: 'primary'|'standby' }` with no role; kubernetes-ha is always `{ name: 'primary'|'standby' }` with no role, plus `ha.primary.masterIp` / `ha.standby.masterIp`. Failovers mutate different fields: `failoverComposeHA` flips `role` in place (names are Pulumi identities and never change), `swapHaRoles` (k8s-ha) swaps `ha.primary`/`ha.standby` and leaves `servers[]` alone. So HA target selection is a ladder: `ha.<side>.masterIp` match, then `role`, then `name` (`primary`/`-primary`), then array position, the same ladder `failover.js`'s `identifyServers` walks.
 - Published perf numbers come only from steps whitelisted in `PERF_TABLE_ROWS` (`tests/e2e/metrics/reporter.ts`); the reporter's per-scenario total is a sum over all steps and needs an explicit exclusion.
 
 ## Design
@@ -80,13 +80,14 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
 |---|---|---|---|
 | phase Running, all containerStatuses ready | healthy | healthy | '' |
 | phase Running, some not ready, no waiting reason | starting | starting | `ready 1/2` |
-| any container waiting with reason (CrashLoopBackOff, ImagePullBackOff, …) | unhealthy | that reason | `restarts N` if > 0 |
+| any container waiting with a transient reason (`ContainerCreating`, `PodInitializing`, `ErrImagePull`) | starting | that reason | `restarts N` if > 0 |
+| any container waiting with any other reason (CrashLoopBackOff, ImagePullBackOff, CreateContainerConfigError, …) | unhealthy | that reason | `restarts N` if > 0 |
 | phase Pending | starting | pending | scheduling message if present |
 | phase Succeeded (Job/one-shot) | done | done | '' |
 | phase Failed | unhealthy | failed | container terminated reason |
 | phase Unknown | unknown | unknown | '' |
 
-Pods in `vibecarbon` become `rows` named by their controller (`metadata.ownerReferences[0].name` with the ReplicaSet hash stripped, e.g. `supabase-kong`, `app`; StatefulSet pods keep their ordinal, `supabase-db-0`). Pods in other namespaces are counted into `platform[ns] = { healthy, total }` where `done` pods are excluded from both. Nodes: `ready` = count of nodes whose `Ready` condition is `True`.
+`classifyPod` tests the terminal phases (`Succeeded`, `Failed`) before any waiting reason, so a one-shot that finished with a stale `waiting` status on a sidecar is still `done`. Pods in `vibecarbon` become `rows` named by their controller (`metadata.ownerReferences[0].name` with the ReplicaSet hash stripped, e.g. `supabase-kong`, `app`; StatefulSet pods keep their ordinal, `supabase-db-0`). Pods in other namespaces are counted into `platform[ns] = { healthy, total }` where `done` pods are excluded from both. Nodes: `ready` = count of nodes whose `Ready` condition is `True`.
 
 **Bounding.** Each server is one `Promise` with its own timeout; servers run in parallel inside the environment's existing `Promise.allSettled`. Missing SSH key → every server `error: 'no ssh key'` immediately, no network. Any throw → `error` set, `rows: []`. Nothing here can reject the environment's checks entry.
 

@@ -22,6 +22,40 @@ import { classifyContainer, rowsFromDockerPs, SERVICE_DISPLAY_NAMES } from './co
 export const APP_NAMESPACE = 'vibecarbon';
 
 /**
+ * Pick the primary and standby entries of an HA `servers[]`.
+ *
+ * The product writes three shapes and a failover mutates two of them
+ * differently, so no single field is authoritative:
+ *   - effects/compose-ha.js: `{ name: '<proj>-<env>-primary', role: 'primary' }`;
+ *     failoverComposeHA flips `role` in place and never renames.
+ *   - orchestrator.js (compose-ha and kubernetes-ha): `{ name: 'primary' }`,
+ *     no role at all.
+ *   - kubernetes-ha additionally persists `ha.primary.masterIp` /
+ *     `ha.standby.masterIp`, and swapHaRoles swaps THOSE, not `servers[]`.
+ * So: the `ha.<side>.masterIp` match wins (it is the only thing a k8s-ha
+ * failover updates), then `role` (the only thing a compose-ha failover
+ * updates), then the name, then array position — the same ladder
+ * failover.js's identifyServers walks. The returned entry keeps its own
+ * `name`, so the Servers block can still find its rollup by name.
+ *
+ * @param {object} envConfig
+ * @returns {object[]} `[primary, standby]`, minus any side that could not be resolved
+ */
+function pickHaPair(envConfig) {
+  const servers = envConfig.servers || [];
+  const byIp = (ip) => (ip ? servers.find((s) => s.ip === ip) : undefined);
+  const byRole = (role) => servers.find((s) => s.role === role);
+  const byName = (role) =>
+    servers.find((s) => s.name === role || (s.name || '').endsWith(`-${role}`));
+  const pick = (side, index) =>
+    byIp(envConfig.ha?.[side]?.masterIp) || byRole(side) || byName(side) || servers[index];
+  const primary = pick('primary', 0);
+  let standby = pick('standby', 1);
+  if (standby === primary) standby = servers.find((s) => s !== primary);
+  return [primary, standby].filter(Boolean);
+}
+
+/**
  * Which servers to query, and how, for one environment.
  *
  * compose → its single server; compose-ha → primary + standby; kubernetes →
@@ -29,7 +63,7 @@ export const APP_NAMESPACE = 'vibecarbon';
  * their pods show up in the cluster table); kubernetes-ha → the primary and
  * standby cluster masters.
  *
- * @param {{deployMode?: string, servers?: Array<{name?: string, ip?: string, role?: string}>}} envConfig
+ * @param {{deployMode?: string, servers?: Array<{name?: string, ip?: string, role?: string}>, ha?: {primary?: {masterIp?: string}, standby?: {masterIp?: string}}}} envConfig
  * @returns {Array<{serverName: string, ip: string, kind: 'compose'|'k8s'}>}
  */
 export function planContainerTargets(envConfig) {
@@ -39,21 +73,20 @@ export function planContainerTargets(envConfig) {
   const target = (s, kind) => ({ serverName: s.name || s.ip || '', ip: s.ip || '', kind });
 
   if (mode === 'compose') return [target(servers[0], 'compose')];
-  if (mode === 'compose-ha') {
-    return servers
-      .filter((s) => s.role === 'primary' || s.role === 'standby')
-      .map((s) => target(s, 'compose'));
-  }
-  if (mode === 'kubernetes-ha') {
-    return servers
-      .filter((s) => s.role === 'primary' || s.role === 'standby')
-      .map((s) => target(s, 'k8s'));
-  }
+  if (mode === 'compose-ha') return pickHaPair(envConfig).map((s) => target(s, 'compose'));
+  if (mode === 'kubernetes-ha') return pickHaPair(envConfig).map((s) => target(s, 'k8s'));
   // kubernetes: the control plane. Roles were not always recorded, so fall
   // back to the first server, which the orchestrator writes as the master.
   const master = servers.find((s) => s.role === 'master') || servers[0];
   return [target(master, 'k8s')];
 }
+
+// Waiting reasons a pod passes through on its way up (not a retry
+// classifier: nothing here decides to retry anything). They are the pod
+// still rolling, so they read `starting` (retried by the e2e verify-status
+// poll) rather than a verdict. Back-offs (CrashLoopBackOff,
+// ImagePullBackOff) and config errors are verdicts and stay unhealthy.
+const STARTUP_WAITING_REASONS = new Set(['ContainerCreating', 'PodInitializing', 'ErrImagePull']);
 
 /**
  * Pod → row health, from phase + container statuses.
@@ -64,15 +97,8 @@ export function planContainerTargets(envConfig) {
 export function classifyPod(pod) {
   const phase = pod?.status?.phase || 'Unknown';
   const statuses = pod?.status?.containerStatuses || [];
-  const waiting = statuses.find((cs) => cs.state?.waiting?.reason);
-  if (waiting) {
-    const restarts = statuses.reduce((n, cs) => n + (cs.restartCount || 0), 0);
-    return {
-      health: 'unhealthy',
-      label: waiting.state.waiting.reason,
-      detail: restarts > 0 ? `restarts ${restarts}` : '',
-    };
-  }
+  // Terminal phases first: a Succeeded one-shot can keep a stale waiting
+  // status on a sidecar, and that must not turn a finished job red.
   if (phase === 'Succeeded') return { health: 'done', label: 'done', detail: '' };
   if (phase === 'Failed') {
     const terminated = statuses.find((cs) => cs.state?.terminated?.reason);
@@ -80,6 +106,16 @@ export function classifyPod(pod) {
       health: 'unhealthy',
       label: 'failed',
       detail: terminated?.state.terminated.reason || '',
+    };
+  }
+  const waiting = statuses.find((cs) => cs.state?.waiting?.reason);
+  if (waiting) {
+    const reason = waiting.state.waiting.reason;
+    const restarts = statuses.reduce((n, cs) => n + (cs.restartCount || 0), 0);
+    return {
+      health: STARTUP_WAITING_REASONS.has(reason) ? 'starting' : 'unhealthy',
+      label: reason,
+      detail: restarts > 0 ? `restarts ${restarts}` : '',
     };
   }
   if (phase === 'Pending') {
@@ -188,10 +224,20 @@ function withTimeout(promise, ms) {
 // Prefer err.stderr (what the remote/ssh actually said); err.timedOut is the
 // wrapper-timeout sentinel (see isTransientSshCommandError's docs in
 // ssh.js) and has no stderr of its own.
+//
+// ssh's own chatter comes first on stderr — the "Warning: Permanently added"
+// known-hosts line and the `@@@…@@@` host-key banner — so skip those before
+// taking the first line, or "Connection refused" reads as a warning.
+const SSH_NOISE_LINE = /^(Warning:|@+$)/;
+
 function describeSshError(err) {
   if (err?.timedOut) return 'ssh timeout';
-  const stderr = typeof err?.stderr === 'string' ? err.stderr.trim() : '';
-  if (stderr) return stderr.split('\n')[0].trim();
+  const stderr = typeof err?.stderr === 'string' ? err.stderr : '';
+  const reason = stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line && !SSH_NOISE_LINE.test(line));
+  if (reason) return reason;
   const msg = err instanceof Error ? err.message : String(err);
   return msg.split('\n')[0].trim();
 }

@@ -15,18 +15,55 @@ describe('planContainerTargets', () => {
     ).toEqual([{ serverName: 'prod', ip: '1.1.1.1', kind: 'compose' }]);
   });
 
-  it('compose-ha: primary and standby, both compose', () => {
+  // Shapes below are what the product writes, not invented ones:
+  //   compose-ha (effects/compose-ha.js)   { name: '<proj>-<env>-primary', ip, role: 'primary' }
+  //   compose-ha (orchestrator.js ~1452)   { name: 'primary', ip, region, serverType }   (no role)
+  //   kubernetes-ha (orchestrator.js ~1440) { name: 'primary', ip, supabaseIp, region }  (no role)
+  //                                        + ha.primary.masterIp / ha.standby.masterIp
+  it('compose-ha (effects shape): role-tagged primary and standby, both compose', () => {
     expect(
       planContainerTargets({
         deployMode: 'compose-ha',
         servers: [
-          { name: 'prod-primary', ip: '1.1.1.1', role: 'primary' },
-          { name: 'prod-standby', ip: '2.2.2.2', role: 'standby' },
+          { name: 'letsgo-prod-primary', id: 1, ip: '1.1.1.1', region: 'fsn1', role: 'primary' },
+          { name: 'letsgo-prod-standby', id: 2, ip: '2.2.2.2', region: 'hel1', role: 'standby' },
         ],
       }),
     ).toEqual([
-      { serverName: 'prod-primary', ip: '1.1.1.1', kind: 'compose' },
-      { serverName: 'prod-standby', ip: '2.2.2.2', kind: 'compose' },
+      { serverName: 'letsgo-prod-primary', ip: '1.1.1.1', kind: 'compose' },
+      { serverName: 'letsgo-prod-standby', ip: '2.2.2.2', kind: 'compose' },
+    ]);
+  });
+
+  it('compose-ha (orchestrator shape): name-only primary and standby', () => {
+    expect(
+      planContainerTargets({
+        deployMode: 'compose-ha',
+        ha: { enabled: true, failoverRegion: 'hel1' },
+        servers: [
+          { name: 'primary', ip: '1.1.1.1', region: 'fsn1', serverType: 'cpx31' },
+          { name: 'standby', ip: '2.2.2.2', region: 'hel1', serverType: 'cpx31' },
+        ],
+      }),
+    ).toEqual([
+      { serverName: 'primary', ip: '1.1.1.1', kind: 'compose' },
+      { serverName: 'standby', ip: '2.2.2.2', kind: 'compose' },
+    ]);
+  });
+
+  it('compose-ha after failover: role wins over the (unchanged) name suffix', () => {
+    // failoverComposeHA flips `role` in place and never renames (ha.js ~1831).
+    expect(
+      planContainerTargets({
+        deployMode: 'compose-ha',
+        servers: [
+          { name: 'letsgo-prod-primary', ip: '1.1.1.1', role: 'standby' },
+          { name: 'letsgo-prod-standby', ip: '2.2.2.2', role: 'primary' },
+        ],
+      }),
+    ).toEqual([
+      { serverName: 'letsgo-prod-standby', ip: '2.2.2.2', kind: 'compose' },
+      { serverName: 'letsgo-prod-primary', ip: '1.1.1.1', kind: 'compose' },
     ]);
   });
 
@@ -35,12 +72,12 @@ describe('planContainerTargets', () => {
       planContainerTargets({
         deployMode: 'kubernetes',
         servers: [
-          { name: 'prod', ip: '1.1.1.1', role: 'master' },
+          { name: 'master', ip: '1.1.1.1', supabaseIp: '3.3.3.3', role: 'master' },
           { name: 'supabase', ip: '3.3.3.3', role: 'supabase' },
           { name: 'worker-1', ip: '4.4.4.4', role: 'worker' },
         ],
       }),
-    ).toEqual([{ serverName: 'prod', ip: '1.1.1.1', kind: 'k8s' }]);
+    ).toEqual([{ serverName: 'master', ip: '1.1.1.1', kind: 'k8s' }]);
   });
 
   it('kubernetes with no roles recorded: falls back to servers[0]', () => {
@@ -52,19 +89,39 @@ describe('planContainerTargets', () => {
     ).toEqual([{ serverName: 'prod', ip: '1.1.1.1', kind: 'k8s' }]);
   });
 
-  it('kubernetes-ha: primary and standby cluster masters, kind k8s', () => {
+  it('kubernetes-ha: name-only primary and standby cluster masters, kind k8s', () => {
     expect(
       planContainerTargets({
         deployMode: 'kubernetes-ha',
         servers: [
-          { name: 'prod-primary', ip: '1.1.1.1', role: 'primary' },
-          { name: 'prod-standby', ip: '2.2.2.2', role: 'standby' },
-          { name: 'worker-1', ip: '4.4.4.4', role: 'worker' },
+          { name: 'primary', ip: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
+          { name: 'standby', ip: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
         ],
       }),
     ).toEqual([
-      { serverName: 'prod-primary', ip: '1.1.1.1', kind: 'k8s' },
-      { serverName: 'prod-standby', ip: '2.2.2.2', kind: 'k8s' },
+      { serverName: 'primary', ip: '1.1.1.1', kind: 'k8s' },
+      { serverName: 'standby', ip: '2.2.2.2', kind: 'k8s' },
+    ]);
+  });
+
+  it('kubernetes-ha after failover: ha.primary.masterIp picks the promoted entry first', () => {
+    // swapHaRoles (failover.js) swaps ha.primary/ha.standby, never servers[].
+    expect(
+      planContainerTargets({
+        deployMode: 'kubernetes-ha',
+        ha: {
+          enabled: true,
+          primary: { masterIp: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
+          standby: { masterIp: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
+        },
+        servers: [
+          { name: 'primary', ip: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
+          { name: 'standby', ip: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
+        ],
+      }),
+    ).toEqual([
+      { serverName: 'standby', ip: '2.2.2.2', kind: 'k8s' },
+      { serverName: 'primary', ip: '1.1.1.1', kind: 'k8s' },
     ]);
   });
 
@@ -132,6 +189,46 @@ describe('classifyPod', () => {
       },
     });
     expect(classifyPod(p)).toEqual({ health: 'unhealthy', label: 'ImagePullBackOff', detail: '' });
+  });
+
+  it('ContainerCreating / PodInitializing / ErrImagePull are transient → starting', () => {
+    for (const reason of ['ContainerCreating', 'PodInitializing', 'ErrImagePull']) {
+      const p = pod({
+        status: {
+          phase: 'Pending',
+          containerStatuses: [{ ready: false, restartCount: 0, state: { waiting: { reason } } }],
+        },
+      });
+      expect(classifyPod(p)).toEqual({ health: 'starting', label: reason, detail: '' });
+    }
+  });
+
+  it('a transient waiting reason still carries restarts in the detail', () => {
+    const p = pod({
+      status: {
+        phase: 'Running',
+        containerStatuses: [
+          { ready: false, restartCount: 2, state: { waiting: { reason: 'PodInitializing' } } },
+        ],
+      },
+    });
+    expect(classifyPod(p)).toEqual({
+      health: 'starting',
+      label: 'PodInitializing',
+      detail: 'restarts 2',
+    });
+  });
+
+  it('Succeeded with a lingering waiting status → done', () => {
+    const p = pod({
+      status: {
+        phase: 'Succeeded',
+        containerStatuses: [
+          { ready: false, restartCount: 0, state: { waiting: { reason: 'ContainerCreating' } } },
+        ],
+      },
+    });
+    expect(classifyPod(p)).toEqual({ health: 'done', label: 'done', detail: '' });
   });
 
   it('Pending without a waiting reason → starting/pending with the scheduling message', () => {
@@ -358,11 +455,12 @@ describe('nodeReadiness', () => {
 });
 
 describe('checkRemoteContainers', () => {
+  // effects/compose-ha.js shape, names shortened for the assertions below
   const composeHa = {
     deployMode: 'compose-ha',
     servers: [
-      { name: 'p', ip: '1.1.1.1', role: 'primary' },
-      { name: 's', ip: '2.2.2.2', role: 'standby' },
+      { name: 'p', id: 1, ip: '1.1.1.1', region: 'fsn1', role: 'primary' },
+      { name: 's', id: 2, ip: '2.2.2.2', region: 'hel1', role: 'standby' },
     ],
   };
   const base = () => ({
@@ -410,7 +508,8 @@ describe('checkRemoteContainers', () => {
       timeout: 10_000,
       transportRetry: false,
     });
-    expect(out!.p).toEqual({
+    expect(out).not.toBeNull();
+    expect(out?.p).toEqual({
       kind: 'compose',
       ip: '1.1.1.1',
       rows: [
@@ -432,7 +531,7 @@ describe('checkRemoteContainers', () => {
         },
       ],
     });
-    expect(out!.s.rows[1]).toMatchObject({
+    expect(out?.s.rows[1]).toMatchObject({
       container: 'kong',
       health: 'unhealthy',
       label: 'exited',
@@ -453,14 +552,49 @@ describe('checkRemoteContainers', () => {
       return 'letsgo-db\trunning\tUp 1h (healthy)\n';
     });
     const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
-    expect(out!.p.error).toBeUndefined();
-    expect(out!.p.rows).toHaveLength(1);
-    expect(out!.s).toEqual({
+    expect(out).not.toBeNull();
+    expect(out?.p.error).toBeUndefined();
+    expect(out?.p.rows).toHaveLength(1);
+    expect(out?.s).toEqual({
       kind: 'compose',
       ip: '2.2.2.2',
       rows: [],
       error: 'ssh: connect to host 2.2.2.2 port 22: Connection timed out',
     });
+  });
+
+  it('skips ssh warning/banner lines in stderr and reports the real reason', async () => {
+    const sshRun = vi.fn(async (ip: string) => {
+      if (ip === '2.2.2.2') {
+        throw Object.assign(new Error('Command failed: ssh -i /k -- root@2.2.2.2 docker ps'), {
+          stderr:
+            "Warning: Permanently added '2.2.2.2' (ED25519) to the list of known hosts.\n" +
+            'ssh: connect to host 2.2.2.2 port 22: Connection refused',
+        });
+      }
+      return 'letsgo-db\trunning\tUp 1h (healthy)\n';
+    });
+    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    expect(out).not.toBeNull();
+    expect(out?.s.error).toBe('ssh: connect to host 2.2.2.2 port 22: Connection refused');
+  });
+
+  it('falls through to the message when stderr is only warnings', async () => {
+    const sshRun = vi.fn(async () => {
+      throw Object.assign(new Error('Command failed: ssh -i /k -- root@1.1.1.1 docker ps'), {
+        stderr:
+          '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n' +
+          "Warning: Permanently added '1.1.1.1' (ED25519) to the list of known hosts.\n",
+      });
+    });
+    const out = await checkRemoteContainers(
+      'prod',
+      { deployMode: 'compose', servers: [{ name: 'p', ip: '1.1.1.1' }] },
+      'letsgo',
+      { ...base(), sshRun },
+    );
+    expect(out).not.toBeNull();
+    expect(out?.p.error).toBe('Command failed: ssh -i /k -- root@1.1.1.1 docker ps');
   });
 
   it('a timed-out server (wrapper timeout, empty stderr) reports "ssh timeout"', async () => {
@@ -474,7 +608,8 @@ describe('checkRemoteContainers', () => {
       return 'letsgo-db\trunning\tUp 1h (healthy)\n';
     });
     const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
-    expect(out!.s).toEqual({ kind: 'compose', ip: '2.2.2.2', rows: [], error: 'ssh timeout' });
+    expect(out).not.toBeNull();
+    expect(out?.s).toEqual({ kind: 'compose', ip: '2.2.2.2', rows: [], error: 'ssh timeout' });
   });
 
   it('a server with no ip is reported, not queried', async () => {
@@ -501,7 +636,8 @@ describe('checkRemoteContainers', () => {
         timeoutMs: 20,
       },
     );
-    expect(out!.p.error).toBe('ssh timeout');
+    expect(out).not.toBeNull();
+    expect(out?.p.error).toBe('ssh timeout');
   });
 
   it('k8s: pods + nodes on the master, app rows and platform rollups', async () => {
@@ -546,7 +682,8 @@ describe('checkRemoteContainers', () => {
       ['get', 'nodes', '-o', 'json'],
     ]);
     expect(sshKubectl.mock.calls[0][3]).toMatchObject({ transportRetry: false });
-    expect(out!.m).toEqual({
+    expect(out).not.toBeNull();
+    expect(out?.m).toEqual({
       kind: 'k8s',
       ip: '1.1.1.1',
       rows: [
@@ -575,7 +712,8 @@ describe('checkRemoteContainers', () => {
         sshRun: vi.fn(),
       },
     );
-    expect(out!.m).toEqual({
+    expect(out).not.toBeNull();
+    expect(out?.m).toEqual({
       kind: 'k8s',
       ip: '1.1.1.1',
       rows: [],

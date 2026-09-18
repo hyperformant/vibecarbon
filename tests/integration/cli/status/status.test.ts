@@ -68,6 +68,8 @@ describe('vibecarbon status', () => {
         domain: 'example.invalid',
         servers: [{ name: 'prod', ip: '203.0.113.10' }],
       },
+      // Nothing to query: the key is omitted, not null (spec §6).
+      staging: { deployMode: 'compose', servers: [] },
     };
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
@@ -89,6 +91,7 @@ describe('vibecarbon status', () => {
     expect(json.environments.prod.checks.remoteHealth.url).toBe(
       'https://example.invalid/api/health/ready',
     );
+    expect(json.environments.staging.checks).not.toHaveProperty('containers');
     expect(r.exitCode).toBe(0);
   });
 });

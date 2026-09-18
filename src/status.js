@@ -1240,7 +1240,9 @@ async function main(argv = []) {
         checkRemoteContainers(envName, envConfig, projectConfig.projectName),
       ]);
       checks.replication = replication;
-      checks.containers = containers;
+      // Omitted, not null, when there is nothing to query (no servers, no
+      // project name) — spec §6; consumers key on the key's absence.
+      if (containers) checks.containers = containers;
 
       return { envName, config: envConfig, checks };
     }),
