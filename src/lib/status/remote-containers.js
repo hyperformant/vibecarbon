@@ -212,15 +212,17 @@ export function nodeReadiness(nodesJson) {
 // re-exported so Task 3 can build compose rows without a second import site
 export { classifyContainer, rowsFromDockerPs };
 
-const DOCKER_PS_ARGV = [
-  'docker',
-  'ps',
-  '-a',
-  '--filter',
-  null,
-  '--format',
-  '{{.Names}}\t{{.State}}\t{{.Status}}',
-];
+function dockerPsArgv(projectName) {
+  return [
+    'docker',
+    'ps',
+    '-a',
+    '--filter',
+    `name=^${projectName}-`,
+    '--format',
+    '{{.Names}}\t{{.State}}\t{{.Status}}',
+  ];
+}
 
 function withTimeout(promise, ms) {
   let timer;
@@ -255,7 +257,7 @@ function describeSshError(err) {
 }
 
 async function collectCompose(target, projectName, keyPath, deps) {
-  const argv = DOCKER_PS_ARGV.map((a) => (a === null ? `name=^${projectName}-` : a));
+  const argv = dockerPsArgv(projectName);
   const listing = await withTimeout(
     deps.sshRun(target.ip, keyPath, argv, {
       silent: true,
@@ -342,5 +344,9 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
       }
     }),
   );
+  // Keyed by `name || ip` (planContainerTargets). Every config writer sets
+  // `name`, and a server with no ip is reported before we get here, so keys
+  // are distinct in practice; two name-less, ip-less entries would collapse
+  // to one row.
   return Object.fromEntries(results);
 }

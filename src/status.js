@@ -1235,11 +1235,14 @@ async function main(argv = []) {
       // concurrently — each is bounded at its own timeout, and stacking them
       // serially would double an HA environment's worst case. Independent of
       // noLocal — that flag is about THIS machine's dev stack.
-      const [replication, containers] = await Promise.all([
+      // allSettled so a throw in one check can never take the other's result with it.
+      const [replicationResult, containersResult] = await Promise.allSettled([
         checkReplication(envName, envConfig, projectConfig.projectName),
         checkRemoteContainers(envName, envConfig, projectConfig.projectName),
       ]);
-      checks.replication = replication;
+      checks.replication =
+        replicationResult.status === 'fulfilled' ? replicationResult.value : null;
+      const containers = containersResult.status === 'fulfilled' ? containersResult.value : null;
       // Omitted, not null, when there is nothing to query (no servers, no
       // project name) — spec §6; consumers key on the key's absence.
       if (containers) checks.containers = containers;
