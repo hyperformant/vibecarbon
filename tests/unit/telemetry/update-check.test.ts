@@ -215,4 +215,17 @@ describe('printUpdateNotice', () => {
       true,
     );
   });
+
+  it('never throws when the sink throws (EPIPE in a finally must not mask the real error)', () => {
+    writeCache('0.99.0', 0);
+    const log = vi.fn(() => {
+      throw new Error('EPIPE');
+    });
+    expect(() =>
+      printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log }),
+    ).not.toThrow();
+    expect(printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log })).toBe(
+      false,
+    );
+  });
 });

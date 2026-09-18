@@ -111,7 +111,16 @@ export function printUpdateNotice({
   if (noticePrinted || !isTTY) return false;
   const notice = getUpdateNotice({ currentVersion, stateDir });
   if (!notice) return false;
-  log(`${leadingBlank ? '\n' : ''}${notice}\n`);
+  try {
+    // The string carries its own trailing "\n" on top of the one console.log
+    // adds: that is the blank line after the notice. `leadingBlank` adds the
+    // one before it for call sites with nothing above (cli.js's fallback).
+    log(`${leadingBlank ? '\n' : ''}${notice}\n`);
+  } catch {
+    // A dead stdout (EPIPE) must never surface from here: this runs inside
+    // cli.js's finally and would replace the error the user actually hit.
+    return false;
+  }
   noticePrinted = true;
   return true;
 }

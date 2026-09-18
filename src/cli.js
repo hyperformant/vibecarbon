@@ -16,7 +16,7 @@ import dns from 'node:dns';
 import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
-import { formatExampleCommand } from './lib/cli/help.js';
+import { formatExamples } from './lib/cli/help.js';
 import { c } from './lib/colors.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
@@ -136,6 +136,18 @@ export const KNOWN_COMMANDS = [
   'telemetry',
 ];
 
+const GLOBAL_EXAMPLES = [
+  { description: 'Create a new project', commands: ['vibecarbon create my-app', 'cd my-app'] },
+  { description: 'Local development', commands: ['vibecarbon up'] },
+  { description: 'Add features', commands: ['vibecarbon add observability'] },
+  { description: 'Wire up external services', commands: ['vibecarbon configure'] },
+  { description: 'Deploy to production', commands: ['vibecarbon deploy prod'] },
+  {
+    description: 'Backup and restore',
+    commands: ['vibecarbon backup prod -l', 'vibecarbon restore prod'],
+  },
+];
+
 function showHelp() {
   console.log(`
 ${c.bold('Vibecarbon CLI')} ${c.dim(`v${VERSION}`)}
@@ -181,26 +193,7 @@ ${c.bold('GLOBAL FLAGS')}
   ${c.dim('Run any command with -h to see its specific flags.')}
 
 ${c.bold('EXAMPLES')}
-  ${c.muted('# Create a new project')}
-  ${formatExampleCommand('vibecarbon create my-app')}
-  cd my-app
-
-  ${c.muted('# Local development')}
-  ${formatExampleCommand('vibecarbon up')}
-
-  ${c.muted('# Add features')}
-  ${formatExampleCommand('vibecarbon add observability')}
-
-  ${c.muted('# Wire up external services')}
-  ${formatExampleCommand('vibecarbon configure')}
-
-  ${c.muted('# Deploy to production')}
-  ${formatExampleCommand('vibecarbon deploy prod')}
-
-  ${c.muted('# Backup and restore')}
-  ${formatExampleCommand('vibecarbon backup prod -l')}
-  ${formatExampleCommand('vibecarbon restore prod')}
-
+${formatExamples(GLOBAL_EXAMPLES).join('\n')}
 ${c.bold('DOCUMENTATION')}
   https://github.com/hyperformant/vibecarbon
 `);

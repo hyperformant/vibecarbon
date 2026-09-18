@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatExampleCommand, renderHelp } from '../../../../src/lib/cli/help.js';
+import { formatExampleCommand, formatExamples, renderHelp } from '../../../../src/lib/cli/help.js';
 
 // Strip ANSI escapes so assertions on text content don't depend on
 // terminal-specific color codes leaking into snapshots.
@@ -137,5 +137,44 @@ describe('renderHelp EXAMPLES colouring', () => {
     expect(out).toContain(formatExampleCommand('vibecarbon backup prod -l'));
     expect(out).toContain('\x1b[90m# list prod backups\x1b[0m');
     expect(out).not.toContain('\x1b[2m# list prod backups');
+  });
+});
+
+describe('formatExampleCommand whitespace', () => {
+  const CYAN = '\x1b[36m';
+  const RESET = '\x1b[0m';
+  it('preserves leading and trailing whitespace around a coloured command', () => {
+    expect(formatExampleCommand('  vibecarbon up\n')).toBe(
+      `  ${CYAN}vibecarbon${RESET} ${CYAN}up${RESET}\n`,
+    );
+  });
+});
+
+describe('formatExamples', () => {
+  it('renders comment, commands, and a trailing blank per group', () => {
+    const lines = formatExamples([
+      { description: 'Create a new project', commands: ['vibecarbon create my-app', 'cd my-app'] },
+      { commands: ['vibecarbon up'] },
+    ]).map(strip);
+    expect(lines).toEqual([
+      '  # Create a new project',
+      '  vibecarbon create my-app',
+      '  cd my-app',
+      '',
+      '  vibecarbon up',
+      '',
+    ]);
+  });
+
+  it('is what renderHelp uses for its EXAMPLES section', () => {
+    const out = renderHelp({
+      name: 'backup',
+      summary: 'x',
+      examples: [{ command: 'vibecarbon backup prod -l', description: 'list prod backups' }],
+    });
+    const expected = formatExamples([
+      { description: 'list prod backups', commands: ['vibecarbon backup prod -l'] },
+    ]);
+    expect(out).toContain(expected.join('\n').trimEnd());
   });
 });

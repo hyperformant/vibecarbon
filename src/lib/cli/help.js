@@ -41,10 +41,40 @@ import { c } from '../colors.js';
  * @returns {string}
  */
 export function formatExampleCommand(command) {
-  const match = command.match(/^vibecarbon(?:\s+(\S+))?(.*)$/);
+  const lead = command.match(/^\s*/)[0];
+  const trail = command.match(/\s*$/)[0];
+  const body = command.slice(lead.length, command.length - trail.length);
+  const match = body.match(/^vibecarbon(?:\s+(\S+))?(.*)$/);
   if (!match) return command;
   const [, name, rest] = match;
-  return name ? `${c.info('vibecarbon')} ${c.info(name)}${rest}` : `${c.info('vibecarbon')}${rest}`;
+  const coloured = name
+    ? `${c.info('vibecarbon')} ${c.info(name)}${rest}`
+    : `${c.info('vibecarbon')}${rest}`;
+  return `${lead}${coloured}${trail}`;
+}
+
+/**
+ * @typedef {object} ExampleGroup
+ * @property {string} [description] - comment line shown above the commands
+ * @property {string[]} commands - one or more invocations shown in order
+ */
+
+/**
+ * Lines for an EXAMPLES section: gray comment, coloured commands, blank line
+ * after each group. Shared by the global help and every command's help so
+ * the two can't drift.
+ *
+ * @param {ExampleGroup[]} groups
+ * @returns {string[]}
+ */
+export function formatExamples(groups) {
+  const lines = [];
+  for (const group of groups) {
+    if (group.description) lines.push(`  ${c.muted(`# ${group.description}`)}`);
+    for (const command of group.commands) lines.push(`  ${formatExampleCommand(command)}`);
+    lines.push('');
+  }
+  return lines;
 }
 
 /**
@@ -105,13 +135,11 @@ export function renderHelp(spec) {
   const examples = spec.examples ?? [];
   if (examples.length > 0) {
     lines.push(c.bold('EXAMPLES'));
-    for (const ex of examples) {
-      if (ex.description) {
-        lines.push(`  ${c.muted(`# ${ex.description}`)}`);
-      }
-      lines.push(`  ${formatExampleCommand(ex.command)}`);
-      lines.push('');
-    }
+    lines.push(
+      ...formatExamples(
+        examples.map((ex) => ({ description: ex.description, commands: [ex.command] })),
+      ),
+    );
   }
 
   return `${lines.join('\n').trimEnd()}\n`;
