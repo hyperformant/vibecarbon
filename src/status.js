@@ -1270,7 +1270,6 @@ export async function run(args) {
 export {
   CORE_SERVICE_ORDER,
   classifyContainer,
-  GATEWAY_PROBES,
   getBranchName,
   main,
   parseKongHostPort,
