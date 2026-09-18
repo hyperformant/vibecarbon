@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   checkDockerContainers,
   classifyContainer,
+  formatDockerServiceLines,
   parseKongHostPort,
 } from '../../../src/status.js';
 
@@ -301,5 +302,122 @@ describe('checkDockerContainers', () => {
     const rows = await checkDockerContainers(undefined, { runCommand: run, fetch: okFetch() });
     expect(rows).toEqual([]);
     expect(run).not.toHaveBeenCalled();
+  });
+});
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+describe('formatDockerServiceLines', () => {
+  it('renders "not running" when there are no rows', () => {
+    const lines = formatDockerServiceLines([]).map(stripAnsi);
+    expect(lines).toEqual(['Docker Services               not running']);
+  });
+
+  it('counts healthy over non-done rows and shows exited rows with their Docker status', () => {
+    const lines = formatDockerServiceLines([
+      {
+        name: 'PostgreSQL',
+        container: 'db',
+        health: 'healthy',
+        label: 'healthy',
+        detail: '',
+        latencyMs: 0,
+      },
+      {
+        name: 'Kong Gateway',
+        container: 'kong',
+        health: 'unhealthy',
+        label: 'exited',
+        detail: 'Exited (128) 24 minutes ago',
+        latencyMs: 0,
+      },
+      {
+        name: 'REST (PostgREST)',
+        container: 'rest',
+        health: 'unknown',
+        label: 'unknown',
+        detail: 'gateway down',
+        latencyMs: 0,
+      },
+      {
+        name: 'Traefik',
+        container: 'traefik',
+        health: 'healthy',
+        label: 'running',
+        detail: '',
+        latencyMs: 0,
+      },
+      {
+        name: 'metabase-setup',
+        container: 'metabase-setup',
+        health: 'done',
+        label: 'done',
+        detail: '',
+        latencyMs: 0,
+      },
+    ]).map(stripAnsi);
+
+    expect(lines[0]).toBe('Docker Services               ● 2/4 healthy');
+    expect(lines[1]).toBe('  PostgreSQL                  ● healthy  ');
+    expect(lines[2]).toBe('  Kong Gateway                ● exited  Exited (128) 24 minutes ago');
+    expect(lines[3]).toBe('  REST (PostgREST)            ○ unknown  gateway down');
+    expect(lines[4]).toBe('  Traefik                     ● running  ');
+    expect(lines[5]).toBe('  metabase-setup              ○ done  ');
+  });
+
+  it('shows latency for probed rows', () => {
+    const lines = formatDockerServiceLines([
+      {
+        name: 'Meta',
+        container: 'meta',
+        health: 'healthy',
+        label: 'healthy',
+        detail: '',
+        latencyMs: 17,
+      },
+    ]).map(stripAnsi);
+    expect(lines[1]).toBe('  Meta                        ● healthy  17ms');
+  });
+
+  it('colours the summary green only when every counted row is healthy', () => {
+    const allGood = formatDockerServiceLines([
+      {
+        name: 'PostgreSQL',
+        container: 'db',
+        health: 'healthy',
+        label: 'healthy',
+        detail: '',
+        latencyMs: 0,
+      },
+      {
+        name: 'x-setup',
+        container: 'x-setup',
+        health: 'done',
+        label: 'done',
+        detail: '',
+        latencyMs: 0,
+      },
+    ]);
+    expect(allGood[0]).toContain('\x1b[32m'); // green
+    const oneBad = formatDockerServiceLines([
+      {
+        name: 'PostgreSQL',
+        container: 'db',
+        health: 'healthy',
+        label: 'healthy',
+        detail: '',
+        latencyMs: 0,
+      },
+      {
+        name: 'Kong Gateway',
+        container: 'kong',
+        health: 'unhealthy',
+        label: 'exited',
+        detail: 'Exited (1) 1s ago',
+        latencyMs: 0,
+      },
+    ]);
+    expect(oneBad[0]).toContain('\x1b[33m'); // yellow
   });
 });

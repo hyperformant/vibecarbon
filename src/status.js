@@ -699,6 +699,54 @@ function checkGitSync(envName, envConfig) {
 // RENDERING FUNCTIONS
 // ============================================================================
 
+/**
+ * Lines for the "Docker Services" section of the Local Development note.
+ *
+ * `done` rows (one-shot init containers that exited 0) are listed but
+ * excluded from the healthy total; `starting` and `unknown` rows count
+ * against it without being painted red, since neither is a failure yet.
+ *
+ * @param {Array<{name: string, health: string, label: string, detail: string, latencyMs: number}>} docker
+ * @returns {string[]}
+ */
+function formatDockerServiceLines(docker) {
+  if (docker.length === 0) {
+    return [`${c.dim('Docker Services'.padEnd(30))}${c.dim('not running')}`];
+  }
+  const counted = docker.filter((s) => s.health !== 'done');
+  const healthyCount = counted.filter((s) => s.health === 'healthy').length;
+  const total = counted.length;
+  const summary = `● ${healthyCount}/${total} healthy`;
+  const lines = [
+    `${c.dim('Docker Services'.padEnd(30))}${healthyCount === total ? c.success(summary) : c.warning(summary)}`,
+  ];
+
+  for (const svc of docker) {
+    let icon;
+    let label;
+    switch (svc.health) {
+      case 'healthy':
+        icon = c.success('●');
+        label = c.dim(svc.label);
+        break;
+      case 'unhealthy':
+        icon = c.error('●');
+        label = c.error(svc.label);
+        break;
+      case 'starting':
+        icon = c.warning('●');
+        label = c.warning(svc.label);
+        break;
+      default: // done, unknown
+        icon = c.dim('○');
+        label = c.dim(svc.label);
+    }
+    const tail = svc.detail ? c.dim(svc.detail) : svc.latencyMs ? c.dim(`${svc.latencyMs}ms`) : '';
+    lines.push(`  ${c.dim(svc.name.padEnd(28))}${icon} ${label}  ${tail}`);
+  }
+  return lines;
+}
+
 function renderLocalDev(data) {
   const lines = [];
 
@@ -717,29 +765,7 @@ function renderLocalDev(data) {
   lines.push(`${c.dim(viteLabel.padEnd(30))}${viteStatus}`);
 
   // Docker services
-  if (data.docker.length > 0) {
-    const healthyCount = data.docker.filter((s) => s.health === 'healthy').length;
-    const total = data.docker.length;
-    const dockerSummary =
-      healthyCount === total
-        ? c.success(`\u25cf ${healthyCount}/${total} healthy`)
-        : c.warning(`\u25cf ${healthyCount}/${total} healthy`);
-    lines.push(`${c.dim('Docker Services'.padEnd(30))}${dockerSummary}`);
-
-    for (const svc of data.docker) {
-      const icon =
-        svc.health === 'healthy'
-          ? c.success('\u25cf')
-          : svc.health === 'unhealthy'
-            ? c.error('\u25cf')
-            : c.dim('\u25cb');
-      const status = svc.health === 'healthy' ? c.dim('healthy') : c.error(svc.health);
-      const latency = svc.latencyMs ? c.dim(`${svc.latencyMs}ms`) : '';
-      lines.push(`  ${c.dim(svc.name.padEnd(28))}${icon} ${status}  ${latency}`);
-    }
-  } else {
-    lines.push(`${c.dim('Docker Services'.padEnd(30))}${c.dim('not running')}`);
-  }
+  lines.push(...formatDockerServiceLines(data.docker));
 
   p.note(lines.join('\n'), 'Local Development');
 }
@@ -993,15 +1019,16 @@ function renderSummary(allData) {
     const parts = [];
     if (ld.api.running) parts.push('API');
     if (ld.vite.running) parts.push('Vite');
-    const dockerHealthy = ld.docker.filter((s) => s.health === 'healthy').length;
-    if (ld.docker.length > 0) parts.push(`Docker ${dockerHealthy}/${ld.docker.length}`);
+    const dockerCounted = ld.docker.filter((s) => s.health !== 'done');
+    const dockerHealthy = dockerCounted.filter((s) => s.health === 'healthy').length;
+    if (dockerCounted.length > 0) parts.push(`Docker ${dockerHealthy}/${dockerCounted.length}`);
 
     if (
       parts.length > 0 &&
       ld.api.running &&
       ld.vite.running &&
-      dockerHealthy === ld.docker.length &&
-      ld.docker.length > 0
+      dockerHealthy === dockerCounted.length &&
+      dockerCounted.length > 0
     ) {
       lines.push(`${c.dim('Local Dev')}      ${c.success('All services running')}`);
     } else if (parts.length > 0) {
@@ -1266,6 +1293,7 @@ export {
   CORE_SERVICE_ORDER,
   checkDockerContainers,
   classifyContainer,
+  formatDockerServiceLines,
   getBranchName,
   main,
   parseKongHostPort,
