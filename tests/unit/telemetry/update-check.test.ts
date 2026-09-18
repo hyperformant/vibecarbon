@@ -2,7 +2,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getUpdateNotice, refreshUpdateCache } from '../../../src/lib/telemetry/update-check.js';
+import {
+  getUpdateNotice,
+  printUpdateNotice,
+  refreshUpdateCache,
+  resetUpdateNoticeForTests,
+} from '../../../src/lib/telemetry/update-check.js';
 
 let dir: string;
 const cachePath = () => join(dir, 'update-check.json');
@@ -126,5 +131,88 @@ describe('refreshUpdateCache', () => {
       fetchImpl: fetchImpl2,
     });
     expect(fetchImpl2).not.toHaveBeenCalled();
+  });
+});
+
+describe('getUpdateNotice colour', () => {
+  it('renders the notice in yellow, not dim', () => {
+    writeCache('0.99.0', 0);
+    const notice = getUpdateNotice({ currentVersion: '0.41.0', stateDir: dir }) as string;
+    expect(notice.startsWith('\x1b[33m')).toBe(true);
+    expect(notice).not.toContain('\x1b[2m');
+  });
+});
+
+describe('printUpdateNotice', () => {
+  beforeEach(() => resetUpdateNoticeForTests());
+
+  it('prints the notice followed by a blank line and returns true', () => {
+    writeCache('0.99.0', 0);
+    const log = vi.fn();
+    const printed = printUpdateNotice({
+      currentVersion: '0.41.0',
+      stateDir: dir,
+      isTTY: true,
+      log,
+    });
+    expect(printed).toBe(true);
+    expect(log).toHaveBeenCalledTimes(1);
+    const line = log.mock.calls[0][0] as string;
+    expect(line).toContain('Update available 0.41.0 → 0.99.0');
+    expect(line.endsWith('\n')).toBe(true);
+  });
+
+  it('adds a leading blank line when asked (fallback path for banner-less commands)', () => {
+    writeCache('0.99.0', 0);
+    const log = vi.fn();
+    printUpdateNotice({
+      currentVersion: '0.41.0',
+      stateDir: dir,
+      isTTY: true,
+      leadingBlank: true,
+      log,
+    });
+    const line = log.mock.calls[0][0] as string;
+    expect(line.startsWith('\n')).toBe(true);
+    expect(line.endsWith('\n')).toBe(true);
+  });
+
+  it('prints at most once per process', () => {
+    writeCache('0.99.0', 0);
+    const log = vi.fn();
+    expect(printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log })).toBe(
+      true,
+    );
+    expect(printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log })).toBe(
+      false,
+    );
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it('prints nothing when stdout is not a TTY', () => {
+    writeCache('0.99.0', 0);
+    const log = vi.fn();
+    expect(printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: false, log })).toBe(
+      false,
+    );
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('prints nothing when there is no newer version', () => {
+    writeCache('0.41.0', 0);
+    const log = vi.fn();
+    expect(printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log })).toBe(
+      false,
+    );
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('does not consume the once-guard when nothing was printed', () => {
+    const log = vi.fn();
+    printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: false, log });
+    writeCache('0.99.0', 0);
+    expect(printUpdateNotice({ currentVersion: '0.41.0', stateDir: dir, isTTY: true, log })).toBe(
+      true,
+    );
   });
 });

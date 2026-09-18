@@ -21,7 +21,7 @@ import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
 import { recordCommandStart, reportCrash, settlePendingTelemetry } from './lib/telemetry/index.js';
-import { getUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
+import { printUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
 import { VERSION } from './lib/version.js';
 
 // Prefer IPv4 to avoid timeouts on systems with broken IPv6 connectivity.
@@ -425,8 +425,10 @@ async function main() {
     await reportCrash(command, error);
     throw error; // preserve today's failure behavior exactly
   } finally {
-    const notice = getUpdateNotice();
-    if (notice && process.stdout.isTTY) console.log(`\n${notice}`);
+    // Fallback for commands that never draw a banner (console, diagnose,
+    // shell, telemetry). Banner commands already printed it under the logo;
+    // the once-guard makes this a no-op for them.
+    printUpdateNotice({ leadingBlank: true });
     await settlePendingTelemetry();
     commandTimer.end();
   }

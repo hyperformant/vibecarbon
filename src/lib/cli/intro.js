@@ -1,11 +1,13 @@
 /**
- * Standard interactive-command opener: brand banner + clack intro line
- * (`vibecarbon <command> v<VERSION>`). Every command opens this way — one
- * helper instead of the printBanner()/p.intro() pair copy-pasted per file.
+ * Standard interactive-command opener: brand banner + update notice (when
+ * one is cached) + clack intro line (`vibecarbon <command> v<VERSION>`).
+ * Every command opens this way — one helper instead of the
+ * printBanner()/p.intro() pair copy-pasted per file.
  */
 
 import * as p from '@clack/prompts';
 import { c, printBanner } from '../colors.js';
+import { printUpdateNotice } from '../telemetry/update-check.js';
 import { VERSION } from '../version.js';
 
 /**
@@ -14,5 +16,6 @@ import { VERSION } from '../version.js';
  */
 export function introCommand(command) {
   printBanner();
+  printUpdateNotice();
   p.intro(`${c.bold(`vibecarbon ${command}`)} ${c.dim(`v${VERSION}`)}`);
 }
