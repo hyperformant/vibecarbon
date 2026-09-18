@@ -17,7 +17,7 @@ import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
-import { runCommand } from './lib/command.js';
+import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
 import {
   buildPrimaryLagQuery,
@@ -174,6 +174,7 @@ const GATEWAY_PROBES = {
  * @returns {{health: 'healthy'|'unhealthy'|'starting'|'done'|'unknown', label: string, detail: string}}
  */
 function classifyContainer(container, state, status) {
+  if (!state) return { health: 'unknown', label: 'unknown', detail: status || '' };
   if (state === 'running') {
     if (/\(healthy\)/.test(status)) return { health: 'healthy', label: 'healthy', detail: '' };
     if (/\(unhealthy\)/.test(status))
@@ -203,7 +204,8 @@ function classifyContainer(container, state, status) {
  */
 function parseKongHostPort(output) {
   const first = (output || '').split('\n').find((line) => line.trim());
-  const match = first?.trim().match(/:(\d+)$/);
+  if (!first) return null;
+  const match = first.trim().match(/:(\d+)$/);
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
@@ -220,18 +222,21 @@ function parseKongHostPort(output) {
  * own.
  *
  * @param {string|undefined} projectName
- * @param {{runCommand?: typeof runCommand, fetch?: typeof fetch, timeoutMs?: number}} [deps]
+ * @param {{runCommand?: typeof runCommandAsync, fetch?: typeof fetch, timeoutMs?: number}} [deps]
  * @returns {Promise<Array<{name: string, container: string, health: string, label: string, detail: string, latencyMs: number}>>}
  */
 async function checkDockerContainers(projectName, deps = {}) {
-  const { runCommand: _run = runCommand, fetch: _fetch = fetch, timeoutMs = 2000 } = deps;
+  const { runCommand: _run = runCommandAsync, fetch: _fetch = fetch, timeoutMs = 2000 } = deps;
+  // No project name means no `${name}-*` prefix to enumerate; the old fallback (strip the
+  // first dash-segment of every container on the host) is exactly the cross-project
+  // confusion this function exists to avoid.
   if (!projectName) return [];
   const prefix = `${projectName}-`;
 
   let listing = '';
   try {
     listing =
-      _run(
+      (await _run(
         [
           'docker',
           'ps',
@@ -243,11 +248,10 @@ async function checkDockerContainers(projectName, deps = {}) {
         ],
         {
           silent: true,
-          encoding: 'utf-8',
           timeout: 5000,
           ignoreError: true,
         },
-      ) || '';
+      )) || '';
   } catch {
     return [];
   }
@@ -271,9 +275,8 @@ async function checkDockerContainers(projectName, deps = {}) {
   if (kongRunning) {
     try {
       kongPort = parseKongHostPort(
-        _run(['docker', 'port', `${prefix}kong`, '8000/tcp'], {
+        await _run(['docker', 'port', `${prefix}kong`, '8000/tcp'], {
           silent: true,
-          encoding: 'utf-8',
           timeout: 5000,
           ignoreError: true,
         }),
@@ -282,6 +285,7 @@ async function checkDockerContainers(projectName, deps = {}) {
       kongPort = null;
     }
   }
+  const gatewayDetail = kongRunning ? 'gateway port not published' : 'gateway down';
 
   const rows = await Promise.all(
     containers.map(async ({ container, state, status }) => {
@@ -300,7 +304,7 @@ async function checkDockerContainers(projectName, deps = {}) {
           container,
           health: 'unknown',
           label: 'unknown',
-          detail: 'gateway down',
+          detail: gatewayDetail,
           latencyMs: 0,
         };
       }
@@ -325,12 +329,17 @@ async function checkDockerContainers(projectName, deps = {}) {
           latencyMs,
         };
       } catch (err) {
+        const detail = controller.signal.aborted
+          ? `timeout after ${timeoutMs}ms`
+          : err instanceof Error
+            ? err.message
+            : String(err);
         return {
           name,
           container,
           health: 'unhealthy',
           label: 'unhealthy',
-          detail: err instanceof Error ? err.message : String(err),
+          detail,
           latencyMs: Date.now() - start,
         };
       } finally {
@@ -720,10 +729,13 @@ function formatDockerServiceLines(docker) {
   const counted = docker.filter((s) => s.health !== 'done');
   const healthyCount = counted.filter((s) => s.health === 'healthy').length;
   const total = counted.length;
-  const summary = `● ${healthyCount}/${total} healthy`;
-  const lines = [
-    `${c.dim('Docker Services'.padEnd(30))}${healthyCount === total ? c.success(summary) : c.warning(summary)}`,
-  ];
+  const summary =
+    total === 0
+      ? c.dim('no long-running services')
+      : healthyCount === total
+        ? c.success(`● ${healthyCount}/${total} healthy`)
+        : c.warning(`● ${healthyCount}/${total} healthy`);
+  const lines = [`${c.dim('Docker Services'.padEnd(30))}${summary}`];
 
   for (const svc of docker) {
     let icon;
@@ -1294,7 +1306,6 @@ export async function run(args) {
 // ============================================================================
 
 export {
-  CORE_SERVICE_ORDER,
   checkDockerContainers,
   classifyContainer,
   formatDockerServiceLines,
@@ -1303,7 +1314,6 @@ export {
   parseKongHostPort,
   providerDisplayName,
   resolveEnvProvider,
-  SERVICE_DISPLAY_NAMES,
   SPEC,
   VERSION,
 };

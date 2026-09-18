@@ -83,6 +83,14 @@ describe('classifyContainer', () => {
     });
     expect(classifyContainer('app', 'paused', 'Up 2 minutes (Paused)').label).toBe('paused');
   });
+
+  it('reports a line with no state as unknown instead of an empty label', () => {
+    expect(classifyContainer('foo', '', '')).toEqual({
+      health: 'unknown',
+      label: 'unknown',
+      detail: '',
+    });
+  });
 });
 
 describe('parseKongHostPort', () => {
@@ -327,6 +335,83 @@ describe('checkDockerContainers', () => {
       label: 'unhealthy',
     });
   });
+
+  it('accepts an async runCommand (the real default is runCommandAsync)', async () => {
+    const run = vi.fn(async (argv: string[]) => {
+      if (argv[1] === 'ps') return 'letsgo-db\trunning\tUp 1 hour (healthy)\n';
+      if (argv[1] === 'port') return '';
+      throw new Error(`unexpected docker call: ${argv.join(' ')}`);
+    });
+    const rows = await checkDockerContainers('letsgo', { runCommand: run, fetch: okFetch() });
+    expect(rows).toEqual([
+      {
+        name: 'PostgreSQL',
+        container: 'db',
+        health: 'healthy',
+        label: 'healthy',
+        detail: '',
+        latencyMs: 0,
+      },
+    ]);
+  });
+
+  it('renders a malformed docker ps line (no tab fields) as unknown rather than crashing', async () => {
+    const rows = await checkDockerContainers('letsgo', {
+      runCommand: fakeDocker({ ps: 'letsgo-weird\n' }),
+      fetch: okFetch(),
+    });
+    expect(rows).toEqual([
+      {
+        name: 'weird',
+        container: 'weird',
+        health: 'unknown',
+        label: 'unknown',
+        detail: '',
+        latencyMs: 0,
+      },
+    ]);
+  });
+
+  it('says "gateway port not published" when kong runs but 8000/tcp is not bound', async () => {
+    const ps = [
+      'letsgo-kong\trunning\tUp 1 minute (healthy)',
+      'letsgo-rest\trunning\tUp 1 minute',
+    ].join('\n');
+    const rows = await checkDockerContainers('letsgo', {
+      runCommand: fakeDocker({ ps, port: '' }),
+      fetch: okFetch(),
+    });
+    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
+      health: 'unknown',
+      label: 'unknown',
+      detail: 'gateway port not published',
+    });
+  });
+
+  it('reports a probe that exceeds timeoutMs as a timeout, not a generic error', async () => {
+    const ps = [
+      'letsgo-kong\trunning\tUp 1 minute (healthy)',
+      'letsgo-rest\trunning\tUp 1 minute',
+    ].join('\n');
+    const hangingFetch = vi.fn(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () =>
+            reject(new Error('The operation was aborted')),
+          );
+        }),
+    ) as unknown as typeof fetch;
+    const rows = await checkDockerContainers('letsgo', {
+      runCommand: fakeDocker({ ps, port: '0.0.0.0:8000\n' }),
+      fetch: hangingFetch,
+      timeoutMs: 10,
+    });
+    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
+      health: 'unhealthy',
+      label: 'unhealthy',
+      detail: 'timeout after 10ms',
+    });
+  });
 });
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
@@ -443,5 +528,20 @@ describe('formatDockerServiceLines', () => {
       },
     ]);
     expect(oneBad[0]).toContain('\x1b[33m'); // yellow
+  });
+
+  it('does not claim 0/0 healthy when only one-shot jobs exist', () => {
+    const lines = formatDockerServiceLines([
+      {
+        name: 'x-setup',
+        container: 'x-setup',
+        health: 'done',
+        label: 'done',
+        detail: '',
+        latencyMs: 0,
+      },
+    ]).map(stripAnsi);
+    expect(lines[0]).toBe('Docker Services               no long-running services');
+    expect(lines[1]).toBe('  x-setup                     ○ done  ');
   });
 });
