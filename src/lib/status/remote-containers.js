@@ -149,10 +149,22 @@ const POD_TEMPLATE_HASH_RE = /-[bcdfghjklmnpqrstvwxz0-9]{5,10}$/;
 export function podDisplayName(pod) {
   const name = pod?.metadata?.name || '';
   const owner = pod?.metadata?.ownerReferences?.[0];
-  if (owner?.kind !== 'ReplicaSet') return name;
-  const hash = pod?.metadata?.labels?.['pod-template-hash'];
-  if (hash && owner.name.endsWith(`-${hash}`)) return owner.name.slice(0, -(hash.length + 1));
-  return owner.name.replace(POD_TEMPLATE_HASH_RE, '');
+  let result;
+  if (owner?.kind !== 'ReplicaSet') {
+    result = name;
+  } else {
+    const hash = pod?.metadata?.labels?.['pod-template-hash'];
+    if (hash && owner.name.endsWith(`-${hash}`)) {
+      result = owner.name.slice(0, -(hash.length + 1));
+    } else {
+      result = owner.name.replace(POD_TEMPLATE_HASH_RE, '');
+    }
+  }
+  // The Supabase Helm chart is installed with release name `supabase` and
+  // chart name `supabase`, so every workload doubles the prefix
+  // (`supabase-supabase-kong`). Collapse exactly one leading duplication so
+  // display names match the spec's `supabase-kong` / `supabase-db-0`.
+  return result.replace(/^supabase-supabase-/, 'supabase-');
 }
 
 /**

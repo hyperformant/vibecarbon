@@ -343,6 +343,40 @@ describe('podDisplayName', () => {
     });
     expect(podDisplayName(p)).toBe('web-abc');
   });
+
+  it('collapses the Helm release/chart double prefix for ReplicaSet-owned pods', () => {
+    const p = pod({
+      metadata: {
+        name: 'supabase-supabase-kong-5b8f9c7dxz-q2w4r',
+        namespace: 'vibecarbon',
+        labels: { 'pod-template-hash': '5b8f9c7dxz' },
+        ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-supabase-kong-5b8f9c7dxz' }],
+      },
+    });
+    expect(podDisplayName(p)).toBe('supabase-kong');
+  });
+
+  it('collapses the Helm release/chart double prefix for StatefulSet-owned pods', () => {
+    const p = pod({
+      metadata: {
+        name: 'supabase-supabase-db-0',
+        namespace: 'vibecarbon',
+        ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-supabase-db' }],
+      },
+    });
+    expect(podDisplayName(p)).toBe('supabase-db-0');
+  });
+
+  it('leaves a single supabase- prefix unchanged', () => {
+    const p = pod({
+      metadata: {
+        name: 'supabase-db-0',
+        namespace: 'vibecarbon',
+        ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-db' }],
+      },
+    });
+    expect(podDisplayName(p)).toBe('supabase-db-0');
+  });
 });
 
 describe('rowsFromPods', () => {
