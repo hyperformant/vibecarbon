@@ -12,6 +12,7 @@ export const colors = {
   green: '\x1b[32m',
   yellow: '\x1b[33m',
   cyan: '\x1b[36m',
+  gray: '\x1b[90m',
 };
 
 // Color formatting helpers
@@ -22,6 +23,10 @@ export const c = {
   info: (s) => `${colors.cyan}${s}${colors.reset}`,
   bold: (s) => `${colors.bold}${s}${colors.reset}`,
   dim: (s) => `${colors.dim}${s}${colors.reset}`,
+  // Bright-black gray for prose that should recede without vanishing —
+  // help-example comments. `dim` alone is indistinguishable from white on
+  // some terminal themes.
+  muted: (s) => `${colors.gray}${s}${colors.reset}`,
   // Bright red + bold — for prominent destruction-warning headlines
   // (destroy preview banner, "WARNING: data will be lost" footer). More
   // vibrant than `c.error` (which stays as the muted bullet color).

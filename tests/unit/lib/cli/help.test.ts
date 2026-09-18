@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderHelp } from '../../../../src/lib/cli/help.js';
+import { formatExampleCommand, renderHelp } from '../../../../src/lib/cli/help.js';
 
 // Strip ANSI escapes so assertions on text content don't depend on
 // terminal-specific color codes leaking into snapshots.
@@ -99,5 +99,43 @@ describe('renderHelp', () => {
   it('renders trailing newline so the output is terminal-clean', () => {
     const out = renderHelp({ name: 'x' });
     expect(out.endsWith('\n')).toBe(true);
+  });
+});
+
+describe('formatExampleCommand', () => {
+  const CYAN = '\x1b[36m';
+  const RESET = '\x1b[0m';
+
+  it('colours `vibecarbon <command>` cyan and leaves the rest plain', () => {
+    expect(formatExampleCommand('vibecarbon backup prod -l')).toBe(
+      `${CYAN}vibecarbon${RESET} ${CYAN}backup${RESET} prod -l`,
+    );
+  });
+
+  it('colours a bare `vibecarbon <command>`', () => {
+    expect(formatExampleCommand('vibecarbon up')).toBe(
+      `${CYAN}vibecarbon${RESET} ${CYAN}up${RESET}`,
+    );
+  });
+
+  it('leaves a non-vibecarbon line untouched', () => {
+    expect(formatExampleCommand('cd my-app')).toBe('cd my-app');
+  });
+
+  it('leaves a bare `vibecarbon` with no command untouched except the word itself', () => {
+    expect(formatExampleCommand('vibecarbon')).toBe(`${CYAN}vibecarbon${RESET}`);
+  });
+});
+
+describe('renderHelp EXAMPLES colouring', () => {
+  it('renders example commands via formatExampleCommand and comments in gray', () => {
+    const out = renderHelp({
+      name: 'backup',
+      summary: 'x',
+      examples: [{ command: 'vibecarbon backup prod -l', description: 'list prod backups' }],
+    });
+    expect(out).toContain(formatExampleCommand('vibecarbon backup prod -l'));
+    expect(out).toContain('\x1b[90m# list prod backups\x1b[0m');
+    expect(out).not.toContain('\x1b[2m# list prod backups');
   });
 });

@@ -16,6 +16,7 @@ import dns from 'node:dns';
 import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
+import { formatExampleCommand } from './lib/cli/help.js';
 import { c } from './lib/colors.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
@@ -180,25 +181,25 @@ ${c.bold('GLOBAL FLAGS')}
   ${c.dim('Run any command with -h to see its specific flags.')}
 
 ${c.bold('EXAMPLES')}
-  ${c.dim('# Create a new project')}
-  vibecarbon create my-app
+  ${c.muted('# Create a new project')}
+  ${formatExampleCommand('vibecarbon create my-app')}
   cd my-app
 
-  ${c.dim('# Local development')}
-  vibecarbon up
+  ${c.muted('# Local development')}
+  ${formatExampleCommand('vibecarbon up')}
 
-  ${c.dim('# Add features')}
-  vibecarbon add observability
+  ${c.muted('# Add features')}
+  ${formatExampleCommand('vibecarbon add observability')}
 
-  ${c.dim('# Wire up external services')}
-  vibecarbon configure
+  ${c.muted('# Wire up external services')}
+  ${formatExampleCommand('vibecarbon configure')}
 
-  ${c.dim('# Deploy to production')}
-  vibecarbon deploy prod
+  ${c.muted('# Deploy to production')}
+  ${formatExampleCommand('vibecarbon deploy prod')}
 
-  ${c.dim('# Backup and restore')}
-  vibecarbon backup prod -l
-  vibecarbon restore prod
+  ${c.muted('# Backup and restore')}
+  ${formatExampleCommand('vibecarbon backup prod -l')}
+  ${formatExampleCommand('vibecarbon restore prod')}
 
 ${c.bold('DOCUMENTATION')}
   https://github.com/hyperformant/vibecarbon

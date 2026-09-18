@@ -9,8 +9,9 @@
  * flag would be parsed but missing from `--help`, or vice-versa.
  *
  * The output style mirrors the existing tone: bold section headers,
- * cyan flag/value names, dim descriptions. Sections are skipped
- * silently when their data is empty (no flags? no FLAGS section).
+ * cyan flag/value names, dim descriptions, gray example comments.
+ * Sections are skipped silently when their data is empty (no flags?
+ * no FLAGS section).
  *
  * Vibecarbon is single-dash-only — flag names render as `-name`,
  * never `--name`. See memory:feedback_cli_single_dash_flags.
@@ -30,6 +31,21 @@ import { c } from '../colors.js';
  *   description?: string,
  * }} HelpSpec
  */
+
+/**
+ * Colour a help example so `vibecarbon <command>` matches the cyan command
+ * names in the lists above it, while args and flags stay plain. Lines that
+ * aren't a vibecarbon invocation (`cd my-app`) come back untouched.
+ *
+ * @param {string} command
+ * @returns {string}
+ */
+export function formatExampleCommand(command) {
+  const match = command.match(/^vibecarbon(?:\s+(\S+))?(.*)$/);
+  if (!match) return command;
+  const [, name, rest] = match;
+  return name ? `${c.info('vibecarbon')} ${c.info(name)}${rest}` : `${c.info('vibecarbon')}${rest}`;
+}
 
 /**
  * Render a command's help body. Returns a string ending in a newline,
@@ -91,9 +107,9 @@ export function renderHelp(spec) {
     lines.push(c.bold('EXAMPLES'));
     for (const ex of examples) {
       if (ex.description) {
-        lines.push(`  ${c.dim(`# ${ex.description}`)}`);
+        lines.push(`  ${c.muted(`# ${ex.description}`)}`);
       }
-      lines.push(`  ${ex.command}`);
+      lines.push(`  ${formatExampleCommand(ex.command)}`);
       lines.push('');
     }
   }
