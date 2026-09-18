@@ -27,6 +27,11 @@ import {
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
+import {
+  classifyContainer,
+  formatContainerRow,
+  rowsFromDockerPs,
+} from './lib/status/container-rows.js';
 import { VERSION } from './lib/version.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
@@ -158,43 +163,6 @@ const GATEWAY_PROBES = {
 };
 
 /**
- * Derive a status row's health from Docker's own view of the container.
- *
- * `state` is `{{.State}}` (running / exited / restarting / created / paused /
- * dead); `status` is `{{.Status}}`, which carries the compose healthcheck
- * verdict as a suffix ("Up 2m (healthy)", "Up 3s (health: starting)").
- *
- * A running container with no healthcheck is counted healthy but labelled
- * "running" so the table doesn't overclaim. One-shot init containers
- * (`*-setup`) that exited 0 are "done" and excluded from the healthy total.
- *
- * @param {string} container compose service name (prefix already stripped)
- * @param {string} state
- * @param {string} status
- * @returns {{health: 'healthy'|'unhealthy'|'starting'|'done'|'unknown', label: string, detail: string}}
- */
-function classifyContainer(container, state, status) {
-  if (!state) return { health: 'unknown', label: 'unknown', detail: status || '' };
-  if (state === 'running') {
-    if (/\(healthy\)/.test(status)) return { health: 'healthy', label: 'healthy', detail: '' };
-    if (/\(unhealthy\)/.test(status))
-      return { health: 'unhealthy', label: 'unhealthy', detail: '' };
-    if (/\(health: starting\)/.test(status)) {
-      return { health: 'starting', label: 'starting', detail: '' };
-    }
-    return { health: 'healthy', label: 'running', detail: '' };
-  }
-  if (state === 'exited') {
-    const exitCode = status.match(/^Exited \((\d+)\)/)?.[1];
-    if (exitCode === '0' && container.endsWith('-setup')) {
-      return { health: 'done', label: 'done', detail: '' };
-    }
-    return { health: 'unhealthy', label: 'exited', detail: status };
-  }
-  return { health: 'unhealthy', label: state, detail: status };
-}
-
-/**
  * Parse `docker port <container> 8000/tcp` output ("0.0.0.0:8000\n[::]:8000")
  * into the host port. Null when the container isn't running or the output
  * isn't a binding.
@@ -256,17 +224,7 @@ async function checkDockerContainers(projectName, deps = {}) {
     return [];
   }
 
-  // Docker's name filter is an unanchored regex match; keep the JS prefix
-  // check so only true `${projectName}-*` names survive whatever the daemon
-  // returned.
-  const containers = listing
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith(prefix))
-    .map((line) => {
-      const [fullName, state = '', status = ''] = line.split('\t');
-      return { container: fullName.slice(prefix.length), state, status };
-    });
+  const containers = rowsFromDockerPs(listing, projectName);
 
   if (containers.length === 0) return [];
 
@@ -737,29 +695,7 @@ function formatDockerServiceLines(docker) {
         : c.warning(`● ${healthyCount}/${total} healthy`);
   const lines = [`${c.dim('Docker Services'.padEnd(30))}${summary}`];
 
-  for (const svc of docker) {
-    let icon;
-    let label;
-    switch (svc.health) {
-      case 'healthy':
-        icon = c.success('●');
-        label = c.dim(svc.label);
-        break;
-      case 'unhealthy':
-        icon = c.error('●');
-        label = c.error(svc.label);
-        break;
-      case 'starting':
-        icon = c.warning('●');
-        label = c.warning(svc.label);
-        break;
-      default: // done, unknown
-        icon = c.dim('○');
-        label = c.dim(svc.label);
-    }
-    const tail = svc.detail ? c.dim(svc.detail) : svc.latencyMs ? c.dim(`${svc.latencyMs}ms`) : '';
-    lines.push(`  ${c.dim(svc.name.padEnd(28))}${icon} ${label}  ${tail}`);
-  }
+  for (const svc of docker) lines.push(formatContainerRow(svc));
   return lines;
 }
 
