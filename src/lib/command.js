@@ -130,9 +130,27 @@ export function gitSafeEnv(env = process.env) {
   return scrubbedEnv({ ...env });
 }
 
+/**
+ * Argv for humans: the token after `-i` (ssh/scp identity file) is replaced
+ * with `<key>` so a failure message or CI debug line never carries the
+ * operator's key path.
+ */
+export function describeArgv(argv) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '-i' && i + 1 < argv.length) {
+      out.push('-i', '<key>');
+      i++;
+      continue;
+    }
+    out.push(argv[i]);
+  }
+  return out.join(' ');
+}
+
 export function runCommand(cmd, options = {}) {
   const argv = toArgv(cmd);
-  const commandStr = argv.join(' ');
+  const commandStr = describeArgv(argv);
 
   if (options.input !== undefined && !options.silent) {
     throw new Error(
@@ -209,7 +227,7 @@ export function runCommandAsync(cmd, options = {}) {
     } catch (e) {
       return reject(e);
     }
-    const commandStr = argv.join(' ');
+    const commandStr = describeArgv(argv);
 
     let env = options.env || process.env;
     if (options.cleanEnv) {
@@ -350,7 +368,7 @@ export function runCommandThroughTaskLog(cmd, options) {
     } catch (e) {
       return reject(e);
     }
-    const commandStr = argv.join(' ');
+    const commandStr = describeArgv(argv);
     const title = options.title;
     if (!title) {
       return reject(new Error('runCommandThroughTaskLog: options.title is required'));

@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
@@ -51,6 +52,7 @@ import {
   runReplicationChecks,
   writeReplicationMarker,
 } from '../checks/replication.js';
+import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
 import { runSupavisorPoolerChecks } from '../checks/supavisor-pooler.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
@@ -178,6 +180,7 @@ const TIMEOUTS: Record<string, number> = {
   // sits at warm-deploy's worst-case budget rather than its typical one.
   'warm-redeploy-change': 1_800_000,
   'verify-deploy': 1_800_000, // 30 min — k8s tail (ACME + rollout) past 20 min
+  'verify-status': 300_000, // 5 min — status -json polls up to 3 min for rolling pods
   // 10 parallel /api/health requests with a 15s per-request timeout. Allows
   // generous 2 min budget so a transient network blip during a single burst
   // doesn't fail the step — the assertion is "10/10 OK", not "burst finished
@@ -235,12 +238,12 @@ const TIMEOUTS: Record<string, number> = {
  * Each entry MUST cite the underlying issue so we know when to remove it.
  * If you find yourself adding a new entry here, prefer fixing the root cause.
  *
- * Currently empty. Previously held k8s-ha verify-failover entries, but the
- * set of failing checks varied run-to-run (auth_signup one run, auth_protected
- * the next, db_* sometimes), all caused by k8s-ha replication never streaming
- * data cross-cluster (project_replication_broken.md). A whitelist couldn't
- * keep up; we now skip verify-failover entirely for k8s-ha at the step-list
- * build site below.
+ * Currently empty. It once held k8s-ha verify-failover entries whose failing
+ * set varied run-to-run because cross-cluster replication never streamed
+ * (project_replication_broken.md), and for a while verify-failover was
+ * skipped for k8s-ha outright. Both are history: the WireGuard transport +
+ * pg_basebackup reseed landed 2026-07-06 and verify-failover now runs for
+ * BOTH HA modes (see step 12 in the step list below).
  */
 const EXPECTED_VERIFY_FAILURES: Record<string, Partial<Record<StepName, string[]>>> = {};
 
@@ -374,7 +377,8 @@ export interface LifecycleOptions {
    * suite — adding 25 min/scenario to PR CI was rejected per the plan.
    *
    * TODO (deferred from Phase 9):
-   *   - verify-status / verify-diagnose steps (decoration, easy adds)
+   *   - verify-status step — DONE (tests/e2e/checks/status-health.ts)
+   *   - verify-diagnose step (decoration, easy add)
    *   - configure cicd add-on flow within the e2e harness — requires
    *     Flux reconciliation polling against the project's main branch and
    *     is a separate harness piece. Leaves PR #43's e2e debt open.
@@ -2329,7 +2333,7 @@ export async function runLifecycle(
   // time to test both was rejected per the plan.
   //
   // TODO (deferred from Phase 9, see LifecycleOptions docstring):
-  //   - verify-status step (cheap — `vibecarbon status` non-zero output)
+  //   - verify-status step — DONE (tests/e2e/checks/status-health.ts)
   //   - verify-diagnose step
   //   - configure cicd add-on flow within the harness (Flux poll)
   // -------------------------------------------------------------------------
@@ -3098,6 +3102,22 @@ EOF`;
     {
       name: 'verify-deploy',
       run: () => runVerificationChecks('verify-deploy'),
+    },
+
+    // 4.0 Verify status — the CLI's own view of the environment must agree
+    // with what verify-deploy just proved from the outside: every container /
+    // pod on every server healthy. Non-perf (see NON_PERF_STEPS).
+    {
+      name: 'verify-status',
+      run: () =>
+        executeStep('verify-status', 'vibecarbon status -json', async () => {
+          const r = await checkStatusHealth({
+            projectDir: config.projectDir,
+            envName: config.envPrefix,
+            timeoutMs: 180_000,
+          });
+          if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
+        }),
     },
 
     // 4.1 Warm deploy — re-invoke `vibecarbon deploy` against the already-
@@ -3873,6 +3893,43 @@ EOF`;
     stepDefs.push({
       name: 'verify-failover',
       run: () => runVerificationChecks('verify-failover'),
+    });
+
+    // 12.1 Verify status (HA only) — same CLI-view-agrees-with-outside-view
+    // assertion as the post-deploy verify-status, re-run after failover so a
+    // promoted-but-unhealthy environment fails loudly here rather than
+    // silently at the next customer-visible poll. Non-perf (see
+    // NON_PERF_STEPS).
+    //
+    // compose-ha: the retired node (the one that is no longer the primary
+    // after the role flip) keeps its app tier `docker stop`ped by design
+    // (failoverComposeHA step 2, APP_TIER_RESTART_SERVICES) until a redeploy
+    // converges it. `status` reports that truthfully as `exited`, so those
+    // rows are excused on that node only; its db (recreated by the wal-g
+    // demote) and everything else must still be healthy. k8s-ha scales the
+    // ex-primary's Deployments to 0, leaving no pods to excuse.
+    stepDefs.push({
+      name: 'verify-status',
+      run: () =>
+        executeStep('verify-status', 'vibecarbon status -json', async () => {
+          let retired: RetiredServer | undefined;
+          if (config.mode === 'compose-ha') {
+            const { standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
+            if (standbyIp) retired = { ip: standbyIp, allowedExited: APP_TIER_RESTART_SERVICES };
+            else
+              console.log(
+                `${tag} [verify-status] no retired-node IP in .vibecarbon.json — the old ` +
+                  'primary is held to the full health bar',
+              );
+          }
+          const r = await checkStatusHealth({
+            projectDir: config.projectDir,
+            envName: config.envPrefix,
+            timeoutMs: 180_000,
+            retired,
+          });
+          if (r.status !== 'pass') throw new Error(`verify-status: ${r.errorMessage}`);
+        }),
     });
 
     // 13. Reconverge deploy (k8s-ha only) — re-invoke `vibecarbon deploy`

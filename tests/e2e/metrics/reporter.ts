@@ -333,6 +333,7 @@ export function logStepMatrix(
     'add-features',
     'deploy',
     'verify-deploy',
+    'verify-status',
     'warm-deploy',
     'verify-load',
     'verify-autoscale',
@@ -510,6 +511,27 @@ export const PERF_TABLE_ROWS: PerfRow[] = [
   // (launch rule: HA/failover claims pin to the latest green matrix).
   { header: 'Failover', step: 'failover' },
 ];
+
+/**
+ * Steps that verify but do not measure: excluded from every duration sum
+ * so the published grid and the scenario totals describe only what a
+ * customer would wait on. verify-status polls `vibecarbon status`.
+ */
+export const NON_PERF_STEPS: ReadonlySet<string> = new Set(['verify-status']);
+
+export function perfDurationSum(
+  steps: Array<{ name: string; duration_ms: number | null }>,
+): number {
+  return steps.reduce(
+    (sum, s) => (NON_PERF_STEPS.has(s.name) ? sum : sum + (s.duration_ms ?? 0)),
+    0,
+  );
+}
+
+/** Same exclusion for the runner's in-memory step results (`durationMs`). */
+export function perfDurationMsSum(steps: Array<{ name: string; durationMs: number }>): number {
+  return steps.reduce((sum, s) => (NON_PERF_STEPS.has(s.name) ? sum : sum + s.durationMs), 0);
+}
 
 // Anomaly guard knobs (Option A). A green-but-slow matrix run — Hetzner
 // slowdown, S3 throttle, noisy-neighbor provision — must NOT overwrite the
@@ -706,7 +728,7 @@ function printReport(): void {
       const scenarioRows = latestDetails.scenarios.map((sc) => {
         // Compute scenario duration from its steps
         const scenarioSteps = latestDetails.steps.filter((s) => s.scenario_id === sc.id);
-        const totalMs = scenarioSteps.reduce((sum, s) => sum + (s.duration_ms ?? 0), 0);
+        const totalMs = perfDurationSum(scenarioSteps);
 
         // Path = cold/warm tag of the deploy step (or the first step if no
         // deploy) — gives a one-glance indication whether this scenario was

@@ -9,8 +9,9 @@
  * flag would be parsed but missing from `--help`, or vice-versa.
  *
  * The output style mirrors the existing tone: bold section headers,
- * cyan flag/value names, dim descriptions. Sections are skipped
- * silently when their data is empty (no flags? no FLAGS section).
+ * cyan flag/value names, dim descriptions, gray example comments.
+ * Sections are skipped silently when their data is empty (no flags?
+ * no FLAGS section).
  *
  * Vibecarbon is single-dash-only — flag names render as `-name`,
  * never `--name`. See memory:feedback_cli_single_dash_flags.
@@ -30,6 +31,51 @@ import { c } from '../colors.js';
  *   description?: string,
  * }} HelpSpec
  */
+
+/**
+ * Colour a help example so `vibecarbon <command>` matches the cyan command
+ * names in the lists above it, while args and flags stay plain. Lines that
+ * aren't a vibecarbon invocation (`cd my-app`) come back untouched.
+ *
+ * @param {string} command
+ * @returns {string}
+ */
+export function formatExampleCommand(command) {
+  const lead = command.match(/^\s*/)[0];
+  const trail = command.match(/\s*$/)[0];
+  const body = command.slice(lead.length, command.length - trail.length);
+  const match = body.match(/^vibecarbon(?:\s+(\S+))?(.*)$/);
+  if (!match) return command;
+  const [, name, rest] = match;
+  const coloured = name
+    ? `${c.info('vibecarbon')} ${c.info(name)}${rest}`
+    : `${c.info('vibecarbon')}${rest}`;
+  return `${lead}${coloured}${trail}`;
+}
+
+/**
+ * @typedef {object} ExampleGroup
+ * @property {string} [description] - comment line shown above the commands
+ * @property {string[]} commands - one or more invocations shown in order
+ */
+
+/**
+ * Lines for an EXAMPLES section: gray comment, coloured commands, blank line
+ * after each group. Shared by the global help and every command's help so
+ * the two can't drift.
+ *
+ * @param {ExampleGroup[]} groups
+ * @returns {string[]}
+ */
+export function formatExamples(groups) {
+  const lines = [];
+  for (const group of groups) {
+    if (group.description) lines.push(`  ${c.muted(`# ${group.description}`)}`);
+    for (const command of group.commands) lines.push(`  ${formatExampleCommand(command)}`);
+    lines.push('');
+  }
+  return lines;
+}
 
 /**
  * Render a command's help body. Returns a string ending in a newline,
@@ -89,13 +135,11 @@ export function renderHelp(spec) {
   const examples = spec.examples ?? [];
   if (examples.length > 0) {
     lines.push(c.bold('EXAMPLES'));
-    for (const ex of examples) {
-      if (ex.description) {
-        lines.push(`  ${c.dim(`# ${ex.description}`)}`);
-      }
-      lines.push(`  ${ex.command}`);
-      lines.push('');
-    }
+    lines.push(
+      ...formatExamples(
+        examples.map((ex) => ({ description: ex.description, commands: [ex.command] })),
+      ),
+    );
   }
 
   return `${lines.join('\n').trimEnd()}\n`;

@@ -99,16 +99,20 @@ const RECORD_FILES = new Set([
   'tests/unit/licensing/no-legacy-traces.test.ts',
   'docs/superpowers/specs/2026-09-15-license-bind-at-activate-design.md',
   'docs/superpowers/plans/2026-09-15-license-bind-at-activate-cli.md',
+  'docs/superpowers/plans/2026-09-18-status-docker-native-health.md',
 ]);
 
 /** `<file>::<pattern>` for every line the pattern matched outside the record. */
 function hitsFor(pattern: string): string[] {
-  // `grep` exits 1 on no match, which execFileSync turns into a throw.
+  // `git grep` exits 1 on no match, which execFileSync turns into a throw.
+  // `--untracked` covers new files that are not yet staged; gitignored files
+  // (an operator's local `tests/.env.e2e`) are skipped, so the sweep judges
+  // what can ship, not what happens to sit in a checkout.
   let out = '';
   try {
     out = execFileSync(
-      'grep',
-      ['-rnE', '--exclude-dir=node_modules', '--', pattern, ...SCOPE.split(' ')],
+      'git',
+      ['grep', '-nE', '--untracked', '-e', pattern, '--', ...SCOPE.split(' ')],
       { encoding: 'utf8' },
     );
   } catch (err) {

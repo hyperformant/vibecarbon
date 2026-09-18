@@ -28,7 +28,7 @@ export function getUpdateNotice({ currentVersion = VERSION, stateDir = DEFAULT_D
   try {
     const cache = JSON.parse(readFileSync(join(stateDir, FILE_NAME), 'utf-8'));
     if (isNewerVersion(cache.latestVersion, currentVersion)) {
-      return c.dim(
+      return c.warning(
         `Update available ${currentVersion} → ${cache.latestVersion} · npm i -g vibecarbon`,
       );
     }
@@ -84,4 +84,48 @@ export async function refreshUpdateCache({
   } catch {
     // read-only disk, mkdirSync failure, etc. — all fine, try next time.
   }
+}
+
+let noticePrinted = false;
+
+/**
+ * Print the update notice once per process, on a TTY only.
+ *
+ * Every banner-opening command calls this right after the logo box (see
+ * introCommand) so an update is the first thing the user reads; cli.js
+ * calls it again in its `finally` as the fallback for the few commands
+ * that never draw a banner. The once-guard is what keeps those two call
+ * sites from double-printing. Always followed by a blank line; the
+ * fallback asks for a leading one too because nothing precedes it there.
+ *
+ * @param {{ currentVersion?: string, stateDir?: string, isTTY?: boolean, leadingBlank?: boolean, log?: (s: string) => void }} [opts]
+ * @returns {boolean} true when a notice was printed
+ */
+export function printUpdateNotice({
+  currentVersion = VERSION,
+  stateDir = DEFAULT_DIR,
+  isTTY = process.stdout.isTTY,
+  leadingBlank = false,
+  log = console.log,
+} = {}) {
+  if (noticePrinted || !isTTY) return false;
+  const notice = getUpdateNotice({ currentVersion, stateDir });
+  if (!notice) return false;
+  try {
+    // The string carries its own trailing "\n" on top of the one console.log
+    // adds: that is the blank line after the notice. `leadingBlank` adds the
+    // one before it for call sites with nothing above (cli.js's fallback).
+    log(`${leadingBlank ? '\n' : ''}${notice}\n`);
+  } catch {
+    // A dead stdout (EPIPE) must never surface from here: this runs inside
+    // cli.js's finally and would replace the error the user actually hit.
+    return false;
+  }
+  noticePrinted = true;
+  return true;
+}
+
+/** Test hook: clear the once-per-process guard. */
+export function resetUpdateNoticeForTests() {
+  noticePrinted = false;
 }

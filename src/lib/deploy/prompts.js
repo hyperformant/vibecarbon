@@ -26,6 +26,7 @@ import {
   resolveS3RegionFor,
 } from '../providers/index.js';
 import { deriveProjectBucketName } from '../providers/s3-base.js';
+import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
 import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
@@ -384,6 +385,7 @@ async function selectZoneAndDomain(zones, providerLabel, existingDomain) {
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();
+  printUpdateNotice();
   p.intro(`${c.bold('vibecarbon deploy')} ${c.dim(`v${VERSION}`)}`);
 
   const projectConfig = loadProjectConfig();

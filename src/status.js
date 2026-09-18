@@ -17,7 +17,7 @@ import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
-import { runCommand } from './lib/command.js';
+import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
 import {
   buildPrimaryLagQuery,
@@ -27,6 +27,14 @@ import {
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
+import {
+  CORE_SERVICE_ORDER,
+  classifyContainer,
+  formatContainerRow,
+  rowsFromDockerPs,
+  SERVICE_DISPLAY_NAMES,
+} from './lib/status/container-rows.js';
+import { checkRemoteContainers } from './lib/status/remote-containers.js';
 import { VERSION } from './lib/version.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
@@ -91,12 +99,12 @@ function getBranchName(envName) {
 // HEALTH CHECK FUNCTIONS
 // ============================================================================
 
-async function checkHttpEndpoint(url, timeout = 2000) {
+async function checkHttpEndpoint(url, timeout = 2000, fetchImpl = fetch) {
   const start = Date.now();
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
-    const response = await fetch(url, { method: 'GET', signal: controller.signal });
+    const response = await fetchImpl(url, { method: 'GET', signal: controller.signal });
     clearTimeout(timeoutId);
     const latencyMs = Date.now() - start;
 
@@ -129,145 +137,163 @@ async function checkHttpEndpoint(url, timeout = 2000) {
 // Note: execSync calls below use only hardcoded commands (no user input),
 // matching the pattern in deploy.js and destroy.js throughout this codebase.
 
-async function checkDockerContainers(projectName) {
-  const services = [
-    {
-      name: 'PostgreSQL',
-      container: 'db',
-      healthUrl: 'http://localhost:8000/rest/v1/',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'Kong Gateway',
-      container: 'kong',
-      healthUrl: 'http://localhost:8000/',
-      acceptCodes: [404],
-    },
-    {
-      name: 'Auth (GoTrue)',
-      container: 'auth',
-      healthUrl: 'http://localhost:8000/auth/v1/health',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'REST (PostgREST)',
-      container: 'rest',
-      healthUrl: 'http://localhost:8000/rest/v1/',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'Realtime',
-      container: 'realtime',
-      healthUrl: 'http://localhost:8000/realtime/v1/',
-      acceptCodes: [200, 401, 403, 426],
-    },
-    {
-      name: 'Storage',
-      container: 'storage',
-      healthUrl: 'http://localhost:8000/storage/v1/status',
-      acceptCodes: [200, 401],
-    },
-    {
-      name: 'Studio',
-      container: 'studio',
-      healthUrl: 'http://studio.localhost/',
-      acceptCodes: [200, 307],
-    },
-    {
-      name: 'Meta',
-      container: 'meta',
-      healthUrl: 'http://localhost:8000/pg/',
-      acceptCodes: [200, 401],
-    },
-  ];
+// Core services whose container may carry no healthcheck. Probed through Kong only when
+// Docker offers no verdict, on whichever host port THIS project's kong container bound.
+const GATEWAY_PROBES = {
+  rest: { path: '/rest/v1/', acceptCodes: [200, 401] },
+  meta: { path: '/pg/', acceptCodes: [200, 401] },
+};
 
-  // Get list of running containers
-  let runningContainers = new Set();
+/**
+ * Parse `docker port <container> 8000/tcp` output ("0.0.0.0:8000\n[::]:8000")
+ * into the host port. Null when the container isn't running or the output
+ * isn't a binding.
+ *
+ * @param {string|null|undefined} output
+ * @returns {number|null}
+ */
+function parseKongHostPort(output) {
+  const first = (output || '').split('\n').find((line) => line.trim());
+  if (!first) return null;
+  const match = first.trim().match(/:(\d+)$/);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+/**
+ * Health of this project's local Docker stack, from Docker's point of view.
+ *
+ * Enumerates `docker ps -a` for containers prefixed `${projectName}-` so the
+ * table shows the whole stack — core services, `vibecarbon add` add-ons, and
+ * containers that have exited (which the old running-only listing hid, e.g.
+ * a kong that lost its port bind). Health comes from the compose healthcheck
+ * verdict in Docker's status string; the two core services without one
+ * (rest, meta) are probed through Kong on the host port THIS project's kong
+ * container bound, never a fixed :8000 that another project's gateway may
+ * own.
+ *
+ * @param {string|undefined} projectName
+ * @param {{runCommand?: typeof runCommandAsync, fetch?: typeof fetch, timeoutMs?: number}} [deps]
+ * @returns {Promise<Array<{name: string, container: string, health: string, label: string, detail: string, latencyMs: number}>>}
+ */
+async function checkDockerContainers(projectName, deps = {}) {
+  const { runCommand: _run = runCommandAsync, fetch: _fetch = fetch, timeoutMs = 2000 } = deps;
+  // No project name means no `${name}-*` prefix to enumerate; the old fallback (strip the
+  // first dash-segment of every container on the host) is exactly the cross-project
+  // confusion this function exists to avoid.
+  if (!projectName) return [];
+  const prefix = `${projectName}-`;
+
+  let listing = '';
   try {
-    const output =
-      runCommand(['docker', 'ps', '--format', '{{.Names}}'], {
-        silent: true,
-        encoding: 'utf-8',
-        timeout: 5000,
-        ignoreError: true,
-      }) || '';
-    const prefix = projectName ? `${projectName}-` : null;
-    runningContainers = new Set(
-      output
-        .split('\n')
-        .map((name) => name.trim())
-        .filter(Boolean)
-        .filter((name) => !prefix || name.startsWith(prefix))
-        .map((name) => (prefix ? name.slice(prefix.length) : name.replace(/^[^-]+-/, ''))),
-    );
+    listing =
+      (await _run(
+        [
+          'docker',
+          'ps',
+          '-a',
+          '--filter',
+          `name=^${prefix}`,
+          '--format',
+          '{{.Names}}\t{{.State}}\t{{.Status}}',
+        ],
+        {
+          silent: true,
+          timeout: 5000,
+          ignoreError: true,
+        },
+      )) || '';
   } catch {
     return [];
   }
 
-  if (runningContainers.size === 0) return [];
+  const containers = rowsFromDockerPs(listing, projectName);
 
-  // Check port offset from env
-  let portOffset = 0;
-  try {
-    const envFiles = ['.env.local', '.env'];
-    for (const file of envFiles) {
-      if (existsSync(file)) {
-        const content = readFileSync(file, 'utf-8');
-        const match = content.match(/^DEV_PORT_OFFSET=["']?(\d+)["']?/m);
-        if (match) {
-          portOffset = Number.parseInt(match[1], 10);
-        }
-        break;
+  if (containers.length === 0) return [];
+
+  const kongRunning = containers.some((ct) => ct.container === 'kong' && ct.state === 'running');
+  let kongPort = null;
+  if (kongRunning) {
+    try {
+      kongPort = parseKongHostPort(
+        await _run(['docker', 'port', `${prefix}kong`, '8000/tcp'], {
+          silent: true,
+          timeout: 5000,
+          ignoreError: true,
+        }),
+      );
+    } catch {
+      kongPort = null;
+    }
+  }
+  const gatewayDetail = kongRunning ? 'gateway port not published' : 'gateway down';
+
+  const rows = await Promise.all(
+    containers.map(async ({ container, state, status }) => {
+      const name = SERVICE_DISPLAY_NAMES[container] || container;
+      const base = classifyContainer(container, state, status);
+      const probe = GATEWAY_PROBES[container];
+      // Kong probe is a fallback for containers Docker has no verdict on
+      // (label 'running' = up, no healthcheck). A real healthcheck verdict
+      // — from compose or baked into the image — always wins.
+      if (!probe || state !== 'running' || base.label !== 'running') {
+        return { name, container, ...base, latencyMs: 0 };
       }
-    }
-  } catch {
-    // Use defaults
-  }
-
-  // Adjust ports if offset
-  if (portOffset > 0) {
-    for (const svc of services) {
-      svc.healthUrl = svc.healthUrl.replace(':8000', `:${8000 + portOffset}`);
-    }
-  }
-
-  // Only check services whose containers are running
-  const activeServices = services.filter((svc) => runningContainers.has(svc.container));
-
-  const results = await Promise.allSettled(
-    activeServices.map(async (svc) => {
-      const start = Date.now();
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2000);
-        const response = await fetch(svc.healthUrl, { method: 'GET', signal: controller.signal });
-        clearTimeout(timeoutId);
-        const latencyMs = Date.now() - start;
-        const isHealthy = svc.acceptCodes
-          ? svc.acceptCodes.includes(response.status)
-          : response.status >= 200 && response.status < 400;
-
+      if (kongPort === null) {
         return {
-          name: svc.name,
-          container: svc.container,
-          health: isHealthy ? 'healthy' : 'unhealthy',
+          name,
+          container,
+          health: 'unknown',
+          label: 'unknown',
+          detail: gatewayDetail,
+          latencyMs: 0,
+        };
+      }
+      const start = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await _fetch(`http://localhost:${kongPort}${probe.path}`, {
+          method: 'GET',
+          signal: controller.signal,
+        });
+        const latencyMs = Date.now() - start;
+        if (probe.acceptCodes.includes(response.status)) {
+          return { name, container, health: 'healthy', label: 'healthy', detail: '', latencyMs };
+        }
+        return {
+          name,
+          container,
+          health: 'unhealthy',
+          label: 'unhealthy',
+          detail: `HTTP ${response.status}`,
           latencyMs,
         };
-      } catch {
+      } catch (err) {
+        const detail = controller.signal.aborted
+          ? `timeout after ${timeoutMs}ms`
+          : err instanceof Error
+            ? err.message
+            : String(err);
         return {
-          name: svc.name,
-          container: svc.container,
+          name,
+          container,
           health: 'unhealthy',
+          label: 'unhealthy',
+          detail,
           latencyMs: Date.now() - start,
         };
+      } finally {
+        clearTimeout(timeoutId);
       }
     }),
   );
 
-  return results.map((r) =>
-    r.status === 'fulfilled'
-      ? r.value
-      : { name: '?', container: '?', health: 'unknown', latencyMs: 0 },
+  const rank = (ct) => {
+    const i = CORE_SERVICE_ORDER.indexOf(ct);
+    return i === -1 ? CORE_SERVICE_ORDER.length : i;
+  };
+  return rows.sort(
+    (a, b) => rank(a.container) - rank(b.container) || a.container.localeCompare(b.container),
   );
 }
 
@@ -318,9 +344,9 @@ async function checkLocalDev(projectName) {
   };
 }
 
-async function checkRemoteHealth(domain) {
-  const url = `https://${domain}/api/health`;
-  const result = await checkHttpEndpoint(url, 5000);
+export async function checkRemoteHealth(domain, deps = {}) {
+  const url = `https://${domain}/api/health/ready`;
+  const result = await checkHttpEndpoint(url, 5000, deps.fetch || fetch);
   return {
     url,
     ok: result.ok,
@@ -626,6 +652,35 @@ function checkGitSync(envName, envConfig) {
 // RENDERING FUNCTIONS
 // ============================================================================
 
+/**
+ * Lines for the "Docker Services" section of the Local Development note.
+ *
+ * `done` rows (one-shot init containers that exited 0) are listed but
+ * excluded from the healthy total; `starting` and `unknown` rows count
+ * against it without being painted red, since neither is a failure yet.
+ *
+ * @param {Array<{name: string, health: string, label: string, detail: string, latencyMs: number}>} docker
+ * @returns {string[]}
+ */
+function formatDockerServiceLines(docker) {
+  if (docker.length === 0) {
+    return [`${c.dim('Docker Services'.padEnd(30))}${c.dim('not running')}`];
+  }
+  const counted = docker.filter((s) => s.health !== 'done');
+  const healthyCount = counted.filter((s) => s.health === 'healthy').length;
+  const total = counted.length;
+  const summary =
+    total === 0
+      ? c.dim('no long-running services')
+      : healthyCount === total
+        ? c.success(`● ${healthyCount}/${total} healthy`)
+        : c.warning(`● ${healthyCount}/${total} healthy`);
+  const lines = [`${c.dim('Docker Services'.padEnd(30))}${summary}`];
+
+  for (const svc of docker) lines.push(formatContainerRow(svc));
+  return lines;
+}
+
 function renderLocalDev(data) {
   const lines = [];
 
@@ -644,29 +699,7 @@ function renderLocalDev(data) {
   lines.push(`${c.dim(viteLabel.padEnd(30))}${viteStatus}`);
 
   // Docker services
-  if (data.docker.length > 0) {
-    const healthyCount = data.docker.filter((s) => s.health === 'healthy').length;
-    const total = data.docker.length;
-    const dockerSummary =
-      healthyCount === total
-        ? c.success(`\u25cf ${healthyCount}/${total} healthy`)
-        : c.warning(`\u25cf ${healthyCount}/${total} healthy`);
-    lines.push(`${c.dim('Docker Services'.padEnd(30))}${dockerSummary}`);
-
-    for (const svc of data.docker) {
-      const icon =
-        svc.health === 'healthy'
-          ? c.success('\u25cf')
-          : svc.health === 'unhealthy'
-            ? c.error('\u25cf')
-            : c.dim('\u25cb');
-      const status = svc.health === 'healthy' ? c.dim('healthy') : c.error(svc.health);
-      const latency = svc.latencyMs ? c.dim(`${svc.latencyMs}ms`) : '';
-      lines.push(`  ${c.dim(svc.name.padEnd(28))}${icon} ${status}  ${latency}`);
-    }
-  } else {
-    lines.push(`${c.dim('Docker Services'.padEnd(30))}${c.dim('not running')}`);
-  }
+  lines.push(...formatDockerServiceLines(data.docker));
 
   p.note(lines.join('\n'), 'Local Development');
 }
@@ -717,6 +750,136 @@ function resolveEnvProvider(envConfig) {
   return envConfig?.provider && hasProvider(envConfig.provider)
     ? providerFor(envConfig)
     : HetznerProvider;
+}
+
+/**
+ * Is one server's container view fully healthy? Counts rows other than
+ * `done`, and for k8s also every platform namespace and every node.
+ */
+function serverContainersHealthy(sc) {
+  if (!sc || sc.error) return false;
+  const counted = sc.rows.filter((r) => r.health !== 'done');
+  if (counted.some((r) => r.health !== 'healthy')) return false;
+  for (const ns of Object.values(sc.platform || {})) if (ns.healthy !== ns.total) return false;
+  if (sc.nodes && sc.nodes.ready !== sc.nodes.total) return false;
+  return true;
+}
+
+/**
+ * The Servers block body: one line per server, then — when container data
+ * exists for it — one rollup line and only the rows that are not healthy.
+ * A healthy server costs exactly one extra line; a broken one shows what is
+ * broken.
+ *
+ * @param {Array<{id?: string, name?: string, ip?: string, serverType?: string, type?: string}>} servers
+ * @param {{serverInfo?: object, containers?: object}} checks
+ * @returns {string[]}
+ */
+function formatServerLines(servers, checks) {
+  const lines = [];
+  for (const server of servers) {
+    const serverInfo = checks.serverInfo?.[server.id];
+    const configType = server.serverType || server.type || null;
+    let statusStr;
+    if (serverInfo) {
+      const icon = serverInfo.status === 'running' ? c.success('●') : c.error('●');
+      const typeLabel = serverInfo.serverType || configType || '';
+      statusStr = `${icon} ${serverInfo.status === 'running' ? c.success('running') : c.error(serverInfo.status)}  ${c.dim(typeLabel)}`;
+    } else if (configType) {
+      statusStr = c.dim(configType);
+    } else {
+      statusStr = c.dim('–');
+    }
+    lines.push(
+      `  ${c.info((server.name || '').padEnd(16))} ${(server.ip || '').padEnd(15)} ${statusStr}`,
+    );
+
+    const sc = checks.containers?.[server.name || server.ip];
+    if (!sc) continue;
+    const noun = sc.kind === 'k8s' ? 'pods' : 'containers';
+    if (sc.error) {
+      lines.push(`    ${c.dim(noun)} ${c.error('● unreachable')}  ${c.dim(sc.error)}`);
+      continue;
+    }
+    const counted = sc.rows.filter((r) => r.health !== 'done');
+    const healthy = counted.filter((r) => r.health === 'healthy').length;
+    const parts = [`● ${healthy}/${counted.length} healthy`];
+    if (sc.nodes) parts.push(`nodes ${sc.nodes.ready}/${sc.nodes.total} ready`);
+    for (const [ns, n] of Object.entries(sc.platform || {}))
+      parts.push(`${ns} ${n.healthy}/${n.total}`);
+    const paint = serverContainersHealthy(sc) ? c.success : c.warning;
+    lines.push(`    ${c.dim(noun)} ${paint(parts.join(' · '))}`);
+
+    for (const r of sc.rows) {
+      if (r.health === 'healthy' || r.health === 'done') continue;
+      lines.push(formatContainerRow(r, '      '));
+    }
+    for (const [ns, n] of Object.entries(sc.platform || {})) {
+      if (n.healthy === n.total) continue;
+      lines.push(
+        formatContainerRow(
+          {
+            name: ns,
+            container: ns,
+            health: 'unknown',
+            label: `${n.healthy}/${n.total} healthy`,
+            detail: '',
+            latencyMs: 0,
+          },
+          '      ',
+        ),
+      );
+    }
+  }
+  return lines;
+}
+
+/**
+ * Lines for the "Health" block: header, probe URL, and a verdict line built
+ * from the real `/api/health/ready` shape (db/supabase nest under
+ * `services`, with a top-level `services`/`database`/`supabase` fallback for
+ * older payload shapes).
+ *
+ * @param {{url: string, ok: boolean, status?: number|null, latencyMs: number, data?: object|null, error?: string}} remoteHealth
+ * @returns {string[]}
+ */
+function formatHealthLines(remoteHealth) {
+  const lines = [];
+  lines.push(c.bold('Health'));
+  lines.push(`  ${c.dim(remoteHealth.url)}`);
+  if (remoteHealth.ok) {
+    const data = remoteHealth.data;
+    let details = '';
+    if (data && typeof data === 'object') {
+      const parts = [];
+      const db = data.services?.database ?? data.database;
+      const supabase = data.services?.supabase ?? data.supabase;
+      if (db) parts.push(`db: ${db}`);
+      if (supabase) parts.push(`supabase: ${supabase}`);
+      if (data.status) parts.push(data.status);
+      if (parts.length > 0) details = c.dim(`  (${parts.join(', ')})`);
+    }
+    lines.push(
+      `  ${c.success('●')} ${c.success('healthy')}  ${c.dim(`${remoteHealth.latencyMs}ms`)}${details}`,
+    );
+  } else {
+    const errMsg = remoteHealth.error || `HTTP ${remoteHealth.status}`;
+    lines.push(`  ${c.error('●')} ${c.error('unhealthy')}  ${c.dim(`(${errMsg})`)}`);
+  }
+  return lines;
+}
+
+/**
+ * Summary-block verdict for one environment: the public probe failed, or
+ * any server's containers are not fully healthy.
+ * @param {{checks?: {remoteHealth?: {ok?: boolean}, containers?: object}}} entry
+ */
+function isEnvironmentUnhealthy(entry) {
+  const checks = entry?.checks || {};
+  if (checks.remoteHealth && !checks.remoteHealth.ok) return true;
+  for (const sc of Object.values(checks.containers || {}))
+    if (!serverContainersHealthy(sc)) return true;
+  return false;
 }
 
 function renderEnvironment(envName, envConfig, checks) {
@@ -805,47 +968,13 @@ function renderEnvironment(envName, envConfig, checks) {
   if (servers.length > 0) {
     lines.push('');
     lines.push(c.bold('Servers'));
-    for (const server of servers) {
-      const serverInfo = checks.serverInfo?.[server.id];
-      const configType = server.serverType || server.type || null;
-      let statusStr;
-      if (serverInfo) {
-        const icon = serverInfo.status === 'running' ? c.success('\u25cf') : c.error('\u25cf');
-        const typeLabel = serverInfo.serverType || configType || '';
-        statusStr = `${icon} ${serverInfo.status === 'running' ? c.success('running') : c.error(serverInfo.status)}  ${c.dim(typeLabel)}`;
-      } else if (configType) {
-        statusStr = c.dim(configType);
-      } else {
-        statusStr = c.dim('\u2013');
-      }
-      lines.push(
-        `  ${c.info((server.name || '').padEnd(16))} ${(server.ip || '').padEnd(15)} ${statusStr}`,
-      );
-    }
+    lines.push(...formatServerLines(servers, checks));
   }
 
   // Remote health
   if (envConfig.domain && checks.remoteHealth) {
     lines.push('');
-    lines.push(c.bold('Health'));
-    lines.push(`  ${c.dim(checks.remoteHealth.url)}`);
-    if (checks.remoteHealth.ok) {
-      const data = checks.remoteHealth.data;
-      let details = '';
-      if (data && typeof data === 'object') {
-        const parts = [];
-        if (data.database) parts.push(`db: ${data.database}`);
-        if (data.supabase) parts.push(`supabase: ${data.supabase}`);
-        if (data.status) parts.push(data.status);
-        if (parts.length > 0) details = c.dim(`  (${parts.join(', ')})`);
-      }
-      lines.push(
-        `  ${c.success('\u25cf')} ${c.success('healthy')}  ${c.dim(`${checks.remoteHealth.latencyMs}ms`)}${details}`,
-      );
-    } else {
-      const errMsg = checks.remoteHealth.error || `HTTP ${checks.remoteHealth.status}`;
-      lines.push(`  ${c.error('\u25cf')} ${c.error('unhealthy')}  ${c.dim(`(${errMsg})`)}`);
-    }
+    lines.push(...formatHealthLines(checks.remoteHealth));
   }
 
   // Services
@@ -900,7 +1029,7 @@ function renderSummary(allData) {
   // Environments
   const envCount = Object.keys(allData.environments || {}).length;
   const unhealthyCount = Object.values(allData.environments || {}).filter(
-    (e) => e.checks?.remoteHealth && !e.checks.remoteHealth.ok,
+    isEnvironmentUnhealthy,
   ).length;
 
   if (envCount > 0) {
@@ -920,15 +1049,16 @@ function renderSummary(allData) {
     const parts = [];
     if (ld.api.running) parts.push('API');
     if (ld.vite.running) parts.push('Vite');
-    const dockerHealthy = ld.docker.filter((s) => s.health === 'healthy').length;
-    if (ld.docker.length > 0) parts.push(`Docker ${dockerHealthy}/${ld.docker.length}`);
+    const dockerCounted = ld.docker.filter((s) => s.health !== 'done');
+    const dockerHealthy = dockerCounted.filter((s) => s.health === 'healthy').length;
+    if (dockerCounted.length > 0) parts.push(`Docker ${dockerHealthy}/${dockerCounted.length}`);
 
     if (
       parts.length > 0 &&
       ld.api.running &&
       ld.vite.running &&
-      dockerHealthy === ld.docker.length &&
-      ld.docker.length > 0
+      dockerHealthy === dockerCounted.length &&
+      dockerCounted.length > 0
     ) {
       lines.push(`${c.dim('Local Dev')}      ${c.success('All services running')}`);
     } else if (parts.length > 0) {
@@ -1100,9 +1230,22 @@ async function main(argv = []) {
       // Git sync
       checks.gitSync = checkGitSync(envName, envConfig);
 
-      // Real replication state for HA envs (best-effort, hard-bounded). null
-      // for non-HA or when the primary/key isn't locally reachable.
-      checks.replication = await checkReplication(envName, envConfig, projectConfig.projectName);
+      // Real replication state for HA envs (best-effort, hard-bounded) and
+      // per-server container/pod health (spec: remote-container-health) run
+      // concurrently — each is bounded at its own timeout, and stacking them
+      // serially would double an HA environment's worst case. Independent of
+      // noLocal — that flag is about THIS machine's dev stack.
+      // allSettled so a throw in one check can never take the other's result with it.
+      const [replicationResult, containersResult] = await Promise.allSettled([
+        checkReplication(envName, envConfig, projectConfig.projectName),
+        checkRemoteContainers(envName, envConfig, projectConfig.projectName),
+      ]);
+      checks.replication =
+        replicationResult.status === 'fulfilled' ? replicationResult.value : null;
+      const containers = containersResult.status === 'fulfilled' ? containersResult.value : null;
+      // Omitted, not null, when there is nothing to query (no servers, no
+      // project name) — spec §6; consumers key on the key's absence.
+      if (containers) checks.containers = containers;
 
       return { envName, config: envConfig, checks };
     }),
@@ -1189,4 +1332,18 @@ export async function run(args) {
 // EXPORTS FOR TESTING
 // ============================================================================
 
-export { getBranchName, main, providerDisplayName, resolveEnvProvider, SPEC, VERSION };
+export {
+  checkDockerContainers,
+  classifyContainer,
+  formatDockerServiceLines,
+  formatHealthLines,
+  formatServerLines,
+  getBranchName,
+  isEnvironmentUnhealthy,
+  main,
+  parseKongHostPort,
+  providerDisplayName,
+  resolveEnvProvider,
+  SPEC,
+  VERSION,
+};
