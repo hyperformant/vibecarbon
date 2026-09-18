@@ -405,6 +405,11 @@ describe('checkRemoteContainers', () => {
       '--format',
       '{{.Names}}\t{{.State}}\t{{.Status}}',
     ]);
+    expect(sshRun.mock.calls[0][3]).toEqual({
+      silent: true,
+      timeout: 10_000,
+      transportRetry: false,
+    });
     expect(out!.p).toEqual({
       kind: 'compose',
       ip: '1.1.1.1',
@@ -437,8 +442,14 @@ describe('checkRemoteContainers', () => {
 
   it('one server failing does not affect the other', async () => {
     const sshRun = vi.fn(async (ip: string) => {
-      if (ip === '2.2.2.2')
-        throw new Error('ssh: connect to host 2.2.2.2 port 22: Connection timed out\nmore');
+      if (ip === '2.2.2.2') {
+        throw Object.assign(
+          new Error(
+            'Command failed: ssh -i /k -- root@2.2.2.2 docker ps\nssh: connect to host 2.2.2.2 port 22: Connection timed out',
+          ),
+          { stderr: 'ssh: connect to host 2.2.2.2 port 22: Connection timed out\nmore' },
+        );
+      }
       return 'letsgo-db\trunning\tUp 1h (healthy)\n';
     });
     const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
@@ -450,6 +461,20 @@ describe('checkRemoteContainers', () => {
       rows: [],
       error: 'ssh: connect to host 2.2.2.2 port 22: Connection timed out',
     });
+  });
+
+  it('a timed-out server (wrapper timeout, empty stderr) reports "ssh timeout"', async () => {
+    const sshRun = vi.fn(async (ip: string) => {
+      if (ip === '2.2.2.2') {
+        throw Object.assign(new Error('Command failed: ssh -i /k -- root@2.2.2.2 docker ps'), {
+          timedOut: true,
+          stderr: '',
+        });
+      }
+      return 'letsgo-db\trunning\tUp 1h (healthy)\n';
+    });
+    const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
+    expect(out!.s).toEqual({ kind: 'compose', ip: '2.2.2.2', rows: [], error: 'ssh timeout' });
   });
 
   it('a server with no ip is reported, not queried', async () => {
@@ -520,6 +545,7 @@ describe('checkRemoteContainers', () => {
       ['get', 'pods', '-A', '-o', 'json'],
       ['get', 'nodes', '-o', 'json'],
     ]);
+    expect(sshKubectl.mock.calls[0][3]).toMatchObject({ transportRetry: false });
     expect(out!.m).toEqual({
       kind: 'k8s',
       ip: '1.1.1.1',

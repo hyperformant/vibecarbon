@@ -182,7 +182,16 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function firstLine(err) {
+// runCommandAsync builds a failure's `message` as `Command failed: <full
+// argv>\n<stderr>` — reading message's first line would echo the ssh
+// invocation (including the local key path) instead of the actual reason.
+// Prefer err.stderr (what the remote/ssh actually said); err.timedOut is the
+// wrapper-timeout sentinel (see isTransientSshCommandError's docs in
+// ssh.js) and has no stderr of its own.
+function describeSshError(err) {
+  if (err?.timedOut) return 'ssh timeout';
+  const stderr = typeof err?.stderr === 'string' ? err.stderr.trim() : '';
+  if (stderr) return stderr.split('\n')[0].trim();
   const msg = err instanceof Error ? err.message : String(err);
   return msg.split('\n')[0].trim();
 }
@@ -190,7 +199,11 @@ function firstLine(err) {
 async function collectCompose(target, projectName, keyPath, deps) {
   const argv = DOCKER_PS_ARGV.map((a) => (a === null ? `name=^${projectName}-` : a));
   const listing = await withTimeout(
-    deps.sshRun(target.ip, keyPath, argv, { silent: true, timeout: deps.timeoutMs }),
+    deps.sshRun(target.ip, keyPath, argv, {
+      silent: true,
+      timeout: deps.timeoutMs,
+      transportRetry: false,
+    }),
     deps.timeoutMs,
   );
   const rows = rowsFromDockerPs(listing, projectName).map(({ container, state, status }) => ({
@@ -205,7 +218,11 @@ async function collectCompose(target, projectName, keyPath, deps) {
 async function collectK8s(target, keyPath, deps) {
   const run = (argv) =>
     withTimeout(
-      deps.sshKubectl(target.ip, keyPath, argv, { silent: true, timeout: deps.timeoutMs }),
+      deps.sshKubectl(target.ip, keyPath, argv, {
+        silent: true,
+        timeout: deps.timeoutMs,
+        transportRetry: false,
+      }),
       deps.timeoutMs,
     );
   const [podsRaw, nodesRaw] = await Promise.all([
@@ -263,7 +280,7 @@ export async function checkRemoteContainers(envName, envConfig, projectName, dep
             : await collectCompose(t, projectName, keyPath, d);
         return [t.serverName, value];
       } catch (err) {
-        return empty(firstLine(err));
+        return empty(describeSshError(err));
       }
     }),
   );
