@@ -303,6 +303,30 @@ describe('checkDockerContainers', () => {
     expect(rows).toEqual([]);
     expect(run).not.toHaveBeenCalled();
   });
+
+  it("keeps Docker's own verdict for rest/meta and skips the gateway probe", async () => {
+    const ps = LETSGO_PS.replace(
+      'letsgo-meta\trunning\tUp 15 minutes',
+      'letsgo-meta\trunning\tUp 15 minutes (healthy)',
+    ).replace(
+      'letsgo-rest\trunning\tUp 15 minutes',
+      'letsgo-rest\trunning\tUp 15 minutes (unhealthy)',
+    );
+    const fetchSpy = okFetch(200);
+    const rows = await checkDockerContainers('letsgo', {
+      runCommand: fakeDocker({ ps, port: '' }), // kong exited in LETSGO_PS
+      fetch: fetchSpy,
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(rows.find((r) => r.container === 'meta')).toMatchObject({
+      health: 'healthy',
+      label: 'healthy',
+    });
+    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
+      health: 'unhealthy',
+      label: 'unhealthy',
+    });
+  });
 });
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions

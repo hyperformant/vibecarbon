@@ -150,8 +150,8 @@ const SERVICE_DISPLAY_NAMES = {
 // alphabetically.
 const CORE_SERVICE_ORDER = Object.keys(SERVICE_DISPLAY_NAMES);
 
-// The only core services without a compose healthcheck. They are probed
-// through Kong, on whichever host port THIS project's kong container bound.
+// Core services whose container may carry no healthcheck. Probed through Kong only when
+// Docker offers no verdict, on whichever host port THIS project's kong container bound.
 const GATEWAY_PROBES = {
   rest: { path: '/rest/v1/', acceptCodes: [200, 401] },
   meta: { path: '/pg/', acceptCodes: [200, 401] },
@@ -252,8 +252,9 @@ async function checkDockerContainers(projectName, deps = {}) {
     return [];
   }
 
-  // Docker's name filter is a substring regex; keep the JS prefix check so a
-  // sibling project like `${projectName}-v2` can't leak in via a loose match.
+  // Docker's name filter is an unanchored regex match; keep the JS prefix
+  // check so only true `${projectName}-*` names survive whatever the daemon
+  // returned.
   const containers = listing
     .split('\n')
     .map((line) => line.trim())
@@ -287,7 +288,10 @@ async function checkDockerContainers(projectName, deps = {}) {
       const name = SERVICE_DISPLAY_NAMES[container] || container;
       const base = classifyContainer(container, state, status);
       const probe = GATEWAY_PROBES[container];
-      if (!probe || state !== 'running') {
+      // Kong probe is a fallback for containers Docker has no verdict on
+      // (label 'running' = up, no healthcheck). A real healthcheck verdict
+      // — from compose or baked into the image — always wins.
+      if (!probe || state !== 'running' || base.label !== 'running') {
         return { name, container, ...base, latencyMs: 0 };
       }
       if (kongPort === null) {
