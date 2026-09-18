@@ -34,6 +34,7 @@ import {
   rowsFromDockerPs,
   SERVICE_DISPLAY_NAMES,
 } from './lib/status/container-rows.js';
+import { checkRemoteContainers } from './lib/status/remote-containers.js';
 import { VERSION } from './lib/version.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
@@ -98,12 +99,12 @@ function getBranchName(envName) {
 // HEALTH CHECK FUNCTIONS
 // ============================================================================
 
-async function checkHttpEndpoint(url, timeout = 2000) {
+async function checkHttpEndpoint(url, timeout = 2000, fetchImpl = fetch) {
   const start = Date.now();
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
-    const response = await fetch(url, { method: 'GET', signal: controller.signal });
+    const response = await fetchImpl(url, { method: 'GET', signal: controller.signal });
     clearTimeout(timeoutId);
     const latencyMs = Date.now() - start;
 
@@ -343,9 +344,9 @@ async function checkLocalDev(projectName) {
   };
 }
 
-async function checkRemoteHealth(domain) {
-  const url = `https://${domain}/api/health`;
-  const result = await checkHttpEndpoint(url, 5000);
+export async function checkRemoteHealth(domain, deps = {}) {
+  const url = `https://${domain}/api/health/ready`;
+  const result = await checkHttpEndpoint(url, 5000, deps.fetch || fetch);
   return {
     url,
     ok: result.ok,
@@ -866,8 +867,10 @@ function renderEnvironment(envName, envConfig, checks) {
       let details = '';
       if (data && typeof data === 'object') {
         const parts = [];
-        if (data.database) parts.push(`db: ${data.database}`);
-        if (data.supabase) parts.push(`supabase: ${data.supabase}`);
+        const db = data.services?.database ?? data.database;
+        const supabase = data.services?.supabase ?? data.supabase;
+        if (db) parts.push(`db: ${db}`);
+        if (supabase) parts.push(`supabase: ${supabase}`);
         if (data.status) parts.push(data.status);
         if (parts.length > 0) details = c.dim(`  (${parts.join(', ')})`);
       }
@@ -1136,6 +1139,16 @@ async function main(argv = []) {
       // Real replication state for HA envs (best-effort, hard-bounded). null
       // for non-HA or when the primary/key isn't locally reachable.
       checks.replication = await checkReplication(envName, envConfig, projectConfig.projectName);
+
+      // Per-server container/pod health (spec: remote-container-health). Runs
+      // for every server of the env, bounded per server; null when there is
+      // nothing to query. Independent of noLocal — that flag is about THIS
+      // machine's dev stack.
+      checks.containers = await checkRemoteContainers(
+        envName,
+        envConfig,
+        projectConfig.projectName,
+      );
 
       return { envName, config: envConfig, checks };
     }),
