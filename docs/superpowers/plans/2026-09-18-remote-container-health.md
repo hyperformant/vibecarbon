@@ -984,6 +984,7 @@ git commit -m "feat(status): gather remote container health per environment and 
 - Produces:
   ```js
   export function formatServerLines(servers, checks)   // -> string[]  (the whole Servers block body, no header)
+  export function formatHealthLines(remoteHealth)      // -> string[]  (Health header + url + verdict line)
   export function isEnvironmentUnhealthy(entry)        // entry = { config, checks } -> boolean
   ```
 
@@ -1216,7 +1217,39 @@ In `renderEnvironment`, replace the `for (const server of servers) { … }` loop
 
 In `renderSummary`, replace the `unhealthyCount` filter predicate with `isEnvironmentUnhealthy`.
 
-Export `formatServerLines` and `isEnvironmentUnhealthy`.
+Also extract the Health block into a pure `formatHealthLines(remoteHealth)` (returns `string[]`, the lines currently pushed under `c.bold('Health')`, header included) and use it from `renderEnvironment`; add to `tests/unit/status/render-environment.test.ts`:
+
+```ts
+describe('formatHealthLines', () => {
+  it('renders the db/supabase detail from the real /ready shape', () => {
+    const lines = formatHealthLines({
+      url: 'https://x/api/health/ready',
+      ok: true,
+      status: 200,
+      latencyMs: 42,
+      data: { status: 'ready', timestamp: 't', services: { database: 'connected', supabase: 'connected' } },
+    }).map(strip);
+    expect(lines).toEqual(['Health', '  https://x/api/health/ready', '  ● healthy  42ms  (db: connected, supabase: connected, ready)']);
+  });
+  it('renders a failed probe with its error or status', () => {
+    expect(formatHealthLines({ url: 'u', ok: false, status: 503, latencyMs: 0 }).map(strip)[2]).toBe('  ● unhealthy  (HTTP 503)');
+    expect(formatHealthLines({ url: 'u', ok: false, error: 'timeout', latencyMs: 0 }).map(strip)[2]).toBe('  ● unhealthy  (timeout)');
+  });
+});
+```
+
+And in `main()`'s per-environment callback, run replication and containers concurrently instead of serially (each is bounded at 10s; stacking them doubles an HA env's worst case):
+
+```js
+      const [replication, containers] = await Promise.all([
+        checkReplication(envName, envConfig, projectConfig.projectName),
+        checkRemoteContainers(envName, envConfig, projectConfig.projectName),
+      ]);
+      checks.replication = replication;
+      checks.containers = containers;
+```
+
+Export `formatServerLines`, `formatHealthLines`, and `isEnvironmentUnhealthy`.
 
 - [ ] **Step 4: Verify**
 
