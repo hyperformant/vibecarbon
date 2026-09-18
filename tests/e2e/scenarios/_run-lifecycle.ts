@@ -238,12 +238,12 @@ const TIMEOUTS: Record<string, number> = {
  * Each entry MUST cite the underlying issue so we know when to remove it.
  * If you find yourself adding a new entry here, prefer fixing the root cause.
  *
- * Currently empty. Previously held k8s-ha verify-failover entries, but the
- * set of failing checks varied run-to-run (auth_signup one run, auth_protected
- * the next, db_* sometimes), all caused by k8s-ha replication never streaming
- * data cross-cluster (project_replication_broken.md). A whitelist couldn't
- * keep up; we now skip verify-failover entirely for k8s-ha at the step-list
- * build site below.
+ * Currently empty. It once held k8s-ha verify-failover entries whose failing
+ * set varied run-to-run because cross-cluster replication never streamed
+ * (project_replication_broken.md), and for a while verify-failover was
+ * skipped for k8s-ha outright. Both are history: the WireGuard transport +
+ * pg_basebackup reseed landed 2026-07-06 and verify-failover now runs for
+ * BOTH HA modes (see step 12 in the step list below).
  */
 const EXPECTED_VERIFY_FAILURES: Record<string, Partial<Record<StepName, string[]>>> = {};
 
