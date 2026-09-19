@@ -128,10 +128,20 @@ describe('signingKeyOrNull', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('returns an env value as-is without reading the file', () => {
-    const env = { VIBECARBON_LICENSE_PRIVATE_KEY: 'from-env' } as NodeJS.ProcessEnv;
+  it('returns a raw PEM env value unchanged, without reading the file', () => {
     // Nonexistent path: a read would be the only way this could differ.
-    expect(signingKeyOrNull(env, join(dir, 'does-not-exist'))).toBe('from-env');
+    expect(
+      signingKeyOrNull(
+        { VIBECARBON_LICENSE_PRIVATE_KEY: PEM_IN_FILE } as NodeJS.ProcessEnv,
+        join(dir, 'does-not-exist'),
+      ),
+    ).toBe(PEM_IN_FILE);
+  });
+
+  it('base64-decodes an env value that is not raw PEM, matching vibecarbon-web', () => {
+    const b64 = Buffer.from(PEM_IN_FILE).toString('base64');
+    const env = { VIBECARBON_LICENSE_PRIVATE_KEY: b64 } as NodeJS.ProcessEnv;
+    expect(signingKeyOrNull(env, join(dir, 'does-not-exist'))).toBe(PEM_IN_FILE);
   });
 
   it('treats a present-but-empty value as absent and falls back to the file', () => {

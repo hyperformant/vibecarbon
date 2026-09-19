@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import {
   derivePublicKeyPem,
   mintKey as mintSignedKey,
+  normalizePem,
   randomLicenseId,
   signVerdictToken,
 } from '../../../scripts/generate-license.js';
@@ -41,16 +42,21 @@ const SEEDABLE_TIERS = new Set(['graphene', 'fullerene']);
  * one of those into whatever this process later spawns. One key is asked for;
  * one key is returned.
  *
+ * Normalised on the way out via `normalizePem`: vibecarbon-web stores its
+ * copy of this key as base64-of-PEM, so an operator pasting "the same value"
+ * from there gets a usable key regardless of which form they pasted.
+ *
  * @param {NodeJS.ProcessEnv} [env]
  * @param {string} [envFilePath] - overridable so tests never read the real file.
- * @returns {string | null}
+ * @returns {string | null} PEM, or null if neither source has a value.
  */
 export function signingKeyOrNull(env = process.env, envFilePath = DEFAULT_ENV_FILE) {
   const fromEnv = env.VIBECARBON_LICENSE_PRIVATE_KEY?.trim();
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return normalizePem(fromEnv);
   const scratch = {};
   loadE2EEnvFile(envFilePath, scratch);
-  return scratch.VIBECARBON_LICENSE_PRIVATE_KEY?.trim() || null;
+  const fromFile = scratch.VIBECARBON_LICENSE_PRIVATE_KEY?.trim();
+  return fromFile ? normalizePem(fromFile) : null;
 }
 
 function todayYmd() {

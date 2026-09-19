@@ -13,6 +13,7 @@
  *
  * Also exports signVerdictToken(), used by the test licence-API stub.
  */
+
 import { createPrivateKey, createPublicKey, randomBytes, sign } from 'node:crypto';
 import { signedMessage, validateLicenseKey, VERDICT_STATUSES, VERDICT_TIERS } from '../src/lib/licensing/validator.js';
 
@@ -32,8 +33,23 @@ Options:
   -h, --help              Show this help message
 
 Environment:
-  VIBECARBON_LICENSE_PRIVATE_KEY must be set to the Ed25519 private key in PEM format.
+  VIBECARBON_LICENSE_PRIVATE_KEY must be set to the Ed25519 private key, PEM or base64-encoded PEM.
 `);
+}
+
+/**
+ * Accept the signing key exactly as vibecarbon-web's LICENSE_SIGNING_PRIVATE_KEY
+ * does: raw PEM passes through unchanged; anything else is treated as
+ * base64-encoded PEM and decoded. This is the single choke point every call
+ * to createPrivateKey in this file goes through, so an operator pasting
+ * either form out of vibecarbon-web gets a working key.
+ * @param {string} value
+ * @returns {string} PEM
+ */
+export function normalizePem(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('-----BEGIN')) return trimmed;
+  return Buffer.from(trimmed, 'base64').toString('utf8').trim();
 }
 
 /**
@@ -58,7 +74,7 @@ export function randomLicenseId() {
 
 /** Derive the Ed25519 public key (PEM, spki) for a private key (PEM, pkcs8). */
 export function derivePublicKeyPem(privateKeyPem) {
-  const privateKey = createPrivateKey(privateKeyPem);
+  const privateKey = createPrivateKey(normalizePem(privateKeyPem));
   const publicKey = createPublicKey(privateKey);
   return publicKey.export({ type: 'spki', format: 'pem' }).toString();
 }
@@ -73,7 +89,7 @@ export function mintKey(privateKeyPem, { licenseId }) {
     throw new Error(`licenseId must be 16 lowercase hex, got ${licenseId}`);
   }
   const message = signedMessage({ format: 'key', licenseId });
-  const signature = sign(null, Buffer.from(message), createPrivateKey(privateKeyPem));
+  const signature = sign(null, Buffer.from(message), createPrivateKey(normalizePem(privateKeyPem)));
   return `vc-${licenseId}-${signature.toString('hex')}`;
 }
 
@@ -101,7 +117,7 @@ export function signVerdictToken(privateKeyPem, { projectId, status, tier, perio
   }
   const parsed = { format: 'verdict', projectId: projectId.toLowerCase(), status, tier, periodEnd, issued };
   const message = signedMessage(parsed);
-  const signature = sign(null, Buffer.from(message), createPrivateKey(privateKeyPem));
+  const signature = sign(null, Buffer.from(message), createPrivateKey(normalizePem(privateKeyPem)));
   const pid32 = parsed.projectId.replace(/-/g, '');
   return `vcv-${pid32}-${status}-${tier}-${periodEnd.replace(/-/g, '')}-${issued.replace(/-/g, '')}-${signature.toString('hex')}`;
 }
@@ -123,7 +139,9 @@ export function run(args, { privateKeyPem, log = console.log } = {}) {
 
   const pem = privateKeyPem ?? process.env.VIBECARBON_LICENSE_PRIVATE_KEY;
   if (!pem) {
-    throw new Error('VIBECARBON_LICENSE_PRIVATE_KEY environment variable is required (Ed25519 private key, PEM format)');
+    throw new Error(
+      'VIBECARBON_LICENSE_PRIVATE_KEY environment variable is required (Ed25519 private key, PEM or base64-encoded PEM)',
+    );
   }
 
   const licenseId = opts.licenseId ?? randomLicenseId();
