@@ -305,7 +305,7 @@ export function assertLicenseSigningKey(env = process.env) {
   if (key) return key;
   throw new Error(
     '[e2e-env] VIBECARBON_LICENSE_PRIVATE_KEY is not set (shell or tests/.env.e2e).\n' +
-      "It is the same value as vibecarbon-web's LICENSE_SIGNING_PRIVATE_KEY, as raw PEM.",
+      "It is the same value as vibecarbon-web's LICENSE_SIGNING_PRIVATE_KEY, PEM or base64-encoded PEM.",
   );
 }
 

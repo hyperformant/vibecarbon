@@ -85,6 +85,7 @@ import {
   logStepComplete,
   logStepMatrix,
   PERF_ANOMALY_WINDOW,
+  perfDurationMsSum,
 } from './metrics/reporter.js';
 import { runLifecycle } from './scenarios/_run-lifecycle.js';
 import type {
@@ -1017,7 +1018,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       db.updateScenarioStatus(scenarioId, diffed.status, diffed.errorMessage);
     }
 
-    const totalMs = diffed.steps.reduce((sum, s) => sum + s.durationMs, 0);
+    const totalMs = perfDurationMsSum(diffed.steps);
     logScenarioSummary(mode, diffed.status, totalMs);
     return { ...diffed, attempts: attemptNumber };
   };
@@ -1108,7 +1109,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       provider: r.provider,
       mode: r.mode,
       status: r.status,
-      durationMs: r.steps.reduce((sum, s) => sum + s.durationMs, 0),
+      durationMs: perfDurationMsSum(r.steps),
       failureCategory: r.failureCategory,
     })),
   );

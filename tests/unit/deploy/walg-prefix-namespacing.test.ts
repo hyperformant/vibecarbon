@@ -12,6 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { composeRoleEnv } from '../../../src/lib/deploy/walg-role.js';
 
 const ROOT = join(__dirname, '../../..');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
@@ -59,10 +60,15 @@ describe('WALG_ROLE is exposed to the db container as the write-guard signal', (
   it('compose-HA writes WALG_ROLE=primary / standby onto each node (.env merge)', () => {
     // The .env merge moved out of the deployComposeHA orchestration into the
     // compose-ha deploy effect (haMergeWalgRole) when the tier was converted to
-    // the step-plan; the write-guard behavior is unchanged.
+    // the step-plan; the write-guard behavior is unchanged. The literal key is
+    // now spelled ONLY in composeRoleEnv (walg-role.js), which pairs it with
+    // REALTIME_REPLICAS — compose-role-env-census.test.ts bans the literal
+    // shape here, so assert the helper call and what it emits instead.
     const eff = read('src/lib/deploy/effects/compose-ha.js');
-    expect(eff).toMatch(/WALG_ROLE:\s*'primary'/);
-    expect(eff).toMatch(/WALG_ROLE:\s*'standby'/);
+    expect(eff).toMatch(/composeRoleEnv\('primary'\)/);
+    expect(eff).toMatch(/composeRoleEnv\('standby'\)/);
+    expect(composeRoleEnv('primary').WALG_ROLE).toBe('primary');
+    expect(composeRoleEnv('standby').WALG_ROLE).toBe('standby');
   });
 });
 

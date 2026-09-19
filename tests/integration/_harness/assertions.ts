@@ -19,6 +19,9 @@ function combined(r: RunResult): string {
   return `exit=${r.exitCode}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`;
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping is intentional.
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
 export function assertSuccess(r: RunResult): void {
   if (r.exitCode !== 0) {
     throw new Error(`assertSuccess: expected exit 0\n${combined(r)}`);
@@ -30,7 +33,7 @@ export function assertExitWith(r: RunResult, code: number, msg?: string | RegExp
     throw new Error(`assertExitWith: expected exit ${code}, got ${r.exitCode}\n${combined(r)}`);
   }
   if (msg !== undefined) {
-    const haystack = `${r.stdout}\n${r.stderr}`;
+    const haystack = stripAnsi(`${r.stdout}\n${r.stderr}`);
     const matched = typeof msg === 'string' ? haystack.includes(msg) : msg.test(haystack);
     if (!matched) {
       throw new Error(

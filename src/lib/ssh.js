@@ -287,6 +287,13 @@ export function runWithTransportRetry(fn) {
  * @param {number} [options.timeout=120000]
  * @param {boolean} [options.silent=true]
  * @param {string} [options.input] - stdin piped to the remote command
+ * @param {boolean} [options.transportRetry=true] - retry a never-started
+ *   transport failure on the shared 5s/15s ladder (see below). Callers that
+ *   already impose their own hard per-call bound (e.g. status's
+ *   checkRemoteContainers, which wraps this in a `withTimeout` race) pass
+ *   `false` so a dead/unreachable server's child process and retry timers
+ *   don't keep running for up to ~20s after the outer bound has already
+ *   given up and moved on.
  * @returns {Promise<string>} - trimmed stdout
  *
  * Transport retry: a never-started connection/protocol failure (see
@@ -296,7 +303,14 @@ export function runWithTransportRetry(fn) {
  * non-zero is NEVER retried here (idempotency unknown to this layer).
  */
 export async function sshRun(ip, sshKeyPath, argv, options = {}) {
-  const { env, firstConnect = false, timeout = 120_000, silent = true, input } = options;
+  const {
+    env,
+    firstConnect = false,
+    timeout = 120_000,
+    silent = true,
+    input,
+    transportRetry = true,
+  } = options;
   if (!Array.isArray(argv) || argv.length === 0) {
     throw new Error('sshRun requires a non-empty argv array');
   }
@@ -310,9 +324,8 @@ export async function sshRun(ip, sshKeyPath, argv, options = {}) {
     `root@${ip}`,
     remoteCmd,
   ];
-  const out = await runWithTransportRetry(() =>
-    runCommandAsync(cmd, { silent, timeout, returnOutput: true, input }),
-  );
+  const run = () => runCommandAsync(cmd, { silent, timeout, returnOutput: true, input });
+  const out = await (transportRetry ? runWithTransportRetry(run) : run());
   return typeof out === 'string' ? out.trim() : '';
 }
 

@@ -313,6 +313,21 @@ describe('sshRun transport retry (never-started failures only)', () => {
       /^\[ssh\] transport failure \(attempt 2\/3\), retrying in 15s: /,
     );
   });
+
+  it('transportRetry: false skips the ladder — a never-started transport failure rejects after exactly one call', async () => {
+    mockRun.mockRejectedValueOnce(
+      transportError(
+        'kex_exchange_identification: Connection timed out during banner exchange',
+        255,
+      ),
+    );
+
+    const r = await settled(sshRun('1.2.3.4', '/key', ['wg', 'pubkey'], { transportRetry: false }));
+
+    expect(r.ok).toBe(false);
+    expect(mockRun).toHaveBeenCalledTimes(1);
+    expect(progressLogMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('scpDownload / scpUpload use argv form', () => {

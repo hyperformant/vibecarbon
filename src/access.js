@@ -35,6 +35,7 @@ import {
 } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
+import { printUpdateNotice } from './lib/telemetry/update-check.js';
 
 const VALID_SUBCOMMANDS = new Set(['list', 'add', 'remove', 'prune']);
 
@@ -323,6 +324,7 @@ export async function run(args = []) {
   const projectConfig = assertInProjectDir();
 
   printBanner();
+  printUpdateNotice();
 
   const apiToken = resolveProviderToken(providerIdFor(projectConfig));
   // The list action doesn't need a token; the others do for the firewall push.

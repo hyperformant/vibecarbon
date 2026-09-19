@@ -54,6 +54,10 @@ export type StepName =
   | 'add-features'
   | 'deploy'
   | 'verify-deploy'
+  // The CLI's own view of the environment (`vibecarbon status -json`) must
+  // agree with what verify-deploy just proved from the outside. See
+  // tests/e2e/checks/status-health.ts.
+  | 'verify-status'
   // Re-invokes `vibecarbon deploy` against the already-provisioned env to
   // time the no-op convergence path — the push-to-deploy iteration loop
   // customers actually live in after the initial cold deploy.

@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   derivePublicKeyPem,
   mintKey,
+  normalizePem,
   parseArgs,
   randomLicenseId,
   run,
@@ -18,6 +19,11 @@ import { validateLicenseKey, verifyVerdictToken } from '../../../src/lib/licensi
 
 const { privateKey } = generateKeyPairSync('ed25519');
 const PEM = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+// normalizePem trims: Node's own PEM export carries a trailing newline, so
+// the normalized form (what createPrivateKey actually receives either way)
+// is the trimmed string, not PEM itself.
+const PEM_TRIMMED = PEM.trim();
+const PEM_B64 = Buffer.from(PEM).toString('base64');
 const PUB = derivePublicKeyPem(PEM);
 
 describe('generate-license', () => {
@@ -72,6 +78,33 @@ describe('generate-license', () => {
     } finally {
       if (saved) process.env.VIBECARBON_LICENSE_PRIVATE_KEY = saved;
     }
+  });
+
+  it('normalizePem passes raw PEM through and base64-decodes anything else', () => {
+    expect(normalizePem(PEM)).toBe(PEM_TRIMMED);
+    expect(normalizePem(PEM_B64)).toBe(PEM_TRIMMED);
+  });
+
+  it('normalizePem trims whitespace/newlines around either form', () => {
+    expect(normalizePem(`\n  ${PEM}  \n`)).toBe(PEM_TRIMMED);
+    expect(normalizePem(`\n  ${PEM_B64}  \n`)).toBe(PEM_TRIMMED);
+  });
+
+  it('mintKey, signVerdictToken, and derivePublicKeyPem accept base64-of-PEM identically to raw PEM', () => {
+    expect(derivePublicKeyPem(PEM_B64)).toBe(PUB);
+
+    const key = mintKey(PEM, { licenseId: '0123456789abcdef' });
+    const keyFromB64 = mintKey(PEM_B64, { licenseId: '0123456789abcdef' });
+    expect(keyFromB64).toBe(key);
+
+    const verdictArgs = {
+      projectId: '11111111-1111-4111-8111-111111111111',
+      status: 'active',
+      tier: 'graphene',
+      periodEnd: '2026-09-15',
+      issued: '2026-09-15',
+    };
+    expect(signVerdictToken(PEM_B64, verdictArgs)).toBe(signVerdictToken(PEM, verdictArgs));
   });
 
   it('signVerdictToken still signs unbound / wrong_project verdicts', () => {

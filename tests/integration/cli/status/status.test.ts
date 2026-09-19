@@ -3,6 +3,9 @@
  * stubs needed for the basic shape, no cloud calls when status hits a
  * not-deployed env.
  */
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertExitWith,
@@ -52,5 +55,43 @@ describe('vibecarbon status', () => {
     project = realProject({ envs: ['prod', 'staging'], withDeployedState: true });
     const r = runCli('status', ['-env', 'staging'], { cwd: project, timeoutMs: 30_000 });
     if (r.exitCode === null) throw new Error(`status timed out`);
+  });
+
+  it('-json includes remote container health, "no ssh key" without a deploy key', () => {
+    destroyRealProject(project);
+    project = realProject({ envs: ['prod'] });
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.environments = {
+      prod: {
+        deployMode: 'compose',
+        domain: 'example.invalid',
+        servers: [{ name: 'prod', ip: '203.0.113.10' }],
+      },
+      // Nothing to query: the key is omitted, not null (spec §6).
+      staging: { deployMode: 'compose', servers: [] },
+    };
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    // No SSH key exists anywhere this HOME can see, so checkRemoteContainers
+    // resolves every server to a "no ssh key" row instead of attempting SSH.
+    const emptyHome = mkdtempSync(join(tmpdir(), 'vc-status-no-key-'));
+
+    const r = runCli('status', ['-json'], {
+      cwd: project,
+      timeoutMs: 30_000,
+      env: { HOME: emptyHome },
+    });
+
+    assertSuccess(r);
+    const json = JSON.parse(r.stdout);
+    expect(json.environments.prod.checks.containers).toEqual({
+      prod: { kind: 'compose', ip: '203.0.113.10', rows: [], error: 'no ssh key' },
+    });
+    expect(json.environments.prod.checks.remoteHealth.url).toBe(
+      'https://example.invalid/api/health/ready',
+    );
+    expect(json.environments.staging.checks).not.toHaveProperty('containers');
+    expect(r.exitCode).toBe(0);
   });
 });

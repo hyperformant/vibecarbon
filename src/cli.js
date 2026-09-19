@@ -16,12 +16,13 @@ import dns from 'node:dns';
 import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
+import { formatExamples } from './lib/cli/help.js';
 import { c } from './lib/colors.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
 import { recordCommandStart, reportCrash, settlePendingTelemetry } from './lib/telemetry/index.js';
-import { getUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
+import { printUpdateNotice, refreshUpdateCache } from './lib/telemetry/update-check.js';
 import { VERSION } from './lib/version.js';
 
 // Prefer IPv4 to avoid timeouts on systems with broken IPv6 connectivity.
@@ -135,6 +136,18 @@ export const KNOWN_COMMANDS = [
   'telemetry',
 ];
 
+const GLOBAL_EXAMPLES = [
+  { description: 'Create a new project', commands: ['vibecarbon create my-app', 'cd my-app'] },
+  { description: 'Local development', commands: ['vibecarbon up'] },
+  { description: 'Add features', commands: ['vibecarbon add observability'] },
+  { description: 'Wire up external services', commands: ['vibecarbon configure'] },
+  { description: 'Deploy to production', commands: ['vibecarbon deploy prod'] },
+  {
+    description: 'Backup and restore',
+    commands: ['vibecarbon backup prod -l', 'vibecarbon restore prod'],
+  },
+];
+
 function showHelp() {
   console.log(`
 ${c.bold('Vibecarbon CLI')} ${c.dim(`v${VERSION}`)}
@@ -180,26 +193,7 @@ ${c.bold('GLOBAL FLAGS')}
   ${c.dim('Run any command with -h to see its specific flags.')}
 
 ${c.bold('EXAMPLES')}
-  ${c.dim('# Create a new project')}
-  vibecarbon create my-app
-  cd my-app
-
-  ${c.dim('# Local development')}
-  vibecarbon up
-
-  ${c.dim('# Add features')}
-  vibecarbon add observability
-
-  ${c.dim('# Wire up external services')}
-  vibecarbon configure
-
-  ${c.dim('# Deploy to production')}
-  vibecarbon deploy prod
-
-  ${c.dim('# Backup and restore')}
-  vibecarbon backup prod -l
-  vibecarbon restore prod
-
+${formatExamples(GLOBAL_EXAMPLES).join('\n')}
 ${c.bold('DOCUMENTATION')}
   https://github.com/hyperformant/vibecarbon
 `);
@@ -425,8 +419,10 @@ async function main() {
     await reportCrash(command, error);
     throw error; // preserve today's failure behavior exactly
   } finally {
-    const notice = getUpdateNotice();
-    if (notice && process.stdout.isTTY) console.log(`\n${notice}`);
+    // Fallback for commands that never draw a banner (console, diagnose,
+    // shell, telemetry). Banner commands already printed it under the logo;
+    // the once-guard makes this a no-op for them.
+    printUpdateNotice({ leadingBlank: true });
     await settlePendingTelemetry();
     commandTimer.end();
   }
