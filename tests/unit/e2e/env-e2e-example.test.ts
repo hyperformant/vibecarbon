@@ -47,11 +47,15 @@ describe('tests/.env.e2e.example is value-free', () => {
         'HETZNER_API_TOKEN',
         'HETZNER_ACCESS_KEY',
         'HETZNER_SECRET_KEY',
+        // Optional override — usually inferred from the compute region.
+        'HETZNER_STORAGE_REGION',
         'CLOUDFLARE_API_TOKEN',
         'DIGITALOCEAN_API_TOKEN',
         'DIGITALOCEAN_ACCESS_KEY',
         'DIGITALOCEAN_SECRET_KEY',
         'DIGITALOCEAN_PROJECT_ID',
+        // Optional override — usually inferred from the compute region.
+        'DIGITALOCEAN_STORAGE_REGION',
         'LINODE_API_TOKEN',
         'LINODE_ACCESS_KEY',
         'LINODE_SECRET_KEY',
@@ -69,6 +73,9 @@ describe('tests/.env.e2e.example is value-free', () => {
         'SCALEWAY_SECRET_KEY',
         'SCALEWAY_ACCESS_KEY',
         'SCALEWAY_DEFAULT_PROJECT_ID',
+        // Optional override (fr-par/nl-ams, not a zone) — usually derived
+        // from the zone.
+        'SCALEWAY_STORAGE_REGION',
         'DOCKER_HUB_USERNAME',
         'DOCKER_HUB_TOKEN',
         // Not a provider credential: the Ed25519 signing key the local

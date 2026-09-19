@@ -123,18 +123,24 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
   const examplePath = join(process.cwd(), 'tests', '.env.e2e.example');
   const exampleKeys = Object.keys(parseDotenv(readFileSync(examplePath, 'utf-8')));
 
-  // DOCKER_HUB_* are operator-shell-level (deliberately NOT in the registry —
-  // see config-registry.js's providers block). VIBECARBON_LICENSE_PRIVATE_KEY
-  // is test-harness-only: it is consumed by tests/e2e/utils/license-stub.js to
-  // sign verdict tokens, never read by the product, so registering it would
-  // add a credential to the CLI's config surface that no command uses. Every
-  // OTHER key in the example is an operator-secret and must be registry-backed,
-  // and vice-versa.
-  const NON_REGISTRY_EXAMPLE_KEYS = new Set([
-    'DOCKER_HUB_USERNAME',
-    'DOCKER_HUB_TOKEN',
-    'VIBECARBON_LICENSE_PRIVATE_KEY',
-  ]);
+  // VIBECARBON_LICENSE_PRIVATE_KEY is test-harness-only: it is consumed by
+  // tests/e2e/utils/license-stub.js to sign verdict tokens, never read by the
+  // product, so registering it would add a credential to the CLI's config
+  // surface that no command uses. DOCKER_HUB_* WAS excluded here too before
+  // the operator config hygiene pass registered it (operator-shell-level,
+  // where: 'operator shell') — now registry-backed, it flows through the
+  // parity check below like any other operator-secret key.
+  const NON_REGISTRY_EXAMPLE_KEYS = new Set(['VIBECARBON_LICENSE_PRIVATE_KEY']);
+
+  // Operator-secret keys that are NOT per-provider e2e credential tokens this
+  // file's header promises ("Operator e2e credential tokens for `pnpm
+  // test:e2e`") — the e2e harness either sets them itself, or the e2e matrix
+  // never exercises them at all:
+  //   ACME_CA_SERVER    — set programmatically by tests/e2e/utils/e2e-env.js
+  //                       (staging directory), never operator-supplied here.
+  //   PULUMI_BACKEND_URL — opt-in Pulumi Cloud override; e2e always uses the
+  //                       provider's own S3 state backend, never Pulumi Cloud.
+  const REGISTRY_ONLY_OPERATOR_KEYS = new Set(['ACME_CA_SERVER', 'PULUMI_BACKEND_URL']);
 
   it('.env.e2e.example carries no legacy spelling', () => {
     for (const key of exampleKeys) {
@@ -145,7 +151,10 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
 
   it('operator-secret registry keys == .env.e2e.example keys (minus non-registry keys)', () => {
     const exampleOperatorKeys = exampleKeys.filter((k) => !NON_REGISTRY_EXAMPLE_KEYS.has(k)).sort();
-    expect(exampleOperatorKeys).toEqual([...operatorSecretKeys()].sort());
+    const expectedRegistryKeys = operatorSecretKeys().filter(
+      (k) => !REGISTRY_ONLY_OPERATOR_KEYS.has(k),
+    );
+    expect(exampleOperatorKeys).toEqual([...expectedRegistryKeys].sort());
   });
 });
 

@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   CONFIG_KEYS,
   clientBuildKeys,
+  entriesForScopes,
   featureConfigKeys,
   featureRuntimeKeys,
   featureSecretKeys,
   isOperatorKey,
   isSecretKey,
   operatorSecretKeys,
+  registryEntry,
   stripOperatorSecretLines,
 } from '../../src/lib/config-registry.js';
 
@@ -104,6 +106,22 @@ describe('config-registry', () => {
       'SCALEWAY_SECRET_KEY',
       'SCALEWAY_ACCESS_KEY',
       'SCALEWAY_DEFAULT_PROJECT_ID',
+      'SCALEWAY_STORAGE_REGION',
+      // Object-storage REGION overrides for Hetzner/DigitalOcean, added
+      // alongside Vultr/Linode/Scaleway's existing rows above (operator
+      // config hygiene pass — these are keys deploy reads outside configure).
+      'HETZNER_STORAGE_REGION',
+      'DIGITALOCEAN_STORAGE_REGION',
+      // Docker Hub is now registry-backed (operator-shell-level: `where`
+      // is 'operator shell', never written to a file — see the
+      // "operator-secret entries live in .env.local or the operator
+      // shell" test below and the DOCKER_HUB-specific test further down).
+      'DOCKER_HUB_USERNAME',
+      'DOCKER_HUB_TOKEN',
+      // CLI-local operator overrides that ride the same guarantees
+      // (.env.local only, stripped from any bundle baseline).
+      'PULUMI_BACKEND_URL',
+      'ACME_CA_SERVER',
     ];
 
     it('operatorSecretKeys returns exactly the provider credential keys', () => {
@@ -119,10 +137,18 @@ describe('config-registry', () => {
       }
     });
 
-    it('does NOT classify DOCKER_HUB_* as operator-secret (operator-shell-level, outside the project store)', () => {
-      const keys = CONFIG_KEYS.map((k) => k.key);
-      expect(keys).not.toContain('DOCKER_HUB_USERNAME');
-      expect(keys).not.toContain('DOCKER_HUB_TOKEN');
+    it('classifies DOCKER_HUB_* as operator-secret with where: "operator shell" (never written to a file)', () => {
+      // Registered (operator config hygiene pass) so deploy's credential
+      // resolution (src/lib/deploy/docker-hub.js) and the registry-driven
+      // docs generator both derive from this registry — but `configure`'s
+      // Docker Hub row stays informational (run() returns {}), so these
+      // must never gain a `where` of '.env' or '.env.local'.
+      for (const key of ['DOCKER_HUB_USERNAME', 'DOCKER_HUB_TOKEN']) {
+        const entry = CONFIG_KEYS.find((k) => k.key === key);
+        expect(entry, `${key} missing from CONFIG_KEYS`).toBeDefined();
+        expect(entry.class).toBe('operator-secret');
+        expect(entry.where).toBe('operator shell');
+      }
     });
 
     it('isSecretKey treats operator-secret keys as secrets', () => {
@@ -192,6 +218,90 @@ describe('config-registry', () => {
       it('handles empty content', () => {
         expect(stripOperatorSecretLines('')).toBe('');
       });
+    });
+  });
+
+  describe('shape metadata', () => {
+    it('every entry has a kind, a where, and a scope', () => {
+      for (const e of CONFIG_KEYS) {
+        expect(e.kind, e.key).toBeTruthy();
+        expect(['.env.local', '.env', 'operator shell', 'tests/.env.e2e'], e.key).toContain(
+          e.where,
+        );
+        expect(e.scope, e.key).toMatch(/^[a-z]+(:[a-z]+)?$/);
+      }
+    });
+    it('every entry with a shape has a sample that satisfies it', () => {
+      for (const e of CONFIG_KEYS.filter((e) => e.shape)) {
+        expect(e.sample, `${e.key} needs a sample`).toBeTruthy();
+        expect(e.shape.describe, `${e.key} shape needs describe`).toBeTruthy();
+        if (e.shape.regex) expect(e.sample, e.key).toMatch(e.shape.regex);
+        if (e.shape.minLen) expect(e.sample.length, e.key).toBeGreaterThanOrEqual(e.shape.minLen);
+        if (e.shape.values) expect(e.shape.values, e.key).toContain(e.sample);
+      }
+    });
+    it('operator-secret entries live in .env.local or the operator shell', () => {
+      for (const e of CONFIG_KEYS.filter((e) => e.class === 'operator-secret')) {
+        expect(['.env.local', 'operator shell'], e.key).toContain(e.where);
+      }
+    });
+    it('registers the keys deploy reads outside configure', () => {
+      for (const k of [
+        'DOCKER_HUB_USERNAME',
+        'DOCKER_HUB_TOKEN',
+        'ALLOWED_SSH_IPS',
+        'HETZNER_STORAGE_REGION',
+        'DIGITALOCEAN_STORAGE_REGION',
+        'SCALEWAY_STORAGE_REGION',
+        'PULUMI_BACKEND_URL',
+        'ACME_CA_SERVER',
+      ]) {
+        expect(registryEntry(k), k).toBeDefined();
+      }
+    });
+    it('tight shapes exist only where the vendor documents the format', () => {
+      const tight = CONFIG_KEYS.filter((e) => e.shape?.regex)
+        .map((e) => e.key)
+        .sort();
+      expect(tight).toEqual([
+        'ACME_CA_SERVER',
+        'ALLOWED_SSH_IPS',
+        'DIGITALOCEAN_PROJECT_ID',
+        'DOCKER_HUB_TOKEN',
+        'GOOGLE_CLIENT_ID',
+        'GOOGLE_CLIENT_SECRET',
+        'HETZNER_API_TOKEN',
+        'MICROSOFT_TENANT_ID',
+        'POLAR_ACCESS_TOKEN',
+        'PULUMI_BACKEND_URL',
+        'SMTP_ADMIN_EMAIL',
+        'SMTP_PORT',
+        'STRIPE_SECRET_KEY',
+        'STRIPE_WEBHOOK_SECRET',
+      ]);
+    });
+    it('entriesForScopes selects by scope', () => {
+      const keys = entriesForScopes(['provider:hetzner'])
+        .map((e) => e.key)
+        .sort();
+      expect(keys).toEqual([
+        'HETZNER_ACCESS_KEY',
+        'HETZNER_API_TOKEN',
+        'HETZNER_SECRET_KEY',
+        'HETZNER_STORAGE_REGION',
+      ]);
+    });
+    it('existing derived views are unchanged by the metadata', () => {
+      expect(featureRuntimeKeys()).not.toContain('HETZNER_API_TOKEN');
+      expect(isOperatorKey('DOCKER_HUB_TOKEN')).toBe(true);
+      // ALLOWED_SSH_IPS is NOT operator-secret: `vibecarbon access` persists
+      // the allowlist to .vibecarbon.json, never via setEnvVar's `localOnly`
+      // (checked in src/access.js — it never touches an env file at all), so
+      // the flip condition doesn't apply. It ships in plain `.env` like any
+      // other runtime-config key (read by the CLI's operator-ip bootstrap and
+      // by the Pulumi IaC programs as a firewall-rule input, never a
+      // credential).
+      expect(isOperatorKey('ALLOWED_SSH_IPS')).toBe(false);
     });
   });
 });

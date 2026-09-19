@@ -127,8 +127,13 @@ describe('GOTRUE_MAILER_AUTOCONFIRM is operator-configurable with a safe default
 
   it('the config registry manages it under the smtp feature', () => {
     const registry = read('src/lib/config-registry.js');
+    // \s* between fields (not a literal space): the operator config hygiene
+    // pass added per-entry shape metadata (kind/shape/sample/where/scope),
+    // which pushes every entry over biome's 100-char line width — the
+    // formatter then breaks one property per line, same as every other
+    // entry in the array.
     expect(registry).toMatch(
-      /key: 'GOTRUE_MAILER_AUTOCONFIRM', class: 'runtime-config', feature: 'smtp'/,
+      /key: 'GOTRUE_MAILER_AUTOCONFIRM',\s*class: 'runtime-config',\s*feature: 'smtp',/,
     );
   });
 
