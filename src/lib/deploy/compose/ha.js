@@ -40,7 +40,7 @@ import {
   composeWalgAuditShell,
   WALG_AUDIT_PROBE_TIMEOUT_MS,
 } from '../walg-audit.js';
-import { composeDbRecreateShell, WALG_ROLE_ENV, walgRoleDegradedMessage } from '../walg-role.js';
+import { composeDbRecreateShell, composeRoleEnv, walgRoleDegradedMessage } from '../walg-role.js';
 import {
   exchangeAndBringUpTunnel,
   REPL_GATEWAY_PORT,
@@ -226,6 +226,26 @@ services:
 // deploy effects (write-replication-overlay) build the identical file set.
 export const REPL_COMPOSE_FLAGS =
   '-f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.replication.yml';
+
+/**
+ * Reconcile the `realtime` service to whatever `REALTIME_REPLICAS` the node's
+ * `.env` now says (composeRoleEnv, walg-role.js): at 1 it creates and starts
+ * the container, at 0 it removes it. Compose reads `deploy.replicas` at `up`
+ * time, so this is the step that makes a role swap reach Realtime — the
+ * standby is deployed with the container absent and promotion has to create it
+ * before the app-tier `docker restart` names `${project}-realtime`.
+ *
+ * REPL_COMPOSE_FLAGS, never bare `docker compose`: base + prod are the two
+ * files that define realtime (prod adds the fail-closed env and the resource
+ * limits), and the compose-invocation census bans the bare shape. `--no-deps`
+ * so a recreate of realtime never touches db or the rest of the tier.
+ *
+ * @param {string} remoteDir e.g. `/opt/<project>`
+ * @returns {string} a shell command, run over SSH
+ */
+export function composeRealtimeReconcileCmd(remoteDir) {
+  return `cd ${remoteDir} && docker compose ${REPL_COMPOSE_FLAGS} up -d --no-deps realtime 2>&1`;
+}
 
 /**
  * Configure the primary PostgreSQL server for streaming replication.
@@ -1280,9 +1300,15 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
   const remoteDir = `/opt/${projectName}`;
 
   try {
-    await mergeEnv(promotedIp, pinnedSshOptsString(sshKeyPath), remoteDir, {
-      [WALG_ROLE_ENV]: 'primary',
-    });
+    // composeRoleEnv: WALG_ROLE=primary AND REALTIME_REPLICAS=1 in one write.
+    // The Realtime half is consumed by the `up -d --no-deps realtime` the
+    // failover flow runs right after this (before the app-tier restart).
+    await mergeEnv(
+      promotedIp,
+      pinnedSshOptsString(sshKeyPath),
+      remoteDir,
+      composeRoleEnv('primary'),
+    );
     // 300s: a db container recreate plus the script's own 90s readiness wait,
     // with room for a slow image start on a node that is mid-incident.
     //
@@ -1345,9 +1371,15 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
   } = deps;
   const remoteDir = `/opt/${projectName}`;
   try {
-    await mergeEnv(oldPrimaryIp, pinnedSshOptsString(sshKeyPath), remoteDir, {
-      [WALG_ROLE_ENV]: 'standby',
-    });
+    // composeRoleEnv: WALG_ROLE=standby AND REALTIME_REPLICAS=0 in one write.
+    // The Realtime half is consumed by the `up -d --no-deps realtime` the
+    // failover flow runs once this demote has landed.
+    await mergeEnv(
+      oldPrimaryIp,
+      pinnedSshOptsString(sshKeyPath),
+      remoteDir,
+      composeRoleEnv('standby'),
+    );
     // Same single-attempt budget as the promote side — this is best-effort and
     // must never stretch the DR path (see restoreComposeWalgRole).
     await run(oldPrimaryIp, sshKeyPath, composeDbRecreateShell(remoteDir), {
@@ -1644,6 +1676,36 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     );
   }
 
+  // Step 1a4: Bring Realtime up on the promoted node. It was deployed as the
+  // standby with REALTIME_REPLICAS=0 (its boot migration cannot run against a
+  // hot-standby Postgres, so the container was never created — see
+  // composeRoleEnv). restoreComposeWalgRole just wrote REALTIME_REPLICAS=1
+  // into .env; this `up` is what reads it. MUST precede Step 1b: the app-tier
+  // `docker restart` names `${project}-realtime` by container name, and a
+  // name that does not exist fails the whole restart. Best-effort like its
+  // neighbours — sshRun answers `false`, it never throws.
+  s.start('Starting Realtime on the new primary');
+  const realtimeUp = await sshRun(
+    standbyServer.ip,
+    sshKeyPath,
+    composeRealtimeReconcileCmd(remoteDir),
+    { timeout: 180_000 },
+  );
+  if (realtimeUp === false) {
+    p.log.warn(
+      `Could not start Realtime on the new primary (${standbyServer.ip}); /realtime/v1 will be ` +
+        `down until \`vibecarbon deploy ${envName}\` reconciles the node (it re-renders ` +
+        `REALTIME_REPLICAS from the now-swapped roles).`,
+    );
+  } else {
+    p.log.info(`[realtime] started on new primary ${standbyServer.ip}`);
+  }
+  s.stop(
+    realtimeUp === false
+      ? 'Realtime NOT started on the new primary (continuing: see warning)'
+      : 'Realtime started on the new primary',
+  );
+
   // Step 1b: Restart app-tier services on the new primary so they re-pool
   // against the now-read-write DB. These services were started during deploy
   // while the local DB was in recovery — supavisor's tenant pools and the
@@ -1749,6 +1811,29 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     sshKeyPath,
     projectName,
   });
+  // Step 2b2: Remove Realtime from the demoted node. Step 2 already stopped
+  // the container; demoteComposeWalgRole just wrote REALTIME_REPLICAS=0, and
+  // at 0 this `up` removes it, so the retired node cannot crash-loop Realtime
+  // against a replica-backed database when it is later reseeded as the
+  // standby. GATED on the demote having landed: if the .env write did not
+  // reach the node its REALTIME_REPLICAS is still 1, and this same command
+  // would START the container Step 2 stopped for split-brain protection.
+  if (demoted) {
+    const realtimeDown = await sshRun(
+      primaryServer.ip,
+      sshKeyPath,
+      composeRealtimeReconcileCmd(remoteDir),
+      { timeout: 180_000 },
+    );
+    if (realtimeDown === false) {
+      p.log.warn(
+        `Could not remove Realtime from the demoted node (${primaryServer.ip}); it stays stopped ` +
+          `(Step 2) and \`vibecarbon deploy ${envName}\` converges it when the node is reseeded.`,
+      );
+    } else {
+      p.log.info(`[realtime] removed from demoted ${primaryServer.ip}`);
+    }
+  }
   // Step 2c: Disarm the retired node's ACME issuer — the swapped pair must
   // never run two armed solvers against one `_acme-challenge` TXT name (the
   // dual-solver clobbering class, acme-role.js). Best-effort for the same

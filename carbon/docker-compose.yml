@@ -391,6 +391,13 @@ services:
     image: supabase/realtime:v2.76.5
     container_name: ${PROJECT_NAME}-realtime
     restart: unless-stopped
+    # compose-ha holds this at 0 on the standby: Realtime migrates on boot and
+    # a hot-standby Postgres rejects the write (SQLSTATE 25006), so it would
+    # crash-loop until promotion. Failover flips it to 1 on the promoted node
+    # and back to 0 on the demoted one (composeRoleEnv, src/lib/deploy/
+    # walg-role.js). Non-HA deploys never set the variable.
+    deploy:
+      replicas: ${REALTIME_REPLICAS:-1}
     cap_drop:
       - ALL
     cap_add:

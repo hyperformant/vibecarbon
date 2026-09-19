@@ -181,15 +181,64 @@ describe('failoverComposeHA — standby already streaming', () => {
     // 33273372657/33276113128).
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
+    // REALTIME_REPLICAS rides the same write (composeRoleEnv): Realtime's
+    // boot migration cannot run against a hot-standby Postgres, so the
+    // standby holds it at 0 and promotion is what brings it to 1.
     expect(envMerges).toEqual([
-      { ip: '2.2.2.2', updates: { WALG_ROLE: 'primary' } },
+      { ip: '2.2.2.2', updates: { WALG_ROLE: 'primary', REALTIME_REPLICAS: '1' } },
       { ip: '2.2.2.2', updates: { ACME_DISARMED_CA_SERVER: '' } },
-      { ip: '1.1.1.1', updates: { WALG_ROLE: 'standby' } },
+      { ip: '1.1.1.1', updates: { WALG_ROLE: 'standby', REALTIME_REPLICAS: '0' } },
       {
         ip: '1.1.1.1',
         updates: { ACME_DISARMED_CA_SERVER: 'https://acme-disarmed.invalid/directory' },
       },
     ]);
+  });
+
+  // The standby was deployed with REALTIME_REPLICAS=0 (see composeRoleEnv), so
+  // the promoted node has NO realtime container when failover begins. The
+  // app-tier `docker restart` names `${project}-realtime` by container name;
+  // if nothing created it first, that restart fails on a name that does not
+  // exist and Realtime never comes up on the new primary.
+  it("starts Realtime on the promoted node (with the node's -f set) BEFORE the app-tier restart names it", async () => {
+    await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
+
+    const upIdx = sshCalls.findIndex(
+      (c) => c.ip === '2.2.2.2' && c.command.includes('up -d --no-deps realtime'),
+    );
+    const restartIdx = sshCalls.findIndex(
+      (c) => c.ip === '2.2.2.2' && c.command.includes('docker restart'),
+    );
+    expect(upIdx, 'realtime up on the promoted node missing').toBeGreaterThanOrEqual(0);
+    expect(restartIdx).toBeGreaterThan(upIdx);
+    // Never bare compose: `deploy.replicas` reads .env either way, but a bare
+    // `up` would resolve docker-compose.yml alone and drop the prod overlay's
+    // fail-closed env + resource limits from the recreated container.
+    expect(sshCalls[upIdx].command).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
+    expect(sshCalls[upIdx].command).toContain('docker-compose.replication.yml');
+    // The env merge that sets REALTIME_REPLICAS=1 has to land before the up
+    // reads it, or compose interpolates the deployed 0 and removes nothing.
+    const roleMergeBeforeUp = envMerges.findIndex(
+      (m) => m.ip === '2.2.2.2' && m.updates.REALTIME_REPLICAS === '1',
+    );
+    expect(roleMergeBeforeUp).toBeGreaterThanOrEqual(0);
+  });
+
+  it('removes Realtime from the demoted node AFTER its app tier is stopped', async () => {
+    await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
+
+    // `up -d --no-deps realtime` at REALTIME_REPLICAS=0 removes the (already
+    // stopped) container, so the retired node cannot crash-loop Realtime
+    // against its now-standby-role database when it comes back.
+    const stopIdx = sshCalls.findIndex(
+      (c) => c.ip === '1.1.1.1' && c.command.includes('docker stop myapp-app'),
+    );
+    const downIdx = sshCalls.findIndex(
+      (c) => c.ip === '1.1.1.1' && c.command.includes('up -d --no-deps realtime'),
+    );
+    expect(stopIdx).toBeGreaterThanOrEqual(0);
+    expect(downIdx).toBeGreaterThan(stopIdx);
+    expect(sshCalls[downIdx].command).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
   });
 
   it('gates failover completion on the domain serving trusted TLS (post-DNS-flip)', async () => {

@@ -57,6 +57,7 @@ import {
 } from '../compose/index.js';
 import { assertReplicationStreamingOrDegraded, verifyStreaming } from '../replication.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
+import { composeRoleEnv } from '../walg-role.js';
 import { WG_PRIMARY_IP, WG_STANDBY_IP } from '../wireguard.js';
 
 /** Shared service-opts object rebuilt from ctx (identical to the inline const). */
@@ -505,6 +506,11 @@ async function haSetupServerFiles(ctx) {
  * prefix on both nodes (so the standby can READ the primary's base backups);
  * WALG_ROLE=standby makes wal-archive.sh + compose-backup.sh no-op on the
  * standby so it never WRITES into the shared prefix (split-brain guard).
+ *
+ * REALTIME_REPLICAS rides the same write (composeRoleEnv): the standby holds
+ * Realtime at 0 because its boot migration cannot run against a hot-standby
+ * Postgres and would crash-loop for the life of the node. Failover's role swap
+ * is what brings it to 1 on the promoted node (compose/ha.js).
  */
 async function haMergeWalgRole(ctx) {
   const projectName = ctx.projectConfig.projectName;
@@ -521,11 +527,11 @@ async function haMergeWalgRole(ctx) {
   // interpolates the right caserver — no recreate needed at deploy time.
   await Promise.all([
     mergeRemoteDotenv(primary.ip, haSshOpts, haRemoteDir, {
-      WALG_ROLE: 'primary',
+      ...composeRoleEnv('primary'),
       [ACME_DISARM_ENV]: '',
     }),
     mergeRemoteDotenv(standby.ip, haSshOpts, haRemoteDir, {
-      WALG_ROLE: 'standby',
+      ...composeRoleEnv('standby'),
       [ACME_DISARM_ENV]: ACME_DISARMED_CA_SERVER,
     }),
   ]);
