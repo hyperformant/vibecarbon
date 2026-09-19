@@ -25,26 +25,24 @@ Users copy values between systems with an implicit contract on name, location, a
 
 ## Design
 
-### 1. Variable registry (`src/lib/operator-env/registry.js`)
+### 1. Variable registry (extend `src/lib/config-registry.js`)
 
-One declarative table, the single source of truth for name, owner, shape, and docs:
+`CONFIG_KEYS` already is the single source of truth for the 52 keys `configure` manages, classed `client-build` / `runtime-config` / `runtime-secret` / `operator-secret`, dependency-free, with coverage tests asserting every deploy path derives from it. The spec's registry is that table with per-entry shape metadata, not a second table:
 
 ```js
-export const OPERATOR_VARS = [
-  { name: 'HETZNER_API_TOKEN',   scope: 'provider:hetzner', kind: 'token',  shape: { regex: /^[A-Za-z0-9]{64}$/, describe: '64 alphanumeric characters' }, where: '.env.local' },
-  { name: 'HETZNER_ACCESS_KEY',  scope: 'provider:hetzner', kind: 'token',  shape: { minLen: 16 }, where: '.env.local' },
-  { name: 'HETZNER_SECRET_KEY',  scope: 'provider:hetzner', kind: 'secret', shape: { minLen: 16 }, where: '.env.local' },
-  { name: 'HETZNER_STORAGE_REGION', scope: 'provider:hetzner', kind: 'slug', shape: { regex: /^[a-z]{3}$/ , describe: 'a three-letter Hetzner location (fsn1, nbg1, hel1)' }, where: '.env.local', optional: true },
-  { name: 'CLOUDFLARE_API_TOKEN', scope: 'dns:cloudflare', kind: 'token', shape: { regex: /^[A-Za-z0-9_-]{40}$/, describe: '40-character API token (not the Global API Key)' }, where: '.env.local' },
-  { name: 'DOCKER_HUB_TOKEN',     scope: 'registry',        kind: 'token', shape: { regex: /^dckr_pat_[A-Za-z0-9_-]+$/, describe: 'a Docker Hub personal access token (dckr_pat_…)' }, where: 'operator shell' },
-  { name: 'ALLOWED_SSH_IPS',      scope: 'access',          kind: 'cidr-list', shape: { each: /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/, describe: 'comma-separated IPv4 CIDRs' }, where: '.env', optional: true },
-  // … one row per operator-facing variable; providers contribute their rows via a static on the Provider class so provider N+1 registers itself.
-];
+{ key: 'HETZNER_API_TOKEN', class: 'operator-secret', feature: 'providers',
+  kind: 'token', shape: { regex: /^[A-Za-z0-9]{64}$/, describe: '64 alphanumeric characters' }, sample: 'a'.repeat(64) },
+{ key: 'STRIPE_SECRET_KEY', class: 'runtime-secret', feature: 'billing',
+  kind: 'token', shape: { regex: /^sk_(live|test)_[A-Za-z0-9]+$/, describe: 'sk_live_… or sk_test_…' }, sample: 'sk_test_abc123' },
+{ key: 'LINODE_API_TOKEN', class: 'operator-secret', feature: 'providers',
+  kind: 'token', shape: { minLen: 16, describe: 'at least 16 characters' }, sample: 'x'.repeat(32) },
+{ key: 'SMTP_PORT', class: 'runtime-config', feature: 'smtp',
+  kind: 'port', shape: { describe: '1-65535' }, sample: '587' },
 ```
 
-Provider rows come from the provider class (`static OPERATOR_VARS = [...]`, next to the existing `TOKEN_ENV` / `OBJECT_STORAGE_ENV`), so the registry is assembled, not hand-listed, for the provider family. Shapes are deliberately loose where the vendor's format is undocumented (`minLen`), tight where it is public (Hetzner tokens, Docker PATs). A wrong tight shape is a bug we'd see immediately in CI; a loose one still catches quotes and newlines.
+`kind` ∈ `token | secret | id | slug | hostname | port | email | url | cidr-list | pem | enum | flag`; `shape` is tight only where the vendor documents the format (Brandon, 2026-09-19), `minLen` otherwise; `sample` is required for every entry with a shape and is what the census feeds through the validator. Keys the code reads but the registry lacks today, and which the census forces in: `DOCKER_HUB_USERNAME`, `DOCKER_HUB_TOKEN` (`^dckr_pat_`), `ALLOWED_SSH_IPS` (cidr-list), `HETZNER_STORAGE_REGION` / `DIGITALOCEAN_STORAGE_REGION` / `SCALEWAY_STORAGE_REGION` (slug), `PULUMI_BACKEND_URL` (url), `ACME_CA_SERVER` (url), and the e2e `VIBECARBON_LICENSE_PRIVATE_KEY` (pem, `scope: 'e2e'`, documented in `tests/.env.e2e.example`). Provider classes keep their `TOKEN_ENV` / `OBJECT_STORAGE_ENV` / `S3_REGION_ENV` statics; a census asserts every such static names a registry key.
 
-### 2. Normalizing reader (`src/lib/operator-env/read.js`)
+### 2. Normalizing reader (`src/lib/operator-env.js`)
 
 ```js
 export function readOperatorVar(name, { env = process.env, registry = OPERATOR_VARS } = {})
@@ -73,7 +71,7 @@ Set them in .env.local (never committed; see .env.example for each variable's fo
 `tests/unit/operator-env/census.test.ts` walks `src/**/*.js` and asserts, for every environment-variable read (`process.env.X`, `process.env[X]`, `getEnvValue('X')`, `Provider.*_ENV` statics):
 
 - If `X` is operator-facing (not in the explicit `RUNTIME_DETECTION` allowlist: `CI`, `GITHUB_ACTIONS`, `HOME`, `PATH`, `DEBUG`, `VITEST`, `DISPLAY`, …), then `X` has a registry row, and the read site goes through `readOperatorVar` (source-shape check, like the signing-key ingress census).
-- Every registry row's `name` appears in `carbon/.env.example` (or `tests/.env.e2e.example` for `scope: 'e2e'`) with a `# format:` comment line above it, and that comment mentions the same `describe` text as the shape (so the doc *is* the shape's prose, generated or compared).
+- Every registry entry is documented with a `# format: <describe>` line above it: `client-build` / `runtime-*` keys in `carbon/.env.example` (ships in the bundle), `operator-secret` keys in a new `carbon/.env.local.example` (the file `configure` actually writes; today those 19 keys plus Docker Hub, `ALLOWED_SSH_IPS`, storage regions, `PULUMI_BACKEND_URL`, `ACME_CA_SERVER` are documented nowhere in the template), `scope: 'e2e'` keys in `tests/.env.e2e.example`. The comment's prose must equal the entry's `describe`, so the doc *is* the shape.
 - Every `X=` in `.env.example` is either a registry row or a template-app variable read by `carbon/src` (walked the same way), so nothing documented is dead.
 
 A new variable that isn't registered fails the suite; a rename that leaves the example stale fails the suite; a shape whose prose drifts from its regex fails the suite. That is what the licence-key incident lacked.
