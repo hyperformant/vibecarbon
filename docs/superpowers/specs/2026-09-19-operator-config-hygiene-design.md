@@ -1,7 +1,7 @@
 # Operator configuration hygiene — design
 
 **Date:** 2026-09-19
-**Status:** draft for Brandon's review
+**Status:** approved 2026-09-19 (Brandon: loose shapes unless the vendor documents one; Configuration line pre-deploy; Phases 1 and 2 together)
 **Trigger:** the licence-signing-key incident (2026-09-19). One value, three silent drifts (name renamed at PR #103, location `.env` vs `.env.local`, encoding base64 vs PEM), docs describing only one of them, and a failure surfaced minutes later as an unrelated error. The CLI fix (`normalizePem`, accept either encoding) closed that instance. This spec closes the class for the values vibecarbon's users actually handle.
 
 ## Problem
@@ -20,7 +20,6 @@ Users copy values between systems with an implicit contract on name, location, a
 
 ## Non-goals
 
-- Validating values `configure` collects interactively (SMTP, OAuth, billing). Those prompts have their own validators; they're a later phase using the same registry.
 - Verifying credentials against the provider (an API call). Shape only; liveness stays where it is (provider preflight ping in e2e, first API call in deploy).
 - Changing where values live. `.env.local` (never leaves the machine) vs `.env` (ships in the server bundle) is a real distinction the existing `localOnly` machinery already enforces.
 
@@ -67,7 +66,7 @@ Configuration problems (nothing was provisioned):
 Set them in .env.local (never committed; see .env.example for each variable's format).
 ```
 
-**`status` advisory (soft).** The Local Development block already prints `▲ Access: no operator CIDRs configured …`. It gains a `Configuration` line per deployed environment's scopes: `Configuration ● ok` or `▲ HETZNER_API_TOKEN looks wrong …`. Same reader, same messages, no exit-code change. This is where a user sees a problem *before* they run deploy.
+**`status` advisory (soft).** The Local Development block already prints `▲ Access: no operator CIDRs configured …`. It gains a `Configuration` line for the project's configured provider (and each deployed environment's DNS/registry scopes), shown even before the first deploy: `Configuration ● ok` or `▲ HETZNER_API_TOKEN looks wrong …`. Same reader, same messages, no exit-code change. This is where a user sees a problem *before* they run deploy.
 
 ### 4. Census (the enumerable invariant)
 
@@ -79,10 +78,20 @@ Set them in .env.local (never committed; see .env.example for each variable's fo
 
 A new variable that isn't registered fails the suite; a rename that leaves the example stale fails the suite; a shape whose prose drifts from its regex fails the suite. That is what the licence-key incident lacked.
 
-### 5. Rollout
+### 5. Phase 2: `configure` values validated at the prompt
 
-- Phase 1 (this spec): registry + reader + preflight + status line + census, provider rows for Hetzner, DigitalOcean, Linode, Vultr, Scaleway, plus Cloudflare, Docker Hub, `ALLOWED_SSH_IPS`, `PULUMI_BACKEND_URL`, `ACME_CA_SERVER`. e2e example rows (`VIBECARBON_LICENSE_PRIVATE_KEY`, kind `pem`) so the harness benefits too.
-- Phase 2 (later spec): `configure`-collected values use the same registry rows at prompt time.
+`configure` collects ~25 values through two helpers, `promptText` and `promptSecret` (`src/configure.js:138-176`), whose only validation today is `requireNonEmpty`. Both helpers gain an optional `row` argument (a registry row); when present:
+
+- the entered value is normalized with the same reader as Phase 1 (`normalizeOperatorValue(raw, row)`: trim, strip matching quotes, strip `Bearer `), and
+- the shape is checked *inside* the clack `validate` callback, so the user sees `Stripe secret key looks wrong: expected sk_live_… or sk_test_…` and re-enters immediately, before anything is written.
+
+Registry rows for the `configure` family, tight only where the vendor documents the format: Stripe secret (`^sk_(live|test)_`), Stripe webhook secret (`^whsec_`), Resend (`^re_`), SendGrid (`^SG\.`), Postmark server token (UUID), Google client ID (`\.apps\.googleusercontent\.com$`), Google client secret (`^GOCSPX-`), Microsoft tenant ID (UUID), Polar access token (`^polar_`), Polar/Paddle price IDs and org IDs (`minLen` only), SMTP host (hostname), SMTP port (1-65535), sender address (email). These rows carry `scope: 'configure:<section>'` and `where: '.env'` (they ship in the server bundle) so Phase 1's preflight and `status` line also cover them once written.
+
+Phase 2 is why the registry, not the validators, is the source of truth: the same row validates at the prompt, at deploy preflight, and in `status`, and the census proves every `configure` prompt that writes an env var has a row.
+
+### 6. Rollout
+
+Phases 1 and 2 ship together (Brandon, 2026-09-19: catching a bad value at the prompt is the earliest possible point). Provider rows for Hetzner, DigitalOcean, Linode, Vultr, Scaleway (tight only for Hetzner's documented 64-char token; the others `minLen`); Cloudflare, Docker Hub, `ALLOWED_SSH_IPS`, `PULUMI_BACKEND_URL`, `ACME_CA_SERVER`; the `configure` family above; e2e rows (`VIBECARBON_LICENSE_PRIVATE_KEY`, kind `pem`).
 
 ## Error handling
 
@@ -94,8 +103,8 @@ A new variable that isn't registered fails the suite; a rename that leaves the e
 
 Unit: reader normalizations (each `fixed` kind, with and without the kind that permits it), shape messages (length hint, never the value), preflight aggregation, status line rendering. Census as above. Integration (`test:cli`): `deploy` with a token wrapped in quotes exits non-zero before any provider call with the expected message; `status` shows the advisory. e2e: unaffected; CI secrets are already the right shape.
 
-## Open questions for Brandon
+## Decisions (Brandon, 2026-09-19)
 
-1. Tight vs loose shapes for providers whose token formats aren't public (Linode, Vultr, Scaleway): loose (`minLen`) by default, tighten as we learn? (Recommended: yes.)
-2. Should `status` show the Configuration line even with no environments deployed (i.e. pre-first-deploy guidance)? (Recommended: yes, keyed on the project's configured provider.)
-3. Phase 2 timing.
+1. Shapes are tight only where the vendor documents the format; loose (`minLen`, no quotes/whitespace) otherwise.
+2. `status` shows the Configuration line even before the first deploy, keyed on the project's configured provider.
+3. Phases 1 and 2 ship together.
