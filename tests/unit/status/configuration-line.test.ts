@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { computeConfigurationCheck, formatConfigurationLines } from '../../../src/status.js';
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
@@ -75,8 +75,15 @@ describe('formatConfigurationLines', () => {
 // renders. Tested directly (not just through the integration harness) via
 // its injectable `{ env }`, using fake fixture values only.
 describe('computeConfigurationCheck', () => {
+  // Hermetic cwd: the deployed pass reads .env/.env.local from cwd, so a
+  // cwd-less call would depend on whatever sits at process.cwd().
+  let emptyCwd: string;
+  beforeEach(() => {
+    emptyCwd = mkdtempSync(join(tmpdir(), 'vc-status-empty-'));
+  });
+  afterEach(() => rmSync(emptyCwd, { recursive: true, force: true }));
   it('a fresh project (no environments, no config) checks only the always-known scopes and reports no problems', () => {
-    const { problems, checked } = computeConfigurationCheck({}, {}, { env: {} });
+    const { problems, checked } = computeConfigurationCheck({}, {}, { env: {}, cwd: emptyCwd });
     expect(problems).toEqual([]);
     // access/tls/state's optional keys — no provider is resolvable (no
     // environment, no projectConfig.provider, no deployMode anywhere) and
@@ -88,7 +95,7 @@ describe('computeConfigurationCheck', () => {
   });
 
   it('renders the fresh-project result as a plain "ok" line', () => {
-    const { problems, checked } = computeConfigurationCheck({}, {}, { env: {} });
+    const { problems, checked } = computeConfigurationCheck({}, {}, { env: {}, cwd: emptyCwd });
     const [line] = formatConfigurationLines(problems, checked).map(stripAnsi);
     expect(line).toMatch(/^Configuration ● ok {2}\(\d+ variables? checked\)$/);
   });
@@ -114,7 +121,7 @@ describe('computeConfigurationCheck', () => {
         prod: {},
         staging: { provider: 'digitalocean', dnsProvider: 'hetzner', deployMode: 'compose' },
       },
-      { env: { HETZNER_API_TOKEN: 'a'.repeat(20) } },
+      { env: { HETZNER_API_TOKEN: 'a'.repeat(20) }, cwd: emptyCwd },
     );
     const hetznerProblems = problems.filter((p) => p.startsWith('HETZNER_API_TOKEN'));
     expect(hetznerProblems).toHaveLength(1);
@@ -133,7 +140,7 @@ describe('computeConfigurationCheck', () => {
         prod: {},
         staging: { provider: 'digitalocean', dnsProvider: 'hetzner', deployMode: 'compose' },
       },
-      { env: {} },
+      { env: {}, cwd: emptyCwd },
     );
     expect(problems).toContain('HETZNER_API_TOKEN is not set');
   });
