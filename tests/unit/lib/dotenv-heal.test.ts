@@ -31,6 +31,16 @@ describe('healLegacyDotenvText', () => {
     expect(skipped).toEqual([{ key: 'PW', reason: expect.stringMatching(/single quote/) }]);
     expect(text).toBe(`PW='mix '\\'' and "'\n`);
   });
+  it('re-encodes a legacy value that starts or ends with a quote', () => {
+    // Old writer's escaping of "abc'" (trailing quote): 'abc'\\'''
+    const end = healLegacyDotenvText("PW='abc'\\'''\n");
+    expect(end.healed).toEqual(['PW']);
+    expect(end.text).toBe('PW="abc\'"\n');
+    // Old writer's escaping of "'abc" (leading quote): ''\\''abc'
+    const start = healLegacyDotenvText("PW=''\\''abc'\n");
+    expect(start.healed).toEqual(['PW']);
+    expect(start.text).toBe('PW="\'abc"\n');
+  });
   it('is a no-op on already-portable text', () => {
     const input = 'A=1\nB="x y"\nC=\'$z\'\n';
     expect(healLegacyDotenvText(input)).toEqual({ text: input, healed: [], skipped: [] });
