@@ -15,8 +15,9 @@ import { PROVIDERS, resolveProviderToken } from '../../../src/lib/providers/inde
  * Scope, stated plainly (M12, review 2026-09-19): this census covers
  * `process.env` reads ONLY. File-based reads of the same keys — the k8s
  * path's `envLocal?.X` / `loadEnvLocal(...)` over the project's `.env.local`,
- * `parseDotenv`-driven reads of `.env`, `getEnvValue(...)` in up.js/status.js
- * — are outside it and are NOT normalized by construction here. "Census
+ * every other `parseDotenv`-driven read of `.env`/`.env.local` (the one
+ * dotenv reader; census in dotenv-parsers-parity.test.ts), `getEnvValue(...)`
+ * in up.js — are outside it and are NOT normalized by construction here. "Census
  * green" therefore means "no raw process.env read of a registered key", not
  * "every read of a registered key is normalized". The file-based readers
  * that matter for operator values are `status`'s configure-family pass
@@ -65,7 +66,8 @@ import { PROVIDERS, resolveProviderToken } from '../../../src/lib/providers/inde
  *   - Comments: block comments (`/* … *\/`, inline or multi-line at line
  *     start) and `//`-led lines. A `process.env.X` mention inside a string
  *     on a code line IS still flagged — loud in the safe direction.
- *   - `getEnvValue('DEV_PORT_OFFSET')` and friends in up.js/status.js: those
+ *   - `getEnvValue('DEV_PORT_OFFSET')` in up.js and `getPortConfig` in
+ *     status.js: those
  *     read the .env FILE for dev-server ports, not `process.env`, and the
  *     DEV_* keys are create-time template values, not operator config.
  *     Deliberately out of scope.

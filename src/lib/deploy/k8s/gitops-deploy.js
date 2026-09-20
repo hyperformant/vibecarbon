@@ -33,6 +33,7 @@ import {
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
 import { deriveProjectBucketName } from '../../providers/s3-base.js';
+import { parseDotenv } from '../../shell.js';
 
 /**
  * Resolve the wal-g backup bucket for a gitops render: persisted names first
@@ -373,15 +374,18 @@ export function buildPerEnvSecrets(envLocal) {
   return { ...infra, ...features };
 }
 
+/**
+ * The project's `.env.local` as a plain object; `{}` when the file is absent
+ * (CI supplies the env another way, so a missing file is not an error here —
+ * unlike k3s.js's loadEnvLocal, which is the deploy path's precondition).
+ * Parsing is `parseDotenv` (src/lib/shell.js), the codebase's one dotenv
+ * reader — the local regex loop it replaces is on record in
+ * tests/unit/lib/dotenv-parsers-parity.test.ts.
+ * @param {string} projectDir
+ * @returns {Record<string, string>}
+ */
 function parseEnvLocal(projectDir) {
   const path = join(projectDir, '.env.local');
   if (!existsSync(path)) return {};
-  const out = {};
-  for (const line of readFileSync(path, 'utf-8').split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|(.*))\s*$/);
-    if (!m) continue;
-    const [, key, dq, sq, raw] = m;
-    out[key] = dq ?? sq ?? raw ?? '';
-  }
-  return out;
+  return parseDotenv(readFileSync(path, 'utf-8'));
 }

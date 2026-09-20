@@ -302,21 +302,24 @@ async function checkDockerContainers(projectName, deps = {}) {
   );
 }
 
+/**
+ * Dev-server ports from the FIRST of `.env.local`/`.env` that exists (not a
+ * per-key merge — unchanged from the regex reader this replaced, which also
+ * stopped at the first existing file). Parsing is `parseDotenv`, the
+ * codebase's one dotenv reader; an empty `KEY=` folds to the default via
+ * `||` exactly as the old regex's non-match did.
+ */
 function getPortConfig() {
   const defaults = { vite: 5173, api: 3000 };
   try {
     const envFiles = ['.env.local', '.env'];
     for (const file of envFiles) {
       if (existsSync(file)) {
-        const content = readFileSync(file, 'utf-8');
-        const getEnvValue = (key) => {
-          const match = content.match(new RegExp(`^${key}=["']?([^"'\\n]+)["']?`, 'm'));
-          return match ? match[1] : null;
-        };
+        const env = parseDotenv(readFileSync(file, 'utf-8'));
 
-        const portOffset = Number.parseInt(getEnvValue('DEV_PORT_OFFSET') || '0', 10);
-        const vitePort = getEnvValue('DEV_VITE_PORT') || String(5173 + portOffset);
-        const apiPort = getEnvValue('DEV_API_PORT') || String(3000 + portOffset);
+        const portOffset = Number.parseInt(env.DEV_PORT_OFFSET || '0', 10);
+        const vitePort = env.DEV_VITE_PORT || String(5173 + portOffset);
+        const apiPort = env.DEV_API_PORT || String(3000 + portOffset);
 
         return { vite: Number.parseInt(vitePort, 10), api: Number.parseInt(apiPort, 10) };
       }

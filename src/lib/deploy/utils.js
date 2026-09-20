@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { runCommand, runCommandAsync } from '../command.js';
 import { buildHostKeyOpts } from '../host-keys.js';
 import { getProviderClass } from '../providers/index.js';
-import { escapeDotenv } from '../shell.js';
+import { escapeDotenv, parseDotenv } from '../shell.js';
 import { scpWithRetry } from '../ssh.js';
 
 /**
@@ -109,6 +109,11 @@ export async function mergeRemoteDotenv(host, sshOpts, remoteDir, updates) {
         `Failed to pull ${remoteDir}/.env from ${host}, is the remote file present and SSH reachable? Underlying error: ${e?.message ?? e}`,
       );
     }
+    // Deliberately NOT parseDotenv: this is an in-place REWRITER, not a
+    // reader. Untouched lines (comments, blanks, key order) must ship back
+    // verbatim, which a parse-then-serialize cannot do; no value is read out
+    // of the file here. Allow-listed by exact line in
+    // tests/unit/lib/dotenv-parsers-parity.test.ts's census.
     const existing = readFileSync(local, 'utf-8').split('\n');
     const seen = new Set();
     const merged = existing.map((line) => {
@@ -164,9 +169,11 @@ export function generateSSHKeyPair(keyPath) {
 /**
  * Read REPL_PASSWORD — process.env first (CI may export it), then .env.local
  * (where `vibecarbon create` writes it at project-init time). Shared by the
- * compose-HA and k8s-HA replication paths so the parsing lives in one place.
- * Accepts both double-quoted (machine secrets) and single-quoted
- * (escapeDotenv'd user secrets) forms, matching create.js output.
+ * compose-HA and k8s-HA replication paths so the parsing lives in one place:
+ * `parseDotenv` (src/lib/shell.js), the codebase's one dotenv reader, which
+ * takes the double-quoted (machine secrets) and single-quoted (escapeDotenv'd
+ * user secrets) forms create.js writes — and, unlike the quoted-only regex
+ * pair this replaced, a bare value too (tests/unit/lib/dotenv-parsers-parity.test.ts).
  *
  * @param {string} [cwd] - directory to look for .env.local in
  * @returns {string|null} the password, or null if absent everywhere
@@ -175,10 +182,7 @@ export function readReplPassword(cwd = process.cwd()) {
   if (process.env.REPL_PASSWORD) return process.env.REPL_PASSWORD;
   const envLocalPath = join(cwd, '.env.local');
   if (!existsSync(envLocalPath)) return null;
-  const content = readFileSync(envLocalPath, 'utf-8');
-  const m =
-    content.match(/^REPL_PASSWORD="([^"]+)"/m) || content.match(/^REPL_PASSWORD='([^']+)'/m);
-  return m ? m[1] : null;
+  return parseDotenv(readFileSync(envLocalPath, 'utf-8')).REPL_PASSWORD || null;
 }
 
 /**

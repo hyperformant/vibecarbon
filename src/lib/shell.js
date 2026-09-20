@@ -66,6 +66,16 @@ export function unescapeDotenv(raw) {
  *     trimmed)
  *   - Blank lines, `#` comments, and non-`KEY=VALUE` lines (e.g.
  *     `export FOO=bar`) are ignored
+ *   - CRLF files read exactly like LF ones (`\r?\n` split). A `\r` left on
+ *     the line used to defeat the `KEY=(.*)$` match below (`.` excludes
+ *     `\r`), so a Windows-edited file parsed as EMPTY — see
+ *     tests/unit/lib/dotenv-parsers-parity.test.ts.
+ *
+ * THE dotenv reader for the whole codebase: every `.env*` file read in src/
+ * goes through here (census in dotenv-parsers-parity.test.ts). The only
+ * other line loops over env text are the two in-place REWRITERS
+ * (deploy/bundle.js, deploy/utils.js mergeRemoteDotenv), which must keep
+ * untouched lines verbatim and never read a value out.
  *
  * The single-quoted branch is a tiny state machine that handles the `'\''`
  * close-reopen escape AND literal backslashes (which are not escape
@@ -74,7 +84,7 @@ export function unescapeDotenv(raw) {
 export function parseDotenv(text) {
   const out = {};
   if (!text) return out;
-  const lines = String(text).split('\n');
+  const lines = String(text).split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!line || line.startsWith('#')) continue;
