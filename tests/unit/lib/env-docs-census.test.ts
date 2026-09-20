@@ -427,7 +427,11 @@ describe('env docs census — supporting files exist where expected', () => {
     expect(lines).not.toContain('.env.local.example');
     for (const pattern of lines) {
       if (!pattern.includes('*')) continue;
-      const re = new RegExp(`^${pattern.replace(/[.]/g, '\\.').replace(/\*/g, '[^/]*')}$`);
+      // Escape every regex metacharacter first (CodeQL js/incomplete-sanitization:
+      // a gitignore line may legally contain `+`, `?`, `(`, `\\` …), then turn the
+      // gitignore `*` (escaped to `\\*` by the previous step) into a path-segment glob.
+      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`^${escaped.replace(/\\\*/g, '[^/]*')}$`);
       expect(
         re.test('.env.local.example'),
         `${pattern} unexpectedly matches .env.local.example`,
