@@ -3,7 +3,7 @@
  * stubs needed for the basic shape, no cloud calls when status hits a
  * not-deployed env.
  */
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -93,5 +93,51 @@ describe('vibecarbon status', () => {
     );
     expect(json.environments.staging.checks).not.toHaveProperty('containers');
     expect(r.exitCode).toBe(0);
+  });
+
+  // Operator config hygiene: status's Configuration advisory runs the same
+  // shape checks Gate 1 (deploy.js) enforces before it will start
+  // provisioning — surfaced here as a passive read instead of a refusal,
+  // so a malformed credential on a DEPLOYED environment is visible without
+  // running `deploy`. Deployed (not merely configured) so the provider
+  // scope is checked WITH presence (a real problem), matching the same
+  // rule Gate 1 pins for its own scopes.
+  it('Configuration line reports a malformed operator credential on a deployed environment, never the value', () => {
+    destroyRealProject(project);
+    project = realProject({ envs: ['prod'] });
+
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.environments = {
+      prod: {
+        provider: 'hetzner',
+        deployMode: 'compose',
+        domain: 'prod.example.com',
+        status: 'deployed',
+      },
+    };
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    const fakeToken = 'a'.repeat(20);
+    appendFileSync(join(project, '.env.local'), `\nHETZNER_API_TOKEN="${fakeToken}"\n`);
+
+    const rendered = runCli('status', [], { cwd: project, timeoutMs: 30_000 });
+    assertSuccess(rendered);
+    expect(rendered.stdout).toMatch(/▲ Configuration: \d+ problems?/);
+    expect(rendered.stdout).toMatch(/HETZNER_API_TOKEN looks wrong/);
+    expect(rendered.stdout).not.toContain(fakeToken);
+
+    const json = runCli('status', ['-json'], { cwd: project, timeoutMs: 30_000 });
+    assertExitWith(json, 0);
+    const parsed = JSON.parse(json.stdout);
+    // localDev is null under -json (noLocal is forced true) — configuration
+    // is attached at the top level of the payload instead of nested under
+    // it, per the note in src/status.js.
+    expect(parsed.localDev).toBeNull();
+    expect(parsed.configuration.problems.some((p: string) => p.includes('HETZNER_API_TOKEN'))).toBe(
+      true,
+    );
+    expect(parsed.configuration.checked).toContain('HETZNER_API_TOKEN');
+    expect(JSON.stringify(parsed)).not.toContain(fakeToken);
   });
 });

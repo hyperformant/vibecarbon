@@ -21,6 +21,7 @@ import {
   getDnsProvider,
   hasAutomatedDns,
   operatorConfigForDns,
+  operatorScopesForProviderAndDns,
   resolveDnsToken,
 } from '../../../src/lib/dns-provider.js';
 import * as hetznerDnsModule from '../../../src/lib/hetzner-dns.js';
@@ -207,6 +208,44 @@ describe('operatorConfigForDns (the operator-env.js scopes/keys a deploy checks 
         keys: [DNS_PROVIDERS[id].tokenEnv],
       });
     }
+  });
+});
+
+describe('operatorScopesForProviderAndDns (shared Gate 1 / status derivation)', () => {
+  it('returns nothing for an unresolved provider (no scopes, no keys)', () => {
+    expect(operatorScopesForProviderAndDns(null, null)).toEqual({ scopes: [], keys: [] });
+    expect(operatorScopesForProviderAndDns(undefined, 'cloudflare')).toEqual({
+      scopes: [],
+      keys: [],
+    });
+  });
+
+  it('a resolved provider with no DNS pick: just its own provider scope', () => {
+    expect(operatorScopesForProviderAndDns('hetzner', null)).toEqual({
+      scopes: ['provider:hetzner'],
+      keys: [],
+    });
+  });
+
+  it('same-token DNS pick adds no extra scope or key', () => {
+    expect(operatorScopesForProviderAndDns('hetzner', 'hetzner')).toEqual({
+      scopes: ['provider:hetzner'],
+      keys: [],
+    });
+  });
+
+  it('no-compute-sibling DNS pick (cloudflare) adds its own dns:<id> scope', () => {
+    expect(operatorScopesForProviderAndDns('hetzner', 'cloudflare')).toEqual({
+      scopes: ['provider:hetzner', 'dns:cloudflare'],
+      keys: [],
+    });
+  });
+
+  it('cross-cloud native DNS pick adds the ONE tokenEnv key, not a whole scope', () => {
+    expect(operatorScopesForProviderAndDns('digitalocean', 'hetzner')).toEqual({
+      scopes: ['provider:digitalocean'],
+      keys: ['HETZNER_API_TOKEN'],
+    });
   });
 });
 

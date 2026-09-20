@@ -34,7 +34,7 @@ import {
   waitForSSH,
 } from './lib/deploy/utils.js';
 import { withDeployLog } from './lib/deploy-logger.js';
-import { operatorConfigForDns } from './lib/dns-provider.js';
+import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { resolveEnvSeed } from './lib/env-identity.js';
 import { ensureLockfile } from './lib/package-manager.js';
 import { buildGitAddArgv, detectPackageManager } from './lib/project.js';
@@ -330,15 +330,12 @@ async function main(values, positional) {
         args.provider ?? envConfig.provider ?? (envConfig.deployMode ? 'hetzner' : null);
       const dnsProvider = args.dnsProvider ?? envConfig.dnsProvider ?? null;
 
-      const scopes = ['access', 'tls', 'state'];
-      const keys = [];
-      if (providerId) scopes.push(`provider:${providerId}`);
+      const { scopes: providerDnsScopes, keys } = operatorScopesForProviderAndDns(
+        providerId,
+        dnsProvider,
+      );
+      const scopes = ['access', 'tls', 'state', ...providerDnsScopes];
       if (resolveDockerHubCreds()) scopes.push('registry');
-      if (dnsProvider && providerId) {
-        const dns = operatorConfigForDns(dnsProvider, providerId);
-        scopes.push(...dns.scopes);
-        keys.push(...dns.keys);
-      }
 
       assertOperatorConfig(scopes, { presence: false, keys });
     }

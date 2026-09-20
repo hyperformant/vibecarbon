@@ -417,6 +417,39 @@ export function operatorConfigForDns(dnsProvider, computeProviderId) {
 }
 
 /**
+ * The shared middle of every operator-config-hygiene gate that has ALREADY
+ * resolved a provider/DNS pair: "this provider's own scope, plus whatever
+ * its DNS backend needs" — `provider:<providerId>` (skipped when no
+ * provider is known yet) plus `operatorConfigForDns`'s scopes/keys (skipped
+ * when no DNS provider is known, or when `providerId` is absent — the
+ * cross-cloud/same-token logic above needs a compute provider to compare
+ * against).
+ *
+ * Extracted so Gate 1 (`src/deploy.js`, before `gatherDeploymentConfig`'s
+ * first network call) and `status`'s Configuration line (`src/status.js`)
+ * derive the exact same scopes/keys for the exact same provider+DNS pair
+ * instead of two hand-rolled copies of this `if` pair drifting apart.
+ * Callers still add their own always-known scopes (`access`/`tls`/`state`,
+ * `registry`) and pick their own `presence` — this only knows about the
+ * provider/DNS half.
+ *
+ * @param {string|null|undefined} providerId
+ * @param {string|null|undefined} dnsProvider
+ * @returns {{ scopes: string[], keys: string[] }}
+ */
+export function operatorScopesForProviderAndDns(providerId, dnsProvider) {
+  const scopes = [];
+  const keys = [];
+  if (providerId) scopes.push(`provider:${providerId}`);
+  if (dnsProvider && providerId) {
+    const dns = operatorConfigForDns(dnsProvider, providerId);
+    scopes.push(...dns.scopes);
+    keys.push(...dns.keys);
+  }
+  return { scopes, keys };
+}
+
+/**
  * Optional interactive guided-setup module for a DNS provider's token
  * (onboarding guide + live verification + save-to-.env.local offer).
  * Returns null when the row has none — callers fall back to a plain

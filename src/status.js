@@ -19,12 +19,14 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
+import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import {
   buildPrimaryLagQuery,
   buildStandbyReplayQuery,
   formatReplicationLagLine,
 } from './lib/deploy/replication.js';
-import { readOperatorVar } from './lib/operator-env.js';
+import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
+import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
@@ -654,6 +656,89 @@ function checkGitSync(envName, envConfig) {
 // ============================================================================
 
 /**
+ * Derive the operator-config scopes/keys `status`'s Configuration advisory
+ * checks — the same shape checks Gate 1 (`src/deploy.js`) enforces before a
+ * deploy, run here as a passive read instead of a refusal, so an operator
+ * sees a malformed credential before running `deploy` at all.
+ *
+ * Two presence tiers, not one: `access`/`tls`/`state`/`registry` and the
+ * PROJECT's configured provider (mirroring Gate 1's `?? 'hetzner'` default:
+ * the first environment's provider, else the project config's own
+ * `provider` field, else `hetzner` when any environment carries a
+ * `deployMode`) are shape-checked only (`presence: false`) — a fresh
+ * project with nothing configured yet must show `ok`, not a wall of
+ * "not set". A DEPLOYED environment's own provider + DNS scope/key are
+ * checked WITH presence (`presence: true`): a deployed environment whose
+ * token has since gone missing is a real problem, not "not configured
+ * yet". A scope already covered by a deployed environment is checked only
+ * once, under the stricter (presence: true) rule.
+ *
+ * @param {{provider?: string}|null|undefined} projectConfig
+ * @param {Record<string, {provider?: string, dnsProvider?: string, deployMode?: string}>} environments
+ * @returns {{ problems: string[], checked: string[] }}
+ */
+function computeConfigurationCheck(projectConfig, environments) {
+  const envEntries = Object.entries(environments || {});
+
+  const projectProviderId =
+    envEntries[0]?.[1]?.provider ??
+    projectConfig?.provider ??
+    (envEntries.some(([, cfg]) => cfg.deployMode) ? 'hetzner' : null);
+
+  const deployedScopes = new Set();
+  const deployedKeys = [];
+  for (const [, envConfig] of envEntries) {
+    const providerId = envConfig.provider ?? (envConfig.deployMode ? 'hetzner' : null);
+    const { scopes, keys } = operatorScopesForProviderAndDns(
+      providerId,
+      envConfig.dnsProvider ?? null,
+    );
+    for (const scope of scopes) deployedScopes.add(scope);
+    deployedKeys.push(...keys);
+  }
+
+  const baseScopes = ['access', 'tls', 'state'];
+  if (resolveDockerHubCreds()) baseScopes.push('registry');
+  if (projectProviderId && !deployedScopes.has(`provider:${projectProviderId}`)) {
+    baseScopes.push(`provider:${projectProviderId}`);
+  }
+
+  const shapeOnly = checkOperatorConfig(baseScopes, { presence: false });
+  const deployed =
+    deployedScopes.size > 0 || deployedKeys.length > 0
+      ? checkOperatorConfig([...deployedScopes], { presence: true, keys: deployedKeys })
+      : { problems: [], checked: [] };
+
+  return {
+    problems: [...shapeOnly.problems, ...deployed.problems],
+    checked: [...new Set([...shapeOnly.checked, ...deployed.checked])],
+  };
+}
+
+/**
+ * Render `computeConfigurationCheck`'s result as display lines — pure, so
+ * it is unit-testable without touching the filesystem or `process.env`.
+ * Never echoes a value: `problems` are the messages `checkOperatorConfig`
+ * already produced, which name a variable and its expected shape but never
+ * its content.
+ *
+ * @param {string[]} problems
+ * @param {string[]} checked
+ * @returns {string[]}
+ */
+function formatConfigurationLines(problems, checked) {
+  if (problems.length === 0) {
+    const n = checked.length;
+    return [c.success(`Configuration ● ok  (${n} variable${n === 1 ? '' : 's'} checked)`)];
+  }
+  const n = problems.length;
+  return [
+    c.warning(`▲ Configuration: ${n} problem${n === 1 ? '' : 's'}`),
+    ...problems.map((problem) => c.warning(`  - ${problem}`)),
+  ];
+}
+
+/**
  * Lines for the "Docker Services" section of the Local Development note.
  *
  * `done` rows (one-shot init containers that exited 0) are listed but
@@ -1276,6 +1361,19 @@ async function main(argv = []) {
     };
   });
 
+  // Operator config hygiene: the same shape checks Gate 1 (deploy.js)
+  // enforces before it will start provisioning, run here as a passive read
+  // (never a refusal) — shown even with no environments deployed (a fresh
+  // project still gets its always-known scopes checked). Computed
+  // unconditionally, independent of `-json`/TTY, so it lands in both output
+  // modes off the same values.
+  //
+  // JSON placement: `localDev` is null whenever `-json` is set (`noLocal`
+  // is forced true above), so nesting this under `allData.localDev` would
+  // mean it never actually appears there — it is attached directly to
+  // `allData` (top level of the `-json` payload) instead.
+  allData.configuration = computeConfigurationCheck(projectConfig, environments);
+
   // Output
   if (args.json) {
     console.log(JSON.stringify(allData, null, 2));
@@ -1299,6 +1397,18 @@ async function main(argv = []) {
     p.log.info(
       `Access: ${cidrs.length} CIDR${cidrs.length === 1 ? '' : 's'} in allowlist — see ${c.info('vibecarbon access')} for details.`,
     );
+  }
+
+  // Configuration advisory — same problems array Gate 1 would refuse a
+  // deploy over, never a value.
+  {
+    const { problems, checked } = allData.configuration;
+    const configLines = formatConfigurationLines(problems, checked);
+    if (problems.length === 0) {
+      p.log.info(configLines[0]);
+    } else {
+      p.log.warn(configLines.join('\n'));
+    }
   }
 
   // Local dev
@@ -1337,6 +1447,7 @@ export async function run(args) {
 export {
   checkDockerContainers,
   classifyContainer,
+  formatConfigurationLines,
   formatDockerServiceLines,
   formatHealthLines,
   formatServerLines,
