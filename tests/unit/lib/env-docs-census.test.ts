@@ -194,10 +194,17 @@ function readCarbonSrcSources(): string[] {
  * property access (carbon/src/server/lib/env.ts's exported `env` object), a
  * `{{KEY}}` create-time template placeholder (src/create.js's `variables`
  * substitution — e.g. Logo.tsx's `'{{PROJECT_DISPLAY_NAME}}'` default), a
- * zod schema property in env.ts, or a bare quoted 'KEY' literal (the
- * envFlag-style indirection in carbon/src/client/lib/admin-services.ts,
- * where the literal names the key and a separate line does the dynamic
+ * zod schema property in env.ts, or an `envFlag: 'KEY'` property (the ONE
+ * indirection in carbon/src/client/lib/admin-services.ts, where the literal
+ * names the key and a separate line does the dynamic
  * `import.meta.env[service.envFlag]` lookup).
+ *
+ * Deliberately NOT a read (M15, review 2026-09-19): a bare quoted `'KEY'`
+ * string literal anywhere. That earlier alternative made any key that
+ * happened to appear in a string — an error message, a docs page, a test
+ * fixture — count as consumed, which is exactly the false "still read"
+ * signal this reverse check exists to reject. Only the env object's own
+ * access forms, the zod key list and the one named indirection count.
  */
 function readByCarbonSrc(key: string, sources: string[]): boolean {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -208,12 +215,30 @@ function readByCarbonSrc(key: string, sources: string[]): boolean {
       `|import\\.meta\\.env\\[['"]${escaped}['"]\\]` +
       `|\\benv\\.${escaped}\\b` +
       `|\\{\\{${escaped}\\}\\}` +
-      `|['"]${escaped}['"]` +
+      `|\\benvFlag\\s*:\\s*['"]${escaped}['"]` +
       `|^\\s*${escaped}\\s*:\\s*z\\.)`,
     'm',
   );
   return sources.some((src) => re.test(src));
 }
+
+describe('readByCarbonSrc — a bare quoted key in a string is not a read (M15)', () => {
+  it('counts only env-object access forms, the zod key list and the envFlag indirection', () => {
+    expect(readByCarbonSrc('FOO_KEY', ['const x = process.env.FOO_KEY;'])).toBe(true);
+    expect(readByCarbonSrc('FOO_KEY', ["const x = process.env['FOO_KEY'];"])).toBe(true);
+    expect(readByCarbonSrc('FOO_KEY', ['const x = import.meta.env.FOO_KEY;'])).toBe(true);
+    expect(readByCarbonSrc('FOO_KEY', ['if (env.FOO_KEY) {}'])).toBe(true);
+    expect(readByCarbonSrc('FOO_KEY', ["  envFlag: 'FOO_KEY',"])).toBe(true);
+    expect(readByCarbonSrc('FOO_KEY', ['  FOO_KEY: z.string().optional(),'])).toBe(true);
+    expect(readByCarbonSrc('FOO_KEY', ["title: '{{FOO_KEY}}'"])).toBe(true);
+
+    // The false positives the narrowing removes.
+    expect(readByCarbonSrc('FOO_KEY', ["throw new Error('FOO_KEY is required');"])).toBe(false);
+    expect(readByCarbonSrc('FOO_KEY', ["const doc = 'set FOO_KEY in .env';"])).toBe(false);
+    expect(readByCarbonSrc('FOO_KEY', ["const k = 'FOO_KEY';"])).toBe(false);
+    expect(readByCarbonSrc('FOO_KEY', ['const x = env.FOO_KEY_SUFFIX;'])).toBe(false);
+  });
+});
 
 /** All `carbon/docker-compose*.yml` files, plus the one module compose file that lives outside carbon/ (observability). */
 function composeSources(): string[] {
@@ -364,6 +389,27 @@ describe('env docs census — reverse: every documented key is a registry entry 
 describe('env docs census — supporting files exist where expected', () => {
   it('carbon/.env.local.example exists (the .env.local docs counterpart)', () => {
     expect(() => readFileSync(join(ROOT, 'carbon/.env.local.example'), 'utf-8')).not.toThrow();
+  });
+
+  it('carbon/.env.local.example opens with the do-not-copy warning (A9: create writes real secrets into .env.local)', () => {
+    // `vibecarbon create` writes the generated infra secrets (JWT_SECRET,
+    // POSTGRES_PASSWORD, ...) into .env.local; a `cp .env.local.example
+    // .env.local` — the reflex every other .example file invites — would
+    // wipe them, and nothing can regenerate them for a running database.
+    // The warning must be the FIRST thing under the banner, before any
+    // sentence that describes the file as ".example counterpart".
+    const lines = readFileSync(join(ROOT, 'carbon/.env.local.example'), 'utf-8').split('\n');
+    const firstProse = lines.findIndex((l, i) => i >= 3 && l.startsWith('# ') && !/^# =+$/.test(l));
+    expect(firstProse).toBeGreaterThan(0);
+    expect(lines[firstProse]).toMatch(/^# DO NOT copy this file over \.env\.local/);
+    const header = lines.slice(0, 40).join('\n');
+    // (Wrapped at 80 columns, hence the tolerant join.)
+    expect(header).toMatch(/Append the keys you need, or run\s+(# )?`vibecarbon configure`\./);
+    // The header may no longer claim every documented key stays off the
+    // server unqualified — ACME_CA_SERVER moved to .env.example (A1) and the
+    // sentence has to scope itself to THESE keys.
+    expect(header).not.toMatch(/none of them are ever written to a deployed server/);
+    expect(header).toMatch(/VIBECARBON_SKIP_CONFIG_SHAPES=1/);
   });
 
   it('carbon/_gitignore does not ignore .env.local.example', () => {

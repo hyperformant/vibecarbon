@@ -7,9 +7,23 @@ import { DNS_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { PROVIDERS, resolveProviderToken } from '../../../src/lib/providers/index.js';
 
 /**
- * Census: every read of a REGISTERED operator key goes through
- * `readOperatorVar()` (src/lib/operator-env.js), never a raw `process.env`
- * access — and every operator-facing key that IS read has a registry row.
+ * Census: every read of a REGISTERED operator key FROM `process.env` goes
+ * through `readOperatorVar()` (src/lib/operator-env.js), never a raw
+ * `process.env` access — and every operator-facing key that IS read has a
+ * registry row.
+ *
+ * Scope, stated plainly (M12, review 2026-09-19): this census covers
+ * `process.env` reads ONLY. File-based reads of the same keys — the k8s
+ * path's `envLocal?.X` / `loadEnvLocal(...)` over the project's `.env.local`,
+ * `parseDotenv`-driven reads of `.env`, `getEnvValue(...)` in up.js/status.js
+ * — are outside it and are NOT normalized by construction here. "Census
+ * green" therefore means "no raw process.env read of a registered key", not
+ * "every read of a registered key is normalized". The file-based readers
+ * that matter for operator values are `status`'s configure-family pass
+ * (src/status.js computeConfigurationCheck, which validates what it reads)
+ * and the k8s `.env.local` reads in src/lib/deploy/k8s/k3s.js (which do
+ * not); anything new that reads a registered key from a FILE should route
+ * the value through `normalizeOperatorValue`/`validateOperatorValue` itself.
  *
  * Why: `readOperatorVar` is where a pasted token loses its trailing newline,
  * its surrounding quotes and its stray `Bearer ` prefix, and where a wrong
