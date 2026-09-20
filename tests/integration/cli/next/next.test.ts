@@ -1,10 +1,10 @@
 /**
- * vibecarbon ? / vibecarbon next — the "what's next" guide.
+ * vibecarbon ? / vibecarbon next, the "what's next" guide.
  *
  * The harness spawns the CLI with piped stdin, so `process.stdin.isTTY` is
  * always false in these runs: every case here exercises the off-TTY,
  * print-only branch (src/next.js never prompts or launches a child when it
- * isn't interactive). That keeps the whole suite hermetic — no clack input
+ * isn't interactive). That keeps the whole suite hermetic, no clack input
  * to script, no child process to stub beyond docker.
  */
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
