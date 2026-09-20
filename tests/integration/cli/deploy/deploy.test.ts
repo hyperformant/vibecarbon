@@ -7,7 +7,7 @@
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertExitWith,
   assertSuccess,
@@ -210,6 +210,51 @@ describe('vibecarbon deploy', () => {
     assertExitWith(r, 1, /ACME_CA_SERVER/);
 
     const out = `${r.stdout}\n${r.stderr}`;
+    if (out.includes(FETCH_TRIPWIRE_SENTINEL)) {
+      throw new Error(`deploy made a network call before the config gate:\n${out}`);
+    }
+    for (const marker of PAST_GATE_1) {
+      if (out.includes(marker)) {
+        throw new Error(`deploy ran past Gate 1 ("${marker}" printed):\n${out}`);
+      }
+    }
+  });
+
+  // Review residual (PR #112): ACME_CA_SERVER is `where: '.env'` — the copy
+  // the deployed server reads lives in the project FILE, and
+  // bootstrapOperatorEnv never folds runtime-config into process.env, so a
+  // shell-only Gate 1 could never see the copy that ships. Gate 1 now checks
+  // the merged .env/.env.local alongside the shell (operatorCheckEnvs); a
+  // VALID shell value must not mask the bad file value.
+  it("Gate 1 refuses a malformed ACME_CA_SERVER stored in the project's .env, even with a valid shell value", () => {
+    const configPath = join(project, '.vibecarbon.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    config.environments = {
+      prod: {
+        provider: 'hetzner',
+        deployMode: 'compose',
+        region: 'nbg1',
+        domain: 'prod.example.com',
+        status: 'deployed',
+      },
+    };
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    appendFileSync(join(project, '.env'), '\nACME_CA_SERVER=not-a-url\n');
+
+    const r = runCli('deploy', ['prod', '-y'], {
+      cwd: project,
+      timeoutMs: 20_000,
+      env: {
+        NODE_OPTIONS: `--import=${FETCH_TRIPWIRE}`,
+        ACME_CA_SERVER: 'https://acme-staging-v02.api.letsencrypt.org/directory',
+      },
+    });
+
+    assertExitWith(r, 1, 'Configuration problems (nothing was provisioned):');
+    assertExitWith(r, 1, /ACME_CA_SERVER looks wrong/);
+
+    const out = `${r.stdout}\n${r.stderr}`;
+    expect(out).not.toContain('not-a-url');
     if (out.includes(FETCH_TRIPWIRE_SENTINEL)) {
       throw new Error(`deploy made a network call before the config gate:\n${out}`);
     }

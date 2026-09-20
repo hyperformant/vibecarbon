@@ -31,7 +31,7 @@ import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
-import { checkDeployPrerequisites } from './preflight.js';
+import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
 
@@ -307,6 +307,11 @@ export async function executeDeployment(args, gatheredConfig) {
   // actually attempt the dockerhub-login step (mirrors plan/steps.js's own
   // `when: (ctx) => !!ctx.dockerHubCreds` gate) — absent creds fall back to
   // an anonymous pull and never touch this scope.
+  //
+  // `env: operatorCheckEnvs(process.cwd())` — the project's `.env`/`.env.local`
+  // are checked alongside the shell for the keys stored there (ACME_CA_SERVER,
+  // ALLOWED_SSH_IPS, the provider tokens); the file is what the bundle ships,
+  // so its problem wins when both copies are bad. See preflight.js.
   const operatorScopes = ['access', 'tls', 'state', `provider:${providerIdFor(config)}`];
   const dnsOperatorConfig = operatorConfigForDns(dnsProvider, providerIdFor(config));
   operatorScopes.push(...dnsOperatorConfig.scopes);
@@ -317,6 +322,7 @@ export async function executeDeployment(args, gatheredConfig) {
     ProviderClass: providerFor(config),
     operatorScopes,
     operatorKeys: dnsOperatorConfig.keys,
+    env: operatorCheckEnvs(process.cwd()),
   });
   assertTierSupported(providerFor(config), tier);
 

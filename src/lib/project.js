@@ -156,6 +156,31 @@ export function loadEnvVariables(cwd = process.cwd()) {
 }
 
 /**
+ * The project's `.env` with `.env.local` layered over it — the same
+ * precedence the running app sees — as a plain key/value bag. Both files go
+ * through the one dotenv parser (`parseDotenv`; `loadEnvVariables` is that
+ * parser applied to `.env.local`) — this is a read of the SAME files
+ * `findEnvDrift` below compares, not a new parser. A missing file
+ * contributes nothing; a line the parser can't read is skipped (parseDotenv
+ * never throws).
+ *
+ * Callers use it to CHECK stored values, never to print them: `status`'s
+ * configure-family pass and, via `operatorCheckEnvs` (deploy/preflight.js),
+ * the file-aware access/tls/state checks in Gate 1, the orchestrator gate
+ * and `status`'s base pass — `where: '.env'` keys like ACME_CA_SERVER live
+ * only here (bootstrapOperatorEnv never folds runtime-config into
+ * process.env), so a shell-only check could never see the copy that ships.
+ *
+ * @param {string} [cwd] - project directory (defaults to process.cwd())
+ * @returns {Record<string, string>}
+ */
+export function readProjectEnvFiles(cwd = process.cwd()) {
+  const envPath = join(cwd, '.env');
+  const base = existsSync(envPath) ? parseDotenv(readFileSync(envPath, 'utf-8')) : {};
+  return { ...base, ...loadEnvVariables(cwd) };
+}
+
+/**
  * Find runtime env keys that would silently miss a deploy: set (non-empty)
  * in `.env.local` but empty or absent in `.env`.
  *

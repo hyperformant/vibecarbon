@@ -22,7 +22,7 @@ import {
   setupGitHubIntegration,
 } from './lib/deploy/github.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
-import { assertOperatorConfig } from './lib/deploy/preflight.js';
+import { assertOperatorConfig, operatorCheckEnvs } from './lib/deploy/preflight.js';
 import { gatherDeploymentConfig, resolveDeployMode } from './lib/deploy/prompts.js';
 // New modular imports
 import {
@@ -321,6 +321,14 @@ async function main(values, positional) {
   // false` defers that judgment to the code that already makes it correctly.
   // A malformed value has no such ambiguity — it's wrong regardless of tier
   // or payment status, so it still refuses here, before anything else runs.
+  //
+  // FILE-AWARE (review residual, PR #112): access/tls/state keys are stored
+  // in the project's `.env`/`.env.local` (`where` in config-registry.js) —
+  // ACME_CA_SERVER's shipping copy is the FILE's, and bootstrapOperatorEnv
+  // never folds runtime-config into process.env — so the gate checks the
+  // merged files alongside the shell (`operatorCheckEnvs`: file's problem
+  // first, one line per key; a valid shell value never masks a bad file
+  // value). `operator shell` keys (registry) stay shell-only.
   {
     const projectConfig = loadProjectConfig();
     if (projectConfig) {
@@ -337,7 +345,11 @@ async function main(values, positional) {
       const scopes = ['access', 'tls', 'state', ...providerDnsScopes];
       if (resolveDockerHubCreds()) scopes.push('registry');
 
-      assertOperatorConfig(scopes, { presence: false, keys });
+      assertOperatorConfig(scopes, {
+        env: operatorCheckEnvs(process.cwd()),
+        presence: false,
+        keys,
+      });
     }
   }
 

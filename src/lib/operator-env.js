@@ -250,8 +250,28 @@ export function readOperatorVar(key, { env = process.env } = {}) {
  * wrongly demand ITS S3/object-storage keys too. A key already covered by
  * `scopes` is not checked twice.
  *
+ * `env` is one bag, or an ARRAY of them checked in order — the file-aware
+ * shape (review residual, PR #112). Each element is either a plain bag
+ * (applies to every entry) or `{ values, where }` (applies only to entries
+ * whose registry `where` is listed — how the project's merged
+ * `.env`/`.env.local` is checked for `.env`/`.env.local`-stored keys and
+ * never for `operator shell` ones; `operatorCheckEnvs` in deploy/preflight.js
+ * builds the canonical `[fileEnv, shellEnv]` pair). Per entry, every
+ * applicable env is read and the results merge BY KEY, one problem at most:
+ *   - a SHAPE problem ("looks wrong") from any env is reported; when more
+ *     than one env has one, the earliest env's message wins (file first —
+ *     the file is what ships);
+ *   - a PRESENCE problem ("is not set") stands only when the key is absent
+ *     from EVERY applicable env — a CI run that exports a provider token
+ *     without a `.env.local` on disk is not "not set" — and is then subject
+ *     to `presence` as before.
+ * A single plain bag is exactly the pre-array behaviour.
+ *
+ * @typedef {Record<string, string | undefined>} EnvBag
+ * @typedef {{ values: EnvBag, where?: import('./config-registry.js').ConfigWhere[] }} ScopedEnv
+ *
  * @param {Iterable<string>} scopes
- * @param {{ env?: Record<string, string | undefined>, presence?: boolean, keys?: string[] }} [opts]
+ * @param {{ env?: EnvBag | Array<EnvBag | ScopedEnv>, presence?: boolean, keys?: string[] }} [opts]
  * @returns {{ problems: string[], checked: string[] }}
  */
 export function checkOperatorConfig(
@@ -269,15 +289,36 @@ export function checkOperatorConfig(
     }
   }
 
+  /** @type {ScopedEnv[]} */
+  const envs = (Array.isArray(env) ? env : [env]).map((e) =>
+    e && typeof e === 'object' && 'values' in e && typeof e.values === 'object'
+      ? /** @type {ScopedEnv} */ (e)
+      : { values: /** @type {EnvBag} */ (e) },
+  );
+
   const problems = [];
   const checked = [];
 
   for (const entry of entries) {
     checked.push(entry.key);
-    const { value, problem } = readOperatorVar(entry.key, { env });
-    if (!problem) continue;
-    if (!presence && value === null) continue; // absent, not malformed — tolerated
-    problems.push(problem);
+    const reads = envs
+      .filter((e) => !e.where || e.where.includes(entry.where))
+      .map((e) => readOperatorVar(entry.key, { env: e.values }));
+    if (reads.length === 0) continue; // nothing applicable to read it from
+
+    // A shape failure always carries a non-empty `value` (readOperatorVar);
+    // `value === null` is exactly "raw was empty/absent".
+    const shape = reads.find((r) => r.problem && r.value !== null);
+    if (shape) {
+      problems.push(shape.problem);
+      continue;
+    }
+    const absentEverywhere = reads.every((r) => r.value === null);
+    if (!absentEverywhere) continue; // present and well-formed somewhere
+    const missing = reads[0].problem; // null for an optional entry
+    if (!missing) continue;
+    if (!presence) continue; // absent, not malformed — tolerated
+    problems.push(missing);
   }
 
   return { problems, checked };

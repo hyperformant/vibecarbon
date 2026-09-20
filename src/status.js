@@ -13,7 +13,6 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -21,6 +20,7 @@ import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
+import { operatorCheckEnvs } from './lib/deploy/preflight.js';
 import {
   buildPrimaryLagQuery,
   buildStandbyReplayQuery,
@@ -28,7 +28,7 @@ import {
 } from './lib/deploy/replication.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
-import { loadEnvVariables, parseDotenv } from './lib/project.js';
+import { parseDotenv, readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
@@ -742,7 +742,15 @@ function computeConfigurationCheck(projectConfig, environments, { env, cwd } = {
     baseScopes.push(`provider:${projectProviderId}`);
   }
 
-  const shapeOnly = checkOperatorConfig(baseScopes, { presence: false, env });
+  // File-aware (review residual, PR #112): access/tls/state keys are
+  // `where: '.env'`/`.env.local` and the shipping copy is the file's, so the
+  // base pass checks the merged files alongside the shell — the same
+  // `operatorCheckEnvs` pair Gate 1 and the orchestrator gate use; file's
+  // problem first, `operator shell` keys (registry) shell-only.
+  const shapeOnly = checkOperatorConfig(baseScopes, {
+    presence: false,
+    env: operatorCheckEnvs(cwd ?? process.cwd(), env),
+  });
   const deployed =
     deployedScopes.size > 0 || deployedKeys.length > 0
       ? checkOperatorConfig([...deployedScopes], { presence: true, keys: deployedKeys, env })
@@ -768,30 +776,13 @@ function computeConfigurationCheck(projectConfig, environments, { env, cwd } = {
 
 /**
  * The registry scopes `configure` writes to the project's env files — the
- * ones `computeConfigurationCheck`'s file-based pass reads. Operator scopes
- * (provider:<id>, dns:<id>, registry, state, access, tls) are deliberately absent: those
- * are checked against process.env above, which is where deploy reads them.
+ * ones `computeConfigurationCheck`'s configure-family pass reads (files
+ * only, via `readProjectEnvFiles` from project.js). Operator scopes
+ * (provider:<id>, dns:<id>, registry, state, access, tls) are deliberately
+ * absent: those belong to the base/deployed passes above, which check the
+ * shell and — for the `.env`/`.env.local`-stored keys — the same files.
  */
 const CONFIGURE_FAMILY_SCOPES = ['billing', 'oauth', 'smtp', 'analytics', 'landing'];
-
-/**
- * The project's `.env` with `.env.local` layered over it — the same
- * precedence the running app sees — as a plain key/value bag for
- * `checkOperatorConfig`'s injectable `env`. Both files go through the one
- * dotenv parser this codebase has (`parseDotenv`, shell.js, re-exported by
- * project.js; `loadEnvVariables` is that parser applied to `.env.local`) —
- * this is a read of the SAME files `findEnvDrift` (project.js) compares, not
- * a new parser. A missing file contributes nothing; a line the parser can't
- * read is skipped (parseDotenv never throws). Values are returned only to be
- * shape-checked — nothing here is printed.
- * @param {string} cwd
- * @returns {Record<string, string>}
- */
-function readProjectEnvFiles(cwd) {
-  const envPath = join(cwd, '.env');
-  const base = existsSync(envPath) ? parseDotenv(readFileSync(envPath, 'utf-8')) : {};
-  return { ...base, ...loadEnvVariables(cwd) };
-}
 
 /**
  * Render `computeConfigurationCheck`'s result as display lines — pure, so

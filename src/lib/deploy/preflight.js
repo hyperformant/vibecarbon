@@ -1,5 +1,6 @@
 import { checkDependency, runCommand } from '../command.js';
 import { checkOperatorConfig } from '../operator-env.js';
+import { readProjectEnvFiles } from '../project.js';
 
 /**
  * The Pulumi release that taught the DIY S3 backend to accept
@@ -103,6 +104,50 @@ const SKIP_CONFIG_SHAPES_HINT =
   'Set VIBECARBON_SKIP_CONFIG_SHAPES=1 to downgrade shape problems to warnings if a provider changed its token format.';
 
 /**
+ * What `checkOperatorConfig` accepts as `env`: one bag, or the ordered array
+ * (`operatorCheckEnvs`'s `[fileEnv, shellEnv]`) whose elements may carry a
+ * `where` restriction — see checkOperatorConfig's doc in operator-env.js.
+ * @typedef {Record<string, string|undefined>} EnvBag
+ * @typedef {{ values: EnvBag, where?: import('../config-registry.js').ConfigWhere[] }} ScopedEnv
+ * @typedef {EnvBag | Array<EnvBag | ScopedEnv>} CheckEnv
+ */
+
+/**
+ * The registry `where`s whose values live in the project's env files —
+ * the entries the file half of `operatorCheckEnvs` is allowed to check.
+ * `operator shell` (Docker Hub) and `tests/.env.e2e` are deliberately not
+ * here: deploy never reads those from a project file.
+ * @type {import('../config-registry.js').ConfigWhere[]}
+ */
+const PROJECT_FILE_WHERES = ['.env', '.env.local'];
+
+/**
+ * The env pair every file-aware operator-config gate checks:
+ * `[fileEnv, shellEnv]` — the project's merged `.env`/`.env.local`
+ * (`readProjectEnvFiles`, `.env.local` over `.env`) scoped to entries stored
+ * in those files, then the shell. Review residual (PR #112): `ACME_CA_SERVER`
+ * and `ALLOWED_SSH_IPS` are `where: '.env'` — the value the deployed server
+ * reads lives in the FILE and `bootstrapOperatorEnv` never folds
+ * runtime-config into process.env, so a shell-only gate could never see the
+ * copy that ships. `checkOperatorConfig` merges the two by key, file first;
+ * see its doc for the presence rule (a key exported in the shell but absent
+ * from the file is not "not set" — CI keeps working).
+ *
+ * Built here, not in operator-env.js, because that module is deliberately
+ * dependency-free (registry + node builtins only) and this needs project.js.
+ * Wired at Gate 1 (deploy.js), the orchestrator gate
+ * (checkDeployPrerequisites via orchestrator.js) and `status`'s base pass.
+ *
+ * @param {string} cwd - the project directory whose env files to read
+ * @param {Record<string, string|undefined>} [env] - the shell env (injectable
+ *   for testing; defaults to `process.env`)
+ * @returns {[ScopedEnv, EnvBag]}
+ */
+export function operatorCheckEnvs(cwd, env = process.env) {
+  return [{ values: readProjectEnvFiles(cwd), where: [...PROJECT_FILE_WHERES] }, env];
+}
+
+/**
  * Throw the canonical "Configuration problems" refusal for every malformed
  * (or, under `presence: true`, missing) operator-config value in `scopes` +
  * `keys` — the one place this message is built, so every call site (the
@@ -110,8 +155,11 @@ const SKIP_CONFIG_SHAPES_HINT =
  * `gatherDeploymentConfig` itself, and `checkDeployPrerequisites` below)
  * prints byte-identical output. A no-op when nothing is wrong.
  *
- * `presence`/`keys` are forwarded verbatim to `checkOperatorConfig` — see
- * its doc for what each means. Defaulting `presence: true` matches this
+ * `env`/`presence`/`keys` are forwarded verbatim to `checkOperatorConfig` —
+ * see its doc for what each means; `env` may be the `[fileEnv, shellEnv]`
+ * array `operatorCheckEnvs` builds, so the project's `.env`/`.env.local` are
+ * checked alongside the shell (file's problem first, one line per key).
+ * Defaulting `presence: true` matches this
  * being the LAST-resort gate's own default; a caller running before an
  * interactive prompt passes `presence: false` explicitly.
  *
@@ -122,7 +170,7 @@ const SKIP_CONFIG_SHAPES_HINT =
  * only the presence problems, if any, still throw.
  *
  * @param {Iterable<string>} scopes - config-registry.js scopes to validate.
- * @param {{ env?: Record<string, string|undefined>, presence?: boolean, keys?: string[] }} [opts]
+ * @param {{ env?: CheckEnv, presence?: boolean, keys?: string[] }} [opts]
  * @throws when `checkOperatorConfig` reports any problem
  */
 export function assertOperatorConfig(
@@ -213,8 +261,10 @@ export function assertOperatorConfig(
  * @param {string[]} [deps.operatorKeys] - individual registered keys to
  *   validate alongside `operatorScopes` (default: `[]`) — see
  *   `assertOperatorConfig`'s `keys` option.
- * @param {Record<string, string|undefined>} [deps.env] - injectable for
- *   testing; defaults to `process.env`.
+ * @param {CheckEnv} [deps.env] -
+ *   injectable for testing; defaults to `process.env`. The orchestrator
+ *   passes `operatorCheckEnvs(process.cwd())` so the project's
+ *   `.env`/`.env.local` are checked alongside the shell.
  * @throws if a required tool is not on PATH, is unusable for this provider,
  *   or an in-scope operator config value is malformed or missing.
  */

@@ -205,3 +205,64 @@ describe('computeConfigurationCheck — configure-family pass over .env/.env.loc
     expect(problems).toEqual([]);
   });
 });
+
+// Review residual (PR #112): the base pass's access/tls/state keys are
+// `where: '.env'` / `.env.local` — the value the SERVER reads lives in the
+// project file, and bootstrapOperatorEnv never folds runtime-config into
+// process.env, so a process.env-only pass could never see the copy that
+// ships. The base pass now checks the merged files AND the shell (file's
+// problem first); `operator shell` keys stay shell-only. Same rule Gate 1
+// (deploy.js) and the orchestrator gate apply via operatorCheckEnvs.
+describe('computeConfigurationCheck — base pass reads access/tls/state from the project files too', () => {
+  const dirs: string[] = [];
+  function projectDir(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-status-fileaware-'));
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    dirs.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a bad ACME_CA_SERVER in .env is reported with nothing in the shell', () => {
+    const cwd = projectDir({ '.env': 'ACME_CA_SERVER=not-a-url\n' });
+    const { problems } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toEqual([
+      'ACME_CA_SERVER looks wrong: expected an https:// ACME directory URL, got 9 characters',
+    ]);
+  });
+
+  it('a valid shell value does not mask a bad file value (the file is what ships)', () => {
+    const cwd = projectDir({ '.env': 'ACME_CA_SERVER=not-a-url\n' });
+    const { problems } = computeConfigurationCheck(
+      {},
+      {},
+      { env: { ACME_CA_SERVER: 'https://acme-staging-v02.api.letsencrypt.org/directory' }, cwd },
+    );
+    expect(problems.filter((p) => p.startsWith('ACME_CA_SERVER'))).toHaveLength(1);
+  });
+
+  it('a bad shell value is still reported when the file has none', () => {
+    const cwd = projectDir({});
+    const { problems } = computeConfigurationCheck(
+      {},
+      {},
+      { env: { ALLOWED_SSH_IPS: 'not-an-address' }, cwd },
+    );
+    expect(problems.some((p) => p.startsWith('ALLOWED_SSH_IPS looks wrong'))).toBe(true);
+    expect(problems.join('\n')).not.toContain('not-an-address');
+  });
+
+  it('an `operator shell` key (DOCKER_HUB_TOKEN) stored in .env is not checked from the file', () => {
+    // registry scope is only added when resolveDockerHubCreds sees creds in
+    // the shell — so put a valid pair in the shell and the stray in the file.
+    const cwd = projectDir({ '.env': 'DOCKER_HUB_TOKEN=abc\n' });
+    const { problems } = computeConfigurationCheck(
+      {},
+      {},
+      { env: { DOCKER_HUB_USERNAME: 'someone', DOCKER_HUB_TOKEN: 'dckr_pat_valid_enough' }, cwd },
+    );
+    expect(problems.filter((p) => p.startsWith('DOCKER_HUB_TOKEN'))).toEqual([]);
+  });
+});

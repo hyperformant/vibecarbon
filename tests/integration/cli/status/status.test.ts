@@ -140,4 +140,24 @@ describe('vibecarbon status', () => {
     expect(parsed.configuration.checked).toContain('HETZNER_API_TOKEN');
     expect(JSON.stringify(parsed)).not.toContain(fakeToken);
   });
+
+  // Review residual (PR #112): access/tls/state keys are stored in the
+  // project's .env (`where: '.env'`) and never reach process.env, so the
+  // base pass reads the merged files too — same rule as deploy's Gate 1.
+  it('Configuration line reports a malformed ACME_CA_SERVER stored in .env, never the value', () => {
+    appendFileSync(join(project, '.env'), '\nACME_CA_SERVER=not-a-url\n');
+
+    const rendered = runCli('status', [], { cwd: project, timeoutMs: 30_000 });
+    assertSuccess(rendered);
+    expect(rendered.stdout).toMatch(/▲ Configuration: \d+ problems?/);
+    expect(rendered.stdout).toMatch(/ACME_CA_SERVER looks wrong/);
+    expect(rendered.stdout).not.toContain('not-a-url');
+
+    const json = runCli('status', ['-json'], { cwd: project, timeoutMs: 30_000 });
+    assertExitWith(json, 0);
+    const parsed = JSON.parse(json.stdout);
+    expect(parsed.configuration.problems.some((p: string) => p.startsWith('ACME_CA_SERVER'))).toBe(
+      true,
+    );
+  });
 });
