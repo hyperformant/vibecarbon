@@ -56,6 +56,8 @@ export { requiredTierFor };
 
 export const COMMAND_GATES = {
   create: 'free',
+  // The `?` guide only ever launches other commands, which gate themselves.
+  next: 'free',
   add: 'free',
   remove: 'free',
   up: 'free',

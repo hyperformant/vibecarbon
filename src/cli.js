@@ -13,8 +13,9 @@
  */
 
 import dns from 'node:dns';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
 import { formatExamples } from './lib/cli/help.js';
 import { c } from './lib/colors.js';
@@ -113,6 +114,7 @@ process.on('SIGINT', () => process.exit(130));
 // All registered subcommands — tested in tests/unit/cli/routing.test.ts
 export const KNOWN_COMMANDS = [
   'create',
+  'next',
   'add',
   'remove',
   'up',
@@ -137,6 +139,7 @@ export const KNOWN_COMMANDS = [
 ];
 
 const GLOBAL_EXAMPLES = [
+  { description: 'Not sure what to do next?', commands: ['vibecarbon ?'] },
   { description: 'Create a new project', commands: ['vibecarbon create my-app', 'cd my-app'] },
   { description: 'Local development', commands: ['vibecarbon up'] },
   { description: 'Add features', commands: ['vibecarbon add observability'] },
@@ -156,6 +159,7 @@ ${c.bold('USAGE')}
   ${c.info('vibecarbon')} <command> [flags]
 
 ${c.bold('DEV COMMANDS')}
+  ${c.info('?')} | ${c.info('next')}                 What comes next: shows the command and offers to run it
   ${c.info('create')} <project-name>    Create a new Vibecarbon project
   ${c.info('up')}                       Start local development environment
   ${c.info('down')}                     Stop local development environment
@@ -223,7 +227,12 @@ async function main() {
     process.exit(0);
   }
 
-  const command = args[0];
+  // `?` is a shell glob in zsh and sometimes bash, so both spellings are one
+  // command. Normalized here rather than as a second `case`: the docs census
+  // (tests/unit/docs/cli-docs-census.test.ts) pairs every `case '<name>':`
+  // with a `## <name>` docs section and only sees `[a-z-]+`, so there must
+  // never be a `case '?'`.
+  const command = args[0] === '?' ? 'next' : args[0];
 
   // Top-level help / version. Single-dash only — `--help` falls through
   // to the unknown-command branch, matching the per-command flag policy.
@@ -276,6 +285,12 @@ async function main() {
         // Dynamically import and run the create command
         const createModule = await import('./create.js');
         await createModule.run(subcommandArgs);
+        break;
+      }
+
+      case 'next': {
+        const nextModule = await import('./next.js');
+        await nextModule.run(subcommandArgs);
         break;
       }
 
@@ -411,6 +426,13 @@ async function main() {
 
       default: {
         console.error(c.error(`Unknown command: ${command}`));
+        // A bare `?` that matched a one-character file name in the cwd
+        // arrives here as that file name, which reads as a baffling error.
+        if (command.length === 1 && existsSync(join(process.cwd(), command))) {
+          console.log(
+            "Your shell may have expanded ? to a file name. Quote it (vibecarbon '?') or run vibecarbon next.",
+          );
+        }
         console.log(`\nRun ${c.info('vibecarbon -h')} for usage information.`);
         process.exit(1);
       }

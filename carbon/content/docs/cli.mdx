@@ -66,6 +66,37 @@ Run `vibecarbon activate <key>` to activate a license.
 
 Local-development primitives. All free, all interactive-by-default.
 
+## next
+
+Show what to do next, and offer to run it.
+
+```bash
+vibecarbon ?
+vibecarbon next
+```
+
+Looks at the current directory, works out where you are on the create, up,
+configure, deploy ladder, prints the exact command for the next step, and offers
+to run it for you. Once an environment is deployed the ladder is finished, and
+the same command turns into a menu of everyday operations: status, scale,
+backup, restore, configure, add a feature, deploy another environment, tear one
+down.
+
+`?` is the short form. zsh treats a bare `?` as a glob, so quote it there:
+`vibecarbon '?'`. bash does the same when a one-character file name exists in
+the directory you are standing in. `next` is the same command spelled out, and
+it is safe in every shell and in scripts.
+
+Without a terminal, in CI, behind a pipe, or under an agent, it prints the next
+command, never asks anything, and exits 0.
+
+| Flag | Description |
+|------|-------------|
+| `-h` | Show help |
+| `-v` | Show version number |
+
+---
+
 ## create
 
 Scaffold a new Vibecarbon project.

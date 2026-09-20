@@ -54,6 +54,7 @@ describe('CLI module integrity', () => {
 describe('KNOWN_COMMANDS registry', () => {
   const expectedCommands = [
     'create',
+    'next',
     'add',
     'remove',
     'up',
@@ -96,6 +97,7 @@ describe('KNOWN_COMMANDS registry', () => {
 describe('Command module exports', () => {
   // Commands that have a run() export we can verify without side-effects
   const modulesWithRun: Array<[string, string]> = [
+    ['next', '../../../src/next.js'],
     ['deploy', '../../../src/deploy.js'],
     ['destroy', '../../../src/destroy.js'],
     ['status', '../../../src/status.js'],
@@ -153,6 +155,14 @@ describe('CLI -h', () => {
   it('mentions scale command specifically', () => {
     const result = runCliScript(['-h']);
     expect(result.stdout).toContain('scale');
+  });
+});
+
+describe("CLI '?' alias", () => {
+  it("'?' -h exits 0 and prints the next help", () => {
+    const result = runCliScript(['?', '-h']);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('vibecarbon next');
   });
 });
 
