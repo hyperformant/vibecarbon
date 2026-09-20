@@ -35,11 +35,14 @@ Thumbs.db
 
 # Local dev artifacts — never publish (blocker #9, 2026-08-08 pre-launch audit).
 # .npmignore overrides .gitignore per-directory, so these git-ignored files
-# would otherwise be packed into the tarball. Keep .env.example as the only
-# committed env file.
+# would otherwise be packed into the tarball. Keep .env.example and
+# .env.local.example — both value-free — as the only committed env files;
+# `create` reads .env.local.example from TEMPLATE_DIR (src/create.js), so
+# without this negation the installed package would ENOENT on every create.
 .env
 .env.*
 !.env.example
+!.env.local.example
 .claude/agent-memory
 *.generated.sql
 docker-compose.dev-init.yml

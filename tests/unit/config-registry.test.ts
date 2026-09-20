@@ -124,19 +124,26 @@ describe('config-registry', () => {
       // (.env.local only, stripped from any bundle baseline).
       'PULUMI_BACKEND_URL',
       'ACME_CA_SERVER',
+      // The one operator-secret entry NOT under the 'providers' feature and
+      // NOT written to .env.local/.env/operator shell — see the
+      // "belongs to the providers feature" exception and the "operator-secret
+      // entries live in .env.local or the operator shell" exception below.
+      'VIBECARBON_LICENSE_PRIVATE_KEY',
     ];
 
     it('operatorSecretKeys returns exactly the provider credential keys', () => {
       expect(operatorSecretKeys().sort()).toEqual([...EXPECTED_OPERATOR_KEYS].sort());
     });
 
-    it('every operator-secret key belongs to the providers feature', () => {
+    it('every operator-secret key belongs to the providers feature (except the e2e signing key)', () => {
       for (const key of EXPECTED_OPERATOR_KEYS) {
+        if (key === 'VIBECARBON_LICENSE_PRIVATE_KEY') continue; // feature: 'e2e', not 'providers'
         const entry = CONFIG_KEYS.find((k) => k.key === key);
         expect(entry, `${key} missing from CONFIG_KEYS`).toBeDefined();
         expect(entry.class).toBe('operator-secret');
         expect(entry.feature).toBe('providers');
       }
+      expect(registryEntry('VIBECARBON_LICENSE_PRIVATE_KEY').feature).toBe('e2e');
     });
 
     it('classifies DOCKER_HUB_* as operator-secret with where: "operator shell" (never written to a file)', () => {
@@ -230,7 +237,9 @@ describe('config-registry', () => {
         expect(['.env.local', '.env', 'operator shell', 'tests/.env.e2e'], e.key).toContain(
           e.where,
         );
-        expect(e.scope, e.key).toMatch(/^[a-z]+(:[a-z]+)?$/);
+        // Alphanumeric so 'e2e' (VIBECARBON_LICENSE_PRIVATE_KEY) is valid
+        // alongside the letters-only scopes ('billing', 'provider:hetzner', …).
+        expect(e.scope, e.key).toMatch(/^[a-z0-9]+(:[a-z0-9]+)?$/);
       }
     });
     it('every entry with a shape has a sample that satisfies it', () => {
@@ -242,9 +251,11 @@ describe('config-registry', () => {
         if (e.shape.values) expect(e.shape.values, e.key).toContain(e.sample);
       }
     });
-    it('operator-secret entries live in .env.local or the operator shell', () => {
+    it('operator-secret entries live in .env.local, the operator shell, or tests/.env.e2e', () => {
+      // tests/.env.e2e is the one exception: VIBECARBON_LICENSE_PRIVATE_KEY
+      // is a test-harness-only signing key, never a project file.
       for (const e of CONFIG_KEYS.filter((e) => e.class === 'operator-secret')) {
-        expect(['.env.local', 'operator shell'], e.key).toContain(e.where);
+        expect(['.env.local', 'operator shell', 'tests/.env.e2e'], e.key).toContain(e.where);
       }
     });
     it('registers the keys deploy reads outside configure', () => {

@@ -819,6 +819,29 @@ export const CONFIG_KEYS = [
     where: '.env',
     scope: 'access',
   },
+
+  // ---- E2E test harness: local licence-API stub signing key ----
+  // Not a cloud/DNS credential — the Ed25519 signing key
+  // tests/e2e/utils/license-stub.js uses to sign real verdict tokens for the
+  // harness's local stub of vibecarbon.com's licence API (same value as
+  // vibecarbon-web's LICENSE_SIGNING_PRIVATE_KEY). Registered anyway
+  // (operator-secret) so the docs census can describe its format — PEM or
+  // base64-encoded PEM, per the 'pem' kind fallback in operator-env.js's
+  // KIND_FALLBACKS — from the SAME registry as every other operator
+  // credential, instead of a second hand-maintained note. `where` is the one
+  // registry entry that lives outside `.env.local`/`.env`/`operator shell`:
+  // tests/.env.e2e only, never a project file. See
+  // tests/unit/lib/credential-key-convention.test.ts for the parity check
+  // against tests/.env.e2e.example, and the 'operator-secret entries live in
+  // .env.local...' test in config-registry.test.ts for the where exception.
+  {
+    key: 'VIBECARBON_LICENSE_PRIVATE_KEY',
+    class: 'operator-secret',
+    feature: 'e2e',
+    kind: 'pem',
+    where: 'tests/.env.e2e',
+    scope: 'e2e',
+  },
 ];
 
 /** Keys of a given classification. @param {ConfigClass} cls */
