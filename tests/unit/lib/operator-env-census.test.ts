@@ -111,6 +111,9 @@ const ALIAS_ALLOWLIST: Record<string, string> = {
   [join('lib', 'deploy', 'preflight.js')]:
     'injectable env bag forwarded verbatim to checkOperatorConfig(scopes, { env }) — the reader ' +
     '(operator-env.js) is what actually reads each registered key off it',
+  [join('lib', 'next', 'launch.js')]:
+    'injectable env default (env = process.env) forwarded verbatim to spawn(..., { env }) as the ' +
+    "child vibecarbon process's env bag, a spawn bag not a read",
 };
 
 /**
