@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { generatePassword } from '../../../src/lib/secrets.js';
 import { healShortVaultEncKey } from '../../../src/upgrade.js';
 
@@ -49,9 +50,7 @@ describe('VAULT_ENC_KEY is 32 bytes', () => {
       return dir;
     };
     const vaultKeyIn = (dir: string) =>
-      (
-        readFileSync(join(dir, '.env.local'), 'utf-8').match(/^VAULT_ENC_KEY=(.*)$/m)?.[1] ?? ''
-      ).replace(/^['"]|['"]$/g, '');
+      parseDotenv(readFileSync(join(dir, '.env.local'), 'utf-8')).VAULT_ENC_KEY ?? '';
 
     it('rewrites a 16-char key to 32 and PERSISTS it', () => {
       const dir = project("VAULT_ENC_KEY='0123456789abcdef'");

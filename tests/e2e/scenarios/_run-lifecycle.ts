@@ -16,6 +16,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
@@ -260,42 +261,25 @@ interface SupabaseKeys {
 }
 
 /**
- * Read Supabase keys from the project's .env.local file.
- * Looks for VITE_SUPABASE_ANON_KEY and SERVICE_ROLE_KEY (or SUPABASE_SERVICE_ROLE_KEY),
- * plus ADMIN_EMAIL/ADMIN_PASSWORD so the functional checks can verify the
- * operator can actually log into their deployed app as the super-admin.
+ * Read Supabase keys from the project's .env.local file — deliberately
+ * `.env.local` ONLY (never `.env`): that is where `create.js` writes every
+ * Supabase/admin secret for a scaffolded project, so there is no second file
+ * to layer against `readEnvFiles`.
+ * Looks for VITE_SUPABASE_ANON_KEY and SERVICE_ROLE_KEY (or
+ * SUPABASE_SERVICE_ROLE_KEY — the current generator only ever writes the
+ * latter; the former is read for older bundles), plus ADMIN_EMAIL/
+ * ADMIN_PASSWORD so the functional checks can verify the operator can
+ * actually log into their deployed app as the super-admin.
  */
 function readSupabaseKeys(projectDir: string): SupabaseKeys | null {
   try {
     const envPath = join(projectDir, '.env.local');
-    const content = readFileSync(envPath, 'utf-8');
-    const lines = content.split('\n');
+    const vars = parseDotenv(readFileSync(envPath, 'utf-8'));
 
-    let anonKey = '';
-    let serviceRoleKey = '';
-    let adminEmail = '';
-    let adminPassword = '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('#') || !trimmed.includes('=')) continue;
-
-      const eqIdx = trimmed.indexOf('=');
-      const key = trimmed.slice(0, eqIdx).trim();
-      const raw = trimmed.slice(eqIdx + 1).trim();
-      // Strip surrounding quotes (single or double) from .env values
-      const value = raw.replace(/^["']|["']$/g, '');
-
-      if (key === 'VITE_SUPABASE_ANON_KEY') {
-        anonKey = value;
-      } else if (key === 'SERVICE_ROLE_KEY' || key === 'SUPABASE_SERVICE_ROLE_KEY') {
-        serviceRoleKey = value;
-      } else if (key === 'ADMIN_EMAIL') {
-        adminEmail = value;
-      } else if (key === 'ADMIN_PASSWORD') {
-        adminPassword = value;
-      }
-    }
+    const anonKey = vars.VITE_SUPABASE_ANON_KEY ?? '';
+    const serviceRoleKey = vars.SERVICE_ROLE_KEY ?? vars.SUPABASE_SERVICE_ROLE_KEY ?? '';
+    const adminEmail = vars.ADMIN_EMAIL ?? '';
+    const adminPassword = vars.ADMIN_PASSWORD ?? '';
 
     if (!anonKey || !serviceRoleKey) return null;
     return {
@@ -312,24 +296,15 @@ function readSupabaseKeys(projectDir: string): SupabaseKeys | null {
 /**
  * Read POSTGRES_PASSWORD from the scaffolded project's `.env.local` — the
  * supavisor-pooler check needs it to authenticate as the tenant user
- * (postgres.<PROJECT_NAME>) through the pooler. Same parsing rules as
- * readSupabaseKeys above.
+ * (postgres.<PROJECT_NAME>) through the pooler. `.env.local`-only, same
+ * reason as readSupabaseKeys above.
  */
 function readPostgresPassword(projectDir: string): string | null {
   try {
-    const content = readFileSync(join(projectDir, '.env.local'), 'utf-8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('#') || !trimmed.includes('=')) continue;
-      const eqIdx = trimmed.indexOf('=');
-      if (trimmed.slice(0, eqIdx).trim() !== 'POSTGRES_PASSWORD') continue;
-      const value = trimmed
-        .slice(eqIdx + 1)
-        .trim()
-        .replace(/^["']|["']$/g, '');
-      if (value) return value;
-    }
-    return null;
+    const value = parseDotenv(
+      readFileSync(join(projectDir, '.env.local'), 'utf-8'),
+    ).POSTGRES_PASSWORD;
+    return value || null;
   } catch {
     return null;
   }

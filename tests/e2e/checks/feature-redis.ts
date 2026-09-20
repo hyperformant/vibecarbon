@@ -12,7 +12,10 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
 import { dnsSafeFetch } from './health.js';
@@ -38,26 +41,23 @@ export async function runRedisChecks(
   const results: VerificationResult[] = [];
   const hasSSH = Boolean(serverIp && sshKeyPath);
 
-  // Read Redis password from the local project's .env file
+  // Read Redis password from the local project's .env file. `.env` is
+  // checked before `.env.local` (unlike readEnvFiles' "local wins" layering)
+  // so the first file that actually defines the key wins; break as soon as
+  // one does.
   let redisPassword = '';
   if (projectDir) {
-    try {
-      const { readFileSync } = await import('node:fs');
-      const { join } = await import('node:path');
-      for (const envFile of ['.env', '.env.local']) {
-        try {
-          const content = readFileSync(join(projectDir, envFile), 'utf-8');
-          const match = content.match(/^REDIS_PASSWORD=["']?([^"'\n]+)["']?/m);
-          if (match?.[1]) {
-            redisPassword = match[1];
-            break;
-          }
-        } catch {
-          // Try next file
+    for (const envFile of ['.env', '.env.local']) {
+      try {
+        const content = readFileSync(join(projectDir, envFile), 'utf-8');
+        const value = parseDotenv(content).REDIS_PASSWORD;
+        if (value) {
+          redisPassword = value;
+          break;
         }
+      } catch {
+        // Try next file — redis-cli will fail with NOAUTH if no password is found
       }
-    } catch {
-      // Fall through — redis-cli will fail with NOAUTH if password is required
     }
   }
   const authFlag = redisPassword ? `-a '${redisPassword}' --no-auth-warning` : '';
