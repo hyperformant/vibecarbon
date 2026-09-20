@@ -51,11 +51,10 @@ const SPEC = {
 
 /**
  * Read `key` from `.env.local`, then `.env` — the first file that carries a
- * NON-EMPTY value wins, else null. Parsing is `parseDotenv` (src/lib/shell.js,
+ * NON-EMPTY value wins, else null. Parsing is `parseDotenv` (src/lib/dotenv.js,
  * via project.js), the codebase's one dotenv reader; the per-key regex this
  * replaced could not match an empty `KEY=` and so fell through to the next
- * file — treating '' as absent here keeps that exact fall-through (see
- * tests/unit/lib/dotenv-parsers-parity.test.ts).
+ * file — treating '' as absent here keeps that exact fall-through.
  * @param {string} key
  * @param {string} cwd
  * @returns {string|null}

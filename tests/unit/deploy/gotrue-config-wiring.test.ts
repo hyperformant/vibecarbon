@@ -152,9 +152,11 @@ describe('GOTRUE_MAILER_AUTOCONFIRM is operator-configurable with a safe default
 
   it('.env.example documents the knob next to the SMTP block, addressing manual SMTP edits', () => {
     const create = read('src/create.js');
-    expect(create).toMatch(/GOTRUE_MAILER_AUTOCONFIRM="true"/);
+    // generateEnvLocal writes the line through formatDotenvLine; `true` is
+    // in the bare alphabet, so the generated file carries it unquoted.
+    expect(create).toMatch(/formatDotenvLine\('GOTRUE_MAILER_AUTOCONFIRM', 'true'\)/);
     // The comment must tell someone hand-filling SMTP_* that they also need
     // to flip this flag — the wizard only does it for its own edits.
-    expect(create).toMatch(/fill in SMTP_\* by hand[\s\S]{0,120}GOTRUE_MAILER_AUTOCONFIRM="false"/);
+    expect(create).toMatch(/fill in SMTP_\* by hand[\s\S]{0,120}GOTRUE_MAILER_AUTOCONFIRM=false/);
   });
 });

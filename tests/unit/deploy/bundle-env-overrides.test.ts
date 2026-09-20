@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
-import { parseDotenv } from '../../../src/lib/shell.js';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 
 // renderBundle runs against `process.cwd()`, so each test gets its own
 // throwaway directory containing a project-shaped `.env`.
@@ -129,11 +129,11 @@ describe('renderBundle envOverrides', () => {
     }
   });
 
-  it('round-trips escapeDotenv-quoted values from a captured old .env', () => {
-    // Simulates the scale flow: we cat the old server's `.env` (which is
-    // escapeDotenv-encoded), parseDotenv it into raw values, pass those as
-    // envOverrides, and renderBundle re-escapes them on write. The values
-    // we read back must equal the originals.
+  it('round-trips portable-grammar values from a captured old .env', () => {
+    // Simulates the scale flow: we cat the old server's `.env`, parseDotenv
+    // it into raw values, pass those as envOverrides, and renderBundle
+    // re-encodes them with formatDotenvLine on write. The values we read back
+    // must equal the originals.
     projectDir = makeProjectDir('');
     process.chdir(projectDir);
 

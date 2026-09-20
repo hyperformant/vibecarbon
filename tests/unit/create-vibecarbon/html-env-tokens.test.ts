@@ -50,7 +50,8 @@ describe('generated .env defines every %VITE_*% token index.html uses', () => {
 
   it('ships the Plausible pair at the .env.example defaults: off, Plausible Cloud script', () => {
     const env = generateEnvLocal('token-app', baseVariables);
-    expect(env).toMatch(/^VITE_PLAUSIBLE_DOMAIN=""$/m);
-    expect(env).toMatch(/^VITE_PLAUSIBLE_SCRIPT_URL="https:\/\/plausible\.io\/js\/script\.js"$/m);
+    // Empty and URL values are in the bare alphabet, so no quotes are written.
+    expect(env).toMatch(/^VITE_PLAUSIBLE_DOMAIN=$/m);
+    expect(env).toMatch(/^VITE_PLAUSIBLE_SCRIPT_URL=https:\/\/plausible\.io\/js\/script\.js$/m);
   });
 });

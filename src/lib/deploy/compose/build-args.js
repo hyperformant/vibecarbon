@@ -41,7 +41,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseDotenv } from '../../shell.js';
+import { parseDotenv } from '../../dotenv.js';
 
 /**
  * @param {string} cwd - Project root (where .env.local lives)

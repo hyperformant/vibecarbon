@@ -25,6 +25,7 @@ import * as p from '@clack/prompts';
 import { spinner } from '../../cli/progress.js';
 import { gitSafeEnv } from '../../command.js';
 import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
+import { parseDotenv } from '../../dotenv.js';
 import {
   seedEnvironmentSecrets,
   seedOrgSecrets,
@@ -33,7 +34,6 @@ import {
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
 import { deriveProjectBucketName } from '../../providers/s3-base.js';
-import { parseDotenv } from '../../shell.js';
 
 /**
  * Resolve the wal-g backup bucket for a gitops render: persisted names first
@@ -378,9 +378,8 @@ export function buildPerEnvSecrets(envLocal) {
  * The project's `.env.local` as a plain object; `{}` when the file is absent
  * (CI supplies the env another way, so a missing file is not an error here —
  * unlike k3s.js's loadEnvLocal, which is the deploy path's precondition).
- * Parsing is `parseDotenv` (src/lib/shell.js), the codebase's one dotenv
- * reader — the local regex loop it replaces is on record in
- * tests/unit/lib/dotenv-parsers-parity.test.ts.
+ * Parsing is `parseDotenv` (src/lib/dotenv.js), the codebase's one dotenv
+ * reader.
  * @param {string} projectDir
  * @returns {Record<string, string>}
  */

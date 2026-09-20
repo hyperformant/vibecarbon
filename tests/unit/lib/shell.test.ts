@@ -1,12 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import {
-  escapeDotenv,
-  escapeSql,
-  escapeYaml,
-  parseDotenv,
-  shEscape,
-  unescapeDotenv,
-} from '../../../src/lib/shell.js';
+import { escapeSql, escapeYaml, shEscape } from '../../../src/lib/shell.js';
+
+// Dotenv reading/writing left this module on 2026-09-20 (src/lib/dotenv.js;
+// tests/unit/lib/dotenv.test.ts). shEscape is for shell command lines only.
 
 describe('shEscape', () => {
   it('wraps simple strings in single quotes', () => {
@@ -32,20 +28,6 @@ describe('shEscape', () => {
 
   it('coerces non-string values via String(value)', () => {
     expect(shEscape(42 as unknown as string)).toBe("'42'");
-  });
-});
-
-describe('escapeDotenv', () => {
-  it('produces single-quoted dotenv values with embedded-quote handling', () => {
-    expect(escapeDotenv(`it's "quoted" and $dangerous`)).toBe(`'it'\\''s "quoted" and $dangerous'`);
-  });
-
-  it('keeps newlines literal inside single quotes', () => {
-    expect(escapeDotenv('a\nb')).toBe("'a\nb'");
-  });
-
-  it('escapes newline + dollar combo as a single literal', () => {
-    expect(escapeDotenv('line1\n$SECRET=injected')).toBe("'line1\n$SECRET=injected'");
   });
 });
 
@@ -78,95 +60,5 @@ describe('escapeYaml', () => {
 
   it('escapes embedded backslashes', () => {
     expect(escapeYaml('back\\slash')).toBe('"back\\\\slash"');
-  });
-});
-
-describe('unescapeDotenv', () => {
-  it('round-trips a simple value through escapeDotenv', () => {
-    const v = 'ghcr.io/owner/repo:tag';
-    expect(unescapeDotenv(escapeDotenv(v))).toBe(v);
-  });
-
-  it('round-trips a value with embedded single quotes', () => {
-    const v = "it's complicated";
-    expect(unescapeDotenv(escapeDotenv(v))).toBe(v);
-  });
-
-  it('round-trips a value with shell metacharacters', () => {
-    const v = '$(echo pwn) `whoami` "quoted"';
-    expect(unescapeDotenv(escapeDotenv(v))).toBe(v);
-  });
-
-  it('strips legacy double-quoted form without interpreting escapes', () => {
-    expect(unescapeDotenv('"hello"')).toBe('hello');
-  });
-
-  it('passes bare unquoted values through', () => {
-    expect(unescapeDotenv('localhost')).toBe('localhost');
-  });
-
-  it('handles empty quoted forms', () => {
-    expect(unescapeDotenv("''")).toBe('');
-    expect(unescapeDotenv('""')).toBe('');
-  });
-
-  it('treats null/undefined as empty string', () => {
-    expect(unescapeDotenv(null as unknown as string)).toBe('');
-    expect(unescapeDotenv(undefined as unknown as string)).toBe('');
-  });
-});
-
-describe('parseDotenv', () => {
-  it('parses canonical KEY=VALUE lines into a map', () => {
-    const text = ['FOO=bar', 'BAZ=qux'].join('\n');
-    expect(parseDotenv(text)).toEqual({ FOO: 'bar', BAZ: 'qux' });
-  });
-
-  it('decodes escapeDotenv-quoted values back to raw', () => {
-    const text = [
-      `APP_IMAGE=${escapeDotenv('ghcr.io/owner/repo:tag')}`,
-      `SECRET=${escapeDotenv("it's a secret")}`,
-    ].join('\n');
-    expect(parseDotenv(text)).toEqual({
-      APP_IMAGE: 'ghcr.io/owner/repo:tag',
-      SECRET: "it's a secret",
-    });
-  });
-
-  it('skips comments and blank lines', () => {
-    const text = ['# header', '', 'FOO=bar', '# trailing'].join('\n');
-    expect(parseDotenv(text)).toEqual({ FOO: 'bar' });
-  });
-
-  it('ignores lines that do not match KEY=VALUE', () => {
-    const text = ['random text', 'lowercase=skipped', '=novalue', 'OK=yes'].join('\n');
-    expect(parseDotenv(text)).toEqual({ OK: 'yes' });
-  });
-
-  it('is tolerant of the shapes a hand edit leaves: `export`, indentation, spaces around `=`', () => {
-    const text = ['export FOO=bar', '  INDENTED=x', 'SPACED = y', '\tTAB =\t"q v"'].join('\n');
-    expect(parseDotenv(text)).toEqual({ FOO: 'bar', INDENTED: 'x', SPACED: 'y', TAB: 'q v' });
-  });
-
-  it('returns an empty object for empty input', () => {
-    expect(parseDotenv('')).toEqual({});
-    expect(parseDotenv(null as unknown as string)).toEqual({});
-  });
-
-  it('round-trips a representative deploy-time .env shape', () => {
-    // Exact subset of fields the orchestrator's renderBundle emits.
-    const original: Record<string, string> = {
-      PROJECT_NAME: 'myproj',
-      APP_IMAGE: 'ghcr.io/owner/repo:abc123',
-      DOMAIN: 'example.com',
-      SITE_URL: 'https://api.example.com',
-      S3_ACCESS_KEY: 'AKIA-with-symbols!@#',
-      S3_SECRET_KEY: "secret-with-'-quote",
-      SUPABASE_SERVICE_ROLE_KEY: 'eyJhbGciOi...long.jwt-shaped.placeholder',
-    };
-    const text = Object.entries(original)
-      .map(([k, v]) => `${k}=${escapeDotenv(v)}`)
-      .join('\n');
-    expect(parseDotenv(text)).toEqual(original);
   });
 });

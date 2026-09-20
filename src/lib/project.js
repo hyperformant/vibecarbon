@@ -8,7 +8,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeSecretFile } from './command.js';
 import { operatorSecretKeys } from './config-registry.js';
-import { escapeDotenv, parseDotenv } from './shell.js';
+import { formatDotenvLine, parseDotenv, readEnvFiles } from './dotenv.js';
+import { healLegacyDotenvText } from './dotenv-heal.js';
 
 // ============================================================================
 // PACKAGE MANAGER DETECTION
@@ -127,19 +128,15 @@ export function ensureProjectId(projectConfig, cwd = process.cwd()) {
 // ENVIRONMENT FILE MANAGEMENT
 // ============================================================================
 
-// Single dotenv parser for the whole codebase — lives beside escapeDotenv/
-// unescapeDotenv in shell.js (state machine: multi-line single-quoted,
-// legacy double-quoted, bare values). Re-exported here so env-file callers
-// can import it from project.js; the parser itself lives in shell.js.
+// The one dotenv reader for the whole codebase lives in dotenv.js (Node's
+// util.parseEnv). Re-exported here so env-file callers that already import
+// project.js keep working.
 export { parseDotenv };
 
-/**
- * Serialize a key-value object into dotenv format using escapeDotenv
- * (single-quoted, safe for dotenv-package parsers).
- */
+/** Serialize a key-value object into dotenv lines in the portable grammar. */
 export function serializeDotenv(obj) {
   return `${Object.entries(obj)
-    .map(([k, v]) => `${k}=${escapeDotenv(v)}`)
+    .map(([k, v]) => formatDotenvLine(k, v))
     .join('\n')}\n`;
 }
 
@@ -157,9 +154,8 @@ export function loadEnvVariables(cwd = process.cwd()) {
 
 /**
  * The project's `.env` with `.env.local` layered over it — the same
- * precedence the running app sees — as a plain key/value bag. Both files go
- * through the one dotenv parser (`parseDotenv`; `loadEnvVariables` is that
- * parser applied to `.env.local`) — this is a read of the SAME files
+ * precedence the running app sees — as a plain key/value bag. This is
+ * `readEnvFiles` from dotenv.js (the one dotenv reader) over the SAME files
  * `findEnvDrift` below compares, not a new parser. A missing file
  * contributes nothing; a line the parser can't read is skipped (parseDotenv
  * never throws).
@@ -175,9 +171,7 @@ export function loadEnvVariables(cwd = process.cwd()) {
  * @returns {Record<string, string>}
  */
 export function readProjectEnvFiles(cwd = process.cwd()) {
-  const envPath = join(cwd, '.env');
-  const base = existsSync(envPath) ? parseDotenv(readFileSync(envPath, 'utf-8')) : {};
-  return { ...base, ...loadEnvVariables(cwd) };
+  return readEnvFiles(cwd);
 }
 
 /**
@@ -294,7 +288,7 @@ export function appendToEnv(sectionName, envVars, cwd = process.cwd()) {
     const sectionHeader = `# ${sectionName.toUpperCase()}`;
     if (content.includes(sectionHeader)) continue;
     const body = Object.entries(envVars)
-      .map(([k, v]) => `${k}=${escapeDotenv(v)}`)
+      .map(([k, v]) => formatDotenvLine(k, v))
       .join('\n');
     const newSection = `\n\n# =============================================================================\n# ${sectionName.toUpperCase()}\n# =============================================================================\n\n${body}\n`;
     writeFileSync(envPath, content.trimEnd() + newSection);
@@ -322,6 +316,8 @@ export function appendToEnv(sectionName, envVars, cwd = process.cwd()) {
  *   originate.
  */
 export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false } = {}) {
+  // Encode first: an unrepresentable value must not touch either file.
+  const replacement = formatDotenvLine(key, value);
   const envFiles = localOnly ? ['.env.local'] : ['.env.local', '.env'];
   for (const filename of envFiles) {
     const envPath = join(cwd, filename);
@@ -332,12 +328,15 @@ export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false }
         continue;
       }
     }
-    const content = readFileSync(envPath, 'utf-8');
-    // Match either legacy KEY="..." or new KEY='...' forms at line start.
-    const regex = new RegExp(`^${key}=(?:"[^"]*"|'(?:[^']|'\\\\'')*')`, 'm');
-    const replacement = `${key}=${escapeDotenv(value)}`;
+    // Repair pre-2026-09-20 POSIX-quoted lines on the way through so an
+    // un-upgraded project is fixed the first time configure touches it.
+    const content = healLegacyDotenvText(readFileSync(envPath, 'utf-8')).text;
+    const regex = new RegExp(`^${key}=.*$`, 'm');
     if (regex.test(content)) {
-      writeFileSync(envPath, content.replace(regex, replacement));
+      writeFileSync(
+        envPath,
+        content.replace(regex, () => replacement),
+      );
     } else {
       writeFileSync(envPath, `${content.trimEnd()}\n${replacement}\n`);
     }

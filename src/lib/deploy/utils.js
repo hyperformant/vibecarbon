@@ -16,9 +16,9 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runCommand, runCommandAsync } from '../command.js';
+import { formatDotenvLine, parseDotenv } from '../dotenv.js';
 import { buildHostKeyOpts } from '../host-keys.js';
 import { getProviderClass } from '../providers/index.js';
-import { escapeDotenv, parseDotenv } from '../shell.js';
 import { scpWithRetry } from '../ssh.js';
 
 /**
@@ -112,20 +112,20 @@ export async function mergeRemoteDotenv(host, sshOpts, remoteDir, updates) {
     // Deliberately NOT parseDotenv: this is an in-place REWRITER, not a
     // reader. Untouched lines (comments, blanks, key order) must ship back
     // verbatim, which a parse-then-serialize cannot do; no value is read out
-    // of the file here. Allow-listed by exact line in
-    // tests/unit/lib/dotenv-parsers-parity.test.ts's census.
+    // of the file here. Allow-listed by exact path in
+    // tests/unit/lib/dotenv-dialect-census.test.ts.
     const existing = readFileSync(local, 'utf-8').split('\n');
     const seen = new Set();
     const merged = existing.map((line) => {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=/);
       if (m && updates[m[1]] !== undefined) {
         seen.add(m[1]);
-        return `${m[1]}=${escapeDotenv(updates[m[1]])}`;
+        return formatDotenvLine(m[1], updates[m[1]]);
       }
       return line;
     });
     for (const [k, v] of Object.entries(updates)) {
-      if (!seen.has(k)) merged.push(`${k}=${escapeDotenv(v)}`);
+      if (!seen.has(k)) merged.push(formatDotenvLine(k, v));
     }
     writeFileSync(local, merged.join('\n'));
     // Push merged .env back
@@ -170,10 +170,9 @@ export function generateSSHKeyPair(keyPath) {
  * Read REPL_PASSWORD — process.env first (CI may export it), then .env.local
  * (where `vibecarbon create` writes it at project-init time). Shared by the
  * compose-HA and k8s-HA replication paths so the parsing lives in one place:
- * `parseDotenv` (src/lib/shell.js), the codebase's one dotenv reader, which
- * takes the double-quoted (machine secrets) and single-quoted (escapeDotenv'd
- * user secrets) forms create.js writes — and, unlike the quoted-only regex
- * pair this replaced, a bare value too (tests/unit/lib/dotenv-parsers-parity.test.ts).
+ * `parseDotenv` (src/lib/dotenv.js), the codebase's one dotenv reader (Node's
+ * util.parseEnv), which reads every form the portable grammar emits: bare,
+ * double-quoted and single-quoted.
  *
  * @param {string} [cwd] - directory to look for .env.local in
  * @returns {string|null} the password, or null if absent everywhere

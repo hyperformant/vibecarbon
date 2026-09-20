@@ -32,13 +32,14 @@ describe('PROJECT_DISPLAY_NAME placeholder', () => {
 describe('generateEnvLocal display name', () => {
   it('records PROJECT_DISPLAY_NAME so upgrade can reconstruct it', () => {
     const env = generateEnvLocal('my-cool-app', baseVariables);
-    expect(env).toMatch(/^PROJECT_DISPLAY_NAME='My Cool App'$/m);
+    // Spaces, no `"` `\` `$`: the portable grammar picks the double-quoted form.
+    expect(env).toMatch(/^PROJECT_DISPLAY_NAME="My Cool App"$/m);
   });
 
   it('uses the display name, not the slug, as the SMTP sender name', () => {
     const env = generateEnvLocal('my-cool-app', baseVariables);
-    expect(env).toMatch(/^SMTP_SENDER_NAME='My Cool App'$/m);
-    expect(env).not.toMatch(/SMTP_SENDER_NAME="my-cool-app"/);
+    expect(env).toMatch(/^SMTP_SENDER_NAME="My Cool App"$/m);
+    expect(env).not.toMatch(/SMTP_SENDER_NAME=my-cool-app/);
   });
 });
 

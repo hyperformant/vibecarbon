@@ -52,6 +52,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from './lib/dns-provider.js';
+import { parseDotenv } from './lib/dotenv.js';
 import { convergeClusterInfra } from './lib/iac/converge-cluster.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
@@ -61,7 +62,6 @@ import { providerFor, providerIdFor, resolveProviderToken } from './lib/provider
 import { pollUntil } from './lib/retry.js';
 import { planK8sScaleChanges } from './lib/scale-plan.js';
 import { buildComposeTypeOptions, buildSimpleTypeOptions } from './lib/server-types.js';
-import { parseDotenv } from './lib/shell.js';
 import { sshRun, sshRunScript } from './lib/ssh.js';
 
 // ============================================================================
@@ -553,10 +553,10 @@ async function scaleServers(ctx) {
       //     preserves every value, including ones the project's local
       //     `.env`/`.env.local` doesn't even know about.
       //
-      // The on-disk form is `KEY='POSIX-single-quoted-value'` (per
-      // escapeDotenv); parseDotenv decodes the wrapping quotes so the values
-      // we pass to renderBundle as envOverrides are raw strings ready to be
-      // re-escaped on write. We then pin APP_IMAGE explicitly because that's
+      // The on-disk form is whichever of bare / "…" / '…' the portable
+      // grammar (src/lib/dotenv.js) picked; parseDotenv decodes it so the
+      // values we pass to renderBundle as envOverrides are raw strings ready
+      // to be re-encoded on write. We then pin APP_IMAGE explicitly because that's
       // the one value scale needs to keep stable across the migration; all
       // other keys flow through transparently.
       // Spinner over the OLD-server .env pull: this SSHes a *different* host

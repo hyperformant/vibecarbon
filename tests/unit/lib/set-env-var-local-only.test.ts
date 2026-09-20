@@ -24,15 +24,15 @@ describe('setEnvVar localOnly', () => {
   it('default (no opts) writes both .env.local and .env — unchanged behavior', () => {
     setEnvVar('FOO', 'bar', projectDir);
 
-    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toContain("FOO='bar'");
-    expect(readFileSync(join(projectDir, '.env'), 'utf-8')).toContain("FOO='bar'");
+    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toMatch(/^FOO=bar$/m);
+    expect(readFileSync(join(projectDir, '.env'), 'utf-8')).toMatch(/^FOO=bar$/m);
   });
 
   it('localOnly: true writes ONLY .env.local, leaving .env untouched', () => {
     setEnvVar('HETZNER_API_TOKEN', 'secret-token', projectDir, { localOnly: true });
 
-    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toContain(
-      "HETZNER_API_TOKEN='secret-token'",
+    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toMatch(
+      /^HETZNER_API_TOKEN=secret-token$/m,
     );
     expect(readFileSync(join(projectDir, '.env'), 'utf-8')).toBe('');
   });
@@ -40,8 +40,8 @@ describe('setEnvVar localOnly', () => {
   it('localOnly: false is byte-identical to the default (both files written)', () => {
     setEnvVar('FOO', 'bar', projectDir, { localOnly: false });
 
-    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toContain("FOO='bar'");
-    expect(readFileSync(join(projectDir, '.env'), 'utf-8')).toContain("FOO='bar'");
+    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toMatch(/^FOO=bar$/m);
+    expect(readFileSync(join(projectDir, '.env'), 'utf-8')).toMatch(/^FOO=bar$/m);
   });
 
   it('localOnly skips .env even when .env does not exist (no accidental creation)', () => {
@@ -50,8 +50,8 @@ describe('setEnvVar localOnly', () => {
     setEnvVar('HETZNER_API_TOKEN', 'secret-token', projectDir, { localOnly: true });
 
     expect(existsSync(join(projectDir, '.env'))).toBe(false);
-    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toContain(
-      "HETZNER_API_TOKEN='secret-token'",
+    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toMatch(
+      /^HETZNER_API_TOKEN=secret-token$/m,
     );
   });
 
@@ -61,8 +61,8 @@ describe('setEnvVar localOnly', () => {
 
     setEnvVar('HETZNER_API_TOKEN', 'new-token', projectDir, { localOnly: true });
 
-    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toContain(
-      "HETZNER_API_TOKEN='new-token'",
+    expect(readFileSync(join(projectDir, '.env.local'), 'utf-8')).toMatch(
+      /^HETZNER_API_TOKEN=new-token$/m,
     );
     // .env keeps its stale value untouched — localOnly never writes it.
     expect(readFileSync(join(projectDir, '.env'), 'utf-8')).toContain(
@@ -78,7 +78,7 @@ describe('setEnvVar localOnly', () => {
 
     const envLocalPath = join(projectDir, '.env.local');
     expect(existsSync(envLocalPath)).toBe(true);
-    expect(readFileSync(envLocalPath, 'utf-8')).toContain("HETZNER_API_TOKEN='secret-token'");
+    expect(readFileSync(envLocalPath, 'utf-8')).toMatch(/^HETZNER_API_TOKEN=secret-token$/m);
     // owner-only permissions — this file now holds a provider secret.
     expect(statSync(envLocalPath).mode & 0o777).toBe(0o600);
   });
