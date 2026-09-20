@@ -65,7 +65,10 @@
  */
 
 // Shared shapes, so the tight formats aren't retyped at each call site.
-const HTTPS_URL_SHAPE = { regex: /^https:\/\/.+/, describe: 'an https:// URL', https: true };
+// https-only — RFC 8555 mandates https for ACME directory URLs, so this
+// shape is scoped to ACME_CA_SERVER alone (PULUMI_BACKEND_URL documents a
+// wider set of schemes and gets its own shape below).
+const HTTPS_URL_SHAPE = { regex: /^https:\/\/.+/, describe: 'an https:// ACME directory URL' };
 const TRUE_FALSE_SHAPE = { values: ['true', 'false'], describe: 'one of true, false' };
 const EMAIL_REGEX = /^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 // One octet, 0-255 — reused for the CIDR-list regex below.
@@ -173,16 +176,16 @@ export const CONFIG_KEYS = [
   },
 
   // ---- Billing: Polar ----
+  // No documented token prefix to pin (review 2026-09-19: the `polar_oat_`
+  // prefix used in an earlier draft was unverified against Polar's docs) —
+  // loose shape only, same treatment as the other undocumented secrets below.
   {
     key: 'POLAR_ACCESS_TOKEN',
     class: 'runtime-secret',
     feature: 'billing',
     kind: 'secret',
-    shape: {
-      regex: /^polar_oat_[A-Za-z0-9]+$/,
-      describe: 'polar_oat_… (Polar organization access token)',
-    },
-    sample: 'polar_oat_1234567890abcdef',
+    shape: { minLen: 16, describe: 'at least 16 characters' },
+    sample: 'polar-access-token-sample',
     where: '.env',
     scope: 'billing',
   },
@@ -315,7 +318,10 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'smtp',
     kind: 'port',
-    shape: { regex: /^\d{1,5}$/, describe: '1-65535' },
+    shape: {
+      regex: /^([1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$/,
+      describe: '1-65535',
+    },
     sample: '587',
     where: '.env',
     scope: 'smtp',
@@ -690,19 +696,22 @@ export const CONFIG_KEYS = [
   },
 
   // ---- State: Pulumi backend override ----
-  // Opt-in Pulumi Cloud backend (src/lib/iac/index.js resolveBackendUrl) —
-  // absent, the CLI computes its own S3 or local file:// backend. The one
-  // documented operator use of this var is pointing at Pulumi Cloud, hence
-  // the https:// shape (a self-hosted s3://, azblob://, file:// backend is
-  // computed internally and never typed by an operator here).
+  // Opt-in backend override (src/lib/iac/index.js resolveBackendUrl) —
+  // absent, the CLI computes its own S3 or local file:// backend. The regex
+  // covers what Pulumi itself documents as valid backend URL schemes
+  // (https://, s3://, azblob://, gs://, file://), not just Pulumi Cloud —
+  // narrower than that would assert a format Pulumi doesn't actually require.
   {
     key: 'PULUMI_BACKEND_URL',
     class: 'operator-secret',
     feature: 'providers',
     kind: 'url',
     optional: true,
-    shape: HTTPS_URL_SHAPE,
-    sample: 'https://api.pulumi.com',
+    shape: {
+      regex: /^[a-z][a-z0-9+.-]*:\/\/\S+$/,
+      describe: 'a Pulumi backend URL (https://…, s3://…, file://…)',
+    },
+    sample: 's3://vibecarbon-state/pulumi',
     where: '.env.local',
     scope: 'state',
   },

@@ -272,13 +272,24 @@ describe('config-registry', () => {
         'GOOGLE_CLIENT_SECRET',
         'HETZNER_API_TOKEN',
         'MICROSOFT_TENANT_ID',
-        'POLAR_ACCESS_TOKEN',
         'PULUMI_BACKEND_URL',
         'SMTP_ADMIN_EMAIL',
         'SMTP_PORT',
         'STRIPE_SECRET_KEY',
         'STRIPE_WEBHOOK_SECRET',
       ]);
+      // POLAR_ACCESS_TOKEN was removed from this list (review 2026-09-19):
+      // the `polar_oat_` prefix it used was unverified against Polar's docs.
+      // This list IS the decision record for which formats are vendor-backed
+      // enough to assert — it stays loose (minLen only) until confirmed.
+    });
+    it('SMTP_PORT is bounded to the real port range, not just 1-5 digits', () => {
+      const { regex } = registryEntry('SMTP_PORT').shape;
+      expect('0').not.toMatch(regex);
+      expect('70000').not.toMatch(regex);
+      expect('99999').not.toMatch(regex);
+      expect('587').toMatch(regex);
+      expect('65535').toMatch(regex);
     });
     it('entriesForScopes selects by scope', () => {
       const keys = entriesForScopes(['provider:hetzner'])
