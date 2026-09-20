@@ -297,7 +297,9 @@ function readSupabaseKeys(projectDir: string): SupabaseKeys | null {
  * Read POSTGRES_PASSWORD from the scaffolded project's `.env.local` — the
  * supavisor-pooler check needs it to authenticate as the tenant user
  * (postgres.<PROJECT_NAME>) through the pooler. `.env.local`-only, same
- * reason as readSupabaseKeys above.
+ * reason as readSupabaseKeys above; like it, a duplicated key now resolves
+ * last-wins (parseDotenv) where the old line scan took the first — create
+ * never writes the key twice.
  */
 function readPostgresPassword(projectDir: string): string | null {
   try {
