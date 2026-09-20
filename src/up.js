@@ -14,9 +14,9 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
-import { formatDotenvLine } from './lib/dotenv.js';
+import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
-import { detectPackageManager, parseDotenv } from './lib/project.js';
+import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
   deriveComposeProjectName,

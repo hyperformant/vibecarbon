@@ -32,7 +32,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { operatorSecretKeys } from '../../../src/lib/config-registry.js';
-import { parseDotenv } from '../../../src/lib/project.js';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
 
 /**

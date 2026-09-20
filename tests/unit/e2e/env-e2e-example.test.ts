@@ -14,7 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseDotenv } from '../../../src/lib/project.js';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 
 describe('root .gitignore covers tests/.env.e2e', () => {
   it('contains the tests/.env.e2e pattern', () => {

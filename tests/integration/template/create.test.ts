@@ -2,6 +2,7 @@ import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 // Shared scrub for test-spawned git (GIT_DIR hook-leak class — see the
 // module doc in _shared/git-env.ts; this file's local copy converged there
 // after the 2026-07-30 incident showed a second hand-rolled copy drifting).
@@ -625,12 +626,11 @@ describe('create-vibecarbon E2E', () => {
       expect(envLocal).toMatch(new RegExp(`^DB_PASSWORD=${BARE}$`, 'm'));
       expect(envLocal).toMatch(/^ADMIN_PASSWORD=testpass123$/m);
 
-      // Secrets should be unique (not placeholders)
-      const anonKeyMatch = envLocal.match(new RegExp(`^SUPABASE_ANON_KEY=(${BARE})$`, 'm'));
-      const serviceKeyMatch = envLocal.match(
-        new RegExp(`^SUPABASE_SERVICE_ROLE_KEY=(${BARE})$`, 'm'),
-      );
-      expect(anonKeyMatch?.[1]).not.toBe(serviceKeyMatch?.[1]);
+      // Secrets should be unique (not placeholders). Values are read back
+      // through parseDotenv, the codebase's one dotenv reader.
+      const env = parseDotenv(envLocal);
+      expect(env.SUPABASE_ANON_KEY).toBeTruthy();
+      expect(env.SUPABASE_ANON_KEY).not.toBe(env.SUPABASE_SERVICE_ROLE_KEY);
     }, 60000);
 
     it('-display-name overrides the derived display name', () => {

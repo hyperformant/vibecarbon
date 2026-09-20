@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 
 /**
  * Tests for sitemap and RSS generation logic.
@@ -69,9 +70,14 @@ ${urls}
 `;
 }
 
+/**
+ * generate-sitemap.ts reads SITE_URL through `readEnvFiles` (carbon/scripts/
+ * lib/dotenv.js, the template's copy of the one dotenv reader); this mirror
+ * does the same through `parseDotenv` on the file text instead of re-rolling
+ * a KEY= regex.
+ */
 function loadSiteUrlFromEnvContent(content: string): string | null {
-  const match = content.match(/^SITE_URL=["']?(.+?)["']?\s*$/m);
-  return match ? match[1] : null;
+  return parseDotenv(content).SITE_URL ?? null;
 }
 
 // ============================================================================

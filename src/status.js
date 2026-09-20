@@ -27,8 +27,9 @@ import {
   formatReplicationLagLine,
 } from './lib/deploy/replication.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
+import { parseDotenv } from './lib/dotenv.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
-import { parseDotenv, readProjectEnvFiles } from './lib/project.js';
+import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';

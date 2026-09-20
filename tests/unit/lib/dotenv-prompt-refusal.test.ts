@@ -11,10 +11,11 @@
  *   2. the live `validate` callbacks — configure's promptText/promptSecret and
  *      the six provider guided setups' token prompts, driven through a mocked
  *      @clack/prompts exactly like guided-setup-paste-normalization.test.ts;
- *   3. a source census: every `validate: (v) =>` in `src/lib/*-guided-setup.js`
- *      and in `src/lib/configure-providers.js` (the token-only fallback prompt
- *      for a compute provider with no guided module) calls the helper, except
- *      the listed prompts whose value never reaches an env file; create.js's
+ *   3. a source census: every `validate: (<param>) =>` in
+ *      `src/lib/*-guided-setup.js` and in `src/lib/configure-providers.js`
+ *      (the token-only fallback prompt for a compute provider with no guided
+ *      module) hands ITS OWN parameter to the helper, except the listed
+ *      prompts whose value never reaches an env file; create.js's
  *      admin-password prompt checks ADMIN_PASSWORD.
  *
  * Fixture values only — nothing here is a real credential.
@@ -201,25 +202,50 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
     ]);
   });
 
+  type Prompt = { message: string; param: string; body: string };
+  /**
+   * Each text/password prompt: `p.text({ message: '…', … validate: (v) => { … },`.
+   * The validate parameter is CAPTURED, not assumed: a prompt written
+   * `validate: (value) =>` is judged by `value`, so `dotenvPromptProblem('K', v)`
+   * with a stale `v` (or none at all) cannot pass on the parameter's name.
+   */
+  function promptsIn(src: string): Prompt[] {
+    return [
+      ...src.matchAll(
+        /p\.(?:text|password)\(\{\s*message: (?:'([^']*)'|`([^`]*)`),[\s\S]*?validate: (?:async )?\((\w+)(?::\s*\w+)?\) => \{([\s\S]*?)\n\s*\},/g,
+      ),
+    ].map(([, quoted, template, param, body]) => ({ message: quoted ?? template, param, body }));
+  }
+  /** Every validate callback in a file, whatever its parameter is called. */
+  const validateCount = (src: string) =>
+    (src.match(/validate: (?:async )?\(\w+(?::\s*\w+)?\) =>/g) ?? []).length;
+  const callsHelper = ({ param, body }: Prompt) =>
+    new RegExp(String.raw`dotenvPromptProblem\((?:'[A-Z_]+'|Provider\.TOKEN_ENV), ${param}\)`).test(
+      body,
+    );
+
+  it('judges a prompt by its own validate parameter, not by the name `v`', () => {
+    const snippet = (param: string, arg: string) =>
+      `const t = await p.password({\n  message: 'Token',\n  validate: (${param}) => {\n    const bad = dotenvPromptProblem('X_TOKEN', ${arg});\n    if (bad) return bad;\n  },\n});`;
+    expect(promptsIn(snippet('v', 'v')).map(callsHelper)).toEqual([true]);
+    expect(promptsIn(snippet('value', 'value')).map(callsHelper)).toEqual([true]);
+    // The stale-name case Reviewer Note B describes: `(value) =>` whose body
+    // still hands `v` to the helper (an outer variable, not the input).
+    expect(promptsIn(snippet('value', 'v')).map(callsHelper)).toEqual([false]);
+    expect(promptsIn(snippet('value', 'value')).map((x) => x.param)).toEqual(['value']);
+    expect(validateCount(snippet('value', 'value'))).toBe(1);
+  });
+
   for (const file of files) {
     it(file, () => {
       const src = readFileSync(join(ROOT, 'src/lib', file), 'utf-8');
-      // Each text/password prompt: `p.text({ message: '…', … validate: (v) => { … },`
-      const prompts = [
-        ...src.matchAll(
-          /p\.(?:text|password)\(\{\s*message: (?:'([^']*)'|`([^`]*)`),[\s\S]*?validate: \(v\) => \{([\s\S]*?)\n\s*\},/g,
-        ),
-      ];
+      const prompts = promptsIn(src);
       // Every validate callback in these modules belongs to a text/password prompt.
-      const validates = src.match(/validate: \(v\) =>/g) ?? [];
-      expect(prompts.length, `${file}: prompt regex drifted`).toBe(validates.length);
+      expect(prompts.length, `${file}: prompt regex drifted`).toBe(validateCount(src));
       expect(prompts.length).toBeGreaterThan(0);
       const missing = prompts
-        .map(([, quoted, template, body]) => ({ message: quoted ?? template, body }))
         .filter(({ message }) => !NOT_AN_ENV_VALUE.has(message))
-        .filter(
-          ({ body }) => !/dotenvPromptProblem\((?:'[A-Z_]+'|Provider\.TOKEN_ENV), v\)/.test(body),
-        )
+        .filter((prompt) => !callsHelper(prompt))
         .map(({ message }) => message);
       expect(missing, `${file}: prompts whose validate lacks dotenvPromptProblem`).toEqual([]);
     });

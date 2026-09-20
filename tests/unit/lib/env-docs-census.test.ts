@@ -41,7 +41,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONFIG_KEYS, type ConfigKey, registryEntry } from '../../../src/lib/config-registry.js';
-import { parseDotenv } from '../../../src/lib/project.js';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 
 const ROOT = process.cwd();
 

@@ -129,9 +129,7 @@ export function ensureProjectId(projectConfig, cwd = process.cwd()) {
 // ============================================================================
 
 // The one dotenv reader for the whole codebase lives in dotenv.js (Node's
-// util.parseEnv). Re-exported here so env-file callers that already import
-// project.js keep working.
-export { parseDotenv };
+// util.parseEnv); import parseDotenv from there, not from here.
 
 /** Serialize a key-value object into dotenv lines in the portable grammar. */
 export function serializeDotenv(obj) {
@@ -331,6 +329,10 @@ export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false }
     // Repair pre-2026-09-20 POSIX-quoted lines on the way through so an
     // un-upgraded project is fixed the first time configure touches it.
     const content = healLegacyDotenvText(readFileSync(envPath, 'utf-8')).text;
+    // In-place REWRITER, deliberately not parse-then-serialize: only the one
+    // `KEY=` line changes, everything else (comments, blanks, order) stays
+    // verbatim, and no value is read out of the file. Allow-listed by exact
+    // path in tests/unit/lib/dotenv-dialect-census.test.ts.
     const regex = new RegExp(`^${key}=.*$`, 'm');
     if (regex.test(content)) {
       writeFileSync(
