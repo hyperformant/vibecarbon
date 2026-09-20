@@ -28,9 +28,16 @@ import remarkGfm from 'remark-gfm';
 import remarkParse from 'remark-parse';
 import remarkRehype from 'remark-rehype';
 import { unified } from 'unified';
+import { readEnvFiles } from './lib/dotenv.js';
 import { isDraft, parseFrontmatter, substituteMdxProps } from './lib/seo-content';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const rootDir = resolve(__dirname, '..');
+// Shell env wins, then .env.local over .env (readEnvFiles layers those two).
+// Production builds receive these as build args (no .env.local in the image);
+// locally this falls back to whatever the project's .env files hold.
+const fileEnv = readEnvFiles(rootDir);
+const getEnvValue = (key: string): string | null => process.env[key] ?? fileEnv[key] ?? null;
 
 function readIfPresent(relPath: string): string | null {
   try {
@@ -65,13 +72,8 @@ const indexHtml = readIfPresent('src/client/index.html');
  * build, where .env.local is absent by design.
  */
 function loadSiteName(): string {
-  const fromEnv = process.env.VITE_PROJECT_DISPLAY_NAME || process.env.PROJECT_DISPLAY_NAME;
+  const fromEnv = getEnvValue('VITE_PROJECT_DISPLAY_NAME') || getEnvValue('PROJECT_DISPLAY_NAME');
   if (fromEnv) return fromEnv;
-  const envLocal = readIfPresent('.env.local');
-  const recorded = envLocal?.match(
-    /^(?:PROJECT_DISPLAY_NAME|VITE_PROJECT_DISPLAY_NAME)=["']?(.+?)["']?\s*$/m
-  );
-  if (recorded) return recorded[1];
   const title = indexHtml?.match(/<title>([^<]*)<\/title>/);
   if (title?.[1]?.trim()) return decodeHtmlEntities(title[1]);
   return 'My SaaS';
@@ -89,17 +91,8 @@ function loadSiteDescription(): string {
 const SITE_DESCRIPTION = loadSiteDescription();
 
 function loadSiteUrl(): string {
-  // Production builds receive the apex URL as VITE_PUBLIC_URL (a build arg);
-  // .env.local is not present in the image. Locally, fall back to .env.local.
-  if (process.env.VITE_PUBLIC_URL) return process.env.VITE_PUBLIC_URL.replace(/\/$/, '');
-  try {
-    const envContent = readFileSync(resolve(__dirname, '../.env.local'), 'utf-8');
-    const match = envContent.match(/^(?:VITE_PUBLIC_URL|SITE_URL)=["']?(.+?)["']?\s*$/m);
-    if (match) return match[1].replace(/\/$/, '');
-  } catch {
-    // .env.local may not exist in CI
-  }
-  return (process.env.SITE_URL || 'http://localhost:5173').replace(/\/$/, '');
+  const value = getEnvValue('VITE_PUBLIC_URL') || getEnvValue('SITE_URL');
+  return (value || 'http://localhost:5173').replace(/\/$/, '');
 }
 
 /**
@@ -110,11 +103,8 @@ function loadSiteUrl(): string {
  * build, where .env.local is absent by design).
  */
 function loadAdminEmail(): string | null {
-  const fromEnv = process.env.VITE_ADMIN_EMAIL || process.env.ADMIN_EMAIL;
+  const fromEnv = getEnvValue('VITE_ADMIN_EMAIL') || getEnvValue('ADMIN_EMAIL');
   if (fromEnv) return fromEnv;
-  const envLocal = readIfPresent('.env.local');
-  const recorded = envLocal?.match(/^(?:VITE_)?ADMIN_EMAIL=["']?(.+?)["']?\s*$/m);
-  if (recorded) return recorded[1];
   const legal = readIfPresent('src/client/pages/Legal.tsx');
   const fallback = legal?.match(/VITE_ADMIN_EMAIL \?\? '([^']+)'/);
   // In a not-yet-created template checkout the fallback is still the literal

@@ -6,8 +6,9 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { readEnvFiles } from './lib/dotenv.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -20,26 +21,18 @@ try {
   // Ignore errors, use default
 }
 
-// Read port configuration from .env.local
+// Read port configuration from .env / .env.local (shell wins, then .env.local over .env)
 function getPortConfig() {
   const defaults = { vite: 5173, api: 3000 };
   try {
-    const envFiles = ['.env.local', '.env'];
-    for (const file of envFiles) {
-      if (existsSync(file)) {
-        const content = readFileSync(file, 'utf-8');
-        const getEnvValue = (key) => {
-          const match = content.match(new RegExp(`^${key}=["']?([^"'\\n]+)["']?`, 'm'));
-          return match ? match[1] : null;
-        };
+    const fileEnv = readEnvFiles(process.cwd());
+    const getEnvValue = (key) => process.env[key] ?? fileEnv[key] ?? null;
 
-        const portOffset = Number.parseInt(getEnvValue('DEV_PORT_OFFSET') || '0', 10);
-        const vitePort = getEnvValue('DEV_VITE_PORT') || String(5173 + portOffset);
-        const apiPort = getEnvValue('DEV_API_PORT') || String(3000 + portOffset);
+    const portOffset = Number.parseInt(getEnvValue('DEV_PORT_OFFSET') || '0', 10);
+    const vitePort = getEnvValue('DEV_VITE_PORT') || String(5173 + portOffset);
+    const apiPort = getEnvValue('DEV_API_PORT') || String(3000 + portOffset);
 
-        return { vite: Number.parseInt(vitePort, 10), api: Number.parseInt(apiPort, 10) };
-      }
-    }
+    return { vite: Number.parseInt(vitePort, 10), api: Number.parseInt(apiPort, 10) };
   } catch {
     // Fall through to defaults
   }

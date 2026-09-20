@@ -131,8 +131,9 @@ describe('env docs census — forward: every registry entry is documented with i
 // process.env), so it is not a read of anything.
 const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
   VITE_PUBLIC_URL:
-    'carbon/scripts/generate-sitemap.ts:34, generate-rss.ts:27, generate-seo.ts:94 ' +
-    '(process.env.VITE_PUBLIC_URL) — build-time SEO scripts, not carbon/src.',
+    'carbon/scripts/generate-sitemap.ts:39, generate-rss.ts:32, generate-seo.ts:94 ' +
+    "(getEnvValue('VITE_PUBLIC_URL'), which reads process.env then the layered .env files) " +
+    '— build-time SEO scripts, not carbon/src.',
   ADMIN_PASSWORD:
     'carbon/docker-compose.metabase.yml:73 — METABASE_ADMIN_PASSWORD falls back to the ' +
     'operator ADMIN_PASSWORD when METABASE_ADMIN_PASSWORD itself is unset.',
@@ -276,10 +277,19 @@ function composeReadsKey(key: string, sources: string[]): boolean {
   return sources.some((src) => re.test(src));
 }
 
-/** True when a script source reads `process.env.key` (member or bracket form). */
+/**
+ * True when a script source reads `process.env.key` (member or bracket
+ * form), or calls the scripts' shared `getEnvValue('key')` helper — the
+ * layered `process.env[key] ?? fileEnv[key]` read every carbon/scripts/*
+ * env consumer now goes through (see carbon/scripts/lib/dotenv.js).
+ */
 function scriptReadsKey(key: string, sources: string[]): boolean {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`process\\.env\\.${escaped}\\b|process\\.env\\[['"]${escaped}['"]\\]`);
+  const re = new RegExp(
+    `process\\.env\\.${escaped}\\b` +
+      `|process\\.env\\[['"]${escaped}['"]\\]` +
+      `|getEnvValue\\(['"]${escaped}['"]\\)`,
+  );
   return sources.some((src) => re.test(src));
 }
 

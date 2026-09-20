@@ -7,7 +7,8 @@ import rehypeSlug from 'rehype-slug';
 import remarkFrontmatter from 'remark-frontmatter';
 import remarkGfm from 'remark-gfm';
 import remarkMdxFrontmatter from 'remark-mdx-frontmatter';
-import { createLogger, defineConfig, loadEnv } from 'vite';
+import { createLogger, defineConfig } from 'vite';
+import { readEnvFiles } from './scripts/lib/dotenv.js';
 import { isViteUrlBannerLine } from './scripts/lib/vite-log-filter.js';
 
 // Calculate ports based on offset and overrides
@@ -18,8 +19,9 @@ function getPort(envVarName: string, defaultPort: number, offset: number): numbe
 }
 
 export default defineConfig(({ mode }) => {
-  // Load env from project root (where .env.local lives)
-  const env = loadEnv(mode, path.resolve(import.meta.dirname), '');
+  // Read env from project root (where .env/.env.local live). Shell wins over
+  // the files; Vite still loads import.meta.env.VITE_* itself for the client.
+  const env = { ...readEnvFiles(path.resolve(import.meta.dirname)), ...process.env };
 
   const portOffset = Number.parseInt(env.DEV_PORT_OFFSET || '0', 10);
   const vitePort = getPort('DEV_VITE_PORT', 5173, portOffset);

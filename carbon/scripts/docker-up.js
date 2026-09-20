@@ -9,7 +9,8 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { readEnvFiles } from './lib/dotenv.js';
 import {
   buildComposeCommand,
   discoverOptionalServices,
@@ -19,18 +20,11 @@ import {
 } from './lib/manifest.js';
 
 /**
- * Read environment value from .env files
+ * Read environment value from .env / .env.local (shell wins, then .env.local over .env)
  */
+const fileEnv = readEnvFiles(process.cwd());
 function getEnvValue(key) {
-  const envFiles = ['.env.local', '.env'];
-  for (const file of envFiles) {
-    if (existsSync(file)) {
-      const content = readFileSync(file, 'utf-8');
-      const match = content.match(new RegExp(`^${key}=["']?([^"'\\n]+)["']?`, 'm'));
-      if (match) return match[1];
-    }
-  }
-  return null;
+  return process.env[key] ?? fileEnv[key] ?? null;
 }
 
 /**
