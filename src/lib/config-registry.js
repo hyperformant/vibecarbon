@@ -70,7 +70,10 @@
 // wider set of schemes and gets its own shape below).
 const HTTPS_URL_SHAPE = { regex: /^https:\/\/.+/, describe: 'an https:// ACME directory URL' };
 const TRUE_FALSE_SHAPE = { values: ['true', 'false'], describe: 'one of true, false' };
-const EMAIL_REGEX = /^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+// Exported so operator-env.js's shape-less 'email' kind fallback validates
+// against the exact same pattern as any registry entry that pins this shape,
+// instead of carrying its own duplicate.
+export const EMAIL_REGEX = /^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 // One octet, 0-255 — reused for the CIDR-list regex below.
 const IPV4_OCTET = '(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
 const IPV4_CIDR = `${IPV4_OCTET}(\\.${IPV4_OCTET}){3}/(3[0-2]|[12]?[0-9])`;

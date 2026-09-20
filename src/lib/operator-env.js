@@ -18,9 +18,8 @@
  * pulling in prompt/UI libraries.
  */
 
-import { entriesForScopes, registryEntry } from './config-registry.js';
+import { EMAIL_REGEX, entriesForScopes, registryEntry } from './config-registry.js';
 
-const EMAIL_REGEX = /^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 const HOSTNAME_REGEX =
   /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 const CIDR_SEGMENT_REGEX =
@@ -39,10 +38,10 @@ const KIND_FALLBACKS = {
     describe: '1-65535',
     test: (v) => /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 65535,
   },
-  email: { describe: 'a valid email address', test: (v) => EMAIL_REGEX.test(v) },
-  hostname: { describe: 'a valid hostname', test: (v) => HOSTNAME_REGEX.test(v) },
+  email: { describe: 'an email address', test: (v) => EMAIL_REGEX.test(v) },
+  hostname: { describe: 'a hostname', test: (v) => HOSTNAME_REGEX.test(v) },
   url: {
-    describe: 'a valid URL',
+    describe: 'a URL',
     test: (v) => {
       try {
         // eslint-disable-next-line no-new
@@ -54,8 +53,12 @@ const KIND_FALLBACKS = {
     },
   },
   'cidr-list': {
-    describe: 'comma-separated CIDR blocks like 203.0.113.0/24',
+    describe: 'comma-separated IPv4 CIDRs',
     test: (v) => v.split(',').every((part) => CIDR_SEGMENT_REGEX.test(part.trim())),
+  },
+  pem: {
+    describe: 'a PEM block (or its base64 encoding)',
+    test: (v) => v.includes('-----BEGIN') && v.includes('-----END'),
   },
 };
 
@@ -105,8 +108,17 @@ export function normalizeOperatorValue(raw, entry) {
       fixed.push('expanded \\n escapes');
     }
     if (!value.startsWith('-----BEGIN')) {
-      value = Buffer.from(value, 'base64').toString('utf8').trim();
-      fixed.push('decoded base64');
+      const decoded = Buffer.from(value, 'base64').toString('utf8').trim();
+      // Only trust the decode if it actually looks like a PEM block — base64
+      // decoding a non-base64, non-PEM string still "succeeds" (Node ignores
+      // invalid characters) and would otherwise silently replace the value
+      // with garbage. Leave the original untouched when it doesn't pan out;
+      // validateOperatorValue's pem fallback below is what reports the
+      // problem.
+      if (decoded.startsWith('-----BEGIN')) {
+        value = decoded;
+        fixed.push('decoded base64');
+      }
     }
   }
 

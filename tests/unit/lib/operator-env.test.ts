@@ -54,6 +54,10 @@ describe('normalizeOperatorValue', () => {
   it('returns empty for null/undefined', () => {
     expect(normalizeOperatorValue(undefined, hetzner)).toEqual({ value: '', fixed: [] });
   });
+  it('leaves a non-PEM value untouched rather than trusting a garbage base64 decode', () => {
+    const garbage = 'plainly-not-a-pem-or-base64!!';
+    expect(normalizeOperatorValue(garbage, pem)).toEqual({ value: garbage, fixed: [] });
+  });
 });
 
 describe('validateOperatorValue', () => {
@@ -81,6 +85,76 @@ describe('validateOperatorValue', () => {
     expect(validateOperatorValue('paypal', entry('BILLING_PROVIDER'))).toContain('one of');
     expect(validateOperatorValue('short', entry('LINODE_API_TOKEN'))).toContain('at least');
     expect(validateOperatorValue('sk_test_abc', stripe)).toBeNull();
+  });
+  it('pins the shape-less hostname/url fallbacks against real registry entries', () => {
+    const smtpHost = entry('SMTP_HOST');
+    expect(validateOperatorValue('smtp.example.com', smtpHost)).toBeNull();
+    expect(validateOperatorValue('mail.internal', smtpHost)).toBeNull();
+    const badHost = 'not a host';
+    expect(validateOperatorValue(badHost, smtpHost)).toBe(
+      `SMTP_HOST looks wrong: expected a hostname, got ${badHost.length} characters`,
+    );
+    const urlAsHost = 'http://smtp.example.com';
+    expect(validateOperatorValue(urlAsHost, smtpHost)).toBe(
+      `SMTP_HOST looks wrong: expected a hostname, got ${urlAsHost.length} characters`,
+    );
+
+    const githubUrl = entry('VITE_GITHUB_REPO_URL');
+    expect(validateOperatorValue('https://github.com/x/y', githubUrl)).toBeNull();
+    const bareUrl = 'github.com/x/y';
+    expect(validateOperatorValue(bareUrl, githubUrl)).toBe(
+      `VITE_GITHUB_REPO_URL looks wrong: expected a URL, got ${bareUrl.length} characters`,
+    );
+  });
+  it('pins the shape-less port/email/cidr-list/pem fallbacks (entries constructed inline, no shape)', () => {
+    const portEntry = {
+      key: 'T_PORT',
+      class: 'operator-secret',
+      feature: 'e2e',
+      kind: 'port',
+      where: 'tests/.env.e2e',
+      scope: 'e2e',
+    } as const;
+    expect(validateOperatorValue('8080', portEntry)).toBeNull();
+    for (const bad of ['0', '70000', 'abc']) {
+      expect(validateOperatorValue(bad, portEntry)).toBe(
+        `T_PORT looks wrong: expected 1-65535, got ${bad.length} characters`,
+      );
+    }
+
+    const emailEntry = {
+      key: 'T_EMAIL',
+      class: 'operator-secret',
+      feature: 'e2e',
+      kind: 'email',
+      where: 'tests/.env.e2e',
+      scope: 'e2e',
+    } as const;
+    expect(validateOperatorValue('a@b.co', emailEntry)).toBeNull();
+    expect(validateOperatorValue('x@', emailEntry)).toBe(
+      'T_EMAIL looks wrong: expected an email address, got 2 characters',
+    );
+
+    const cidrEntry = {
+      key: 'T_CIDR',
+      class: 'operator-secret',
+      feature: 'e2e',
+      kind: 'cidr-list',
+      where: 'tests/.env.e2e',
+      scope: 'e2e',
+    } as const;
+    expect(validateOperatorValue('10.0.0.0/8, 192.168.1.0/24', cidrEntry)).toBeNull();
+    const noMask = '10.0.0.1';
+    expect(validateOperatorValue(noMask, cidrEntry)).toBe(
+      `T_CIDR looks wrong: expected comma-separated IPv4 CIDRs, got ${noMask.length} characters`,
+    );
+
+    const p = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----';
+    expect(validateOperatorValue(p, pem)).toBeNull();
+    const garbage = 'plainly-not-a-pem-or-base64!!';
+    expect(validateOperatorValue(garbage, pem)).toBe(
+      `X_PEM looks wrong: expected a PEM block (or its base64 encoding), got ${garbage.length} characters`,
+    );
   });
 });
 
