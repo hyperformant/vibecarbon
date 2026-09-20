@@ -1,4 +1,5 @@
 import { checkDependency, runCommand } from '../command.js';
+import { checkOperatorConfig } from '../operator-env.js';
 
 /**
  * The Pulumi release that taught the DIY S3 backend to accept
@@ -102,16 +103,39 @@ export function assertPulumiSupportsBackendOptions(ProviderClass, installed) {
  * and far more confusingly. Hence the version assertion — provider-scoped, so
  * it only speaks up when it is actually load-bearing.
  *
+ * Beyond host tools, a deploy also depends on the operator-facing config
+ * values (provider/DNS/registry credentials, plus the always-checked
+ * access/tls/state keys) being well-formed BEFORE any of that config is
+ * used — a malformed value discovered mid-deploy (a live provider 401, a
+ * Pulumi state-backend rejection) means the operator finds out only after
+ * paying for a server or mutating DNS. `operatorScopes` names which
+ * `config-registry.js` scopes apply to THIS deploy (computed by the
+ * orchestrator from the resolved provider/DNS/registry usage); every
+ * problem across every scope is collected and thrown together so the
+ * operator fixes everything in one pass instead of one prompt at a time.
+ *
  * @param {string} tier - 'compose' | 'compose-ha' | 'k8s' | 'k8s-ha'
  * @param {object} [deps] - injectable for testing
  * @param {(bin: string) => boolean} [deps.has]
  * @param {object} [deps.ProviderClass] - the provider this deploy targets
  * @param {() => string|null} [deps.pulumiVersion]
- * @throws if a required tool is not on PATH, or is unusable for this provider
+ * @param {string[]} [deps.operatorScopes] - config-registry.js scopes to
+ *   validate for this deploy (default: none, i.e. skip the check — callers
+ *   that don't pass this opt out, which existing unit tests rely on).
+ * @param {Record<string, string|undefined>} [deps.env] - injectable for
+ *   testing; defaults to `process.env`.
+ * @throws if a required tool is not on PATH, is unusable for this provider,
+ *   or an in-scope operator config value is malformed.
  */
 export function checkDeployPrerequisites(
   _tier,
-  { has = checkDependency, ProviderClass = null, pulumiVersion = readPulumiVersion } = {},
+  {
+    has = checkDependency,
+    ProviderClass = null,
+    pulumiVersion = readPulumiVersion,
+    operatorScopes = [],
+    env = process.env,
+  } = {},
 ) {
   const hints = {
     pulumi:
@@ -133,5 +157,23 @@ export function checkDeployPrerequisites(
   // probe like this hides). Do not hoist it back out.
   if (ProviderClass?.STATE_BACKEND_CHECKSUM_CALCULATION) {
     assertPulumiSupportsBackendOptions(ProviderClass, pulumiVersion());
+  }
+
+  // Operator config gate — AFTER host tools (a missing `pulumi`/`ssh` is a
+  // machine problem the operator fixes once; a malformed credential is a
+  // config problem they fix in .env.local, and hearing about every one of
+  // them at once beats a live 401 five minutes into provisioning). Runs
+  // BEFORE anything below this call in the orchestrator ever reads these
+  // values — no provider API call, Pulumi invocation, or SSH has happened
+  // yet at this point in the deploy.
+  const { problems } = checkOperatorConfig(operatorScopes, { env });
+  if (problems.length > 0) {
+    throw new Error(
+      [
+        'Configuration problems (nothing was provisioned):',
+        ...problems.map((p) => `  - ${p}`),
+        "Set them in .env.local (never committed; see .env.local.example for each variable's format).",
+      ].join('\n'),
+    );
   }
 }

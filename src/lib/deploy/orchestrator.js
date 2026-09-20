@@ -10,7 +10,7 @@ import { progressLog, spinner } from '../cli/progress.js';
 import { c } from '../colors.js';
 import { runCommand, runCommandAsync } from '../command.js';
 import { loadProjectConfig, registerProject, saveProjectConfig } from '../config.js';
-import { getDnsProvider, hasAutomatedDns } from '../dns-provider.js';
+import { DNS_PROVIDERS, getDnsProvider, hasAutomatedDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
 import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
@@ -295,7 +295,27 @@ export async function executeDeployment(args, gatheredConfig) {
   // Provider passed so the pulumi VERSION assertion can fire: a CLI too old
   // for this provider's state-backend options fails as totally as a missing
   // one, with a bucket error that names neither pulumi nor a version.
-  checkDeployPrerequisites(tier, { ProviderClass: providerFor(config) });
+  //
+  // The operator-config scopes (config-registry.js) THIS deploy touches,
+  // gathered before checkDeployPrerequisites so a malformed value in any of
+  // them is refused in the same breath as a missing host tool — always the
+  // resolved compute provider plus access/tls/state (their keys are all
+  // optional, so they only fail on an actually-malformed value); DNS only
+  // when it is both automated AND holds its own credential (Hetzner DNS
+  // aliases the compute token via the same-token rule — DNS_PROVIDERS[id]
+  // .computeProviderId — so it is already covered by provider:<id> below,
+  // and gets no scope of its own); registry only when the deploy will
+  // actually attempt the dockerhub-login step (mirrors plan/steps.js's own
+  // `when: (ctx) => !!ctx.dockerHubCreds` gate) — absent creds fall back to
+  // an anonymous pull and never touch this scope.
+  const operatorScopes = ['access', 'tls', 'state', `provider:${providerIdFor(config)}`];
+  if (hasAutomatedDns(dnsProvider) && !DNS_PROVIDERS[dnsProvider]?.computeProviderId) {
+    operatorScopes.push(`dns:${dnsProvider}`);
+  }
+  if (resolveDockerHubCreds()) {
+    operatorScopes.push('registry');
+  }
+  checkDeployPrerequisites(tier, { ProviderClass: providerFor(config), operatorScopes });
   assertTierSupported(providerFor(config), tier);
 
   // Operator-IP access: detect + persist + (when env already deployed) patch

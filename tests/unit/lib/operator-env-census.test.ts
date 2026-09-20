@@ -92,6 +92,9 @@ const ALIAS_ALLOWLIST: Record<string, string> = {
     'isAnalyticsDisabled reads VIBECARBON_TELEMETRY_DISABLED/DO_NOT_TRACK/CI',
   [join('lib', 'telemetry', 'update-check.js')]:
     'reads CI and VIBECARBON_API_BASE to decide whether/where to check for updates',
+  [join('lib', 'deploy', 'preflight.js')]:
+    'injectable env bag forwarded verbatim to checkOperatorConfig(scopes, { env }) — the reader ' +
+    '(operator-env.js) is what actually reads each registered key off it',
 };
 
 /**
