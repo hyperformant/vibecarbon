@@ -38,6 +38,7 @@ import {
 } from './lib/config-registry.js';
 import { promptProviders } from './lib/configure-providers.js';
 import { DNS_PROVIDERS } from './lib/dns-provider.js';
+import { dotenvValueProblem } from './lib/dotenv.js';
 import { envSummaryLines } from './lib/env-summary.js';
 import {
   addLocale,
@@ -164,6 +165,10 @@ export async function promptText(message, currentValue, options = {}) {
         // the "surrounding quotes?" / "trailing newline?" hint can fire when
         // the cleaned value is still wrong (M10).
         const { value: normalized } = normalizeOperatorValue(value, options.entry);
+        // Refuse here what no portable .env form can hold (src/lib/dotenv.js);
+        // setEnvVar would throw the same reason after every other prompt ran.
+        const problem = dotenvValueProblem(options.entry.key, normalized);
+        if (problem) return `${options.entry.key} ${problem}`;
         return validateOperatorValue(normalized, options.entry, { raw: value }) ?? undefined;
       }
       return options.validate?.(value);
@@ -190,6 +195,8 @@ export async function promptSecret(message, currentValue, options = {}) {
       if (options.entry) {
         // Same raw-threading as promptText above (M10).
         const { value: normalized } = normalizeOperatorValue(v, options.entry);
+        const problem = dotenvValueProblem(options.entry.key, normalized);
+        if (problem) return `${options.entry.key} ${problem}`;
         return validateOperatorValue(normalized, options.entry, { raw: v }) ?? undefined;
       }
       if (!v) return 'This field is required';

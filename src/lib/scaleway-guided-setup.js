@@ -77,7 +77,7 @@ import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import { resolveNameservers } from './dns-propagation.js';
 import { DNS_PROVIDERS, getDnsProvider, locateDomainBackend } from './dns-provider.js';
-import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
+import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 import {
   EXTERNAL_DOMAIN_CHALLENGE_NAME,
@@ -271,7 +271,7 @@ async function promptCompanions() {
         message: 'Paste your Scaleway Access Key here (starts with SCW)',
         validate: (v) => {
           if (!v || v.length < 10) return 'Access key is required';
-          return undefined;
+          return dotenvPromptProblem('SCALEWAY_ACCESS_KEY', v);
         },
       }),
     ),
@@ -285,7 +285,7 @@ async function promptCompanions() {
         message: 'Paste your dedicated Project ID here (UUID, console → Project settings)',
         validate: (v) => {
           if (!v || v.length < 10) return 'Project ID is required';
-          return undefined;
+          return dotenvPromptProblem('SCALEWAY_DEFAULT_PROJECT_ID', v);
         },
       }),
     ),
@@ -355,7 +355,7 @@ export async function getApiToken(projectName, options = {}) {
         message: 'Paste your Scaleway Secret Key here',
         validate: (v) => {
           if (!v || v.length < 10) return 'Secret key is required';
-          return undefined;
+          return dotenvPromptProblem('SCALEWAY_SECRET_KEY', v);
         },
       }),
     );

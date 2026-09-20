@@ -13,13 +13,14 @@
  * shape but NEVER echoes the value itself — these are credentials, and even
  * a rejected one shouldn't end up in a log or terminal scrollback.
  *
- * Dependency-free by design (imports only `config-registry.js` and node
- * builtins) so deploy code and `configure` can both import this without
- * pulling in prompt/UI libraries.
+ * Dependency-free by design (imports only `config-registry.js`, `dotenv.js`
+ * and node builtins) so deploy code and `configure` can both import this
+ * without pulling in prompt/UI libraries.
  */
 
 import { isIPv4, isIPv6 } from 'node:net';
 import { EMAIL_REGEX, entriesForScopes, registryEntry } from './config-registry.js';
+import { dotenvValueProblem } from './dotenv.js';
 
 const HOSTNAME_REGEX =
   /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
@@ -202,6 +203,26 @@ export function validateOperatorValue(value, entry, { raw: rawInput } = {}) {
     problem += ' — surrounding quotes?';
   }
   return problem;
+}
+
+/**
+ * Prompt-time refusal of a value no portable `.env` form can hold (see
+ * `dotenvValueProblem` in dotenv.js): a `'` mixed with `"`/`\`/`$`, a control
+ * character, `$` in a `VITE_*` key. Meant for a clack `validate` callback on
+ * a prompt whose accepted value ends in `setEnvVar`: it normalizes the raw
+ * paste exactly as the caller will before saving, and returns the message
+ * the prompt shows (naming the key and the reason, never the value) or
+ * `undefined` when the value is fine. `setEnvVar` throws the same reason as
+ * the non-interactive backstop.
+ * @param {string} key
+ * @param {string | null | undefined} raw
+ * @returns {string | undefined}
+ */
+export function dotenvPromptProblem(key, raw) {
+  const entry = registryEntry(key);
+  const value = entry ? normalizeOperatorValue(raw, entry).value : (raw ?? '');
+  const problem = dotenvValueProblem(key, value);
+  return problem ? `${key} ${problem}` : undefined;
 }
 
 /**

@@ -21,7 +21,7 @@ import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { verifyToken } from './cloudflare-dns.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
+import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 /**
@@ -129,7 +129,7 @@ export async function getApiToken(projectName, options = {}) {
       message: 'Paste your Cloudflare API token here',
       validate: (v) => {
         if (!v || v.length < 10) return 'API token is required';
-        return undefined;
+        return dotenvPromptProblem('CLOUDFLARE_API_TOKEN', v);
       },
     });
 
