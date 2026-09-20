@@ -61,7 +61,7 @@ export function readOperatorVar(name, { env = process.env, registry = OPERATOR_V
 Configuration problems (nothing was provisioned):
   - HETZNER_API_TOKEN looks wrong: expected 64 alphanumeric characters, got 65 (a trailing newline or quote?)
   - CLOUDFLARE_API_TOKEN is not set — this environment uses Cloudflare DNS
-Set them in .env.local (never committed; see .env.example for each variable's format).
+Set them in .env.local (never committed; see .env.local.example for each variable's format).
 ```
 
 **`status` advisory (soft).** The Local Development block already prints `▲ Access: no operator CIDRs configured …`. It gains a `Configuration` line for the project's configured provider (and each deployed environment's DNS/registry scopes), shown even before the first deploy: `Configuration ● ok` or `▲ HETZNER_API_TOKEN looks wrong …`. Same reader, same messages, no exit-code change. This is where a user sees a problem *before* they run deploy.
