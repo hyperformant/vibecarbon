@@ -673,11 +673,25 @@ function checkGitSync(envName, envConfig) {
  * yet". A scope already covered by a deployed environment is checked only
  * once, under the stricter (presence: true) rule.
  *
+ * `problems` is deduped by the variable name each message names — every
+ * `checkOperatorConfig` message starts with `<KEY> ` (`<KEY> is not set` /
+ * `<KEY> looks wrong: ...`), and env-var keys never contain a space, so the
+ * first token is exactly that key. The same key CAN reach both passes: a
+ * project's default provider token (base, presence: false) is also the
+ * lone sibling key a cross-cloud DNS pick reads (deployed, presence: true)
+ * — see `operatorConfigForDns`'s cross-cloud case. Without deduping, a
+ * single malformed value would be reported (and counted) twice. The
+ * deployed pass's message wins on a collision (it is the stricter check,
+ * and is the only one that can report an ABSENT value as a problem at
+ * all — the base pass tolerates that silently under `presence: false`).
+ *
  * @param {{provider?: string}|null|undefined} projectConfig
  * @param {Record<string, {provider?: string, dnsProvider?: string, deployMode?: string}>} environments
+ * @param {{ env?: Record<string, string|undefined> }} [opts] - injectable
+ *   for testing; defaults to `process.env`.
  * @returns {{ problems: string[], checked: string[] }}
  */
-function computeConfigurationCheck(projectConfig, environments) {
+function computeConfigurationCheck(projectConfig, environments, { env } = {}) {
   const envEntries = Object.entries(environments || {});
 
   const projectProviderId =
@@ -698,19 +712,23 @@ function computeConfigurationCheck(projectConfig, environments) {
   }
 
   const baseScopes = ['access', 'tls', 'state'];
-  if (resolveDockerHubCreds()) baseScopes.push('registry');
+  if (resolveDockerHubCreds({ env })) baseScopes.push('registry');
   if (projectProviderId && !deployedScopes.has(`provider:${projectProviderId}`)) {
     baseScopes.push(`provider:${projectProviderId}`);
   }
 
-  const shapeOnly = checkOperatorConfig(baseScopes, { presence: false });
+  const shapeOnly = checkOperatorConfig(baseScopes, { presence: false, env });
   const deployed =
     deployedScopes.size > 0 || deployedKeys.length > 0
-      ? checkOperatorConfig([...deployedScopes], { presence: true, keys: deployedKeys })
+      ? checkOperatorConfig([...deployedScopes], { presence: true, keys: deployedKeys, env })
       : { problems: [], checked: [] };
 
+  const problemByKey = new Map();
+  for (const problem of shapeOnly.problems) problemByKey.set(problem.split(' ')[0], problem);
+  for (const problem of deployed.problems) problemByKey.set(problem.split(' ')[0], problem);
+
   return {
-    problems: [...shapeOnly.problems, ...deployed.problems],
+    problems: [...problemByKey.values()],
     checked: [...new Set([...shapeOnly.checked, ...deployed.checked])],
   };
 }
@@ -722,6 +740,12 @@ function computeConfigurationCheck(projectConfig, environments) {
  * already produced, which name a variable and its expected shape but never
  * its content.
  *
+ * Styling matches its neighbour, the `Access:` advisory above it: the body
+ * stays plain and only the one meaningful piece is coloured — there, an
+ * inline command name; here, the count (since there is no command to
+ * suggest). The glyphs (`●`/`▲`), the "Configuration"/"ok" words, and every
+ * `  - <problem>` detail line stay uncoloured.
+ *
  * @param {string[]} problems
  * @param {string[]} checked
  * @returns {string[]}
@@ -729,12 +753,12 @@ function computeConfigurationCheck(projectConfig, environments) {
 function formatConfigurationLines(problems, checked) {
   if (problems.length === 0) {
     const n = checked.length;
-    return [c.success(`Configuration ● ok  (${n} variable${n === 1 ? '' : 's'} checked)`)];
+    return [`Configuration ● ok  ${c.success(`(${n} variable${n === 1 ? '' : 's'} checked)`)}`];
   }
   const n = problems.length;
   return [
-    c.warning(`▲ Configuration: ${n} problem${n === 1 ? '' : 's'}`),
-    ...problems.map((problem) => c.warning(`  - ${problem}`)),
+    `▲ Configuration: ${c.warning(`${n} problem${n === 1 ? '' : 's'}`)}`,
+    ...problems.map((problem) => `  - ${problem}`),
   ];
 }
 
@@ -1447,6 +1471,7 @@ export async function run(args) {
 export {
   checkDockerContainers,
   classifyContainer,
+  computeConfigurationCheck,
   formatConfigurationLines,
   formatDockerServiceLines,
   formatHealthLines,
