@@ -8,12 +8,13 @@ Guidance for AI coding agents working on this repository.
 
 Vibecarbon is a CLI tool that generates production-ready software applications with Hono + Vite + React 19 + self-hosted Supabase. The repository contains:
 
-1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`, `activate.js`)
+1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`, `activate.js`)
 2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `vibecarbon create`
 3. **Test suite** (`tests/`): Comprehensive Vitest test suite
 
 ### CLI Commands
 ```bash
+vibecarbon ?  /  vibecarbon next   # What comes next: inspects the project, shows the next command, offers to run it
 vibecarbon create <project-name>   # Create new project
 vibecarbon add <feature>           # Add optional feature (observability, redis)
 vibecarbon remove <feature>        # Remove a feature from project
