@@ -183,12 +183,12 @@ export async function promptSecret(message, currentValue, options = {}) {
   const result = await p.password({
     message: currentValue ? `${message} ${c.dim('(press Enter to keep current)')}` : message,
     validate: (v) => {
-      if (!v && !currentValue) return 'This field is required';
-      if (!v) return undefined; // Enter-on-existing: keep the current value
+      if (!v && currentValue) return undefined; // Enter-on-existing: keep the current value
       if (options.entry) {
         const { value: normalized } = normalizeOperatorValue(v, options.entry);
         return validateOperatorValue(normalized, options.entry) ?? undefined;
       }
+      if (!v) return 'This field is required';
       return undefined;
     },
   });

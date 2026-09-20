@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CONFIG_KEYS,
@@ -314,5 +316,103 @@ describe('config-registry', () => {
       // credential).
       expect(isOperatorKey('ALLOWED_SSH_IPS')).toBe(false);
     });
+  });
+});
+
+/**
+ * Census: for every configure-collected key (feature billing/oauth/smtp —
+ * the ones `configure`'s prompts write), the registry's `optional` must
+ * match whether `carbon/src/server/lib/env.ts`'s zod schema marks that same
+ * key `.optional()`. This is the check that would have caught the original
+ * bug: PADDLE_PRICE_STARTER/PRO, POLAR_PRICE_STARTER/PRO and
+ * POLAR_ORGANIZATION_ID were hard-required at the configure prompt while
+ * env.ts (and the runtime code that reads them — billing.ts's per-tier price
+ * map, polar.ts's conditional organization_id) already treated a blank value
+ * as legitimate.
+ *
+ * A handful of oauth keys (GOOGLE_CLIENT_ID/SECRET, MICROSOFT_CLIENT_ID/
+ * SECRET/TENANT_ID) and one smtp key (GOTRUE_MAILER_AUTOCONFIRM) never
+ * appear in env.ts at all — they're read by the GoTrue auth service
+ * container's own env, not the app's zod schema — so there is no boot-time
+ * contract to compare against. They're listed explicitly below rather than
+ * silently skipped, so a key that starts appearing in env.ts is noticed.
+ */
+describe('config-registry ↔ carbon env.ts — optional matches for configure-collected keys', () => {
+  const ENV_TS_PATH = join(process.cwd(), 'carbon/src/server/lib/env.ts');
+  const CONFIGURE_FEATURES = new Set(['billing', 'oauth', 'smtp']);
+
+  const NOT_IN_ENV_SCHEMA: Record<string, string> = {
+    GOOGLE_CLIENT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
+    GOOGLE_CLIENT_SECRET: 'read by the GoTrue auth service container env, not the app zod schema',
+    MICROSOFT_CLIENT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
+    MICROSOFT_CLIENT_SECRET:
+      'read by the GoTrue auth service container env, not the app zod schema',
+    MICROSOFT_TENANT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
+    GOTRUE_MAILER_AUTOCONFIRM:
+      'read by the GoTrue auth service container env, not the app zod schema',
+  };
+
+  /** Maps each envSchema field name to whether its zod chain is `.optional()`. */
+  function parseEnvSchemaOptionality(): Record<string, boolean> {
+    const src = readFileSync(ENV_TS_PATH, 'utf-8');
+    const match = src.match(/envSchema = z\.object\(\{([\s\S]*?)\n\}\);/);
+    if (!match) throw new Error('could not find `envSchema = z.object({ ... })` in env.ts');
+    const body = match[1];
+    const result: Record<string, boolean> = {};
+    const lineRe = /^\s*([A-Z][A-Z0-9_]*):\s*(.+),\s*$/gm;
+    let m: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: standard exec-loop idiom
+    while ((m = lineRe.exec(body))) {
+      result[m[1]] = /\.optional\(\)/.test(m[2]);
+    }
+    return result;
+  }
+
+  it('every configure-collected key is optional in the registry iff env.ts marks it .optional()', () => {
+    const envOptionality = parseEnvSchemaOptionality();
+    // Guards the parser itself: env.ts must have real optional/required keys
+    // to compare against, or this test would pass vacuously.
+    expect(Object.keys(envOptionality).length).toBeGreaterThan(20);
+    expect(envOptionality.SUPABASE_URL).toBe(false);
+    expect(envOptionality.STRIPE_SECRET_KEY).toBe(true);
+
+    const relevant = CONFIG_KEYS.filter((k) => CONFIGURE_FEATURES.has(k.feature));
+
+    const untracked: string[] = [];
+    const mismatches: string[] = [];
+    for (const entry of relevant) {
+      if (entry.key in NOT_IN_ENV_SCHEMA) continue;
+      if (!(entry.key in envOptionality)) {
+        untracked.push(entry.key);
+        continue;
+      }
+      const envOptional = envOptionality[entry.key];
+      const registryOptional = Boolean(entry.optional);
+      if (envOptional !== registryOptional) {
+        mismatches.push(
+          `${entry.key}: registry optional=${registryOptional}, env.ts .optional()=${envOptional}`,
+        );
+      }
+    }
+
+    expect(
+      untracked,
+      'not found in env.ts and not explained in NOT_IN_ENV_SCHEMA — add a line there with why',
+    ).toEqual([]);
+    expect(
+      mismatches,
+      `registry optional disagrees with env.ts .optional() for:\n  ${mismatches.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('NOT_IN_ENV_SCHEMA cannot rot: every listed key is a real registry entry still absent from env.ts', () => {
+    const envOptionality = parseEnvSchemaOptionality();
+    const stale = Object.keys(NOT_IN_ENV_SCHEMA).filter(
+      (key) => !registryEntry(key) || key in envOptionality,
+    );
+    expect(
+      stale,
+      'listed as absent from env.ts, but either left the registry or now appears in env.ts',
+    ).toEqual([]);
   });
 });

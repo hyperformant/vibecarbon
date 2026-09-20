@@ -142,6 +142,70 @@ describe('promptSecret — validates through the registry when options.entry is 
   });
 });
 
+describe('promptText with an optional, shapeless registry entry (PADDLE_PRICE_PRO)', () => {
+  // Single-tier billing is supported (carbon/src/server/routes/v1/billing.ts
+  // builds the price map per tier conditionally), so this key is
+  // `optional: true` in the registry with no `shape` at all (kind: 'id').
+  const PADDLE_PRICE_PRO = registryEntry('PADDLE_PRICE_PRO');
+
+  it('accepts an empty submit (optional) and returns the empty string', async () => {
+    clackMock.text.mockResolvedValue('');
+    const result = await promptText('Paddle price ID for Pro plan', undefined, {
+      entry: PADDLE_PRICE_PRO,
+    });
+
+    const { validate } = clackMock.text.mock.calls[0][0];
+    expect(validate('')).toBeUndefined();
+    expect(result).toBe('');
+  });
+
+  it('normalizes a quoted value but does not reject it — the key carries no shape to reject against', async () => {
+    clackMock.text.mockResolvedValue('"pri_123abc"');
+    const result = await promptText('Paddle price ID for Pro plan', undefined, {
+      entry: PADDLE_PRICE_PRO,
+    });
+
+    const { validate } = clackMock.text.mock.calls[0][0];
+    // No shape on this entry, so even obviously-wrong-looking input is
+    // accepted once normalized — "rejects only if a shape exists".
+    expect(validate('"garbage but still normalizable"')).toBeUndefined();
+    expect(result).toBe('pri_123abc');
+  });
+});
+
+describe('promptSecret — Minor fix: defers to validateOperatorValue when entry is present', () => {
+  // Inline registry-entry-shaped fixture (not a real CONFIG_KEYS entry) so
+  // this test is not coupled to which real secrets happen to be optional.
+  const OPTIONAL_SECRET = {
+    key: 'FAKE_OPTIONAL_SECRET',
+    class: 'runtime-secret',
+    feature: 'test',
+    kind: 'secret',
+    optional: true,
+    where: '.env',
+    scope: 'test',
+  };
+
+  it('accepts an empty submit with no current value — optional entries are not force-required', async () => {
+    clackMock.password.mockResolvedValue('');
+    const result = await promptSecret('Optional secret', undefined, { entry: OPTIONAL_SECRET });
+
+    const { validate } = clackMock.password.mock.calls[0][0];
+    // Before the fix, the hardcoded "This field is required" check ran
+    // BEFORE the entry branch and would have rejected this unconditionally.
+    expect(validate('')).toBeUndefined();
+    expect(result).toBe('');
+  });
+
+  it('an entry-less prompt still hardcodes "This field is required" on empty with no current value', async () => {
+    clackMock.password.mockResolvedValue('anything');
+    await promptSecret('Some secret', undefined);
+
+    const { validate } = clackMock.password.mock.calls[0][0];
+    expect(validate('')).toBe('This field is required');
+  });
+});
+
 describe('configure prompt-site census — every registered-key prompt validates through the registry', () => {
   const src = readFileSync(join(process.cwd(), 'src/configure.js'), 'utf-8');
 
