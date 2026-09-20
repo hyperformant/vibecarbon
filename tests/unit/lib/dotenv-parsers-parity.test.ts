@@ -17,9 +17,10 @@
  *      Where they agreed, the test asserts the agreement; where they
  *      disagreed, the test pins `parseDotenv`'s behaviour and names the
  *      legacy behaviour it replaces, so the choice is on record rather than
- *      implicit. The one case where `parseDotenv` was the outlier — CRLF
- *      files, which it dropped wholesale — was fixed in the parser itself,
- *      not pinned.
+ *      implicit. `parseDotenv` is the TOLERANT parser: where it was the
+ *      strict outlier (CRLF files dropped wholesale; indented keys and
+ *      `KEY = value` ignored) the parser was widened to what the replaced
+ *      readers accepted, not pinned.
  *
  *   2. CENSUS — a source-shape sweep over src/ that fails when any function
  *      other than `parseDotenv` reads a `.env*` file and then splits it on
@@ -143,11 +144,14 @@ describe('dotenv parser parity — parseDotenv vs the readers it replaced', () =
     expect(legacyGetEnvValue(FIXTURE, 'EMPTY')).toBeNull();
   });
 
-  // DIFFERENCE 1 — `export KEY=value`: ignored (parseDotenv, gitops); the
-  // k3s reader produced a junk key named "export EXPORTED" nobody read.
-  it('DIFFERENCE 1: an `export KEY=` line is ignored (k3s used to keep a junk "export KEY" entry)', () => {
-    expect(canonical.EXPORTED).toBeUndefined();
+  // DIFFERENCE 1 — `export KEY=value`: parseDotenv reads it as KEY (the
+  // dotenv package's behaviour; fix round, controller ruling: the shared
+  // parser is the TOLERANT one). gitops ignored the line; the k3s reader
+  // produced a junk key named "export EXPORTED" nobody read.
+  it('DIFFERENCE 1: an `export KEY=value` line reads as KEY (gitops ignored it, k3s kept a junk "export KEY" entry)', () => {
+    expect(canonical.EXPORTED).toBe('1');
     expect(canonical['export EXPORTED']).toBeUndefined();
+    expect(gitops.EXPORTED).toBeUndefined();
     expect(gitops['export EXPORTED']).toBeUndefined();
     expect(k3s['export EXPORTED']).toBe('1'); // the legacy quirk, on record
   });
@@ -174,17 +178,23 @@ describe('dotenv parser parity — parseDotenv vs the readers it replaced', () =
     expect(legacyGetEnvValue(FIXTURE, 'PAD_VALUE')).toBe('  spaced  ');
   });
 
-  // DIFFERENCE 4 — an indented key, or spaces around `=`: parseDotenv only
-  // reads `KEY=` at column 0 with no padding (the shape every writer in this
-  // codebase emits — serializeDotenv, setEnvVar, appendToEnv, create.js).
-  // k3s and gitops both tolerated the padding.
-  it('DIFFERENCE 4: an indented key or `KEY = value` is ignored (k3s/gitops tolerated the padding)', () => {
-    expect(canonical.INDENTED).toBeUndefined();
-    expect(canonical.SPACED_EQ).toBeUndefined();
+  // AGREEMENT (fix round) — an indented key, or spaces around `=`: both
+  // replaced readers tolerated the padding, and a hand-edited `.env.local`
+  // with `HETZNER_API_TOKEN = …` must not silently lose the key on k8s.
+  // parseDotenv now accepts leading whitespace and whitespace around `=`
+  // (controller ruling: the shared parser is the tolerant one, not the
+  // strictest); a quoted value after `KEY = ` still reaches the quote
+  // scanners.
+  it('an indented key or `KEY = value` reads its value, as k3s/gitops did', () => {
+    expect(canonical.INDENTED).toBe('indented');
+    expect(canonical.SPACED_EQ).toBe('around');
     expect(k3s.INDENTED).toBe('indented');
     expect(k3s.SPACED_EQ).toBe('around');
     expect(gitops.INDENTED).toBe('indented');
     expect(gitops.SPACED_EQ).toBe('around');
+    expect(parseDotenv("  K = 'it'\\''s'\n")).toEqual({ K: "it's" }); // escapeDotenv's '\'' form
+    expect(parseDotenv('K = \'a # b\'\nD = "x y"  \n')).toEqual({ K: 'a # b', D: 'x y' });
+    expect(parseDotenv("export K = 'multi\nline'\n")).toEqual({ K: 'multi\nline' });
   });
 
   // DIFFERENCE 5 — lowercase keys: ignored (parseDotenv, gitops); k3s read

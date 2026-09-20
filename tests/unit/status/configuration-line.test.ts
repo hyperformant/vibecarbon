@@ -254,6 +254,42 @@ describe('computeConfigurationCheck — base pass reads access/tls/state from th
     expect(problems.join('\n')).not.toContain('not-an-address');
   });
 
+  // Fix round: `.env.local` keys are checked on the effective shell-over-file
+  // value in BOTH the base and deployed passes — the same stale token must not
+  // be tolerated pre-deploy and refused post-deploy (or the reverse).
+  it('a stale malformed HETZNER_API_TOKEN in .env.local with a valid shell export is not a problem, even on a deployed environment', () => {
+    const cwd = projectDir({ '.env.local': 'HETZNER_API_TOKEN=stale-short\n' });
+    const env = {
+      HETZNER_API_TOKEN: 'a'.repeat(64),
+      HETZNER_ACCESS_KEY: 'access-key-id',
+      HETZNER_SECRET_KEY: 'a-secret-key-long-enough',
+    };
+    const base = computeConfigurationCheck({ provider: 'hetzner' }, {}, { env, cwd });
+    expect(base.problems).toEqual([]);
+    const deployed = computeConfigurationCheck(
+      { provider: 'hetzner' },
+      { prod: { provider: 'hetzner', deployMode: 'compose' } },
+      { env, cwd },
+    );
+    expect(deployed.problems).toEqual([]);
+  });
+
+  it('the same stale .env.local token WITHOUT a shell export is a problem in both passes', () => {
+    const cwd = projectDir({ '.env.local': 'HETZNER_API_TOKEN=stale-short\n' });
+    const base = computeConfigurationCheck({ provider: 'hetzner' }, {}, { env: {}, cwd });
+    expect(base.problems).toEqual([
+      'HETZNER_API_TOKEN looks wrong: expected 64 alphanumeric characters, got 11 characters',
+    ]);
+    const deployed = computeConfigurationCheck(
+      { provider: 'hetzner' },
+      { prod: { provider: 'hetzner', deployMode: 'compose' } },
+      { env: {}, cwd },
+    );
+    expect(deployed.problems.filter((p) => p.startsWith('HETZNER_API_TOKEN'))).toEqual([
+      'HETZNER_API_TOKEN looks wrong: expected 64 alphanumeric characters, got 11 characters',
+    ]);
+  });
+
   it('an `operator shell` key (DOCKER_HUB_TOKEN) stored in .env is not checked from the file', () => {
     // registry scope is only added when resolveDockerHubCreds sees creds in
     // the shell — so put a valid pair in the shell and the stray in the file.

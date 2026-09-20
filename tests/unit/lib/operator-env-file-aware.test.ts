@@ -8,18 +8,21 @@
  * base pass checked access/tls/state against `process.env` ONLY, so the one
  * copy that ships was the one copy never validated.
  *
- * Rule under test: for a registry entry whose `where` is `.env` or
- * `.env.local`, check BOTH the merged file values (`.env.local` over `.env`)
- * and the shell; merge problems by key, the file's problem first (the file is
- * what ships). A `presence` ("is not set") problem only stands when the key is
- * absent from EVERY env it is checked in — a CI run that exports a provider
- * token without a `.env.local` must keep working. `operator shell` entries
- * stay shell-only.
+ * Rule under test: a `where: '.env'` entry (the SERVER reads the file) is
+ * checked on the merged file values (`.env.local` over `.env`) AND the shell,
+ * the file's problem first — a valid shell value never masks a bad file
+ * value. A `where: '.env.local'` entry is checked on its EFFECTIVE runtime
+ * value, shell over file (bootstrapOperatorEnv fills only keys the shell
+ * lacks), so a stale file token a valid export overrides is not refused. A
+ * `presence` ("is not set") problem only stands when the key is absent from
+ * EVERY env it is checked in — a CI run that exports a provider token without
+ * a `.env.local` must keep working. `operator shell` entries stay shell-only.
  *
  * Shape: `checkOperatorConfig(scopes, { env })` accepts, besides a plain bag,
  * an array of bags where each element may be `{ values, where }` to restrict
  * it to entries stored in those `where`s. `operatorCheckEnvs(cwd, env)`
- * (deploy/preflight.js) builds the canonical pair `[fileEnv, shellEnv]`.
+ * (deploy/preflight.js) builds the canonical triple
+ * `[fileEnv (.env keys), effectiveEnv (.env.local keys), shellEnv]`.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -176,24 +179,82 @@ describe('operatorCheckEnvs + assertOperatorConfig — the project files are che
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('returns [fileEnv scoped to .env/.env.local, shellEnv] with .env.local layered over .env', () => {
+  // Fix round (controller ruling): file-wins is right ONLY for `where: '.env'`
+  // keys — the server reads the file. For `where: '.env.local'` keys the
+  // runtime value is shell-over-file (bootstrapOperatorEnv fills only keys
+  // absent from the shell), so they are checked on that EFFECTIVE value.
+  it('returns [file bag for .env keys, effective shell-over-file bag for .env.local keys, shell bag]', () => {
     const cwd = projectDir({
-      '.env': 'ACME_CA_SERVER=from-env\nALLOWED_SSH_IPS=203.0.113.5\n',
-      '.env.local': 'ACME_CA_SERVER=from-local\n',
+      '.env': 'ACME_CA_SERVER=from-env\nALLOWED_SSH_IPS=203.0.113.5\nHETZNER_API_TOKEN=from-env\n',
+      '.env.local': 'ACME_CA_SERVER=from-local\nHETZNER_API_TOKEN=from-local\n',
     });
-    const shell = { ACME_CA_SERVER: 'from-shell' };
-    const [file, shellOut] = operatorCheckEnvs(cwd, shell);
+    const shell = { ACME_CA_SERVER: 'from-shell', HETZNER_API_TOKEN: 'from-shell' };
+    const [file, effective, shellOut] = operatorCheckEnvs(cwd, shell);
     expect(file).toEqual({
-      values: { ACME_CA_SERVER: 'from-local', ALLOWED_SSH_IPS: '203.0.113.5' },
-      where: ['.env', '.env.local'],
+      values: {
+        ACME_CA_SERVER: 'from-local',
+        ALLOWED_SSH_IPS: '203.0.113.5',
+        HETZNER_API_TOKEN: 'from-local',
+      },
+      where: ['.env'],
+    });
+    expect(effective).toEqual({
+      values: {
+        ACME_CA_SERVER: 'from-shell',
+        ALLOWED_SSH_IPS: '203.0.113.5',
+        HETZNER_API_TOKEN: 'from-shell',
+      },
+      where: ['.env.local'],
     });
     expect(shellOut).toBe(shell);
   });
 
-  it('a project with no env files yields an empty file env (fresh clone, CI checkout)', () => {
+  it('a project with no env files yields empty file bags (fresh clone, CI checkout)', () => {
     const cwd = projectDir({});
-    const [file] = operatorCheckEnvs(cwd, {});
-    expect(file).toEqual({ values: {}, where: ['.env', '.env.local'] });
+    const [file, effective] = operatorCheckEnvs(cwd, { HETZNER_API_TOKEN: GOOD_HETZNER_TOKEN });
+    expect(file).toEqual({ values: {}, where: ['.env'] });
+    expect(effective).toEqual({
+      values: { HETZNER_API_TOKEN: GOOD_HETZNER_TOKEN },
+      where: ['.env.local'],
+    });
+  });
+
+  it('an undefined shell entry does not blank a file value in the effective bag', () => {
+    const cwd = projectDir({ '.env.local': `HETZNER_API_TOKEN=${GOOD_HETZNER_TOKEN}\n` });
+    const [, effective] = operatorCheckEnvs(cwd, { HETZNER_API_TOKEN: undefined });
+    expect(effective.values.HETZNER_API_TOKEN).toBe(GOOD_HETZNER_TOKEN);
+  });
+
+  it('a stale malformed HETZNER_API_TOKEN in .env.local is NOT a problem when a valid shell export overrides it', () => {
+    const cwd = projectDir({ '.env.local': 'HETZNER_API_TOKEN=stale-short\n' });
+    expect(() =>
+      assertOperatorConfig(['provider:hetzner'], {
+        presence: false,
+        env: operatorCheckEnvs(cwd, { HETZNER_API_TOKEN: GOOD_HETZNER_TOKEN }),
+      }),
+    ).not.toThrow();
+  });
+
+  it('the same stale .env.local token WITHOUT a shell export is a problem (it is what bootstrapOperatorEnv would load)', () => {
+    const cwd = projectDir({ '.env.local': 'HETZNER_API_TOKEN=stale-short\n' });
+    expect(() =>
+      assertOperatorConfig(['provider:hetzner'], {
+        presence: false,
+        env: operatorCheckEnvs(cwd, {}),
+      }),
+    ).toThrow(/HETZNER_API_TOKEN looks wrong/);
+  });
+
+  it('a malformed ACME_CA_SERVER in .env with a valid shell value is STILL a problem (.env keys: file wins)', () => {
+    const cwd = projectDir({ '.env': 'ACME_CA_SERVER=not-a-url\n' });
+    expect(() =>
+      assertOperatorConfig(['tls'], {
+        presence: false,
+        env: operatorCheckEnvs(cwd, {
+          ACME_CA_SERVER: 'https://acme-staging-v02.api.letsencrypt.org/directory',
+        }),
+      }),
+    ).toThrow(/ACME_CA_SERVER looks wrong/);
   });
 
   it('assertOperatorConfig refuses a bad ACME_CA_SERVER stored in .env while the shell has none', () => {

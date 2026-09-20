@@ -105,7 +105,7 @@ const SKIP_CONFIG_SHAPES_HINT =
 
 /**
  * What `checkOperatorConfig` accepts as `env`: one bag, or the ordered array
- * (`operatorCheckEnvs`'s `[fileEnv, shellEnv]`) whose elements may carry a
+ * (`operatorCheckEnvs`'s `[fileEnv, effectiveEnv, shellEnv]`) whose elements may carry a
  * `where` restriction — see checkOperatorConfig's doc in operator-env.js.
  * @typedef {Record<string, string|undefined>} EnvBag
  * @typedef {{ values: EnvBag, where?: import('../config-registry.js').ConfigWhere[] }} ScopedEnv
@@ -113,38 +113,50 @@ const SKIP_CONFIG_SHAPES_HINT =
  */
 
 /**
- * The registry `where`s whose values live in the project's env files —
- * the entries the file half of `operatorCheckEnvs` is allowed to check.
- * `operator shell` (Docker Hub) and `tests/.env.e2e` are deliberately not
- * here: deploy never reads those from a project file.
- * @type {import('../config-registry.js').ConfigWhere[]}
- */
-const PROJECT_FILE_WHERES = ['.env', '.env.local'];
-
-/**
- * The env pair every file-aware operator-config gate checks:
- * `[fileEnv, shellEnv]` — the project's merged `.env`/`.env.local`
- * (`readProjectEnvFiles`, `.env.local` over `.env`) scoped to entries stored
- * in those files, then the shell. Review residual (PR #112): `ACME_CA_SERVER`
- * and `ALLOWED_SSH_IPS` are `where: '.env'` — the value the deployed server
- * reads lives in the FILE and `bootstrapOperatorEnv` never folds
- * runtime-config into process.env, so a shell-only gate could never see the
- * copy that ships. `checkOperatorConfig` merges the two by key, file first;
- * see its doc for the presence rule (a key exported in the shell but absent
- * from the file is not "not set" — CI keeps working).
+ * The env bags every file-aware operator-config gate checks, in order —
+ * `[fileEnv, effectiveEnv, shellEnv]`, one per way a registry `where` reaches
+ * its consumer (review residual, PR #112; refined in its fix round):
+ *
+ *   - `where: '.env'` (ACME_CA_SERVER, ALLOWED_SSH_IPS): the deployed SERVER
+ *     reads the file the bundle ships, and `bootstrapOperatorEnv` never folds
+ *     runtime-config into process.env — so a shell-only gate could never see
+ *     the copy that ships. Checked on the merged project files
+ *     (`readProjectEnvFiles`, `.env.local` over `.env`) AND, via the plain
+ *     shell bag, on the shell; `checkOperatorConfig` merges by key, the
+ *     file's problem first. A valid shell value never masks a bad file value.
+ *   - `where: '.env.local'` (provider/DNS tokens, PULUMI_BACKEND_URL): the
+ *     runtime value is SHELL OVER FILE — `bootstrapOperatorEnv` fills only
+ *     keys the shell lacks — so these are checked on that effective value
+ *     (`{ ...file, ...shell }`), not the file alone: a stale malformed token
+ *     left in `.env.local` that a valid export overrides is a working deploy
+ *     and must not be refused; the same file without the export is what
+ *     would be loaded, and is.
+ *   - `operator shell` (DOCKER_HUB_*) and `tests/.env.e2e`: shell only — the
+ *     plain, unscoped shell bag is the only one that reaches them.
+ *
+ * See `checkOperatorConfig`'s doc for the presence rule (a key exported in
+ * the shell but absent from the file is not "not set" — CI keeps working).
  *
  * Built here, not in operator-env.js, because that module is deliberately
  * dependency-free (registry + node builtins only) and this needs project.js.
  * Wired at Gate 1 (deploy.js), the orchestrator gate
- * (checkDeployPrerequisites via orchestrator.js) and `status`'s base pass.
+ * (checkDeployPrerequisites via orchestrator.js) and both of `status`'s
+ * process-env passes (base and deployed — the same stale value must not be
+ * tolerated pre-deploy and refused post-deploy, or the reverse).
  *
  * @param {string} cwd - the project directory whose env files to read
- * @param {Record<string, string|undefined>} [env] - the shell env (injectable
- *   for testing; defaults to `process.env`)
- * @returns {[ScopedEnv, EnvBag]}
+ * @param {EnvBag} [env] - the shell env (injectable for testing; defaults to
+ *   `process.env`)
+ * @returns {[ScopedEnv, ScopedEnv, EnvBag]}
  */
 export function operatorCheckEnvs(cwd, env = process.env) {
-  return [{ values: readProjectEnvFiles(cwd), where: [...PROJECT_FILE_WHERES] }, env];
+  const file = readProjectEnvFiles(cwd);
+  /** @type {Record<string, string>} */
+  const effective = { ...file };
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) effective[key] = value;
+  }
+  return [{ values: file, where: ['.env'] }, { values: effective, where: ['.env.local'] }, env];
 }
 
 /**
@@ -156,9 +168,10 @@ export function operatorCheckEnvs(cwd, env = process.env) {
  * prints byte-identical output. A no-op when nothing is wrong.
  *
  * `env`/`presence`/`keys` are forwarded verbatim to `checkOperatorConfig` —
- * see its doc for what each means; `env` may be the `[fileEnv, shellEnv]`
- * array `operatorCheckEnvs` builds, so the project's `.env`/`.env.local` are
- * checked alongside the shell (file's problem first, one line per key).
+ * see its doc for what each means; `env` may be the array
+ * `operatorCheckEnvs` builds, so the project's `.env`/`.env.local` are
+ * checked alongside the shell (one line per key; see that helper for which
+ * copy wins per registry `where`).
  * Defaulting `presence: true` matches this
  * being the LAST-resort gate's own default; a caller running before an
  * interactive prompt passes `presence: false` explicitly.

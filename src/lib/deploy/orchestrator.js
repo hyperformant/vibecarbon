@@ -308,10 +308,11 @@ export async function executeDeployment(args, gatheredConfig) {
   // `when: (ctx) => !!ctx.dockerHubCreds` gate) — absent creds fall back to
   // an anonymous pull and never touch this scope.
   //
-  // `env: operatorCheckEnvs(process.cwd())` — the project's `.env`/`.env.local`
-  // are checked alongside the shell for the keys stored there (ACME_CA_SERVER,
-  // ALLOWED_SSH_IPS, the provider tokens); the file is what the bundle ships,
-  // so its problem wins when both copies are bad. See preflight.js.
+  // `env: operatorCheckEnvs(process.cwd())` — `where: '.env'` keys
+  // (ACME_CA_SERVER, ALLOWED_SSH_IPS) are checked on the project file first
+  // (it is what the bundle ships) and the shell; `where: '.env.local'` keys
+  // (the provider tokens) on their effective shell-over-file value. See
+  // preflight.js.
   const operatorScopes = ['access', 'tls', 'state', `provider:${providerIdFor(config)}`];
   const dnsOperatorConfig = operatorConfigForDns(dnsProvider, providerIdFor(config));
   operatorScopes.push(...dnsOperatorConfig.scopes);

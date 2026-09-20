@@ -253,14 +253,16 @@ export function readOperatorVar(key, { env = process.env } = {}) {
  * `env` is one bag, or an ARRAY of them checked in order — the file-aware
  * shape (review residual, PR #112). Each element is either a plain bag
  * (applies to every entry) or `{ values, where }` (applies only to entries
- * whose registry `where` is listed — how the project's merged
- * `.env`/`.env.local` is checked for `.env`/`.env.local`-stored keys and
- * never for `operator shell` ones; `operatorCheckEnvs` in deploy/preflight.js
- * builds the canonical `[fileEnv, shellEnv]` pair). Per entry, every
- * applicable env is read and the results merge BY KEY, one problem at most:
+ * whose registry `where` is listed — how the project's `.env` is checked for
+ * `.env`-stored keys, the effective shell-over-file value for
+ * `.env.local`-stored keys, and neither for `operator shell` ones;
+ * `operatorCheckEnvs` in deploy/preflight.js builds the canonical
+ * `[fileEnv, effectiveEnv, shellEnv]` triple and documents which copy wins
+ * per `where`). Per entry, every applicable env is read and the results
+ * merge BY KEY, one problem at most:
  *   - a SHAPE problem ("looks wrong") from any env is reported; when more
- *     than one env has one, the earliest env's message wins (file first —
- *     the file is what ships);
+ *     than one env has one, the earliest env's message wins (so for a
+ *     `.env` key the file's, which is what ships);
  *   - a PRESENCE problem ("is not set") stands only when the key is absent
  *     from EVERY applicable env — a CI run that exports a provider token
  *     without a `.env.local` on disk is not "not set" — and is then subject

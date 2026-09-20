@@ -322,13 +322,14 @@ async function main(values, positional) {
   // A malformed value has no such ambiguity — it's wrong regardless of tier
   // or payment status, so it still refuses here, before anything else runs.
   //
-  // FILE-AWARE (review residual, PR #112): access/tls/state keys are stored
-  // in the project's `.env`/`.env.local` (`where` in config-registry.js) —
-  // ACME_CA_SERVER's shipping copy is the FILE's, and bootstrapOperatorEnv
-  // never folds runtime-config into process.env — so the gate checks the
-  // merged files alongside the shell (`operatorCheckEnvs`: file's problem
-  // first, one line per key; a valid shell value never masks a bad file
-  // value). `operator shell` keys (registry) stay shell-only.
+  // FILE-AWARE (review residual, PR #112): `where: '.env'` keys
+  // (ACME_CA_SERVER, ALLOWED_SSH_IPS) ship in the FILE and bootstrapOperatorEnv
+  // never folds runtime-config into process.env, so the gate checks the
+  // merged project files first, then the shell — a valid shell value never
+  // masks a bad file value. `where: '.env.local'` keys (provider tokens) are
+  // checked on their effective shell-over-file value, so a stale file token a
+  // valid export overrides is not refused. `operator shell` keys (registry)
+  // stay shell-only. See operatorCheckEnvs (deploy/preflight.js).
   {
     const projectConfig = loadProjectConfig();
     if (projectConfig) {

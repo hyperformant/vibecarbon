@@ -166,9 +166,9 @@ export function loadEnvVariables(cwd = process.cwd()) {
  *
  * Callers use it to CHECK stored values, never to print them: `status`'s
  * configure-family pass and, via `operatorCheckEnvs` (deploy/preflight.js),
- * the file-aware access/tls/state checks in Gate 1, the orchestrator gate
- * and `status`'s base pass — `where: '.env'` keys like ACME_CA_SERVER live
- * only here (bootstrapOperatorEnv never folds runtime-config into
+ * the file-aware operator checks in Gate 1, the orchestrator gate and
+ * `status`'s base/deployed passes — `where: '.env'` keys like ACME_CA_SERVER
+ * live only here (bootstrapOperatorEnv never folds runtime-config into
  * process.env), so a shell-only check could never see the copy that ships.
  *
  * @param {string} [cwd] - project directory (defaults to process.cwd())

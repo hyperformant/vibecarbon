@@ -1522,10 +1522,11 @@ export async function prePullChartImages({ nodeIps, sshKeyPath, khPath }) {
  * fingerprint existsSync first; see digestEnvLocalSecrets).
  *
  * Parsing is `parseDotenv` (src/lib/shell.js), the codebase's one dotenv
- * reader; the strict `KEY=VALUE` loop that used to live here (indented keys,
- * lowercase keys and `export KEY=` lines tolerated, inline `# comment` kept
- * as value) is gone — tests/unit/lib/dotenv-parsers-parity.test.ts records
- * each difference and pins the shared behaviour.
+ * reader, which keeps this file's hand-edit tolerance (indented keys,
+ * `KEY = value`, `export KEY=`); the local loop it replaced also read
+ * lowercase keys and kept an inline `# comment` as part of an unquoted
+ * value — tests/unit/lib/dotenv-parsers-parity.test.ts records each
+ * difference and pins the shared behaviour.
  *
  * @param {string} envPath
  * @returns {Record<string, string>}

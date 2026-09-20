@@ -742,18 +742,23 @@ function computeConfigurationCheck(projectConfig, environments, { env, cwd } = {
     baseScopes.push(`provider:${projectProviderId}`);
   }
 
-  // File-aware (review residual, PR #112): access/tls/state keys are
-  // `where: '.env'`/`.env.local` and the shipping copy is the file's, so the
-  // base pass checks the merged files alongside the shell — the same
-  // `operatorCheckEnvs` pair Gate 1 and the orchestrator gate use; file's
-  // problem first, `operator shell` keys (registry) shell-only.
-  const shapeOnly = checkOperatorConfig(baseScopes, {
-    presence: false,
-    env: operatorCheckEnvs(cwd ?? process.cwd(), env),
-  });
+  // File-aware (review residual, PR #112): the base and deployed passes both
+  // read the SAME `operatorCheckEnvs` bags Gate 1 and the orchestrator gate
+  // use — `where: '.env'` keys (ACME_CA_SERVER, ALLOWED_SSH_IPS) on the
+  // merged project files first, then the shell (the file is what ships);
+  // `where: '.env.local'` keys on their effective shell-over-file value
+  // (bootstrapOperatorEnv fills only what the shell lacks); `operator shell`
+  // keys (registry) on the shell alone. One helper for both passes so a
+  // stale value cannot be tolerated pre-deploy and refused post-deploy.
+  const checkEnvs = operatorCheckEnvs(cwd ?? process.cwd(), env);
+  const shapeOnly = checkOperatorConfig(baseScopes, { presence: false, env: checkEnvs });
   const deployed =
     deployedScopes.size > 0 || deployedKeys.length > 0
-      ? checkOperatorConfig([...deployedScopes], { presence: true, keys: deployedKeys, env })
+      ? checkOperatorConfig([...deployedScopes], {
+          presence: true,
+          keys: deployedKeys,
+          env: checkEnvs,
+        })
       : { problems: [], checked: [] };
 
   const configureFamily = checkOperatorConfig(CONFIGURE_FAMILY_SCOPES, {
