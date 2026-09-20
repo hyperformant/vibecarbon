@@ -100,4 +100,17 @@ describe('composeRunningServices', () => {
     composeRunningServices('/my/project', { execFile: fn, timeoutMs: 1500 });
     expect(calls[0][2]).toMatchObject({ timeout: 1500 });
   });
+
+  it('reports unavailable when the array-shape output is truncated (invalid JSON)', () => {
+    const { fn } = fakeExecFile('[{"Service":"db","State":"running"}');
+    const result = composeRunningServices('/proj', { execFile: fn });
+    expect(result).toEqual({ available: false, running: [] });
+  });
+
+  it('skips a null NDJSON line and keeps the valid running service', () => {
+    const stdout = ['null', JSON.stringify({ Service: 'web', State: 'running' })].join('\n');
+    const { fn } = fakeExecFile(stdout);
+    const result = composeRunningServices('/proj', { execFile: fn });
+    expect(result).toEqual({ available: true, running: ['web'] });
+  });
 });

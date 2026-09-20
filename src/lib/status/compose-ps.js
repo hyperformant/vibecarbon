@@ -31,7 +31,13 @@ export function composeRunningServices(cwd, { execFile = execFileSync, timeoutMs
 
   const entries = [];
   if (trimmed.startsWith('[')) {
-    entries.push(...JSON.parse(trimmed));
+    try {
+      entries.push(...JSON.parse(trimmed));
+    } catch {
+      // Truncated or otherwise invalid array body: the probe could not
+      // read the stack at all, so report unavailable rather than throw.
+      return { available: false, running: [] };
+    }
   } else {
     for (const line of trimmed.split('\n')) {
       if (!line) continue;
@@ -44,7 +50,7 @@ export function composeRunningServices(cwd, { execFile = execFileSync, timeoutMs
   }
 
   const running = entries
-    .filter((entry) => entry.State === 'running')
+    .filter((entry) => entry !== null && typeof entry === 'object' && entry.State === 'running')
     .map((entry) => entry.Service ?? entry.Name);
 
   return { available: true, running };
