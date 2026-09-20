@@ -75,6 +75,15 @@ describe('parseDotenv / readEnvFiles', () => {
     expect(parseDotenv('')).toEqual({});
     expect(parseDotenv(undefined)).toEqual({});
   });
+  it('reads a CRLF file exactly like the LF one (no \\r left on any value)', () => {
+    // A Windows-edited .env.local once parsed as EMPTY under the old reader
+    // (dotenv-parsers-parity.test.ts, retired 2026-09-20). util.parseEnv
+    // strips the \r for bare, "double" and 'single' values alike.
+    const lf = 'A=1\nB="two"\nC=\'lit $X\'\nD=x y\n';
+    expect(parseDotenv('A=1\r\nB="two"\r\n')).toEqual({ A: '1', B: 'two' });
+    expect(parseDotenv(lf.replace(/\n/g, '\r\n'))).toEqual(parseDotenv(lf));
+    expect(parseDotenv(lf)).toEqual({ A: '1', B: 'two', C: 'lit $X', D: 'x y' });
+  });
   it('round-trips everything the encoder accepts', () => {
     const values = [
       '',

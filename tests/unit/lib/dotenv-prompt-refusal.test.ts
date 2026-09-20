@@ -12,8 +12,10 @@
  *      the six provider guided setups' token prompts, driven through a mocked
  *      @clack/prompts exactly like guided-setup-paste-normalization.test.ts;
  *   3. a source census: every `validate: (v) =>` in `src/lib/*-guided-setup.js`
- *      calls the helper, except the listed prompts whose value never reaches an
- *      env file; create.js's admin-password prompt checks ADMIN_PASSWORD.
+ *      and in `src/lib/configure-providers.js` (the token-only fallback prompt
+ *      for a compute provider with no guided module) calls the helper, except
+ *      the listed prompts whose value never reaches an env file; create.js's
+ *      admin-password prompt checks ADMIN_PASSWORD.
  *
  * Fixture values only — nothing here is a real credential.
  */
@@ -173,18 +175,24 @@ describe('guided-setup token prompts refuse at the prompt', () => {
   }
 });
 
-describe('census: every guided-setup prompt that reaches an env file calls dotenvPromptProblem', () => {
+describe('census: every provider prompt that reaches an env file calls dotenvPromptProblem', () => {
   // Prompts whose value is never written to .env/.env.local, by exact message.
   const NOT_AN_ENV_VALUE = new Set([
     // scaleway onboardDomain: the domain goes to the Scaleway API, not to a file.
     'Domain to add to Scaleway (the registrable name, not a subdomain)',
   ]);
 
-  const files = readdirSync(join(ROOT, 'src/lib')).filter((f) => f.endsWith('-guided-setup.js'));
+  // configure-providers.js holds genericGetApiToken, the prompt a compute
+  // provider without a COMPUTE_GUIDED_MODULES entry falls back to; its value
+  // reaches setEnvVar through configure.js exactly like a guided token.
+  const files = readdirSync(join(ROOT, 'src/lib'))
+    .filter((f) => f.endsWith('-guided-setup.js'))
+    .concat(['configure-providers.js']);
 
-  it('finds the six provider modules', () => {
+  it('finds the six provider modules and the generic fallback', () => {
     expect(files.sort()).toEqual([
       'cloudflare-guided-setup.js',
+      'configure-providers.js',
       'digitalocean-guided-setup.js',
       'hetzner-guided-setup.js',
       'linode-guided-setup.js',
@@ -199,7 +207,7 @@ describe('census: every guided-setup prompt that reaches an env file calls doten
       // Each text/password prompt: `p.text({ message: '…', … validate: (v) => { … },`
       const prompts = [
         ...src.matchAll(
-          /p\.(?:text|password)\(\{\s*message: '([^']*)',[\s\S]*?validate: \(v\) => \{([\s\S]*?)\n\s*\},/g,
+          /p\.(?:text|password)\(\{\s*message: (?:'([^']*)'|`([^`]*)`),[\s\S]*?validate: \(v\) => \{([\s\S]*?)\n\s*\},/g,
         ),
       ];
       // Every validate callback in these modules belongs to a text/password prompt.
@@ -207,9 +215,12 @@ describe('census: every guided-setup prompt that reaches an env file calls doten
       expect(prompts.length, `${file}: prompt regex drifted`).toBe(validates.length);
       expect(prompts.length).toBeGreaterThan(0);
       const missing = prompts
-        .filter(([, message]) => !NOT_AN_ENV_VALUE.has(message))
-        .filter(([, , body]) => !/dotenvPromptProblem\('[A-Z_]+', v\)/.test(body))
-        .map(([, message]) => message);
+        .map(([, quoted, template, body]) => ({ message: quoted ?? template, body }))
+        .filter(({ message }) => !NOT_AN_ENV_VALUE.has(message))
+        .filter(
+          ({ body }) => !/dotenvPromptProblem\((?:'[A-Z_]+'|Provider\.TOKEN_ENV), v\)/.test(body),
+        )
+        .map(({ message }) => message);
       expect(missing, `${file}: prompts whose validate lacks dotenvPromptProblem`).toEqual([]);
     });
   }

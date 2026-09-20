@@ -36,7 +36,7 @@ import * as digitaloceanGuidedSetup from './digitalocean-guided-setup.js';
 import { envSummaryLines } from './env-summary.js';
 import * as hetznerGuidedSetup from './hetzner-guided-setup.js';
 import * as linodeGuidedSetup from './linode-guided-setup.js';
-import { readOperatorVar } from './operator-env.js';
+import { dotenvPromptProblem, readOperatorVar } from './operator-env.js';
 import { getBootstrappedKeys } from './project.js';
 import { getProviderClass, listProviders } from './providers/index.js';
 import * as scalewayGuidedSetup from './scaleway-guided-setup.js';
@@ -139,7 +139,9 @@ async function genericGetApiToken(Provider, _projectName, options = {}) {
     message: `Paste your ${Provider.NAME} API token here`,
     validate: (v) => {
       if (!v || v.length < 10) return 'API token is required';
-      return undefined;
+      // The accepted token ends in setEnvVar (configure.js): refuse here what
+      // no portable .env form can hold, like every guided-setup prompt does.
+      return dotenvPromptProblem(Provider.TOKEN_ENV, v);
     },
   });
   if (p.isCancel(token)) {

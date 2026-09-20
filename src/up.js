@@ -14,6 +14,7 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
+import { formatDotenvLine } from './lib/dotenv.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
 import { detectPackageManager, parseDotenv } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -161,18 +162,27 @@ async function findFreeOffset(_cwd) {
 /**
  * Write DEV_PORT_OFFSET to .env.local, creating the file if it doesn't exist.
  * Returns true if the value was saved.
+ *
+ * Both lines go through formatDotenvLine (src/lib/dotenv.js) and the match is
+ * the WHOLE existing line whatever its quoting: `create` writes the bare form
+ * (`DEV_PORT_OFFSET=0`) while pre-2026-09-20 files hold `"0"`. A quoted-only
+ * match would append a second DEV_PORT_OFFSET line to a fresh project, and
+ * the two readers disagree on which wins (util.parseEnv: last; the template's
+ * first-match regex: first) — `up` would report the new offset while the dev
+ * servers bound the old ports.
  */
 export function setPortOffset(offset, cwd) {
   const envPath = join(cwd, '.env.local');
   const existing = existsSync(envPath);
   let content = existing ? readFileSync(envPath, 'utf-8') : '';
-  const regex = /^DEV_PORT_OFFSET="[^"]*"/m;
+  const line = formatDotenvLine('DEV_PORT_OFFSET', String(offset));
+  const regex = /^DEV_PORT_OFFSET=.*$/m;
 
   if (regex.test(content)) {
-    content = content.replace(regex, `DEV_PORT_OFFSET="${offset}"`);
+    content = content.replace(regex, () => line);
   } else {
     const prefix = content.trimEnd();
-    content = `${prefix ? `${prefix}\n\n` : ''}# Port offset (set by vibecarbon up to avoid conflicts)\nDEV_PORT_OFFSET="${offset}"\n`;
+    content = `${prefix ? `${prefix}\n\n` : ''}# Port offset (set by vibecarbon up to avoid conflicts)\n${line}\n`;
   }
 
   // Client-visible twin: vite only exposes VITE_-prefixed vars, and the admin
@@ -181,11 +191,12 @@ export function setPortOffset(offset, cwd) {
   // points at port 80, i.e. whichever OTHER project owns the default ports
   // (RCA 2026-07-17: swim2's admin panel linked into my-app's traefik).
   // Kept in lockstep with DEV_PORT_OFFSET by writing both here.
-  const viteRegex = /^VITE_DEV_PORT_OFFSET="[^"]*"/m;
+  const viteLine = formatDotenvLine('VITE_DEV_PORT_OFFSET', String(offset));
+  const viteRegex = /^VITE_DEV_PORT_OFFSET=.*$/m;
   if (viteRegex.test(content)) {
-    content = content.replace(viteRegex, `VITE_DEV_PORT_OFFSET="${offset}"`);
+    content = content.replace(viteRegex, () => viteLine);
   } else {
-    content = `${content.trimEnd()}\nVITE_DEV_PORT_OFFSET="${offset}"\n`;
+    content = `${content.trimEnd()}\n${viteLine}\n`;
   }
 
   writeFileSync(envPath, content, { mode: 0o600 });
@@ -202,13 +213,14 @@ export function setPortOffset(offset, cwd) {
 function setSubnetPrefix(prefix, cwd) {
   const envPath = join(cwd, '.env');
   let content = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
+  const line = formatDotenvLine('DEV_SUBNET_PREFIX', String(prefix));
   const regex = /^DEV_SUBNET_PREFIX=.*$/m;
 
   if (regex.test(content)) {
-    content = content.replace(regex, `DEV_SUBNET_PREFIX="${prefix}"`);
+    content = content.replace(regex, () => line);
   } else {
     const body = content.trimEnd();
-    content = `${body ? `${body}\n\n` : ''}# Network subnet prefix (set by vibecarbon up to avoid Docker pool overlaps)\nDEV_SUBNET_PREFIX="${prefix}"\n`;
+    content = `${body ? `${body}\n\n` : ''}# Network subnet prefix (set by vibecarbon up to avoid Docker pool overlaps)\n${line}\n`;
   }
 
   writeFileSync(envPath, content, { mode: 0o600 });
