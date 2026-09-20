@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { computeConfigurationCheck, formatConfigurationLines } from '../../../src/status.js';
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
@@ -133,5 +136,72 @@ describe('computeConfigurationCheck', () => {
       { env: {} },
     );
     expect(problems).toContain('HETZNER_API_TOKEN is not set');
+  });
+});
+
+// A8 (spec §5, review 2026-09-19): the configure family (billing/oauth/smtp/
+// analytics/landing) lives in the project's `.env`/`.env.local` FILES, never
+// in process.env, so the two process.env passes above can never see a stale
+// or malformed value `configure` wrote (or an operator hand-edited). This
+// third pass reads the files — `.env.local` over `.env`, the same precedence
+// the app itself sees — shape-only (`presence: false`: an unconfigured
+// feature is not a problem). Enter-on-existing at the configure prompt
+// deliberately keeps the stored value unvalidated (right for a prompt);
+// `status` is where such a stale value surfaces. Fixture values only.
+describe('computeConfigurationCheck — configure-family pass over .env/.env.local', () => {
+  const dirs: string[] = [];
+  function projectDir(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-status-config-'));
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    dirs.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports a stale publishable key stored as STRIPE_SECRET_KEY in .env — exactly one problem', () => {
+    const cwd = projectDir({ '.env': 'STRIPE_SECRET_KEY=pk_test_x\nBILLING_PROVIDER=stripe\n' });
+    const { problems, checked } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toEqual([
+      'STRIPE_SECRET_KEY looks wrong: expected sk_live_…, sk_test_… or a restricted rk_… key, got 9 characters',
+    ]);
+    expect(checked).toContain('STRIPE_SECRET_KEY');
+    expect(checked).toContain('BILLING_PROVIDER');
+    expect(checked).toContain('SMTP_HOST');
+    expect(checked).toContain('VITE_GITHUB_REPO_URL');
+    // The pass is shape-only: every unset configure key is tolerated.
+    expect(problems.some((p) => p.endsWith('is not set'))).toBe(false);
+  });
+
+  it('.env.local wins over .env (the app precedence) — a good local override hides a bad .env value', () => {
+    const cwd = projectDir({
+      '.env': 'STRIPE_SECRET_KEY=pk_test_x\n',
+      '.env.local': 'STRIPE_SECRET_KEY=sk_test_localgood\n',
+    });
+    const { problems } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toEqual([]);
+  });
+
+  it('a project with no env files at all still renders ok (fresh clone, second worktree)', () => {
+    const cwd = projectDir({});
+    const { problems, checked } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toEqual([]);
+    expect(checked).toContain('STRIPE_SECRET_KEY');
+  });
+
+  it('never echoes the stored value', () => {
+    const cwd = projectDir({ '.env': 'SMTP_PORT=99999\nSMTP_ADMIN_EMAIL=not-an-email\n' });
+    const { problems } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toHaveLength(2);
+    expect(problems.join('\n')).not.toContain('99999');
+    expect(problems.join('\n')).not.toContain('not-an-email');
+  });
+
+  it('a normalizable paste (quotes, whitespace) stored in the file is not a problem — the reader normalizes on every read', () => {
+    // dotenv single-quoting keeps the inner double quotes + padding literal.
+    const cwd = projectDir({ '.env': 'STRIPE_SECRET_KEY=\'  "sk_test_abc"  \'\n' });
+    const { problems } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toEqual([]);
   });
 });

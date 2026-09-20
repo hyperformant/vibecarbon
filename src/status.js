@@ -13,6 +13,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -27,6 +28,7 @@ import {
 } from './lib/deploy/replication.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
+import { loadEnvVariables, parseDotenv } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
@@ -673,25 +675,45 @@ function checkGitSync(envName, envConfig) {
  * yet". A scope already covered by a deployed environment is checked only
  * once, under the stricter (presence: true) rule.
  *
+ * A THIRD pass covers the configure family (spec §5): billing/oauth/smtp/
+ * analytics/landing values are written by `configure` to the project's
+ * `.env`/`.env.local` FILES and read by the app from there — they are never
+ * in this process's env, so the two passes above cannot see them. This pass
+ * reads the files through the codebase's one dotenv parser (`parseDotenv`,
+ * via project.js's `loadEnvVariables` for `.env.local`), merging `.env.local`
+ * over `.env` — the precedence the app itself sees — and checks shape only
+ * (`presence: false`: a feature that simply isn't configured is not a
+ * problem). This is the ONLY place a stale stored value surfaces: the
+ * configure prompt's Enter-on-existing deliberately keeps the current value
+ * unvalidated (correct for a prompt — the operator asked to keep it), so a
+ * publishable key stored as STRIPE_SECRET_KEY before shape validation
+ * existed, or a hand edit, is caught here rather than at the next prompt.
+ * Reading the files never echoes a value: only `checkOperatorConfig`'s
+ * messages leave this function.
+ *
  * `problems` is deduped by the variable name each message names — every
  * `checkOperatorConfig` message starts with `<KEY> ` (`<KEY> is not set` /
  * `<KEY> looks wrong: ...`), and env-var keys never contain a space, so the
- * first token is exactly that key. The same key CAN reach both passes: a
- * project's default provider token (base, presence: false) is also the
- * lone sibling key a cross-cloud DNS pick reads (deployed, presence: true)
- * — see `operatorConfigForDns`'s cross-cloud case. Without deduping, a
- * single malformed value would be reported (and counted) twice. The
- * deployed pass's message wins on a collision (it is the stricter check,
- * and is the only one that can report an ABSENT value as a problem at
- * all — the base pass tolerates that silently under `presence: false`).
+ * first token is exactly that key. The same key CAN reach both process-env
+ * passes: a project's default provider token (base, presence: false) is
+ * also the lone sibling key a cross-cloud DNS pick reads (deployed,
+ * presence: true) — see `operatorConfigForDns`'s cross-cloud case. Without
+ * deduping, a single malformed value would be reported (and counted) twice.
+ * The deployed pass's message wins on a collision (it is the stricter
+ * check, and is the only one that can report an ABSENT value as a problem
+ * at all — the base pass tolerates that silently under `presence: false`).
+ * The configure-family pass shares no key with the other two (disjoint
+ * scopes) but folds into the same map for the one ordering/count.
  *
  * @param {{provider?: string}|null|undefined} projectConfig
  * @param {Record<string, {provider?: string, dnsProvider?: string, deployMode?: string}>} environments
- * @param {{ env?: Record<string, string|undefined> }} [opts] - injectable
- *   for testing; defaults to `process.env`.
+ * @param {{ env?: Record<string, string|undefined>, cwd?: string }} [opts] -
+ *   injectable for testing; `env` defaults to `process.env`, `cwd` (the
+ *   project directory whose `.env`/`.env.local` the configure-family pass
+ *   reads) to `process.cwd()`.
  * @returns {{ problems: string[], checked: string[] }}
  */
-function computeConfigurationCheck(projectConfig, environments, { env } = {}) {
+function computeConfigurationCheck(projectConfig, environments, { env, cwd } = {}) {
   const envEntries = Object.entries(environments || {});
 
   const projectProviderId =
@@ -723,14 +745,49 @@ function computeConfigurationCheck(projectConfig, environments, { env } = {}) {
       ? checkOperatorConfig([...deployedScopes], { presence: true, keys: deployedKeys, env })
       : { problems: [], checked: [] };
 
+  const configureFamily = checkOperatorConfig(CONFIGURE_FAMILY_SCOPES, {
+    presence: false,
+    env: readProjectEnvFiles(cwd ?? process.cwd()),
+  });
+
   const problemByKey = new Map();
   for (const problem of shapeOnly.problems) problemByKey.set(problem.split(' ')[0], problem);
   for (const problem of deployed.problems) problemByKey.set(problem.split(' ')[0], problem);
+  for (const problem of configureFamily.problems) {
+    problemByKey.set(problem.split(' ')[0], problem);
+  }
 
   return {
     problems: [...problemByKey.values()],
-    checked: [...new Set([...shapeOnly.checked, ...deployed.checked])],
+    checked: [...new Set([...shapeOnly.checked, ...deployed.checked, ...configureFamily.checked])],
   };
+}
+
+/**
+ * The registry scopes `configure` writes to the project's env files — the
+ * ones `computeConfigurationCheck`'s file-based pass reads. Operator scopes
+ * (provider:<id>, dns:<id>, registry, state, access, tls) are deliberately absent: those
+ * are checked against process.env above, which is where deploy reads them.
+ */
+const CONFIGURE_FAMILY_SCOPES = ['billing', 'oauth', 'smtp', 'analytics', 'landing'];
+
+/**
+ * The project's `.env` with `.env.local` layered over it — the same
+ * precedence the running app sees — as a plain key/value bag for
+ * `checkOperatorConfig`'s injectable `env`. Both files go through the one
+ * dotenv parser this codebase has (`parseDotenv`, shell.js, re-exported by
+ * project.js; `loadEnvVariables` is that parser applied to `.env.local`) —
+ * this is a read of the SAME files `findEnvDrift` (project.js) compares, not
+ * a new parser. A missing file contributes nothing; a line the parser can't
+ * read is skipped (parseDotenv never throws). Values are returned only to be
+ * shape-checked — nothing here is printed.
+ * @param {string} cwd
+ * @returns {Record<string, string>}
+ */
+function readProjectEnvFiles(cwd) {
+  const envPath = join(cwd, '.env');
+  const base = existsSync(envPath) ? parseDotenv(readFileSync(envPath, 'utf-8')) : {};
+  return { ...base, ...loadEnvVariables(cwd) };
 }
 
 /**
@@ -1396,7 +1453,7 @@ async function main(argv = []) {
   // is forced true above), so nesting this under `allData.localDev` would
   // mean it never actually appears there — it is attached directly to
   // `allData` (top level of the `-json` payload) instead.
-  allData.configuration = computeConfigurationCheck(projectConfig, environments);
+  allData.configuration = computeConfigurationCheck(projectConfig, environments, { cwd });
 
   // Output
   if (args.json) {

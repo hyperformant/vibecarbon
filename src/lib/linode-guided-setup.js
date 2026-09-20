@@ -18,7 +18,8 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
-import { readOperatorVar } from './operator-env.js';
+import { registryEntry } from './config-registry.js';
+import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.linode.com/v4';
@@ -196,6 +197,11 @@ export async function getApiToken(projectName, options = {}) {
     if (p.isCancel(token)) {
       exitCancelled();
     }
+    // First-time-user path (M11): the paste goes through the same
+    // normalization every later readOperatorVar() read applies — trailing
+    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
+    // against the live API, exported to process.env or saved to .env.local.
+    token = normalizeOperatorValue(token, registryEntry('LINODE_API_TOKEN')).value;
 
     warnIfBadTokenFormat(token);
 
@@ -265,7 +271,7 @@ export async function getS3Credentials(projectName, options = {}) {
   // Interactive prompt
   displayS3CredentialsGuide(projectName);
 
-  const accessKey = await p.text({
+  const accessKeyInput = await p.text({
     message: 'Paste your Object Storage Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
@@ -273,11 +279,11 @@ export async function getS3Credentials(projectName, options = {}) {
     },
   });
 
-  if (p.isCancel(accessKey)) {
+  if (p.isCancel(accessKeyInput)) {
     exitCancelled();
   }
 
-  const secretKey = await p.password({
+  const secretKeyInput = await p.password({
     message: 'Paste your Object Storage Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
@@ -285,9 +291,19 @@ export async function getS3Credentials(projectName, options = {}) {
     },
   });
 
-  if (p.isCancel(secretKey)) {
+  if (p.isCancel(secretKeyInput)) {
     exitCancelled();
   }
+
+  // Same first-time-user normalization as getApiToken above (M11).
+  const accessKey = normalizeOperatorValue(
+    accessKeyInput,
+    registryEntry('LINODE_ACCESS_KEY'),
+  ).value;
+  const secretKey = normalizeOperatorValue(
+    secretKeyInput,
+    registryEntry('LINODE_SECRET_KEY'),
+  ).value;
 
   p.log.success('Object Storage credentials received!');
 

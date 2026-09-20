@@ -74,9 +74,10 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
+import { registryEntry } from './config-registry.js';
 import { resolveNameservers } from './dns-propagation.js';
 import { DNS_PROVIDERS, getDnsProvider, locateDomainBackend } from './dns-provider.js';
-import { readOperatorVar } from './operator-env.js';
+import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 import {
   EXTERNAL_DOMAIN_CHALLENGE_NAME,
@@ -262,26 +263,34 @@ async function promptOrExit(promise) {
  * @returns {Promise<{accessKey: string, projectId: string}>}
  */
 async function promptCompanions() {
-  const accessKey = await promptOrExit(
-    p.text({
-      message: 'Paste your Scaleway Access Key here (starts with SCW)',
-      validate: (v) => {
-        if (!v || v.length < 10) return 'Access key is required';
-        return undefined;
-      },
-    }),
-  );
+  // Both companions get the same first-time-user normalization as the secret
+  // key (M11) before the format warning, the export and the save.
+  const accessKey = normalizeOperatorValue(
+    await promptOrExit(
+      p.text({
+        message: 'Paste your Scaleway Access Key here (starts with SCW)',
+        validate: (v) => {
+          if (!v || v.length < 10) return 'Access key is required';
+          return undefined;
+        },
+      }),
+    ),
+    registryEntry('SCALEWAY_ACCESS_KEY'),
+  ).value;
   warnIfBadFormat(accessKey, 'access key', ACCESS_KEY_FORMAT, 'SCW + 17 uppercase alphanumerics');
 
-  const projectId = await promptOrExit(
-    p.text({
-      message: 'Paste your dedicated Project ID here (UUID, console → Project settings)',
-      validate: (v) => {
-        if (!v || v.length < 10) return 'Project ID is required';
-        return undefined;
-      },
-    }),
-  );
+  const projectId = normalizeOperatorValue(
+    await promptOrExit(
+      p.text({
+        message: 'Paste your dedicated Project ID here (UUID, console → Project settings)',
+        validate: (v) => {
+          if (!v || v.length < 10) return 'Project ID is required';
+          return undefined;
+        },
+      }),
+    ),
+    registryEntry('SCALEWAY_DEFAULT_PROJECT_ID'),
+  ).value;
   warnIfBadFormat(projectId, 'Project ID', UUID_FORMAT, 'a UUID');
 
   return { accessKey, projectId };
@@ -350,6 +359,11 @@ export async function getApiToken(projectName, options = {}) {
         },
       }),
     );
+    // First-time-user path (M11): the paste goes through the same
+    // normalization every later readOperatorVar() read applies — trailing
+    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
+    // against the live API, exported to process.env or saved to .env.local.
+    secretKey = normalizeOperatorValue(secretKey, registryEntry('SCALEWAY_SECRET_KEY')).value;
 
     warnIfBadFormat(secretKey, 'secret key', UUID_FORMAT, 'a UUID');
 

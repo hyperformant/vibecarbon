@@ -20,7 +20,8 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { verifyToken } from './cloudflare-dns.js';
 import { c } from './colors.js';
-import { readOperatorVar } from './operator-env.js';
+import { registryEntry } from './config-registry.js';
+import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 /**
@@ -135,6 +136,11 @@ export async function getApiToken(projectName, options = {}) {
     if (p.isCancel(token)) {
       exitCancelled();
     }
+    // First-time-user path (M11): the paste goes through the same
+    // normalization every later readOperatorVar() read applies — trailing
+    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
+    // against the live API, exported to process.env or saved to .env.local.
+    token = normalizeOperatorValue(token, registryEntry('CLOUDFLARE_API_TOKEN')).value;
 
     const s = spinner();
     s.start('Verifying API token...');
