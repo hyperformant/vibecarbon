@@ -79,7 +79,10 @@ describe('npm tarball excludes dev artifacts', () => {
 
     const forbidden = files.filter(
       (p) =>
-        /(^|\/)\.env(\.(?!example)[^/]*)?$/.test(p) || // .env or .env.* except .env.example
+        // .env or .env.* except .env.example / .env.local.example (both value-free).
+        (/(^|\/)\.env(\.[^/]*)?$/.test(p) &&
+          !p.endsWith('.env.example') &&
+          !p.endsWith('.env.local.example')) ||
         /(^|\/)\.claude\/agent-memory\//.test(p) ||
         /\.generated\.sql$/.test(p) ||
         /(^|\/)docker-compose\.dev-init\.yml$/.test(p),
@@ -88,8 +91,12 @@ describe('npm tarball excludes dev artifacts', () => {
     expect(forbidden, `tarball leaked dev artifacts:\n${forbidden.join('\n')}`).toEqual([]);
   });
 
-  it('still ships the intended .env.example', () => {
+  it('still ships the intended .env.example and .env.local.example', () => {
     const files = packedFiles();
     expect(files.some((p) => p.endsWith('carbon/.env.example'))).toBe(true);
+    // .env.local.example is the value-free docs counterpart of .env.local
+    // (gitignored) — src/create.js reads it from TEMPLATE_DIR on every
+    // `vibecarbon create`, so it must ship or a real install ENOENTs.
+    expect(files.some((p) => p.endsWith('carbon/.env.local.example'))).toBe(true);
   });
 });

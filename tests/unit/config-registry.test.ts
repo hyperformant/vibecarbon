@@ -1,13 +1,17 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CONFIG_KEYS,
   clientBuildKeys,
+  entriesForScopes,
   featureConfigKeys,
   featureRuntimeKeys,
   featureSecretKeys,
   isOperatorKey,
   isSecretKey,
   operatorSecretKeys,
+  registryEntry,
   stripOperatorSecretLines,
 } from '../../src/lib/config-registry.js';
 
@@ -104,25 +108,59 @@ describe('config-registry', () => {
       'SCALEWAY_SECRET_KEY',
       'SCALEWAY_ACCESS_KEY',
       'SCALEWAY_DEFAULT_PROJECT_ID',
+      'SCALEWAY_STORAGE_REGION',
+      // Object-storage REGION overrides for Hetzner/DigitalOcean, added
+      // alongside Vultr/Linode/Scaleway's existing rows above (operator
+      // config hygiene pass — these are keys deploy reads outside configure).
+      'HETZNER_STORAGE_REGION',
+      'DIGITALOCEAN_STORAGE_REGION',
+      // Docker Hub is now registry-backed (operator-shell-level: `where`
+      // is 'operator shell', never written to a file — see the
+      // "operator-secret entries live in .env.local or the operator
+      // shell" test below and the DOCKER_HUB-specific test further down).
+      'DOCKER_HUB_USERNAME',
+      'DOCKER_HUB_TOKEN',
+      // CLI-local operator override that rides the same guarantees
+      // (.env.local only, stripped from any bundle baseline). ACME_CA_SERVER
+      // is deliberately NOT here: the deployed server reads it from `.env`
+      // (docker-compose.prod.yml `${ACME_CA_SERVER:-…}`), so the strip
+      // guarantee would have silently removed it — see the runtime-config
+      // test below (whole-branch review 2026-09-19, Critical).
+      'PULUMI_BACKEND_URL',
+      // The one operator-secret entry NOT under the 'providers' feature and
+      // NOT written to .env.local/.env/operator shell — see the
+      // "belongs to the providers feature" exception and the "operator-secret
+      // entries live in .env.local or the operator shell" exception below.
+      'VIBECARBON_LICENSE_PRIVATE_KEY',
     ];
 
     it('operatorSecretKeys returns exactly the provider credential keys', () => {
       expect(operatorSecretKeys().sort()).toEqual([...EXPECTED_OPERATOR_KEYS].sort());
     });
 
-    it('every operator-secret key belongs to the providers feature', () => {
+    it('every operator-secret key belongs to the providers feature (except the e2e signing key)', () => {
       for (const key of EXPECTED_OPERATOR_KEYS) {
+        if (key === 'VIBECARBON_LICENSE_PRIVATE_KEY') continue; // feature: 'e2e', not 'providers'
         const entry = CONFIG_KEYS.find((k) => k.key === key);
         expect(entry, `${key} missing from CONFIG_KEYS`).toBeDefined();
         expect(entry.class).toBe('operator-secret');
         expect(entry.feature).toBe('providers');
       }
+      expect(registryEntry('VIBECARBON_LICENSE_PRIVATE_KEY').feature).toBe('e2e');
     });
 
-    it('does NOT classify DOCKER_HUB_* as operator-secret (operator-shell-level, outside the project store)', () => {
-      const keys = CONFIG_KEYS.map((k) => k.key);
-      expect(keys).not.toContain('DOCKER_HUB_USERNAME');
-      expect(keys).not.toContain('DOCKER_HUB_TOKEN');
+    it('classifies DOCKER_HUB_* as operator-secret with where: "operator shell" (never written to a file)', () => {
+      // Registered (operator config hygiene pass) so deploy's credential
+      // resolution (src/lib/deploy/docker-hub.js) and the registry-driven
+      // docs generator both derive from this registry — but `configure`'s
+      // Docker Hub row stays informational (run() returns {}), so these
+      // must never gain a `where` of '.env' or '.env.local'.
+      for (const key of ['DOCKER_HUB_USERNAME', 'DOCKER_HUB_TOKEN']) {
+        const entry = CONFIG_KEYS.find((k) => k.key === key);
+        expect(entry, `${key} missing from CONFIG_KEYS`).toBeDefined();
+        expect(entry.class).toBe('operator-secret');
+        expect(entry.where).toBe('operator shell');
+      }
     });
 
     it('isSecretKey treats operator-secret keys as secrets', () => {
@@ -184,6 +222,12 @@ describe('config-registry', () => {
         expect(stripped).toContain('DOMAIN');
       });
 
+      it('keeps ACME_CA_SERVER — the compose server reads it from the shipped .env', () => {
+        const staging = 'ACME_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory';
+        const content = [staging, "HETZNER_API_TOKEN='leaked'"].join('\n');
+        expect(stripOperatorSecretLines(content)).toBe(staging);
+      });
+
       it('is a no-op when no operator-secret keys are present', () => {
         const content = "FOO='bar'\nBAZ='qux'";
         expect(stripOperatorSecretLines(content)).toBe(content);
@@ -193,5 +237,334 @@ describe('config-registry', () => {
         expect(stripOperatorSecretLines('')).toBe('');
       });
     });
+  });
+
+  describe('shape metadata', () => {
+    it('every entry has a kind, a where, and a scope', () => {
+      for (const e of CONFIG_KEYS) {
+        expect(e.kind, e.key).toBeTruthy();
+        expect(['.env.local', '.env', 'operator shell', 'tests/.env.e2e'], e.key).toContain(
+          e.where,
+        );
+        // Alphanumeric so 'e2e' (VIBECARBON_LICENSE_PRIVATE_KEY) is valid
+        // alongside the letters-only scopes ('billing', 'provider:hetzner', …).
+        expect(e.scope, e.key).toMatch(/^[a-z0-9]+(:[a-z0-9]+)?$/);
+      }
+    });
+    it('every entry with a shape has a sample that satisfies it', () => {
+      for (const e of CONFIG_KEYS.filter((e) => e.shape)) {
+        expect(e.sample, `${e.key} needs a sample`).toBeTruthy();
+        expect(e.shape.describe, `${e.key} shape needs describe`).toBeTruthy();
+        if (e.shape.regex) expect(e.sample, e.key).toMatch(e.shape.regex);
+        if (e.shape.minLen) expect(e.sample.length, e.key).toBeGreaterThanOrEqual(e.shape.minLen);
+        if (e.shape.values) expect(e.shape.values, e.key).toContain(e.sample);
+      }
+    });
+    it('ACME_CA_SERVER is runtime-config in .env (a server-read value, not a credential)', () => {
+      // carbon/docker-compose.prod.yml + docker-compose.dns01.prod.yml
+      // interpolate `${ACME_CA_SERVER:-<prod LE>}` from the `.env` the bundle
+      // ships; the k8s issuer patch reads it from the project env too. Any
+      // class stripOperatorSecretLines acts on would drop it from every
+      // compose bundle and silently move a staging deploy to LE production.
+      const e = registryEntry('ACME_CA_SERVER');
+      expect(e.class).toBe('runtime-config');
+      expect(e.where).toBe('.env');
+      expect(e.scope).toBe('tls');
+      expect(e.optional).toBe(true);
+      expect(isOperatorKey('ACME_CA_SERVER')).toBe(false);
+      expect(featureConfigKeys()).toContain('ACME_CA_SERVER');
+    });
+    it('every *_STORAGE_REGION is optional (guided setup warns-and-continues on blank; e2e example ships them empty)', () => {
+      const regions = CONFIG_KEYS.filter((e) => e.key.endsWith('_STORAGE_REGION'));
+      expect(regions.map((e) => e.key).sort()).toEqual([
+        'DIGITALOCEAN_STORAGE_REGION',
+        'HETZNER_STORAGE_REGION',
+        'LINODE_STORAGE_REGION',
+        'SCALEWAY_STORAGE_REGION',
+        'VULTR_STORAGE_REGION',
+      ]);
+      for (const e of regions) expect(e.optional, e.key).toBe(true);
+    });
+    it('operator-secret entries live in .env.local, the operator shell, or tests/.env.e2e', () => {
+      // tests/.env.e2e is the one exception: VIBECARBON_LICENSE_PRIVATE_KEY
+      // is a test-harness-only signing key, never a project file.
+      for (const e of CONFIG_KEYS.filter((e) => e.class === 'operator-secret')) {
+        expect(['.env.local', 'operator shell', 'tests/.env.e2e'], e.key).toContain(e.where);
+      }
+    });
+    it('registers the keys deploy reads outside configure', () => {
+      for (const k of [
+        'DOCKER_HUB_USERNAME',
+        'DOCKER_HUB_TOKEN',
+        'ALLOWED_SSH_IPS',
+        'HETZNER_STORAGE_REGION',
+        'DIGITALOCEAN_STORAGE_REGION',
+        'SCALEWAY_STORAGE_REGION',
+        'PULUMI_BACKEND_URL',
+        'ACME_CA_SERVER',
+      ]) {
+        expect(registryEntry(k), k).toBeDefined();
+      }
+    });
+    it('tight shapes exist only where the vendor documents the format AND it is the only accepted one', () => {
+      const tight = CONFIG_KEYS.filter((e) => e.shape?.regex)
+        .map((e) => e.key)
+        .sort();
+      expect(tight).toEqual([
+        'ACME_CA_SERVER',
+        'DIGITALOCEAN_PROJECT_ID',
+        'GOOGLE_CLIENT_ID',
+        'HETZNER_API_TOKEN',
+        'MICROSOFT_TENANT_ID',
+        'PULUMI_BACKEND_URL',
+        'SMTP_ADMIN_EMAIL',
+        'SMTP_PORT',
+        'STRIPE_SECRET_KEY',
+        'STRIPE_WEBHOOK_SECRET',
+      ]);
+      // This list IS the decision record for which formats are vendor-backed
+      // enough to assert. Removed, and why (each stays loose until the vendor
+      // documents ONE accepted format):
+      //   - POLAR_ACCESS_TOKEN (review 2026-09-19): the `polar_oat_` prefix
+      //     was unverified against Polar's docs.
+      //   - DOCKER_HUB_TOKEN (whole-branch review 2026-09-19): `docker login`
+      //     also accepts account passwords, legacy UUID tokens and 2025 org
+      //     tokens (`dckr_oat_…`) — `dckr_pat_` is not the only shape.
+      //   - GOOGLE_CLIENT_SECRET (same review): secrets minted before 2021
+      //     carry no `GOCSPX-` prefix and still work.
+      //   - ALLOWED_SSH_IPS (same review): nobody documents a format, and
+      //     the parser it feeds always accepted bare IPs and IPv6; the
+      //     'cidr-list' kind fallback in operator-env.js validates it.
+      // STRIPE_SECRET_KEY STAYS tight but was widened to `(sk|rk)_` —
+      // restricted keys are a documented, accepted Stripe key type.
+    });
+    it('STRIPE_SECRET_KEY accepts restricted keys, not just secret keys', () => {
+      const { regex } = registryEntry('STRIPE_SECRET_KEY').shape;
+      expect('rk_live_abc123').toMatch(regex);
+      expect('rk_test_abc123').toMatch(regex);
+      expect('sk_test_abc123').toMatch(regex);
+      expect('pk_test_abc123').not.toMatch(regex);
+    });
+    it('SMTP_PORT is bounded to the real port range, not just 1-5 digits', () => {
+      const { regex } = registryEntry('SMTP_PORT').shape;
+      expect('0').not.toMatch(regex);
+      expect('70000').not.toMatch(regex);
+      expect('99999').not.toMatch(regex);
+      expect('587').toMatch(regex);
+      expect('65535').toMatch(regex);
+    });
+    it('entriesForScopes selects by scope', () => {
+      const keys = entriesForScopes(['provider:hetzner'])
+        .map((e) => e.key)
+        .sort();
+      expect(keys).toEqual([
+        'HETZNER_ACCESS_KEY',
+        'HETZNER_API_TOKEN',
+        'HETZNER_SECRET_KEY',
+        'HETZNER_STORAGE_REGION',
+      ]);
+    });
+    it('existing derived views are unchanged by the metadata', () => {
+      expect(featureRuntimeKeys()).not.toContain('HETZNER_API_TOKEN');
+      // Not merely "no shape": a shape with only `describe` would still be
+      // documented via the same text — the fallback's describe and the docs
+      // census's KIND_PROSE['cidr-list'] must agree, so the entry carries
+      // none and both derive from operator-env.js.
+      expect(registryEntry('ALLOWED_SSH_IPS').shape).toBeUndefined();
+      expect(isOperatorKey('DOCKER_HUB_TOKEN')).toBe(true);
+      // ALLOWED_SSH_IPS is NOT operator-secret: `vibecarbon access` persists
+      // the allowlist to .vibecarbon.json, never via setEnvVar's `localOnly`
+      // (checked in src/access.js — it never touches an env file at all), so
+      // the flip condition doesn't apply. It ships in plain `.env` like any
+      // other runtime-config key (read by the CLI's operator-ip bootstrap and
+      // by the Pulumi IaC programs as a firewall-rule input, never a
+      // credential).
+      expect(isOperatorKey('ALLOWED_SSH_IPS')).toBe(false);
+    });
+  });
+});
+
+/**
+ * Census: for every configure-collected key (feature billing/oauth/smtp —
+ * the ones `configure`'s prompts write) that appears in
+ * `carbon/src/server/lib/env.ts`, the registry's `optional` may never be
+ * LOOSER than env.ts's `.optional()`. This is a ONE-DIRECTIONAL rule
+ * (env.ts required ⇒ registry required), not equality — the two flags mean
+ * different things and conflating them is exactly how this rule's
+ * predecessor got it wrong twice:
+ *
+ *   - env.ts `.optional()`  → "this whole FEATURE may be left disabled"
+ *     (no Stripe key at all because billing isn't used; no SMTP host at
+ *     all because email isn't set up). Nearly every feature key is
+ *     `.optional()` there for exactly this reason.
+ *   - registry `optional`   → "blank is a legitimate answer WHILE the
+ *     operator is actively configuring this section" — the STRICTER of the
+ *     two. A key can be `.optional()` in env.ts (the feature is skippable)
+ *     while still `optional: false`/unset in the registry (once you're in
+ *     that section, the field is load-bearing) — e.g. STRIPE_SECRET_KEY:
+ *     billing-as-a-whole can be skipped, but a configured Stripe section
+ *     needs its secret key. That is fine and is the NORMAL case for
+ *     section-load-bearing fields. What must never happen is the reverse:
+ *     env.ts says a key is REQUIRED (no `.optional()` at all — the app
+ *     will refuse to boot without it) while the registry lets the prompt
+ *     accept blank — that would silently write a value the app itself
+ *     insists on.
+ *
+ * History: PADDLE_PRICE_STARTER/PRO, POLAR_PRICE_STARTER/PRO and
+ * POLAR_ORGANIZATION_ID were first found hard-required at the prompt while
+ * the runtime already tolerated blank (billing.ts's per-tier price map,
+ * polar.ts's conditional organization_id) — too strict, and the bug this
+ * census exists to catch. A follow-up fix then over-corrected by mirroring
+ * env.ts's `.optional()` one-to-one (equality, not one-directional), which
+ * would have made SMTP_HOST/PORT/USER/PASS/ADMIN_EMAIL and the primary
+ * provider secrets (STRIPE_SECRET_KEY, PADDLE_API_KEY, POLAR_ACCESS_TOKEN,
+ * their webhook secrets) skippable mid-section — too loose. This
+ * one-directional rule is the version that actually holds.
+ *
+ * A handful of oauth keys (GOOGLE_CLIENT_ID/SECRET, MICROSOFT_CLIENT_ID/
+ * SECRET/TENANT_ID) and one smtp key (GOTRUE_MAILER_AUTOCONFIRM) never
+ * appear in env.ts at all — they're read by the GoTrue auth service
+ * container's own env, not the app's zod schema — so there is no boot-time
+ * contract to compare against. They're listed explicitly below rather than
+ * silently skipped, so a key that starts appearing in env.ts is noticed.
+ */
+describe('config-registry ↔ carbon env.ts — registry is never looser than env.ts', () => {
+  const ENV_TS_PATH = join(process.cwd(), 'carbon/src/server/lib/env.ts');
+  const CONFIGURE_FEATURES = new Set(['billing', 'oauth', 'smtp']);
+
+  const NOT_IN_ENV_SCHEMA: Record<string, string> = {
+    GOOGLE_CLIENT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
+    GOOGLE_CLIENT_SECRET: 'read by the GoTrue auth service container env, not the app zod schema',
+    MICROSOFT_CLIENT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
+    MICROSOFT_CLIENT_SECRET:
+      'read by the GoTrue auth service container env, not the app zod schema',
+    MICROSOFT_TENANT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
+    GOTRUE_MAILER_AUTOCONFIRM:
+      'read by the GoTrue auth service container env, not the app zod schema',
+  };
+
+  /** Maps each envSchema field name to whether its zod chain is `.optional()`. */
+  function parseEnvSchemaOptionality(): Record<string, boolean> {
+    const src = readFileSync(ENV_TS_PATH, 'utf-8');
+    const match = src.match(/envSchema = z\.object\(\{([\s\S]*?)\n\}\);/);
+    if (!match) throw new Error('could not find `envSchema = z.object({ ... })` in env.ts');
+    const body = match[1];
+    const result: Record<string, boolean> = {};
+    const lineRe = /^\s*([A-Z][A-Z0-9_]*):\s*(.+),\s*$/gm;
+    let m: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: standard exec-loop idiom
+    while ((m = lineRe.exec(body))) {
+      result[m[1]] = /\.optional\(\)/.test(m[2]);
+    }
+    return result;
+  }
+
+  /**
+   * The one-directional check itself, factored out so it can be exercised
+   * directly against a synthetic fixture (see the negative-fixture test
+   * below) as well as against the real registry + env.ts.
+   *
+   * A violation is: env.ts requires the key (not `.optional()`) AND the
+   * registry marks it `optional: true`. Everything else is fine, including
+   * a registry-required / env-optional pair (the normal, section-load-
+   * bearing case) and a registry-optional / env-optional pair.
+   */
+  function looserThanEnvViolations(
+    entries: Array<{ key: string; optional?: boolean }>,
+    envOptionality: Record<string, boolean>,
+    notInSchema: Record<string, string>,
+  ): string[] {
+    const violations: string[] = [];
+    for (const entry of entries) {
+      if (entry.key in notInSchema) continue;
+      if (!(entry.key in envOptionality)) continue;
+      const envRequired = envOptionality[entry.key] === false;
+      const registryOptional = Boolean(entry.optional);
+      if (envRequired && registryOptional) {
+        violations.push(
+          `${entry.key}: registry optional=true but env.ts requires it (no .optional())`,
+        );
+      }
+    }
+    return violations;
+  }
+
+  it('every configure-collected key present in env.ts is accounted for (not silently skipped)', () => {
+    const envOptionality = parseEnvSchemaOptionality();
+    // Guards the parser itself: env.ts must have real optional/required keys
+    // to compare against, or this test would pass vacuously.
+    expect(Object.keys(envOptionality).length).toBeGreaterThan(20);
+    expect(envOptionality.SUPABASE_URL).toBe(false);
+    expect(envOptionality.STRIPE_WEBHOOK_SECRET).toBe(true);
+
+    const relevant = CONFIG_KEYS.filter((k) => CONFIGURE_FEATURES.has(k.feature));
+    const untracked = relevant
+      .filter((e) => !(e.key in NOT_IN_ENV_SCHEMA) && !(e.key in envOptionality))
+      .map((e) => e.key);
+
+    expect(
+      untracked,
+      'not found in env.ts and not explained in NOT_IN_ENV_SCHEMA — add a line there with why',
+    ).toEqual([]);
+  });
+
+  it('the registry is never looser than env.ts: env.ts required ⇒ registry required', () => {
+    const envOptionality = parseEnvSchemaOptionality();
+    const relevant = CONFIG_KEYS.filter((k) => CONFIGURE_FEATURES.has(k.feature));
+
+    const violations = looserThanEnvViolations(relevant, envOptionality, NOT_IN_ENV_SCHEMA);
+
+    expect(
+      violations,
+      `registry is optional for a key env.ts requires:\n  ${violations.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('negative fixture: the check DOES catch a registry-optional/env-required pair, and does not false-positive on the normal (registry-required/env-optional) or (registry-optional/env-optional) cases', () => {
+    const envRequired = { FAKE_REQUIRED_KEY: false };
+    const envOptional = { FAKE_OPTIONAL_KEY: true };
+
+    // The bug shape: env.ts requires it, registry lets the prompt skip it.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_REQUIRED_KEY', optional: true }], envRequired, {}),
+    ).toEqual([
+      'FAKE_REQUIRED_KEY: registry optional=true but env.ts requires it (no .optional())',
+    ]);
+
+    // Registry-required while env.ts requires it too — fine.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_REQUIRED_KEY', optional: false }], envRequired, {}),
+    ).toEqual([]);
+
+    // The normal, section-load-bearing case: env.ts says the FEATURE is
+    // skippable, but the registry still requires the field once you're
+    // configuring that section (e.g. STRIPE_SECRET_KEY). Not a violation.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_OPTIONAL_KEY', optional: false }], envOptional, {}),
+    ).toEqual([]);
+
+    // Both agree the field can be blank — fine (e.g. SMTP_SENDER_NAME).
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_OPTIONAL_KEY', optional: true }], envOptional, {}),
+    ).toEqual([]);
+
+    // A key listed in notInSchema (or simply absent from envOptionality) is
+    // never checked, regardless of its registry `optional`.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_REQUIRED_KEY', optional: true }], envRequired, {
+        FAKE_REQUIRED_KEY: 'excused for this fixture',
+      }),
+    ).toEqual([]);
+  });
+
+  it('NOT_IN_ENV_SCHEMA cannot rot: every listed key is a real registry entry still absent from env.ts', () => {
+    const envOptionality = parseEnvSchemaOptionality();
+    const stale = Object.keys(NOT_IN_ENV_SCHEMA).filter(
+      (key) => !registryEntry(key) || key in envOptionality,
+    );
+    expect(
+      stale,
+      'listed as absent from env.ts, but either left the registry or now appears in env.ts',
+    ).toEqual([]);
   });
 });

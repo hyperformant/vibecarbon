@@ -36,6 +36,7 @@ import * as digitaloceanGuidedSetup from './digitalocean-guided-setup.js';
 import { envSummaryLines } from './env-summary.js';
 import * as hetznerGuidedSetup from './hetzner-guided-setup.js';
 import * as linodeGuidedSetup from './linode-guided-setup.js';
+import { readOperatorVar } from './operator-env.js';
 import { getBootstrappedKeys } from './project.js';
 import { getProviderClass, listProviders } from './providers/index.js';
 import * as scalewayGuidedSetup from './scaleway-guided-setup.js';
@@ -111,7 +112,7 @@ function entrySummaryLines(env, entry) {
 function warnShellOverrides(entry) {
   const bootstrapped = getBootstrappedKeys();
   for (const key of entry.envKeys) {
-    if (process.env[key] && !bootstrapped.has(key)) {
+    if (readOperatorVar(key).value && !bootstrapped.has(key)) {
       p.log.warn(`${key} is set in your shell and overrides what's saved to .env.local.`);
     }
   }
@@ -128,7 +129,7 @@ function warnShellOverrides(entry) {
 async function genericGetApiToken(Provider, _projectName, options = {}) {
   const { force = false } = options;
   if (!force) {
-    const envToken = process.env[Provider.TOKEN_ENV];
+    const envToken = readOperatorVar(Provider.TOKEN_ENV).value;
     if (envToken) return envToken;
   }
   p.log.info(
@@ -164,7 +165,8 @@ async function runComputeEntry(id, Provider, storageKeys, projectName) {
   // this fold they'd be silently dropped, since configure passes
   // save:false and persists only what run() returns.
   for (const key of EXTRA_ENV_KEYS_BY_PROVIDER[id] ?? []) {
-    if (process.env[key]) vars[key] = process.env[key];
+    const value = readOperatorVar(key).value;
+    if (value) vars[key] = value;
   }
 
   if (guided && storageKeys.length === 2) {

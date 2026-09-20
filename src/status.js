@@ -19,11 +19,16 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
+import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
+import { operatorCheckEnvs } from './lib/deploy/preflight.js';
 import {
   buildPrimaryLagQuery,
   buildStandbyReplayQuery,
   formatReplicationLagLine,
 } from './lib/deploy/replication.js';
+import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
+import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
+import { parseDotenv, readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
@@ -297,21 +302,24 @@ async function checkDockerContainers(projectName, deps = {}) {
   );
 }
 
+/**
+ * Dev-server ports from the FIRST of `.env.local`/`.env` that exists (not a
+ * per-key merge — unchanged from the regex reader this replaced, which also
+ * stopped at the first existing file). Parsing is `parseDotenv`, the
+ * codebase's one dotenv reader; an empty `KEY=` folds to the default via
+ * `||` exactly as the old regex's non-match did.
+ */
 function getPortConfig() {
   const defaults = { vite: 5173, api: 3000 };
   try {
     const envFiles = ['.env.local', '.env'];
     for (const file of envFiles) {
       if (existsSync(file)) {
-        const content = readFileSync(file, 'utf-8');
-        const getEnvValue = (key) => {
-          const match = content.match(new RegExp(`^${key}=["']?([^"'\\n]+)["']?`, 'm'));
-          return match ? match[1] : null;
-        };
+        const env = parseDotenv(readFileSync(file, 'utf-8'));
 
-        const portOffset = Number.parseInt(getEnvValue('DEV_PORT_OFFSET') || '0', 10);
-        const vitePort = getEnvValue('DEV_VITE_PORT') || String(5173 + portOffset);
-        const apiPort = getEnvValue('DEV_API_PORT') || String(3000 + portOffset);
+        const portOffset = Number.parseInt(env.DEV_PORT_OFFSET || '0', 10);
+        const vitePort = env.DEV_VITE_PORT || String(5173 + portOffset);
+        const apiPort = env.DEV_API_PORT || String(3000 + portOffset);
 
         return { vite: Number.parseInt(vitePort, 10), api: Number.parseInt(apiPort, 10) };
       }
@@ -651,6 +659,164 @@ function checkGitSync(envName, envConfig) {
 // ============================================================================
 // RENDERING FUNCTIONS
 // ============================================================================
+
+/**
+ * Derive the operator-config scopes/keys `status`'s Configuration advisory
+ * checks — the same shape checks Gate 1 (`src/deploy.js`) enforces before a
+ * deploy, run here as a passive read instead of a refusal, so an operator
+ * sees a malformed credential before running `deploy` at all.
+ *
+ * Two presence tiers, not one: `access`/`tls`/`state`/`registry` and the
+ * PROJECT's configured provider (mirroring Gate 1's `?? 'hetzner'` default:
+ * the first environment's provider, else the project config's own
+ * `provider` field, else `hetzner` when any environment carries a
+ * `deployMode`) are shape-checked only (`presence: false`) — a fresh
+ * project with nothing configured yet must show `ok`, not a wall of
+ * "not set". A DEPLOYED environment's own provider + DNS scope/key are
+ * checked WITH presence (`presence: true`): a deployed environment whose
+ * token has since gone missing is a real problem, not "not configured
+ * yet". A scope already covered by a deployed environment is checked only
+ * once, under the stricter (presence: true) rule.
+ *
+ * A THIRD pass covers the configure family (spec §5): billing/oauth/smtp/
+ * analytics/landing values are written by `configure` to the project's
+ * `.env`/`.env.local` FILES and read by the app from there — they are never
+ * in this process's env, so the two passes above cannot see them. This pass
+ * reads the files through the codebase's one dotenv parser (`parseDotenv`,
+ * via project.js's `loadEnvVariables` for `.env.local`), merging `.env.local`
+ * over `.env` — the precedence the app itself sees — and checks shape only
+ * (`presence: false`: a feature that simply isn't configured is not a
+ * problem). This is the ONLY place a stale stored value surfaces: the
+ * configure prompt's Enter-on-existing deliberately keeps the current value
+ * unvalidated (correct for a prompt — the operator asked to keep it), so a
+ * publishable key stored as STRIPE_SECRET_KEY before shape validation
+ * existed, or a hand edit, is caught here rather than at the next prompt.
+ * Reading the files never echoes a value: only `checkOperatorConfig`'s
+ * messages leave this function.
+ *
+ * `problems` is deduped by the variable name each message names — every
+ * `checkOperatorConfig` message starts with `<KEY> ` (`<KEY> is not set` /
+ * `<KEY> looks wrong: ...`), and env-var keys never contain a space, so the
+ * first token is exactly that key. The same key CAN reach both process-env
+ * passes: a project's default provider token (base, presence: false) is
+ * also the lone sibling key a cross-cloud DNS pick reads (deployed,
+ * presence: true) — see `operatorConfigForDns`'s cross-cloud case. Without
+ * deduping, a single malformed value would be reported (and counted) twice.
+ * The deployed pass's message wins on a collision (it is the stricter
+ * check, and is the only one that can report an ABSENT value as a problem
+ * at all — the base pass tolerates that silently under `presence: false`).
+ * The configure-family pass shares no key with the other two (disjoint
+ * scopes) but folds into the same map for the one ordering/count.
+ *
+ * @param {{provider?: string}|null|undefined} projectConfig
+ * @param {Record<string, {provider?: string, dnsProvider?: string, deployMode?: string}>} environments
+ * @param {{ env?: Record<string, string|undefined>, cwd?: string }} [opts] -
+ *   injectable for testing; `env` defaults to `process.env`, `cwd` (the
+ *   project directory whose `.env`/`.env.local` the configure-family pass
+ *   reads) to `process.cwd()`.
+ * @returns {{ problems: string[], checked: string[] }}
+ */
+function computeConfigurationCheck(projectConfig, environments, { env, cwd } = {}) {
+  const envEntries = Object.entries(environments || {});
+
+  const projectProviderId =
+    envEntries[0]?.[1]?.provider ??
+    projectConfig?.provider ??
+    (envEntries.some(([, cfg]) => cfg.deployMode) ? 'hetzner' : null);
+
+  const deployedScopes = new Set();
+  const deployedKeys = [];
+  for (const [, envConfig] of envEntries) {
+    const providerId = envConfig.provider ?? (envConfig.deployMode ? 'hetzner' : null);
+    const { scopes, keys } = operatorScopesForProviderAndDns(
+      providerId,
+      envConfig.dnsProvider ?? null,
+    );
+    for (const scope of scopes) deployedScopes.add(scope);
+    deployedKeys.push(...keys);
+  }
+
+  const baseScopes = ['access', 'tls', 'state'];
+  if (resolveDockerHubCreds({ env })) baseScopes.push('registry');
+  if (projectProviderId && !deployedScopes.has(`provider:${projectProviderId}`)) {
+    baseScopes.push(`provider:${projectProviderId}`);
+  }
+
+  // File-aware (review residual, PR #112): the base and deployed passes both
+  // read the SAME `operatorCheckEnvs` bags Gate 1 and the orchestrator gate
+  // use — `where: '.env'` keys (ACME_CA_SERVER, ALLOWED_SSH_IPS) on the
+  // merged project files first, then the shell (the file is what ships);
+  // `where: '.env.local'` keys on their effective shell-over-file value
+  // (bootstrapOperatorEnv fills only what the shell lacks); `operator shell`
+  // keys (registry) on the shell alone. One helper for both passes so a
+  // stale value cannot be tolerated pre-deploy and refused post-deploy.
+  const checkEnvs = operatorCheckEnvs(cwd ?? process.cwd(), env);
+  const shapeOnly = checkOperatorConfig(baseScopes, { presence: false, env: checkEnvs });
+  const deployed =
+    deployedScopes.size > 0 || deployedKeys.length > 0
+      ? checkOperatorConfig([...deployedScopes], {
+          presence: true,
+          keys: deployedKeys,
+          env: checkEnvs,
+        })
+      : { problems: [], checked: [] };
+
+  const configureFamily = checkOperatorConfig(CONFIGURE_FAMILY_SCOPES, {
+    presence: false,
+    env: readProjectEnvFiles(cwd ?? process.cwd()),
+  });
+
+  const problemByKey = new Map();
+  for (const problem of shapeOnly.problems) problemByKey.set(problem.split(' ')[0], problem);
+  for (const problem of deployed.problems) problemByKey.set(problem.split(' ')[0], problem);
+  for (const problem of configureFamily.problems) {
+    problemByKey.set(problem.split(' ')[0], problem);
+  }
+
+  return {
+    problems: [...problemByKey.values()],
+    checked: [...new Set([...shapeOnly.checked, ...deployed.checked, ...configureFamily.checked])],
+  };
+}
+
+/**
+ * The registry scopes `configure` writes to the project's env files — the
+ * ones `computeConfigurationCheck`'s configure-family pass reads (files
+ * only, via `readProjectEnvFiles` from project.js). Operator scopes
+ * (provider:<id>, dns:<id>, registry, state, access, tls) are deliberately
+ * absent: those belong to the base/deployed passes above, which check the
+ * shell and — for the `.env`/`.env.local`-stored keys — the same files.
+ */
+const CONFIGURE_FAMILY_SCOPES = ['billing', 'oauth', 'smtp', 'analytics', 'landing'];
+
+/**
+ * Render `computeConfigurationCheck`'s result as display lines — pure, so
+ * it is unit-testable without touching the filesystem or `process.env`.
+ * Never echoes a value: `problems` are the messages `checkOperatorConfig`
+ * already produced, which name a variable and its expected shape but never
+ * its content.
+ *
+ * Styling matches its neighbour, the `Access:` advisory above it: the body
+ * stays plain and only the one meaningful piece is coloured — there, an
+ * inline command name; here, the count (since there is no command to
+ * suggest). The glyphs (`●`/`▲`), the "Configuration"/"ok" words, and every
+ * `  - <problem>` detail line stay uncoloured.
+ *
+ * @param {string[]} problems
+ * @param {string[]} checked
+ * @returns {string[]}
+ */
+function formatConfigurationLines(problems, checked) {
+  if (problems.length === 0) {
+    const n = checked.length;
+    return [`Configuration ● ok  ${c.success(`(${n} variable${n === 1 ? '' : 's'} checked)`)}`];
+  }
+  const n = problems.length;
+  return [
+    `▲ Configuration: ${c.warning(`${n} problem${n === 1 ? '' : 's'}`)}`,
+    ...problems.map((problem) => `  - ${problem}`),
+  ];
+}
 
 /**
  * Lines for the "Docker Services" section of the Local Development note.
@@ -1207,12 +1373,13 @@ async function main(argv = []) {
       // unconditional-Hetzner behavior for unregistered provider strings
       // instead of throwing away this environment's whole checks entry)
       // and reused for both the env-only token gate and the probe itself.
-      // Reads process.env directly rather than calling resolveProviderToken()
-      // — the two are behaviorally identical now that token resolution is
-      // env-only (see providers/index.js), this just avoids the extra call.
+      // Reads through the normalizing reader by the class's TOKEN_ENV rather
+      // than calling resolveProviderToken() — the two are behaviorally
+      // identical now that token resolution is env-only (see
+      // providers/index.js), this just avoids the by-id lookup.
       const servers = envConfig.servers || [];
       const Provider = resolveEnvProvider(envConfig);
-      const token = process.env[Provider.TOKEN_ENV];
+      const token = readOperatorVar(Provider.TOKEN_ENV).value;
       if (servers.length > 0 && token) {
         const providerInstance = new Provider(token);
         const serverInfoResults = await Promise.allSettled(
@@ -1274,6 +1441,19 @@ async function main(argv = []) {
     };
   });
 
+  // Operator config hygiene: the same shape checks Gate 1 (deploy.js)
+  // enforces before it will start provisioning, run here as a passive read
+  // (never a refusal) — shown even with no environments deployed (a fresh
+  // project still gets its always-known scopes checked). Computed
+  // unconditionally, independent of `-json`/TTY, so it lands in both output
+  // modes off the same values.
+  //
+  // JSON placement: `localDev` is null whenever `-json` is set (`noLocal`
+  // is forced true above), so nesting this under `allData.localDev` would
+  // mean it never actually appears there — it is attached directly to
+  // `allData` (top level of the `-json` payload) instead.
+  allData.configuration = computeConfigurationCheck(projectConfig, environments, { cwd });
+
   // Output
   if (args.json) {
     console.log(JSON.stringify(allData, null, 2));
@@ -1297,6 +1477,18 @@ async function main(argv = []) {
     p.log.info(
       `Access: ${cidrs.length} CIDR${cidrs.length === 1 ? '' : 's'} in allowlist — see ${c.info('vibecarbon access')} for details.`,
     );
+  }
+
+  // Configuration advisory — same problems array Gate 1 would refuse a
+  // deploy over, never a value.
+  {
+    const { problems, checked } = allData.configuration;
+    const configLines = formatConfigurationLines(problems, checked);
+    if (problems.length === 0) {
+      p.log.info(configLines[0]);
+    } else {
+      p.log.warn(configLines.join('\n'));
+    }
   }
 
   // Local dev
@@ -1335,6 +1527,8 @@ export async function run(args) {
 export {
   checkDockerContainers,
   classifyContainer,
+  computeConfigurationCheck,
+  formatConfigurationLines,
   formatDockerServiceLines,
   formatHealthLines,
   formatServerLines,

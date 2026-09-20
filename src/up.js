@@ -15,7 +15,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
-import { detectPackageManager } from './lib/project.js';
+import { detectPackageManager, parseDotenv } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
   deriveComposeProjectName,
@@ -50,16 +50,22 @@ const SPEC = {
 };
 
 /**
- * Read a value from .env.local
+ * Read `key` from `.env.local`, then `.env` — the first file that carries a
+ * NON-EMPTY value wins, else null. Parsing is `parseDotenv` (src/lib/shell.js,
+ * via project.js), the codebase's one dotenv reader; the per-key regex this
+ * replaced could not match an empty `KEY=` and so fell through to the next
+ * file — treating '' as absent here keeps that exact fall-through (see
+ * tests/unit/lib/dotenv-parsers-parity.test.ts).
+ * @param {string} key
+ * @param {string} cwd
+ * @returns {string|null}
  */
 function getEnvValue(key, cwd) {
   for (const file of ['.env.local', '.env']) {
     const filePath = join(cwd, file);
-    if (existsSync(filePath)) {
-      const content = readFileSync(filePath, 'utf-8');
-      const match = content.match(new RegExp(`^${key}=["']?([^"'\\n]+)["']?`, 'm'));
-      if (match) return match[1];
-    }
+    if (!existsSync(filePath)) continue;
+    const value = parseDotenv(readFileSync(filePath, 'utf-8'))[key];
+    if (value) return value;
   }
   return null;
 }

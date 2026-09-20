@@ -23,6 +23,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { progressLog } from '../cli/progress.js';
+import { readOperatorVar } from '../operator-env.js';
 import { getProviderClass } from '../providers/index.js';
 import {
   classifyStateError,
@@ -103,8 +104,9 @@ mkdirSync(LOCAL_STATE_DIR, { recursive: true });
  * @param {string} [provider] - Provider id, when the caller knows it.
  */
 export function resolveBackendUrl(s3Config, provider) {
-  if (process.env.PULUMI_BACKEND_URL) {
-    return process.env.PULUMI_BACKEND_URL;
+  const override = readOperatorVar('PULUMI_BACKEND_URL').value;
+  if (override) {
+    return override;
   }
   if (s3Config?.bucket && s3Config?.endpoint) {
     const stateBucket = s3Config.stateBucket ?? s3Config.bucket;
@@ -181,6 +183,14 @@ export function buildEnv(options) {
     // companion env var is missing, rather than mid-Pulumi.
     Object.assign(env, ProviderClass.buildIacEnv(options.providerToken));
   }
+  // Pulumi gives PULUMI_BACKEND_URL precedence over projectSettings.backend.url
+  // inside the child, so a shell-exported value with quotes/whitespace would
+  // win there while the CLI's own resolveBackendUrl() saw the clean one.
+  // Hand the child the normalized value (or nothing) — same seam as
+  // buildIacEnv for the provider credentials.
+  const backendUrl = readOperatorVar('PULUMI_BACKEND_URL').value;
+  if (backendUrl) env.PULUMI_BACKEND_URL = backendUrl;
+  else delete env.PULUMI_BACKEND_URL;
   if (options.s3Config?.accessKey) env.AWS_ACCESS_KEY_ID = options.s3Config.accessKey;
   if (options.s3Config?.secretKey) env.AWS_SECRET_ACCESS_KEY = options.s3Config.secretKey;
   // Disable Pulumi's telemetry for solo-hosted users. No data leaves the box.

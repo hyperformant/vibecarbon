@@ -851,6 +851,11 @@ async function bootstrap(cliArgs) {
   // Copy .env.example WITHOUT replacing placeholders (it's committed to git as documentation)
   const envExampleContent = readFileSync(join(TEMPLATE_DIR, '.env.example'), 'utf-8');
   writeFileSync(join(projectDir, '.env.example'), envExampleContent);
+  // Same treatment for .env.local.example — the operator-credential docs
+  // counterpart of the gitignored .env.local (see carbon/_gitignore). Value-free,
+  // so no placeholder substitution needed here either.
+  const envLocalExampleContent = readFileSync(join(TEMPLATE_DIR, '.env.local.example'), 'utf-8');
+  writeFileSync(join(projectDir, '.env.local.example'), envLocalExampleContent);
   const envLocal = generateEnvLocal(projectName, variables);
   writeFileSync(join(projectDir, '.env.local'), envLocal, { mode: 0o600 });
   // Also create .env for docker-compose (reads .env by default)

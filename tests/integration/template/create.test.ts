@@ -403,12 +403,17 @@ describe('create-vibecarbon E2E', () => {
         encoding: 'utf-8',
         env: gitScrubbedEnv(),
       });
-      // Real generated secrets live in .env / .env.local — both must stay untracked.
-      expect(tracked).not.toContain('.env.local');
-      expect(tracked.split('\n')).not.toContain('.env');
-      // sanity: the commit DID include real template files (and the example env).
+      // Real generated secrets live in .env / .env.local — both must stay
+      // untracked. Exact line membership, not a substring match: .env.local.example
+      // (the value-free docs counterpart of .env.local) IS legitimately
+      // tracked, and ".env.local" is a substring of its name.
+      const trackedLines = tracked.split('\n');
+      expect(trackedLines).not.toContain('.env.local');
+      expect(trackedLines).not.toContain('.env');
+      // sanity: the commit DID include real template files (and the example envs).
       expect(tracked).toContain('package.json');
       expect(tracked).toContain('.env.example');
+      expect(trackedLines).toContain('.env.local.example');
     });
 
     it('gitignores `vibecarbon upgrade` backup/new files at root and nested paths', () => {

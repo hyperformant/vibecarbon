@@ -53,6 +53,7 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
+import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
@@ -282,8 +283,8 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {{SCW_SECRET_KEY: string, SCW_ACCESS_KEY: string, SCW_DEFAULT_PROJECT_ID: string}}
    */
   static buildIacEnv(token) {
-    const accessKey = process.env.SCALEWAY_ACCESS_KEY;
-    const projectId = process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const accessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
+    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
     const missing = [];
     if (!accessKey) missing.push('SCALEWAY_ACCESS_KEY');
     if (!projectId) missing.push('SCALEWAY_DEFAULT_PROJECT_ID');
@@ -841,7 +842,7 @@ export class ScalewayProvider extends BaseProvider {
       return { id: existing.id, server: existing, reused: true };
     }
 
-    const projectId = process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
     if (!projectId) {
       throw new Error(
         'SCALEWAY_DEFAULT_PROJECT_ID is not set, Scaleway server creation must target the ' +
@@ -1197,7 +1198,7 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<string>} SSH key UUID
    */
   async createSSHKey(name, publicKey) {
-    const projectId = process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
     const normalize = (key) => {
       const [type, body] = (key || '').trim().split(/\s+/);
       return `${type || ''} ${body || ''}`.trim();
@@ -1462,7 +1463,7 @@ export class ScalewayProvider extends BaseProvider {
    * @returns {Promise<boolean>}
    */
   async deleteSSHKeyByName(name) {
-    const projectId = process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
     const res = await fetchWithRetry(
       `${ScalewayProvider.API_BASE}/iam/v1alpha1/ssh-keys?page_size=100&name=${encodeURIComponent(name)}${
         projectId ? `&project_id=${projectId}` : ''

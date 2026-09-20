@@ -358,7 +358,12 @@ export function renderBundle(projectName, options = {}) {
     Object.assign(envOverrides, dnsChallengeEnv(options.dnsProvider, options.dnsToken));
   }
 
-  // Merge overrides into local copy
+  // Merge overrides into local copy. Deliberately NOT parseDotenv: this is
+  // an in-place REWRITER, not a reader — every line envOverrides does not
+  // touch (comments, blanks, key order) ships verbatim, which a
+  // parse-then-serialize cannot guarantee, and no value is read out of the
+  // file here. Allow-listed by exact line in
+  // tests/unit/lib/dotenv-parsers-parity.test.ts's census.
   const lines = envContent.split('\n');
   const seen = new Set();
   const merged = lines.map((line) => {

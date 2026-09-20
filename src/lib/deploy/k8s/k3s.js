@@ -50,10 +50,11 @@ import {
   csiSidecarSetImagePlan,
   dbImageRef,
 } from '../../images.js';
+import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
-import { shEscape } from '../../shell.js';
+import { parseDotenv, shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
 import { postAdminUser, waitForGotrueHealth } from '../admin-user.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
@@ -1516,11 +1517,16 @@ export async function prePullChartImages({ nodeIps, sshKeyPath, khPath }) {
 // row's comment for the pinning rationale.
 
 /**
- * Parse a `.env.local` file into a plain object.
+ * Read a `.env.local` file into a plain object — the deploy path's hard
+ * precondition, so a MISSING file throws (callers that merely want a
+ * fingerprint existsSync first; see digestEnvLocalSecrets).
  *
- * Strict subset of dotenv: `KEY=VALUE` per line, optional surrounding
- * single/double quotes stripped, lines starting with `#` or blank ignored.
- * Values with `=` in them are preserved (split-once on the first `=`).
+ * Parsing is `parseDotenv` (src/lib/shell.js), the codebase's one dotenv
+ * reader, which keeps this file's hand-edit tolerance (indented keys,
+ * `KEY = value`, `export KEY=`); the local loop it replaced also read
+ * lowercase keys and kept an inline `# comment` as part of an unquoted
+ * value — tests/unit/lib/dotenv-parsers-parity.test.ts records each
+ * difference and pins the shared behaviour.
  *
  * @param {string} envPath
  * @returns {Record<string, string>}
@@ -1529,21 +1535,7 @@ function loadEnvLocal(envPath) {
   if (!existsSync(envPath)) {
     throw new Error(`loadEnvLocal: ${envPath} not found. Run 'vibecarbon create' to generate it.`);
   }
-  const out = {};
-  const raw = readFileSync(envPath, 'utf-8');
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let val = trimmed.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    out[key] = val;
-  }
-  return out;
+  return parseDotenv(readFileSync(envPath, 'utf-8'));
 }
 
 /**
@@ -4454,7 +4446,7 @@ export async function applyK3sManifests({
   // it into the project's .env.local. Anything else gets the prod issuer.
   // Provider suffix (cloudflare/hetzner/manual) determines which solver
   // — DNS-01 vs HTTP-01 — cert-manager actually uses; see pickIssuerName.
-  const acmeServer = envLocal?.ACME_CA_SERVER || process.env.ACME_CA_SERVER || '';
+  const acmeServer = envLocal?.ACME_CA_SERVER || readOperatorVar('ACME_CA_SERVER').value || '';
   const issuerName = pickIssuerName({ dnsProvider, acmeServer });
   // DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — one cert
   // covers *.${domain} so every IngressRoute subdomain is included without

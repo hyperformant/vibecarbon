@@ -25,6 +25,7 @@
 
 import { saveProjectConfig } from './config.js';
 import { fetchWithRetry } from './fetch-retry.js';
+import { readOperatorVar } from './operator-env.js';
 import { providerFor } from './providers/index.js';
 
 // ============================================================================
@@ -309,7 +310,7 @@ export async function ensureOperatorIpAccess({
     if (list.length > 0) {
       return { added: false, cidr: null, list };
     }
-    const envCidrs = parseAllowedSshIpsEnv(process.env.ALLOWED_SSH_IPS);
+    const envCidrs = parseAllowedSshIpsEnv(readOperatorVar('ALLOWED_SSH_IPS').value);
     if (envCidrs.length === 0) {
       throw new Error(
         'No operator CIDRs configured. Run `vibecarbon deploy` interactively first, or set ALLOWED_SSH_IPS="1.2.3.4/32,5.6.7.8/32".',

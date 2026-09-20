@@ -27,6 +27,8 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
+import { registryEntry } from './config-registry.js';
+import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.vultr.com/v2';
@@ -189,7 +191,7 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    const envToken = process.env.VULTR_API_TOKEN;
+    const envToken = readOperatorVar('VULTR_API_TOKEN').value;
     if (envToken) {
       warnIfBadTokenFormat(envToken);
       const check = await validateVultrToken(envToken);
@@ -226,6 +228,11 @@ export async function getApiToken(projectName, options = {}) {
     if (p.isCancel(token)) {
       exitCancelled();
     }
+    // First-time-user path (M11): the paste goes through the same
+    // normalization every later readOperatorVar() read applies — trailing
+    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
+    // against the live API, exported to process.env or saved to .env.local.
+    token = normalizeOperatorValue(token, registryEntry('VULTR_API_TOKEN')).value;
 
     warnIfBadTokenFormat(token);
 
@@ -280,12 +287,12 @@ export async function getS3Credentials(projectName, options = {}) {
   const { save = true, force = false, skipPrompts = false } = options;
 
   if (!force) {
-    const envAccessKey = process.env.VULTR_ACCESS_KEY;
-    const envSecretKey = process.env.VULTR_SECRET_KEY;
+    const envAccessKey = readOperatorVar('VULTR_ACCESS_KEY').value;
+    const envSecretKey = readOperatorVar('VULTR_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
       p.log.info('✓ Using Object Storage credentials from environment variables');
-      const envRegion = process.env.VULTR_STORAGE_REGION;
+      const envRegion = readOperatorVar('VULTR_STORAGE_REGION').value;
       if (!envRegion) {
         // Not fatal — resolveS3Region still returns the compute region's
         // default cluster — but on Vultr that default is a guess, and a
@@ -311,7 +318,7 @@ export async function getS3Credentials(projectName, options = {}) {
   // Interactive prompt
   displayS3CredentialsGuide(projectName);
 
-  const accessKey = await p.text({
+  const accessKeyInput = await p.text({
     message: 'Paste your Object Storage Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
@@ -319,11 +326,11 @@ export async function getS3Credentials(projectName, options = {}) {
     },
   });
 
-  if (p.isCancel(accessKey)) {
+  if (p.isCancel(accessKeyInput)) {
     exitCancelled();
   }
 
-  const secretKey = await p.password({
+  const secretKeyInput = await p.password({
     message: 'Paste your Object Storage Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
@@ -331,25 +338,34 @@ export async function getS3Credentials(projectName, options = {}) {
     },
   });
 
-  if (p.isCancel(secretKey)) {
+  if (p.isCancel(secretKeyInput)) {
     exitCancelled();
   }
 
-  const region = await p.text({
+  // Same first-time-user normalization as getApiToken above (M11).
+  const accessKey = normalizeOperatorValue(accessKeyInput, registryEntry('VULTR_ACCESS_KEY')).value;
+  const secretKey = normalizeOperatorValue(secretKeyInput, registryEntry('VULTR_SECRET_KEY')).value;
+
+  const regionInput = await p.text({
     message: 'Which cluster is that subscription in? (hostname prefix, e.g. ewr1)',
     placeholder: 'ewr1',
     validate: (v) => {
       if (!v) return 'Cluster is required, Vultr keys only work against their own cluster';
-      if (!CLUSTER_FORMAT.test(v)) {
+      // Checked on the normalized paste (M11) — "ewr1 " with a stray space
+      // or a quoted "ewr1" is fine once cleaned.
+      if (
+        !CLUSTER_FORMAT.test(normalizeOperatorValue(v, registryEntry('VULTR_STORAGE_REGION')).value)
+      ) {
         return 'Just the prefix of the S3 hostname — "ewr1", not "ewr1.vultrobjects.com"';
       }
       return undefined;
     },
   });
 
-  if (p.isCancel(region)) {
+  if (p.isCancel(regionInput)) {
     exitCancelled();
   }
+  const region = normalizeOperatorValue(regionInput, registryEntry('VULTR_STORAGE_REGION')).value;
 
   p.log.success('Object Storage credentials received!');
 

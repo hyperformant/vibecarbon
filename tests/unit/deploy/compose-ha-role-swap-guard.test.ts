@@ -23,6 +23,9 @@ vi.mock('../../../src/lib/deploy/preflight.js', () => ({
   checkDeployPrerequisites: () => {
     throw new Error('STOP_AFTER_ROLE_SWAP_GUARD');
   },
+  // Evaluated as checkDeployPrerequisites's `env` argument (the file-aware
+  // `[fileEnv, shellEnv]` pair) — inert here, the call above is the stop.
+  operatorCheckEnvs: () => [],
 }));
 
 // The first two mutations executeDeployment would perform on an already-deployed

@@ -33,9 +33,10 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 ```
 
 Access Grafana at: **http://grafana.localhost** (via Traefik — Grafana no longer
-publishes a host port). Anonymous access is disabled, so sign in with the Grafana
-admin credentials (`GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`, defaulting to
-your `ADMIN_EMAIL` / `ADMIN_PASSWORD`).
+publishes a host port). Anonymous access is disabled, so sign in with your
+`ADMIN_EMAIL` / `ADMIN_PASSWORD` (the module's compose file maps them to Grafana's
+`GF_SECURITY_ADMIN_USER` / `GF_SECURITY_ADMIN_PASSWORD`; there are no separate
+Grafana credentials).
 
 ### Production
 

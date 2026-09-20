@@ -10,8 +10,9 @@ import { progressLog, spinner } from '../cli/progress.js';
 import { c } from '../colors.js';
 import { runCommand, runCommandAsync } from '../command.js';
 import { loadProjectConfig, registerProject, saveProjectConfig } from '../config.js';
-import { getDnsProvider, hasAutomatedDns } from '../dns-provider.js';
+import { getDnsProvider, hasAutomatedDns, operatorConfigForDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
+import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
 import { perfAsync, perfTimer } from '../perf.js';
 import { runProjectAssignment } from '../project-assignment.js';
@@ -30,7 +31,7 @@ import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
-import { checkDeployPrerequisites } from './preflight.js';
+import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
 
@@ -106,7 +107,7 @@ async function probePublicHealth(
   const undici = await import('undici');
   const { makePublicDnsLookup } = await import('./public-dns-lookup.js');
   const connectOpts = { lookup: makePublicDnsLookup() };
-  if ((process.env.ACME_CA_SERVER || '').includes('staging')) {
+  if ((readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')) {
     const { stagingProbeCa } = await import('./staging-ca.js');
     connectOpts.ca = stagingProbeCa();
   }
@@ -294,7 +295,36 @@ export async function executeDeployment(args, gatheredConfig) {
   // Provider passed so the pulumi VERSION assertion can fire: a CLI too old
   // for this provider's state-backend options fails as totally as a missing
   // one, with a bucket error that names neither pulumi nor a version.
-  checkDeployPrerequisites(tier, { ProviderClass: providerFor(config) });
+  //
+  // The operator-config scopes/keys (config-registry.js) THIS deploy
+  // touches, gathered before checkDeployPrerequisites so a malformed value
+  // in any of them is refused in the same breath as a missing host tool —
+  // always the resolved compute provider plus access/tls/state (their keys
+  // are all optional, so they only fail on an actually-malformed value);
+  // DNS via the shared operatorConfigForDns (mirrors resolveDnsToken's own
+  // same-token comparison — see its doc for the same-cloud/no-sibling/
+  // cross-cloud three-way split); registry only when the deploy will
+  // actually attempt the dockerhub-login step (mirrors plan/steps.js's own
+  // `when: (ctx) => !!ctx.dockerHubCreds` gate) — absent creds fall back to
+  // an anonymous pull and never touch this scope.
+  //
+  // `env: operatorCheckEnvs(process.cwd())` — `where: '.env'` keys
+  // (ACME_CA_SERVER, ALLOWED_SSH_IPS) are checked on the project file first
+  // (it is what the bundle ships) and the shell; `where: '.env.local'` keys
+  // (the provider tokens) on their effective shell-over-file value. See
+  // preflight.js.
+  const operatorScopes = ['access', 'tls', 'state', `provider:${providerIdFor(config)}`];
+  const dnsOperatorConfig = operatorConfigForDns(dnsProvider, providerIdFor(config));
+  operatorScopes.push(...dnsOperatorConfig.scopes);
+  if (resolveDockerHubCreds()) {
+    operatorScopes.push('registry');
+  }
+  checkDeployPrerequisites(tier, {
+    ProviderClass: providerFor(config),
+    operatorScopes,
+    operatorKeys: dnsOperatorConfig.keys,
+    env: operatorCheckEnvs(process.cwd()),
+  });
   assertTierSupported(providerFor(config), tier);
 
   // Operator-IP access: detect + persist + (when env already deployed) patch

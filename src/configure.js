@@ -34,6 +34,7 @@ import {
   featureSecretKeys,
   isOperatorKey,
   operatorSecretKeys,
+  registryEntry,
 } from './lib/config-registry.js';
 import { promptProviders } from './lib/configure-providers.js';
 import { DNS_PROVIDERS } from './lib/dns-provider.js';
@@ -46,9 +47,13 @@ import {
   removeLocale,
   SUPPORTED_LOCALES,
 } from './lib/globalization.js';
+import {
+  normalizeOperatorValue,
+  readOperatorVar,
+  validateOperatorValue,
+} from './lib/operator-env.js';
 import { buildGitAddArgv, loadEnvVariables, setEnvVar } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
-import { validateAdminEmail } from './lib/validators.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
@@ -134,8 +139,15 @@ const SPEC = {
 /**
  * Helper: prompt for a text value, showing current value as placeholder.
  * Returns the entered value, or the current value if user pressed Enter on a non-empty placeholder.
+ *
+ * `options.entry` (a config-registry `ConfigKey`, from `registryEntry(key)`)
+ * routes the raw input through `normalizeOperatorValue`/`validateOperatorValue`
+ * instead of `options.validate`: the user re-enters immediately on a bad
+ * shape, and the RETURNED value is the normalized one (trimmed, unquoted,
+ * …) — so what `configure` writes to disk is the cleaned value, not the
+ * raw paste. Without `entry`, behavior is unchanged from before.
  */
-async function promptText(message, currentValue, options = {}) {
+export async function promptText(message, currentValue, options = {}) {
   const fallback = currentValue || options.defaultValue || undefined;
   const placeholder = fallback || options.placeholder || '';
   const result = await p.text({
@@ -147,33 +159,47 @@ async function promptText(message, currentValue, options = {}) {
     // When we have a default, accept empty submit (Tab/Enter) and fall back to it.
     validate: (value) => {
       if (!value?.trim() && fallback !== undefined) return undefined;
+      if (options.entry) {
+        // Validate the NORMALIZED value but hand the raw paste along too, so
+        // the "surrounding quotes?" / "trailing newline?" hint can fire when
+        // the cleaned value is still wrong (M10).
+        const { value: normalized } = normalizeOperatorValue(value, options.entry);
+        return validateOperatorValue(normalized, options.entry, { raw: value }) ?? undefined;
+      }
       return options.validate?.(value);
     },
   });
   if (p.isCancel(result)) return null;
-  return result || fallback || '';
-}
-
-function requireNonEmpty(label) {
-  return (value) => {
-    if (!value?.trim()) return `${label} is required`;
-    return undefined;
-  };
+  if (!result) return fallback || '';
+  return options.entry ? normalizeOperatorValue(result, options.entry).value : result;
 }
 
 /**
  * Helper: prompt for a secret value (masked input).
+ *
+ * `options.entry` behaves exactly as it does for `promptText` above: shape
+ * validation replaces the bare "required" check for a non-empty input, and
+ * the returned value is normalized. Enter-on-existing still keeps the
+ * current (already-stored) value untouched.
  */
-async function promptSecret(message, currentValue) {
+export async function promptSecret(message, currentValue, options = {}) {
   const result = await p.password({
     message: currentValue ? `${message} ${c.dim('(press Enter to keep current)')}` : message,
     validate: (v) => {
-      if (!v && !currentValue) return 'This field is required';
+      if (!v && currentValue) return undefined; // Enter-on-existing: keep the current value
+      if (options.entry) {
+        // Same raw-threading as promptText above (M10).
+        const { value: normalized } = normalizeOperatorValue(v, options.entry);
+        return validateOperatorValue(normalized, options.entry, { raw: v }) ?? undefined;
+      }
+      if (!v) return 'This field is required';
+      return undefined;
     },
   });
   if (p.isCancel(result)) return null;
   // If user pressed Enter with no input and there's a current value, keep it
-  return result || currentValue || '';
+  if (!result) return currentValue || '';
+  return options.entry ? normalizeOperatorValue(result, options.entry).value : result;
 }
 
 /**
@@ -271,13 +297,16 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
       'Stripe setup',
     );
 
-    const secretKey = await promptSecret('Stripe secret key (sk_...)', env.STRIPE_SECRET_KEY);
+    const secretKey = await promptSecret('Stripe secret key (sk_...)', env.STRIPE_SECRET_KEY, {
+      entry: registryEntry('STRIPE_SECRET_KEY'),
+    });
     if (secretKey === null) return null;
     vars.STRIPE_SECRET_KEY = secretKey;
 
     const webhookSecret = await promptSecret(
       'Stripe webhook secret (whsec_...)',
       env.STRIPE_WEBHOOK_SECRET,
+      { entry: registryEntry('STRIPE_WEBHOOK_SECRET') },
     );
     if (webhookSecret === null) return null;
     vars.STRIPE_WEBHOOK_SECRET = webhookSecret;
@@ -365,11 +394,15 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
       'Paddle setup',
     );
 
-    const apiKey = await promptSecret('Paddle API key', env.PADDLE_API_KEY);
+    const apiKey = await promptSecret('Paddle API key', env.PADDLE_API_KEY, {
+      entry: registryEntry('PADDLE_API_KEY'),
+    });
     if (apiKey === null) return null;
     vars.PADDLE_API_KEY = apiKey;
 
-    const webhookSecret = await promptSecret('Paddle webhook secret', env.PADDLE_WEBHOOK_SECRET);
+    const webhookSecret = await promptSecret('Paddle webhook secret', env.PADDLE_WEBHOOK_SECRET, {
+      entry: registryEntry('PADDLE_WEBHOOK_SECRET'),
+    });
     if (webhookSecret === null) return null;
     vars.PADDLE_WEBHOOK_SECRET = webhookSecret;
 
@@ -387,11 +420,14 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
     const priceStarter = await promptText(
       'Paddle price ID for Startup plan',
       env.PADDLE_PRICE_STARTER,
+      { entry: registryEntry('PADDLE_PRICE_STARTER') },
     );
     if (priceStarter === null) return null;
     vars.PADDLE_PRICE_STARTER = priceStarter;
 
-    const pricePro = await promptText('Paddle price ID for Pro plan', env.PADDLE_PRICE_PRO);
+    const pricePro = await promptText('Paddle price ID for Pro plan', env.PADDLE_PRICE_PRO, {
+      entry: registryEntry('PADDLE_PRICE_PRO'),
+    });
     if (pricePro === null) return null;
     vars.PADDLE_PRICE_PRO = pricePro;
   } else if (provider === 'polar') {
@@ -420,26 +456,35 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
       'Polar setup',
     );
 
-    const accessToken = await promptSecret('Polar access token', env.POLAR_ACCESS_TOKEN);
+    const accessToken = await promptSecret('Polar access token', env.POLAR_ACCESS_TOKEN, {
+      entry: registryEntry('POLAR_ACCESS_TOKEN'),
+    });
     if (accessToken === null) return null;
     vars.POLAR_ACCESS_TOKEN = accessToken;
 
-    const webhookSecret = await promptSecret('Polar webhook secret', env.POLAR_WEBHOOK_SECRET);
+    const webhookSecret = await promptSecret('Polar webhook secret', env.POLAR_WEBHOOK_SECRET, {
+      entry: registryEntry('POLAR_WEBHOOK_SECRET'),
+    });
     if (webhookSecret === null) return null;
     vars.POLAR_WEBHOOK_SECRET = webhookSecret;
 
-    const orgId = await promptText('Polar organization ID', env.POLAR_ORGANIZATION_ID);
+    const orgId = await promptText('Polar organization ID', env.POLAR_ORGANIZATION_ID, {
+      entry: registryEntry('POLAR_ORGANIZATION_ID'),
+    });
     if (orgId === null) return null;
     vars.POLAR_ORGANIZATION_ID = orgId;
 
     const priceStarter = await promptText(
       'Polar price ID for Startup plan',
       env.POLAR_PRICE_STARTER,
+      { entry: registryEntry('POLAR_PRICE_STARTER') },
     );
     if (priceStarter === null) return null;
     vars.POLAR_PRICE_STARTER = priceStarter;
 
-    const pricePro = await promptText('Polar price ID for Pro plan', env.POLAR_PRICE_PRO);
+    const pricePro = await promptText('Polar price ID for Pro plan', env.POLAR_PRICE_PRO, {
+      entry: registryEntry('POLAR_PRICE_PRO'),
+    });
     if (pricePro === null) return null;
     vars.POLAR_PRICE_PRO = pricePro;
   }
@@ -487,10 +532,14 @@ async function promptGoogleOAuth(env) {
     'Google OAuth setup',
   );
 
-  const clientId = await promptText('Google Client ID', env.GOOGLE_CLIENT_ID);
+  const clientId = await promptText('Google Client ID', env.GOOGLE_CLIENT_ID, {
+    entry: registryEntry('GOOGLE_CLIENT_ID'),
+  });
   if (clientId === null) return null;
 
-  const clientSecret = await promptSecret('Google Client Secret', env.GOOGLE_CLIENT_SECRET);
+  const clientSecret = await promptSecret('Google Client Secret', env.GOOGLE_CLIENT_SECRET, {
+    entry: registryEntry('GOOGLE_CLIENT_SECRET'),
+  });
   if (clientSecret === null) return null;
 
   return {
@@ -524,15 +573,20 @@ async function promptMicrosoftOAuth(env) {
     'Microsoft OAuth setup',
   );
 
-  const clientId = await promptText('Microsoft Client ID', env.MICROSOFT_CLIENT_ID);
+  const clientId = await promptText('Microsoft Client ID', env.MICROSOFT_CLIENT_ID, {
+    entry: registryEntry('MICROSOFT_CLIENT_ID'),
+  });
   if (clientId === null) return null;
 
-  const clientSecret = await promptSecret('Microsoft Client Secret', env.MICROSOFT_CLIENT_SECRET);
+  const clientSecret = await promptSecret('Microsoft Client Secret', env.MICROSOFT_CLIENT_SECRET, {
+    entry: registryEntry('MICROSOFT_CLIENT_SECRET'),
+  });
   if (clientSecret === null) return null;
 
   const tenantId = await promptText('Microsoft Tenant ID', env.MICROSOFT_TENANT_ID, {
     placeholder: 'common',
     defaultValue: 'common',
+    entry: registryEntry('MICROSOFT_TENANT_ID'),
   });
   if (tenantId === null) return null;
 
@@ -620,7 +674,9 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
     port = '587';
     user = 'resend';
 
-    pass = await promptSecret('Resend API key', env.SMTP_PASS);
+    pass = await promptSecret('Resend API key', env.SMTP_PASS, {
+      entry: registryEntry('SMTP_PASS'),
+    });
     if (pass === null) return null;
   } else if (provider === 'postmark') {
     // Postmark SMTP: the Server API Token is used as BOTH the username and the
@@ -641,7 +697,9 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
     host = 'smtp.postmarkapp.com';
     port = '587';
 
-    const token = await promptSecret('Postmark Server API token', env.SMTP_PASS);
+    const token = await promptSecret('Postmark Server API token', env.SMTP_PASS, {
+      entry: registryEntry('SMTP_PASS'),
+    });
     if (token === null) return null;
     // Both credentials are the Server API Token (per Postmark's SMTP docs).
     user = token;
@@ -667,7 +725,9 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
     // SendGrid requires the literal string "apikey" as the SMTP username.
     user = 'apikey';
 
-    pass = await promptSecret('SendGrid API key', env.SMTP_PASS);
+    pass = await promptSecret('SendGrid API key', env.SMTP_PASS, {
+      entry: registryEntry('SMTP_PASS'),
+    });
     if (pass === null) return null;
   } else {
     p.note(
@@ -681,21 +741,24 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
     );
 
     host = await promptText('SMTP host', env.SMTP_HOST, {
-      validate: requireNonEmpty('SMTP host'),
+      entry: registryEntry('SMTP_HOST'),
     });
     if (host === null) return null;
 
     port = await promptText('SMTP port', env.SMTP_PORT, {
       defaultValue: '587',
+      entry: registryEntry('SMTP_PORT'),
     });
     if (port === null) return null;
 
     user = await promptText('SMTP username', env.SMTP_USER, {
-      validate: requireNonEmpty('SMTP username'),
+      entry: registryEntry('SMTP_USER'),
     });
     if (user === null) return null;
 
-    pass = await promptSecret('SMTP password', env.SMTP_PASS);
+    pass = await promptSecret('SMTP password', env.SMTP_PASS, {
+      entry: registryEntry('SMTP_PASS'),
+    });
     if (pass === null) return null;
   }
 
@@ -717,7 +780,7 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
   const adminEmail = await promptText('Sender email address (from)', env.SMTP_ADMIN_EMAIL, {
     defaultValue: emailSuggestion,
     placeholder: `support@${domain}`,
-    validate: validateAdminEmail,
+    entry: registryEntry('SMTP_ADMIN_EMAIL'),
   });
   if (adminEmail === null) return null;
 
@@ -725,6 +788,7 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
   const senderName = await promptText('Sender display name', env.SMTP_SENDER_NAME, {
     placeholder: senderDefault,
     defaultValue: senderDefault,
+    entry: registryEntry('SMTP_SENDER_NAME'),
   });
   if (senderName === null) return null;
 
@@ -787,12 +851,14 @@ async function promptPlausible(env, ctx = {}) {
   const domain = await promptText(
     'Your site domain (e.g., myapp.com)',
     env.VITE_PLAUSIBLE_DOMAIN || ctx.domain,
+    { entry: registryEntry('VITE_PLAUSIBLE_DOMAIN') },
   );
   if (domain === null) return null;
 
   const scriptUrl = await promptText(
     'Plausible script URL',
     env.VITE_PLAUSIBLE_SCRIPT_URL || 'https://plausible.io/js/script.js',
+    { entry: registryEntry('VITE_PLAUSIBLE_SCRIPT_URL') },
   );
   if (scriptUrl === null) return null;
 
@@ -1508,14 +1574,17 @@ export async function runConfigureCicd(envName) {
   );
   const { getImageTag } = await import('./lib/ci-setup.js');
   const providerCreds = {
-    hetznerApiToken: process.env.HETZNER_API_TOKEN || '',
+    hetznerApiToken: readOperatorVar('HETZNER_API_TOKEN').value || '',
     // DNS token candidates keyed by env var, registry-derived — seedOrgSecrets
     // seeds the non-empty ones (native DNS rows share the compute token env).
     dnsTokens: Object.fromEntries(
-      Object.values(DNS_PROVIDERS).map((row) => [row.tokenEnv, process.env[row.tokenEnv] || '']),
+      Object.values(DNS_PROVIDERS).map((row) => [
+        row.tokenEnv,
+        readOperatorVar(row.tokenEnv).value || '',
+      ]),
     ),
-    s3AccessKey: process.env.HETZNER_ACCESS_KEY || '',
-    s3SecretKey: process.env.HETZNER_SECRET_KEY || '',
+    s3AccessKey: readOperatorVar('HETZNER_ACCESS_KEY').value || '',
+    s3SecretKey: readOperatorVar('HETZNER_SECRET_KEY').value || '',
   };
   const imageTag = getImageTag(cwd);
 

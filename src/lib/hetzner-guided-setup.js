@@ -18,6 +18,8 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
+import { registryEntry } from './config-registry.js';
+import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 /**
@@ -145,7 +147,7 @@ export async function getApiToken(projectName, options = {}) {
 
   if (!force) {
     // Check environment variable
-    const envToken = process.env.HETZNER_API_TOKEN;
+    const envToken = readOperatorVar('HETZNER_API_TOKEN').value;
     if (envToken) {
       const check = await validateHetznerToken(envToken);
       if (!check.valid) {
@@ -174,7 +176,9 @@ export async function getApiToken(projectName, options = {}) {
       message: 'Paste your Hetzner API token here',
       validate: (v) => {
         if (!v || v.length < 10) return 'API token is required';
-        if (v.length !== 64)
+        // Measure the NORMALIZED paste — a quote-wrapped or newline-
+        // terminated 64-char token is fine once cleaned (M11).
+        if (normalizeOperatorValue(v, registryEntry('HETZNER_API_TOKEN')).value.length !== 64)
           return 'Token should be 64 characters - please check you copied it correctly';
         return undefined;
       },
@@ -183,6 +187,11 @@ export async function getApiToken(projectName, options = {}) {
     if (p.isCancel(token)) {
       exitCancelled();
     }
+    // First-time-user path (M11): the paste goes through the same
+    // normalization every later readOperatorVar() read applies — trailing
+    // newline, surrounding quotes, a stray "Bearer " — BEFORE it is verified
+    // against the live API, exported to process.env or saved to .env.local.
+    token = normalizeOperatorValue(token, registryEntry('HETZNER_API_TOKEN')).value;
 
     const s = spinner();
     s.start('Verifying API token...');
@@ -233,8 +242,8 @@ export async function getS3Credentials(projectName, options = {}) {
 
   if (!force) {
     // Check environment variables
-    const envAccessKey = process.env.HETZNER_ACCESS_KEY;
-    const envSecretKey = process.env.HETZNER_SECRET_KEY;
+    const envAccessKey = readOperatorVar('HETZNER_ACCESS_KEY').value;
+    const envSecretKey = readOperatorVar('HETZNER_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
       p.log.info('✓ Using S3 credentials from environment variables');
@@ -254,7 +263,7 @@ export async function getS3Credentials(projectName, options = {}) {
   // Interactive prompt
   displayS3CredentialsGuide(projectName);
 
-  const accessKey = await p.text({
+  const accessKeyInput = await p.text({
     message: 'Paste your S3 Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
@@ -262,11 +271,11 @@ export async function getS3Credentials(projectName, options = {}) {
     },
   });
 
-  if (p.isCancel(accessKey)) {
+  if (p.isCancel(accessKeyInput)) {
     exitCancelled();
   }
 
-  const secretKey = await p.password({
+  const secretKeyInput = await p.password({
     message: 'Paste your S3 Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
@@ -274,9 +283,19 @@ export async function getS3Credentials(projectName, options = {}) {
     },
   });
 
-  if (p.isCancel(secretKey)) {
+  if (p.isCancel(secretKeyInput)) {
     exitCancelled();
   }
+
+  // Same first-time-user normalization as getApiToken above (M11).
+  const accessKey = normalizeOperatorValue(
+    accessKeyInput,
+    registryEntry('HETZNER_ACCESS_KEY'),
+  ).value;
+  const secretKey = normalizeOperatorValue(
+    secretKeyInput,
+    registryEntry('HETZNER_SECRET_KEY'),
+  ).value;
 
   p.log.success('S3 credentials received!');
 

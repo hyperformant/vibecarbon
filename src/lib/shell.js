@@ -64,8 +64,23 @@ export function unescapeDotenv(raw) {
  *     interpretation)
  *   - Bare unquoted values (trailing ` # comment` stripped, whitespace
  *     trimmed)
- *   - Blank lines, `#` comments, and non-`KEY=VALUE` lines (e.g.
- *     `export FOO=bar`) are ignored
+ *   - Hand-edit tolerance, like the dotenv package: leading whitespace,
+ *     whitespace around `=`, and an `export ` prefix are all accepted
+ *     (`  export KEY = 'v'` reads KEY). The shared parser is deliberately
+ *     the TOLERANT one — the readers it replaced accepted these shapes, and
+ *     a hand-edited `.env.local` must not silently lose a key.
+ *   - Blank lines, `#` comments, and lines with no `[A-Z_][A-Z0-9_]*=` key
+ *     (lowercase keys, prose) are ignored
+ *   - CRLF files read exactly like LF ones (`\r?\n` split). A `\r` left on
+ *     the line used to defeat the `KEY=(.*)$` match below (`.` excludes
+ *     `\r`), so a Windows-edited file parsed as EMPTY — see
+ *     tests/unit/lib/dotenv-parsers-parity.test.ts.
+ *
+ * THE dotenv reader for the whole codebase: every `.env*` file read in src/
+ * goes through here (census in dotenv-parsers-parity.test.ts). The only
+ * other line loops over env text are the two in-place REWRITERS
+ * (deploy/bundle.js, deploy/utils.js mergeRemoteDotenv), which must keep
+ * untouched lines verbatim and never read a value out.
  *
  * The single-quoted branch is a tiny state machine that handles the `'\''`
  * close-reopen escape AND literal backslashes (which are not escape
@@ -74,11 +89,13 @@ export function unescapeDotenv(raw) {
 export function parseDotenv(text) {
   const out = {};
   if (!text) return out;
-  const lines = String(text).split('\n');
+  const lines = String(text).split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!line || line.startsWith('#')) continue;
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (!line || line.trimStart().startsWith('#')) continue;
+    // `\s*` after `=` drops leading padding so `KEY = 'x'` / `KEY = "x"`
+    // still reach the quote branches below; the unquoted branch trims.
+    const m = line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/);
     if (!m) continue;
     const key = m[1];
     const rest = m[2];

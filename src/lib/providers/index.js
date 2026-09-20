@@ -12,6 +12,7 @@
  * 2. Import and register it in PROVIDERS below
  */
 
+import { readOperatorVar } from '../operator-env.js';
 import { BaseProvider } from './base.js';
 import { DigitalOceanProvider } from './digitalocean.js';
 import { HetznerProvider } from './hetzner.js';
@@ -138,11 +139,12 @@ export function assertTierSupported(ProviderClass, tier) {
  * Resolve a provider's API token, replacing the hand-rolled per-command
  * `process.env.HETZNER_API_TOKEN || ...` idioms with one implementation.
  *
- * Env-only: `process.env[Provider.TOKEN_ENV]`, populated either by the
- * operator's shell/CI or by `bootstrapOperatorEnv` folding the project's
- * `.env.local` into `process.env` at CLI startup (see project.js) — real
- * env always wins. There is no separate credentials-file fallback to
- * choose between, so this takes no options.
+ * Env-only: `process.env[Provider.TOKEN_ENV]`, read through the normalizing
+ * `readOperatorVar` and populated either by the operator's shell/CI or by
+ * `bootstrapOperatorEnv` folding the project's `.env.local` into
+ * `process.env` at CLI startup (see project.js) — real env always wins.
+ * There is no separate credentials-file fallback to choose between, so this
+ * takes no options.
  *
  * @param {string} providerId - Provider id (e.g. 'hetzner')
  * @returns {string|null} The resolved token, or null if not found
@@ -150,7 +152,11 @@ export function assertTierSupported(ProviderClass, tier) {
  */
 export function resolveProviderToken(providerId) {
   const Provider = getProviderClass(providerId);
-  return process.env[Provider.TOKEN_ENV] || null;
+  // Through the normalizing reader: a pasted token arrives trimmed, unquoted
+  // and without a stray `Bearer `. A shape problem does NOT null it here —
+  // preflight reports problems; a read only normalizes, so a token the
+  // registry's regex doesn't recognise still reaches the provider call.
+  return readOperatorVar(Provider.TOKEN_ENV).value;
 }
 
 /**

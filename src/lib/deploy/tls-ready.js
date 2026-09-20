@@ -27,6 +27,7 @@
  */
 
 import tls from 'node:tls';
+import { readOperatorVar } from '../operator-env.js';
 import { stagingProbeCa } from './staging-ca.js';
 
 /**
@@ -65,7 +66,9 @@ export const TLS_PROBE_TIMEOUT_MS = 10_000;
  * @returns {Promise<{trusted: boolean, reason?: string, served?: {subject: string, issuer: string}|null}>}
  */
 export async function probeTlsTrustOnce(domain, { timeoutMs = TLS_PROBE_TIMEOUT_MS } = {}) {
-  const ca = (process.env.ACME_CA_SERVER || '').includes('staging') ? stagingProbeCa() : undefined;
+  const ca = (readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')
+    ? stagingProbeCa()
+    : undefined;
   try {
     await tlsHandshake(domain, { ca, rejectUnauthorized: true, timeoutMs });
     return { trusted: true };

@@ -139,8 +139,13 @@ describe('parseDotenv', () => {
   });
 
   it('ignores lines that do not match KEY=VALUE', () => {
-    const text = ['export FOO=bar', 'random text', 'lowercase=skipped', 'OK=yes'].join('\n');
+    const text = ['random text', 'lowercase=skipped', '=novalue', 'OK=yes'].join('\n');
     expect(parseDotenv(text)).toEqual({ OK: 'yes' });
+  });
+
+  it('is tolerant of the shapes a hand edit leaves: `export`, indentation, spaces around `=`', () => {
+    const text = ['export FOO=bar', '  INDENTED=x', 'SPACED = y', '\tTAB =\t"q v"'].join('\n');
+    expect(parseDotenv(text)).toEqual({ FOO: 'bar', INDENTED: 'x', SPACED: 'y', TAB: 'q v' });
   });
 
   it('returns an empty object for empty input', () => {

@@ -20,6 +20,7 @@
  */
 
 import { fetchWithRetry } from '../fetch-retry.js';
+import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
@@ -1298,7 +1299,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * @returns {Promise<{ projectId: string, created: boolean, assigned: number }>}
    */
   async ensureProjectAssignment({ projectName, environment }) {
-    const envId = process.env[DigitalOceanProvider.PROJECT_ID_ENV];
+    const envId = readOperatorVar(DigitalOceanProvider.PROJECT_ID_ENV).value;
     const { id: projectId, created } = envId
       ? { id: envId, created: false }
       : await this.findOrCreateProject(projectName);
