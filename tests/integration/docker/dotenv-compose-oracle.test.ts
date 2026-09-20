@@ -41,12 +41,14 @@ const KEYS = Object.keys(ORACLE_VALUES);
 
 describeDocker('dotenv oracle: docker compose reads the writer identically', () => {
   let dir: string;
+  // stderr is inherited so a failure (pull refused, daemon down) shows
+  // docker's own reason in the vitest log instead of a bare "Command failed".
   const compose = (args: string[], timeout: number) =>
     execFileSync('docker', ['compose', '-f', 'compose.yml', ...args], {
       cwd: dir,
       encoding: 'utf-8',
       timeout,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'inherit'],
     });
 
   beforeAll(() => {
@@ -82,7 +84,10 @@ describeDocker('dotenv oracle: docker compose reads the writer identically', () 
     // printf reuses its format for each argument: one NUL-terminated string
     // per key, in KEYS order, empty values included.
     const script = `printf '%s\\0' ${KEYS.map((k) => `"$${k}"`).join(' ')}`;
-    const out = compose(['run', '--rm', '-T', '--no-deps', 'probe', 'sh', '-c', script], 180_000);
+    const out = compose(
+      ['run', '--rm', '-T', '--no-deps', '--quiet-pull', 'probe', 'sh', '-c', script],
+      180_000,
+    );
     const parts = out.split('\0');
     expect(parts.pop(), 'trailing bytes after the last NUL').toBe('');
     expect(parts.length).toBe(KEYS.length);

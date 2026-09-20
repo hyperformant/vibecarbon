@@ -29,9 +29,14 @@
  * parameter and this file never spells `.env`); a parser with none of the
  * listed shapes (a char-by-char state machine). The `parseEnv`/dotenv-library
  * check and review cover those.
- * Known false-positive surface: a file that reads `.env` through the module
- * AND splits some unrelated text at `=`; it passes because it imports the
- * module, so the value-capture check below is the one that stays strict.
+ * A further false negative: a file that imports the module and STILL
+ * hand-parses env text is forgiven by the reader test on the strength of the
+ * import. The KEY-locator, value-capture and split('=') checks below stay
+ * strict regardless of the import (they exempt only the modules, the healer
+ * and the rewriters); what remains forgiven is a parser built from
+ * `indexOf('=')` + `slice` or from a bare line split (`indexOf('=')` is kept
+ * out of the strict check because k3s.js applies it to kubectl output while
+ * also reading `.env.local` through the module).
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -85,6 +90,8 @@ const ENV_PATH_ARG = /[(,[]\s*['"`](?:[^'"`\n]*\/)?\.env(?:\.local|\.e2e|\.examp
 const READS_A_FILE = /\b(?:readFileSync|readFile|loadEnvFile|createReadStream)\(/;
 /** Splitting a line at `=` by hand. */
 const SPLITS_AT_EQUALS = /\.split\(['"]=['"]|\.split\(\/=\/|\.indexOf\(['"]=['"]\)/;
+/** The `.split('=')` forms alone: never legitimate in a file that reads a `.env*` path. */
+const SPLITS_AT_EQUALS_STRICT = /\.split\(['"]=['"]|\.split\(\/=\//;
 /**
  * A regex that locates a `KEY=` line: a generic key shape or a `^…=` anchor
  * followed by `=`. This is what the rewriters legitimately do.
@@ -106,7 +113,7 @@ const KEY_LOCATOR = new RegExp(
  * is: URL-query regexes like `/[?&]name=([^&]+)/` in a file that also reads
  * a `.env*` path — none today.
  */
-const VALUE_CAPTURE = /=\\s\*\(|=\(|=\["']\?\(|=['"]\(/;
+const VALUE_CAPTURE = /=\\s\*\(|=\(|=\["']\?\(|=\\s\*\["']\?\(|=['"]\(/;
 const PARSES_ENV_TEXT = (src: string) =>
   SPLITS_AT_EQUALS.test(src) || KEY_LOCATOR.test(src) || VALUE_CAPTURE.test(src);
 const importsModule = (src: string) => /from '(?:[^'\n]*\/)?dotenv(?:-heal)?\.js'/.test(src);
@@ -162,13 +169,26 @@ function writesEnvFile(src: string): boolean {
 /**
  * An env line built by hand: at the start of a template literal, or on its
  * own line inside one (multi-line templates), `UPPER_KEY=` or `${key}=`
- * followed by an interpolation that is not the encoder. `--build-arg KEY=${v}`
- * and `-e KEY=${v}` never start a line, so they do not match.
+ * followed by an interpolation that is not the encoder. A `KEY=${v}` embedded
+ * in the same template literal as its flag (`\`--build-arg KEY=${v}\``) does
+ * not start a line, so it does not match; a standalone `\`${k}=${v}\`` pushed
+ * after the flag does match on shape alone, and the writer set (files whose
+ * write sink is a `.env*` path) is what keeps build-arg builders out.
  */
 const HAND_BUILT_ENV_LINE =
   /(?:^|`|\\n)\s*(?:[A-Z][A-Z0-9_]*|\$\{[\w.]+\})=(?:["']?\$\{(?!encodeDotenvValue\(|formatDotenvLine\()|["']?\$\{(?!encodeDotenvValue\(|formatDotenvLine\())/m;
 /** Hand-rolled quoting/escaping of a value in or out of an env line. */
-const HAND_ROLLED_QUOTING = /\^\$\{key\}=|\^\(\?:VITE_|=\["'\]\?|\[\^"'\\\\n\]/;
+const HAND_ROLLED_QUOTING = /\^\$\{key\}=|\^\(\?:VITE_|=\["'\]\?|\[\^"'\\n\]/;
+
+/**
+ * Node's parser called directly, the dotenv / dotenv-expand libraries by any
+ * import form (`from`, side-effect `import 'dotenv/config'`, `require`,
+ * dynamic `import()`), or Vite's `loadEnv`. `loadEnv` is caught as Vite's
+ * named import, not as a bare call: state.js takes a `loadEnv` parameter that
+ * defaults to project.js's module-backed reader.
+ */
+const DOTENV_LIBRARY =
+  /\bparseEnv\(|\bfrom\s+['"]dotenv|\bimport\s*\(?\s*['"]dotenv|\brequire\(\s*['"]dotenv|import\s*\{[^}]*\bloadEnv\b[^}]*\}\s*from\s*['"]vite['"]/;
 
 describe('dotenv dialect census', () => {
   it('walks the expected roots', () => {
@@ -197,6 +217,22 @@ describe('dotenv dialect census', () => {
     expect(VALUE_CAPTURE.test("/^([A-Za-z_][A-Za-z0-9_]*)='(.*)'\\s*$/")).toBe(true);
     expect(VALUE_CAPTURE.test('/^SITE_URL=["\']?(.+?)["\']?\\s*$/m')).toBe(true);
     expect(VALUE_CAPTURE.test('const x = (a + b);\nconst y = f(z);')).toBe(false);
+    expect(VALUE_CAPTURE.test(String.raw`/^KEY=\s*["']?([^"'\n]+)/`)).toBe(true);
+    // The old template regex shape `[^"'\n]+` as it appears in a regex literal.
+    expect(HAND_ROLLED_QUOTING.test(String.raw`/^KEY=([^"'\n]+)/`)).toBe(true);
+    expect(HAND_ROLLED_QUOTING.test('/^KEY=(.*)$/m')).toBe(false);
+    // Every way to pull the dotenv library (or dotenv-expand) into a process.
+    for (const form of [
+      "import dotenv from 'dotenv';",
+      "import 'dotenv/config';",
+      "import { expand } from 'dotenv-expand';",
+      "const dotenv = require('dotenv');",
+      "const m = await import('dotenv');",
+      "import { loadEnv } from 'vite';",
+    ]) {
+      expect(DOTENV_LIBRARY.test(form), form).toBe(true);
+    }
+    expect(DOTENV_LIBRARY.test('const env = loadEnv(cwd) ?? {};')).toBe(false);
     // WRITER: inline target, tracked variable, and a non-env target.
     expect(writesEnvFile("writeFileSync(join(projectDir, '.env'), envLocal);")).toBe(true);
     expect(
@@ -243,11 +279,7 @@ describe('dotenv dialect census', () => {
   it('only the two dotenv modules call util.parseEnv or a dotenv library', () => {
     for (const f of files) {
       if (MODULES.has(f) || f === SELF || f === ORACLE) continue;
-      // `loadEnv` is caught as Vite's import, not as a bare call: state.js
-      // takes a `loadEnv` parameter that defaults to project.js's module-backed reader.
-      expect(read(f), f).not.toMatch(
-        /\bparseEnv\(|from ['"]dotenv|import\s*\{[^}]*\bloadEnv\b[^}]*\}\s*from\s*['"]vite['"]/,
-      );
+      expect(read(f), f).not.toMatch(DOTENV_LIBRARY);
     }
   });
 
@@ -284,6 +316,15 @@ describe('dotenv dialect census', () => {
       if (MODULES.has(f) || f === SELF || f === HEALER) return false;
       const src = read(f);
       return readsEnvFile(src) && VALUE_CAPTURE.test(src);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it("no file that reads a .env* path splits a line at '=' by hand, even alongside the module", () => {
+    const offenders = files.filter((f) => {
+      if (MODULES.has(f) || f === SELF) return false;
+      const src = read(f);
+      return readsEnvFile(src) && SPLITS_AT_EQUALS_STRICT.test(src);
     });
     expect(offenders).toEqual([]);
   });

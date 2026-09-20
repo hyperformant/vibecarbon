@@ -205,17 +205,22 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
   type Prompt = { message: string; param: string; body: string };
   /**
    * Each text/password prompt: `p.text({ message: '…', … validate: (v) => { … },`.
-   * The validate parameter is CAPTURED, not assumed: a prompt written
-   * `validate: (value) =>` is judged by `value`, so `dotenvPromptProblem('K', v)`
-   * with a stale `v` (or none at all) cannot pass on the parameter's name.
+   * The span between message and validate may not cross another prompt opener,
+   * so a prompt WITHOUT a validate yields no match instead of borrowing the next
+   * prompt's callback (and silently dropping that prompt). The validate
+   * parameter is CAPTURED, not assumed: a prompt written `validate: (value) =>`
+   * is judged by `value`, so `dotenvPromptProblem('K', v)` with a stale `v` (or
+   * none at all) cannot pass on the parameter's name.
    */
   function promptsIn(src: string): Prompt[] {
     return [
       ...src.matchAll(
-        /p\.(?:text|password)\(\{\s*message: (?:'([^']*)'|`([^`]*)`),[\s\S]*?validate: (?:async )?\((\w+)(?::\s*\w+)?\) => \{([\s\S]*?)\n\s*\},/g,
+        /p\.(?:text|password)\(\{\s*message: (?:'([^']*)'|`([^`]*)`),(?:(?!p\.(?:text|password)\()[\s\S])*?validate: (?:async )?\((\w+)(?::\s*\w+)?\) => \{([\s\S]*?)\n\s*\},/g,
       ),
     ].map(([, quoted, template, param, body]) => ({ message: quoted ?? template, param, body }));
   }
+  /** Every text/password prompt opener in a file, with or without a validate. */
+  const promptOpenerCount = (src: string) => (src.match(/p\.(?:text|password)\(\{/g) ?? []).length;
   /** Every validate callback in a file, whatever its parameter is called. */
   const validateCount = (src: string) =>
     (src.match(/validate: (?:async )?\(\w+(?::\s*\w+)?\) =>/g) ?? []).length;
@@ -236,11 +241,30 @@ describe('census: every provider prompt that reaches an env file calls dotenvPro
     expect(validateCount(snippet('value', 'value'))).toBe(1);
   });
 
+  it('a prompt with no validate is counted as a prompt but never paired with the next one', () => {
+    const noValidate =
+      "const d = await p.text({\n  message: 'A domain',\n  placeholder: 'x',\n});\n";
+    const withValidate =
+      "const t = await p.password({\n  message: 'B token',\n  validate: (v) => {\n    return dotenvPromptProblem('X_TOKEN', v);\n  },\n});\n";
+    const src = noValidate + withValidate;
+    expect(promptsIn(src).map((x) => x.message)).toEqual(['B token']);
+    expect(promptOpenerCount(src)).toBe(2);
+    expect(validateCount(src)).toBe(1);
+    // The census's drift check compares captured prompts to OPENERS, so this
+    // file shape fails it (1 !== 2) instead of passing with A silently dropped.
+    expect(promptsIn(src).length).not.toBe(promptOpenerCount(src));
+  });
+
   for (const file of files) {
     it(file, () => {
       const src = readFileSync(join(ROOT, 'src/lib', file), 'utf-8');
       const prompts = promptsIn(src);
-      // Every validate callback in these modules belongs to a text/password prompt.
+      // Every text/password prompt in these modules carries a validate, and
+      // every validate belongs to one of them: a prompt that lost its validate
+      // shows up as an opener without a capture.
+      expect(prompts.length, `${file}: a prompt without a validate, or the regex drifted`).toBe(
+        promptOpenerCount(src),
+      );
       expect(prompts.length, `${file}: prompt regex drifted`).toBe(validateCount(src));
       expect(prompts.length).toBeGreaterThan(0);
       const missing = prompts
