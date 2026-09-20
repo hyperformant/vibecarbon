@@ -321,14 +321,40 @@ describe('config-registry', () => {
 
 /**
  * Census: for every configure-collected key (feature billing/oauth/smtp —
- * the ones `configure`'s prompts write), the registry's `optional` must
- * match whether `carbon/src/server/lib/env.ts`'s zod schema marks that same
- * key `.optional()`. This is the check that would have caught the original
- * bug: PADDLE_PRICE_STARTER/PRO, POLAR_PRICE_STARTER/PRO and
- * POLAR_ORGANIZATION_ID were hard-required at the configure prompt while
- * env.ts (and the runtime code that reads them — billing.ts's per-tier price
- * map, polar.ts's conditional organization_id) already treated a blank value
- * as legitimate.
+ * the ones `configure`'s prompts write) that appears in
+ * `carbon/src/server/lib/env.ts`, the registry's `optional` may never be
+ * LOOSER than env.ts's `.optional()`. This is a ONE-DIRECTIONAL rule
+ * (env.ts required ⇒ registry required), not equality — the two flags mean
+ * different things and conflating them is exactly how this rule's
+ * predecessor got it wrong twice:
+ *
+ *   - env.ts `.optional()`  → "this whole FEATURE may be left disabled"
+ *     (no Stripe key at all because billing isn't used; no SMTP host at
+ *     all because email isn't set up). Nearly every feature key is
+ *     `.optional()` there for exactly this reason.
+ *   - registry `optional`   → "blank is a legitimate answer WHILE the
+ *     operator is actively configuring this section" — the STRICTER of the
+ *     two. A key can be `.optional()` in env.ts (the feature is skippable)
+ *     while still `optional: false`/unset in the registry (once you're in
+ *     that section, the field is load-bearing) — e.g. STRIPE_SECRET_KEY:
+ *     billing-as-a-whole can be skipped, but a configured Stripe section
+ *     needs its secret key. That is fine and is the NORMAL case for
+ *     section-load-bearing fields. What must never happen is the reverse:
+ *     env.ts says a key is REQUIRED (no `.optional()` at all — the app
+ *     will refuse to boot without it) while the registry lets the prompt
+ *     accept blank — that would silently write a value the app itself
+ *     insists on.
+ *
+ * History: PADDLE_PRICE_STARTER/PRO, POLAR_PRICE_STARTER/PRO and
+ * POLAR_ORGANIZATION_ID were first found hard-required at the prompt while
+ * the runtime already tolerated blank (billing.ts's per-tier price map,
+ * polar.ts's conditional organization_id) — too strict, and the bug this
+ * census exists to catch. A follow-up fix then over-corrected by mirroring
+ * env.ts's `.optional()` one-to-one (equality, not one-directional), which
+ * would have made SMTP_HOST/PORT/USER/PASS/ADMIN_EMAIL and the primary
+ * provider secrets (STRIPE_SECRET_KEY, PADDLE_API_KEY, POLAR_ACCESS_TOKEN,
+ * their webhook secrets) skippable mid-section — too loose. This
+ * one-directional rule is the version that actually holds.
  *
  * A handful of oauth keys (GOOGLE_CLIENT_ID/SECRET, MICROSOFT_CLIENT_ID/
  * SECRET/TENANT_ID) and one smtp key (GOTRUE_MAILER_AUTOCONFIRM) never
@@ -337,7 +363,7 @@ describe('config-registry', () => {
  * contract to compare against. They're listed explicitly below rather than
  * silently skipped, so a key that starts appearing in env.ts is noticed.
  */
-describe('config-registry ↔ carbon env.ts — optional matches for configure-collected keys', () => {
+describe('config-registry ↔ carbon env.ts — registry is never looser than env.ts', () => {
   const ENV_TS_PATH = join(process.cwd(), 'carbon/src/server/lib/env.ts');
   const CONFIGURE_FEATURES = new Set(['billing', 'oauth', 'smtp']);
 
@@ -368,40 +394,101 @@ describe('config-registry ↔ carbon env.ts — optional matches for configure-c
     return result;
   }
 
-  it('every configure-collected key is optional in the registry iff env.ts marks it .optional()', () => {
+  /**
+   * The one-directional check itself, factored out so it can be exercised
+   * directly against a synthetic fixture (see the negative-fixture test
+   * below) as well as against the real registry + env.ts.
+   *
+   * A violation is: env.ts requires the key (not `.optional()`) AND the
+   * registry marks it `optional: true`. Everything else is fine, including
+   * a registry-required / env-optional pair (the normal, section-load-
+   * bearing case) and a registry-optional / env-optional pair.
+   */
+  function looserThanEnvViolations(
+    entries: Array<{ key: string; optional?: boolean }>,
+    envOptionality: Record<string, boolean>,
+    notInSchema: Record<string, string>,
+  ): string[] {
+    const violations: string[] = [];
+    for (const entry of entries) {
+      if (entry.key in notInSchema) continue;
+      if (!(entry.key in envOptionality)) continue;
+      const envRequired = envOptionality[entry.key] === false;
+      const registryOptional = Boolean(entry.optional);
+      if (envRequired && registryOptional) {
+        violations.push(
+          `${entry.key}: registry optional=true but env.ts requires it (no .optional())`,
+        );
+      }
+    }
+    return violations;
+  }
+
+  it('every configure-collected key present in env.ts is accounted for (not silently skipped)', () => {
     const envOptionality = parseEnvSchemaOptionality();
     // Guards the parser itself: env.ts must have real optional/required keys
     // to compare against, or this test would pass vacuously.
     expect(Object.keys(envOptionality).length).toBeGreaterThan(20);
     expect(envOptionality.SUPABASE_URL).toBe(false);
-    expect(envOptionality.STRIPE_SECRET_KEY).toBe(true);
+    expect(envOptionality.STRIPE_WEBHOOK_SECRET).toBe(true);
 
     const relevant = CONFIG_KEYS.filter((k) => CONFIGURE_FEATURES.has(k.feature));
-
-    const untracked: string[] = [];
-    const mismatches: string[] = [];
-    for (const entry of relevant) {
-      if (entry.key in NOT_IN_ENV_SCHEMA) continue;
-      if (!(entry.key in envOptionality)) {
-        untracked.push(entry.key);
-        continue;
-      }
-      const envOptional = envOptionality[entry.key];
-      const registryOptional = Boolean(entry.optional);
-      if (envOptional !== registryOptional) {
-        mismatches.push(
-          `${entry.key}: registry optional=${registryOptional}, env.ts .optional()=${envOptional}`,
-        );
-      }
-    }
+    const untracked = relevant
+      .filter((e) => !(e.key in NOT_IN_ENV_SCHEMA) && !(e.key in envOptionality))
+      .map((e) => e.key);
 
     expect(
       untracked,
       'not found in env.ts and not explained in NOT_IN_ENV_SCHEMA — add a line there with why',
     ).toEqual([]);
+  });
+
+  it('the registry is never looser than env.ts: env.ts required ⇒ registry required', () => {
+    const envOptionality = parseEnvSchemaOptionality();
+    const relevant = CONFIG_KEYS.filter((k) => CONFIGURE_FEATURES.has(k.feature));
+
+    const violations = looserThanEnvViolations(relevant, envOptionality, NOT_IN_ENV_SCHEMA);
+
     expect(
-      mismatches,
-      `registry optional disagrees with env.ts .optional() for:\n  ${mismatches.join('\n  ')}`,
+      violations,
+      `registry is optional for a key env.ts requires:\n  ${violations.join('\n  ')}`,
+    ).toEqual([]);
+  });
+
+  it('negative fixture: the check DOES catch a registry-optional/env-required pair, and does not false-positive on the normal (registry-required/env-optional) or (registry-optional/env-optional) cases', () => {
+    const envRequired = { FAKE_REQUIRED_KEY: false };
+    const envOptional = { FAKE_OPTIONAL_KEY: true };
+
+    // The bug shape: env.ts requires it, registry lets the prompt skip it.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_REQUIRED_KEY', optional: true }], envRequired, {}),
+    ).toEqual([
+      'FAKE_REQUIRED_KEY: registry optional=true but env.ts requires it (no .optional())',
+    ]);
+
+    // Registry-required while env.ts requires it too — fine.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_REQUIRED_KEY', optional: false }], envRequired, {}),
+    ).toEqual([]);
+
+    // The normal, section-load-bearing case: env.ts says the FEATURE is
+    // skippable, but the registry still requires the field once you're
+    // configuring that section (e.g. STRIPE_SECRET_KEY). Not a violation.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_OPTIONAL_KEY', optional: false }], envOptional, {}),
+    ).toEqual([]);
+
+    // Both agree the field can be blank — fine (e.g. SMTP_SENDER_NAME).
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_OPTIONAL_KEY', optional: true }], envOptional, {}),
+    ).toEqual([]);
+
+    // A key listed in notInSchema (or simply absent from envOptionality) is
+    // never checked, regardless of its registry `optional`.
+    expect(
+      looserThanEnvViolations([{ key: 'FAKE_REQUIRED_KEY', optional: true }], envRequired, {
+        FAKE_REQUIRED_KEY: 'excused for this fixture',
+      }),
     ).toEqual([]);
   });
 

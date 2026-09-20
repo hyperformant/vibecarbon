@@ -40,6 +40,23 @@
  * or no shape at all otherwise, so this file never asserts a format it can't
  * back up.
  *
+ * `optional` has a NARROWER meaning here than `carbon/src/server/lib/env.ts`'s
+ * `.optional()` on the same key, and the two must not be confused:
+ *   - env.ts `.optional()`  → "this whole FEATURE may be disabled" (no
+ *     Stripe key at all because billing isn't used; no SMTP host at all
+ *     because email isn't set up). Nearly every feature key is `.optional()`
+ *     there for exactly this reason.
+ *   - registry `optional`   → "blank is a legitimate answer WHILE the
+ *     operator is actively configuring this section" (a single-tier plan
+ *     really can skip the Pro price ID even though Stripe itself is fully
+ *     configured). This is the STRICTER of the two meanings: a field can be
+ *     `.optional()` in env.ts (the feature is skippable) while still being
+ *     `optional: false`/unset here (once you're in that section, the field
+ *     is load-bearing) — e.g. STRIPE_SECRET_KEY. The reverse must never
+ *     happen (see the one-directional census in
+ *     tests/unit/config-registry.test.ts: env.ts required ⇒ registry
+ *     required — the registry may never be LOOSER than the app schema).
+ *
  * Keep this aligned with what `configure` writes (src/configure.js) and what
  * the app/auth services read (carbon/src/server/lib/env.ts + the GoTrue
  * `auth` service wiring in carbon/docker-compose.yml). Dependency-free on
@@ -98,8 +115,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'billing',
     kind: 'secret',
-    // Optional: billing can be left unconfigured entirely — carbon/src/server/lib/env.ts:58 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the Stripe section (env.ts:58 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { regex: /^sk_(test|live)_[A-Za-z0-9]+$/, describe: 'sk_live_… or sk_test_…' },
     sample: 'sk_test_abc123',
     where: '.env',
@@ -110,8 +127,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'billing',
     kind: 'secret',
-    // Optional: billing can be left unconfigured entirely — carbon/src/server/lib/env.ts:59 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the Stripe section (env.ts:59 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { regex: /^whsec_[A-Za-z0-9]+$/, describe: 'whsec_… webhook signing secret' },
     sample: 'whsec_abc123',
     where: '.env',
@@ -123,7 +140,8 @@ export const CONFIG_KEYS = [
     feature: 'billing',
     kind: 'id',
     // Optional: single-tier billing — carbon/src/server/routes/v1/billing.ts:225-234
-    // builds the price map per tier conditionally (env.ts:60 also `.optional()`).
+    // builds the price map per tier conditionally, so Starter-only or
+    // Pro-only is a real, supported state even with Stripe fully configured.
     optional: true,
     where: '.env',
     scope: 'billing',
@@ -133,8 +151,7 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'billing',
     kind: 'id',
-    // Optional: single-tier billing — carbon/src/server/routes/v1/billing.ts:225-234
-    // builds the price map per tier conditionally (env.ts:61 also `.optional()`).
+    // Optional: single-tier billing — see STRIPE_PRICE_STARTER above.
     optional: true,
     where: '.env',
     scope: 'billing',
@@ -146,8 +163,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'billing',
     kind: 'secret',
-    // Optional: billing can be left unconfigured entirely — carbon/src/server/lib/env.ts:64 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the Paddle section (env.ts:64 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { minLen: 8, describe: 'at least 8 characters' },
     sample: 'paddle-api-key-sample',
     where: '.env',
@@ -158,8 +175,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'billing',
     kind: 'secret',
-    // Optional: billing can be left unconfigured entirely — carbon/src/server/lib/env.ts:65 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the Paddle section (env.ts:65 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { minLen: 8, describe: 'at least 8 characters' },
     sample: 'paddle-webhook-secret',
     where: '.env',
@@ -180,8 +197,7 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'billing',
     kind: 'id',
-    // Optional: single-tier billing — carbon/src/server/routes/v1/billing.ts:225-234
-    // builds the price map per tier conditionally (env.ts:67 also `.optional()`).
+    // Optional: single-tier billing — see STRIPE_PRICE_STARTER above.
     optional: true,
     where: '.env',
     scope: 'billing',
@@ -191,8 +207,7 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'billing',
     kind: 'id',
-    // Optional: single-tier billing — carbon/src/server/routes/v1/billing.ts:225-234
-    // builds the price map per tier conditionally (env.ts:68 also `.optional()`).
+    // Optional: single-tier billing — see STRIPE_PRICE_STARTER above.
     optional: true,
     where: '.env',
     scope: 'billing',
@@ -207,8 +222,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'billing',
     kind: 'secret',
-    // Optional: billing can be left unconfigured entirely — carbon/src/server/lib/env.ts:71 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the Polar section (env.ts:71 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { minLen: 16, describe: 'at least 16 characters' },
     sample: 'polar-access-token-sample',
     where: '.env',
@@ -219,8 +234,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'billing',
     kind: 'secret',
-    // Optional: billing can be left unconfigured entirely — carbon/src/server/lib/env.ts:72 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the Polar section (env.ts:72 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { minLen: 8, describe: 'at least 8 characters' },
     sample: 'polar-webhook-secret',
     where: '.env',
@@ -231,8 +246,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'billing',
     kind: 'id',
-    // Optional: carbon/src/server/billing/providers/polar.ts:135-137 only sends
-    // organization_id when set (env.ts:73 also marks it `.optional()`).
+    // Optional: carbon/src/server/billing/providers/polar.ts:135-137 only
+    // sends organization_id when set — a working Polar config can omit it.
     optional: true,
     where: '.env',
     scope: 'billing',
@@ -242,8 +257,7 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'billing',
     kind: 'id',
-    // Optional: single-tier billing — carbon/src/server/routes/v1/billing.ts:225-234
-    // builds the price map per tier conditionally (env.ts:74 also `.optional()`).
+    // Optional: single-tier billing — see STRIPE_PRICE_STARTER above.
     optional: true,
     where: '.env',
     scope: 'billing',
@@ -253,8 +267,7 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'billing',
     kind: 'id',
-    // Optional: single-tier billing — carbon/src/server/routes/v1/billing.ts:225-234
-    // builds the price map per tier conditionally (env.ts:75 also `.optional()`).
+    // Optional: single-tier billing — see STRIPE_PRICE_STARTER above.
     optional: true,
     where: '.env',
     scope: 'billing',
@@ -346,8 +359,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'smtp',
     kind: 'hostname',
-    // Optional: SMTP can be left unconfigured entirely — carbon/src/server/lib/env.ts:47 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the SMTP section (env.ts:47 is
+    // `.optional()` in the other, broader sense — see the header comment).
     where: '.env',
     scope: 'smtp',
   },
@@ -356,8 +369,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'smtp',
     kind: 'port',
-    // Optional: SMTP can be left unconfigured entirely — carbon/src/server/lib/env.ts:48 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the SMTP section (env.ts:48 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: {
       regex: /^([1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$/,
       describe: '1-65535',
@@ -371,8 +384,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'smtp',
     kind: 'id',
-    // Optional: SMTP can be left unconfigured entirely — carbon/src/server/lib/env.ts:49 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the SMTP section (env.ts:49 is
+    // `.optional()` in the other, broader sense — see the header comment).
     where: '.env',
     scope: 'smtp',
   },
@@ -381,8 +394,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'smtp',
     kind: 'secret',
-    // Optional: SMTP can be left unconfigured entirely — carbon/src/server/lib/env.ts:50 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the SMTP section (env.ts:50 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { minLen: 8, describe: 'at least 8 characters' },
     sample: 'smtp-password',
     where: '.env',
@@ -393,8 +406,8 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'smtp',
     kind: 'email',
-    // Optional: SMTP can be left unconfigured entirely — carbon/src/server/lib/env.ts:51 marks it `.optional()`.
-    optional: true,
+    // Required: load-bearing within the SMTP section (env.ts:51 is
+    // `.optional()` in the other, broader sense — see the header comment).
     shape: { regex: EMAIL_REGEX, describe: 'a valid email address, e.g. admin@example.com' },
     sample: 'admin@example.com',
     where: '.env',
@@ -405,7 +418,10 @@ export const CONFIG_KEYS = [
     class: 'runtime-config',
     feature: 'smtp',
     kind: 'id',
-    // Optional: SMTP can be left unconfigured entirely — carbon/src/server/lib/env.ts:52 marks it `.optional()`.
+    // Optional: a cosmetic default exists — carbon/src/server/lib/email.ts:40-42
+    // falls back to plain SMTP_ADMIN_EMAIL as the From address when this is
+    // blank, and GOTRUE_SMTP_SENDER_NAME in docker-compose.yml/the k8s values
+    // default to empty. Never load-bearing.
     optional: true,
     where: '.env',
     scope: 'smtp',
