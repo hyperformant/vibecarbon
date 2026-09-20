@@ -15,12 +15,16 @@
  * near-identical inline reads.
  */
 
+import { readOperatorVar } from '../operator-env.js';
+
 /**
  * @returns {{ username: string, token: string } | null}
  */
 export function resolveDockerHubCreds() {
-  if (process.env.DOCKER_HUB_USERNAME && process.env.DOCKER_HUB_TOKEN) {
-    return { username: process.env.DOCKER_HUB_USERNAME, token: process.env.DOCKER_HUB_TOKEN };
+  const username = readOperatorVar('DOCKER_HUB_USERNAME').value;
+  const token = readOperatorVar('DOCKER_HUB_TOKEN').value;
+  if (username && token) {
+    return { username, token };
   }
   return null;
 }

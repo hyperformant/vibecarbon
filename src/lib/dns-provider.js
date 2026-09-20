@@ -28,6 +28,8 @@
  * certs fall back to HTTP-01).
  */
 
+import { readOperatorVar } from './operator-env.js';
+
 /**
  * @typedef {object} Dns01ProviderRow
  * @property {string} tokenEnvVar - Env var lego (Traefik's ACME client)
@@ -370,7 +372,7 @@ export function resolveDnsToken(dnsProvider, { computeProviderId, computeToken }
   if (row.computeProviderId && row.computeProviderId === computeProviderId && computeToken) {
     return computeToken;
   }
-  return process.env[row.tokenEnv] || null;
+  return readOperatorVar(row.tokenEnv).value;
 }
 
 /**

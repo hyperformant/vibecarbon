@@ -20,6 +20,7 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { verifyToken } from './cloudflare-dns.js';
 import { c } from './colors.js';
+import { readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 /**
@@ -98,7 +99,7 @@ export async function getApiToken(projectName, options = {}) {
 
   if (!force) {
     // Check environment variable
-    const envToken = process.env.CLOUDFLARE_API_TOKEN;
+    const envToken = readOperatorVar('CLOUDFLARE_API_TOKEN').value;
     if (envToken) {
       const check = await verifyToken(envToken);
       if (!check.valid) {

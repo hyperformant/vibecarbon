@@ -18,6 +18,7 @@ import {
 } from '../dns-provider.js';
 import { resolveEnvSeed } from '../env-identity.js';
 import { requireDeployEntitlement } from '../licensing/index.js';
+import { readOperatorVar } from '../operator-env.js';
 import {
   getObjectStorageProvider,
   listProviders,
@@ -647,7 +648,7 @@ export async function gatherDeploymentConfig(args) {
         .map((id) => ({
           value: id,
           label: DNS_PROVIDERS[id].name,
-          hint: process.env[DNS_PROVIDERS[id].tokenEnv]
+          hint: readOperatorVar(DNS_PROVIDERS[id].tokenEnv).value
             ? 'API token found'
             : `Needs ${DNS_PROVIDERS[id].tokenEnv}`,
         }));
@@ -777,7 +778,7 @@ export async function gatherDeploymentConfig(args) {
   // (Hetzner/DO/Linode) are indifferent to this order.
   const s3Region =
     args.s3Region ||
-    process.env[Provider.S3_REGION_ENV] ||
+    readOperatorVar(Provider.S3_REGION_ENV).value ||
     envConfig.s3?.region ||
     (await resolveS3RegionFor(providerId, region));
 

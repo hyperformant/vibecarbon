@@ -27,6 +27,7 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
+import { readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.vultr.com/v2';
@@ -189,7 +190,7 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    const envToken = process.env.VULTR_API_TOKEN;
+    const envToken = readOperatorVar('VULTR_API_TOKEN').value;
     if (envToken) {
       warnIfBadTokenFormat(envToken);
       const check = await validateVultrToken(envToken);
@@ -280,12 +281,12 @@ export async function getS3Credentials(projectName, options = {}) {
   const { save = true, force = false, skipPrompts = false } = options;
 
   if (!force) {
-    const envAccessKey = process.env.VULTR_ACCESS_KEY;
-    const envSecretKey = process.env.VULTR_SECRET_KEY;
+    const envAccessKey = readOperatorVar('VULTR_ACCESS_KEY').value;
+    const envSecretKey = readOperatorVar('VULTR_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
       p.log.info('✓ Using Object Storage credentials from environment variables');
-      const envRegion = process.env.VULTR_STORAGE_REGION;
+      const envRegion = readOperatorVar('VULTR_STORAGE_REGION').value;
       if (!envRegion) {
         // Not fatal — resolveS3Region still returns the compute region's
         // default cluster — but on Vultr that default is a guess, and a

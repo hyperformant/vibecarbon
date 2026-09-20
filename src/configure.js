@@ -46,6 +46,7 @@ import {
   removeLocale,
   SUPPORTED_LOCALES,
 } from './lib/globalization.js';
+import { readOperatorVar } from './lib/operator-env.js';
 import { buildGitAddArgv, loadEnvVariables, setEnvVar } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { validateAdminEmail } from './lib/validators.js';
@@ -1508,14 +1509,17 @@ export async function runConfigureCicd(envName) {
   );
   const { getImageTag } = await import('./lib/ci-setup.js');
   const providerCreds = {
-    hetznerApiToken: process.env.HETZNER_API_TOKEN || '',
+    hetznerApiToken: readOperatorVar('HETZNER_API_TOKEN').value || '',
     // DNS token candidates keyed by env var, registry-derived — seedOrgSecrets
     // seeds the non-empty ones (native DNS rows share the compute token env).
     dnsTokens: Object.fromEntries(
-      Object.values(DNS_PROVIDERS).map((row) => [row.tokenEnv, process.env[row.tokenEnv] || '']),
+      Object.values(DNS_PROVIDERS).map((row) => [
+        row.tokenEnv,
+        readOperatorVar(row.tokenEnv).value || '',
+      ]),
     ),
-    s3AccessKey: process.env.HETZNER_ACCESS_KEY || '',
-    s3SecretKey: process.env.HETZNER_SECRET_KEY || '',
+    s3AccessKey: readOperatorVar('HETZNER_ACCESS_KEY').value || '',
+    s3SecretKey: readOperatorVar('HETZNER_SECRET_KEY').value || '',
   };
   const imageTag = getImageTag(cwd);
 

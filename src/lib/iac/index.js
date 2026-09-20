@@ -23,6 +23,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
 import { progressLog } from '../cli/progress.js';
+import { readOperatorVar } from '../operator-env.js';
 import { getProviderClass } from '../providers/index.js';
 import {
   classifyStateError,
@@ -103,8 +104,9 @@ mkdirSync(LOCAL_STATE_DIR, { recursive: true });
  * @param {string} [provider] - Provider id, when the caller knows it.
  */
 export function resolveBackendUrl(s3Config, provider) {
-  if (process.env.PULUMI_BACKEND_URL) {
-    return process.env.PULUMI_BACKEND_URL;
+  const override = readOperatorVar('PULUMI_BACKEND_URL').value;
+  if (override) {
+    return override;
   }
   if (s3Config?.bucket && s3Config?.endpoint) {
     const stateBucket = s3Config.stateBucket ?? s3Config.bucket;

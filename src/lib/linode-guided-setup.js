@@ -18,6 +18,7 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
+import { readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.linode.com/v4';
@@ -158,7 +159,7 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    const envToken = process.env.LINODE_API_TOKEN;
+    const envToken = readOperatorVar('LINODE_API_TOKEN').value;
     if (envToken) {
       warnIfBadTokenFormat(envToken);
       const check = await validateLinodeToken(envToken);
@@ -243,8 +244,8 @@ export async function getS3Credentials(projectName, options = {}) {
   const { save = true, force = false, skipPrompts = false } = options;
 
   if (!force) {
-    const envAccessKey = process.env.LINODE_ACCESS_KEY;
-    const envSecretKey = process.env.LINODE_SECRET_KEY;
+    const envAccessKey = readOperatorVar('LINODE_ACCESS_KEY').value;
+    const envSecretKey = readOperatorVar('LINODE_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
       p.log.info('✓ Using Object Storage credentials from environment variables');

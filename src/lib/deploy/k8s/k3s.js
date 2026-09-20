@@ -50,6 +50,7 @@ import {
   csiSidecarSetImagePlan,
   dbImageRef,
 } from '../../images.js';
+import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
@@ -4454,7 +4455,7 @@ export async function applyK3sManifests({
   // it into the project's .env.local. Anything else gets the prod issuer.
   // Provider suffix (cloudflare/hetzner/manual) determines which solver
   // — DNS-01 vs HTTP-01 — cert-manager actually uses; see pickIssuerName.
-  const acmeServer = envLocal?.ACME_CA_SERVER || process.env.ACME_CA_SERVER || '';
+  const acmeServer = envLocal?.ACME_CA_SERVER || readOperatorVar('ACME_CA_SERVER').value || '';
   const issuerName = pickIssuerName({ dnsProvider, acmeServer });
   // DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — one cert
   // covers *.${domain} so every IngressRoute subdomain is included without

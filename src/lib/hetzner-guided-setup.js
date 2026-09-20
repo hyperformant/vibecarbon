@@ -18,6 +18,7 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
+import { readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 /**
@@ -145,7 +146,7 @@ export async function getApiToken(projectName, options = {}) {
 
   if (!force) {
     // Check environment variable
-    const envToken = process.env.HETZNER_API_TOKEN;
+    const envToken = readOperatorVar('HETZNER_API_TOKEN').value;
     if (envToken) {
       const check = await validateHetznerToken(envToken);
       if (!check.valid) {
@@ -233,8 +234,8 @@ export async function getS3Credentials(projectName, options = {}) {
 
   if (!force) {
     // Check environment variables
-    const envAccessKey = process.env.HETZNER_ACCESS_KEY;
-    const envSecretKey = process.env.HETZNER_SECRET_KEY;
+    const envAccessKey = readOperatorVar('HETZNER_ACCESS_KEY').value;
+    const envSecretKey = readOperatorVar('HETZNER_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
       p.log.info('✓ Using S3 credentials from environment variables');

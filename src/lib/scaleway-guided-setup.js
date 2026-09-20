@@ -76,6 +76,7 @@ import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { resolveNameservers } from './dns-propagation.js';
 import { DNS_PROVIDERS, getDnsProvider, locateDomainBackend } from './dns-provider.js';
+import { readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 import {
   EXTERNAL_DOMAIN_CHALLENGE_NAME,
@@ -303,9 +304,9 @@ export async function getApiToken(projectName, options = {}) {
   const { save = true, force = false } = options;
 
   if (!force) {
-    const envSecret = process.env.SCALEWAY_SECRET_KEY;
-    const envAccess = process.env.SCALEWAY_ACCESS_KEY;
-    const envProject = process.env.SCALEWAY_DEFAULT_PROJECT_ID;
+    const envSecret = readOperatorVar('SCALEWAY_SECRET_KEY').value;
+    const envAccess = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
+    const envProject = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value;
     if (envSecret && envAccess && envProject) {
       warnIfBadFormat(envSecret, 'secret key', UUID_FORMAT, 'a UUID');
       const check = await validateScalewaySecretKey(envSecret);
@@ -563,7 +564,8 @@ export function displayDelegationDeadlock(domain, nameservers) {
  * @returns {Promise<{ready: boolean, domain: string|null, validationToken: string|null}>}
  */
 export async function onboardDomain(secretKey, domain = null, options = {}) {
-  const { projectId = process.env.SCALEWAY_DEFAULT_PROJECT_ID, validationTimeoutMs } = options;
+  const { projectId = readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value, validationTimeoutMs } =
+    options;
 
   // Unreachable off a TTY in practice (the deploy only offers this on the
   // interactive path), but the invariant is 'any function that prompts,
@@ -733,8 +735,8 @@ export async function getS3Credentials(projectName, options = {}) {
   const { save = true, force = false, skipPrompts = false } = options;
 
   if (!force) {
-    const envAccessKey = process.env.SCALEWAY_ACCESS_KEY;
-    const envSecretKey = process.env.SCALEWAY_SECRET_KEY;
+    const envAccessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
+    const envSecretKey = readOperatorVar('SCALEWAY_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
       p.log.info(
@@ -751,7 +753,7 @@ export async function getS3Credentials(projectName, options = {}) {
   // The triple flow collects (and validates) the pair; force so a partial
   // env doesn't short-circuit the collection this call exists to do.
   const secretKey = await getApiToken(projectName, { save, force: true });
-  const accessKey = process.env.SCALEWAY_ACCESS_KEY;
+  const accessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
   if (!secretKey || !accessKey) return null;
 
   p.log.success('Object Storage credentials received!');

@@ -17,6 +17,7 @@ import { exitCancelled } from './cli/exit-guard.js';
 import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
+import { readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.digitalocean.com/v2';
@@ -177,7 +178,7 @@ export async function getApiToken(projectName, options = {}) {
 
   if (!force) {
     // Check environment variable
-    const envToken = process.env.DIGITALOCEAN_API_TOKEN;
+    const envToken = readOperatorVar('DIGITALOCEAN_API_TOKEN').value;
     if (envToken) {
       warnIfBadTokenFormat(envToken);
       const check = await validateDigitalOceanToken(envToken);
@@ -272,8 +273,8 @@ export async function getS3Credentials(projectName, options = {}) {
 
   if (!force) {
     // Check environment variables
-    const envAccessKey = process.env.DIGITALOCEAN_ACCESS_KEY;
-    const envSecretKey = process.env.DIGITALOCEAN_SECRET_KEY;
+    const envAccessKey = readOperatorVar('DIGITALOCEAN_ACCESS_KEY').value;
+    const envSecretKey = readOperatorVar('DIGITALOCEAN_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
       p.log.info('✓ Using Spaces credentials from environment variables');

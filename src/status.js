@@ -24,6 +24,7 @@ import {
   buildStandbyReplayQuery,
   formatReplicationLagLine,
 } from './lib/deploy/replication.js';
+import { readOperatorVar } from './lib/operator-env.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
@@ -1207,12 +1208,13 @@ async function main(argv = []) {
       // unconditional-Hetzner behavior for unregistered provider strings
       // instead of throwing away this environment's whole checks entry)
       // and reused for both the env-only token gate and the probe itself.
-      // Reads process.env directly rather than calling resolveProviderToken()
-      // — the two are behaviorally identical now that token resolution is
-      // env-only (see providers/index.js), this just avoids the extra call.
+      // Reads through the normalizing reader by the class's TOKEN_ENV rather
+      // than calling resolveProviderToken() — the two are behaviorally
+      // identical now that token resolution is env-only (see
+      // providers/index.js), this just avoids the by-id lookup.
       const servers = envConfig.servers || [];
       const Provider = resolveEnvProvider(envConfig);
-      const token = process.env[Provider.TOKEN_ENV];
+      const token = readOperatorVar(Provider.TOKEN_ENV).value;
       if (servers.length > 0 && token) {
         const providerInstance = new Provider(token);
         const serverInfoResults = await Promise.allSettled(

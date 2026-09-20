@@ -17,6 +17,7 @@
  */
 
 import { log } from '@clack/prompts';
+import { readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 /**
@@ -30,7 +31,7 @@ export async function runProjectAssignment(provider, { projectName, environment 
     if (!result) return null;
 
     const envKey = provider.constructor.PROJECT_ID_ENV;
-    if (envKey && process.env[envKey] !== result.projectId) {
+    if (envKey && readOperatorVar(envKey).value !== result.projectId) {
       process.env[envKey] = result.projectId;
       setEnvVar(envKey, result.projectId, process.cwd(), { localOnly: true });
     }

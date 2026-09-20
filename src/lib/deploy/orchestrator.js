@@ -12,6 +12,7 @@ import { runCommand, runCommandAsync } from '../command.js';
 import { loadProjectConfig, registerProject, saveProjectConfig } from '../config.js';
 import { getDnsProvider, hasAutomatedDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
+import { readOperatorVar } from '../operator-env.js';
 import { ensureOperatorIpAccess } from '../operator-ip.js';
 import { perfAsync, perfTimer } from '../perf.js';
 import { runProjectAssignment } from '../project-assignment.js';
@@ -106,7 +107,7 @@ async function probePublicHealth(
   const undici = await import('undici');
   const { makePublicDnsLookup } = await import('./public-dns-lookup.js');
   const connectOpts = { lookup: makePublicDnsLookup() };
-  if ((process.env.ACME_CA_SERVER || '').includes('staging')) {
+  if ((readOperatorVar('ACME_CA_SERVER').value || '').includes('staging')) {
     const { stagingProbeCa } = await import('./staging-ca.js');
     connectOpts.ca = stagingProbeCa();
   }
