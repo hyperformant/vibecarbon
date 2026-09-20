@@ -135,13 +135,14 @@ describe('credential key convention — config-registry <-> .env.e2e.example par
 
   // Operator-secret keys that are NOT per-provider e2e credential tokens this
   // file's header promises ("Operator e2e credential tokens for `pnpm
-  // test:e2e`") — the e2e harness either sets them itself, or the e2e matrix
-  // never exercises them at all:
-  //   ACME_CA_SERVER    — set programmatically by tests/e2e/utils/e2e-env.js
-  //                       (staging directory), never operator-supplied here.
+  // test:e2e`") — the e2e matrix never exercises them at all:
   //   PULUMI_BACKEND_URL — opt-in Pulumi Cloud override; e2e always uses the
   //                       provider's own S3 state backend, never Pulumi Cloud.
-  const REGISTRY_ONLY_OPERATOR_KEYS = new Set(['ACME_CA_SERVER', 'PULUMI_BACKEND_URL']);
+  // (ACME_CA_SERVER used to sit here; it is runtime-config in `.env` since the
+  // 2026-09-19 whole-branch review, so it is no longer an operator-secret key
+  // at all and needs no exemption. The harness still sets it programmatically
+  // in tests/e2e/utils/e2e-env.js.)
+  const REGISTRY_ONLY_OPERATOR_KEYS = new Set(['PULUMI_BACKEND_URL']);
 
   it('.env.e2e.example carries no legacy spelling', () => {
     for (const key of exampleKeys) {

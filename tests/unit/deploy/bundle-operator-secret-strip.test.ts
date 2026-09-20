@@ -89,6 +89,32 @@ describe('renderBundle strips operator-secret keys from the raw .env baseline', 
     }
   });
 
+  it('keeps ACME_CA_SERVER in the baseline — a staging CA override must reach the compose server', () => {
+    // Regression (whole-branch review 2026-09-19, Critical): ACME_CA_SERVER was
+    // briefly classified operator-secret, so this strip dropped it from every
+    // compose bundle. carbon/docker-compose.prod.yml:133 and
+    // docker-compose.dns01.prod.yml:54 interpolate
+    // `${ACME_CA_SERVER:-<prod LE>}` from the shipped .env, so a stripped
+    // override silently moved every staging deploy (the e2e matrix appends it
+    // to .env — tests/e2e/scenarios/_run-lifecycle.ts) to LE production. It is
+    // runtime-config in `.env`, not a credential, and must survive verbatim.
+    const staging = 'https://acme-staging-v02.api.letsencrypt.org/directory';
+    projectDir = makeProjectDir(
+      [`ACME_CA_SERVER=${staging}`, "HETZNER_API_TOKEN='leaked-token'", 'FOO=local'].join('\n'),
+    );
+    process.chdir(projectDir);
+
+    const stage = renderBundle('myproj', {});
+
+    try {
+      const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
+      expect(env.ACME_CA_SERVER).toBe(staging);
+      expect(env.HETZNER_API_TOKEN).toBeUndefined();
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+
   it('an explicit S3 override wins over a stale S3_ACCESS_KEY in the raw .env baseline', () => {
     // options.s3 is the deliberate, feature-specific propagation path
     // (Supabase storage/backup on the deployed server). S3_ACCESS_KEY here is

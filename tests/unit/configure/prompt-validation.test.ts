@@ -44,7 +44,7 @@ describe('promptText — validates through the registry when options.entry is gi
 
     const { validate } = clackMock.text.mock.calls[0][0];
     expect(validate('pk_test_x')).toBe(
-      'STRIPE_SECRET_KEY looks wrong: expected sk_live_… or sk_test_…, got 9 characters',
+      'STRIPE_SECRET_KEY looks wrong: expected sk_live_…, sk_test_… or a restricted rk_… key, got 9 characters',
     );
   });
 
@@ -55,6 +55,19 @@ describe('promptText — validates through the registry when options.entry is gi
     const { validate } = clackMock.text.mock.calls[0][0];
     expect(validate(' "sk_test_abc" ')).toBeUndefined();
     expect(result).toBe('sk_test_abc');
+  });
+
+  // M10: the hint keys off the RAW paste, which the helper threads through
+  // separately from the normalized value it validates.
+  it('a quote-wrapped INVALID paste is told about the quotes; a quote-wrapped VALID one just passes', async () => {
+    clackMock.text.mockResolvedValue('sk_test_wontbeused');
+    await promptText('Stripe secret key', undefined, { entry: STRIPE_SECRET_KEY });
+
+    const { validate } = clackMock.text.mock.calls[0][0];
+    expect(validate('"pk_test_x"')).toBe(
+      'STRIPE_SECRET_KEY looks wrong: expected sk_live_…, sk_test_… or a restricted rk_… key, got 9 characters — surrounding quotes?',
+    );
+    expect(validate('"sk_test_abc"')).toBeUndefined();
   });
 
   it('Enter on an existing value still keeps it, unvalidated', async () => {
@@ -99,7 +112,7 @@ describe('promptSecret — validates through the registry when options.entry is 
 
     const { validate } = clackMock.password.mock.calls[0][0];
     expect(validate('pk_test_x')).toBe(
-      'STRIPE_SECRET_KEY looks wrong: expected sk_live_… or sk_test_…, got 9 characters',
+      'STRIPE_SECRET_KEY looks wrong: expected sk_live_…, sk_test_… or a restricted rk_… key, got 9 characters',
     );
   });
 
@@ -110,6 +123,17 @@ describe('promptSecret — validates through the registry when options.entry is 
     const { validate } = clackMock.password.mock.calls[0][0];
     expect(validate(' "sk_test_abc" ')).toBeUndefined();
     expect(result).toBe('sk_test_abc');
+  });
+
+  it('a quote-wrapped INVALID paste is told about the quotes; a quote-wrapped VALID one just passes', async () => {
+    clackMock.password.mockResolvedValue('sk_test_wontbeused');
+    await promptSecret('Stripe secret key', undefined, { entry: STRIPE_SECRET_KEY });
+
+    const { validate } = clackMock.password.mock.calls[0][0];
+    expect(validate('"pk_test_x"\n')).toBe(
+      'STRIPE_SECRET_KEY looks wrong: expected sk_live_…, sk_test_… or a restricted rk_… key, got 9 characters — a trailing newline?',
+    );
+    expect(validate('"sk_test_abc"')).toBeUndefined();
   });
 
   it('Enter on an existing value still keeps it, unvalidated', async () => {

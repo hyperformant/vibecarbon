@@ -43,6 +43,12 @@ Environment:
  * base64-encoded PEM and decoded. This is the single choke point every call
  * to createPrivateKey in this file goes through, so an operator pasting
  * either form out of vibecarbon-web gets a working key.
+ *
+ * Twin: src/lib/operator-env.js `normalizeOperatorValue` (kind 'pem')
+ * reimplements this for the CLI's registry-driven reads and additionally
+ * expands literal `\n` escapes; it stays a copy so that lib remains
+ * dependency-free of scripts/. Deliberately not unified (review 2026-09-19,
+ * M13) — mirror any change to the accepted encodings there.
  * @param {string} value
  * @returns {string} PEM
  */

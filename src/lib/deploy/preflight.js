@@ -88,6 +88,21 @@ export function assertPulumiSupportsBackendOptions(ProviderClass, installed) {
 }
 
 /**
+ * The one escape hatch out of the shape gate. A tight registry regex is a
+ * bet that the vendor's documented format stays the only accepted one; if a
+ * provider changes its token format between CLI releases, an operator must
+ * be able to deploy today, not wait for a patch. Set to exactly `1`, SHAPE
+ * problems ("looks wrong") are printed as warnings instead of refusing.
+ * PRESENCE problems ("is not set") are untouched — a missing required value
+ * has nothing to do with a format change. Documented in the refusal footer
+ * and in carbon/.env.local.example's header; read straight from the process
+ * env (not the injectable `env` bag, which is the operator's config under
+ * test) and registered as RUNTIME_DETECTION in the operator-env census.
+ */
+const SKIP_CONFIG_SHAPES_HINT =
+  'Set VIBECARBON_SKIP_CONFIG_SHAPES=1 to downgrade shape problems to warnings if a provider changed its token format.';
+
+/**
  * Throw the canonical "Configuration problems" refusal for every malformed
  * (or, under `presence: true`, missing) operator-config value in `scopes` +
  * `keys` — the one place this message is built, so every call site (the
@@ -100,6 +115,12 @@ export function assertPulumiSupportsBackendOptions(ProviderClass, installed) {
  * being the LAST-resort gate's own default; a caller running before an
  * interactive prompt passes `presence: false` explicitly.
  *
+ * Under `VIBECARBON_SKIP_CONFIG_SHAPES=1` (see SKIP_CONFIG_SHAPES_HINT) the
+ * shape problems are warned via `console.warn` — this module is deliberately
+ * free of @clack/prompts (deploy code imports it without a UI dependency),
+ * matching how the rest of src/lib/deploy reports outside a spinner — and
+ * only the presence problems, if any, still throw.
+ *
  * @param {Iterable<string>} scopes - config-registry.js scopes to validate.
  * @param {{ env?: Record<string, string|undefined>, presence?: boolean, keys?: string[] }} [opts]
  * @throws when `checkOperatorConfig` reports any problem
@@ -108,13 +129,32 @@ export function assertOperatorConfig(
   scopes,
   { env = process.env, presence = true, keys = [] } = {},
 ) {
-  const { problems } = checkOperatorConfig(scopes, { env, presence, keys });
+  let { problems } = checkOperatorConfig(scopes, { env, presence, keys });
   if (problems.length === 0) return;
+
+  if (process.env.VIBECARBON_SKIP_CONFIG_SHAPES === '1') {
+    // `checkOperatorConfig` messages are exactly `<KEY> is not set` or
+    // `<KEY> looks wrong: …` (see readOperatorVar/validateOperatorValue) —
+    // the latter is the shape class this hatch downgrades.
+    const shape = problems.filter((p) => p.includes(' looks wrong: '));
+    problems = problems.filter((p) => !p.includes(' looks wrong: '));
+    if (shape.length > 0) {
+      console.warn(
+        [
+          'Configuration shape problems ignored (VIBECARBON_SKIP_CONFIG_SHAPES=1):',
+          ...shape.map((p) => `  - ${p}`),
+        ].join('\n'),
+      );
+    }
+    if (problems.length === 0) return;
+  }
+
   throw new Error(
     [
       'Configuration problems (nothing was provisioned):',
       ...problems.map((p) => `  - ${p}`),
       "Set them in .env.local (never committed; see .env.local.example for each variable's format).",
+      SKIP_CONFIG_SHAPES_HINT,
     ].join('\n'),
   );
 }

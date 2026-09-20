@@ -12,8 +12,8 @@
  *
  * Scope: feature keys (billing, OAuth, SMTP, analytics) plus operator/provider
  * credentials (Hetzner/DigitalOcean/Cloudflare/S3 tokens, Docker Hub, the
- * Pulumi state backend, the ACME CA override) plus the one operator-local
- * runtime key deploy reads directly (ALLOWED_SSH_IPS). Infra secrets
+ * Pulumi state backend) plus the two operator-set runtime keys deploy reads
+ * directly (ALLOWED_SSH_IPS, the ACME_CA_SERVER CA override). Infra secrets
  * (DB_PASSWORD/JWT_SECRET/ANON_KEY/…) are *generated*, not configured, and
  * carry k8s-specific Supabase-chart translation logic — they stay local to the
  * k8s deploy modules.
@@ -24,21 +24,32 @@
  *   - 'runtime-config'  → non-secret server/auth runtime env.
  *   - 'runtime-secret'  → secret server/auth runtime env.
  *   - 'operator-secret' → cloud/DNS provider credentials, Docker Hub registry
- *                         credentials, the Pulumi state-backend URL, and the
- *                         ACME CA override — CLI-local values the CLI (or its
- *                         spawned children: ssh/pulumi/docker) uses locally.
- *                         Never a pod/container env var — `featureRuntimeKeys()`
- *                         and `clientBuildKeys()` exclude this class by
+ *                         credentials, and the Pulumi state-backend URL —
+ *                         CLI-local values the CLI (or its spawned children:
+ *                         ssh/pulumi/docker) uses locally. Never a
+ *                         pod/container env var — `featureRuntimeKeys()` and
+ *                         `clientBuildKeys()` exclude this class by
  *                         construction (they only ever list the other three),
- *                         so nothing here can leak into deploy propagation.
+ *                         so nothing here can leak into deploy propagation —
+ *                         and `stripOperatorSecretLines` (below) removes any
+ *                         line of this class from the raw `.env` baseline a
+ *                         compose bundle ships. That second guarantee is
+ *                         exactly why a value the SERVER must read (the
+ *                         ACME_CA_SERVER override `${ACME_CA_SERVER:-…}` in
+ *                         docker-compose.prod.yml) can never carry this class:
+ *                         classifying it here silently strips it from every
+ *                         bundle (whole-branch review 2026-09-19, Critical).
  *
  * Per-entry shape metadata (`kind`/`shape`/`sample`/`where`/`optional`/`scope`)
  * lets `configure` validate input and lets docs generation (the
  * `.env.local.example` operator doc) describe each key without a second,
  * hand-maintained copy of this same knowledge. A tight `shape.regex` is added
- * ONLY where the vendor documents the exact format — a loose shape (`minLen`)
- * or no shape at all otherwise, so this file never asserts a format it can't
- * back up.
+ * ONLY where the vendor documents the exact format AND that documented format
+ * is the only one the vendor accepts — a loose shape (`minLen`) or no shape at
+ * all otherwise, so this file never asserts a format it can't back up and
+ * never rejects a value the vendor itself takes (legacy Docker Hub tokens,
+ * pre-2021 Google client secrets, Stripe restricted keys — all loosened in the
+ * 2026-09-19 review for exactly that reason).
  *
  * `optional` has a NARROWER meaning here than `carbon/src/server/lib/env.ts`'s
  * `.optional()` on the same key, and the two must not be confused:
@@ -91,9 +102,6 @@ const TRUE_FALSE_SHAPE = { values: ['true', 'false'], describe: 'one of true, fa
 // against the exact same pattern as any registry entry that pins this shape,
 // instead of carrying its own duplicate.
 export const EMAIL_REGEX = /^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
-// One octet, 0-255 — reused for the CIDR-list regex below.
-const IPV4_OCTET = '(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
-const IPV4_CIDR = `${IPV4_OCTET}(\\.${IPV4_OCTET}){3}/(3[0-2]|[12]?[0-9])`;
 
 /** @type {ConfigKey[]} */
 export const CONFIG_KEYS = [
@@ -117,7 +125,13 @@ export const CONFIG_KEYS = [
     kind: 'secret',
     // Required: load-bearing within the Stripe section (env.ts:58 is
     // `.optional()` in the other, broader sense — see the header comment).
-    shape: { regex: /^sk_(test|live)_[A-Za-z0-9]+$/, describe: 'sk_live_… or sk_test_…' },
+    // Restricted keys (rk_live_/rk_test_) are first-class Stripe API keys and
+    // work for the server's use here — rejecting them is the tight-regex
+    // failure mode the header warns about.
+    shape: {
+      regex: /^(sk|rk)_(live|test)_[A-Za-z0-9]+$/,
+      describe: 'sk_live_…, sk_test_… or a restricted rk_… key',
+    },
     sample: 'sk_test_abc123',
     where: '.env',
     scope: 'billing',
@@ -302,7 +316,9 @@ export const CONFIG_KEYS = [
     class: 'runtime-secret',
     feature: 'oauth',
     kind: 'secret',
-    shape: { regex: /^GOCSPX-[A-Za-z0-9_-]+$/, describe: 'GOCSPX-… (Google OAuth client secret)' },
+    // Google added the GOCSPX- prefix in 2021; secrets minted before that
+    // have no prefix and still work, so only a length floor is asserted.
+    shape: { minLen: 16, describe: 'at least 16 characters' },
     sample: 'GOCSPX-AbCdEf1234567890ghijk',
     where: '.env',
     scope: 'oauth',
@@ -638,14 +654,17 @@ export const CONFIG_KEYS = [
     scope: 'provider:linode',
   },
   // Vultr — 2026-08 provider expansion (Compose tier, scenario v1). Its
-  // STORAGE_REGION is the one object-storage region kept as an explicit
-  // registry key, and deliberately so: Vultr mints storage keys per
-  // subscription and a subscription lives in exactly one cluster, so the
-  // cluster slug is required config that travels with the pair rather than
-  // something resolveS3Region can infer from the compute region. Classified
-  // operator-secret so it inherits the class's two guarantees — written
-  // .env.local only, and stripped from any bundle baseline — keeping the
-  // credential triple intact instead of splitting it across two files.
+  // STORAGE_REGION travels with the key pair rather than being inferred:
+  // Vultr mints storage keys per subscription and a subscription lives in
+  // exactly one cluster, so resolveS3Region cannot derive the cluster slug
+  // from the compute region. Still `optional: true` like every other
+  // *_STORAGE_REGION: the guided setup (vultr-guided-setup.js) warns and
+  // continues on a blank answer, and the e2e example ships it empty — blank
+  // is a legitimate within-section answer (see the header's `optional`
+  // note), it just costs a default cluster. Classified operator-secret so it
+  // inherits the class's two guarantees — written .env.local only, and
+  // stripped from any bundle baseline — keeping the credential triple intact
+  // instead of splitting it across two files.
   {
     key: 'VULTR_API_TOKEN',
     class: 'operator-secret',
@@ -679,6 +698,7 @@ export const CONFIG_KEYS = [
     class: 'operator-secret',
     feature: 'providers',
     kind: 'slug',
+    optional: true,
     where: '.env.local',
     scope: 'provider:vultr',
   },
@@ -750,10 +770,10 @@ export const CONFIG_KEYS = [
     feature: 'providers',
     kind: 'token',
     optional: true,
-    shape: {
-      regex: /^dckr_pat_[A-Za-z0-9_-]+$/,
-      describe: 'dckr_pat_… (Docker Hub personal access token)',
-    },
+    // `docker login` accepts more than dckr_pat_ personal access tokens: the
+    // account password, legacy UUID-shaped tokens, and 2025 organization
+    // access tokens (dckr_oat_…) all work — so only a length floor here.
+    shape: { minLen: 8, describe: 'a Docker Hub access token or password' },
     sample: 'dckr_pat_AbCdEf1234567890-xyz',
     where: 'operator shell',
     scope: 'registry',
@@ -785,15 +805,25 @@ export const CONFIG_KEYS = [
   // production — e2e/dev envs avoiding LE's production rate limits (see
   // src/lib/deploy/staging-ca.js, src/lib/deploy/tls-ready.js). Absent, the
   // deploy templates default to the production LE directory.
+  //
+  // NOT a credential, and NOT operator-secret: the deployed SERVER reads it —
+  // carbon/docker-compose.prod.yml and docker-compose.dns01.prod.yml
+  // interpolate `${ACME_CA_SERVER:-<prod LE>}` from the `.env` the bundle
+  // ships, and the k8s issuer patch reads it from the project env too. The
+  // operator-secret class strips its lines from that `.env` baseline
+  // (stripOperatorSecretLines), which would silently move every staging
+  // deploy to LE production — so it lives in `.env` as runtime-config, like
+  // ALLOWED_SSH_IPS. The CLI's own staging detection (orchestrator.js,
+  // tls-ready.js) reads it from the operator shell via readOperatorVar.
   {
     key: 'ACME_CA_SERVER',
-    class: 'operator-secret',
-    feature: 'providers',
+    class: 'runtime-config',
+    feature: 'tls',
     kind: 'url',
     optional: true,
     shape: HTTPS_URL_SHAPE,
     sample: 'https://acme-v02.api.letsencrypt.org/directory',
-    where: '.env.local',
+    where: '.env',
     scope: 'tls',
   },
 
@@ -805,16 +835,18 @@ export const CONFIG_KEYS = [
   // (src/lib/iac/programs/*). Not operator-secret: it never carries a
   // credential and `access` never writes it with setEnvVar's `localOnly`
   // option, so it ships in .env like any other runtime-config key.
+  //
+  // No `shape`: nobody documents a format for this, and the parser it feeds
+  // (operator-ip.js / the IaC programs' firewall rules) always accepted bare
+  // IPs and IPv6 — the 'cidr-list' kind fallback in operator-env.js accepts
+  // comma-separated IPv4/IPv6 addresses with an optional /mask and rejects
+  // only things that are not addresses at all.
   {
     key: 'ALLOWED_SSH_IPS',
     class: 'runtime-config',
     feature: 'access',
     kind: 'cidr-list',
     optional: true,
-    shape: {
-      regex: new RegExp(`^${IPV4_CIDR}(,\\s*${IPV4_CIDR})*$`),
-      describe: 'comma-separated IPv4 CIDRs like 203.0.113.0/24',
-    },
     sample: '203.0.113.0/24,198.51.100.5/32',
     where: '.env',
     scope: 'access',
@@ -871,8 +903,8 @@ export function clientBuildKeys() {
 
 /**
  * Operator/provider credential keys (Hetzner/DigitalOcean/Cloudflare/S3
- * tokens, Docker Hub, the Pulumi backend URL, the ACME CA override) — CLI-local
- * only, never propagated to a deployed server. Deliberately NOT included in
+ * tokens, Docker Hub, the Pulumi backend URL) — CLI-local only, never
+ * propagated to a deployed server. Deliberately NOT included in
  * `featureRuntimeKeys()`/`clientBuildKeys()`.
  */
 export function operatorSecretKeys() {

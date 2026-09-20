@@ -192,12 +192,18 @@ describe('vibecarbon deploy', () => {
       },
     };
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-    appendFileSync(join(project, '.env.local'), '\nACME_CA_SERVER=not-a-url\n');
 
+    // ACME_CA_SERVER is runtime-config that lives in `.env` for the SERVER
+    // (docker-compose.prod.yml interpolates it); the CLI's own read of it
+    // (orchestrator.js / tls-ready.js staging detection, and this gate) is
+    // from the operator shell, which is how the e2e harness sets it too
+    // (tests/e2e/utils/e2e-env.js). It is NOT operator-secret, so
+    // bootstrapOperatorEnv never folds it in from .env.local — hence the
+    // shell env here, not a file append.
     const r = runCli('deploy', ['prod', '-y'], {
       cwd: project,
       timeoutMs: 20_000,
-      env: { NODE_OPTIONS: `--import=${FETCH_TRIPWIRE}` },
+      env: { NODE_OPTIONS: `--import=${FETCH_TRIPWIRE}`, ACME_CA_SERVER: 'not-a-url' },
     });
 
     assertExitWith(r, 1, 'Configuration problems (nothing was provisioned):');

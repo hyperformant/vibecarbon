@@ -57,7 +57,7 @@ const KIND_PROSE: Record<ConfigKey['kind'], string> = {
   email: 'an email address',
   hostname: 'a hostname',
   url: 'a URL',
-  'cidr-list': 'comma-separated IPv4 CIDRs',
+  'cidr-list': 'comma-separated IPv4/IPv6 addresses or CIDRs like 203.0.113.0/24',
   pem: 'a PEM block (or its base64 encoding)',
   token: 'an opaque token',
   secret: 'an opaque secret',

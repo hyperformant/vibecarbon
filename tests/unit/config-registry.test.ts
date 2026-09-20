@@ -120,10 +120,13 @@ describe('config-registry', () => {
       // shell" test below and the DOCKER_HUB-specific test further down).
       'DOCKER_HUB_USERNAME',
       'DOCKER_HUB_TOKEN',
-      // CLI-local operator overrides that ride the same guarantees
-      // (.env.local only, stripped from any bundle baseline).
+      // CLI-local operator override that rides the same guarantees
+      // (.env.local only, stripped from any bundle baseline). ACME_CA_SERVER
+      // is deliberately NOT here: the deployed server reads it from `.env`
+      // (docker-compose.prod.yml `${ACME_CA_SERVER:-…}`), so the strip
+      // guarantee would have silently removed it — see the runtime-config
+      // test below (whole-branch review 2026-09-19, Critical).
       'PULUMI_BACKEND_URL',
-      'ACME_CA_SERVER',
       // The one operator-secret entry NOT under the 'providers' feature and
       // NOT written to .env.local/.env/operator shell — see the
       // "belongs to the providers feature" exception and the "operator-secret
@@ -219,6 +222,12 @@ describe('config-registry', () => {
         expect(stripped).toContain('DOMAIN');
       });
 
+      it('keeps ACME_CA_SERVER — the compose server reads it from the shipped .env', () => {
+        const staging = 'ACME_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory';
+        const content = [staging, "HETZNER_API_TOKEN='leaked'"].join('\n');
+        expect(stripOperatorSecretLines(content)).toBe(staging);
+      });
+
       it('is a no-op when no operator-secret keys are present', () => {
         const content = "FOO='bar'\nBAZ='qux'";
         expect(stripOperatorSecretLines(content)).toBe(content);
@@ -251,6 +260,31 @@ describe('config-registry', () => {
         if (e.shape.values) expect(e.shape.values, e.key).toContain(e.sample);
       }
     });
+    it('ACME_CA_SERVER is runtime-config in .env (a server-read value, not a credential)', () => {
+      // carbon/docker-compose.prod.yml + docker-compose.dns01.prod.yml
+      // interpolate `${ACME_CA_SERVER:-<prod LE>}` from the `.env` the bundle
+      // ships; the k8s issuer patch reads it from the project env too. Any
+      // class stripOperatorSecretLines acts on would drop it from every
+      // compose bundle and silently move a staging deploy to LE production.
+      const e = registryEntry('ACME_CA_SERVER');
+      expect(e.class).toBe('runtime-config');
+      expect(e.where).toBe('.env');
+      expect(e.scope).toBe('tls');
+      expect(e.optional).toBe(true);
+      expect(isOperatorKey('ACME_CA_SERVER')).toBe(false);
+      expect(featureConfigKeys()).toContain('ACME_CA_SERVER');
+    });
+    it('every *_STORAGE_REGION is optional (guided setup warns-and-continues on blank; e2e example ships them empty)', () => {
+      const regions = CONFIG_KEYS.filter((e) => e.key.endsWith('_STORAGE_REGION'));
+      expect(regions.map((e) => e.key).sort()).toEqual([
+        'DIGITALOCEAN_STORAGE_REGION',
+        'HETZNER_STORAGE_REGION',
+        'LINODE_STORAGE_REGION',
+        'SCALEWAY_STORAGE_REGION',
+        'VULTR_STORAGE_REGION',
+      ]);
+      for (const e of regions) expect(e.optional, e.key).toBe(true);
+    });
     it('operator-secret entries live in .env.local, the operator shell, or tests/.env.e2e', () => {
       // tests/.env.e2e is the one exception: VIBECARBON_LICENSE_PRIVATE_KEY
       // is a test-harness-only signing key, never a project file.
@@ -272,17 +306,14 @@ describe('config-registry', () => {
         expect(registryEntry(k), k).toBeDefined();
       }
     });
-    it('tight shapes exist only where the vendor documents the format', () => {
+    it('tight shapes exist only where the vendor documents the format AND it is the only accepted one', () => {
       const tight = CONFIG_KEYS.filter((e) => e.shape?.regex)
         .map((e) => e.key)
         .sort();
       expect(tight).toEqual([
         'ACME_CA_SERVER',
-        'ALLOWED_SSH_IPS',
         'DIGITALOCEAN_PROJECT_ID',
-        'DOCKER_HUB_TOKEN',
         'GOOGLE_CLIENT_ID',
-        'GOOGLE_CLIENT_SECRET',
         'HETZNER_API_TOKEN',
         'MICROSOFT_TENANT_ID',
         'PULUMI_BACKEND_URL',
@@ -291,10 +322,28 @@ describe('config-registry', () => {
         'STRIPE_SECRET_KEY',
         'STRIPE_WEBHOOK_SECRET',
       ]);
-      // POLAR_ACCESS_TOKEN was removed from this list (review 2026-09-19):
-      // the `polar_oat_` prefix it used was unverified against Polar's docs.
       // This list IS the decision record for which formats are vendor-backed
-      // enough to assert — it stays loose (minLen only) until confirmed.
+      // enough to assert. Removed, and why (each stays loose until the vendor
+      // documents ONE accepted format):
+      //   - POLAR_ACCESS_TOKEN (review 2026-09-19): the `polar_oat_` prefix
+      //     was unverified against Polar's docs.
+      //   - DOCKER_HUB_TOKEN (whole-branch review 2026-09-19): `docker login`
+      //     also accepts account passwords, legacy UUID tokens and 2025 org
+      //     tokens (`dckr_oat_…`) — `dckr_pat_` is not the only shape.
+      //   - GOOGLE_CLIENT_SECRET (same review): secrets minted before 2021
+      //     carry no `GOCSPX-` prefix and still work.
+      //   - ALLOWED_SSH_IPS (same review): nobody documents a format, and
+      //     the parser it feeds always accepted bare IPs and IPv6; the
+      //     'cidr-list' kind fallback in operator-env.js validates it.
+      // STRIPE_SECRET_KEY STAYS tight but was widened to `(sk|rk)_` —
+      // restricted keys are a documented, accepted Stripe key type.
+    });
+    it('STRIPE_SECRET_KEY accepts restricted keys, not just secret keys', () => {
+      const { regex } = registryEntry('STRIPE_SECRET_KEY').shape;
+      expect('rk_live_abc123').toMatch(regex);
+      expect('rk_test_abc123').toMatch(regex);
+      expect('sk_test_abc123').toMatch(regex);
+      expect('pk_test_abc123').not.toMatch(regex);
     });
     it('SMTP_PORT is bounded to the real port range, not just 1-5 digits', () => {
       const { regex } = registryEntry('SMTP_PORT').shape;
@@ -317,6 +366,11 @@ describe('config-registry', () => {
     });
     it('existing derived views are unchanged by the metadata', () => {
       expect(featureRuntimeKeys()).not.toContain('HETZNER_API_TOKEN');
+      // Not merely "no shape": a shape with only `describe` would still be
+      // documented via the same text — the fallback's describe and the docs
+      // census's KIND_PROSE['cidr-list'] must agree, so the entry carries
+      // none and both derive from operator-env.js.
+      expect(registryEntry('ALLOWED_SSH_IPS').shape).toBeUndefined();
       expect(isOperatorKey('DOCKER_HUB_TOKEN')).toBe(true);
       // ALLOWED_SSH_IPS is NOT operator-secret: `vibecarbon access` persists
       // the allowlist to .vibecarbon.json, never via setEnvVar's `localOnly`

@@ -160,8 +160,11 @@ export async function promptText(message, currentValue, options = {}) {
     validate: (value) => {
       if (!value?.trim() && fallback !== undefined) return undefined;
       if (options.entry) {
+        // Validate the NORMALIZED value but hand the raw paste along too, so
+        // the "surrounding quotes?" / "trailing newline?" hint can fire when
+        // the cleaned value is still wrong (M10).
         const { value: normalized } = normalizeOperatorValue(value, options.entry);
-        return validateOperatorValue(normalized, options.entry) ?? undefined;
+        return validateOperatorValue(normalized, options.entry, { raw: value }) ?? undefined;
       }
       return options.validate?.(value);
     },
@@ -185,8 +188,9 @@ export async function promptSecret(message, currentValue, options = {}) {
     validate: (v) => {
       if (!v && currentValue) return undefined; // Enter-on-existing: keep the current value
       if (options.entry) {
+        // Same raw-threading as promptText above (M10).
         const { value: normalized } = normalizeOperatorValue(v, options.entry);
-        return validateOperatorValue(normalized, options.entry) ?? undefined;
+        return validateOperatorValue(normalized, options.entry, { raw: v }) ?? undefined;
       }
       if (!v) return 'This field is required';
       return undefined;

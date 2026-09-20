@@ -121,6 +121,9 @@ const RUNTIME_DETECTION: Record<string, string> = {
   VIBECARBON_PERF: 'internal perf-timer switch (perf.js)',
   VIBECARBON_UPLINK_LOCK_DIR: 'internal override for the uplink lock directory (uplink-lock.js)',
   VIBECARBON_BUNDLE_VERBOSE: 'internal bundle-render verbosity (orchestrator.js)',
+  VIBECARBON_SKIP_CONFIG_SHAPES:
+    'escape hatch for a vendor token-format change: downgrades shape problems to warnings in ' +
+    'assertOperatorConfig (deploy/preflight.js); a switch about THIS process, not operator config',
 };
 
 /**

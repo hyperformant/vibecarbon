@@ -73,6 +73,34 @@ describe('validateOperatorValue', () => {
     expect(validateOperatorValue(`${good64}\n`, hetzner)).toContain('trailing newline');
     expect(validateOperatorValue(`"${good64}"`, hetzner)).toContain('surrounding quotes');
   });
+  // M10 (review 2026-09-19): every real caller validates the NORMALIZED value
+  // and threads the raw paste through `opts.raw`, so the hint keys off what
+  // the operator actually typed — a wrapped-but-valid token is simply fine,
+  // a wrapped-and-invalid one gets told about the quotes.
+  describe('opts.raw — the paste hint keys off the raw string, not the normalized one', () => {
+    it('a quote-wrapped VALID token, validated normalized, yields no problem', () => {
+      const raw = `"${good64}"`;
+      const { value } = normalizeOperatorValue(raw, hetzner);
+      expect(validateOperatorValue(value, hetzner, { raw })).toBeNull();
+    });
+    it('a quote-wrapped INVALID token, validated normalized, still carries the surrounding-quotes hint', () => {
+      const raw = '"abc"';
+      const { value } = normalizeOperatorValue(raw, hetzner);
+      expect(validateOperatorValue(value, hetzner, { raw })).toBe(
+        'HETZNER_API_TOKEN looks wrong: expected 64 alphanumeric characters, got 3 characters — surrounding quotes?',
+      );
+    });
+    it('a trailing-newline INVALID token, validated normalized, carries the newline hint', () => {
+      const raw = 'abc\n';
+      const { value } = normalizeOperatorValue(raw, hetzner);
+      expect(validateOperatorValue(value, hetzner, { raw })).toContain('a trailing newline?');
+    });
+    it('without opts.raw the normalized value carries no hint (nothing to hint about)', () => {
+      expect(validateOperatorValue('abc', hetzner)).toBe(
+        'HETZNER_API_TOKEN looks wrong: expected 64 alphanumeric characters, got 3 characters',
+      );
+    });
+  });
   it('reports a missing required value', () => {
     expect(validateOperatorValue('', hetzner)).toBe('HETZNER_API_TOKEN is not set');
     expect(validateOperatorValue('', entry('HETZNER_STORAGE_REGION'))).toBeNull();
@@ -81,10 +109,40 @@ describe('validateOperatorValue', () => {
     expect(validateOperatorValue('70000', entry('SMTP_PORT'))).toContain('1-65535');
     expect(validateOperatorValue('not-an-email', entry('SMTP_ADMIN_EMAIL'))).toContain('email');
     expect(validateOperatorValue('http://x', entry('ACME_CA_SERVER'))).toContain('https://');
-    expect(validateOperatorValue('10.0.0.0/8,garbage', entry('ALLOWED_SSH_IPS'))).toContain('CIDR');
+    expect(validateOperatorValue('10.0.0.0/8,garbage', entry('ALLOWED_SSH_IPS'))).toContain(
+      'CIDRs',
+    );
     expect(validateOperatorValue('paypal', entry('BILLING_PROVIDER'))).toContain('one of');
     expect(validateOperatorValue('short', entry('LINODE_API_TOKEN'))).toContain('at least');
     expect(validateOperatorValue('sk_test_abc', stripe)).toBeNull();
+  });
+  // A2-A4 (review 2026-09-19): a tight regex only where the documented format
+  // is the ONLY one the vendor accepts. These values are all accepted by
+  // their vendors and were wrongly refused before.
+  it('accepts vendor-valid values the earlier tight regexes rejected', () => {
+    // Stripe restricted keys.
+    expect(validateOperatorValue('rk_live_abcDEF123', stripe)).toBeNull();
+    expect(validateOperatorValue('rk_test_abcDEF123', stripe)).toBeNull();
+    expect(validateOperatorValue('sk_live_abcDEF123', stripe)).toBeNull();
+    expect(validateOperatorValue('pk_test_abcDEF123', stripe)).toBe(
+      'STRIPE_SECRET_KEY looks wrong: expected sk_live_…, sk_test_… or a restricted rk_… key, got 17 characters',
+    );
+    // Docker Hub: account passwords, legacy UUID tokens, dckr_oat_ org tokens.
+    const dockerHub = entry('DOCKER_HUB_TOKEN');
+    expect(validateOperatorValue('dckr_pat_AbCdEf1234567890-xyz', dockerHub)).toBeNull();
+    expect(validateOperatorValue('dckr_oat_AbCdEf1234567890-xyz', dockerHub)).toBeNull();
+    expect(validateOperatorValue('12345678-1234-4123-8123-123456789012', dockerHub)).toBeNull();
+    expect(validateOperatorValue('my-account-password', dockerHub)).toBeNull();
+    expect(validateOperatorValue('short', dockerHub)).toBe(
+      'DOCKER_HUB_TOKEN looks wrong: expected a Docker Hub access token or password, got 5 characters',
+    );
+    // Google: pre-2021 client secrets have no GOCSPX- prefix.
+    const google = entry('GOOGLE_CLIENT_SECRET');
+    expect(validateOperatorValue('GOCSPX-AbCdEf1234567890ghijk', google)).toBeNull();
+    expect(validateOperatorValue('AbCdEf1234567890ghijklmn', google)).toBeNull();
+    expect(validateOperatorValue('tooshort', google)).toBe(
+      'GOOGLE_CLIENT_SECRET looks wrong: expected at least 16 characters, got 8 characters',
+    );
   });
   it('pins the shape-less hostname/url fallbacks against real registry entries', () => {
     const smtpHost = entry('SMTP_HOST');
@@ -143,11 +201,38 @@ describe('validateOperatorValue', () => {
       where: 'tests/.env.e2e',
       scope: 'e2e',
     } as const;
-    expect(validateOperatorValue('10.0.0.0/8, 192.168.1.0/24', cidrEntry)).toBeNull();
-    const noMask = '10.0.0.1';
-    expect(validateOperatorValue(noMask, cidrEntry)).toBe(
-      `T_CIDR looks wrong: expected comma-separated IPv4 CIDRs, got ${noMask.length} characters`,
-    );
+    // A5 (review 2026-09-19): nobody documents a format for this list and the
+    // parser it feeds always took bare addresses and IPv6 — accept anything
+    // that IS an address (v4/v6, optional /mask in range), reject only
+    // non-addresses and out-of-range masks.
+    const cidrDescribe = 'comma-separated IPv4/IPv6 addresses or CIDRs like 203.0.113.0/24';
+    for (const ok of [
+      '10.0.0.0/8, 192.168.1.0/24',
+      '203.0.113.5',
+      '2001:db8::1/128',
+      '::1',
+      '203.0.113.0/24,2001:db8::/32',
+      '0.0.0.0/0',
+    ]) {
+      expect(validateOperatorValue(ok, cidrEntry), ok).toBeNull();
+    }
+    for (const bad of [
+      'garbage',
+      '10.0.0.0/99',
+      '2001:db8::1/129',
+      '10.0.0.0/',
+      '10.0.0.0/8,',
+      '999.1.1.1',
+    ]) {
+      expect(validateOperatorValue(bad, cidrEntry), bad).toBe(
+        `T_CIDR looks wrong: expected ${cidrDescribe}, got ${bad.length} characters`,
+      );
+    }
+    // The real entry has no `shape` and rides this same fallback.
+    expect(
+      validateOperatorValue('2001:db8::1/128, 203.0.113.5', entry('ALLOWED_SSH_IPS')),
+    ).toBeNull();
+    expect(validateOperatorValue('garbage', entry('ALLOWED_SSH_IPS'))).toContain(cidrDescribe);
 
     const p = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----';
     expect(validateOperatorValue(p, pem)).toBeNull();
