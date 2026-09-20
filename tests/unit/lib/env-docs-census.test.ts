@@ -23,8 +23,21 @@
  * carbon/src/client/lib/admin-services.ts's envFlag pattern), or explicitly
  * listed in TEMPLATE_APP_ONLY_KEYS with the compose file / script that reads
  * it. Nothing documented is allowed to be dead.
+ *
+ * TEMPLATE_APP_ONLY_KEYS is not just a free-text exemption list: every entry
+ * is mechanically checked (below) against real compose/script sources. The
+ * check specifically distinguishes a compose line that INTERPOLATES `${KEY}`
+ * (a genuine read of the operator's value) from a line that merely ASSIGNS a
+ * container variable of the same name from a different source, e.g.
+ * `N8N_DB_PASSWORD=${POSTGRES_PASSWORD}` — the container var happens to be
+ * named N8N_DB_PASSWORD, but the value comes from POSTGRES_PASSWORD, so the
+ * operator's N8N_DB_PASSWORD is never read at all. That exact shape shipped
+ * as a mislabeled TEMPLATE_APP_ONLY_KEYS entry once (code review caught it,
+ * 2026-09-19) — this mechanical check exists so the census catches it next
+ * time instead of relying on the researcher noticing the assignment runs the
+ * other direction.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONFIG_KEYS, type ConfigKey, registryEntry } from '../../../src/lib/config-registry.js';
@@ -106,33 +119,58 @@ describe('env docs census — forward: every registry entry is documented with i
 
 // Keys documented in one of the three example files that are NOT registry
 // entries but genuinely are consumed — just not by carbon/src. Each reason
-// names the file that reads it; verified by grepping
+// cites the exact file:line that INTERPOLATES ${KEY} (compose) or reads
+// process.env.KEY (a script) — never a same-named assignment from a
+// different source (see the file header). Verified by grep against
 // carbon/docker-compose*.yml, carbon/scripts, and (for the one module that
-// lives outside carbon/) services/observability before being listed here. A
-// key that stops being read anywhere is caught by the "still holds" test
-// below — it can't rot silently.
+// lives outside carbon/) services/observability before being listed here,
+// and re-verified mechanically below (composeReadsKey/scriptReadsKey). A key
+// that stops being read anywhere is caught by the "still holds" test below —
+// it can't rot silently. dev-init.js is deliberately never cited: it writes
+// a fully hardcoded DEV object into a generated dev .env (never reads
+// process.env), so it is not a read of anything.
 const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
   VITE_PUBLIC_URL:
-    'read by carbon/scripts/generate-sitemap.ts, generate-seo.ts, generate-rss.ts and dev-init.js ' +
-    '(build-time SEO/dev scripts), not carbon/src.',
+    'carbon/scripts/generate-sitemap.ts:34, generate-rss.ts:27, generate-seo.ts:94 ' +
+    '(process.env.VITE_PUBLIC_URL) — build-time SEO scripts, not carbon/src.',
   ADMIN_PASSWORD:
-    "read by carbon/docker-compose.metabase.yml (METABASE_ADMIN_PASSWORD's fallback) and " +
-    'carbon/scripts/dev-init.js; not read by carbon/src.',
+    'carbon/docker-compose.metabase.yml:73 — METABASE_ADMIN_PASSWORD falls back to the ' +
+    'operator ADMIN_PASSWORD when METABASE_ADMIN_PASSWORD itself is unset.',
   GRAFANA_URL:
-    'read by services/observability/compose/docker-compose.yml (GF_SERVER_ROOT_URL) — the ' +
-    'observability module lives outside carbon/, copied in by `vibecarbon add observability`.',
-  N8N_DB_PASSWORD: "read by carbon/docker-compose.n8n.yml only (n8n's own Postgres role).",
-  N8N_ENCRYPTION_KEY: 'read by carbon/docker-compose.n8n.yml only.',
-  N8N_HOST: 'read by carbon/docker-compose.n8n*.yml only.',
-  N8N_PROTOCOL: 'read by carbon/docker-compose.n8n*.yml only.',
-  N8N_WEBHOOK_URL: 'read by carbon/docker-compose.n8n.yml only.',
-  N8N_EDITOR_BASE_URL: 'read by carbon/docker-compose.n8n*.yml only.',
-  METABASE_SITE_URL: 'read by carbon/docker-compose.metabase.yml (MB_SITE_URL) only.',
-  S3_ENDPOINT: 'read by carbon/docker-compose.yml (AWS_ENDPOINT for wal-g) only.',
-  S3_BUCKET: 'read by carbon/docker-compose.yml (WALG_S3_PREFIX fallback) only.',
-  S3_REGION: 'read by carbon/docker-compose.yml (AWS_REGION for wal-g) only.',
-  S3_ACCESS_KEY: 'read by carbon/docker-compose.yml (AWS_ACCESS_KEY_ID for wal-g) only.',
-  S3_SECRET_KEY: 'read by carbon/docker-compose.yml (AWS_SECRET_ACCESS_KEY for wal-g) only.',
+    'services/observability/compose/docker-compose.yml:49 — GF_SERVER_ROOT_URL falls back ' +
+    'to the operator GRAFANA_URL. The observability module lives outside carbon/, copied in ' +
+    'by `vibecarbon add observability`.',
+  N8N_ENCRYPTION_KEY:
+    'carbon/docker-compose.n8n.yml:38 — N8N_ENCRYPTION_KEY defaults from the operator ' +
+    'N8N_ENCRYPTION_KEY of the same name (a genuine self-referencing read, not just a same name).',
+  N8N_HOST: 'carbon/docker-compose.n8n.yml:31 — N8N_HOST defaults from the operator N8N_HOST.',
+  N8N_PROTOCOL:
+    'carbon/docker-compose.n8n.yml:33 — N8N_PROTOCOL defaults from the operator N8N_PROTOCOL.',
+  N8N_WEBHOOK_URL:
+    'carbon/docker-compose.n8n.yml:34 — the container WEBHOOK_URL defaults from the operator ' +
+    'N8N_WEBHOOK_URL.',
+  N8N_EDITOR_BASE_URL:
+    'carbon/docker-compose.n8n.yml:35 — N8N_EDITOR_BASE_URL defaults from the operator ' +
+    'N8N_EDITOR_BASE_URL of the same name.',
+  METABASE_SITE_URL:
+    'carbon/docker-compose.metabase.yml:29 — the container MB_SITE_URL defaults from the ' +
+    'operator METABASE_SITE_URL.',
+  S3_ENDPOINT: 'carbon/docker-compose.yml:228 — the wal-g AWS_ENDPOINT defaults from S3_ENDPOINT.',
+  S3_BUCKET:
+    'carbon/docker-compose.yml:224 — the WALG_S3_PREFIX bucket segment falls back to S3_BUCKET.',
+  S3_REGION: 'carbon/docker-compose.yml:229 — the wal-g AWS_REGION defaults from S3_REGION.',
+  S3_ACCESS_KEY:
+    'carbon/docker-compose.yml:226,479 — the wal-g/storage AWS_ACCESS_KEY_ID defaults from ' +
+    'S3_ACCESS_KEY.',
+  S3_SECRET_KEY:
+    'carbon/docker-compose.yml:227,480 — the wal-g/storage AWS_SECRET_ACCESS_KEY defaults ' +
+    'from S3_SECRET_KEY.',
+  // N8N_DB_PASSWORD was REMOVED (2026-09-19 code review): carbon/docker-compose.n8n.yml:87 sets
+  // the container's N8N_DB_PASSWORD FROM POSTGRES_PASSWORD — it assigns a container var NAMED
+  // N8N_DB_PASSWORD from a DIFFERENT source and never reads the operator's N8N_DB_PASSWORD at
+  // all. The n8n role password really is POSTGRES_PASSWORD (carbon/volumes/db/n8n-init.sh), same
+  // as METABASE_DB_PASSWORD before it. The .env.example line was dropped, not exempted — see the
+  // mechanical check below.
 };
 
 function walkTsFiles(dir: string): string[] {
@@ -177,6 +215,88 @@ function readByCarbonSrc(key: string, sources: string[]): boolean {
   return sources.some((src) => re.test(src));
 }
 
+/** All `carbon/docker-compose*.yml` files, plus the one module compose file that lives outside carbon/ (observability). */
+function composeSources(): string[] {
+  const carbonDir = join(ROOT, 'carbon');
+  const carbonComposeFiles = readdirSync(carbonDir)
+    .filter((f) => /^docker-compose.*\.yml$/.test(f))
+    .map((f) => join(carbonDir, f));
+  const outOfTree = [
+    join(ROOT, 'services', 'observability', 'compose', 'docker-compose.yml'),
+  ].filter(existsSync);
+  return [...carbonComposeFiles, ...outOfTree].map((f) => readFileSync(f, 'utf-8'));
+}
+
+/** Every `.ts`/`.js` file directly under carbon/scripts (build-time Node scripts, not carbon/src). */
+function scriptSources(): string[] {
+  const dir = join(ROOT, 'carbon', 'scripts');
+  const files = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && /\.(ts|js)$/.test(e.name))
+    .map((e) => join(dir, e.name));
+  return files.map((f) => readFileSync(f, 'utf-8'));
+}
+
+/**
+ * True when a compose source genuinely READS the operator's `key` — i.e.
+ * contains a `${key}` (or `${key:-...}` / `${key:?...}` / `${key:=...}`)
+ * interpolation ANYWHERE, on either side of an assignment. Deliberately does
+ * NOT match on the assignment's left-hand side: `key=${OTHER}` sets a
+ * container variable NAMED `key` from a DIFFERENT source and must NOT count
+ * as a read of `key` — that is exactly the N8N_DB_PASSWORD shape this
+ * function exists to reject (see the file header).
+ */
+function composeReadsKey(key: string, sources: string[]): boolean {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\$\\{${escaped}(:[-?=][^}]*)?\\}`);
+  return sources.some((src) => re.test(src));
+}
+
+/** True when a script source reads `process.env.key` (member or bracket form). */
+function scriptReadsKey(key: string, sources: string[]): boolean {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`process\\.env\\.${escaped}\\b|process\\.env\\[['"]${escaped}['"]\\]`);
+  return sources.some((src) => re.test(src));
+}
+
+describe('composeReadsKey — a same-named assignment is not a read (the N8N_DB_PASSWORD shape)', () => {
+  it('assigning KEY from a different variable does not count as reading KEY, but reading that other variable, or KEY appearing on a different line, does', () => {
+    // These fixture lines are deliberately shaped like real compose YAML
+    // interpolation syntax (${VAR}), not forgotten template literals.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${VAR} fixture
+    const assignsFromDifferentSource = '      - N8N_DB_PASSWORD=${POSTGRES_PASSWORD}';
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${VAR} fixture
+    const selfReferencingDefault = '      - N8N_HOST=${N8N_HOST:-n8n.localhost}';
+    const fixture = [assignsFromDifferentSource, selfReferencingDefault].join('\n');
+
+    expect(composeReadsKey('N8N_DB_PASSWORD', [fixture]), 'assignment target is not a read').toBe(
+      false,
+    );
+    expect(composeReadsKey('POSTGRES_PASSWORD', [fixture]), 'the RHS interpolation IS a read').toBe(
+      true,
+    );
+    expect(composeReadsKey('N8N_HOST', [fixture]), 'self-referencing default IS a read').toBe(true);
+  });
+
+  it('recognizes the :-, :?, and := interpolation forms, not just a bare interpolation', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${VAR} fixture
+    const bare = 'a: ${FOO}';
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${VAR} fixture
+    const withDefault = 'a: ${FOO:-default}';
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${VAR} fixture
+    const required = 'a: ${FOO:?required}';
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${VAR} fixture
+    const assignDefault = 'a: ${FOO:=default}';
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${VAR} fixture, a different key
+    const differentKey = 'a: ${FOOBAR}';
+
+    expect(composeReadsKey('FOO', [bare])).toBe(true);
+    expect(composeReadsKey('FOO', [withDefault])).toBe(true);
+    expect(composeReadsKey('FOO', [required])).toBe(true);
+    expect(composeReadsKey('FOO', [assignDefault])).toBe(true);
+    expect(composeReadsKey('FOO', [differentKey])).toBe(false);
+  });
+});
+
 describe('env docs census — reverse: every documented key is a registry entry or genuinely read', () => {
   const sources = readCarbonSrcSources();
   const allExampleKeys = new Map<string, string[]>(); // key -> files it appears in
@@ -220,6 +340,24 @@ describe('env docs census — reverse: every documented key is a registry entry 
       shouldveBeenFound,
       'these are actually read by carbon/src — remove from TEMPLATE_APP_ONLY_KEYS',
     ).toEqual([]);
+  });
+
+  it('every TEMPLATE_APP_ONLY_KEYS entry is backed by a real compose interpolation or a process.env.KEY script read', () => {
+    // Mechanical re-verification of the whole list, not just its prose: a
+    // reason string can claim a file reads a key when the file actually just
+    // assigns a same-named container var from something else entirely (the
+    // N8N_DB_PASSWORD bug this test exists to catch). composeReadsKey/
+    // scriptReadsKey are the same functions the fixture tests above pin.
+    const compose = composeSources();
+    const scripts = scriptSources();
+    const problems = Object.keys(TEMPLATE_APP_ONLY_KEYS)
+      .filter((key) => !composeReadsKey(key, compose) && !scriptReadsKey(key, scripts))
+      .map(
+        (key) =>
+          `${key}: no \${${key}} interpolation in any compose file and no process.env.${key} ` +
+          `in carbon/scripts — TEMPLATE_APP_ONLY_KEYS[${key}] is not backed by a real read`,
+      );
+    expect(problems, problems.join('\n')).toEqual([]);
   });
 });
 
