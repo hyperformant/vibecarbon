@@ -198,20 +198,56 @@ export function readOperatorVar(key, { env = process.env } = {}) {
 
 /**
  * Walk every registry entry whose `scope` is one of `scopes` (in registry
- * order) and collect the read problems.
+ * order), plus any individually-named `keys` not already covered by those
+ * scopes, and collect the read problems.
+ *
+ * `presence` distinguishes two callers with different tolerances for an
+ * ABSENT (not merely malformed) value: a gate running before an interactive
+ * prompt would otherwise fill the value in (`presence: false`) must let a
+ * missing credential through — that's what the prompt is FOR — while a gate
+ * that is the last stop before real provisioning (`presence: true`, the
+ * default) must not. Either way, a value that IS present but malformed is
+ * always a problem — `presence` only ever suppresses the "X is not set"
+ * case (detected via `readOperatorVar`'s `value === null`, which is exactly
+ * "raw was empty/absent", never a shape failure — a shape failure always
+ * has a non-empty `value`).
+ *
+ * `keys` exists for a value whose OWN scope would be too broad for a given
+ * caller to ask for — e.g. a cross-cloud native-DNS pick reads a sibling
+ * compute provider's token (`resolveDnsToken`'s same-token rule falling
+ * through to the row's `tokenEnv`) without that deploy using anything else
+ * scoped to that provider, so checking `provider:<thatId>` wholesale would
+ * wrongly demand ITS S3/object-storage keys too. A key already covered by
+ * `scopes` is not checked twice.
+ *
  * @param {Iterable<string>} scopes
- * @param {{ env?: Record<string, string | undefined> }} [opts]
+ * @param {{ env?: Record<string, string | undefined>, presence?: boolean, keys?: string[] }} [opts]
  * @returns {{ problems: string[], checked: string[] }}
  */
-export function checkOperatorConfig(scopes, { env = process.env } = {}) {
-  const entries = entriesForScopes(scopes);
+export function checkOperatorConfig(
+  scopes,
+  { env = process.env, presence = true, keys = [] } = {},
+) {
+  const entries = [...entriesForScopes(scopes)];
+  const covered = new Set(entries.map((e) => e.key));
+  for (const key of keys) {
+    if (covered.has(key)) continue;
+    const extra = registryEntry(key);
+    if (extra) {
+      entries.push(extra);
+      covered.add(key);
+    }
+  }
+
   const problems = [];
   const checked = [];
 
   for (const entry of entries) {
     checked.push(entry.key);
-    const { problem } = readOperatorVar(entry.key, { env });
-    if (problem) problems.push(problem);
+    const { value, problem } = readOperatorVar(entry.key, { env });
+    if (!problem) continue;
+    if (!presence && value === null) continue; // absent, not malformed — tolerated
+    problems.push(problem);
   }
 
   return { problems, checked };

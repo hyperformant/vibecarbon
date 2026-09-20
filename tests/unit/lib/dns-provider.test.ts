@@ -20,6 +20,7 @@ import {
   findZoneForDomain,
   getDnsProvider,
   hasAutomatedDns,
+  operatorConfigForDns,
   resolveDnsToken,
 } from '../../../src/lib/dns-provider.js';
 import * as hetznerDnsModule from '../../../src/lib/hetzner-dns.js';
@@ -146,6 +147,66 @@ describe('resolveDnsToken', () => {
   it('throws on unknown ids like the dispatcher does', () => {
     expect(() => resolveDnsToken('route53', {})).toThrowError(/unknown dns provider/i);
     expect(() => resolveDnsToken('manual', {})).toThrowError(/unknown dns provider/i);
+  });
+});
+
+describe('operatorConfigForDns (the operator-env.js scopes/keys a deploy checks for a DNS pick)', () => {
+  it('checks nothing for manual/unknown/absent DNS — mirrors hasAutomatedDns', () => {
+    for (const dnsProvider of ['manual', 'route53', undefined, null] as const) {
+      expect(
+        operatorConfigForDns(dnsProvider as unknown as string, 'hetzner'),
+        String(dnsProvider),
+      ).toEqual({
+        scopes: [],
+        keys: [],
+      });
+    }
+  });
+
+  it('same-token rule (DNS and compute are the same cloud): no scope, no key — already covered by provider:<id>', () => {
+    for (const id of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
+      expect(operatorConfigForDns(id, id), id).toEqual({ scopes: [], keys: [] });
+    }
+  });
+
+  it('no compute sibling (Cloudflare): its own dns:<id> scope, regardless of compute provider', () => {
+    for (const computeProviderId of ['hetzner', 'digitalocean', null, undefined]) {
+      expect(
+        operatorConfigForDns('cloudflare', computeProviderId as unknown as string),
+        String(computeProviderId),
+      ).toEqual({ scopes: ['dns:cloudflare'], keys: [] });
+    }
+  });
+
+  // Important #2 (fix round): the cross-cloud NATIVE DNS case —
+  // resolveDnsToken falls through to the row's OWN tokenEnv here (the
+  // compute token in hand belongs to a DIFFERENT cloud), so THAT single key
+  // is what must be checked. Never the whole provider:<row.computeProviderId>
+  // scope — that would additionally demand the OTHER cloud's S3/
+  // object-storage keys, which a DigitalOcean-compute deploy never reads.
+  it('cross-cloud native DNS: the ONE tokenEnv key, never the sibling provider scope', () => {
+    expect(operatorConfigForDns('hetzner', 'digitalocean')).toEqual({
+      scopes: [],
+      keys: ['HETZNER_API_TOKEN'],
+    });
+    expect(operatorConfigForDns('digitalocean', 'hetzner')).toEqual({
+      scopes: [],
+      keys: ['DIGITALOCEAN_API_TOKEN'],
+    });
+    expect(operatorConfigForDns('vultr', 'hetzner')).toEqual({
+      scopes: [],
+      keys: ['VULTR_API_TOKEN'],
+    });
+  });
+
+  it('every non-cloudflare row: same-token when compute matches, single-key when it does not', () => {
+    for (const id of ['hetzner', 'digitalocean', 'linode', 'vultr', 'scaleway']) {
+      expect(operatorConfigForDns(id, id), `${id} same-cloud`).toEqual({ scopes: [], keys: [] });
+      expect(operatorConfigForDns(id, 'not-the-same-cloud'), `${id} cross-cloud`).toEqual({
+        scopes: [],
+        keys: [DNS_PROVIDERS[id].tokenEnv],
+      });
+    }
   });
 });
 

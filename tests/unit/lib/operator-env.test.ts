@@ -210,4 +210,69 @@ describe('checkOperatorConfig', () => {
       }).problems,
     ).toEqual([]);
   });
+
+  describe('presence: false', () => {
+    it('tolerates an absent required key (no "is not set" problem)', () => {
+      expect(
+        checkOperatorConfig(['provider:hetzner'], { presence: false, env: {} }).problems,
+      ).toEqual([]);
+    });
+
+    it('still reports a PRESENT but malformed value — presence never covers shape', () => {
+      expect(
+        checkOperatorConfig(['provider:hetzner'], {
+          presence: false,
+          env: { HETZNER_API_TOKEN: 'short' },
+        }).problems,
+      ).toEqual([
+        'HETZNER_API_TOKEN looks wrong: expected 64 alphanumeric characters, got 5 characters',
+      ]);
+    });
+
+    it('defaults to true (an absent required key IS a problem) when omitted', () => {
+      expect(checkOperatorConfig(['provider:hetzner'], { env: {} }).problems).toContain(
+        'HETZNER_API_TOKEN is not set',
+      );
+    });
+  });
+
+  describe('keys', () => {
+    it('checks an individually-named registered key not covered by scopes', () => {
+      const r = checkOperatorConfig(['tls'], {
+        keys: ['CLOUDFLARE_API_TOKEN'],
+        env: { CLOUDFLARE_API_TOKEN: '' },
+      });
+      expect(r.problems).toEqual(['CLOUDFLARE_API_TOKEN is not set']);
+      expect(r.checked).toContain('CLOUDFLARE_API_TOKEN');
+    });
+
+    it('is combined with presence: false the same way a scope-covered key is', () => {
+      expect(
+        checkOperatorConfig([], {
+          presence: false,
+          keys: ['CLOUDFLARE_API_TOKEN'],
+          env: {},
+        }).problems,
+      ).toEqual([]);
+    });
+
+    it('an unregistered key name is silently ignored (never a crash)', () => {
+      expect(checkOperatorConfig([], { keys: ['NOT_A_REGISTERED_KEY'], env: {} }).problems).toEqual(
+        [],
+      );
+    });
+
+    it('a key already covered by a scope is not checked twice', () => {
+      const r = checkOperatorConfig(['provider:hetzner'], {
+        keys: ['HETZNER_API_TOKEN'],
+        env: {
+          HETZNER_API_TOKEN: 'short',
+          HETZNER_ACCESS_KEY: 'k'.repeat(20),
+          HETZNER_SECRET_KEY: 's'.repeat(40),
+        },
+      });
+      expect(r.problems).toHaveLength(1);
+      expect(r.checked.filter((k) => k === 'HETZNER_API_TOKEN')).toHaveLength(1);
+    });
+  });
 });

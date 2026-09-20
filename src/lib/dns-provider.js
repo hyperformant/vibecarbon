@@ -376,6 +376,47 @@ export function resolveDnsToken(dnsProvider, { computeProviderId, computeToken }
 }
 
 /**
+ * The `operator-env.js` scopes/keys a deploy must validate for a given DNS
+ * selection, BEFORE any DNS credential is read for real (a zone lookup, the
+ * guided-setup's live verify) — mirrors `resolveDnsToken`'s own same-token
+ * comparison exactly, so a scope is asked for if and only if
+ * `resolveDnsToken` would actually go read something for it.
+ *
+ * Three cases:
+ *   - Not automated (manual/unknown/absent `dnsProvider`): nothing to check.
+ *   - Same-token rule applies (`row.computeProviderId === computeProviderId`,
+ *     e.g. Hetzner compute + Hetzner DNS): the DNS backend reads the SAME
+ *     token this deploy's own `provider:<computeProviderId>` scope already
+ *     covers — no separate scope or key.
+ *   - Backend has no compute sibling (Cloudflare): its own scope
+ *     (`dns:<dnsProvider>`), which validates every key registered under it.
+ *   - Cross-cloud NATIVE DNS (e.g. DigitalOcean compute + Hetzner DNS —
+ *     `row.computeProviderId` truthy but NOT this deploy's compute
+ *     provider): `resolveDnsToken` falls through to the row's lone
+ *     `tokenEnv`, read from a DIFFERENT provider's env var that no scope
+ *     this deploy uses otherwise covers. Checking that ONE key (not the
+ *     whole `provider:<row.computeProviderId>` scope) is deliberate — the
+ *     whole scope would additionally demand that OTHER cloud's S3/
+ *     object-storage keys, which this deploy never reads.
+ *
+ * @param {string|null|undefined} dnsProvider
+ * @param {string|null|undefined} computeProviderId - providerIdFor(...) of
+ *   THIS deploy's resolved compute provider.
+ * @returns {{ scopes: string[], keys: string[] }}
+ */
+export function operatorConfigForDns(dnsProvider, computeProviderId) {
+  if (!hasAutomatedDns(dnsProvider)) return { scopes: [], keys: [] };
+  const row = DNS_PROVIDERS[dnsProvider];
+  if (!row.computeProviderId) {
+    return { scopes: [`dns:${dnsProvider}`], keys: [] };
+  }
+  if (row.computeProviderId !== computeProviderId) {
+    return { scopes: [], keys: [row.tokenEnv] };
+  }
+  return { scopes: [], keys: [] };
+}
+
+/**
  * Optional interactive guided-setup module for a DNS provider's token
  * (onboarding guide + live verification + save-to-.env.local offer).
  * Returns null when the row has none — callers fall back to a plain

@@ -8,6 +8,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { checkDependency, runCommand } from './lib/command.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import {
   checkExistingRepo,
   checkGitHubAuth,
@@ -21,6 +22,7 @@ import {
   setupGitHubIntegration,
 } from './lib/deploy/github.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
+import { assertOperatorConfig } from './lib/deploy/preflight.js';
 import { gatherDeploymentConfig, resolveDeployMode } from './lib/deploy/prompts.js';
 // New modular imports
 import {
@@ -32,6 +34,8 @@ import {
   waitForSSH,
 } from './lib/deploy/utils.js';
 import { withDeployLog } from './lib/deploy-logger.js';
+import { operatorConfigForDns } from './lib/dns-provider.js';
+import { resolveEnvSeed } from './lib/env-identity.js';
 import { ensureLockfile } from './lib/package-manager.js';
 import { buildGitAddArgv, detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -285,6 +289,60 @@ async function main(values, positional) {
   // orchestrator both read. Field translations live in buildLegacyArgs;
   // the orchestration code stays untouched.
   const args = buildLegacyArgs(values, positional);
+
+  // 0e. Gate 1 (operator config hygiene, spec §3): refuse a malformed
+  // operator credential before the FIRST network call this command makes.
+  // gatherDeploymentConfig below resolves the provider token by verifying
+  // it against the LIVE provider API (Provider.promptApiToken →
+  // hetzner-guided-setup.js's getApiToken, etc.), then fetches server
+  // types, then — for a cross-cloud native DNS pick — looks up zones on the
+  // DNS backend. All of that happens before this task's other two gates
+  // (2a/2b, inside gatherDeploymentConfig itself) could otherwise catch a
+  // bad value, so this is the true first stop.
+  //
+  // Scopes here are only what's ALREADY KNOWN at this point: a brand-new
+  // environment's provider/DNS aren't picked yet (no -provider flag, no
+  // persisted binding) — those gate at 2a/2b once resolved. access/tls/state
+  // are always checked; their keys are all optional, so a merely-absent one
+  // is never a problem, only an actually-malformed one.
+  //
+  // `presence: false` — a MISSING credential is never refused here, only a
+  // MALFORMED one, matching Gate 2a/2b. This is deliberate, not merely
+  // consistent: `requireDeployEntitlement` (the license gate for a paid
+  // tier) runs inside gatherDeploymentConfig, AFTER mode resolution but
+  // BEFORE any credential is read — deliberately, so an unpaid k8s/HA
+  // attempt is refused with "License required" rather than a credential
+  // complaint, even when both are true at once (see
+  // tests/integration/cli/_global/license-gate.test.ts, which pins this
+  // exact ordering with every provider credential scrubbed). Gate 1 runs
+  // before mode is even known, so it cannot tell a free deploy with no
+  // token yet (fine — a prompt or, for -y, a clean "Cannot prompt" refusal
+  // is coming) from a paid one that should hear about money first; `presence:
+  // false` defers that judgment to the code that already makes it correctly.
+  // A malformed value has no such ambiguity — it's wrong regardless of tier
+  // or payment status, so it still refuses here, before anything else runs.
+  {
+    const projectConfig = loadProjectConfig();
+    if (projectConfig) {
+      const environment = normalizeEnvName(args.env || 'prod');
+      const { envConfig } = resolveEnvSeed(projectConfig, environment);
+      const providerId =
+        args.provider ?? envConfig.provider ?? (envConfig.deployMode ? 'hetzner' : null);
+      const dnsProvider = args.dnsProvider ?? envConfig.dnsProvider ?? null;
+
+      const scopes = ['access', 'tls', 'state'];
+      const keys = [];
+      if (providerId) scopes.push(`provider:${providerId}`);
+      if (resolveDockerHubCreds()) scopes.push('registry');
+      if (dnsProvider && providerId) {
+        const dns = operatorConfigForDns(dnsProvider, providerId);
+        scopes.push(...dns.scopes);
+        keys.push(...dns.keys);
+      }
+
+      assertOperatorConfig(scopes, { presence: false, keys });
+    }
+  }
 
   // 1. Gather configuration
   const gatheredConfig = await gatherDeploymentConfig(args);

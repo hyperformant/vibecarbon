@@ -14,6 +14,7 @@ import {
   getDnsGuidedSetup,
   getDnsProvider,
   hasAutomatedDns,
+  operatorConfigForDns,
   resolveDnsToken,
 } from '../dns-provider.js';
 import { resolveEnvSeed } from '../env-identity.js';
@@ -31,6 +32,7 @@ import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
 import { collectDeployDelta, formatDeployDeltaLines } from './delta.js';
+import { assertOperatorConfig } from './preflight.js';
 import { resolveTier } from './tier-registry.js';
 import {
   DEFAULT_WORKER_MAX,
@@ -431,6 +433,17 @@ export async function gatherDeploymentConfig(args) {
   // (selecting DigitalOcean must hide the k8s modes) sees the provider just
   // chosen here, not the hetzner default the two bindings above assumed.
   ({ envConfig, Provider } = await resolveProvider(args, envConfig));
+
+  // Gate 2a (operator config hygiene, spec §3): the provider is now known —
+  // refuse a MALFORMED (never a merely-absent — `presence: false`) token
+  // before promptApiToken() below verifies it against the live provider
+  // API and fetchServerTypes() queries it further. A missing token is
+  // exactly what that prompt is for; a garbled one reaching a real API call
+  // is what this gate exists to head off (see preflight.js's
+  // assertOperatorConfig doc for why this can't wait for
+  // checkDeployPrerequisites, deep in the orchestrator).
+  assertOperatorConfig([`provider:${providerIdFor(envConfig)}`], { presence: false });
+
   // Re-run the -region guard: a region valid for the provider resolved
   // above (before any selection could happen) may not be valid for the one
   // just chosen — e.g. `-region hel1` is a real Hetzner region but unknown
@@ -669,6 +682,24 @@ export async function gatherDeploymentConfig(args) {
         exitCancelled();
       }
       dnsProvider = choice;
+    }
+  }
+
+  // Gate 2b (operator config hygiene, spec §3): the DNS pick is now final —
+  // refuse a MALFORMED DNS credential (`presence: false`, same reasoning as
+  // Gate 2a) before resolveDnsToken/the DNS backend's own guided setup
+  // (getApiToken) or a live zone lookup reads it. operatorConfigForDns
+  // mirrors resolveDnsToken's own same-token comparison exactly: nothing to
+  // check for the same-token-rule case (already covered by Gate 2a's
+  // provider scope), the DNS backend's own scope when it holds its own
+  // credential (Cloudflare), or just its one token env var for a
+  // cross-cloud NATIVE DNS pick (e.g. DigitalOcean compute + Hetzner DNS) —
+  // never the whole sibling provider's scope, which would wrongly demand
+  // that OTHER cloud's S3/object-storage keys too.
+  {
+    const dns = operatorConfigForDns(dnsProvider, providerId);
+    if (dns.scopes.length > 0 || dns.keys.length > 0) {
+      assertOperatorConfig(dns.scopes, { presence: false, keys: dns.keys });
     }
   }
 
