@@ -1,0 +1,281 @@
+import { describe, expect, it } from 'vitest';
+import { KNOWN_COMMANDS } from '../../../../src/cli.js';
+import {
+  deployedEnvironments,
+  deployedMenu,
+  LADDER,
+  nextStep,
+} from '../../../../src/lib/next/steps.js';
+
+type Env = {
+  name: string;
+  status: string | null;
+  deployMode: string | null;
+  region: string | null;
+  domain: string | null;
+  deployedAt: string | null;
+};
+
+function env(overrides: Partial<Env> = {}): Env {
+  return {
+    name: 'prod',
+    status: 'deployed',
+    deployMode: 'compose',
+    region: 'fsn1',
+    domain: 'example.com',
+    deployedAt: '2026-09-19T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function projectState(overrides: Record<string, unknown> = {}) {
+  return {
+    kind: 'project' as const,
+    cwd: '/tmp/acme',
+    projectConfig: {},
+    project: { name: 'acme' },
+    localDev: { dockerAvailable: true, running: [] as string[] },
+    configured: { any: false, features: [] as string[], providers: false },
+    environments: [] as Env[],
+    ...overrides,
+  };
+}
+
+describe('LADDER', () => {
+  it('lists the opinionated path in order', () => {
+    expect(LADDER).toEqual(['create', 'up', 'configure', 'deploy']);
+  });
+});
+
+describe('deployedEnvironments', () => {
+  it('returns only environments whose status is deployed', () => {
+    const state = projectState({
+      environments: [
+        env({ name: 'prod', status: 'deployed' }),
+        env({ name: 'stg', status: 'deploying' }),
+      ],
+    });
+    expect(deployedEnvironments(state)).toEqual([env({ name: 'prod', status: 'deployed' })]);
+  });
+
+  it('returns an empty array when there are no environments', () => {
+    expect(deployedEnvironments(projectState())).toEqual([]);
+  });
+});
+
+describe('nextStep', () => {
+  it('rule 1: no-project state returns the create step', () => {
+    const step = nextStep({ kind: 'no-project', cwd: '/tmp/empty' });
+    expect(step).toEqual({
+      id: 'create',
+      title: 'Create a project',
+      why: 'Scaffolds a new app with a local Supabase stack. You will pick a name and an admin login.',
+      command: ['create', '<name>'],
+      display: 'vibecarbon create <name>',
+      canLaunch: true,
+      blocksTerminal: false,
+      optional: false,
+    });
+  });
+
+  it('rule 2: a deployed environment returns the menu step regardless of other fields', () => {
+    const state = projectState({
+      localDev: { dockerAvailable: false, running: [] },
+      configured: { any: false, features: [], providers: false },
+      environments: [env({ status: 'deployed' })],
+    });
+    const step = nextStep(state);
+    expect(step).toEqual({
+      id: 'menu',
+      title: 'You are deployed',
+      why: 'Opinionated setup ends here. Pick what you want to do next.',
+      command: null,
+      display: null,
+      canLaunch: false,
+      blocksTerminal: false,
+      optional: false,
+    });
+  });
+
+  it('rule 4: nothing done yet returns the up step', () => {
+    const state = projectState({ localDev: { dockerAvailable: true, running: [] } });
+    const step = nextStep(state);
+    expect(step).toEqual({
+      id: 'up',
+      title: 'Start local development',
+      why: 'Starts the Docker services and the dev server so you can build and test locally.',
+      command: ['up'],
+      display: 'vibecarbon up',
+      canLaunch: true,
+      blocksTerminal: true,
+      optional: false,
+    });
+  });
+
+  it('rule 4: docker unavailable appends the Docker sentence to the up step', () => {
+    const state = projectState({ localDev: { dockerAvailable: false, running: [] } });
+    const step = nextStep(state);
+    expect(step.id).toBe('up');
+    expect(step.why).toBe(
+      'Starts the Docker services and the dev server so you can build and test locally. ' +
+        'Docker does not seem to be running; up will tell you what it needs.',
+    );
+  });
+
+  it('rule 5: local dev running but not configured returns the configure step', () => {
+    const state = projectState({
+      localDev: { dockerAvailable: true, running: ['web', 'db'] },
+      configured: { any: false, features: [], providers: false },
+    });
+    const step = nextStep(state);
+    expect(step).toEqual({
+      id: 'configure',
+      title: 'Configure services (optional)',
+      why: 'Sets up cloud provider credentials, payments, OAuth, SMTP and CI/CD before your first deploy. Deploy works without it.',
+      command: ['configure'],
+      display: 'vibecarbon configure',
+      canLaunch: true,
+      blocksTerminal: false,
+      optional: true,
+    });
+  });
+
+  it('rule 6: running + skipConfigure returns the deploy step', () => {
+    const state = projectState({
+      localDev: { dockerAvailable: true, running: ['web'] },
+      configured: { any: false, features: [], providers: false },
+    });
+    const step = nextStep(state, { skipConfigure: true });
+    expect(step).toEqual({
+      id: 'deploy',
+      title: 'Deploy to the cloud',
+      why: 'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license.',
+      command: ['deploy'],
+      display: 'vibecarbon deploy',
+      canLaunch: true,
+      blocksTerminal: false,
+      optional: false,
+    });
+  });
+
+  it('rule 6: configured but not running returns the deploy step', () => {
+    const state = projectState({
+      localDev: { dockerAvailable: true, running: [] },
+      configured: { any: true, features: ['CI/CD'], providers: false },
+    });
+    const step = nextStep(state);
+    expect(step.id).toBe('deploy');
+    expect(step.why).toBe(
+      'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license.',
+    );
+  });
+
+  it('rule 6: a deploying environment appends the resume sentence to the deploy step', () => {
+    const state = projectState({
+      localDev: { dockerAvailable: true, running: ['web'] },
+      configured: { any: true, features: ['CI/CD'], providers: false },
+      environments: [env({ name: 'stg', status: 'deploying' })],
+    });
+    const step = nextStep(state);
+    expect(step.id).toBe('deploy');
+    expect(step.why).toBe(
+      'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license. ' +
+        'A previous deploy of stg did not finish; running deploy again resumes it.',
+    );
+  });
+});
+
+describe('deployedMenu', () => {
+  const items = deployedMenu(projectState({ environments: [env({ status: 'deployed' })] }));
+
+  it('pins the menu order, values, labels, hints, commands and flags', () => {
+    expect(items).toEqual([
+      { value: 'status', label: 'Check status', command: ['status'], envScoped: false },
+      { value: 'scale', label: 'Scale an environment', command: ['scale'], envScoped: true },
+      { value: 'backup', label: 'Back up the database', command: ['backup'], envScoped: true },
+      { value: 'restore', label: 'Restore the database', command: ['restore'], envScoped: true },
+      {
+        value: 'failover',
+        label: 'Fail over to the standby region',
+        hint: 'HA deployments only',
+        command: ['failover'],
+        envScoped: true,
+      },
+      { value: 'configure', label: 'Configure services', command: ['configure'], envScoped: false },
+      {
+        value: 'add',
+        label: 'Add a feature',
+        hint: 'observability, redis',
+        command: ['add'],
+        envScoped: false,
+      },
+      { value: 'remove', label: 'Remove a feature', command: ['remove'], envScoped: false },
+      { value: 'upgrade', label: 'Upgrade template files', command: ['upgrade'], envScoped: false },
+      {
+        value: 'shell',
+        label: 'Open a shell with cluster credentials',
+        command: ['shell'],
+        envScoped: true,
+      },
+      {
+        value: 'diagnose',
+        label: 'Dump cluster diagnostics',
+        command: ['diagnose'],
+        envScoped: true,
+      },
+      { value: 'access', label: 'Manage operator access', command: ['access'], envScoped: false },
+      {
+        value: 'deploy-another',
+        label: 'Deploy another environment',
+        command: ['deploy', '<name>'],
+        envScoped: false,
+        needsName: true,
+      },
+      {
+        value: 'destroy',
+        label: 'Tear down an environment',
+        hint: 'Destructive',
+        command: ['destroy'],
+        envScoped: true,
+      },
+      { value: 'nothing', label: 'Nothing right now', command: null, envScoped: false },
+    ]);
+  });
+});
+
+describe('command census', () => {
+  // Task 5 wires `next` into KNOWN_COMMANDS; until then it is expected to be
+  // missing, so it is the one name this census skips.
+  function assertKnown(command: string[] | null) {
+    if (!command) return;
+    const name = command[0];
+    if (name === 'next') return;
+    expect(KNOWN_COMMANDS).toContain(name);
+  }
+
+  it('every nextStep command[0] across all states is a known CLI command', () => {
+    const states = [
+      { kind: 'no-project' as const, cwd: '/tmp/empty' },
+      projectState({ localDev: { dockerAvailable: true, running: [] } }),
+      projectState({ localDev: { dockerAvailable: false, running: [] } }),
+      projectState({ localDev: { dockerAvailable: true, running: ['web'] } }),
+      projectState({
+        localDev: { dockerAvailable: true, running: ['web'] },
+        configured: { any: true, features: ['CI/CD'], providers: false },
+      }),
+      projectState({ environments: [env({ status: 'deployed' })] }),
+    ];
+    for (const state of states) {
+      assertKnown(nextStep(state).command);
+      assertKnown(nextStep(state, { skipConfigure: true }).command);
+    }
+  });
+
+  it('every deployedMenu command[0] is a known CLI command', () => {
+    for (const item of deployedMenu(
+      projectState({ environments: [env({ status: 'deployed' })] }),
+    )) {
+      assertKnown(item.command);
+    }
+  });
+});
