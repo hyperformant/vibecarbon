@@ -21,6 +21,25 @@ describe('checkS3CredentialMismatch', () => {
     expect(risks).toEqual([]);
   });
 
+  it('reads the injected env through the normalizing reader (a padded/quoted paste counts as present)', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: { s3: { bucket: 'acme-prod', region: 'fsn1' } },
+      envKeys: HETZNER_KEYS,
+      env: { HETZNER_ACCESS_KEY: '"ak"\n', HETZNER_SECRET_KEY: ' sk ' },
+    });
+    expect(risks).toEqual([]);
+  });
+
+  it('treats a blank value as missing, like the destroy credential resolution does', () => {
+    const risks = checkS3CredentialMismatch({
+      envConfig: { s3: { bucket: 'acme-prod', region: 'fsn1' } },
+      envKeys: HETZNER_KEYS,
+      env: { HETZNER_ACCESS_KEY: '   ', HETZNER_SECRET_KEY: 'sk' },
+    });
+    expect(risks).toHaveLength(1);
+    expect(risks[0].reason).toContain('HETZNER_ACCESS_KEY is not set');
+  });
+
   it('is silent when no bucket is recorded — nothing to leave behind', () => {
     const risks = checkS3CredentialMismatch({
       envConfig: {},

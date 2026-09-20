@@ -27,6 +27,7 @@ const TOKEN_ENV_VARS = [
   'AWS_SECRET_ACCESS_KEY',
   'PULUMI_CONFIG_PASSPHRASE',
   'PULUMI_SKIP_UPDATE_CHECK',
+  'PULUMI_BACKEND_URL',
 ];
 
 beforeEach(() => {
@@ -123,5 +124,31 @@ describe('buildEnv', () => {
       const env = buildEnv({ provider, providerToken: 'secret-token' });
       expect(env.VC_BUILD_ENV_PROBE).toBe('present');
     });
+  });
+});
+
+describe('buildEnv — PULUMI_BACKEND_URL reaches the child normalized', () => {
+  // Pulumi lets the env var override projectSettings.backend.url inside the
+  // child process, so a shell export with paste artifacts (quotes, trailing
+  // newline) would steer the child at a backend the CLI's own
+  // resolveBackendUrl() never saw. .env.local values are already unquoted
+  // by parseDotenv; only a shell export produces this, which is exactly the
+  // case a spread of process.env forwards verbatim.
+  it('strips quotes/whitespace from a shell-exported PULUMI_BACKEND_URL', () => {
+    vi.stubEnv('PULUMI_BACKEND_URL', '"s3://acme-state?endpoint=fsn1.example"\n');
+    const env = buildEnv({ s3Config: { bucket: 'b' } });
+    expect(env.PULUMI_BACKEND_URL).toBe('s3://acme-state?endpoint=fsn1.example');
+  });
+
+  it('leaves PULUMI_BACKEND_URL absent when the shell does not export it', () => {
+    delete process.env.PULUMI_BACKEND_URL;
+    const env = buildEnv({ s3Config: { bucket: 'b' } });
+    expect('PULUMI_BACKEND_URL' in env).toBe(false);
+  });
+
+  it('drops a blank export rather than forwarding an empty override', () => {
+    vi.stubEnv('PULUMI_BACKEND_URL', '   ');
+    const env = buildEnv({ s3Config: { bucket: 'b' } });
+    expect('PULUMI_BACKEND_URL' in env).toBe(false);
   });
 });

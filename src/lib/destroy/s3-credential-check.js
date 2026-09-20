@@ -17,8 +17,13 @@
  * destroyExitCode doc.
  *
  * Pure by construction (env and provider key names are injected) so the matrix
- * of bucket combinations is unit-testable without touching process.env.
+ * of bucket combinations is unit-testable without touching process.env. The
+ * key reads go through `readOperatorVar` with that injected env, so a
+ * quoted/padded paste counts as present exactly when the destroy's own
+ * credential resolution would see it.
  */
+
+import { readOperatorVar } from '../operator-env.js';
 
 /**
  * @param {object} params
@@ -27,7 +32,8 @@
  *   `[accessKeyEnv, secretKeyEnv]` pair (`Provider.OBJECT_STORAGE_ENV`). An
  *   empty pair means the provider declares no env-based credentials, so there
  *   is no mismatch to detect.
- * @param {Record<string, string|undefined>} [params.env] - environment to read.
+ * @param {Record<string, string|undefined>} [params.env] - environment to read
+ *   (defaults to the process env inside the reader).
  * @param {boolean} [params.purgeBackups] - the `-purge` flag. Without it the
  *   backup bucket is deliberately preserved and its credentials are irrelevant.
  * @param {boolean} [params.canPrompt] - true when an interactive prompt can
@@ -38,14 +44,16 @@
 export function checkS3CredentialMismatch({
   envConfig,
   envKeys,
-  env = process.env,
+  env,
   purgeBackups = false,
   canPrompt = false,
 }) {
   const [accessKeyEnv, secretKeyEnv] = envKeys ?? [];
   if (!accessKeyEnv || !secretKeyEnv) return [];
 
-  const missing = [accessKeyEnv, secretKeyEnv].filter((key) => !env?.[key]);
+  const missing = [accessKeyEnv, secretKeyEnv].filter(
+    (key) => !readOperatorVar(key, { env }).value,
+  );
   if (missing.length === 0) return [];
 
   const region = envConfig?.s3?.region || envConfig?.backupS3?.region || null;
