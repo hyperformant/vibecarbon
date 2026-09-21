@@ -52,8 +52,8 @@ const SPEC = {
 
 /**
  * Read `key` from `.env.local`, then `.env` — the first file that carries a
- * NON-EMPTY value wins, else null. Parsing is `parseDotenv` (src/lib/dotenv.js,
- * via project.js), the codebase's one dotenv reader; the per-key regex this
+ * NON-EMPTY value wins, else null. Parsing is `parseDotenv` (src/lib/dotenv.js),
+ * the codebase's one dotenv reader; the per-key regex this
  * replaced could not match an empty `KEY=` and so fell through to the next
  * file — treating '' as absent here keeps that exact fall-through.
  * @param {string} key
@@ -163,13 +163,16 @@ async function findFreeOffset(_cwd) {
  * Write DEV_PORT_OFFSET to .env.local, creating the file if it doesn't exist.
  * Returns true if the value was saved.
  *
- * Both lines go through formatDotenvLine (src/lib/dotenv.js) and the match is
- * the WHOLE existing line whatever its quoting: `create` writes the bare form
+ * In-place REWRITER (like setSubnetPrefix below): each literal-key line is
+ * located whole and re-emitted through formatDotenvLine (src/lib/dotenv.js),
+ * so comments, blanks and order stay verbatim and no value is read out of
+ * the file. Allow-listed by exact path in
+ * tests/unit/lib/dotenv-dialect-census.test.ts. The match is the WHOLE
+ * existing line whatever its quoting: `create` writes the bare form
  * (`DEV_PORT_OFFSET=0`) while pre-2026-09-20 files hold `"0"`. A quoted-only
- * match would append a second DEV_PORT_OFFSET line to a fresh project, and
- * the two readers disagree on which wins (util.parseEnv: last; the template's
- * first-match regex: first) — `up` would report the new offset while the dev
- * servers bound the old ports.
+ * match would append a second DEV_PORT_OFFSET line to a fresh project; every
+ * reader is last-wins (util.parseEnv in the CLI and the template alike), so
+ * the stale first line would be silently shadowed rather than reported.
  */
 export function setPortOffset(offset, cwd) {
   const envPath = join(cwd, '.env.local');

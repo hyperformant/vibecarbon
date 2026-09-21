@@ -21,12 +21,12 @@ try {
   // Ignore errors, use default
 }
 
-// Read port configuration from .env / .env.local (shell wins, then .env.local over .env)
+// Read port configuration from .env / .env.local (shell wins, a blank export falls through, then .env.local over .env)
 function getPortConfig() {
   const defaults = { vite: 5173, api: 3000 };
   try {
     const fileEnv = readEnvFiles(process.cwd());
-    const getEnvValue = (key) => process.env[key] ?? fileEnv[key] ?? null;
+    const getEnvValue = (key) => process.env[key] || fileEnv[key] || null;
 
     const portOffset = Number.parseInt(getEnvValue('DEV_PORT_OFFSET') || '0', 10);
     const vitePort = getEnvValue('DEV_VITE_PORT') || String(5173 + portOffset);

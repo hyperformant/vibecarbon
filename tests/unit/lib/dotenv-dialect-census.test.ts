@@ -68,6 +68,9 @@ const REWRITERS = new Set([
   // project.js setEnvVar: replaces the one `^KEY=` line in .env/.env.local
   // (or appends) — the CLI's canonical single-key writer.
   'src/lib/project.js',
+  // up.js setPortOffset/setSubnetPrefix replace one literal-key line and emit
+  // it with formatDotenvLine.
+  'src/up.js',
 ]);
 
 function walk(p: string, out: string[] = []) {
@@ -366,6 +369,21 @@ describe('dotenv dialect census', () => {
       if (rewriter === 'src/lib/project.js') {
         expect(src).toMatch(/const replacement = formatDotenvLine\(key, value\);/);
         expect(src).toMatch(/content\.replace\(regex, \(\) => replacement\)/);
+      } else if (rewriter === 'src/up.js') {
+        // Three literal keys, each: line built by the encoder, whole existing
+        // line replaced by it (or appended) — never a hand-built `KEY=${…}`.
+        for (const [key, name] of [
+          ['DEV_PORT_OFFSET', 'line'],
+          ['VITE_DEV_PORT_OFFSET', 'viteLine'],
+          ['DEV_SUBNET_PREFIX', 'line'],
+        ]) {
+          expect(src).toMatch(
+            new RegExp(String.raw`const ${name} = formatDotenvLine\('${key}', String\(\w+\)\);`),
+          );
+          expect(src).toMatch(new RegExp(String.raw`/\^${key}=\.\*\$/m`));
+        }
+        expect(src).toMatch(/content\.replace\(regex, \(\) => line\)/);
+        expect(src).toMatch(/content\.replace\(viteRegex, \(\) => viteLine\)/);
       } else {
         expect(src).toMatch(/\.map\(\(line\) =>[\s\S]*?return formatDotenvLine\(/);
         expect(src).toMatch(/merged\.push\(formatDotenvLine\(/);

@@ -53,7 +53,12 @@ import {
   readOperatorVar,
   validateOperatorValue,
 } from './lib/operator-env.js';
-import { buildGitAddArgv, loadEnvVariables, setEnvVar } from './lib/project.js';
+import {
+  buildGitAddArgv,
+  loadEnvVariables,
+  repairLegacyEnvQuoting,
+  setEnvVar,
+} from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
@@ -1334,6 +1339,11 @@ function resolveProvider(featureValue, providerArg) {
  * just falls back to generic placeholders.
  */
 function loadFeatureContext(cwd) {
+  // Heal pre-2026-09-20 POSIX-quoted lines BEFORE the read: every prompt's
+  // "press Enter to keep current" hands the value read here straight back to
+  // setEnvVar, so a truncated read would be written over the recoverable
+  // line and the `'` half of the secret lost (final review H1).
+  repairLegacyEnvQuoting(cwd);
   const env = loadEnvVariables(cwd);
   let projectConfig = null;
   try {

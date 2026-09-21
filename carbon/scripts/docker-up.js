@@ -20,11 +20,11 @@ import {
 } from './lib/manifest.js';
 
 /**
- * Read environment value from .env / .env.local (shell wins, then .env.local over .env)
+ * Read environment value from .env / .env.local (shell wins, a blank export falls through, then .env.local over .env)
  */
 const fileEnv = readEnvFiles(process.cwd());
 function getEnvValue(key) {
-  return process.env[key] ?? fileEnv[key] ?? null;
+  return process.env[key] || fileEnv[key] || null;
 }
 
 /**

@@ -21,6 +21,9 @@ function getPort(envVarName: string, defaultPort: number, offset: number): numbe
 export default defineConfig(({ mode }) => {
   // Read env from project root (where .env/.env.local live). Shell wins over
   // the files; Vite still loads import.meta.env.VITE_* itself for the client.
+  // Config-side read only: .env and .env.local, no .env.[mode] files — the
+  // template ships none; import.meta.env.VITE_* still honours them via Vite's
+  // own loader.
   const env = { ...readEnvFiles(path.resolve(import.meta.dirname)), ...process.env };
 
   const portOffset = Number.parseInt(env.DEV_PORT_OFFSET || '0', 10);

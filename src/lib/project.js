@@ -6,10 +6,11 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { writeSecretFile } from './command.js';
 import { operatorSecretKeys } from './config-registry.js';
 import { formatDotenvLine, parseDotenv, readEnvFiles } from './dotenv.js';
-import { healLegacyDotenvText } from './dotenv-heal.js';
+import { healLegacyDotenvQuoting, healLegacyDotenvText } from './dotenv-heal.js';
 
 // ============================================================================
 // PACKAGE MANAGER DETECTION
@@ -326,8 +327,11 @@ export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false }
         continue;
       }
     }
-    // Repair pre-2026-09-20 POSIX-quoted lines on the way through so an
-    // un-upgraded project is fixed the first time configure touches it.
+    // Backstop repair of pre-2026-09-20 POSIX-quoted lines: the commands
+    // that read these files run repairLegacyEnvQuoting at entry (before the
+    // value is read, which is what makes a keep-current write correct); this
+    // keeps a direct setEnvVar caller from leaving a truncating line beside
+    // the one it just wrote.
     const content = healLegacyDotenvText(readFileSync(envPath, 'utf-8')).text;
     // In-place REWRITER, deliberately not parse-then-serialize: only the one
     // `KEY=` line changes, everything else (comments, blanks, order) stays
@@ -343,6 +347,45 @@ export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false }
       writeFileSync(envPath, `${content.trimEnd()}\n${replacement}\n`);
     }
   }
+}
+
+/**
+ * Re-encode `.env` / `.env.local` lines written with the pre-2026-09-20 POSIX
+ * quoting (`'it'\''s'`), which Node, Compose and Vite all truncate to `it`.
+ *
+ * Runs at the ENTRY of every command that reads those files — configure's
+ * `loadFeatureContext`, deploy and scale before their first env read, upgrade
+ * before `reconstructVariables` reads the env — because the repair must land
+ * before the value is read: a read-first flow acts on the truncated string
+ * (configure's Enter-to-keep would write `it` back over the recoverable
+ * line; a k8s deploy would ship it as the Secret). `status` is read-only and
+ * detects instead (`hasLegacyDotenvQuoting`).
+ *
+ * Logs one info line naming the healed KEYS (never a value) and one warning
+ * per line the grammar refuses, pointing at `vibecarbon configure`; silent
+ * when there is nothing to say. `dryRun` reports without writing
+ * (`upgrade -dry`). `log` is injectable for tests.
+ *
+ * @param {string} [cwd]
+ * @param {{ dryRun?: boolean, log?: { info: (m: string) => void, warn: (m: string) => void } }} [opts]
+ * @returns {{ healed: string[], skipped: Array<{ key: string, reason: string }> }}
+ */
+export function repairLegacyEnvQuoting(cwd = process.cwd(), { dryRun = false, log = p.log } = {}) {
+  const result = healLegacyDotenvQuoting(cwd, { dryRun });
+  // A key present in both files is healed twice but named once.
+  const keys = [...new Set(result.healed)];
+  if (keys.length > 0) {
+    const noun = `${keys.length} legacy-quoted value${keys.length === 1 ? '' : 's'}`;
+    log.info(
+      dryRun
+        ? `Would re-encode ${noun} in .env/.env.local: ${keys.join(', ')} (dry run)`
+        : `Re-encoded ${noun} in .env/.env.local: ${keys.join(', ')}`,
+    );
+  }
+  for (const { key, reason } of result.skipped) {
+    log.warn(`${key}: ${reason} — re-enter it with \`vibecarbon configure\``);
+  }
+  return result;
 }
 
 // ============================================================================

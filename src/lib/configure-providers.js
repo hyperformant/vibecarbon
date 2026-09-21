@@ -31,12 +31,12 @@ import * as p from '@clack/prompts';
 import { exitCancelled } from './cli/exit-guard.js';
 import { getApiToken as getCloudflareApiToken } from './cloudflare-guided-setup.js';
 import { c } from './colors.js';
-import { isSecretKey } from './config-registry.js';
+import { isSecretKey, registryEntry } from './config-registry.js';
 import * as digitaloceanGuidedSetup from './digitalocean-guided-setup.js';
 import { envSummaryLines } from './env-summary.js';
 import * as hetznerGuidedSetup from './hetzner-guided-setup.js';
 import * as linodeGuidedSetup from './linode-guided-setup.js';
-import { dotenvPromptProblem, readOperatorVar } from './operator-env.js';
+import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { getBootstrappedKeys } from './project.js';
 import { getProviderClass, listProviders } from './providers/index.js';
 import * as scalewayGuidedSetup from './scaleway-guided-setup.js';
@@ -126,7 +126,8 @@ function warnShellOverrides(entry) {
 // entry in COMPUTE_GUIDED_MODULES — no dedicated guide/verification, just a
 // plain env-first token prompt. Keeps "future providers auto-appear
 // token-only" true without requiring a guided-setup module to exist first.
-async function genericGetApiToken(Provider, _projectName, options = {}) {
+// Exported for tests only (every listed provider has a guided module today).
+export async function genericGetApiToken(Provider, _projectName, options = {}) {
   const { force = false } = options;
   if (!force) {
     const envToken = readOperatorVar(Provider.TOKEN_ENV).value;
@@ -147,8 +148,14 @@ async function genericGetApiToken(Provider, _projectName, options = {}) {
   if (p.isCancel(token)) {
     exitCancelled();
   }
-  process.env[Provider.TOKEN_ENV] = token;
-  return token;
+  // Save what validate judged: the paste normalized against the registry
+  // entry (surrounding quotes, trailing newline, a stray "Bearer "), as the
+  // guided setups do — the raw paste could pass validate and then be refused
+  // by setEnvVar. A key with no entry has no normalization to apply.
+  const entry = registryEntry(Provider.TOKEN_ENV);
+  const saved = entry ? normalizeOperatorValue(token, entry).value : token;
+  process.env[Provider.TOKEN_ENV] = saved;
+  return saved;
 }
 
 async function runComputeEntry(id, Provider, storageKeys, projectName) {

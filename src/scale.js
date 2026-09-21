@@ -52,10 +52,11 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from './lib/dns-provider.js';
-import { parseDotenv } from './lib/dotenv.js';
+import { dotenvValueProblem, parseDotenv } from './lib/dotenv.js';
 import { convergeClusterInfra } from './lib/iac/converge-cluster.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
+import { repairLegacyEnvQuoting } from './lib/project.js';
 import { runProjectAssignment } from './lib/project-assignment.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
@@ -387,6 +388,30 @@ export async function buildReplacementServerArgs(
 }
 
 /**
+ * The subset of an old server's parsed `.env` that `renderBundle` can
+ * re-encode. Each dropped key gets one warning naming the key and the reason
+ * (never the value) and the command to set it again. `log` is injectable for
+ * tests. Pure: returns a new object, never mutates `env`.
+ * @param {Record<string, string>} env
+ * @param {{ log?: { warn: (m: string) => void } }} [opts]
+ * @returns {Record<string, string>}
+ */
+export function dropUnportableEnv(env, { log = p.log } = {}) {
+  const kept = {};
+  for (const [key, value] of Object.entries(env)) {
+    const problem = dotenvValueProblem(key, value);
+    if (problem) {
+      log.warn(
+        `${key} on the old server cannot be carried over: ${problem}; set it again with \`vibecarbon configure\``,
+      );
+      continue;
+    }
+    kept[key] = value;
+  }
+  return kept;
+}
+
+/**
  * compose/compose-ha `scale-servers` effect: blue-green replace every target
  * server (backup old → create new → wait for SSH → provision → copy files →
  * registry logins → optional remote build → pull images → compose up →
@@ -568,8 +593,12 @@ async function scaleServers(ctx) {
       s.start('Reading current server configuration...');
       try {
         const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
-        oldEnv = parseDotenv(envText);
         s.stop('Current server configuration read');
+        // renderBundle re-encodes every override and throws on a value the
+        // portable grammar refuses (a hand-edited server value with a tab,
+        // or `'` beside `"`) — mid-scale, after the new server exists. Drop
+        // and warn here instead; the operator re-enters it with configure.
+        oldEnv = dropUnportableEnv(parseDotenv(envText));
       } catch {
         // Old server may be unreachable; renderBundle will fall back to the
         // project's local `.env`. That path is degraded (missing S3 secrets)
@@ -962,6 +991,12 @@ export async function run(args) {
   const projectConfig = assertInProjectDir();
 
   introCommand('scale');
+
+  // Heal pre-2026-09-20 POSIX-quoted lines in the local .env/.env.local
+  // before anything reads them: the compose strategy bundles the local .env
+  // as the new server's baseline (renderBundle), and the provider token is
+  // resolved from .env.local. A truncated read would ship as-is.
+  repairLegacyEnvQuoting(process.cwd());
 
   const envs = projectConfig.environments || {};
   const deployedEnvs = Object.entries(envs)

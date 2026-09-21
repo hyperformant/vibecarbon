@@ -33,11 +33,12 @@ import { isDraft, parseFrontmatter, substituteMdxProps } from './lib/seo-content
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
-// Shell env wins, then .env.local over .env (readEnvFiles layers those two).
+// Shell env wins (a blank export falls through), then .env.local over .env
+// (readEnvFiles layers those two).
 // Production builds receive these as build args (no .env.local in the image);
 // locally this falls back to whatever the project's .env files hold.
 const fileEnv = readEnvFiles(rootDir);
-const getEnvValue = (key: string): string | null => process.env[key] ?? fileEnv[key] ?? null;
+const getEnvValue = (key: string): string | null => process.env[key] || fileEnv[key] || null;
 
 function readIfPresent(relPath: string): string | null {
   try {

@@ -31,7 +31,6 @@ import { spinner } from './lib/cli/progress.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { resolveDisplayName } from './lib/display-name.js';
-import { healLegacyDotenvText } from './lib/dotenv-heal.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
 import {
   adaptDockerfileForPackageManager,
@@ -44,6 +43,7 @@ import {
   detectPackageManager,
   loadEnvVariables,
   loadManifest,
+  repairLegacyEnvQuoting,
   saveManifest,
   setEnvVar,
 } from './lib/project.js';
@@ -182,38 +182,12 @@ export function healShortVaultEncKey(cwd) {
   return true;
 }
 
-/**
- * Re-encode `.env` / `.env.local` lines written with the pre-2026-09-20 POSIX
- * quoting (`'it'\''s'`), which Node, Compose and Vite all truncate. Runs
- * before the env is read so the reconstructed variables see the real value.
- * @param {string} cwd
- * @returns {{ healed: string[], skipped: Array<{ key: string, reason: string }> }}
- */
-export function healLegacyDotenvQuoting(cwd) {
-  const healed = [];
-  const skipped = [];
-  for (const name of ['.env', '.env.local']) {
-    const path = join(cwd, name);
-    if (!existsSync(path)) continue;
-    const before = readFileSync(path, 'utf-8');
-    const result = healLegacyDotenvText(before);
-    if (result.text !== before) writeFileSync(path, result.text);
-    healed.push(...result.healed);
-    skipped.push(...result.skipped);
-  }
-  return { healed, skipped };
-}
-
-function reconstructVariables(cwd) {
+function reconstructVariables(cwd, { dryRun = false } = {}) {
   // Runs BEFORE the env is read below, so the reconstructed variables (and any
-  // template rendered from them) see the healed value rather than the short one.
-  const dotenvHeal = healLegacyDotenvQuoting(cwd);
-  if (dotenvHeal.healed.length > 0) {
-    p.log.info(`Re-encoded legacy-quoted .env value(s): ${dotenvHeal.healed.join(', ')}`);
-  }
-  for (const { key, reason } of dotenvHeal.skipped) {
-    p.log.warn(`${key}: ${reason} — re-enter it with \`vibecarbon configure\``);
-  }
+  // template rendered from them) see the healed value rather than the short
+  // one. Same hook configure/deploy/scale run at entry (project.js); under
+  // `-dry` it reports what it would re-encode and writes nothing.
+  repairLegacyEnvQuoting(cwd, { dryRun });
   healShortVaultEncKey(cwd);
   const env = loadEnvVariables(cwd);
   const manifest = loadManifest(cwd);
@@ -388,7 +362,7 @@ async function main(cliArgs) {
   const s = spinner();
   s.start('Scanning infrastructure files');
 
-  const variables = reconstructVariables(cwd);
+  const variables = reconstructVariables(cwd, { dryRun: args.dryRun });
   const upgradeableFiles = getUpgradeableFiles(TEMPLATE_DIR);
 
   // Classify each file

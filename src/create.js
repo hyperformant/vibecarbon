@@ -601,8 +601,10 @@ async function bootstrap(cliArgs) {
             validate: (value) => {
               const err = validateAdminPassword(value);
               if (err) return err;
-              // Refuse at the prompt what .env cannot hold (src/lib/dotenv.js);
-              // generateEnvLocal would otherwise throw after the scaffold began.
+              // Backstop behind validateAdminPassword, which already rejects
+              // every character the portable .env grammar refuses (quotes,
+              // backslash, `$`, control characters); kept so the prompt and
+              // generateEnvLocal can never disagree about what .env can hold.
               const problem = dotenvValueProblem('ADMIN_PASSWORD', value);
               if (problem) return `ADMIN_PASSWORD ${problem}`;
             },

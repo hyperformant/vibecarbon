@@ -13,6 +13,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -28,6 +29,7 @@ import {
 } from './lib/deploy/replication.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { parseDotenv } from './lib/dotenv.js';
+import { hasLegacyDotenvQuoting } from './lib/dotenv-heal.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
 import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
@@ -684,8 +686,8 @@ function checkGitSync(envName, envConfig) {
  * `.env`/`.env.local` FILES and read by the app from there — they are never
  * in this process's env, so the two passes above cannot see them. This pass
  * reads the files through the codebase's one dotenv parser (`parseDotenv`,
- * via project.js's `loadEnvVariables` for `.env.local`), merging `.env.local`
- * over `.env` — the precedence the app itself sees — and checks shape only
+ * via project.js's `readProjectEnvFiles`), merging `.env.local` over `.env`
+ * — the precedence the app itself sees — and checks shape only
  * (`presence: false`: a feature that simply isn't configured is not a
  * problem). This is the ONLY place a stale stored value surfaces: the
  * configure prompt's Enter-on-existing deliberately keeps the current value
@@ -774,10 +776,41 @@ function computeConfigurationCheck(projectConfig, environments, { env, cwd } = {
     problemByKey.set(problem.split(' ')[0], problem);
   }
 
+  // Pre-2026-09-20 POSIX-quoted lines (`'pa'\''ss'`): every reader above
+  // truncates them, so their shape problems would describe the truncated
+  // read, not the stored value. `status` is read-only (every other command
+  // heals at entry — project.js repairLegacyEnvQuoting), so name the keys
+  // once and point at the explicit repair instead of validating them.
+  const legacyKeys = legacyQuotedKeys(cwd ?? process.cwd());
+  for (const key of legacyKeys) problemByKey.delete(key);
+  if (legacyKeys.length > 0) {
+    problemByKey.set(
+      legacyKeys.join(', '),
+      `${legacyKeys.join(', ')} use legacy quoting — run \`vibecarbon upgrade\``,
+    );
+  }
+
   return {
     problems: [...problemByKey.values()],
     checked: [...new Set([...shapeOnly.checked, ...deployed.checked, ...configureFamily.checked])],
   };
+}
+
+/**
+ * Keys of every `.env` / `.env.local` line still carrying the old `'\''`
+ * quoting, deduped, `.env` first. A raw text read on purpose: the parsed
+ * view is exactly what cannot show the problem.
+ * @param {string} cwd
+ * @returns {string[]}
+ */
+function legacyQuotedKeys(cwd) {
+  const keys = new Set();
+  for (const name of ['.env', '.env.local']) {
+    const path = join(cwd, name);
+    if (!existsSync(path)) continue;
+    for (const key of hasLegacyDotenvQuoting(readFileSync(path, 'utf-8'))) keys.add(key);
+  }
+  return [...keys];
 }
 
 /**

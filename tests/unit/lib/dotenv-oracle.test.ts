@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { parse as dotenvParse } from 'dotenv';
 import { expand } from 'dotenv-expand';
@@ -33,5 +35,17 @@ describe('dotenv oracle: Node, dotenv, dotenv-expand read the writer identically
       const key = k === 'VITE_DOLLAR' ? 'VITE_PUBLIC_URL' : k;
       expect(dotenvValueProblem(key, v), k).not.toBeNull();
     }
+  });
+  it('the template .env.example header states the VITE_* "$" rule the hand-editor needs', () => {
+    // The header tells users to single-quote "$" — exactly what is refused for
+    // VITE_* keys (dotenv-expand expands "$" inside single quotes too), so
+    // the exception has to be stated beside the rule.
+    const header = readFileSync(
+      join(import.meta.dirname, '../../../carbon/.env.example'),
+      'utf-8',
+    ).slice(0, 800);
+    expect(header).toMatch(
+      /Never put \$ in a VITE_\* value: Vite expands it in the browser build\./,
+    );
   });
 });
