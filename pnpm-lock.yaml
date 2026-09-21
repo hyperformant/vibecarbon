@@ -47,7 +47,7 @@ importers:
         version: 3.262.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.54.0
-        version: 1.55.1(typescript@7.0.2)
+        version: 1.56.1(typescript@7.0.2)
       bcryptjs:
         specifier: ^3.0.3
         version: 3.0.3
@@ -794,8 +794,8 @@ packages:
       typescript:
         optional: true
 
-  '@pulumiverse/scaleway@1.55.1':
-    resolution: {integrity: sha512-BTB09BjLk5O5XE7fZWKqN07IJc842isG9cSMxzClKCg5sB6KzUOJzcRHSkcOmFrSIQRb40Q+idxoTSAfpvtPWQ==}
+  '@pulumiverse/scaleway@1.56.1':
+    resolution: {integrity: sha512-SYPOm+wZ7GS/9+MKEaOJ1Qe8U5ReX/SoIsG9+Q4Z8dbXZZ5oxQnWdOyFteymuVeU276ZsHjaIVE4KplPWv2zHA==}
 
   '@rolldown/binding-android-arm-eabi@1.2.8':
     resolution: {integrity: sha512-tN5aztYkKCte4i5SIrrz5yK/HMjEuCqCSCJa418jOV8tZ1cBY3YF2otxB1ktPxzsLA1BeTqwapK0bfjxNvHJVw==}
@@ -3870,7 +3870,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@pulumiverse/scaleway@1.55.1(typescript@7.0.2)':
+  '@pulumiverse/scaleway@1.56.1(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
     transitivePeerDependencies:
