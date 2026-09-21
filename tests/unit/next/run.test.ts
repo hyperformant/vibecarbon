@@ -38,6 +38,9 @@ vi.mock('../../../src/lib/licensing/index.js', () => ({ getLicense }));
 const selectAction = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/lib/cli/select-action.js', () => ({ selectAction }));
 
+const selectEnvironment = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/lib/cli/select-environment.js', () => ({ selectEnvironment }));
+
 import { run } from '../../../src/next.js';
 
 const CANCEL = Symbol.for('cancel');
@@ -60,7 +63,10 @@ beforeEach(() => {
 
 afterEach(() => {
   process.exit = originalExit;
+  // Under vitest stdin has no own isTTY, so there is no descriptor to put
+  // back and the property setTTY defined has to be removed instead.
   if (originalTTY) Object.defineProperty(process.stdin, 'isTTY', originalTTY);
+  else delete (process.stdin as { isTTY?: boolean }).isTTY;
 });
 
 const noProject = { kind: 'no-project', cwd };
@@ -110,6 +116,16 @@ const menuState = projectState({
   localDev: { dockerAvailable: true, running: ['web'] },
   configured: { any: true, features: ['CI/CD'], providers: false },
   environments: [env()],
+});
+
+/** Two deployed environments: an env-scoped action has to ask which one. */
+const twoEnvMenuState = projectState({
+  projectConfig: {
+    environments: { prod: { status: 'deployed' }, staging: { status: 'deployed' } },
+  },
+  localDev: { dockerAvailable: true, running: ['web'] },
+  configured: { any: true, features: ['CI/CD'], providers: false },
+  environments: [env(), env({ name: 'staging' })],
 });
 
 /** Note bodies are coloured the same way help examples are. */
@@ -292,6 +308,21 @@ describe('deployed menu', () => {
 
     await expect(run([])).resolves.toBeUndefined();
     expect(launchCli).toHaveBeenCalledWith(['scale', 'prod'], { cwd });
+  });
+
+  it('asks which environment when more than one is deployed', async () => {
+    detectProjectState.mockResolvedValue(twoEnvMenuState);
+    clack.select.mockResolvedValueOnce('scale').mockResolvedValueOnce('nothing');
+    selectEnvironment.mockResolvedValue({ envName: 'staging' });
+    clack.confirm.mockResolvedValue(true);
+    launchCli.mockResolvedValue({ code: 0, signal: null });
+
+    await expect(run([])).resolves.toBeUndefined();
+    expect(selectEnvironment).toHaveBeenCalledTimes(1);
+    expect(selectEnvironment.mock.calls[0][0]).toEqual({
+      environments: { prod: { status: 'deployed' }, staging: { status: 'deployed' } },
+    });
+    expect(launchCli).toHaveBeenCalledWith(['scale', 'staging'], { cwd });
   });
 
   it('declining the confirm prints the command and returns', async () => {

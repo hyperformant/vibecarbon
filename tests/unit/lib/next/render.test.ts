@@ -172,6 +172,17 @@ describe('stateLines', () => {
     expect(stateLines(state)).toContain('Configured: CI/CD (provider credentials saved)');
   });
 
+  it('reports the provider suffix alone when providers is true and no feature is configured', () => {
+    const state = {
+      kind: 'project' as const,
+      project: { name: 'acme' },
+      localDev: { dockerAvailable: true, running: [] },
+      configured: { any: true, features: [], providers: true },
+      environments: [],
+    };
+    expect(stateLines(state)).toContain('Configured: (provider credentials saved)');
+  });
+
   it('reports a deployed environment with all parts present', () => {
     const state = {
       kind: 'project' as const,
@@ -235,6 +246,50 @@ describe('stateLines', () => {
     };
     expect(stateLines(state, { now: new Date('2026-09-20T18:00:00.000Z') })).toContain(
       'Deployed: prod (compose, fsn1, example.com, deployed 5 days ago)',
+    );
+  });
+
+  it('clamps a deployedAt in the future to today rather than a negative day count', () => {
+    const state = {
+      kind: 'project' as const,
+      project: { name: 'acme' },
+      localDev: { dockerAvailable: true, running: [] },
+      configured: { any: false, features: [], providers: false },
+      environments: [
+        {
+          name: 'prod',
+          status: 'deployed',
+          deployMode: 'compose',
+          region: null,
+          domain: null,
+          deployedAt: '2026-09-23T12:00:00.000Z',
+        },
+      ],
+    };
+    expect(stateLines(state, { now: new Date('2026-09-20T18:00:00.000Z') })).toContain(
+      'Deployed: prod (compose, deployed today)',
+    );
+  });
+
+  it('omits the deployed clause entirely when deployedAt cannot be parsed', () => {
+    const state = {
+      kind: 'project' as const,
+      project: { name: 'acme' },
+      localDev: { dockerAvailable: true, running: [] },
+      configured: { any: false, features: [], providers: false },
+      environments: [
+        {
+          name: 'prod',
+          status: 'deployed',
+          deployMode: 'compose',
+          region: 'fsn1',
+          domain: null,
+          deployedAt: 'not a date',
+        },
+      ],
+    };
+    expect(stateLines(state, { now: new Date('2026-09-20T18:00:00.000Z') })).toContain(
+      'Deployed: prod (compose, fsn1)',
     );
   });
 

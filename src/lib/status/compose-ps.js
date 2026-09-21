@@ -51,7 +51,10 @@ export function composeRunningServices(cwd, { execFile = execFileSync, timeoutMs
 
   const running = entries
     .filter((entry) => entry !== null && typeof entry === 'object' && entry.State === 'running')
-    .map((entry) => entry.Service ?? entry.Name);
+    .map((entry) => entry.Service ?? entry.Name)
+    // A row with neither key would otherwise put undefined in the list, and
+    // the guide counts and prints these.
+    .filter(Boolean);
 
   return { available: true, running };
 }

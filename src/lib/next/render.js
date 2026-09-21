@@ -3,9 +3,9 @@
  * (src/lib/next/state.js) into the lines `vibecarbon ?` prints.
  *
  * Pure formatting: reuses the same `formatExamples` renderer every other
- * command's help text uses, so a "next" example looks identical to a
- * `--help` example (gray `# comment`, cyan command name, trailing blank per
- * group). No clack, no process.exit; src/next.js does the printing.
+ * command's help text uses, so a "next" example looks identical to a `-h`
+ * example (gray `# comment`, cyan command name, trailing blank per group).
+ * No clack, no process.exit; src/next.js does the printing.
  */
 
 import { formatExamples } from '../cli/help.js';
@@ -45,18 +45,23 @@ function configuredLine({ any, features, providers }) {
 
 /**
  * 'today' / 'yesterday' / '<n> days ago', comparing calendar days so time-of-
- * day differences don't shift the bucket.
+ * day differences don't shift the bucket. A timestamp in the future (clock
+ * skew, a hand-edited manifest) clamps to 'today' rather than reading
+ * '-2 days ago', and an unparseable timestamp returns null so the caller can
+ * drop the clause instead of printing 'NaN days ago'.
  *
  * @param {string} deployedAt
  * @param {Date} now
- * @returns {string}
+ * @returns {string|null}
  */
 function relativeDate(deployedAt, now) {
+  const deployed = new Date(deployedAt);
+  if (Number.isNaN(deployed.getTime())) return null;
   const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const diffDays = Math.round(
-    (startOfDay(now).getTime() - startOfDay(new Date(deployedAt)).getTime()) / 86_400_000,
+    (startOfDay(now).getTime() - startOfDay(deployed).getTime()) / 86_400_000,
   );
-  if (diffDays === 0) return 'today';
+  if (diffDays <= 0) return 'today';
   if (diffDays === 1) return 'yesterday';
   return `${diffDays} days ago`;
 }
@@ -69,7 +74,10 @@ function relativeDate(deployedAt, now) {
  */
 function deployedLine(env, now) {
   const parts = [env.deployMode, env.region, env.domain].filter((part) => part !== null);
-  if (env.deployedAt) parts.push(`deployed ${relativeDate(env.deployedAt, now)}`);
+  if (env.deployedAt) {
+    const relative = relativeDate(env.deployedAt, now);
+    if (relative) parts.push(`deployed ${relative}`);
+  }
   return parts.length > 0 ? `Deployed: ${env.name} (${parts.join(', ')})` : `Deployed: ${env.name}`;
 }
 
@@ -109,6 +117,10 @@ export function stateLines(state, { now = new Date() } = {}) {
 /**
  * why, blank line, then formatExamples([{ description: step.title, commands:
  * [step.display] }]) with the trailing blank trimmed.
+ *
+ * Caller invariant: never called for the menu step, whose `display` is null.
+ * src/next.js branches on `step.id === 'menu'` first, so every step reaching
+ * here has a command.
  *
  * @param {import('./steps.js').Step} step
  * @returns {string[]}

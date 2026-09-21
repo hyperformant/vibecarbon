@@ -244,13 +244,9 @@ describe('deployedMenu', () => {
 });
 
 describe('command census', () => {
-  // Task 5 wires `next` into KNOWN_COMMANDS; until then it is expected to be
-  // missing, so it is the one name this census skips.
   function assertKnown(command: string[] | null) {
     if (!command) return;
-    const name = command[0];
-    if (name === 'next') return;
-    expect(KNOWN_COMMANDS).toContain(name);
+    expect(KNOWN_COMMANDS).toContain(command[0]);
   }
 
   it('every nextStep command[0] across all states is a known CLI command', () => {

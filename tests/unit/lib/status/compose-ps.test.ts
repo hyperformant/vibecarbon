@@ -107,6 +107,16 @@ describe('composeRunningServices', () => {
     expect(result).toEqual({ available: false, running: [] });
   });
 
+  it('drops a running row that has neither Service nor Name', () => {
+    const stdout = [
+      JSON.stringify({ State: 'running' }),
+      JSON.stringify({ Service: 'web', State: 'running' }),
+    ].join('\n');
+    const { fn } = fakeExecFile(stdout);
+    const result = composeRunningServices('/proj', { execFile: fn });
+    expect(result).toEqual({ available: true, running: ['web'] });
+  });
+
   it('skips a null NDJSON line and keeps the valid running service', () => {
     const stdout = ['null', JSON.stringify({ Service: 'web', State: 'running' })].join('\n');
     const { fn } = fakeExecFile(stdout);

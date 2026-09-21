@@ -241,16 +241,24 @@ export async function run(args) {
       return;
     }
 
-    if (!getLicense({ projectDir: cwd }).active) {
-      p.log.info(c.dim('Kubernetes and HA modes need a license: vibecarbon activate <key>'));
+    if (step.id === 'deploy') {
+      if (!getLicense({ projectDir: cwd }).active) {
+        p.log.info(c.dim('Kubernetes and HA modes need a license: vibecarbon activate <key>'));
+      }
+      const ok = await p.confirm({ message: 'Deploy now?' });
+      if (p.isCancel(ok)) exitCancelled();
+      if (!ok) {
+        p.outro("When you're ready: vibecarbon deploy");
+        return;
+      }
+      // A finished deploy lands on the menu on the next pass.
+      exitFromChild(await launchCli(['deploy'], { cwd }));
+      continue;
     }
-    const ok = await p.confirm({ message: 'Deploy now?' });
-    if (p.isCancel(ok)) exitCancelled();
-    if (!ok) {
-      p.outro("When you're ready: vibecarbon deploy");
-      return;
-    }
-    // A finished deploy lands on the menu on the next pass.
-    exitFromChild(await launchCli(['deploy'], { cwd }));
+
+    // Every step id nextStep can return is handled above. A new one that
+    // slips past the branches must be loud here rather than silently
+    // falling through to deploy.
+    throw new Error(`unhandled step: ${step.id}`);
   }
 }

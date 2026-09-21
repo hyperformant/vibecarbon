@@ -98,7 +98,7 @@ npm install -g vibecarbon
 # 2. Create a new project
 vibecarbon create my-app
 
-# Lost at any point? Run `vibecarbon ?` (`vibecarbon next` on zsh).
+# Lost at any point? Run vibecarbon ? (vibecarbon next on zsh)
 
 # 3. Start local development
 cd my-app

@@ -15,6 +15,12 @@
  * loadable manifest AND docker-compose.yml, because loadProjectConfig falls
  * back to package.json alone (so the Vibecarbon source repo itself, and any
  * plain Node project, would otherwise look like a project).
+ *
+ * One caveat on the injected `cwd`: configure.js's `globalization` feature
+ * reads `process.cwd()` in its `isConfigured`, not the directory passed
+ * here, so the configured-feature list is fully correct only when `cwd ===
+ * process.cwd()`. That always holds for the guide, which passes its own
+ * cwd; tests that point at a temp directory inject `features` instead.
  */
 
 import { hasDockerCompose, loadProjectConfig } from '../config.js';

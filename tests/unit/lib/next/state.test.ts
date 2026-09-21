@@ -186,6 +186,26 @@ describe('detectProjectState', () => {
     ]);
   });
 
+  it('lists two environments in manifest insertion order', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'acme',
+        environments: {
+          staging: { status: 'deployed', deployMode: 'compose' },
+          prod: { status: 'deployed', deployMode: 'k8s' },
+        },
+      }),
+    );
+    writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
+    const result = await detectProjectState(dir, baseDeps());
+    const names = (result as { environments: Array<{ name: string }> }).environments.map(
+      (e) => e.name,
+    );
+    expect(names).toEqual(['staging', 'prod']);
+  });
+
   it('returns a deploying status as-is, leaving step decisions to the caller', async () => {
     dir = mkdtempSync(join(tmpdir(), 'next-state-'));
     writeFileSync(

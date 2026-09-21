@@ -102,7 +102,7 @@ export function nextStep(state, { skipConfigure = false } = {}) {
 
   let why =
     'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license.';
-  const resuming = state.environments.find((env) => env.status === 'deploying');
+  const resuming = (state.environments ?? []).find((env) => env.status === 'deploying');
   if (resuming) {
     why += ` A previous deploy of ${resuming.name} did not finish; running deploy again resumes it.`;
   }
