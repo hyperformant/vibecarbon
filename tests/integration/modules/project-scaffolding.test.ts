@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { copyTemplate, generateEnvLocal, generateReadme } from '../../../src/create.js';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 
 const TEMPLATE_DIR = resolve(import.meta.dirname, '../../../carbon');
@@ -66,13 +67,20 @@ describe('Project Scaffolding Integration', () => {
 
       const content = generateEnvLocal('test-project', variables);
 
-      expect(content).toContain('SUPABASE_URL="http://localhost:8000"');
-      expect(content).toContain('SUPABASE_ANON_KEY="test-anon-key"');
-      expect(content).toContain('SUPABASE_SERVICE_ROLE_KEY="test-service-role-key"');
-      expect(content).toContain('JWT_SECRET="test-jwt-secret"');
-      expect(content).toContain('DB_PASSWORD="test-db-password"');
-      expect(content).toContain('ADMIN_EMAIL="test@example.com"');
-      expect(content).toContain("ADMIN_PASSWORD='test-admin-password'");
+      // Every value line is emitted by formatDotenvLine: these all fit the
+      // bare alphabet, so no quotes at all.
+      expect(content).toContain('\nSUPABASE_URL=http://localhost:8000\n');
+      expect(content).toContain('\nSUPABASE_ANON_KEY=test-anon-key\n');
+      expect(content).toContain('\nSUPABASE_SERVICE_ROLE_KEY=test-service-role-key\n');
+      expect(content).toContain('\nJWT_SECRET=test-jwt-secret\n');
+      expect(content).toContain('\nDB_PASSWORD=test-db-password\n');
+      expect(content).toContain('\nADMIN_EMAIL=test@example.com\n');
+      expect(content).toContain('\nADMIN_PASSWORD=test-admin-password\n');
+      expect(parseDotenv(content)).toMatchObject({
+        SUPABASE_URL: 'http://localhost:8000',
+        SUPABASE_ANON_KEY: 'test-anon-key',
+        ADMIN_PASSWORD: 'test-admin-password',
+      });
     });
   });
 
