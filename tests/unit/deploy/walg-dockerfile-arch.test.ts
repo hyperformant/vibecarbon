@@ -33,7 +33,7 @@ const ROOT = process.cwd();
 
 const WALG_VERSION = 'v3.0.9';
 const WALG_IMAGE = `ghcr.io/hyperformant/wal-g:${WALG_VERSION.slice(1)}`;
-const PG_BASE = 'supabase/postgres:17.6.1.171';
+const PG_BASE = 'supabase/postgres:17.6.1.172';
 
 const WALG_BUILDER = join('docker', 'wal-g', 'Dockerfile');
 const WALG_CONSUMERS = [
@@ -133,7 +133,7 @@ describe.each(WALG_CONSUMERS)('%s takes wal-g from the published static image', 
 
 describe('version lockstep across the delivery chain', () => {
   it('src/lib/images.js DB_IMAGE_TAG carries the same base version and wal-g version', () => {
-    // Tag scheme: <PG_VERSION>-walg<WALG_VERSION> — e.g. 17.6.1.171-walg3.0.9.
+    // Tag scheme: <PG_VERSION>-walg<WALG_VERSION> — e.g. 17.6.1.172-walg3.0.9.
     // k8s pulls ghcr.io/hyperformant/postgres:<DB_IMAGE_TAG>, built from
     // docker/postgres-walg/Dockerfile, so the tag must describe that image.
     const pgVersion = PG_BASE.split(':')[1];
