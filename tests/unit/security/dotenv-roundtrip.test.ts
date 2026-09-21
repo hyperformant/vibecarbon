@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseDotenv, serializeDotenv } from '../../../src/lib/project.js';
+import { DotenvValueError, formatDotenvLine, parseDotenv } from '../../../src/lib/dotenv.js';
+import { serializeDotenv } from '../../../src/lib/project.js';
 
 describe('C-8 / H-14: dotenv round-trip preserves all characters', () => {
   it.each([
@@ -12,11 +13,26 @@ describe('C-8 / H-14: dotenv round-trip preserves all characters', () => {
     ['WITH_BACKSLASH', 'a\\b'],
     ['WITH_BACKTICK', 'back`tick'],
     ['WITH_NEWLINE', 'line1\nline2'],
-    ['MIXED_PAYLOAD', `shell"'\`$\\ends here`],
+    ['DOUBLE_AND_DOLLAR', `say "hi" for $5`],
   ])('round-trips %s = %j', (key, value) => {
-    const text = serializeDotenv({ [key]: value });
+    const text = `${formatDotenvLine(key, value)}\n`;
     const parsed = parseDotenv(text);
     expect(parsed[key]).toBe(value);
+  });
+
+  // A single quote together with any of `"` `\` `$` has no portable form
+  // (2026-09-20 spec): the writer refuses, naming the key and never the value.
+  it('refuses MIXED_PAYLOAD instead of approximating it', () => {
+    const value = `shell"'\`$\\ends here`;
+    let caught: unknown;
+    try {
+      serializeDotenv({ MIXED_PAYLOAD: value });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(DotenvValueError);
+    expect((caught as Error).message).toContain('MIXED_PAYLOAD');
+    expect((caught as Error).message).not.toContain('ends here');
   });
 
   it('parses multiple keys in one file', () => {
@@ -25,9 +41,9 @@ describe('C-8 / H-14: dotenv round-trip preserves all characters', () => {
     expect(parsed).toEqual({ A: '1', B: '2', C: 'three' });
   });
 
-  it('accepts legacy double-quoted input (backwards compat)', () => {
-    const legacy = 'FOO="bar"\nBAZ="qux"\n';
-    expect(parseDotenv(legacy)).toEqual({ FOO: 'bar', BAZ: 'qux' });
+  it('reads the three forms the writer emits: bare, "double", \'single\'', () => {
+    const text = 'BARE=bar\nDOUBLE="two words"\nSINGLE=\'lit $X\'\n';
+    expect(parseDotenv(text)).toEqual({ BARE: 'bar', DOUBLE: 'two words', SINGLE: 'lit $X' });
   });
 
   it('ignores comment lines and blank lines', () => {
@@ -45,7 +61,7 @@ describe('C-8 / H-14: dotenv round-trip preserves all characters', () => {
     ['QUOTE_END', "ends in quote'"],
     ['NEWLINE_AND_QUOTES', "line1\n'line2'\nline3"],
   ])('round-trips tricky %s', (key, value) => {
-    const text = serializeDotenv({ [key]: value });
+    const text = `${formatDotenvLine(key, value)}\n`;
     const parsed = parseDotenv(text);
     expect(parsed[key]).toBe(value);
   });

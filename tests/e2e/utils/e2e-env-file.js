@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { parseDotenv } from '../../../src/lib/project.js';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 
 /**
  * Load the operator's e2e token file (`tests/.env.e2e`, gitignored — see

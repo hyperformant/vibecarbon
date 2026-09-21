@@ -118,6 +118,8 @@
     "autocannon": "^8.0.0",
     "better-sqlite3": "^13.0.2",
     "conventional-changelog-conventionalcommits": "^10.2.0",
+    "dotenv": "^18.0.1",
+    "dotenv-expand": "^1000.0.0",
     "js-yaml": "^5.4.1",
     "playwright-core": "^1.61.1",
     "protobufjs": "^8.8.0",

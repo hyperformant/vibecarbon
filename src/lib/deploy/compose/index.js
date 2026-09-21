@@ -14,10 +14,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
+import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOpts, SSH_TUNNEL_NO_MUX_OPTS } from '../../host-keys.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { pollUntil } from '../../retry.js';
-import { parseDotenv, shEscape } from '../../shell.js';
+import { shEscape } from '../../shell.js';
 import {
   isDnsNotSettledSshCommandError,
   isTransientSshCommandError,
@@ -1489,11 +1490,11 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
  * Extract the admin credentials a deploy needs to provision the super-admin
  * out of a project `.env` file's text.
  *
- * `create` writes these via `escapeDotenv` (ADMIN_PASSWORD is POSIX
- * single-quoted) and double-quotes for the rest, so the on-disk shapes are a
- * mix of `'…'` and `"…"`. Decoding MUST go through `parseDotenv`/`unescapeDotenv`
- * — the inverse of `escapeDotenv` — or single-quote wrappers leak into the
- * value and GoTrue provisions a password the operator can never type.
+ * `create` writes these with `formatDotenvLine` (src/lib/dotenv.js), so the
+ * on-disk shape is whichever of bare / `"…"` / `'…'` the portable grammar
+ * picked for each value. Decoding MUST go through `parseDotenv` — the reader
+ * that grammar targets — or quote wrappers leak into the value and GoTrue
+ * provisions a password the operator can never type.
  *
  * @param {string} envContent
  * @returns {{adminEmail?: string, adminPassword?: string, serviceRoleKey?: string}}

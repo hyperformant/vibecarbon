@@ -43,6 +43,7 @@ import {
   detectPackageManager,
   loadEnvVariables,
   loadManifest,
+  repairLegacyEnvQuoting,
   saveManifest,
   setEnvVar,
 } from './lib/project.js';
@@ -181,9 +182,12 @@ export function healShortVaultEncKey(cwd) {
   return true;
 }
 
-function reconstructVariables(cwd) {
+function reconstructVariables(cwd, { dryRun = false } = {}) {
   // Runs BEFORE the env is read below, so the reconstructed variables (and any
-  // template rendered from them) see the healed value rather than the short one.
+  // template rendered from them) see the healed value rather than the short
+  // one. Same hook configure/deploy/scale run at entry (project.js); under
+  // `-dry` it reports what it would re-encode and writes nothing.
+  repairLegacyEnvQuoting(cwd, { dryRun });
   healShortVaultEncKey(cwd);
   const env = loadEnvVariables(cwd);
   const manifest = loadManifest(cwd);
@@ -358,7 +362,7 @@ async function main(cliArgs) {
   const s = spinner();
   s.start('Scanning infrastructure files');
 
-  const variables = reconstructVariables(cwd);
+  const variables = reconstructVariables(cwd, { dryRun: args.dryRun });
   const upgradeableFiles = getUpgradeableFiles(TEMPLATE_DIR);
 
   // Classify each file

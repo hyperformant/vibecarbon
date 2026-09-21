@@ -94,8 +94,11 @@ describe('production build-arg parity across generators', () => {
       ['generate-sitemap.ts', sitemapScript],
       ['generate-rss.ts', rssScript],
     ] as const) {
-      expect(src, `${name} must read process.env.VITE_PUBLIC_URL`).toContain(
-        'process.env.VITE_PUBLIC_URL',
+      // Each generator reads it via the shared layered helper (shell env,
+      // which is where a Docker build arg lands, wins over the .env files)
+      // rather than a direct process.env.VITE_PUBLIC_URL access.
+      expect(src, `${name} must read VITE_PUBLIC_URL via getEnvValue`).toContain(
+        "getEnvValue('VITE_PUBLIC_URL')",
       );
     }
   });

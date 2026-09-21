@@ -38,6 +38,7 @@ import {
 } from './lib/config-registry.js';
 import { promptProviders } from './lib/configure-providers.js';
 import { DNS_PROVIDERS } from './lib/dns-provider.js';
+import { dotenvValueProblem } from './lib/dotenv.js';
 import { envSummaryLines } from './lib/env-summary.js';
 import {
   addLocale,
@@ -52,7 +53,12 @@ import {
   readOperatorVar,
   validateOperatorValue,
 } from './lib/operator-env.js';
-import { buildGitAddArgv, loadEnvVariables, setEnvVar } from './lib/project.js';
+import {
+  buildGitAddArgv,
+  loadEnvVariables,
+  repairLegacyEnvQuoting,
+  setEnvVar,
+} from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
@@ -164,6 +170,10 @@ export async function promptText(message, currentValue, options = {}) {
         // the "surrounding quotes?" / "trailing newline?" hint can fire when
         // the cleaned value is still wrong (M10).
         const { value: normalized } = normalizeOperatorValue(value, options.entry);
+        // Refuse here what no portable .env form can hold (src/lib/dotenv.js);
+        // setEnvVar would throw the same reason after every other prompt ran.
+        const problem = dotenvValueProblem(options.entry.key, normalized);
+        if (problem) return `${options.entry.key} ${problem}`;
         return validateOperatorValue(normalized, options.entry, { raw: value }) ?? undefined;
       }
       return options.validate?.(value);
@@ -190,6 +200,8 @@ export async function promptSecret(message, currentValue, options = {}) {
       if (options.entry) {
         // Same raw-threading as promptText above (M10).
         const { value: normalized } = normalizeOperatorValue(v, options.entry);
+        const problem = dotenvValueProblem(options.entry.key, normalized);
+        if (problem) return `${options.entry.key} ${problem}`;
         return validateOperatorValue(normalized, options.entry, { raw: v }) ?? undefined;
       }
       if (!v) return 'This field is required';
@@ -1327,6 +1339,11 @@ function resolveProvider(featureValue, providerArg) {
  * just falls back to generic placeholders.
  */
 function loadFeatureContext(cwd) {
+  // Heal pre-2026-09-20 POSIX-quoted lines BEFORE the read: every prompt's
+  // "press Enter to keep current" hands the value read here straight back to
+  // setEnvVar, so a truncated read would be written over the recoverable
+  // line and the `'` half of the secret lost (final review H1).
+  repairLegacyEnvQuoting(cwd);
   const env = loadEnvVariables(cwd);
   let projectConfig = null;
   try {

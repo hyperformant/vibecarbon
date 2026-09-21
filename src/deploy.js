@@ -37,7 +37,7 @@ import { withDeployLog } from './lib/deploy-logger.js';
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { resolveEnvSeed } from './lib/env-identity.js';
 import { ensureLockfile } from './lib/package-manager.js';
-import { buildGitAddArgv, detectPackageManager } from './lib/project.js';
+import { buildGitAddArgv, detectPackageManager, repairLegacyEnvQuoting } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { HetznerS3Provider, sanitizeBucketName } from './lib/providers/hetzner-s3.js';
 import { getProvider, getProviderClass, listProviders } from './lib/providers/index.js';
@@ -253,6 +253,13 @@ async function main(values, positional) {
   // loud warning naming the keys — a key can legitimately be local-first
   // mid-setup (vibecarbon.com 2026-08-22: STRIPE_/SMTP_ shipped empty).
   {
+    // 0d-0. Heal pre-2026-09-20 POSIX-quoted lines (`'it'\''s'`, which every
+    // reader truncates to `it`) BEFORE this command's first env read. Every
+    // read below — this preflight, Gate 1's operatorCheckEnvs, the
+    // orchestrator's .env bundle baseline and the k8s/gitops Secret loaders
+    // — would otherwise act on the truncated value, and for k8s that would
+    // ship a wrong Secret where the previous CLI shipped the right one.
+    repairLegacyEnvQuoting(process.cwd());
     const { findEnvDrift, findMissingRequiredEnv } = await import('./lib/project.js');
     // 0d-i. HARD STOP for keys the compose stack refuses to start without
     // (`${KEY:?}` in docker-compose.prod.yml — JWT_SECRET, POSTGRES_PASSWORD,

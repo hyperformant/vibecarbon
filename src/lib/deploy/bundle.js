@@ -8,7 +8,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
-import { escapeDotenv } from '../shell.js';
+import { formatDotenvLine } from '../dotenv.js';
 import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
 import { registryEnsureShell } from './compose/registry-config.js';
 
@@ -362,20 +362,20 @@ export function renderBundle(projectName, options = {}) {
   // an in-place REWRITER, not a reader — every line envOverrides does not
   // touch (comments, blanks, key order) ships verbatim, which a
   // parse-then-serialize cannot guarantee, and no value is read out of the
-  // file here. Allow-listed by exact line in
-  // tests/unit/lib/dotenv-parsers-parity.test.ts's census.
+  // file here. Allow-listed by exact path in
+  // tests/unit/lib/dotenv-dialect-census.test.ts.
   const lines = envContent.split('\n');
   const seen = new Set();
   const merged = lines.map((line) => {
     const m = line.match(/^([A-Z_][A-Z0-9_]*)=/);
     if (m && envOverrides[m[1]] !== undefined) {
       seen.add(m[1]);
-      return `${m[1]}=${escapeDotenv(envOverrides[m[1]])}`;
+      return formatDotenvLine(m[1], envOverrides[m[1]]);
     }
     return line;
   });
   for (const [k, v] of Object.entries(envOverrides)) {
-    if (!seen.has(k)) merged.push(`${k}=${escapeDotenv(v)}`);
+    if (!seen.has(k)) merged.push(formatDotenvLine(k, v));
   }
   writeFileSync(join(stageDir, '.env'), merged.join('\n'));
 

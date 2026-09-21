@@ -2,6 +2,7 @@ import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 // Shared scrub for test-spawned git (GIT_DIR hook-leak class — see the
 // module doc in _shared/git-env.ts; this file's local copy converged there
 // after the 2026-07-30 incident showed a second hand-rolled copy drifting).
@@ -201,8 +202,9 @@ describe('create-vibecarbon E2E', () => {
 
     it('records the display name in .env.local for upgrade reconstruction', () => {
       const envLocal = readFileSync(join(projectDir(), '.env.local'), 'utf-8');
-      expect(envLocal).toMatch(/^PROJECT_DISPLAY_NAME='Test E2e Project'$/m);
-      expect(envLocal).toMatch(/^SMTP_SENDER_NAME='Test E2e Project'$/m);
+      // Spaces put the display name in the grammar's double-quoted form.
+      expect(envLocal).toMatch(/^PROJECT_DISPLAY_NAME="Test E2e Project"$/m);
+      expect(envLocal).toMatch(/^SMTP_SENDER_NAME="Test E2e Project"$/m);
     });
 
     it('links the mobile icon set from index.html', () => {
@@ -613,20 +615,22 @@ describe('create-vibecarbon E2E', () => {
 
       const envLocal = readFileSync(join(tempDir, secretsProject, '.env.local'), 'utf-8');
 
-      // All required secrets should be present and non-empty.
-      // User-supplied secrets (ADMIN_PASSWORD, REPL_PASSWORD) are POSIX-single-quoted
-      // by escapeDotenv so hostile characters round-trip safely; machine-generated
-      // secrets stay double-quoted — match either.
-      expect(envLocal).toMatch(/SUPABASE_ANON_KEY="[^"]+"/);
-      expect(envLocal).toMatch(/SUPABASE_SERVICE_ROLE_KEY="[^"]+"/);
-      expect(envLocal).toMatch(/JWT_SECRET="[^"]+"/);
-      expect(envLocal).toMatch(/DB_PASSWORD="[^"]+"/);
-      expect(envLocal).toMatch(/ADMIN_PASSWORD=(?:"[^"]+"|'[^']+')/);
+      // All required secrets should be present and non-empty. Every line goes
+      // through formatDotenvLine (src/lib/dotenv.js): machine-generated secrets
+      // are base64/base64url/JWT and the test password is alphanumeric, all in
+      // the bare alphabet, so each is written unquoted.
+      const BARE = '[A-Za-z0-9_./:@+=,%-]+';
+      expect(envLocal).toMatch(new RegExp(`^SUPABASE_ANON_KEY=${BARE}$`, 'm'));
+      expect(envLocal).toMatch(new RegExp(`^SUPABASE_SERVICE_ROLE_KEY=${BARE}$`, 'm'));
+      expect(envLocal).toMatch(new RegExp(`^JWT_SECRET=${BARE}$`, 'm'));
+      expect(envLocal).toMatch(new RegExp(`^DB_PASSWORD=${BARE}$`, 'm'));
+      expect(envLocal).toMatch(/^ADMIN_PASSWORD=testpass123$/m);
 
-      // Secrets should be unique (not placeholders)
-      const anonKeyMatch = envLocal.match(/SUPABASE_ANON_KEY="([^"]+)"/);
-      const serviceKeyMatch = envLocal.match(/SUPABASE_SERVICE_ROLE_KEY="([^"]+)"/);
-      expect(anonKeyMatch?.[1]).not.toBe(serviceKeyMatch?.[1]);
+      // Secrets should be unique (not placeholders). Values are read back
+      // through parseDotenv, the codebase's one dotenv reader.
+      const env = parseDotenv(envLocal);
+      expect(env.SUPABASE_ANON_KEY).toBeTruthy();
+      expect(env.SUPABASE_ANON_KEY).not.toBe(env.SUPABASE_SERVICE_ROLE_KEY);
     }, 60000);
 
     it('-display-name overrides the derived display name', () => {
@@ -643,9 +647,9 @@ describe('create-vibecarbon E2E', () => {
       const html = readFileSync(join(tempDir, displayProject, 'src/client/index.html'), 'utf-8');
       expect(html).toContain('<title>Acme Cloud</title>');
       const envLocal = readFileSync(join(tempDir, displayProject, '.env.local'), 'utf-8');
-      expect(envLocal).toMatch(/^PROJECT_DISPLAY_NAME='Acme Cloud'$/m);
-      // Machine slug is untouched by the display name
-      expect(envLocal).toMatch(/^PROJECT_NAME="test-e2e-display"$/m);
+      expect(envLocal).toMatch(/^PROJECT_DISPLAY_NAME="Acme Cloud"$/m);
+      // Machine slug is untouched by the display name (slug alphabet → bare)
+      expect(envLocal).toMatch(/^PROJECT_NAME=test-e2e-display$/m);
     }, 60000);
   });
 });

@@ -2,6 +2,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { parseDotenv } from '../../../src/lib/dotenv.js';
 import {
   arePortsAvailable,
   cleanupDocker,
@@ -11,29 +12,6 @@ import {
 } from '../../_shared/docker-utils.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
 import { testConfig } from '../../config.js';
-
-// Parse .env file into an object, stripping quotes from values
-function loadEnvFile(filePath: string): Record<string, string> {
-  const content = readFileSync(filePath, 'utf-8');
-  const env: Record<string, string> = {};
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed && !trimmed.startsWith('#')) {
-      const [key, ...valueParts] = trimmed.split('=');
-      if (key) {
-        let value = valueParts.join('=');
-        if (
-          (value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))
-        ) {
-          value = value.slice(1, -1);
-        }
-        env[key] = value;
-      }
-    }
-  }
-  return env;
-}
 
 // Heavyweight: needs a clean docker host. Skipped by default; run
 // explicitly via `DOCKER_INTEGRATION=true pnpm test:docker`.
@@ -82,7 +60,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     );
 
     // Load the generated .env.local
-    projectEnv = loadEnvFile(join(projectDir(), '.env.local'));
+    projectEnv = parseDotenv(readFileSync(join(projectDir(), '.env.local'), 'utf-8'));
     projectEnv.PROJECT_NAME = projectName;
     projectEnv.POSTGRES_PASSWORD = projectEnv.DB_PASSWORD || 'postgres';
 

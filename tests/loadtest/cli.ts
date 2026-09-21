@@ -21,6 +21,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cancel, confirm, intro, isCancel, log, multiselect, outro, spinner } from '@clack/prompts';
+import { readEnvFiles } from '../../src/lib/dotenv.js';
 import { compare } from './compare.js';
 
 // ── Paths ────────────────────────────────────────────────────────────────────
@@ -85,21 +86,10 @@ function loadVibecarbonConfig(): VibecarbonConfig | null {
   }
 }
 
-function parseEnvFile(filePath: string): Record<string, string> {
-  if (!existsSync(filePath)) return {};
-  const out: Record<string, string> = {};
-  for (const line of readFileSync(filePath, 'utf-8').split('\n')) {
-    // Match KEY="value" or KEY=value
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=["']?([^"'\n]*)["']?/);
-    if (m) out[m[1]] = m[2];
-  }
-  return out;
-}
-
 function loadProjectEnv(): Record<string, string> {
-  const base = parseEnvFile(join(projectDir, '.env'));
-  const local = parseEnvFile(join(projectDir, '.env.local'));
-  return { ...base, ...local }; // .env.local wins
+  // .env then .env.local layered, local wins — same semantics the CLI itself
+  // uses for a project directory.
+  return readEnvFiles(projectDir);
 }
 
 // ── Token fetching ────────────────────────────────────────────────────────────

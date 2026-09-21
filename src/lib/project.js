@@ -6,9 +6,11 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { writeSecretFile } from './command.js';
 import { operatorSecretKeys } from './config-registry.js';
-import { escapeDotenv, parseDotenv } from './shell.js';
+import { formatDotenvLine, parseDotenv, readEnvFiles } from './dotenv.js';
+import { healLegacyDotenvQuoting, healLegacyDotenvText } from './dotenv-heal.js';
 
 // ============================================================================
 // PACKAGE MANAGER DETECTION
@@ -127,19 +129,13 @@ export function ensureProjectId(projectConfig, cwd = process.cwd()) {
 // ENVIRONMENT FILE MANAGEMENT
 // ============================================================================
 
-// Single dotenv parser for the whole codebase — lives beside escapeDotenv/
-// unescapeDotenv in shell.js (state machine: multi-line single-quoted,
-// legacy double-quoted, bare values). Re-exported here so env-file callers
-// can import it from project.js; the parser itself lives in shell.js.
-export { parseDotenv };
+// The one dotenv reader for the whole codebase lives in dotenv.js (Node's
+// util.parseEnv); import parseDotenv from there, not from here.
 
-/**
- * Serialize a key-value object into dotenv format using escapeDotenv
- * (single-quoted, safe for dotenv-package parsers).
- */
+/** Serialize a key-value object into dotenv lines in the portable grammar. */
 export function serializeDotenv(obj) {
   return `${Object.entries(obj)
-    .map(([k, v]) => `${k}=${escapeDotenv(v)}`)
+    .map(([k, v]) => formatDotenvLine(k, v))
     .join('\n')}\n`;
 }
 
@@ -157,9 +153,8 @@ export function loadEnvVariables(cwd = process.cwd()) {
 
 /**
  * The project's `.env` with `.env.local` layered over it — the same
- * precedence the running app sees — as a plain key/value bag. Both files go
- * through the one dotenv parser (`parseDotenv`; `loadEnvVariables` is that
- * parser applied to `.env.local`) — this is a read of the SAME files
+ * precedence the running app sees — as a plain key/value bag. This is
+ * `readEnvFiles` from dotenv.js (the one dotenv reader) over the SAME files
  * `findEnvDrift` below compares, not a new parser. A missing file
  * contributes nothing; a line the parser can't read is skipped (parseDotenv
  * never throws).
@@ -175,9 +170,7 @@ export function loadEnvVariables(cwd = process.cwd()) {
  * @returns {Record<string, string>}
  */
 export function readProjectEnvFiles(cwd = process.cwd()) {
-  const envPath = join(cwd, '.env');
-  const base = existsSync(envPath) ? parseDotenv(readFileSync(envPath, 'utf-8')) : {};
-  return { ...base, ...loadEnvVariables(cwd) };
+  return readEnvFiles(cwd);
 }
 
 /**
@@ -294,7 +287,7 @@ export function appendToEnv(sectionName, envVars, cwd = process.cwd()) {
     const sectionHeader = `# ${sectionName.toUpperCase()}`;
     if (content.includes(sectionHeader)) continue;
     const body = Object.entries(envVars)
-      .map(([k, v]) => `${k}=${escapeDotenv(v)}`)
+      .map(([k, v]) => formatDotenvLine(k, v))
       .join('\n');
     const newSection = `\n\n# =============================================================================\n# ${sectionName.toUpperCase()}\n# =============================================================================\n\n${body}\n`;
     writeFileSync(envPath, content.trimEnd() + newSection);
@@ -322,6 +315,8 @@ export function appendToEnv(sectionName, envVars, cwd = process.cwd()) {
  *   originate.
  */
 export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false } = {}) {
+  // Encode first: an unrepresentable value must not touch either file.
+  const replacement = formatDotenvLine(key, value);
   const envFiles = localOnly ? ['.env.local'] : ['.env.local', '.env'];
   for (const filename of envFiles) {
     const envPath = join(cwd, filename);
@@ -332,16 +327,65 @@ export function setEnvVar(key, value, cwd = process.cwd(), { localOnly = false }
         continue;
       }
     }
-    const content = readFileSync(envPath, 'utf-8');
-    // Match either legacy KEY="..." or new KEY='...' forms at line start.
-    const regex = new RegExp(`^${key}=(?:"[^"]*"|'(?:[^']|'\\\\'')*')`, 'm');
-    const replacement = `${key}=${escapeDotenv(value)}`;
+    // Backstop repair of pre-2026-09-20 POSIX-quoted lines: the commands
+    // that read these files run repairLegacyEnvQuoting at entry (before the
+    // value is read, which is what makes a keep-current write correct); this
+    // keeps a direct setEnvVar caller from leaving a truncating line beside
+    // the one it just wrote.
+    const content = healLegacyDotenvText(readFileSync(envPath, 'utf-8')).text;
+    // In-place REWRITER, deliberately not parse-then-serialize: only the one
+    // `KEY=` line changes, everything else (comments, blanks, order) stays
+    // verbatim, and no value is read out of the file. Allow-listed by exact
+    // path in tests/unit/lib/dotenv-dialect-census.test.ts.
+    const regex = new RegExp(`^${key}=.*$`, 'm');
     if (regex.test(content)) {
-      writeFileSync(envPath, content.replace(regex, replacement));
+      writeFileSync(
+        envPath,
+        content.replace(regex, () => replacement),
+      );
     } else {
       writeFileSync(envPath, `${content.trimEnd()}\n${replacement}\n`);
     }
   }
+}
+
+/**
+ * Re-encode `.env` / `.env.local` lines written with the pre-2026-09-20 POSIX
+ * quoting (`'it'\''s'`), which Node, Compose and Vite all truncate to `it`.
+ *
+ * Runs at the ENTRY of every command that reads those files — configure's
+ * `loadFeatureContext`, deploy and scale before their first env read, upgrade
+ * before `reconstructVariables` reads the env — because the repair must land
+ * before the value is read: a read-first flow acts on the truncated string
+ * (configure's Enter-to-keep would write `it` back over the recoverable
+ * line; a k8s deploy would ship it as the Secret). `status` is read-only and
+ * detects instead (`hasLegacyDotenvQuoting`).
+ *
+ * Logs one info line naming the healed KEYS (never a value) and one warning
+ * per line the grammar refuses, pointing at `vibecarbon configure`; silent
+ * when there is nothing to say. `dryRun` reports without writing
+ * (`upgrade -dry`). `log` is injectable for tests.
+ *
+ * @param {string} [cwd]
+ * @param {{ dryRun?: boolean, log?: { info: (m: string) => void, warn: (m: string) => void } }} [opts]
+ * @returns {{ healed: string[], skipped: Array<{ key: string, reason: string }> }}
+ */
+export function repairLegacyEnvQuoting(cwd = process.cwd(), { dryRun = false, log = p.log } = {}) {
+  const result = healLegacyDotenvQuoting(cwd, { dryRun });
+  // A key present in both files is healed twice but named once.
+  const keys = [...new Set(result.healed)];
+  if (keys.length > 0) {
+    const noun = `${keys.length} legacy-quoted value${keys.length === 1 ? '' : 's'}`;
+    log.info(
+      dryRun
+        ? `Would re-encode ${noun} in .env/.env.local: ${keys.join(', ')} (dry run)`
+        : `Re-encoded ${noun} in .env/.env.local: ${keys.join(', ')}`,
+    );
+  }
+  for (const { key, reason } of result.skipped) {
+    log.warn(`${key}: ${reason} — re-enter it with \`vibecarbon configure\``);
+  }
+  return result;
 }
 
 // ============================================================================

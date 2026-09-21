@@ -35,9 +35,12 @@ vi.mock('@clack/prompts', () => clackMock);
 
 // Project/env/config side-effects are stubbed — these tests exercise routing,
 // not disk I/O. loadEnvVariables returns {} so every isConfigured() is false
-// (no overwrite gate) and no real .env is read.
+// (no overwrite gate) and no real .env is read; the entry-point quoting
+// repair that precedes that read is a no-op here (see keep-current-heals.test.ts
+// for the real one).
 const projectMock = vi.hoisted(() => ({
   loadEnvVariables: vi.fn(() => ({})),
+  repairLegacyEnvQuoting: vi.fn(() => ({ healed: [], skipped: [] })),
   setEnvVar: vi.fn(),
   buildGitAddArgv: vi.fn(() => ['git', 'add', '-A']),
 }));

@@ -10,9 +10,17 @@
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readEnvFiles } from './lib/dotenv.js';
 import { isDraft, parseFrontmatter } from './lib/seo-content';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const rootDir = resolve(__dirname, '..');
+// Shell env wins (a blank export falls through), then .env.local over .env
+// (readEnvFiles layers those two).
+// Production builds receive VITE_PUBLIC_URL as a build arg (no .env.local in
+// the image); locally this falls back to whatever the project's .env files hold.
+const fileEnv = readEnvFiles(rootDir);
+const getEnvValue = (key: string): string | null => process.env[key] || fileEnv[key] || null;
 
 // Public routes that should be indexed
 const PUBLIC_ROUTES = [
@@ -29,17 +37,8 @@ const PUBLIC_ROUTES = [
 ];
 
 function loadSiteUrl(): string {
-  // Production builds receive the apex URL as VITE_PUBLIC_URL (a build arg);
-  // .env.local is not present in the image. Locally, fall back to .env.local.
-  if (process.env.VITE_PUBLIC_URL) return process.env.VITE_PUBLIC_URL.replace(/\/$/, '');
-  try {
-    const envContent = readFileSync(resolve(__dirname, '../.env.local'), 'utf-8');
-    const match = envContent.match(/^(?:VITE_PUBLIC_URL|SITE_URL)=["']?(.+?)["']?\s*$/m);
-    if (match) return match[1].replace(/\/$/, '');
-  } catch {
-    // .env.local may not exist in CI
-  }
-  return (process.env.SITE_URL || 'http://localhost:5173').replace(/\/$/, '');
+  const value = getEnvValue('VITE_PUBLIC_URL') || getEnvValue('SITE_URL');
+  return (value || 'http://localhost:5173').replace(/\/$/, '');
 }
 
 /** Published (non-draft) slugs in a content directory. */

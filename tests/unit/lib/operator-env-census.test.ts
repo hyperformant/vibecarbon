@@ -16,7 +16,7 @@ import { PROVIDERS, resolveProviderToken } from '../../../src/lib/providers/inde
  * `process.env` reads ONLY. File-based reads of the same keys — the k8s
  * path's `envLocal?.X` / `loadEnvLocal(...)` over the project's `.env.local`,
  * every other `parseDotenv`-driven read of `.env`/`.env.local` (the one
- * dotenv reader; census in dotenv-parsers-parity.test.ts), `getEnvValue(...)`
+ * dotenv reader, src/lib/dotenv.js), `getEnvValue(...)`
  * in up.js — are outside it and are NOT normalized by construction here. "Census
  * green" therefore means "no raw process.env read of a registered key", not
  * "every read of a registered key is normalized". The file-based readers

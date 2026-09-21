@@ -52,16 +52,16 @@ Same rules apply to environment names like `GITHUB_TOKEN` or `CLOUDFLARE_API_TOK
 
 ### 4. Template-placeholder escaping
 
-`src/lib/shell.js` exposes one escaper per sink. Match the sink to the helper (cross-sink escaping is unsafe):
+One escaper per sink: `src/lib/shell.js` for shell, SQL and YAML; `src/lib/dotenv.js` for `.env` files. Match the sink to the helper (cross-sink escaping is unsafe):
 
 | Sink | Helper | Notes |
 |---|---|---|
-| POSIX shell | `shEscape(value)` | Returns a single-quoted form, escaping `'` as `'\''`. Use for anything that lands in a shell command, including inside a bash script passed to `runShellScript`. |
-| `.env` / dotenv | `escapeDotenv(value)` | Returns the single-quoted dotenv form. Round-trip is covered by `tests/unit/security/dotenv-roundtrip.test.ts`. |
+| POSIX shell | `shEscape(value)` | Returns a single-quoted form, escaping `'` as `'\''`. Use for anything that lands in a shell command, including inside a bash script passed to `runShellScript`. Never for a `.env` line: Node, Docker Compose and Vite all read `'it'\''s'` as `it`. |
+| `.env` / dotenv | `formatDotenvLine(key, value)` | Emits the one form Node `util.parseEnv`, Docker Compose and Vite all read identically (bare, `"…"` or `'…'`), and throws `DotenvValueError` (naming the key, never the value) for a value no such form can hold. Round-trip is covered by `tests/unit/security/dotenv-roundtrip.test.ts`. |
 | PostgreSQL SQL literal | `escapeSql(value)` | Returns a single-quoted SQL literal (`'` doubled). **Only for static SQL templates.** Anything truly dynamic must use parameterised queries (`psql -v` or the driver's bind parameters), not this helper. |
 | YAML / JSON | `escapeYaml(value)` | JSON-encodes the value. YAML is a JSON superset for primitives so the result parses as valid YAML. |
 
-**When in doubt, the sink decides.** A value that flows into *both* a dotenv file and a kubectl YAML needs to go through `escapeDotenv` at the dotenv write site and through `escapeYaml` at the YAML write site, independently. Trying to pick one escaper that covers both sinks gets you neither.
+**When in doubt, the sink decides.** A value that flows into *both* a dotenv file and a kubectl YAML needs to go through `formatDotenvLine` at the dotenv write site and through `escapeYaml` at the YAML write site, independently. Trying to pick one escaper that covers both sinks gets you neither.
 
 ### 5. Gitignore invariants
 

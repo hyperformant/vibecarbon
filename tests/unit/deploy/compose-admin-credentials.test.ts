@@ -2,35 +2,38 @@
  * Regression guard for the compose super-admin provisioning escape bug
  * (RCA 2026-05-30).
  *
- * `vibecarbon create` writes ADMIN_PASSWORD to `.env` via `escapeDotenv`
- * (POSIX single-quoting) while ADMIN_EMAIL / SUPABASE_SERVICE_ROLE_KEY are
- * double-quoted. The compose `createAdminUser` path used to extract these with
- * a double-quote-only regex, so a single-quoted password arrived at GoTrue
+ * `vibecarbon create` writes ADMIN_PASSWORD to `.env` through
+ * `formatDotenvLine` (src/lib/dotenv.js), which picks bare / `"…"` / `'…'`
+ * per value. The compose `createAdminUser` path used to extract these with a
+ * double-quote-only regex, so a single-quoted password arrived at GoTrue
  * wrapped in literal `'…'` — the deploy reported "Admin user created" but the
  * operator could never sign in (e2e `auth_admin_login` returned 400
  * invalid_credentials on compose + compose-ha).
  *
  * These tests pin the contract: credentials must round-trip through
- * escapeDotenv → readAdminCredentials back to their RAW values.
+ * formatDotenvLine → readAdminCredentials back to their RAW values, whichever
+ * of the three forms the grammar chose.
  */
 import { describe, expect, it } from 'vitest';
 import { readAdminCredentials } from '../../../src/lib/deploy/compose/index.js';
-import { escapeDotenv } from '../../../src/lib/shell.js';
+import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 
 /** Build a `.env` body exactly the way create.js renders these three keys. */
 function renderEnv(email: string, password: string, serviceKey: string): string {
   return [
     '# ADMIN CREDENTIALS',
-    `ADMIN_EMAIL="${email}"`,
-    `ADMIN_PASSWORD=${escapeDotenv(password)}`,
-    `SUPABASE_SERVICE_ROLE_KEY="${serviceKey}"`,
+    formatDotenvLine('ADMIN_EMAIL', email),
+    formatDotenvLine('ADMIN_PASSWORD', password),
+    formatDotenvLine('SUPABASE_SERVICE_ROLE_KEY', serviceKey),
     '',
   ].join('\n');
 }
 
 describe('readAdminCredentials', () => {
-  it('round-trips the single-quoted password create.js writes (no quote leakage)', () => {
+  it('round-trips the double-quoted password create.js writes (no quote leakage)', () => {
+    // `!` is outside the bare alphabet, so this lands in the "…" form.
     const env = renderEnv('test@vibecarbon.dev', 'TestPassword123!', 'service-role-jwt');
+    expect(env).toContain('ADMIN_PASSWORD="TestPassword123!"');
     const creds = readAdminCredentials(env);
 
     expect(creds.adminEmail).toBe('test@vibecarbon.dev');
@@ -39,13 +42,20 @@ describe('readAdminCredentials', () => {
     expect(creds.serviceRoleKey).toBe('service-role-jwt');
   });
 
-  it('handles passwords containing the shell-significant characters escapeDotenv guards', () => {
-    // Embedded single quote exercises escapeDotenv's '\'' close-reopen path.
-    const tricky = "p@ss'w0rd!$x";
+  it('handles a password with a single quote (the "…" form)', () => {
+    const tricky = "p@ss'w0rd!#x";
     const env = renderEnv('admin@example.com', tricky, 'svc');
-    const creds = readAdminCredentials(env);
+    expect(env).toContain(`ADMIN_PASSWORD="${tricky}"`);
+    expect(readAdminCredentials(env).adminPassword).toBe(tricky);
+  });
 
-    expect(creds.adminPassword).toBe(tricky);
+  it("handles a password with a double quote and a dollar sign (the '…' form)", () => {
+    // Not something validateAdminPassword lets create write, but a hand-edited
+    // .env can hold it and the reader must decode every form the writer emits.
+    const tricky = 'p@ss"w0rd$x';
+    const env = renderEnv('admin@example.com', tricky, 'svc');
+    expect(env).toContain(`ADMIN_PASSWORD='${tricky}'`);
+    expect(readAdminCredentials(env).adminPassword).toBe(tricky);
   });
 
   it('returns undefined fields when keys are absent (caller treats as missing creds)', () => {

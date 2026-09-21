@@ -14,8 +14,9 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
+import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
-import { detectPackageManager, parseDotenv } from './lib/project.js';
+import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
   deriveComposeProjectName,
@@ -51,11 +52,10 @@ const SPEC = {
 
 /**
  * Read `key` from `.env.local`, then `.env` — the first file that carries a
- * NON-EMPTY value wins, else null. Parsing is `parseDotenv` (src/lib/shell.js,
- * via project.js), the codebase's one dotenv reader; the per-key regex this
+ * NON-EMPTY value wins, else null. Parsing is `parseDotenv` (src/lib/dotenv.js),
+ * the codebase's one dotenv reader; the per-key regex this
  * replaced could not match an empty `KEY=` and so fell through to the next
- * file — treating '' as absent here keeps that exact fall-through (see
- * tests/unit/lib/dotenv-parsers-parity.test.ts).
+ * file — treating '' as absent here keeps that exact fall-through.
  * @param {string} key
  * @param {string} cwd
  * @returns {string|null}
@@ -162,18 +162,30 @@ async function findFreeOffset(_cwd) {
 /**
  * Write DEV_PORT_OFFSET to .env.local, creating the file if it doesn't exist.
  * Returns true if the value was saved.
+ *
+ * In-place REWRITER (like setSubnetPrefix below): each literal-key line is
+ * located whole and re-emitted through formatDotenvLine (src/lib/dotenv.js),
+ * so comments, blanks and order stay verbatim and no value is read out of
+ * the file. Allow-listed by exact path in
+ * tests/unit/lib/dotenv-dialect-census.test.ts. The match is the WHOLE
+ * existing line whatever its quoting: `create` writes the bare form
+ * (`DEV_PORT_OFFSET=0`) while pre-2026-09-20 files hold `"0"`. A quoted-only
+ * match would append a second DEV_PORT_OFFSET line to a fresh project; every
+ * reader is last-wins (util.parseEnv in the CLI and the template alike), so
+ * the stale first line would be silently shadowed rather than reported.
  */
 export function setPortOffset(offset, cwd) {
   const envPath = join(cwd, '.env.local');
   const existing = existsSync(envPath);
   let content = existing ? readFileSync(envPath, 'utf-8') : '';
-  const regex = /^DEV_PORT_OFFSET="[^"]*"/m;
+  const line = formatDotenvLine('DEV_PORT_OFFSET', String(offset));
+  const regex = /^DEV_PORT_OFFSET=.*$/m;
 
   if (regex.test(content)) {
-    content = content.replace(regex, `DEV_PORT_OFFSET="${offset}"`);
+    content = content.replace(regex, () => line);
   } else {
     const prefix = content.trimEnd();
-    content = `${prefix ? `${prefix}\n\n` : ''}# Port offset (set by vibecarbon up to avoid conflicts)\nDEV_PORT_OFFSET="${offset}"\n`;
+    content = `${prefix ? `${prefix}\n\n` : ''}# Port offset (set by vibecarbon up to avoid conflicts)\n${line}\n`;
   }
 
   // Client-visible twin: vite only exposes VITE_-prefixed vars, and the admin
@@ -182,11 +194,12 @@ export function setPortOffset(offset, cwd) {
   // points at port 80, i.e. whichever OTHER project owns the default ports
   // (RCA 2026-07-17: swim2's admin panel linked into my-app's traefik).
   // Kept in lockstep with DEV_PORT_OFFSET by writing both here.
-  const viteRegex = /^VITE_DEV_PORT_OFFSET="[^"]*"/m;
+  const viteLine = formatDotenvLine('VITE_DEV_PORT_OFFSET', String(offset));
+  const viteRegex = /^VITE_DEV_PORT_OFFSET=.*$/m;
   if (viteRegex.test(content)) {
-    content = content.replace(viteRegex, `VITE_DEV_PORT_OFFSET="${offset}"`);
+    content = content.replace(viteRegex, () => viteLine);
   } else {
-    content = `${content.trimEnd()}\nVITE_DEV_PORT_OFFSET="${offset}"\n`;
+    content = `${content.trimEnd()}\n${viteLine}\n`;
   }
 
   writeFileSync(envPath, content, { mode: 0o600 });
@@ -203,13 +216,14 @@ export function setPortOffset(offset, cwd) {
 function setSubnetPrefix(prefix, cwd) {
   const envPath = join(cwd, '.env');
   let content = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
+  const line = formatDotenvLine('DEV_SUBNET_PREFIX', String(prefix));
   const regex = /^DEV_SUBNET_PREFIX=.*$/m;
 
   if (regex.test(content)) {
-    content = content.replace(regex, `DEV_SUBNET_PREFIX="${prefix}"`);
+    content = content.replace(regex, () => line);
   } else {
     const body = content.trimEnd();
-    content = `${body ? `${body}\n\n` : ''}# Network subnet prefix (set by vibecarbon up to avoid Docker pool overlaps)\nDEV_SUBNET_PREFIX="${prefix}"\n`;
+    content = `${body ? `${body}\n\n` : ''}# Network subnet prefix (set by vibecarbon up to avoid Docker pool overlaps)\n${line}\n`;
   }
 
   writeFileSync(envPath, content, { mode: 0o600 });

@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
-import { parseDotenv } from './shell.js';
+import { parseDotenv } from './dotenv.js';
 
 /**
  * Sanitize a project name to be a valid hostname

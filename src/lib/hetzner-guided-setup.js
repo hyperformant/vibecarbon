@@ -19,7 +19,7 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
+import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 /**
@@ -180,7 +180,7 @@ export async function getApiToken(projectName, options = {}) {
         // terminated 64-char token is fine once cleaned (M11).
         if (normalizeOperatorValue(v, registryEntry('HETZNER_API_TOKEN')).value.length !== 64)
           return 'Token should be 64 characters - please check you copied it correctly';
-        return undefined;
+        return dotenvPromptProblem('HETZNER_API_TOKEN', v);
       },
     });
 
@@ -267,7 +267,7 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your S3 Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return undefined;
+      return dotenvPromptProblem('HETZNER_ACCESS_KEY', v);
     },
   });
 
@@ -279,7 +279,7 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your S3 Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return undefined;
+      return dotenvPromptProblem('HETZNER_SECRET_KEY', v);
     },
   });
 

@@ -18,7 +18,7 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
+import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.digitalocean.com/v2';
@@ -215,7 +215,7 @@ export async function getApiToken(projectName, options = {}) {
       message: 'Paste your DigitalOcean API token here',
       validate: (v) => {
         if (!v || v.length < 10) return 'API token is required';
-        return undefined;
+        return dotenvPromptProblem('DIGITALOCEAN_API_TOKEN', v);
       },
     });
 
@@ -304,7 +304,7 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Spaces Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return undefined;
+      return dotenvPromptProblem('DIGITALOCEAN_ACCESS_KEY', v);
     },
   });
 
@@ -316,7 +316,7 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Spaces Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return undefined;
+      return dotenvPromptProblem('DIGITALOCEAN_SECRET_KEY', v);
     },
   });
 

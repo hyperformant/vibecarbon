@@ -25,12 +25,18 @@ afterEach(() => {
 });
 
 describe('getUpdateNotice', () => {
-  it('returns a one-line notice when the cache holds a newer version', () => {
+  it('returns a two-line notice when the cache holds a newer version: prose, then the command alone', () => {
     writeCache('0.99.0', 0);
     const notice = getUpdateNotice({ currentVersion: '0.41.0', stateDir: dir });
     expect(notice).toContain('0.41.0');
     expect(notice).toContain('0.99.0');
-    expect(notice).toContain('npm i -g vibecarbon');
+    // The command is the whole second line (ANSI aside) — no separator or
+    // prose can be read as part of it.
+    const lines = (notice as string).split('\n');
+    expect(lines).toHaveLength(2);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI colour codes
+    expect(lines[1].replace(/\x1b\[[0-9;]*m/g, '')).toBe('npm i -g vibecarbon');
+    expect(lines[0]).not.toContain('npm');
   });
 
   it('returns null when cache is same/older version, missing, or corrupt', () => {

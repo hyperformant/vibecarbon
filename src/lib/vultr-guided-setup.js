@@ -28,7 +28,7 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { normalizeOperatorValue, readOperatorVar } from './operator-env.js';
+import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
 import { setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.vultr.com/v2';
@@ -221,7 +221,7 @@ export async function getApiToken(projectName, options = {}) {
       message: 'Paste your Vultr API key here',
       validate: (v) => {
         if (!v || v.length < 10) return 'API key is required';
-        return undefined;
+        return dotenvPromptProblem('VULTR_API_TOKEN', v);
       },
     });
 
@@ -322,7 +322,7 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return undefined;
+      return dotenvPromptProblem('VULTR_ACCESS_KEY', v);
     },
   });
 
@@ -334,7 +334,7 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return undefined;
+      return dotenvPromptProblem('VULTR_SECRET_KEY', v);
     },
   });
 
@@ -358,7 +358,7 @@ export async function getS3Credentials(projectName, options = {}) {
       ) {
         return 'Just the prefix of the S3 hostname — "ewr1", not "ewr1.vultrobjects.com"';
       }
-      return undefined;
+      return dotenvPromptProblem('VULTR_STORAGE_REGION', v);
     },
   });
 

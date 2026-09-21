@@ -43,6 +43,7 @@ import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync, writeSecretFile } from '../../command.js';
 import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
 import { DNS01_PROVIDERS } from '../../dns-provider.js';
+import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
 import {
   carbonAutoscalerImageRef,
@@ -54,7 +55,7 @@ import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
-import { parseDotenv, shEscape } from '../../shell.js';
+import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
 import { postAdminUser, waitForGotrueHealth } from '../admin-user.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
@@ -1521,12 +1522,8 @@ export async function prePullChartImages({ nodeIps, sshKeyPath, khPath }) {
  * precondition, so a MISSING file throws (callers that merely want a
  * fingerprint existsSync first; see digestEnvLocalSecrets).
  *
- * Parsing is `parseDotenv` (src/lib/shell.js), the codebase's one dotenv
- * reader, which keeps this file's hand-edit tolerance (indented keys,
- * `KEY = value`, `export KEY=`); the local loop it replaced also read
- * lowercase keys and kept an inline `# comment` as part of an unquoted
- * value — tests/unit/lib/dotenv-parsers-parity.test.ts records each
- * difference and pins the shared behaviour.
+ * Parsing is `parseDotenv` (src/lib/dotenv.js), the codebase's one dotenv
+ * reader (Node's util.parseEnv).
  *
  * @param {string} envPath
  * @returns {Record<string, string>}

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -208,6 +208,63 @@ describe('computeConfigurationCheck — configure-family pass over .env/.env.loc
   it('a normalizable paste (quotes, whitespace) stored in the file is not a problem — the reader normalizes on every read', () => {
     // dotenv single-quoting keeps the inner double quotes + padding literal.
     const cwd = projectDir({ '.env': 'STRIPE_SECRET_KEY=\'  "sk_test_abc"  \'\n' });
+    const { problems } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toEqual([]);
+  });
+});
+
+// Final review H1/M1 (2026-09-21): `status` is read-only, so it does not heal
+// a pre-2026-09-20 POSIX-quoted line (`'pa'\''ss'`, which every reader
+// truncates to `pa`). Validating the truncated read would report a shape
+// problem that is really a quoting problem ("SMTP_PASS looks wrong: expected
+// at least 8 characters, got 2"); instead the keys are named once with the
+// repair to run. Every other command heals at entry; `upgrade` is the
+// explicit one. Fixture values only.
+describe('computeConfigurationCheck — legacy-quoted lines are advised, not shape-checked', () => {
+  const dirs: string[] = [];
+  function projectDir(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-status-quoting-'));
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    dirs.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('names the legacy-quoted keys in one advisory and suppresses their truncated-value shape problems', () => {
+    const cwd = projectDir({
+      '.env': "SMTP_HOST=smtp.example.com\nSMTP_PASS='pa'\\''ss'\n",
+      '.env.local': "STRIPE_SECRET_KEY='sk'\\''x'\nSMTP_PORT=99999\n",
+    });
+    const { problems } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(problems).toEqual([
+      'SMTP_PORT looks wrong: expected 1-65535, got 5 characters',
+      'SMTP_PASS, STRIPE_SECRET_KEY use legacy quoting — run `vibecarbon upgrade`',
+    ]);
+    expect(problems.join('\n')).not.toContain("pa'ss");
+    expect(problems.join('\n')).not.toContain('sk');
+  });
+
+  it('leaves both files byte-identical (status never writes)', () => {
+    const env = "SMTP_PASS='pa'\\''ss'\n";
+    const cwd = projectDir({ '.env': env });
+    computeConfigurationCheck({}, {}, { env: {}, cwd });
+    expect(readFileSync(join(cwd, '.env'), 'utf-8')).toBe(env);
+  });
+
+  it('renders as one problem line in the ▲ advisory', () => {
+    const cwd = projectDir({ '.env.local': "SMTP_PASS='pa'\\''ss'\n" });
+    const { problems, checked } = computeConfigurationCheck({}, {}, { env: {}, cwd });
+    const lines = formatConfigurationLines(problems, checked).map(stripAnsi);
+    expect(lines).toEqual([
+      '▲ Configuration: 1 problem',
+      '  - SMTP_PASS use legacy quoting — run `vibecarbon upgrade`',
+    ]);
+  });
+
+  it("a plain '…' value (no '\\'' inside) is not legacy quoting", () => {
+    const cwd = projectDir({ '.env': "SMTP_PASS='plain-enough'\n" });
     const { problems } = computeConfigurationCheck({}, {}, { env: {}, cwd });
     expect(problems).toEqual([]);
   });
