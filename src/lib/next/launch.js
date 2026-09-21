@@ -20,8 +20,19 @@
  * registered for SIGINT and SIGTERM, installs its own, and puts the saved
  * listeners back (in their original registration order) the instant the
  * child closes or fails to spawn. This generalizes `waitForDevTree`
- * (src/up.js:414-437), which does the same thing for `up`'s single
+ * (src/up.js:414-432), which does the same thing for `up`'s single
  * dev-server child.
+ *
+ * The order of that handoff matters, and it is: register `onSigint` and
+ * `onSigterm` FIRST, then remove each saved listener individually, then
+ * spawn. Parking the saved listeners before installing ours would leave a
+ * window in which the process has no SIGINT listener at all, so a Ctrl-C
+ * landing there is SIG_DFL and kills the wizard outright, orphaning the
+ * child it just spawned. Because the handlers are live before the child
+ * exists, both they and the grace timer tolerate `child === undefined` and
+ * use `child?.kill(...)`. Removal is per-listener (`removeListener`), never
+ * `removeAllListeners`, so ours survive the parking and nothing else
+ * registered in between is silently dropped.
  *
  * The terminal already delivers Ctrl+C to the whole foreground process
  * group, so on SIGINT the child sees it without any help from us; the only
@@ -31,12 +42,14 @@
  * timer that SIGKILLs the child after `graceMs`, so a wedged child cannot
  * hold the terminal hostage forever. That timer is `unref()`'d so it never
  * by itself keeps this process (or a test) alive, and is cleared the moment
- * the child closes.
+ * the child closes. Restoring is one-shot: a failed spawn emits both
+ * `error` and `close`, and the second restore must not re-add the saved
+ * listeners a second time.
  *
  * `proc` is injectable (defaults to the real `process`) so tests can pass a
  * fake EventEmitter with an `execPath` property instead of touching the
  * real process's signal listeners. Only `proc.listeners`,
- * `proc.removeAllListeners`, `proc.on` and `proc.execPath` are used, all of
+ * `proc.removeListener`, `proc.on` and `proc.execPath` are used, all of
  * which a plain EventEmitter-plus-`execPath` fake can provide.
  */
 
@@ -79,15 +92,14 @@ export function launchCli(
   return new Promise((resolve, reject) => {
     const savedSigint = proc.listeners('SIGINT');
     const savedSigterm = proc.listeners('SIGTERM');
-    proc.removeAllListeners('SIGINT');
-    proc.removeAllListeners('SIGTERM');
 
-    const child = spawn(proc.execPath, [cliEntryPath(), ...argv], { cwd, env, stdio: 'inherit' });
+    /** @type {import('node:child_process').ChildProcess|undefined} */
+    let child;
 
     let graceTimer = null;
     const armGrace = () => {
       if (graceTimer) return;
-      graceTimer = setTimeout(() => child.kill('SIGKILL'), graceMs);
+      graceTimer = setTimeout(() => child?.kill('SIGKILL'), graceMs);
       graceTimer.unref();
     };
 
@@ -98,19 +110,32 @@ export function launchCli(
     };
     const onSigterm = () => {
       // SIGTERM reaches only this process, so forward it explicitly.
-      child.kill('SIGTERM');
+      child?.kill('SIGTERM');
       armGrace();
     };
+
+    // Ours go on before the inherited ones come off, so there is never an
+    // instant without a SIGINT listener. Then park the saved listeners one
+    // by one, leaving ours in place.
     proc.on('SIGINT', onSigint);
     proc.on('SIGTERM', onSigterm);
+    for (const listener of savedSigint) proc.removeListener('SIGINT', listener);
+    for (const listener of savedSigterm) proc.removeListener('SIGTERM', listener);
 
+    let restored = false;
     const restore = () => {
+      // `error` is followed by `close`, so this can be called twice; the
+      // second call must not duplicate the saved listeners.
+      if (restored) return;
+      restored = true;
       if (graceTimer) clearTimeout(graceTimer);
-      proc.removeAllListeners('SIGINT');
-      proc.removeAllListeners('SIGTERM');
+      proc.removeListener('SIGINT', onSigint);
+      proc.removeListener('SIGTERM', onSigterm);
       for (const listener of savedSigint) proc.on('SIGINT', listener);
       for (const listener of savedSigterm) proc.on('SIGTERM', listener);
     };
+
+    child = spawn(proc.execPath, [cliEntryPath(), ...argv], { cwd, env, stdio: 'inherit' });
 
     child.on('close', (code, signal) => {
       restore();

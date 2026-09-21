@@ -1,6 +1,7 @@
-import { type ChildProcess, spawn as nodeSpawn } from 'node:child_process';
+import { type ChildProcess, spawn as nodeSpawn, type StdioOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
+import type { Readable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cliEntryPath, launchCli } from '../../../../src/lib/next/launch.js';
 
@@ -20,11 +21,27 @@ describe('launchCli', () => {
   // The injected `spawn` ignores the args launchCli builds and instead runs
   // a small script, so real-child tests can control exit code / signal
   // handling without needing cli.js itself to behave a particular way.
-  const scriptSpawn = (script: string) => () => {
-    child = nodeSpawn(process.execPath, ['-e', script], { stdio: 'ignore' });
-    return child;
-  };
+  const scriptSpawn =
+    (script: string, stdio: StdioOptions = 'ignore') =>
+    () => {
+      child = nodeSpawn(process.execPath, ['-e', script], { stdio });
+      return child;
+    };
   const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** Resolves once `text` has appeared on the stream. No fixed sleep. */
+  const waitForLine = (stream: Readable, text: string) =>
+    new Promise<void>((resolve) => {
+      let seen = '';
+      const onData = (chunk: Buffer | string) => {
+        seen += String(chunk);
+        if (seen.includes(text)) {
+          stream.off('data', onData);
+          resolve();
+        }
+      };
+      stream.on('data', onData);
+    });
 
   afterEach(() => {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
@@ -129,14 +146,44 @@ describe('launchCli', () => {
   it('SIGKILLs a child that ignores SIGTERM after the grace timer elapses', async () => {
     const fakeProc = new EventEmitter() as unknown as NodeJS.Process;
     const resultPromise = launchCli(['up'], {
-      spawn: scriptSpawn("process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"),
+      // The child announces itself only once the SIGTERM trap is installed,
+      // so the handshake below is exact, where a fixed sleep would race a
+      // loaded machine.
+      spawn: scriptSpawn(
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); console.log('ready')",
+        ['ignore', 'pipe', 'ignore'],
+      ),
       proc: fakeProc,
       graceMs: 150,
     });
-    await tick(100); // let the child install its SIGTERM trap
+    await waitForLine(child?.stdout as Readable, 'ready');
 
     fakeProc.emit('SIGTERM');
     const result = await resultPromise;
     expect(result.signal).toBe('SIGKILL');
+  });
+
+  it('rejects on a spawn error and restores the saved listeners exactly once', async () => {
+    const fakeChild = new EventEmitter() as unknown as ChildProcess;
+    const fakeProc = Object.assign(new EventEmitter(), {
+      execPath: '/fake/node',
+    }) as unknown as NodeJS.Process;
+    const saved = () => {};
+    const savedTerm = () => {};
+    fakeProc.on('SIGINT', saved);
+    fakeProc.on('SIGTERM', savedTerm);
+
+    const resultPromise = launchCli(['up'], {
+      spawn: vi.fn(() => fakeChild),
+      proc: fakeProc,
+    });
+    // A failed spawn emits `error` and then `close`: restore runs twice, and
+    // the saved listeners must come back once, not twice.
+    fakeChild.emit('error', new Error('spawn ENOENT'));
+    fakeChild.emit('close', null, null);
+
+    await expect(resultPromise).rejects.toThrow('spawn ENOENT');
+    expect(fakeProc.listeners('SIGINT')).toEqual([saved]);
+    expect(fakeProc.listeners('SIGTERM')).toEqual([savedTerm]);
   });
 });
