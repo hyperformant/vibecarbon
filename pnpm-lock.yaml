@@ -44,7 +44,7 @@ importers:
         version: 6.5.0(typescript@7.0.2)
       '@pulumi/pulumi':
         specifier: ^3.260.0
-        version: 3.262.0(typescript@7.0.2)
+        version: 3.263.0(typescript@7.0.2)
       '@pulumiverse/scaleway':
         specifier: ^1.54.0
         version: 1.55.1(typescript@7.0.2)
@@ -782,8 +782,8 @@ packages:
   '@pulumi/linode@6.5.0':
     resolution: {integrity: sha512-Xz6m03T4dhKXZ41b35AZAYw1mkZKgnMhbo9E0Z/CqkK1/kiDqNl7NVAUa7GLqrJNTrP8vya4mmycocWCvIbPSQ==}
 
-  '@pulumi/pulumi@3.262.0':
-    resolution: {integrity: sha512-fsYlQ5sr0g5DCxW25LTLwBsSkgkTMxXDfKdZGGvb880zXEQZd509uUSgUTX608fca9FAxjfflPNGYKgB9ps3ow==}
+  '@pulumi/pulumi@3.263.0':
+    resolution: {integrity: sha512-ZIWdlwKCSRFkUxRmISu3FT7db7Ac+Hfjh1ta3cyau+QupneuzZ+OFzezM6Var9PeNRaHNyWtSPg7Qjq8CHNzww==}
     engines: {node: '>=22'}
     peerDependencies:
       ts-node: '>= 7.0.1 < 12'
@@ -1264,8 +1264,8 @@ packages:
   bowser@2.14.1:
     resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
 
-  brace-expansion@5.0.9:
-    resolution: {integrity: sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==}
+  brace-expansion@5.0.12:
+    resolution: {integrity: sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==}
     engines: {node: 20 || >=22}
 
   braces@3.0.3:
@@ -1807,8 +1807,8 @@ packages:
     resolution: {integrity: sha512-IBTdIkzZNOpqm7q3dRqJvMaldXjDHWkEDfrwGEQTs5eaQMWV+djAhR+wahyNNMAa+qpbDUhBMVt4ZKNwpPm7xQ==}
     engines: {node: ^20.17.0 || >=22.9.0}
 
-  ip-address@10.7.0:
-    resolution: {integrity: sha512-BGFsyJd5mpXp3rK6jIdADLNgpJUK1jnjzvYF8lK+VyDab9JAmqN0YOKDdP17HlgKb2+ehPgDc8EtnRLbGCAMhA==}
+  ip-address@10.7.2:
+    resolution: {integrity: sha512-7H/2gFSIitxc0hG3nOI1glS8QLo/EHBFFLk8vEUjXY/xu0AdL8jZ9U1IzO2PUm0d2D/ofQcAifb0g6OBkt8U7w==}
     engines: {node: '>= 12'}
 
   is-arrayish@0.2.1:
@@ -2348,8 +2348,8 @@ packages:
     resolution: {integrity: sha512-I4Prw6ivkd6p8PiYR1tXASOAOBzIJwu0TB7fqaX0c/8c3QAehNYmX57EijyGGGBt3c/BIowGwV03RVBtXvHEVg==}
     engines: {node: '>=18'}
 
-  p-map@7.0.7:
-    resolution: {integrity: sha512-VaWRu2i4FJNRtiRWCuuQRgfQ1B7a6+gMSrO+3j0EQi/k0ULfS9kosRxGoiqwzIjZTDI02tGfk5mXXltLg6QtfQ==}
+  p-map@7.0.8:
+    resolution: {integrity: sha512-MitaVsCuCFIvOLLPIU7NnfrZvS9H9h7kwMUkDo+T2pEISaJD48IV9S8iIdXB7PsvvdxyYcsSTTrr90XKsbulNw==}
     engines: {node: '>=18'}
 
   p-reduce@3.0.0:
@@ -2659,8 +2659,8 @@ packages:
   spdx-expression-parse@4.0.0:
     resolution: {integrity: sha512-Clya5JIij/7C6bRR22+tnGXbc4VKlibKSVj2iHvVeX5iMW7s1SIQlqu699JkODJJIhh/pUu8L0/VLh8xflD+LQ==}
 
-  spdx-license-ids@3.0.23:
-    resolution: {integrity: sha512-CWLcCCH7VLu13TgOH+r8p1O/Znwhqv/dbb6lqWy67G+pT1kHmeD/+V36AVb/vq8QMIQwVShJ6Ssl5FPh0fuSdw==}
+  spdx-license-ids@3.0.24:
+    resolution: {integrity: sha512-cLS9TtWkIQFyLkJ3/5aFQAOHOSKTlOs/7WDut/XPSdjom1fJhUdkepeJAKXa9Y05+FabHd0sti+Et559vDtkpQ==}
 
   split2@1.0.0:
     resolution: {integrity: sha512-NKywug4u4pX/AZBB1FCPzZ6/7O+Xhz1qMVbzTvvKvikjO99oPN87SkK08mEY9P63/5lWjK+wgOOgApnTg5r6qg==}
@@ -3340,7 +3340,7 @@ snapshots:
 
   '@ediri/vultr@2.27.1(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.263.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3816,7 +3816,7 @@ snapshots:
 
   '@pulumi/digitalocean@4.79.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.263.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3824,7 +3824,7 @@ snapshots:
 
   '@pulumi/hcloud@1.41.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.263.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -3832,13 +3832,13 @@ snapshots:
 
   '@pulumi/linode@6.5.0(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.263.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
       - typescript
 
-  '@pulumi/pulumi@3.262.0(typescript@7.0.2)':
+  '@pulumi/pulumi@3.263.0(typescript@7.0.2)':
     dependencies:
       '@grpc/grpc-js': 1.14.4
       '@logdna/tail-file': 2.2.0
@@ -3872,7 +3872,7 @@ snapshots:
 
   '@pulumiverse/scaleway@1.55.1(typescript@7.0.2)':
     dependencies:
-      '@pulumi/pulumi': 3.262.0(typescript@7.0.2)
+      '@pulumi/pulumi': 3.263.0(typescript@7.0.2)
     transitivePeerDependencies:
       - supports-color
       - ts-node
@@ -4287,7 +4287,7 @@ snapshots:
 
   bowser@2.14.1: {}
 
-  brace-expansion@5.0.9:
+  brace-expansion@5.0.12:
     dependencies:
       balanced-match: 4.0.4
 
@@ -4312,7 +4312,7 @@ snapshots:
       minipass-collect: 2.0.1
       minipass-flush: 1.0.7
       minipass-pipeline: 1.2.4
-      p-map: 7.0.7
+      p-map: 7.0.8
       ssri: 13.0.1
 
   call-bind-apply-helpers@1.0.2:
@@ -4866,7 +4866,7 @@ snapshots:
 
   ini@6.0.0: {}
 
-  ip-address@10.7.0: {}
+  ip-address@10.7.2: {}
 
   is-arrayish@0.2.1: {}
 
@@ -5098,7 +5098,7 @@ snapshots:
 
   minimatch@10.2.6:
     dependencies:
-      brace-expansion: 5.0.9
+      brace-expansion: 5.0.12
 
   minimist@1.2.8: {}
 
@@ -5289,7 +5289,7 @@ snapshots:
 
   p-map@7.0.6: {}
 
-  p-map@7.0.7: {}
+  p-map@7.0.8: {}
 
   p-reduce@3.0.0: {}
 
@@ -5620,7 +5620,7 @@ snapshots:
 
   socks@2.8.10:
     dependencies:
-      ip-address: 10.7.0
+      ip-address: 10.7.2
       smart-buffer: 4.2.0
 
   source-map-js@1.2.1: {}
@@ -5637,21 +5637,21 @@ snapshots:
   spdx-correct@3.2.0:
     dependencies:
       spdx-expression-parse: 3.0.1
-      spdx-license-ids: 3.0.23
+      spdx-license-ids: 3.0.24
 
   spdx-exceptions@2.5.0: {}
 
   spdx-expression-parse@3.0.1:
     dependencies:
       spdx-exceptions: 2.5.0
-      spdx-license-ids: 3.0.23
+      spdx-license-ids: 3.0.24
 
   spdx-expression-parse@4.0.0:
     dependencies:
       spdx-exceptions: 2.5.0
-      spdx-license-ids: 3.0.23
+      spdx-license-ids: 3.0.24
 
-  spdx-license-ids@3.0.23: {}
+  spdx-license-ids@3.0.24: {}
 
   split2@1.0.0:
     dependencies:
