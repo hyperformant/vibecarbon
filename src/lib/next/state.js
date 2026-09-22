@@ -23,7 +23,7 @@
  * cwd; tests that point at a temp directory inject `features` instead.
  */
 
-import { hasDockerCompose, loadProjectConfig } from '../config.js';
+import { findProjectRoot, hasDockerCompose, loadProjectConfig } from '../config.js';
 import { operatorSecretKeys } from '../config-registry.js';
 import { loadEnvVariables } from '../project.js';
 import { composeRunningServices } from '../status/compose-ps.js';
@@ -37,6 +37,7 @@ import { composeRunningServices } from '../status/compose-ps.js';
  * @param {{
  *   loadConfig?: typeof loadProjectConfig,
  *   hasCompose?: typeof hasDockerCompose,
+ *   findRoot?: typeof findProjectRoot,
  *   composePs?: typeof composeRunningServices,
  *   loadEnv?: typeof loadEnvVariables,
  *   operatorKeys?: typeof operatorSecretKeys,
@@ -44,7 +45,7 @@ import { composeRunningServices } from '../status/compose-ps.js';
  * }} [deps]
  * @returns {Promise<
  *   { kind: 'no-project', cwd: string } |
- *   { kind: 'project', cwd: string, projectConfig: object,
+ *   { kind: 'project', cwd: string, subdir: string|null, projectConfig: object,
  *     project: { name: string },
  *     localDev: { dockerAvailable: boolean, running: string[] },
  *     configured: { any: boolean, features: string[], providers: boolean },
@@ -55,6 +56,7 @@ export async function detectProjectState(cwd = process.cwd(), deps = {}) {
   const {
     loadConfig = loadProjectConfig,
     hasCompose = hasDockerCompose,
+    findRoot = findProjectRoot,
     composePs = composeRunningServices,
     loadEnv = loadEnvVariables,
     operatorKeys = operatorSecretKeys,
@@ -63,6 +65,17 @@ export async function detectProjectState(cwd = process.cwd(), deps = {}) {
 
   const projectConfig = loadConfig(cwd);
   if (!(projectConfig && hasCompose(cwd))) {
+    // Below a project root (e.g. `src/client`) the user is in a project,
+    // just not where commands run. Answer for the project above rather than
+    // proposing `create`, which from here would scaffold a second project
+    // nested inside the first. `subdir` records where they actually are, so
+    // the guide can hand over the cd instead of launching anything: every
+    // command asserts the root as its cwd (src/lib/project-guard.js), and
+    // this process cannot change the user's shell directory.
+    const root = findRoot(cwd);
+    if (root && root !== cwd) {
+      return { ...(await detectProjectState(root, deps)), subdir: cwd };
+    }
     return { kind: 'no-project', cwd };
   }
 
@@ -105,6 +118,7 @@ export async function detectProjectState(cwd = process.cwd(), deps = {}) {
   return {
     kind: 'project',
     cwd,
+    subdir: null,
     projectConfig,
     project: { name: projectConfig.projectName },
     localDev: { dockerAvailable: available, running },

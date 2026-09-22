@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { formatCommandNote } from '../cli/help.js';
 import { progressLog, spinner } from '../cli/progress.js';
 import { c } from '../colors.js';
 import { runCommand, runCommandAsync } from '../command.js';
@@ -1193,7 +1194,7 @@ export async function executeDeployment(args, gatheredConfig) {
       const masterIp = deployResult.primary?.masterIp || deployResult.masterIp;
       p.log.success('Local-first deploy complete. App is sideloaded + running on the cluster.');
       p.note(
-        [
+        formatCommandNote([
           `Kubeconfig:  ${kubeconfigPath}`,
           `Master IP:   ${masterIp ?? '(unknown: check Pulumi output)'}`,
           '',
@@ -1202,8 +1203,9 @@ export async function executeDeployment(args, gatheredConfig) {
           `  vibecarbon diagnose ${environment} # full cluster state dump`,
           `  vibecarbon destroy ${environment}  # tear down when done`,
           '',
-          `To layer in Flux + GitHub Actions: vibecarbon configure cicd ${environment}`,
-        ].join('\n'),
+          '# To layer in Flux + GitHub Actions:',
+          `  vibecarbon configure cicd ${environment}`,
+        ]),
         'Cluster + app ready',
       );
       // Fall through to Step 6 so .vibecarbon.json persists the serverlist —

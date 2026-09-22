@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -96,6 +96,61 @@ describe('vibecarbon — outside a project directory: canonical refusal', () => 
       );
       expect(combined, `${name}: secret-scan ran before the project guard`).not.toContain(
         'secrets detected',
+      );
+    });
+  }
+});
+
+// Below a project root the refusal is still correct — every command resolves
+// docker-compose.yml, .env.local, k8s overlays and relative arguments against
+// the cwd, so running from `src/client` would read a tree the user did not
+// mean. What changes is the follow-up line: telling someone already inside a
+// created project to "run this from within a project created with vibecarbon
+// create" describes their situation wrongly and leaves them to find the root
+// themselves.
+describe('vibecarbon — inside a project but below its root: refusal names the root', () => {
+  let root: string;
+  let sub: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'vc-subdir-'));
+    writeFileSync(join(root, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
+    writeFileSync(join(root, 'docker-compose.yml'), 'services: {}\n');
+    sub = join(root, 'src', 'client');
+    mkdirSync(sub, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  for (const { name, argv } of [
+    { name: 'up', argv: ['up'] },
+    { name: 'deploy', argv: ['deploy', 'prod'] },
+  ]) {
+    it(`${name} → refuses, names the project root, and exits non-zero`, () => {
+      const result = spawnSync(process.execPath, [CLI, ...argv], {
+        cwd: sub,
+        encoding: 'utf-8',
+        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
+        timeout: 15000,
+      });
+
+      const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
+
+      expect(
+        result.status,
+        `${name}: expected non-zero exit. status=${result.status} output:\n${combined}`,
+      ).not.toBe(0);
+      expect(combined, `${name}: missing canonical error message`).toContain(
+        'Not in a Vibecarbon project directory.',
+      );
+      expect(combined, `${name}: did not name the project root`).toContain(
+        `The project root is ${root}`,
+      );
+      expect(combined, `${name}: did not hand over the cd`).toContain(`cd ${root}`);
+      expect(combined, `${name}: kept the misleading generic follow-up line`).not.toContain(
+        'Run this command from within a project created with',
       );
     });
   }

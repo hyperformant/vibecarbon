@@ -42,7 +42,7 @@ describe('stepBlock', () => {
     const step = {
       id: 'up' as const,
       title: 'Start local development',
-      why: 'Starts the Docker services and the dev server so you can build and test locally.',
+      why: 'Starts the Docker services and dev server so you can build and test locally.',
       command: ['up'],
       display: 'vibecarbon up',
       canLaunch: true,
@@ -113,6 +113,26 @@ describe('stateLines', () => {
     expect(stateLines(state)).toEqual([
       'Project: acme',
       'Local dev: running (2 containers)',
+      'Configured services: none',
+      'Deployed: none',
+    ]);
+  });
+
+  it('names the project root and the cwd below it when run from a subdirectory', () => {
+    const state = {
+      kind: 'project' as const,
+      cwd: '/home/dev/acme',
+      subdir: '/home/dev/acme/src/client',
+      project: { name: 'acme' },
+      localDev: { dockerAvailable: true, running: [] },
+      configured: { any: false, features: [], providers: false },
+      environments: [],
+    };
+    expect(stateLines(state)).toEqual([
+      'Project: acme',
+      'You are in src/client, below the project root.',
+      'Project root: /home/dev/acme',
+      'Local dev: not running',
       'Configured services: none',
       'Deployed: none',
     ]);

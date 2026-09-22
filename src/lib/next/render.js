@@ -8,6 +8,7 @@
  * No clack, no process.exit; src/next.js does the printing.
  */
 
+import { relative } from 'node:path';
 import { formatExamples } from '../cli/help.js';
 
 /**
@@ -93,6 +94,13 @@ export function stateLines(state, { now = new Date() } = {}) {
 
   const { project, localDev, configured, environments } = state;
   const lines = [`Project: ${project.name}`];
+
+  // state.cwd is the project root; state.subdir is where the user actually
+  // is when that is somewhere below it.
+  if (state.subdir) {
+    lines.push(`You are in ${relative(state.cwd, state.subdir)}, below the project root.`);
+    lines.push(`Project root: ${state.cwd}`);
+  }
 
   if (localDev.running.length > 0) {
     lines.push(`Local dev: running (${localDev.running.length} containers)`);

@@ -26,6 +26,7 @@ import * as p from '@clack/prompts';
 import { isBinaryFile } from './lib/binary-files.js';
 import { hashContent } from './lib/checksum.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
+import { formatCommandNote } from './lib/cli/help.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
@@ -1538,7 +1539,7 @@ ${runCmd} test:prepush
     'vibecarbon deploy',
   ];
 
-  p.note(nextSteps.join('\n'), 'Next steps');
+  p.note(formatCommandNote(nextSteps), 'Next steps');
   await tick();
 
   p.outro(`Happy building! Admin: ${adminEmail}`);

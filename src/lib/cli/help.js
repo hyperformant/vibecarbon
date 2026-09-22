@@ -67,6 +67,44 @@ export function formatExampleCommand(command) {
  * @param {ExampleGroup[]} groups
  * @returns {string[]}
  */
+/**
+ * Colour the body of a `p.note()` that lists commands — the "Next steps"
+ * boxes after create/add/remove and the cluster-ready note after deploy —
+ * with the same vocabulary the help EXAMPLES use: `vibecarbon <command>` in
+ * cyan, `#` comments muted, everything else (args, flags, plain shell like
+ * `cd my-app`) left alone so our commands stay visually distinct from the
+ * user's own.
+ *
+ * Handles the two shapes those notes use that a bare formatExampleCommand
+ * does not: a chain (`vibecarbon down && vibecarbon up`, each invocation
+ * coloured) and a trailing inline comment (`vibecarbon shell e1  # ...`).
+ *
+ * @param {string[]} lines - note body, one entry per line
+ * @returns {string} the body joined with newlines, ready for p.note()
+ */
+export function formatCommandNote(lines) {
+  return lines
+    .map((line) => {
+      if (!line.trim()) return line;
+      const indent = line.match(/^\s*/)[0];
+      const body = line.slice(indent.length);
+      if (body.startsWith('#')) return `${indent}${c.muted(body)}`;
+      // Trailing inline comment: the `#` must follow whitespace, so a `#`
+      // inside a value (a URL fragment, say) is left as part of the command.
+      const split = body.match(/^(.*?\S)(\s+)(#\s.*)$/);
+      const commands = split ? split[1] : body;
+      // Keep the original gap verbatim: these notes pad it so the `#`
+      // comments line up in a column, and normalising it breaks that.
+      const comment = split ? `${split[2]}${c.muted(split[3])}` : '';
+      const coloured = commands
+        .split(/(\s*&&\s*)/)
+        .map((part) => (/^\s*&&\s*$/.test(part) ? part : formatExampleCommand(part)))
+        .join('');
+      return `${indent}${coloured}${comment}`;
+    })
+    .join('\n');
+}
+
 export function formatExamples(groups) {
   const lines = [];
   for (const group of groups) {

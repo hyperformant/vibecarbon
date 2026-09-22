@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -47,6 +47,36 @@ describe('detectProjectState', () => {
     writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
     const result = await detectProjectState(dir, baseDeps());
     expect(result).toEqual({ kind: 'no-project', cwd: dir });
+  });
+
+  it('resolves the project root from a subdirectory and records where the user is', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    writeFileSync(join(dir, '.vibecarbon.json'), JSON.stringify({ projectName: 'acme' }));
+    writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
+    const sub = join(dir, 'src', 'client');
+    mkdirSync(sub, { recursive: true });
+
+    const result = await detectProjectState(sub, baseDeps());
+    // Inside a project, just not where commands run: answer for the project
+    // above rather than proposing `create`, which from here would scaffold a
+    // second project nested inside the first.
+    expect(result.kind).toBe('project');
+    expect((result as { cwd: string }).cwd).toBe(dir);
+    expect((result as { subdir: string | null }).subdir).toBe(sub);
+  });
+
+  it('does not adopt an ancestor that only satisfies the package.json fallback', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'next-state-'));
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'some-monorepo' }));
+    writeFileSync(join(dir, 'docker-compose.yml'), 'services: {}\n');
+    const sub = join(dir, 'packages', 'api');
+    mkdirSync(sub, { recursive: true });
+
+    // The upward walk requires a real .vibecarbon.json, so an unrelated repo
+    // that happens to have a docker-compose.yml is never adopted as "your
+    // project" and handed to `up` to start containers in.
+    const result = await detectProjectState(sub, baseDeps());
+    expect(result).toEqual({ kind: 'no-project', cwd: sub });
   });
 
   it('reports a project with project.name from projectName when manifest and compose file are present', async () => {

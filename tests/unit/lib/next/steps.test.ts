@@ -69,7 +69,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'create',
       title: 'Create a project',
-      why: 'Scaffolds a new app with a local Supabase stack. You will pick a name and an admin login.',
+      why: 'Scaffolds a new app in its own directory so you can start building!',
       command: ['create', '<name>'],
       display: 'vibecarbon create <name>',
       canLaunch: true,
@@ -103,7 +103,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'up',
       title: 'Start local development',
-      why: 'Starts the Docker services and the dev server so you can build and test locally.',
+      why: 'Starts the Docker services and dev server so you can build and test locally.',
       command: ['up'],
       display: 'vibecarbon up',
       canLaunch: true,
@@ -117,7 +117,7 @@ describe('nextStep', () => {
     const step = nextStep(state);
     expect(step.id).toBe('up');
     expect(step.why).toBe(
-      'Starts the Docker services and the dev server so you can build and test locally. ' +
+      'Starts the Docker services and dev server so you can build and test locally. ' +
         'Docker does not seem to be running; up will tell you what it needs.',
     );
   });

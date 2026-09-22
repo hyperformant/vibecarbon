@@ -20,6 +20,7 @@ import {
   saveManifest,
 } from './add.js';
 import { exitCancelled } from './lib/cli/exit-guard.js';
+import { formatCommandNote } from './lib/cli/help.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
@@ -257,7 +258,10 @@ async function main(cliArgs) {
 
   if (success) {
     p.note(
-      ['# Restart services to apply changes:', 'vibecarbon down && vibecarbon up'].join('\n'),
+      formatCommandNote([
+        '# Restart services to apply changes:',
+        'vibecarbon down && vibecarbon up',
+      ]),
       'Next steps',
     );
     p.outro('Services removed successfully!');

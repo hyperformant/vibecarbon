@@ -58,7 +58,7 @@ export function nextStep(state, { skipConfigure = false } = {}) {
     return makeStep({
       id: 'create',
       title: 'Create a project',
-      why: 'Scaffolds a new app with a local Supabase stack. You will pick a name and an admin login.',
+      why: 'Scaffolds a new app in its own directory so you can start building!',
       command: ['create', '<name>'],
     });
   }
@@ -77,7 +77,7 @@ export function nextStep(state, { skipConfigure = false } = {}) {
   const configureDone = configured.any || skipConfigure;
 
   if (!upDone) {
-    let why = 'Starts the Docker services and the dev server so you can build and test locally.';
+    let why = 'Starts the Docker services and dev server so you can build and test locally.';
     if (!localDev.dockerAvailable) {
       why += ' Docker does not seem to be running; up will tell you what it needs.';
     }

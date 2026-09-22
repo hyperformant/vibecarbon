@@ -112,6 +112,8 @@ You are the primary owner of **user-facing documentation**:
 
 ## Brand Consistency Protocol
 
+**Scope: authoritative for product UI** — anything under `src/client/pages/` and the app shell (dashboard, auth, settings, billing). There, consistency beats novelty. Public marketing surfaces follow "Marketing Surfaces: Anti-Default Discipline" below, which takes precedence where the two disagree.
+
 When working on UI, always:
 1. **Audit existing patterns first** — Read existing page components and identify the current design language (spacing, typography scale, color usage, layout patterns)
 2. **Match existing component patterns** — If other pages use a specific card layout, header style, or section spacing, replicate it exactly
@@ -120,16 +122,35 @@ When working on UI, always:
 5. **Color palette adherence** — Only use colors defined in the design system; never introduce new colors without explicit instruction
 6. **Animation/transition consistency** — Match existing hover states, transitions, and micro-interactions
 
+## Marketing Surfaces: Anti-Default Discipline
+
+**Scope: public marketing surfaces only** — the landing page, pricing, and other Launch UI block sections. Product UI follows the Brand Consistency Protocol above instead.
+
+These pages are the first thing a visitor sees, and the default AI landing page is recognizable on sight. Consistency still governs tokens and components here; it does not require the same section rhythm on every page.
+
+1. **State a design read before generating.** One line, no more: "Reading this as: <page kind> for <audience>, with a <vibe> language." If the brief genuinely diverges, ask exactly one clarifying question — never a multi-question dump. If you can infer it from context, do not ask.
+2. **Reach past the defaults.** Do not ship these unless the brief explicitly asks for them:
+   - A purple/violet gradient as the primary brand accent
+   - A centered hero over a dark mesh or aurora background
+   - Three equal-width feature cards as the section directly after the hero
+   - Glassmorphism on every surface rather than one deliberate layer
+   - Inter (or the stack default) + `slate-900` as the entire type and color story
+   - Looping micro-animations on elements that are not interactive
+3. **Vary the section rhythm.** Alternate section shapes down the page (full-bleed, split, offset, staggered) instead of stacking identical centered blocks.
+4. **Earn each motion.** Animate on entry or interaction, once, and let it resolve. Motion that never settles reads as decoration.
+5. **Stay inside the system.** All of the above is composition, not palette — use the existing design tokens and Launch UI blocks. Introducing a new color still requires explicit instruction.
+
 ## Workflow
 
 For every UI task:
 1. **Understand the requirement** — Clarify what the user wants if ambiguous
-2. **Inventory existing components** — Check `src/client/components/ui/` and other component directories for reusable pieces
-3. **Review existing pages for patterns** — Look at similar pages/components to maintain consistency
-4. **Implement with composition** — Build from existing primitives, only create new base components when truly necessary
-5. **Verify responsive behavior** — Ensure the UI works across mobile, tablet, and desktop breakpoints
-6. **Check TypeScript correctness** — Ensure all props are typed, no `any` types
-7. **Validate accessibility** — Semantic HTML, keyboard navigation, ARIA attributes where needed
+2. **On a marketing surface, state the design read** — One line before any code (see Marketing Surfaces above); skip this for product UI
+3. **Inventory existing components** — Check `src/client/components/ui/` and other component directories for reusable pieces
+4. **Review existing pages for patterns** — Look at similar pages/components to maintain consistency
+5. **Implement with composition** — Build from existing primitives, only create new base components when truly necessary
+6. **Verify responsive behavior** — Ensure the UI works across mobile, tablet, and desktop breakpoints
+7. **Check TypeScript correctness** — Ensure all props are typed, no `any` types
+8. **Validate accessibility** — Semantic HTML, keyboard navigation, ARIA attributes where needed
 
 ## Anti-Patterns to Avoid
 
@@ -142,6 +163,7 @@ For every UI task:
 - Putting business logic in UI components (extract to hooks)
 - Using `useEffect` for data fetching (use TanStack Query)
 - Creating deeply nested component hierarchies without clear composition boundaries
+- Shipping the default AI landing aesthetic on marketing surfaces — purple gradient, centered hero on dark mesh, three equal feature cards (see Marketing Surfaces above)
 
 ## Quality Checklist
 
@@ -154,6 +176,7 @@ Before considering any UI work complete, verify:
 - [ ] Loading, error, and empty states handled
 - [ ] Keyboard accessible
 - [ ] Component is reusable if the pattern could appear elsewhere
+- [ ] Marketing surfaces only: design read stated, and no anti-default pattern shipped
 - [ ] Passes Biome linting (`npm run lint`)
 - [ ] Passes TypeScript checking (`npm run typecheck`)
 

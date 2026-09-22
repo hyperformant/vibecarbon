@@ -213,18 +213,49 @@ describe('without a terminal', () => {
   });
 });
 
+describe('below the project root', () => {
+  const subdir = `${cwd}/src/client`;
+
+  it('shows the project step and stops at the cd instead of launching', async () => {
+    detectProjectState.mockResolvedValue(projectState({ subdir }));
+
+    await expect(run([])).resolves.toBeUndefined();
+    // Every command asserts the project root as its cwd, and this process
+    // cannot cd the user's shell, so the guide hands over the cd instead.
+    expect(launchCli).not.toHaveBeenCalled();
+    expect(clack.confirm).not.toHaveBeenCalled();
+    const notes = clack.note.mock.calls.map((call) => noteText(call));
+    expect(notes[0]).toContain('vibecarbon up');
+    expect(notes[1]).toContain(`cd ${cwd}`);
+  });
+
+  it('shows the deployed menu without opening the select', async () => {
+    detectProjectState.mockResolvedValue({ ...menuState, subdir });
+
+    await expect(run([])).resolves.toBeUndefined();
+    expect(clack.select).not.toHaveBeenCalled();
+    expect(launchCli).not.toHaveBeenCalled();
+    expect(noteText(clack.note.mock.calls[0])).toContain('vibecarbon scale prod');
+  });
+});
+
 describe('create step', () => {
-  it('creates the project, then tells the user to cd into it', async () => {
+  it('launches create bare and leaves the name prompt and the cd note to it', async () => {
     detectProjectState.mockResolvedValue(noProject);
     clack.confirm.mockResolvedValue(true);
-    clack.text.mockResolvedValue('my-app');
     launchCli.mockResolvedValue({ code: 0, signal: null });
 
     await expect(run([])).resolves.toBeUndefined();
-    expect(launchCli).toHaveBeenCalledWith(['create', 'my-app'], { cwd });
-    const last = noteText(clack.note.mock.calls[clack.note.mock.calls.length - 1]);
-    expect(last).toContain('cd my-app');
-    expect(last).toContain('vibecarbon ?');
+    // create prompts for the name whenever the argument is absent, and ends
+    // with its own "Next steps" note leading with `cd <name>`. The guide
+    // asking first would put that question ahead of create's banner and
+    // print a second note repeating the same cd. Nothing needs to cross the
+    // process boundary: the ladder re-derives from the cwd every run, so
+    // this directory still resolves to "create".
+    expect(launchCli).toHaveBeenCalledWith(['create'], { cwd });
+    expect(clack.text).not.toHaveBeenCalled();
+    // Only the "Next: Create a project" step block, nothing after the child.
+    expect(clack.note).toHaveBeenCalledTimes(1);
     expect(process.exit).not.toHaveBeenCalled();
   });
 

@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parseDotenv } from './dotenv.js';
 
 /**
@@ -250,6 +250,32 @@ export function cleanStaleProjects(configDir = DEFAULT_CONFIG_DIR) {
  */
 export function hasDockerCompose(cwd = process.cwd()) {
   return existsSync(join(cwd, 'docker-compose.yml'));
+}
+
+/**
+ * Walk up from `startDir` looking for the root of the Vibecarbon project it
+ * sits inside, and return that directory (null once the filesystem root is
+ * reached). `startDir` itself is checked first.
+ *
+ * Deliberately stricter than the cwd predicate in `assertInProjectDir`: an
+ * ancestor must carry `.vibecarbon.json` itself, not merely satisfy
+ * `loadProjectConfig`'s package.json fallback. That fallback is safe for a
+ * directory the user deliberately cd'd into and typed a command in. Applied
+ * upward it would silently adopt any unrelated Node repo that happens to
+ * have a docker-compose.yml as "your project", and point commands like `up`
+ * at a foreign tree to start containers in.
+ *
+ * @param {string} [startDir] - Directory to start from
+ * @returns {string|null} - Absolute project root, or null if there is none
+ */
+export function findProjectRoot(startDir = process.cwd()) {
+  let dir = resolve(startDir);
+  for (;;) {
+    if (existsSync(join(dir, '.vibecarbon.json')) && hasDockerCompose(dir)) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 /**
