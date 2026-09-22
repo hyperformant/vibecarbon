@@ -25,7 +25,10 @@ describe('formatCommandNote', () => {
   it('colours every invocation in a chain', () => {
     const out = formatCommandNote(['vibecarbon down && vibecarbon up']);
     expect(plain(out)).toBe('vibecarbon down && vibecarbon up');
-    expect(out.match(new RegExp(CYAN.replace('[', '\\['), 'g'))?.length).toBe(4);
+    // Count the cyan starts by splitting on the literal escape: building a
+    // RegExp from it needs the '[' escaped, and the single-occurrence
+    // String.replace that does so reads as incomplete sanitization.
+    expect(out.split(CYAN).length - 1).toBe(4);
   });
 
   it('mutes a trailing inline comment but not the command before it', () => {
