@@ -18,7 +18,7 @@
  */
 
 import * as p from '@clack/prompts';
-import { hasDockerCompose, loadProjectConfig } from './config.js';
+import { findProjectRoot, hasDockerCompose, loadProjectConfig } from './config.js';
 
 /**
  * Verify the current working directory is a Vibecarbon project. On
@@ -32,7 +32,18 @@ export function assertInProjectDir(cwd = process.cwd()) {
   const projectConfig = loadProjectConfig(cwd);
   if (!projectConfig || !hasDockerCompose(cwd)) {
     p.log.error('Not in a Vibecarbon project directory.');
-    p.log.info('Run this command from within a project created with `vibecarbon create`.');
+    // Refusing is still right when the cwd is *inside* a project: every
+    // command resolves docker-compose.yml, .env.local, k8s overlays and
+    // relative arguments against the cwd, so running from a subdirectory
+    // would read a tree the user did not mean. But the generic message is
+    // misleading there, since they are within a created project. Name the
+    // root and hand over the cd instead.
+    const root = findProjectRoot(cwd);
+    if (root) {
+      p.log.info(`The project root is ${root}. Run this command from there: cd ${root}`);
+    } else {
+      p.log.info('Run this command from within a project created with `vibecarbon create`.');
+    }
     process.exit(1);
   }
   return projectConfig;
