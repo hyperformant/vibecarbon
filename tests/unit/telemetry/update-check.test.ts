@@ -25,17 +25,19 @@ afterEach(() => {
 });
 
 describe('getUpdateNotice', () => {
-  it('returns a two-line notice when the cache holds a newer version: prose, then the command alone', () => {
+  it('returns a three-line notice when the cache holds a newer version: prose, Run: label, indented command', () => {
     writeCache('0.99.0', 0);
     const notice = getUpdateNotice({ currentVersion: '0.41.0', stateDir: dir });
     expect(notice).toContain('0.41.0');
     expect(notice).toContain('0.99.0');
-    // The command is the whole second line (ANSI aside) — no separator or
-    // prose can be read as part of it.
-    const lines = (notice as string).split('\n');
-    expect(lines).toHaveLength(2);
     // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI colour codes
-    expect(lines[1].replace(/\x1b\[[0-9;]*m/g, '')).toBe('npm i -g vibecarbon');
+    const plain = (notice as string).replace(/\x1b\[[0-9;]*m/g, '');
+    const lines = plain.split('\n');
+    // The label and the indent must carry the meaning with colour stripped:
+    // this is what a piped/logged/NO_COLOR terminal sees.
+    expect(lines).toEqual(['Update available 0.41.0 → 0.99.0', 'Run:', '  npm i -g vibecarbon']);
+    // Nothing but the command on its line, so selecting it copies what you run.
+    expect(lines[2].trim()).toBe('npm i -g vibecarbon');
     expect(lines[0]).not.toContain('npm');
   });
 
