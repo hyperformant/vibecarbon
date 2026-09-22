@@ -159,7 +159,7 @@ ${c.bold('USAGE')}
   ${c.info('vibecarbon')} <command> [flags]
 
 ${c.bold('DEV COMMANDS')}
-  ${c.info('?')} | ${c.info('next')}                 What comes next: shows the command and offers to run it
+  ${c.info('?')} | ${c.info('next')}                 Guided help process for what's next if you get stuck
   ${c.info('create')} <project-name>    Create a new Vibecarbon project
   ${c.info('up')}                       Start local development environment
   ${c.info('down')}                     Stop local development environment
