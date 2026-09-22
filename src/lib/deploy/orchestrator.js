@@ -229,6 +229,31 @@ async function probePublicHealth(
  * @param {string} environment
  * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
  */
+/**
+ * Refuse to provision against a bucket the provider has not made readable.
+ * createBucket's visibility probe (HEAD+LIST+write, 120s) can exhaust its
+ * budget: the provider acked the create but no frontend serves the bucket.
+ * Every consumer downstream depends on it (storage uploads on the app
+ * bucket, wal-g on the backup bucket, Pulumi on the state bucket), and
+ * proceeding used to mean building a VPS and failing minutes later with a
+ * NoSuchBucket from whichever consumer touched it first (Hetzner e2e
+ * 2026-09-21, compose leg: wal-g's audit, five minutes and one server in).
+ * Nothing has been provisioned at this point, and bucket creation is
+ * idempotent, so a clean refusal plus a re-run is the whole recovery.
+ *
+ * @param {{ name: string, ready: boolean }} result - createBucket's return value
+ * @param {string} role - human label: 'app storage' | 'backup' | 'Pulumi state'
+ */
+export function assertBucketReady(result, role) {
+  if (result.ready) return;
+  throw new Error(
+    `${role} bucket ${result.name} was created, but the object storage provider did not make it ` +
+      'readable within 2 minutes (no frontend answered HEAD, LIST and a write round-trip ' +
+      'consistently). Nothing was provisioned. Re-run `vibecarbon deploy` once the bucket is ' +
+      'visible in the provider console; bucket creation is idempotent and the existing bucket is reused.',
+  );
+}
+
 export function resolveKubeconfigPath(environment, envConfig) {
   const roleStack = envConfig?.ha?.primary?.stack;
   const candidates = [
@@ -502,6 +527,7 @@ export async function executeDeployment(args, gatheredConfig) {
     try {
       s3Spinner.start(`Creating S3 bucket: ${s3Config.bucket}`);
       const bucket = await s3Provider.createBucket(s3Config.bucket);
+      assertBucketReady(bucket, 'App storage');
       s3Spinner.stop(
         bucket.created
           ? `S3 bucket created: ${s3Config.bucket}`
@@ -533,17 +559,18 @@ export async function executeDeployment(args, gatheredConfig) {
         s3Spinner.stop('CORS configuration skipped (not supported by provider)');
       }
 
+      // No try/catch here: a backup bucket that failed to create used to be
+      // logged and skipped, and the deploy then died at wal-g's audit after
+      // the VPS existed. The step's catch below reports and exits before
+      // anything is provisioned.
       s3Spinner.start(`Creating backup bucket: ${backupS3Config.bucket}`);
-      try {
-        const backupBucket = await s3Provider.createBucket(backupS3Config.bucket);
-        s3Spinner.stop(
-          backupBucket.created
-            ? `Backup bucket created: ${backupS3Config.bucket}`
-            : `Backup bucket exists: ${backupS3Config.bucket}`,
-        );
-      } catch (backupBucketError) {
-        s3Spinner.stop(`Backup bucket creation failed: ${backupBucketError.message}`);
-      }
+      const backupBucket = await s3Provider.createBucket(backupS3Config.bucket);
+      assertBucketReady(backupBucket, 'Backup');
+      s3Spinner.stop(
+        backupBucket.created
+          ? `Backup bucket created: ${backupS3Config.bucket}`
+          : `Backup bucket exists: ${backupS3Config.bucket}`,
+      );
 
       // Capture the region/endpoint the APP and BACKUP buckets were actually
       // created under, BEFORE the state-bucket create below. createBucket's
@@ -562,6 +589,7 @@ export async function executeDeployment(args, gatheredConfig) {
       // web-facing: no CORS, not public.
       s3Spinner.start(`Creating Pulumi state bucket: ${stateBucket}`);
       const stateBucketResult = await s3Provider.createBucket(stateBucket);
+      assertBucketReady(stateBucketResult, 'Pulumi state');
       s3Spinner.stop(
         stateBucketResult.created
           ? `Pulumi state bucket created: ${stateBucket}`
