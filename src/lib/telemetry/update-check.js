@@ -19,10 +19,13 @@ const FILE_NAME = 'update-check.json';
 const TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Update notice from the cached check, or null. Two lines: the yellow
- * prose, then the install command alone on its own line in the same cyan
- * the help EXAMPLES use for commands, so nothing else can be mistaken for
- * part of what to type.
+ * Update notice from the cached check, or null. Three lines: the yellow
+ * prose, a `Run:` label, then the install command indented on its own line
+ * in the same cyan the help EXAMPLES use for commands. The label and the
+ * indent carry the meaning structurally, so the notice still reads as a
+ * command to type when colour is stripped (piped, logged, NO_COLOR); the
+ * command line holds nothing but the command, so selecting it copies
+ * exactly what you run.
  *
  * @param {{ currentVersion?: string, stateDir?: string }} [opts]
  * @returns {string|null}
@@ -31,7 +34,11 @@ export function getUpdateNotice({ currentVersion = VERSION, stateDir = DEFAULT_D
   try {
     const cache = JSON.parse(readFileSync(join(stateDir, FILE_NAME), 'utf-8'));
     if (isNewerVersion(cache.latestVersion, currentVersion)) {
-      return `${c.warning(`Update available ${currentVersion} → ${cache.latestVersion}`)}\n${c.info('npm i -g vibecarbon')}`;
+      return (
+        `${c.warning(`Update available ${currentVersion} → ${cache.latestVersion}`)}\n` +
+        `${c.warning('Run:')}\n` +
+        `  ${c.info('npm i -g vibecarbon')}`
+      );
     }
   } catch {
     // no cache / corrupt cache — no notice
