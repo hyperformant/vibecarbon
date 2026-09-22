@@ -385,12 +385,20 @@ export class S3CompatibleProvider {
    *   - BucketAlreadyOwnedByYou: success-equivalent — return early.
    * Transient errors fall through to the same loop's backoff, courtesy
    * of `_send` (with maxAttempts=1 inside) so we don't double-retry.
+   * `ready` reports the post-create visibility probe (waitForBucketVisible):
+   * false means the provider acked the create but never made the bucket
+   * sustainably readable within the budget. Callers whose next step depends
+   * on the bucket (wal-g, Pulumi state, storage uploads) must refuse on
+   * `ready: false` rather than provision against a bucket that may not
+   * exist — Hetzner e2e 2026-09-21: an unready backup bucket let the deploy
+   * build a VPS and fail five minutes later at wal-g's audit with
+   * NoSuchBucket, and the bucket never appeared at all.
    * @param {string} bucketName - Bucket name (must be globally unique)
-   * @returns {Promise<{name: string, created: boolean}>}
+   * @returns {Promise<{name: string, created: boolean, ready: boolean, message?: string}>}
    */
   async createBucket(bucketName) {
     if (await this.bucketExists(bucketName)) {
-      return { name: bucketName, created: false, message: 'Bucket already exists' };
+      return { name: bucketName, created: false, ready: true, message: 'Bucket already exists' };
     }
 
     const command = new CreateBucketCommand({ Bucket: bucketName });
@@ -399,11 +407,16 @@ export class S3CompatibleProvider {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         await this._send(command, { maxAttempts: 1 });
-        await this.waitForBucketVisible(bucketName);
-        return { name: bucketName, created: true };
+        const ready = await this.waitForBucketVisible(bucketName);
+        return { name: bucketName, created: true, ready };
       } catch (error) {
         if (error.name === 'BucketAlreadyOwnedByYou') {
-          return { name: bucketName, created: false, message: 'Bucket already exists' };
+          return {
+            name: bucketName,
+            created: false,
+            ready: true,
+            message: 'Bucket already exists',
+          };
         }
         if (isTransientS3Error(error) && attempt < maxAttempts - 1) {
           await new Promise((r) => setTimeout(r, backoffSeconds[attempt] * 1000));
@@ -419,7 +432,12 @@ export class S3CompatibleProvider {
             this.region = foundRegion;
             this.endpoint = this.constructor.ENDPOINTS[foundRegion];
             this._client = null;
-            return { name: bucketName, created: false, message: 'Bucket already exists' };
+            return {
+              name: bucketName,
+              created: false,
+              ready: true,
+              message: 'Bucket already exists',
+            };
           }
           if (attempt < maxAttempts - 1) {
             // Eventual consistency window — probably our own prior delete
@@ -459,9 +477,12 @@ export class S3CompatibleProvider {
    * write → read → delete round-trip, proving the WRITE path every consumer
    * (registry uploads, wal-g, Pulumi state) actually depends on.
    *
-   * Best-effort: on budget exhaustion we warn and proceed, leaving residual
-   * raciness to the caller-side NoSuchBucket retry (see lib/iac
-   * withStateBackendRetry) and the registry push's round-trip probe.
+   * On budget exhaustion this returns false and the CALLER decides:
+   * createBucket surfaces it as `ready: false`, and the deploy orchestrator
+   * refuses before provisioning (assertBucketReady). Residual raciness on a
+   * bucket that did pass is still covered by the caller-side NoSuchBucket
+   * retry (see lib/iac withStateBackendRetry) and the registry push's
+   * round-trip probe.
    */
   async waitForBucketVisible(bucketName, { budgetMs = 120_000, intervalMs = 2000 } = {}) {
     const REQUIRED_STREAK = 3;
@@ -506,7 +527,7 @@ export class S3CompatibleProvider {
       }
       if (Date.now() + intervalMs > deadline) {
         console.warn(
-          `[s3] bucket ${bucketName} created but not sustainably HEAD+LIST+write-ready after ${budgetMs}ms, proceeding`,
+          `[s3] bucket ${bucketName} created but not sustainably HEAD+LIST+write-ready after ${budgetMs}ms`,
         );
         return false;
       }

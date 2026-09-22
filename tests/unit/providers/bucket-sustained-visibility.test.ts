@@ -89,7 +89,7 @@ describe('waitForBucketVisible sustained-visibility condition', () => {
     expect(sends.filter((s) => s === 'PutObjectCommand').length).toBe(3);
   });
 
-  it('still resolves false (best-effort) on budget exhaustion', async () => {
+  it('resolves false on budget exhaustion so the caller can refuse (createBucket → ready: false)', async () => {
     const { p } = makeProvider({ headResults: [false] });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
