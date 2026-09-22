@@ -31,7 +31,6 @@ import { launchCli } from './lib/next/launch.js';
 import { displayCommand, menuLines, stateLines, stepBlock } from './lib/next/render.js';
 import { detectProjectState } from './lib/next/state.js';
 import { deployedEnvironments, deployedMenu, nextStep } from './lib/next/steps.js';
-import { validateProjectName } from './lib/validators.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 export const SPEC = {
@@ -144,6 +143,26 @@ export async function run(args) {
 
     const step = nextStep(state, { skipConfigure });
 
+    // Inside the project but below its root: show the real next step for
+    // the project above, then stop at the cd. Launching from here would
+    // hand the child a cwd every command refuses (src/lib/project-guard.js),
+    // and this process cannot change the user's shell directory for them.
+    if (state.subdir) {
+      if (step.id === 'menu') {
+        p.note(
+          menuLines(deployedMenu(state), { envName: deployedEnvironments(state)[0].name }).join(
+            '\n',
+          ),
+          'What next',
+        );
+      } else {
+        p.note(stepBlock(step).join('\n'), `Next: ${step.title}`);
+      }
+      p.note(`cd ${state.cwd}`, 'Run it from the project root');
+      p.outro('The guide cannot change your shell directory, so cd first.');
+      return;
+    }
+
     if (step.id === 'menu') {
       const items = deployedMenu(state);
       const deployed = deployedEnvironments(state);
@@ -194,15 +213,17 @@ export async function run(args) {
         p.outro("When you're ready: vibecarbon create <name>");
         return;
       }
-      const name = await p.text({
-        message: 'Project name?',
-        placeholder: 'my-app',
-        validate: validateProjectName,
-      });
-      if (p.isCancel(name)) exitCancelled();
-      exitFromChild(await launchCli(['create', name], { cwd }));
-      p.note(`cd ${name}\nvibecarbon ?`, 'Next');
-      p.outro('The guide cannot change your shell directory, so cd first.');
+      // Launch `create` with no name argument: create owns that prompt
+      // (src/create.js prompts whenever the argument is absent) and ends
+      // with its own "Next steps" note leading with `cd <name>`. Asking
+      // here instead moved the one question create owns outside it, ahead
+      // of create's own banner, and left this guide printing a second note
+      // repeating the same `cd`. The ladder never needs the name: state is
+      // re-derived from the cwd on every run (src/lib/next/state.js), so
+      // this directory keeps resolving to "create" and the new project
+      // directory resolves to "up", with nothing carried across the
+      // process boundary.
+      exitFromChild(await launchCli(['create'], { cwd }));
       return;
     }
 
