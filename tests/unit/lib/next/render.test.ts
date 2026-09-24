@@ -98,7 +98,7 @@ describe('menuLines', () => {
 describe('stateLines', () => {
   it('reports the no-project sentence', () => {
     expect(stateLines({ kind: 'no-project', cwd: '/tmp/empty' })).toEqual([
-      'Not in a Vibecarbon project (needs .vibecarbon.json and docker-compose.yml).',
+      'Not in a Vibecarbon project.',
     ]);
   });
 
