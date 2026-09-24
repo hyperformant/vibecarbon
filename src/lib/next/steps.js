@@ -58,7 +58,7 @@ export function nextStep(state, { skipConfigure = false } = {}) {
     return makeStep({
       id: 'create',
       title: 'Create a project',
-      why: "Every project gets its own folder so you stay organized. Let's set one up.",
+      why: 'Every project lives in its own folder with its own git repo and dev stack.',
       command: ['create', '<project-name>'],
     });
   }
@@ -148,7 +148,7 @@ export function deployedMenu(_state) {
     {
       value: 'backup',
       label: 'Back up the database',
-      hint: 'protect your data',
+      hint: 'or list existing backups',
       command: ['backup'],
       envScoped: true,
     },
@@ -179,7 +179,7 @@ export function deployedMenu(_state) {
     {
       value: 'shell',
       label: 'Open a shell with cluster credentials',
-      hint: 'direct access',
+      hint: 'kubectl and SSH ready',
       command: ['shell'],
       envScoped: true,
     },

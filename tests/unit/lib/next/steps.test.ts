@@ -69,7 +69,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'create',
       title: 'Create a project',
-      why: "Every project gets its own folder so you stay organized. Let's set one up.",
+      why: 'Every project lives in its own folder with its own git repo and dev stack.',
       command: ['create', '<project-name>'],
       display: 'vibecarbon create <project-name>',
       canLaunch: true,
@@ -201,7 +201,7 @@ describe('deployedMenu', () => {
       {
         value: 'backup',
         label: 'Back up the database',
-        hint: 'protect your data',
+        hint: 'or list existing backups',
         command: ['backup'],
         envScoped: true,
       },
@@ -232,7 +232,7 @@ describe('deployedMenu', () => {
       {
         value: 'shell',
         label: 'Open a shell with cluster credentials',
-        hint: 'direct access',
+        hint: 'kubectl and SSH ready',
         command: ['shell'],
         envScoped: true,
       },
