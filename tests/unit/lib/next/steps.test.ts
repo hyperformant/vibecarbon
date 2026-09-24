@@ -69,9 +69,9 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'create',
       title: 'Create a project',
-      why: 'Scaffolds a new app in its own directory so you can start building!',
-      command: ['create', '<name>'],
-      display: 'vibecarbon create <name>',
+      why: 'Every project lives in its own folder with its own git repo and dev stack.',
+      command: ['create', '<project-name>'],
+      display: 'vibecarbon create <project-name>',
       canLaunch: true,
       blocksTerminal: false,
       optional: false,
@@ -88,7 +88,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'menu',
       title: 'You are deployed',
-      why: 'Opinionated setup ends here. Pick what you want to do next.',
+      why: "You're past the setup phase. Pick what you want to do next.",
       command: null,
       display: null,
       canLaunch: false,
@@ -103,7 +103,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'up',
       title: 'Start local development',
-      why: 'Starts the Docker services and dev server so you can build and test locally.',
+      why: "Let's spin up your dev environment. Docker and your app will be ready to build and test.",
       command: ['up'],
       display: 'vibecarbon up',
       canLaunch: true,
@@ -117,8 +117,8 @@ describe('nextStep', () => {
     const step = nextStep(state);
     expect(step.id).toBe('up');
     expect(step.why).toBe(
-      'Starts the Docker services and dev server so you can build and test locally. ' +
-        'Docker does not seem to be running; up will tell you what it needs.',
+      "Let's spin up your dev environment. Docker and your app will be ready to build and test. " +
+        "Docker doesn't seem to be running yet; up will tell you what it needs.",
     );
   });
 
@@ -131,7 +131,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'configure',
       title: 'Configure services (optional)',
-      why: 'Sets up cloud provider credentials, payments, OAuth, SMTP and CI/CD before your first deploy. Deploy works without it.',
+      why: 'Enter cloud credentials, payments, OAuth, SMTP and CI/CD details before your first deploy. Deploy works without it.',
       command: ['configure'],
       display: 'vibecarbon configure',
       canLaunch: true,
@@ -149,7 +149,7 @@ describe('nextStep', () => {
     expect(step).toEqual({
       id: 'deploy',
       title: 'Deploy to the cloud',
-      why: 'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license.',
+      why: 'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do.',
       command: ['deploy'],
       display: 'vibecarbon deploy',
       canLaunch: true,
@@ -166,7 +166,7 @@ describe('nextStep', () => {
     const step = nextStep(state);
     expect(step.id).toBe('deploy');
     expect(step.why).toBe(
-      'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license.',
+      'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do.',
     );
   });
 
@@ -179,8 +179,8 @@ describe('nextStep', () => {
     const step = nextStep(state);
     expect(step.id).toBe('deploy');
     expect(step.why).toBe(
-      'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license. ' +
-        'A previous deploy of stg did not finish; running deploy again resumes it.',
+      'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do. ' +
+        "A previous deploy of stg didn't finish; running deploy again will resume it.",
     );
   });
 });
@@ -190,10 +190,28 @@ describe('deployedMenu', () => {
 
   it('pins the menu order, values, labels, hints, commands and flags', () => {
     expect(items).toEqual([
-      { value: 'status', label: 'Check status', command: ['status'], envScoped: false },
+      {
+        value: 'status',
+        label: 'Check status',
+        hint: 'view your deployment',
+        command: ['status'],
+        envScoped: false,
+      },
       { value: 'scale', label: 'Scale an environment', command: ['scale'], envScoped: true },
-      { value: 'backup', label: 'Back up the database', command: ['backup'], envScoped: true },
-      { value: 'restore', label: 'Restore the database', command: ['restore'], envScoped: true },
+      {
+        value: 'backup',
+        label: 'Back up the database',
+        hint: 'or list existing backups',
+        command: ['backup'],
+        envScoped: true,
+      },
+      {
+        value: 'restore',
+        label: 'Restore the database',
+        hint: 'from a backup',
+        command: ['restore'],
+        envScoped: true,
+      },
       {
         value: 'failover',
         label: 'Fail over to the standby region',
@@ -214,12 +232,14 @@ describe('deployedMenu', () => {
       {
         value: 'shell',
         label: 'Open a shell with cluster credentials',
+        hint: 'kubectl and SSH ready',
         command: ['shell'],
         envScoped: true,
       },
       {
         value: 'diagnose',
         label: 'Dump cluster diagnostics',
+        hint: 'troubleshoot issues',
         command: ['diagnose'],
         envScoped: true,
       },
@@ -234,7 +254,7 @@ describe('deployedMenu', () => {
       {
         value: 'destroy',
         label: 'Tear down an environment',
-        hint: 'Destructive',
+        hint: 'destructive',
         command: ['destroy'],
         envScoped: true,
       },

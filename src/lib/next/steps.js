@@ -58,8 +58,8 @@ export function nextStep(state, { skipConfigure = false } = {}) {
     return makeStep({
       id: 'create',
       title: 'Create a project',
-      why: 'Scaffolds a new app in its own directory so you can start building!',
-      command: ['create', '<name>'],
+      why: 'Every project lives in its own folder with its own git repo and dev stack.',
+      command: ['create', '<project-name>'],
     });
   }
 
@@ -67,7 +67,7 @@ export function nextStep(state, { skipConfigure = false } = {}) {
     return makeStep({
       id: 'menu',
       title: 'You are deployed',
-      why: 'Opinionated setup ends here. Pick what you want to do next.',
+      why: "You're past the setup phase. Pick what you want to do next.",
       command: null,
     });
   }
@@ -77,9 +77,10 @@ export function nextStep(state, { skipConfigure = false } = {}) {
   const configureDone = configured.any || skipConfigure;
 
   if (!upDone) {
-    let why = 'Starts the Docker services and dev server so you can build and test locally.';
+    let why =
+      "Let's spin up your dev environment. Docker and your app will be ready to build and test.";
     if (!localDev.dockerAvailable) {
-      why += ' Docker does not seem to be running; up will tell you what it needs.';
+      why += " Docker doesn't seem to be running yet; up will tell you what it needs.";
     }
     return makeStep({
       id: 'up',
@@ -94,17 +95,17 @@ export function nextStep(state, { skipConfigure = false } = {}) {
     return makeStep({
       id: 'configure',
       title: 'Configure services (optional)',
-      why: 'Sets up cloud provider credentials, payments, OAuth, SMTP and CI/CD before your first deploy. Deploy works without it.',
+      why: 'Enter cloud credentials, payments, OAuth, SMTP and CI/CD details before your first deploy. Deploy works without it.',
       command: ['configure'],
       optional: true,
     });
   }
 
   let why =
-    'Provisions a server or cluster and ships the app. Single-server Compose is free; Kubernetes and HA modes need a license.';
+    'Provisions a server or cluster on your cloud account and ships the app. Compose deploys need no license; Kubernetes and HA modes do.';
   const resuming = (state.environments ?? []).find((env) => env.status === 'deploying');
   if (resuming) {
-    why += ` A previous deploy of ${resuming.name} did not finish; running deploy again resumes it.`;
+    why += ` A previous deploy of ${resuming.name} didn't finish; running deploy again will resume it.`;
   }
   return makeStep({
     id: 'deploy',
@@ -136,10 +137,28 @@ export function nextStep(state, { skipConfigure = false } = {}) {
  */
 export function deployedMenu(_state) {
   return [
-    { value: 'status', label: 'Check status', command: ['status'], envScoped: false },
+    {
+      value: 'status',
+      label: 'Check status',
+      hint: 'view your deployment',
+      command: ['status'],
+      envScoped: false,
+    },
     { value: 'scale', label: 'Scale an environment', command: ['scale'], envScoped: true },
-    { value: 'backup', label: 'Back up the database', command: ['backup'], envScoped: true },
-    { value: 'restore', label: 'Restore the database', command: ['restore'], envScoped: true },
+    {
+      value: 'backup',
+      label: 'Back up the database',
+      hint: 'or list existing backups',
+      command: ['backup'],
+      envScoped: true,
+    },
+    {
+      value: 'restore',
+      label: 'Restore the database',
+      hint: 'from a backup',
+      command: ['restore'],
+      envScoped: true,
+    },
     {
       value: 'failover',
       label: 'Fail over to the standby region',
@@ -160,12 +179,14 @@ export function deployedMenu(_state) {
     {
       value: 'shell',
       label: 'Open a shell with cluster credentials',
+      hint: 'kubectl and SSH ready',
       command: ['shell'],
       envScoped: true,
     },
     {
       value: 'diagnose',
       label: 'Dump cluster diagnostics',
+      hint: 'troubleshoot issues',
       command: ['diagnose'],
       envScoped: true,
     },
@@ -180,7 +201,7 @@ export function deployedMenu(_state) {
     {
       value: 'destroy',
       label: 'Tear down an environment',
-      hint: 'Destructive',
+      hint: 'destructive',
       command: ['destroy'],
       envScoped: true,
     },

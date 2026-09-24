@@ -89,7 +89,7 @@ function deployedLine(env, now) {
  */
 export function stateLines(state, { now = new Date() } = {}) {
   if (state.kind === 'no-project') {
-    return ['Not in a Vibecarbon project (needs .vibecarbon.json and docker-compose.yml).'];
+    return ['Not in a Vibecarbon project.'];
   }
 
   const { project, localDev, configured, environments } = state;

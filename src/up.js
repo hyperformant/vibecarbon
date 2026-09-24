@@ -30,10 +30,9 @@ const SPEC = {
   name: 'up',
   summary: 'Start the local development environment',
   description: [
-    "Detects the project's package manager and runs the dev:start script,",
-    'which boots Docker services, runs database migrations, and starts the',
-    'API and Vite dev servers. If ports are already in use, a port offset',
-    'is applied automatically.',
+    'Get your entire dev environment running with one command: Docker, database,',
+    'migrations, API, and Vite dev server. Your package manager is detected',
+    'automatically, and port/subnet conflicts are resolved on the fly.',
     '',
     // Lock files are listed in the order detectPackageManager (src/lib/
     // project.js) actually probes them, which is NOT the npm-first order the
@@ -272,7 +271,7 @@ export async function run(args = []) {
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
   if (!pkg.scripts?.['dev:start']) {
     p.log.error('No "dev:start" script found in package.json.');
-    p.log.info(`Run ${c.info('vibecarbon create <name>')} to create a new project.`);
+    p.log.info(`Run ${c.info('vibecarbon create <project-name>')} to create a new project.`);
     process.exit(1);
   }
 

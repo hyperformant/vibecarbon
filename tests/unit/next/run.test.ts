@@ -265,7 +265,7 @@ describe('create step', () => {
 
     await expect(run([])).resolves.toBeUndefined();
     expect(launchCli).not.toHaveBeenCalled();
-    expect(clack.outro).toHaveBeenCalledWith("When you're ready: vibecarbon create <name>");
+    expect(clack.outro).toHaveBeenCalledWith("When you're ready: vibecarbon create <project-name>");
   });
 });
 

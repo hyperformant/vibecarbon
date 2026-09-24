@@ -37,9 +37,9 @@ export const SPEC = {
   name: 'next',
   summary: 'Show what to do next and offer to run it',
   description: [
-    'Looks at the current directory, says where you are in the create, up, configure, deploy',
-    'ladder, shows the exact command for the next step and offers to run it for you.',
-    'Once an environment is deployed it becomes a menu of everyday operations.',
+    'Figures out where you are in the create, up, configure, deploy ladder, shows the',
+    'exact command for your next step, and offers to run it. Once deployed, it becomes a',
+    'menu for everyday operations, so you never have to remember which command does what.',
     '',
     'SPELLINGS',
     "  vibecarbon ?      Short form. zsh needs quotes: vibecarbon '?'",
@@ -210,7 +210,7 @@ export async function run(args) {
       const ok = await p.confirm({ message: 'Would you like to create one now?' });
       if (p.isCancel(ok)) exitCancelled();
       if (!ok) {
-        p.outro("When you're ready: vibecarbon create <name>");
+        p.outro("When you're ready: vibecarbon create <project-name>");
         return;
       }
       // Launch `create` with no name argument: create owns that prompt
