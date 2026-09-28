@@ -13,7 +13,7 @@
 # guarded by tests/unit/deploy/walg-dockerfile-arch.test.ts.
 FROM ghcr.io/hyperformant/wal-g:3.0.9 AS walg
 
-FROM supabase/postgres:17.6.1.172@sha256:9468db51b26ebb11bf29b6be2f061ac9fd6f3912a0f311c3e84f4ba96e097a9f
+FROM supabase/postgres:17.6.1.176@sha256:6dac0b07d9f629df8ec87c93f481c20bb36698aeca3e27051c69ba4b75242255
 
 COPY --from=walg /usr/local/bin/wal-g /usr/local/bin/wal-g
 # The load-bearing exec: deploy only asserts archive_mode=on, never that
