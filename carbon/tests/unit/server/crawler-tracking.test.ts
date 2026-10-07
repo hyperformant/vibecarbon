@@ -73,19 +73,28 @@ async function loadMiddleware(): Promise<CrawlerTracking> {
   return mod.crawlerTracking as CrawlerTracking;
 }
 
-/** Minimal context double: the middleware only reads method, path and the UA. */
-function ctx(method: string, path: string, userAgent?: string) {
+/**
+ * Minimal context double: the middleware reads method, path and the UA from the
+ * request, and the response status once `next()` has run.
+ */
+function ctx(method: string, path: string, userAgent?: string, status = 200) {
   return {
     req: {
       method,
       path,
       header: (name: string) => (name.toLowerCase() === 'user-agent' ? userAgent : undefined),
     },
+    res: { status },
   } as unknown as Context<{ Variables: HonoVariables }>;
 }
 
 /** The inserted row, as passed to `.insert()`. */
-function insertedRow(call = 0): { crawler: string; path: string; user_agent: string | null } {
+function insertedRow(call = 0): {
+  crawler: string;
+  path: string;
+  user_agent: string | null;
+  status: number | null;
+} {
   return insertMock.mock.calls[call][0];
 }
 
@@ -163,8 +172,22 @@ describe('crawlerTracking — when a row is written', () => {
       crawler: 'GPTBot',
       path: '/docs/seo',
       user_agent: GPTBOT_UA,
+      status: 200,
     });
     expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the status the crawler received, after the response is built', async () => {
+    const crawlerTracking = await loadMiddleware();
+    const c = ctx('GET', '/docs/seo', GPTBOT_UA, 200);
+    // The handler decides the status; the row must reflect it, not the default.
+    const next = vi.fn(async () => {
+      (c as unknown as { res: { status: number } }).res.status = 503;
+    });
+
+    await crawlerTracking(c, next);
+
+    expect(insertedRow().status).toBe(503);
   });
 
   it('does NOT insert for a browser UA', async () => {

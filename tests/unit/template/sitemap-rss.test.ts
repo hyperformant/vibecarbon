@@ -40,26 +40,42 @@ function readPublicRoutes(): string[] {
 
 const PUBLIC_ROUTES = readPublicRoutes();
 
+interface SitemapEntry {
+  route: string;
+  lastmod?: string;
+}
+
 function generateSitemap(
   siteUrl: string,
-  blogSlugs: string[],
-  changelogSlugs: string[],
-  docsSlugs: string[],
+  blog: SitemapEntry[],
+  changelog: SitemapEntry[],
+  docs: SitemapEntry[],
 ): string {
-  const today = new Date().toISOString().split('T')[0];
-  const allRoutes = [
-    ...PUBLIC_ROUTES,
-    ...blogSlugs.map((s) => `/blog/${s}`),
-    ...changelogSlugs.map((s) => `/changelog/${s}`),
-    ...docsSlugs.map((s) => `/docs/${s}`),
+  const newest = (entries: SitemapEntry[]) =>
+    entries
+      .map((e) => e.lastmod)
+      .filter(Boolean)
+      .sort()
+      .at(-1);
+  const indexLastmod: Record<string, string | undefined> = {
+    '/blog': newest(blog),
+    '/changelog': newest(changelog),
+  };
+  const entries: SitemapEntry[] = [
+    ...PUBLIC_ROUTES.map((route) => ({ route, lastmod: indexLastmod[route] })),
+    ...blog,
+    ...changelog,
+    ...docs,
   ];
 
-  const urls = allRoutes
-    .map(
-      (route) => `  <url>
-    <loc>${siteUrl}${route === '/' ? '' : route}</loc>
-    <lastmod>${today}</lastmod>
-  </url>`,
+  const urls = entries
+    .map(({ route, lastmod }) =>
+      [
+        '  <url>',
+        `    <loc>${siteUrl}${route === '/' ? '' : route}</loc>`,
+        ...(lastmod ? [`    <lastmod>${lastmod}</lastmod>`] : []),
+        '  </url>',
+      ].join('\n'),
     )
     .join('\n');
 
@@ -69,6 +85,10 @@ ${urls}
 </urlset>
 `;
 }
+
+/** Slugs as undated sitemap entries under `prefix`. */
+const pages = (prefix: string, slugs: string[], lastmod?: string): SitemapEntry[] =>
+  slugs.map((s) => ({ route: `${prefix}/${s}`, lastmod }));
 
 /**
  * generate-sitemap.ts reads SITE_URL through `readEnvFiles` (carbon/scripts/
@@ -155,13 +175,13 @@ describe('Sitemap generation', () => {
     it('covers the routes the app actually serves', () => {
       // Two-way pin: adding a route to generate-sitemap.ts flows into every
       // assertion below automatically, while REMOVING one of these — which
-      // would de-index a live page — fails here instead of passing silently.
+      // would drop a live page from the sitemap — fails here instead of
+      // passing silently. /login and /signup are deliberately absent: they
+      // stay indexable but are not pages worth pointing crawlers at.
       expect(PUBLIC_ROUTES).toEqual([
         '/',
         '/pricing',
         '/contact',
-        '/login',
-        '/signup',
         '/blog',
         '/changelog',
         '/docs',
@@ -193,7 +213,7 @@ describe('Sitemap generation', () => {
     it('includes blog slugs', () => {
       const sitemap = generateSitemap(
         'https://example.com',
-        ['hello-world', 'second-post'],
+        pages('/blog', ['hello-world', 'second-post']),
         [],
         [],
       );
@@ -202,7 +222,12 @@ describe('Sitemap generation', () => {
     });
 
     it('includes changelog slugs', () => {
-      const sitemap = generateSitemap('https://example.com', [], ['v0-1-0', 'v0-2-0'], []);
+      const sitemap = generateSitemap(
+        'https://example.com',
+        [],
+        pages('/changelog', ['v0-1-0', 'v0-2-0']),
+        [],
+      );
       expect(sitemap).toContain('<loc>https://example.com/changelog/v0-1-0</loc>');
       expect(sitemap).toContain('<loc>https://example.com/changelog/v0-2-0</loc>');
     });
@@ -212,16 +237,41 @@ describe('Sitemap generation', () => {
         'https://example.com',
         [],
         [],
-        ['getting-started', 'authentication'],
+        pages('/docs', ['getting-started', 'authentication']),
       );
       expect(sitemap).toContain('<loc>https://example.com/docs/getting-started</loc>');
       expect(sitemap).toContain('<loc>https://example.com/docs/authentication</loc>');
     });
 
-    it('includes lastmod with today date', () => {
+    it('never stamps the build date as lastmod', () => {
       const today = new Date().toISOString().split('T')[0];
-      const sitemap = generateSitemap('https://example.com', [], [], []);
-      expect(sitemap).toContain(`<lastmod>${today}</lastmod>`);
+      const sitemap = generateSitemap(
+        'https://example.com',
+        pages('/blog', ['a']),
+        [],
+        pages('/docs', ['b']),
+      );
+      expect(sitemap).not.toContain(`<lastmod>${today}</lastmod>`);
+      expect(sitemap).not.toContain('<lastmod>');
+    });
+
+    it("uses a page's own date and gives its index the newest one", () => {
+      const sitemap = generateSitemap(
+        'https://example.com',
+        [
+          { route: '/blog/old', lastmod: '2026-01-02' },
+          { route: '/blog/new', lastmod: '2026-08-29' },
+        ],
+        [],
+        [],
+      );
+      expect(sitemap).toContain(
+        '<loc>https://example.com/blog/old</loc>\n    <lastmod>2026-01-02</lastmod>',
+      );
+      expect(sitemap).toContain(
+        '<loc>https://example.com/blog</loc>\n    <lastmod>2026-08-29</lastmod>',
+      );
+      expect(sitemap).toContain('<loc>https://example.com/pricing</loc>\n  </url>');
     });
 
     it('homepage has no trailing path', () => {
@@ -232,7 +282,12 @@ describe('Sitemap generation', () => {
     });
 
     it('handles all content types together', () => {
-      const sitemap = generateSitemap('https://example.com', ['post-1'], ['v1'], ['intro']);
+      const sitemap = generateSitemap(
+        'https://example.com',
+        pages('/blog', ['post-1']),
+        pages('/changelog', ['v1']),
+        pages('/docs', ['intro']),
+      );
       const urlCount = (sitemap.match(/<url>/g) || []).length;
       expect(urlCount).toBe(PUBLIC_ROUTES.length + 3); // public + 1 blog + 1 changelog + 1 doc
     });

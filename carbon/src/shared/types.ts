@@ -313,6 +313,8 @@ export type Database = {
           crawler: string;
           path: string;
           user_agent: string | null;
+          /** HTTP status the crawler received; null for rows recorded before the column existed. */
+          status: number | null;
           hit_at: string;
         };
         Insert: {
@@ -320,12 +322,14 @@ export type Database = {
           crawler: string;
           path: string;
           user_agent?: string | null;
+          status?: number | null;
           hit_at?: string;
         };
         Update: {
           crawler?: string;
           path?: string;
           user_agent?: string | null;
+          status?: number | null;
           hit_at?: string;
         };
         Relationships: [];
@@ -337,6 +341,8 @@ export type Database = {
           crawler: string;
           path: string;
           hits: number;
+          /** Hits answered with a 5xx. */
+          errors: number;
           created_at: string;
           updated_at: string;
         };
@@ -345,6 +351,7 @@ export type Database = {
           crawler: string;
           path: string;
           hits?: number;
+          errors?: number;
           created_at?: string;
           updated_at?: string;
         };
@@ -353,6 +360,7 @@ export type Database = {
           crawler?: string;
           path?: string;
           hits?: number;
+          errors?: number;
           created_at?: string;
           updated_at?: string;
         };

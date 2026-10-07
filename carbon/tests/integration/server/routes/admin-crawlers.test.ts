@@ -58,9 +58,15 @@ const ROLLUP_DAY = '2026-08-01';
 
 interface CrawlerStatsBody {
   windowDays: number;
-  totals: Array<{ crawler: string; operator: string; category: string; hits: number }>;
+  totals: Array<{
+    crawler: string;
+    operator: string;
+    category: string;
+    hits: number;
+    errors: number;
+  }>;
   daily: Array<{ day: string; hits: number; byCategory: Record<string, number> }>;
-  topPaths: Array<{ path: string; hits: number; crawlers: string[] }>;
+  topPaths: Array<{ path: string; hits: number; errors: number; crawlers: string[] }>;
 }
 
 const SUPER_ADMIN: Partial<User> = { id: 'admin-1', app_metadata: { role: 'super_admin' } };
@@ -82,8 +88,8 @@ async function getStats(query = '', user: Partial<User> | null = SUPER_ADMIN) {
 }
 
 /** A raw hit row as PostgREST returns it. */
-function rawHit(crawler: string, path: string, day = TODAY) {
-  return { crawler, path, hit_at: `${day}T09:00:00.000Z` };
+function rawHit(crawler: string, path: string, day = TODAY, status: number | null = 200) {
+  return { crawler, path, status, hit_at: `${day}T09:00:00.000Z` };
 }
 
 beforeEach(() => {
@@ -158,11 +164,11 @@ describe('GET /api/v1/admin/crawlers — response contract', () => {
     expect(body.windowDays).toBe(30);
 
     expect(body.totals).toEqual([
-      { crawler: 'GPTBot', operator: 'OpenAI', category: 'ai-training', hits: 13 },
-      { crawler: 'Bingbot', operator: 'Microsoft', category: 'search', hits: 2 },
+      { crawler: 'GPTBot', operator: 'OpenAI', category: 'ai-training', hits: 13, errors: 0 },
+      { crawler: 'Bingbot', operator: 'Microsoft', category: 'search', hits: 2, errors: 0 },
       // Equal hits fall back to name order.
-      { crawler: 'ClaudeBot', operator: 'Anthropic', category: 'ai-training', hits: 1 },
-      { crawler: 'Googlebot', operator: 'Google', category: 'search', hits: 1 },
+      { crawler: 'ClaudeBot', operator: 'Anthropic', category: 'ai-training', hits: 1, errors: 0 },
+      { crawler: 'Googlebot', operator: 'Google', category: 'search', hits: 1, errors: 0 },
     ]);
   });
 
@@ -216,10 +222,41 @@ describe('GET /api/v1/admin/crawlers — response contract', () => {
     const { body } = await getStats();
 
     expect(body.topPaths).toEqual([
-      { path: '/docs/seo', hits: 13, crawlers: ['GPTBot'] },
-      { path: '/', hits: 3, crawlers: ['Bingbot', 'ClaudeBot'] },
-      { path: '/docs/cli', hits: 1, crawlers: ['Googlebot'] },
+      { path: '/docs/seo', hits: 13, errors: 0, crawlers: ['GPTBot'] },
+      { path: '/', hits: 3, errors: 0, crawlers: ['Bingbot', 'ClaudeBot'] },
+      { path: '/docs/cli', hits: 1, errors: 0, crawlers: ['Googlebot'] },
     ]);
+  });
+});
+
+describe('GET /api/v1/admin/crawlers — server errors served to crawlers', () => {
+  it('counts raw 5xx hits and rollup errors per crawler and per path', async () => {
+    rawMock.mockResolvedValue({
+      data: [
+        rawHit('Googlebot', '/docs/cli', TODAY, 503),
+        rawHit('Googlebot', '/docs/cli', TODAY, 200),
+        // 4xx is not a server error; null is a row from before the status column existed.
+        rawHit('Googlebot', '/missing', TODAY, 404),
+        rawHit('Googlebot', '/docs/cli', TODAY, null),
+      ],
+      error: null,
+    });
+    dailyMock.mockResolvedValue({
+      data: [{ day: ROLLUP_DAY, crawler: 'Googlebot', path: '/docs/cli', hits: 5, errors: 2 }],
+      error: null,
+    });
+
+    const { body } = await getStats();
+
+    expect(body.totals).toEqual([
+      { crawler: 'Googlebot', operator: 'Google', category: 'search', hits: 9, errors: 3 },
+    ]);
+    expect(body.topPaths[0]).toEqual({
+      path: '/docs/cli',
+      hits: 8,
+      errors: 3,
+      crawlers: ['Googlebot'],
+    });
   });
 });
 
@@ -236,7 +273,12 @@ describe('GET /api/v1/admin/crawlers — topPaths cap', () => {
     const { body } = await getStats();
 
     expect(body.topPaths).toHaveLength(10);
-    expect(body.topPaths[0]).toEqual({ path: '/p-00', hits: 12, crawlers: ['GPTBot'] });
+    expect(body.topPaths[0]).toEqual({
+      path: '/p-00',
+      hits: 12,
+      errors: 0,
+      crawlers: ['GPTBot'],
+    });
     expect(body.topPaths[9].path).toBe('/p-09');
     // The two least-visited paths are cut, not merged in.
     expect(body.topPaths.map((p) => p.path)).not.toContain('/p-10');

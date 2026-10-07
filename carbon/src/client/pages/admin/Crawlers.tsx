@@ -1,4 +1,5 @@
 import {
+  IconAlertTriangle as AlertTriangle,
   IconRobot as Bot,
   IconBrain as Brain,
   IconFileText as FileText,
@@ -8,6 +9,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import { PageHeader } from '@/components/PageHeader';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -45,6 +47,8 @@ interface CrawlerTotal {
   operator: string;
   category: CrawlerCategory;
   hits: number;
+  /** Hits answered with a 5xx. */
+  errors: number;
 }
 
 interface CrawlerDay {
@@ -56,6 +60,7 @@ interface CrawlerDay {
 interface CrawlerTopPath {
   path: string;
   hits: number;
+  errors: number;
   crawlers: string[];
 }
 
@@ -181,6 +186,7 @@ export default function AdminCrawlers() {
     { 'ai-search': 0, 'ai-training': 0, search: 0 } as Record<CrawlerCategory, number>
   );
   const totalHits = totals.reduce((sum, t) => sum + t.hits, 0);
+  const totalErrors = totals.reduce((sum, t) => sum + (t.errors ?? 0), 0);
   const aiHits = byCategory['ai-search'] + byCategory['ai-training'];
   const hasData = totalHits > 0;
 
@@ -223,6 +229,21 @@ export default function AdminCrawlers() {
           </Card>
         ) : (
           <>
+            {totalErrors > 0 && (
+              <Alert variant="destructive">
+                <AlertTriangle />
+                <AlertTitle>
+                  Crawlers received {num(totalErrors)} server{' '}
+                  {totalErrors === 1 ? 'error' : 'errors'}
+                </AlertTitle>
+                <AlertDescription>
+                  Pages that answer crawlers with a 5xx drop out of search results until they
+                  recover. The 5xx column below shows which crawlers and pages were affected; deploy
+                  windows and an unreachable database are the usual causes.
+                </AlertDescription>
+              </Alert>
+            )}
+
             {/* Crawler KPIs */}
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               <KpiCard
@@ -316,6 +337,7 @@ export default function AdminCrawlers() {
                             <TableHead>Operator</TableHead>
                             <TableHead>Type</TableHead>
                             <TableHead className="text-right">Hits</TableHead>
+                            <TableHead className="text-right">5xx</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -330,6 +352,11 @@ export default function AdminCrawlers() {
                               </TableCell>
                               <TableCell className="text-right tabular-nums">
                                 {num(row.hits)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right tabular-nums ${row.errors ? 'text-destructive font-medium' : 'text-muted-foreground'}`}
+                              >
+                                {num(row.errors ?? 0)}
                               </TableCell>
                             </TableRow>
                           ))}
@@ -364,6 +391,7 @@ export default function AdminCrawlers() {
                             <TableHead>Path</TableHead>
                             <TableHead>Crawlers</TableHead>
                             <TableHead className="text-right">Hits</TableHead>
+                            <TableHead className="text-right">5xx</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -383,6 +411,11 @@ export default function AdminCrawlers() {
                               </TableCell>
                               <TableCell className="text-right tabular-nums">
                                 {num(row.hits)}
+                              </TableCell>
+                              <TableCell
+                                className={`text-right tabular-nums ${row.errors ? 'text-destructive font-medium' : 'text-muted-foreground'}`}
+                              >
+                                {num(row.errors ?? 0)}
                               </TableCell>
                             </TableRow>
                           ))}

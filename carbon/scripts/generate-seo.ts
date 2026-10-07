@@ -237,6 +237,12 @@ const HOME_HTML = `
 </main>
 `.trim();
 
+// EDIT THIS as your public profiles go live: GitHub, LinkedIn, X, Crunchbase,
+// directory listings (AlternativeTo, G2, Product Hunt). They become the
+// homepage Organization's `sameAs`, which is how search engines and AI
+// assistants connect those profiles to this site as one entity. Full URLs.
+const SAME_AS: string[] = [];
+
 function buildRouteMeta(
   siteUrl: string,
   docs: ContentPage[],
@@ -254,10 +260,23 @@ function buildRouteMeta(
     html: HOME_HTML,
     jsonLd: {
       '@context': 'https://schema.org',
-      '@type': 'WebSite',
-      name: SITE_NAME,
-      description: SITE_DESCRIPTION,
-      url: siteUrl,
+      '@graph': [
+        {
+          '@type': 'WebSite',
+          name: SITE_NAME,
+          description: SITE_DESCRIPTION,
+          url: siteUrl,
+          publisher: { '@id': `${siteUrl}/#organization` },
+        },
+        {
+          '@type': 'Organization',
+          '@id': `${siteUrl}/#organization`,
+          name: SITE_NAME,
+          url: siteUrl,
+          logo: `${siteUrl}/icon-512.png`,
+          ...(SAME_AS.length ? { sameAs: SAME_AS } : {}),
+        },
+      ],
     },
   };
 
