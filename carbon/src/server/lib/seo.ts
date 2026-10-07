@@ -17,6 +17,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Context } from 'hono';
+import { matchesRoute, PRIVATE_ROUTES } from '../../shared/routes';
 import { logger } from './logger';
 
 export interface RouteSeo {
@@ -99,6 +100,12 @@ interface SeoShell {
    * Hono handler: serves the rendered shell with a content-hash ETag and
    * answers If-None-Match revalidations with 304. Rendered HTML and its ETag
    * are memoized per route (bounded: known routes + the plain shell).
+   *
+   * Status follows src/shared/routes.ts: manifest routes are 200 and
+   * indexable, private routes are 200 with `X-Robots-Tag: noindex`, and any
+   * other path is a 404 (the SPA still renders its NotFound page). Without a
+   * readable manifest every route is served 200, as before, so a broken build
+   * never 404s the whole site.
    */
   handler(c: Context): Response | Promise<Response>;
 }
@@ -111,11 +118,13 @@ interface SeoShell {
  */
 export function createSeoShell(
   shellPath = './dist/client/index.html',
-  manifestPath = './dist/seo/route-meta.json'
+  manifestPath = './dist/seo/route-meta.json',
+  privateRoutes: readonly string[] = PRIVATE_ROUTES
 ): SeoShell {
   let loaded = false;
   let shell: string | null = null;
   let routes: Record<string, RouteSeo> = {};
+  let manifestLoaded = false;
 
   const load = () => {
     loaded = true;
@@ -132,6 +141,7 @@ export function createSeoShell(
         Object.create(null),
         JSON.parse(readFileSync(manifestPath, 'utf-8')).routes ?? {}
       );
+      manifestLoaded = true;
     } catch (err) {
       logger.warn({ err, manifestPath }, 'SEO route manifest missing; serving plain SPA shell');
     }
@@ -139,11 +149,21 @@ export function createSeoShell(
 
   const rendered = new Map<string, { html: string; etag: string }>();
 
-  const renderResult = (path: string): { html: string; etag: string } | null => {
+  type Visibility = 'indexed' | 'private' | 'missing';
+
+  const renderResult = (
+    path: string
+  ): { html: string; etag: string; visibility: Visibility } | null => {
     if (!loaded) load();
     if (shell === null) return null;
     const normalized = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
     const meta = routes[normalized];
+    const visibility: Visibility =
+      meta || !manifestLoaded
+        ? 'indexed'
+        : matchesRoute(normalized, privateRoutes)
+          ? 'private'
+          : 'missing';
     // Unknown routes all share the plain-shell entry, so the cache stays
     // bounded by the manifest size + 1.
     const key = meta ? normalized : '';
@@ -153,7 +173,7 @@ export function createSeoShell(
       entry = { html, etag: `"${createHash('sha256').update(html).digest('hex').slice(0, 32)}"` };
       rendered.set(key, entry);
     }
-    return entry;
+    return { ...entry, visibility };
   };
 
   return {
@@ -164,6 +184,10 @@ export function createSeoShell(
       const result = renderResult(c.req.path);
       if (result === null) return c.notFound();
       c.header('Cache-Control', 'no-cache');
+      // A real 404 (not a 200 "soft 404"): search engines drop the URL
+      // instead of indexing a blank, canonical-less copy of the shell.
+      if (result.visibility === 'missing') return c.html(result.html, 404);
+      if (result.visibility === 'private') c.header('X-Robots-Tag', 'noindex');
       c.header('ETag', result.etag);
       const ifNoneMatch = c.req.header('If-None-Match');
       if (

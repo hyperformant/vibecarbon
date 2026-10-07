@@ -142,6 +142,7 @@ const authClient = createAuthClient();
 
 1. Create component in `src/client/pages/` — use `SidebarProvider` + `AppSidebar` + `SidebarInset` layout (see existing pages)
 2. Add route in `src/client/App.tsx` wrapped in `<ProtectedRoute>`
+3. Classify it for search: add the path to `PRIVATE_ROUTES` in `src/shared/routes.ts` (served `200` + `noindex`), or, for a public page, a manifest entry in `scripts/generate-seo.ts`. Unclassified routes return `404` on a hard load; `tests/structural/route-indexing.test.ts` enforces this.
 
 ### Rebranding the logo
 

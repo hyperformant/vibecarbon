@@ -51,6 +51,16 @@ Write descriptions as one plain sentence — they appear in search results, in `
 
 The homepage has no MDX file, so its crawler-visible summary is a block of HTML in `scripts/generate-seo.ts`. Edit it when you change your hero copy so the two don't drift apart.
 
+### Status codes and new pages
+
+The server answers every page request with the app shell, and picks the status from the route:
+
+- **Indexable pages** (everything in the SEO manifest: the homepage, pricing, docs, blog, changelog, legal) return `200` with their own title, canonical link and content.
+- **Private pages** listed in `src/shared/routes.ts` (password reset, the signed-in app, admin) return `200` with an `X-Robots-Tag: noindex` header, so they work normally but stay out of search results.
+- **Any other path** returns `404`. The app still shows its "Page not found" screen, and search engines drop the URL instead of indexing a blank copy of your homepage.
+
+When you add a page to `src/client/App.tsx`, add it to one of the first two: a manifest entry in `scripts/generate-seo.ts` for a public page, or `PRIVATE_ROUTES` for anything else. A structural test fails the build until you do, because an unlisted page would 404 when someone opens it directly.
+
 ### robots.txt
 
 `src/client/public/robots.txt` allows all crawlers, including the AI ones, and disallows only the authenticated routes (`/dashboard`, `/settings`, `/admin`, `/api/`). Blocking an AI crawler here removes you from that assistant's answers — leave the wildcard rule alone unless that's what you want.
