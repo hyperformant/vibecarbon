@@ -14,7 +14,7 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
-import { resolveComposeProjectName } from './lib/compose-project-name.js';
+import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-project-name.js';
 import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
 import { formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
@@ -344,6 +344,11 @@ export async function run(args = []) {
   }
   if (resolved.action === 'pin' || resolved.action === 'adopt') {
     setComposeProjectName(resolved.name, cwd);
+  }
+  if (resolved.action === 'adopt' && !releaseMovedStack(resolved.name, { cwd })) {
+    p.log.warn(
+      'could not stop the old containers, so they may keep pointing at the previous folder',
+    );
   }
   process.env.COMPOSE_PROJECT_NAME = resolved.name;
 

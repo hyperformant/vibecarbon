@@ -6,6 +6,7 @@
  * database. `up` pins the name in `.env` instead; this resolves what to pin.
  */
 
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { deriveComposeProjectName } from './subnet.js';
@@ -44,4 +45,26 @@ export function resolveComposeProjectName({
     return { action: 'adopt', name: owner.project, from: owner.workingDir };
   }
   return { action: 'refuse', from: owner.workingDir };
+}
+
+/**
+ * After `adopt`, remove the moved stack's containers so `up` recreates them
+ * from the new folder with fresh compose labels (compose does not recreate an
+ * unchanged container, so its working_dir label would keep pointing at the old
+ * folder). NEVER `-v`: the volumes hold the user's data.
+ *
+ * @param {string} name - the adopted compose project name
+ * @param {{ run?: (args: string[]) => unknown, cwd?: string }} [deps]
+ * @returns {boolean} true on success, false if the teardown failed
+ */
+export function releaseMovedStack(
+  name,
+  { cwd, run = (args) => execFileSync('docker', args, { cwd, stdio: 'pipe' }) } = {},
+) {
+  try {
+    run(['compose', '-p', name, 'down', '--remove-orphans']);
+    return true;
+  } catch {
+    return false;
+  }
 }

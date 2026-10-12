@@ -3,11 +3,12 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { releaseMovedStack } from '../../../src/lib/compose-project-name.js';
 import { findOrphanStacks, listVibecarbonStacks } from '../../../src/lib/local-stacks.js';
 
 // Proves the assumptions behind `vibecarbon up` pinning COMPOSE_PROJECT_NAME:
 // with the name pinned in .env, renaming the folder and running compose again
-// reuses the same volume and keeps the data.
+// reuses the same volume, keeps the data, and the stack follows the new folder.
 const shouldRunDocker = process.env.DOCKER_INTEGRATION === 'true';
 const describeDocker = shouldRunDocker ? describe : describe.skip;
 
@@ -64,18 +65,28 @@ describeDocker('renaming a project folder keeps its local volume', () => {
       ]),
     );
 
+    // Same teardown `up` runs on adopt: containers go, volumes stay.
+    expect(releaseMovedStack('rkv', { cwd: b })).toBe(true);
     docker(['compose', 'up', '-d'], b);
 
     expect(docker(['exec', 'rkv-db', 'cat', '/data/marker']).trim()).toBe('kept');
-    // Still one volume under the pinned name: no empty twin was created.
-    expect(
-      docker(['volume', 'ls', '-q', '--filter', 'label=com.docker.compose.project=rkv'])
-        .trim()
-        .split('\n'),
-    ).toHaveLength(1);
-    // NOTE: a plain `up -d` does not recreate an unchanged container, so its
-    // working_dir label keeps pointing at the old folder (verified on this
-    // docker/compose; the brief expected it to move to b/). The data survives
-    // regardless, which is what the pin is for.
+    const volumes = docker([
+      'volume',
+      'ls',
+      '-q',
+      '--filter',
+      'label=com.docker.compose.project=rkv',
+    ])
+      .trim()
+      .split('\n');
+    expect(volumes).toHaveLength(1);
+    const workingDir = docker([
+      'inspect',
+      '-f',
+      '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}',
+      'rkv-db',
+    ]).trim();
+    expect(workingDir).toBe(b);
+    expect(findOrphanStacks(listVibecarbonStacks()).map((o) => o.project)).not.toContain('rkv');
   });
 });
