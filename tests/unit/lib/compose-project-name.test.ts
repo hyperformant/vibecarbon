@@ -94,6 +94,42 @@ describe('resolveComposeProjectName', () => {
   });
 });
 
+describe('resolveComposeProjectName symlinks and stale pins', () => {
+  const base = { cwd: '/p/my-app2', projectName: 'my-app', pinned: null };
+
+  it('treats a symlinked working_dir that resolves to cwd as ours, not a copy', () => {
+    const r = resolveComposeProjectName({
+      ...base,
+      stacks: [stack('my-app', '/link/my-app')],
+      exists: () => true,
+      realpath: (p: string) => (p === '/link/my-app' ? '/p/my-app2' : p),
+    });
+    expect(r).toEqual({ action: 'pin', name: 'my-app' });
+  });
+
+  it('falls back to the raw path when realpath throws', () => {
+    const r = resolveComposeProjectName({
+      ...base,
+      stacks: [stack('my-app', '/p/my-app')],
+      exists: () => true,
+      realpath: () => {
+        throw new Error('ENOENT');
+      },
+    });
+    expect(r).toEqual({ action: 'refuse', from: '/p/my-app' });
+  });
+
+  it('repins when the stack at cwd has a different name than the stale pin', () => {
+    const r = resolveComposeProjectName({
+      ...base,
+      pinned: 'old-name',
+      stacks: [stack('my-app', '/p/my-app2')],
+      exists: () => true,
+    });
+    expect(r).toEqual({ action: 'pin', name: 'my-app' });
+  });
+});
+
 describe('releaseMovedStack', () => {
   it('runs compose down --remove-orphans for the adopted name and never -v', () => {
     const calls: string[][] = [];
