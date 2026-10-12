@@ -5,12 +5,15 @@
  * Stops Docker services (Supabase, Traefik, etc.) for the current project.
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
+import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { runCommandThroughTaskLog } from './lib/command.js';
+import { findOrphanStacks, formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
@@ -25,12 +28,111 @@ const SPEC = {
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
     { name: 'v', boolean: true, description: 'Show version' },
+    {
+      name: 'orphans',
+      boolean: true,
+      description: 'Remove local stacks whose project folder is gone',
+    },
+    { name: 'y', boolean: true, description: 'Skip the confirmation' },
   ],
 };
 
+/**
+ * Remove local stacks whose project folder is gone. Containers and the network
+ * go after one confirmation; data volumes only after a separate interactive
+ * yes (default no). `-y` and non-interactive runs always keep volumes.
+ */
+export async function removeOrphanStacks({
+  list = listVibecarbonStacks,
+  find = findOrphanStacks,
+  run: exec = execFileSync,
+  confirm = p.confirm,
+  isTTY = Boolean(process.stdin.isTTY),
+  yes = false,
+  log = p.log,
+  home,
+} = {}) {
+  const orphans = find(list());
+  if (orphans.length === 0) {
+    log.info('no orphaned local stacks found');
+    return { removed: [], keptVolumes: [] };
+  }
+
+  for (const s of orphans) {
+    const reason =
+      s.reason === 'files-missing'
+        ? 'started from files that are no longer there'
+        : 'folder is gone';
+    log.info(`${s.project} (${formatStackPath(s.workingDir, home)}), ${reason}`);
+  }
+
+  if (!yes) {
+    if (!isTTY) return { removed: [], keptVolumes: [] };
+    const ok = await confirm({
+      message: 'remove these stacks (containers and network, not data)?',
+      initialValue: true,
+    });
+    if (ok !== true) return { removed: [], keptVolumes: [] };
+  }
+
+  const removed = [];
+  const keptVolumes = [];
+  for (const { project } of orphans) {
+    // Works without the compose files. Never -v: volumes are handled below.
+    exec('docker', ['compose', '-p', project, 'down', '--remove-orphans'], { stdio: 'ignore' });
+    removed.push(project);
+
+    const names = String(
+      exec(
+        'docker',
+        ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
+        { encoding: 'utf8' },
+      ),
+    )
+      .split('\n')
+      .map((n) => n.trim())
+      .filter(Boolean);
+    if (names.length === 0) continue;
+
+    let deleteThem = false;
+    if (!yes && isTTY) {
+      log.info(
+        'if you moved this project, keep them: `vibecarbon up` in its new folder reuses them',
+      );
+      deleteThem =
+        (await confirm({
+          message: `delete ${project}'s data volumes too? this can't be undone`,
+          initialValue: false,
+        })) === true;
+    }
+    if (deleteThem) {
+      exec('docker', ['volume', 'rm', ...names], { stdio: 'ignore' });
+    } else {
+      keptVolumes.push(...names);
+      log.info(`kept ${names.join(', ')}; remove later with docker volume rm ${names.join(' ')}`);
+    }
+  }
+  return { removed, keptVolumes };
+}
+
 export async function run(args = []) {
-  const { handled } = parseFlagsOrExit(args, SPEC);
+  const { handled, values } = parseFlagsOrExit(args, SPEC);
   if (handled) return;
+
+  if (values.orphans) {
+    introCommand('down');
+    requireTTYOrFlags({
+      requirements: [
+        {
+          flag: 'y',
+          description: 'confirm removing the listed stacks',
+          satisfied: Boolean(values.y),
+        },
+      ],
+    });
+    await removeOrphanStacks({ yes: Boolean(values.y) });
+    return;
+  }
 
   // Project guard runs first so an accidental `vibecarbon down` from a
   // parent directory emits the canonical "not in a Vibecarbon project"

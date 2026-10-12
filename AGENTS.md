@@ -20,6 +20,7 @@ vibecarbon add <feature>           # Add optional feature (observability, redis)
 vibecarbon remove <feature>        # Remove a feature from project
 vibecarbon up                      # Start local dev environment
 vibecarbon down                    # Stop local dev environment
+vibecarbon down -orphans           # Remove local stacks whose project folder is gone
 vibecarbon reset                   # Reset local environment (removes all data)
 vibecarbon deploy [environment]    # Deploy an environment (-provider, -mode <compose|compose-ha|k8s|k8s-ha>, -region, -standby-region, -full, -restore, -allow-degraded)
 vibecarbon destroy [environment]   # Tear down cloud environment
