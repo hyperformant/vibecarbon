@@ -47,7 +47,7 @@ export function listVibecarbonStacks({ execFile = execFileSync, timeoutMs = 3000
     const labels = c?.Config?.Labels ?? {};
     const project = labels[PROJECT_LABEL];
     const networks = Object.keys(c?.NetworkSettings?.Networks ?? {});
-    if (!project || !networks.some((n) => n.endsWith(NETWORK_SUFFIX))) continue;
+    if (!project || !networks.some((n) => n === `${project}${NETWORK_SUFFIX}`)) continue;
     if (!byProject.has(project)) {
       byProject.set(project, {
         project,
@@ -68,13 +68,19 @@ export function listVibecarbonStacks({ execFile = execFileSync, timeoutMs = 3000
  * Stacks whose folder is gone, or whose folder exists but no longer holds a
  * compose file the stack was started with (a different checkout at the same
  * path). Either way `docker compose up` from that folder can't recreate it.
+ * Missing files only count while nothing in the stack is running:
+ * `vibecarbon remove <addon>` deletes the add-on's compose files from a stack
+ * that is still live.
  */
 export function findOrphanStacks(stacks, { exists = existsSync } = {}) {
   const orphans = [];
   for (const stack of stacks) {
     if (!stack.workingDir || !exists(stack.workingDir)) {
       orphans.push({ ...stack, reason: 'folder-missing' });
-    } else if (stack.configFiles.some((f) => !exists(f))) {
+    } else if (
+      stack.configFiles.some((f) => !exists(f)) &&
+      !stack.containers.some((c) => c.state === 'running')
+    ) {
       orphans.push({ ...stack, reason: 'files-missing' });
     }
   }

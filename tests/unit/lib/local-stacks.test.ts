@@ -76,6 +76,12 @@ describe('listVibecarbonStacks', () => {
     expect(listVibecarbonStacks({ execFile: fn })).toEqual([]);
   });
 
+  it('matches the network name exactly, not by suffix', () => {
+    const lookalike = { ...yippy, net: 'yippy_other_vibecarbon-network' };
+    const { fn } = fakeDocker([lookalike]);
+    expect(listVibecarbonStacks({ execFile: fn })).toEqual([]);
+  });
+
   it('returns [] without calling inspect when there are no compose containers', () => {
     const { fn, calls } = fakeDocker([]);
     expect(listVibecarbonStacks({ execFile: fn })).toEqual([]);
@@ -130,6 +136,41 @@ describe('findOrphanStacks', () => {
     };
     const exists = (p: string) => p !== '/repo/carbon/docker-compose.dev-init.yml';
     expect(findOrphanStacks([s], { exists })).toEqual([{ ...s, reason: 'files-missing' }]);
+  });
+
+  it('does not flag files-missing while a container is running', () => {
+    const s = {
+      ...stack,
+      workingDir: '/repo',
+      configFiles: ['/repo/docker-compose.yml', '/repo/docker-compose.n8n.yml'],
+      containers: [
+        { name: 'a', state: 'exited' },
+        { name: 'b', state: 'running' },
+      ],
+    };
+    const exists = (p: string) => p !== '/repo/docker-compose.n8n.yml';
+    expect(findOrphanStacks([s], { exists })).toEqual([]);
+  });
+
+  it('flags files-missing when every container is stopped or restarting', () => {
+    const s = {
+      ...stack,
+      workingDir: '/repo',
+      configFiles: ['/repo/docker-compose.yml', '/repo/docker-compose.n8n.yml'],
+      containers: [
+        { name: 'a', state: 'exited' },
+        { name: 'b', state: 'restarting' },
+      ],
+    };
+    const exists = (p: string) => p !== '/repo/docker-compose.n8n.yml';
+    expect(findOrphanStacks([s], { exists })).toEqual([{ ...s, reason: 'files-missing' }]);
+  });
+
+  it('still flags folder-missing even when containers are running', () => {
+    const s = { ...stack, containers: [{ name: 'a', state: 'running' }] };
+    expect(findOrphanStacks([s], { exists: () => false })).toEqual([
+      { ...s, reason: 'folder-missing' },
+    ]);
   });
 
   it('leaves healthy stacks alone', () => {

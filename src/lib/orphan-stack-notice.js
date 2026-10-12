@@ -19,12 +19,12 @@ export function formatOrphanNotice(orphans, { home } = {}) {
     .join(', ');
   const head =
     orphans.length === 1
-      ? `found a local stack whose project folder is gone: ${list}`
-      : `found ${orphans.length} local stacks whose project folders are gone: ${list}`;
+      ? `found a local stack whose project folder is gone or changed: ${list}`
+      : `found ${orphans.length} local stacks whose project folders are gone or changed: ${list}`;
   return [
     head,
     'if you moved a project, run `vibecarbon up` in its new folder to pick it back up',
-    'otherwise `vibecarbon down -orphans` removes them',
+    `otherwise \`vibecarbon down -orphans\` removes ${orphans.length === 1 ? 'it' : 'them'}`,
   ];
 }
 
