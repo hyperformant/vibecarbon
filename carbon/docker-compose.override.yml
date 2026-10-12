@@ -10,7 +10,12 @@
 # (for the admin email and password hash).
 
 services:
+  # Dev stacks cap restarts and don't come back on their own after a reboot:
+  # a project folder deleted or moved while its stack existed otherwise
+  # crash-loops forever. Run `vibecarbon up` after a reboot. Prod keeps
+  # unless-stopped (this file is never deployed).
   db:
+    restart: on-failure:5
     ports:
       - "${DEV_DB_PORT:-5432}:5432"
     volumes:
@@ -19,6 +24,7 @@ services:
   # Traefik dev config: add extra_hosts so it can reach the Vite dev server on the host
   # Also mount dev middlewares that use host.docker.internal for ForwardAuth
   traefik:
+    restart: on-failure:5
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -26,3 +32,30 @@ services:
       - ./volumes/traefik:/etc/traefik/dynamic:ro
       # Override middlewares to use host.docker.internal for ForwardAuth in dev
       - ./volumes/traefik/middlewares.dev.yml:/etc/traefik/dynamic/middlewares.yml:ro
+
+  app:
+    restart: on-failure:5
+
+  kong:
+    restart: on-failure:5
+
+  auth:
+    restart: on-failure:5
+
+  rest:
+    restart: on-failure:5
+
+  realtime:
+    restart: on-failure:5
+
+  storage:
+    restart: on-failure:5
+
+  imgproxy:
+    restart: on-failure:5
+
+  meta:
+    restart: on-failure:5
+
+  studio:
+    restart: on-failure:5
