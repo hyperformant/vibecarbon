@@ -51,11 +51,12 @@ export async function removeOrphanStacks({
   yes = false,
   log = p.log,
   home,
+  guard = requireTTYOrFlags,
 } = {}) {
   const orphans = find(list());
   if (orphans.length === 0) {
     log.info('no orphaned local stacks found');
-    return { removed: [], keptVolumes: [] };
+    return { removed: [], keptVolumes: [], failed: [] };
   }
 
   for (const s of orphans) {
@@ -66,32 +67,54 @@ export async function removeOrphanStacks({
     log.info(`${s.project} (${formatStackPath(s.workingDir, home)}), ${reason}`);
   }
 
+  // Off a TTY without -y there is nobody to confirm: exit 1 with the canonical message.
+  guard({
+    requirements: [
+      { flag: 'y', description: 'confirm removing the listed stacks', satisfied: yes },
+    ],
+    stdin: { isTTY },
+  });
+
   if (!yes) {
-    if (!isTTY) return { removed: [], keptVolumes: [] };
     const ok = await confirm({
       message: 'remove these stacks (containers and network, not data)?',
       initialValue: true,
     });
-    if (ok !== true) return { removed: [], keptVolumes: [] };
+    if (ok !== true) return { removed: [], keptVolumes: [], failed: [] };
   }
 
   const removed = [];
   const keptVolumes = [];
+  const failed = [];
+  const errMsg = (e) => String(e?.stderr || e?.message || e).trim();
   for (const { project } of orphans) {
-    // Works without the compose files. Never -v: volumes are handled below.
-    exec('docker', ['compose', '-p', project, 'down', '--remove-orphans'], { stdio: 'ignore' });
+    try {
+      // Works without the compose files. Never -v: volumes are handled below.
+      exec('docker', ['compose', '-p', project, 'down', '--remove-orphans'], { stdio: 'ignore' });
+    } catch (e) {
+      log.warn(`couldn't remove ${project}: ${errMsg(e)}`);
+      failed.push(project);
+      continue;
+    }
     removed.push(project);
 
-    const names = String(
-      exec(
-        'docker',
-        ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
-        { encoding: 'utf8' },
-      ),
-    )
-      .split('\n')
-      .map((n) => n.trim())
-      .filter(Boolean);
+    let names = [];
+    try {
+      names = String(
+        exec(
+          'docker',
+          ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
+          { encoding: 'utf8' },
+        ),
+      )
+        .split('\n')
+        .map((n) => n.trim())
+        .filter(Boolean);
+    } catch (e) {
+      log.warn(`couldn't remove ${project}: ${errMsg(e)}`);
+      failed.push(project);
+      continue;
+    }
     if (names.length === 0) continue;
 
     let deleteThem = false;
@@ -106,13 +129,19 @@ export async function removeOrphanStacks({
         })) === true;
     }
     if (deleteThem) {
-      exec('docker', ['volume', 'rm', ...names], { stdio: 'ignore' });
+      try {
+        exec('docker', ['volume', 'rm', ...names], { stdio: 'ignore' });
+      } catch (e) {
+        log.warn(`couldn't remove ${project}: ${errMsg(e)}`);
+        failed.push(project);
+        keptVolumes.push(...names);
+      }
     } else {
       keptVolumes.push(...names);
       log.info(`kept ${names.join(', ')}; remove later with docker volume rm ${names.join(' ')}`);
     }
   }
-  return { removed, keptVolumes };
+  return { removed, keptVolumes, failed };
 }
 
 export async function run(args = []) {
@@ -121,16 +150,8 @@ export async function run(args = []) {
 
   if (values.orphans) {
     introCommand('down');
-    requireTTYOrFlags({
-      requirements: [
-        {
-          flag: 'y',
-          description: 'confirm removing the listed stacks',
-          satisfied: Boolean(values.y),
-        },
-      ],
-    });
-    await removeOrphanStacks({ yes: Boolean(values.y) });
+    const result = await removeOrphanStacks({ yes: Boolean(values.y) });
+    if (result.failed.length > 0) process.exitCode = 1;
     return;
   }
 

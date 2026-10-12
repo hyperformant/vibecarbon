@@ -18,17 +18,20 @@ function setup(
     isTTY?: boolean;
     yes?: boolean;
     exists?: (p: string) => boolean;
+    failOn?: (argv: string[]) => boolean;
+    guard?: (o: unknown) => void;
   } = {},
 ) {
   const calls: string[][] = [];
   const run = vi.fn((_bin: string, argv: string[]) => {
     calls.push(argv);
+    if (opts.failOn?.(argv)) throw new Error('boom');
     return argv[0] === 'volume' && argv[1] === 'ls' ? (opts.volumes ?? '') : '';
   });
   const answers = [...(opts.confirms ?? [])];
   const confirm = vi.fn(async () => answers.shift());
   const logs: string[] = [];
-  const log = { info: (m: string) => logs.push(m) };
+  const log = { info: (m: string) => logs.push(m), warn: (m: string) => logs.push(`WARN ${m}`) };
   const promise = removeOrphanStacks({
     list: () => (opts.stacks ?? [yippy]) as never,
     find: (stacks: never[]) =>
@@ -44,6 +47,7 @@ function setup(
     yes: opts.yes ?? false,
     log,
     home: '/home/u',
+    guard: (opts.guard ?? (() => {})) as never,
   });
   return { promise, calls, run, confirm, logs };
 }
@@ -51,7 +55,7 @@ function setup(
 describe('removeOrphanStacks', () => {
   it('reports when there are no orphans and runs nothing', async () => {
     const t = setup({ stacks: [] });
-    expect(await t.promise).toEqual({ removed: [], keptVolumes: [] });
+    expect(await t.promise).toEqual({ removed: [], keptVolumes: [], failed: [] });
     expect(t.logs).toEqual(['no orphaned local stacks found']);
     expect(t.run).not.toHaveBeenCalled();
   });
@@ -112,7 +116,7 @@ describe('removeOrphanStacks', () => {
 
   it('removes nothing when the first confirm is declined', async () => {
     const t = setup({ confirms: [false] });
-    expect(await t.promise).toEqual({ removed: [], keptVolumes: [] });
+    expect(await t.promise).toEqual({ removed: [], keptVolumes: [], failed: [] });
     expect(t.run).not.toHaveBeenCalled();
   });
 
@@ -129,5 +133,56 @@ describe('removeOrphanStacks', () => {
     const t = setup({ stacks: [yippy, live], yes: true });
     await t.promise;
     expect(t.calls.flat()).not.toContain('live');
+  });
+
+  it('does not call the guard when there is nothing to remove', async () => {
+    const guard = vi.fn();
+    const t = setup({ stacks: [], isTTY: false, guard });
+    await t.promise;
+    expect(guard).not.toHaveBeenCalled();
+    expect(t.logs).toEqual(['no orphaned local stacks found']);
+  });
+
+  it('runs the guard when orphans exist off-TTY without -y and removes nothing if it exits', async () => {
+    const guard = vi.fn(() => {
+      throw new Error('exit 1');
+    });
+    const t = setup({ isTTY: false, guard });
+    await expect(t.promise).rejects.toThrow('exit 1');
+    expect(guard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requirements: [expect.objectContaining({ flag: 'y', satisfied: false })],
+        stdin: { isTTY: false },
+      }),
+    );
+    expect(t.run).not.toHaveBeenCalled();
+  });
+
+  it('warns and continues when a stack compose down fails, skipping its volume prompt', async () => {
+    const t = setup({
+      stacks: [yippy, carbon],
+      volumes: 'x_db\n',
+      confirms: [true, false],
+      failOn: (a) => a[2] === 'yippy' && a[3] === 'down',
+    });
+    const res = await t.promise;
+    expect(res.failed).toEqual(['yippy']);
+    expect(res.removed).toEqual(['carbon']);
+    expect(t.logs.some((l) => l.startsWith("WARN couldn't remove yippy: boom"))).toBe(true);
+    expect(t.confirm).toHaveBeenCalledTimes(2);
+    expect(t.calls.filter((a) => a[0] === 'volume')).toHaveLength(1);
+  });
+
+  it('warns and continues when volume rm fails', async () => {
+    const t = setup({
+      stacks: [yippy, carbon],
+      volumes: 'x_db\n',
+      confirms: [true, true, false],
+      failOn: (a) => a[0] === 'volume' && a[1] === 'rm',
+    });
+    const res = await t.promise;
+    expect(res.failed).toEqual(['yippy']);
+    expect(res.removed).toEqual(['yippy', 'carbon']);
+    expect(t.logs.some((l) => l.startsWith("WARN couldn't remove yippy"))).toBe(true);
   });
 });
