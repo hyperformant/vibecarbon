@@ -29,6 +29,10 @@ coverage/
 .env.local
 .env.*.local
 
+# Written by carbon/scripts/dev-init.js (dev admin credentials + the overlay that mounts them)
+carbon/docker-compose.dev-init.yml
+carbon/volumes/db/super-admin.generated.sql
+
 # Operator e2e credential tokens (A6) — see tests/.env.e2e.example
 tests/.env.e2e
 
