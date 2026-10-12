@@ -8,6 +8,7 @@
   "files": {
     "compose/docker-compose.yml": "docker-compose.redis.yml",
     "compose/docker-compose.prod.yml": "docker-compose.redis.prod.yml",
+    "compose/docker-compose.override.yml": "docker-compose.redis.override.yml",
     "k8s/": "k8s/base/redis/",
     "docs/integration.md": "redis-integration.md"
   },

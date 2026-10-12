@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as parseYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
@@ -14,13 +14,25 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = join(__dirname, '..', '..', '..');
 type Compose = { services?: Record<string, { restart?: string }> };
-const load = (rel: string) => parseYaml(readFileSync(join(ROOT, rel), 'utf-8')) as Compose;
+// Service templates carry {{PLACEHOLDER}} tokens that are not valid YAML.
+const load = (rel: string) =>
+  parseYaml(readFileSync(join(ROOT, rel), 'utf-8').replace(/\{\{[A-Z_]+\}\}/g, 'x')) as Compose;
 
 const PAIRS: Array<[string, string]> = [
   ['carbon/docker-compose.yml', 'carbon/docker-compose.override.yml'],
   ['carbon/docker-compose.n8n.yml', 'carbon/docker-compose.n8n.override.yml'],
   ['carbon/docker-compose.metabase.yml', 'carbon/docker-compose.metabase.override.yml'],
 ];
+
+// Add-ons ship from services/<svc>/compose/, not carbon/. Discover them so a
+// future add-on without the cap fails here.
+for (const svc of readdirSync(join(ROOT, 'services'))) {
+  const base = `services/${svc}/compose/docker-compose.yml`;
+  const override = `services/${svc}/compose/docker-compose.override.yml`;
+  if (!existsSync(join(ROOT, base))) continue;
+  // A missing override file is a failure too: load() throws ENOENT.
+  PAIRS.push([base, override]);
+}
 
 describe('dev restart policy', () => {
   it.each(PAIRS)('every unless-stopped service in %s is on-failure:5 in %s', (base, override) => {
@@ -43,11 +55,11 @@ describe('dev restart policy', () => {
   });
 
   it('one-shot services keep restart "no"', () => {
-    const services = load('carbon/docker-compose.metabase.override.yml').services ?? {};
-    for (const [name, svc] of Object.entries(
-      load('carbon/docker-compose.metabase.yml').services ?? {},
-    )) {
-      if (svc.restart === 'no') expect(services[name]?.restart).toBeUndefined();
+    for (const [base, override] of PAIRS) {
+      const services = load(override).services ?? {};
+      for (const [name, svc] of Object.entries(load(base).services ?? {})) {
+        if (svc.restart === 'no') expect(services[name]?.restart).toBeUndefined();
+      }
     }
   });
 });
