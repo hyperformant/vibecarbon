@@ -323,6 +323,13 @@ export function renderBundle(projectName, options = {}) {
   // key must never survive the read — see stripOperatorSecretLines' doc for
   // why this doesn't touch envOverrides (S3/DNS-01/scale-replay stay live).
   envContent = stripOperatorSecretLines(envContent);
+  // Servers derive the compose project from /opt/<project>. A local
+  // COMPOSE_PROJECT_NAME pin (written by `vibecarbon up` after a folder
+  // rename) would move the server stack onto new, empty volumes.
+  envContent = envContent
+    .split('\n')
+    .filter((line) => !/^COMPOSE_PROJECT_NAME=/.test(line))
+    .join('\n');
 
   const envOverrides = { ...(options.envOverrides || {}) };
   if (options.domain) {
