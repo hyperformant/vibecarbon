@@ -86,7 +86,7 @@ describe('removeOrphanStacks', () => {
       initialValue: false,
     });
     expect(t.logs).toContain(
-      'if you moved this project, keep them: `vibecarbon up` in its new folder reuses them',
+      "if you moved this project, keep them, then set COMPOSE_PROJECT_NAME=yippy in the new folder's .env before `vibecarbon up` there to reuse them",
     );
   });
 
@@ -118,6 +118,13 @@ describe('removeOrphanStacks', () => {
     const t = setup({ confirms: [false] });
     expect(await t.promise).toEqual({ removed: [], keptVolumes: [], failed: [] });
     expect(t.run).not.toHaveBeenCalled();
+    expect(t.logs).toContain('nothing removed');
+  });
+
+  it('names the deleted volumes after volume rm', async () => {
+    const t = setup({ volumes: 'yippy_db\nyippy_storage\n', confirms: [true, true] });
+    await t.promise;
+    expect(t.logs).toContain('deleted yippy_db, yippy_storage');
   });
 
   it('lists the right reason text per stack', async () => {

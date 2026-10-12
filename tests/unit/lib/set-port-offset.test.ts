@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
-import { setPortOffset } from '../../../src/up.js';
+import { setComposeProjectName, setPortOffset } from '../../../src/up.js';
 
 /**
  * DEV_PORT_OFFSET and its client-visible twin VITE_DEV_PORT_OFFSET must be
@@ -99,5 +99,31 @@ describe('setPortOffset', () => {
       '# Port offset (set by vibecarbon up to avoid conflicts)\nDEV_PORT_OFFSET=100\nVITE_DEV_PORT_OFFSET=100\n',
     );
     expect(parseDotenv(content)).toEqual({ DEV_PORT_OFFSET: '100', VITE_DEV_PORT_OFFSET: '100' });
+  });
+});
+
+describe('setComposeProjectName', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vc-composename-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('replaces a hand-edited `export` form instead of duplicating the key', () => {
+    writeFileSync(join(dir, '.env'), 'A=1\nexport COMPOSE_PROJECT_NAME=old\nB=2\n');
+    setComposeProjectName('yippy', dir);
+    const raw = readFileSync(join(dir, '.env'), 'utf-8');
+    expect(raw.match(/COMPOSE_PROJECT_NAME/g)).toHaveLength(1);
+    expect(parseDotenv(raw).COMPOSE_PROJECT_NAME).toBe('yippy');
+  });
+
+  it('replaces an indented plain line too', () => {
+    writeFileSync(join(dir, '.env'), '  COMPOSE_PROJECT_NAME = old\n');
+    setComposeProjectName('yippy', dir);
+    const raw = readFileSync(join(dir, '.env'), 'utf-8');
+    expect(raw.match(/COMPOSE_PROJECT_NAME/g)).toHaveLength(1);
+    expect(parseDotenv(raw).COMPOSE_PROJECT_NAME).toBe('yippy');
   });
 });

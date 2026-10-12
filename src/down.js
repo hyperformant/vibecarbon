@@ -80,7 +80,10 @@ export async function removeOrphanStacks({
       message: 'remove these stacks (containers and network, not data)?',
       initialValue: true,
     });
-    if (ok !== true) return { removed: [], keptVolumes: [], failed: [] };
+    if (ok !== true) {
+      log.info('nothing removed');
+      return { removed: [], keptVolumes: [], failed: [] };
+    }
   }
 
   const removed = [];
@@ -120,7 +123,7 @@ export async function removeOrphanStacks({
     let deleteThem = false;
     if (!yes && isTTY) {
       log.info(
-        'if you moved this project, keep them: `vibecarbon up` in its new folder reuses them',
+        `if you moved this project, keep them, then set COMPOSE_PROJECT_NAME=${project} in the new folder's .env before \`vibecarbon up\` there to reuse them`,
       );
       deleteThem =
         (await confirm({
@@ -131,6 +134,7 @@ export async function removeOrphanStacks({
     if (deleteThem) {
       try {
         exec('docker', ['volume', 'rm', ...names], { stdio: 'ignore' });
+        log.info(`deleted ${names.join(', ')}`);
       } catch (e) {
         log.warn(`couldn't remove ${project}: ${errMsg(e)}`);
         failed.push(project);

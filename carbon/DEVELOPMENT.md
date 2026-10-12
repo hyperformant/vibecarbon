@@ -12,6 +12,8 @@ pnpm dev    # ensures carbon/'s dev env exists, then runs `vibecarbon up` in car
 
 `carbon/.env` and `.env.local` are gitignored, so a fresh checkout has none. `pnpm dev` runs `npm run dev:init` inside `carbon/` for you when they're missing, then starts the stack via the working-tree CLI. Running `vibecarbon up` directly from `carbon/` also works, but you must `npm run dev:init` first.
 
+Local dev services don't start by themselves after a reboot, so run `vibecarbon up` again; they cap restarts so a deleted or moved project folder can't leave containers crash-looping forever.
+
 (The vibecarbon repo root uses pnpm; the template in `carbon/` and every generated project use npm.)
 
 ## Template Variable System

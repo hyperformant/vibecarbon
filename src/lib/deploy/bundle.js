@@ -328,7 +328,7 @@ export function renderBundle(projectName, options = {}) {
   // rename) would move the server stack onto new, empty volumes.
   envContent = envContent
     .split('\n')
-    .filter((line) => !/^COMPOSE_PROJECT_NAME=/.test(line))
+    .filter((line) => !/^\s*(export\s+)?COMPOSE_PROJECT_NAME\s*=/.test(line))
     .join('\n');
 
   const envOverrides = { ...(options.envOverrides || {}) };

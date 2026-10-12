@@ -185,7 +185,12 @@ describe('renderBundle strips the local COMPOSE_PROJECT_NAME pin', () => {
 
   it('never ships the local pin, so servers keep deriving the name from /opt/<project>', () => {
     projectDir = makeProjectDir(
-      ['COMPOSE_PROJECT_NAME=carbon', 'PROJECT_NAME=vibecarbon'].join('\n'),
+      [
+        'COMPOSE_PROJECT_NAME=carbon',
+        'export COMPOSE_PROJECT_NAME=carbon',
+        '  COMPOSE_PROJECT_NAME = carbon',
+        'PROJECT_NAME=vibecarbon',
+      ].join('\n'),
     );
     process.chdir(projectDir);
 
@@ -193,7 +198,7 @@ describe('renderBundle strips the local COMPOSE_PROJECT_NAME pin', () => {
 
     try {
       const raw = readFileSync(join(stage, '.env'), 'utf-8');
-      expect(raw).not.toMatch(/^COMPOSE_PROJECT_NAME=/m);
+      expect(raw).not.toMatch(/COMPOSE_PROJECT_NAME/);
       expect(parseDotenv(raw).PROJECT_NAME).toBe('myproj');
     } finally {
       rmSync(stage, { recursive: true, force: true });

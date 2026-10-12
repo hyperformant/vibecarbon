@@ -237,11 +237,11 @@ function setSubnetPrefix(prefix, cwd) {
  * `docker compose down`. Pinning keeps the stack (and its db volume) stable
  * when the project folder is renamed.
  */
-function setComposeProjectName(name, cwd) {
+export function setComposeProjectName(name, cwd) {
   const envPath = join(cwd, '.env');
   let content = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
   const line = formatDotenvLine('COMPOSE_PROJECT_NAME', name);
-  const regex = /^COMPOSE_PROJECT_NAME=.*$/m;
+  const regex = /^\s*(?:export\s+)?COMPOSE_PROJECT_NAME\s*=.*$/m;
 
   if (regex.test(content)) {
     content = content.replace(regex, () => line);
@@ -331,9 +331,7 @@ export async function run(args = []) {
     stacks,
   });
   if (resolved.action === 'refuse') {
-    p.log.error(
-      `${projectName} already has a local stack running from ${formatStackPath(resolved.from)}`,
-    );
+    p.log.error(`${projectName} already has a local stack from ${formatStackPath(resolved.from)}`);
     p.log.info(
       'if this folder is a copy, give it its own PROJECT_NAME in .env and .env.local, or run `vibecarbon down` in the other folder first',
     );
