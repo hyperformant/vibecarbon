@@ -18,6 +18,7 @@ import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-proj
 import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
 import { formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
+import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
@@ -322,11 +323,12 @@ export async function run(args = []) {
     ? parseDotenv(readFileSync(envFile, 'utf-8')).COMPOSE_PROJECT_NAME || null
     : null;
   const projectName = getEnvValue('PROJECT_NAME', cwd);
+  const stacks = listVibecarbonStacks();
   const resolved = resolveComposeProjectName({
     cwd,
     projectName,
     pinned,
-    stacks: listVibecarbonStacks(),
+    stacks,
   });
   if (resolved.action === 'refuse') {
     p.log.error(
@@ -351,6 +353,8 @@ export async function run(args = []) {
     );
   }
   process.env.COMPOSE_PROJECT_NAME = resolved.name;
+  // dev:start recreates the resolved stack, so it is never an orphan of itself.
+  warnAboutOrphanStacks({ exclude: [resolved.name], list: () => stacks });
 
   // Check for port conflicts (excluding ports already bound by this project's containers)
   const ports = getProjectPorts(cwd);

@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
@@ -30,7 +30,9 @@ import {
 import { operatorScopesForProviderAndDns } from './lib/dns-provider.js';
 import { parseDotenv } from './lib/dotenv.js';
 import { hasLegacyDotenvQuoting } from './lib/dotenv-heal.js';
+import { findOrphanStacks, listVibecarbonStacks } from './lib/local-stacks.js';
 import { checkOperatorConfig, readOperatorVar } from './lib/operator-env.js';
+import { formatOrphanNotice } from './lib/orphan-stack-notice.js';
 import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
@@ -43,6 +45,7 @@ import {
   SERVICE_DISPLAY_NAMES,
 } from './lib/status/container-rows.js';
 import { checkRemoteContainers } from './lib/status/remote-containers.js';
+import { deriveComposeProjectName } from './lib/subnet.js';
 import { VERSION } from './lib/version.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
@@ -333,13 +336,22 @@ function getPortConfig() {
   return defaults;
 }
 
+function ownComposeProjectName(cwd = process.cwd()) {
+  const envFile = join(cwd, '.env');
+  const pinned = existsSync(envFile)
+    ? parseDotenv(readFileSync(envFile, 'utf-8')).COMPOSE_PROJECT_NAME
+    : null;
+  return pinned || deriveComposeProjectName(basename(cwd));
+}
+
 async function checkLocalDev(projectName) {
   const ports = getPortConfig();
 
-  const [apiCheck, viteCheck, dockerServices] = await Promise.allSettled([
+  const [apiCheck, viteCheck, dockerServices, orphanStacks] = await Promise.allSettled([
     checkHttpEndpoint(`http://localhost:${ports.api}/api/health`, 2000),
     checkHttpEndpoint(`http://localhost:${ports.vite}`, 2000),
     checkDockerContainers(projectName),
+    Promise.resolve().then(() => findOrphanStacks(listVibecarbonStacks())),
   ]);
 
   const api =
@@ -347,8 +359,14 @@ async function checkLocalDev(projectName) {
   const vite =
     viteCheck.status === 'fulfilled' ? viteCheck.value : { ok: false, error: 'check failed' };
   const docker = dockerServices.status === 'fulfilled' ? dockerServices.value : [];
+  // The project's own stack is never an orphan of itself.
+  const own = ownComposeProjectName();
+  const orphans = (orphanStacks.status === 'fulfilled' ? orphanStacks.value : []).filter(
+    (o) => o.project !== own,
+  );
 
   return {
+    orphanNotice: formatOrphanNotice(orphans),
     api: { running: api.ok, latencyMs: api.latencyMs, port: ports.api, data: api.data },
     vite: { running: vite.ok, port: ports.vite },
     docker,
@@ -900,6 +918,14 @@ function renderLocalDev(data) {
 
   // Docker services
   lines.push(...formatDockerServiceLines(data.docker));
+
+  if (data.orphanNotice) {
+    lines.push(
+      '',
+      c.warning(data.orphanNotice[0]),
+      ...data.orphanNotice.slice(1).map((l) => c.dim(l)),
+    );
+  }
 
   p.note(lines.join('\n'), 'Local Development');
 }
