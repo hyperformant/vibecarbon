@@ -70,7 +70,6 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 | `GET /api/health` | Liveness probe (no DB check, public) |
 | `GET /api/health/ready` | Readiness probe (checks DB connectivity, public) |
 | `GET/POST /api/auth/*` | In-process auth (Better Auth): sign-up, sign-in (with account lockout), sign-out, session, OAuth callbacks, email verification, password reset, magic link |
-| `POST /api/v1/auth/login` | Legacy email/password login, removed once the client signs in through `/api/auth` |
 | `GET /api/v1/auth/settings` | Auth settings (enabled providers, MFA config) |
 | `GET /api/v1/me` | Current user info with memberships |
 | `GET/POST /api/v1/organizations` | List/create organizations |

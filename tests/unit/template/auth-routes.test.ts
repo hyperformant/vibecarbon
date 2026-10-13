@@ -35,26 +35,7 @@ interface MockSupabaseResponse<T> {
   error: { message: string } | null;
 }
 
-interface MockAuthResponse {
-  data: {
-    session: {
-      access_token: string;
-      refresh_token: string;
-      expires_in: number;
-      expires_at: number;
-      token_type: string;
-    } | null;
-    user: MockUser;
-  };
-  error: { message: string } | null;
-}
-
 // Validation schemas (from auth.ts)
-const loginSchema = z.object({
-  email: z.string().email('Valid email is required'),
-  password: z.string().min(1, 'Password is required'),
-});
-
 const unlockAccountSchema = z.object({
   email: z.string().email('Valid email is required'),
 });
@@ -93,72 +74,6 @@ function getClientIp(c: { req: { header: (name: string) => string | undefined } 
 // ============================================================================
 
 describe('Validation Schemas', () => {
-  describe('loginSchema', () => {
-    it('accepts valid email and password', () => {
-      const result = loginSchema.safeParse({
-        email: 'user@example.com',
-        password: 'password123',
-      });
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data.email).toBe('user@example.com');
-        expect(result.data.password).toBe('password123');
-      }
-    });
-
-    it('rejects invalid email', () => {
-      const result = loginSchema.safeParse({
-        email: 'not-an-email',
-        password: 'password123',
-      });
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].message).toBe('Valid email is required');
-      }
-    });
-
-    it('rejects missing email', () => {
-      const result = loginSchema.safeParse({
-        password: 'password123',
-      });
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        // Zod returns "Invalid input" when field is missing (required but undefined)
-        expect(result.error.issues[0].message).toContain('expected string');
-      }
-    });
-
-    it('rejects empty password', () => {
-      const result = loginSchema.safeParse({
-        email: 'user@example.com',
-        password: '',
-      });
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].message).toBe('Password is required');
-      }
-    });
-
-    it('rejects missing password', () => {
-      const result = loginSchema.safeParse({
-        email: 'user@example.com',
-      });
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        // Zod returns "Invalid input" when field is missing (required but undefined)
-        expect(result.error.issues[0].message).toContain('expected string');
-      }
-    });
-
-    it('accepts password with minimum 1 character', () => {
-      const result = loginSchema.safeParse({
-        email: 'user@example.com',
-        password: 'a',
-      });
-      expect(result.success).toBe(true);
-    });
-  });
-
   describe('unlockAccountSchema', () => {
     it('accepts valid email', () => {
       const result = unlockAccountSchema.safeParse({
@@ -297,338 +212,6 @@ describe('getClientIp', () => {
       },
     };
     expect(getClientIp(mockContext)).toBe('127.0.0.1');
-  });
-});
-
-// ============================================================================
-// LOGIN ENDPOINT LOGIC TESTS
-// ============================================================================
-
-describe('Login Endpoint Logic', () => {
-  // Simulates the login endpoint as a testable function
-  async function loginEndpoint(
-    mockContext: MockContext,
-    mockDb: {
-      checkLockout: (
-        email: string,
-        ip: string,
-      ) => Promise<MockSupabaseResponse<{ locked: boolean; remaining_minutes?: number }>>;
-      signIn: (email: string, password: string) => Promise<MockAuthResponse>;
-      recordFailedLogin: (email: string, ip: string) => Promise<MockSupabaseResponse<null>>;
-      clearFailedLogins: (email: string, ip: string) => Promise<MockSupabaseResponse<null>>;
-    },
-  ): Promise<{ status: number; body: unknown }> {
-    // Parse and validate body
-    let body: z.infer<typeof loginSchema>;
-    try {
-      const rawBody = await mockContext.req.json();
-      const result = loginSchema.safeParse(rawBody);
-
-      if (!result.success) {
-        const errors = result.error.issues.map((e) => e.message).join(', ');
-        return { status: 400, body: { error: errors } };
-      }
-
-      body = result.data;
-    } catch {
-      return { status: 400, body: { error: 'Invalid JSON body' } };
-    }
-
-    const ipAddress = getClientIp(mockContext);
-    const email = body.email.toLowerCase();
-
-    // Check lockout status
-    const lockoutResult = await mockDb.checkLockout(email, ipAddress);
-
-    if (lockoutResult.error) {
-      // Log error but continue with login attempt
-      console.error('Lockout check failed', lockoutResult.error);
-    } else if (lockoutResult.data?.locked) {
-      const remainingMinutes = lockoutResult.data.remaining_minutes || 0;
-      return {
-        status: 429,
-        body: {
-          error: `Account temporarily locked due to too many failed attempts. Please try again in ${remainingMinutes} minute${remainingMinutes === 1 ? '' : 's'}.`,
-          locked: true,
-          remainingMinutes,
-        },
-      };
-    }
-
-    // Attempt authentication
-    const authResult = await mockDb.signIn(email, body.password);
-
-    if (authResult.error || !authResult.data.session) {
-      // Record failed attempt
-      try {
-        await mockDb.recordFailedLogin(email, ipAddress);
-      } catch (recordError) {
-        console.error('Failed to record login attempt', recordError);
-      }
-
-      return {
-        status: 401,
-        body: { error: authResult.error?.message || 'Invalid credentials' },
-      };
-    }
-
-    // Clear failed attempts on success
-    try {
-      await mockDb.clearFailedLogins(email, ipAddress);
-    } catch (clearError) {
-      console.error('Failed to clear failed logins', clearError);
-    }
-
-    // Return session data
-    return {
-      status: 200,
-      body: {
-        session: authResult.data.session,
-        user: {
-          id: authResult.data.user.id,
-          email: authResult.data.user.email,
-          app_metadata: authResult.data.user.app_metadata,
-          user_metadata: authResult.data.user.user_metadata,
-        },
-      },
-    };
-  }
-
-  it('returns 400 for invalid JSON body', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockRejectedValue(new Error('Invalid JSON')),
-        header: () => undefined,
-      },
-      get: () => null,
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn(),
-      signIn: vi.fn(),
-      recordFailedLogin: vi.fn(),
-      clearFailedLogins: vi.fn(),
-    };
-
-    const result = await loginEndpoint(mockContext, mockDb);
-
-    expect(result.status).toBe(400);
-    expect(result.body).toEqual({ error: 'Invalid JSON body' });
-    expect(mockDb.checkLockout).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 for missing email', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockResolvedValue({ password: 'test123' }),
-        header: () => undefined,
-      },
-      get: () => null,
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn(),
-      signIn: vi.fn(),
-      recordFailedLogin: vi.fn(),
-      clearFailedLogins: vi.fn(),
-    };
-
-    const result = await loginEndpoint(mockContext, mockDb);
-
-    expect(result.status).toBe(400);
-    expect((result.body as { error: string }).error).toContain('expected string');
-  });
-
-  it('returns 400 for missing password', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockResolvedValue({ email: 'user@example.com' }),
-        header: () => undefined,
-      },
-      get: () => null,
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn(),
-      signIn: vi.fn(),
-      recordFailedLogin: vi.fn(),
-      clearFailedLogins: vi.fn(),
-    };
-
-    const result = await loginEndpoint(mockContext, mockDb);
-
-    expect(result.status).toBe(400);
-    expect((result.body as { error: string }).error).toContain('expected string');
-  });
-
-  it('returns 429 when account is locked', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockResolvedValue({ email: 'locked@example.com', password: 'test123' }),
-        header: () => '192.168.1.100',
-      },
-      get: () => null,
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn().mockResolvedValue({
-        data: { locked: true, remaining_minutes: 15 },
-        error: null,
-      }),
-      signIn: vi.fn(),
-      recordFailedLogin: vi.fn(),
-      clearFailedLogins: vi.fn(),
-    };
-
-    const result = await loginEndpoint(mockContext, mockDb);
-
-    expect(result.status).toBe(429);
-    expect(result.body).toMatchObject({
-      locked: true,
-      remainingMinutes: 15,
-    });
-    expect(mockDb.checkLockout).toHaveBeenCalledWith('locked@example.com', '192.168.1.100');
-    expect(mockDb.signIn).not.toHaveBeenCalled();
-  });
-
-  it('continues with login attempt when lockout check fails', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockResolvedValue({ email: 'user@example.com', password: 'correct' }),
-        header: () => '192.168.1.100',
-      },
-      get: () => null,
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn().mockResolvedValue({
-        data: null,
-        error: { message: 'Database error' },
-      }),
-      signIn: vi.fn().mockResolvedValue({
-        data: {
-          session: {
-            access_token: 'token123',
-            refresh_token: 'refresh123',
-            expires_in: 3600,
-            expires_at: Date.now() + 3600000,
-            token_type: 'bearer',
-          },
-          user: { id: 'user-1', email: 'user@example.com' },
-        },
-        error: null,
-      }),
-      recordFailedLogin: vi.fn(),
-      clearFailedLogins: vi.fn().mockResolvedValue({ data: null, error: null }),
-    };
-
-    const result = await loginEndpoint(mockContext, mockDb);
-
-    expect(result.status).toBe(200);
-    expect(mockDb.signIn).toHaveBeenCalledWith('user@example.com', 'correct');
-  });
-
-  it('records failed attempt and returns 401 on auth failure', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockResolvedValue({ email: 'user@example.com', password: 'wrong' }),
-        header: () => '192.168.1.100',
-      },
-      get: () => null,
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn().mockResolvedValue({ data: { locked: false }, error: null }),
-      signIn: vi.fn().mockResolvedValue({
-        data: { session: null, user: {} as MockUser },
-        error: { message: 'Invalid credentials' },
-      }),
-      recordFailedLogin: vi.fn().mockResolvedValue({ data: null, error: null }),
-      clearFailedLogins: vi.fn(),
-    };
-
-    const result = await loginEndpoint(mockContext, mockDb);
-
-    expect(result.status).toBe(401);
-    expect(result.body).toEqual({ error: 'Invalid credentials' });
-    expect(mockDb.recordFailedLogin).toHaveBeenCalledWith('user@example.com', '192.168.1.100');
-    expect(mockDb.clearFailedLogins).not.toHaveBeenCalled();
-  });
-
-  it('clears failed attempts and returns session on success', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockResolvedValue({ email: 'User@Example.com', password: 'correct' }),
-        header: () => '192.168.1.100',
-      },
-      get: () => null,
-    };
-
-    const mockSession = {
-      access_token: 'token123',
-      refresh_token: 'refresh123',
-      expires_in: 3600,
-      expires_at: Date.now() + 3600000,
-      token_type: 'bearer',
-    };
-
-    const mockUser = {
-      id: 'user-1',
-      email: 'user@example.com',
-      app_metadata: { role: 'user' },
-      user_metadata: { name: 'Test User' },
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn().mockResolvedValue({ data: { locked: false }, error: null }),
-      signIn: vi.fn().mockResolvedValue({
-        data: { session: mockSession, user: mockUser },
-        error: null,
-      }),
-      recordFailedLogin: vi.fn(),
-      clearFailedLogins: vi.fn().mockResolvedValue({ data: null, error: null }),
-    };
-
-    const result = await loginEndpoint(mockContext, mockDb);
-
-    expect(result.status).toBe(200);
-    expect(result.body).toEqual({
-      session: mockSession,
-      user: {
-        id: mockUser.id,
-        email: mockUser.email,
-        app_metadata: mockUser.app_metadata,
-        user_metadata: mockUser.user_metadata,
-      },
-    });
-    expect(mockDb.signIn).toHaveBeenCalledWith('user@example.com', 'correct');
-    expect(mockDb.clearFailedLogins).toHaveBeenCalledWith('user@example.com', '192.168.1.100');
-    expect(mockDb.recordFailedLogin).not.toHaveBeenCalled();
-  });
-
-  it('lowercases email before use', async () => {
-    const mockContext: MockContext = {
-      req: {
-        json: vi.fn().mockResolvedValue({ email: 'USER@EXAMPLE.COM', password: 'test' }),
-        header: () => '192.168.1.100',
-      },
-      get: () => null,
-    };
-
-    const mockDb = {
-      checkLockout: vi.fn().mockResolvedValue({ data: { locked: false }, error: null }),
-      signIn: vi.fn().mockResolvedValue({
-        data: { session: null, user: {} as MockUser },
-        error: { message: 'Invalid credentials' },
-      }),
-      recordFailedLogin: vi.fn().mockResolvedValue({ data: null, error: null }),
-      clearFailedLogins: vi.fn(),
-    };
-
-    await loginEndpoint(mockContext, mockDb);
-
-    expect(mockDb.checkLockout).toHaveBeenCalledWith('user@example.com', '192.168.1.100');
-    expect(mockDb.signIn).toHaveBeenCalledWith('user@example.com', 'test');
   });
 });
 
@@ -1001,9 +584,6 @@ describe('Auth Settings GET Endpoint', () => {
     env: {
       GOOGLE_ENABLED: boolean;
       MICROSOFT_ENABLED: boolean;
-      GITHUB_ENABLED: boolean;
-      APPLE_ENABLED: boolean;
-      DISCORD_ENABLED: boolean;
       MAGIC_LINK_ENABLED: boolean;
     };
   }): Promise<{ status: number; body: unknown }> {
@@ -1020,9 +600,6 @@ describe('Auth Settings GET Endpoint', () => {
               providers: {
                 google: mockDb.env.GOOGLE_ENABLED,
                 microsoft: mockDb.env.MICROSOFT_ENABLED,
-                github: mockDb.env.GITHUB_ENABLED,
-                apple: mockDb.env.APPLE_ENABLED,
-                discord: mockDb.env.DISCORD_ENABLED,
               },
               magicLinkEnabled: mockDb.env.MAGIC_LINK_ENABLED,
             },
@@ -1045,9 +622,6 @@ describe('Auth Settings GET Endpoint', () => {
             providers: {
               google: mockDb.env.GOOGLE_ENABLED,
               microsoft: mockDb.env.MICROSOFT_ENABLED,
-              github: mockDb.env.GITHUB_ENABLED,
-              apple: mockDb.env.APPLE_ENABLED,
-              discord: mockDb.env.DISCORD_ENABLED,
             },
             magicLinkEnabled: mockDb.env.MAGIC_LINK_ENABLED,
           },
@@ -1063,9 +637,6 @@ describe('Auth Settings GET Endpoint', () => {
             providers: {
               google: mockDb.env.GOOGLE_ENABLED,
               microsoft: mockDb.env.MICROSOFT_ENABLED,
-              github: mockDb.env.GITHUB_ENABLED,
-              apple: mockDb.env.APPLE_ENABLED,
-              discord: mockDb.env.DISCORD_ENABLED,
             },
             magicLinkEnabled: mockDb.env.MAGIC_LINK_ENABLED,
           },
@@ -1083,9 +654,6 @@ describe('Auth Settings GET Endpoint', () => {
       env: {
         GOOGLE_ENABLED: true,
         MICROSOFT_ENABLED: false,
-        GITHUB_ENABLED: true,
-        APPLE_ENABLED: false,
-        DISCORD_ENABLED: false,
         MAGIC_LINK_ENABLED: true,
       },
     };
@@ -1099,9 +667,6 @@ describe('Auth Settings GET Endpoint', () => {
         providers: {
           google: true,
           microsoft: false,
-          github: true,
-          apple: false,
-          discord: false,
         },
         magicLinkEnabled: true,
       },
@@ -1117,9 +682,6 @@ describe('Auth Settings GET Endpoint', () => {
       env: {
         GOOGLE_ENABLED: false,
         MICROSOFT_ENABLED: false,
-        GITHUB_ENABLED: false,
-        APPLE_ENABLED: false,
-        DISCORD_ENABLED: false,
         MAGIC_LINK_ENABLED: false,
       },
     };
@@ -1133,9 +695,6 @@ describe('Auth Settings GET Endpoint', () => {
         providers: {
           google: false,
           microsoft: false,
-          github: false,
-          apple: false,
-          discord: false,
         },
         magicLinkEnabled: false,
       },
@@ -1151,9 +710,6 @@ describe('Auth Settings GET Endpoint', () => {
       env: {
         GOOGLE_ENABLED: true,
         MICROSOFT_ENABLED: true,
-        GITHUB_ENABLED: true,
-        APPLE_ENABLED: true,
-        DISCORD_ENABLED: true,
         MAGIC_LINK_ENABLED: true,
       },
     };
@@ -1167,9 +723,6 @@ describe('Auth Settings GET Endpoint', () => {
         providers: {
           google: true,
           microsoft: true,
-          github: true,
-          apple: true,
-          discord: true,
         },
         magicLinkEnabled: true,
       },
@@ -1185,9 +738,6 @@ describe('Auth Settings GET Endpoint', () => {
       env: {
         GOOGLE_ENABLED: false,
         MICROSOFT_ENABLED: true,
-        GITHUB_ENABLED: false,
-        APPLE_ENABLED: true,
-        DISCORD_ENABLED: false,
         MAGIC_LINK_ENABLED: false,
       },
     };
@@ -1201,9 +751,6 @@ describe('Auth Settings GET Endpoint', () => {
         providers: {
           google: false,
           microsoft: true,
-          github: false,
-          apple: true,
-          discord: false,
         },
         magicLinkEnabled: false,
       },

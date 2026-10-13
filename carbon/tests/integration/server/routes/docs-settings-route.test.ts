@@ -36,7 +36,6 @@ vi.mock('@server/db/client', () => ({
     }),
   },
 }));
-vi.mock('@server/lib/supabase', () => ({ createAuthClient: () => ({}) }));
 
 vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },

@@ -7,12 +7,9 @@ import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
 import { isoTimestamp } from '../../db/values';
 import { isSuperAdmin } from '../../lib/auth';
-import { getClientIp, lockoutIp } from '../../lib/client-ip';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
-import { createRateLimiter } from '../../lib/rate-limiter';
-import { createAuthClient } from '../../lib/supabase';
 import type { HonoVariables } from '../../types';
 
 /**
@@ -25,23 +22,17 @@ async function setFlag(key: string, enabled: boolean, updatedBy: string): Promis
     .onConflictDoUpdate({ target: appSettings.key, set: { value: { enabled }, updatedBy } });
 }
 
+/**
+ * App settings and the account-lockout admin tools. Sign-in itself is the
+ * in-process auth API at /api/auth (server/auth/), whose lockout plugin
+ * (auth/lockout.ts) records and clears the failures these endpoints list
+ * and unlock.
+ */
 const authRoutes = new Hono<{ Variables: HonoVariables }>();
-
-// Strict per-IP limiter on login, on top of the app-wide 100/min and the
-// per-(email,ip) DB lockout. The lockout is per-email, so without this an
-// attacker gets 100 req/min/IP of CROSS-email credential stuffing (a fresh
-// lockout bucket per email). 10/15min/IP closes the stuffing + GoTrue-load gap
-// without letting an attacker lock a victim out on the victim's own IP.
-authRoutes.use('/login', createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10 }));
 
 // ============================================================================
 // VALIDATION SCHEMAS
 // ============================================================================
-
-const loginSchema = z.object({
-  email: z.string().email('Valid email is required'),
-  password: z.string().min(1, 'Password is required'),
-});
 
 const unlockAccountSchema = z.object({
   email: z.string().email('Valid email is required'),
@@ -51,111 +42,6 @@ const updateSettingsSchema = z.object({
   mfa_enabled: z.boolean().optional(),
   user_docs_enabled: z.boolean().optional(),
   api_docs_enabled: z.boolean().optional(),
-});
-
-// ============================================================================
-// LOGIN ENDPOINT (consolidated lockout + auth)
-// ============================================================================
-
-/**
- * Login with email/password
- * Handles lockout checking, authentication, and lockout recording in a single request
- */
-authRoutes.post('/login', async (c) => {
-  let body: z.infer<typeof loginSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = loginSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
-
-  // The lockout functions take a Postgres inet, so an unresolvable client IP
-  // ('localhost' in dev, 'unknown' behind no proxy) shares one valid bucket.
-  const ipAddress = lockoutIp(getClientIp(c));
-  const email = body.email.toLowerCase();
-
-  try {
-    // Step 1: Check if account is locked
-    let lockoutData: { locked?: boolean; remaining_minutes: number } | null = null;
-    try {
-      const { rows } = await adminDb.execute<{
-        lockout: { locked?: boolean; remaining_minutes: number };
-      }>(sql`select check_account_lockout(${email}, ${ipAddress}::inet) as lockout`);
-      lockoutData = rows[0]?.lockout ?? null;
-    } catch (lockoutError) {
-      logger.error({ err: dbErrorForLog(lockoutError) }, 'Failed to check lockout status');
-      // Continue with login attempt even if lockout check fails
-    }
-
-    if (lockoutData?.locked) {
-      return c.json(
-        {
-          error: `Account temporarily locked due to too many failed attempts. Please try again in ${lockoutData.remaining_minutes} minute${lockoutData.remaining_minutes === 1 ? '' : 's'}.`,
-          locked: true,
-          remainingMinutes: lockoutData.remaining_minutes,
-        },
-        429
-      );
-    }
-
-    // Step 2: Attempt login via fresh auth client
-    // Uses a disposable client to avoid contaminating supabaseAdmin's session state
-    const authClient = createAuthClient();
-    const { data: authData, error: authError } = await authClient.auth.signInWithPassword({
-      email,
-      password: body.password,
-    });
-
-    if (authError || !authData.session) {
-      // Step 3a: Record failed attempt
-      try {
-        await adminDb.execute(sql`select record_failed_login(${email}, ${ipAddress}::inet)`);
-        logger.warn({ email, ip: ipAddress }, 'Failed login attempt recorded');
-      } catch (recordError) {
-        logger.error({ err: dbErrorForLog(recordError) }, 'Failed to record login attempt');
-      }
-
-      // SECURITY: return a single generic message regardless of the underlying
-      // auth error so responses can't be used to enumerate which emails exist
-      // or distinguish "wrong password" from "no such user".
-      return c.json({ error: 'Invalid credentials' }, 401);
-    }
-
-    // Step 3b: Clear failed attempts on success
-    try {
-      await adminDb.execute(sql`select clear_failed_logins(${email}, ${ipAddress}::inet)`);
-    } catch (clearError) {
-      logger.error({ err: dbErrorForLog(clearError) }, 'Failed to clear lockout records');
-    }
-
-    // Return session data for client to use
-    return c.json({
-      session: {
-        access_token: authData.session.access_token,
-        refresh_token: authData.session.refresh_token,
-        expires_in: authData.session.expires_in,
-        expires_at: authData.session.expires_at,
-        token_type: authData.session.token_type,
-      },
-      user: {
-        id: authData.user.id,
-        email: authData.user.email,
-        app_metadata: authData.user.app_metadata,
-        user_metadata: authData.user.user_metadata,
-      },
-    });
-  } catch (error) {
-    logger.error({ err: dbErrorForLog(error) }, 'Login error');
-    return c.json({ error: sanitizeError(error, 'Login failed') }, 500);
-  }
 });
 
 // ============================================================================

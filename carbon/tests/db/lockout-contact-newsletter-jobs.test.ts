@@ -6,37 +6,12 @@ import type { HonoVariables } from '@server/types';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
- * The login lockout, contact, newsletter and jobs routes against a real
- * database. The lockout flow goes through the SQL functions exactly as the
- * login route calls them (bound text email, `::inet` address).
+ * The lockout admin tools, contact, newsletter and jobs routes against a real
+ * database. Failures are recorded the way the auth API's lockout plugin
+ * records them (`record_failed_login`, bound text email, `::inet` address);
+ * the sign-in side of the lockout is covered in auth.test.ts.
  */
 
-const auth = vi.hoisted(() => ({ succeed: false }));
-
-vi.mock('@server/lib/supabase', () => ({
-  // The credential check is Supabase Auth's job; this suite is about what the
-  // route does with the lockout functions around it.
-  createAuthClient: () => ({
-    auth: {
-      signInWithPassword: async () =>
-        auth.succeed
-          ? {
-              data: {
-                session: {
-                  access_token: 'a',
-                  refresh_token: 'r',
-                  expires_in: 1,
-                  expires_at: 1,
-                  token_type: 'bearer',
-                },
-                user: { id: 'u', email: 'x', app_metadata: {}, user_metadata: {} },
-              },
-              error: null,
-            }
-          : { data: { session: null, user: null }, error: { message: 'bad' } },
-    },
-  }),
-}));
 vi.mock('@server/lib/rate-limiter', () => ({
   createRateLimiter: () => async (_c: unknown, next: () => Promise<void>) => {
     await next();
@@ -76,40 +51,31 @@ describe.skipIf(!dbTestsEnabled)('lockout, contact, newsletter, jobs on Postgres
     return email;
   }
 
-  function login(app: Hono<{ Variables: HonoVariables }>, email: string) {
-    return app.request('/api/v1/auth/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email, password: 'pw' }),
-    });
+  async function fail(email: string, times: number) {
+    for (let i = 0; i < times; i++) {
+      await seed.query("select public.record_failed_login($1, '0.0.0.0'::inet)", [email]);
+    }
   }
 
-  it('locks after 5 failures, and an admin unlock lets a good login through', async () => {
+  it('lists a locked account for admins, and an admin unlock clears it', async () => {
     const { authRoutes } = await import('@server/routes/v1/auth');
-    const app = appFor(null);
-    app.route('/api/v1/auth', authRoutes);
     const email = newEmail();
+    await fail(email, 5);
 
-    // No trusted client IP in the test request: the route must still reach
-    // the database with a valid inet (the bare sentinel used to fail the cast).
-    auth.succeed = false;
-    for (let i = 0; i < 5; i++) {
-      expect((await login(app, email)).status).toBe(401);
-    }
-    const { rows: stored } = await seed.query(
-      'select count(*)::int as n, host(min(ip_address)) as ip from public.failed_login_attempts where email = $1',
+    const { rows: locked } = await seed.query(
+      "select public.check_account_lockout($1, '0.0.0.0'::inet) as lockout",
       [email]
     );
-    expect(stored[0].n).toBe(5);
-    expect(stored[0].ip).toBe('0.0.0.0');
+    expect(locked[0].lockout).toMatchObject({ locked: true });
 
-    // Sixth attempt: locked, even with the right password.
-    auth.succeed = true;
-    const locked = await login(app, email);
-    expect(locked.status).toBe(429);
-    expect(await locked.json()).toMatchObject({ locked: true });
+    // Not for anyone but a super admin.
+    const anon = appFor(null);
+    anon.route('/api/v1/auth', authRoutes);
+    expect((await anon.request('/api/v1/auth/admin/locked-accounts')).status).toBe(401);
+    const member = appFor('user');
+    member.route('/api/v1/auth', authRoutes);
+    expect((await member.request('/api/v1/auth/admin/locked-accounts')).status).toBe(403);
 
-    // Locked accounts are listed for admins.
     const admin = appFor('super_admin');
     admin.route('/api/v1/auth', authRoutes);
     const listed = await admin.request('/api/v1/auth/admin/locked-accounts');
@@ -127,19 +93,6 @@ describe.skipIf(!dbTestsEnabled)('lockout, contact, newsletter, jobs on Postgres
       body: JSON.stringify({ email }),
     });
     expect(unlock.status).toBe(200);
-    expect((await login(app, email)).status).toBe(200);
-  });
-
-  it('a successful login clears earlier failures below the threshold', async () => {
-    const { authRoutes } = await import('@server/routes/v1/auth');
-    const app = appFor(null);
-    app.route('/api/v1/auth', authRoutes);
-    const email = newEmail();
-
-    auth.succeed = false;
-    for (let i = 0; i < 3; i++) await login(app, email);
-    auth.succeed = true;
-    expect((await login(app, email)).status).toBe(200);
 
     const { rows } = await seed.query(
       'select count(*)::int as n from public.failed_login_attempts where email = $1',

@@ -156,8 +156,15 @@ describe('Rate limiting: abuse-prone routes are protected', () => {
     expect(index).toContain("app.use('/api/health/*'");
   });
 
-  it.runIf(auth)('login has a dedicated strict limiter', () => {
-    expect(auth).toMatch(/authRoutes\.use\(\s*['"]\/login['"]\s*,\s*createRateLimiter/);
+  it('password sign-in has a dedicated strict limiter (10 per 15 min per IP)', () => {
+    const caps = srv('middleware/auth-rate-limits.ts');
+    expect(caps).toMatch(
+      /path:\s*'\/api\/auth\/sign-in\/email',\s*windowMs:\s*15\s*\*\s*MINUTE,\s*max:\s*10\b/
+    );
+  });
+
+  it.runIf(auth)('no legacy password login route survives beside the auth API', () => {
+    expect(auth).not.toMatch(/authRoutes\.post\(\s*['"]\/login['"]/);
   });
 
   it.runIf(billing)('public license checkout is strictly limited', () => {
