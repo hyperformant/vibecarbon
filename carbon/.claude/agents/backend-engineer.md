@@ -37,7 +37,7 @@ src/server/
 │   ├── errors.ts        # sanitizeError — never leak internals to a client
 │   ├── rate-limiter.ts  # Rate limiting middleware
 │   └── supabase.ts      # Auth only: supabaseAdmin.auth.admin, createAuthClient, getSupabaseClient
-├── types.ts             # HonoVariables — what c.get('user') / c.get('aal') return
+├── types.ts             # HonoVariables — what c.get('user') / c.get('session') return
 src/shared/              # Shared TypeScript types between client and server
 ```
 
