@@ -35,9 +35,15 @@ describe('buildObjectKey', () => {
     expect(() => buildObjectKey('avatar', 'u1', 'image/svg+xml')).toThrow(StorageInputError);
     expect(() => buildObjectKey('private', 'u1', 'text/html')).toThrow(StorageInputError);
   });
+  it.each(['TEXT/HTML', 'text/html; charset=utf-8'])('rejects %s for both kinds', (t) => {
+    expect(() => buildObjectKey('avatar', 'u1', t)).toThrow(StorageInputError);
+    expect(() => buildObjectKey('private', 'u1', t)).toThrow(StorageInputError);
+  });
+  it('rejects private application/zip (allowlist)', () => {
+    expect(() => buildObjectKey('private', 'u1', 'application/zip')).toThrow(StorageInputError);
+  });
   it('maps pdf and falls back to bin', () => {
     expect(buildObjectKey('private', 'u1', 'application/pdf')).toMatch(/\.pdf$/);
-    expect(buildObjectKey('private', 'u1', 'application/x-weird')).toMatch(/\.bin$/);
   });
 });
 
@@ -58,6 +64,16 @@ describe('presignUpload', () => {
     expect(r.headers).toEqual({ 'Content-Type': 'image/png', 'Content-Length': '1000' });
     expect(r.expiresIn).toBe(300);
     expect(r.key.startsWith('avatars/u1/')).toBe(true);
+  });
+  it('normalizes content type in the signed headers', async () => {
+    const r = await presignUpload({
+      kind: 'avatar',
+      userId: 'u1',
+      contentType: 'image/PNG; charset=x',
+      size: 10,
+    });
+    expect(r.headers['Content-Type']).toBe('image/png');
+    expect(r.key).toMatch(/\.png$/);
   });
   it('reports not-configured first', async () => {
     fakeEnv.S3_BUCKET = undefined;
@@ -90,5 +106,11 @@ describe('presignRead', () => {
     const url = await presignRead(key);
     expect(new URL(url).pathname.endsWith(key)).toBe(true);
     expect(url).toContain('X-Amz-Expires=300');
+  });
+  it('forces attachment for private reads only', async () => {
+    const priv = await presignRead(`private/u1/${UUID}.pdf`);
+    expect(priv).toContain('response-content-disposition=attachment');
+    const av = await presignRead(`avatars/u1/${UUID}.png`);
+    expect(av).not.toContain('response-content-disposition');
   });
 });

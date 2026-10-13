@@ -9,13 +9,30 @@ export const UPLOAD_KINDS = {
     maxBytes: 2_097_152,
     types: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as readonly string[],
   },
-  private: { prefix: 'private', maxBytes: 10_485_760, types: null },
+  private: {
+    prefix: 'private',
+    maxBytes: 10_485_760,
+    types: [
+      'image/jpeg',
+      'image/png',
+      'image/gif',
+      'image/webp',
+      'application/pdf',
+      'text/plain',
+      'text/csv',
+    ] as readonly string[],
+  },
 } as const;
 export type UploadKind = keyof typeof UPLOAD_KINDS;
 
-// Types a browser would render inline from our origin's links: refused even for
-// private uploads so a stored file can never become a script on our domain.
-const BLOCKED_TYPES = new Set(['text/html', 'image/svg+xml', 'application/xhtml+xml']);
+const TYPE_RE = /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/;
+
+/** Strip parameters, trim, lowercase; reject anything not a plain type/subtype. */
+function normalizeContentType(raw: string): string {
+  const t = raw.split(';')[0].trim().toLowerCase();
+  if (!TYPE_RE.test(t)) throw new StorageInputError('type_not_allowed');
+  return t;
+}
 const EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -54,11 +71,9 @@ function s3(): S3Client {
 
 export function buildObjectKey(kind: UploadKind, userId: string, contentType: string): string {
   const spec = UPLOAD_KINDS[kind];
-  if (BLOCKED_TYPES.has(contentType)) throw new StorageInputError('type_not_allowed');
-  if (spec.types && !spec.types.includes(contentType)) {
-    throw new StorageInputError('type_not_allowed');
-  }
-  return `${spec.prefix}/${userId}/${randomUUID()}.${EXT[contentType] ?? 'bin'}`;
+  const type = normalizeContentType(contentType);
+  if (!spec.types.includes(type)) throw new StorageInputError('type_not_allowed');
+  return `${spec.prefix}/${userId}/${randomUUID()}.${EXT[type] ?? 'bin'}`;
 }
 
 export async function presignUpload(args: {
@@ -73,11 +88,12 @@ export async function presignUpload(args: {
   if (!Number.isInteger(args.size) || args.size <= 0 || args.size > spec.maxBytes) {
     throw new StorageInputError('size_not_allowed');
   }
-  const key = buildObjectKey(args.kind, args.userId, args.contentType);
+  const contentType = normalizeContentType(args.contentType);
+  const key = buildObjectKey(args.kind, args.userId, contentType);
   const command = new PutObjectCommand({
     Bucket: env.S3_BUCKET,
     Key: key,
-    ContentType: args.contentType,
+    ContentType: contentType,
     ContentLength: args.size,
   });
   // Signing Content-Length makes S3 reject a body whose size differs from the
@@ -90,14 +106,23 @@ export async function presignUpload(args: {
     key,
     url,
     expiresIn: EXPIRES_IN,
-    headers: { 'Content-Type': args.contentType, 'Content-Length': String(args.size) },
+    headers: { 'Content-Type': contentType, 'Content-Length': String(args.size) },
   };
 }
 
 export async function presignRead(key: string): Promise<string> {
-  return getSignedUrl(s3(), new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: key }), {
-    expiresIn: EXPIRES_IN,
-  });
+  return getSignedUrl(
+    s3(),
+    new GetObjectCommand({
+      Bucket: env.S3_BUCKET,
+      Key: key,
+      // Private files never render inline from the storage origin.
+      ...(key.startsWith('private/') ? { ResponseContentDisposition: 'attachment' } : {}),
+    }),
+    {
+      expiresIn: EXPIRES_IN,
+    }
+  );
 }
 
 export function parseObjectKey(
