@@ -413,7 +413,7 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
     it('is idempotent and never resets an existing password', async () => {
       const email = newEmail();
       await bootstrapAdmin({ email, password: PASSWORD });
-      expect(await bootstrapAdmin({ email, password: 'a-different-password' })).toBe('unchanged');
+      expect(await bootstrapAdmin({ email, password: 'test-different-password' })).toBe('unchanged');
       const { rows } = await db.query(
         'select count(*)::int as n from public."user" where email = $1',
         [email],

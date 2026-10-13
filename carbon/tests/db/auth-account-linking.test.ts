@@ -311,7 +311,7 @@ describe.skipIf(!dbTestsEnabled)('social sign-in onto an existing email (real da
           headers: { 'content-type': 'application/json', origin: ORIGIN, cookie },
           body: JSON.stringify({
             currentPassword: PASSWORD,
-            newPassword: 'attacker-new-password',
+            newPassword: 'test-attacker-new-password',
             revokeOtherSessions: true,
           }),
         }),
