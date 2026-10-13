@@ -1,4 +1,7 @@
+import { and, count, gte, lt, type SQL } from 'drizzle-orm';
 import { Hono } from 'hono';
+import { adminDb } from '../../db/client';
+import { organizations } from '../../db/schema';
 import { isSuperAdmin } from '../../lib/auth';
 import { logger } from '../../lib/logger';
 import { supabaseAdmin } from '../../lib/supabase';
@@ -7,17 +10,13 @@ import type { HonoVariables } from '../../types';
 const statsRoutes = new Hono<{ Variables: HonoVariables }>();
 
 /**
- * Count organizations with an optional filter applied to the query builder.
+ * Count organizations matching an optional condition.
  * Returns 0 on any error for resilience.
  */
-async function countOrgs(
-  // biome-ignore lint/suspicious/noExplicitAny: Supabase query builder generics are too complex to type the filter callback
-  filter?: (q: any) => PromiseLike<{ count: number | null; error: unknown }>
-): Promise<number> {
+async function countOrgs(where?: SQL): Promise<number> {
   try {
-    const base = supabaseAdmin.from('organizations').select('*', { count: 'exact', head: true });
-    const result = filter ? await filter(base) : await base;
-    return result.error ? 0 : (result.count ?? 0);
+    const [row] = await adminDb.select({ total: count() }).from(organizations).where(where);
+    return row?.total ?? 0;
   } catch {
     return 0;
   }
@@ -88,13 +87,14 @@ statsRoutes.get('/', async (c) => {
       countOrgs(),
 
       // Organizations created this month
-      countOrgs((q) => q.gte('created_at', startOfThisMonth.toISOString())),
+      countOrgs(gte(organizations.createdAt, startOfThisMonth.toISOString())),
 
       // Organizations created last month
-      countOrgs((q) =>
-        q
-          .gte('created_at', startOfLastMonth.toISOString())
-          .lt('created_at', startOfThisMonth.toISOString())
+      countOrgs(
+        and(
+          gte(organizations.createdAt, startOfLastMonth.toISOString()),
+          lt(organizations.createdAt, startOfThisMonth.toISOString())
+        )
       ),
     ]);
 
