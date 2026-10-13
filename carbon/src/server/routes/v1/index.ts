@@ -8,6 +8,7 @@ import {
   notificationDismissals,
   notifications,
   organizations,
+  user as userTable,
 } from '../../db/schema';
 import { isoTimestamp, isUuid, pgErrorCode } from '../../db/values';
 import { orgInviteEmail } from '../../emails/templates';
@@ -15,20 +16,15 @@ import { isSuperAdmin } from '../../lib/auth';
 import { sendEmail } from '../../lib/email';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
-import { supabaseAdmin } from '../../lib/supabase';
 import { assertAal2, requireAal2 } from '../../middleware/requireAal2';
 import type { HonoVariables } from '../../types';
 import { forwardAuthCookieRoutes } from './forwardauth-cookie';
-import { impersonationRoutes } from './impersonation';
 import { setupRoutes } from './setup';
 
 const v1Routes = new Hono<{ Variables: HonoVariables }>();
 
 // HttpOnly ForwardAuth cookie mint/clear (super_admin only) — see module doc.
 v1Routes.route('/admin/forwardauth-cookie', forwardAuthCookieRoutes);
-
-// Server-side impersonation swap (super_admin only) — see module doc.
-v1Routes.route('/admin/impersonate', impersonationRoutes);
 
 // Setup progress + billing opt-out (super_admin only).
 v1Routes.route('/admin/setup', setupRoutes);
@@ -302,10 +298,13 @@ v1Routes.delete('/me', requireAal2, async (c) => {
     }
   }
 
-  // Delete the user (cascades to memberships, customers, notification_dismissals)
-  const { error: deleteError } = await supabaseAdmin.auth.admin.deleteUser(user.id);
-
-  if (deleteError) {
+  // Delete the user row. Foreign keys do the rest: sessions, accounts,
+  // two-factor, memberships, customers and notification dismissals cascade;
+  // notifications.created_by and app_settings.updated_by are set to null.
+  // Files the user uploaded stay in object storage (no per-user index yet).
+  try {
+    await adminDb.delete(userTable).where(eq(userTable.id, user.id));
+  } catch (deleteError) {
     return c.json({ error: sanitizeError(deleteError, 'Failed to delete account') }, 500);
   }
 
@@ -431,34 +430,32 @@ v1Routes.get('/organizations/:orgId/members', async (c) => {
     return c.json({ error: 'Organization not found or access denied' }, 404);
   }
 
-  // Fetch user details only for the specific member IDs (not all users)
+  // Profile details for exactly these members (RLS above decided who they
+  // are; app_user cannot read "user", so this one query uses adminDb).
   const userDetailsMap = new Map<
     string,
-    { id: string; email?: string; name?: string; avatar?: string }
+    { id: string; email: string; name: string | null; avatar: string | null }
   >();
-
-  // Fetch user details with BOUNDED concurrency. A naive Promise.all over all
-  // members fires one GoTrue Admin call per member with no cap, so a member of
-  // a large org could drive hundreds of parallel calls against the auth service
-  // per request — an amplification vector on a shared box. Chunk into small
-  // batches so the fan-out is bounded regardless of org size. (A hard page cap
-  // on the members list itself is a follow-up.)
-  const MEMBER_LOOKUP_CONCURRENCY = 20;
-  for (let i = 0; i < members.length; i += MEMBER_LOOKUP_CONCURRENCY) {
-    const batch = members.slice(i, i + MEMBER_LOOKUP_CONCURRENCY);
-    await Promise.all(
-      batch.map(async (member) => {
-        const { data, error } = await supabaseAdmin.auth.admin.getUserById(member.userId);
-        if (!error && data?.user) {
-          userDetailsMap.set(member.userId, {
-            id: data.user.id,
-            email: data.user.email,
-            name: data.user.user_metadata?.full_name || data.user.user_metadata?.name,
-            avatar: data.user.user_metadata?.avatar_url,
-          });
-        }
+  try {
+    const rows = await adminDb
+      .select({
+        id: userTable.id,
+        email: userTable.email,
+        name: userTable.name,
+        avatar: userTable.image,
       })
-    );
+      .from(userTable)
+      .where(
+        inArray(
+          userTable.id,
+          members.map((m) => m.userId)
+        )
+      );
+    for (const row of rows) {
+      userDetailsMap.set(row.id, { ...row, name: row.name || null });
+    }
+  } catch (error) {
+    return c.json({ error: sanitizeError(error, 'Failed to fetch members') }, 500);
   }
 
   // Map user details to members
@@ -504,28 +501,16 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  // Find user by email using paginated search (avoids loading all users at once)
-  const emailLower = body.email.toLowerCase();
-  let targetUser = null;
-  let page = 1;
-  const perPage = 100;
-  const maxPages = 50; // Safety limit: 5000 users max search
-
-  while (!targetUser && page <= maxPages) {
-    const { data: usersPage, error: userLookupError } = await supabaseAdmin.auth.admin.listUsers({
-      page,
-      perPage,
-    });
-
-    if (userLookupError) {
-      return c.json({ error: sanitizeError(userLookupError, 'Failed to look up user') }, 500);
-    }
-
-    targetUser = usersPage.users.find((u) => u.email?.toLowerCase() === emailLower);
-
-    // Stop if we've exhausted the user list
-    if (usersPage.users.length < perPage) break;
-    page++;
+  // Find the user by email (stored lowercase by the auth API).
+  let targetUser: { id: string; email: string; name: string } | undefined;
+  try {
+    [targetUser] = await adminDb
+      .select({ id: userTable.id, email: userTable.email, name: userTable.name })
+      .from(userTable)
+      .where(eq(userTable.email, body.email.toLowerCase()))
+      .limit(1);
+  } catch (userLookupError) {
+    return c.json({ error: sanitizeError(userLookupError, 'Failed to look up user') }, 500);
   }
 
   if (!targetUser) {
@@ -589,7 +574,7 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
         user: {
           id: targetUser.id,
           email: targetUser.email,
-          name: targetUser.user_metadata?.full_name || targetUser.user_metadata?.name,
+          name: targetUser.name || null,
         },
       },
     },
@@ -886,7 +871,9 @@ v1Routes.get('/admin/organizations', async (c) => {
         plan: organizations.plan,
         createdAt: organizations.createdAt,
         updatedAt: organizations.updatedAt,
-        memberCount: sql<number>`(select count(*) from ${memberships} where ${memberships.organizationId} = ${organizations.id})::int`,
+        // Explicit alias: a bare column inside the subquery would resolve
+        // against memberships, not the outer organizations (always 0).
+        memberCount: sql<number>`(select count(*) from ${memberships} m where m.organization_id = ${organizations}.id)::int`,
       })
       .from(organizations)
       .where(where)
@@ -945,99 +932,77 @@ v1Routes.get('/admin/users', async (c) => {
 
   const { search, sortBy, sortOrder, page, limit } = queryResult.data;
 
-  // Fetch all users using admin client
-  const { data: usersData, error: usersError } = await supabaseAdmin.auth.admin.listUsers({
-    page,
-    perPage: limit,
-  });
+  const offset = (page - 1) * limit;
 
-  if (usersError) {
+  // Search across every user (input validated by the Zod schema and bound as
+  // a parameter; LIKE wildcards escaped so "a_b" matches literally).
+  const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
+  const where = search
+    ? or(ilike(userTable.email, pattern), ilike(userTable.name, pattern))
+    : undefined;
+
+  // 'slug' and 'plan' do not apply to users: they sort by created_at.
+  const sortColumn =
+    sortBy === 'email' ? userTable.email : sortBy === 'name' ? userTable.name : userTable.createdAt;
+  const direction = sortOrder === 'asc' ? asc : desc;
+
+  let rows: Array<{
+    id: string;
+    email: string;
+    name: string;
+    image: string | null;
+    role: string | null;
+    emailVerified: boolean;
+    organizationCount: number;
+    lastSignInAt: Date | null;
+    createdAt: Date;
+  }>;
+  let total: number;
+  try {
+    rows = await adminDb
+      .select({
+        id: userTable.id,
+        email: userTable.email,
+        name: userTable.name,
+        image: userTable.image,
+        role: userTable.role,
+        emailVerified: userTable.emailVerified,
+        // Correlated subquery with an explicit alias: a bare column inside
+        // it would resolve against memberships, not the outer "user".
+        organizationCount: sql<number>`(select count(*) from ${memberships} m where m.user_id = ${userTable}.id)::int`,
+        lastSignInAt: userTable.lastSignInAt,
+        createdAt: userTable.createdAt,
+      })
+      .from(userTable)
+      .where(where)
+      .orderBy(direction(sortColumn), asc(userTable.id))
+      .limit(limit)
+      .offset(offset);
+    [{ value: total }] = await adminDb.select({ value: count() }).from(userTable).where(where);
+  } catch (usersError) {
     return c.json({ error: sanitizeError(usersError, 'Failed to fetch users') }, 500);
   }
 
-  let users = usersData.users;
-
-  // Apply search filter
-  if (search) {
-    const searchLower = search.toLowerCase();
-    users = users.filter(
-      (u) =>
-        u.email?.toLowerCase().includes(searchLower) ||
-        u.user_metadata?.full_name?.toLowerCase().includes(searchLower) ||
-        u.user_metadata?.name?.toLowerCase().includes(searchLower)
-    );
-  }
-
-  // Apply sorting
-  users.sort((a, b) => {
-    let aVal: string | Date | undefined;
-    let bVal: string | Date | undefined;
-
-    switch (sortBy) {
-      case 'email':
-        aVal = a.email;
-        bVal = b.email;
-        break;
-      case 'name':
-        aVal = a.user_metadata?.full_name || a.user_metadata?.name || '';
-        bVal = b.user_metadata?.full_name || b.user_metadata?.name || '';
-        break;
-      default:
-        // Default to created_at for any other sortBy values
-        aVal = a.created_at;
-        bVal = b.created_at;
-        break;
-    }
-
-    if (!aVal && !bVal) return 0;
-    if (!aVal) return sortOrder === 'asc' ? -1 : 1;
-    if (!bVal) return sortOrder === 'asc' ? 1 : -1;
-
-    const comparison = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-    return sortOrder === 'asc' ? comparison : -comparison;
-  });
-
-  // Get membership counts for each user
-  const userIds = users.map((u) => u.id);
-  const userMemberships =
-    userIds.length > 0
-      ? await adminDb
-          .select({ userId: memberships.userId })
-          .from(memberships)
-          .where(inArray(memberships.userId, userIds))
-      : [];
-
-  const membershipCounts = new Map<string, number>();
-  for (const m of userMemberships) {
-    membershipCounts.set(m.userId, (membershipCounts.get(m.userId) || 0) + 1);
-  }
-
   return c.json({
-    users: users.map((u) => ({
+    users: rows.map((u) => ({
       id: u.id,
       email: u.email,
-      name: u.user_metadata?.full_name || u.user_metadata?.name || null,
-      avatar: u.user_metadata?.avatar_url || null,
-      role: u.app_metadata?.role || null,
-      emailVerified: u.email_confirmed_at !== null,
-      organizationCount: membershipCounts.get(u.id) || 0,
-      lastSignIn: u.last_sign_in_at,
-      createdAt: u.created_at,
+      name: u.name || null,
+      avatar: u.image || null,
+      role: u.role || null,
+      emailVerified: u.emailVerified,
+      organizationCount: u.organizationCount || 0,
+      lastSignIn: u.lastSignInAt?.toISOString() ?? null,
+      createdAt: u.createdAt.toISOString(),
     })),
     pagination: {
       page,
       limit,
-      total: usersData.total || users.length,
-      totalPages: Math.ceil((usersData.total || users.length) / limit),
+      total: total || 0,
+      totalPages: Math.ceil((total || 0) / limit),
     },
   });
 });
-
-// ============================================================================
-// ADMIN IMPERSONATION (Super Admin only)
-// ============================================================================
-// Server-side session swap — see routes/v1/impersonation.ts for the routes
-// and the vc-impersonation-restore cookie contract.
 
 // ============================================================================
 // NOTIFICATION ENDPOINTS

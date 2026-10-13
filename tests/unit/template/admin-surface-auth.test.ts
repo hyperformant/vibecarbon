@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 /**
  * Admin-surface auth contract (2026-07-23 security audit). The platform has
- * exactly ONE elevated role: super_admin (app_metadata.role). There is NO
+ * exactly ONE elevated role: super_admin (`user.role`). There is NO
  * platform `admin` role — `admin` belongs to the org-membership axis
  * (OWNER/ADMIN/MEMBER), enforced by RLS, never by ForwardAuth. So EVERY
  * privileged dashboard is super_admin-gated, and the `admin-auth` ForwardAuth

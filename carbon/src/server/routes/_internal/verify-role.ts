@@ -1,6 +1,11 @@
+import { makeSignature } from 'better-auth/crypto';
 import { Hono } from 'hono';
+import { getCookie } from 'hono/cookie';
+import { auth } from '../../auth';
 import { logger } from '../../lib/logger';
-import { supabaseAdmin } from '../../lib/supabase';
+import { isMfaGloballyEnabled } from '../../lib/mfa-settings';
+import type { HonoVariables } from '../../types';
+import { FORWARDAUTH_COOKIE } from '../v1/forwardauth-cookie';
 
 /**
  * Validate and sanitize the SITE_URL for redirect.
@@ -31,7 +36,7 @@ function getValidatedSiteUrl(): string {
  * network; do not build client flows against it.
  *
  * Verifies that the user is authenticated and has the required role. The only
- * elevated platform role is `super_admin` (app_metadata.role); there is no
+ * elevated platform role is `super_admin` (`user.role`); there is no
  * platform `admin` role, so production gates use `?role=super_admin`. The
  * `?roles=a,b` (any-of) form exists for user-defined tiers — if you ever add
  * one, ALWAYS include super_admin so a super admin is never locked out.
@@ -40,22 +45,30 @@ function getValidatedSiteUrl(): string {
  *   GET /api/_internal/verify-role?role=super_admin
  *   GET /api/_internal/verify-role?roles=editor,super_admin (any of these)
  *
- * Authentication:
- *   - Reads JWT from Authorization header (Bearer token)
- *   - Or from the HttpOnly vc-admin-token cookie (browser sessions — minted
- *     by POST /api/v1/admin/forwardauth-cookie; the SPA's sb-auth-token
- *     session cookie is deliberately NOT accepted)
- *   - Or from X-Forwarded-Access-Token header (set by Traefik)
+ * Authentication: ONLY the HttpOnly `vc-admin-token` cookie, minted by
+ * POST /api/v1/admin/forwardauth-cookie for super admins. It carries the
+ * admin's session token (unsigned); this route signs it the way the auth
+ * library signs its own session cookie and asks the auth API for the
+ * session, from the database (never the session cache), so a signed-out,
+ * revoked or banned session is refused at once. NOT accepted:
+ *   - the app's own session cookie (host-only; possession of it must never
+ *     gate admin infra, and it is never sent to admin subdomains anyway);
+ *   - `Authorization: Bearer` / `X-Forwarded-Access-Token`: no client holds
+ *     a session token (it never reaches page JS), so these have no
+ *     legitimate sender, and a tool's own API token in them must not be
+ *     taken for a session.
+ * While MFA is globally on, the session must have passed two-factor (aal2).
  *
  * Returns:
  *   200 - User authenticated and has required role
- *   401 - Not authenticated or invalid token
+ *   401 - Not authenticated, or the session is gone, banned, or aal1 while
+ *         MFA is on
  *   403 - Authenticated but missing required role
  *
  * Response headers (on success):
  *   X-User-Id: The authenticated user's ID
  *   X-User-Email: The authenticated user's email
- *   X-User-Role: The user's role from app_metadata
+ *   X-User-Role: The user's role (`user.role`)
  *   X-Authenticated-User: The authenticated user's email — consumed by
  *     Grafana's auth-proxy (GF_AUTH_PROXY_HEADER_NAME). Traefik copies this
  *     from the ForwardAuth response onto the upstream request. SECURITY: the
@@ -65,49 +78,25 @@ function getValidatedSiteUrl(): string {
  *     GF_AUTH_PROXY_WHITELIST. See services/observability H-9.
  */
 
-import type { HonoVariables } from '../../types';
-
 const verifyRoleRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Helper to extract JWT from various sources
-function extractToken(req: Request, cookieHeader: string | undefined): string | null {
-  // 1. Check Authorization header
-  const authHeader = req.headers.get('Authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    return authHeader.slice(7);
-  }
+/**
+ * The request headers the auth API would see from a browser holding this
+ * session: one cookie, the session token signed with the auth secret (the
+ * library's own signing helper and cookie name, `__Secure-` prefix included
+ * on https).
+ */
+async function sessionCookieHeaders(token: string): Promise<Headers> {
+  const ctx = await auth.$context;
+  const signed = `${token}.${await makeSignature(token, ctx.secret)}`;
+  return new Headers({
+    cookie: `${ctx.authCookies.sessionToken.name}=${encodeURIComponent(signed)}`,
+  });
+}
 
-  // 2. Check X-Forwarded-Access-Token (set by Traefik ForwardAuth)
-  const forwardedToken = req.headers.get('X-Forwarded-Access-Token');
-  if (forwardedToken) {
-    return forwardedToken;
-  }
-
-  // 3. Check cookies for Supabase auth token
-  if (cookieHeader) {
-    const cookies = cookieHeader.split(';').reduce(
-      (acc, cookie) => {
-        const [key, value] = cookie.trim().split('=');
-        if (key && value) {
-          acc[key] = value;
-        }
-        return acc;
-      },
-      {} as Record<string, string>
-    );
-
-    // ONLY the dedicated ForwardAuth cookie is accepted. The SPA session
-    // cookie (sb-auth-token) is deliberately NOT a credential here: it is
-    // apex-host-only, JS-readable, and possession of it must not gate admin
-    // infra. vc-admin-token is HttpOnly and carries the raw access token
-    // (minted by POST /api/v1/admin/forwardauth-cookie for super_admins).
-    const adminToken = cookies['vc-admin-token'];
-    if (adminToken) {
-      return decodeURIComponent(adminToken);
-    }
-  }
-
-  return null;
+function isBanned(user: { banned?: boolean | null; banExpires?: Date | null }): boolean {
+  if (!user.banned) return false;
+  return !user.banExpires || new Date(user.banExpires).getTime() > Date.now();
 }
 
 verifyRoleRoutes.all('/', async (c) => {
@@ -124,8 +113,7 @@ verifyRoleRoutes.all('/', async (c) => {
     return c.text('Bad Request: role or roles parameter required', 400);
   }
 
-  // Extract token from request
-  const token = extractToken(c.req.raw, c.req.header('Cookie'));
+  const token = getCookie(c, FORWARDAUTH_COOKIE) || null;
 
   if (!token) {
     logger.debug('verify-role: No token found');
@@ -151,20 +139,26 @@ verifyRoleRoutes.all('/', async (c) => {
   }
 
   try {
-    // Verify the JWT and get user info using Supabase Admin
-    const {
-      data: { user },
-      error,
-    } = await supabaseAdmin.auth.getUser(token);
+    // Uncached (database) and without the sliding refresh: this check must
+    // see a revocation at once, and never extends the session.
+    const data = await auth.api.getSession({
+      headers: await sessionCookieHeaders(token),
+      query: { disableCookieCache: true, disableRefresh: true },
+    });
 
-    if (error || !user) {
-      logger.debug({ error: error?.message }, 'verify-role: Invalid token');
+    if (!data || isBanned(data.user)) {
+      logger.debug('verify-role: Invalid or ended session');
       return c.text('Unauthorized', 401);
     }
 
-    // Check user's role in app_metadata
-    const userRole = user.app_metadata?.role as string | undefined;
-    const hasRequiredRole = requiredRoles.includes(userRole || '');
+    const { user, session } = data;
+    if (session.twoFactorVerified !== true && (await isMfaGloballyEnabled())) {
+      logger.info({ userId: user.id }, 'verify-role: session has not passed two-factor');
+      return c.text('Unauthorized', 401);
+    }
+
+    const userRole = user.role ?? '';
+    const hasRequiredRole = requiredRoles.includes(userRole);
 
     if (!hasRequiredRole) {
       logger.info(
@@ -177,7 +171,7 @@ verifyRoleRoutes.all('/', async (c) => {
     // Success - set headers for downstream services
     c.header('X-User-Id', user.id);
     c.header('X-User-Email', user.email || '');
-    c.header('X-User-Role', userRole || '');
+    c.header('X-User-Role', userRole);
     // Grafana auth-proxy identity header (GF_AUTH_PROXY_HEADER_NAME). Grafana
     // auto-provisions/logs in the user named here, so it must be the verified
     // email — never a client-controlled value. Only reaches Grafana via

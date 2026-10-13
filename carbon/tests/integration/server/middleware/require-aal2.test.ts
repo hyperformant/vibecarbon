@@ -109,6 +109,21 @@ describe('requireAal2', () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
+  it('refuses an impersonation session, even aal2 and with MFA off', async () => {
+    disableMfa();
+    const app = new Hono<{ Variables: HonoVariables }>();
+    app.use('*', async (c, next) => {
+      const set = c.set as (k: string, v: unknown) => void;
+      set('user', aUser);
+      set('session', { id: 's-imp', twoFactorVerified: true, impersonatedBy: 'admin-1' });
+      await next();
+    });
+    app.delete('/gated', requireAal2, (c) => c.json({ ok: true }));
+    const res = await app.request('/gated', { method: 'DELETE' });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe('impersonation_not_allowed');
+  });
+
   it('returns 401 when there is no authenticated user', async () => {
     const res = await gatedApp({ user: null, aal: null }).request('/gated', { method: 'DELETE' });
     expect(res.status).toBe(401);

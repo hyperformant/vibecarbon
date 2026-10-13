@@ -66,6 +66,9 @@ export const user = pgTable('user', {
   twoFactorEnabled: boolean('two_factor_enabled').default(false),
   // additional field
   onboardingCompleted: boolean('onboarding_completed').default(false).notNull(),
+  // Written by the app when a session is issued (auth/sign-in-record.ts),
+  // never by Better Auth or the client.
+  lastSignInAt: timestamp('last_sign_in_at', authTz),
   createdAt: authCreatedAt(),
   updatedAt: authUpdatedAt(),
 });

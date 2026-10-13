@@ -442,10 +442,17 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
       return user;
     };
 
+    // impersonate-user with an id nobody has: past the gates it answers 404
+    // USER_NOT_FOUND, which means the gate let the caller through.
+    const impersonateNobody = (jar: CookieJar) =>
+      post('/api/auth/admin/impersonate-user', { userId: randomUUID() }, jar);
+    const gotThrough = async (res: Response) =>
+      res.status === 404 && (await res.json()).code === 'USER_NOT_FOUND';
+
     it('MFA on: an aal1 super admin is refused with mfa_required', async () => {
       const { jar } = await superAdmin();
       await setMfa(true);
-      const res = await get('/api/auth/admin/list-users', jar);
+      const res = await impersonateNobody(jar);
       expect(res.status).toBe(403);
       expect((await res.json()).code).toBe('MFA_REQUIRED');
     });
@@ -454,13 +461,13 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
       const { jar } = await superAdmin();
       await enroll(jar);
       await setMfa(true);
-      expect((await get('/api/auth/admin/list-users', jar)).status).toBe(200);
+      expect(await gotThrough(await impersonateNobody(jar))).toBe(true);
     });
 
     it('MFA off: an aal1 super admin gets through', async () => {
       const { jar } = await superAdmin();
       await setMfa(false);
-      expect((await get('/api/auth/admin/list-users', jar)).status).toBe(200);
+      expect(await gotThrough(await impersonateNobody(jar))).toBe(true);
     });
 
     it('MFA on: an aal2 admin impersonates, and the aal1 impersonation session can stop', async () => {
@@ -496,6 +503,8 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
       '/api/auth/admin/get-user',
       '/api/auth/admin/has-permission',
       '/api/auth/admin/set-role',
+      '/api/auth/admin/list-users',
+      '/api/auth/admin/remove-user',
     ])('%s is not served over HTTP', async (path) => {
       const { jar } = await superAdmin();
       await enroll(jar);

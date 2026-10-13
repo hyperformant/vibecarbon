@@ -308,15 +308,18 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
 
     it("Better Auth's own admin endpoints refuse a revoked session immediately", async () => {
       const admin = await signedInAdmin('203.0.113.55');
-      const before = await app.request('/api/auth/admin/list-users', {
-        headers: { cookie: admin.cookie },
-      });
-      expect(before.status).toBe(200);
+      // An id nobody has: 404 USER_NOT_FOUND means the admin got past every gate.
+      const impersonateNobody = () =>
+        post(
+          '/api/auth/admin/impersonate-user',
+          { userId: randomUUID() },
+          { cookie: admin.cookie },
+        );
+      const before = await impersonateNobody();
+      expect(before.status).toBe(404);
+      expect((await before.json()).code).toBe('USER_NOT_FOUND');
       await db.query('delete from public.session where user_id = $1', [admin.id]);
-      const after = await app.request('/api/auth/admin/list-users', {
-        headers: { cookie: admin.cookie },
-      });
-      expect(after.status).toBe(401);
+      expect((await impersonateNobody()).status).toBe(401);
     });
   });
 

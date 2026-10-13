@@ -98,7 +98,7 @@ Follow these principles:
 
 ### Mocking Conventions
 - Database: `vi.mock('@server/db/client', () => ({ adminDb: { select: () => queryChain(() => rows) }, withUserDb: ... }))`, with `queryChain` from `tests/_helpers/drizzle-mock.ts` standing in for any Drizzle chain
-- Supabase Auth: `vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { auth: { admin: { ... } } } }))`
+- Server auth: `vi.mock('@server/auth', () => ({ auth: { api: { getSession: vi.fn() } } }))` when a route calls the auth API itself; otherwise seed `c.get('user')` / `c.get('session')` in a pre-route middleware
 - Stripe: `vi.mock('@server/lib/stripe', () => ({ stripe: { ... } }))`
 - Client-side fetch: `vi.stubGlobal('fetch', vi.fn(...))` plus `vi.unstubAllGlobals()` in `afterEach`
 - TanStack Query: wrap each render in a fresh `QueryClient` with `retry: false`

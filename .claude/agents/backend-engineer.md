@@ -30,8 +30,7 @@ src/server/
 ├── lib/
 │   ├── env.ts       # Environment configuration with Zod validation
 │   ├── logger.ts    # Pino structured logging
-│   ├── rate-limiter.ts  # Rate limiting middleware
-│   └── supabase.ts  # Auth only (GoTrue): supabaseAdmin.auth.admin, createAuthClient
+│   └── rate-limiter.ts  # Rate limiting middleware
 src/shared/          # Shared TypeScript types between client and server
 ```
 
@@ -45,7 +44,7 @@ src/shared/          # Shared TypeScript types between client and server
 - **`withUserDb(user.id, (tx) => ...)`** (`carbon/src/server/db/client.ts`): one transaction as role `app_user` with `app.user_id` set, so RLS scopes every statement. The default for anything done for a user (`null` for anonymous).
 - **`adminDb`**: bypasses RLS. Only where the server acts for itself (webhooks, admin tools, jobs), after its own authorization check when a user-supplied id is involved. Allowed files are listed with reasons in `carbon/tests/structural/db-access-census.test.ts`.
 - **Never build SQL text from input**: Drizzle's builder or the `sql` template (bound parameters) only. Log db errors as `{ err: dbErrorForLog(err) }`; a Drizzle message carries every bound value.
-- Server Supabase clients (`src/server/lib/supabase.ts`) are Auth only; `.from()` on them does not compile.
+- The server has no Supabase client: auth is in-process (`src/server/auth/`, Better Auth), users are rows in `"user"`.
 - NEVER expose the service role key to the client
 
 ### API Route Conventions

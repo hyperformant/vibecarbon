@@ -34,8 +34,7 @@ For every review, systematically evaluate changes against these security domains
 - **Data client selection is critical:**
   - `withUserDb(user.id, fn)`: RLS enforced as the caller. The default for user-facing data.
   - `adminDb`: bypasses RLS. Server-side work only, census-allowlisted, authorization checked first.
-  - Server Supabase clients (`src/server/lib/supabase.ts`) are Auth only (typed `AuthOnlyClient`); any data call through one is a finding.
-  - Client-side (`src/client/lib/supabase.ts`): anon key, used for Auth in the browser.
+  - The server has no Supabase client (auth is in-process, `src/server/auth/`); any `@supabase/supabase-js` import under `src/server` is a finding. The browser holds no session or token (HttpOnly cookie only).
   - Flag any server route that uses the service role client without verifying the caller's authorization first.
 - **JWT validation:** Ensure API routes that require auth actually verify the JWT token and extract user identity.
 - **Role checks:** The only elevated platform role is `super_admin` (JWT `app_metadata.role`); there is no platform `admin` role (`admin` is an org-membership tier, RLS-enforced). Platform-admin routes (`/api/v1/admin/*`, `/api/_internal/services/*`) must require `super_admin`. Flag any `role === 'admin'` exact check (excludes super admins) and any ForwardAuth gate at `?role=admin`.

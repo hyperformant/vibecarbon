@@ -15,6 +15,7 @@ interface CheckAal2Context {
   user: { id: string } | null;
   aal: Aal;
   mfaGloballyEnabled: boolean;
+  impersonating?: boolean;
 }
 
 interface CheckAal2Result {
@@ -26,6 +27,9 @@ interface CheckAal2Result {
 function checkAal2(ctx: CheckAal2Context): CheckAal2Result {
   if (!ctx.user) {
     return { allowed: false, status: 401, body: { error: 'Unauthorized' } };
+  }
+  if (ctx.impersonating) {
+    return { allowed: false, status: 403, body: { error: 'impersonation_not_allowed' } };
   }
   if (ctx.aal === 'aal2') {
     return { allowed: true };
@@ -61,6 +65,15 @@ describe('requireAal2 decision matrix', () => {
 
   it('allows an aal1 session when MFA is globally disabled (gate inert)', () => {
     expect(checkAal2({ user, aal: 'aal1', mfaGloballyEnabled: false }).allowed).toBe(true);
+  });
+
+  it('refuses an impersonation session, even aal2 and with MFA off', () => {
+    const r = checkAal2({ user, aal: 'aal2', mfaGloballyEnabled: false, impersonating: true });
+    expect(r).toEqual({
+      allowed: false,
+      status: 403,
+      body: { error: 'impersonation_not_allowed' },
+    });
   });
 
   it('returns 401 when there is no user', () => {

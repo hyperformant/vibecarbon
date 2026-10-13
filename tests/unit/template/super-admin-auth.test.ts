@@ -43,15 +43,10 @@ describe('isSuperAdmin (carbon/src/server/lib/auth.ts)', () => {
 });
 
 describe('server role checks go through isSuperAdmin', () => {
-  // Files that still compare a role from the old auth service's admin API
-  // (a looked-up target user, not the caller). They move to the in-process
-  // auth with the admin-surface rewrite.
-  const LEGACY_TARGET_LOOKUPS = new Set(['routes/v1/impersonation.ts']);
-
-  it("no server file compares the caller's role inline", () => {
+  it('no server file compares a role inline', () => {
     const offenders = serverFiles()
       .map((path) => ({ rel: relative(SERVER, path), text: readFileSync(path, 'utf-8') }))
-      .filter((f) => f.rel !== 'lib/auth.ts' && !LEGACY_TARGET_LOOKUPS.has(f.rel))
+      .filter((f) => f.rel !== 'lib/auth.ts')
       .filter((f) => /\.role\s*[!=]==?\s*['"]super_admin['"]/.test(f.text))
       .map((f) => f.rel);
     expect(offenders).toEqual([]);

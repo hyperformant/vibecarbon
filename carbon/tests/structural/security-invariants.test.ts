@@ -187,7 +187,6 @@ describe('Session cookies: the split-cookie contract holds', () => {
   //  - vc-admin-token: the ForwardAuth credential, HttpOnly, super admins only.
   const verifyRole = read('src/server/routes/_internal/verify-role.ts');
   const forwardAuthCookie = read('src/server/routes/v1/forwardauth-cookie.ts');
-  const impersonation = read('src/server/routes/v1/impersonation.ts');
   const authProvider = read('src/client/components/auth/AuthProvider.tsx');
   const clientSources = (function walk(dir: string): [string, string][] {
     return readdirSync(join(ROOT, dir), { withFileTypes: true }).flatMap((e) => {
@@ -227,24 +226,25 @@ describe('Session cookies: the split-cookie contract holds', () => {
         `verify-role parses ${legacy}. Only vc-admin-token may gate admin infra.`
       ).toBe(false);
     }
-    expect(verifyRole).toContain("'vc-admin-token'");
+    expect(forwardAuthCookie).toContain("FORWARDAUTH_COOKIE = 'vc-admin-token'");
+    // The only credential read: the ForwardAuth cookie. No header tokens.
+    expect(verifyRole).toContain('getCookie(c, FORWARDAUTH_COOKIE)');
+    expect(verifyRole).not.toMatch(/header\(\s*['"](Authorization|X-Forwarded-Access-Token)['"]/i);
   });
 
-  it('both server-set auth cookies are HttpOnly', () => {
-    for (const [label, src] of [
-      ['forwardauth-cookie', forwardAuthCookie],
-      ['impersonation', impersonation],
-    ] as const) {
-      expect(
-        /httpOnly:\s*true/.test(src),
-        `${label} sets a cookie without httpOnly: true. XSS could read it.`
-      ).toBe(true);
-    }
+  it('verify-role reads the session uncached and never refreshes it', () => {
+    expect(verifyRole).toMatch(/disableCookieCache:\s*true,\s*disableRefresh:\s*true/);
   });
 
-  it('the impersonation restore cookie is path-scoped and SameSite=Strict', () => {
-    expect(impersonation).toContain("path: '/api/v1/admin/impersonate'");
-    expect(impersonation).toMatch(/sameSite:\s*'Strict'/);
+  it('the ForwardAuth cookie is HttpOnly and carries the server-side session token', () => {
+    expect(forwardAuthCookie).toMatch(/httpOnly:\s*true/);
+    expect(forwardAuthCookie).toContain('session.token');
+    expect(forwardAuthCookie).not.toMatch(/header\(\s*['"]Authorization['"]/);
+  });
+
+  it('impersonation goes through the auth API only (no app impersonation route)', () => {
+    expect(exists('src/server/routes/v1/impersonation.ts')).toBe(false);
+    expect(read('src/server/routes/v1/index.ts')).not.toContain('/admin/impersonate');
   });
 
   it('the client never stores a session in web storage (impersonation stash regression)', () => {

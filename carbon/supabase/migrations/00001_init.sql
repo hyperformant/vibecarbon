@@ -120,6 +120,8 @@ CREATE TABLE IF NOT EXISTS "user" (
   ban_expires TIMESTAMPTZ,
   two_factor_enabled BOOLEAN DEFAULT FALSE,
   onboarding_completed BOOLEAN DEFAULT FALSE NOT NULL,
+  -- Set by the app when a session is issued (not by the auth library).
+  last_sign_in_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
   updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );

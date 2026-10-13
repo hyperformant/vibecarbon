@@ -10,8 +10,8 @@ import * as schema from './schema';
  * The server's one connection to Postgres.
  *
  * - `adminDb` runs as the connection role (DB_USER), which bypasses RLS. Use
- *   it only where the server acts for itself: webhooks, admin tooling, jobs.
- *   That is the same set of places that used `supabaseAdmin` before.
+ *   it only where the server acts for itself: webhooks, admin tooling, jobs,
+ *   and the auth tables (which app_user cannot read).
  * - `withUserDb(userId, fn)` is the path for anything done on behalf of a
  *   user (or an anonymous visitor). RLS decides what `fn` can see.
  *

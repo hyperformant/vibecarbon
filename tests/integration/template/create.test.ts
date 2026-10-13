@@ -235,7 +235,7 @@ describe('create-vibecarbon E2E', () => {
       const sourceFiles = [
         'src/server/index.ts',
         'src/server/lib/env.ts',
-        'src/server/lib/supabase.ts',
+        'src/server/auth/index.ts',
         'src/server/routes/health.ts',
         'src/client/App.tsx',
         'src/client/main.tsx',

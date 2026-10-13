@@ -114,7 +114,7 @@ const LOCK_MINUTES = 15;
 /** How recent a passwordless account's sign-in must be to enroll 2FA. */
 const FRESH_SESSION_MS = 10 * 60 * 1000;
 
-type SessionLike = {
+export type SessionLike = {
   session: {
     id: string;
     twoFactorVerified?: boolean | null;
@@ -324,7 +324,7 @@ async function gateVerify(path: string, current: SessionLike): Promise<void> {
  * sign-in finishing its second factor).
  */
 // biome-ignore lint/suspicious/noExplicitAny: Better Auth's middleware context
-async function liveSession(ctx: any): Promise<SessionLike | null> {
+export async function liveSession(ctx: any): Promise<SessionLike | null> {
   const current = (await getAuthoritativeSessionFromCtx(ctx)) as SessionLike | null;
   if (current) return current;
   if (ctx.getCookie(ctx.context.authCookies.sessionToken.name)) {

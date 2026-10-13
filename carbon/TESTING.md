@@ -121,9 +121,9 @@ vi.mock('@server/db/client', () => {
   };
 });
 
-// Supabase Auth (the only thing the Supabase clients still do)
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: { auth: { admin: { getUserById: vi.fn() } } },
+// The auth API, for a route that calls it itself (most read c.get('user'))
+vi.mock('@server/auth', () => ({
+  auth: { api: { getSession: vi.fn() } },
 }));
 
 // Stripe

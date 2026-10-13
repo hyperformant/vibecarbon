@@ -35,8 +35,7 @@ src/server/
 │   ├── logger.ts        # Pino structured logging
 │   ├── auth.ts          # Role helpers (isSuperAdmin)
 │   ├── errors.ts        # sanitizeError — never leak internals to a client
-│   ├── rate-limiter.ts  # Rate limiting middleware
-│   └── supabase.ts      # Auth only: supabaseAdmin.auth.admin, createAuthClient, getSupabaseClient
+│   └── rate-limiter.ts  # Rate limiting middleware
 ├── types.ts             # HonoVariables — what c.get('user') / c.get('session') return
 src/shared/              # Shared TypeScript types between client and server
 ```
@@ -52,7 +51,7 @@ src/shared/              # Shared TypeScript types between client and server
 - **`adminDb`**: the connection role, which bypasses RLS and sees every row. Use ONLY where the server acts for itself (webhooks, admin tools, jobs), and only after an authorization check of your own when a user-supplied id is involved. The files allowed to import it are listed, each with a reason, in `tests/structural/db-access-census.test.ts`; adding one is a security decision.
 - **Never build SQL text from input.** Drizzle's query builder or the `sql` template only (values become bound parameters); never `sql.raw()` user input. RLS inside `withUserDb` catches logic mistakes, not injection.
 - **Log database errors as `{ err: dbErrorForLog(err) }`** and never log or return `err.message` of one: Drizzle puts the SQL and every bound value in it.
-- **Supabase clients are Auth only** (`src/server/lib/supabase.ts`): `supabaseAdmin.auth.admin.*`, `createAuthClient()` for `signInWithPassword()`. `.from()` on them does not compile and fails the census.
+- **No Supabase client on the server.** Auth is in-process (`src/server/auth/`, Better Auth); users live in `"user"`, reached through `adminDb` only in census-allowlisted files.
 - A new table needs its Drizzle definition in `src/server/db/schema.ts` (`tests/db/schema-drift.test.ts` checks it against the migrations).
 - NEVER expose the service role key to the client
 

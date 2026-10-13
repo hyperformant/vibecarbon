@@ -27,6 +27,7 @@ describe('auth plugin order', () => {
       'magic-link',
       'two-factor',
       'session-assurance',
+      'impersonation-guard',
       'account-lockout',
       'strip-session-token',
     ]);

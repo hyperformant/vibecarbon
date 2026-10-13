@@ -10,10 +10,11 @@ import { describe, expect, it } from 'vitest';
  *     anonymous visitor. RLS decides what `fn` sees.
  *   - `adminDb`, which bypasses RLS, only where the server acts for itself.
  *
- * Supabase clients remain for Auth (GoTrue) only. This census fails when:
+ * The server uses no Supabase client at all (auth is in-process, data is
+ * Drizzle). This census fails when:
  *   1. a file under src/server makes a data call through a Supabase client
- *      (`.from('table')`, `.rpc('fn')`, `.schema('x')`, storage), or builds
- *      its own Supabase client outside lib/supabase.ts;
+ *      (`.from('table')`, `.rpc('fn')`, `.schema('x')`, storage), or imports
+ *      @supabase/supabase-js at all;
  *   2. a file other than db/client.ts imports or names `adminDb` (or the raw
  *      `pool`) without being on the allowlist below (db/ helpers included);
  *   3. a file reaches db/client any way but a plain named import (namespace
@@ -31,15 +32,16 @@ import { describe, expect, it } from 'vitest';
 const ROOT = join(__dirname, '..', '..');
 const SERVER = join(ROOT, 'src', 'server');
 
-/**
- * Files that may import `adminDb`. Each one used the service-role
- * `supabaseAdmin` for the same data before the move to Drizzle.
- */
+/** Files that may import `adminDb`, each with the reason it needs to bypass RLS. */
 const ADMIN_DB_ALLOWLIST: Record<string, string> = {
   'auth/account-linking.ts':
     "social-link hook: removes an unverified account's password and sessions (auth tables are server-only)",
   'auth/assurance.ts':
     'marks a session two-factor verified and counts wrong step-up codes (auth tables are server-only)',
+  'auth/impersonation.ts':
+    "reads an impersonation target's role to refuse super admins (auth tables are server-only)",
+  'auth/sign-in-record.ts':
+    'stamps user.last_sign_in_at when a session is issued (auth tables are server-only)',
   'auth/bootstrap-admin.ts':
     'startup: finds or promotes the ADMIN_EMAIL account (no session; app_user cannot read "user")',
   'auth/index.ts':
@@ -104,20 +106,15 @@ describe('db access census: no data through Supabase clients', () => {
     ).toEqual([]);
   });
 
-  it('only lib/supabase.ts creates Supabase clients', () => {
+  it('no file under src/server imports a Supabase client', () => {
     const offenders = files
-      .filter((f) => f.rel !== 'lib/supabase.ts')
-      .filter((f) => /from\s*'@supabase\/supabase-js'/.test(f.text))
-      .filter((f) => /import\s*\{[^}]*\bcreateClient\b/.test(f.text))
+      .filter((f) => /from\s*['"]@supabase\/supabase-js['"]/.test(f.text))
       .map((f) => f.rel);
-    expect(offenders).toEqual([]);
-  });
-
-  it('lib/supabase.ts hands out auth-only clients', () => {
-    const text = files.find((f) => f.rel === 'lib/supabase.ts')?.text ?? '';
-    expect(text).toMatch(/export type AuthOnlyClient = Pick<SupabaseClient<Database>, 'auth'>/);
-    // Every exported client is typed AuthOnlyClient, never a full SupabaseClient.
-    expect(text).not.toMatch(/export (const \w+|function \w+\([^)]*\)): SupabaseClient/);
+    expect(
+      offenders,
+      'The server has no Supabase client: auth is the in-process auth API ' +
+        '(src/server/auth), data goes through db/client.ts.'
+    ).toEqual([]);
   });
 });
 

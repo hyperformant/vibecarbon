@@ -85,7 +85,8 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 | `GET /api/v1/newsletter/unsubscribe` | Unsubscribe from newsletter |
 | `GET /api/v1/admin/users` | List all users (super admin) |
 | `GET /api/v1/admin/organizations` | List all organizations (super admin) |
-| `POST /api/v1/admin/impersonate/:userId` | Impersonate user (super admin) |
+| `POST /api/auth/admin/impersonate-user` | Impersonate a regular user for at most 1 h (super admin, aal2 while MFA is on); `POST /api/auth/admin/stop-impersonating` returns |
+| `POST/DELETE /api/v1/admin/forwardauth-cookie` | Mint/clear the `vc-admin-token` ForwardAuth cookie (super admin, aal2 while MFA is on) |
 | `GET/POST /api/v1/admin/notifications` | Manage notifications (super admin) |
 | `GET /api/v1/admin/stats` | Platform-wide stats (super admin) |
 | `GET /api/v1/admin/performance` | Service performance/health checks (super admin) |
@@ -137,7 +138,7 @@ await adminDb.insert(items).values({ ... });
 - **Before any `adminDb` query that takes a user-supplied id**, check authorization yourself (super_admin, or org membership via `requireOrgRole`). RLS is not there to catch you.
 - **Never build SQL text from input.** Use Drizzle's query builder or the `sql` template, which binds values as parameters. Never `sql.raw()` user input. RLS inside `withUserDb` catches logic mistakes (a missing `where`), not injection: injected SQL could `reset role`.
 - **Log database errors through `dbErrorForLog(err)`** (`src/server/db/errors.ts`), and never log or return `err.message` of one: Drizzle puts the SQL and every bound value (emails, tokens) in it. The logger strips them from `err`/`error` fields as a backstop.
-- **Supabase clients are for Auth only** (`src/server/lib/supabase.ts`, typed `AuthOnlyClient`): `supabaseAdmin.auth.admin.*` for user management, `createAuthClient()` for `signInWithPassword()` (never the shared `supabaseAdmin`: it would keep the user's session). A `.from()` on a Supabase client fails the census.
+- **The server has no Supabase client.** Auth is the in-process auth API (`src/server/auth/`); users are rows in `"user"`, read and written through `adminDb` in the census-allowlisted files (the auth tables have no `app_user` privileges). The census fails on any `@supabase/supabase-js` import under `src/server`.
 - **New table**: add its Drizzle definition to `src/server/db/schema.ts`; `tests/db/schema-drift.test.ts` fails when it and the migrations disagree.
 
 ## Key Patterns
@@ -278,7 +279,7 @@ Helpers live in `tests/_helpers/`:
 
 **Mocking conventions:**
 - Database: `vi.mock('@server/db/client', () => ({ adminDb: { select: () => queryChain(() => rows) }, withUserDb: ... }))`. `queryChain` (`tests/_helpers/drizzle-mock.ts`) stands in for any Drizzle chain. Prove RLS itself in the `db` tier, never with mocks.
-- Supabase Auth: `vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { auth: { admin: { ... } } } }))`.
+- Server auth: `vi.mock('@server/auth', () => ({ auth: { api: { getSession: vi.fn() } } }))` for a route that calls the auth API itself; most routes only read `c.get('user')` / `c.get('session')`, so seed those in a pre-route middleware instead. Prove real auth flows in the `db` tier (`tests/db/auth*.test.ts`, `tests/db/admin-surfaces.test.ts`).
 - Client auth: `vi.mock('@/lib/auth-client', () => ({ authClient: { signIn: { email: vi.fn() }, getSession: vi.fn(), ... } }))`. Each call resolves `{ data, error }` and never throws. See `tests/component/auth-provider.test.tsx`.
 - Stripe: `vi.mock('@server/lib/stripe', () => ({ stripe: { ... } }))`.
 - fetch (client side): `vi.stubGlobal('fetch', vi.fn(...))` + `vi.unstubAllGlobals()` in afterEach.
@@ -365,8 +366,8 @@ Rules:
 Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-split`, invariants pinned in `tests/structural/security-invariants.test.ts`):
 
 - **The session cookie** is set by the auth API (`/api/auth/*`): **HttpOnly** and **host-only** (apex). Page JS never sees it or any session token, and the SPA keeps no session store of its own. It **MUST NOT** get a `domain=` attribute: a parent-domain scope would send every user's session to every admin subdomain, where XSS in any bundled tool (Grafana, Metabase, n8n) could ride it. It is **NOT** a ForwardAuth credential.
-- **`vc-admin-token`** is the only cookie `/api/_internal/verify-role` accepts: **HttpOnly**, access token only, 1h, minted by `POST /api/v1/admin/forwardauth-cookie` for super_admins only. Regular users carry no domain-wide cookie at all. **NEVER** relax verify-role to read `sb-*` cookies again.
-- **Impersonation never client-stores the admin session.** The client impersonates through the admin plugin (`POST /api/auth/admin/impersonate-user`, `stop-impersonating`), which keeps the admin's session server-side in its own HttpOnly signed cookie. The older `/api/v1/admin/impersonate` routes and their path-scoped **`vc-impersonation-restore`** cookie remain until the admin surfaces move to the auth API. **NEVER** write a session into `localStorage`/`sessionStorage`.
+- **`vc-admin-token`** is the only credential `/api/_internal/verify-role` accepts (no session cookie, no `Authorization` / `X-Forwarded-Access-Token` header): **HttpOnly**, 1h, parent-domain scoped, minted by `POST /api/v1/admin/forwardauth-cookie` for super admins only (aal2 while MFA is globally on, never from an impersonation session). It carries the admin's session token, taken server-side from the verified session, never from the request and never in a response body. It is unsigned: verify-role signs it with the auth secret to look the session up (uncached, never refreshed), so a leaked value is not a usable app session cookie, and signing out, a revoked or banned session, a role change, or MFA turned on with an aal1 session ends it at once. Regular users carry no domain-wide cookie at all. **NEVER** let verify-role read the app's session cookie.
+- **Impersonation never client-stores the admin session.** The client impersonates through the admin plugin (`POST /api/auth/admin/impersonate-user`, `stop-impersonating`), which keeps the admin's session server-side in its own HttpOnly signed cookie. Rules (`src/server/auth/impersonation.ts`): super admin only, aal2 while MFA is on, never yourself (400 `CANNOT_IMPERSONATE_SELF`), never another super admin (403 `CANNOT_IMPERSONATE_ADMIN`), no nesting. The impersonation session lasts at most 1 h (its expiry never slides forward), and may not change how the account signs in or read its provider tokens (`/change-password`, `/change-email`, `/link-social`, `/unlink-account`, `/verify-password`, token endpoints: 403 `IMPERSONATION_NOT_ALLOWED`), touch two-factor, mint the ForwardAuth cookie, or pass `requireAal2` (403 `impersonation_not_allowed`). **NEVER** write a session into `localStorage`/`sessionStorage`.
 
 ## Database Security (RLS)
 
@@ -434,7 +435,6 @@ CREATE POLICY "dangerous_update"
 - **MUST** validate all input with Zod schemas before processing
 - **MUST** use `withUserDb(user.id, ...)` for user-facing database queries — RLS applies inside it
 - **MUST** validate redirect URLs against an allowlist — never redirect to arbitrary user-supplied URLs
-- **MUST** use `createAuthClient()` for `signInWithPassword()` operations — never use the `supabaseAdmin` singleton for auth flows (it stores session state and contaminates subsequent queries)
 - **MUST** verify webhook signatures before processing webhook payloads (Stripe uses `stripe.webhooks.constructEvent()`)
 - **MUST** perform your own authorization check (super_admin, or org membership via `requireOrgRole`) **before** any `adminDb` query that touches user-supplied IDs — `adminDb` bypasses ALL RLS, so a missing check is a direct IDOR
 - **NEVER** use `adminDb` for data shown to end users — it bypasses RLS
@@ -447,8 +447,7 @@ CREATE POLICY "dangerous_update"
 |--------|--------|-----|---------|
 | `withUserDb(userId, fn)` | `src/server/db/client.ts` | Enforced (`app_user`) | All user-facing queries; `null` user for anonymous reads |
 | `adminDb` | `src/server/db/client.ts` | Bypassed | Webhooks, admin tools, jobs; census allowlist only |
-| `supabaseAdmin` | `src/server/lib/supabase.ts` | N/A (Auth only) | `auth.admin.*` user management, token checks |
-| `createAuthClient()` | `src/server/lib/supabase.ts` | N/A (Auth only) | `signInWithPassword()` and other session-creating auth flows |
+| `auth.api.*` | `src/server/auth/index.ts` | N/A (auth tables) | Server-side auth calls (`getSession`, ...); sessions and users otherwise come from `c.get('user')` / `c.get('session')` |
 
 ### API Endpoint Pattern
 

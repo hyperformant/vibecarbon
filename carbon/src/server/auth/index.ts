@@ -16,8 +16,10 @@ import {
 } from './account-linking';
 import { sessionAssurance } from './assurance';
 import { sendAuthEmail } from './email';
+import { capImpersonationExpiry, impersonationGuard } from './impersonation';
 import { lockoutPlugin } from './lockout';
 import { socialProviders } from './providers';
+import { recordSignIn } from './sign-in-record';
 import { stripSessionToken } from './strip-session-token';
 
 /**
@@ -134,7 +136,13 @@ export const auth = betterAuth({
           const source = (ctx?.context as { session?: { session?: { id?: string } } | null })
             ?.session?.session?.id;
           await rejectOrphanedPasswordSession(created, ctx?.path, source);
+          await recordSignIn(created);
         },
+      },
+      update: {
+        // An impersonation session never outlives its hour
+        // (auth/impersonation.ts).
+        before: async (update, ctx) => capImpersonationExpiry(update, ctx),
       },
     },
     user: {
@@ -188,11 +196,14 @@ export const auth = betterAuth({
   // Paths not served over HTTP. Server-side `auth.api.*` calls still reach
   // them (the startup bootstrap uses createUser).
   disabledPaths: [
-    // Admin endpoints the app does not use. What stays: list-users,
-    // impersonate-user, stop-impersonating and remove-user (the admin
-    // users page, impersonation, account deletion). set-role must never be
+    // Admin endpoints the app does not use. Only impersonate-user and
+    // stop-impersonating stay (the admin users page; rules in
+    // auth/impersonation.ts). The users list, stats and account deletion
+    // are app routes over the database (routes/v1). set-role must never be
     // reachable: role assignment is bootstrap-only.
     '/admin/set-role',
+    '/admin/list-users',
+    '/admin/remove-user',
     '/admin/create-user',
     '/admin/update-user',
     '/admin/get-user',
@@ -214,7 +225,8 @@ export const auth = betterAuth({
   ],
   // ORDER MATTERS. After hooks run in this order, and each later plugin sees
   // what the earlier ones returned:
-  //   admin, magicLink, twoFactor, sessionAssurance, lockout, stripSessionToken.
+  //   admin, magicLink, twoFactor, sessionAssurance, impersonationGuard,
+  //   lockout, stripSessionToken.
   // lockout must follow twoFactor (a pending 2FA challenge is neither a
   // failure nor a success); sessionAssurance must follow twoFactor (it marks
   // the session a verify endpoint produced); stripSessionToken must be last
@@ -247,6 +259,8 @@ export const auth = betterAuth({
       allowPasswordless: true,
     }),
     sessionAssurance(),
+    // After sessionAssurance: an aal1 admin hears "verify a code" first.
+    impersonationGuard(),
     lockoutPlugin(),
     // Last, so it sees every other plugin's response: no session token in
     // any JSON body; the HttpOnly cookie is its only carrier.

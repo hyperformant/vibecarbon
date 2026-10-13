@@ -13,9 +13,11 @@ type Ctx = Context<{ Variables: HonoVariables }>;
  * The session middleware reads the session from the database on every
  * request, so a verification counts from the very next request.
  *
- * Order: no user -> 401; this session verified -> allow; MFA globally
- * disabled -> allow (gate inert, respects the operator toggle); otherwise ->
- * 403 mfa_required.
+ * Order: no user -> 401; an impersonation session -> 403
+ * impersonation_not_allowed (a super admin acting as the user never takes
+ * the user's sensitive actions: deleting the account, billing, ownership);
+ * this session verified -> allow; MFA globally disabled -> allow (gate
+ * inert, respects the operator toggle); otherwise -> 403 mfa_required.
  *
  * The 403 tells the client what to do next:
  * - `mfa_enrolled: true`: the user has an authenticator. Verify a code from
@@ -31,7 +33,18 @@ export async function checkAal2(c: Ctx): Promise<Response | null> {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (c.get('session')?.twoFactorVerified === true) {
+  const session = c.get('session');
+  if (session?.impersonatedBy) {
+    return c.json(
+      {
+        error: 'impersonation_not_allowed',
+        message: 'This is not available while impersonating a user.',
+      },
+      403
+    );
+  }
+
+  if (session?.twoFactorVerified === true) {
     return null;
   }
 

@@ -16,7 +16,9 @@ const envSchema = z.object({
   // generates 64.
   BETTER_AUTH_SECRET: z.string().min(32),
 
-  // Supabase (required until the admin routes leave the GoTrue admin API)
+  // The Supabase services that still run beside the app (Kong, Studio,
+  // Realtime). Nothing in the server reads the two keys; they stay required
+  // only until the deploy plumbing stops passing them.
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
