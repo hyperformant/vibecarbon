@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { isAdminReady } from '../auth/admin-status';
+import { getAdminStatus, isAdminReady } from '../auth/admin-status';
 import { pingDb } from '../db/client';
 import { dbErrorForLog } from '../db/errors';
 import { logger } from '../lib/logger';
@@ -10,12 +10,15 @@ const healthRoutes = new Hono<{ Variables: HonoVariables }>();
 // Liveness probe: returns 200 if the server process is running.
 // No external dependency checks — if this handler executes, the server is alive.
 // `adminReady` says whether the startup bootstrap has confirmed the
-// ADMIN_EMAIL super admin can sign in; `vibecarbon deploy` waits for it.
+// ADMIN_EMAIL super admin can sign in; `adminStatus` says why not
+// (pending, or terminal: skipped / refused / failed, see auth/admin-status.ts).
+// `vibecarbon deploy` waits for ready and stops early on a terminal status.
 healthRoutes.get('/', (c) => {
   return c.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     adminReady: isAdminReady(),
+    adminStatus: getAdminStatus(),
   });
 });
 

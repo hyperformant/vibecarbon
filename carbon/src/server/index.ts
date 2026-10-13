@@ -7,9 +7,8 @@ import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
 import { auth } from './auth';
-import { bootstrapAdminAtStartup } from './auth/bootstrap-admin';
 import { pool } from './db/client';
-import { checkDbRoleAtStartup } from './db/startup';
+import { checkDbRoleAtStartup, ensureAdminAtStartup } from './db/startup';
 import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
@@ -246,6 +245,10 @@ const openApiSpec = {
                     adminReady: {
                       type: 'boolean',
                       description: 'Whether the ADMIN_EMAIL super admin exists and can sign in',
+                    },
+                    adminStatus: {
+                      type: 'string',
+                      enum: ['pending', 'ready', 'skipped', 'refused', 'failed'],
                     },
                   },
                 },
@@ -578,8 +581,9 @@ const server = serve({
 // Not awaited: the server must come up even while Postgres is still starting
 // (readiness reports it down meanwhile). It exits the process only if the
 // connection role turns out not to bypass RLS. Once the database answers,
-// ensure the ADMIN_EMAIL super admin exists (auth/bootstrap-admin.ts).
-void checkDbRoleAtStartup().then(() => bootstrapAdminAtStartup());
+// ensure the ADMIN_EMAIL super admin exists, retrying transient errors
+// (db/startup.ts ensureAdminAtStartup, auth/bootstrap-admin.ts).
+void checkDbRoleAtStartup().then(() => ensureAdminAtStartup());
 
 // Graceful shutdown handler - drain in-flight requests before exiting
 let isShuttingDown = false;

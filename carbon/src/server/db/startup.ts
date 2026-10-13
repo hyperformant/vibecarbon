@@ -1,3 +1,9 @@
+import {
+  type AdminStatus,
+  adminStatusAfter,
+  type BootstrapResult,
+  setAdminStatus,
+} from '../auth/admin-status';
 import { logger } from '../lib/logger';
 import { assertBypassRole, DbRoleError } from './client';
 import { dbErrorForLog } from './errors';
@@ -87,6 +93,115 @@ export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {})
         log.warn(
           { err: dbErrorForLog(err) },
           'Postgres is not ready yet; serving with the database down'
+        );
+        warned = true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+    }
+  }
+}
+
+// Errors waiting fixes: the connection dropped or was refused (node errno or
+// SQLSTATE class 08 / 57P0x), a concurrent transaction won (40001, 40P01),
+// or the schema is mid-migration (42P01 undefined_table, 42703
+// undefined_column, 42704 undefined_object).
+const TRANSIENT_ERRNO = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+const TRANSIENT_SQLSTATE = new Set([
+  '40001',
+  '40P01',
+  '42P01',
+  '42703',
+  '42704',
+  '57P01',
+  '57P02',
+  '57P03',
+  '53300',
+]);
+
+/**
+ * True when a bootstrap error is worth retrying: a connection problem, a
+ * lost serialization race, or a schema that is still being migrated. Looks
+ * through Drizzle's (and Better Auth's) `cause` wrapping like isDbAuthFailure.
+ */
+export function isTransientDbError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string') {
+      if (TRANSIENT_ERRNO.has(code) || TRANSIENT_SQLSTATE.has(code) || code.startsWith('08')) {
+        return true;
+      }
+    }
+    if (/Connection terminated|timeout exceeded when trying to connect/i.test(current.message)) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
+interface AdminStartupDeps {
+  bootstrap: () => Promise<BootstrapResult>;
+  setStatus: (status: AdminStatus) => void;
+  log: Pick<typeof logger, 'error' | 'info' | 'warn'>;
+  retryMs: number;
+}
+
+const adminDefaults: AdminStartupDeps = {
+  // Loaded lazily: the auth instance is heavy and this module is imported by
+  // tests that never bootstrap.
+  bootstrap: async () => (await import('../auth/bootstrap-admin')).bootstrapAdmin(),
+  setStatus: setAdminStatus,
+  log: logger,
+  retryMs: defaults.retryMs,
+};
+
+/**
+ * Ensure the ADMIN_EMAIL super admin exists, as the second half of startup:
+ * call it once checkDbRoleAtStartup has confirmed the database answers and is
+ * migrated. Never rejects; run it without awaiting.
+ *
+ * A transient failure (isTransientDbError) is retried on the startup loop's
+ * cadence until the bootstrap settles, so a database blip or a migration
+ * still running does not leave the app without its admin until a restart.
+ * Settled outcomes are terminal and published for /api/health: ready,
+ * skipped (no ADMIN_* env), refused (ownership not proven), or failed (an
+ * error waiting cannot fix). Deploys wait for ready and stop early on the
+ * others.
+ */
+export async function ensureAdminAtStartup(
+  overrides: Partial<AdminStartupDeps> = {}
+): Promise<AdminStatus> {
+  const { bootstrap, setStatus, log, retryMs } = { ...adminDefaults, ...overrides };
+  let warned = false;
+  for (;;) {
+    try {
+      const result = await bootstrap();
+      const status = adminStatusAfter(result);
+      setStatus(status);
+      if (result === 'created') log.info('Created the super admin account from ADMIN_EMAIL');
+      else if (result === 'promoted') log.info('Granted super_admin to the ADMIN_EMAIL account');
+      else if (result === 'skipped')
+        log.info('ADMIN_EMAIL/ADMIN_PASSWORD not set; no super admin bootstrap');
+      // 'refused' has already logged its own error with what to do.
+      return status;
+    } catch (err) {
+      if (!isTransientDbError(err)) {
+        log.error({ err: dbErrorForLog(err) }, 'Super admin bootstrap failed');
+        setStatus('failed');
+        return 'failed';
+      }
+      if (!warned) {
+        log.warn(
+          { err: dbErrorForLog(err) },
+          'Super admin bootstrap hit a transient database error; retrying'
         );
         warned = true;
       }

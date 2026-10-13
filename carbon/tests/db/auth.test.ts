@@ -3,7 +3,8 @@ import { Hono } from 'hono';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
-import { adminReadyAfter, bootstrapAdmin } from '@server/auth/bootstrap-admin';
+import { adminStatusAfter } from '@server/auth/admin-status';
+import { bootstrapAdmin } from '@server/auth/bootstrap-admin';
 import { isSuperAdmin } from '@server/lib/auth';
 import { logger } from '@server/lib/logger';
 import { csrfProtection } from '@server/middleware/csrf';
@@ -393,11 +394,11 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
 
     // /api/health's adminReady (what `vibecarbon deploy` waits for).
     it('reports the admin ready only when it can sign in', () => {
-      expect(adminReadyAfter('created')).toBe(true);
-      expect(adminReadyAfter('promoted')).toBe(true);
-      expect(adminReadyAfter('unchanged')).toBe(true);
-      expect(adminReadyAfter('skipped')).toBe(false);
-      expect(adminReadyAfter('refused')).toBe(false);
+      expect(adminStatusAfter('created')).toBe('ready');
+      expect(adminStatusAfter('promoted')).toBe('ready');
+      expect(adminStatusAfter('unchanged')).toBe('ready');
+      expect(adminStatusAfter('skipped')).toBe('skipped');
+      expect(adminStatusAfter('refused')).toBe('refused');
     });
 
     it('does nothing without both ADMIN_EMAIL and ADMIN_PASSWORD', async () => {

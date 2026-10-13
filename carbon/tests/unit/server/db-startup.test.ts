@@ -15,7 +15,8 @@ vi.mock('@server/lib/logger', () => ({
 const { assertBypassRole, DbNotMigratedError, DbRoleError, pool } = await import(
   '@server/db/client'
 );
-const { checkDbRoleAtStartup, isDbAuthFailure } = await import('@server/db/startup');
+const { checkDbRoleAtStartup, ensureAdminAtStartup, isDbAuthFailure, isTransientDbError } =
+  await import('@server/db/startup');
 
 function fakeLog() {
   return { fatal: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
@@ -183,5 +184,68 @@ describe('assertBypassRole', () => {
     await checkDbRoleAtStartup({ assert, log: fakeLog(), exit, retryMs: 0 });
     expect(exit).not.toHaveBeenCalled();
     expect(assert).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ensureAdminAtStartup: the super admin bootstrap settles, retrying only transient errors', () => {
+  const run = (bootstrap: () => Promise<unknown>) => {
+    const statuses: string[] = [];
+    const log = fakeLog();
+    const done = ensureAdminAtStartup({
+      bootstrap: bootstrap as never,
+      setStatus: (s) => statuses.push(s),
+      log,
+      retryMs: 0,
+    });
+    return { done, statuses, log };
+  };
+
+  it('retries a transient failure and reports ready once it succeeds, without a restart', async () => {
+    const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(wrappedPgError('42P01')) // migration still running
+      .mockRejectedValueOnce(wrappedPgError('40001')) // serialization race
+      .mockResolvedValueOnce('created');
+    const { done, statuses, log } = run(bootstrap);
+    expect(await done).toBe('ready');
+    expect(bootstrap).toHaveBeenCalledTimes(4);
+    expect(statuses).toEqual(['ready']);
+    expect(log.warn).toHaveBeenCalledTimes(1); // once per outage, not per retry
+  });
+
+  it('a refused bootstrap is terminal: reported, never retried', async () => {
+    const bootstrap = vi.fn().mockResolvedValue('refused');
+    const { done, statuses } = run(bootstrap);
+    expect(await done).toBe('refused');
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual(['refused']);
+  });
+
+  it('missing ADMIN_* env is terminal (skipped)', async () => {
+    const { done, statuses } = run(vi.fn().mockResolvedValue('skipped'));
+    expect(await done).toBe('skipped');
+    expect(statuses).toEqual(['skipped']);
+  });
+
+  it('an error waiting cannot fix is terminal (failed) and logged', async () => {
+    const bootstrap = vi.fn().mockRejectedValue(new Error('password too short'));
+    const { done, statuses, log } = run(bootstrap);
+    expect(await done).toBe('failed');
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual(['failed']);
+    expect(log.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies connection, race and mid-migration errors as transient, nothing else', () => {
+    for (const code of ['08006', '57P01', '40001', '40P01', '42P01', '42703']) {
+      expect(isTransientDbError(wrappedPgError(code)), code).toBe(true);
+    }
+    expect(isTransientDbError(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe(true);
+    expect(isTransientDbError(new Error('Connection terminated unexpectedly'))).toBe(true);
+    expect(isTransientDbError(wrappedPgError('23505'))).toBe(false); // unique violation
+    expect(isTransientDbError(wrappedPgError('28P01'))).toBe(false);
+    expect(isTransientDbError(new Error('nope'))).toBe(false);
   });
 });

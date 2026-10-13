@@ -1,14 +1,13 @@
 import { and, eq } from 'drizzle-orm';
 import { adminDb } from '../db/client';
-import { dbErrorForLog } from '../db/errors';
 import { account, user } from '../db/schema';
 import { isSuperAdmin } from '../lib/auth';
 import { env } from '../lib/env';
 import { logger } from '../lib/logger';
-import { setAdminReady } from './admin-status';
+import type { BootstrapResult } from './admin-status';
 import { auth } from './index';
 
-export type BootstrapResult = 'skipped' | 'created' | 'promoted' | 'unchanged' | 'refused';
+export type { BootstrapResult } from './admin-status';
 
 /**
  * Ensure the operator's super admin exists, from ADMIN_EMAIL and
@@ -122,31 +121,4 @@ async function passwordMatches(userId: string, password: string): Promise<boolea
   if (!hash) return false;
   const ctx = await auth.$context;
   return ctx.password.verify({ hash, password });
-}
-
-/** Whether a bootstrap outcome leaves the super admin able to sign in. */
-export function adminReadyAfter(result: BootstrapResult): boolean {
-  return result === 'created' || result === 'promoted' || result === 'unchanged';
-}
-
-/**
- * Startup wrapper: never throws, logs the outcome, and records whether the
- * super admin is ready to sign in (`adminReady` on /api/health, which
- * deploys wait for). Ready means it was created, promoted, or already there
- * with a password; skipped, refused and failed all leave it false.
- */
-export async function bootstrapAdminAtStartup(): Promise<BootstrapResult | null> {
-  try {
-    const result = await bootstrapAdmin();
-    setAdminReady(adminReadyAfter(result));
-    if (result === 'created') logger.info('Created the super admin account from ADMIN_EMAIL');
-    else if (result === 'promoted') logger.info('Granted super_admin to the ADMIN_EMAIL account');
-    else if (result === 'skipped')
-      logger.info('ADMIN_EMAIL/ADMIN_PASSWORD not set; no super admin bootstrap');
-    // 'refused' has already logged its own error with what to do.
-    return result;
-  } catch (err) {
-    logger.error({ err: dbErrorForLog(err) }, 'Super admin bootstrap failed');
-    return null;
-  }
 }

@@ -32,16 +32,21 @@ describe('GET /api/health', () => {
     expect(new Date(body.timestamp).toString()).not.toBe('Invalid Date');
   });
 
-  // `vibecarbon deploy` waits for adminReady before calling a deploy done.
-  it('reports adminReady from the startup bootstrap, false until it succeeds', async () => {
-    const { setAdminReady } = await import('@server/auth/admin-status');
+  // `vibecarbon deploy` waits for adminReady before calling a deploy done,
+  // and stops early on a terminal adminStatus.
+  it('reports the startup bootstrap: pending, then ready or a terminal reason', async () => {
+    const { setAdminStatus } = await import('@server/auth/admin-status');
     const read = async () =>
-      ((await (await app.request('/api/health')).json()) as { adminReady: unknown }).adminReady;
-    expect(await read()).toBe(false);
-    setAdminReady(true);
-    expect(await read()).toBe(true);
-    setAdminReady(false);
-    expect(await read()).toBe(false);
+      (await (await app.request('/api/health')).json()) as {
+        adminReady: unknown;
+        adminStatus: unknown;
+      };
+    expect(await read()).toMatchObject({ adminReady: false, adminStatus: 'pending' });
+    setAdminStatus('ready');
+    expect(await read()).toMatchObject({ adminReady: true, adminStatus: 'ready' });
+    setAdminStatus('refused');
+    expect(await read()).toMatchObject({ adminReady: false, adminStatus: 'refused' });
+    setAdminStatus('pending');
   });
 });
 
