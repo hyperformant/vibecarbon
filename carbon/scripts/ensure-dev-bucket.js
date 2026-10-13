@@ -21,12 +21,15 @@ import {
 } from '@aws-sdk/client-s3';
 import { readEnvFiles } from './lib/dotenv.js';
 
-/** Origins the browser may upload from: the default Vite port plus any override. */
+/**
+ * Origins the browser may upload from: the Vite dev origin, with the same port
+ * rule as scripts/dev.js and the server CORS (DEV_VITE_PORT, else
+ * 5173 + DEV_PORT_OFFSET).
+ */
 export function devOrigins(env) {
-  const origins = ['http://localhost:5173'];
-  const port = env.DEV_VITE_PORT;
-  if (port) origins.push(`http://localhost:${port}`);
-  return [...new Set(origins)];
+  const offset = Number.parseInt(env.DEV_PORT_OFFSET || '0', 10) || 0;
+  const port = env.DEV_VITE_PORT || String(5173 + offset);
+  return [`http://localhost:${port}`];
 }
 
 /** Create the bucket if missing and always (re)apply CORS. */

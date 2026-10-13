@@ -77,12 +77,23 @@ describe('ensureDevBucket', () => {
 });
 
 describe('devOrigins', () => {
-  it('always includes 5173 and adds the configured vite port, deduped', () => {
+  // Same port rule as scripts/dev.js and the server CORS: DEV_VITE_PORT wins,
+  // else 5173 + DEV_PORT_OFFSET.
+  it('defaults to the Vite port 5173', () => {
     expect(devOrigins({})).toEqual(['http://localhost:5173']);
-    expect(devOrigins({ DEV_VITE_PORT: '5183' })).toEqual([
-      'http://localhost:5173',
-      'http://localhost:5183',
+  });
+
+  it('shifts the Vite port by DEV_PORT_OFFSET', () => {
+    expect(devOrigins({ DEV_PORT_OFFSET: '10' })).toEqual(['http://localhost:5183']);
+  });
+
+  it('lets DEV_VITE_PORT win over DEV_PORT_OFFSET', () => {
+    expect(devOrigins({ DEV_VITE_PORT: '6000', DEV_PORT_OFFSET: '10' })).toEqual([
+      'http://localhost:6000',
     ]);
-    expect(devOrigins({ DEV_VITE_PORT: '5173' })).toEqual(['http://localhost:5173']);
+  });
+
+  it('treats an unparseable offset as 0', () => {
+    expect(devOrigins({ DEV_PORT_OFFSET: 'abc' })).toEqual(['http://localhost:5173']);
   });
 });
