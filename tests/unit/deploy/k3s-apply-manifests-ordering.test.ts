@@ -184,22 +184,13 @@ function installSpawnMock() {
         typeof spawn
       >;
     }
-    // waitForSupabaseStorageSchema's probe (invoked from applyMigrations) reads
-    // the storage.buckets column count via a trailing bare `-tA` psql flag (SQL
-    // arrives over stdin, not argv) and polls every 5s for up to 600s until it
-    // sees '3' — answering '3' here on the FIRST attempt keeps any test that
-    // exercises applyMigrations (a real migrations/ dir) from blocking on that
-    // real-timer poll loop.
-    if (cmd === 'kubectl' && argv.includes('exec') && argv[argv.length - 1] === '-tA') {
-      return fakeChild({ stdout: '3\n', argv: full }) as unknown as ReturnType<typeof spawn>;
-    }
     // Post-migration RLS audit (applyMigrations, -tAc). Empty stdout = clean
     // schema (no public tables without RLS) so the audit passes — a non-empty
     // result would be read as a list of unprotected tables and abort the deploy.
     if (cmd === 'kubectl' && argv.includes('exec') && argv.includes('-tAc')) {
       return fakeChild({ stdout: '', argv: full }) as unknown as ReturnType<typeof spawn>;
     }
-    // Other kubectl exec probes (storage schema / psql) read '1' as the ready signal.
+    // Other kubectl exec probes (psql) read '1' as the ready signal.
     const isExec = cmd === 'kubectl' && argv.includes('exec');
     return fakeChild({ stdout: isExec ? '1\n' : '', argv: full }) as unknown as ReturnType<
       typeof spawn
@@ -1168,11 +1159,11 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     // Pinned against the SAME variable the deploy call used (TEST_VPC_CIDR),
     // not a hand-copied literal — one occurrence per policy.
     const cidrMatches = yaml.match(/cidr: 10\.20\.0\.0\/16/g);
-    // 3 since 2026-08-30 — the registry's arm left with its S3 backend
-    // (filesystem now); storage joined 2026-08-21. app + storage + db.
-    expect(cidrMatches?.length).toBe(3);
+    // 2: the registry's arm left 2026-08-30 with its S3 backend (filesystem
+    // now) and the storage service's arm left with the service. app + db.
+    expect(cidrMatches?.length).toBe(2);
 
-    // Near-miss rejection — scoped to exactly the 3 S3-purposed policies;
+    // Near-miss rejection — scoped to exactly the 2 S3-purposed policies;
     // the audited-and-left-alone policies (Task 9c report) must gain no
     // NetworkPolicy object of their own here. Matches actual `name:` fields
     // (not a bare substring check) so the file's own header comment, which
@@ -1182,14 +1173,7 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     expect(yaml).not.toMatch(/name: traefik-policy\b/);
     expect(yaml).not.toMatch(/name: (allow-db-)?repl-gateway\S*/);
     const policyNames = [...yaml.matchAll(/^\s*name:\s*(\S+)/gm)].map((m) => m[1]);
-    expect(policyNames.sort()).toEqual(
-      [
-        'app-s3-vpc-egress',
-        'supabase-db-s3-vpc-egress',
-        // Added 2026-08-21 with the storage service's first working S3 wiring.
-        'supabase-storage-s3-vpc-egress',
-      ].sort(),
-    );
+    expect(policyNames.sort()).toEqual(['app-s3-vpc-egress', 'supabase-db-s3-vpc-egress'].sort());
   });
 
   it('Hetzner-shaped ProviderClass (no getS3EgressExtraCidrs, no vpcCidr): no S3-egress-VPC apply at all — real render path byte-identical', async () => {

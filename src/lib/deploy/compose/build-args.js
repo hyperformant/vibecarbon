@@ -31,8 +31,8 @@
  *   - VITE_PROJECT_NAME: forced to the deploy's projectName (the operator
  *     might have changed it in .env.local during local dev iteration)
  *   - VITE_SUPABASE_URL: rewritten to https://${domain} — production serves
- *     ONE origin; Traefik path-routes /auth/v1|/rest/v1|/realtime/v1|
- *     /storage/v1 on the apex to Kong, so the browser's Supabase calls are
+ *     ONE origin; Traefik path-routes /auth/v1|/rest/v1|/realtime/v1
+ *     on the apex to Kong, so the browser's Supabase calls are
  *     same-origin (dev keeps hitting Kong's localhost port directly)
  *
  * All other VITE_* values (feature flags, plausible config, etc.) flow

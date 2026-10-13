@@ -56,7 +56,7 @@ const TOPOLOGY_LAYERS = [
   {
     name: 'Application',
     icon: Server,
-    services: ['auth', 'rest', 'realtime', 'storage', 'meta', 'studio'],
+    services: ['auth', 'rest', 'realtime', 'meta', 'studio'],
     description: 'Core Supabase services',
   },
   {
@@ -74,8 +74,8 @@ const TOPOLOGY_LAYERS = [
   {
     name: 'Tooling',
     icon: Container,
-    services: ['n8n', 'metabase', 'imgproxy'],
-    description: 'Automation, analytics & media',
+    services: ['n8n', 'metabase'],
+    description: 'Automation & analytics',
   },
 ] as const;
 

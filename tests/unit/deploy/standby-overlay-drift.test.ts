@@ -13,7 +13,8 @@ describe('supabase chart workload snapshot', () => {
     // The app-tier Deployments the spec's zero-list must cover. If the chart
     // pin bump adds/removes one, regenerate the snapshot:
     //   node scripts/gen-chart-workloads-snapshot.mjs
-    expect(snapshot.deployments.length).toBeGreaterThanOrEqual(8);
+    // 6 since storage + imgproxy were disabled in supabase.values.yaml.
+    expect(snapshot.deployments.length).toBeGreaterThanOrEqual(6);
     expect(snapshot.statefulsets).toContain('db');
     expect(snapshot.deployments).not.toContain('db');
   });
@@ -86,6 +87,6 @@ describe('standby zero overlay', () => {
   it('fixture records the chart PVC set (regen on pin bump)', () => {
     expect(Array.isArray(snapshot().pvcs)).toBe(true);
     expect(snapshot().pvcs).toContain('db');
-    expect(snapshot().pvcs).toContain('storage');
+    expect(snapshot().pvcs).toContain('snippets');
   });
 });

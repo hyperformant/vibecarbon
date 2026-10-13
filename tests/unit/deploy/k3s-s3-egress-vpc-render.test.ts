@@ -33,7 +33,7 @@ function kustomizeBuild(path: string) {
 const POLICY_NAMES = ['app-s3-vpc-egress', 'supabase-db-s3-vpc-egress'];
 
 describe('renderS3EgressVpcManifest', () => {
-  it('the real checked-in s3-egress-vpc.yaml ships the placeholder for all 3 policies, not a hardcoded literal', () => {
+  it('the real checked-in s3-egress-vpc.yaml ships the placeholder for both policies, not a hardcoded literal', () => {
     // Sanity precondition — if this ever fails, the fixture drifted and the
     // rest of this suite would be testing nothing. Matches actual `cidr:`
     // lines specifically (not a bare `__VPC_CIDR__` substring count) — the
@@ -44,10 +44,11 @@ describe('renderS3EgressVpcManifest', () => {
     for (const name of POLICY_NAMES) {
       expect(raw).toContain(`name: ${name}`);
     }
-    // 3 since 2026-08-30: the registry's arm left with its S3 backend
-    // (filesystem now — registry-no-object-storage.test.ts); storage's arm
-    // joined 2026-08-21 with its first working S3 wiring. app + storage + db.
-    expect(raw.match(/cidr: __VPC_CIDR__/g)?.length).toBe(3);
+    // 2: the registry's arm left 2026-08-30 with its S3 backend (filesystem
+    // now — registry-no-object-storage.test.ts), and the storage service's arm
+    // left with the service (uploads go browser -> S3 via presigned URLs).
+    // app + db.
+    expect(raw.match(/cidr: __VPC_CIDR__/g)?.length).toBe(2);
     expect(raw).not.toMatch(/cidr: \d+\.\d+\.\d+\.\d+\/\d+/);
   });
 
@@ -57,7 +58,7 @@ describe('renderS3EgressVpcManifest', () => {
 
     expect(rendered).not.toContain('__VPC_CIDR__');
     const cidrMatches = rendered.match(/cidr: 10\.10\.0\.0\/20/g);
-    expect(cidrMatches?.length).toBe(3);
+    expect(cidrMatches?.length).toBe(2);
     for (const name of POLICY_NAMES) {
       expect(rendered).toContain(`name: ${name}`);
     }
@@ -67,7 +68,7 @@ describe('renderS3EgressVpcManifest', () => {
     const template = readFileSync(REAL_TEMPLATE, 'utf-8');
     const rendered = renderS3EgressVpcManifest(template, ['10.20.0.0/16']);
 
-    expect(rendered.match(/cidr: 10\.20\.0\.0\/16/g)?.length).toBe(3);
+    expect(rendered.match(/cidr: 10\.20\.0\.0\/16/g)?.length).toBe(2);
     // The header comment's RCA prose legitimately mentions the observed
     // rig's real value ('10.10.0.0/20') for documentation, independent of
     // whatever CIDR is actually rendered — so the precise check is that no

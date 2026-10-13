@@ -113,8 +113,6 @@ This single command:
 - GoTrue (Auth)
 - PostgREST (REST API)
 - Realtime server
-- Storage API
-- imgproxy (image transformations)
 - Supabase Studio (database GUI)
 - Traefik reverse proxy
 
@@ -438,7 +436,6 @@ When accessing an admin dashboard without a valid session:
 | `authenticator` | PostgREST | API gateway connection, switches roles based on JWT |
 | `supabase_admin` | Realtime, Meta, Studio | Admin operations on database |
 | `supabase_auth_admin` | GoTrue | Manages auth schema and user records |
-| `supabase_storage_admin` | Storage | Manages storage schema and file metadata |
 | `anon` | Anonymous API | SELECT only, RLS enforced |
 | `authenticated` | Logged-in users | CRUD operations, RLS enforced |
 | `service_role` | Server-side code | Bypasses RLS for admin operations |
@@ -514,13 +511,12 @@ vibecarbon deploy prod -y
 | Realtime | 1.0 | 512 MB |
 | App | 1.0 | 512 MB |
 | Auth | 0.5 | 256 MB |
-| Storage | 0.5 | 512 MB |
 | Traefik | 0.5 | 256 MB |
-| Other (imgproxy, meta, studio) | ~0.5 | ~512 MB |
-| **Subtotal (Production)** | **~8.0** | **~7.5 GB** |
+| Other (meta, studio) | ~0.5 | ~512 MB |
+| **Subtotal (Production)** | **~7.5** | **~7 GB** |
 | N8N (optional) | ~0.5 | ~512 MB |
 | Observability Stack (optional) | ~1.0 | ~1.5 GB |
-| **Total (Full Stack)** | **~9.5** | **~9.5 GB** |
+| **Total (Full Stack)** | **~9.0** | **~9 GB** |
 
 ### VPS Recommendations
 
@@ -618,7 +614,7 @@ The standby cluster is deployed as a cost-optimized, non-serving replica designe
 **Idle State:**
 - **2 nodes only:** master (control plane, ingress, cert-manager, replication gateway, in-cluster registry) + dedicated database node (the streaming replica database)
 - Same server types as the primary's master and database nodes: cost savings come from eliminating workers and the warm app tier, not from downsizing
-- **Cold app tier, declaratively:** All app-tier workloads (the app Deployment, `auth`, `rest`, `realtime`, `storage`, `meta`, `kong`, `studio`, `imgproxy`, cluster-autoscaler) are set to `replicas: 0`; the only active workloads are the db StatefulSet and replication gateway
+- **Cold app tier, declaratively:** All app-tier workloads (the app Deployment, `auth`, `rest`, `realtime`, `meta`, `kong`, `studio`, cluster-autoscaler) are set to `replicas: 0`; the only active workloads are the db StatefulSet and replication gateway
 - **Seeded on first boot:** The standby database is initialized by a seed container running `pg_basebackup` at deploy time, booting as a live streaming replica. The 200s stage/swap/reboot reseed cycle is eliminated
 
 **Deploy as role reconciler:**

@@ -127,14 +127,12 @@ function okFetch(status = 200) {
 }
 
 const LETSGO_PS = [
-  'letsgo-storage\trunning\tUp 15 minutes (healthy)',
   'letsgo-studio\trunning\tUp 15 minutes (healthy)',
   'letsgo-auth\trunning\tUp 15 minutes (healthy)',
   'letsgo-realtime\trunning\tUp 15 minutes (healthy)',
   'letsgo-meta\trunning\tUp 15 minutes',
   'letsgo-app\trunning\tUp 15 minutes',
   'letsgo-rest\trunning\tUp 15 minutes',
-  'letsgo-imgproxy\trunning\tUp 15 minutes (healthy)',
   'letsgo-kong\texited\tExited (128) 24 minutes ago',
   'letsgo-db\trunning\tUp 15 minutes (healthy)',
   'letsgo-traefik\trunning\tUp 15 minutes',
@@ -156,8 +154,6 @@ describe('checkDockerContainers', () => {
       'auth',
       'rest',
       'realtime',
-      'storage',
-      'imgproxy',
       'meta',
       'studio',
       'app',

@@ -90,13 +90,16 @@ describe('deriveScaleUpList', () => {
 
 describe('deriveScaleUpList persistence-block isolation', () => {
   it('persistence keys never leak into the scale-up list (no dupes, no false comps)', () => {
-    // The overlay now carries a `persistence:` map whose child keys (storage,
-    // imgproxy, snippets) collide with deployment component names — the comp
-    // scan must stay scoped to the overlay's `deployment:` block.
+    // The overlay carries a `persistence:` map whose child keys can collide
+    // with deployment component names — the comp scan must stay scoped to the
+    // overlay's `deployment:` block.
     const list = deriveScaleUpList(real());
     const names = list.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
-    expect(names.filter((n) => n === 'supabase-supabase-storage')).toHaveLength(1);
+    // storage + imgproxy are disabled in supabase.values.yaml: the chart renders
+    // no Deployment for them, so a scale-up entry would fail on promotion.
+    expect(names).not.toContain('supabase-supabase-storage');
+    expect(names).not.toContain('supabase-supabase-imgproxy');
     // `snippets` is a persistence key, NOT a deployment component
     expect(names).not.toContain('supabase-supabase-snippets');
   });

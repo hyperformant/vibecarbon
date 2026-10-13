@@ -85,21 +85,10 @@ describeDocker('Docker Services Smoke Test', () => {
     let services: string[];
     if (traefikAvailable && fullStackAvailable) {
       // Full stack with Traefik and app
-      services = [
-        'db',
-        'kong',
-        'auth',
-        'rest',
-        'realtime',
-        'storage',
-        'imgproxy',
-        'meta',
-        'traefik',
-        'app',
-      ];
+      services = ['db', 'kong', 'auth', 'rest', 'realtime', 'meta', 'traefik', 'app'];
     } else if (fullStackAvailable) {
       // Full Supabase stack without Traefik
-      services = ['db', 'kong', 'auth', 'rest', 'realtime', 'storage', 'imgproxy', 'meta'];
+      services = ['db', 'kong', 'auth', 'rest', 'realtime', 'meta'];
     } else {
       // Database only
       services = ['db'];
@@ -494,26 +483,6 @@ describeDocker('Docker Services Smoke Test', () => {
         .map((c: { Service: string }) => c.Service);
 
       expect(runningServices).toContain('realtime');
-    });
-  });
-
-  describe('Storage', () => {
-    it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('storage');
     });
   });
 

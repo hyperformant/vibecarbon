@@ -17,8 +17,6 @@ export const SERVICE_DISPLAY_NAMES = {
   auth: 'Auth (GoTrue)',
   rest: 'REST (PostgREST)',
   realtime: 'Realtime',
-  storage: 'Storage',
-  imgproxy: 'ImgProxy',
   meta: 'Meta',
   studio: 'Studio',
   app: 'App',

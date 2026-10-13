@@ -231,7 +231,7 @@ describe('getPromotedAnonKey', () => {
 describe('waitForPromotedApiServing', () => {
   const pathOf = (argv: string[]) => argv[argv.length - 1];
 
-  it('returns true only once health, auth, AND storage all serve 200', async () => {
+  it('returns true only once health AND auth both serve 200', async () => {
     const seen: string[] = [];
     const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       const url = pathOf(argv);
@@ -242,13 +242,11 @@ describe('waitForPromotedApiServing', () => {
     const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', { runner });
     expect(ok).toBe(true);
 
-    // Health is probed before auth, and every restarted Kong-routed upstream
-    // the verify suite single-shots is exercised — storage included (its
-    // absence is what let DO run 32309395314's compose sibling 502; the k8s
-    // gate had the same one-service-short premise).
+    // Health is probed before auth. No /storage/v1 probe: the storage service
+    // is gone, Kong has no such route, and a probe there could never pass.
     expect(seen[0]).toContain('/api/health');
     expect(seen.some((u) => u.includes('/auth/v1/health'))).toBe(true);
-    expect(seen.some((u) => u.includes('/storage/v1/status'))).toBe(true);
+    expect(seen.some((u) => u.includes('/storage/v1/'))).toBe(false);
   });
 
   it('does NOT probe auth while health is still non-200', async () => {
@@ -266,39 +264,6 @@ describe('waitForPromotedApiServing', () => {
     expect(ok).toBe(false);
     // Auth endpoint was never hit because health short-circuited the probe.
     expect(seen.every((u) => !u.includes('/auth/v1/health'))).toBe(true);
-  });
-
-  it('does NOT pass while ONLY storage is still coming up (migration window)', async () => {
-    const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
-      pathOf(argv).includes('/storage/v1/status') ? '502' : '200',
-    );
-
-    const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', {
-      runner,
-      budgetMs: 10,
-    });
-    expect(ok).toBe(false);
-  });
-
-  it('passes once storage finishes its boot-time migrations and serves 200', async () => {
-    let storageProbes = 0;
-    const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (pathOf(argv).includes('/storage/v1/status')) {
-        storageProbes++;
-        return storageProbes < 3 ? '502' : '200';
-      }
-      return '200';
-    });
-
-    const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', {
-      runner,
-      budgetMs: 60_000,
-      // keep the poll fast in unit time
-      initialDelayMs: 1,
-      maxDelayMs: 1,
-    });
-    expect(ok).toBe(true);
-    expect(storageProbes).toBe(3);
   });
 
   it('is best-effort: returns false (never throws) when the budget lapses', async () => {

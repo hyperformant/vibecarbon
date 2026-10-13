@@ -13,8 +13,6 @@ resources:
   - ../../base/supabase/auth/
   - ../../base/supabase/rest/
   - ../../base/supabase/realtime/
-  - ../../base/supabase/storage/
-  - ../../base/supabase/imgproxy/
   - ../../base/supabase/meta/
   - ../../base/supabase/studio/
   - ../../base/traefik/
@@ -67,18 +65,6 @@ patches:
               CREATE DATABASE n8n WITH OWNER n8n ENCODING 'UTF8' TEMPLATE template0;
               GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
             " || true
-
-  # Use local-path for storage PVC
-  - target:
-      kind: PersistentVolumeClaim
-      name: storage-data
-    patch: |-
-      - op: replace
-        path: /spec/storageClassName
-        value: local-path
-      - op: replace
-        path: /spec/resources/requests/storage
-        value: 1Gi
 
   # Use local-path for n8n PVC
   - target:

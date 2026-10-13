@@ -18,6 +18,4 @@ data:
   AUTH_URL: "http://auth:9999"
   REST_URL: "http://rest:3000"
   REALTIME_URL: "http://realtime:4000"
-  STORAGE_URL: "http://storage:5000"
   META_URL: "http://meta:8080"
-  IMGPROXY_URL: "http://imgproxy:5001"

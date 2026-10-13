@@ -6,7 +6,7 @@ Guidance for AI coding agents working on this codebase. The **Security Rules** s
 
 - **Frontend**: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4, i18next
 - **Backend**: Hono (lightweight Node.js framework), Pino logger, Zod validation, nodemailer (SMTP email)
-- **Auth/Database**: Self-hosted Supabase (PostgreSQL, Auth, REST API, Realtime, Storage)
+- **Auth/Database**: Self-hosted Supabase (PostgreSQL, Auth, REST API, Realtime); file uploads go to S3 object storage via presigned URLs
 - **Billing**: Multi-provider — Stripe, Paddle, Polar (subscriptions, checkout, webhooks, plan gating)
 - **Content**: MDX (blog, changelog, docs) with remark/rehype plugins
 - **Tooling**: Biome (lint/format), TypeScript, esbuild, Vitest
@@ -447,12 +447,12 @@ myRoutes.post('/', async (c) => {
 
 - **MUST** protect Studio, the Traefik dashboard, n8n, Metabase, and Grafana with `super-admin-auth` (compose) / `admin-auth` (k8s) in production
 - **MUST** use Docker socket proxy in production — never mount `/var/run/docker.sock` directly into Traefik
-- **NEVER** expose internal Supabase services (Auth, PostgREST, Realtime, Storage) directly — they must go through Kong
+- **NEVER** expose internal Supabase services (Auth, PostgREST, Realtime) directly — they must go through Kong
 - **NEVER** remove ForwardAuth middleware from production compose files or Kubernetes manifests
 
 ### Public Exposure (single origin)
 
-The app has **one public origin** (the apex). Traefik path-routes only the **versioned** Supabase prefixes — `/auth/v1`, `/rest/v1`, `/realtime/v1`, `/storage/v1` — to Kong; everything else is the app (SPA + Hono API). Rules:
+The app has **one public origin** (the apex). Traefik path-routes only the **versioned** Supabase prefixes — `/auth/v1`, `/rest/v1`, `/realtime/v1` — to Kong; everything else is the app (SPA + Hono API). Rules:
 
 - **NEVER** add a new public path that reaches Kong or an internal Supabase service, and **NEVER** use a **bare** `/auth` (or `/rest`/`/storage`/`/realtime`) prefix in a Traefik rule — the SPA owns `/auth/callback` and `/reset-password`; a bare `/auth` prefix sends the OAuth landing page to Kong (404) and breaks every login.
 - **NEVER** re-introduce an `api.<domain>` host for Supabase. `SITE_URL` is the single origin; it feeds GoTrue redirects, billing return URLs, and CSP.

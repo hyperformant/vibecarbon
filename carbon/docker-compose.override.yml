@@ -48,12 +48,6 @@ services:
   realtime:
     restart: on-failure:5
 
-  storage:
-    restart: on-failure:5
-
-  imgproxy:
-    restart: on-failure:5
-
   meta:
     restart: on-failure:5
 

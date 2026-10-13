@@ -5,11 +5,9 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 
-// Fake child for the async `spawn` path — used both by
-// waitForSupabaseStorageSchema's probe (execKubectlOnce, always did this)
-// and, after the runCommandAsync migration, by applyMigrations' per-file
-// psql exec too (previously spawnSync, now routed through the shared async
-// exec layer, which itself calls `spawn`).
+// Fake child for the async `spawn` path — used by applyMigrations' per-file
+// psql exec (routed through the shared async exec layer, which itself calls
+// `spawn`) and by execKubectlOnce.
 function makeFakeChild(stdout = '1', exitCode = 0): EventEmitter {
   const c = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
@@ -53,11 +51,7 @@ describe('applyMigrations (PR 1C)', () => {
     const mocked = vi.mocked(spawn);
     mocked.mockReset();
     const recordedInputs: string[] = [];
-    mocked.mockImplementation(((_cmd: string, args: string[]) => {
-      if (args.includes('-tA')) {
-        // waitForSupabaseStorageSchema's probe — column already exists.
-        return makeFakeChild('3', 0) as unknown as ReturnType<typeof spawn>;
-      }
+    mocked.mockImplementation((() => {
       // A migration apply — capture the piped SQL from stdin.
       const child = makeFakeChild('', 0);
       child.stdin.on('data', (chunk) => recordedInputs.push(chunk.toString()));
@@ -70,14 +64,11 @@ describe('applyMigrations (PR 1C)', () => {
 
     await applyMigrations({ kubeconfig: '/tmp/kc', projectDir });
 
-    // Calls: one storage-schema probe (-tA), one per migration file, and one
-    // post-migration RLS audit (-tAc). Migration applies are the ones that are
-    // neither probe (-tA) nor audit (-tAc).
-    const isProbeOrAudit = (c: unknown[]) => {
-      const a = c[1] as string[];
-      return a.includes('-tA') || a.includes('-tAc');
-    };
-    const migrationCalls = mocked.mock.calls.filter((c) => !isProbeOrAudit(c));
+    // Calls: one per migration file, then one post-migration RLS audit (-tAc).
+    // No storage-schema readiness probe: the template no longer runs the
+    // Supabase storage service, so no migration waits on its schema.
+    const isAudit = (c: unknown[]) => (c[1] as string[]).includes('-tAc');
+    const migrationCalls = mocked.mock.calls.filter((c) => !isAudit(c));
     expect(migrationCalls.length).toBe(2);
     // The RLS audit runs after the migrations (ground-truth backstop).
     const auditCall = mocked.mock.calls.find((c) => (c[1] as string[]).includes('-tAc'));
@@ -114,13 +105,11 @@ describe('applyMigrations (PR 1C)', () => {
     const { spawn } = await import('node:child_process');
     const mocked = vi.mocked(spawn);
     mocked.mockReset();
-    // The storage-schema probe succeeds; every migration-apply call fails.
-    mocked.mockImplementation(((_cmd: string, args: string[]) => {
-      if (args.includes('-tA')) {
-        return makeFakeChild('3', 0) as unknown as ReturnType<typeof spawn>;
-      }
-      return makeFakeChild('', 1) as unknown as ReturnType<typeof spawn>;
-    }) as unknown as typeof spawn);
+    // Every migration-apply call fails.
+    mocked.mockImplementation(
+      (() =>
+        makeFakeChild('', 1) as unknown as ReturnType<typeof spawn>) as unknown as typeof spawn,
+    );
 
     const projectDir = makeProject();
     writeFileSync(join(projectDir, 'supabase', 'migrations', '00001_init.sql'), 'BAD SQL;');
@@ -139,55 +128,6 @@ describe('applyMigrations (PR 1C)', () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'vc-mig-empty-'));
     await expect(applyMigrations({ kubeconfig: '/tmp/kc', projectDir })).resolves.toBeUndefined();
     expect(mocked).not.toHaveBeenCalled();
-  });
-});
-
-describe('waitForSupabaseStorageSchema', () => {
-  it('waits for file_size_limit + allowed_mime_types, not just public (the columns 00001_init inserts)', async () => {
-    // k8s-ha standby failure 2026-07-11: the guard passed as soon as
-    // storage.buckets.public existed, but the app migration INSERTs public,
-    // file_size_limit AND allowed_mime_types — added by a LATER storage-api
-    // migration — so the migration raced ahead and failed with
-    // "column file_size_limit of relation buckets does not exist". The guard
-    // must wait for all three.
-    const { waitForSupabaseStorageSchema } = await k3sModulePromise;
-    const { spawn } = await import('node:child_process');
-    const mocked = vi.mocked(spawn);
-    mocked.mockReset();
-    const probeSqls: string[] = [];
-    mocked.mockImplementation((() => {
-      const c = new EventEmitter() as EventEmitter & {
-        stdout: PassThrough;
-        stderr: PassThrough;
-        stdin: PassThrough;
-        kill: () => void;
-      };
-      c.stdout = new PassThrough();
-      c.stderr = new PassThrough();
-      c.stdin = new PassThrough();
-      c.kill = () => {};
-      let sql = '';
-      c.stdin.on('data', (chunk) => {
-        sql += chunk.toString();
-      });
-      c.stdin.on('finish', () => {
-        probeSqls.push(sql);
-        // Report "all requested columns present": '3' for the 3-column guard,
-        // '1' for the legacy single-column ('public') probe — so BOTH the old
-        // and fixed code complete and the assertion below is what distinguishes.
-        c.stdout.write(sql.includes('file_size_limit') ? '3' : '1');
-        c.stdout.end();
-        c.stderr.end();
-        c.emit('close', 0);
-      });
-      return c as unknown as ReturnType<typeof spawn>;
-    }) as unknown as typeof spawn);
-
-    await waitForSupabaseStorageSchema({ kubeconfig: '/tmp/kc', maxWaitSec: 5 });
-
-    const sql = probeSqls.join('\n');
-    expect(sql).toContain('file_size_limit');
-    expect(sql).toContain('allowed_mime_types');
   });
 });
 

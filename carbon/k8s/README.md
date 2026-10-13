@@ -42,8 +42,6 @@ k8s/
 │   │   ├── auth/
 │   │   ├── rest/
 │   │   ├── realtime/
-│   │   ├── storage/
-│   │   ├── imgproxy/
 │   │   ├── meta/
 │   │   └── studio/
 │   └── traefik/                  # Ingress controller

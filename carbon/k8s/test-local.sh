@@ -213,7 +213,6 @@ show_access_info() {
     echo "  Auth:      http://localhost:8080/auth/v1/"
     echo "  REST:      http://localhost:8080/rest/v1/"
     echo "  Realtime:  http://localhost:8080/realtime/v1/"
-    echo "  Storage:   http://localhost:8080/storage/v1/"
     echo ""
     echo -e "${BLUE}App API:${NC}"
     echo "  Health:    http://localhost:8080/api/health"

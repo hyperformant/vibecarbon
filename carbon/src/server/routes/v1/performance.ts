@@ -56,15 +56,6 @@ const HEALTH_CHECK_SERVICES: ServiceHealthCheck[] = [
     acceptCodes: [200, 401, 403, 426],
   },
   {
-    name: 'File Storage',
-    url: isKubernetes
-      ? 'http://kong:8000/storage/v1/status'
-      : isDocker
-        ? 'http://storage:5000/status'
-        : 'http://localhost:8000/storage/v1/status',
-    acceptCodes: isDocker ? undefined : [200, 401],
-  },
-  {
     name: 'DB Management',
     url: isKubernetes
       ? 'http://kong:8000/pg/'

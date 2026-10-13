@@ -600,9 +600,8 @@ export async function getPromotedAnonKey(ip, sshKeyPath, opts = {}) {
 
 /**
  * Poll the promoted cluster's public API until it actually SERVES — the app
- * health endpoint (/api/health), an auth-path endpoint (/auth/v1/health), AND
- * the storage health endpoint (/storage/v1/status) all return 200 within a
- * budget (k8s path-based routing → kong → gotrue/storage-api).
+ * health endpoint (/api/health) AND an auth-path endpoint (/auth/v1/health)
+ * both return 200 within a budget (k8s path-based routing → kong → gotrue).
  *
  * This is the k8s mirror of compose/ha.js waitForNewPrimaryApi: `vibecarbon
  * failover` returns via the skip-if-streaming fast path in ~44s (promotion ~9s),
@@ -610,13 +609,6 @@ export async function getPromotedAnonKey(ip, sshKeyPath, opts = {}) {
  * restarting/reconnecting — auth 502s and PostgREST serves schema-cache misses
  * against the (present!) tables. failover used to report "complete" straight
  * into that window and verify-failover (which does not retry) caught it.
- *
- * Storage is part of the gate since 2026-08-19 (DO run 32309395314): the
- * compose sibling proved rest only and verify's single-shot upload met Kong's
- * 502 while storage-api was still replaying its boot-time DB migrations — the
- * slowest riser of the restarted tier. This gate had the same
- * one-service-short premise. /storage/v1/status is key-auth'd at kong, so the
- * probe rides the same anonKey the auth probe already needs.
  *
  * Best-effort, matching compose: returns false + a LOUD warning on timeout
  * rather than throwing — a not-yet-confirmed promoted API is still better than
@@ -629,7 +621,6 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
     poll = pollUntil,
     healthPath = '/api/health',
     authPath = '/auth/v1/health',
-    storagePath = '/storage/v1/status',
     anonKey = '',
     initialDelayMs = 3000,
     maxDelayMs = 15_000,
@@ -653,11 +644,6 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
       last = `auth=${auth || 'none'}`;
       return false;
     }
-    const storage = await codeOf(storagePath);
-    if (storage !== '200') {
-      last = `storage=${storage || 'none'}`;
-      return false;
-    }
     return true;
   };
   try {
@@ -665,7 +651,7 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
       budgetMs,
       initialDelayMs,
       maxDelayMs,
-      description: `promoted API to serve ${domain} (health + auth + storage)`,
+      description: `promoted API to serve ${domain} (health + auth)`,
     });
     return true;
   } catch {

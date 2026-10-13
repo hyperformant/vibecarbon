@@ -778,10 +778,9 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
  * Wait for all compose services with healthchecks to reach "healthy".
  *
  * `docker compose up -d` returns as soon as containers are *created*, not
- * when their healthchecks pass. For Supabase, auth/storage/rest all need
- * 10-60s after container-start to become healthy — verify-deploy's
- * storage_upload / rest_api checks 502 when they run against a starting
- * service. Polls every 5s up to 3min; returns early once every service
+ * when their healthchecks pass. For Supabase, auth/rest need 10-60s after
+ * container-start to become healthy — verify-deploy's rest_api check 502s
+ * when it runs against a starting service. Polls every 5s up to 3min; returns early once every service
  * with a declared healthcheck reports "healthy".
  *
  * Non-critical — on timeout or error we log but don't fail, since the
@@ -902,9 +901,9 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       if (out.endsWith('2xx')) {
         // App is serving, but Supabase services may still be warming up
         // their healthchecks. The e2e harness's verify-deploy probes
-        // auth/storage/rest endpoints immediately after deploy returns —
-        // a 502 from storage that takes 60s to become healthy would fail
-        // otherwise-valid deploys. Wait for all compose-managed services
+        // auth/rest endpoints immediately after deploy returns — a 502
+        // from a service still 60s from healthy would fail otherwise-valid
+        // deploys. Wait for all compose-managed services
         // with healthchecks to reach "healthy". Bounded: 3 min budget
         // (wasn't spent during the app probe since that succeeded quickly).
         await waitForServicesHealthy(ip, sshKeyPath, projectName);
@@ -1020,27 +1019,6 @@ export async function runMigrations(ip, sshKeyPath, projectName) {
       `docker compose exec -T db psql -U supabase_admin -d postgres -c 'SELECT 1' >/dev/null 2>&1 && exit 0; ` +
       `echo "[migrate] waiting for supabase_admin to accept queries (attempt $i/60)"; sleep 3; ` +
       `done; echo "[migrate] supabase_admin never became ready" >&2; exit 1`,
-    { timeout: 240_000 },
-  );
-
-  // Also wait for the storage service to finish ITS first-boot migrations
-  // before applying app migrations. supabase-storage adds columns to the
-  // `storage` schema on startup (notably storage.buckets.public); our
-  // 00001_init.sql seeds buckets referencing them. Racing ahead fails with
-  // `column "public" of relation "buckets" does not exist`, which aborts the
-  // whole migration — the core public.* tables get created first, but the
-  // deploy still fails (deployComposeHA only ever masked this by swallowing the
-  // error in a try/catch). The supabase_admin gate above is insufficient: that
-  // role exists before storage has migrated. Gate on storage.buckets.public
-  // being queryable as the proxy for "storage migrations done", polling ~3 min.
-  await sshRunAsync(
-    ip,
-    sshKeyPath,
-    `cd ${remoteDir} && ` +
-      `for i in $(seq 1 60); do ` +
-      `docker compose exec -T db psql -U supabase_admin -d postgres -c 'SELECT public FROM storage.buckets LIMIT 0' >/dev/null 2>&1 && exit 0; ` +
-      `echo "[migrate] waiting for storage schema (buckets.public) to be ready (attempt $i/60)"; sleep 3; ` +
-      `done; echo "[migrate] storage schema never became ready" >&2; exit 1`,
     { timeout: 240_000 },
   );
 

@@ -323,7 +323,7 @@ Fail-back) describes **k8s-ha** specifically.
 
 The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
 - **Idle floor: 2 nodes**, a master (control plane, ingress, replication gateway) and a dedicated database node (the streaming replica database)
-- **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app, auth, rest, realtime, storage, meta, kong, studio, imgproxy, cluster-autoscaler)
+- **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app, auth, rest, realtime, meta, kong, studio, cluster-autoscaler)
 - **Seeded at deploy:** The database boots from a seed snapshot on first start, immediately becoming a live streaming replica, with no separate reseed cycle
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance
 

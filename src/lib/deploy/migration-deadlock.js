@@ -5,10 +5,10 @@
  * ---------
  * applyMigrations runs each supabase/migrations/*.sql file through
  * `psql -v ON_ERROR_STOP=1 --single-transaction` while the Supabase services
- * are ALREADY booting — and several of them (storage-api, auth) run their own
- * first-boot DDL against the same relations our migrations touch
- * (storage.objects policies, auth schema). The storage-schema readiness
- * probe (buckets.public queryable) proves the schema EXISTS, not that the
+ * are ALREADY booting — and some of them (auth; the since-removed storage
+ * service did too) run their own first-boot DDL against the same relations
+ * our migrations touch (auth schema; storage.objects policies at the time of
+ * the incident). A readiness probe proves a schema EXISTS, not that the
  * service is done taking locks. Observed 2026-08-30 (run 33287840597,
  * hetzner k8s-ha restore's re-deploy):
  *

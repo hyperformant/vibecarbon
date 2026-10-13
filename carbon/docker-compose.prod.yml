@@ -339,7 +339,7 @@ services:
       # Same host as the app router, so the apex cert is shared (Traefik
       # dedupes the ACME order); priority 10 beats the app catch-all (1).
       # The :80 side needs no kong router — app-http redirects the whole host.
-      - "traefik.http.routers.kong.rule=Host(`${DOMAIN:-localhost}`) && (PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`))"
+      - "traefik.http.routers.kong.rule=Host(`${DOMAIN:-localhost}`) && (PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`))"
       - "traefik.http.routers.kong.priority=10"
       - "traefik.http.routers.kong.entrypoints=websecure"
       - "traefik.http.routers.kong.tls=true"
@@ -375,15 +375,6 @@ services:
       resources:
         limits:
           cpus: '1.0'
-          memory: 512M
-
-  storage:
-    environment:
-      VAULT_ENC_KEY: ${VAULT_ENC_KEY:?VAULT_ENC_KEY missing — vibecarbon create writes it to .env.local}
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
           memory: 512M
 
   meta:

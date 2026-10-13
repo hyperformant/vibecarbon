@@ -84,6 +84,15 @@ deployment:
   vector:
     # Log-shipper — disable; conflicts with the optional observability stack.
     enabled: false
+  storage:
+    # File uploads go browser -> provider S3 via presigned URLs the app issues
+    # (src/server/lib/storage.ts), so the chart's storage service is unused.
+    # Its PVC is gated on this flag too (chart templates/persistence.yaml).
+    enabled: false
+  imgproxy:
+    # Image transforms only served the storage service above; avatars are
+    # resized in the browser before upload.
+    enabled: false
   db:
     # Pin postgres to the dedicated database node (taint applied by Pulumi).
     nodeSelector:
@@ -571,61 +580,6 @@ environment:
     # so it's helm-owned and survives every upgrade with no db restart.
     - name: AWS_SHARED_CREDENTIALS_FILE
       value: /etc/walg/credentials
-  storage:
-    - name: REQUEST_ALLOW_X_FORWARDED_PATH
-      value: "true"
-    - name: FILE_SIZE_LIMIT
-      value: "52428800"
-    - name: FILE_STORAGE_BACKEND_PATH
-      value: /var/lib/storage
-    - name: TENANT_ID
-      value: stub
-    # S3 wiring for the storage service. These were literal `stub` with no
-    # endpoint and no credentials at all, while STORAGE_BACKEND was already
-    # `s3` — so storage-api came up pointed at S3 with nothing to reach it
-    # with, and every upload 500'd:
-    #
-    #   CredentialsProviderError: Could not load credentials from any providers
-    #
-    # It stayed invisible for months because the e2e storage checks skipped
-    # (the test bucket was never created), so the k8s tier shipped green with
-    # its object-storage path non-functional. Compose has always set the full
-    # set — these mirror docker-compose.yml's storage service exactly.
-    #
-    # Rendered through the same {{...}} substitution the wal-g block beside
-    # this uses (k3s.js renders into a 0600 file via writeSecretFile, which
-    # already carries ADMIN_PASSWORD).
-    - name: REGION
-      value: "{{S3_REGION}}"
-    - name: GLOBAL_S3_BUCKET
-      value: "{{S3_STORAGE_BUCKET}}"
-    - name: GLOBAL_S3_ENDPOINT
-      value: "{{S3_ENDPOINT}}"
-    # Non-AWS S3 (Hetzner/DO Spaces/Linode/Vultr/Scaleway) is path-style;
-    # virtual-host style resolves to a bucket subdomain that does not exist.
-    - name: GLOBAL_S3_FORCE_PATH_STYLE
-      value: "true"
-    - name: AWS_ACCESS_KEY_ID
-      value: "{{S3_ACCESS_KEY}}"
-    - name: AWS_SECRET_ACCESS_KEY
-      value: "{{S3_SECRET_KEY}}"
-    - name: ENABLE_IMAGE_TRANSFORMATION
-      value: "true"
-    # vibecarbon: S3-backed object storage instead of the local backend.
-    - name: STORAGE_BACKEND
-      value: s3
-  imgproxy:
-    - name: IMGPROXY_BIND
-      value: ":5001"
-    - name: IMGPROXY_LOCAL_FILESYSTEM_ROOT
-      value: /
-    - name: IMGPROXY_USE_ETAG
-      value: "true"
-    - name: IMGPROXY_ENABLE_WEBP_DETECTION
-      value: "true"
-    # vibecarbon: serve transforms from S3 (matches storage above).
-    - name: IMGPROXY_USE_S3
-      value: "true"
   studio:
     - name: HOSTNAME
       value: "::"

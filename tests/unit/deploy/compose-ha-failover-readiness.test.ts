@@ -10,18 +10,11 @@
  * (curl --resolve, DNS-independent) until it serves 200.
  *
  * RCA 2026-08-19 (DO compose-ha, run 32309395314): the gate proved ONE of the
- * six restarted services and declared the whole app tier serving. storage-api
- * (which replays DB migrations on boot — the slowest riser) was still down
- * when verify-failover single-shot its upload: Kong answered 502 through the
- * open storage-v1-object-public route. Fix: the probe covers every Kong-routed
- * restarted service — rest/app (DB-backed 200), auth (open health route 200),
- * storage (open public-object route: any storage-api-originated status proves
- * the upstream answers; a gateway 502/503/504 or no answer does not).
- *
- * Storage is probed KEYLESS through the open route on purpose: the key-auth'd
- * /storage/v1/status would 401 at Kong before ever reaching storage-api (the
- * exact k8s auth-probe trap of 2026-07-08), and the open route is the one the
- * verify upload actually failed through.
+ * restarted services and declared the whole app tier serving while a slower
+ * one was still down. Fix: the probe covers every Kong-routed restarted
+ * service — rest/app (DB-backed 200) and auth (open health route 200) — and
+ * the census below holds every restarted service to "probed or exempted".
+ * (The service that lagged then, Supabase storage, has since been removed.)
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -33,36 +26,29 @@ import {
 
 const noSleep = () => Promise.resolve();
 
-const allUp = 'rest=200 auth=200 storage=400';
+const allUp = 'rest=200 auth=200';
 
 describe('newPrimaryApiProbeCmd', () => {
-  it('probes rest/app, auth, and storage, pinned to loopback, ignoring the staging cert', () => {
+  it('probes rest/app and auth, pinned to loopback, ignoring the staging cert', () => {
     const cmd = newPrimaryApiProbeCmd('e2.appcarbon.dev');
     expect(cmd).toContain('https://e2.appcarbon.dev/api/v1/notifications');
     expect(cmd).toContain('https://e2.appcarbon.dev/auth/v1/health');
-    expect(cmd).toContain('https://e2.appcarbon.dev/storage/v1/object/public/');
+    expect(cmd).not.toContain('/storage/v1/');
     // Every curl is pinned to loopback and skips cert verification.
     const curls = cmd.split('curl ').slice(1);
-    expect(curls.length).toBe(3);
+    expect(curls.length).toBe(2);
     for (const c of curls) {
       expect(c).toContain('--resolve e2.appcarbon.dev:443:127.0.0.1');
       expect(c).toContain("-w '%{http_code}'");
       expect(c).toContain('-sk');
     }
     // Output is labeled so the poller can name the lagging service.
-    expect(cmd).toMatch(/rest=.*auth=.*storage=/s);
-  });
-
-  it("probes storage through an OPEN (keyless) route — key-auth'd paths 401 at Kong and prove nothing", () => {
-    const cmd = newPrimaryApiProbeCmd('e2.appcarbon.dev');
-    // /storage/v1/object/public/ is the keyless route (and the one the
-    // verify upload 502'd through). /status sits behind key-auth.
-    expect(cmd).not.toContain('/storage/v1/status');
+    expect(cmd).toMatch(/rest=.*auth=/s);
   });
 });
 
 describe('waitForNewPrimaryApi', () => {
-  it('resolves true as soon as every service answers (storage 400 = upstream spoke)', async () => {
+  it('resolves true as soon as every service answers', async () => {
     const runner = vi.fn().mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
@@ -72,25 +58,11 @@ describe('waitForNewPrimaryApi', () => {
     expect(runner).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps polling while ONLY storage lags behind a gateway 502 (run 32309395314)', async () => {
-    const runner = vi
-      .fn()
-      .mockReturnValueOnce('rest=200 auth=200 storage=502')
-      .mockReturnValueOnce('rest=200 auth=200 storage=502')
-      .mockReturnValue('rest=200 auth=200 storage=200');
-    const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
-      runner,
-      sleep: noSleep,
-    });
-    expect(ok).toBe(true);
-    expect(runner).toHaveBeenCalledTimes(3);
-  });
-
   it('keeps polling through the PostgREST cold-cache 500 window, then passes on recovery', async () => {
     const runner = vi
       .fn()
-      .mockReturnValueOnce('rest=500 auth=200 storage=200')
-      .mockReturnValueOnce('rest=500 auth=200 storage=200')
+      .mockReturnValueOnce('rest=500 auth=200')
+      .mockReturnValueOnce('rest=500 auth=200')
       .mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
@@ -101,10 +73,7 @@ describe('waitForNewPrimaryApi', () => {
   });
 
   it('does not pass while auth is still coming up', async () => {
-    const runner = vi
-      .fn()
-      .mockReturnValueOnce('rest=200 auth=502 storage=200')
-      .mockReturnValue(allUp);
+    const runner = vi.fn().mockReturnValueOnce('rest=200 auth=502').mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
       sleep: noSleep,
@@ -113,11 +82,11 @@ describe('waitForNewPrimaryApi', () => {
     expect(runner).toHaveBeenCalledTimes(2);
   });
 
-  it('treats a storage gateway timeout (504) and silence (000) as not-ready', async () => {
+  it('treats a gateway timeout (504) and silence (000) as not-ready', async () => {
     const runner = vi
       .fn()
-      .mockReturnValueOnce('rest=200 auth=200 storage=000')
-      .mockReturnValueOnce('rest=200 auth=200 storage=504')
+      .mockReturnValueOnce('rest=000 auth=200')
+      .mockReturnValueOnce('rest=200 auth=504')
       .mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
@@ -153,7 +122,7 @@ describe('waitForNewPrimaryApi', () => {
   });
 
   it('returns false (best-effort, never throws) after exhausting attempts', async () => {
-    const runner = vi.fn().mockReturnValue('rest=200 auth=200 storage=502');
+    const runner = vi.fn().mockReturnValue('rest=200 auth=502');
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
       sleep: noSleep,
@@ -168,7 +137,7 @@ describe('serve-gate coverage census', () => {
   // THE INVARIANT: every service the failover restarts is either proven by the
   // serve gate or carries an explicit, reasoned exemption. Adding a service to
   // the restart list without extending the probe (or exempting it) fails here
-  // — that is how the 2026-08-19 storage gap becomes unrepresentable.
+  // — that is how the 2026-08-19 lagging-service gap becomes unrepresentable.
   it('every restarted app-tier service is probed or explicitly exempted', () => {
     const cmd = newPrimaryApiProbeCmd('e2.appcarbon.dev');
     for (const svc of APP_TIER_RESTART_SERVICES) {
@@ -195,5 +164,4 @@ const NEW_PRIMARY_PROBE_URLS_BY_SERVICE: Record<string, string> = {
   rest: '/api/v1/notifications',
   app: '/api/v1/notifications',
   auth: '/auth/v1/health',
-  storage: '/storage/v1/object/public/',
 };

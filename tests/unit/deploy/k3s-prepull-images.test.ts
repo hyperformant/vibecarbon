@@ -92,6 +92,7 @@ describe('parseChartImages', () => {
     expect(joined).not.toContain('vector'); // vector disabled
     expect(joined).not.toContain('edge-runtime'); // functions disabled
     expect(joined).not.toContain('minio'); // minio disabled
+    expect(joined).not.toContain('imgproxy'); // imgproxy disabled
   });
 
   it('drops refs that fail the shell-safety character allowlist', () => {
@@ -111,7 +112,8 @@ describe('exclusion list stays in lockstep with the values file', () => {
     const disabled = [...values.matchAll(/^ {2}([a-z]+):\n(?: {4}#.*\n)* {4}enabled: false/gm)].map(
       (m) => m[1],
     );
-    expect(disabled.length).toBeGreaterThanOrEqual(3); // functions, analytics, vector today
+    // functions, analytics, vector, storage, imgproxy today
+    expect(disabled.length).toBeGreaterThanOrEqual(5);
     for (const comp of disabled) {
       expect(PREPULL_EXCLUDED_COMPONENTS).toContain(comp);
     }

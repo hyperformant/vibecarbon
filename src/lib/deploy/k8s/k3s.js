@@ -1308,6 +1308,8 @@ export const PREPULL_EXCLUDED_COMPONENTS = [
   'functions',
   'analytics',
   'vector',
+  'storage',
+  'imgproxy',
   'minio',
   // minioClient's init-bucket container is template-gated on
   // deployment.minio.enabled — off in our values, so it never runs.
@@ -2165,7 +2167,7 @@ export async function applyObservabilitySecrets({ kubeconfig, envLocal, domain }
  * tests/unit/deploy/k3s-supabase-storage-class.test.ts's drift guard; regenerate
  * with `node scripts/gen-chart-workloads-snapshot.mjs` and update this list.
  */
-export const SUPABASE_PVC_KEYS = ['db', 'imgproxy', 'pgsodium', 'snippets', 'storage'];
+export const SUPABASE_PVC_KEYS = ['db', 'pgsodium', 'snippets'];
 
 /**
  * The PVC objects whose StorageClass decides the DATABASE's durability model:
@@ -2566,20 +2568,6 @@ export async function installSupabase({
     .replace(/\{\{WALG_ROLE\}\}/g, walgRole)
     .replace(/\{\{S3_ENDPOINT\}\}/g, s3Config?.endpoint ?? '')
     .replace(/\{\{S3_REGION\}\}/g, s3Config?.region ?? '')
-    // Storage-service S3 wiring. DISTINCT from S3_BACKUP_BUCKET above: user
-    // objects live in the storage bucket (s3Config.bucket), wal-g backups in
-    // the dedicated backup bucket. Rendering the same name into both would
-    // put customer uploads and WAL segments in one bucket.
-    //
-    // These exist because the storage block shipped with literal `stub`
-    // region/bucket, no endpoint and no credentials while STORAGE_BACKEND was
-    // already `s3` — every upload 500'd with
-    // `CredentialsProviderError: Could not load credentials from any
-    // providers` (live DO k8s, 2026-08-21). Invisible for months because the
-    // e2e storage checks skipped on a bucket nothing created.
-    .replace(/\{\{S3_STORAGE_BUCKET\}\}/g, s3Config?.bucket ?? '')
-    .replace(/\{\{S3_ACCESS_KEY\}\}/g, s3Config?.accessKey ?? '')
-    .replace(/\{\{S3_SECRET_KEY\}\}/g, s3Config?.secretKey ?? '')
     .replace(/\{\{DB_IMAGE\}\}/g, dbImageRepo)
     .replace(/\{\{DB_IMAGE_TAG\}\}/g, dbImageVer)
     // Studio dashboard creds — sourced from .env.local at deploy time. Empty
@@ -2783,99 +2771,6 @@ export async function installSupabase({
 }
 
 /**
- * Wait until the supabase storage schema has fully initialized — specifically
- * until `storage.buckets` has ALL the columns our app migration inserts:
- * `public`, `file_size_limit`, and `allowed_mime_types`. The supabase chart's
- * storage-api container runs its own schema migrations on startup which lag
- * helm's `--wait`-Ready signal by 30-90s on cold clusters, and it adds these
- * columns in SEPARATE migrations (`public` earlier, `file_size_limit` +
- * `allowed_mime_types` in a later one). Running our own migrations against an
- * in-progress storage schema fails with errors like "column 'file_size_limit'
- * of relation 'buckets' does not exist" when an INSERT INTO storage.buckets
- * references a column the storage container hasn't added yet. Waiting only for
- * `public` was insufficient: it let the app migration race the later
- * file_size_limit migration (observed 2026-04-26 e2e #4 for `public`, and again
- * 2026-07-11 k8s-ha standby for `file_size_limit` after deploy timing tightened).
- *
- * Polls every 5s for up to maxWaitSec. Idempotent: if the column already
- * exists (warm path), returns immediately on first probe.
- *
- * Each kubectl exec is bounded to ~15s wall via `--request-timeout=15s` plus
- * a Node-side kill backstop. A bare `spawnSync(kubectl exec)` with no
- * timeout can hang for arbitrary time when the apiserver streaming
- * connection wedges, which silently bypasses maxWaitSec — observed
- * 2026-05-08 e2e run #3 where standby's poll ran ~1005s against a
- * nominal maxWaitSec=300 and rolled into the parallel primary's 16.7-min
- * rolloutApp window. Bounding each call also lets first-failure stderr
- * surface so a real storage-api crashloop is distinguishable from an exec
- * connectivity issue. Uses async spawn so the parent's event loop stays
- * free for the parallel HA branch.
- *
- * @param {{kubeconfig: string, maxWaitSec?: number}} args
- */
-export async function waitForSupabaseStorageSchema({ kubeconfig, maxWaitSec = 600 }) {
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
-  // Require all three columns 00001_init inserts — a later storage-api
-  // migration adds file_size_limit + allowed_mime_types, so waiting only for
-  // `public` races that migration. count(*) must reach 3.
-  const probeSql = `SELECT count(*) FROM information_schema.columns WHERE table_schema='storage' AND table_name='buckets' AND column_name IN ('public','file_size_limit','allowed_mime_types');`;
-  const perCallSec = 15;
-  let attempt = 0;
-  let firstErrLogged = false;
-  try {
-    // Fixed 5s spacing (initialDelayMs === maxDelayMs, no backoff growth) —
-    // matches the old hand-rolled `while` loop's constant waitMs exactly.
-    await pollUntil(
-      async () => {
-        attempt += 1;
-        const { status, stdout, stderr } = await execKubectlOnce(
-          [
-            '-n',
-            'vibecarbon',
-            'exec',
-            '-i',
-            `--request-timeout=${perCallSec}s`,
-            'supabase-supabase-db-0',
-            '--',
-            'psql',
-            '-U',
-            'supabase_admin',
-            '-d',
-            'postgres',
-            '-tA',
-          ],
-          { env, input: probeSql, killAfterMs: (perCallSec + 5) * 1000 },
-        );
-        if (status === 0 && stdout.trim() === '3') return true;
-        if (!firstErrLogged && (status !== 0 || stderr)) {
-          // Surface the first failure so a real crashloop / connectivity
-          // issue is visible instead of silently looping. Subsequent polls
-          // stay quiet to keep the deploy log readable.
-          const msg = (stderr || stdout || '(no output)').trim().slice(-500);
-          console.log(
-            `[waitForSupabaseStorageSchema] attempt ${attempt} status=${status ?? '?'} — ${msg}`,
-          );
-          firstErrLogged = true;
-        }
-        return false;
-      },
-      {
-        budgetMs: maxWaitSec * 1000,
-        initialDelayMs: 5000,
-        maxDelayMs: 5000,
-        description: 'storage.buckets public + file_size_limit + allowed_mime_types columns',
-      },
-    );
-  } catch {
-    throw new Error(
-      `Supabase storage schema didn't add storage.buckets.{public,file_size_limit,allowed_mime_types} ` +
-        `columns within ${maxWaitSec}s. Storage-api container may have crashlooped: check ` +
-        `kubectl logs supabase-supabase-storage-0`,
-    );
-  }
-}
-
-/**
  * Single bounded kubectl exec: spawn-based (non-blocking), per-call kill
  * backstop on top of kubectl's own `--request-timeout`. Caller passes argv
  * starting after `kubectl`. Returns { status, stdout, stderr } with status
@@ -2946,11 +2841,6 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
     .filter((f) => f.endsWith('.sql'))
     .sort();
   if (files.length === 0) return;
-  // Wait for supabase's own storage-api schema to finish initializing —
-  // some project migrations (e.g. INSERT INTO storage.buckets with a
-  // `public` column) reference columns added by storage-api's startup
-  // migrations, which can lag helm's --wait Ready signal.
-  await waitForSupabaseStorageSchema({ kubeconfig });
   for (const file of files) {
     const sql = readFileSync(join(migrationsDir, file), 'utf-8');
     try {
@@ -4878,12 +4768,8 @@ export async function applyK3sManifests({
   //    pod is up; without migrations the app's /api/health/ready 503s.
   if (pilotStandby) {
     // Pilot-light: no app tier is reading the schema on a standby yet, and
-    // applyMigrations execs against a pod whose migrations wouldn't matter —
-    // skip both it and its nested waitForSupabaseStorageSchema poll.
+    // applyMigrations execs against a pod whose migrations wouldn't matter.
     console.error('[pilot-standby] skipping applyMigrations, app tier is zeroed until failover');
-    console.error(
-      '[pilot-standby] skipping waitForSupabaseStorageSchema, app tier is zeroed until failover',
-    );
   } else if (restore) {
     progressLog(
       `[k3s] restore=${restore} requested, skipping applyMigrations (restored DB carries schema_migrations).`,

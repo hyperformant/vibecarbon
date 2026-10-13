@@ -660,20 +660,15 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   //                            with itself (new pod can't bind ports
   //                            while old pod still listens) and
   //                            traefik doesn't talk to postgres.
-  //       - supabase-storage — single replica with RWO PVC; old pod
-  //                            holds the volume and new pod stays in
-  //                            Init forever waiting for attach.
-  //                            Storage will reconnect on next request.
   //       - supabase-kong    — supabase community chart runs kong in
   //                            DB-less mode (declarative config),
   //                            no postgres connection.
-  //       - supabase-imgproxy — image proxy, no postgres connection.
   //       - supabase-studio  — talks via meta/kong, no direct conn.
   //
   //     Verified on a live standby cluster on 2026-04-28: restarting
   //     all 10 deployments hung on traefik (10 min progress deadline)
-  //     and storage (RWO PVC stuck attaching). The selective list
-  //     below completes in <2 min.
+  //     and the since-removed storage service (RWO PVC stuck attaching).
+  //     The selective list below completes in <2 min.
   const postgresDependentDeployments = [
     'app',
     'supabase-supabase-auth',

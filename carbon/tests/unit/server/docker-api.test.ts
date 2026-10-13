@@ -48,14 +48,14 @@ describe('mapContainerList', () => {
       Labels: { 'com.docker.compose.service': 'db' },
     },
     // No compose labels: service falls back to name minus the project prefix.
-    { Id: 'ddd', Names: ['/my-app-imgproxy'], Labels: {} },
+    { Id: 'ddd', Names: ['/my-app-meta'], Labels: {} },
   ];
 
   it('keeps only exact-prefix matches and resolves service names', () => {
     expect(mapContainerList(entries, 'my-app')).toEqual([
       { id: 'aaa', name: 'my-app-db', service: 'db' },
       { id: 'bbb', name: 'my-app-kong', service: 'kong' },
-      { id: 'ddd', name: 'my-app-imgproxy', service: 'imgproxy' },
+      { id: 'ddd', name: 'my-app-meta', service: 'meta' },
     ]);
   });
 

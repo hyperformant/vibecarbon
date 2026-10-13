@@ -198,7 +198,7 @@ Point your domain to the server's IP address:
 |--------|------|-------|
 | A | `app.example.com` | `<server-ip>` |
 
-The app is served from a single origin. Auth, REST, realtime, and storage APIs are path-routed under it (`/auth/v1`, `/rest/v1`, `/realtime/v1`, `/storage/v1`), so no separate `api.` record exists.
+The app is served from a single origin. Auth, REST, and realtime APIs are path-routed under it (`/auth/v1`, `/rest/v1`, `/realtime/v1`), so no separate `api.` record exists.
 
 If you have optional services enabled, add records for their subdomains too (e.g., `grafana.example.com`).
 

@@ -210,7 +210,7 @@ if (!args.prod) {
  */
 function diagnoseFailure() {
   try {
-    const logs = execSync('docker compose logs --tail 20 auth rest storage 2>&1', {
+    const logs = execSync('docker compose logs --tail 20 auth rest 2>&1', {
       encoding: 'utf-8',
       env: { ...process.env, ...getPortEnvVars() },
     });

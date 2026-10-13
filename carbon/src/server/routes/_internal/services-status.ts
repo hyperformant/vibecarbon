@@ -110,17 +110,6 @@ const CORE_SERVICES: ServiceConfig[] = [
     acceptCodes: [200, 401, 403, 426], // May require auth or websocket upgrade
   },
   {
-    name: 'File Storage',
-    container: 'storage',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/storage/v1/status'
-      : isDocker
-        ? 'http://storage:5000/status'
-        : `http://localhost:${kongPort}/storage/v1/status`,
-    timeout: 2000,
-    acceptCodes: isDocker ? undefined : [200, 401], // Via Kong requires API key
-  },
-  {
     name: 'Studio',
     container: 'studio',
     healthUrl: isKubernetes
@@ -684,7 +673,6 @@ const K8S_LABEL_NAMES: Record<string, string> = {
   'vibecarbon-auth': 'Authentication',
   'vibecarbon-rest': 'REST API',
   'vibecarbon-realtime': 'Realtime',
-  'vibecarbon-storage': 'File Storage',
   'vibecarbon-studio': 'Studio',
   'vibecarbon-meta': 'DB Management',
   'vibecarbon-postgres': 'PostgreSQL',

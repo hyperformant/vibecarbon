@@ -26,7 +26,7 @@ function extractTopLevelBlock(text, key) {
 export function deriveScaleUpList({ overlayText, sharedValuesText, appManifestText }) {
   // Scope the component scan to the overlay's own `deployment:` block — the
   // overlay also carries a `persistence:` map whose child keys collide with
-  // component names (storage, imgproxy, ...) and must never produce
+  // component names (a chart PVC key per component) and must never produce
   // duplicate/false scale-up entries.
   const overlayDeploymentBlock = extractTopLevelBlock(overlayText, 'deployment');
   const comps = [...overlayDeploymentBlock.matchAll(/^ {2}([a-z]+):$/gm)].map((m) => m[1]);

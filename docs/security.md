@@ -201,7 +201,7 @@ Manage the list with `vibecarbon access`:
 
 ### Database connection pooling
 
-The internal Supabase stack (`auth`, `rest`, `realtime`, `storage`, `meta`)
+The internal Supabase stack (`auth`, `rest`, `realtime`, `meta`)
 connects to Postgres **directly** on `db:5432`: required, because a
 transaction pooler breaks realtime's replication slot, PostgREST's
 `NOTIFY pgrst 'reload schema'`, and migration advisory locks.

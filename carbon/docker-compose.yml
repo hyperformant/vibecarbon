@@ -190,7 +190,7 @@ services:
       - hot_standby=on
       - -c
       # Explicit connection ceiling (image default is 100). Real consumers —
-      # PostgREST pool + auth + storage + realtime + meta + Supavisor's server
+      # PostgREST pool + auth + realtime + meta + Supavisor's server
       # pool + replication + superuser_reserved — sum to ~65; 200 leaves
       # headroom for the HA standby and scale-ups so the ceiling can't be hit.
       # Connection pooling for EXTERNAL direct-DB clients is Supavisor (prod
@@ -444,82 +444,6 @@ services:
       - vibecarbon-network
 
   # ===========================================
-  # SUPABASE STORAGE
-  # ===========================================
-
-  storage:
-    image: supabase/storage-api:v1.44.2
-    container_name: ${PROJECT_NAME}-storage
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    read_only: true
-    tmpfs:
-      - /tmp
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5000/status"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
-    environment:
-      ANON_KEY: ${SUPABASE_ANON_KEY}
-      SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      POSTGREST_URL: http://rest:3000
-      PGRST_JWT_SECRET: ${JWT_SECRET}
-      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
-      FILE_SIZE_LIMIT: 52428800
-      STORAGE_BACKEND: s3
-      TENANT_ID: stub
-      REGION: ${S3_REGION:-stub}
-      GLOBAL_S3_BUCKET: ${S3_BUCKET:-stub}
-      GLOBAL_S3_ENDPOINT: ${S3_ENDPOINT:-}
-      GLOBAL_S3_FORCE_PATH_STYLE: "true"
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-}
-      ENABLE_IMAGE_TRANSFORMATION: "true"
-      IMGPROXY_URL: http://imgproxy:5001
-      VAULT_ENC_KEY: ${VAULT_ENC_KEY:-vaultenckey}
-    volumes:
-      - storage_data:/var/lib/storage
-    depends_on:
-      db:
-        condition: service_healthy
-      rest:
-        condition: service_started
-      imgproxy:
-        condition: service_started
-    networks:
-      - vibecarbon-network
-
-  imgproxy:
-    image: darthsim/imgproxy:v3.30.1
-    container_name: ${PROJECT_NAME}-imgproxy
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    read_only: true
-    tmpfs:
-      - /tmp
-    healthcheck:
-      test: ["CMD", "imgproxy", "health"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
-    environment:
-      IMGPROXY_BIND: ":5001"
-      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
-      IMGPROXY_USE_ETAG: "true"
-      IMGPROXY_ENABLE_WEBP_DETECTION: "true"
-    volumes:
-      - storage_data:/var/lib/storage
-    networks:
-      - vibecarbon-network
-
-  # ===========================================
   # SUPABASE MANAGEMENT
   # ===========================================
 
@@ -585,7 +509,6 @@ services:
 
 volumes:
   db_data:
-  storage_data:
 
 networks:
   vibecarbon-network:

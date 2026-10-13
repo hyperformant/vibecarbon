@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 /**
  * Single-origin routing contract (2026-07-23): production serves ONE public
  * origin. Traefik routes the versioned Supabase prefixes (/auth/v1, /rest/v1,
- * /realtime/v1, /storage/v1) on the apex to Kong; the app owns everything
+ * /realtime/v1) on the apex to Kong; the app owns everything
  * else — including the SPA's /auth/callback OAuth landing page, which a bare
  * /auth prefix rule would swallow (Kong 404s it, breaking every OAuth login).
  * The retired api.<domain> host must never come back: the app server treats
@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
  * and a split-origin regression re-breaks all of those at once.
  */
 
-const KONG_PREFIXES = ['/auth/v1', '/rest/v1', '/realtime/v1', '/storage/v1'];
+const KONG_PREFIXES = ['/auth/v1', '/rest/v1', '/realtime/v1'];
 
 const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
 
@@ -24,10 +24,11 @@ describe('single-origin routing: compose prod', () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: literal compose ${DOMAIN} interpolation, not a JS template
     const kongRule = 'traefik.http.routers.kong.rule=Host(`${DOMAIN:-localhost}`) && ';
     expect(compose).toContain(
-      kongRule +
-        '(PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || ' +
-        'PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`))',
+      kongRule + '(PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`))',
     );
+    // Uploads go browser -> S3 via app-issued presigned URLs; no storage
+    // gateway prefix exists any more.
+    expect(compose).not.toContain('/storage/v1');
     expect(compose).toContain('traefik.http.routers.kong.priority=10');
   });
 
@@ -49,11 +50,10 @@ describe('single-origin routing: k8s ingress', () => {
   const ingress = read('carbon/k8s/base/traefik/ingressroute.yaml');
 
   it('routes only the VERSIONED Supabase prefixes to kong, on both entrypoints', () => {
-    const rule =
-      'PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || ' +
-      'PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`)';
+    const rule = 'PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`)';
     const count = ingress.split(rule).length - 1;
     expect(count).toBe(2); // websecure + web(redirect)
+    expect(ingress).not.toContain('/storage/v1');
   });
 
   it('never uses bare (unversioned) Supabase prefixes — the SPA owns /auth/callback', () => {
@@ -73,6 +73,7 @@ describe('single-origin routing: kong parity + server CSP', () => {
     for (const prefix of KONG_PREFIXES) {
       expect(kong).toContain(prefix);
     }
+    expect(kong).not.toContain('/storage/v1');
   });
 
   it('the server never derives an api. origin from SITE_URL', () => {

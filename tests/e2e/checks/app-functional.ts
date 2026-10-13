@@ -1,13 +1,14 @@
 /**
  * Application-level functional verification checks.
  *
- * Tests that actual application features (auth, database CRUD, storage,
+ * Tests that actual application features (auth, database CRUD, file uploads,
  * realtime) work against a deployed environment. Every check is
  * fault-tolerant — errors are captured, never thrown.
  */
 
 import crypto from 'node:crypto';
 import type { VerificationResult } from '../scenarios/types.js';
+import { createPresignedTransfer, type PresignedTransfer } from '../utils/presigned-transfer.js';
 import { dnsSafeFetch, resolveCheckIp } from './health.js';
 
 // ---------------------------------------------------------------------------
@@ -345,7 +346,7 @@ async function runAuthChecks(
   // `domain` here is the Kong api-subdomain (k8s: same domain, so it masked
   // the difference — overnight 2026-07-08 compose verify-deploy 404).
   appDomain: string = domain,
-): Promise<VerificationResult[]> {
+): Promise<{ results: VerificationResult[]; accessToken?: string }> {
   const results: VerificationResult[] = [];
 
   // Admin login first — independent of the throwaway-signup pipeline below, so
@@ -369,7 +370,7 @@ async function runAuthChecks(
     results.push(skip('auth_signin', 'Skipped because signup failed'));
     results.push(skip('auth_protected', 'Skipped because signup failed'));
     results.push(skip('app_api_me_authenticated', 'Skipped because signup failed'));
-    return results;
+    return { results };
   }
 
   // Sign in
@@ -378,7 +379,7 @@ async function runAuthChecks(
   if (signinOutcome.result.status === 'fail' || !signinOutcome.accessToken) {
     results.push(skip('auth_protected', 'Skipped because signin failed'));
     results.push(skip('app_api_me_authenticated', 'Skipped because signin failed'));
-    return results;
+    return { results };
   }
 
   // Protected endpoint
@@ -387,7 +388,7 @@ async function runAuthChecks(
   // User-context DB path through the app's own API (see check docstring)
   results.push(await checkAppApiMeAuthenticated(appDomain, signinOutcome.accessToken));
 
-  return results;
+  return { results, accessToken: signinOutcome.accessToken };
 }
 
 // ---------------------------------------------------------------------------
@@ -528,300 +529,119 @@ async function runDbChecks(domain: string, serviceRoleKey: string): Promise<Veri
 }
 
 // ---------------------------------------------------------------------------
-// Storage checks
+// File upload round-trip
 // ---------------------------------------------------------------------------
 
-/**
- * Every spelling of "object not found" the storage download path produces —
- * the trigger for storage_download's DIAGNOSTIC retry (which fails either
- * way; it exists to name the failure mode, not absorb it).
- *
- * Two observed spellings, one per occurrence of the post-restore
- * read-after-write race:
- *  - outer HTTP 404 (2026-08-23, run 32614839037) — Kong/storage passthrough.
- *  - outer HTTP 400 with storage-api's JSON envelope
- *    `{"statusCode":"404","error":"Not found",…}` (2026-08-30, run
- *    33324819789) — the trigger keyed on outer 404 alone MISSED this one,
- *    so that run produced zero discriminating evidence. Body match is pinned
- *    to the envelope shape, not prose mentioning 404.
- */
-export function isStorageNotFoundResponse(status: number, body: string): boolean {
-  if (status === 404) return true;
-  return status === 400 && /"statusCode"\s*:\s*"?404"?/.test(body);
+/** A valid 1x1 PNG: the smallest real image the avatar allowlist accepts. */
+export const ONE_PIXEL_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+interface PresignBody {
+  key?: unknown;
+  url?: unknown;
+  headers?: unknown;
+  fileUrl?: unknown;
 }
 
 /**
- * Create `test-bucket` if it is not already there, so the storage checks
- * below have the precondition they need.
+ * The upload path end to end, the way the browser walks it: the signed-in user
+ * asks the app for a presigned PUT (`POST /api/v1/files/presign`), PUTs the
+ * bytes straight to object storage, then reads them back through the app
+ * (`GET /api/files/<key>`, a 302 to a presigned GET). Passes only when the
+ * bytes that come back equal the bytes that went up.
  *
- * WHY THIS EXISTS. Nothing in the product or the harness ever created this
- * bucket, so `storage_upload`/`storage_download`/`storage_delete` skipped as
- * "precondition missing" in verify-deploy, verify-restore AND verify-failover
- * — on every provider, in every run, since the checks were written. Every
- * green lifecycle record we have was green with the Storage path entirely
- * unexercised (confirmed on the 2026-08-20 vultr and scaleway compose-HA
- * passes: "30 passed, 0 failed, 4 skipped" three times over).
- *
- * The bucket is the TEST's fixture, not the product's — the template must not
- * ship a `test-bucket` — so the harness creates it. Doing it here rather than
- * as a separate lifecycle step means every caller of runStorageChecks gets it,
- * including the post-restore and post-failover ones where a re-created stack
- * has an empty storage schema again.
- *
- * Creating it through the Storage API is a bonus assertion: the admin path
- * (POST /storage/v1/bucket) has never been covered either.
- *
- * @returns null on success, or an operator-facing reason on failure
+ * App requests ride `appFetch` (dnsSafeFetch: pinned, Host + SNI kept on the
+ * domain). The two object-storage legs ride `transfer`, see
+ * tests/e2e/utils/presigned-transfer.ts for why they sit off the pinned seam.
+ * `appFetch` does not follow redirects, which is what lets this check assert
+ * the 302 itself before following it.
  */
-export async function ensureTestBucket(
-  domain: string,
-  serviceRoleKey: string,
-): Promise<string | null> {
+export async function checkFileUploadRoundtrip(
+  appDomain: string,
+  accessToken: string,
+  deps: { appFetch?: typeof safeFetch; transfer?: PresignedTransfer } = {},
+): Promise<VerificationResult> {
+  const appFetch = deps.appFetch ?? safeFetch;
+  const transfer = deps.transfer ?? createPresignedTransfer(appDomain);
+  const start = Date.now();
+  const fail = (step: string, message: string, details?: Record<string, unknown>) =>
+    result('file_upload_roundtrip', 'fail', start, {
+      errorMessage: `${step}: ${message}`,
+      details: { step, ...details },
+    });
+
   try {
-    const res = await safeFetch(`https://${domain}/storage/v1/bucket`, {
+    const presignRes = await appFetch(`https://${appDomain}/api/v1/files/presign`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${serviceRoleKey}`,
-        apikey: serviceRoleKey,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ id: 'test-bucket', name: 'test-bucket', public: true }),
-    });
-    if (res.ok) return null;
-    const body = await res.text();
-    // Idempotent: a bucket that already exists is exactly what we wanted.
-    // Supabase answers 409 for this, but the wording has moved across
-    // versions, so match the status OR either spelling.
-    if (res.status === 409 || /already exists|Duplicate/i.test(body)) return null;
-    return `POST /storage/v1/bucket returned ${res.status}: ${body.slice(0, 300)}`;
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-}
-
-async function runStorageChecks(
-  domain: string,
-  serviceRoleKey: string,
-): Promise<VerificationResult[]> {
-  const results: VerificationResult[] = [];
-  const uid = crypto.randomUUID();
-  const objectPath = `e2e-test-${uid}.txt`;
-  const content = 'e2e test content';
-  // TWO distinct paths, per the Storage REST contract:
-  //   upload / delete -> /object/<bucket>/<key>          (authenticated)
-  //   public download -> /object/public/<bucket>/<key>   (public read URL)
-  // Supabase's own troubleshooting note is explicit: a public bucket only
-  // means a public URL exists for DOWNLOAD; "use the normal path for all
-  // other operations and not the public URL path with 'public' in it".
-  //
-  // This check used the public path for ALL THREE, so upload and delete were
-  // always addressed wrong. It never showed up because the bucket did not
-  // exist either, and the missing-bucket branch short-circuited before the
-  // path could be wrong in a visible way. Creating the bucket
-  // (ensureTestBucket) exposed it immediately: the very next CI run failed
-  // storage_upload with `Bucket not found` against /object/public/... while
-  // storage_bucket_ensure passed. Two bugs, one hiding the other.
-  const objectUrl = `https://${domain}/storage/v1/object/test-bucket/${objectPath}`;
-  const publicUrl = `https://${domain}/storage/v1/object/public/test-bucket/${objectPath}`;
-  const authHeaders: Record<string, string> = {
-    Authorization: `Bearer ${serviceRoleKey}`,
-    apikey: serviceRoleKey,
-  };
-
-  // Precondition, created rather than assumed — see ensureTestBucket. A
-  // failure here FAILS the check rather than skipping it: "we could not set
-  // up storage" is a storage result, and silently skipping is what hid this
-  // whole surface for months.
-  const bucketStart = Date.now();
-  const bucketError = await ensureTestBucket(domain, serviceRoleKey);
-  if (bucketError) {
-    results.push(
-      result('storage_bucket_ensure', 'fail', bucketStart, {
-        errorMessage: `Could not create or find test-bucket: ${bucketError}`,
+      body: JSON.stringify({
+        kind: 'avatar',
+        contentType: 'image/png',
+        size: ONE_PIXEL_PNG.length,
       }),
-    );
-    results.push(skip('storage_upload', 'Skipped because test-bucket could not be created'));
-    results.push(skip('storage_download', 'Skipped because test-bucket could not be created'));
-    results.push(skip('storage_delete', 'Skipped because test-bucket could not be created'));
-    return results;
-  }
-  results.push(result('storage_bucket_ensure', 'pass', bucketStart));
-
-  // Upload
-  const uploadStart = Date.now();
-  try {
-    const res = await safeFetch(objectUrl, {
-      method: 'POST',
-      headers: {
-        ...authHeaders,
-        'Content-Type': 'text/plain',
-      },
-      body: content,
     });
-
-    if (!res.ok) {
-      const body = await res.text();
-      // "Bucket not found" USED to skip all three checks here. It cannot be a
-      // skip any more: ensureTestBucket has just reported the bucket present,
-      // so storage losing it between those two calls is a real defect and must
-      // read as one. That old skip is precisely how this surface stayed
-      // unexercised on every provider for months.
-      const missing = body.includes('Bucket not found') || res.status === 404;
-      // DIAGNOSTIC retry, sibling of storage_download's (#29) and
-      // storage_delete's: on the not-found envelope (covers the S3
-      // stale-frontend NoSuchBucket rendered as 400 + statusCode "404" —
-      // run 33435737752, post-restore verify) probe the IDENTICAL upload
-      // once after 2s. It fails either way; it exists to name the failure
-      // mode — and the attestation carries the classifiable spelling into
-      // the thrown step error.
-      let retryNote = '';
-      if (missing || isStorageNotFoundResponse(res.status, body)) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const again = await safeFetch(objectUrl, {
-            method: 'POST',
-            headers: { ...authHeaders, 'Content-Type': 'text/plain' },
-            body: content,
-          });
-          retryNote = again.ok
-            ? ' S3-BACKEND BLIP: the identical upload succeeded on a 2s-later retry — stale storage frontend (ensureTestBucket had just seen the bucket), not a broken upload path.'
-            : ` Retry after 2s also failed (${again.status}) — the upload path itself is failing.`;
-        } catch (retryErr) {
-          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
-        }
-      }
-      results.push(
-        result('storage_upload', 'fail', uploadStart, {
-          errorMessage: missing
-            ? `test-bucket vanished between creation and upload (${res.status}): ${body}${retryNote}`
-            : `Upload returned ${res.status}: ${body}${retryNote}`,
-        }),
+    if (presignRes.status !== 200) {
+      const body = await presignRes.text();
+      return fail(
+        'presign',
+        `POST /api/v1/files/presign returned ${presignRes.status}: ${body.slice(0, 300)}`,
       );
-      results.push(skip('storage_download', 'Skipped because upload failed'));
-      results.push(skip('storage_delete', 'Skipped because upload failed'));
-      return results;
+    }
+    const presign = (await presignRes.json()) as PresignBody;
+    if (
+      typeof presign.url !== 'string' ||
+      typeof presign.key !== 'string' ||
+      typeof presign.fileUrl !== 'string' ||
+      !presign.headers ||
+      typeof presign.headers !== 'object'
+    ) {
+      return fail('presign', `200 but unexpected shape: ${JSON.stringify(presign).slice(0, 300)}`);
+    }
+    const key = presign.key;
+
+    const put = await transfer.put(
+      presign.url,
+      presign.headers as Record<string, string>,
+      new Uint8Array(ONE_PIXEL_PNG),
+    );
+    if (put.status < 200 || put.status >= 300) {
+      return fail('upload', `PUT to the presigned URL returned ${put.status}: ${put.body}`, {
+        key,
+      });
     }
 
-    results.push(result('storage_upload', 'pass', uploadStart));
-  } catch (err) {
-    results.push(
-      result('storage_upload', 'fail', uploadStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
-    );
-    results.push(skip('storage_download', 'Skipped because upload failed'));
-    results.push(skip('storage_delete', 'Skipped because upload failed'));
-    return results;
-  }
-
-  // Download
-  const downloadStart = Date.now();
-  try {
-    // Deliberately the PUBLIC url: reading back through the public path is
-    // what proves the bucket is actually public and Kong routes it.
-    const res = await safeFetch(publicUrl, {
-      method: 'GET',
-      headers: authHeaders,
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      // DIAGNOSTIC RETRY — NOT AN ABSORBER. 2026-08-23 (matrix 32614839037,
-      // hetzner compose verify-restore): the public download 404'd 137ms
-      // after a successful upload, then the identical sequence passed on the
-      // rerun. One data point cannot distinguish "object never readable"
-      // from "read-after-write race on a restored stack". So on failure,
-      // probe once more after 2s and FAIL EITHER WAY — the check stays red,
-      // but its message now names which failure mode occurred, which is the
-      // evidence the next occurrence needs. An absorbing retry here would be
-      // an unregistered mitigation hiding an `ours` bug (mitigation policy).
-      // Occurrence #2 (2026-08-30, run 33324819789, same step): storage-api
-      // rendered the miss as outer 400 + body statusCode "404", the old
-      // `status === 404` trigger missed it, and we got no evidence — hence
-      // isStorageNotFoundResponse, which pins BOTH spellings.
-      let retryNote = '';
-      if (isStorageNotFoundResponse(res.status, body)) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const again = await safeFetch(publicUrl, { method: 'GET', headers: authHeaders });
-          retryNote = again.ok
-            ? ` READ-AFTER-WRITE RACE: same URL succeeded on a 2s-later retry — the object became publicly readable late, it was not missing.`
-            : ` Retry after 2s also failed (${again.status}) — not a settle race at this horizon.`;
-        } catch (retryErr) {
-          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
-        }
-      }
-      results.push(
-        result('storage_download', 'fail', downloadStart, {
-          errorMessage: `Download returned ${res.status}: ${body}${retryNote}`,
-        }),
+    const readRes = await appFetch(`https://${appDomain}${presign.fileUrl}`, { method: 'GET' });
+    const location = readRes.headers.get('location');
+    if (readRes.status !== 302 || !location) {
+      const body = await readRes.text();
+      return fail(
+        'read',
+        `GET ${presign.fileUrl} returned ${readRes.status} (expected a 302 to a presigned URL): ${body.slice(0, 200)}`,
+        { key },
       );
-    } else {
-      const body = await res.text();
-      if (body !== content) {
-        results.push(
-          result('storage_download', 'fail', downloadStart, {
-            errorMessage: 'Downloaded content does not match uploaded content',
-            details: { expected: content, received: body.slice(0, 200) },
-          }),
-        );
-      } else {
-        results.push(result('storage_download', 'pass', downloadStart));
-      }
     }
-  } catch (err) {
-    results.push(
-      result('storage_download', 'fail', downloadStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
-    );
-  }
 
-  // Delete (best-effort cleanup)
-  const deleteStart = Date.now();
-  try {
-    const res = await safeFetch(objectUrl, {
-      method: 'DELETE',
-      headers: authHeaders,
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      // DIAGNOSTIC RETRY — NOT AN ABSORBER (same contract as the download
-      // leg above). 2026-08-23 run 32646830369: upload and download passed,
-      // then this DELETE got a bare storage-api 500 — the same hetzner
-      // object-storage degradation family the registry-500 RCA documented.
-      // One 5xx tells us nothing about blip-vs-broken, so probe once after
-      // 2s and FAIL EITHER WAY with the mode named.
-      let retryNote = '';
-      if (res.status >= 500) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const again = await safeFetch(objectUrl, { method: 'DELETE', headers: authHeaders });
-          retryNote = again.ok
-            ? ' S3-BACKEND BLIP: the identical delete succeeded on a 2s-later retry — transient backend error, not a broken delete path.'
-            : ` Retry after 2s also failed (${again.status}) — the delete path itself is failing.`;
-        } catch (retryErr) {
-          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
-        }
-      }
-      results.push(
-        result('storage_delete', 'fail', deleteStart, {
-          errorMessage: `Delete returned ${res.status}: ${body}${retryNote}`,
-        }),
+    const got = await transfer.get(location);
+    if (got.status !== 200) {
+      return fail('download', `following the read redirect returned ${got.status}`, { key });
+    }
+    if (!Buffer.from(got.bytes).equals(ONE_PIXEL_PNG)) {
+      return fail(
+        'compare',
+        `downloaded ${got.bytes.length} bytes that differ from the ${ONE_PIXEL_PNG.length} uploaded`,
+        { key },
       );
-    } else {
-      results.push(result('storage_delete', 'pass', deleteStart));
     }
-  } catch (err) {
-    results.push(
-      result('storage_delete', 'fail', deleteStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
-    );
-  }
 
-  return results;
+    return result('file_upload_roundtrip', 'pass', start, { details: { key } });
+  } catch (err) {
+    return fail('request', err instanceof Error ? err.message : String(err));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,14 +845,19 @@ export async function runAppFunctionalChecks(
   // Run check groups sequentially — auth creates state the others do not
   // depend on, but sequential execution keeps resource usage predictable
   // and makes logs easier to follow during long e2e runs.
-  const authResults = await runAuthChecks(domain, anonKey, adminEmail, adminPassword, appDomain);
-  results.push(...authResults);
+  const auth = await runAuthChecks(domain, anonKey, adminEmail, adminPassword, appDomain);
+  results.push(...auth.results);
 
   const dbResults = await runDbChecks(domain, serviceRoleKey);
   results.push(...dbResults);
 
-  const storageResults = await runStorageChecks(domain, serviceRoleKey);
-  results.push(...storageResults);
+  // Uploads are an app feature (presign + read routes on the app domain), so
+  // they run as the signed-in throwaway user from the auth checks above.
+  results.push(
+    auth.accessToken
+      ? await checkFileUploadRoundtrip(appDomain, auth.accessToken)
+      : skip('file_upload_roundtrip', 'Skipped because no signed-in user (auth checks failed)'),
+  );
 
   const realtimeResults = await runRealtimeCheck(domain, anonKey);
   results.push(...realtimeResults);

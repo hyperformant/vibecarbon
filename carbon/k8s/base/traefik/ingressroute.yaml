@@ -34,7 +34,7 @@ spec:
     # API routes go to Kong (Supabase gateway)
     # Versioned prefixes ONLY — the SPA owns /auth/callback and /reset-password;
     # a bare /auth prefix would send the OAuth landing page to Kong (404).
-    - match: PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`)
+    - match: PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`)
       kind: Rule
       priority: 10
       services:
@@ -107,7 +107,7 @@ spec:
         - name: redirect-https
     # Versioned prefixes ONLY — the SPA owns /auth/callback and /reset-password;
     # a bare /auth prefix would send the OAuth landing page to Kong (404).
-    - match: PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`) || PathPrefix(`/storage/v1`)
+    - match: PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`)
       kind: Rule
       priority: 10
       services:

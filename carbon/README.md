@@ -1,6 +1,6 @@
 # {{PROJECT_NAME}}
 
-A full-stack application: a React 19 single-page app, a Hono API, and self-hosted Supabase for auth, data, storage, and realtime. Authentication, multi-provider billing, multi-tenant organizations, an admin panel, transactional email, MDX content, and background jobs are already wired together and running against a real database. The same CLI that scaffolded this project also deploys and operates it, from a single Docker Compose server through multi-region Kubernetes, on Hetzner Cloud, DigitalOcean, Linode, Vultr, or Scaleway.
+A full-stack application: a React 19 single-page app, a Hono API, and self-hosted Supabase for auth, data, and realtime, with file uploads stored in S3-compatible object storage. Authentication, multi-provider billing, multi-tenant organizations, an admin panel, transactional email, MDX content, and background jobs are already wired together and running against a real database. The same CLI that scaffolded this project also deploys and operates it, from a single Docker Compose server through multi-region Kubernetes, on Hetzner Cloud, DigitalOcean, Linode, Vultr, or Scaleway.
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ flowchart TD
     NET -.->|"without Cloudflare"| TR
 
     TR -->|"apex host"| APP["app<br/>Hono API · :3000"]
-    TR -->|"/auth/v1 · /rest/v1<br/>/realtime/v1 · /storage/v1"| KONG["kong<br/>Supabase gateway · :8000"]
+    TR -->|"/auth/v1 · /rest/v1<br/>/realtime/v1"| KONG["kong<br/>Supabase gateway · :8000"]
     TR -->|"studio subdomain<br/>super-admin auth"| STUDIO["studio<br/>Supabase Studio"]
 
     APP --> KONG
@@ -59,13 +59,11 @@ flowchart TD
         AUTH["auth<br/>GoTrue"]
         REST["rest<br/>PostgREST"]
         RT["realtime"]
-        STORE["storage"]
     end
 
     KONG --> AUTH
     KONG --> REST
     KONG --> RT
-    KONG --> STORE
     STUDIO --> META["meta<br/>postgres-meta"]
 
     subgraph PG["db · PostgreSQL 17"]

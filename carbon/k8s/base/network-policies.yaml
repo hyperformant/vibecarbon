@@ -128,47 +128,6 @@ spec:
           port: 443
 
 ---
-# The storage service pushes and fetches user objects in S3 (STORAGE_BACKEND=s3
-# in k8s/values/supabase.values.yaml). Like the db's wal-g egress above, the
-# implicit default-deny (allow-dns / allow-intra-namespace-egress select every
-# pod with an Egress type) drops its outbound 443 without this.
-#
-# This was MISSING entirely, on every provider, for as long as the k8s tier has
-# existed. It went unnoticed because storage was ALSO shipped without S3
-# credentials or an endpoint (fixed 5b2e8dfa), so it never attempted a
-# connection that could be dropped — and because the e2e storage checks skipped
-# on a bucket nothing created, nothing ever tried an upload. Two independent
-# faults, both invisible behind the same skip: the first live upload attempt
-# failed on credentials, and the very next one failed here.
-#
-# Same shape as supabase-db-s3-egress: public S3 only, private ranges excluded.
-# The DO-specific VPC-gateway allowance lives in
-# k8s/base/s3-egress-vpc/s3-egress-vpc.yaml, which grants the sibling arm.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: supabase-storage-s3-egress
-  namespace: vibecarbon
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: supabase-storage
-      app.kubernetes.io/instance: supabase
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-      ports:
-        - protocol: TCP
-          port: 443
-
----
 # H-9: allow the app pod to reach the (optional) vibecarbon-observability
 # namespace. The app's services-status API polls grafana:3000, prometheus:9090
 # and loki:3100 for health, and pushes logs to loki:3100. This namespace is

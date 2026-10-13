@@ -15,8 +15,8 @@ resources:
   - config/
   # Note: hetzner-ccm and hetzner-csi are installed via cloud-init (master-init.sh)
   # Note: cert-manager is installed separately via infra/ kustomization
-  # Note: Supabase (postgres, kong, auth, rest, realtime, storage, imgproxy,
-  # meta, studio, supavisor, edge-functions) is installed via the community
+  # Note: Supabase (postgres, kong, auth, rest, realtime, meta, studio,
+  # supavisor, edge-functions) is installed via the community
   # Helm chart — see the helm step in src/lib/deploy/k8s/k3s.js. Values come
   # from k8s/values/supabase.values.yaml, rendered at deploy time with our
   # secrets.

@@ -1727,7 +1727,7 @@ export async function runLifecycle(
         const allResults: VerificationResult[] = [];
 
         // Single public origin in every mode: Traefik path-routes the versioned
-        // Supabase prefixes (/auth/v1, /rest/v1, /realtime/v1, /storage/v1) on
+        // Supabase prefixes (/auth/v1, /rest/v1, /realtime/v1) on
         // the apex to Kong — there is no api. subdomain. Optional add-ons
         // (grafana/n8n/...) still use subdomains on compose, hence isCompose.
         const isCompose = config.mode.startsWith('compose');
@@ -1886,7 +1886,8 @@ export async function runLifecycle(
         );
 
         // App functional checks (auth, real-schema assertion, DB write
-        // round-trip, storage, realtime via Kong path-routed on the apex)
+        // round-trip, file upload round-trip, realtime via Kong path-routed
+        // on the apex)
         const appResults = await runAppFunctionalChecks(
           apiDomain,
           supabaseKeys.anonKey,

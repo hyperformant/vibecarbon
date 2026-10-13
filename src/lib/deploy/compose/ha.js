@@ -1120,17 +1120,11 @@ export async function destroyComposeHA(options) {
  * The app-tier services failover Step 1b restarts on the new primary (container
  * names are `${projectName}-<svc>`). Exported so the serve-gate coverage census
  * can assert every member is either probed by newPrimaryApiProbeCmd or carries
- * an explicit exemption — the invariant that made the 2026-08-19 storage gap
- * (gate proved rest only; storage still booting; verify 502'd) unrepresentable.
+ * an explicit exemption — the invariant that made the 2026-08-19 gap (gate
+ * proved rest only; the since-removed storage service still booting; verify
+ * 502'd) unrepresentable.
  */
-export const APP_TIER_RESTART_SERVICES = [
-  'supavisor',
-  'auth',
-  'rest',
-  'realtime',
-  'storage',
-  'app',
-];
+export const APP_TIER_RESTART_SERVICES = ['supavisor', 'auth', 'rest', 'realtime', 'app'];
 
 /**
  * Restarted services the serve gate deliberately does NOT probe, with the
@@ -1155,18 +1149,12 @@ export const NEW_PRIMARY_PROBE_EXEMPT = {
  * propagation (the DNS flip happens later in failover, and the operator host's
  * resolver may still be cached). `-k` skips the LE-staging cert.
  *
- * The three probes, and why these paths:
+ * The two probes, and why these paths:
  *  - rest/app: /api/v1/notifications — the exact endpoint verify-failover
  *    checks; 200 means app → Kong → PostgREST → DB is serving, including
  *    PostgREST's schema cache (cold for ~10-30s after the restart).
  *  - auth: /auth/v1/health — Kong's OPEN health route (no key-auth), 200 from
  *    GoTrue itself.
- *  - storage: /storage/v1/object/public/<nonexistent> — the OPEN route the
- *    2026-08-19 verify upload actually 502'd through. storage-api answering
- *    AT ALL (200/400/404 for a bucket that doesn't exist) proves the upstream
- *    is up; only Kong can say 502/503/504 here. The key-auth'd
- *    /storage/v1/status is useless for this: Kong 401s it before storage-api
- *    is ever consulted (the k8s auth-probe trap of 2026-07-08).
  *
  * @param {string} domain
  * @returns {string}
@@ -1177,17 +1165,9 @@ export function newPrimaryApiProbeCmd(domain) {
   return (
     `r=$(${curlTo('/api/v1/notifications')}); ` +
     `a=$(${curlTo('/auth/v1/health')}); ` +
-    `s=$(${curlTo('/storage/v1/object/public/vc-serve-gate-probe/probe')}); ` +
-    'echo "rest=$r auth=$a storage=$s"'
+    'echo "rest=$r auth=$a"'
   );
 }
-
-/**
- * Storage readiness codes: anything storage-api itself would say to a GET of a
- * nonexistent public object. 502/503/504 are Kong speaking FOR a dead upstream;
- * 000 is curl reaching nothing.
- */
-const STORAGE_UPSTREAM_ANSWERED = new Set(['200', '400', '404']);
 
 /**
  * Parse one probe output line into a verdict. Exported-shape deliberate: the
@@ -1199,24 +1179,21 @@ const STORAGE_UPSTREAM_ANSWERED = new Set(['200', '400', '404']);
  */
 function parseNewPrimaryProbe(out) {
   const detail = out.trim();
-  const m = /rest=(\S+) auth=(\S+) storage=(\S+)/.exec(detail);
+  const m = /rest=(\S+) auth=(\S+)/.exec(detail);
   if (!m) return { ready: false, detail: detail || 'none' };
-  const [, rest, auth, storage] = m;
-  return {
-    ready: rest === '200' && auth === '200' && STORAGE_UPSTREAM_ANSWERED.has(storage),
-    detail,
-  };
+  const [, rest, auth] = m;
+  return { ready: rest === '200' && auth === '200', detail };
 }
 
 /**
  * Poll the new primary until its restarted app tier actually SERVES.
  *
  * Root-cause fix for the compose-ha failover-readiness race, twice over: Step
- * 1b runs `docker restart … rest storage app …` to force a clean reconnect
+ * 1b runs `docker restart … rest app …` to force a clean reconnect
  * against the now-read-write DB, but restart returns when containers *start*,
  * not when they're *ready*. PostgREST spends ~10-30s rebuilding its schema
- * cache (RCA 2026-05-30); storage-api replays its DB migrations and rises even
- * later (RCA 2026-08-19, DO run 32309395314 — the gate proved rest only, and
+ * cache (RCA 2026-05-30); a since-removed storage service rose even later
+ * (RCA 2026-08-19, DO run 32309395314 — the gate proved rest only, and
  * verify-failover's single-shot upload met Kong's 502). Gating on every
  * Kong-routed restarted service closes the race for the e2e *and* real
  * operators (a failover that reports success before the app serves is itself
@@ -1709,7 +1686,7 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
   // Step 1b: Restart app-tier services on the new primary so they re-pool
   // against the now-read-write DB. These services were started during deploy
   // while the local DB was in recovery — supavisor's tenant pools and the
-  // app/auth/rest/realtime/storage DB handles can hold stale connections that
+  // app/auth/rest/realtime DB handles can hold stale connections that
   // surface as 500 "Database error" / 544 DatabaseTimeout right after
   // promotion. Restart is cheap (~10s) and forces a clean reconnect.
   s.start('Restarting new-primary app-tier');
@@ -1777,7 +1754,7 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
   // having stopped NOTHING, so the old primary kept serving writes behind
   // the SPLIT-BRAIN warning on every failover. The compose-invocation
   // census (compose-invocation-service-names.test.ts) bans the old shape.
-  const oldPrimaryContainers = ['app', 'auth', 'rest', 'realtime', 'storage', 'supavisor']
+  const oldPrimaryContainers = ['app', 'auth', 'rest', 'realtime', 'supavisor']
     .map((svc) => `${projectName}-${svc}`)
     .join(' ');
   const stopped = await sshRun(

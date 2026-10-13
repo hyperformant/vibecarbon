@@ -3,8 +3,8 @@
  *
  * These exercise the app's OWN Hono routes under `/api/v1/*` on the main
  * domain — the layer the rest of the e2e suite never touched. Everything else
- * hits Supabase services directly (Kong: /auth/v1, /rest/v1, /storage/v1,
- * /realtime/v1), so a broken app backend (missing schema, dead route, bad DB
+ * hits Supabase services directly (Kong: /auth/v1, /rest/v1, /realtime/v1),
+ * so a broken app backend (missing schema, dead route, bad DB
  * wiring) could 500 while every platform check stayed green.
  *
  * RCA prod-1 2026-05-26: /api/v1/notifications 500'd (PGRST205, empty schema)

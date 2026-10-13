@@ -336,8 +336,8 @@ export function renderBundle(projectName, options = {}) {
     envOverrides.DOMAIN = options.domain;
     envOverrides.ACME_EMAIL = `admin@${options.domain}`;
     // Single public origin: the apex serves the SPA, the Hono /api, AND the
-    // Supabase gateway (Traefik path-routes /auth/v1|/rest/v1|/realtime/v1|
-    // /storage/v1 to Kong). SITE_URL is that one origin — GoTrue redirect
+    // Supabase gateway (Traefik path-routes /auth/v1|/rest/v1|/realtime/v1
+    // to Kong). SITE_URL is that one origin — GoTrue redirect
     // config, billing return URLs, and CSP/CORS all derive from it.
     envOverrides.SITE_URL = `https://${options.domain}`;
     envOverrides.SUPABASE_URL = 'http://kong:8000';

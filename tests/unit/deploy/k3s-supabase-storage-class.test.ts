@@ -232,7 +232,7 @@ describe('installSupabase — wrong-StorageClass guard (db-critical PVCs)', () =
       {
         match: 'get pvc',
         stdout:
-          'supabase-db=hcloud-volumes\nsupabase-pgsodium=hcloud-volumes\nsupabase-storage=local-path\n',
+          'supabase-db=hcloud-volumes\nsupabase-pgsodium=hcloud-volumes\nsupabase-snippets=local-path\n',
       },
     ];
     await expect(runInstall()).resolves.not.toThrow();

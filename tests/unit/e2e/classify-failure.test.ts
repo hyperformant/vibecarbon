@@ -210,8 +210,9 @@ describe('classifyFailure', () => {
     // NoSuchBucket spelling from this very classifier).
     const result = classifyFailure({
       errorMessage:
-        '1 verification(s) failed: storage_upload\n' +
-        '[fail] storage_upload: Upload returned 400: {"statusCode":"404","error":"UnknownError","message":"NoSuchBucket"}',
+        '1 verification(s) failed: file_upload_roundtrip\n' +
+        '[fail] file_upload_roundtrip: upload: PUT to the presigned URL returned 404: ' +
+        '<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchBucket</Code></Error>',
     });
     expect(result.category).toBe('infra');
     expect(result.reason).toBe('S3 transient');

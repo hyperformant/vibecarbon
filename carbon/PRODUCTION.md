@@ -18,7 +18,7 @@ See the in-app deployment guide (`content/docs/deployment.mdx`, rendered at `/do
 **Goal**: Fast startup, minimal resources, easy debugging
 
 Services included:
-- ✓ Core Supabase stack (Auth, Database, Storage, Realtime, REST API)
+- ✓ Core Supabase stack (Auth, Database, Realtime, REST API)
 - ✓ Development tools (Studio, Meta)
 - ✓ Basic networking
 
@@ -56,7 +56,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 - Handles 1000+ concurrent external connections efficiently (`POOLER_MAX_CLIENT_CONN`)
 - Connection pooling (default: 15 per pool)
 - Session mode on port 5432, transaction mode on port 6543 (Supavisor's defaults, pinned explicitly via `PROXY_PORT_SESSION` / `PROXY_PORT_TRANSACTION` in `docker-compose.prod.yml`)
-- The internal Supabase stack (auth, rest, realtime, storage, meta) always connects **directly** to `db:5432` — a transaction pooler breaks realtime's replication slot, PostgREST's NOTIFY-based schema reload, and migration advisory locks
+- The internal Supabase stack (auth, rest, realtime, meta) always connects **directly** to `db:5432` — a transaction pooler breaks realtime's replication slot, PostgREST's NOTIFY-based schema reload, and migration advisory locks
 
 ```bash
 # Internal services (fixed — do not route these through the pooler)
@@ -184,8 +184,8 @@ SMTP_PORT=
 ### Production (.env.production)
 ```bash
 # Production URLs — ONE public origin: the apex serves the app, the Hono API,
-# and the Supabase gateway (Traefik path-routes /auth/v1, /rest/v1,
-# /realtime/v1, /storage/v1 to Kong). SUPABASE_URL is the server-side
+# and the Supabase gateway (Traefik path-routes /auth/v1, /rest/v1 and
+# /realtime/v1 to Kong). SUPABASE_URL is the server-side
 # (in-network) Kong address, never a public host.
 SITE_URL=https://yourdomain.com
 SUPABASE_URL=http://kong:8000
@@ -196,12 +196,13 @@ SMTP_PORT=587
 SMTP_USER=apikey
 SMTP_PASS=your_api_key
 
-# S3 storage (required for production)
-STORAGE_BACKEND=s3
-S3_BUCKET=your-bucket
+# S3 storage for uploads (`vibecarbon deploy` provisions the bucket and
+# writes these; when any is missing, uploads are disabled and the app still boots)
+S3_ENDPOINT=https://your-provider-endpoint
 S3_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
+S3_BUCKET=your-bucket
+S3_ACCESS_KEY=your_key
+S3_SECRET_KEY=your_secret
 ```
 
 ## Package.json Scripts
