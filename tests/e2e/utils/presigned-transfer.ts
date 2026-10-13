@@ -18,6 +18,8 @@
 const TRANSFER_TIMEOUT_MS = 15_000;
 
 export interface PresignedTransfer {
+  /** Browser-shaped CORS preflight for a PUT with a Content-Type, from `origin`. */
+  preflight(url: string, origin: string): Promise<{ status: number; allowOrigin: string | null }>;
   put(
     url: string,
     headers: Record<string, string>,
@@ -42,6 +44,20 @@ export function assertObjectStorageUrl(url: string, envDomain: string): void {
 
 export function createPresignedTransfer(envDomain: string): PresignedTransfer {
   return {
+    async preflight(url, origin) {
+      assertObjectStorageUrl(url, envDomain);
+      const res = await fetch(url, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: origin,
+          'Access-Control-Request-Method': 'PUT',
+          'Access-Control-Request-Headers': 'content-type',
+        },
+        signal: AbortSignal.timeout(TRANSFER_TIMEOUT_MS),
+      });
+      await res.arrayBuffer();
+      return { status: res.status, allowOrigin: res.headers.get('access-control-allow-origin') };
+    },
     async put(url, headers, body) {
       assertObjectStorageUrl(url, envDomain);
       // Node's fetch derives Content-Length from the body, as a browser does.

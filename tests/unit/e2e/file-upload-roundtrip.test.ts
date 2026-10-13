@@ -29,18 +29,29 @@ function presignResponse(overrides: Record<string, unknown> = {}) {
   );
 }
 
+const STORAGE_ORIGIN = 'https://fsn1.your-objectstorage.com';
+const CSP = `default-src 'self'; connect-src 'self' https://${DOMAIN} https://cloudflareinsights.com ${STORAGE_ORIGIN}; object-src 'none'`;
+
 function appFetchWith({
   presign = () => presignResponse(),
+  home = () =>
+    new Response('<html></html>', { status: 200, headers: { 'content-security-policy': CSP } }),
   read = () => new Response('', { status: 302, headers: { location: GET_URL } }),
 }: {
   presign?: () => Response;
+  home?: () => Response;
   read?: () => Response;
 } = {}) {
-  return vi.fn(async (url: string) => (url.endsWith('/api/v1/files/presign') ? presign() : read()));
+  return vi.fn(async (url: string) => {
+    if (url.endsWith('/api/v1/files/presign')) return presign();
+    if (url === `https://${DOMAIN}/`) return home();
+    return read();
+  });
 }
 
 function transferWith(overrides: Partial<PresignedTransfer> = {}): PresignedTransfer {
   return {
+    preflight: vi.fn(async () => ({ status: 200, allowOrigin: `https://${DOMAIN}` })),
     put: vi.fn(async () => ({ status: 200, body: '' })),
     get: vi.fn(async () => ({ status: 200, bytes: new Uint8Array(ONE_PIXEL_PNG) })),
     ...overrides,
@@ -64,10 +75,14 @@ describe('checkFileUploadRoundtrip', () => {
       contentType: 'image/png',
       size: ONE_PIXEL_PNG.length,
     });
+    // The page's CSP is read from `/`, and a browser-shaped CORS preflight hits
+    // the presigned URL from the app's origin.
+    expect(appFetch.mock.calls[1][0]).toBe(`https://${DOMAIN}/`);
+    expect(transfer.preflight).toHaveBeenCalledWith(PUT_URL, `https://${DOMAIN}`);
     // PUT goes to the presigned URL with the signed headers; the read goes
     // through the app and the redirect target is what gets downloaded.
     expect(transfer.put).toHaveBeenCalledWith(PUT_URL, expect.any(Object), expect.any(Uint8Array));
-    expect(appFetch.mock.calls[1][0]).toBe(`https://${DOMAIN}/api/files/${KEY}`);
+    expect(appFetch.mock.calls[2][0]).toBe(`https://${DOMAIN}/api/files/${KEY}`);
     expect(transfer.get).toHaveBeenCalledWith(GET_URL);
   });
 
@@ -89,6 +104,55 @@ describe('checkFileUploadRoundtrip', () => {
     });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toMatch(/^presign: 200 but unexpected shape/);
+  });
+
+  it('fails when the page CSP connect-src does not allow the storage origin', async () => {
+    const transfer = transferWith();
+    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+      appFetch: appFetchWith({
+        home: () =>
+          new Response('', {
+            status: 200,
+            headers: { 'content-security-policy': "default-src 'self'; connect-src 'self'" },
+          }),
+      }),
+      transfer,
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(
+      /^csp: connect-src does not allow https:\/\/fsn1\.your-objectstorage\.com/,
+    );
+    expect(transfer.put).not.toHaveBeenCalled();
+  });
+
+  it('fails when the page carries no CSP header', async () => {
+    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+      appFetch: appFetchWith({ home: () => new Response('', { status: 200 }) }),
+      transfer: transferWith(),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/^csp: /);
+  });
+
+  it('fails when the CORS preflight does not echo the app origin', async () => {
+    const transfer = transferWith({
+      preflight: vi.fn(async () => ({ status: 403, allowOrigin: null })),
+    });
+    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', { appFetch: appFetchWith(), transfer });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/^cors: preflight .*403.*Access-Control-Allow-Origin/);
+    expect(transfer.put).not.toHaveBeenCalled();
+  });
+
+  it('fails when the preflight allows a different origin', async () => {
+    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+      appFetch: appFetchWith(),
+      transfer: transferWith({
+        preflight: vi.fn(async () => ({ status: 200, allowOrigin: 'https://evil.example' })),
+      }),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/^cors: /);
   });
 
   it('fails when object storage rejects the PUT', async () => {

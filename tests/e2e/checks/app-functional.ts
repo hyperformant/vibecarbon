@@ -538,6 +538,16 @@ export const ONE_PIXEL_PNG = Buffer.from(
   'base64',
 );
 
+/** Source list of one CSP directive, or null when the header or directive is absent. */
+function cspDirective(header: string | null, name: string): string[] | null {
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const [directive, ...sources] = part.trim().split(/\s+/);
+    if (directive?.toLowerCase() === name) return sources;
+  }
+  return null;
+}
+
 interface PresignBody {
   key?: unknown;
   url?: unknown;
@@ -547,7 +557,8 @@ interface PresignBody {
 
 /**
  * The upload path end to end, the way the browser walks it: the signed-in user
- * asks the app for a presigned PUT (`POST /api/v1/files/presign`), PUTs the
+ * asks the app for a presigned PUT (`POST /api/v1/files/presign`), confirms the
+ * page CSP and the bucket CORS would let a browser make that PUT, PUTs the
  * bytes straight to object storage, then reads them back through the app
  * (`GET /api/files/<key>`, a 302 to a presigned GET). Passes only when the
  * bytes that come back equal the bytes that went up.
@@ -603,6 +614,33 @@ export async function checkFileUploadRoundtrip(
       return fail('presign', `200 but unexpected shape: ${JSON.stringify(presign).slice(0, 300)}`);
     }
     const key = presign.key;
+
+    // The browser PUTs straight to object storage, so two things outside the
+    // byte transfer must hold or the real upload button fails while this
+    // server-side PUT succeeds: the page's CSP connect-src must allow the
+    // storage origin, and the bucket's CORS must answer the preflight for the
+    // app's origin.
+    const storageOrigin = new URL(presign.url).origin;
+    const homeRes = await appFetch(`https://${appDomain}/`, { method: 'GET' });
+    const csp = homeRes.headers.get('content-security-policy');
+    const connectSrc = cspDirective(csp, 'connect-src');
+    if (!connectSrc?.includes(storageOrigin)) {
+      return fail(
+        'csp',
+        `connect-src does not allow ${storageOrigin} (got: ${connectSrc ? connectSrc.join(' ') : `no connect-src in ${JSON.stringify(csp)}`})`,
+        { key },
+      );
+    }
+
+    const appOrigin = `https://${appDomain}`;
+    const preflight = await transfer.preflight(presign.url, appOrigin);
+    if (preflight.status < 200 || preflight.status >= 300 || preflight.allowOrigin !== appOrigin) {
+      return fail(
+        'cors',
+        `preflight from ${appOrigin} returned ${preflight.status} with Access-Control-Allow-Origin ${JSON.stringify(preflight.allowOrigin)}`,
+        { key },
+      );
+    }
 
     const put = await transfer.put(
       presign.url,
