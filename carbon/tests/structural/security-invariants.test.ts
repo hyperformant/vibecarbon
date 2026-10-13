@@ -175,6 +175,18 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
     expect(origins).toMatch(/throw new Error\(/);
   });
 
+  it('magic-link tokens keep the plain storage the assurance cleanup reads', () => {
+    // auth/assurance.ts finds the pending link by `magic-link:<token>` to
+    // revoke an unproven second factor before the link signs anyone in. A
+    // magicLink `storeToken` (hashed or custom) changes that identifier, so
+    // the lookup would silently find nothing and the cleanup would never run.
+    const live = uncommentedTs(authConfig);
+    expect(live).toContain('magicLink({');
+    expect(live).not.toMatch(/storeToken/);
+    const assurance = read('src/server/auth/assurance.ts');
+    expect(assurance).toContain('`magic-link:${token}`');
+  });
+
   it('the auth API keeps its own origin and CSRF checks on', () => {
     expect(authConfig).toContain('disableOriginCheck: false');
     expect(authConfig).toContain('disableCSRFCheck: false');
