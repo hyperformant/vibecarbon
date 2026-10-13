@@ -26,7 +26,7 @@ import { adminNewsletterRoutes } from './routes/v1/admin/newsletter';
 import { authRoutes } from './routes/v1/auth';
 import { billingRoutes } from './routes/v1/billing';
 import { contactRoutes } from './routes/v1/contact';
-import { filesRoutes } from './routes/v1/files';
+import { fileReadRoutes, filesRoutes } from './routes/v1/files';
 import { newsletterRoutes } from './routes/v1/newsletter';
 import { performanceRoutes } from './routes/v1/performance';
 import { statsRoutes } from './routes/v1/stats';
@@ -244,6 +244,7 @@ app.route('/api/v1/admin/newsletter', adminNewsletterRoutes);
 app.route('/api/v1/contact', contactRoutes);
 app.route('/api/v1/newsletter', newsletterRoutes);
 app.route('/api/v1/files', filesRoutes);
+app.route('/api/files', fileReadRoutes);
 
 // Webhooks (no auth required, signature verified internally)
 // Note: Must receive raw body for signature verification

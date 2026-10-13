@@ -2,7 +2,14 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
-import { presignUpload, StorageInputError, StorageNotConfiguredError } from '../../lib/storage';
+import {
+  isStorageConfigured,
+  parseObjectKey,
+  presignRead,
+  presignUpload,
+  StorageInputError,
+  StorageNotConfiguredError,
+} from '../../lib/storage';
 import type { HonoVariables } from '../../types';
 
 const filesRoutes = new Hono<{ Variables: HonoVariables }>();
@@ -57,4 +64,43 @@ filesRoutes.post('/presign', async (c) => {
   }
 });
 
-export { filesRoutes };
+const fileReadRoutes = new Hono<{ Variables: HonoVariables }>();
+
+const READ_PREFIX = '/api/files/';
+
+/**
+ * Serve a stored file by redirecting to a short-lived presigned GET URL.
+ * Avatars are public through the app; private files are owner-only. Every
+ * refusal is a 404 so callers cannot probe which keys exist.
+ */
+fileReadRoutes.get('/*', async (c) => {
+  if (!isStorageConfigured()) {
+    return c.notFound();
+  }
+
+  // SECURITY: take the raw path and never decode it. parseObjectKey is a strict
+  // allowlist match, so encoded slashes and dot segments simply fail to parse.
+  const raw = c.req.path.startsWith(READ_PREFIX) ? c.req.path.slice(READ_PREFIX.length) : '';
+  const parsed = parseObjectKey(raw);
+  if (!parsed) {
+    return c.notFound();
+  }
+
+  if (parsed.kind === 'private') {
+    const user = c.get('user');
+    if (!user || user.id !== parsed.userId) {
+      return c.notFound();
+    }
+  }
+
+  try {
+    const url = await presignRead(parsed.key);
+    c.header('Cache-Control', 'private, max-age=60');
+    return c.redirect(url, 302);
+  } catch (err) {
+    logger.error({ err }, 'Failed to presign file read');
+    return c.notFound();
+  }
+});
+
+export { fileReadRoutes, filesRoutes };
