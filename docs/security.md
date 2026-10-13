@@ -208,7 +208,7 @@ transaction pooler breaks realtime's replication slot, PostgREST's
 
 **Connection budget.** `db` runs with an explicit `max_connections=200`
 (`carbon/docker-compose.yml`). The real consumers (PostgREST pool + auth +
-storage + realtime + meta + Supavisor's server pool + replication +
+realtime + meta + Supavisor's server pool + replication +
 `superuser_reserved`) sum to ~65, leaving headroom for the HA standby and
 scale-ups. PostgREST's own pool is capped explicitly (`PGRST_DB_POOL`) with a
 fail-fast acquisition timeout so a saturated pool errors clearly instead of

@@ -95,6 +95,8 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 | `GET /api/v1/admin/newsletter` | Manage newsletter subscribers (super admin) |
 | `POST /api/v1/admin/newsletter/send` | Send newsletter to active subscribers (super admin) |
 | `GET /api/v1/admin/newsletter/export` | Export subscribers as CSV (super admin) |
+| `POST /api/v1/files/presign` | Get a signed upload URL for an avatar or private file (`{kind, contentType, size}`) |
+| `GET /api/files/<key>` | 302 to a 5-minute signed download URL (404 unless you may read it) |
 | `GET /api/_internal/verify-role` | Traefik ForwardAuth |
 | `POST /api/webhooks/billing` | Billing webhook handler (Stripe/Paddle/Polar) |
 | `POST /api/webhooks/stripe` | Stripe webhook handler (backward compat) |
@@ -298,6 +300,19 @@ This project uses Claude Code's agent teams with a **lead-coordinator** that orc
 - `task-completed-gate.sh` — the full test suite must pass before QA marks a task complete
 
 **Configuration**: the agent definitions live in `.claude/agents/`, one `.md` per agent — edit them to teach the team about your project. `.claude/settings.json` registers the hooks and the `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var required for agent teams, and each agent keeps notes under `.claude/agent-memory/<agent>/`.
+
+## File Uploads (signed URLs)
+
+Files go from the browser straight to the S3 bucket. They never touch the server's disk and never pass through Hono, so uploads stay fast and the VPS stays small. The server only signs short-lived URLs (`src/server/lib/storage.ts`).
+
+- **Upload**: the client calls `POST /api/v1/files/presign` with `{kind, contentType, size}` and gets back `{key, url, headers, expiresIn, fileUrl}`. It then `PUT`s the file to `url` with those `headers`. The URL expires after 300 seconds.
+- **Read**: `GET /api/files/<key>` answers with a 302 to a 5-minute signed URL. Anything the caller may not read is a 404, so key existence does not leak.
+- **Kinds**: `avatar` (max 2 MB; jpeg, png, gif, webp; readable by anyone through the app) and `private` (max 10 MB; jpeg, png, gif, webp, pdf, txt, csv; readable only by the owner and served as a download). Keys look like `avatars/<userId>/<uuid>.<ext>` and `private/<userId>/<uuid>.<ext>`.
+- **Components**: `FileUpload` takes a `kind` and an optional `prepare` hook that transforms the file before upload. `AvatarUpload` uses it to resize to a 256px WebP in the browser.
+- **Optional**: when any `S3_*` variable (`S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) is missing, presign returns `503 storage_not_configured` and reads return 404. The app still boots.
+- **Local dev**: a SeaweedFS `s3` service in `docker-compose.override.yml` listens on `127.0.0.1:8333`. `scripts/ensure-dev-bucket.js` creates the bucket and its CORS rules on dev start, and `vibecarbon create` writes the dev `S3_*` variables.
+- **Deployed**: `vibecarbon deploy` provisions your provider's native S3 bucket and sets its CORS for `https://<your-domain>`. The bucket stays private; never add public-read ACLs or bucket policies.
+- **NEVER** accept file bytes in a route or write them to disk. Add new file kinds in `storage.ts`, with an explicit size cap and content-type allowlist.
 
 ## Important Notes
 
