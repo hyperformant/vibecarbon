@@ -24,6 +24,8 @@
  * @property {string[]} [enum] - constrain a value flag to an allowed set.
  *   The parser emits an error if the supplied value isn't in this list.
  * @property {string} [description] - human-readable description for help.
+ * @property {boolean} [featured] - docs-only: README and AGENTS give this flag
+ *   its own row under the command. The parser ignores it.
  *
  * @typedef {object} PositionalSpec
  * @property {string} name - identifier (used as the key in the result).

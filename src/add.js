@@ -102,10 +102,10 @@ const SERVICE_ENV_FLAGS = {
  * later in the file as `LOCAL_FEATURES`; lazy access via a getter so
  * this module can resolve hoisting cleanly.
  */
-function buildSpec() {
+export function buildSpec() {
   return /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */ ({
     name: 'add',
-    summary: 'Add a feature to a Vibecarbon project',
+    summary: 'Add features (observability, redis)',
     description: [
       'Available features:',
       ...AVAILABLE_FEATURES.map((f) => `  ${f.name.padEnd(16)} ${f.description}`),

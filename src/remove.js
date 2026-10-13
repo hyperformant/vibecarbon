@@ -36,7 +36,7 @@ import { assertInProjectDir } from './lib/project-guard.js';
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'remove',
-  summary: 'Remove a feature from a Vibecarbon project',
+  summary: 'Remove features from a project',
   positional: [
     {
       name: 'features',

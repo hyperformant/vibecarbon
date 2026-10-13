@@ -52,6 +52,8 @@ This single command boots your entire development environment:
 2. **Runs database migrations**: creates tables, security policies, and your admin user
 3. **Launches dev servers**: Hono API on port 3000 and Vite on port 5173 with hot reloading
 
+Local services don't start by themselves after a reboot (so a deleted or moved project can't crash-loop in the background). Run `vibecarbon up` again when you come back.
+
 Open [http://app.localhost](http://app.localhost) and sign in with the credentials you chose during creation. You'll be guided through onboarding to set up your profile, create an organization, and choose a plan.
 
 | Service | URL |

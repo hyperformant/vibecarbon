@@ -108,7 +108,7 @@ const OPTIONAL_FILE_PREFIXES = ['docker-compose.n8n.', 'docker-compose.metabase.
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'upgrade',
-  summary: 'Update infrastructure files to the latest template',
+  summary: 'Upgrade infrastructure files to the latest template',
   description: [
     "Compares your project's infrastructure files against the latest template",
     'and applies updates. User source code (src/**, content/**, migrations/**)',

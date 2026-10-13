@@ -137,7 +137,7 @@ const SECRET_PLACEHOLDERS = new Set([
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'create',
-  summary: 'Scaffold a new Vibecarbon project',
+  summary: 'Create a new Vibecarbon project',
   description: [
     "What's included:",
     '  • Hono API server with TypeScript',
@@ -170,7 +170,8 @@ const SPEC = {
     {
       name: 'install',
       boolean: true,
-      description: "Run the package manager's install during create (default: off)",
+      description:
+        "Run the package manager's install during create (default: deferred to first vibecarbon up)",
     },
     {
       name: 'skip-lockfile',
@@ -182,7 +183,7 @@ const SPEC = {
       name: 'pm',
       value: '<name>',
       enum: ['npm', 'pnpm', 'bun'],
-      description: 'Package manager to use (default: npm)',
+      description: 'Package manager: npm (default), pnpm, or bun',
     },
     {
       name: 'admin-email',

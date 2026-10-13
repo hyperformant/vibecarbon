@@ -51,7 +51,7 @@ import { VERSION } from './lib/version.js';
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'status',
-  summary: 'Show project & deployment status',
+  summary: 'Show project and deployment status',
   description: [
     'Read-only summary of project + environment health.',
     '',

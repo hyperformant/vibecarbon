@@ -29,7 +29,7 @@ import {
 } from './lib/subnet.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string }} */
-const SPEC = {
+export const SPEC = {
   name: 'up',
   summary: 'Start the local development environment',
   description: [

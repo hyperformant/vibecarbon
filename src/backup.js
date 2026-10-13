@@ -46,7 +46,7 @@ import { printWalgBackupList } from './lib/walg-backups.js';
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'backup',
-  summary: 'Create or manage database backups',
+  summary: 'Create, list, or download database backups',
   positional: [
     {
       name: 'env',
@@ -68,13 +68,13 @@ const SPEC = {
       name: 'action',
       value: '<verb>',
       enum: ['create', 'list', 'download'],
-      description: 'Action seed (skips the action prompt)',
+      description: 'Action seed (skips the action prompt): create, list, or download',
     },
     {
       name: 'source',
       value: '<file>',
       description:
-        'Backup filename for -action download (legacy backup-pod dumps only — k8s without object storage; wal-g environments restore with `vibecarbon restore`)',
+        'Backup filename for -action download (legacy backup-pod dumps only, k8s without object storage; wal-g environments restore with `vibecarbon restore`)',
     },
   ],
   examples: [

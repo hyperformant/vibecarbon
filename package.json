@@ -21,6 +21,7 @@
     "node:check": "node scripts/sync-node-version.js --check",
     "dev:stop": "node scripts/dev-stop.js",
     "lint": "node scripts/check-shell-safety.js && node scripts/check-stale-deploy-references.js && node scripts/check-paid-boundary.js && biome check src/ tests/ && tsc -p tsconfig.e2e.json",
+    "docs:cli": "node scripts/gen-cli-docs.js",
     "lint:shell": "node scripts/check-shell-safety.js",
     "lint:stale-deploy": "node scripts/check-stale-deploy-references.js",
     "lint:fix": "biome check --write src/ tests/",

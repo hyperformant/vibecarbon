@@ -59,7 +59,7 @@ const DEPLOY_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'deploy',
-  summary: 'Deploy a Vibecarbon environment to the cloud',
+  summary: 'Deploy an environment (interactive picker for mode and region)',
   description: [
     'Most settings (server type, S3, DNS, backup schedule, worker bounds)',
     'come from the interactive prompt or `.vibecarbon.json`. Power users',
@@ -98,7 +98,7 @@ const SPEC = {
       name: 'mode',
       value: '<mode>',
       enum: DEPLOY_MODES,
-      description: 'Deploy mode',
+      description: 'Deploy mode: compose, compose-ha, k8s, or k8s-ha',
     },
     {
       name: 'server-type',
@@ -115,7 +115,7 @@ const SPEC = {
       name: 'restore',
       value: '<latest|timestamp>',
       description:
-        'Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). Skips migrations; the restored DB is authoritative. k8s only.',
+        'Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). Skips migrations; the restored DB is authoritative. k8s and k8s-ha only.',
     },
     {
       name: 'allow-degraded',

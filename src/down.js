@@ -18,7 +18,7 @@ import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string }} */
-const SPEC = {
+export const SPEC = {
   name: 'down',
   summary: 'Stop the local development environment',
   description: [
@@ -31,7 +31,8 @@ const SPEC = {
     {
       name: 'orphans',
       boolean: true,
-      description: 'Remove local stacks whose project folder is gone',
+      featured: true,
+      description: 'Remove local stacks whose project folder is gone or moved',
     },
     { name: 'y', boolean: true, description: 'Skip the confirmation' },
   ],

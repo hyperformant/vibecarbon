@@ -31,10 +31,12 @@ unblock the invocation.
 Multi-letter flags are spelled out (`-env`, `-mode`, `-source`). Only `-h`,
 `-v`, `-y`, and `-l` are single-letter.
 
+{/* BEGIN GENERATED: global-flags */}
 | Flag | Description |
 |------|-------------|
 | `-h` | Show help |
 | `-v` | Show version number |
+{/* END GENERATED: global-flags */}
 
 ---
 
@@ -90,10 +92,9 @@ it is safe in every shell and in scripts.
 Without a terminal, in CI, behind a pipe, or under an agent, it prints the next
 command, never asks anything, and exits 0.
 
-| Flag | Description |
-|------|-------------|
-| `-h` | Show help |
-| `-v` | Show version number |
+{/* BEGIN GENERATED: flags next */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags next */}
 
 ---
 
@@ -114,13 +115,17 @@ Generates secure secrets (JWT, database password, Supabase keys), copies the
 template, initializes a git repository (with pre-commit + pre-push hooks),
 optionally runs `npm install`, and creates the admin user in Supabase Auth.
 
+{/* BEGIN GENERATED: flags create */}
 | Flag | Description |
 |------|-------------|
-| `-y` | Skip prompts (requires `-admin-email` and `-admin-password`) |
-| `-admin-email <email>` | Admin email for dashboard access |
-| `-admin-password <pw>` | Admin password for dashboard access |
-| `-pm <name>` | Package manager: `npm` (default), `pnpm`, or `bun` |
-| `-install` | Run `<pm> install` during create (default: deferred to first `vibecarbon up`) |
+| `-y` | Skip prompts (requires -admin-email and -admin-password) |
+| `-install` | Run the package manager's install during create (default: deferred to first vibecarbon up) |
+| `-skip-lockfile` | Skip lockfile generation (faster; deploy will need `vibecarbon up` first to install) |
+| `-pm <name>` | Package manager: npm (default), pnpm, or bun |
+| `-admin-email <email>` | Admin email for dashboard access (required with -y) |
+| `-admin-password <pw>` | Admin password for dashboard access (required with -y) |
+| `-display-name <name>` | Human-facing product name shown in browser titles, the PWA manifest, and emails (default: derived from project name) |
+{/* END GENERATED: flags create */}
 
 A git repository is initialized automatically (with pre-commit + pre-push hooks). If `git` isn't on PATH, this step is skipped silently with a hint to run `git init` manually afterwards.
 
@@ -129,6 +134,10 @@ A git repository is initialized automatically (with pre-commit + pre-push hooks)
 ## up
 
 Start the local development environment.
+
+{/* BEGIN GENERATED: flags up */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags up */}
 
 ```bash
 vibecarbon up
@@ -139,11 +148,30 @@ which boots Docker services (PostgreSQL, Supabase, Traefik), runs database
 migrations, and starts the Hono API and Vite dev servers. If ports are already
 in use, a port offset is applied automatically.
 
+On first run, `up` pins the stack name in your project's `.env` as
+`COMPOSE_PROJECT_NAME`. That name ties your containers and database volumes to
+the project, so you can rename or move the folder and keep your local database.
+`up` notices the old stack, removes its containers (never its volumes), and
+recreates them from the new folder. It tells you when it does this, so you know
+your data came along.
+
+If you copy a project folder while the original's stack still exists, `up`
+refuses to start the copy so the two can't fight over one database. The message
+says what to change: give the copy its own `PROJECT_NAME`, or run
+`vibecarbon down` in the other folder first.
+
 ---
 
 ## down
 
 Stop the local development environment.
+
+{/* BEGIN GENERATED: flags down */}
+| Flag | Description |
+|------|-------------|
+| `-orphans` | Remove local stacks whose project folder is gone or moved |
+| `-y` | Skip the confirmation |
+{/* END GENERATED: flags down */}
 
 ```bash
 vibecarbon down
@@ -151,6 +179,16 @@ vibecarbon down
 
 Stops all Docker Compose services for this project. Volumes (database data) are
 preserved.
+
+`-orphans` cleans up after projects you deleted or moved. It lists local stacks
+whose project folder is gone, or that were started from files that are no longer
+there (and have no running containers). You're asked before the containers and
+network are removed, and asked again, separately, before any data volumes are
+deleted. That second question defaults to No. `-y` and non-interactive runs
+never delete volumes.
+
+To reuse a moved project's data, set `COMPOSE_PROJECT_NAME=<old name>` in the
+new folder's `.env` before you run `vibecarbon up`.
 
 ---
 
@@ -169,9 +207,11 @@ vibecarbon reset -y
 Removes containers, Docker volumes, and locally-built images. **All local
 database data will be lost.** Run `vibecarbon up` afterward to restart.
 
+{/* BEGIN GENERATED: flags reset */}
 | Flag | Description |
 |------|-------------|
 | `-y` | Skip confirmation prompt |
+{/* END GENERATED: flags reset */}
 
 ---
 
@@ -195,10 +235,12 @@ projects. When run inside a project, shows detailed environment status. Live
 server checks require your provider's API token in the environment (for
 example `HETZNER_API_TOKEN` or `DIGITALOCEAN_API_TOKEN`).
 
+{/* BEGIN GENERATED: flags status */}
 | Flag | Description |
 |------|-------------|
 | `-env <name>` | Show only a specific environment |
 | `-json` | Machine-readable JSON output |
+{/* END GENERATED: flags status */}
 
 ---
 
@@ -222,11 +264,12 @@ vibecarbon add observability redis
 CI/CD and external services (Stripe, OAuth, SMTP, etc.) live in
 [`vibecarbon configure`](#configure) instead.
 
+{/* BEGIN GENERATED: flags add */}
 | Flag | Description |
 |------|-------------|
-| `-h` | Show this help |
 | `-y` | Skip confirmation prompts |
-| `-offline` | Use bundled templates (for air-gapped environments) |
+| `-online` | Fetch the latest bundles from GitHub instead of the packaged copy |
+{/* END GENERATED: flags add */}
 
 ---
 
@@ -248,12 +291,13 @@ vibecarbon remove redis -force
 Service data (volumes, databases) is preserved; only deployment configs
 (Docker / k8s manifests) are removed.
 
+{/* BEGIN GENERATED: flags remove */}
 | Flag | Description |
 |------|-------------|
-| `-h` | Show this help |
 | `-y` | Skip confirmation prompts |
-| `-force` | Skip confirmation prompts (alias for `-y`) |
-| `-offline` | Use bundled service definitions (for air-gapped environments) |
+| `-force` | Skip confirmation prompt (alias for -y) |
+| `-online` | Fetch the latest service definitions from GitHub instead of the packaged copy |
+{/* END GENERATED: flags remove */}
 
 ---
 
@@ -261,6 +305,10 @@ Service data (volumes, databases) is preserved; only deployment configs
 
 Interactive wizard for configuring external services (billing, OAuth, SMTP,
 CI/CD).
+
+{/* BEGIN GENERATED: flags configure */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags configure */}
 
 ```bash
 # Configure a new project after creation
@@ -367,11 +415,13 @@ Files are classified into three categories:
 - **Merge**: always shown for review (e.g. `docker-compose.yml`, `package.json`)
 - **Never**: your code, never touched (e.g. `src/**`, `supabase/**`, `.env`)
 
+{/* BEGIN GENERATED: flags upgrade */}
 | Flag | Description |
 |------|-------------|
 | `-y` | Auto-accept safe replacements, skip merge files |
 | `-dry` | Preview changes without applying |
-| `-force` | Replace all files (creates `.upgrade-backup` copies) |
+| `-force` | Replace all files (creates .upgrade-backup copies) |
+{/* END GENERATED: flags upgrade */}
 
 ---
 
@@ -381,6 +431,10 @@ Control anonymous usage analytics. `vibecarbon` sends command names,
 versions, and (when inside a project) the provider and deploy mode — never
 arguments, paths, or personal data — to help prioritize development. The
 version update check is separate and always runs (it carries no data).
+
+{/* BEGIN GENERATED: flags telemetry */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags telemetry */}
 
 ```bash
 # Show whether analytics is on, and why (default with no subcommand)
@@ -436,19 +490,20 @@ the interactive prompt or `.vibecarbon.json`. Power users who want one-shot
 scripted deploys configure `.vibecarbon.json` once and re-run with `-y` to skip
 confirmations.
 
+{/* BEGIN GENERATED: flags deploy */}
 | Flag | Description |
 |------|-------------|
-| `-h` | Show this help |
 | `-y` | Skip confirmation prompts |
 | `-env <name>` | Environment seed (alternative to positional) |
-| `-provider <id>` | Cloud provider for a NEW environment (existing environments keep their binding). Required with `-y` on a new environment. |
-| `-region <id>` | Primary region (provider-specific, e.g. `hel1` on Hetzner, `nyc3` on DigitalOcean) |
-| `-standby-region <id>` | HA standby/failover region (defaults to a same-continent partner of `-region`) |
-| `-mode <mode>` | Deploy mode: `compose`, `compose-ha`, `k8s`, or `k8s-ha` |
-| `-server-type <id>` | Server type (provider-specific, e.g. `cpx22`). Compose: the whole box; k8s: blanket for master/supabase/worker unless `.vibecarbon.json` sets them per role. Without it a scripted deploy takes the region default. |
+| `-provider <id>` | Cloud provider for a NEW environment (existing environments keep their binding). Required with -y on a new environment. |
+| `-region <id>` | Primary region (provider-specific, e.g. hel1 on Hetzner, nyc3 on DigitalOcean) |
+| `-standby-region <id>` | HA standby/failover region (defaults to a same-continent partner of -region) |
+| `-mode <mode>` | Deploy mode: compose, compose-ha, k8s, or k8s-ha |
+| `-server-type <id>` | Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/supabase/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
-| `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3, or PITR to an ISO-8601 timestamp. Skips migrations; the restored DB is authoritative. K8s modes only. |
-| `-allow-degraded` | HA only: finish even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy fails unless replication is confirmed streaming. |
+| `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). Skips migrations; the restored DB is authoritative. k8s and k8s-ha only. |
+| `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |
+{/* END GENERATED: flags deploy */}
 
 Provider support varies by mode: `compose` runs on all five providers, and
 `compose-ha`, `k8s`, and `k8s-ha` run on Hetzner and DigitalOcean. See
@@ -498,13 +553,15 @@ The Pulumi state bucket is kept and recorded as `retainedStateBucket` in
 `.vibecarbon.json` so a redeploy resumes the same warm state backend; `-purge`
 deletes it along with the backup bucket.
 
+{/* BEGIN GENERATED: flags destroy */}
 | Flag | Description |
 |------|-------------|
-| `-y` | Skip confirmation prompts (does not skip prod type-to-confirm) |
+| `-y` | Skip confirmation prompts (does not skip the prod type-to-confirm) |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-orphans` | Destroy stray Pulumi stacks not tracked in config |
 | `-purge` | Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved) |
-| `-confirm <value>` | Production only: the type-to-confirm value (`<project>-<env>`) on the command line |
+| `-confirm <value>` | Production only: supply the type-to-confirm value (project and env joined by a dash, like my-saas-prod) on the command line (scripts / no TTY) |
+{/* END GENERATED: flags destroy */}
 
 ---
 
@@ -528,14 +585,15 @@ vibecarbon backup prod -l
 vibecarbon backup prod -action create -y
 ```
 
+{/* BEGIN GENERATED: flags backup */}
 | Flag | Description |
 |------|-------------|
-| `-h` | Show this help |
 | `-y` | Skip confirmation prompts |
-| `-l` | List backups (read-only; equivalent to `-action list`) |
+| `-l` | List backups (read-only; equivalent to -action list) |
 | `-env <name>` | Environment seed (alternative to positional) |
-| `-action <verb>` | Action seed: `create`, `list`, or `download` |
-| `-source <file>` | Backup filename for `-action download` — legacy backup-pod dumps only (k8s without object storage). wal-g environments have no file to download; restore with `vibecarbon restore`. |
+| `-action <verb>` | Action seed (skips the action prompt): create, list, or download |
+| `-source <file>` | Backup filename for -action download (legacy backup-pod dumps only, k8s without object storage; wal-g environments restore with `vibecarbon restore`) |
+{/* END GENERATED: flags backup */}
 
 ---
 
@@ -568,14 +626,15 @@ even with `-y`; `-confirm <env>` supplies it for scripts (without it, and
 with no terminal, the command exits instead of waiting). Planner statistics
 are rebuilt (`ANALYZE`) once the restored cluster promotes.
 
+{/* BEGIN GENERATED: flags restore */}
 | Flag | Description |
 |------|-------------|
-| `-h` | Show this help |
 | `-y` | Skip confirmation prompts |
-| `-l` | List restore points (read-only; does not restore) |
+| `-l` | List available backups (read-only; does not restore) |
 | `-env <name>` | Environment seed (alternative to positional) |
-| `-source <latest\|ISO-timestamp>` | Restore point: `latest` or an ISO-8601 timestamp (PITR) |
-| `-confirm <value>` | Production only: the type-to-confirm value on the command line |
+| `-source <latest\|ISO-timestamp>` | Restore point: `latest` (newest base backup + all WAL) or an ISO-8601 timestamp (PITR) |
+| `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |
+{/* END GENERATED: flags restore */}
 
 ---
 
@@ -603,12 +662,15 @@ Behavior depends on deployment topology:
 | HA + manual DNS | Promotes standby DB, prints DNS update instructions |
 | Single server | Prints backup/restore recovery steps (failover is a no-op) |
 
+{/* BEGIN GENERATED: flags failover */}
 | Flag | Description |
 |------|-------------|
-| `-h` | Show this help |
 | `-y` | Skip confirmation prompts |
 | `-dry` | Show plan without executing |
 | `-env <name>` | Environment seed (alternative to positional) |
+| `-server-type <id>` | Worker server type override for pilot-light failover provisioning (e.g. cx33) |
+| `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |
+{/* END GENERATED: flags failover */}
 
 ---
 
@@ -633,11 +695,13 @@ vibecarbon scale -env prod -type cx33 -y
 | Kubernetes | Worker / master / supabase server types (in-place) |
 | Kubernetes | Worker bounds (autoscaler floor + ceiling) |
 
+{/* BEGIN GENERATED: flags scale */}
 | Flag | Description |
 |------|-------------|
-| `-y` | Skip confirmations (required with `-type`) |
+| `-y` | Skip confirmations (required with -type) |
 | `-env <name>` | Environment seed (alternative to positional) |
-| `-type <id>` | Server type to scale to, from the environment's own provider catalog (e.g. `cx33` on Hetzner, `s-4vcpu-8gb` on DigitalOcean). Compose: resizes the VPS. K8s: resizes all roles. |
+| `-type <id>` | Server type to scale to, from the environment's own provider catalog (e.g. cx33 on Hetzner, s-4vcpu-8gb on DigitalOcean). Compose: resizes the VPS. K8s: resizes all roles. |
+{/* END GENERATED: flags scale */}
 
 ---
 
@@ -649,6 +713,10 @@ no license required.
 ## shell
 
 Drop into an interactive bash with cluster context exported.
+
+{/* BEGIN GENERATED: flags shell */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags shell */}
 
 ```bash
 # Default to prod
@@ -671,6 +739,10 @@ SSH key path are in the welcome banner.
 ## diagnose
 
 Dump full cluster state for an environment.
+
+{/* BEGIN GENERATED: flags diagnose */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags diagnose */}
 
 ```bash
 # Full dump (excludes the heavy egress probe)
@@ -699,6 +771,10 @@ SSH is broken (firewall change, cloud-init failure, kernel panic). Hetzner-only
 today: on an environment deployed elsewhere it exits with an unsupported-provider
 error, and you reach for that provider's own web console instead.
 
+{/* BEGIN GENERATED: flags console */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags console */}
+
 ```bash
 # Open the noVNC URL for the master node
 vibecarbon console master
@@ -719,6 +795,10 @@ so you can click through. Does NOT auto-open a browser.
 Manage the operator-CIDR allowlist that locks SSH (port 22) and the Kubernetes
 API (port 6443) on the cloud firewall. The allowlist push assumes one provider
 per project and targets the Hetzner Cloud firewall today.
+
+{/* BEGIN GENERATED: flags access */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags access */}
 
 ```bash
 # List current CIDRs (default)
@@ -762,6 +842,10 @@ vibecarbon.com, so run it from inside that project's directory. It writes
 `.vibecarbon.license`, which should be committed and shared with your team
 so anyone working on the project can deploy without activating separately.
 
+{/* BEGIN GENERATED: flags activate */}
+_No flags beyond -h and -v._
+{/* END GENERATED: flags activate */}
+
 ```bash
 # Prompts for key
 vibecarbon activate
@@ -800,10 +884,12 @@ vibecarbon deactivate vc-xxxxxxxxxxxxxxxx-signature...
 vibecarbon deactivate -rm
 ```
 
+{/* BEGIN GENERATED: flags deactivate */}
 | Flag | Description |
 |------|-------------|
 | `-y` | Skip confirmation prompt |
-| `-rm` | Remove the local `.vibecarbon.license` only; no request is sent |
+| `-rm` | Remove the local .vibecarbon.license only; no request is sent |
+{/* END GENERATED: flags deactivate */}
 
 Clicking the link unbinds the key. The local `.vibecarbon.license` stays
 where it is until you remove it with `deactivate -rm`.

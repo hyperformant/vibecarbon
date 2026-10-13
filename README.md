@@ -124,6 +124,7 @@ vibecarbon <command> [options]
 
 ### Dev: create, run, and evolve your project
 
+<!-- BEGIN GENERATED: commands dev -->
 | Command | What it does |
 | :------ | :----------- |
 | **`?`** / **`next`** | Tell me what to do next, and offer to run it |
@@ -132,38 +133,46 @@ vibecarbon <command> [options]
 | **`down`** | Stop the local development environment |
 | **`down -orphans`** | Remove local stacks whose project folder is gone or moved |
 | **`status`** | Show project and deployment status |
-| **`reset`** | Reset the local environment (**removes all data**) |
+| **`reset`** | Reset the local environment (removes all data) |
+| **`add [feature]`** | Add features (observability, redis) |
+| **`remove [feature]`** | Remove features from a project |
 | **`configure`** | Configure external services and settings: billing, OAuth, SMTP, CI/CD, globalization, and more |
-| **`add <feature>`** | Add features (observability, redis) |
-| **`remove <feature>`** | Remove features from a project |
 | **`upgrade`** | Upgrade infrastructure files to the latest template |
+| **`telemetry [on\|off]`** | Control anonymous usage analytics (status by default) |
+<!-- END GENERATED: commands dev -->
 
 ### Deploy: take an environment to the cloud (and back)
 
+<!-- BEGIN GENERATED: commands deploy -->
 | Command | What it does |
 | :------ | :----------- |
-| **`deploy [environment]`** | Deploy an environment (interactive picker for mode and region) |
-| **`destroy [environment]`** | Tear down a cloud environment |
-| **`backup [environment]`** | Create, list, or download database backups |
-| **`restore [environment]`** | Restore the database from a backup |
-| **`failover [environment]`** | Initiate failover to the standby region |
-| **`scale [environment]`** | Scale worker nodes and instance sizes |
+| **`deploy [env]`** | Deploy an environment (interactive picker for mode and region) |
+| **`destroy [env]`** | Tear down a cloud environment |
+| **`backup [env]`** | Create, list, or download database backups |
+| **`restore [env]`** | Restore the database from a backup |
+| **`failover [env]`** | Initiate failover to the standby region |
+| **`scale [env]`** | Scale worker nodes and instance sizes |
+<!-- END GENERATED: commands deploy -->
 
 ### License: unlock HA + Kubernetes
 
+<!-- BEGIN GENERATED: commands license -->
 | Command | What it does |
 | :------ | :----------- |
-| **`activate [key]`** | Bind a Graphene or Fullerene key to this project (unlocks Kubernetes and HA deploys). Run inside the project. |
-| **`deactivate [key]`** | Release the key from this project; confirmed by a link emailed to the buyer. `-rm` removes only the local file |
+| **`activate [key]`** | Bind a Graphene or Fullerene key to this project, unlocking Kubernetes and HA deploys. Run it inside the project |
+| **`deactivate [key]`** | Release the key from this project, confirmed by a link emailed to the buyer (-rm removes only the local file) |
+<!-- END GENERATED: commands license -->
 
 ### Debug: look under the hood
 
+<!-- BEGIN GENERATED: commands debug -->
 | Command | What it does |
 | :------ | :----------- |
-| **`shell [environment]`** | Interactive bash with `KUBECONFIG` + cloud creds exported |
-| **`diagnose [environment]`** | Dump full cluster state to `~/.vibecarbon/diag-*` |
+| **`shell [env]`** | Open an interactive bash with KUBECONFIG and cloud credentials exported |
+| **`diagnose [env]`** | Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-* |
 | **`console <node>`** | Open Hetzner's web VNC console for a node |
-| **`access [subcommand]`** | Manage the SSH + k8s-API operator-CIDR allowlist |
+| **`access [subcommand]`** | Manage the SSH and k8s-API operator-CIDR allowlist |
+<!-- END GENERATED: commands debug -->
 
 > [!WARNING]
 > `reset` and `destroy` are destructive. Both are confirmation-gated, but read the prompt before you say yes.

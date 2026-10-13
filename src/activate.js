@@ -23,19 +23,24 @@ const LICENSE_URL = 'https://vibecarbon.com/license';
 const PRICING_URL = 'https://vibecarbon.com/pricing';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string }} */
-const ACTIVATE_SPEC = {
+export const ACTIVATE_SPEC = {
   name: 'activate',
-  summary: 'Bind a Vibecarbon license key to this project',
+  summary:
+    'Bind a Graphene or Fullerene key to this project, unlocking Kubernetes and HA deploys. Run it inside the project',
   positional: [
     { name: 'key', optional: true, description: 'License key (vc-...). Prompts if omitted.' },
   ],
-  flags: [{ name: 'h', boolean: true, description: 'Show this help' }],
+  flags: [
+    { name: 'h', boolean: true, description: 'Show this help' },
+    { name: 'v', boolean: true, description: 'Show version' },
+  ],
 };
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string }} */
-const DEACTIVATE_SPEC = {
+export const DEACTIVATE_SPEC = {
   name: 'deactivate',
-  summary: 'Release the license key from this project (confirmed by email)',
+  summary:
+    'Release the key from this project, confirmed by a link emailed to the buyer (-rm removes only the local file)',
   positional: [
     {
       name: 'key',
@@ -45,6 +50,7 @@ const DEACTIVATE_SPEC = {
   ],
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
+    { name: 'v', boolean: true, description: 'Show version' },
     { name: 'y', boolean: true, description: 'Skip confirmation prompt' },
     {
       name: 'rm',

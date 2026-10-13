@@ -13,31 +13,37 @@ Vibecarbon is a CLI tool that generates production-ready software applications w
 3. **Test suite** (`tests/`): Comprehensive Vitest test suite
 
 ### CLI Commands
+
+The block below is generated from each command's `SPEC` by `pnpm docs:cli`. Don't edit inside the markers.
+
+<!-- BEGIN GENERATED: commands -->
 ```bash
-vibecarbon ?  /  vibecarbon next   # What comes next: inspects the project, shows the next command, offers to run it
-vibecarbon create <project-name>   # Create new project
-vibecarbon add <feature>           # Add optional feature (observability, redis)
-vibecarbon remove <feature>        # Remove a feature from project
-vibecarbon up                      # Start local dev environment
-vibecarbon down                    # Stop local dev environment
-vibecarbon down -orphans           # Remove local stacks whose project folder is gone
-vibecarbon reset                   # Reset local environment (removes all data)
-vibecarbon deploy [environment]    # Deploy an environment (-provider, -mode <compose|compose-ha|k8s|k8s-ha>, -region, -standby-region, -full, -restore, -allow-degraded)
-vibecarbon destroy [environment]   # Tear down cloud environment
-vibecarbon status                  # Show project and deployment status
-vibecarbon backup [environment]    # Create or list database backups
-vibecarbon restore [environment]   # Restore database from backup
-vibecarbon failover [environment]  # Initiate failover to standby region (HA deployments)
-vibecarbon scale [environment]     # Scale worker nodes and instance sizes
-vibecarbon configure               # Configure external services and project settings (billing, OAuth, SMTP, CI/CD, globalization, etc.)
-vibecarbon upgrade                 # Upgrade infrastructure files to latest template
-vibecarbon activate <key>          # Activate a license key (Graphene or Fullerene)
-vibecarbon deactivate [key]        # Request an emailed release of the license from this project; -rm removes the local file
-vibecarbon shell [environment]     # Interactive bash with KUBECONFIG + cloud credentials exported
-vibecarbon diagnose [environment]  # Dump full cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
-vibecarbon console <node>          # Open the cloud provider's web console for a node
-vibecarbon access [subcommand]     # Manage SSH + k8s-API operator-CIDR allowlist
+vibecarbon ?  /  vibecarbon next  # Tell me what to do next, and offer to run it
+vibecarbon create <project-name>  # Create a new Vibecarbon project
+vibecarbon up                     # Start the local development environment
+vibecarbon down                   # Stop the local development environment
+vibecarbon down -orphans          # Remove local stacks whose project folder is gone or moved
+vibecarbon status                 # Show project and deployment status
+vibecarbon reset                  # Reset the local environment (removes all data)
+vibecarbon add [feature]          # Add features (observability, redis)
+vibecarbon remove [feature]       # Remove features from a project
+vibecarbon configure              # Configure external services and settings: billing, OAuth, SMTP, CI/CD, globalization, and more
+vibecarbon upgrade                # Upgrade infrastructure files to the latest template
+vibecarbon telemetry [on|off]     # Control anonymous usage analytics (status by default)
+vibecarbon deploy [env]           # Deploy an environment (interactive picker for mode and region)
+vibecarbon destroy [env]          # Tear down a cloud environment
+vibecarbon backup [env]           # Create, list, or download database backups
+vibecarbon restore [env]          # Restore the database from a backup
+vibecarbon failover [env]         # Initiate failover to the standby region
+vibecarbon scale [env]            # Scale worker nodes and instance sizes
+vibecarbon shell [env]            # Open an interactive bash with KUBECONFIG and cloud credentials exported
+vibecarbon diagnose [env]         # Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
+vibecarbon console <node>         # Open Hetzner's web VNC console for a node
+vibecarbon access [subcommand]    # Manage the SSH and k8s-API operator-CIDR allowlist
+vibecarbon activate [key]         # Bind a Graphene or Fullerene key to this project, unlocking Kubernetes and HA deploys. Run it inside the project
+vibecarbon deactivate [key]       # Release the key from this project, confirmed by a link emailed to the buyer (-rm removes only the local file)
 ```
+<!-- END GENERATED: commands -->
 
 ### `destroy` exit codes
 
@@ -193,6 +199,8 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 - **Exit codes**: `0` success, `1` any failure (usage errors included: there is no exit-2 convention), `130`/`143` on SIGINT/SIGTERM. Fatal errors either `process.exit(1)` after printing context or throw to cli.js's central handler (which prints `Error: <msg>` and exits 1).
 - **Error output idioms** (pick by layer): argument/usage errors print `✗ <msg>` to stderr via `parseFlagsOrExit`; mid-flow interactive failures use `p.log.error(...)` (clack gutter); user-initiated cancels use `p.cancel(...)` + exit 0; only cli.js's top-level catch prints the bare `Error:` prefix. Don't hand-roll new variants.
 - **Command openers**: `introCommand('<name>')` (`src/lib/cli/intro.js`) prints the banner + `vibecarbon <name> v<VERSION>` intro; env-scoped deploy-side commands resolve their environment through `resolveEnvContext` (`src/lib/cli/env-context.js`).
+- **Context-sensitive messages are part of the feature.** When the CLI detects a specific scenario, its message names what happened, why it matters, and the exact command or edit that fixes it. Examples: a missing prerequisite, a conflicting stack, a refused action, or something left behind. Use the existing voice (lowercase hints via `p.log.info`, no em dashes). Unit tests assert the key strings for each scenario. A bare error with no next step is incomplete.
+- **Commands and flags document themselves.** A command's `SPEC` (summary, flag descriptions, `featured` for flags worth a README row) is the only place its interface is written. After changing a `SPEC`, run `pnpm docs:cli`. That regenerates the top-level help list, the `cli.mdx` flag tables, the README Commands tables and this file's command block. `tests/unit/docs/cli-docs-generated.test.ts` fails on drift. New command checklist: a `case` in `src/cli.js`, an entry in `src/lib/cli/command-registry.js`, an entry in `COMMAND_GATES` (`src/lib/licensing/gate.js`), a `## <name>` section in `carbon/content/docs/cli.mdx` with the `flags <name>` marker pair, then `pnpm docs:cli`. Behavior that flags can't express (scenarios, data safety, migrations) still gets hand-written prose in `cli.mdx` outside the generated markers.
 
 ## Template Placeholders
 

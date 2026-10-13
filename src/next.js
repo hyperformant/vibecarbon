@@ -35,7 +35,7 @@ import { deployedEnvironments, deployedMenu, nextStep } from './lib/next/steps.j
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 export const SPEC = {
   name: 'next',
-  summary: 'Show what to do next and offer to run it',
+  summary: 'Tell me what to do next, and offer to run it',
   description: [
     'Figures out where you are in the create, up, configure, deploy ladder, shows the',
     'exact command for your next step, and offers to run it. Once deployed, it becomes a',
