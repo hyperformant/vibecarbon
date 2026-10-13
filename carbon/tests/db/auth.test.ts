@@ -29,7 +29,13 @@ function buildApp() {
   app.get('/api/v1/whoami', (c) => {
     const user = c.get('user');
     if (!user) return c.json({ error: 'Unauthorized' }, 401);
-    return c.json({ id: user.id, email: user.email, role: user.role, aal: c.get('aal') });
+    return c.json({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      aal: c.get('aal'),
+      serverSeesToken: Boolean(c.get('session')?.token),
+    });
   });
   app.post('/api/v1/echo', (c) => {
     if (!c.get('user')) return c.json({ error: 'Unauthorized' }, 401);
@@ -171,6 +177,69 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect(out.status).toBe(200);
       const me = await app.request('/api/v1/whoami', { headers: { cookie } });
       expect(me.status).toBe(401);
+    });
+  });
+
+  describe('the session token never reaches page JS', () => {
+    /** The raw session token: the cookie value before the `.signature`. */
+    const rawToken = (res: Response) =>
+      decodeURIComponent(cookieHeader(res, TOKEN_COOKIE).split('=')[1]).split('.')[0];
+
+    it('sign-up, sign-in, get-session and list-sessions bodies carry no token; the cookie still works', async () => {
+      const email = newEmail();
+      const up = await signUp(email);
+      const upToken = rawToken(up);
+      expect(upToken.length).toBeGreaterThan(10);
+      const upText = await up.text();
+      expect(upText).not.toContain(upToken);
+      expect(JSON.parse(upText)).not.toHaveProperty('token');
+      expect(JSON.parse(upText).user.email).toBe(email);
+
+      const res = await signIn(email, PASSWORD, '203.0.113.11');
+      const token = rawToken(res);
+      const text = await res.text();
+      expect(text).not.toContain(token);
+      expect(JSON.parse(text)).not.toHaveProperty('token');
+      expect(JSON.parse(text).user.email).toBe(email);
+
+      // Token cookie only, so get-session reads the database row.
+      const cookie = cookieHeader(res, TOKEN_COOKIE);
+      const session = await app.request('/api/auth/get-session', { headers: { cookie } });
+      expect(session.status).toBe(200);
+      const sessionText = await session.text();
+      expect(sessionText).not.toContain(token);
+      const sessionBody = JSON.parse(sessionText);
+      expect(sessionBody.user.email).toBe(email);
+      expect(sessionBody.session).not.toHaveProperty('token');
+
+      // And with the cached-session cookie too (the cookie-cache path).
+      const cached = await app.request('/api/auth/get-session', {
+        headers: { cookie: cookieHeader(res) },
+      });
+      expect(await cached.text()).not.toContain(token);
+
+      const list = await app.request('/api/auth/list-sessions', { headers: { cookie } });
+      expect(list.status).toBe(200);
+      const listText = await list.text();
+      expect(listText).not.toContain(token);
+      expect(listText).not.toContain(upToken);
+
+      // The cookie still authenticates, and server code still gets the token.
+      const me = await app.request('/api/v1/whoami', { headers: { cookie } });
+      expect(await me.json()).toMatchObject({ email, serverSeesToken: true });
+    });
+
+    it('withoutTokens drops token keys at any depth and keeps everything else', async () => {
+      const { withoutTokens } = await import('@server/auth/strip-session-token');
+      const at = new Date(0);
+      expect(
+        withoutTokens({
+          token: 't',
+          user: { id: 'u', createdAt: at },
+          session: { token: 't', id: 's' },
+          list: [{ token: 't', id: 1 }],
+        }),
+      ).toEqual({ user: { id: 'u', createdAt: at }, session: { id: 's' }, list: [{ id: 1 }] });
     });
   });
 

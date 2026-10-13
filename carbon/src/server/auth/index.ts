@@ -10,6 +10,7 @@ import { env } from '../lib/env';
 import { sendAuthEmail } from './email';
 import { lockoutAfter, lockoutBefore } from './lockout';
 import { socialProviders } from './providers';
+import { stripSessionToken } from './strip-session-token';
 
 /**
  * The app's one auth instance, mounted at /api/auth/* (server/index.ts).
@@ -130,6 +131,9 @@ export const auth = betterAuth({
         await sendAuthEmail('magic link', email, url);
       },
     }),
+    // Last, so it sees every other plugin's response: no session token in
+    // any JSON body; the HttpOnly cookie is its only carrier.
+    stripSessionToken(),
   ],
 });
 
