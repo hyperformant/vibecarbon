@@ -756,4 +756,5 @@ billingRoutes.post('/license-checkout', async (c) => {
   }
 });
 
-export { billingRoutes };
+// getOrCreateCustomer is exported for its tests (billing-customer.test.ts).
+export { billingRoutes, getOrCreateCustomer };
