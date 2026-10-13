@@ -3,7 +3,11 @@ import { handleOAuthUserInfo } from 'better-auth/oauth2';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
-import { rejectOrphanedPasswordSession, secureSocialLink } from '@server/auth/account-linking';
+import {
+  CREDENTIAL_SESSION_PATHS,
+  rejectOrphanedPasswordSession,
+  secureSocialLink,
+} from '@server/auth/account-linking';
 import { adminDb } from '@server/db/client';
 import { logger } from '@server/lib/logger';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
@@ -218,24 +222,82 @@ describe.skipIf(!dbTestsEnabled)('social sign-in onto an existing email (real da
     expect(rows[0].n).toBe(1);
   });
 
-  it('the session check only touches password sign-ins', async () => {
+  it.each([...CREDENTIAL_SESSION_PATHS])(
+    'a session issued by %s without a surviving password is deleted and refused',
+    async (path) => {
+      const email = newEmail();
+      const result = await googleSignIn(email, true); // a user with no password
+      const created = result.data?.session as { id: string; userId: string };
+      await expect(rejectOrphanedPasswordSession(created, path)).rejects.toMatchObject({
+        statusCode: 401,
+      });
+      const { rows } = await db.query('select count(*)::int as n from public.session where id = $1', [
+        created.id,
+      ]);
+      expect(rows[0].n).toBe(0);
+    },
+  );
+
+  it.each(['/callback/:id', '/magic-link/verify', '/verify-email', '/admin/impersonate-user'])(
+    'sessions from %s (not password-backed) are left alone',
+    async (path) => {
+      const email = newEmail();
+      const result = await googleSignIn(email, true);
+      const created = result.data?.session as { id: string; userId: string };
+      await rejectOrphanedPasswordSession(created, path);
+      const { rows } = await db.query('select count(*)::int as n from public.session where id = $1', [
+        created.id,
+      ]);
+      expect(rows[0].n).toBe(1);
+    },
+  );
+
+  it('a password-backed path with the password still present keeps its session', async () => {
     const email = newEmail();
-    const result = await googleSignIn(email, true); // a social-only user
-    const created = result.data?.session as { id: string; userId: string };
-    const sessionCount = async () =>
-      (
-        await db.query<{ n: number }>('select count(*)::int as n from public.session where id = $1', [
-          created.id,
-        ])
-      ).rows[0].n;
+    await post('/api/auth/sign-up/email', { email, password: PASSWORD, name: 'A' });
+    expect((await post('/api/auth/sign-in/email', { email, password: PASSWORD })).status).toBe(200);
+  });
 
-    await rejectOrphanedPasswordSession(created, '/callback/:id');
-    expect(await sessionCount()).toBe(1);
+  it('change-password racing the cleanup gets no new session', async () => {
+    const email = newEmail();
+    const signup = await post('/api/auth/sign-up/email', { email, password: PASSWORD, name: 'A' });
+    const cookie = cookieOf(signup);
+    const { rows: owner } = await db.query('select id from public."user" where email = $1', [
+      email,
+    ]);
+    const userId = owner[0].id as string;
 
-    await expect(rejectOrphanedPasswordSession(created, '/sign-in/email')).rejects.toMatchObject({
-      statusCode: 401,
+    // The attacker's change-password has verified the current password when
+    // the victim's link cleanup commits; then it issues its new session.
+    const passwords = (await auth.$context).password;
+    const realVerify = passwords.verify.bind(passwords);
+    const verify = vi.spyOn(passwords, 'verify').mockImplementationOnce(async (args) => {
+      const ok = await realVerify(args);
+      expect(await secureSocialLink({ userId, providerId: 'google' })).toBe(true);
+      return ok;
     });
-    expect(await sessionCount()).toBe(0);
+    let res: Response;
+    try {
+      res = await auth.handler(
+        new Request(`${ORIGIN}/api/auth/change-password`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin: ORIGIN, cookie },
+          body: JSON.stringify({
+            currentPassword: PASSWORD,
+            newPassword: 'attacker-new-password',
+            revokeOtherSessions: true,
+          }),
+        }),
+      );
+    } finally {
+      verify.mockRestore();
+    }
+    expect(res.status).toBe(401);
+    const { rows } = await db.query('select count(*)::int as n from public.session where user_id = $1', [
+      userId,
+    ]);
+    expect(rows[0].n).toBe(0);
+    expect(await accountsOf(email)).toEqual([]);
   });
 
   it('a provider that does not vouch for the email cannot link at all', async () => {

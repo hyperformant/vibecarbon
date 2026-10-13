@@ -88,20 +88,39 @@ export async function secureSocialLink(linked: {
  * credential hash, spends time verifying it, then inserts its session. If
  * the cleanup commits in between, that insert still succeeds (it only
  * waited on the cleanup's row lock) and the attacker would hold a live
- * session on the now-verified account. So after every session that
- * `/sign-in/email` creates, check the credential it was granted on still
- * exists; if not, delete the session and fail the sign-in. Both orderings
- * are covered: a session inserted before the cleanup is deleted by it, one
- * inserted after is deleted here.
+ * session on the now-verified account. The same holds for every endpoint
+ * that issues a session on the strength of the password (or of a session
+ * that the password created). So after every session one of those creates,
+ * check the credential still exists; if not, delete the session and fail
+ * the request. Both orderings are covered: a session inserted before the
+ * cleanup is deleted by it, one inserted after is deleted here.
+ *
+ * Better Auth does not record how a session was authenticated, so this
+ * keys on the endpoint path. tests/structural/auth-session-paths.test.ts
+ * lists every place the installed Better Auth creates a session and fails
+ * when a new one appears, so an upgrade cannot add an unclassified path.
  *
  * Runs as the `session.create.after` database hook; the thrown error ends
- * the sign-in before its cookie is set.
+ * the request before its cookie is set.
  */
+export const CREDENTIAL_SESSION_PATHS: ReadonlySet<string> = new Set([
+  '/sign-in/email', // password sign-in
+  '/sign-up/email', // sign-up with a password, auto sign-in
+  '/change-password', // re-issues the session (revokeOtherSessions)
+  // Second factor (MFA task): finishing a password sign-in, and enabling or
+  // disabling 2FA (which re-issue the session and require the password).
+  '/two-factor/verify-totp',
+  '/two-factor/verify-otp',
+  '/two-factor/verify-backup-code',
+  '/two-factor/enable',
+  '/two-factor/disable',
+]);
+
 export async function rejectOrphanedPasswordSession(
   created: { id: string; userId: string },
   path: string | undefined
 ): Promise<void> {
-  if (path !== '/sign-in/email') return;
+  if (!path || !CREDENTIAL_SESSION_PATHS.has(path)) return;
   const [credential] = await adminDb
     .select({ id: account.id })
     .from(account)
@@ -109,8 +128,8 @@ export async function rejectOrphanedPasswordSession(
   if (credential) return;
   await adminDb.delete(session).where(eq(session.id, created.id));
   logger.warn(
-    { userId: created.userId },
-    'Password sign-in finished after its password was removed: session deleted'
+    { userId: created.userId, path },
+    'Password-backed session issued after its password was removed: session deleted'
   );
   // The same answer as a wrong password, so the race reveals nothing.
   throw new APIError('UNAUTHORIZED', {
