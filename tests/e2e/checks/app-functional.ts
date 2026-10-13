@@ -126,11 +126,11 @@ export async function fetchSessionUser(
 /**
  * Whether the deployed app requires email verification. The server requires it
  * exactly when SMTP is configured (carbon/src/server/lib/email.ts
- * isEmailConfigured: a transporter from SMTP_HOST plus SMTP_ADMIN_EMAIL), so
+ * isEmailConfigured: a transporter from SMTP_HOST and SMTP_USER, plus SMTP_ADMIN_EMAIL), so
  * the harness derives it from the same keys in the project's env.
  */
 export function smtpConfiguredFromEnv(vars: Record<string, string | undefined>): boolean {
-  return Boolean(vars.SMTP_HOST?.trim() && vars.SMTP_ADMIN_EMAIL?.trim());
+  return Boolean(vars.SMTP_HOST?.trim() && vars.SMTP_USER?.trim() && vars.SMTP_ADMIN_EMAIL?.trim());
 }
 
 /**

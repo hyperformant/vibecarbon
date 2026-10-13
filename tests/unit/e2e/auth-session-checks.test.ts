@@ -205,10 +205,13 @@ describe('checkAuthSignin verification and cap handling', () => {
 });
 
 describe('smtpConfiguredFromEnv', () => {
-  it('needs both SMTP_HOST and SMTP_ADMIN_EMAIL, as the server does', () => {
-    expect(smtpConfiguredFromEnv({ SMTP_HOST: 'h', SMTP_ADMIN_EMAIL: 'a@b.c' })).toBe(true);
+  it('needs SMTP_HOST, SMTP_USER and SMTP_ADMIN_EMAIL, as the server does', () => {
+    const full = { SMTP_HOST: 'h', SMTP_USER: 'u', SMTP_ADMIN_EMAIL: 'a@b.c' };
+    expect(smtpConfiguredFromEnv(full)).toBe(true);
+    expect(smtpConfiguredFromEnv({ ...full, SMTP_USER: '' })).toBe(false);
+    expect(smtpConfiguredFromEnv({ SMTP_HOST: 'h', SMTP_ADMIN_EMAIL: 'a@b.c' })).toBe(false);
     expect(smtpConfiguredFromEnv({ SMTP_HOST: 'h' })).toBe(false);
-    expect(smtpConfiguredFromEnv({ SMTP_HOST: '', SMTP_ADMIN_EMAIL: 'a@b.c' })).toBe(false);
+    expect(smtpConfiguredFromEnv({ ...full, SMTP_HOST: '' })).toBe(false);
     expect(smtpConfiguredFromEnv({})).toBe(false);
   });
 });
