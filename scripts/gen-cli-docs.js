@@ -10,7 +10,13 @@ import { DOC_TARGETS, generateAll } from '../src/lib/cli/docs-gen.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const current = new Map(DOC_TARGETS.map((p) => [p, readFileSync(join(root, p), 'utf-8')]));
-const next = await generateAll(current);
+let next;
+try {
+  next = await generateAll(current);
+} catch (err) {
+  console.error(`docs:cli failed: ${err.message}`);
+  process.exit(1);
+}
 
 for (const [path, text] of next) {
   if (text === current.get(path)) {

@@ -82,7 +82,7 @@ export const SPEC = {
     {
       name: 'section',
       optional: true,
-      description: `One of: ${ALL_VALID_SECTIONS.join(', ')}, all (default: all — excludes egress)`,
+      description: `One of: ${ALL_VALID_SECTIONS.join(', ')}, all (default: all, excludes egress)`,
     },
   ],
   flags: [

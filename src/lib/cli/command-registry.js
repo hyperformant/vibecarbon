@@ -4,7 +4,8 @@
  * Top-level help and generated docs render from this list plus each
  * command's exported `SPEC` (summary + flags). The registry carries only what
  * a SPEC can't: the display category and the argument hint shown after the
- * name. Loaders use dynamic `import()` so `src/cli.js` startup cost is unchanged.
+ * name. Loaders use dynamic `import()`: a normal command loads only its own
+ * module, while top-level `-h` imports every command (about 0.2s).
  */
 
 /** @typedef {import('./parse-flags.js').CommandSpec} CommandSpec */

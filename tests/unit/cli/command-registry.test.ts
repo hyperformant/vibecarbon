@@ -14,6 +14,23 @@ const dispatched = [
 
 const specs = await loadAllSpecs();
 
+type AnySpec = {
+  summary?: string;
+  flags?: { name: string; description?: string }[];
+  positional?: { name: string; description?: string }[];
+};
+const texts = (spec: AnySpec): [string, string][] => [
+  ['summary', spec.summary ?? ''],
+  ...(spec.flags ?? []).map((f): [string, string] => [
+    `flag -${f.name} description`,
+    f.description ?? '',
+  ]),
+  ...(spec.positional ?? []).map((p): [string, string] => [
+    `positional ${p.name} description`,
+    p.description ?? '',
+  ]),
+];
+
 describe('command registry', () => {
   it('covers exactly the commands cli.js dispatches (aliases aside)', () => {
     expect(dispatched.length).toBeGreaterThan(15);
@@ -55,7 +72,22 @@ describe('command registry', () => {
         expect(typeof spec.summary).toBe('string');
         expect(spec.summary.trim()).not.toBe('');
         expect(spec.summary).not.toContain('\n');
-        expect(spec.summary).not.toContain('—');
+      });
+      it('has no em or en dashes in any summary or description', () => {
+        for (const [field, text] of texts(spec)) {
+          expect(text, `${entry.name} ${field}: use a comma, colon or period`).not.toMatch(
+            /[\u2014\u2013]/,
+          );
+        }
+      });
+      it('has no <, >, { or } outside backtick code spans (MDX would not compile)', () => {
+        for (const [field, text] of texts(spec)) {
+          const bare = text.replace(/`[^`]*`/g, '');
+          expect(
+            bare,
+            `${entry.name} ${field}: bare < > { } break the cli.mdx MDX compile (flag tables are generated from SPEC). Wrap it in backticks or reword.`,
+          ).not.toMatch(/[<>{}]/);
+        }
       });
       it('describes every flag', () => {
         for (const f of spec.flags ?? []) {

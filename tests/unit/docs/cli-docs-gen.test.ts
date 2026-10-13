@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  generateAll,
   renderAgentsBlock,
   renderCommandTable,
   renderFlagTable,
@@ -141,5 +142,14 @@ describe('pipe escaping in command names', () => {
       'dev',
     );
     expect(out).toContain('| **`telemetry [on\\|off]`** | x |');
+  });
+});
+
+describe('generateAll missing marker', () => {
+  it('names the file and how to add the marker pair', async () => {
+    const files = { 'carbon/content/docs/cli.mdx': '# nothing here' };
+    await expect(generateAll(files, rows)).rejects.toThrow(
+      /carbon\/content\/docs\/cli\.mdx[\s\S]*BEGIN GENERATED: global-flags[\s\S]*END GENERATED: global-flags/,
+    );
   });
 });

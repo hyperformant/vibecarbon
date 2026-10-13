@@ -117,6 +117,28 @@ export async function generateAll(files, rows) {
   const input = files instanceof Map ? files : new Map(Object.entries(files));
   const out = new Map();
   for (const [path, text] of input) {
+    try {
+      out.set(path, regenerate(path, text, specs));
+    } catch (err) {
+      throw new Error(markerHint(path, err), { cause: err });
+    }
+  }
+  return out;
+}
+
+function markerHint(path, err) {
+  const id = /GENERATED: (.+?)(?: -->| \*\/\})/.exec(err.message)?.[1];
+  let hint = '';
+  if (id && err.message.includes('marker missing')) {
+    const pair = `\`{/* BEGIN GENERATED: ${id} */}\` / \`{/* END GENERATED: ${id} */}\``;
+    const where = id.startsWith('flags ') ? ` under \`## ${id.slice(6)}\`` : '';
+    hint = ` Add ${pair}${where} in ${path}.`;
+  }
+  return `${path}: ${err.message}.${hint}`;
+}
+
+function regenerate(path, text, specs) {
+  {
     let next = text;
     if (path.endsWith('cli.mdx')) {
       next = replaceRegion(next, 'global-flags', renderGlobalFlags(), 'mdx');
@@ -130,7 +152,6 @@ export async function generateAll(files, rows) {
     } else if (path.endsWith('AGENTS.md')) {
       next = replaceRegion(next, 'commands', renderAgentsBlock(specs), 'md');
     }
-    out.set(path, next);
+    return next;
   }
-  return out;
 }
