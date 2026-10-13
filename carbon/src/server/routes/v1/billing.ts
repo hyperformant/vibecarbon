@@ -8,7 +8,7 @@ import { sanitizeError } from '../../lib/errors';
 import { createRateLimiter } from '../../lib/rate-limiter';
 import { supabaseAdmin } from '../../lib/supabase';
 import { requireAal2 } from '../../middleware/requireAal2';
-import { requireOrgRole } from '../../middleware/requireOrgRole';
+import { isBillingTargetType, requireOrgRole } from '../../middleware/requireOrgRole';
 import type { HonoVariables } from '../../types';
 
 // Organization billing actions require an owner/admin of the target org.
@@ -87,11 +87,15 @@ async function getOrCreateCustomer(
 
   if (type === 'user') {
     query.eq('user_id', userId).is('organization_id', null);
-  } else {
+  } else if (type === 'organization') {
     if (!organizationId) {
       throw new Error('Organization ID is required for organization billing');
     }
     query.eq('organization_id', organizationId).is('user_id', null);
+  } else {
+    // Unreachable via the typed signature; fail closed rather than run an
+    // unscoped customers query with the service-role client.
+    throw new Error('Invalid billing target type');
   }
 
   const { data: existingCustomer, error: fetchError } = await query.maybeSingle();
@@ -268,7 +272,12 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
     return c.json({ error: 'Billing is not configured' }, 503);
   }
 
+  // Strict allowlist (defense in depth; requireOrgRole also rejects). Anything
+  // that is not 'user' must never fall through to the org branch below.
   const type = c.req.query('type') || 'user';
+  if (!isBillingTargetType(type)) {
+    return c.json({ error: 'Invalid type' }, 400);
+  }
   const organizationId = c.req.query('organizationId');
 
   try {
@@ -277,7 +286,7 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
 
     if (type === 'user') {
       customerQuery = customerQuery.eq('user_id', user.id).is('organization_id', null);
-    } else {
+    } else if (type === 'organization') {
       if (!organizationId) {
         return c.json({ error: 'Organization ID is required' }, 400);
       }
@@ -586,8 +595,10 @@ billingRoutes.post('/portal', requireAal2, requireOrgRole(ORG_BILLING_ROLES), as
 
     if (body.type === 'user') {
       query.eq('user_id', user.id).is('organization_id', null);
-    } else {
+    } else if (body.type === 'organization' && body.organizationId) {
       query.eq('organization_id', body.organizationId).is('user_id', null);
+    } else {
+      return c.json({ error: 'Organization ID is required for organization billing' }, 400);
     }
 
     const { data: customer, error: fetchError } = await query.maybeSingle();
