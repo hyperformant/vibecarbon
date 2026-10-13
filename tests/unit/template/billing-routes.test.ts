@@ -53,11 +53,6 @@ interface MockSubscription {
   cancel_at_period_end: boolean;
 }
 
-interface MockOrganization {
-  id: string;
-  name: string;
-}
-
 interface MockMembership {
   role: 'OWNER' | 'ADMIN' | 'MEMBER';
 }
