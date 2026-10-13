@@ -23,7 +23,6 @@ import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
 import { runAppFunctionalChecks } from '../checks/app-functional.js';
 import { runBackupEvidenceChecks } from '../checks/backup-evidence.js';
-import { runClientKeyAgreementCheck } from '../checks/client-key-agreement.js';
 import { resolveComposeFirewallServers, runCloudFirewallChecks } from '../checks/cloud-firewall.js';
 import {
   CONFIG_CANARY_SECRET,
@@ -265,9 +264,10 @@ interface SupabaseKeys {
  * `.env.local` ONLY (never `.env`): that is where `create.js` writes every
  * Supabase/admin secret for a scaffolded project, so there is no second file
  * to layer against `readEnvFiles`.
- * Looks for VITE_SUPABASE_ANON_KEY and SERVICE_ROLE_KEY (or
- * SUPABASE_SERVICE_ROLE_KEY — the current generator only ever writes the
- * latter; the former is read for older bundles), plus ADMIN_EMAIL/
+ * Looks for SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY (the names the
+ * generator writes; the bare ANON_KEY / SERVICE_ROLE_KEY forms are read for
+ * older bundles). Only the services Kong still fronts (PostgREST, Realtime)
+ * use them: the app and its auth API read none. Plus ADMIN_EMAIL/
  * ADMIN_PASSWORD so the functional checks can verify the operator can
  * actually log into their deployed app as the super-admin.
  */
@@ -276,7 +276,7 @@ function readSupabaseKeys(projectDir: string): SupabaseKeys | null {
     const envPath = join(projectDir, '.env.local');
     const vars = parseDotenv(readFileSync(envPath, 'utf-8'));
 
-    const anonKey = vars.VITE_SUPABASE_ANON_KEY ?? '';
+    const anonKey = vars.SUPABASE_ANON_KEY ?? vars.ANON_KEY ?? '';
     const serviceRoleKey = vars.SERVICE_ROLE_KEY ?? vars.SUPABASE_SERVICE_ROLE_KEY ?? '';
     const adminEmail = vars.ADMIN_EMAIL ?? '';
     const adminPassword = vars.ADMIN_PASSWORD ?? '';
@@ -1727,7 +1727,7 @@ export async function runLifecycle(
         const allResults: VerificationResult[] = [];
 
         // Single public origin in every mode: Traefik path-routes the versioned
-        // Supabase prefixes (/auth/v1, /rest/v1, /realtime/v1) on
+        // Supabase prefixes (/rest/v1, /realtime/v1) on
         // the apex to Kong — there is no api. subdomain. Optional add-ons
         // (grafana/n8n/...) still use subdomains on compose, hence isCompose.
         const isCompose = config.mode.startsWith('compose');
@@ -1753,7 +1753,7 @@ export async function runLifecycle(
         // Why it is needed: on the k8s tiers `serverIps` is not populated until
         // a later step, so at verify-deploy EVERY ssh-based check silently
         // self-skipped with "no serverIp/sshKeyPath" — config_secret_propagation,
-        // config_oauth_gotrue_propagation and the wal-g backup evidence pair.
+        // config_oauth_app_propagation and the wal-g backup evidence pair.
         // The k8s runs showed 18 passed / 8 skipped against compose's 27 / 4,
         // and the two config canaries never ran on k8s AT ALL, at any phase, on
         // any provider. They exist specifically to cover a k8s gap
@@ -1857,18 +1857,19 @@ export async function runLifecycle(
           );
         }
 
-        // Wait for the Supabase gateway (apex /auth/v1 path → Kong) before the
-        // functional checks — the app router can come up before Kong does.
-        console.log(`${tag} Waiting for ${apiDomain}/auth/v1/health to become ready...`);
+        // Wait for the in-process auth API before the functional checks: the
+        // app answers /api/health before its auth routes are mounted behind
+        // the router on a cold start.
+        console.log(`${tag} Waiting for ${apiDomain}/api/auth/ok to become ready...`);
         const apiHealthy = await waitForHealthy(
           apiDomain,
           Math.min(TIMEOUTS[stepName], 120_000),
           5_000,
-          '/auth/v1/health',
+          '/api/auth/ok',
         );
         if (!apiHealthy) {
           console.warn(
-            `${tag} Supabase gateway on ${apiDomain} did not become healthy within 120s — functional checks may fail`,
+            `${tag} Auth API on ${apiDomain} did not become healthy within 120s — functional checks may fail`,
           );
         }
 
@@ -1945,13 +1946,6 @@ export async function runLifecycle(
         // if no browser binary is available on the runner.
         const frontendResults = await runFrontendSmokeChecks(config.domain);
         allResults.push(...frontendResults);
-
-        // Client/server key agreement — the anon key baked into the served
-        // bundle must be the SAME key the auth checks above just passed.
-        // Closes the vibecarbon.com 2026-08-22 blindspot where every auth
-        // check was green (they use the harness's server-side key) while
-        // every real browser 401'd on a stale baked key.
-        allResults.push(await runClientKeyAgreementCheck(config.domain, supabaseKeys.anonKey));
 
         // Cloud-firewall presence — compose/compose-ha only, verify-deploy only
         // (RCA in checks/cloud-firewall.ts: an empirical experiment proved DO
@@ -2757,12 +2751,10 @@ EOF`;
           // seeding). Done here — before setup-repo commits — so the CI path
           // picks it up too.
           setEnvVar('STRIPE_SECRET_KEY', CONFIG_CANARY_SECRET, config.projectDir);
-          // OAuth canary: client id ONLY, never GOOGLE_ENABLED — a
-          // half-configured enabled provider could fail GoTrue's boot
-          // validation, while an unused client id on a disabled provider is
-          // inert. Asserted inside the auth container by
-          // config_oauth_gotrue_propagation (compose env interpolation /
-          // k8s valueFrom secretKeyRef).
+          // OAuth canary: client id ONLY, never the secret — a half-configured
+          // provider stays off in the auth instance, while an unused client id
+          // is inert. Asserted inside the app container by
+          // config_oauth_app_propagation (compose env_file / k8s envFrom).
           setEnvVar('GOOGLE_CLIENT_ID', OAUTH_CANARY_CLIENT_ID, config.projectDir);
         }),
     },
@@ -3566,8 +3558,7 @@ EOF`;
 
           // 4. Frontend render smoke AFTER scale. Scale blue-green-replaces the
           //    server and REBUILDS the app image; a rebuild that drops the
-          //    VITE_* build args ships an empty VITE_SUPABASE_URL and the SPA
-          //    white-screens with "Missing Supabase environment variables".
+          //    VITE_* build args ships a bundle that white-screens.
           //    verify-deploy catches this at deploy time, but without a check
           //    here a scale that breaks the bundle passes green (RCA 2026-06-22:
           //    scale.js called buildRemote with no build args). Self-skips

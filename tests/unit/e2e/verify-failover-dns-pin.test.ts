@@ -184,8 +184,8 @@ describe('dnsSafeFetch under a pin', () => {
     const captured: CapturedRequest[] = [];
     const res = await withResolutionPin(PIN, () =>
       dnsSafeFetch(
-        `https://${DOMAIN}/auth/v1/health`,
-        { headers: { apikey: 'anon-key' } },
+        `https://${DOMAIN}/api/auth/ok`,
+        { headers: { Cookie: 'session=abc' } },
         { httpsRequest: stubHttps(captured) },
       ),
     );
@@ -199,8 +199,8 @@ describe('dnsSafeFetch under a pin', () => {
     // must route by name and present a certificate valid for the domain.
     expect(opts.servername).toBe(DOMAIN);
     expect(opts.headers?.Host).toBe(DOMAIN);
-    expect(opts.headers?.apikey).toBe('anon-key');
-    expect(opts.path).toBe('/auth/v1/health');
+    expect(opts.headers?.Cookie).toBe('session=abc');
+    expect(opts.path).toBe('/api/auth/ok');
   });
 
   it('pins subdomain checks too (grafana./add-on hosts follow the wildcard)', async () => {

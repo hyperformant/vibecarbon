@@ -3,7 +3,7 @@
  *
  * These exercise the app's OWN Hono routes under `/api/v1/*` on the main
  * domain — the layer the rest of the e2e suite never touched. Everything else
- * hits Supabase services directly (Kong: /auth/v1, /rest/v1, /realtime/v1),
+ * hits the auth API or Supabase services directly (/api/auth, Kong's /rest/v1, /realtime/v1),
  * so a broken app backend (missing schema, dead route, bad DB
  * wiring) could 500 while every platform check stayed green.
  *
@@ -108,7 +108,7 @@ async function checkRoute(
 
 /**
  * Run app API-layer checks against the main domain (where the app's Hono
- * server serves /api/v1/*, distinct from the /auth/v1|/rest/v1|... paths
+ * server serves /api/v1/*, distinct from the /rest/v1|/realtime/v1 paths
  * Traefik routes to Kong on the same apex).
  */
 export async function runAppApiChecks(domain: string): Promise<VerificationResult[]> {

@@ -526,8 +526,10 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
 
     // k8s runs two app replicas; both bootstrap at startup. Better Auth's
     // createUser writes the user row, hashes, then links the password with
-    // no transaction, so the loser can see a super admin without a password.
-    // That is "not settled yet", never a refusal.
+    // no transaction, so an unserialized second replica could see a super
+    // admin without a password. The advisory lock makes the second replica
+    // wait for the first to finish, so it sees the settled admin and reports
+    // ready; it is never refused.
     it('two replicas bootstrapping at once both end ready, never refused', async () => {
       const email = newEmail();
       const statuses: string[][] = [[], []];

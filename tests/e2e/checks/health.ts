@@ -204,11 +204,22 @@ export async function dnsSafeFetch(
           res.on('data', (c) => chunks.push(c));
           res.on('end', () => {
             const body = Buffer.concat(chunks).toString();
+            // Append each header value on its own: node hands Set-Cookie over
+            // as an array, and a Record-built Headers would join the cookies
+            // into one comma string getSetCookie() cannot split again.
+            const responseHeaders = new Headers();
+            for (const [name, value] of Object.entries(res.headers)) {
+              if (Array.isArray(value)) {
+                for (const v of value) responseHeaders.append(name, v);
+              } else if (value !== undefined) {
+                responseHeaders.set(name, value);
+              }
+            }
             resolve(
               new Response(body, {
                 status: res.statusCode ?? 500,
                 statusText: res.statusMessage ?? '',
-                headers: res.headers as Record<string, string>,
+                headers: responseHeaders,
               }),
             );
           });
@@ -391,45 +402,33 @@ async function checkApiHealth(domain: string): Promise<VerificationResult> {
   };
 }
 
-async function checkAuthHealth(domain: string, anonKey?: string): Promise<VerificationResult> {
-  const url = `https://${domain}/auth/v1/health`;
+async function checkAuthHealth(domain: string): Promise<VerificationResult> {
+  // Better Auth's own liveness endpoint, served in-process by the app:
+  // `{ ok: true }`. The app answers it, so there is no separate auth service
+  // to wait for, only the app's own cold start.
+  const url = `https://${domain}/api/auth/ok`;
   const start = process.hrtime();
 
-  // GoTrue (via Kong) may still be starting when the app health check passes.
   // Adaptive backoff (HEALTH_RETRY_DELAYS_MS): fast on the happy path, ~35s
   // total budget for K8s cold-start tail.
   const MAX_RETRIES = HEALTH_RETRY_DELAYS_MS.length;
 
-  // Pass the anon key — Supabase Helm chart's Kong declarative config has a
-  // key-auth plugin on the `/auth/v1/*` consumer. Without apikey, Kong
-  // returns 401 before GoTrue is even reached, so the check fails even
-  // when auth is fully healthy.
-  const headers: Record<string, string> = {};
-  if (anonKey) {
-    headers.apikey = anonKey;
-  }
-
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await dnsSafeFetch(url, { headers });
+      const res = await dnsSafeFetch(url);
       const responseTimeMs = elapsedMs(start);
       const body = await res.text().catch(() => '');
       const contentType = res.headers.get('content-type') ?? '';
 
-      // An HTML 200 is the app's SPA fallback answering — the apex /auth/v1
-      // route to Kong is missing/misprioritized. Never count that as healthy.
-      if (res.status === 200 && contentType.includes('text/html')) {
-        if (attempt === MAX_RETRIES) {
-          return {
-            checkName: 'auth_health',
-            status: 'fail',
-            responseTimeMs,
-            errorMessage:
-              'Got 200 text/html (SPA fallback) — /auth/v1 is not routed to Kong on the apex',
-            details: { httpStatus: res.status, contentType, attempts: attempt + 1 },
-          };
+      let ok = false;
+      if (res.status === 200 && !contentType.includes('text/html')) {
+        try {
+          ok = (JSON.parse(body) as { ok?: unknown }).ok === true;
+        } catch {
+          ok = false;
         }
-      } else if (res.status === 200) {
+      }
+      if (ok) {
         return {
           checkName: 'auth_health',
           status: 'pass',
@@ -438,13 +437,17 @@ async function checkAuthHealth(domain: string, anonKey?: string): Promise<Verifi
         };
       }
 
-      // Non-200 on last attempt → fail
       if (attempt === MAX_RETRIES) {
+        // An HTML 200 is the SPA fallback answering: /api/auth is not mounted.
+        const why =
+          res.status === 200
+            ? `Got 200 ${contentType || 'without a content type'} instead of {"ok":true}`
+            : `Expected HTTP 200 {"ok":true} from /api/auth/ok, got ${res.status}`;
         return {
           checkName: 'auth_health',
           status: 'fail',
           responseTimeMs,
-          errorMessage: `Expected HTTP 200 from GoTrue, got ${res.status}`,
+          errorMessage: why,
           details: { httpStatus: res.status, body: body.slice(0, 256), attempts: attempt + 1 },
         };
       }
@@ -473,10 +476,11 @@ async function checkAuthHealth(domain: string, anonKey?: string): Promise<Verifi
 }
 
 /**
- * The SPA owns /auth/callback (OAuth landing page) — routing must send it to
- * the app, NOT to Kong. Only the VERSIONED /auth/v1 prefix belongs to Kong;
- * a bare /auth prefix rule swallows this page (Kong 404s it, breaking every
- * OAuth login). Regression probe for the routing-priority contract.
+ * The SPA owns /auth/callback (the page a sign-in lands on after the provider
+ * round trip) — routing must send it to the app, NOT to Kong. Only versioned
+ * Kong prefixes (/rest/v1, /realtime/v1, ...) belong to Kong; a bare /auth
+ * prefix rule would swallow this page and break every OAuth login. Regression
+ * probe for the routing-priority contract.
  */
 async function checkSpaAuthCallback(domain: string): Promise<VerificationResult> {
   const url = `https://${domain}/auth/callback`;
@@ -757,7 +761,7 @@ export async function runHealthChecks(
   // Run checks concurrently -- they are independent of each other.
   const results = await Promise.all([
     checkApiHealth(domain),
-    checkAuthHealth(domain, anonKey),
+    checkAuthHealth(domain),
     checkRestApi(domain, anonKey),
     checkSpaAuthCallback(domain),
     checkSslValid(domain),

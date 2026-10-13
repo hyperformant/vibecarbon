@@ -28,12 +28,12 @@ import {
 export const CONFIG_CANARY_SECRET = 'sk_test_e2e_canary_propagation';
 
 /**
- * OAuth canary: seeded as GOOGLE_CLIENT_ID and asserted inside the GoTrue
- * (auth) container as GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID — proving the
- * configure→GoTrue mapping (compose env interpolation / k8s valueFrom
- * secretKeyRef) end-to-end. Deliberately NOT paired with GOOGLE_ENABLED: a
- * half-configured enabled provider could fail GoTrue's boot validation, and
- * an unused client id on a disabled provider is inert.
+ * OAuth canary: seeded as GOOGLE_CLIENT_ID and asserted inside the app
+ * container, which runs the auth API in-process and reads the provider's
+ * client id from its own env. Proves the configure→app path (compose
+ * env_file / k8s envFrom) end-to-end. Deliberately NOT paired with
+ * GOOGLE_CLIENT_SECRET: a half-configured provider stays off in the auth
+ * instance, and an unused client id is inert.
  */
 export const OAUTH_CANARY_CLIENT_ID = 'e2e-canary-client-id.apps.example.invalid';
 
@@ -119,7 +119,7 @@ export async function runConfigCanaryChecks(
   // missing precondition still stays distinct from a green pass (matches
   // edge/redis checks).
   if (!masterIp || !sshKeyPath) {
-    return ['config_secret_propagation', 'config_oauth_gotrue_propagation'].map((checkName) => ({
+    return ['config_secret_propagation', 'config_oauth_app_propagation'].map((checkName) => ({
       checkName,
       status: 'skip' as const,
       responseTimeMs: elapsed(),
@@ -137,11 +137,9 @@ export async function runConfigCanaryChecks(
     }));
   }
 
-  // Two propagation paths, each with its own consumer:
-  //  - app: envFrom (k8s) / env_file (compose) — the whole-secret path
-  //  - auth (GoTrue): explicit per-key mapping — compose env interpolation /
-  //    k8s valueFrom secretKeyRef (the path that was silently missing on k8s
-  //    until 2026-07-15; see memory project_configure_gaps_audit)
+  // Both canaries ride the app's whole-secret path: envFrom (k8s) / env_file
+  // (compose). The auth API runs inside the app, so there is no per-key
+  // mapping for a separate auth service to get wrong.
   const specs = [
     {
       checkName: 'config_secret_propagation',
@@ -153,13 +151,13 @@ export async function runConfigCanaryChecks(
         : `kubectl -n vibecarbon exec deploy/app -- printenv STRIPE_SECRET_KEY 2>/dev/null || true`,
     },
     {
-      checkName: 'config_oauth_gotrue_propagation',
-      envName: 'GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID',
+      checkName: 'config_oauth_app_propagation',
+      envName: 'GOOGLE_CLIENT_ID',
       expected: OAUTH_CANARY_CLIENT_ID,
-      target: 'auth',
+      target: 'app',
       cmd: isCompose
-        ? `docker exec ${projectName}-auth printenv GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID 2>/dev/null || true`
-        : `kubectl -n vibecarbon exec deploy/supabase-supabase-auth -- printenv GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID 2>/dev/null || true`,
+        ? `docker exec ${projectName}-app printenv GOOGLE_CLIENT_ID 2>/dev/null || true`
+        : `kubectl -n vibecarbon exec deploy/app -- printenv GOOGLE_CLIENT_ID 2>/dev/null || true`,
     },
   ];
 

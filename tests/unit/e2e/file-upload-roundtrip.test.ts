@@ -4,13 +4,19 @@
  * the check's own logic with fakes; the live round-trip only runs on real infra.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { checkFileUploadRoundtrip, ONE_PIXEL_PNG } from '../../e2e/checks/app-functional.js';
+import {
+  CookieJar,
+  checkFileUploadRoundtrip,
+  ONE_PIXEL_PNG,
+} from '../../e2e/checks/app-functional.js';
 import {
   assertObjectStorageUrl,
   type PresignedTransfer,
 } from '../../e2e/utils/presigned-transfer.js';
 
 const DOMAIN = 'app.example.com';
+const jar = new CookieJar();
+jar.absorb(new Response('', { headers: { 'set-cookie': 's=tok' } }));
 const KEY = 'avatars/11111111-2222-3333-4444-555555555555/abc.png';
 const PUT_URL = 'https://fsn1.your-objectstorage.com/bucket/put?sig=1';
 const GET_URL = 'https://fsn1.your-objectstorage.com/bucket/get?sig=2';
@@ -62,14 +68,16 @@ describe('checkFileUploadRoundtrip', () => {
   it('passes when the bytes read back through the app equal the bytes uploaded', async () => {
     const appFetch = appFetchWith();
     const transfer = transferWith();
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', { appFetch, transfer });
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, { appFetch, transfer });
 
     expect(r).toMatchObject({ checkName: 'file_upload_roundtrip', status: 'pass' });
     // Presign as the signed-in user, for a 1x1 png avatar of the exact size.
     const [presignUrl, presignInit] = appFetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(presignUrl).toBe(`https://${DOMAIN}/api/v1/files/presign`);
     expect(presignInit.method).toBe('POST');
-    expect((presignInit.headers as Record<string, string>).Authorization).toBe('Bearer jwt');
+    expect((presignInit.headers as Record<string, string>).Cookie).toBe('s=tok');
+    expect((presignInit.headers as Record<string, string>).Origin).toBe(`https://${DOMAIN}`);
+    expect((presignInit.headers as Record<string, string>).Authorization).toBeUndefined();
     expect(JSON.parse(presignInit.body as string)).toEqual({
       kind: 'avatar',
       contentType: 'image/png',
@@ -91,14 +99,14 @@ describe('checkFileUploadRoundtrip', () => {
       presign: () => new Response('{"error":"storage_not_configured"}', { status: 503 }),
     });
     const transfer = transferWith();
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', { appFetch, transfer });
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, { appFetch, transfer });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toMatch(/^presign: .*503.*storage_not_configured/);
     expect(transfer.put).not.toHaveBeenCalled();
   });
 
   it('fails on a presign 200 with the wrong shape', async () => {
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith({ presign: () => presignResponse({ url: undefined }) }),
       transfer: transferWith(),
     });
@@ -108,7 +116,7 @@ describe('checkFileUploadRoundtrip', () => {
 
   it('fails when the page CSP connect-src does not allow the storage origin', async () => {
     const transfer = transferWith();
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith({
         home: () =>
           new Response('', {
@@ -126,7 +134,7 @@ describe('checkFileUploadRoundtrip', () => {
   });
 
   it('fails when the page carries no CSP header', async () => {
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith({ home: () => new Response('', { status: 200 }) }),
       transfer: transferWith(),
     });
@@ -138,14 +146,14 @@ describe('checkFileUploadRoundtrip', () => {
     const transfer = transferWith({
       preflight: vi.fn(async () => ({ status: 403, allowOrigin: null })),
     });
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', { appFetch: appFetchWith(), transfer });
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, { appFetch: appFetchWith(), transfer });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toMatch(/^cors: preflight .*403.*Access-Control-Allow-Origin/);
     expect(transfer.put).not.toHaveBeenCalled();
   });
 
   it('fails when the preflight allows a different origin', async () => {
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith(),
       transfer: transferWith({
         preflight: vi.fn(async () => ({ status: 200, allowOrigin: 'https://evil.example' })),
@@ -156,7 +164,7 @@ describe('checkFileUploadRoundtrip', () => {
   });
 
   it('fails when object storage rejects the PUT', async () => {
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith(),
       transfer: transferWith({
         put: vi.fn(async () => ({ status: 403, body: 'SignatureDoesNotMatch' })),
@@ -167,7 +175,7 @@ describe('checkFileUploadRoundtrip', () => {
   });
 
   it('fails when the read route answers without a redirect', async () => {
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith({ read: () => new Response('Not Found', { status: 404 }) }),
       transfer: transferWith(),
     });
@@ -176,7 +184,7 @@ describe('checkFileUploadRoundtrip', () => {
   });
 
   it('fails when the downloaded bytes differ from the uploaded bytes', async () => {
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith(),
       transfer: transferWith({
         get: vi.fn(async () => ({ status: 200, bytes: new Uint8Array([1, 2, 3]) })),
@@ -190,7 +198,7 @@ describe('checkFileUploadRoundtrip', () => {
     const appFetch = vi.fn(async () => {
       throw new Error('DNS resolution failed for app.example.com after retries');
     });
-    const r = await checkFileUploadRoundtrip(DOMAIN, 'jwt', { appFetch, transfer: transferWith() });
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, { appFetch, transfer: transferWith() });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toMatch(/^request: DNS resolution failed/);
   });

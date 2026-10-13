@@ -1,7 +1,7 @@
 /**
  * A skip must say WHICH precondition was missing.
  *
- * `config_secret_propagation`, `config_oauth_gotrue_propagation` and the wal-g
+ * `config_secret_propagation`, `config_oauth_app_propagation` and the wal-g
  * backup pair all skipped on the k8s tier at verify-deploy with the single
  * message "no serverIp/sshKeyPath". That wording cannot distinguish an absent
  * node IP from an absent key file, so a fix aimed at one of them (backfilling
