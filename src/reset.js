@@ -16,9 +16,9 @@ import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string }} */
-const SPEC = {
+export const SPEC = {
   name: 'reset',
-  summary: 'Reset the local development environment',
+  summary: 'Reset the local environment (removes all data)',
   description: [
     "Detects the project's package manager and runs the dev:reset script,",
     'which removes containers, Docker volumes, and locally-built images.',

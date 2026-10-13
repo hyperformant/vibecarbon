@@ -66,9 +66,9 @@ const OPTIONAL_SECTIONS = ['egress'];
 const ALL_VALID_SECTIONS = [...SECTIONS, ...OPTIONAL_SECTIONS];
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
-const SPEC = {
+export const SPEC = {
   name: 'diagnose',
-  summary: 'Dump full cluster state for an environment',
+  summary: 'Dump full cluster state to ~/.vibecarbon/diag-*',
   description: [
     'Streams sections to stdout AND writes the full report to:',
     '  ~/.vibecarbon/diag-<env>-<timestamp>.txt',
@@ -85,7 +85,10 @@ const SPEC = {
       description: `One of: ${ALL_VALID_SECTIONS.join(', ')}, all (default: all — excludes egress)`,
     },
   ],
-  flags: [{ name: 'h', boolean: true, description: 'Show this help' }],
+  flags: [
+    { name: 'h', boolean: true, description: 'Show this help' },
+    { name: 'v', boolean: true, description: 'Show version' },
+  ],
   examples: [
     { command: 'vibecarbon diagnose e3', description: 'full dump (excludes heavy egress probe)' },
     { command: 'vibecarbon diagnose e3 network', description: 'CoreDNS + CCM + DNS probe' },

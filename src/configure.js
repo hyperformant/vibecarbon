@@ -62,9 +62,10 @@ import {
 import { assertInProjectDir } from './lib/project-guard.js';
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
-const SPEC = {
+export const SPEC = {
   name: 'configure',
-  summary: 'Configure external services (billing, OAuth, SMTP, CI/CD)',
+  summary:
+    'Configure external services and settings: billing, OAuth, SMTP, CI/CD, globalization, and more',
   description: [
     'Interactive wizard for configuring external services in your Vibecarbon',
     'project. Walks you through enabling features and entering API keys.',

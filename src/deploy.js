@@ -59,7 +59,7 @@ const DEPLOY_MODES = ['compose', 'compose-ha', 'k8s', 'k8s-ha'];
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'deploy',
-  summary: 'Deploy a Vibecarbon environment to the cloud',
+  summary: 'Deploy an environment (interactive picker for mode and region)',
   description: [
     'Most settings (server type, S3, DNS, backup schedule, worker bounds)',
     'come from the interactive prompt or `.vibecarbon.json`. Power users',

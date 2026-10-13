@@ -47,7 +47,7 @@ export function hetznerOnlyGateError(envConfig) {
 }
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, examples?: Array<{ command: string, description?: string }> }} */
-const SPEC = {
+export const SPEC = {
   name: 'console',
   summary: "Open Hetzner's web VNC console for a node",
   positional: [
@@ -57,7 +57,10 @@ const SPEC = {
         'Substring of a server name (e.g. "master", "supabase", or a full name like "myproject-prod-master")',
     },
   ],
-  flags: [{ name: 'h', boolean: true, description: 'Show this help' }],
+  flags: [
+    { name: 'h', boolean: true, description: 'Show this help' },
+    { name: 'v', boolean: true, description: 'Show version' },
+  ],
   examples: [
     {
       command: 'vibecarbon console master',

@@ -46,7 +46,7 @@ import { printWalgBackupList } from './lib/walg-backups.js';
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'backup',
-  summary: 'Create or manage database backups',
+  summary: 'Create, list, or download database backups',
   positional: [
     {
       name: 'env',

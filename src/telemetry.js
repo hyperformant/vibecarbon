@@ -4,6 +4,7 @@
  * https://vibecarbon.com/docs/telemetry
  */
 
+import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import {
   getTelemetryState,
@@ -11,12 +12,41 @@ import {
   setTelemetryDisabled,
 } from './lib/telemetry/state.js';
 
+/** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
+export const SPEC = {
+  name: 'telemetry',
+  summary: 'Control anonymous usage analytics (status by default)',
+  description: [
+    'Turn anonymous usage analytics on or off, or check whether they are on. The version',
+    'update check carries no data and keeps running either way.',
+    '',
+    'What is collected: https://vibecarbon.com/docs/telemetry',
+  ].join('\n'),
+  positional: [
+    {
+      name: 'state',
+      optional: true,
+      description: 'on, off, or status (default: status)',
+    },
+  ],
+  flags: [
+    { name: 'h', boolean: true, description: 'Show this help' },
+    { name: 'v', boolean: true, description: 'Show version' },
+  ],
+  examples: [
+    { command: 'vibecarbon telemetry', description: 'check whether analytics are on' },
+    { command: 'vibecarbon telemetry off', description: 'turn analytics off' },
+  ],
+};
+
 /**
  * @param {string[]} args
  * @param {{ stateDir?: string, env?: NodeJS.ProcessEnv }} [opts] injectable for tests
  */
 export async function run(args, { stateDir = undefined, env = process.env } = {}) {
-  const sub = args[0] || 'status';
+  const { positional, handled } = parseFlagsOrExit(args, SPEC);
+  if (handled) return;
+  const sub = /** @type {string|undefined} */ (positional.state) || 'status';
 
   if (sub === 'off') {
     setTelemetryDisabled(true, stateDir);

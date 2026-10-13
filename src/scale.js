@@ -72,7 +72,7 @@ import { sshRun, sshRunScript } from './lib/ssh.js';
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'scale',
-  summary: 'Adjust instance types post-deploy',
+  summary: 'Scale worker nodes and instance sizes',
   description: [
     'What you can change:',
     '  Compose / Compose HA   VPS server type (blue-green; zero downtime)',

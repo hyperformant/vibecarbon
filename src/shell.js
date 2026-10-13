@@ -54,9 +54,9 @@ export function buildShellTryHint(providerId) {
 const shellSpecProvider = providerFor(undefined);
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string }} */
-const SPEC = {
+export const SPEC = {
   name: 'shell',
-  summary: 'Drop into an interactive shell with cluster context',
+  summary: 'Open an interactive bash with KUBECONFIG and cloud credentials exported',
   description: [
     'Drops you into an interactive bash with KUBECONFIG, VC_SSH_KEY,',
     `${shellSpecProvider.CLI_TOKEN_ENV}, ${shellSpecProvider.K8S_ASSETS.networkEnvVar}, and VC_ENV exported so kubectl + hcloud`,
@@ -77,7 +77,10 @@ const SPEC = {
       description: 'Environment to load (default: prod)',
     },
   ],
-  flags: [{ name: 'h', boolean: true, description: 'Show this help' }],
+  flags: [
+    { name: 'h', boolean: true, description: 'Show this help' },
+    { name: 'v', boolean: true, description: 'Show version' },
+  ],
 };
 
 function loadHcloudNetwork(envName) {

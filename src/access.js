@@ -40,9 +40,9 @@ import { printUpdateNotice } from './lib/telemetry/update-check.js';
 const VALID_SUBCOMMANDS = new Set(['list', 'add', 'remove', 'prune']);
 
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
-const SPEC = {
+export const SPEC = {
   name: 'access',
-  summary: 'Manage operator-CIDR firewall allowlist',
+  summary: 'Manage the SSH and k8s-API operator-CIDR allowlist',
   description: [
     "Most operators don't need to run this. `vibecarbon deploy` and",
     '`vibecarbon shell` (and other commands that need port 22 or 6443)',

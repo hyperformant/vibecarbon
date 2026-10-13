@@ -137,7 +137,7 @@ const SECRET_PLACEHOLDERS = new Set([
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'create',
-  summary: 'Scaffold a new Vibecarbon project',
+  summary: 'Create a new Vibecarbon project',
   description: [
     "What's included:",
     '  • Hono API server with TypeScript',

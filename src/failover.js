@@ -64,7 +64,7 @@ import { listWalgBackups } from './lib/walg-backups.js';
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 const SPEC = {
   name: 'failover',
-  summary: 'Promote the standby region to primary',
+  summary: 'Initiate failover to the standby region',
   description: [
     'Scenarios:',
     '  HA + Cloudflare DNS   Promotes standby DB, switches DNS A record automatically',
