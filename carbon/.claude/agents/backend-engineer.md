@@ -76,12 +76,12 @@ When your changes affect documented behavior, update the relevant `.md` files in
 ### Database Migrations
 1. **Always create a new timestamped migration file**: `supabase/migrations/YYYYMMDDHHMMSS_descriptive_name.sql`
 2. **Every table MUST have RLS enabled in the SAME migration**: `ALTER TABLE table_name ENABLE ROW LEVEL SECURITY;` — user requests rely on it inside `withUserDb`, and PostgREST still serves `/rest/v1`, so an un-RLS'd `public` table is internet-readable/writable.
-3. **Every table MUST have appropriate RLS policies** restricting access via `(SELECT app.user_id())` (subquery form) and the org helpers. Every `UPDATE`/`INSERT` policy needs a `WITH CHECK` that mirrors the full scope of its `USING` (a narrower `WITH CHECK` on a tenant column = cross-tenant takeover). Role checks read `app_metadata` (`is_super_admin()`), never `user_metadata`.
+3. **Every table MUST have appropriate RLS policies** restricting access via `(SELECT app.user_id())` (subquery form) and the org helpers. Every `UPDATE`/`INSERT` policy needs a `WITH CHECK` that mirrors the full scope of its `USING` (a narrower `WITH CHECK` on a tenant column = cross-tenant takeover). Role checks read the server-controlled `"user".role` column (`is_super_admin()` in SQL, `isSuperAdmin(user)` in TypeScript), never a field the user can write (`name`, `image`, `onboardingCompleted`).
 4. **Include both UP logic in the migration** - write migrations that are safe to re-run where possible
 5. **Add appropriate indexes** for columns used in WHERE clauses, JOINs, and ORDER BY
 6. **Use proper data types**: `uuid` for IDs (with `gen_random_uuid()` default), `timestamptz` for timestamps, `text` over `varchar` unless length constraint is meaningful
 7. **Add comments** explaining non-obvious design decisions
-8. **Foreign keys** should reference `auth.users(id)` for user ownership, with `ON DELETE CASCADE` where appropriate
+8. **Foreign keys** should reference `"user"(id)` (the auth user table in `public`, quoted because `user` is a reserved word) for user ownership, with `ON DELETE CASCADE` where appropriate
 
 ### RLS Policy Patterns
 ```sql

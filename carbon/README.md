@@ -1,6 +1,6 @@
 # {{PROJECT_NAME}}
 
-A full-stack application: a React 19 single-page app, a Hono API, and self-hosted Supabase for auth, data, and realtime, with file uploads stored in S3-compatible object storage. Authentication, multi-provider billing, multi-tenant organizations, an admin panel, transactional email, MDX content, and background jobs are already wired together and running against a real database. The same CLI that scaffolded this project also deploys and operates it, from a single Docker Compose server through multi-region Kubernetes, on Hetzner Cloud, DigitalOcean, Linode, Vultr, or Scaleway.
+A full-stack application: a React 19 single-page app, a Hono API with authentication built in, and self-hosted Supabase for data and realtime, with file uploads stored in S3-compatible object storage. Authentication, multi-provider billing, multi-tenant organizations, an admin panel, transactional email, MDX content, and background jobs are already wired together and running against a real database. The same CLI that scaffolded this project also deploys and operates it, from a single Docker Compose server through multi-region Kubernetes, on Hetzner Cloud, DigitalOcean, Linode, Vultr, or Scaleway.
 
 ## Quick Start
 

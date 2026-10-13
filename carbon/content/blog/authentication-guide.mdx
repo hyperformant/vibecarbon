@@ -16,16 +16,17 @@ Your application comes with a full authentication system built into its API serv
 
 ## Enabling OAuth Providers
 
-OAuth providers are configured in your Supabase dashboard and toggled via environment variables:
+Google and Microsoft sign-in run inside your app, so there is no separate auth dashboard. Run `vibecarbon configure` and pick **OAuth**: it writes the provider's switch and credentials to your environment, and `vibecarbon deploy` ships them to your server:
 
 ```bash
-GITHUB_ENABLED=true
-APPLE_ENABLED=true
-DISCORD_ENABLED=true
+GOOGLE_ENABLED=true
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+MICROSOFT_ENABLED=true
 MAGIC_LINK_ENABLED=true
 ```
 
-The sign-in page automatically shows buttons for enabled providers.
+In the provider's console, set the redirect URI to `<SITE_URL>/api/auth/callback/google` (or `/microsoft`). The sign-in page shows a button for each provider you enable.
 
 ## Row-Level Security
 

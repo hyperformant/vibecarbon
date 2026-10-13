@@ -51,7 +51,7 @@ Create a migration file with the table, index, RLS policies, and trigger:
 
 CREATE TABLE IF NOT EXISTS my_table (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -111,7 +111,7 @@ Policies also use helper functions defined in the initial migration:
 | `get_user_admin_org_ids()` | `SETOF UUID` | Org IDs where the user is OWNER or ADMIN |
 | `get_user_owner_org_ids()` | `SETOF UUID` | Org IDs where the user is OWNER |
 | `get_user_customer_ids()` | `SETOF UUID` | Customer IDs for the user or their orgs |
-| `is_super_admin()` | `BOOLEAN` | `true` if user's `app_metadata.role` is `super_admin` |
+| `is_super_admin()` | `BOOLEAN` | `true` if the user's `"user".role` is `super_admin` |
 
 All helper functions use `SECURITY DEFINER` so they can read the `memberships` table regardless of the calling user's permissions.
 

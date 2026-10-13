@@ -31,7 +31,7 @@ http:
           X-Authenticated-User: ""
 
     # ForwardAuth for the (currently unused) admin-auth chain. The platform has
-    # exactly ONE elevated role — super_admin (app_metadata.role); there is no
+    # exactly ONE elevated role — super_admin (the user.role column); there is no
     # platform `admin` role (that name belongs to the org-membership axis:
     # OWNER/ADMIN/MEMBER, enforced by RLS, never by ForwardAuth). So this gate
     # requires super_admin, matching the k8s admin-auth. Do NOT set this to

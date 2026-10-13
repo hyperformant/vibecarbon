@@ -107,7 +107,7 @@ await signUp('user@example.com', 'password', 'Jane Smith');
 // User is signed in and redirected to onboarding
 ```
 
-The `name` parameter is stored in `user_metadata.full_name`.
+The `name` parameter is stored in `user.name`.
 
 ## Route Protection
 
@@ -193,6 +193,8 @@ if (pendingMfaChallenge) {
 ### Admin Enforcement
 
 Super admins can require MFA for all users from the admin dashboard. This sets the `mfa_enabled` key in the `app_settings` table. When enforced, `ProtectedRoute` redirects users without MFA to the enrollment page.
+
+Your users can still turn their own two-factor off from **Settings → Security** while it is required. They confirm a code from their authenticator first (step-up), and then the requirement sends them back to enrollment.
 
 ## Account Lockout
 

@@ -13,9 +13,8 @@ import type { HonoVariables } from '../../../types';
 
 const adminNewsletterRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Require super admin for all newsletter management endpoints (JWT-based role
-// check — see requireSuperAdmin). The prior PostgREST lookup of auth.users
-// errored on the unexposed auth schema and fell closed for everyone.
+// Require super admin (plus a verified second factor while MFA is on) for all
+// newsletter management endpoints; see requireSuperAdmin.
 adminNewsletterRoutes.use('*', requireSuperAdmin);
 
 /**

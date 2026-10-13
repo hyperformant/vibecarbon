@@ -32,10 +32,8 @@ function historyJson(r: HistoryRow) {
 
 const jobsRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Require super admin for all job management endpoints. Uses the JWT-based
-// role check (app_metadata.role) — the previous PostgREST lookup of auth.users
-// query errored because the auth schema isn't exposed to PostgREST, which made
-// this guard fail closed (403 for everyone) and broke the admin panels.
+// Require super admin (plus a verified second factor while MFA is on) for all
+// job management endpoints; see requireSuperAdmin.
 jobsRoutes.use('*', requireSuperAdmin);
 
 /**
