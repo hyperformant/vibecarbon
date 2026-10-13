@@ -1,13 +1,13 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { dbErrorForLog } from '../db/errors';
-import { user } from '../db/schema';
+import { account, user } from '../db/schema';
 import { isSuperAdmin } from '../lib/auth';
 import { env } from '../lib/env';
 import { logger } from '../lib/logger';
 import { auth } from './index';
 
-export type BootstrapResult = 'skipped' | 'created' | 'promoted' | 'unchanged';
+export type BootstrapResult = 'skipped' | 'created' | 'promoted' | 'unchanged' | 'refused';
 
 /**
  * Ensure the operator's super admin exists, from ADMIN_EMAIL and
@@ -15,12 +15,17 @@ export type BootstrapResult = 'skipped' | 'created' | 'promoted' | 'unchanged';
  *
  * - no account with that email: create it with the password, as a verified
  *   super admin past onboarding;
- * - an account exists: make it super_admin if it is not. Its password,
- *   name and everything else stay as they are, so changing ADMIN_PASSWORD
- *   later never resets a password someone already chose.
+ * - the account is already super_admin: nothing to do (its password is
+ *   never touched, so changing ADMIN_PASSWORD later resets nothing);
+ * - the account exists but is not super_admin: promote it ONLY if its own
+ *   password verifies against ADMIN_PASSWORD. Sign-up is open and, without
+ *   SMTP, unverified, so anyone could register the admin address before
+ *   the first boot; the password proves the account is the operator's.
+ *   Otherwise refuse, change nothing, and log what to do.
  *
  * Two replicas starting together may both try to create the account; the
- * loser hits the unique email and falls through to the promote path.
+ * loser hits the unique email and falls through to the existing-account
+ * path, where it finds a super admin.
  */
 export async function bootstrapAdmin(
   opts: { email?: string; password?: string } = {
@@ -32,19 +37,35 @@ export async function bootstrapAdmin(
   const password = opts.password;
   if (!email || !password) return 'skipped';
 
-  const promote = async (): Promise<BootstrapResult> => {
-    const [existing] = await adminDb
+  const findUser = async () => {
+    const [found] = await adminDb
       .select({ id: user.id, role: user.role })
       .from(user)
       .where(eq(user.email, email));
-    if (!existing) throw new Error('admin account vanished during bootstrap');
+    return found;
+  };
+
+  const ensureExisting = async (existing: {
+    id: string;
+    role: string | null;
+  }): Promise<BootstrapResult> => {
     if (isSuperAdmin(existing)) return 'unchanged';
+    if (!(await passwordMatches(existing.id, password))) {
+      logger.error(
+        { email },
+        `An account with ADMIN_EMAIL (${email}) already exists, is not a super admin, and its ` +
+          'password does not match ADMIN_PASSWORD, so it was NOT promoted. If that account is ' +
+          "yours, sign in and set its password to ADMIN_PASSWORD, then restart. If it isn't, " +
+          'delete it (or set ADMIN_EMAIL to an address you control) and restart.'
+      );
+      return 'refused';
+    }
     await adminDb.update(user).set({ role: 'super_admin' }).where(eq(user.id, existing.id));
     return 'promoted';
   };
 
-  const [existing] = await adminDb.select({ id: user.id }).from(user).where(eq(user.email, email));
-  if (existing) return promote();
+  const existing = await findUser();
+  if (existing) return ensureExisting(existing);
 
   try {
     // Called without request headers, so the admin plugin allows it as a
@@ -61,10 +82,25 @@ export async function bootstrapAdmin(
     });
     return 'created';
   } catch (err) {
-    const [raced] = await adminDb.select({ id: user.id }).from(user).where(eq(user.email, email));
-    if (raced) return promote();
+    const raced = await findUser();
+    if (raced) return ensureExisting(raced);
     throw err;
   }
+}
+
+/**
+ * Whether the user's email + password credential verifies against
+ * `password`, with Better Auth's own hasher (never a hand comparison).
+ * False when the account has no password (OAuth or magic-link only).
+ */
+async function passwordMatches(userId: string, password: string): Promise<boolean> {
+  const [credential] = await adminDb
+    .select({ hash: account.password })
+    .from(account)
+    .where(and(eq(account.userId, userId), eq(account.providerId, 'credential')));
+  if (!credential?.hash) return false;
+  const ctx = await auth.$context;
+  return ctx.password.verify({ hash: credential.hash, password });
 }
 
 /** Startup wrapper: never throws, logs the outcome. */
@@ -75,6 +111,7 @@ export async function bootstrapAdminAtStartup(): Promise<BootstrapResult | null>
     else if (result === 'promoted') logger.info('Granted super_admin to the ADMIN_EMAIL account');
     else if (result === 'skipped')
       logger.info('ADMIN_EMAIL/ADMIN_PASSWORD not set; no super admin bootstrap');
+    // 'refused' has already logged its own error with what to do.
     return result;
   } catch (err) {
     logger.error({ err: dbErrorForLog(err) }, 'Super admin bootstrap failed');

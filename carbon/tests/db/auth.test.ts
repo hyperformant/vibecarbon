@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import type pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
 import { bootstrapAdmin } from '@server/auth/bootstrap-admin';
+import { logger } from '@server/lib/logger';
 import { csrfProtection } from '@server/middleware/csrf';
 import { sessionMiddleware } from '@server/middleware/session';
 import type { HonoVariables } from '@server/types';
@@ -343,13 +344,51 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect((await signIn(email, 'a-different-password', '203.0.113.33')).status).toBe(401);
     });
 
-    it('promotes an existing non-admin with ADMIN_EMAIL, keeping their password', async () => {
+    it("refuses to promote an account someone else registered with ADMIN_EMAIL", async () => {
+      // Open sign-up, no email verification without SMTP: an attacker can
+      // register the admin address first. Their password is not the
+      // operator's, so the account must stay a plain user.
       const email = newEmail();
-      await signUp(email);
-      expect(await bootstrapAdmin({ email, password: 'operator-password' })).toBe('promoted');
+      await signUp(email, 'attacker-password');
+      const errors = vi.spyOn(logger, 'error');
+      try {
+        expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
+        expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
+        const logged = JSON.stringify(errors.mock.calls);
+        expect(logged).toContain(email);
+        expect(logged).not.toContain(PASSWORD);
+        expect(logged).not.toContain('attacker-password');
+      } finally {
+        errors.mockRestore();
+      }
+      expect((await roleOf(email)).role).toBe('user');
+      const { rows } = await db.query(
+        'select count(*)::int as n from public."user" where email = $1',
+        [email],
+      );
+      expect(rows[0].n).toBe(1);
+      // The attacker's password still works for their plain account; the
+      // operator's does not grant anything.
+      expect((await signIn(email, PASSWORD, '203.0.113.37')).status).toBe(401);
+    });
+
+    it('refuses an account with no password at all (OAuth or magic-link only)', async () => {
+      const email = newEmail();
+      await db.query(
+        'insert into public."user" (name, email, role) values ($1, $2, $3)',
+        ['No Password', email, 'user'],
+      );
+      expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
+      expect((await roleOf(email)).role).toBe('user');
+    });
+
+    it("promotes the operator's own account when its password is ADMIN_PASSWORD", async () => {
+      const email = newEmail();
+      await signUp(email, PASSWORD);
+      expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('promoted');
       expect((await roleOf(email)).role).toBe('super_admin');
+      expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('unchanged');
       expect((await signIn(email, PASSWORD, '203.0.113.34')).status).toBe(200);
-      expect((await signIn(email, 'operator-password', '203.0.113.35')).status).toBe(401);
     });
 
     it('matches ADMIN_EMAIL case-insensitively', async () => {
