@@ -4,8 +4,9 @@ import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
 import {
-  CREDENTIAL_SESSION_PATHS,
+  PASSWORD_SESSION_PATHS,
   rejectOrphanedPasswordSession,
+  SECOND_FACTOR_SESSION_PATHS,
   secureSocialLink,
 } from '@server/auth/account-linking';
 import { adminDb } from '@server/db/client';
@@ -222,8 +223,8 @@ describe.skipIf(!dbTestsEnabled)('social sign-in onto an existing email (real da
     expect(rows[0].n).toBe(1);
   });
 
-  it.each([...CREDENTIAL_SESSION_PATHS])(
-    'a session issued by %s without a surviving password is deleted and refused',
+  it.each([...PASSWORD_SESSION_PATHS, ...SECOND_FACTOR_SESSION_PATHS])(
+    'a session issued by %s without a surviving password (and no current session) is deleted and refused',
     async (path) => {
       const email = newEmail();
       const result = await googleSignIn(email, true); // a user with no password
@@ -235,6 +236,32 @@ describe.skipIf(!dbTestsEnabled)('social sign-in onto an existing email (real da
         created.id,
       ]);
       expect(rows[0].n).toBe(0);
+    },
+  );
+
+  it.each([...SECOND_FACTOR_SESSION_PATHS])(
+    'a session %s issues in place of a current session needs that session, not a password',
+    async (path) => {
+      const email = newEmail();
+      // A social-only user (no password) with two sessions: the current one,
+      // and the one the endpoint just issued to replace it.
+      const current = (await googleSignIn(email, true)).data?.session as { id: string };
+      const created = (await googleSignIn(email, true)).data?.session as {
+        id: string;
+        userId: string;
+      };
+      await rejectOrphanedPasswordSession(created, path, current.id);
+      const count = async (id: string) =>
+        (await db.query('select count(*)::int as n from public.session where id = $1', [id]))
+          .rows[0].n;
+      expect(await count(created.id)).toBe(1);
+
+      // The cleanup ended the current session meanwhile: the new one goes too.
+      await db.query('delete from public.session where id = $1', [current.id]);
+      await expect(rejectOrphanedPasswordSession(created, path, current.id)).rejects.toMatchObject({
+        statusCode: 401,
+      });
+      expect(await count(created.id)).toBe(0);
     },
   );
 

@@ -1,13 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { betterAuth } from 'better-auth';
-import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { twoFactor } from 'better-auth/plugins';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { lockoutPlugin } from '@server/auth/lockout';
-import { stripSessionToken } from '@server/auth/strip-session-token';
-import { adminDb } from '@server/db/client';
-import * as schema from '@server/db/schema';
+import { auth } from '@server/auth';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
@@ -15,35 +9,36 @@ import { connectTestDb, dbTestsEnabled } from './_helpers';
  * failure nor a success. twoFactor's after hook is what turns a correct
  * password into a challenge (it drops `newSession`), so the lockout has to
  * run after it: plugin after hooks run in array order, and the top-level
- * `hooks.after` option would run before all of them.
+ * `hooks.after` option would run before all of them. stripSessionToken
+ * must be last (it rewrites every body the others produced).
  *
- * The app's instance gets twoFactor in the MFA task; this suite builds a
- * test-only instance with the same plugin order the app documents
- * (twoFactor, lockout, stripSessionToken) to prove the order now.
+ * Both are checked on the app's real auth instance.
  */
 
 const ORIGIN = 'http://app.test';
 const PASSWORD = 'correct-horse-battery';
 const IP = '203.0.113.81';
 
+describe('auth plugin order', () => {
+  it('twoFactor runs before the lockout, and stripSessionToken runs last', () => {
+    const ids = (auth.options.plugins ?? []).map((p) => p.id);
+    expect(ids).toEqual([
+      'admin',
+      'magic-link',
+      'two-factor',
+      'session-assurance',
+      'account-lockout',
+      'strip-session-token',
+    ]);
+  });
+});
+
 describe.skipIf(!dbTestsEnabled)('lockout with a pending 2FA challenge (real database)', () => {
   let db: pg.Client;
   const emails: string[] = [];
 
-  const instance = betterAuth({
-    basePath: '/api/auth',
-    baseURL: ORIGIN,
-    secret: 'test-auth-secret-at-least-32-characters-long',
-    trustedOrigins: [ORIGIN],
-    database: drizzleAdapter(adminDb, { provider: 'pg', schema }),
-    advanced: { database: { generateId: false }, disableOriginCheck: false },
-    rateLimit: { enabled: false },
-    emailAndPassword: { enabled: true },
-    plugins: [twoFactor(), lockoutPlugin(), stripSessionToken()],
-  });
-
   const post = (path: string, body: unknown) =>
-    instance.handler(
+    auth.handler(
       new Request(`${ORIGIN}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', origin: ORIGIN, 'x-forwarded-for': IP },
@@ -85,8 +80,10 @@ describe.skipIf(!dbTestsEnabled)('lockout with a pending 2FA challenge (real dat
     const challenge = await post('/api/auth/sign-in/email', { email, password: PASSWORD });
     expect(challenge.status).toBe(200);
     expect((await challenge.json()).twoFactorRedirect).toBe(true);
-    // No session was issued, so the earlier failures stand (not cleared)...
+    // No session was issued (only the challenge cookie)...
+    expect(challenge.headers.getSetCookie().join('\n')).not.toMatch(/session_token=[^;]/);
+    // ...so the earlier failures stand (not cleared), and the right password
+    // was not counted as a failure either.
     expect(await failures(email)).toBe(3);
-    // ...and the right password was not counted as a failure either.
   });
 });

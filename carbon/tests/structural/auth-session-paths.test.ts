@@ -9,10 +9,19 @@ import { describe, expect, it } from 'vitest';
  * session issued on the strength of a password that the social-link
  * cleanup has just removed. Better Auth does not record how a session was
  * authenticated, so the defence keys on endpoint paths
- * (CREDENTIAL_SESSION_PATHS). This census fails when a Better Auth upgrade
- * adds, moves or removes a session-creating call, so the list is revisited
- * instead of silently missing a new password-backed path.
+ * (PASSWORD_SESSION_PATHS and SECOND_FACTOR_SESSION_PATHS). This census
+ * fails when a Better Auth upgrade adds, moves or removes a session-creating
+ * call, so the lists are revisited instead of silently missing a new
+ * password-backed path.
+ *
+ * The installed version is pinned too: the auth code leans on Better Auth
+ * internals beyond these calls (hook order, `ctx.context.newSession` and
+ * `ctx.context.session` in hooks, the twoFactor verify flow, the magic-link
+ * cleanup in revoke-unproven-account-access). Any upgrade is a re-review of
+ * src/server/auth/, then a bump of PINNED_VERSION.
  */
+
+const PINNED_VERSION = '1.7.7';
 
 const ROOT = join(__dirname, '..', '..');
 const DIST = join(ROOT, 'node_modules', 'better-auth', 'dist');
@@ -59,17 +68,17 @@ const CLASSIFIED: Record<string, Site> = {
   'plugins/two-factor/index.mjs': {
     count: 3,
     credentialPaths: ['/two-factor/enable', '/two-factor/disable'],
-    why: 'enable/disable re-issue the session and require the password',
+    why: 'enable/disable re-issue the current session (password checked when the account has one)',
   },
   'plugins/two-factor/totp/index.mjs': {
     count: 1,
     credentialPaths: ['/two-factor/verify-totp'],
-    why: 'verify-totp re-issues an existing session',
+    why: 'verify-totp re-issues the current session when it confirms an enrollment',
   },
   'plugins/two-factor/otp/index.mjs': {
     count: 1,
     credentialPaths: ['/two-factor/verify-otp'],
-    why: 'verify-otp re-issues an existing session',
+    why: 'verify-otp re-issues an existing session (path disabled; classified anyway)',
   },
   'plugins/two-factor/verify-two-factor.mjs': {
     count: 1,
@@ -104,6 +113,17 @@ function distFiles(dir = DIST): string[] {
 const CALL = /internalAdapter\.createSession\(/g;
 
 describe('Better Auth session-creating calls are all classified', () => {
+  it(`the installed Better Auth is ${PINNED_VERSION} (an upgrade is a re-review)`, () => {
+    const pkg = JSON.parse(
+      readFileSync(join(ROOT, 'node_modules', 'better-auth', 'package.json'), 'utf8')
+    ) as { version: string };
+    expect(
+      pkg.version,
+      'Better Auth was upgraded. Re-review src/server/auth/ against the new version (hooks, ' +
+        'twoFactor verify flow, session creation), then update PINNED_VERSION here.'
+    ).toBe(PINNED_VERSION);
+  });
+
   it('the installed dist has exactly the classified createSession calls', () => {
     const found: Record<string, number> = {};
     for (const path of distFiles()) {
@@ -116,16 +136,20 @@ describe('Better Auth session-creating calls are all classified', () => {
     expect(
       found,
       'Better Auth changed where it creates sessions. Classify each new or moved call in ' +
-        'CLASSIFIED, and add any password-backed endpoint to CREDENTIAL_SESSION_PATHS in ' +
-        'src/server/auth/account-linking.ts.'
+        'CLASSIFIED, and add any password-backed endpoint to PASSWORD_SESSION_PATHS (or ' +
+        'SECOND_FACTOR_SESSION_PATHS) in src/server/auth/account-linking.ts.'
     ).toEqual(expected);
   });
 
-  it('every password-backed path is in CREDENTIAL_SESSION_PATHS', () => {
+  it('every password-backed path is in PASSWORD_SESSION_PATHS or SECOND_FACTOR_SESSION_PATHS', () => {
     const src = readFileSync(join(ROOT, 'src/server/auth/account-linking.ts'), 'utf8');
-    const block = src.match(/CREDENTIAL_SESSION_PATHS[^=]*= new Set\(\[([\s\S]*?)\]\)/)?.[1];
-    expect(block, 'CREDENTIAL_SESSION_PATHS not found').toBeDefined();
-    const listed = new Set([...(block ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]));
+    const listed = new Set<string>();
+    for (const name of ['PASSWORD_SESSION_PATHS', 'SECOND_FACTOR_SESSION_PATHS']) {
+      const pattern = new RegExp(`${name}[^=]*= new Set\\(\\[([\\s\\S]*?)\\]\\)`);
+      const block = src.match(pattern)?.[1];
+      expect(block, `${name} not found`).toBeDefined();
+      for (const m of (block ?? '').matchAll(/'([^']+)'/g)) listed.add(m[1]);
+    }
     const required = new Set(Object.values(CLASSIFIED).flatMap((s) => s.credentialPaths));
     expect([...required].filter((p) => !listed.has(p))).toEqual([]);
   });

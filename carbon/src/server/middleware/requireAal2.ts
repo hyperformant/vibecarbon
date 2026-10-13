@@ -8,8 +8,22 @@ type Ctx = Context<{ Variables: HonoVariables }>;
  * Shared decision for aal2 gating. Returns a Response to short-circuit with, or
  * null when the request may proceed.
  *
- * Order: no user -> 401; already aal2 -> allow; MFA globally disabled -> allow
- * (gate inert, respects the operator toggle); otherwise -> 403 mfa_required.
+ * aal2 means THIS session passed a second factor: `session.twoFactorVerified`,
+ * which only auth/assurance.ts writes (on a verified TOTP or backup code).
+ * The session middleware reads the session from the database on every
+ * request, so a verification counts from the very next request.
+ *
+ * Order: no user -> 401; this session verified -> allow; MFA globally
+ * disabled -> allow (gate inert, respects the operator toggle); otherwise ->
+ * 403 mfa_required.
+ *
+ * The 403 tells the client what to do next:
+ * - `mfa_enrolled: true`: the user has an authenticator. Verify a code from
+ *   THIS session (step-up): POST /api/auth/two-factor/verify-totp
+ *   `{ code }` (or /verify-backup-code), then retry. Sessions from a magic
+ *   link, social sign-in or a trusted device land here.
+ * - `mfa_enrolled: false`: no second factor yet. Enroll one (POST
+ *   /api/auth/two-factor/enable, then verify its first code), then retry.
  */
 export async function checkAal2(c: Ctx): Promise<Response | null> {
   const user = c.get('user');
@@ -17,8 +31,7 @@ export async function checkAal2(c: Ctx): Promise<Response | null> {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const aal = c.get('aal');
-  if (aal === 'aal2') {
+  if (c.get('session')?.twoFactorVerified === true) {
     return null;
   }
 
@@ -26,7 +39,19 @@ export async function checkAal2(c: Ctx): Promise<Response | null> {
     return null;
   }
 
-  return c.json({ error: 'mfa_required', current_aal: aal ?? 'aal1', aal_required: 'aal2' }, 403);
+  const enrolled = user.twoFactorEnabled === true;
+  return c.json(
+    {
+      error: 'mfa_required',
+      current_aal: 'aal1',
+      aal_required: 'aal2',
+      mfa_enrolled: enrolled,
+      message: enrolled
+        ? 'Confirm a code from your authenticator app to continue.'
+        : 'Set up two-factor authentication to continue.',
+    },
+    403
+  );
 }
 
 /**

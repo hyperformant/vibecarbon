@@ -21,14 +21,20 @@ const { __resetMfaSettingsCache } = await import('@server/lib/mfa-settings');
 
 type Aal = 'aal1' | 'aal2' | null;
 
-// Build a fresh app whose injector middleware seeds user + aal BEFORE the
+/** What the session middleware sets for a session at this level. */
+function seed(c: { set: (k: never, v: never) => void }, user: unknown, aal: Aal) {
+  const set = c.set as (k: string, v: unknown) => void;
+  set('user', user);
+  set('session', user ? { id: 'session-1', twoFactorVerified: aal === 'aal2' } : null);
+  set('aal', aal);
+}
+
+// Build a fresh app whose injector middleware seeds user + session BEFORE the
 // gated route (mountRoute can't be used here — it adds no pre-route middleware).
 function gatedApp(opts: { user: unknown; aal: Aal }) {
   const app = new Hono<{ Variables: HonoVariables }>();
   app.use('*', async (c, next) => {
-    // biome-ignore lint/suspicious/noExplicitAny: test injects a minimal user
-    c.set('user', opts.user as any);
-    c.set('aal', opts.aal);
+    seed(c, opts.user, opts.aal);
     await next();
   });
   app.delete('/gated', requireAal2, (c) => c.json({ ok: true }));
@@ -65,6 +71,8 @@ describe('requireAal2', () => {
       error: 'mfa_required',
       current_aal: 'aal1',
       aal_required: 'aal2',
+      mfa_enrolled: false,
+      message: 'Set up two-factor authentication to continue.',
     });
   });
 
@@ -76,7 +84,35 @@ describe('requireAal2', () => {
       error: 'mfa_required',
       current_aal: 'aal1',
       aal_required: 'aal2',
+      mfa_enrolled: false,
+      message: 'Set up two-factor authentication to continue.',
     });
+  });
+
+  it('tells an enrolled user to verify a code from this session (step-up)', async () => {
+    enableMfa();
+    const res = await gatedApp({ user: { ...aUser, twoFactorEnabled: true }, aal: 'aal1' }).request(
+      '/gated',
+      { method: 'DELETE' },
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({
+      error: 'mfa_required',
+      mfa_enrolled: true,
+      message: 'Confirm a code from your authenticator app to continue.',
+    });
+  });
+
+  it('reads the session row, not the derived aal variable', async () => {
+    enableMfa();
+    const app = new Hono<{ Variables: HonoVariables }>();
+    app.use('*', async (c, next) => {
+      seed(c, aUser, 'aal1');
+      c.set('aal', 'aal2');
+      await next();
+    });
+    app.delete('/gated', requireAal2, (c) => c.json({ ok: true }));
+    expect((await app.request('/gated', { method: 'DELETE' })).status).toBe(403);
   });
 
   it('passes an aal1 session through when MFA is globally disabled (gate inert)', async () => {
@@ -106,9 +142,7 @@ describe('requireAal2', () => {
     enableMfa();
     const app = new Hono<{ Variables: HonoVariables }>();
     app.use('*', async (c, next) => {
-      // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-      c.set('user', aUser as any);
-      c.set('aal', 'aal1');
+      seed(c, aUser, 'aal1');
       await next();
     });
     app.post('/inline', async (c) => {

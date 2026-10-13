@@ -111,6 +111,8 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 3. **Server middleware** (`src/server/middleware/session.ts`): reads the session cookie with `auth.api.getSession()` (`src/server/auth/`), sets `c.get('user')`, `c.get('session')` and `c.get('aal')`
 4. **RLS**: Routes run user queries through `withUserDb(user.id, ...)`, so row-level security decides what the caller sees
 
+**Two-factor and assurance level** (`src/server/auth/assurance.ts`): users enroll TOTP (authenticator app) with backup codes. A session is `aal2` when it passed a second factor itself (`session.twoFactorVerified`, written only by the verify hook, never client input); every other session is `aal1`. A password sign-in with 2FA enabled stops at a code; a magic-link, social or trusted-device sign-in does not, and stays `aal1` until the user verifies a code from that session (step-up: `POST /api/auth/two-factor/verify-totp`). Gate sensitive routes with `requireAal2` / `assertAal2` (`src/server/middleware/requireAal2.ts`): it passes `aal2`, or anyone while MFA is globally off (`app_settings.mfa_enabled`), else answers 403 `mfa_required` with `mfa_enrolled` telling the client to verify (true) or enroll (false). Better Auth's `/api/auth/admin/*` endpoints follow the same rule, and reading, regenerating or removing an enrolled factor always needs `aal2`.
+
 ## Database Access
 
 This is the #1 source of bugs. The server talks to Postgres through `src/server/db/client.ts` and nothing else:

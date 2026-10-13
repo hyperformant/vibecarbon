@@ -298,8 +298,11 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       const victim = cookieHeader(await signIn(email, PASSWORD, '203.0.113.54'));
       expect((await app.request('/api/v1/whoami', { headers: { cookie: victim } })).status).toBe(200);
       const { rows } = await db.query('select id from public."user" where email = $1', [email]);
-      const ban = await post('/api/auth/admin/ban-user', { userId: rows[0].id }, { cookie: admin.cookie });
-      expect(ban.status).toBe(200);
+      // ban-user is not served over HTTP (no UI uses it); server code can still call it.
+      await auth.api.banUser({
+        body: { userId: rows[0].id },
+        headers: new Headers({ cookie: admin.cookie }),
+      });
       expect((await app.request('/api/v1/whoami', { headers: { cookie: victim } })).status).toBe(401);
     });
 
@@ -523,7 +526,8 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
         { userId: rows[0].id, data: { role: 'super_admin' } },
         { cookie },
       );
-      expect(update.status).toBe(403);
+      // update-user is not served over HTTP at all (auth/index.ts disabledPaths).
+      expect(update.status).toBe(404);
       expect((await roleOf(target)).role).toBe('user');
     });
   });

@@ -38,6 +38,8 @@ const SERVER = join(ROOT, 'src', 'server');
 const ADMIN_DB_ALLOWLIST: Record<string, string> = {
   'auth/account-linking.ts':
     "social-link hook: removes an unverified account's password and sessions (auth tables are server-only)",
+  'auth/assurance.ts':
+    'marks a session two-factor verified and counts wrong step-up codes (auth tables are server-only)',
   'auth/bootstrap-admin.ts':
     'startup: finds or promotes the ADMIN_EMAIL account (no session; app_user cannot read "user")',
   'auth/index.ts':

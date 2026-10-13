@@ -1,6 +1,6 @@
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { admin, magicLink } from 'better-auth/plugins';
+import { admin, magicLink, twoFactor } from 'better-auth/plugins';
 import { createAccessControl } from 'better-auth/plugins/access';
 import { adminAc, defaultStatements, userAc } from 'better-auth/plugins/admin/access';
 import { adminDb } from '../db/client';
@@ -8,7 +8,12 @@ import * as schema from '../db/schema';
 import { isEmailConfigured } from '../lib/email';
 import { env } from '../lib/env';
 import { allowedOrigins } from '../lib/origins';
-import { rejectOrphanedPasswordSession, secureSocialLink } from './account-linking';
+import {
+  dropUnprovenSecondFactor,
+  rejectOrphanedPasswordSession,
+  secureSocialLink,
+} from './account-linking';
+import { sessionAssurance } from './assurance';
 import { sendAuthEmail } from './email';
 import { lockoutPlugin } from './lockout';
 import { socialProviders } from './providers';
@@ -28,6 +33,8 @@ import { stripSessionToken } from './strip-session-token';
  *   role lacks `set-role` and the set-role path is disabled. The only way to
  *   a super admin is the startup bootstrap (auth/bootstrap-admin.ts).
  * - Email + password sign-in goes through the account lockout hooks.
+ * - Two-factor (TOTP + backup codes) and the per-session assurance level
+ *   (aal2 = this session passed a second factor): auth/assurance.ts.
  */
 
 const ac = createAccessControl(defaultStatements);
@@ -72,7 +79,8 @@ export const auth = betterAuth({
     // session lingers for at most a minute in its own get-session answers.
     cookieCache: { enabled: true, maxAge: 60 },
     additionalFields: {
-      // Set only by the second-factor verify hook (MFA). Never client input.
+      // Set only by the second-factor verify hook (auth/assurance.ts). Never
+      // client input: /update-session refuses it (and is disabled below).
       twoFactorVerified: { type: 'boolean', defaultValue: false, required: false, input: false },
     },
   },
@@ -121,7 +129,19 @@ export const auth = betterAuth({
         // The other half of the pre-hijacking defence: a password sign-in
         // that raced the cleanup gets no session (auth/account-linking.ts).
         after: async (created, ctx) => {
-          await rejectOrphanedPasswordSession(created, ctx?.path);
+          // The session this one replaces, when the endpoint had one.
+          const source = (ctx?.context as { session?: { session?: { id?: string } } | null })
+            ?.session?.session?.id;
+          await rejectOrphanedPasswordSession(created, ctx?.path, source);
+        },
+      },
+    },
+    user: {
+      update: {
+        // A magic link that proves an unverified address also drops any
+        // second factor enrolled on it (auth/account-linking.ts).
+        after: async (updated, ctx) => {
+          await dropUnprovenSecondFactor(updated, ctx?.path);
         },
       },
     },
@@ -155,16 +175,40 @@ export const auth = betterAuth({
         }
       : {}),
   },
+  // Paths not served over HTTP. Server-side `auth.api.*` calls still reach
+  // them (the startup bootstrap uses createUser).
   disabledPaths: [
+    // Admin endpoints the app does not use. What stays: list-users,
+    // impersonate-user, stop-impersonating and remove-user (the admin
+    // users page, impersonation, account deletion). set-role must never be
+    // reachable: role assignment is bootstrap-only.
     '/admin/set-role',
+    '/admin/create-user',
+    '/admin/update-user',
+    '/admin/get-user',
+    '/admin/set-user-password',
+    '/admin/ban-user',
+    '/admin/unban-user',
+    '/admin/list-user-sessions',
+    '/admin/revoke-user-session',
+    '/admin/revoke-user-sessions',
+    '/admin/has-permission',
+    // Its only use is writing session fields, and the one session field
+    // (twoFactorVerified) is server-only.
+    '/update-session',
+    // Second factor by emailed one-time code: not offered (TOTP and backup
+    // codes only), so its send and verify paths stay closed.
+    '/two-factor/send-otp',
+    '/two-factor/verify-otp',
     ...(env.MAGIC_LINK_ENABLED ? [] : ['/sign-in/magic-link', '/magic-link/verify']),
   ],
   // ORDER MATTERS. After hooks run in this order, and each later plugin sees
   // what the earlier ones returned:
-  //   admin, magicLink, twoFactor (MFA task), lockout, stripSessionToken.
+  //   admin, magicLink, twoFactor, sessionAssurance, lockout, stripSessionToken.
   // lockout must follow twoFactor (a pending 2FA challenge is neither a
-  // failure nor a success); stripSessionToken must be last (it rewrites
-  // every body the others produced).
+  // failure nor a success); sessionAssurance must follow twoFactor (it marks
+  // the session a verify endpoint produced); stripSessionToken must be last
+  // (it rewrites every body the others produced).
   plugins: [
     admin({
       ac,
@@ -180,7 +224,19 @@ export const auth = betterAuth({
         await sendAuthEmail('magic link', email, url);
       },
     }),
-    // twoFactor goes here, before the lockout.
+    // TOTP (authenticator app) with backup codes. A password sign-in by a
+    // user with 2FA enabled stops at a challenge until a code is verified.
+    // Magic link and social sign-in are not challenged; those sessions stay
+    // aal1 until a code is verified from them (step-up, auth/assurance.ts).
+    twoFactor({
+      issuer: '{{PROJECT_DISPLAY_NAME}}',
+      // An account without a password (social or magic link only) can still
+      // enroll and remove 2FA; a password account must give its password.
+      // The session checks in auth/assurance.ts and auth/account-linking.ts
+      // stand in for the password there.
+      allowPasswordless: true,
+    }),
+    sessionAssurance(),
     lockoutPlugin(),
     // Last, so it sees every other plugin's response: no session token in
     // any JSON body; the HttpOnly cookie is its only carrier.

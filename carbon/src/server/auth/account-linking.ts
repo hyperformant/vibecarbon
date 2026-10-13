@@ -89,11 +89,18 @@ export async function secureSocialLink(linked: {
  * the cleanup commits in between, that insert still succeeds (it only
  * waited on the cleanup's row lock) and the attacker would hold a live
  * session on the now-verified account. The same holds for every endpoint
- * that issues a session on the strength of the password (or of a session
- * that the password created). So after every session one of those creates,
- * check the credential still exists; if not, delete the session and fail
- * the request. Both orderings are covered: a session inserted before the
- * cleanup is deleted by it, one inserted after is deleted here.
+ * that issues a session on the strength of the password, or of a session
+ * the password created. So after every session one of those creates, check
+ * that what it rests on still exists; if not, delete the session and fail
+ * the request.
+ *
+ * Both orderings are covered, and this depends on two things in the schema
+ * and the cleanup: session.user_id is a foreign key to "user", so inserting
+ * a session takes a KEY SHARE lock on the user row, and the cleanup holds
+ * that row FOR UPDATE for its whole transaction. Those locks conflict, so a
+ * session insert either commits before the cleanup's DELETE runs (and is
+ * deleted by it) or waits until the cleanup commits (and is deleted here).
+ * Dropping that foreign key, or the FOR UPDATE, reopens the race.
  *
  * Better Auth does not record how a session was authenticated, so this
  * keys on the endpoint path. tests/structural/auth-session-paths.test.ts
@@ -103,12 +110,24 @@ export async function secureSocialLink(linked: {
  * Runs as the `session.create.after` database hook; the thrown error ends
  * the request before its cookie is set.
  */
-export const CREDENTIAL_SESSION_PATHS: ReadonlySet<string> = new Set([
+
+/** Sessions issued because the password was just checked: the password must survive. */
+export const PASSWORD_SESSION_PATHS: ReadonlySet<string> = new Set([
   '/sign-in/email', // password sign-in
   '/sign-up/email', // sign-up with a password, auto sign-in
   '/change-password', // re-issues the session (revokeOtherSessions)
-  // Second factor (MFA task): finishing a password sign-in, and enabling or
-  // disabling 2FA (which re-issue the session and require the password).
+]);
+
+/**
+ * Sessions the second-factor endpoints issue. With a current session
+ * (confirming an enrollment, enabling or disabling 2FA) the new session
+ * replaces it, so that session must still exist: the cleanup deletes every
+ * session of the user. Without one (finishing a password sign-in that owed
+ * a second factor) the session rests on the password, which must survive.
+ * Keying the first case on the session, not the password, is what lets a
+ * social-only account (no password; `allowPasswordless`) manage 2FA.
+ */
+export const SECOND_FACTOR_SESSION_PATHS: ReadonlySet<string> = new Set([
   '/two-factor/verify-totp',
   '/two-factor/verify-otp',
   '/two-factor/verify-backup-code',
@@ -116,24 +135,93 @@ export const CREDENTIAL_SESSION_PATHS: ReadonlySet<string> = new Set([
   '/two-factor/disable',
 ]);
 
-export async function rejectOrphanedPasswordSession(
-  created: { id: string; userId: string },
-  path: string | undefined
-): Promise<void> {
-  if (!path || !CREDENTIAL_SESSION_PATHS.has(path)) return;
+async function hasPassword(userId: string): Promise<boolean> {
   const [credential] = await adminDb
     .select({ id: account.id })
     .from(account)
-    .where(and(eq(account.userId, created.userId), eq(account.providerId, 'credential')));
-  if (credential) return;
+    .where(and(eq(account.userId, userId), eq(account.providerId, 'credential')));
+  return Boolean(credential);
+}
+
+async function sessionExists(sessionId: string, userId: string): Promise<boolean> {
+  const [row] = await adminDb
+    .select({ id: session.id })
+    .from(session)
+    .where(and(eq(session.id, sessionId), eq(session.userId, userId)));
+  return Boolean(row);
+}
+
+export async function rejectOrphanedPasswordSession(
+  created: { id: string; userId: string },
+  path: string | undefined,
+  sourceSessionId?: string | null
+): Promise<void> {
+  if (!path) return;
+  let stands: boolean;
+  if (PASSWORD_SESSION_PATHS.has(path)) {
+    stands = await hasPassword(created.userId);
+  } else if (SECOND_FACTOR_SESSION_PATHS.has(path)) {
+    stands = sourceSessionId
+      ? await sessionExists(sourceSessionId, created.userId)
+      : await hasPassword(created.userId);
+  } else {
+    return;
+  }
+  if (stands) return;
   await adminDb.delete(session).where(eq(session.id, created.id));
   logger.warn(
     { userId: created.userId, path },
-    'Password-backed session issued after its password was removed: session deleted'
+    'Session issued after the password or session it rested on was removed: session deleted'
   );
   // The same answer as a wrong password, so the race reveals nothing.
   throw new APIError('UNAUTHORIZED', {
     code: 'INVALID_EMAIL_OR_PASSWORD',
     message: 'Invalid email or password',
   });
+}
+
+/**
+ * The magic-link side of the pre-hijacking defence.
+ *
+ * Better Auth's magic-link verify has its own version of secureSocialLink
+ * (dist/db/revoke-unproven-account-access.mjs): when the link proves an
+ * address whose account was never verified, it deletes every account link
+ * (the attacker's password included) and every session, then marks the
+ * email verified. It does not touch the second factor, so an attacker who
+ * pre-registered the address and enrolled their own authenticator would
+ * leave it behind: the owner could not remove it (that needs aal2, which
+ * needs the attacker's codes). This finishes the job. It runs as the
+ * `user.update.after` database hook: in /magic-link/verify the only user
+ * update is that helper's "mark verified" step.
+ *
+ * Social sign-in never reaches that helper (secureSocialLink above covers
+ * it, second factor included), and the two cannot fight: each deletes
+ * rows the other may already have deleted.
+ */
+export async function dropUnprovenSecondFactor(
+  updated: { id: string; emailVerified?: boolean | null },
+  path: string | undefined
+): Promise<void> {
+  if (path !== '/magic-link/verify' || !updated.emailVerified) return;
+  try {
+    await adminDb.transaction(async (tx) => {
+      const removed = await tx
+        .delete(twoFactor)
+        .where(eq(twoFactor.userId, updated.id))
+        .returning({ id: twoFactor.id });
+      await tx.update(user).set({ twoFactorEnabled: false }).where(eq(user.id, updated.id));
+      if (removed.length) {
+        logger.warn(
+          { userId: updated.id },
+          'Magic link proved an unverified address: removed a second factor nobody had proved'
+        );
+      }
+    });
+  } catch (err) {
+    logger.error(
+      { err: dbErrorForLog(err), userId: updated.id },
+      'Could not remove an unproven second factor; refusing the magic link'
+    );
+    throw new Error('Magic link refused: second-factor cleanup failed');
+  }
 }

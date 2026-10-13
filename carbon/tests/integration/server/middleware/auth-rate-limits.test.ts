@@ -74,6 +74,17 @@ describe('auth endpoint rate limits (per trusted client IP)', () => {
     );
   });
 
+  it.each([
+    ['/api/auth/two-factor/verify-totp', '203.0.113.20'],
+    ['/api/auth/two-factor/verify-backup-code', '203.0.113.21'],
+    ['/api/auth/two-factor/enable', '203.0.113.22'],
+    ['/api/auth/two-factor/disable', '203.0.113.23'],
+    ['/api/auth/two-factor/get-totp-uri', '203.0.113.24'],
+    ['/api/auth/two-factor/generate-backup-codes', '203.0.113.25'],
+  ])('every second-factor endpoint is capped: %s', async (path, ip) => {
+    expect(await hit(path, ip, 4)).toEqual(allowedThenLimited(3));
+  });
+
   it('everything else under /api/auth: the general 100 per minute', async () => {
     const statuses = await hit('/api/auth/get-session', '203.0.113.7', 101);
     expect(statuses.slice(0, 100).every((s) => s === 200)).toBe(true);
