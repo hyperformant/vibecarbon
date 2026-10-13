@@ -29,6 +29,24 @@ export function adminStatusAfter(result: BootstrapResult): AdminStatus {
   return result;
 }
 
+/**
+ * Thrown by a bootstrap attempt that found the admin half-made: a super
+ * admin row without its password yet. Better Auth's createUser writes the
+ * user row, hashes the password, then links the credential, outside one
+ * transaction, so a second replica bootstrapping at the same moment sees
+ * exactly this while the first is still working. The startup loop retries
+ * it, and settles it as `refused` (logging `message`, the operator's fix)
+ * only if it persists.
+ */
+export class AdminNotSettledError extends Error {
+  readonly email: string;
+  constructor(message: string, email: string) {
+    super(message);
+    this.name = 'AdminNotSettledError';
+    this.email = email;
+  }
+}
+
 let status: AdminStatus = 'pending';
 
 export function setAdminStatus(next: AdminStatus): void {

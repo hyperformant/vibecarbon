@@ -1,4 +1,5 @@
 import {
+  AdminNotSettledError,
   type AdminStatus,
   adminStatusAfter,
   type BootstrapResult,
@@ -101,11 +102,12 @@ export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {})
   }
 }
 
-// Errors waiting fixes: the connection dropped or was refused (node errno or
-// SQLSTATE class 08 / 57P0x), a concurrent transaction won (40001, 40P01),
-// or the schema is mid-migration (42P01 undefined_table, 42703
-// undefined_column, 42704 undefined_object).
-const TRANSIENT_ERRNO = new Set([
+// Connection loss only: the database went away or refused us. These are a
+// dependency wait (the db container restarting, a failover), the same wait
+// checkDbRoleAtStartup does before the bootstrap ever runs. Node errno codes
+// for the socket, SQLSTATE class 08 (connection exception) and 57P01-03
+// (admin/crash shutdown, cannot connect now).
+const CONNECTION_ERRNO = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
   'ETIMEDOUT',
@@ -113,33 +115,25 @@ const TRANSIENT_ERRNO = new Set([
   'ENOTFOUND',
   'EAI_AGAIN',
 ]);
-const TRANSIENT_SQLSTATE = new Set([
-  '40001',
-  '40P01',
-  '42P01',
-  '42703',
-  '42704',
-  '57P01',
-  '57P02',
-  '57P03',
-  '53300',
-]);
+const CONNECTION_SQLSTATE = new Set(['57P01', '57P02', '57P03']);
 
 /**
- * True when a bootstrap error is worth retrying: a connection problem, a
- * lost serialization race, or a schema that is still being migrated. Looks
- * through Drizzle's (and Better Auth's) `cause` wrapping like isDbAuthFailure.
+ * True when a bootstrap error is the connection to Postgres dropping or
+ * being refused. Looks through Drizzle's (and Better Auth's) `cause`
+ * wrapping like isDbAuthFailure.
  */
-export function isTransientDbError(err: unknown): boolean {
+export function isConnectionLoss(err: unknown): boolean {
   let current: unknown = err;
   for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
     const code = (current as { code?: unknown }).code;
     if (typeof code === 'string') {
-      if (TRANSIENT_ERRNO.has(code) || TRANSIENT_SQLSTATE.has(code) || code.startsWith('08')) {
+      if (CONNECTION_ERRNO.has(code) || CONNECTION_SQLSTATE.has(code) || code.startsWith('08')) {
         return true;
       }
-    }
-    if (/Connection terminated|timeout exceeded when trying to connect/i.test(current.message)) {
+    } else if (/^Connection terminated/.test(current.message)) {
+      // node-pg raises "Connection terminated (unexpectedly)" with no code at
+      // all when the server closes the socket mid-query. Matched only when
+      // there is no code, as the same dependency wait as the codes above.
       return true;
     }
     current = current.cause;
@@ -147,42 +141,96 @@ export function isTransientDbError(err: unknown): boolean {
   return false;
 }
 
+/** SQLSTATE 25006: the database is a read-only replica (a compose-ha standby). */
+export function isReadOnlyDatabase(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
+    if ((current as { code?: unknown }).code === '25006') return true;
+    current = current.cause;
+  }
+  return false;
+}
+
 interface AdminStartupDeps {
   bootstrap: () => Promise<BootstrapResult>;
+  schemaReady: () => Promise<{ ready: boolean; missing: string[] }>;
   setStatus: (status: AdminStatus) => void;
   log: Pick<typeof logger, 'error' | 'info' | 'warn'>;
   retryMs: number;
+  /** How often a persistent problem is logged again, at error level. */
+  relogMs: number;
+  /** How long a half-made super admin may stay half-made before it is refused. */
+  notSettledMs: number;
+  now: () => number;
 }
 
 const adminDefaults: AdminStartupDeps = {
   // Loaded lazily: the auth instance is heavy and this module is imported by
   // tests that never bootstrap.
   bootstrap: async () => (await import('../auth/bootstrap-admin')).bootstrapAdmin(),
+  schemaReady: async () => (await import('../auth/bootstrap-admin')).adminSchemaReady(),
   setStatus: setAdminStatus,
   log: logger,
   retryMs: defaults.retryMs,
+  relogMs: defaults.authRelogMs,
+  notSettledMs: 120_000,
+  now: Date.now,
 };
 
 /**
  * Ensure the ADMIN_EMAIL super admin exists, as the second half of startup:
  * call it once checkDbRoleAtStartup has confirmed the database answers and is
- * migrated. Never rejects; run it without awaiting.
+ * migrated. Never rejects; run it without awaiting. Every wait below runs on
+ * the startup loop's cadence (`retryMs`).
  *
- * A transient failure (isTransientDbError) is retried on the startup loop's
- * cadence until the bootstrap settles, so a database blip or a migration
- * still running does not leave the app without its admin until a restart.
- * Settled outcomes are terminal and published for /api/health: ready,
- * skipped (no ADMIN_* env), refused (ownership not proven), or failed (an
- * error waiting cannot fix). Deploys wait for ready and stop early on the
- * others.
+ * - Waits for a positive schema check (adminSchemaReady: every column the
+ *   bootstrap writes exists) before trying, so a migration still running is
+ *   waited for by its condition, not by retrying schema errors.
+ * - Waits through connection loss (isConnectionLoss), warning once.
+ * - Waits while the database is a read-only replica (SQLSTATE 25006, a
+ *   compose-ha standby that has no admin row yet): the status stays
+ *   `pending` (not settled on a standby); replication or the promotion
+ *   restart settles it.
+ * - A half-made super admin (AdminNotSettledError: another replica between
+ *   writing the user and its password) is retried; past `notSettledMs` it
+ *   settles as `refused` with the operator's fix in the log.
+ * - Any other error publishes `failed` (so a deploy stops with a reason) and
+ *   keeps retrying, so fixing the cause recovers without a restart.
+ *
+ * While waiting on the schema or on a persistent error, the cause is logged
+ * at error level again every `relogMs`, so it reaches a deploy's log tail.
+ * Settled outcomes (ready, skipped, refused) end the loop.
  */
 export async function ensureAdminAtStartup(
   overrides: Partial<AdminStartupDeps> = {}
 ): Promise<AdminStatus> {
-  const { bootstrap, setStatus, log, retryMs } = { ...adminDefaults, ...overrides };
-  let warned = false;
+  const { bootstrap, schemaReady, setStatus, log, retryMs, relogMs, notSettledMs, now } = {
+    ...adminDefaults,
+    ...overrides,
+  };
+  let warnedConnection = false;
+  let notedReadOnly = false;
+  let loggedAt: number | undefined;
+  let notSettledSince: number | undefined;
+  const relog = (fields: object, message: string) => {
+    if (loggedAt === undefined || now() - loggedAt >= relogMs) {
+      log.error(fields, message);
+      loggedAt = now();
+    }
+  };
+  const pause = () => new Promise((resolve) => setTimeout(resolve, retryMs));
+
   for (;;) {
     try {
+      const schema = await schemaReady();
+      if (!schema.ready) {
+        relog(
+          { missing: schema.missing },
+          'Super admin bootstrap is waiting for the auth tables; run the database migrations'
+        );
+        await pause();
+        continue;
+      }
       const result = await bootstrap();
       const status = adminStatusAfter(result);
       setStatus(status);
@@ -193,19 +241,33 @@ export async function ensureAdminAtStartup(
       // 'refused' has already logged its own error with what to do.
       return status;
     } catch (err) {
-      if (!isTransientDbError(err)) {
-        log.error({ err: dbErrorForLog(err) }, 'Super admin bootstrap failed');
+      if (err instanceof AdminNotSettledError) {
+        notSettledSince ??= now();
+        if (now() - notSettledSince >= notSettledMs) {
+          log.error({ email: err.email }, err.message);
+          setStatus('refused');
+          return 'refused';
+        }
+      } else if (isConnectionLoss(err)) {
+        if (!warnedConnection) {
+          log.warn(
+            { err: dbErrorForLog(err) },
+            'Super admin bootstrap lost the database connection; waiting for it'
+          );
+          warnedConnection = true;
+        }
+      } else if (isReadOnlyDatabase(err)) {
+        if (!notedReadOnly) {
+          log.info(
+            'The database is read-only (a standby); the super admin arrives with replication'
+          );
+          notedReadOnly = true;
+        }
+      } else {
         setStatus('failed');
-        return 'failed';
+        relog({ err: dbErrorForLog(err) }, 'Super admin bootstrap failed; retrying');
       }
-      if (!warned) {
-        log.warn(
-          { err: dbErrorForLog(err) },
-          'Super admin bootstrap hit a transient database error; retrying'
-        );
-        warned = true;
-      }
-      await new Promise((resolve) => setTimeout(resolve, retryMs));
+      await pause();
     }
   }
 }

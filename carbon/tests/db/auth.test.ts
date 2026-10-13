@@ -3,8 +3,9 @@ import { Hono } from 'hono';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
-import { adminStatusAfter } from '@server/auth/admin-status';
-import { bootstrapAdmin } from '@server/auth/bootstrap-admin';
+import { AdminNotSettledError, adminStatusAfter } from '@server/auth/admin-status';
+import { adminSchemaReady, bootstrapAdmin } from '@server/auth/bootstrap-admin';
+import { ensureAdminAtStartup } from '@server/db/startup';
 import { isSuperAdmin } from '@server/lib/auth';
 import { logger } from '@server/lib/logger';
 import { csrfProtection } from '@server/middleware/csrf';
@@ -471,21 +472,52 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect((await roleOf(email)).role).toBe('user');
     });
 
-    it('reports a super admin with no password instead of calling it done', async () => {
-      // A bootstrap interrupted between the user row and its password.
+    it('reports a super admin with no password as not settled, never as done', async () => {
+      // A bootstrap interrupted between the user row and its password, or
+      // another replica still mid-create: the startup loop retries this and
+      // refuses it only if it persists (unit-tested in db-startup.test.ts).
       const email = newEmail();
       await db.query('insert into public."user" (name, email, role) values ($1, $2, $3)', [
         'Half Made',
         email,
         'super_admin',
       ]);
-      const errors = vi.spyOn(logger, 'error');
-      try {
-        expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
-        expect(JSON.stringify(errors.mock.calls)).toContain('has no password');
-      } finally {
-        errors.mockRestore();
-      }
+      await expect(bootstrapAdmin({ email, password: PASSWORD })).rejects.toBeInstanceOf(
+        AdminNotSettledError
+      );
+      await expect(bootstrapAdmin({ email, password: PASSWORD })).rejects.toThrow(
+        'has no password'
+      );
+    });
+
+    // k8s runs two app replicas; both bootstrap at startup. Better Auth's
+    // createUser writes the user row, hashes, then links the password with
+    // no transaction, so the loser can see a super admin without a password.
+    // That is "not settled yet", never a refusal.
+    it('two replicas bootstrapping at once both end ready, never refused', async () => {
+      const email = newEmail();
+      const statuses: string[][] = [[], []];
+      const replica = (i: number) =>
+        ensureAdminAtStartup({
+          bootstrap: () => bootstrapAdmin({ email, password: PASSWORD }),
+          schemaReady: adminSchemaReady,
+          setStatus: (st) => statuses[i].push(st),
+          log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
+          retryMs: 50,
+        });
+      const results = await Promise.all([replica(0), replica(1)]);
+      expect(results).toEqual(['ready', 'ready']);
+      expect(statuses.flat()).not.toContain('refused');
+      const { rows } = await db.query(
+        'select count(*)::int as n from public."user" where email = $1',
+        [email],
+      );
+      expect(rows[0].n).toBe(1);
+      expect((await signIn(email, PASSWORD, '203.0.113.39')).status).toBe(200);
+    });
+
+    it('the schema check sees every column the bootstrap writes on a migrated database', async () => {
+      expect(await adminSchemaReady()).toEqual({ ready: true, missing: [] });
     });
 
     it("promotes the operator's own account when its password is ADMIN_PASSWORD", async () => {
@@ -503,20 +535,6 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect(await bootstrapAdmin({ email: email.toUpperCase(), password: PASSWORD })).toBe(
         'promoted',
       );
-    });
-
-    it('two replicas bootstrapping at once end with one super admin', async () => {
-      const email = newEmail();
-      const results = await Promise.all([
-        bootstrapAdmin({ email, password: PASSWORD }),
-        bootstrapAdmin({ email, password: PASSWORD }),
-      ]);
-      expect(results).toContain('created');
-      const { rows } = await db.query(
-        'select count(*)::int as n from public."user" where email = $1 and role = $2',
-        [email, 'super_admin'],
-      );
-      expect(rows[0].n).toBe(1);
     });
 
     it('no HTTP path assigns roles: set-role is disabled even for a super admin', async () => {

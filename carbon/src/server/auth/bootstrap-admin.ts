@@ -1,10 +1,10 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, getTableColumns, sql } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { account, user } from '../db/schema';
 import { isSuperAdmin } from '../lib/auth';
 import { env } from '../lib/env';
 import { logger } from '../lib/logger';
-import type { BootstrapResult } from './admin-status';
+import { AdminNotSettledError, type BootstrapResult } from './admin-status';
 import { auth } from './index';
 
 export type { BootstrapResult } from './admin-status';
@@ -17,7 +17,9 @@ export type { BootstrapResult } from './admin-status';
  *   super admin past onboarding;
  * - the account is already super_admin: nothing to do (its password is
  *   never touched, so changing ADMIN_PASSWORD later resets nothing),
- *   unless it has no password at all, which is refused with a fix;
+ *   unless it has no password yet, which throws AdminNotSettledError
+ *   (another replica may be mid-create; the startup loop retries, then
+ *   reports it as refused with a fix);
  * - the account exists but is not super_admin: promote it ONLY if its own
  *   password verifies against ADMIN_PASSWORD. Sign-up is open and, without
  *   SMTP, unverified, so anyone could register the admin address before
@@ -26,7 +28,8 @@ export type { BootstrapResult } from './admin-status';
  *
  * Two replicas starting together may both try to create the account; the
  * loser hits the unique email and falls through to the existing-account
- * path, where it finds a super admin.
+ * path, where it finds a super admin (possibly before its password is
+ * linked: see above).
  */
 export async function bootstrapAdmin(
   opts: { email?: string; password?: string } = {
@@ -52,14 +55,16 @@ export async function bootstrapAdmin(
   }): Promise<BootstrapResult> => {
     if (isSuperAdmin(existing)) {
       if (await hasPassword(existing.id)) return 'unchanged';
-      logger.error(
-        { email },
+      // Possibly another replica mid-createUser (row first, password after):
+      // not settled yet. The startup loop retries and, if it persists,
+      // settles it as refused with this message.
+      throw new AdminNotSettledError(
         `The super admin ${email} has no password, so it cannot sign in with ADMIN_PASSWORD ` +
           '(a bootstrap interrupted before the password was saved, or an account that only ' +
           'uses social sign-in). Request a password reset for it, or delete the account and ' +
-          'restart to recreate it from ADMIN_EMAIL and ADMIN_PASSWORD.'
+          'restart to recreate it from ADMIN_EMAIL and ADMIN_PASSWORD.',
+        email
       );
-      return 'refused';
     }
     if (!(await passwordMatches(existing.id, password))) {
       logger.error(
@@ -121,4 +126,25 @@ async function passwordMatches(userId: string, password: string): Promise<boolea
   if (!hash) return false;
   const ctx = await auth.$context;
   return ctx.password.verify({ hash, password });
+}
+
+/**
+ * Positive schema check for the bootstrap: every column of the tables it
+ * writes (`user`, `account`, as declared in db/schema.ts, which is what
+ * Better Auth inserts) exists. The startup loop waits on this instead of
+ * retrying schema errors, so a database still being migrated is waited
+ * for by its condition, not by guessing at error codes.
+ */
+export async function adminSchemaReady(): Promise<{ ready: boolean; missing: string[] }> {
+  const wanted = [
+    ...Object.values(getTableColumns(user)).map((c) => `user.${c.name}`),
+    ...Object.values(getTableColumns(account)).map((c) => `account.${c.name}`),
+  ];
+  const { rows } = await adminDb.execute<{ col: string }>(
+    sql`select table_name || '.' || column_name as col from information_schema.columns
+      where table_schema = 'public' and table_name in ('user', 'account')`
+  );
+  const present = new Set(rows.map((r) => r.col));
+  const missing = wanted.filter((c) => !present.has(c));
+  return { ready: missing.length === 0, missing };
 }

@@ -15,8 +15,9 @@ vi.mock('@server/lib/logger', () => ({
 const { assertBypassRole, DbNotMigratedError, DbRoleError, pool } = await import(
   '@server/db/client'
 );
-const { checkDbRoleAtStartup, ensureAdminAtStartup, isDbAuthFailure, isTransientDbError } =
+const { checkDbRoleAtStartup, ensureAdminAtStartup, isConnectionLoss, isDbAuthFailure } =
   await import('@server/db/startup');
+const { AdminNotSettledError } = await import('@server/auth/admin-status');
 
 function fakeLog() {
   return { fatal: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
@@ -187,32 +188,89 @@ describe('assertBypassRole', () => {
   });
 });
 
-describe('ensureAdminAtStartup: the super admin bootstrap settles, retrying only transient errors', () => {
-  const run = (bootstrap: () => Promise<unknown>) => {
+describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only on conditions', () => {
+  const ready = async () => ({ ready: true, missing: [] });
+  const run = (
+    bootstrap: () => Promise<unknown>,
+    extra: Partial<Parameters<typeof ensureAdminAtStartup>[0]> = {}
+  ) => {
     const statuses: string[] = [];
     const log = fakeLog();
     const done = ensureAdminAtStartup({
       bootstrap: bootstrap as never,
+      schemaReady: ready,
       setStatus: (s) => statuses.push(s),
       log,
       retryMs: 0,
+      ...extra,
     });
     return { done, statuses, log };
   };
+  const pgError = (code: string) =>
+    new DrizzleQueryError('insert', [], Object.assign(new Error(`pg ${code}`), { code }));
 
-  it('retries a transient failure and reports ready once it succeeds, without a restart', async () => {
+  it('waits through connection loss and reports ready once it succeeds, without a restart', async () => {
     const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
     const bootstrap = vi
       .fn()
       .mockRejectedValueOnce(refused)
-      .mockRejectedValueOnce(wrappedPgError('42P01')) // migration still running
-      .mockRejectedValueOnce(wrappedPgError('40001')) // serialization race
+      .mockRejectedValueOnce(pgError('57P01'))
+      .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'))
       .mockResolvedValueOnce('created');
     const { done, statuses, log } = run(bootstrap);
     expect(await done).toBe('ready');
     expect(bootstrap).toHaveBeenCalledTimes(4);
     expect(statuses).toEqual(['ready']);
     expect(log.warn).toHaveBeenCalledTimes(1); // once per outage, not per retry
+  });
+
+  it('waits for the schema by a positive check, re-logging the cause at error level', async () => {
+    let t = 0;
+    const schemaReady = vi
+      .fn()
+      .mockResolvedValueOnce({ ready: false, missing: ['account.password'] })
+      .mockResolvedValueOnce({ ready: false, missing: ['account.password'] })
+      .mockResolvedValueOnce({ ready: false, missing: ['account.password'] })
+      .mockResolvedValue({ ready: true, missing: [] });
+    const bootstrap = vi.fn().mockResolvedValue('unchanged');
+    const { done, log } = run(bootstrap, {
+      schemaReady,
+      relogMs: 60_000,
+      now: () => {
+        t += 40_000;
+        return t;
+      },
+    });
+    expect(await done).toBe('ready');
+    expect(bootstrap).toHaveBeenCalledTimes(1); // never tried against a half schema
+    expect(log.error.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(log.error.mock.calls.length).toBeLessThan(3); // throttled, not per probe
+    expect(JSON.stringify(log.error.mock.calls[0])).toContain('account.password');
+  });
+
+  it('retries a half-made super admin (another replica mid-create) until it settles', async () => {
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValueOnce(new AdminNotSettledError('has no password', 'a@b.c'))
+      .mockResolvedValueOnce('unchanged');
+    const { done, statuses } = run(bootstrap);
+    expect(await done).toBe('ready');
+    expect(statuses).toEqual(['ready']);
+  });
+
+  it('settles a half-made super admin that stays half-made as refused, with the fix', async () => {
+    let t = 0;
+    const bootstrap = vi.fn().mockRejectedValue(new AdminNotSettledError('has no password', 'a@b.c'));
+    const { done, statuses, log } = run(bootstrap, {
+      notSettledMs: 120_000,
+      now: () => {
+        t += 50_000;
+        return t;
+      },
+    });
+    expect(await done).toBe('refused');
+    expect(statuses).toEqual(['refused']);
+    expect(log.error).toHaveBeenCalledWith({ email: 'a@b.c' }, 'has no password');
   });
 
   it('a refused bootstrap is terminal: reported, never retried', async () => {
@@ -229,23 +287,43 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, retrying only
     expect(statuses).toEqual(['skipped']);
   });
 
-  it('an error waiting cannot fix is terminal (failed) and logged', async () => {
-    const bootstrap = vi.fn().mockRejectedValue(new Error('password too short'));
+  it('reports failed for any other error, logs it, and recovers once the cause is fixed', async () => {
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValueOnce(pgError('23502'))
+      .mockRejectedValueOnce(pgError('23502'))
+      .mockResolvedValueOnce('created');
     const { done, statuses, log } = run(bootstrap);
-    expect(await done).toBe('failed');
-    expect(bootstrap).toHaveBeenCalledTimes(1);
-    expect(statuses).toEqual(['failed']);
-    expect(log.error).toHaveBeenCalledTimes(1);
+    expect(await done).toBe('ready');
+    expect(statuses).toEqual(['failed', 'failed', 'ready']);
+    expect(log.error).toHaveBeenCalledTimes(1); // re-logged only every relogMs
   });
 
-  it('classifies connection, race and mid-migration errors as transient, nothing else', () => {
-    for (const code of ['08006', '57P01', '40001', '40P01', '42P01', '42703']) {
-      expect(isTransientDbError(wrappedPgError(code)), code).toBe(true);
+  it('a read-only standby stays pending (not failed) until the admin replicates', async () => {
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValueOnce(pgError('25006'))
+      .mockRejectedValueOnce(pgError('25006'))
+      .mockResolvedValueOnce('unchanged');
+    const { done, statuses, log } = run(bootstrap);
+    expect(await done).toBe('ready');
+    expect(statuses).toEqual(['ready']);
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('treats only connection loss as a connection wait', () => {
+    for (const code of ['08006', '08001', '57P01', '57P03']) {
+      expect(isConnectionLoss(pgError(code)), code).toBe(true);
     }
-    expect(isTransientDbError(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe(true);
-    expect(isTransientDbError(new Error('Connection terminated unexpectedly'))).toBe(true);
-    expect(isTransientDbError(wrappedPgError('23505'))).toBe(false); // unique violation
-    expect(isTransientDbError(wrappedPgError('28P01'))).toBe(false);
-    expect(isTransientDbError(new Error('nope'))).toBe(false);
+    expect(isConnectionLoss(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe(true);
+    expect(isConnectionLoss(new Error('Connection terminated unexpectedly'))).toBe(true);
+    // A coded error with that text is judged by its code alone.
+    expect(isConnectionLoss(Object.assign(new Error('Connection terminated'), { code: '23505' }))).toBe(
+      false
+    );
+    for (const code of ['40001', '40P01', '42P01', '53300', '23505', '28P01']) {
+      expect(isConnectionLoss(pgError(code)), code).toBe(false);
+    }
+    expect(isConnectionLoss(new Error('nope'))).toBe(false);
   });
 });
