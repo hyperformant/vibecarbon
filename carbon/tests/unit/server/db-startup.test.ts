@@ -17,7 +17,6 @@ const { assertBypassRole, DbNotMigratedError, DbRoleError, pool } = await import
 );
 const { checkDbRoleAtStartup, ensureAdminAtStartup, isConnectionLoss, isDbAuthFailure } =
   await import('@server/db/startup');
-const { AdminNotSettledError } = await import('@server/auth/admin-status');
 
 function fakeLog() {
   return { fatal: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
@@ -248,31 +247,6 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
     expect(JSON.stringify(log.error.mock.calls[0])).toContain('account.password');
   });
 
-  it('retries a half-made super admin (another replica mid-create) until it settles', async () => {
-    const bootstrap = vi
-      .fn()
-      .mockRejectedValueOnce(new AdminNotSettledError('has no password', 'a@b.c'))
-      .mockResolvedValueOnce('unchanged');
-    const { done, statuses } = run(bootstrap);
-    expect(await done).toBe('ready');
-    expect(statuses).toEqual(['ready']);
-  });
-
-  it('settles a half-made super admin that stays half-made as refused, with the fix', async () => {
-    let t = 0;
-    const bootstrap = vi.fn().mockRejectedValue(new AdminNotSettledError('has no password', 'a@b.c'));
-    const { done, statuses, log } = run(bootstrap, {
-      notSettledMs: 120_000,
-      now: () => {
-        t += 50_000;
-        return t;
-      },
-    });
-    expect(await done).toBe('refused');
-    expect(statuses).toEqual(['refused']);
-    expect(log.error).toHaveBeenCalledWith({ email: 'a@b.c' }, 'has no password');
-  });
-
   it('a refused bootstrap is terminal: reported, never retried', async () => {
     const bootstrap = vi.fn().mockResolvedValue('refused');
     const { done, statuses } = run(bootstrap);
@@ -295,8 +269,49 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
       .mockResolvedValueOnce('created');
     const { done, statuses, log } = run(bootstrap);
     expect(await done).toBe('ready');
-    expect(statuses).toEqual(['failed', 'failed', 'ready']);
-    expect(log.error).toHaveBeenCalledTimes(1); // re-logged only every relogMs
+    expect(statuses).toEqual(['failed', 'ready']);
+    expect(log.error).toHaveBeenCalledTimes(1); // the same cause re-logs only every relogMs
+  });
+
+  // Fresh deploy: the loop waits on the schema (logged), then the first real
+  // failure arrives seconds later. It must reach the log tail at once, not
+  // wait out the schema line's 60 s throttle.
+  it('throttles per cause: a failure right after the schema wait is still logged', async () => {
+    let t = 0;
+    const schemaReady = vi
+      .fn()
+      .mockResolvedValueOnce({ ready: false, missing: ['user.role'] })
+      .mockResolvedValue({ ready: true, missing: [] });
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValueOnce(pgError('23502'))
+      .mockResolvedValueOnce('created');
+    const { done, log } = run(bootstrap, {
+      schemaReady,
+      relogMs: 60_000,
+      now: () => {
+        t += 1000;
+        return t;
+      },
+    });
+    expect(await done).toBe('ready');
+    const messages = log.error.mock.calls.map((c) => String(c[1]));
+    expect(messages).toEqual([
+      expect.stringContaining('waiting for the auth tables'),
+      expect.stringContaining('bootstrap failed'),
+    ]);
+  });
+
+  it('a waiting state puts a stale failed back to pending', async () => {
+    const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+    const bootstrap = vi
+      .fn()
+      .mockRejectedValueOnce(pgError('23502'))
+      .mockRejectedValueOnce(refused)
+      .mockResolvedValueOnce('unchanged');
+    const { done, statuses } = run(bootstrap);
+    expect(await done).toBe('ready');
+    expect(statuses).toEqual(['failed', 'pending', 'ready']);
   });
 
   it('a read-only standby stays pending (not failed) until the admin replicates', async () => {

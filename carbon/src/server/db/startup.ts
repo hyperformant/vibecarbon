@@ -1,5 +1,4 @@
 import {
-  AdminNotSettledError,
   type AdminStatus,
   adminStatusAfter,
   type BootstrapResult,
@@ -159,8 +158,6 @@ interface AdminStartupDeps {
   retryMs: number;
   /** How often a persistent problem is logged again, at error level. */
   relogMs: number;
-  /** How long a half-made super admin may stay half-made before it is refused. */
-  notSettledMs: number;
   now: () => number;
 }
 
@@ -173,7 +170,6 @@ const adminDefaults: AdminStartupDeps = {
   log: logger,
   retryMs: defaults.retryMs,
   relogMs: defaults.authRelogMs,
-  notSettledMs: 120_000,
   now: Date.now,
 };
 
@@ -191,9 +187,6 @@ const adminDefaults: AdminStartupDeps = {
  *   compose-ha standby that has no admin row yet): the status stays
  *   `pending` (not settled on a standby); replication or the promotion
  *   restart settles it.
- * - A half-made super admin (AdminNotSettledError: another replica between
- *   writing the user and its password) is retried; past `notSettledMs` it
- *   settles as `refused` with the operator's fix in the log.
  * - Any other error publishes `failed` (so a deploy stops with a reason) and
  *   keeps retrying, so fixing the cause recovers without a restart.
  *
@@ -204,19 +197,34 @@ const adminDefaults: AdminStartupDeps = {
 export async function ensureAdminAtStartup(
   overrides: Partial<AdminStartupDeps> = {}
 ): Promise<AdminStatus> {
-  const { bootstrap, schemaReady, setStatus, log, retryMs, relogMs, notSettledMs, now } = {
+  const { bootstrap, schemaReady, setStatus, log, retryMs, relogMs, now } = {
     ...adminDefaults,
     ...overrides,
   };
   let warnedConnection = false;
   let notedReadOnly = false;
-  let loggedAt: number | undefined;
-  let notSettledSince: number | undefined;
-  const relog = (fields: object, message: string) => {
-    if (loggedAt === undefined || now() - loggedAt >= relogMs) {
+  // Throttled per cause: the first occurrence of each distinct cause always
+  // logs at error level, repeats every relogMs. One shared timer would let a
+  // schema-wait line swallow the first real failure right after it.
+  const loggedAt = new Map<string, number>();
+  const relog = (cause: string, fields: object, message: string) => {
+    const last = loggedAt.get(cause);
+    if (last === undefined || now() - last >= relogMs) {
       log.error(fields, message);
-      loggedAt = now();
+      loggedAt.set(cause, now());
     }
+  };
+  // Published only on change. Waiting states put a stale `failed` back to
+  // `pending`, so health reports what the loop is doing now.
+  let published: AdminStatus | undefined;
+  const publish = (next: AdminStatus) => {
+    if (next !== published) {
+      setStatus(next);
+      published = next;
+    }
+  };
+  const waiting = () => {
+    if (published === 'failed') publish('pending');
   };
   const pause = () => new Promise((resolve) => setTimeout(resolve, retryMs));
 
@@ -224,7 +232,9 @@ export async function ensureAdminAtStartup(
     try {
       const schema = await schemaReady();
       if (!schema.ready) {
+        waiting();
         relog(
+          'schema',
           { missing: schema.missing },
           'Super admin bootstrap is waiting for the auth tables; run the database migrations'
         );
@@ -233,7 +243,7 @@ export async function ensureAdminAtStartup(
       }
       const result = await bootstrap();
       const status = adminStatusAfter(result);
-      setStatus(status);
+      publish(status);
       if (result === 'created') log.info('Created the super admin account from ADMIN_EMAIL');
       else if (result === 'promoted') log.info('Granted super_admin to the ADMIN_EMAIL account');
       else if (result === 'skipped')
@@ -241,14 +251,8 @@ export async function ensureAdminAtStartup(
       // 'refused' has already logged its own error with what to do.
       return status;
     } catch (err) {
-      if (err instanceof AdminNotSettledError) {
-        notSettledSince ??= now();
-        if (now() - notSettledSince >= notSettledMs) {
-          log.error({ email: err.email }, err.message);
-          setStatus('refused');
-          return 'refused';
-        }
-      } else if (isConnectionLoss(err)) {
+      if (isConnectionLoss(err)) {
+        waiting();
         if (!warnedConnection) {
           log.warn(
             { err: dbErrorForLog(err) },
@@ -257,6 +261,7 @@ export async function ensureAdminAtStartup(
           warnedConnection = true;
         }
       } else if (isReadOnlyDatabase(err)) {
+        waiting();
         if (!notedReadOnly) {
           log.info(
             'The database is read-only (a standby); the super admin arrives with replication'
@@ -264,8 +269,14 @@ export async function ensureAdminAtStartup(
           notedReadOnly = true;
         }
       } else {
-        setStatus('failed');
-        relog({ err: dbErrorForLog(err) }, 'Super admin bootstrap failed; retrying');
+        publish('failed');
+        const code = (err as { code?: unknown; cause?: { code?: unknown } })?.code;
+        const causeCode = (err as { cause?: { code?: unknown } })?.cause?.code;
+        relog(
+          `failed:${String(code ?? causeCode ?? (err instanceof Error ? err.message : err))}`,
+          { err: dbErrorForLog(err) },
+          'Super admin bootstrap failed; retrying'
+        );
       }
       await pause();
     }

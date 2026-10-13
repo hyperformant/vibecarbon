@@ -3,8 +3,13 @@ import { Hono } from 'hono';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
-import { AdminNotSettledError, adminStatusAfter } from '@server/auth/admin-status';
-import { adminSchemaReady, bootstrapAdmin } from '@server/auth/bootstrap-admin';
+import { adminStatusAfter } from '@server/auth/admin-status';
+import {
+  ADMIN_BOOTSTRAP_LOCK_KEY,
+  adminSchemaReady,
+  bootstrapAdmin,
+  withAdminBootstrapLock,
+} from '@server/auth/bootstrap-admin';
 import { ensureAdminAtStartup } from '@server/db/startup';
 import { isSuperAdmin } from '@server/lib/auth';
 import { logger } from '@server/lib/logger';
@@ -472,22 +477,51 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect((await roleOf(email)).role).toBe('user');
     });
 
-    it('reports a super admin with no password as not settled, never as done', async () => {
-      // A bootstrap interrupted between the user row and its password, or
-      // another replica still mid-create: the startup loop retries this and
-      // refuses it only if it persists (unit-tested in db-startup.test.ts).
+    it('refuses a leftover super admin with no password at once, with the fix', async () => {
+      // A bootstrap interrupted between the user row and its password. Under
+      // the advisory lock no other replica can be mid-create, so this is a
+      // real leftover: refused immediately, not waited on.
       const email = newEmail();
       await db.query('insert into public."user" (name, email, role) values ($1, $2, $3)', [
         'Half Made',
         email,
         'super_admin',
       ]);
-      await expect(bootstrapAdmin({ email, password: PASSWORD })).rejects.toBeInstanceOf(
-        AdminNotSettledError
+      const errors = vi.spyOn(logger, 'error');
+      try {
+        expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
+        expect(JSON.stringify(errors.mock.calls)).toContain('has no password');
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
+    it('the bootstrap lock is exclusive and released afterwards', async () => {
+      const held = await db.query(
+        'select pg_try_advisory_lock($1::bigint) as got',
+        [ADMIN_BOOTSTRAP_LOCK_KEY],
       );
-      await expect(bootstrapAdmin({ email, password: PASSWORD })).rejects.toThrow(
-        'has no password'
-      );
+      expect(held.rows[0].got).toBe(true);
+      try {
+        // Another session (the bootstrap's own pool client) must wait.
+        let ran = false;
+        const pending = withAdminBootstrapLock(async () => {
+          ran = true;
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        expect(ran).toBe(false);
+        await db.query('select pg_advisory_unlock($1::bigint)', [ADMIN_BOOTSTRAP_LOCK_KEY]);
+        await pending;
+        expect(ran).toBe(true);
+      } finally {
+        await db.query('select pg_advisory_unlock_all()');
+      }
+      // Released: this session can take it again at once.
+      const again = await db.query('select pg_try_advisory_lock($1::bigint) as got', [
+        ADMIN_BOOTSTRAP_LOCK_KEY,
+      ]);
+      expect(again.rows[0].got).toBe(true);
+      await db.query('select pg_advisory_unlock_all()');
     });
 
     // k8s runs two app replicas; both bootstrap at startup. Better Auth's

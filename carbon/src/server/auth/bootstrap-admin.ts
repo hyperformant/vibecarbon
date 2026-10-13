@@ -1,10 +1,10 @@
 import { and, eq, getTableColumns, sql } from 'drizzle-orm';
-import { adminDb } from '../db/client';
+import { adminDb, pool } from '../db/client';
 import { account, user } from '../db/schema';
 import { isSuperAdmin } from '../lib/auth';
 import { env } from '../lib/env';
 import { logger } from '../lib/logger';
-import { AdminNotSettledError, type BootstrapResult } from './admin-status';
+import type { BootstrapResult } from './admin-status';
 import { auth } from './index';
 
 export type { BootstrapResult } from './admin-status';
@@ -17,19 +17,21 @@ export type { BootstrapResult } from './admin-status';
  *   super admin past onboarding;
  * - the account is already super_admin: nothing to do (its password is
  *   never touched, so changing ADMIN_PASSWORD later resets nothing),
- *   unless it has no password yet, which throws AdminNotSettledError
- *   (another replica may be mid-create; the startup loop retries, then
- *   reports it as refused with a fix);
+ *   unless it has no password, which is refused with a fix (under the
+ *   bootstrap lock this is a real leftover, never another replica's
+ *   create in progress);
  * - the account exists but is not super_admin: promote it ONLY if its own
  *   password verifies against ADMIN_PASSWORD. Sign-up is open and, without
  *   SMTP, unverified, so anyone could register the admin address before
  *   the first boot; the password proves the account is the operator's.
  *   Otherwise refuse, change nothing, and log what to do.
  *
- * Two replicas starting together may both try to create the account; the
- * loser hits the unique email and falls through to the existing-account
- * path, where it finds a super admin (possibly before its password is
- * linked: see above).
+ * Serialized across replicas by a Postgres session advisory lock
+ * (withAdminBootstrapLock). Better Auth's createUser writes the user row,
+ * hashes, then links the password outside one transaction, so two replicas
+ * starting together could otherwise see each other's half-made admin. Under
+ * the lock the second one finds the finished admin and returns `unchanged`.
+ * The unique-email fallback below stays as a backstop.
  */
 export async function bootstrapAdmin(
   opts: { email?: string; password?: string } = {
@@ -40,7 +42,44 @@ export async function bootstrapAdmin(
   const email = opts.email?.trim().toLowerCase();
   const password = opts.password;
   if (!email || !password) return 'skipped';
+  return withAdminBootstrapLock(() => bootstrapUnderLock(email, password));
+}
 
+/**
+ * Stable key for the bootstrap's advisory lock (any bigint; this one is
+ * unique to the admin bootstrap in this database).
+ */
+export const ADMIN_BOOTSTRAP_LOCK_KEY = '7264519330021875';
+
+/**
+ * Run `fn` holding a session advisory lock on a dedicated pool client, so
+ * only one process bootstraps the admin at a time. The lock is released in
+ * `finally`; if releasing fails, the client is discarded, which ends the
+ * session and so drops the lock with it.
+ */
+export async function withAdminBootstrapLock<T>(fn: () => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  let broken: Error | undefined;
+  try {
+    await client.query('select pg_advisory_lock($1::bigint)', [ADMIN_BOOTSTRAP_LOCK_KEY]);
+    try {
+      return await fn();
+    } finally {
+      await client
+        .query('select pg_advisory_unlock($1::bigint)', [ADMIN_BOOTSTRAP_LOCK_KEY])
+        .catch((err: Error) => {
+          broken = err;
+        });
+    }
+  } catch (err) {
+    broken ??= err instanceof Error ? err : new Error(String(err));
+    throw err;
+  } finally {
+    client.release(broken);
+  }
+}
+
+async function bootstrapUnderLock(email: string, password: string): Promise<BootstrapResult> {
   const findUser = async () => {
     const [found] = await adminDb
       .select({ id: user.id, role: user.role })
@@ -55,16 +94,16 @@ export async function bootstrapAdmin(
   }): Promise<BootstrapResult> => {
     if (isSuperAdmin(existing)) {
       if (await hasPassword(existing.id)) return 'unchanged';
-      // Possibly another replica mid-createUser (row first, password after):
-      // not settled yet. The startup loop retries and, if it persists,
-      // settles it as refused with this message.
-      throw new AdminNotSettledError(
+      // Under the bootstrap lock no other replica can be mid-create, so this
+      // is a real leftover: refuse now, with the fix.
+      logger.error(
+        { email },
         `The super admin ${email} has no password, so it cannot sign in with ADMIN_PASSWORD ` +
           '(a bootstrap interrupted before the password was saved, or an account that only ' +
           'uses social sign-in). Request a password reset for it, or delete the account and ' +
-          'restart to recreate it from ADMIN_EMAIL and ADMIN_PASSWORD.',
-        email
+          'restart to recreate it from ADMIN_EMAIL and ADMIN_PASSWORD.'
       );
+      return 'refused';
     }
     if (!(await passwordMatches(existing.id, password))) {
       logger.error(
