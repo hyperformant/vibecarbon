@@ -1,4 +1,6 @@
 import { createHmac, randomUUID } from 'node:crypto';
+import { betterAuth } from 'better-auth';
+import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { handleOAuthUserInfo } from 'better-auth/oauth2';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -6,6 +8,7 @@ import type pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
 import { adminDb } from '@server/db/client';
+import * as schema from '@server/db/schema';
 import { appSettings } from '@server/db/schema';
 import { env } from '@server/lib/env';
 import { __resetMfaSettingsCache } from '@server/lib/mfa-settings';
@@ -821,6 +824,57 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
         expect(res.status).toBe(403);
         expect((await res.json()).code).toBe('IMPERSONATION_NOT_ALLOWED');
       });
+    });
+  });
+  describe('fix round 4', () => {
+    it('the database hook alone refuses unlinking the password (endpoint guard not installed)', async () => {
+      // The app's database hooks, on an instance without the session-assurance
+      // plugin (whose endpoint guard would refuse first).
+      const bare = betterAuth({
+        basePath: '/api/auth',
+        baseURL: ORIGIN,
+        secret: env.BETTER_AUTH_SECRET,
+        trustedOrigins: [ORIGIN],
+        database: drizzleAdapter(adminDb, { provider: 'pg', schema }),
+        advanced: { database: { generateId: false } },
+        rateLimit: { enabled: false },
+        emailAndPassword: { enabled: true },
+        databaseHooks: { account: auth.options.databaseHooks?.account },
+      });
+      const call = (path: string, body: unknown, cookie = '') =>
+        bare.handler(
+          new Request(`${ORIGIN}${path}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', origin: ORIGIN, cookie },
+            body: JSON.stringify(body),
+          }),
+        );
+      const email = newEmail();
+      const signup = await call('/api/auth/sign-up/email', { email, password: PASSWORD, name: 'U' });
+      const cookie = new CookieJar();
+      cookie.take(signup);
+      const userId = await userIdOf(email);
+      await db.query(
+        `insert into public.account (account_id, provider_id, user_id) values ($1, 'google', $2)`,
+        [`g-${randomUUID()}`, userId],
+      );
+      const ids = async () =>
+        (
+          await db.query<{ id: string; provider_id: string }>(
+            'select id, provider_id from public.account where user_id = $1',
+            [userId],
+          )
+        ).rows;
+      const credential = (await ids()).find((r) => r.provider_id === 'credential');
+
+      const res = await call('/api/auth/unlink-account', { accountId: credential?.id }, cookie.header);
+      expect(res.status).toBe(403);
+      expect((await res.json()).code).toBe('PASSWORD_UNLINK_NOT_ALLOWED');
+      expect((await ids()).map((r) => r.provider_id).sort()).toEqual(['credential', 'google']);
+
+      // Other accounts still unlink.
+      const google = (await ids()).find((r) => r.provider_id === 'google');
+      expect((await call('/api/auth/unlink-account', { accountId: google?.id }, cookie.header)).status).toBe(200);
     });
   });
 });

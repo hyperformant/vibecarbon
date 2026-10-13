@@ -181,6 +181,30 @@ export async function rejectOrphanedPasswordSession(
 }
 
 /**
+ * The password (credential account) cannot be unlinked: the database-level
+ * half of that rule, as the `account.delete.before` hook. The endpoint
+ * guard in auth/assurance.ts refuses it first; this one holds even if a
+ * Better Auth upgrade changes how /unlink-account picks the account.
+ *
+ * Keyed on the endpoint path, so only unlinking is refused. Other deletes
+ * are untouched: Better Auth's magic-link cleanup of an unverified account
+ * (/magic-link/verify), user removal (its own paths), and our own cleanups
+ * (secureSocialLink, bootstrap), which delete through adminDb directly and
+ * never run Better Auth's hooks.
+ */
+export function refuseCredentialUnlinkRow(
+  deleting: { providerId?: string | null },
+  path: string | undefined
+): void {
+  if (path === '/unlink-account' && deleting.providerId === 'credential') {
+    throw new APIError('FORBIDDEN', {
+      code: 'PASSWORD_UNLINK_NOT_ALLOWED',
+      message: 'Your password cannot be removed. Change or reset it instead.',
+    });
+  }
+}
+
+/**
  * The magic-link side of the pre-hijacking defence.
  *
  * Better Auth's magic-link verify has its own version of secureSocialLink

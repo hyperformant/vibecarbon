@@ -9,6 +9,7 @@ import { isEmailConfigured } from '../lib/email';
 import { env } from '../lib/env';
 import { allowedOrigins } from '../lib/origins';
 import {
+  refuseCredentialUnlinkRow,
   rejectOrphanedPasswordSession,
   secureSocialLink,
   sweepUnprovenSecondFactor,
@@ -154,6 +155,13 @@ export const auth = betterAuth({
         // (thrown) stops the link: fail closed.
         before: async (linking) => {
           await secureSocialLink(linking);
+        },
+      },
+      delete: {
+        // The password cannot be unlinked (also refused at the endpoint,
+        // auth/assurance.ts); see auth/account-linking.ts.
+        before: async (deleting, ctx) => {
+          refuseCredentialUnlinkRow(deleting, ctx?.path);
         },
       },
     },
