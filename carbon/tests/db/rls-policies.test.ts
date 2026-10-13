@@ -237,6 +237,27 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
     ).rejects.toThrow(/permission denied/);
   });
 
+  it('the PostgREST roles hold no privilege on the auth tables either', async () => {
+    // PostgREST still serves `public` through Kong: anon/authenticated with
+    // the anon key, service_role with the service key. None may read hashes,
+    // session tokens or TOTP secrets.
+    const { rows } = await db.query<{ role: string; tbl: string; priv: string }>(
+      `select r.rolname as role, t.tbl, p.priv
+         from pg_roles r
+         cross join unnest(array['public."user"', 'public.session', 'public.account',
+                                 'public.verification', 'public.two_factor']) as t(tbl)
+         cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as p(priv)
+        where r.rolname in ('anon', 'authenticated', 'service_role', 'app_user')
+          and has_table_privilege(r.rolname, t.tbl, p.priv)`,
+    );
+    expect(rows).toEqual([]);
+    const pinned = await db.query<{ authenticated: boolean; service_role: boolean }>(
+      `select has_table_privilege('authenticated', 'public.account', 'SELECT') as authenticated,
+              has_table_privilege('service_role', 'public.account', 'SELECT') as service_role`,
+    );
+    expect(pinned.rows[0]).toEqual({ authenticated: false, service_role: false });
+  });
+
   it('notifications: anonymous sees public-only, signed-in sees authenticated-only, org-scoped stays in its org', async () => {
     const anon = await asUser(db, null, notificationTitles);
     expect(anon).toContain('db-test public-only');

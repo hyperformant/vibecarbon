@@ -98,11 +98,18 @@ describe('Auth tables are server-only', () => {
     }
   });
 
-  it('revokes every auth table from PUBLIC and, per role, from app_user', () => {
+  it('revokes every auth table from PUBLIC and, per role, from every request role', () => {
     const tableList =
       'public."user", public.session, public.account, public.verification, public.two_factor';
     expect(sql).toContain(`REVOKE ALL ON TABLE ${tableList} FROM %I`);
-    expect(sql).toMatch(/FOREACH r IN ARRAY ARRAY\['app_user'/);
+    // app_user (the request role), anon/authenticated (PostgREST), service_role
+    // (PostgREST with the service key, still served until the Supabase services
+    // go) and metabase (default SELECT on public tables). Dropping any one
+    // re-exposes password hashes and session tokens to that role.
+    const roles = sql.match(/FOREACH r IN ARRAY ARRAY\[([^\]]*)\]/)?.[1] ?? '';
+    for (const role of ['app_user', 'anon', 'authenticated', 'service_role', 'metabase']) {
+      expect(roles, `${role} missing from the auth-table revoke`).toContain(`'${role}'`);
+    }
     expect(sql).toContain(
       'REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;',
     );

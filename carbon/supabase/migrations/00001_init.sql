@@ -192,14 +192,16 @@ ALTER TABLE two_factor ENABLE ROW LEVEL SECURITY;
 
 -- Server-only: revoke every request role, including what the GRANT ON ALL
 -- TABLES above (re-run on every deploy) and the default privileges just gave
--- app_user. anon/authenticated are the legacy PostgREST roles; metabase gets
--- default SELECT on public tables when the analytics service is enabled.
+-- app_user. anon/authenticated/service_role are the PostgREST roles (it still
+-- serves `public` through Kong, and the service key would otherwise read
+-- password hashes and session tokens there); metabase gets default SELECT on
+-- public tables when the analytics service is enabled.
 REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;
 DO $$
 DECLARE
   r TEXT;
 BEGIN
-  FOREACH r IN ARRAY ARRAY['app_user', 'anon', 'authenticated', 'metabase'] LOOP
+  FOREACH r IN ARRAY ARRAY['app_user', 'anon', 'authenticated', 'service_role', 'metabase'] LOOP
     IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = r) THEN
       EXECUTE format(
         'REVOKE ALL ON TABLE public."user", public.session, public.account, public.verification, public.two_factor FROM %I',
