@@ -7,6 +7,7 @@ process.env.SUPABASE_URL ??= 'http://supabase.test';
 process.env.SUPABASE_ANON_KEY ??= 'anon';
 process.env.SUPABASE_SERVICE_ROLE_KEY ??= 'service';
 process.env.BETTER_AUTH_SECRET ??= 'test-auth-secret-at-least-32-characters-long';
+process.env.SITE_URL ??= 'http://app.test';
 process.env.DB_HOST ??= 'db.test';
 process.env.DB_PASSWORD ??= 'pw';
 

@@ -30,10 +30,12 @@ const envSchema = z.object({
   DB_PASSWORD: z.string().min(1),
   DB_NAME: z.string().min(1).default('postgres'),
 
-  // Public site URL — used in CSP connectSrc so the client can reach Supabase
-  // via the public domain (Traefik → Kong). Defaults to empty string in dev
-  // (CSP is disabled in development).
-  SITE_URL: z.string().url().optional(),
+  // The app's one public origin (http://localhost:5173 in dev). Required:
+  // auth builds every emailed link (verification, password reset, magic
+  // link) and OAuth callback from it, never from the request's Host header,
+  // and it anchors the trusted origins for CORS, CSRF and auth. Also used in
+  // the CSP connectSrc.
+  SITE_URL: z.string().url(),
 
   // App storage bucket (provider-native S3, provisioned by `vibecarbon deploy`).
   // All optional: when any is missing, uploads are disabled (503) and the app
@@ -74,7 +76,7 @@ const envSchema = z.object({
   // Super admin ensured at startup (see auth/bootstrap-admin.ts). Both unset:
   // no bootstrap. An existing account is promoted, never re-passworded.
   ADMIN_EMAIL: z.string().email().optional(),
-  ADMIN_PASSWORD: z.string().optional(),
+  ADMIN_PASSWORD: z.string().min(8).optional(),
 
   // SMTP (auth emails and transactional emails). Without it, email
   // verification is not required and auth emails are logged, not sent.

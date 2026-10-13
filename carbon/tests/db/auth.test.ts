@@ -23,6 +23,14 @@ import { connectTestDb, dbTestsEnabled } from './_helpers';
 const ORIGIN = 'http://app.test'; // SITE_URL in tests/_helpers/setup-db.ts
 const PASSWORD = 'correct-horse-battery';
 
+// Capture auth emails instead of sending (or logging) them.
+const sentEmails = vi.hoisted(() => [] as { kind: string; to: string; url: string }[]);
+vi.mock('@server/auth/email', () => ({
+  sendAuthEmail: async (kind: string, to: string, url: string) => {
+    sentEmails.push({ kind, to, url });
+  },
+}));
+
 function buildApp() {
   const app = new Hono<{ Variables: HonoVariables }>();
   app.use('/api/*', csrfProtection());
@@ -495,6 +503,41 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       );
       expect(update.status).toBe(403);
       expect((await roleOf(target)).role).toBe('user');
+    });
+  });
+
+  describe('emailed links always use SITE_URL', () => {
+    const spoofed = (path: string, body: unknown) =>
+      app.request(`http://evil.example${path}`, {
+        method: 'POST',
+        headers: {
+          host: 'evil.example',
+          'x-forwarded-host': 'evil.example',
+          'x-forwarded-proto': 'https',
+          'content-type': 'application/json',
+          origin: ORIGIN,
+          'x-forwarded-for': '203.0.113.61',
+        },
+        body: JSON.stringify(body),
+      });
+
+    it('password reset and magic link ignore a spoofed Host header', async () => {
+      const email = newEmail();
+      await signUp(email);
+      sentEmails.length = 0;
+
+      expect(
+        (await spoofed('/api/auth/request-password-reset', { email, redirectTo: '/reset-password' }))
+          .status,
+      ).toBe(200);
+      expect((await spoofed('/api/auth/sign-in/magic-link', { email })).status).toBe(200);
+
+      expect(sentEmails.map((m) => m.kind).sort()).toEqual(['magic link', 'password reset']);
+      for (const m of sentEmails) {
+        expect(m.to).toBe(email);
+        expect(m.url.startsWith(`${ORIGIN}/api/auth/`)).toBe(true);
+        expect(m.url).not.toContain('evil.example');
+      }
     });
   });
 

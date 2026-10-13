@@ -13,6 +13,8 @@ const defaults: Record<string, string> = {
   NODE_ENV: 'test',
   // Signs session cookies; any 32+ characters will do in tests.
   BETTER_AUTH_SECRET: 'test-auth-secret-at-least-32-characters-long',
+  // The dev default; routes fall back to this same value when it is unset.
+  SITE_URL: 'http://localhost:5173',
   // The DB pool connects lazily, so these are never dialed: routes that touch
   // the database mock @server/db/client.
   DB_HOST: 'db.test',

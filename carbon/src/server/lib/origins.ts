@@ -1,7 +1,8 @@
 /**
  * Browser origins the API answers credentialed requests from: SITE_URL, any
- * CORS_ORIGINS, and (outside production) the local Vite and API ports. CORS
- * and the CSRF origin check share this one list so they cannot disagree.
+ * CORS_ORIGINS, and (outside production) the local Vite and API ports. CORS,
+ * the CSRF origin check and Better Auth's trustedOrigins (auth/index.ts)
+ * share this one list so they cannot disagree.
  *
  * Read per call from process.env, as the CORS middleware always has, so a
  * test can vary it.

@@ -7,6 +7,7 @@ import { adminDb } from '../db/client';
 import * as schema from '../db/schema';
 import { isEmailConfigured } from '../lib/email';
 import { env } from '../lib/env';
+import { allowedOrigins } from '../lib/origins';
 import { sendAuthEmail } from './email';
 import { lockoutPlugin } from './lockout';
 import { socialProviders } from './providers';
@@ -45,9 +46,14 @@ const emailConfigured = isEmailConfigured();
 export const auth = betterAuth({
   appName: '{{PROJECT_DISPLAY_NAME}}',
   basePath: '/api/auth',
+  // Always SITE_URL (required by env.ts): emailed links and OAuth callbacks
+  // never take their origin from the request's Host header.
   baseURL: env.SITE_URL,
   secret: env.BETTER_AUTH_SECRET,
-  trustedOrigins: env.SITE_URL ? [env.SITE_URL] : [],
+  // The same list CORS and the CSRF check use (lib/origins.ts): SITE_URL,
+  // CORS_ORIGINS, and the local dev ports outside production. Better Auth
+  // also accepts these as callback/redirect targets.
+  trustedOrigins: allowedOrigins(),
   database: drizzleAdapter(adminDb, { provider: 'pg', schema }),
   advanced: {
     database: { generateId: false },
