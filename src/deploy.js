@@ -98,7 +98,7 @@ const SPEC = {
       name: 'mode',
       value: '<mode>',
       enum: DEPLOY_MODES,
-      description: 'Deploy mode',
+      description: 'Deploy mode: compose, compose-ha, k8s, or k8s-ha',
     },
     {
       name: 'server-type',

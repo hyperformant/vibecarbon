@@ -68,13 +68,13 @@ const SPEC = {
       name: 'action',
       value: '<verb>',
       enum: ['create', 'list', 'download'],
-      description: 'Action seed (skips the action prompt)',
+      description: 'Action seed (skips the action prompt): create, list, or download',
     },
     {
       name: 'source',
       value: '<file>',
       description:
-        'Backup filename for -action download (legacy backup-pod dumps only — k8s without object storage; wal-g environments restore with `vibecarbon restore`)',
+        'Backup filename for -action download (legacy backup-pod dumps only, k8s without object storage; wal-g environments restore with `vibecarbon restore`)',
     },
   ],
   examples: [

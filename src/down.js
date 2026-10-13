@@ -31,6 +31,7 @@ export const SPEC = {
     {
       name: 'orphans',
       boolean: true,
+      featured: true,
       description: 'Remove local stacks whose project folder is gone',
     },
     { name: 'y', boolean: true, description: 'Skip the confirmation' },

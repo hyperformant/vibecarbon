@@ -182,7 +182,7 @@ const SPEC = {
       name: 'pm',
       value: '<name>',
       enum: ['npm', 'pnpm', 'bun'],
-      description: 'Package manager to use (default: npm)',
+      description: 'Package manager: npm (default), pnpm, or bun',
     },
     {
       name: 'admin-email',
