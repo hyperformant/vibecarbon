@@ -17,11 +17,12 @@ const defaults: StartupDeps = {
 
 /**
  * Confirm at boot that the connection role bypasses RLS, so `adminDb` can
- * never silently become RLS-scoped. A role that cannot is a configuration
- * error: log it as fatal and exit.
+ * never silently become RLS-scoped, and that it is a member of `app_user`,
+ * so `withUserDb` can switch to it. A role that fails either is a
+ * configuration error: log it as fatal and exit.
  *
- * A database that is not reachable yet (the db container still starting) is
- * not: the server keeps serving, `/api/health/ready` reports the db down,
+ * A database that is not ready yet (the db container still starting, or
+ * migrations not applied so `app_user` does not exist) is not: the server keeps serving, `/api/health/ready` reports the db down,
  * and this keeps checking every `retryMs` until it gets an answer. Run it
  * without awaiting; it never rejects.
  */
@@ -31,7 +32,7 @@ export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {})
   for (;;) {
     try {
       await assert();
-      log.info('Postgres connection role verified (bypasses RLS)');
+      log.info('Postgres connection role verified (bypasses RLS, member of app_user)');
       return;
     } catch (err) {
       if (err instanceof DbRoleError) {
@@ -40,7 +41,7 @@ export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {})
         return;
       }
       if (!warned) {
-        log.warn({ err }, 'Postgres is not reachable yet; serving with the database down');
+        log.warn({ err }, 'Postgres is not ready yet; serving with the database down');
         warned = true;
       }
       await new Promise((resolve) => setTimeout(resolve, retryMs));

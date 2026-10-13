@@ -12,7 +12,7 @@ vi.mock('@server/lib/logger', () => ({
   logger: { fatal: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
 
-const { DbRoleError } = await import('@server/db/client');
+const { assertBypassRole, DbNotMigratedError, DbRoleError } = await import('@server/db/client');
 const { checkDbRoleAtStartup } = await import('@server/db/startup');
 
 function fakeLog() {
@@ -70,5 +70,47 @@ describe('checkDbRoleAtStartup', () => {
     assert.mockResolvedValueOnce(undefined);
     await checkDbRoleAtStartup({ assert, log, exit: vi.fn(), retryMs: 0 });
     expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('assertBypassRole', () => {
+  type Row = { role: string; bypass: boolean | null; hasAppUser: boolean; member: boolean };
+  const executor = (row: Row) =>
+    ({ execute: async () => ({ rows: [row] }) }) as unknown as Parameters<
+      typeof assertBypassRole
+    >[0];
+  const ok: Row = { role: 'postgres', bypass: true, hasAppUser: true, member: true };
+
+  it('accepts a bypass role that is a member of app_user', async () => {
+    await expect(assertBypassRole(executor(ok))).resolves.toBeUndefined();
+  });
+
+  it('refuses a role RLS would scope', async () => {
+    await expect(assertBypassRole(executor({ ...ok, bypass: false }))).rejects.toThrow(
+      /cannot bypass row-level security/
+    );
+  });
+
+  it('refuses a bypass role that is not a member of app_user', async () => {
+    const err = await assertBypassRole(executor({ ...ok, member: false })).catch((e) => e);
+    expect(err).toBeInstanceOf(DbRoleError);
+    expect(err.message).toMatch(/not a member of app_user/);
+  });
+
+  // Fresh deploy: the app can start before the migrations create app_user.
+  // That is "not ready yet" (retry), never a fatal exit.
+  it('reports a database without app_user as not migrated, which startup retries', async () => {
+    const notMigrated = { ...ok, hasAppUser: false, member: false };
+    await expect(assertBypassRole(executor(notMigrated))).rejects.toBeInstanceOf(
+      DbNotMigratedError
+    );
+    const exit = vi.fn();
+    const assert = vi
+      .fn()
+      .mockImplementationOnce(() => assertBypassRole(executor(notMigrated)))
+      .mockResolvedValueOnce(undefined);
+    await checkDbRoleAtStartup({ assert, log: fakeLog(), exit, retryMs: 0 });
+    expect(exit).not.toHaveBeenCalled();
+    expect(assert).toHaveBeenCalledTimes(2);
   });
 });

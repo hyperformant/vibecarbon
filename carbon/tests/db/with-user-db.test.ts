@@ -173,6 +173,26 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
     ).rejects.toBeInstanceOf(DbRoleError);
   });
 
+  // A role that bypasses RLS but is not a member of app_user would pass the
+  // bypass check and then fail every withUserDb call at `set role app_user`.
+  it('assertBypassRole refuses a bypass role that is not a member of app_user', async () => {
+    const err = await adminDb
+      .transaction(async (tx) => {
+        await tx.execute(sql`create role t6_bypass_no_member nologin bypassrls`);
+        await tx.execute(sql`grant t6_bypass_no_member to current_user`);
+        await tx.execute(sql`set local role t6_bypass_no_member`);
+        await assertBypassRole(tx);
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DbRoleError);
+    expect((err as Error).message).toMatch(/not a member of app_user/);
+    // The transaction rolled back, so the probe role is gone.
+    const { rows } = await adminDb.execute(
+      sql`select 1 from pg_roles where rolname = 't6_bypass_no_member'`,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
   it('pingDb reports a reachable database', async () => {
     expect(await pingDb()).toBe(true);
   });

@@ -80,28 +80,58 @@ export async function withUserDb<T>(
   });
 }
 
-/** The connection role cannot bypass RLS, so `adminDb` would be scoped. */
+/**
+ * The connection role is wrong for `adminDb`: RLS would scope it, or it
+ * cannot switch to `app_user`, so `withUserDb` would fail on every request.
+ */
 export class DbRoleError extends Error {
-  constructor(role: string) {
+  constructor(role: string, reason: 'no-bypass' | 'not-app-user-member' = 'no-bypass') {
     super(
-      `Postgres role "${role}" cannot bypass row-level security. ` +
-        'Set DB_USER to a role with BYPASSRLS (the default is postgres).'
+      reason === 'no-bypass'
+        ? `Postgres role "${role}" cannot bypass row-level security. ` +
+            'Set DB_USER to a role with BYPASSRLS (the default is postgres).'
+        : `Postgres role "${role}" is not a member of app_user, so it cannot run ` +
+            'user requests under RLS. Grant it (GRANT app_user TO ' +
+            `${role}) or set DB_USER to a role that is (the default is postgres).`
     );
     this.name = 'DbRoleError';
   }
 }
 
+/** Role app_user is missing: the migrations have not run yet. Retryable. */
+export class DbNotMigratedError extends Error {
+  constructor() {
+    super('Role app_user does not exist yet; the database migrations have not run');
+    this.name = 'DbNotMigratedError';
+  }
+}
+
 /**
- * Resolve if the current role bypasses RLS (superuser or BYPASSRLS), throw
- * `DbRoleError` if it does not. Connection failures propagate as they are,
- * so a caller can tell "db not up yet" from "wrong role".
+ * Resolve if the current role bypasses RLS (superuser or BYPASSRLS) and is a
+ * member of `app_user` (so `withUserDb` can switch to it). Throw
+ * `DbRoleError` if either is false. A database without `app_user` yet (fresh
+ * deploy, migrations pending) throws `DbNotMigratedError` instead, and
+ * connection failures propagate as they are: both mean "not ready yet",
+ * which a caller retries, not "wrong role".
  */
 export async function assertBypassRole(db: Executor = adminDb): Promise<void> {
-  const { rows } = await db.execute<{ role: string; bypass: boolean | null }>(
-    sql`select current_user as role, (select rolsuper or rolbypassrls from pg_roles where rolname = current_user) as bypass`
+  const { rows } = await db.execute<{
+    role: string;
+    bypass: boolean | null;
+    hasAppUser: boolean;
+    member: boolean;
+  }>(
+    sql`select current_user as role,
+      (select rolsuper or rolbypassrls from pg_roles where rolname = current_user) as bypass,
+      exists (select 1 from pg_roles where rolname = 'app_user') as "hasAppUser",
+      case when exists (select 1 from pg_roles where rolname = 'app_user')
+        then pg_has_role(current_user, 'app_user', 'MEMBER') else false end as member`
   );
   const row = rows[0];
-  if (!row?.bypass) throw new DbRoleError(row?.role ?? env.DB_USER);
+  const role = row?.role ?? env.DB_USER;
+  if (!row?.bypass) throw new DbRoleError(role);
+  if (!row.hasAppUser) throw new DbNotMigratedError();
+  if (!row.member) throw new DbRoleError(role, 'not-app-user-member');
 }
 
 /** `true` when Postgres answers a trivial query. Never throws. */
