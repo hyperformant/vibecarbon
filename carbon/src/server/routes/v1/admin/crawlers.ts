@@ -2,10 +2,10 @@ import { and, desc, gte, lt } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { adminDb } from '../../../db/client';
 import { crawlerHits, crawlerHitsDaily } from '../../../db/schema';
-import { isSuperAdmin } from '../../../lib/auth';
 import { type CrawlerCategory, findCrawlerByName } from '../../../lib/crawlers';
 import { sanitizeError } from '../../../lib/errors';
 import { logger } from '../../../lib/logger';
+import { checkSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
 
 /**
@@ -70,9 +70,8 @@ crawlerRoutes.get('/', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const windowDays = parseWindowDays(c.req.query('days'));
 

@@ -17,6 +17,7 @@ import { sendEmail } from '../../lib/email';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 import { assertAal2, requireAal2 } from '../../middleware/requireAal2';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 import { forwardAuthCookieRoutes } from './forwardauth-cookie';
 import { setupRoutes } from './setup';
@@ -821,9 +822,8 @@ v1Routes.get('/admin/organizations', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   // Validate and parse query params
   const queryResult = adminPaginationSchema.safeParse({
@@ -912,9 +912,8 @@ v1Routes.get('/admin/users', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   // Validate and parse query params
   const queryResult = adminPaginationSchema.safeParse({
@@ -1122,9 +1121,8 @@ v1Routes.get('/admin/notifications', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   // Use admin client to see all notifications
   let rows: NotificationRow[];
@@ -1152,9 +1150,8 @@ v1Routes.post('/admin/notifications', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   // Parse and validate request body
   let body: z.infer<typeof createNotificationSchema>;
@@ -1216,9 +1213,8 @@ v1Routes.patch('/admin/notifications/:notificationId', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const notificationId = c.req.param('notificationId');
 
@@ -1293,9 +1289,8 @@ v1Routes.delete('/admin/notifications/:notificationId', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const notificationId = c.req.param('notificationId');
 

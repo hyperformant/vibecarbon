@@ -11,6 +11,7 @@ import { __resetMfaSettingsCache } from '@server/lib/mfa-settings';
 import { csrfProtection } from '@server/middleware/csrf';
 import { sessionMiddleware } from '@server/middleware/session';
 import { verifyRoleRoutes } from '@server/routes/_internal/verify-role';
+import { authRoutes } from '@server/routes/v1/auth';
 import { statsRoutes } from '@server/routes/v1/stats';
 import type { HonoVariables } from '@server/types';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
@@ -19,7 +20,8 @@ import { connectTestDb, dbTestsEnabled } from './_helpers';
  * The admin surfaces on the in-process auth, against a real database:
  * impersonation (the admin plugin plus this app's rules), the ForwardAuth
  * cookie and verify-role, account deletion, the users list, member details,
- * invites by email, and the user counts on the stats page.
+ * invites by email, the user counts on the stats page, and the second
+ * factor every super-admin route asks for while MFA is on.
  *
  * The app below is wired the way server/index.ts wires these routes (CSRF,
  * the /api/auth mount, the session middleware), minus the rate limiters.
@@ -43,6 +45,7 @@ async function buildApp() {
   app.use('/api/*', sessionMiddleware);
   app.route('/api/_internal/verify-role', verifyRoleRoutes);
   app.route('/api/v1', v1Routes);
+  app.route('/api/v1/auth', authRoutes);
   app.route('/api/v1/admin/stats', statsRoutes);
   return app;
 }
@@ -653,6 +656,56 @@ describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {
       const users = list.members.map((m: { user: unknown }) => m.user);
       expect(users).toContainEqual({ id: invitee.id, email: invitee.email, name: 'Invitee', avatar: null });
       expect(users).toContainEqual({ id: owner.id, email: owner.email, name: 'Owner', avatar: null });
+    });
+  });
+
+  describe('super-admin routes while MFA is globally on', () => {
+    const patchSettings = (jar: CookieJar, body: unknown) =>
+      send('PATCH', '/api/v1/auth/admin/settings', jar, body);
+    const verifySession = (userId: string) =>
+      db.query('update public.session set two_factor_verified = true where user_id = $1', [userId]);
+
+    it('an aal1 super admin cannot turn MFA off (or anything else) until it verifies a code', async () => {
+      const admin = await superAdmin();
+      await setMfa(true);
+      const res = await patchSettings(admin.jar, { mfa_enabled: false });
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe('mfa_required');
+      const [row] = await adminDb
+        .select({ value: appSettings.value })
+        .from(appSettings)
+        .where(eq(appSettings.key, 'mfa_enabled'));
+      expect(row.value).toEqual({ enabled: true });
+
+      for (const path of ['/api/v1/admin/users', '/api/v1/admin/stats', '/api/v1/admin/organizations']) {
+        const blocked = await get(path, admin.jar);
+        expect(blocked.status, path).toBe(403);
+        expect((await blocked.json()).error, path).toBe('mfa_required');
+      }
+    });
+
+    it('the same super admin passes once this session verified a code (aal2)', async () => {
+      const admin = await superAdmin();
+      await setMfa(true);
+      await verifySession(admin.id);
+      expect((await get('/api/v1/admin/users', admin.jar)).status).toBe(200);
+      expect((await get('/api/v1/admin/stats', admin.jar)).status).toBe(200);
+      const res = await patchSettings(admin.jar, { mfa_enabled: false });
+      expect(res.status).toBe(200);
+      __resetMfaSettingsCache();
+    });
+
+    it('a regular user still hears "super admin only", not a step-up prompt', async () => {
+      const user = await member();
+      await setMfa(true);
+      const res = await patchSettings(user.jar, { mfa_enabled: false });
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe('Super admin access required');
+    });
+
+    it('with MFA off, an aal1 super admin is not asked for a code', async () => {
+      const admin = await superAdmin();
+      expect((await patchSettings(admin.jar, { user_docs_enabled: true })).status).toBe(200);
     });
   });
 

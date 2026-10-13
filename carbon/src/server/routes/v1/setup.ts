@@ -5,10 +5,10 @@ import { isBillingConfigured } from '../../billing';
 import { adminDb } from '../../db/client';
 import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
-import { isSuperAdmin } from '../../lib/auth';
 import { isEmailConfigured } from '../../lib/email';
 import { env } from '../../lib/env';
 import { logger } from '../../lib/logger';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
 /**
@@ -41,7 +41,8 @@ function analyticsConfigured(): boolean {
 setupRoutes.get('/', async (c) => {
   const user = c.get('user');
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
-  if (!isSuperAdmin(user)) return c.json({ error: 'Super admin access required' }, 403);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const billingOptOut = await readBillingOptOut().catch(() => false);
 
@@ -60,7 +61,8 @@ const patchSchema = z.object({ billingOptOut: z.boolean() });
 setupRoutes.patch('/', async (c) => {
   const user = c.get('user');
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
-  if (!isSuperAdmin(user)) return c.json({ error: 'Super admin access required' }, 403);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const parsed = patchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);

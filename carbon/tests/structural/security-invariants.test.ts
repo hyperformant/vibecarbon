@@ -206,6 +206,43 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
   });
 });
 
+describe('Super-admin routes: the role check always comes with the aal2 rule', () => {
+  // An inline `if (!isSuperAdmin(user))` checks the role only. While MFA is
+  // globally on, an aal1 admin session (a stolen cookie, a password-only
+  // sign-in) could then turn MFA off from that very route. Gate with
+  // `requireSuperAdmin` / `checkSuperAdmin` (middleware/requireSuperAdmin.ts),
+  // which applies `checkAal2` after the role.
+  const routesDir = join(ROOT, 'src', 'server', 'routes');
+  const routeFiles = (readdirSync(routesDir, { recursive: true }) as string[])
+    .filter((f) => f.endsWith('.ts'))
+    .map((f) => join('src', 'server', 'routes', f));
+  // Uses that are not an access gate, or that chain requireAal2 themselves.
+  const allowed: Record<string, number> = {
+    // DELETE /me refuses a super admin deleting itself (behind requireAal2).
+    [join('src', 'server', 'routes', 'v1', 'index.ts')]: 1,
+    // Mints the ForwardAuth cookie; chains requireAal2 right after.
+    [join('src', 'server', 'routes', 'v1', 'forwardauth-cookie.ts')]: 1,
+  };
+
+  it('no route checks isSuperAdmin() inline outside the allowlist', () => {
+    const offenders: string[] = [];
+    for (const rel of routeFiles) {
+      const count = (read(rel).match(/\bisSuperAdmin\(/g) ?? []).length;
+      if (count > (allowed[rel] ?? 0)) offenders.push(`${rel} (${count})`);
+    }
+    expect(
+      offenders,
+      `Inline super-admin checks skip the aal2 rule: ${offenders.join(', ')}. ` +
+        'Use requireSuperAdmin or checkSuperAdmin from middleware/requireSuperAdmin.ts.',
+    ).toEqual([]);
+  });
+
+  it('checkSuperAdmin applies checkAal2 after the role', () => {
+    const mw = read('src/server/middleware/requireSuperAdmin.ts');
+    expect(mw).toMatch(/return checkAal2\(c\);/);
+  });
+});
+
 describe('Rate limiting: abuse-prone routes are protected', () => {
   const srv = (rel: string) => (exists(`src/server/${rel}`) ? read(`src/server/${rel}`) : '');
   const index = srv('index.ts');

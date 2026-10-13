@@ -3,8 +3,8 @@ import { Hono } from 'hono';
 import { adminDb } from '../../db/client';
 import { dbErrorForLog } from '../../db/errors';
 import { organizations, user as userTable } from '../../db/schema';
-import { isSuperAdmin } from '../../lib/auth';
 import { logger } from '../../lib/logger';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
 const statsRoutes = new Hono<{ Variables: HonoVariables }>();
@@ -93,9 +93,8 @@ statsRoutes.get('/', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const now = new Date();
 

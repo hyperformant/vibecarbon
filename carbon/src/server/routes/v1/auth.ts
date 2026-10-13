@@ -6,10 +6,10 @@ import { adminDb } from '../../db/client';
 import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
 import { isoTimestamp } from '../../db/values';
-import { isSuperAdmin } from '../../lib/auth';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
 /**
@@ -58,9 +58,8 @@ authRoutes.post('/admin/unlock-account', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   let body: z.infer<typeof unlockAccountSchema>;
   try {
@@ -98,9 +97,8 @@ authRoutes.get('/admin/locked-accounts', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   try {
     const { rows } = await adminDb.execute<{
@@ -192,9 +190,8 @@ authRoutes.patch('/admin/settings', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   let body: z.infer<typeof updateSettingsSchema>;
   try {

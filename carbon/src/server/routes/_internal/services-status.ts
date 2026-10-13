@@ -5,9 +5,9 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { promisify } from 'node:util';
 import { Hono } from 'hono';
-import { isSuperAdmin } from '../../lib/auth';
 import { fetchContainerLogs, listProjectContainers } from '../../lib/docker-api';
 import { logger } from '../../lib/logger';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 
 const execAsync = promisify(exec);
 
@@ -427,19 +427,9 @@ import type { HonoVariables } from '../../types';
 
 const servicesStatusRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Helper to check if user is a super admin
-function requireSuperAdmin(c: {
-  get: (key: string) => unknown;
-}): { error: string; status: 401 | 403 } | null {
-  const user = c.get('user') as { role?: string | null } | null;
-  if (!user) return { error: 'Unauthorized', status: 401 };
-  if (!isSuperAdmin(user)) return { error: 'Forbidden', status: 403 };
-  return null;
-}
-
 servicesStatusRoutes.get('/', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   logger.debug('Checking services status');
 
@@ -523,8 +513,8 @@ async function restartContainer(container: string): Promise<{ success: boolean; 
 
 // POST /restart - Restart all running services
 servicesStatusRoutes.post('/restart', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   if (isKubernetes) {
     return c.json({ success: false, error: 'Not supported in Kubernetes' }, 501);
@@ -560,8 +550,8 @@ servicesStatusRoutes.post('/restart', async (c) => {
 
 // POST /restart/:container - Restart a specific service
 servicesStatusRoutes.post('/restart/:container', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   if (isKubernetes) {
     return c.json({ success: false, error: 'Not supported in Kubernetes' }, 501);
@@ -791,8 +781,8 @@ async function getK8sPodLogs(
  *   - container: specific container (optional, defaults to all)
  */
 servicesStatusRoutes.get('/logs', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const tail = Math.min(Math.max(Number(c.req.query('tail')) || 200, 1), 1000); // 1..1000 lines
   const since = c.req.query('since') || '10m';
@@ -958,8 +948,8 @@ servicesStatusRoutes.get('/logs', async (c) => {
 
 // GET /logs/containers - List available containers for log filtering
 servicesStatusRoutes.get('/logs/containers', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   if (isKubernetes) {
     try {
