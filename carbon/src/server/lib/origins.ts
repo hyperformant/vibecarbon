@@ -4,7 +4,10 @@
  * the CSRF origin check and Better Auth's trustedOrigins (auth/index.ts)
  * share this one list so they cannot disagree.
  *
- * Entries are exact origins. A `*` or `?` is refused: Better Auth would read
+ * Entries are exact origins, normalized with `new URL(x).origin` so a
+ * trailing slash, a default port or upper-case host still matches the
+ * browser's Origin header. An entry that is not an http(s) URL is refused.
+ * A `*` or `?` is refused: Better Auth would read
  * it as a glob (`https://*.example.com` trusts every subdomain for auth
  * redirects) while CORS compares it literally, so the two would silently
  * disagree. The auth instance calls this at startup, so a bad value stops
@@ -40,5 +43,17 @@ function exact(source: string, origin: string): string {
         'comma-separated (for example https://app.example.com,https://admin.example.com).'
     );
   }
-  return origin;
+  let normalized: string;
+  try {
+    normalized = new URL(origin).origin;
+  } catch {
+    normalized = 'null';
+  }
+  if (normalized === 'null') {
+    throw new Error(
+      `${source} contains ${origin}, which is not a full origin. Write it with its scheme ` +
+        '(for example https://app.example.com).'
+    );
+  }
+  return normalized;
 }

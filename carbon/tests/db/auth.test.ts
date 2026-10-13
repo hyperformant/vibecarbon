@@ -659,6 +659,15 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect((await simplePost({})).status).toBe(403);
     });
 
+    it('refuses a cross-origin JSON POST that carries the session cookie', async () => {
+      const res = await app.request('/api/v1/echo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie, origin: 'https://evil.example' },
+        body: '{}',
+      });
+      expect(res.status).toBe(403);
+    });
+
     it('lets the same request through from our own origin', async () => {
       expect((await simplePost({ origin: ORIGIN })).status).toBe(200);
       expect((await simplePost({ 'sec-fetch-site': 'same-origin' })).status).toBe(200);

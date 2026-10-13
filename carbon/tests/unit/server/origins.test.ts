@@ -32,6 +32,25 @@ describe('allowedOrigins', () => {
     expect(() => allowedOrigins()).toThrow(/CORS_ORIGINS.*wildcard/);
   });
 
+  it('normalizes each entry to its origin (trailing slash, default port, case)', () => {
+    process.env.SITE_URL = 'https://App.Example.com/';
+    process.env.CORS_ORIGINS = 'https://a.example.com:443, http://b.example.com:80/path';
+    expect(allowedOrigins()).toEqual(
+      expect.arrayContaining([
+        'https://app.example.com',
+        'https://a.example.com',
+        'http://b.example.com',
+      ])
+    );
+    expect(allowedOrigins()).not.toContain('https://App.Example.com/');
+  });
+
+  it('refuses an entry that is not a URL, naming the variable', () => {
+    process.env.SITE_URL = 'https://app.example.com';
+    process.env.CORS_ORIGINS = 'app.example.com';
+    expect(() => allowedOrigins()).toThrow(/CORS_ORIGINS.*app\.example\.com/);
+  });
+
   it('refuses a wildcard in SITE_URL too', () => {
     process.env.SITE_URL = 'https://*.example.com';
     delete process.env.CORS_ORIGINS;

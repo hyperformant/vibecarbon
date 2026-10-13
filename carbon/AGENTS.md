@@ -526,7 +526,7 @@ Both gates require `super_admin` (the only elevated platform role). `super-admin
 
 ## CSRF
 
-Sessions are cookies, so every mutating `/api/*` request that carries one passes an origin check (`src/server/middleware/csrf.ts`, Hono `csrf()` against `SITE_URL`, `CORS_ORIGINS` and the dev ports). `/api/auth/*` is checked by Better Auth itself; `/api/webhooks/*` is exempt and verifies signatures instead. A new webhook route belongs under `/api/webhooks/`.
+Sessions are cookies, so every mutating `/api/*` request (anything but GET, HEAD, OPTIONS) that carries a Cookie header passes an origin check, whatever its content type (`src/server/middleware/csrf.ts`, against `allowedOrigins()` in `src/server/lib/origins.ts`: `SITE_URL`, `CORS_ORIGINS` and the dev ports, each normalized to its origin). The `Origin` header must be one of ours; a `null` Origin is refused. Without an `Origin`, the `Referer`'s origin must be one of ours. With neither, only `Sec-Fetch-Site: same-origin` passes. Anything else gets a 403. `/api/auth/*` is checked by Better Auth itself; `/api/webhooks/*` is exempt and verifies signatures instead; `/api/_internal/*` sits behind Traefik ForwardAuth, which relays the admin tool's own Origin, and each route checks the role. A new webhook route belongs under `/api/webhooks/`. A script that calls the API with a session cookie must send a matching `Origin`.
 
 ## Rate Limiting
 

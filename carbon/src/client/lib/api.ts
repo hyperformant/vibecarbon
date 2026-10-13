@@ -2,8 +2,10 @@
  * Same-origin API calls. The session is an HttpOnly cookie the browser sends
  * by itself (`credentials: 'same-origin'`): there is no token in page JS and
  * no `Authorization` header to attach. Mutating requests carry the browser's
- * own `Origin` header, which the server's CSRF check compares against
- * SITE_URL (see AGENTS.md "CSRF"), so nothing extra is needed here.
+ * own `Origin` header, and the server's CSRF check refuses any cookie-bearing
+ * mutating request whose Origin (or, without one, Referer) is not one of the
+ * app's origins, whatever its content type (see AGENTS.md "CSRF"). Nothing
+ * extra is needed here.
  */
 
 /**
