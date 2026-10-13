@@ -418,11 +418,16 @@ classes:
       Run 33287840597 (hetzner k8s-ha restore's re-deploy, 2026-08-30
       03:5xZ): applyMigrations' --single-transaction psql died with
       "ERROR: deadlock detected / Process 71 waits for AccessExclusiveLock
-      on relation 16524 ... blocked by process 55" while applying policies
-      on storage.objects — the relations supabase-storage's own first-boot
-      DDL migrates concurrently. The storage-schema readiness probe
-      (buckets.public queryable) proves schema EXISTENCE, not lock
-      quiescence, and full serialization is circular: our migrations
+      on relation 16524 ... blocked by process 55". The class is our
+      migrations' DDL racing a service's own first-boot DDL on relations
+      both touch; the service still in scope is auth (GoTrue migrates the
+      auth schema at boot while our migrations add foreign keys to
+      auth.users). That incident's failing statement sat among
+      storage.objects policies, racing supabase-storage's boot DDL; the
+      storage service and those policies were removed 2026-10-13, so the
+      captured evidence predates the removal and the residual exposure is
+      the auth boot DDL. A schema readiness probe proves EXISTENCE, not
+      lock quiescence, and full serialization is circular: our migrations
       REQUIRE the services' boot DDL to have run. Deadlock retry is
       Postgres's documented contract for 40P01 (the file's transaction
       rolled back completely, so the re-run is byte-identical to attempt
