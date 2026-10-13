@@ -2,83 +2,66 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from '../../shared/types';
 import { env } from './env';
 
-// Server-side Supabase client with service role key
-// This bypasses RLS - use only for admin operations
-export const supabaseAdmin: SupabaseClient<Database> = createClient<Database>(
+/**
+ * Supabase Auth (GoTrue) access for the server, and nothing else.
+ *
+ * Data never goes through here: the server reads and writes Postgres through
+ * src/server/db/client.ts (`withUserDb` for anything done for a user,
+ * `adminDb` where the server acts for itself). Every client this module
+ * hands out is typed as auth-only, so `.from()` / `.rpc()` do not compile,
+ * and tests/structural/db-access-census.test.ts fails on any data call
+ * through a Supabase client under src/server.
+ */
+export type AuthOnlyClient = Pick<SupabaseClient<Database>, 'auth'>;
+
+const noSession = { autoRefreshToken: false, persistSession: false } as const;
+
+/**
+ * Service-role client for the auth admin API (`auth.admin.*`: look up,
+ * list, delete users, generate links) and for verifying a bearer token
+ * with `auth.getUser(token)`.
+ */
+export const supabaseAdmin: AuthOnlyClient = createClient<Database>(
   env.SUPABASE_URL,
   env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
+  { auth: noSession }
 );
 
-// Create a client for a specific user's context (respects RLS).
-//
-// SECURITY: uses the ANON key (not the service-role key) as the apikey, with the
-// user's JWT layered on via the Authorization header. PostgREST derives the
-// Postgres role from the JWT, so RLS is enforced for the authenticated user.
-// The critical property is fail-safe degradation: if the Authorization header is
-// ever dropped (bug, proxy stripping, refactor), the client falls back to the
-// anon role under RLS rather than to service_role BYPASSRLS. The dedicated
-// service-role clients (supabaseAdmin / createAuthClient) remain for admin ops.
-export function createSupabaseClient(accessToken: string): SupabaseClient<Database> {
-  return createClient<Database>(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
-    global: {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    },
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  });
-}
-
-// Create a fresh client for auth operations (signInWithPassword, etc.)
-// IMPORTANT: Never use supabaseAdmin for signInWithPassword — it stores the
-// user's session on the singleton, contaminating all subsequent admin queries
-// with the user's "authenticated" role instead of the "service_role" key.
-export function createAuthClient(): SupabaseClient<Database> {
+/**
+ * A fresh client for auth flows that create a session (signInWithPassword).
+ * Never use `supabaseAdmin` for those: it would store the user's session on
+ * the shared singleton.
+ */
+export function createAuthClient(): AuthOnlyClient {
   return createClient<Database>(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
+    auth: noSession,
   });
 }
 
-// Refresh a parked refresh token against GoTrue (impersonation restore).
-// Anon key on purpose: token refresh is a user-context operation and must not
-// ride the service role. A fresh client per call so no session sticks.
+/**
+ * Refresh a parked refresh token against GoTrue (impersonation restore).
+ * Anon key on purpose: token refresh is a user-context operation and must
+ * not ride the service role. A fresh client per call so no session sticks.
+ */
 export async function refreshUserSession(refreshToken: string) {
   const client = createClient<Database>(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
+    auth: noSession,
   });
   return client.auth.refreshSession({ refresh_token: refreshToken });
 }
 
-// Helper to get Supabase client from request headers
-export function getSupabaseClient(authHeader: string | undefined): SupabaseClient<Database> {
-  if (!authHeader?.startsWith('Bearer ')) {
-    // No valid auth header — return an anon client so RLS is enforced.
-    // Routes must still reject unauthenticated requests via c.get('user'),
-    // but this ensures any accidental query falls under anon RLS policies
-    // rather than bypassing them entirely with the service role key.
-    return createClient<Database>(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    });
-  }
-
-  const token = authHeader.replace('Bearer ', '');
-  return createSupabaseClient(token);
+/**
+ * The session middleware's client for `auth.getUser()` on a request's bearer
+ * token. ANON key as the apikey with the user's JWT layered on: GoTrue
+ * resolves the user from the JWT, and a dropped Authorization header
+ * degrades to anonymous, never to the service role.
+ */
+export function getSupabaseClient(authHeader: string | undefined): AuthOnlyClient {
+  const headers = authHeader?.startsWith('Bearer ')
+    ? { Authorization: `Bearer ${authHeader.replace('Bearer ', '')}` }
+    : undefined;
+  return createClient<Database>(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
+    ...(headers ? { global: { headers } } : {}),
+    auth: noSession,
+  });
 }

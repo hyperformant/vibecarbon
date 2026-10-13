@@ -79,6 +79,30 @@ spec:
             secretKeyRef:
               name: vibecarbon-secrets
               key: SERVICE_ROLE_KEY
+        # The API server talks to Postgres directly (src/server/db/client.ts).
+        # Named explicitly, not left to envFrom, so a stray DB_HOST in the
+        # Secret (e.g. the local-dev localhost) can never win. The host is the
+        # Supabase chart's db Service; DB_USER defaults to postgres.
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_NAME
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-secrets
+              key: DB_PASSWORD
         resources:
           requests:
             cpu: 100m

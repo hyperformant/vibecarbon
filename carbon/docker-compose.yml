@@ -84,13 +84,18 @@ services:
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - SITE_URL=${SITE_URL:-http://localhost:5173}
+      # The API server talks to Postgres directly (src/server/db/client.ts).
+      # These win over .env, whose DB_HOST=localhost is for local dev.
+      # DB_USER/DB_NAME default to postgres.
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
     depends_on:
-      # The Hono backend uses the Supabase JS client (calls flow through Kong)
-      # and never touches postgres directly, so we don't need `db: healthy`
-      # gating app startup. `service_started` on both lets the app boot in
-      # parallel with db's ~20-30s initial warmup.
+      # Data goes straight to Postgres, so the app waits for a healthy db.
+      # Kong still fronts Supabase Auth, which the app calls to verify
+      # sessions; `service_started` is enough there.
       db:
-        condition: service_started
+        condition: service_healthy
       kong:
         condition: service_started
     networks:

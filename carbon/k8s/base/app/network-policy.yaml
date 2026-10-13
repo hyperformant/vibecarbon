@@ -28,11 +28,17 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
-    # Allow connection to database (direct queries)
+    # Allow connection to the database: the API server queries Postgres
+    # directly (src/server/db/client.ts). Selects the Supabase chart's db pod
+    # by the labels the chart generates (release `supabase`), the same pair
+    # supabase-db-s3-egress uses; base `labels:` never rewrites selectors.
+    # (allow-intra-namespace-egress also admits this; the explicit rule keeps
+    # the app's db path visible here and survives a tighter namespace policy.)
     - to:
         - podSelector:
             matchLabels:
-              app: vibecarbon-postgres
+              app.kubernetes.io/name: supabase-db
+              app.kubernetes.io/instance: supabase
       ports:
         - protocol: TCP
           port: 5432

@@ -11,7 +11,7 @@ import type { HonoVariables } from '../../../types';
 const adminContactRoutes = new Hono<{ Variables: HonoVariables }>();
 
 // Require super admin for all contact management endpoints (JWT-based role
-// check — see requireSuperAdmin). The prior `adminDb.from('auth.users')` guard
+// check — see requireSuperAdmin). The prior PostgREST lookup of auth.users
 // errored on the unexposed auth schema and fell closed for everyone.
 adminContactRoutes.use('*', requireSuperAdmin);
 
