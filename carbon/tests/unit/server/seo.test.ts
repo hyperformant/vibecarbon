@@ -166,7 +166,7 @@ describe('createSeoShell', () => {
     );
   });
 
-  it('serves the plain shell for unknown routes', () => {
+  it('renders the plain shell for routes without metadata', () => {
     const shell = setup();
     expect(shell.render('/dashboard')).toBe(SHELL);
   });
@@ -239,6 +239,39 @@ describe('createSeoShell', () => {
       expect(a).toBe(b);
       expect(plain).toMatch(/^"[^"]+"$/);
       expect(plain).not.toBe(a);
+    });
+
+    it('404s paths that are neither manifest routes nor private routes', async () => {
+      const app = mount(setup());
+      for (const path of ['/no-such-page', '/docs/no-such-doc', '/blog/old-slug/']) {
+        const res = await app.request(path);
+        expect(res.status, path).toBe(404);
+        // Still the SPA shell, so the client renders its NotFound page.
+        expect(await res.text()).toBe(SHELL);
+        expect(res.headers.get('ETag')).toBeNull();
+      }
+    });
+
+    it('serves private routes 200 with X-Robots-Tag: noindex', async () => {
+      const app = mount(setup());
+      for (const path of ['/dashboard', '/settings/profile', '/admin', '/admin/users/']) {
+        const res = await app.request(path);
+        expect(res.status, path).toBe(200);
+        expect(res.headers.get('X-Robots-Tag'), path).toBe('noindex');
+      }
+    });
+
+    it('leaves manifest routes indexable', async () => {
+      const app = mount(setup());
+      const res = await app.request('/docs/getting-started');
+      expect(res.headers.get('X-Robots-Tag')).toBeNull();
+    });
+
+    it('serves every route 200 when the manifest is missing (broken build never 404s the site)', async () => {
+      const app = mount(setup({ manifest: null }));
+      const res = await app.request('/docs/getting-started');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('X-Robots-Tag')).toBeNull();
     });
 
     it('404s when the shell itself is unreadable', async () => {

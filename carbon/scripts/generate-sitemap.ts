@@ -5,6 +5,12 @@
  *
  * Reads SITE_URL from .env.local and outputs sitemap.xml to dist/client/.
  * Includes static routes and dynamic blog post routes.
+ *
+ * <lastmod> is only written when the build actually knows when a page last
+ * changed: a content page's frontmatter `updated` (or `date`), and for the
+ * blog and changelog indexes, their newest entry. Pages without one omit the
+ * tag. Stamping every URL with the build date tells search engines that
+ * every page changes on every deploy, and they learn to ignore the field.
  */
 
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -22,13 +28,13 @@ const rootDir = resolve(__dirname, '..');
 const fileEnv = readEnvFiles(rootDir);
 const getEnvValue = (key: string): string | null => process.env[key] || fileEnv[key] || null;
 
-// Public routes that should be indexed
+// Public routes listed in the sitemap. /login and /signup stay indexable
+// (see scripts/generate-seo.ts) but are left out: they never rank, and a
+// sitemap should point crawlers at the pages worth crawling.
 const PUBLIC_ROUTES = [
   '/',
   '/pricing',
   '/contact',
-  '/login',
-  '/signup',
   '/blog',
   '/changelog',
   '/docs',
@@ -41,41 +47,59 @@ function loadSiteUrl(): string {
   return (value || 'http://localhost:5173').replace(/\/$/, '');
 }
 
-/** Published (non-draft) slugs in a content directory. */
-function getPublishedSlugs(dir: string): string[] {
+interface SitemapEntry {
+  route: string;
+  lastmod?: string;
+}
+
+/** A frontmatter `updated` or `date` as YYYY-MM-DD, or undefined when absent or malformed. */
+function lastModified(fm: Record<string, string>): string | undefined {
+  const value = fm.updated || fm.date;
+  return value && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : undefined;
+}
+
+/** Published (non-draft) pages in a content directory, routed under `prefix`. */
+function getPublishedPages(dir: string, prefix: string): SitemapEntry[] {
   try {
     const contentDir = resolve(__dirname, '..', dir);
     return readdirSync(contentDir)
       .filter((f) => f.endsWith('.mdx'))
-      .filter((f) => !isDraft(parseFrontmatter(readFileSync(resolve(contentDir, f), 'utf-8')).fm))
-      .map((f) => f.replace('.mdx', ''));
+      .map((f) => ({ f, fm: parseFrontmatter(readFileSync(resolve(contentDir, f), 'utf-8')).fm }))
+      .filter(({ fm }) => !isDraft(fm))
+      .map(({ f, fm }) => ({ route: `${prefix}/${f.replace('.mdx', '')}`, lastmod: lastModified(fm) }));
   } catch {
     return [];
   }
 }
 
-const getBlogSlugs = () => getPublishedSlugs('content/blog');
-const getChangelogSlugs = () => getPublishedSlugs('content/changelog');
-const getDocsSlugs = () => getPublishedSlugs('content/docs');
+/** Newest lastmod among `entries`, for the index page that lists them. */
+const newest = (entries: SitemapEntry[]): string | undefined =>
+  entries.map((e) => e.lastmod).filter(Boolean).sort().at(-1);
+
+const blogPages = getPublishedPages('content/blog', '/blog');
+const changelogPages = getPublishedPages('content/changelog', '/changelog');
+const docsPages = getPublishedPages('content/docs', '/docs');
 
 function generateSitemap(siteUrl: string): string {
-  const today = new Date().toISOString().split('T')[0];
-  const blogSlugs = getBlogSlugs();
-  const changelogSlugs = getChangelogSlugs();
-  const docsSlugs = getDocsSlugs();
-  const allRoutes = [
-    ...PUBLIC_ROUTES,
-    ...blogSlugs.map((s) => `/blog/${s}`),
-    ...changelogSlugs.map((s) => `/changelog/${s}`),
-    ...docsSlugs.map((s) => `/docs/${s}`),
+  const indexLastmod: Record<string, string | undefined> = {
+    '/blog': newest(blogPages),
+    '/changelog': newest(changelogPages),
+  };
+  const entries: SitemapEntry[] = [
+    ...PUBLIC_ROUTES.map((route) => ({ route, lastmod: indexLastmod[route] })),
+    ...blogPages,
+    ...changelogPages,
+    ...docsPages,
   ];
 
-  const urls = allRoutes
-    .map(
-      (route) => `  <url>
-    <loc>${siteUrl}${route === '/' ? '' : route}</loc>
-    <lastmod>${today}</lastmod>
-  </url>`,
+  const urls = entries
+    .map(({ route, lastmod }) =>
+      [
+        '  <url>',
+        `    <loc>${siteUrl}${route === '/' ? '' : route}</loc>`,
+        ...(lastmod ? [`    <lastmod>${lastmod}</lastmod>`] : []),
+        '  </url>',
+      ].join('\n')
     )
     .join('\n');
 
@@ -105,8 +129,7 @@ try {
   // No robots.txt in dist — nothing to fix.
 }
 
-const blogCount = getBlogSlugs().length;
-const changelogCount = getChangelogSlugs().length;
-const docsCount = getDocsSlugs().length;
-const totalUrls = PUBLIC_ROUTES.length + blogCount + changelogCount + docsCount;
-console.log(`Sitemap generated with ${totalUrls} URLs (${blogCount} blog, ${changelogCount} changelog, ${docsCount} docs) → dist/client/sitemap.xml`);
+const totalUrls = PUBLIC_ROUTES.length + blogPages.length + changelogPages.length + docsPages.length;
+console.log(
+  `Sitemap generated with ${totalUrls} URLs (${blogPages.length} blog, ${changelogPages.length} changelog, ${docsPages.length} docs) → dist/client/sitemap.xml`
+);

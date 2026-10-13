@@ -88,18 +88,28 @@ crawlerRoutes.get('/', async (c) => {
   const rawFromKey = toDayKey(rawFromMs);
 
   // --- Accumulators -------------------------------------------------------
-  const perCrawler = new Map<string, number>();
+  const perCrawler = new Map<string, { hits: number; errors: number }>();
   const perDay = new Map<string, { hits: number; byCategory: Record<CrawlerCategory, number> }>();
-  const perPath = new Map<string, { hits: number; crawlers: Set<string> }>();
+  const perPath = new Map<string, { hits: number; errors: number; crawlers: Set<string> }>();
 
-  function addRecord(day: string, crawlerName: string, path: string, hits: number): void {
+  /** `errors`: how many of these hits were answered with a 5xx. */
+  function addRecord(
+    day: string,
+    crawlerName: string,
+    path: string,
+    hits: number,
+    errors: number
+  ): void {
     const crawler = findCrawlerByName(crawlerName);
     // Rows whose crawler is no longer in the registry (renamed/removed entry)
     // are skipped rather than reported without an operator/category — the
     // response contract has no shape for an unclassified crawler.
     if (!crawler || hits <= 0) return;
 
-    perCrawler.set(crawlerName, (perCrawler.get(crawlerName) ?? 0) + hits);
+    const crawlerBucket = perCrawler.get(crawlerName) ?? { hits: 0, errors: 0 };
+    crawlerBucket.hits += hits;
+    crawlerBucket.errors += errors;
+    perCrawler.set(crawlerName, crawlerBucket);
 
     let dayBucket = perDay.get(day);
     if (!dayBucket) {
@@ -111,10 +121,11 @@ crawlerRoutes.get('/', async (c) => {
 
     let pathBucket = perPath.get(path);
     if (!pathBucket) {
-      pathBucket = { hits: 0, crawlers: new Set<string>() };
+      pathBucket = { hits: 0, errors: 0, crawlers: new Set<string>() };
       perPath.set(path, pathBucket);
     }
     pathBucket.hits += hits;
+    pathBucket.errors += errors;
     pathBucket.crawlers.add(crawlerName);
   }
 
@@ -122,7 +133,7 @@ crawlerRoutes.get('/', async (c) => {
     // --- Recent window: raw per-hit rows ----------------------------------
     const { data: rawHits, error: rawError } = await supabaseAdmin
       .from('crawler_hits')
-      .select('crawler, path, hit_at')
+      .select('crawler, path, status, hit_at')
       .gte('hit_at', new Date(rawFromMs).toISOString())
       .order('hit_at', { ascending: false })
       .limit(MAX_RAW_ROWS);
@@ -139,14 +150,16 @@ crawlerRoutes.get('/', async (c) => {
     }
 
     for (const hit of rawHits ?? []) {
-      addRecord(toDayKey(Date.parse(hit.hit_at)), hit.crawler, hit.path, 1);
+      // status is null for rows recorded before the column existed.
+      const isError = (hit.status ?? 0) >= 500 ? 1 : 0;
+      addRecord(toDayKey(Date.parse(hit.hit_at)), hit.crawler, hit.path, 1, isError);
     }
 
     // --- Older days: daily rollup ----------------------------------------
     if (windowDays > RAW_WINDOW_DAYS) {
       const { data: dailyRows, error: dailyError } = await supabaseAdmin
         .from('crawler_hits_daily')
-        .select('day, crawler, path, hits')
+        .select('day, crawler, path, hits, errors')
         .gte('day', dayKeys[0])
         .lt('day', rawFromKey)
         .order('hits', { ascending: false })
@@ -165,7 +178,7 @@ crawlerRoutes.get('/', async (c) => {
 
       for (const row of dailyRows ?? []) {
         // `day` is a DATE; PostgREST already renders it as YYYY-MM-DD.
-        addRecord(row.day, row.crawler, row.path, row.hits);
+        addRecord(row.day, row.crawler, row.path, row.hits, row.errors ?? 0);
       }
     }
   } catch (error) {
@@ -174,10 +187,12 @@ crawlerRoutes.get('/', async (c) => {
 
   // --- Response -----------------------------------------------------------
   const totals = [...perCrawler.entries()]
-    .flatMap(([name, hits]) => {
+    .flatMap(([name, { hits, errors }]) => {
       const crawler = findCrawlerByName(name);
       if (!crawler || hits <= 0) return [];
-      return [{ crawler: name, operator: crawler.operator, category: crawler.category, hits }];
+      return [
+        { crawler: name, operator: crawler.operator, category: crawler.category, hits, errors },
+      ];
     })
     .sort((a, b) => b.hits - a.hits || a.crawler.localeCompare(b.crawler));
 
@@ -196,6 +211,7 @@ crawlerRoutes.get('/', async (c) => {
     .map(([path, bucket]) => ({
       path,
       hits: bucket.hits,
+      errors: bucket.errors,
       crawlers: [...bucket.crawlers].sort(),
     }));
 

@@ -187,7 +187,12 @@ function admitHit(crawler: string): boolean {
   return true;
 }
 
-function recordHit(crawler: string, path: string, userAgent: string | undefined): void {
+function recordHit(
+  crawler: string,
+  path: string,
+  userAgent: string | undefined,
+  status: number | null
+): void {
   if (!admitHit(crawler)) return;
 
   // NOT awaited: the response must not wait on (or fail because of) this write.
@@ -198,6 +203,7 @@ function recordHit(crawler: string, path: string, userAgent: string | undefined)
       crawler,
       path: normalizeTrackedPath(path),
       user_agent: userAgent ? userAgent.slice(0, MAX_USER_AGENT_LENGTH) : null,
+      status,
     })
     .then((result) => {
       if (result.error) logInsertFailure(result.error);
@@ -208,11 +214,12 @@ export async function crawlerTracking(
   c: Context<{ Variables: HonoVariables }>,
   next: Next
 ): Promise<void> {
+  let crawler: string | undefined;
+  let userAgent: string | undefined;
   try {
     if (isTrackablePath(c.req.method, c.req.path)) {
-      const userAgent = c.req.header('user-agent');
-      const crawler = classifyCrawler(userAgent);
-      if (crawler) recordHit(crawler.name, c.req.path, userAgent);
+      userAgent = c.req.header('user-agent');
+      crawler = classifyCrawler(userAgent)?.name;
     }
   } catch (err) {
     // This middleware fronts the entire site. Losing a metric is acceptable;
@@ -220,4 +227,13 @@ export async function crawlerTracking(
     logInsertFailure(err);
   }
   await next();
+  // Recorded after the response exists, so the row carries the status the
+  // crawler actually received: a 5xx served to Googlebot shows up on the
+  // admin page within minutes instead of in a Search Console email weeks later.
+  if (!crawler) return;
+  try {
+    recordHit(crawler, c.req.path, userAgent, c.res?.status ?? null);
+  } catch (err) {
+    logInsertFailure(err);
+  }
 }

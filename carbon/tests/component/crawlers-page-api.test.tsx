@@ -35,11 +35,11 @@ describe('Crawlers fetchCrawlerStats', () => {
   it('requests the windowed endpoint with the bearer token and resolves the body', async () => {
     const payload: CrawlerStatsResponse = {
       windowDays: 30,
-      totals: [{ crawler: 'GPTBot', operator: 'OpenAI', category: 'ai-training', hits: 12 }],
+      totals: [{ crawler: 'GPTBot', operator: 'OpenAI', category: 'ai-training', hits: 12, errors: 0 }],
       daily: [
         { day: '2026-08-24', hits: 12, byCategory: { 'ai-training': 12, 'ai-search': 0, search: 0 } },
       ],
-      topPaths: [{ path: '/docs/seo', hits: 7, crawlers: ['GPTBot'] }],
+      topPaths: [{ path: '/docs/seo', hits: 7, errors: 0, crawlers: ['GPTBot'] }],
     };
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }));
 

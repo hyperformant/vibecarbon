@@ -51,6 +51,20 @@ Write descriptions as one plain sentence — they appear in search results, in `
 
 The homepage has no MDX file, so its crawler-visible summary is a block of HTML in `scripts/generate-seo.ts`. Edit it when you change your hero copy so the two don't drift apart.
 
+### Linked profiles
+
+`SAME_AS` in `scripts/generate-seo.ts` lists the public profiles that belong to you: GitHub, LinkedIn, Crunchbase, directory listings. The build publishes them as the homepage Organization's `sameAs`, which is how search engines and AI assistants connect those profiles to your site as one entity. Add each one as it goes live.
+
+### Status codes and new pages
+
+The server answers every page request with the app shell, and picks the status from the route:
+
+- **Indexable pages** (everything in the SEO manifest: the homepage, pricing, docs, blog, changelog, legal) return `200` with their own title, canonical link and content.
+- **Private pages** listed in `src/shared/routes.ts` (password reset, the signed-in app, admin) return `200` with an `X-Robots-Tag: noindex` header, so they work normally but stay out of search results.
+- **Any other path** returns `404`. The app still shows its "Page not found" screen, and search engines drop the URL instead of indexing a blank copy of your homepage.
+
+When you add a page to `src/client/App.tsx`, add it to one of the first two: a manifest entry in `scripts/generate-seo.ts` for a public page, or `PRIVATE_ROUTES` for anything else. A structural test fails the build until you do, because an unlisted page would 404 when someone opens it directly.
+
 ### robots.txt
 
 `src/client/public/robots.txt` allows all crawlers, including the AI ones, and disallows only the authenticated routes (`/dashboard`, `/settings`, `/admin`, `/api/`). Blocking an AI crawler here removes you from that assistant's answers — leave the wildcard rule alone unless that's what you want.
@@ -69,11 +83,12 @@ On-site markup only matters once crawlers find you.
 
 Once the crawlers arrive, **Admin → AI Visibility** shows what they did. The server classifies every document request by user agent against a built-in crawler registry — GPTBot, OAI-SearchBot, ClaudeBot, PerplexityBot, Bingbot, Googlebot, Amazonbot, CCBot, and friends — and records the hit. Asset and API requests are skipped, so the numbers reflect pages, markdown mirrors, and `llms.txt` rather than JavaScript bundles.
 
-The page answers the two questions worth acting on:
+The page answers the questions worth acting on:
 
 - **Is anything crawling you at all?** Totals per crawler and per category (AI search, AI training, search engine), plus a daily trend chart.
 - **What are they actually fetching?** A most-crawled-pages table. If your pricing page never appears but your changelog does, that's a content gap, not a markup bug.
+- **Are they getting errors?** Each hit records the status the crawler received. Any 5xx shows up as a warning at the top of the page and in the 5xx column of both tables, the same day it happens. Search engines drop pages that keep answering with server errors, so treat this as an outage signal.
 
-Only the crawler name, the requested path, a truncated user-agent string, and a timestamp are stored — **no IP addresses**, so this adds no personal-data surface. Raw hits are kept for 90 days and rolled up nightly into a daily table that's retained indefinitely; both jobs run on `pg_cron` and can be triggered by hand from **Admin → Jobs** (`rollup-crawler-hits` and `cleanup-crawler-hits`).
+Only the crawler name, the requested path, the response status, a truncated user-agent string, and a timestamp are stored — **no IP addresses**, so this adds no personal-data surface. Raw hits are kept for 90 days and rolled up nightly into a daily table that's retained indefinitely; both jobs run on `pg_cron` and can be triggered by hand from **Admin → Jobs** (`rollup-crawler-hits` and `cleanup-crawler-hits`).
 
 An empty dashboard usually means the site isn't reachable yet rather than that something is broken — crawlers can only visit a public domain, and `robots.txt` has to let them in.
