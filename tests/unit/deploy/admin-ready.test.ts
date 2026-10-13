@@ -99,6 +99,21 @@ describe('adminReadyProbeScript (runs inside the app container)', () => {
     expect(await runProbe(port)).toBe(ADMIN_PROBE_EXIT.ADMIN_PENDING);
   });
 
+  it('gives each terminal adminStatus its own exit code', async () => {
+    const cases: Array<[string, number]> = [
+      ['refused', ADMIN_PROBE_EXIT.ADMIN_REFUSED],
+      ['skipped', ADMIN_PROBE_EXIT.ADMIN_SKIPPED],
+      ['failed', ADMIN_PROBE_EXIT.ADMIN_FAILED],
+      ['pending', ADMIN_PROBE_EXIT.ADMIN_PENDING],
+    ];
+    for (const [adminStatus, code] of cases) {
+      const port = await serve(200, JSON.stringify({ adminReady: false, adminStatus }));
+      expect(await runProbe(port), adminStatus).toBe(code);
+      await new Promise<void>((r) => server?.close(() => r()));
+      server = null;
+    }
+  });
+
   it('treats a missing flag (an app image from before the flag) as not ready', async () => {
     const port = await serve(200, JSON.stringify({ status: 'ok' }));
     expect(await runProbe(port)).toBe(ADMIN_PROBE_EXIT.ADMIN_PENDING);
@@ -154,6 +169,36 @@ describe('waitForAdminReady (compose, compose-ha)', () => {
   });
 });
 
+describe('waitForAdminReady: a terminal status fails fast with its reason', () => {
+  it('stops at the first refused answer and says why', async () => {
+    const sshRun = vi.fn(async (_ip: string, _key: string, cmd: string) =>
+      cmd.includes('logs') ? 'password does not match ADMIN_PASSWORD' : 'exit=5',
+    );
+    await expect(
+      waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, delayMs: 0, attempts: 18 }),
+    ).rejects.toThrow(
+      /super admin is not ready: the app refused to make ADMIN_EMAIL a super admin[\s\S]*password does not match/,
+    );
+    // One probe plus the log read: no waiting out the budget.
+    expect(sshRun).toHaveBeenCalledTimes(2);
+  });
+
+  it('names missing admin env (skipped) and an unrecoverable error (failed)', async () => {
+    for (const [exit, reason] of [
+      ['exit=6', /no ADMIN_EMAIL \/ ADMIN_PASSWORD/],
+      ['exit=7', /could not create its super admin/],
+    ] as const) {
+      const sshRun = vi.fn(async (_ip: string, _key: string, cmd: string) =>
+        cmd.includes('logs') ? '' : exit,
+      );
+      await expect(
+        waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, delayMs: 0 }),
+      ).rejects.toThrow(reason);
+      expect(sshRun).toHaveBeenCalledTimes(2);
+    }
+  });
+});
+
 describe('awaitAppAdminReady (k8s, k8s-ha)', () => {
   const statusErr = (status: number) => Object.assign(new Error(`exit ${status}`), { status });
 
@@ -176,6 +221,16 @@ describe('awaitAppAdminReady (k8s, k8s-ha)', () => {
       '--',
     ]);
     expect(argv).not.toContain('port-forward');
+  });
+
+  it('fails at once on a terminal status, with the reason and the log command', async () => {
+    const exec = vi.fn().mockRejectedValue(statusErr(ADMIN_PROBE_EXIT.ADMIN_REFUSED));
+    await expect(
+      awaitAppAdminReady({ env: {}, exec, sleep: async () => {}, budgetMs: 60_000 }),
+    ).rejects.toThrow(
+      /super admin is not ready: the app refused[\s\S]*kubectl -n vibecarbon logs deploy\/app -c app/,
+    );
+    expect(exec).toHaveBeenCalledTimes(1);
   });
 
   it('throws naming what is missing and where to read the app log', async () => {

@@ -28,6 +28,7 @@ import {
   adminNotReadyHint,
   adminReadyProbeScript,
   describeAdminProbeExit,
+  isTerminalAdminProbeExit,
 } from '../admin-ready.js';
 // DNS_NOT_SETTLED_RETRY_DELAYS_MS: shared with remote-build.js's own
 // DNS-not-settled ladder so the two can't drift apart — see that file's
@@ -960,8 +961,10 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
  *
  * Polls on the same ramp as verifyAppHealth: the app starts with the stack,
  * before migrations, and creates the admin a few seconds after the schema
- * lands. Throws, with the app's log tail, if it never does: a deploy the
- * operator cannot sign in to is not a successful deploy.
+ * lands. Stops at once when the app reports a terminal status (refused,
+ * skipped, failed), and throws, with the reason and the app's log tail, if
+ * the admin is not ready: a deploy the operator cannot sign in to is not a
+ * successful deploy.
  *
  * @param {string} ip
  * @param {string} sshKeyPath
@@ -980,8 +983,10 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
   const probeCmd = `cd ${remoteDir} && echo ${scriptB64} | base64 -d | docker compose exec -T app node - 2>&1; echo "exit=$?"`;
 
   let lastCode = null;
+  let probes = 0;
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await new Promise((r) => setTimeout(r, delayFor(i)));
+    probes = i + 1;
     try {
       const out =
         (await sshRun(ip, sshKeyPath, probeCmd, { timeout: 15_000, ignoreError: true })) || '';
@@ -993,6 +998,8 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
     } catch {
       lastCode = null;
     }
+    // The app settled on an outcome waiting cannot change: stop now.
+    if (isTerminalAdminProbeExit(lastCode)) break;
   }
 
   let logs = '';
@@ -1007,9 +1014,12 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
   } catch {
     /* best effort */
   }
+  const headline = isTerminalAdminProbeExit(lastCode)
+    ? `The app's super admin is not ready: ${describeAdminProbeExit(lastCode)}.`
+    : `The app did not report its super admin ready after ${probes} probes ` +
+      `(last: ${describeAdminProbeExit(lastCode)}).`;
   throw new Error(
-    `The app did not report its super admin ready after ${attempts} probes ` +
-      `(last: ${describeAdminProbeExit(lastCode)}).\n` +
+    `${headline}\n` +
       `${adminNotReadyHint(`ssh in, then: cd ${remoteDir} && docker compose logs app`)}\n` +
       `--- app container log tail ---\n${logs.trim()}`,
   );

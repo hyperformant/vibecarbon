@@ -42,6 +42,7 @@ import {
   adminNotReadyHint,
   adminReadyProbeScript,
   describeAdminProbeExit,
+  isTerminalAdminProbeExit,
 } from '../admin-ready.js';
 
 /**
@@ -73,7 +74,7 @@ const PROBE_INTERVAL_MS = 2000;
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const defaultExec = (argv, opts) => runCommandAsync(argv, opts);
 
-async function pollCondition({ name, attempt, budgetMs, sleep, nowFn }) {
+async function pollCondition({ name, attempt, budgetMs, sleep, nowFn, isFinal }) {
   const now = nowFn ?? Date.now;
   const deadline = now() + budgetMs;
   const startedAt = now();
@@ -90,6 +91,9 @@ async function pollCondition({ name, attempt, budgetMs, sleep, nowFn }) {
       }
       return;
     } catch (err) {
+      // A condition that reported a final answer (it will never hold) fails
+      // now instead of burning the budget.
+      if (isFinal?.(err)) throw err;
       lastErr = err;
       if (attempts === 1) {
         progressLog(`[readiness] ${name}: not serving yet, polling the condition`);
@@ -242,7 +246,8 @@ export async function awaitPostgresAccepting({
  * ADMIN_PASSWORD, see src/lib/deploy/admin-ready.js). Probed from inside an
  * app pod with the image's own `node`, so no port-forward is involved. Any
  * pod answering ready is enough: they share one database, and the flag means
- * the admin row exists there.
+ * the admin row exists there. A terminal adminStatus (refused, skipped,
+ * failed) fails at once with its reason rather than at the budget.
  *
  * @param {object} params
  * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
@@ -266,6 +271,7 @@ export async function awaitAppAdminReady({
       budgetMs,
       sleep,
       nowFn,
+      isFinal: (err) => err?.terminal === true,
       attempt: async () => {
         try {
           await exec(
@@ -288,6 +294,12 @@ export async function awaitAppAdminReady({
           // The probe's own exit codes say which half is missing; anything
           // else (no pod yet, apiserver blip) keeps kubectl's message.
           const code = err?.status;
+          if (isTerminalAdminProbeExit(code)) {
+            throw Object.assign(
+              new Error(`app super admin is not ready: ${describeAdminProbeExit(code)}`),
+              { terminal: true },
+            );
+          }
           if (Number.isInteger(code) && code >= 1 && code <= 4) {
             throw new Error(describeAdminProbeExit(code));
           }
