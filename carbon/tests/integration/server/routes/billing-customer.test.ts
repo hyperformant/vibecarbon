@@ -128,6 +128,18 @@ describe('getOrCreateCustomer', () => {
     expect((err as Error).cause).toBeInstanceOf(DrizzleQueryError);
   });
 
+  it('still throws the insert failure when best-effort provider cleanup itself fails', async () => {
+    provider.createCustomer.mockResolvedValue('cus_orphan');
+    provider.deleteCustomer.mockRejectedValue(new Error('provider down'));
+    db.insertResult = () => {
+      throw new DrizzleQueryError('insert into customers ...', ['u@test.com'], new Error('boom'));
+    };
+    await expect(getOrCreateCustomer('user', USER, 'u@test.com')).rejects.toThrow(
+      'Failed to create customer record'
+    );
+    expect(provider.deleteCustomer).toHaveBeenCalledWith('cus_orphan');
+  });
+
   it('a failed lookup surfaces without the query params in its message', async () => {
     const lookup = new DrizzleQueryError('select ... where user_id = $1', [USER], new Error('boom'));
     db.selects = [lookup];

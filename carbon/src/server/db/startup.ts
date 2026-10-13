@@ -22,9 +22,10 @@ const defaults: StartupDeps = {
  * configuration error: log it as fatal and exit.
  *
  * A database that is not ready yet (the db container still starting, or
- * migrations not applied so `app_user` does not exist) is not: the server keeps serving, `/api/health/ready` reports the db down,
- * and this keeps checking every `retryMs` until it gets an answer. Run it
- * without awaiting; it never rejects.
+ * migrations not applied so `app_user` does not exist) is not: the server
+ * keeps serving, `/api/health/ready` reports the db down, and this keeps
+ * checking every `retryMs` until it gets an answer. Run it without
+ * awaiting; it never rejects.
  */
 export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {}): Promise<void> {
   const { assert, log, exit, retryMs } = { ...defaults, ...overrides };

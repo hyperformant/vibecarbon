@@ -8,7 +8,11 @@ data:
   SITE_URL: "http://localhost:8080"
   PROJECT_NAME: "vibecarbon-local"
 
-  # Database
+  # Database. STALE OVERLAY: kustomization.yaml still lists the hand-written
+  # base/supabase/* manifests (removed when deploys moved to the Supabase Helm
+  # chart), so `kubectl kustomize overlays/local` does not build. "postgres"
+  # (like kong/auth below) names that overlay's own former services. Real
+  # deploys use base + the chart, whose db Service is supabase-supabase-db.
   DB_HOST: "postgres"
   DB_PORT: "5432"
   DB_NAME: "postgres"
