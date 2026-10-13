@@ -25,6 +25,7 @@ const force = process.argv.includes('--force');
 const DEV = {
   PROJECT_NAME: 'vibecarbon',
   JWT_SECRET: 'local-dev-jwt-secret-must-be-at-least-32-chars-padded-padded',
+  BETTER_AUTH_SECRET: 'local-dev-auth-secret-at-least-32-characters-long',
   DB_ENC_KEY: 'devdbencryptkey1',
   VAULT_ENC_KEY: 'local-vault-encryption-key-1234567890',
   REALTIME_SECRET: 'local-realtime-secret-pad',
@@ -86,6 +87,9 @@ const envLines = [
   '',
   '# JWT Secret',
   formatDotenvLine('JWT_SECRET', DEV.JWT_SECRET),
+  '',
+  '# Auth session signing key (in-process auth)',
+  formatDotenvLine('BETTER_AUTH_SECRET', DEV.BETTER_AUTH_SECRET),
   '',
   '# Database. The API server connects with the DB_* vars (base port, like the',
   '# URLs above: DEV_DB_PORT or DEV_PORT_OFFSET is applied at runtime by env.ts)',

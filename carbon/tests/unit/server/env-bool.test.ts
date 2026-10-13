@@ -6,6 +6,7 @@ const REQUIRED = {
   SUPABASE_URL: 'http://supabase.test',
   SUPABASE_ANON_KEY: 'anon',
   SUPABASE_SERVICE_ROLE_KEY: 'service',
+  BETTER_AUTH_SECRET: 'test-auth-secret-at-least-32-characters-long',
   DB_HOST: 'db.test',
   DB_PASSWORD: 'pw',
   NODE_ENV: 'test',

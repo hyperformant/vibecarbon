@@ -1,6 +1,7 @@
 import { inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { socialProviders } from '../../auth/providers';
 import { adminDb } from '../../db/client';
 import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
@@ -271,11 +272,8 @@ authRoutes.get('/settings', async (c) => {
         apiDocsEnabled:
           (settings.api_docs_enabled as { enabled?: boolean } | undefined)?.enabled ?? true,
         providers: {
-          google: env.GOOGLE_ENABLED,
-          microsoft: env.MICROSOFT_ENABLED,
-          github: env.GITHUB_ENABLED,
-          apple: env.APPLE_ENABLED,
-          discord: env.DISCORD_ENABLED,
+          google: socialProviders.google,
+          microsoft: socialProviders.microsoft,
         },
         magicLinkEnabled: env.MAGIC_LINK_ENABLED,
       },
@@ -289,11 +287,8 @@ authRoutes.get('/settings', async (c) => {
         userDocsEnabled: true,
         apiDocsEnabled: true,
         providers: {
-          google: env.GOOGLE_ENABLED,
-          microsoft: env.MICROSOFT_ENABLED,
-          github: env.GITHUB_ENABLED,
-          apple: env.APPLE_ENABLED,
-          discord: env.DISCORD_ENABLED,
+          google: socialProviders.google,
+          microsoft: socialProviders.microsoft,
         },
         magicLinkEnabled: env.MAGIC_LINK_ENABLED,
       },

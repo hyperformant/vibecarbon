@@ -7,18 +7,21 @@ import { createMiddleware } from 'hono/factory';
 import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
+import { auth } from './auth';
+import { bootstrapAdminAtStartup } from './auth/bootstrap-admin';
 import { pool } from './db/client';
 import { checkDbRoleAtStartup } from './db/startup';
 import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
 import { handleAppError } from './lib/errors';
-import { decodeAalFromJwt } from './lib/jwt';
 import { logger } from './lib/logger';
+import { allowedOrigins } from './lib/origins';
 import { createRateLimiter } from './lib/rate-limiter';
 import { createSeoShell } from './lib/seo';
-import { getSupabaseClient } from './lib/supabase';
 import { crawlerTracking } from './middleware/crawler-tracking';
+import { csrfProtection } from './middleware/csrf';
+import { sessionMiddleware } from './middleware/session';
 import { servicesStatusRoutes } from './routes/_internal/services-status';
 import { verifyRoleRoutes } from './routes/_internal/verify-role';
 import { healthRoutes } from './routes/health';
@@ -130,6 +133,15 @@ app.use('/api/v1/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 app.use('/api/health', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 app.use('/api/health/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 
+// Auth endpoints: the general budget, plus a strict per-IP cap on password
+// and magic-link sign-in on top of the per-(email, IP) account lockout. The
+// lockout is per email, so without this an attacker gets the whole budget of
+// cross-email credential stuffing (a fresh lockout bucket per email).
+// 10/15min/IP closes that without letting an attacker lock a victim out on
+// the victim's own IP.
+app.use('/api/auth/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
+app.use('/api/auth/sign-in/*', createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10 }));
+
 // Rate limiting for internal endpoints (higher threshold for infrastructure)
 // These are called by Traefik for auth verification on each request
 app.use('/api/_internal/*', createRateLimiter({ windowMs: 60 * 1000, max: 1000 }));
@@ -142,30 +154,7 @@ app.use('/api/webhooks/*', createRateLimiter({ windowMs: 60 * 1000, max: 500 }))
 app.use(
   '/api/*',
   cors({
-    origin: (origin) => {
-      // Build allowed origins list
-      const allowedOrigins: string[] = [];
-
-      // Always allow the configured site URL
-      if (process.env.SITE_URL) {
-        allowedOrigins.push(process.env.SITE_URL);
-      }
-
-      // Allow custom CORS origins from environment
-      if (process.env.CORS_ORIGINS) {
-        allowedOrigins.push(...process.env.CORS_ORIGINS.split(',').map((o) => o.trim()));
-      }
-
-      // Only allow localhost in development (with configurable ports)
-      if (process.env.NODE_ENV !== 'production') {
-        const portOffset = Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
-        const vitePort = process.env.DEV_VITE_PORT || String(5173 + portOffset);
-        const apiPort = process.env.DEV_API_PORT || String(3000 + portOffset);
-        allowedOrigins.push(`http://localhost:${vitePort}`, `http://localhost:${apiPort}`);
-      }
-
-      return allowedOrigins.includes(origin) ? origin : null;
-    },
+    origin: (origin) => (allowedOrigins().includes(origin) ? origin : null),
     allowHeaders: ['Content-Type', 'Authorization', 'apikey'],
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
@@ -185,47 +174,21 @@ app.use(
   })
 );
 
-// Session middleware - verify the bearer token and inject the user into context
-// Skip for health endpoint (no auth needed, avoids unnecessary getUser() call)
-app.use('/api/*', async (c, next) => {
-  if (c.req.path === '/api/health' || c.req.path === '/api/health/ready') {
-    c.set('user', null);
-    c.set('aal', null);
-    await next();
-    return;
-  }
+// CSRF origin check on cookie-authenticated mutating requests (see
+// middleware/csrf.ts; skips /api/auth and /api/webhooks).
+app.use('/api/*', csrfProtection());
 
-  const authHeader = c.req.header('Authorization');
-  // Verify the JWT and get user info. This client is for auth.getUser() only;
-  // data goes through db/client.ts (withUserDb / adminDb).
-  if (authHeader?.startsWith('Bearer ')) {
-    const authClient = getSupabaseClient(authHeader);
-    const {
-      data: { user },
-      error,
-    } = await authClient.auth.getUser();
-    if (!error && user) {
-      c.set('user', user);
-      // Token signature already verified by getUser() above — safe to read claims.
-      c.set('aal', decodeAalFromJwt(authHeader));
-    } else {
-      c.set('user', null);
-      c.set('aal', null);
-    }
-  } else {
-    c.set('user', null);
-    c.set('aal', null);
-  }
+// Auth endpoints (sign-up, sign-in, sign-out, sessions, OAuth callbacks,
+// email verification, password reset, magic link, admin plugin). Mounted
+// before the session middleware: Better Auth reads its own cookies.
+app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(c.req.raw));
 
-  await next();
-});
+// Session middleware: put the signed-in user (or null) on the context.
+app.use('/api/*', sessionMiddleware);
 
 // ============================================================================
 // ROUTES
 // ============================================================================
-
-// Note: Auth is handled by Supabase (Kong routes to Auth service)
-// Your Hono app only needs to handle application-specific APIs
 
 // Health check (public, used by load balancers)
 app.route('/api/health', healthRoutes);
@@ -631,8 +594,9 @@ const server = serve({
 
 // Not awaited: the server must come up even while Postgres is still starting
 // (readiness reports it down meanwhile). It exits the process only if the
-// connection role turns out not to bypass RLS.
-void checkDbRoleAtStartup();
+// connection role turns out not to bypass RLS. Once the database answers,
+// ensure the ADMIN_EMAIL super admin exists (auth/bootstrap-admin.ts).
+void checkDbRoleAtStartup().then(() => bootstrapAdminAtStartup());
 
 // Graceful shutdown handler - drain in-flight requests before exiting
 let isShuttingDown = false;

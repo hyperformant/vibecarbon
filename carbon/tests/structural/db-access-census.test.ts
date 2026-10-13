@@ -36,6 +36,11 @@ const SERVER = join(ROOT, 'src', 'server');
  * `supabaseAdmin` for the same data before the move to Drizzle.
  */
 const ADMIN_DB_ALLOWLIST: Record<string, string> = {
+  'auth/bootstrap-admin.ts':
+    'startup: finds or promotes the ADMIN_EMAIL account (no session; app_user cannot read "user")',
+  'auth/index.ts':
+    "Better Auth's drizzle adapter: the auth tables are server-only, app_user has no privileges",
+  'auth/lockout.ts': 'sign-in lockout functions, called before the user is authenticated',
   'billing/records.ts': 'billing webhooks write customer and subscription rows (no user session)',
   'lib/docs-settings.ts': 'reads app_settings.api_docs_enabled for the public API-docs gate',
   'lib/mfa-settings.ts': 'reads app_settings.mfa_enabled for the MFA gate',

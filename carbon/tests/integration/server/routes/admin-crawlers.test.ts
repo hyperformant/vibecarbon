@@ -10,7 +10,7 @@
  * `?days` clamp — plus the two guards (401 / 403).
  */
 
-import type { User } from '@supabase/supabase-js';
+import type { AuthUser as User } from '@server/auth';
 import { getTableName } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -75,7 +75,7 @@ interface CrawlerStatsBody {
   topPaths: Array<{ path: string; hits: number; errors: number; crawlers: string[] }>;
 }
 
-const SUPER_ADMIN: Partial<User> = { id: 'admin-1', app_metadata: { role: 'super_admin' } };
+const SUPER_ADMIN: Partial<User> = { id: 'admin-1', role: 'super_admin' };
 
 function appWithUser(user: Partial<User> | null) {
   const app = new Hono<{ Variables: HonoVariables }>();
@@ -118,7 +118,7 @@ describe('GET /api/v1/admin/crawlers — access control', () => {
   });
 
   it('returns 403 for a signed-in non-super-admin', async () => {
-    const res = await appWithUser({ id: 'u1', app_metadata: { role: 'authenticated' } }).request(
+    const res = await appWithUser({ id: 'u1', role: 'authenticated' }).request(
       BASE
     );
     expect(res.status).toBe(403);
@@ -127,7 +127,7 @@ describe('GET /api/v1/admin/crawlers — access control', () => {
   });
 
   it('returns 403 for a plain admin (super_admin only)', async () => {
-    const res = await appWithUser({ id: 'u2', app_metadata: { role: 'admin' } }).request(BASE);
+    const res = await appWithUser({ id: 'u2', role: 'admin' }).request(BASE);
     expect(res.status).toBe(403);
   });
 

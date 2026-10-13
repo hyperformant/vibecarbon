@@ -11,7 +11,12 @@ const envBool = (def: boolean) =>
   z.preprocess((v) => (v === undefined ? def : v === 'true'), z.boolean());
 
 const envSchema = z.object({
-  // Supabase (required)
+  // Session signing and encryption key for the in-process auth (cookies,
+  // verification tokens). At least 32 characters; `vibecarbon create`
+  // generates 64.
+  BETTER_AUTH_SECRET: z.string().min(32),
+
+  // Supabase (required until the admin routes leave the GoTrue admin API)
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
@@ -54,15 +59,25 @@ const envSchema = z.object({
   DEV_PROMETHEUS_PORT: z.coerce.number().optional(),
   DEV_LOKI_PORT: z.coerce.number().optional(),
 
-  // OAuth (optional - configure in Supabase dashboard)
+  // OAuth (optional, set by `vibecarbon configure`). A provider is offered
+  // only when it is enabled AND its client id and secret are set. Redirect
+  // URI: <SITE_URL>/api/auth/callback/<google|microsoft>.
   GOOGLE_ENABLED: envBool(false),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
   MICROSOFT_ENABLED: envBool(false),
-  GITHUB_ENABLED: envBool(false),
-  APPLE_ENABLED: envBool(false),
-  DISCORD_ENABLED: envBool(false),
+  MICROSOFT_CLIENT_ID: z.string().optional(),
+  MICROSOFT_CLIENT_SECRET: z.string().optional(),
+  MICROSOFT_TENANT_ID: z.string().optional(),
   MAGIC_LINK_ENABLED: envBool(true),
 
-  // SMTP (shared with Supabase Auth)
+  // Super admin ensured at startup (see auth/bootstrap-admin.ts). Both unset:
+  // no bootstrap. An existing account is promoted, never re-passworded.
+  ADMIN_EMAIL: z.string().email().optional(),
+  ADMIN_PASSWORD: z.string().optional(),
+
+  // SMTP (auth emails and transactional emails). Without it, email
+  // verification is not required and auth emails are logged, not sent.
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().optional(),
   SMTP_USER: z.string().optional(),

@@ -8,8 +8,8 @@ vi.mock('@server/lib/logger', () => ({
 const { parentCookieDomain } = await import('@server/lib/cookie-domain');
 const { forwardAuthCookieRoutes } = await import('@server/routes/v1/forwardauth-cookie');
 
-const superAdmin = { id: 'u1', email: 'admin@example.com', app_metadata: { role: 'super_admin' } };
-const regularUser = { id: 'u2', email: 'user@example.com', app_metadata: {} };
+const superAdmin = { id: 'u1', email: 'admin@example.com', role: 'super_admin' };
+const regularUser = { id: 'u2', email: 'user@example.com', role: 'user' };
 
 function appWithUser(user: unknown) {
   const app = new Hono();

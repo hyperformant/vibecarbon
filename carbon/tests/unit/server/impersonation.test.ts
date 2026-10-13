@@ -33,7 +33,7 @@ const { impersonationRoutes } = await import('@server/routes/v1/impersonation');
 const { logger } = await import('@server/lib/logger');
 const { signCookiePayload, verifyCookiePayload } = await import('@server/lib/signed-cookie');
 
-const superAdmin = { id: 'admin-1', email: 'admin@example.com', app_metadata: { role: 'super_admin' } };
+const superAdmin = { id: 'admin-1', email: 'admin@example.com', role: 'super_admin' };
 const targetUser = {
   id: 'target-1',
   email: 'customer@example.com',
@@ -91,7 +91,7 @@ describe('POST /admin/impersonate/:userId (start)', () => {
   }
 
   it('403 for a non-super-admin', async () => {
-    const res = await start({ id: 'u2', app_metadata: {} });
+    const res = await start({ id: 'u2', role: 'user' });
     expect(res.status).toBe(403);
   });
 

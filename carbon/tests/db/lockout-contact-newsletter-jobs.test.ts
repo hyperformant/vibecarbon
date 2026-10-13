@@ -52,7 +52,7 @@ describe.skipIf(!dbTestsEnabled)('lockout, contact, newsletter, jobs on Postgres
     const app = new Hono<{ Variables: HonoVariables }>();
     app.use('*', async (c, next) => {
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-      if (role) c.set('user', { id: randomUUID(), app_metadata: { role } } as any);
+      if (role) c.set('user', { id: randomUUID(), role } as any);
       await next();
     });
     return app;

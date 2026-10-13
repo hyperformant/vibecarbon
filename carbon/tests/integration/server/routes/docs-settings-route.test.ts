@@ -1,4 +1,4 @@
-import type { User } from '@supabase/supabase-js';
+import type { AuthUser as User } from '@server/auth';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HonoVariables } from '@server/types';
@@ -50,7 +50,7 @@ function app(asSuperAdmin: boolean) {
     c.set(
       'user',
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-      { id: 'admin1', app_metadata: { role: asSuperAdmin ? 'super_admin' : 'user' } } as any
+      { id: 'admin1', role: asSuperAdmin ? 'super_admin' : 'user' } as any
     );
     await next();
   });

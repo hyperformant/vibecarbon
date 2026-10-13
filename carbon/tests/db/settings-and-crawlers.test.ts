@@ -38,7 +38,7 @@ describe.skipIf(!dbTestsEnabled)('settings, theme, setup, crawlers, stats on Pos
     const app = new Hono<{ Variables: HonoVariables }>();
     app.use('*', async (c, next) => {
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected super admin
-      c.set('user', { id: userIds[0], app_metadata: { role: 'super_admin' } } as any);
+      c.set('user', { id: userIds[0], role: 'super_admin' } as any);
       await next();
     });
     mount(app);

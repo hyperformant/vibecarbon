@@ -69,7 +69,8 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 |-------|-------------|
 | `GET /api/health` | Liveness probe (no DB check, public) |
 | `GET /api/health/ready` | Readiness probe (checks DB connectivity, public) |
-| `POST /api/v1/auth/login` | Email/password login with lockout protection |
+| `GET/POST /api/auth/*` | In-process auth (Better Auth): sign-up, sign-in (with account lockout), sign-out, session, OAuth callbacks, email verification, password reset, magic link |
+| `POST /api/v1/auth/login` | Legacy email/password login, removed once the client signs in through `/api/auth` |
 | `GET /api/v1/auth/settings` | Auth settings (enabled providers, MFA config) |
 | `GET /api/v1/me` | Current user info with memberships |
 | `GET/POST /api/v1/organizations` | List/create organizations |
@@ -107,7 +108,7 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 
 1. **Client-side**: Supabase JS handles auth (email/password, OAuth, magic links, MFA)
 2. **API requests**: Client sends JWT in `Authorization: Bearer <token>` header
-3. **Server middleware**: Extracts token, calls `auth.getUser()` on an auth-only Supabase client, sets `c.get('user')`
+3. **Server middleware** (`src/server/middleware/session.ts`): reads the session cookie with `auth.api.getSession()` (`src/server/auth/`), sets `c.get('user')`, `c.get('session')` and `c.get('aal')`
 4. **RLS**: Routes run user queries through `withUserDb(user.id, ...)`, so row-level security decides what the caller sees
 
 ## Database Access
@@ -351,16 +352,16 @@ The rules below are mandatory — violations introduce real vulnerabilities. The
 
 There are **two independent role axes** — do not conflate them:
 
-- **Platform role** lives in the JWT `app_metadata.role`. The only elevated value is **`super_admin`**. There is **no platform `admin` role.** Check it with `isSuperAdmin(user)` (server) or `is_super_admin()` (SQL). Every platform-admin surface (the `/admin/*` API, Studio, Grafana, n8n, Metabase, the Traefik dashboard) requires `super_admin`.
+- **Platform role** lives in the server-controlled `user.role` column. The only elevated value is **`super_admin`**. There is **no platform `admin` role.** Check it with `isSuperAdmin(user)` (server) or `is_super_admin()` (SQL). Every platform-admin surface (the `/admin/*` API, Studio, Grafana, n8n, Metabase, the Traefik dashboard) requires `super_admin`.
 - **Org role** lives in the `memberships` table as `OWNER` / `ADMIN` / `MEMBER`. This is a per-organization membership tier enforced by RLS (`get_user_admin_org_ids()` etc.) and `requireOrgRole(...)`. An org `ADMIN` has authority **only within its own org** and **never** any platform capability.
 
 Rules:
 
-- **MUST** read the role only from `app_metadata` (server-controlled, set via the service role at bootstrap). **NEVER** gate anything — code or RLS policy — on `user_metadata`: it is user-writable via GoTrue `updateUser`, so trusting it is a self-service privilege escalation.
+- **MUST** read the role only through `isSuperAdmin(user)` (exact match on `user.role`) or `is_super_admin()` in SQL. **NEVER** gate anything on a field the user can write (`name`, `image`, `onboardingCompleted`, anything set through `/api/auth/update-user`): that is a self-service privilege escalation.
 - **MUST** keep every admin-gated surface accepting `super_admin`. If you ever introduce a user-defined tier below super_admin, the ForwardAuth gate must be `?roles=<tier>,super_admin` (any-of) and the code check `isSuperAdmin(user) || is<Tier>(user)` — a bare `role === 'admin'` / `?role=admin` **locks super admins out** and is a bug.
 - **MUST NOT** trust the `X-User-Id` / `X-User-Email` / `X-User-Role` / `X-Authenticated-User` request headers as auth input. Traefik sets them for downstream services (e.g. Grafana) and strips client-supplied copies; app code derives identity **only** from the verified JWT via `c.get('user')`.
 - **MUST NOT** add a public route or client flow against `/api/_internal/verify-role` — it is the ForwardAuth trust anchor, denied on the public edge and called by Traefik internally only.
-- **NEVER** add an API path that writes `app_metadata.role`. Role assignment is operator-bootstrap only (there is intentionally no "set role" endpoint).
+- **NEVER** add an API path that writes `user.role`. Role assignment is operator-bootstrap only: the app makes `ADMIN_EMAIL` a super admin at startup (`src/server/auth/bootstrap-admin.ts`), the admin plugin's set-role path is disabled, and the `super_admin` access-control role has no `set-role` permission.
 
 ## Session Cookies & ForwardAuth (split-cookie contract)
 
@@ -526,14 +527,20 @@ Both gates require `super_admin` (the only elevated platform role). `super-admin
 - **NEVER** expose `SUPABASE_SERVICE_ROLE_KEY` to the client — it bypasses all RLS
 - **MUST** validate all server environment variables in `src/server/lib/env.ts`
 
+## CSRF
+
+Sessions are cookies, so every mutating `/api/*` request that carries one passes an origin check (`src/server/middleware/csrf.ts`, Hono `csrf()` against `SITE_URL`, `CORS_ORIGINS` and the dev ports). `/api/auth/*` is checked by Better Auth itself; `/api/webhooks/*` is exempt and verifies signatures instead. A new webhook route belongs under `/api/webhooks/`.
+
 ## Rate Limiting
 
-Three tiers are configured in `src/server/index.ts`:
+These limits are configured in `src/server/index.ts`:
 
 | Route Pattern | Limit | Reason |
 |--------------|-------|--------|
 | `/api/v1/*` | 100/min per IP | Standard API endpoints |
 | `/api/webhooks/*` | 500/min per IP | External services (Stripe) send bursts |
+| `/api/auth/*` | 100/min per IP | Auth endpoints |
+| `/api/auth/sign-in/*` | 10/15min per IP | Credential stuffing across emails (the account lockout is per email + IP) |
 | `/api/_internal/*` | 1000/min per IP | Infrastructure calls (Traefik ForwardAuth) |
 
 When adding new route groups, assign an appropriate rate limit tier.

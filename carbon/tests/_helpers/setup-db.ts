@@ -18,6 +18,9 @@ const values: Record<string, string> = {
   SUPABASE_ANON_KEY: 'test-anon-key',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
   NODE_ENV: 'test',
+  // Signs session cookies; any 32+ characters will do in tests.
+  BETTER_AUTH_SECRET: 'test-auth-secret-at-least-32-characters-long',
+  SITE_URL: 'http://app.test',
 };
 
 for (const [key, value] of Object.entries(values)) process.env[key] = value;

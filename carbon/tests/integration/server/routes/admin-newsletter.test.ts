@@ -1,4 +1,4 @@
-import type { User } from '@supabase/supabase-js';
+import type { AuthUser as User } from '@server/auth';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HonoVariables } from '@server/types';
@@ -38,7 +38,7 @@ describe('admin newsletter super-admin guard (requireSuperAdmin)', () => {
   });
 
   it('returns 403 for a non-super-admin (guard no longer fails closed for admins)', async () => {
-    const res = await appWithUser({ id: 'u1', app_metadata: { role: 'authenticated' } }).request(
+    const res = await appWithUser({ id: 'u1', role: 'authenticated' }).request(
       '/api/v1/admin/newsletter/export'
     );
     expect(res.status).toBe(403);
@@ -46,7 +46,7 @@ describe('admin newsletter super-admin guard (requireSuperAdmin)', () => {
 
   it('allows a super_admin through', async () => {
     orderMock.mockResolvedValue([]);
-    const res = await appWithUser({ id: 'u1', app_metadata: { role: 'super_admin' } }).request(
+    const res = await appWithUser({ id: 'u1', role: 'super_admin' }).request(
       '/api/v1/admin/newsletter/export'
     );
     expect(res.status).toBe(200);
@@ -72,7 +72,7 @@ describe('newsletter CSV export escaping (formula/CSV injection)', () => {
       },
     ]);
 
-    const res = await appWithUser({ id: 'u1', app_metadata: { role: 'super_admin' } }).request(
+    const res = await appWithUser({ id: 'u1', role: 'super_admin' }).request(
       '/api/v1/admin/newsletter/export'
     );
     expect(res.status).toBe(200);

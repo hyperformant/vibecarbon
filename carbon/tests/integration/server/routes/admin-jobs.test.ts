@@ -1,4 +1,4 @@
-import type { User } from '@supabase/supabase-js';
+import type { AuthUser as User } from '@server/auth';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,7 +34,7 @@ const PARAM_MARKER = 'job-param-secret@example.test';
 function adminApp() {
   const app = new Hono<{ Variables: HonoVariables }>();
   app.use('*', async (c, next) => {
-    c.set('user', { id: 'u1', app_metadata: { role: 'super_admin' } } as unknown as User);
+    c.set('user', { id: 'u1', role: 'super_admin' } as unknown as User);
     await next();
   });
   app.route('/api/v1/admin/jobs', jobsRoutes);

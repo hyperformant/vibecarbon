@@ -70,7 +70,7 @@ describe.skipIf(!dbTestsEnabled)('get_cron_jobs()', () => {
     const app = new Hono<{ Variables: HonoVariables }>();
     app.use('*', async (c, next) => {
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-      c.set('user', { id: randomUUID(), app_metadata: { role: 'super_admin' } } as any);
+      c.set('user', { id: randomUUID(), role: 'super_admin' } as any);
       await next();
     });
     app.route('/api/v1/admin/jobs', jobsRoutes);

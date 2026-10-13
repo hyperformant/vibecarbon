@@ -72,7 +72,7 @@ describe.skipIf(!dbTestsEnabled)('org, billing, and notification paths on Postgr
     const app = new Hono<{ Variables: HonoVariables }>();
     app.use('*', async (c, next) => {
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-      c.set('user', u ? ({ id: u.id, email: u.email, user_metadata: {}, app_metadata: {} } as any) : null);
+      c.set('user', u ? ({ id: u.id, email: u.email, name: 'DB Test', role: 'user' } as any) : null);
       c.set('aal', u ? aal : null);
       await next();
     });

@@ -219,10 +219,10 @@ v1Routes.get('/me', async (c) => {
     user: {
       id: user.id,
       email: user.email,
-      name: user.user_metadata?.full_name || user.user_metadata?.name,
-      avatar: user.user_metadata?.avatar_url,
-      emailVerified: user.email_confirmed_at !== null,
-      role: user.app_metadata?.role || null,
+      name: user.name || undefined,
+      avatar: user.image ?? undefined,
+      emailVerified: user.emailVerified,
+      role: user.role || null,
     },
     memberships: userMemberships,
   });
@@ -567,8 +567,7 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
     .limit(1);
 
   if (targetUser.email && orgData) {
-    const inviterName =
-      user.user_metadata?.full_name || user.user_metadata?.name || user.email || 'A team member';
+    const inviterName = user.name || user.email || 'A team member';
     const baseUrl = process.env.SITE_URL || 'http://localhost:5173';
     const template = orgInviteEmail({
       inviterName,

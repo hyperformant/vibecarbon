@@ -5,6 +5,7 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { promisify } from 'node:util';
 import { Hono } from 'hono';
+import { isSuperAdmin } from '../../lib/auth';
 import { fetchContainerLogs, listProjectContainers } from '../../lib/docker-api';
 import { logger } from '../../lib/logger';
 
@@ -439,9 +440,9 @@ const servicesStatusRoutes = new Hono<{ Variables: HonoVariables }>();
 function requireSuperAdmin(c: {
   get: (key: string) => unknown;
 }): { error: string; status: 401 | 403 } | null {
-  const user = c.get('user') as { app_metadata?: { role?: string } } | null;
+  const user = c.get('user') as { role?: string | null } | null;
   if (!user) return { error: 'Unauthorized', status: 401 };
-  if (user.app_metadata?.role !== 'super_admin') return { error: 'Forbidden', status: 403 };
+  if (!isSuperAdmin(user)) return { error: 'Forbidden', status: 403 };
   return null;
 }
 

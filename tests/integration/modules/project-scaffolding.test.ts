@@ -137,7 +137,7 @@ describe('Project Scaffolding Integration', () => {
       const authContent = readFileSync(authPath, 'utf-8');
 
       // Verify isSuperAdmin function checks for super_admin
-      expect(authContent).toContain("app_metadata?.role === 'super_admin'");
+      expect(authContent).toContain("user.role === 'super_admin'");
       // Should NOT check for old 'admin' role in isSuperAdmin
       expect(authContent).not.toMatch(/isSuperAdmin.*role\s*===\s*['"]admin['"]/);
 

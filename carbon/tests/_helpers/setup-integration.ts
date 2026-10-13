@@ -11,6 +11,8 @@ const defaults: Record<string, string> = {
   SUPABASE_ANON_KEY: 'test-anon-key',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
   NODE_ENV: 'test',
+  // Signs session cookies; any 32+ characters will do in tests.
+  BETTER_AUTH_SECRET: 'test-auth-secret-at-least-32-characters-long',
   // The DB pool connects lazily, so these are never dialed: routes that touch
   // the database mock @server/db/client.
   DB_HOST: 'db.test',

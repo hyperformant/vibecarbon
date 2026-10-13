@@ -134,9 +134,6 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
     'carbon/scripts/generate-sitemap.ts:39, generate-rss.ts:32, generate-seo.ts:94 ' +
     "(getEnvValue('VITE_PUBLIC_URL'), which reads process.env then the layered .env files) " +
     '— build-time SEO scripts, not carbon/src.',
-  ADMIN_PASSWORD:
-    'carbon/docker-compose.metabase.yml:73 — METABASE_ADMIN_PASSWORD falls back to the ' +
-    'operator ADMIN_PASSWORD when METABASE_ADMIN_PASSWORD itself is unset.',
   GRAFANA_URL:
     'services/observability/compose/docker-compose.yml:49 — GF_SERVER_ROOT_URL falls back ' +
     'to the operator GRAFANA_URL. The observability module lives outside carbon/, copied in ' +
