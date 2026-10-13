@@ -103,23 +103,25 @@
 
 ## File Uploads & Storage
 
-- Supabase Storage backend (self-hosted, no third-party CDN required)
-- Direct client-to-Supabase upload (not proxied through API server)
+- Signed-URL uploads straight from the browser to your provider's S3 bucket (never through the API server, never on the server's disk)
+- `POST /api/v1/files/presign` signs a 5-minute PUT; `GET /api/files/<key>` answers with a 302 to a 5-minute signed read
+- Server-owned object keys (`avatars/<userId>/<uuid>.<ext>`, `private/<userId>/<uuid>.<ext>`); callers never choose a path
+- Two kinds with size caps and content-type allowlists
+  - `avatar`: JPEG, PNG, GIF, WebP, max 2 MB, readable by anyone through the app
+  - `private`: JPEG, PNG, GIF, WebP, PDF, TXT, CSV, max 10 MB, owner-only and served as a download
+- Bucket stays private; CORS allows only your domain, set on every deploy
+- Optional: without the `S3_*` variables, presign returns 503 and the app still boots
+- Local SeaweedFS S3 service for development, with the bucket and CORS created on `npm run dev:start`
 - Generic `<FileUpload>` component
-  - Configurable bucket, path prefix, accepted file types, and max size
+  - `kind` prop (`avatar` or `private`) and an optional `prepare` transform before upload
   - Drag-and-drop zone with visual feedback
   - Click-to-browse fallback
   - Loading spinner during upload
   - Client-side file size validation (default 10 MB)
-  - Upsert mode (re-upload overwrites)
 - `<AvatarUpload>` specialization
-  - Hardcoded to `avatars` bucket
-  - Accepts JPEG, PNG, GIF, WebP (max 2 MB)
+  - Resizes to a 256px WebP in the browser before upload
   - Circular preview with placeholder
   - Persists URL to user metadata on upload
-- Storage RLS: user-scoped paths (`auth.uid()` as first path segment)
-- Avatars bucket: public read, private write
-- Uploads bucket: fully private
 
 ## Contact Form
 
@@ -376,7 +378,7 @@
 - Compose-based HA: multi-region Docker Compose with PostgreSQL streaming replication and one-command failover
 - Kubernetes manifests for production (Kustomize-based with overlays per region)
   - App: Deployment, Service, HPA (2-10 replicas, CPU 70%, memory 80%), PodDisruptionBudget
-  - Full self-hosted Supabase stack: auth, db, imgproxy, kong, meta, realtime, rest, storage, studio
+  - Full self-hosted Supabase stack: auth, db, kong, meta, realtime, rest, studio (file uploads go to the provider's S3 bucket, so no storage or imgproxy service)
   - Traefik with IngressRoute, middlewares, cert-manager integration
   - Network policies, RBAC, service accounts
   - Local OCI registry (`local-registry.yaml`) for k3s image distribution without external registry
@@ -455,7 +457,7 @@
 - `concurrently` runs both dev servers via `npm run dev`
 - Multi-stage Docker build (build + minimal runtime)
 - `vibecarbon status` command
-  - Local health: API server, Vite, Docker containers (PostgreSQL, Kong, Auth, REST, Realtime, Storage, Studio)
+  - Local health: API server, Vite, Docker containers (PostgreSQL, Kong, Auth, REST, Realtime, Meta, Studio)
   - Remote health: HTTPS check with latency
   - Hetzner server status (optional, via API token)
   - Git sync tracking (deployed commit SHA, commits ahead)
