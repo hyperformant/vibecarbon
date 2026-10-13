@@ -31,6 +31,18 @@ describe('GET /api/health', () => {
     expect(body.status).toBe('ok');
     expect(new Date(body.timestamp).toString()).not.toBe('Invalid Date');
   });
+
+  // `vibecarbon deploy` waits for adminReady before calling a deploy done.
+  it('reports adminReady from the startup bootstrap, false until it succeeds', async () => {
+    const { setAdminReady } = await import('@server/auth/admin-status');
+    const read = async () =>
+      ((await (await app.request('/api/health')).json()) as { adminReady: unknown }).adminReady;
+    expect(await read()).toBe(false);
+    setAdminReady(true);
+    expect(await read()).toBe(true);
+    setAdminReady(false);
+    expect(await read()).toBe(false);
+  });
 });
 
 describe('GET /api/health/ready', () => {

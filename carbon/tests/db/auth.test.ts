@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
-import { bootstrapAdmin } from '@server/auth/bootstrap-admin';
+import { adminReadyAfter, bootstrapAdmin } from '@server/auth/bootstrap-admin';
 import { isSuperAdmin } from '@server/lib/auth';
 import { logger } from '@server/lib/logger';
 import { csrfProtection } from '@server/middleware/csrf';
@@ -391,6 +391,15 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
         )
       ).rows[0];
 
+    // /api/health's adminReady (what `vibecarbon deploy` waits for).
+    it('reports the admin ready only when it can sign in', () => {
+      expect(adminReadyAfter('created')).toBe(true);
+      expect(adminReadyAfter('promoted')).toBe(true);
+      expect(adminReadyAfter('unchanged')).toBe(true);
+      expect(adminReadyAfter('skipped')).toBe(false);
+      expect(adminReadyAfter('refused')).toBe(false);
+    });
+
     it('does nothing without both ADMIN_EMAIL and ADMIN_PASSWORD', async () => {
       expect(await bootstrapAdmin({ email: newEmail() })).toBe('skipped');
       expect(await bootstrapAdmin({ password: PASSWORD })).toBe('skipped');
@@ -420,7 +429,7 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       );
       expect(rows[0].n).toBe(1);
       expect((await signIn(email, PASSWORD, '203.0.113.32')).status).toBe(200);
-      expect((await signIn(email, 'a-different-password', '203.0.113.33')).status).toBe(401);
+      expect((await signIn(email, 'test-different-password', '203.0.113.33')).status).toBe(401);
     });
 
     it("refuses to promote an account someone else registered with ADMIN_EMAIL", async () => {

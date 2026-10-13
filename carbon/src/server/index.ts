@@ -241,14 +241,11 @@ const openApiSpec = {
                 schema: {
                   type: 'object',
                   properties: {
-                    status: { type: 'string', example: 'healthy' },
+                    status: { type: 'string', example: 'ok' },
                     timestamp: { type: 'string', format: 'date-time' },
-                    services: {
-                      type: 'object',
-                      properties: {
-                        database: { type: 'string' },
-                        supabase: { type: 'string' },
-                      },
+                    adminReady: {
+                      type: 'boolean',
+                      description: 'Whether the ADMIN_EMAIL super admin exists and can sign in',
                     },
                   },
                 },
