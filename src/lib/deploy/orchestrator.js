@@ -554,10 +554,14 @@ export async function executeDeployment(args, gatheredConfig) {
             'No domain configured — scoping bucket CORS to localhost dev origins instead of `*`. Re-run deploy with a domain to allow your production origin.',
           );
         }
-        await s3Provider.configureCORS(s3Config.bucket, corsOrigins);
+        await s3Provider.setBucketCors(s3Config.bucket, corsOrigins);
         s3Spinner.stop('CORS configured');
-      } catch {
-        s3Spinner.stop('CORS configuration skipped (not supported by provider)');
+      } catch (corsErr) {
+        // Uploads are the only consumer, so this never fails the deploy.
+        s3Spinner.stop('Bucket CORS not set');
+        p.log.warn(
+          `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to try again, or set CORS on ${s3Config.bucket} in your provider console.`,
+        );
       }
 
       // No try/catch here: a backup bucket that failed to create used to be
