@@ -60,7 +60,10 @@ export const auth = betterAuth({
   // IP the trusted-proxy way; Better Auth's reads X-Forwarded-For as given.
   rateLimit: { enabled: false },
   session: {
-    cookieCache: { enabled: true, maxAge: 300 },
+    // Short: the app's API session middleware never reads it (it always reads
+    // the database), and Better Auth's admin endpoints bypass it, so a revoked
+    // session lingers for at most a minute in its own get-session answers.
+    cookieCache: { enabled: true, maxAge: 60 },
     additionalFields: {
       // Set only by the second-factor verify hook (MFA). Never client input.
       twoFactorVerified: { type: 'boolean', defaultValue: false, required: false, input: false },

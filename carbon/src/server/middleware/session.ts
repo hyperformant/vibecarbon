@@ -8,6 +8,16 @@ import type { HonoVariables } from '../types';
  * 'aal2' once this session passed a second factor, else 'aal1'; null when
  * signed out). Routes check `c.get('user')` and return 401 when it is null.
  *
+ * Every lookup reads the database, never the signed session-cache cookie.
+ * The cache would keep a revoked session, a banned user, a demoted super
+ * admin or a stale assurance level valid until it expires; nearly every
+ * /api route acts on the caller's identity or role, so instead of sorting
+ * routes into "sensitive" and not (and getting one wrong), none trust it.
+ * The cost is one indexed session + user read per API request, on the
+ * pool every route already uses. The cookie cache still spares the
+ * browser client's own frequent /api/auth/get-session polls (Better Auth's
+ * admin endpoints bypass it themselves).
+ *
  * The health probes skip the lookup: they are public and polled often.
  */
 export const sessionMiddleware = createMiddleware<{ Variables: HonoVariables }>(async (c, next) => {
@@ -19,7 +29,10 @@ export const sessionMiddleware = createMiddleware<{ Variables: HonoVariables }>(
     return;
   }
 
-  const data = await auth.api.getSession({ headers: c.req.raw.headers });
+  const data = await auth.api.getSession({
+    headers: c.req.raw.headers,
+    query: { disableCookieCache: true },
+  });
   if (data) {
     c.set('user', data.user);
     c.set('session', data.session);

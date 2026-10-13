@@ -4,6 +4,7 @@ import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
 import { bootstrapAdmin } from '@server/auth/bootstrap-admin';
+import { isSuperAdmin } from '@server/lib/auth';
 import { logger } from '@server/lib/logger';
 import { csrfProtection } from '@server/middleware/csrf';
 import { sessionMiddleware } from '@server/middleware/session';
@@ -43,6 +44,12 @@ function buildApp() {
     return c.json({ ok: true });
   });
   app.post('/api/webhooks/test', (c) => c.json({ received: true }));
+  app.get('/api/v1/admin/ping', (c) => {
+    const user = c.get('user');
+    if (!user) return c.json({ error: 'Unauthorized' }, 401);
+    if (!isSuperAdmin(user)) return c.json({ error: 'Super admin access required' }, 403);
+    return c.json({ ok: true });
+  });
   return app;
 }
 
@@ -241,6 +248,59 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
           list: [{ token: 't', id: 1 }],
         }),
       ).toEqual({ user: { id: 'u', createdAt: at }, session: { id: 's' }, list: [{ id: 1 }] });
+    });
+  });
+
+  describe('revocation takes effect on the next request, not after the cookie cache', () => {
+    /** A super admin signed in, with BOTH cookies (token + cached session). */
+    const signedInAdmin = async (ip: string) => {
+      const email = newEmail();
+      await bootstrapAdmin({ email, password: PASSWORD });
+      const res = await signIn(email, PASSWORD, ip);
+      const cookie = cookieHeader(res);
+      expect(cookie).toContain('better-auth.session_data=');
+      const { rows } = await db.query('select id from public."user" where email = $1', [email]);
+      return { email, id: rows[0].id as string, cookie };
+    };
+
+    it('a revoked session is refused by an admin route immediately', async () => {
+      const admin = await signedInAdmin('203.0.113.51');
+      expect((await app.request('/api/v1/admin/ping', { headers: { cookie: admin.cookie } })).status).toBe(200);
+      await db.query('delete from public.session where user_id = $1', [admin.id]);
+      const after = await app.request('/api/v1/admin/ping', { headers: { cookie: admin.cookie } });
+      expect(after.status).toBe(401);
+    });
+
+    it('a demoted super admin loses admin routes immediately', async () => {
+      const admin = await signedInAdmin('203.0.113.52');
+      await db.query("update public.\"user\" set role = 'user' where id = $1", [admin.id]);
+      const after = await app.request('/api/v1/admin/ping', { headers: { cookie: admin.cookie } });
+      expect(after.status).toBe(403);
+    });
+
+    it('a banned user is signed out of the API immediately', async () => {
+      const admin = await signedInAdmin('203.0.113.53');
+      const email = newEmail();
+      await signUp(email);
+      const victim = cookieHeader(await signIn(email, PASSWORD, '203.0.113.54'));
+      expect((await app.request('/api/v1/whoami', { headers: { cookie: victim } })).status).toBe(200);
+      const { rows } = await db.query('select id from public."user" where email = $1', [email]);
+      const ban = await post('/api/auth/admin/ban-user', { userId: rows[0].id }, { cookie: admin.cookie });
+      expect(ban.status).toBe(200);
+      expect((await app.request('/api/v1/whoami', { headers: { cookie: victim } })).status).toBe(401);
+    });
+
+    it("Better Auth's own admin endpoints refuse a revoked session immediately", async () => {
+      const admin = await signedInAdmin('203.0.113.55');
+      const before = await app.request('/api/auth/admin/list-users', {
+        headers: { cookie: admin.cookie },
+      });
+      expect(before.status).toBe(200);
+      await db.query('delete from public.session where user_id = $1', [admin.id]);
+      const after = await app.request('/api/auth/admin/list-users', {
+        headers: { cookie: admin.cookie },
+      });
+      expect(after.status).toBe(401);
     });
   });
 
