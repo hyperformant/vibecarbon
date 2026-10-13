@@ -28,6 +28,8 @@ export interface DbErrorLog {
   constraint?: string;
   table?: string;
   column?: string;
+  /** The wrapping error's own message, when the db error is its cause. */
+  context?: string;
 }
 
 type QueryError = Error & { query: string; params: unknown[] };
@@ -92,6 +94,11 @@ export function dbErrorForLog(err: unknown): DbErrorLog | unknown {
       const value = pick(source, key);
       if (value) out[key] = value;
     }
+  }
+  // A wrapper such as new Error('Failed to fetch customer', { cause }) keeps
+  // its context, unless its message embeds Drizzle's (SQL and params).
+  if (found !== err && err instanceof Error && !/Failed query|params:/.test(err.message)) {
+    out.context = err.message;
   }
   return out;
 }

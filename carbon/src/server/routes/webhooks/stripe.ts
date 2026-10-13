@@ -124,7 +124,10 @@ async function handleCheckoutSessionCompleted(session: Stripe.Checkout.Session) 
       });
     }
   } catch (emailErr) {
-    logger.error({ error: emailErr }, 'Failed to prepare subscription confirmation email');
+    logger.error(
+      { err: dbErrorForLog(emailErr) },
+      'Failed to prepare subscription confirmation email'
+    );
   }
 }
 
@@ -213,7 +216,7 @@ async function handlePaymentFailed(invoice: Stripe.Invoice) {
       });
     }
   } catch (emailErr) {
-    logger.error({ error: emailErr }, 'Failed to prepare payment failed email');
+    logger.error({ err: dbErrorForLog(emailErr) }, 'Failed to prepare payment failed email');
   }
 }
 

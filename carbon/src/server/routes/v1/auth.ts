@@ -254,7 +254,7 @@ authRoutes.get('/settings', async (c) => {
         .from(appSettings)
         .where(inArray(appSettings.key, ['mfa_enabled', 'user_docs_enabled', 'api_docs_enabled']));
     } catch (error) {
-      logger.debug({ error }, 'app_settings query failed, using defaults');
+      logger.debug({ err: dbErrorForLog(error) }, 'app_settings query failed, using defaults');
     }
 
     // Convert to object
@@ -282,7 +282,7 @@ authRoutes.get('/settings', async (c) => {
     });
   } catch (error) {
     // Return defaults on any error
-    logger.debug({ error }, 'app_settings fetch failed, using defaults');
+    logger.debug({ err: dbErrorForLog(error) }, 'app_settings fetch failed, using defaults');
     return c.json({
       settings: {
         mfaEnabled: false,

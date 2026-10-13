@@ -17,9 +17,29 @@ export function serializeLoggedError(value: unknown): unknown {
   return value instanceof Error ? pino.stdSerializers.err(value) : value;
 }
 
+/** The message pino gets when a call logs an error without one. */
+export const ERROR_WITHOUT_MESSAGE = 'Error (no log message given)';
+
+/**
+ * pino fills `msg` from the error's own `message` when a call passes an
+ * Error (or `{ err }`) with no message string, and that copy skips the
+ * serializers: `logger.error(drizzleErr)` would write the SQL and params as
+ * the message. This hook puts a bare Error under `err` (so the serializer
+ * sees it) and supplies a fixed message whenever none was given.
+ */
+function logMethod(this: pino.Logger, args: unknown[], method: pino.LogFn): void {
+  let [first, ...rest] = args;
+  if (first instanceof Error) first = { err: first };
+  const hasError =
+    typeof first === 'object' && first !== null && ('err' in first || 'error' in first);
+  if (hasError && typeof rest[0] !== 'string') rest = [ERROR_WITHOUT_MESSAGE, ...rest];
+  (method as (...a: unknown[]) => void).apply(this, [first, ...rest]);
+}
+
 export const loggerOptions: pino.LoggerOptions = {
   level: isProduction ? 'info' : 'debug',
   serializers: { err: serializeLoggedError, error: serializeLoggedError },
+  hooks: { logMethod },
 };
 
 export const logger = pino({

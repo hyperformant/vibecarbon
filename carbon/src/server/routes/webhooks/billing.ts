@@ -175,7 +175,10 @@ async function handleCheckoutCompleted(data: Record<string, unknown>): Promise<v
         });
       }
     } catch (emailErr) {
-      logger.error({ error: emailErr }, 'Failed to prepare subscription confirmation email');
+      logger.error(
+        { err: dbErrorForLog(emailErr) },
+        'Failed to prepare subscription confirmation email'
+      );
     }
   }
 }
@@ -285,7 +288,7 @@ async function handlePaymentFailed(data: Record<string, unknown>): Promise<void>
       }
     }
   } catch (emailErr) {
-    logger.error({ error: emailErr }, 'Failed to prepare payment failed email');
+    logger.error({ err: dbErrorForLog(emailErr) }, 'Failed to prepare payment failed email');
   }
 }
 

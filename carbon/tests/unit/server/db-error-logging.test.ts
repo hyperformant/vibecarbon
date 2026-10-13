@@ -3,7 +3,7 @@ import { DrizzleQueryError } from 'drizzle-orm/errors';
 import pino from 'pino';
 import { describe, expect, it } from 'vitest';
 import { dbErrorForLog, dbErrorMessage } from '@server/db/errors';
-import { loggerOptions } from '@server/lib/logger';
+import { ERROR_WITHOUT_MESSAGE, loggerOptions } from '@server/lib/logger';
 
 /**
  * Drizzle's query error carries the SQL and every bound value in its message
@@ -37,6 +37,20 @@ function queryError(): DrizzleQueryError {
     [EMAIL, UNSUBSCRIBE_VALUE],
     pgError()
   );
+}
+
+/** Log through `options` with raw pino arguments; return the JSON line. */
+function logRaw(options: pino.LoggerOptions, ...args: unknown[]): string {
+  let out = '';
+  const sink = new Writable({
+    write(chunk, _enc, cb) {
+      out += chunk.toString();
+      cb();
+    },
+  });
+  const log = pino(options, sink);
+  (log.error as (...a: unknown[]) => void).apply(log, args);
+  return out;
 }
 
 /** Log one record through `options` and return the raw JSON line. */
@@ -81,6 +95,43 @@ describe('db error logging', () => {
     const line = logLine(loggerOptions, { err: wrapped });
     expect(line).not.toContain(EMAIL);
     expect(line).not.toContain(UNSUBSCRIBE_VALUE);
+  });
+
+  it('a wrapped database error keeps the wrapper message as context', () => {
+    const wrapped = new Error('Failed to fetch customer', { cause: queryError() });
+    expect(dbErrorForLog(wrapped)).toMatchObject({
+      type: 'DatabaseError',
+      code: '23505',
+      context: 'Failed to fetch customer',
+    });
+    // ...unless the wrapper pasted Drizzle's message into its own.
+    const pasted = new Error(`x: ${queryError().message}`, { cause: queryError() });
+    expect(dbErrorForLog(pasted)).not.toHaveProperty('context');
+    expect(dbErrorForLog(queryError())).not.toHaveProperty('context');
+  });
+
+  // pino copies err.message into msg when no message string is given, and
+  // that copy skips the serializers.
+  for (const [name, args] of [
+    ['a bare error', () => [queryError()]],
+    ['{ err } with no message', () => [{ err: queryError() }]],
+    ['{ error } with no message', () => [{ error: queryError() }]],
+  ] as const) {
+    it(`${name}: msg is a fixed text, never the Drizzle message`, () => {
+      const line = logRaw(loggerOptions, ...args());
+      expect(line).not.toContain(EMAIL);
+      expect(line).not.toContain('Failed query');
+      expect(JSON.parse(line).msg).toBe(ERROR_WITHOUT_MESSAGE);
+    });
+  }
+
+  it('the control: plain pino does put params in msg for a bare error', () => {
+    expect(logRaw({}, queryError())).toContain(EMAIL);
+  });
+
+  it('a given message string is kept', () => {
+    const line = logRaw(loggerOptions, { err: queryError() }, 'Failed to subscribe');
+    expect(JSON.parse(line).msg).toBe('Failed to subscribe');
   });
 
   it('a bare pg error drops detail and where', () => {
