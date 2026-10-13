@@ -61,6 +61,10 @@ function s3(): S3Client {
     endpoint: env.S3_ENDPOINT,
     region: env.S3_REGION,
     forcePathStyle: true,
+    // Presigned URLs must not embed a body checksum (the SDK would sign the CRC32 of an
+    // empty body, and real uploads would then fail validation).
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
     credentials: {
       accessKeyId: env.S3_ACCESS_KEY as string,
       secretAccessKey: env.S3_SECRET_KEY as string,
@@ -73,7 +77,7 @@ export function buildObjectKey(kind: UploadKind, userId: string, contentType: st
   const spec = UPLOAD_KINDS[kind];
   const type = normalizeContentType(contentType);
   if (!spec.types.includes(type)) throw new StorageInputError('type_not_allowed');
-  return `${spec.prefix}/${userId}/${randomUUID()}.${EXT[type] ?? 'bin'}`;
+  return `${spec.prefix}/${userId}/${randomUUID()}.${EXT[type]}`;
 }
 
 export async function presignUpload(args: {

@@ -42,7 +42,7 @@ describe('buildObjectKey', () => {
   it('rejects private application/zip (allowlist)', () => {
     expect(() => buildObjectKey('private', 'u1', 'application/zip')).toThrow(StorageInputError);
   });
-  it('maps pdf and falls back to bin', () => {
+  it('maps pdf to .pdf', () => {
     expect(buildObjectKey('private', 'u1', 'application/pdf')).toMatch(/\.pdf$/);
   });
 });
@@ -64,6 +64,25 @@ describe('presignUpload', () => {
     expect(r.headers).toEqual({ 'Content-Type': 'image/png', 'Content-Length': '1000' });
     expect(r.expiresIn).toBe(300);
     expect(r.key.startsWith('avatars/u1/')).toBe(true);
+  });
+  it('embeds no checksum params and signs content-length and content-type', async () => {
+    const r = await presignUpload({
+      kind: 'avatar',
+      userId: 'u1',
+      contentType: 'image/png',
+      size: 1000,
+    });
+    const lower = r.url.toLowerCase();
+    expect(lower).not.toContain('x-amz-checksum');
+    expect(lower).not.toContain('x-amz-sdk-checksum-algorithm');
+    const signed = new URL(r.url).searchParams.get('X-Amz-SignedHeaders') ?? '';
+    expect(signed.split(';')).toEqual(expect.arrayContaining(['content-length', 'content-type']));
+  });
+  it('enforces the private kind 10 MB limit', async () => {
+    const base = { kind: 'private' as const, userId: 'u1', contentType: 'application/pdf' };
+    const ok = await presignUpload({ ...base, size: 10_485_760 });
+    expect(ok.key).toMatch(/^private\/u1\/.*\.pdf$/);
+    await expect(presignUpload({ ...base, size: 10_485_761 })).rejects.toThrow(StorageInputError);
   });
   it('normalizes content type in the signed headers', async () => {
     const r = await presignUpload({
