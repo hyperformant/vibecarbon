@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -14,8 +14,11 @@ import { describe, expect, it } from 'vitest';
  *   1. a file under src/server makes a data call through a Supabase client
  *      (`.from('table')`, `.rpc('fn')`, `.schema('x')`, storage), or builds
  *      its own Supabase client outside lib/supabase.ts;
- *   2. a file imports `adminDb` (or the raw `pool`) without being on the
- *      allowlist below.
+ *   2. a file other than db/client.ts imports or names `adminDb` (or the raw
+ *      `pool`) without being on the allowlist below (db/ helpers included);
+ *   3. a file reaches db/client any way but a plain named import (namespace
+ *      or default import, re-export, export-star, dynamic import, require),
+ *      since the census cannot see what flows through those.
  *
  * Adding a file to ADMIN_DB_ALLOWLIST is a security decision: `adminDb` sees
  * every row of every user. A new user-facing route belongs on `withUserDb`.
@@ -75,21 +78,6 @@ const files = serverFiles().map((path) => ({
   text: readFileSync(path, 'utf8'),
 }));
 
-/** Names a file imports statically from db/client, or ['*'] for a dynamic import. */
-function dbClientImports(text: string): string[] {
-  const names: string[] = [];
-  for (const m of text.matchAll(/import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*'[^']*db\/client'/g)) {
-    for (const part of m[1].split(',')) {
-      const name = part.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0];
-      if (name) names.push(name);
-    }
-  }
-  if (/import\(\s*['"][^'"]*db\/client['"]\s*\)/.test(text)) names.push('*');
-  return names;
-}
-
-const inDbModule = (rel: string) => rel.startsWith('db/');
-
 describe('db access census: no data through Supabase clients', () => {
   // `.from('table')` with a string is the supabase-js query builder; Drizzle's
   // `.from()` takes a table object, never a string literal.
@@ -124,16 +112,87 @@ describe('db access census: no data through Supabase clients', () => {
   });
 });
 
+
+/** The module every database handle comes from. */
+const DB_CLIENT = 'db/client.ts';
+const DB_CLIENT_NO_EXT = join(SERVER, 'db', 'client');
+
+/** Strip comments so prose that names `adminDb` is not counted as use. */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`\w])\/\/.*$/gm, '$1');
+}
+
+/** True when `spec`, imported from server file `rel`, is db/client (any suffix). */
+function resolvesToDbClient(rel: string, spec: string): boolean {
+  if (!spec.startsWith('.')) return false;
+  const abs = resolve(dirname(join(SERVER, rel)), spec).replace(/\.(?:[cm]?js|ts)$/, '');
+  return abs === DB_CLIENT_NO_EXT;
+}
+
+interface DbClientUse {
+  /** Names imported with a plain named import (`import { a, type B } from`). */
+  names: string[];
+  /** Any other way of reaching db/client: namespace or default import,
+   * re-export, export-star, dynamic import, require. The census cannot see
+   * what flows through those, so they are refused outright. */
+  opaque: string[];
+  /** `adminDb` / `pool` appear as identifiers in the code (comments aside). */
+  mentions: string[];
+}
+
+function dbClientUse(rel: string, text: string): DbClientUse {
+  const code = stripComments(text);
+  const use: DbClientUse = { names: [], opaque: [], mentions: [] };
+  // Static import / export ... from '<spec>' (either quote style, multi-line).
+  for (const m of code.matchAll(/\b(import|export)\s+([^;'"`]*?)\s*from\s*(['"])([^'"]+)\3/g)) {
+    if (!resolvesToDbClient(rel, m[4])) continue;
+    const named = m[1] === 'import' && /^(?:type\s+)?\{([^}]*)\}$/.exec(m[2].trim());
+    if (!named) {
+      use.opaque.push(`${m[1]} ${m[2].trim()} from ${m[4]}`);
+      continue;
+    }
+    for (const part of named[1].split(',')) {
+      const name = part
+        .trim()
+        .replace(/^type\s+/, '')
+        .split(/\s+as\s+/)[0];
+      if (name) use.names.push(name);
+    }
+  }
+  // Side-effect import, dynamic import, require.
+  for (const m of code.matchAll(
+    /\bimport\s*(['"])([^'"]+)\1|\bimport\(\s*(['"`])([^'"`]+)\3\s*\)|\brequire\(\s*(['"])([^'"]+)\5\s*\)/g
+  )) {
+    const spec = m[2] ?? m[4] ?? m[6];
+    if (resolvesToDbClient(rel, spec)) use.opaque.push(m[0]);
+  }
+  for (const id of ['adminDb', 'pool']) {
+    if (new RegExp(`\\b${id}\\b`).test(code)) use.mentions.push(id);
+  }
+  return use;
+}
+
+const uses = files
+  .filter((f) => f.rel !== DB_CLIENT)
+  .map((f) => ({ rel: f.rel, use: dbClientUse(f.rel, f.text) }));
+
 describe('db access census: adminDb only where the server acts for itself', () => {
-  it('every file that imports adminDb is on the allowlist', () => {
-    const offenders = files
-      .filter((f) => !inDbModule(f.rel))
-      .filter((f) => {
-        const names = dbClientImports(f.text);
-        return names.includes('adminDb') || names.includes('*');
-      })
-      .filter((f) => !(f.rel in ADMIN_DB_ALLOWLIST))
-      .map((f) => f.rel);
+  it('no file reaches db/client except through a plain named import', () => {
+    const offenders = uses
+      .filter((u) => u.use.opaque.length > 0)
+      .map((u) => `${u.rel}: ${u.use.opaque.join('; ')}`);
+    expect(
+      offenders,
+      'Import db/client with `import { withUserDb } from ...` only; namespace imports, ' +
+        're-exports and dynamic imports hide adminDb from this census.'
+    ).toEqual([]);
+  });
+
+  it('only allowlisted files import or name adminDb', () => {
+    const offenders = uses
+      .filter((u) => u.use.names.includes('adminDb') || u.use.mentions.includes('adminDb'))
+      .filter((u) => !(u.rel in ADMIN_DB_ALLOWLIST))
+      .map((u) => u.rel);
     expect(
       offenders,
       'adminDb bypasses RLS. Use withUserDb for anything done for a user; if this ' +
@@ -141,11 +200,19 @@ describe('db access census: adminDb only where the server acts for itself', () =
     ).toEqual([]);
   });
 
+  it('only allowlisted files import or name the raw pool', () => {
+    const offenders = uses
+      .filter((u) => u.use.names.includes('pool') || u.use.mentions.includes('pool'))
+      .filter((u) => !(u.rel in POOL_ALLOWLIST))
+      .map((u) => u.rel);
+    expect(offenders).toEqual([]);
+  });
+
   it('every allowlisted file exists and still imports adminDb (no stale entries)', () => {
     for (const rel of Object.keys(ADMIN_DB_ALLOWLIST)) {
       expect(existsSync(join(SERVER, rel)), rel).toBe(true);
       const text = readFileSync(join(SERVER, rel), 'utf8');
-      expect(dbClientImports(text), rel).toContain('adminDb');
+      expect(dbClientUse(rel, text).names, rel).toContain('adminDb');
     }
   });
 
@@ -155,22 +222,47 @@ describe('db access census: adminDb only where the server acts for itself', () =
     }
   });
 
-  it('only the allowlisted files import the raw pool', () => {
-    const offenders = files
-      .filter((f) => !inDbModule(f.rel))
-      .filter((f) => dbClientImports(f.text).includes('pool'))
-      .filter((f) => !(f.rel in POOL_ALLOWLIST))
-      .map((f) => f.rel);
-    expect(offenders).toEqual([]);
-  });
+  describe('self-check: the census catches every way to reach adminDb', () => {
+    const at = (rel: string, text: string) => dbClientUse(rel, text);
+    const caught = (u: DbClientUse) =>
+      u.opaque.length > 0 || u.names.includes('adminDb') || u.mentions.includes('adminDb');
 
-  it('the census sees the db/client imports it is meant to see (self-check)', () => {
-    expect(dbClientImports("import { adminDb, type UserDb, withUserDb } from '../../db/client';"))
-      .toEqual(['adminDb', 'UserDb', 'withUserDb']);
-    expect(dbClientImports("const m = await import('../db/client');")).toEqual(['*']);
-    expect(
-      files.some((f) => dbClientImports(f.text).includes('withUserDb')),
-      'no file imports withUserDb: the scan is broken'
-    ).toBe(true);
+    it.each([
+      ['namespace import', 'lib/x.ts', "import * as db from '../db/client';"],
+      ['re-export', 'lib/x.ts', "export { adminDb } from '../db/client';"],
+      ['export star', 'lib/x.ts', "export * from '../db/client';"],
+      ['double quotes', 'lib/x.ts', 'import { adminDb } from "../db/client";'],
+      ['dynamic import with .js', 'lib/x.ts', "const m = await import('../db/client.js');"],
+      ['named import with .js', 'lib/x.ts', "import { adminDb } from '../db/client.js';"],
+      ['named import with .ts', 'lib/x.ts', "import { adminDb } from '../db/client.ts';"],
+      ['default import', 'lib/x.ts', "import db from '../db/client';"],
+      ['require', 'lib/x.ts', "const db = require('../db/client');"],
+      [
+        'a db/ helper wrapping adminDb',
+        'db/helper.ts',
+        "import { adminDb } from './client';\nexport const q = () => adminDb.select();",
+      ],
+      [
+        'multi-line named import',
+        'routes/v1/x.ts',
+        "import {\n  type UserDb,\n  adminDb,\n} from '../../db/client';",
+      ],
+    ])('%s', (_name, rel, text) => {
+      expect(caught(at(rel, text))).toBe(true);
+    });
+
+    it('a clean named import of withUserDb is not flagged', () => {
+      const u = at('routes/v1/x.ts', "import { type UserDb, withUserDb } from '../../db/client';");
+      expect(u).toEqual({ names: ['UserDb', 'withUserDb'], opaque: [], mentions: [] });
+    });
+
+    it('prose that names adminDb in a comment is not use', () => {
+      expect(at('lib/x.ts', '// never the service-role adminDb\n/* pool */').mentions).toEqual([]);
+    });
+
+    it('the scan sees the real tree', () => {
+      expect(uses.some((u) => u.use.names.includes('withUserDb'))).toBe(true);
+      expect(uses.find((u) => u.rel === 'routes/v1/index.ts')?.use.names).toContain('adminDb');
+    });
   });
 });
