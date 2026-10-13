@@ -38,6 +38,11 @@
 
 import { progressLog } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
+import {
+  adminNotReadyHint,
+  adminReadyProbeScript,
+  describeAdminProbeExit,
+} from '../admin-ready.js';
 
 /**
  * Inert probe resource: namespaced (no cluster-wide footprint), self-signed
@@ -178,10 +183,6 @@ export async function awaitCertManagerAdmission({
  * (1 = rejecting: starting/shutting down; 2 = no response) — precisely the
  * lifecycle window the ladder's FATALs spell out.
  *
- * It also removes the driver behind the admin-user ladder's GoTrue 500s:
- * GoTrue can answer /health while its DB session pool is still refused, so
- * gating the database here quiets the app-tier symptom too.
- *
  * @param {object} params
  * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
  * @param {string} params.dbPod - e.g. supabase-supabase-db-0
@@ -233,4 +234,70 @@ export async function awaitPostgresAccepting({
         { env, silent: true },
       ),
   });
+}
+
+/**
+ * Prove the operator can sign in: the app reports `adminReady: true` on its
+ * own `/api/health` (it creates the super admin at startup from ADMIN_EMAIL /
+ * ADMIN_PASSWORD, see src/lib/deploy/admin-ready.js). Probed from inside an
+ * app pod with the image's own `node`, so no port-forward is involved. Any
+ * pod answering ready is enough: they share one database, and the flag means
+ * the admin row exists there.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {string} [params.namespace]
+ * @param {number} [params.budgetMs]
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @param {Function} [params.sleep] - test seam
+ * @param {Function} [params.nowFn] - test seam
+ */
+export async function awaitAppAdminReady({
+  env,
+  namespace = 'vibecarbon',
+  budgetMs = 180_000,
+  exec = defaultExec,
+  sleep = defaultSleep,
+  nowFn,
+}) {
+  try {
+    await pollCondition({
+      name: 'app super admin',
+      budgetMs,
+      sleep,
+      nowFn,
+      attempt: async () => {
+        try {
+          await exec(
+            [
+              'kubectl',
+              '-n',
+              namespace,
+              'exec',
+              'deploy/app',
+              '-c',
+              'app',
+              '--',
+              'node',
+              '-e',
+              adminReadyProbeScript(),
+            ],
+            { env, silent: true },
+          );
+        } catch (err) {
+          // The probe's own exit codes say which half is missing; anything
+          // else (no pod yet, apiserver blip) keeps kubectl's message.
+          const code = err?.status;
+          if (Number.isInteger(code) && code >= 1 && code <= 4) {
+            throw new Error(describeAdminProbeExit(code));
+          }
+          throw err;
+        }
+      },
+    });
+  } catch (err) {
+    throw new Error(
+      `${err.message}\n${adminNotReadyHint(`kubectl -n ${namespace} logs deploy/app -c app`)}`,
+    );
+  }
 }

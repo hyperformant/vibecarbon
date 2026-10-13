@@ -505,7 +505,9 @@ describe('SSH_TUNNEL_NO_MUX_OPTS — port-forward tunnels bypass multiplexing', 
         }
       }
     }
-    expect(tunnels).toBeGreaterThanOrEqual(2); // compose admin tunnel + registry push tunnel
+    // The registry push tunnel (the compose admin tunnel went with the
+    // external auth service). Floor of 1 keeps the census from passing empty.
+    expect(tunnels).toBeGreaterThanOrEqual(1);
   });
 
   it('the opt-out really overrides: OpenSSH takes the FIRST -o value, so it must PRECEDE the shared opts', async () => {
@@ -561,6 +563,8 @@ describe('SSH_TUNNEL_NO_MUX_OPTS — port-forward tunnels bypass multiplexing', 
         }
       }
     }
-    expect(tunnels).toBeGreaterThanOrEqual(2); // compose admin tunnel + registry push tunnel
+    // The registry push tunnel (the compose admin tunnel went with the
+    // external auth service). Floor of 1 keeps the census from passing empty.
+    expect(tunnels).toBeGreaterThanOrEqual(1);
   });
 });

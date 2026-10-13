@@ -507,22 +507,18 @@ async function promptBilling(env, _ctx = {}, { provider: preselected } = {}) {
 
 // ---- Google OAuth ----
 
-// Supabase Auth handles the OAuth dance; providers redirect to its callback,
-// not to your app. Show the user the exact URI to paste so they don't guess.
-// Production serves ONE origin (Traefik path-routes /auth/v1 on the apex to
-// Kong), so a configured https:// SITE_URL is the callback base; dev falls
-// back to SUPABASE_URL (Kong's localhost port — the Vite proxy only covers
-// /api, so dev callbacks hit Kong directly).
-function supabaseCallbackUrl(env) {
-  const siteUrl = (env.SITE_URL || '').replace(/\/$/, '');
-  const base = siteUrl.startsWith('https://')
-    ? siteUrl
-    : (env.SUPABASE_URL || '').replace(/\/$/, '');
-  if (!base) return c.dim('<SUPABASE_URL>/auth/v1/callback');
-  return c.dim(`${base}/auth/v1/callback`);
+// The app's own auth handles the OAuth dance; the provider redirects back to
+// /api/auth/callback/<provider> on the app's origin. Show the exact URI to
+// paste so nobody guesses. A deployed project's origin is its domain; before
+// a deploy, SITE_URL (localhost in dev, where the Vite proxy forwards /api).
+export function oauthCallbackUrl(env, ctx, provider) {
+  const base = ctx?.domain
+    ? `https://${ctx.domain}`
+    : (env.SITE_URL || '').replace(/\/$/, '') || '<SITE_URL>';
+  return `${base}/api/auth/callback/${provider}`;
 }
 
-async function promptGoogleOAuth(env) {
+async function promptGoogleOAuth(env, ctx) {
   p.log.info(c.bold('Google OAuth'));
 
   p.note(
@@ -536,7 +532,7 @@ async function promptGoogleOAuth(env) {
       `   Application type: ${c.dim('Web application')}.`,
       '',
       `${c.bold('3. Authorized redirect URI')}`,
-      `   ${supabaseCallbackUrl(env)}`,
+      `   ${c.dim(oauthCallbackUrl(env, ctx, 'google'))}`,
       '   (paste this exact URL, Google must match it character-for-character)',
       '',
       `${c.bold('4. Copy the Client ID and Client secret')}`,
@@ -564,7 +560,7 @@ async function promptGoogleOAuth(env) {
 
 // ---- Microsoft OAuth ----
 
-async function promptMicrosoftOAuth(env) {
+async function promptMicrosoftOAuth(env, ctx) {
   p.log.info(c.bold('Microsoft OAuth'));
 
   p.note(
@@ -574,7 +570,7 @@ async function promptMicrosoftOAuth(env) {
       '   Microsoft Entra ID → App registrations → New registration.',
       '',
       `${c.bold('2. Redirect URI')} (platform: Web)`,
-      `   ${supabaseCallbackUrl(env)}`,
+      `   ${c.dim(oauthCallbackUrl(env, ctx, 'microsoft'))}`,
       '',
       `${c.bold('3. Client secret')} (Certificates & secrets → New client secret)`,
       `   ${c.dim('Copy the Value (not the Secret ID), Entra only shows it once.')}`,
@@ -805,17 +801,9 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
   });
   if (senderName === null) return null;
 
-  // Signup confirmation emails. Deploys default to auto-confirm (skipping
-  // the email) because without working SMTP every signup 500s on the
-  // unsendable message — but the operator just configured SMTP, so real
-  // verification turns on automatically (decision 2026-07-24: working SMTP
-  // with silently-skipped verification was the audit's residual risk).
-  // GoTrue's env semantics are inverted (AUTOCONFIRM=true means SKIP the
-  // email) and the env var carries GoTrue's value directly (compose
-  // interpolation cannot negate), so "verification on" writes 'false'.
-  p.log.info(
-    `New signups will now require email confirmation ${c.dim('(GOTRUE_MAILER_AUTOCONFIRM="false" — flip it back to "true" in your env to skip verification)')}`,
-  );
+  // The app requires email verification whenever SMTP is configured
+  // (carbon/src/server/auth/), so there is no separate switch to flip.
+  p.log.info('New signups will now confirm their email address before they can sign in.');
 
   return {
     SMTP_HOST: host,
@@ -824,7 +812,6 @@ async function promptSmtp(env, ctx = {}, { provider: preselected } = {}) {
     SMTP_PASS: pass,
     SMTP_ADMIN_EMAIL: adminEmail,
     SMTP_SENDER_NAME: senderName,
-    GOTRUE_MAILER_AUTOCONFIRM: 'false',
   };
 }
 

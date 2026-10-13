@@ -42,7 +42,6 @@ import {
   openWireguardPortUfw,
 } from '../compose/ha.js';
 import {
-  createAdminUser,
   dockerLoginOnServer,
   pullComposeImages,
   runMigrations,
@@ -52,6 +51,7 @@ import {
   sshRun,
   sshRunAsync,
   startComposeStack,
+  waitForAdminReady,
   waitForDockerReady,
   waitForSSH,
 } from '../compose/index.js';
@@ -643,25 +643,25 @@ async function haRunMigrations(ctx) {
 }
 
 /**
- * Create the production super-admin on the PRIMARY. Idempotent (422 =
- * exists); FATAL on failure — shares createAdminUser (compose/index.js) with
- * the single-compose effect, so the same fast-follow to M3 Task 9h applies
- * here: a retry-exhaustion or missing-credentials failure throws instead of
- * degrading to a soft warning.
+ * Wait for the PRIMARY's app to report its super admin ready (it creates the
+ * admin at startup from ADMIN_EMAIL / ADMIN_PASSWORD in the bundled .env).
+ * FATAL on failure — shares waitForAdminReady (compose/index.js) with the
+ * single-compose effect. The standby's app needs no separate wait: its
+ * database is a replica, so the admin row arrives with replication.
  */
-async function haCreateAdminUser(ctx) {
+async function haWaitAdminReady(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { primary, sshKeyPath } = ctx;
-  ctx.onProgress('Creating admin user...');
-  const adminResult = await perfAsync('deploy.ha.compose.createAdminUser', () =>
-    createAdminUser(primary.ip, sshKeyPath, projectName),
+  ctx.onProgress('Waiting for the app to report its super admin ready...');
+  const result = await perfAsync('deploy.ha.compose.waitAdminReady', () =>
+    waitForAdminReady(primary.ip, sshKeyPath, projectName),
   );
-  p.log.success(adminResult.message);
+  p.log.success(result.message);
 }
 
 /**
  * Wait for primary Postgres to accept connections before configuring
- * replication (pg_basebackup needs the socket; not GoTrue/Storage migrations).
+ * replication (pg_basebackup needs the socket).
  * ~6min budget; proceeds optimistically on timeout with a breadcrumb.
  */
 async function haWaitPrimaryPostgres(ctx) {
@@ -703,8 +703,9 @@ async function haWaitPrimaryPostgres(ctx) {
  * THE `up -d db` MUST RUN WITH RECONCILE'S OWN FLAG SET (extracted from
  * reconcile.sh on the node), not REPL_COMPOSE_FLAGS. The 3-file subset
  * recreated db with a config-hash no full-set reconcile ever computes, so
- * EVERY subsequent warm deploy recreated db again — and auth 502'd through
- * createAdminUser's whole retry budget while db cycled (e2 warm-deploy,
+ * EVERY subsequent warm deploy recreated db again — and the then-separate
+ * auth service 502'd through the admin-user step's whole retry budget while
+ * db cycled (e2 warm-deploy,
  * 3× on 2026-08-06/07; the .vc-render-first/last diff on the kept rig named
  * the replication overlay as the drifting content). Extracting the baked
  * flags keeps this invocation byte-identical to future reconciles by
@@ -948,7 +949,7 @@ export const COMPOSE_HA_EFFECTS = {
   haUpdateDns,
   haStartComposeStack,
   haRunMigrations,
-  haCreateAdminUser,
+  haWaitAdminReady,
   haWaitPrimaryPostgres,
   haWriteReplicationOverlay,
   haConfigureReplication,

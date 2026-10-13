@@ -57,7 +57,6 @@ import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
-import { postAdminUser, waitForGotrueHealth } from '../admin-user.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { pushImageOverSshTunnel } from '../registry-push.js';
@@ -71,6 +70,7 @@ import {
 import { REPL_GATEWAY_PORT } from '../wireguard.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
+  awaitAppAdminReady,
   awaitCertManagerAdmission,
   awaitControlPlaneServing,
   awaitPostgresAccepting,
@@ -316,8 +316,7 @@ export function buildK3sApplyInputs({ imageTag, dbImageTag, restore, projectDir,
  * `k3s-apply` loads `.env.local` and feeds it to applyVibecarbonSecrets (the
  * whole vibecarbon-secrets Secret — every configure-managed OAuth/SMTP/billing
  * key plus REDIS_*), to the Supabase values render (ADMIN_EMAIL,
- * ADMIN_PASSWORD, MICROSOFT_TENANT_ID, GOTRUE_MAILER_AUTOCONFIRM), and to
- * ACME_CA_SERVER. None of that was in the gate. `.env.local` sits in neither
+ * ADMIN_PASSWORD), and to ACME_CA_SERVER. None of that was in the gate. `.env.local` sits in neither
  * digested manifest tree, and .dockerignore keeps it out of the build context
  * so no source digest sees it either.
  *
@@ -347,17 +346,10 @@ export function digestEnvLocalSecrets(projectDir) {
   const envLocal = loadEnvLocal(envPath);
   if (!envLocal) return 'no-env-local';
   const hash = createHash('sha256');
-  // Sorted so key ORDER in the file is not a change; ADMIN_*/ACME_CA_SERVER/
-  // GOTRUE_MAILER_AUTOCONFIRM/MICROSOFT_TENANT_ID join SECRET_KEYS because the
-  // values render reads them directly.
-  const watched = [
-    ...SECRET_KEYS,
-    'ADMIN_EMAIL',
-    'ADMIN_PASSWORD',
-    'MICROSOFT_TENANT_ID',
-    'GOTRUE_MAILER_AUTOCONFIRM',
-    'ACME_CA_SERVER',
-  ].sort();
+  // Sorted so key ORDER in the file is not a change. SECRET_KEYS already
+  // carries ADMIN_EMAIL/ADMIN_PASSWORD (also read by the values render);
+  // ACME_CA_SERVER joins because the issuer pick reads it directly.
+  const watched = [...new Set([...SECRET_KEYS, 'ACME_CA_SERVER'])].sort();
   for (const key of watched) {
     const value = envLocal[key];
     if (value === undefined) continue;
@@ -1573,11 +1565,10 @@ export async function buildAppImage(
   masterPrivateIp = '10.0.1.1',
 ) {
   const { buildLocalImage } = await import('../image.js');
-  // App image: collect VITE_* build args (incl. VITE_SUPABASE_URL rewritten to
+  // App image: collect VITE_* build args (incl. VITE_PUBLIC_URL rewritten to
   // https://<domain> — single public origin) so the browser bundle ships with
-  // real config instead of empty strings. buildLocalImage previously passed NO build args, so the
-  // k8s SPA crashed on load with "Missing Supabase environment variables" —
-  // compose plumbs these via collectComposeBuildArgs, k8s did not. The backup
+  // real config instead of empty strings. buildLocalImage previously passed NO
+  // build args, so the k8s SPA shipped empty client config — compose plumbs these via collectComposeBuildArgs, k8s did not. The backup
   // image build (no frontend) calls this without a domain → no VITE args.
   let buildArgs = {};
   if (domain) {
@@ -1959,8 +1950,9 @@ export async function pushImageToLocalRegistry({
 /**
  * Generated infra secrets that must land in the in-cluster vibecarbon-secrets
  * Secret. The Supabase Helm chart reads JWT_SECRET + ANON_KEY +
- * SERVICE_ROLE_KEY via secretRef from this Secret; the app Deployment reads
- * DB_PASSWORD + the rest via envFrom.
+ * SERVICE_ROLE_KEY via secretRef from this Secret (the app reads none of the
+ * three); the app Deployment reads DB_PASSWORD, BETTER_AUTH_SECRET and
+ * ADMIN_EMAIL/ADMIN_PASSWORD via envFrom.
  *
  * These are generated at deploy time (not user-configured), so they stay
  * local here rather than in the config-registry.
@@ -1976,9 +1968,12 @@ const INFRA_SECRET_KEYS = [
   'PG_META_CRYPTO_KEY',
   'DB_ENC_KEY',
   'REPL_PASSWORD',
+  // The app's session signing key (carbon/src/server/auth/).
+  'BETTER_AUTH_SECRET',
+  // The app creates its super admin from these at startup, and Studio's
+  // dashboard login reuses them (rendered into the chart values).
   'ADMIN_EMAIL',
   'ADMIN_PASSWORD',
-  'ADMIN_PASSWORD_HASH',
 ];
 
 /**
@@ -2576,23 +2571,6 @@ export async function installSupabase({
     // chart-generated supabase-dashboard secret.
     .replace(/\{\{ADMIN_EMAIL\}\}/g, envLocal?.ADMIN_EMAIL ?? '')
     .replace(/\{\{ADMIN_PASSWORD\}\}/g, envLocal?.ADMIN_PASSWORD ?? '')
-    // Microsoft OAuth tenant URL for GoTrue's AZURE provider — mirrors
-    // compose's `https://login.microsoftonline.com/${MICROSOFT_TENANT_ID:-common}`
-    // interpolation, which a k8s env valueFrom cannot express. Rendered even
-    // when Microsoft OAuth is unconfigured (harmless — the provider stays
-    // disabled without MICROSOFT_ENABLED in vibecarbon-secrets).
-    .replace(
-      /\{\{AZURE_TENANT_URL\}\}/g,
-      `https://login.microsoftonline.com/${envLocal?.MICROSOFT_TENANT_ID || 'common'}`,
-    )
-    // Signup-confirmation opt-in (configure → SMTP). Fail-safe: only the
-    // literal 'false' (require confirmation emails) is honored — anything
-    // else renders 'true' (auto-confirm), because without working SMTP a
-    // false here 500s every signup.
-    .replace(
-      /\{\{GOTRUE_MAILER_AUTOCONFIRM\}\}/g,
-      envLocal?.GOTRUE_MAILER_AUTOCONFIRM === 'false' ? 'false' : 'true',
-    )
     // Repl-gateway relay endpoint for the standby seed init: the standby's
     // OWN database-node private IP + the relay port (see the seed-standby
     // init in the values file). Rendered on every tier; only a standby's
@@ -2989,378 +2967,6 @@ export async function reloadPostgrest({ kubeconfig }) {
   if (status !== 0) {
     progressLog(
       `[migrate] PostgREST schema reload NOTIFY failed (non-fatal, self-heals on rest restart): ${(stderr || '').trim().slice(-200)}`,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// provisionAdminUser's `kubectl port-forward` child. Constants + helpers live
-// at module scope so the forward's diagnostics are greppable from a deploy log
-// and unit-testable through provisionAdminUser's injected `spawnImpl` seam.
-//
-// Twin of compose/index.js's `openAdminTunnel` (#226), which fixed this
-// evidence hole on the `ssh -L` side first. Deliberately duplicated rather
-// than shared: the two children differ in binary, in stderr vocabulary, and —
-// most importantly — in whether the local port may be WALKED. Keep them in
-// sync by hand when either grows a new evidence channel.
-// ---------------------------------------------------------------------------
-
-/** Bounded stderr tail kept per port-forward child. */
-const ADMIN_PF_STDERR_TAIL_LINES = 10;
-const ADMIN_PF_STDERR_TAIL_CHARS = 2000;
-/** Grace for a dying child's stderr to flush when 'close' never arrives. */
-const ADMIN_PF_EXIT_FLUSH_MS = 500;
-/**
- * `kubectl port-forward`'s own wording for a local bind collision. It reports
- * the OS error verbatim ("bind: address already in use") and then its own
- * summary ("unable to listen on any of the requested ports"); either alone is
- * enough to classify.
- */
-const ADMIN_PF_BIND_CONFLICT = /address already in use|unable to listen on any of the requested/i;
-
-/**
- * Last-N-lines tail of a child's stderr, bounded by chars first and then lines
- * so neither a chatty session nor one runaway line can paste a whole log into
- * a deploy error.
- *
- * @param {string} text
- * @returns {string}
- */
-function tailPortForwardStderr(text) {
-  return text
-    .slice(-ADMIN_PF_STDERR_TAIL_CHARS)
-    .split('\n')
-    .slice(-ADMIN_PF_STDERR_TAIL_LINES)
-    .join('\n');
-}
-
-/**
- * Flatten a fetch rejection into one log-safe line.
- *
- * Node's fetch throws a bland `TypeError: fetch failed` and hides the part
- * that actually discriminates the failure (ECONNREFUSED = nothing listening on
- * the forwarded port, vs ETIMEDOUT / socket hang up = the forward is up but
- * GoTrue isn't answering) in `.cause`.
- *
- * @param {unknown} err
- * @returns {string}
- */
-function describeAdminFetchError(err) {
-  if (!err) return 'no fetch error recorded';
-  if (!(err instanceof Error)) return String(err);
-  const cause = err.cause;
-  const detail = cause instanceof Error ? cause.message : cause ? String(cause) : '';
-  const code = (cause instanceof Error ? /** @type {any} */ (cause).code : undefined) ?? err.code;
-  let text = detail && detail !== err.message ? `${err.message} (${detail})` : err.message;
-  if (code && !text.includes(code)) text += ` [${code}]`;
-  return text;
-}
-
-/**
- * Open provisionAdminUser's `kubectl port-forward` child, wrapped with the
- * evidence its failure paths need: a bounded stderr tail, the exit code/signal
- * (or spawn error), and a `settled` promise that resolves the moment the child
- * dies.
- *
- * stderr is PIPED for the reason #226 established on the compose side: it is
- * the only channel carrying the child's own diagnosis, and the previous
- * `stdio: 'ignore'` discarded it. A forward that cannot bind its local port,
- * names a service that does not exist, or loses its apiserver connection
- * prints exactly that and exits — under 'ignore' the deploy only ever saw the
- * wrapper's "Could not reach GoTrue via kubectl port-forward", which is
- * un-RCA-able without a re-run.
- *
- * @param {object} args
- * @param {number} args.localPort
- * @param {NodeJS.ProcessEnv} args.env - carries KUBECONFIG
- * @param {typeof spawn} args.spawnImpl
- */
-function openAdminPortForward({ localPort, env, spawnImpl }) {
-  const child = spawnImpl(
-    'kubectl',
-    ['-n', 'vibecarbon', 'port-forward', 'svc/supabase-supabase-auth', `${localPort}:9999`],
-    { env, stdio: ['ignore', 'ignore', 'pipe'] },
-  );
-
-  let stderr = '';
-  /** @type {{code: number|null, signal: string|null}|null} */
-  let exitInfo = null;
-  /** @type {Error|null} */
-  let spawnError = null;
-  /** @type {ReturnType<typeof setTimeout>|null} */
-  let flushTimer = null;
-  let resolveSettled = () => {};
-  const settled = new Promise((resolve) => {
-    resolveSettled = resolve;
-  });
-  const finish = () => {
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = null;
-    resolveSettled();
-  };
-
-  child.stderr?.on?.('data', (chunk) => {
-    stderr = tailPortForwardStderr(stderr + String(chunk));
-  });
-  // A spawn-level failure ('error', e.g. ENOENT) must not crash the deploy as
-  // an unhandled ChildProcess event — it stays folded into the same retry
-  // budget as any other reach failure, but now carries its message.
-  child.on('error', (err) => {
-    spawnError = err;
-    finish();
-  });
-  // Settle on 'close' where possible (stderr is flushed by then); 'exit' can
-  // fire with data still queued on the pipe. If 'close' never arrives, the
-  // grace timer settles anyway so an attempt can't hang waiting for it.
-  child.on('close', finish);
-  child.on('exit', (code, signal) => {
-    exitInfo = { code, signal };
-    if (!flushTimer) flushTimer = setTimeout(finish, ADMIN_PF_EXIT_FLUSH_MS);
-  });
-
-  return {
-    localPort,
-    /** Resolves once the child has died (never, for a healthy forward). */
-    settled,
-    get dead() {
-      return exitInfo !== null || spawnError !== null;
-    },
-    /** True when kubectl's stderr names a local bind collision. */
-    get bindConflict() {
-      return ADMIN_PF_BIND_CONFLICT.test(stderr);
-    },
-    /** One-line `kubectl: …` clause for a deploy error / retry log line. */
-    describe() {
-      if (spawnError) return `kubectl: spawn failed: ${spawnError.message}`;
-      const tail = stderr.trim().replace(/\s*\n\s*/g, ' / ');
-      let state;
-      if (exitInfo === null) state = 'still running';
-      else if (exitInfo.code === null || exitInfo.code === undefined)
-        state = `killed by ${exitInfo.signal ?? 'an unknown signal'}`;
-      else state = `exited ${exitInfo.code}${exitInfo.signal ? ` (${exitInfo.signal})` : ''}`;
-      return tail ? `kubectl: ${state}; ${tail}` : `kubectl: ${state}, no stderr`;
-    },
-    /** Idempotent teardown — safe to call on every exit path. */
-    close() {
-      try {
-        child.kill();
-      } catch {
-        // already gone
-      }
-      child.stderr?.destroy?.();
-      if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = null;
-    },
-  };
-}
-
-/**
- * Create the production app super-admin in `auth.users` via GoTrue's admin API.
- *
- * The k8s mirror of compose/index.js `createAdminUser`: identical GoTrue
- * admin-API contract (POST the super_admin payload with the service-role
- * bearer, idempotent on 422 via the shared admin-user helper), reached via
- * `kubectl port-forward svc/supabase-supabase-auth` instead of an `ssh -L`
- * tunnel. Goes direct to GoTrue (auth :9999, path `/admin/users`) — no Kong
- * `/auth/v1` prefix to strip.
- *
- * Without this, a k8s deploy shipped a prod app the operator couldn't log
- * into: ADMIN_EMAIL/ADMIN_PASSWORD only seeded the Supabase Studio dashboard
- * basic-auth secret, never an app `auth.users` row.
- *
- * M3 Task 9h: the port-forward + HTTP reach gets a budgeted retry (same
- * tunnel-then-operation shape as the registry push's retries, which live in
- * registry-push.js — a backgrounded local forward that needs re-opening on
- * failure, not a plain probe). `helm upgrade --install --wait` (installSupabase) already
- * gates on every chart pod, including auth/GoTrue, reaching Available BEFORE
- * this step ever runs (see applyK3sManifests step 8c below) — so there is no
- * missing ordering wait to add; a failure here is a transient port-forward /
- * apiserver hiccup against an already-Ready pod, the same class of blip the
- * cert-manager readiness poll above absorbs, not a readiness race. A battery
- * run (d3 run 6) hit exactly that: the single old attempt failed, logged a
- * warning, and the deploy "succeeded" with no admin.users row — customer CI
- * would ship the same half-configured stack. Exhausting the retry budget now
- * fails the deploy loudly instead: pre-release, no half-configured success.
- *
- * Credentials-missing (no ADMIN_EMAIL/ADMIN_PASSWORD/SUPABASE_SERVICE_ROLE_KEY
- * resolvable from `envLocal`) is NOT retryable (there's nothing to poll for)
- * but is NOT a soft return either (M3 Task 9h fix round 1): `create` always
- * writes these into the project's `.env.local`, and they're also
- * GH-Environment-managed CI secrets (see github-environments.js) — a real
- * customer CI run with a missing/misnamed secret hits this exact branch, and
- * a soft `{success: false}` here reproduces the identical bug this task
- * exists to kill (deploy "succeeds", no admin.users row). It throws.
- *
- * Diagnosability (twin of #226, which fixed the same hole on compose's `ssh
- * -L` tunnel): every failure path now carries WHY. The forward child is
- * spawned with a PIPED stderr and its tail / exit code / signal / spawn error
- * are captured (openAdminPortForward above), the health poll's LAST fetch
- * error is recorded through `waitForGotrueHealth`'s `fetchImpl` seam, and both
- * land in the thrown message AND in every per-attempt retry log line. Before
- * this, a failing attempt produced the bare wrapper string "Could not reach
- * GoTrue via kubectl port-forward" — indistinguishable between a missing
- * service, a squatted local port, a dead apiserver connection and a GoTrue
- * that answers 503, and un-RCA-able without re-running the deploy.
- *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, localPort?: number, spawnImpl?: typeof spawn, fetchImpl?: typeof fetch}} args
- *   (The former `retryDelaysMs` ladder is removed — band-aid removal
- *   2026-08-16; one attempt, loud failure.)
- *
- *   `spawnImpl` / `fetchImpl` — injection seams for the `kubectl port-forward`
- *   child and the health-poll fetch (same DI convention as admin-user.js's
- *   `fetchImpl`, and as compose's `createAdminUser`). Production callers omit
- *   both; tests inject fakes so the forward's diagnostics can be asserted
- *   without mocking `node:child_process` (builtin-module mocks are not
- *   reliably scoped per file under the parallel unit run — see
- *   k3s-admin-port-forward-diagnostics.test.ts's header).
- * @returns {Promise<{success: boolean, message: string}>} resolves only on
- *   success (admin created, or already exists — idempotent).
- * @throws {Error} if required admin credentials are missing from `envLocal`,
- *   or if GoTrue stays unreachable (or the admin-user POST keeps failing)
- *   through the whole retry budget.
- */
-export async function provisionAdminUser({
-  kubeconfig,
-  envLocal,
-  localPort = 15000,
-  spawnImpl = spawn,
-  fetchImpl = fetch,
-}) {
-  const adminEmail = envLocal?.ADMIN_EMAIL;
-  const adminPassword = envLocal?.ADMIN_PASSWORD;
-  const serviceRoleKey = envLocal?.SERVICE_ROLE_KEY ?? envLocal?.SUPABASE_SERVICE_ROLE_KEY;
-  if (!adminEmail || !adminPassword || !serviceRoleKey) {
-    const missing = [
-      !adminEmail && 'ADMIN_EMAIL',
-      !adminPassword && 'ADMIN_PASSWORD',
-      !serviceRoleKey && 'SUPABASE_SERVICE_ROLE_KEY',
-    ].filter(Boolean);
-    throw new Error(
-      `Admin credentials missing (${missing.join(', ')}) — admin login will not work. Expected ` +
-        `as keys in the project's .env.local for a local deploy, or as the matching ` +
-        `per-environment GitHub Environment secret(s) for a CI deploy.`,
-    );
-  }
-
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
-
-  // 4 attempts total (3 retries): [3s, 6s, 12s] backoff. Each attempt also
-  // pays waitForGotrueHealth's own ~10s internal poll (20 x 500ms) before
-  // declaring that attempt's port-forward unreachable, so the worst case is
-  // ~61s — generous for a transient blip against a pod helm --wait already
-  // confirmed Ready, well short of the cert-manager budget above (that one
-  // covers pods that may not even be scheduled yet).
-  // The retry ladder that lived here is REMOVED (band-aid removal,
-  // 2026-08-16): its enumerated triggers were GoTrue answering 500 while its
-  // DB session pool was refused (closed at the source by
-  // awaitPostgresAccepting) and forward wedges (owned per-attempt by the
-  // open→use→teardown lifecycle below). One attempt; a failure is loud and
-  // carries the full per-phase cause.
-  const attemptErrors = [];
-
-  // One attempt: open a fresh port-forward, wait for GoTrue to answer
-  // through it, POST the admin user, then always tear the forward down.
-  // Mirrors the registry push's per-attempt tunnel lifecycle (open →
-  // use → teardown in `finally`, registry-push.js) so a wedged forward from a failed attempt
-  // can't block the next attempt from re-opening the same localPort — kept
-  // fixed (not walked, unlike the push tunnel) because HA runs primary and
-  // standby's provisionAdminUser in parallel on adjacent bases (15000 /
-  // 15001, mirroring the 5000/5001 registry-tunnel split); a per-attempt
-  // port offset could walk one cluster's retry straight into the other's.
-  // The retry backoff (min 3s) is ample for kubectl port-forward to release
-  // the port after `pf.kill()`.
-  const attemptOnce = async () => {
-    // A spawn-level failure ('error', e.g. ENOENT) is captured by the helper
-    // rather than crashing the deploy as an unhandled ChildProcess event —
-    // folded into the same retry budget as any other reach failure, but now
-    // carrying its message instead of masquerading as a reach timeout.
-    const pf = openAdminPortForward({ localPort, env, spawnImpl });
-    try {
-      // Record the last health-poll fetch error through waitForGotrueHealth's
-      // existing `fetchImpl` seam. That helper returns a bare boolean by
-      // design (compose reads it the same way), so wrapping the fetch here
-      // keeps the cause without changing a contract shared with the compose
-      // path.
-      let lastFetchError = null;
-      const probeFetch = async (url, init) => {
-        // The forward is already gone; fail fast instead of spending the rest
-        // of the poll's budget fetching a closed port.
-        if (pf.dead) throw new Error('kubectl port-forward exited');
-        try {
-          const res = await fetchImpl(url, init);
-          if (!res.ok) lastFetchError = new Error(`HTTP ${res.status} from ${url}`);
-          return res;
-        } catch (err) {
-          lastFetchError = err;
-          throw err;
-        }
-      };
-
-      // Race the reach poll against the forward's own death so a bind
-      // collision (or a missing service) is classified immediately instead of
-      // after the poll burns its full ~10s budget.
-      const outcome = await Promise.race([
-        waitForGotrueHealth(`http://localhost:${localPort}/health`, {
-          attempts: 20,
-          intervalMs: 500,
-          fetchImpl: probeFetch,
-        }).then((ok) => (ok ? 'healthy' : 'unreachable')),
-        pf.settled.then(() => 'forward-died'),
-      ]);
-
-      if (outcome !== 'healthy') {
-        // Everything the next RCA needs, on one line: which port, what the
-        // last HTTP attempt actually said, and what kubectl itself reported.
-        //
-        // A bind collision gets an explicit remedy because this path CANNOT
-        // route around it: unlike compose's tunnel (which walks 19876 →
-        // 19885), the port here is fixed, since HA provisions primary and
-        // standby in parallel on adjacent bases (15000/15001) and a walk could
-        // step one cluster's retry straight onto the other's.
-        throw new Error(
-          `Could not reach GoTrue via kubectl port-forward on localhost:${localPort} ` +
-            `(last error: ${describeAdminFetchError(lastFetchError)}; ${pf.describe()})` +
-            (pf.bindConflict
-              ? `, local port ${localPort} is already bound (a leaked port-forward from an ` +
-                `earlier run, or another process on this machine). This port is fixed, not ` +
-                `walked: the HA pair provisions primary and standby in parallel on 15000/15001, ` +
-                `so walking could collide the two. Kill the stale forward and re-run.`
-              : ''),
-        );
-      }
-
-      const result = await postAdminUser({
-        adminUsersUrl: `http://localhost:${localPort}/admin/users`,
-        serviceRoleKey,
-        adminEmail,
-        adminPassword,
-      });
-      if (!result.success) {
-        throw new Error(result.message);
-      }
-      return result;
-    } finally {
-      // Every exit path — success, unreachable, POST failure and throw — reaps
-      // this attempt's forward.
-      pf.close();
-    }
-  };
-
-  try {
-    return await attemptOnce();
-  } catch (err) {
-    attemptErrors.push(err instanceof Error ? err.message : String(err));
-    // Loud failure (M3 Task 9h): no warning-and-continue crutch. States what
-    // failed, the consequence, and what was attempted so the operator/CI log
-    // is actionable without re-running to discover it. Framed as "admin-user
-    // provisioning failed" rather than "GoTrue unreachable" — attemptErrors
-    // can mix unreachable-port-forward failures with reachable-but-erroring
-    // postAdminUser calls (e.g. a transient 500), and the message must cover
-    // both. Numbered per-attempt, same shape as the registry push's
-    // exhausted-attempts error (registry-push.js).
-    throw new Error(
-      `GoTrue admin-user provisioning failed after ${attemptErrors.length} attempt${attemptErrors.length === 1 ? '' : 's'} — ` +
-        `admin login will not work. Errors: ${attemptErrors.map((m, i) => `[#${i + 1}] ${m}`).join(' | ')}`,
     );
   }
 }
@@ -4785,43 +4391,10 @@ export async function applyK3sManifests({
       reloadPostgrest({ kubeconfig }),
     );
   }
-  // 8c. Create the production app super-admin via GoTrue's admin API. Mirrors
-  //     the compose path — without it the operator can't log into their own
-  //     deployed app (ADMIN_* only seeds the Studio dashboard secret, never an
-  //     auth.users row). Runs unconditionally (incl. restore: idempotent on
-  //     422, and a backup predating admin-creation still gets seeded). In HA
-  //     both clusters run this against their independently-writable DB at
-  //     deploy time (same as applyMigrations); the localPort is derived from
-  //     localTunnelPort so the parallel primary/standby port-forwards don't
-  //     race for the same bind. FATAL on ANY failure (M3 Task 9h, fix round
-  //     1): provisionAdminUser retries the whole port-forward + HTTP flow
-  //     under its own budget and throws once it's exhausted, AND throws
-  //     immediately on missing admin credentials — no soft return remains.
-  //     A transient blip here used to warn-and-continue, shipping a deploy
-  //     with no admin.users row behind a false "success" (battery d3 run 6);
-  //     a missing/misnamed CI secret hit the exact same failure mode via the
-  //     credentials-missing branch.
-  //     SKIPPED on a pilot standby: GoTrue isn't running yet (auth Deployment
-  //     is part of the zeroed app tier), so the port-forward would just spin
-  //     until provisionAdminUser's retry budget is exhausted.
-  if (pilotStandby) {
-    console.error('[pilot-standby] skipping createAdminUser, app tier is zeroed until failover');
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.createAdminUser`, async () => {
-      // provisionAdminUser now always either succeeds or throws (see its
-      // doc comment) — no soft-fail return remains to branch on here.
-      const adminResult = await provisionAdminUser({
-        kubeconfig,
-        envLocal,
-        localPort: 15000 + (localTunnelPort - 5000),
-      });
-      progressLog(`[k3s] ${adminResult.message}`);
-    });
-  }
   // 9. Wait for app rollout. The deployment template already has
   //    imagePullPolicy: IfNotPresent, so kubelet uses the sideloaded image
   //    without pulling. 300s wasn't enough on a cold deploy where the app
-  //    pods stay Pending behind kong/auth converge — bump to 10m to match
+  //    pods stay Pending behind the chart services converging — bump to 10m to match
   //    the helm `--wait` budget.
   //
   //    Retry on apiserver-warm-up transients. iter-postpush + iter-validate2
@@ -4896,6 +4469,18 @@ export async function applyK3sManifests({
         },
       );
     });
+  }
+  // 9b. Wait for the app to report its super admin ready. The app creates it
+  //     at startup from ADMIN_EMAIL / ADMIN_PASSWORD (delivered through the
+  //     vibecarbon-secrets envFrom, see SECRET_KEYS) once the database
+  //     answers; the deploy is not done until the operator can sign in.
+  //     Runs on restore too (a backup predating the admin still gets one).
+  //     SKIPPED on a pilot standby: its app tier is zeroed until failover,
+  //     and the admin row arrives with the replicated database.
+  if (pilotStandby) {
+    console.error('[pilot-standby] skipping awaitAppAdminReady, app tier is zeroed until failover');
+  } else {
+    await perfAsync(`deploy.${perfPrefix}.awaitAdminReady`, () => awaitAppAdminReady({ env }));
   }
   // 10. Force-restart traefik so it starts AFTER kube-router has installed
   //     iptables rules for the NetworkPolicies. RCA from k8s-hetzner

@@ -14,7 +14,6 @@ export const SERVICE_DISPLAY_NAMES = {
   traefik: 'Traefik',
   db: 'PostgreSQL',
   kong: 'Kong Gateway',
-  auth: 'Auth (GoTrue)',
   rest: 'REST (PostgREST)',
   realtime: 'Realtime',
   meta: 'Meta',

@@ -3,7 +3,6 @@
  */
 
 import { createHmac, randomBytes } from 'node:crypto';
-import bcrypt from 'bcryptjs';
 
 /**
  * Generate a secure random password
@@ -61,15 +60,4 @@ export function generateJWT(secret, payload, exp = 315360000) {
  */
 export function generateReplPassword() {
   return randomBytes(24).toString('base64url');
-}
-
-/**
- * Generate a bcrypt hash of a password
- * Uses the same algorithm as Supabase GoTrue (bcrypt with cost factor 10)
- *
- * @param {string} password - Plain text password
- * @returns {string} - Bcrypt hash
- */
-export function hashPassword(password) {
-  return bcrypt.hashSync(password, 10);
 }

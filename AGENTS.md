@@ -186,10 +186,10 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 `src/create.js` uses `@clack/prompts` for interactive CLI. It:
 1. Parses CLI arguments via the shared spec-driven parser (`-y`, `-pm <npm|pnpm|bun>`, `-admin-email <email>`, `-admin-password <pw>`, `-install`, `-skip-lockfile`)
 2. Prompts for admin email and password (required for dashboard access)
-3. Generates secure secrets (JWT, passwords, Supabase keys)
+3. Generates secure secrets (BETTER_AUTH_SECRET for the app's sessions, database passwords, and the JWT/keys the remaining Supabase services read)
 4. Copies template files from `carbon/` directory
-5. Replaces placeholders (e.g., `{{PROJECT_NAME}}`, `{{JWT_SECRET}}`, `{{ADMIN_EMAIL}}`)
-6. Creates admin user in Supabase auth
+5. Replaces placeholders (e.g., `{{PROJECT_NAME}}`, `{{ADMIN_EMAIL}}`)
+6. Writes ADMIN_EMAIL/ADMIN_PASSWORD to `.env`/`.env.local`; the app creates the super admin from them at startup, and every deploy waits for `/api/health` to report `adminReady` (`src/lib/deploy/admin-ready.js`)
 7. Installs dependencies and initializes git
 
 ### CLI conventions

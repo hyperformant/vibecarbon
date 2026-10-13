@@ -688,8 +688,8 @@ async function scaleServers(ctx) {
         s.start(`Building image ${oldAppImage} on new server...`);
         // Pass the VITE_* build args (same as deploy/HA). Vite inlines
         // import.meta.env.VITE_* at build time, so without these the new
-        // server's frontend bundle ships empty VITE_SUPABASE_URL/ANON_KEY and
-        // the browser throws "Missing Supabase environment variables". Deploy
+        // server's frontend bundle ships empty client config (VITE_PUBLIC_URL,
+        // feature flags). Deploy
         // (orchestrator.js) and HA (ha.js) already do this — scale did not.
         const scaleBuildArgs = collectComposeBuildArgs(process.cwd(), { projectName, domain });
         // Perf label renamed 2026-08-23: this wrapped buildRemote under the

@@ -649,7 +649,8 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   //     a direct db ping (`select 1` on the app's own pg pool, which
   //     reconnects on its own). The other postgres clients are still
   //     the problem: when primary postgres restarted, supabase-rest +
-  //     auth + realtime + meta held onto stale connections, and
+  //     realtime + meta (and, back then, a separate auth service) held
+  //     onto stale connections, and
   //     restarting only `app` left them broken. Service `app` then had
   //     zero Ready endpoints and Traefik's IngressRoute fell through
   //     to its default 404 backend on the public probe.
@@ -671,13 +672,12 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   //     The selective list below completes in <2 min.
   const postgresDependentDeployments = [
     'app',
-    'supabase-supabase-auth',
     'supabase-supabase-rest',
     'supabase-supabase-realtime',
     'supabase-supabase-meta',
   ];
-  // Restart + status-wait the 5 postgres-dependent deployments in parallel.
-  // All 5 share the same apiserver but live in independent ReplicaSets — kubelet
+  // Restart + status-wait the postgres-dependent deployments in parallel.
+  // All share the same apiserver but live in independent ReplicaSets — kubelet
   // can roll them concurrently and rollout-status only blocks on its own
   // deployment. Previously serial: total ≈ Σ(per-deploy rollout) = 5 × ~30-60s
   // worst case = 2.5-5 min. Parallel: total ≈ max(per-deploy) = ~30-60s.

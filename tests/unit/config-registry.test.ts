@@ -421,21 +421,15 @@ describe('config-registry', () => {
  * their webhook secrets) skippable mid-section — too loose. This
  * one-directional rule is the version that actually holds.
  *
- * One smtp key (GOTRUE_MAILER_AUTOCONFIRM) never appears in env.ts at
- * all — it's read by the GoTrue auth service container's own env, not the
- * app's zod schema — so there is no boot-time contract to compare against.
- * It's listed explicitly below rather than silently skipped, so a key that
- * starts appearing in env.ts is noticed. (The OAuth client keys used to be
- * listed too; the app's in-process auth reads them from env.ts now.)
+ * Every key here is read by the app's own env.ts now (auth runs in-process),
+ * so NOT_IN_ENV_SCHEMA is empty. A key a separate container reads instead
+ * goes there with the reason, rather than being silently skipped.
  */
 describe('config-registry ↔ carbon env.ts — registry is never looser than env.ts', () => {
   const ENV_TS_PATH = join(process.cwd(), 'carbon/src/server/lib/env.ts');
   const CONFIGURE_FEATURES = new Set(['billing', 'oauth', 'smtp']);
 
-  const NOT_IN_ENV_SCHEMA: Record<string, string> = {
-    GOTRUE_MAILER_AUTOCONFIRM:
-      'read by the GoTrue auth service container env, not the app zod schema',
-  };
+  const NOT_IN_ENV_SCHEMA: Record<string, string> = {};
 
   /** Maps each envSchema field name to whether its zod chain is `.optional()`. */
   function parseEnvSchemaOptionality(): Record<string, boolean> {

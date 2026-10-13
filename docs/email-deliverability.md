@@ -14,12 +14,11 @@ until you configure SMTP**:
   host configured:
   - The **app mailer silently no-ops**: invites and notifications simply never
     arrive, with no error surfaced to the user.
-  - **GoTrue password-reset and magic-link email fail**: users who forget their
-    password cannot recover their account.
-- Local development sets `GOTRUE_MAILER_AUTOCONFIRM=true`, so signups are
-  auto-confirmed and you never notice email is unconfigured. **In production you
-  should turn autoconfirm off** (`vibecarbon configure`), which then *requires*
-  working SMTP. Otherwise no one can complete signup.
+  - **Password-reset, verification and magic-link emails are logged, not
+    sent**: users who forget their password cannot recover their account.
+  - **Signups need no email verification**, so you never notice email is
+    unconfigured. Once SMTP is set (`vibecarbon configure`), new signups must
+    confirm their address before they can sign in, so that SMTP has to work.
 
 ## Configure SMTP
 

@@ -11,10 +11,11 @@
  *
  * RCA 2026-08-19 (DO compose-ha, run 32309395314): the gate proved ONE of the
  * restarted services and declared the whole app tier serving while a slower
- * one was still down. Fix: the probe covers every Kong-routed restarted
- * service — rest/app (DB-backed 200) and auth (open health route 200) — and
- * the census below holds every restarted service to "probed or exempted".
- * (The service that lagged then, Supabase storage, has since been removed.)
+ * one was still down. Fix: the probe covers every restarted service it can
+ * prove, and the census below holds every restarted service to "probed or
+ * exempted". (The service that lagged then, Supabase storage, has since been
+ * removed; so has the separate auth service: auth runs inside the app, so
+ * the app's DB-backed 200 covers sign-in too.)
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -26,24 +27,24 @@ import {
 
 const noSleep = () => Promise.resolve();
 
-const allUp = 'rest=200 auth=200';
+const allUp = 'rest=200';
 
 describe('newPrimaryApiProbeCmd', () => {
-  it('probes rest/app and auth, pinned to loopback, ignoring the staging cert', () => {
+  it('probes rest/app, pinned to loopback, ignoring the staging cert', () => {
     const cmd = newPrimaryApiProbeCmd('e2.appcarbon.dev');
     expect(cmd).toContain('https://e2.appcarbon.dev/api/v1/notifications');
-    expect(cmd).toContain('https://e2.appcarbon.dev/auth/v1/health');
+    expect(cmd).not.toContain('/auth/v1/');
     expect(cmd).not.toContain('/storage/v1/');
     // Every curl is pinned to loopback and skips cert verification.
     const curls = cmd.split('curl ').slice(1);
-    expect(curls.length).toBe(2);
+    expect(curls.length).toBe(1);
     for (const c of curls) {
       expect(c).toContain('--resolve e2.appcarbon.dev:443:127.0.0.1');
       expect(c).toContain("-w '%{http_code}'");
       expect(c).toContain('-sk');
     }
     // Output is labeled so the poller can name the lagging service.
-    expect(cmd).toMatch(/rest=.*auth=/s);
+    expect(cmd).toMatch(/rest=/);
   });
 });
 
@@ -61,8 +62,8 @@ describe('waitForNewPrimaryApi', () => {
   it('keeps polling through the PostgREST cold-cache 500 window, then passes on recovery', async () => {
     const runner = vi
       .fn()
-      .mockReturnValueOnce('rest=500 auth=200')
-      .mockReturnValueOnce('rest=500 auth=200')
+      .mockReturnValueOnce('rest=500')
+      .mockReturnValueOnce('rest=500')
       .mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
@@ -72,21 +73,11 @@ describe('waitForNewPrimaryApi', () => {
     expect(runner).toHaveBeenCalledTimes(3);
   });
 
-  it('does not pass while auth is still coming up', async () => {
-    const runner = vi.fn().mockReturnValueOnce('rest=200 auth=502').mockReturnValue(allUp);
-    const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
-      runner,
-      sleep: noSleep,
-    });
-    expect(ok).toBe(true);
-    expect(runner).toHaveBeenCalledTimes(2);
-  });
-
   it('treats a gateway timeout (504) and silence (000) as not-ready', async () => {
     const runner = vi
       .fn()
-      .mockReturnValueOnce('rest=000 auth=200')
-      .mockReturnValueOnce('rest=200 auth=504')
+      .mockReturnValueOnce('rest=000')
+      .mockReturnValueOnce('rest=504')
       .mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
@@ -122,7 +113,7 @@ describe('waitForNewPrimaryApi', () => {
   });
 
   it('returns false (best-effort, never throws) after exhausting attempts', async () => {
-    const runner = vi.fn().mockReturnValue('rest=200 auth=502');
+    const runner = vi.fn().mockReturnValue('rest=502');
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
       sleep: noSleep,
@@ -163,5 +154,12 @@ describe('serve-gate coverage census', () => {
 const NEW_PRIMARY_PROBE_URLS_BY_SERVICE: Record<string, string> = {
   rest: '/api/v1/notifications',
   app: '/api/v1/notifications',
-  auth: '/auth/v1/health',
 };
+
+describe('the restart list names only containers the stack runs', () => {
+  // `docker restart` of a container that does not exist fails the whole
+  // command, so a removed service left in the list breaks every failover.
+  it('no longer restarts or stops the removed auth service', () => {
+    expect(APP_TIER_RESTART_SERVICES).not.toContain('auth');
+  });
+});

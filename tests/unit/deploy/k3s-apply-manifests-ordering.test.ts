@@ -29,37 +29,15 @@ import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-orde
  * retry.js / perf.js / command.js / fs stay real; the temp projectDir carries
  * the supabase values template installSupabase reads.
  *
- * Admin creds (M3 Task 9h fix round 1): baseArgs() carries real-looking
- * ADMIN_EMAIL/ADMIN_PASSWORD/SUPABASE_SERVICE_ROLE_KEY — provisionAdminUser
- * now THROWS on missing credentials (no more soft early-return, see
- * tests/unit/deploy/k3s-provision-admin-user.test.ts for its own retry/throw
- * contract), so a fixture that omits them would fail every test here that
- * reaches step 8c. waitForGotrueHealth/postAdminUser
- * (../../../src/lib/deploy/admin-user.js) are mocked to succeed on the first
- * call so admin provisioning is a cheap, deterministic no-op that doesn't
- * hit a real port or network — the retry/backoff behavior itself is unit
- * tested in k3s-provision-admin-user.test.ts, not here.
+ * Admin: applyK3sManifests no longer provisions an account. It waits for
+ * the app to report its super admin ready (`kubectl exec deploy/app … node
+ * -e`, see awaitAppAdminReady), which the spawn mock answers with exit 0.
  */
 
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
   return { ...actual, spawn: vi.fn() };
 });
-
-const mockWaitForGotrueHealth = vi.fn();
-const mockPostAdminUser = vi.fn();
-vi.mock('../../../src/lib/deploy/admin-user.js', () => ({
-  waitForGotrueHealth: (...args: unknown[]) => mockWaitForGotrueHealth(...args),
-  postAdminUser: (...args: unknown[]) => mockPostAdminUser(...args),
-}));
-
-/** Reset the admin-user mocks to their default (first-attempt success) shape. */
-function resetAdminUserMock() {
-  mockWaitForGotrueHealth.mockReset().mockResolvedValue(true);
-  mockPostAdminUser
-    .mockReset()
-    .mockResolvedValue({ success: true, message: 'Admin user created: admin@example.test' });
-}
 
 const k3sPromise = import('../../../src/lib/deploy/k8s/k3s.js');
 
@@ -267,15 +245,10 @@ function baseArgs(projectDir: string) {
     projectName: 'proj',
     imageTag: '10.0.1.1:5000/proj:abc-20260101000000',
     dbImageTag: 'ghcr.io/org/postgres:15-walg1',
-    // provisionAdminUser now throws on missing creds (M3 Task 9h fix round
-    // 1) — carry real-looking ones so step 8c reaches the (mocked-success)
-    // admin-user.js calls instead of failing every test here. The
-    // credentials-missing throw itself is pinned by its own test below,
-    // which overrides this with an empty envLocal.
     envLocal: {
       ADMIN_EMAIL: 'admin@example.test',
       ADMIN_PASSWORD: 'test-password',
-      SUPABASE_SERVICE_ROLE_KEY: 'svc-role-key',
+      BETTER_AUTH_SECRET: 'test-better-auth-secret-0123456789abcdef',
     },
     domain: 'app.example.test',
     // s3Config omitted → WAL-archiving block skipped (fewer calls).
@@ -374,7 +347,6 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   it('#1 registry push runs concurrently with installSupabase (helm), yet stays awaited', async () => {
@@ -521,7 +493,6 @@ describe('applyK3sManifests pilot-standby role', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   it('reaps stale -worker- Node objects on the pilot standby (run 32620564611)', async () => {
@@ -828,7 +799,6 @@ describe('cert-manager DNS-01 webhook install fails loud', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   async function runWithHetznerDns() {
@@ -882,7 +852,6 @@ describe('DNS-01 Secret precedes the ClusterIssuers that reference it (digitaloc
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   const issuerApplyIndex = () =>
@@ -950,7 +919,6 @@ describe('readiness probes are wired in (mitigation-audit clusters 1+4 root fix)
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   // These pin the WIRING, not the probe mechanics (k8s-readiness.test.ts owns
@@ -1020,7 +988,6 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   it('runs pg_isready against the db pod BEFORE the archive_mode psql', async () => {
@@ -1048,13 +1015,11 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
   });
 });
 
-describe('createAdminUser: missing credentials fails the deploy loudly (M3 Task 9h fix round 1)', () => {
-  // Reviewer finding: `create` always writes ADMIN_EMAIL/ADMIN_PASSWORD into
-  // .env.local, and they're also GH-Environment-managed CI secrets — a real
-  // customer CI run with one missing/misnamed hits provisionAdminUser's
-  // credentials-missing branch exactly like this test does. It must no
-  // longer degrade to a soft `{success: false}` (the same bug class this
-  // whole task exists to kill); it must throw and fail the deploy.
+describe('applyK3sManifests — waits for the app to report its super admin', () => {
+  // The app creates the super admin itself at startup from ADMIN_EMAIL /
+  // ADMIN_PASSWORD (delivered via vibecarbon-secrets). The deploy's job is
+  // to ship those keys and then not report success until the app says the
+  // admin is ready, so the operator can always sign in to what was deployed.
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
@@ -1064,30 +1029,37 @@ describe('createAdminUser: missing credentials fails the deploy loudly (M3 Task 
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
-  it('throws naming every missing key when envLocal has no admin credentials at all', async () => {
-    const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
+  const isAdminProbe = (a: string[]) =>
+    a[0] === 'kubectl' &&
+    a.includes('exec') &&
+    a.includes('deploy/app') &&
+    a.some((x) => String(x).includes('adminReady'));
 
-    await expect(applyK3sManifests({ ...baseArgs(projectDir), envLocal: {} })).rejects.toThrow(
-      /Admin credentials missing \(ADMIN_EMAIL, ADMIN_PASSWORD, SUPABASE_SERVICE_ROLE_KEY\).*admin login will not work/is,
+  it('probes the app pod for adminReady after the app rollout, with no port-forward', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+
+    const probeIdx = cmdCalls.findIndex(isAdminProbe);
+    const rolloutIdx = cmdCalls.findIndex(
+      (a) => a[0] === 'kubectl' && a.includes('rollout') && a.includes('deployment/app'),
     );
-    // Never reached the port-forward — nothing to retry for a config problem.
-    expect(mockWaitForGotrueHealth).not.toHaveBeenCalled();
+    expect(probeIdx, 'admin-ready probe must run').toBeGreaterThan(-1);
+    expect(rolloutIdx).toBeGreaterThan(-1);
+    expect(probeIdx).toBeGreaterThan(rolloutIdx);
+    expect(cmdCalls.some((a) => a.includes('port-forward'))).toBe(false);
   });
 
-  it('throws naming only the ONE missing key when the rest are present', async () => {
+  it('ships the session secret and the admin credentials in vibecarbon-secrets', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
+    await applyK3sManifests(baseArgs(makeProjectDir()));
 
-    await expect(
-      applyK3sManifests({
-        ...baseArgs(projectDir),
-        envLocal: { ADMIN_EMAIL: 'a@b.test', ADMIN_PASSWORD: 'pw' }, // SUPABASE_SERVICE_ROLE_KEY missing
-      }),
-    ).rejects.toThrow(/Admin credentials missing \(SUPABASE_SERVICE_ROLE_KEY\)/);
+    const secret = stdinCalls.find((c) => c.data.includes('name: vibecarbon-secrets'));
+    expect(secret, 'vibecarbon-secrets apply missing').toBeDefined();
+    for (const key of ['BETTER_AUTH_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']) {
+      expect(secret?.data, key).toMatch(new RegExp(`\\b${key}:`));
+    }
   });
 });
 
@@ -1115,7 +1087,6 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   const TEST_VPC_CIDR = '10.20.0.0/16';

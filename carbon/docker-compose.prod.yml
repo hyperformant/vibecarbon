@@ -30,6 +30,11 @@ services:
       - DOCKER_API_PROXY=http://docker-socket-proxy:2375
       # Fail closed: without the secret the app cannot sign a session.
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET missing — vibecarbon create writes it to .env.local}
+      # The app creates its super admin from these at startup, and a deploy
+      # waits for it (src/server/auth/bootstrap-admin.ts). Required here so
+      # a missing value fails deploy's preflight, before anything is created.
+      - ADMIN_EMAIL=${ADMIN_EMAIL:?ADMIN_EMAIL missing — vibecarbon create writes it to .env.local}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD missing — vibecarbon create writes it to .env.local}
     labels:
       - "traefik.enable=true"
       # HTTP to HTTPS redirect (whole host — covers the Kong paths too)
@@ -324,13 +329,10 @@ services:
     # 0.0.0.0:8000 + 0.0.0.0:8443 publications survived into production,
     # exposing the unauthenticated Supabase gateway outside Traefik/TLS.
     #
-    # Bound to LOOPBACK rather than removed outright: createAdminUser reaches
-    # the gateway over `ssh -L <port>:localhost:8000` (compose/index.js), whose
-    # forward target resolves ON THE SERVER, so dropping the publication
-    # entirely breaks admin-user provisioning on every compose deploy
-    # (ExitOnForwardFailure=yes — it fails hard, it does not degrade).
-    # 127.0.0.1 keeps that path working while making the gateway unreachable
-    # externally regardless of firewall state. 8443 is dropped — nothing
+    # Bound to LOOPBACK: an operator can still reach the gateway on the box
+    # (or over `ssh -L <port>:localhost:8000`) while it stays unreachable
+    # externally regardless of firewall state. Deploys no longer tunnel to it
+    # (the app creates its own super admin). 8443 is dropped — nothing
     # tunnels to it, and public TLS terminates at Traefik.
     ports: !override
       - "127.0.0.1:8000:8000"

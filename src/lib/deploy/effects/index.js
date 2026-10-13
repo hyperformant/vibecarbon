@@ -487,21 +487,19 @@ async function runMigrations(ctx) {
 }
 
 /**
- * Create the production app super-admin via GoTrue's admin API. Shipped-bug
- * guard: the inlined path once skipped it, shipping a prod app the operator
- * couldn't log into. Idempotent (422 = exists). FATAL on failure (fast-follow
- * to M3 Task 9h, mirrors k3s.js#provisionAdminUser): createAdminUserRemote
- * now retries the whole auth-readiness + SSH-tunnel + POST flow under its own
- * budget and throws once exhausted, or throws immediately on missing admin
- * credentials — no soft `{success: false}` return remains to branch on here.
+ * Wait for the app to report its super admin ready. The app creates it at
+ * startup from ADMIN_EMAIL / ADMIN_PASSWORD in the bundled .env. Shipped-bug
+ * guard: a deploy once reported success with no admin, shipping a prod app
+ * the operator couldn't log into. FATAL on failure (waitForAdminReady throws
+ * with the app's log tail; mirrors k3s.js's awaitAppAdminReady).
  */
-async function createAdminUser(ctx) {
+async function waitAdminReady(ctx) {
   const { serverIp, sshKeyPath, projectConfig } = ctx;
-  const { createAdminUser: createAdminUserRemote } = await import('../compose/index.js');
-  const adminResult = await perfAsync('deploy.compose.createAdminUser', () =>
-    createAdminUserRemote(serverIp, sshKeyPath, projectConfig.projectName),
+  const { waitForAdminReady } = await import('../compose/index.js');
+  const result = await perfAsync('deploy.compose.waitAdminReady', () =>
+    waitForAdminReady(serverIp, sshKeyPath, projectConfig.projectName),
   );
-  p.log.success(adminResult.message);
+  p.log.success(result.message);
 }
 
 /**
@@ -628,7 +626,7 @@ export const EFFECTS = {
   updateDns,
   startComposeStack,
   runMigrations,
-  createAdminUser,
+  waitAdminReady,
   verifyHealth,
   verifyTlsReady,
   setupBackupCron,

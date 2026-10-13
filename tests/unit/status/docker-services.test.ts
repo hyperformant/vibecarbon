@@ -8,7 +8,7 @@ import {
 
 describe('classifyContainer', () => {
   it('maps a running container with a passing healthcheck to healthy', () => {
-    expect(classifyContainer('auth', 'running', 'Up 15 minutes (healthy)')).toEqual({
+    expect(classifyContainer('realtime', 'running', 'Up 15 minutes (healthy)')).toEqual({
       health: 'healthy',
       label: 'healthy',
       detail: '',
@@ -16,7 +16,7 @@ describe('classifyContainer', () => {
   });
 
   it('maps a running container with a failing healthcheck to unhealthy', () => {
-    expect(classifyContainer('auth', 'running', 'Up 15 minutes (unhealthy)')).toEqual({
+    expect(classifyContainer('realtime', 'running', 'Up 15 minutes (unhealthy)')).toEqual({
       health: 'unhealthy',
       label: 'unhealthy',
       detail: '',
@@ -128,7 +128,6 @@ function okFetch(status = 200) {
 
 const LETSGO_PS = [
   'letsgo-studio\trunning\tUp 15 minutes (healthy)',
-  'letsgo-auth\trunning\tUp 15 minutes (healthy)',
   'letsgo-realtime\trunning\tUp 15 minutes (healthy)',
   'letsgo-meta\trunning\tUp 15 minutes',
   'letsgo-app\trunning\tUp 15 minutes',
@@ -138,7 +137,7 @@ const LETSGO_PS = [
   'letsgo-traefik\trunning\tUp 15 minutes',
   // A different project sharing the host — must be ignored.
   'vibecarbon-kong\trunning\tUp 20 minutes (healthy)',
-  'vibecarbon-auth\trunning\tUp 20 minutes (healthy)',
+  'vibecarbon-app\trunning\tUp 20 minutes',
 ].join('\n');
 
 describe('checkDockerContainers', () => {
@@ -151,7 +150,6 @@ describe('checkDockerContainers', () => {
       'traefik',
       'db',
       'kong',
-      'auth',
       'rest',
       'realtime',
       'meta',
@@ -165,8 +163,8 @@ describe('checkDockerContainers', () => {
       label: 'exited',
       detail: 'Exited (128) 24 minutes ago',
     });
-    expect(rows.find((r) => r.container === 'auth')).toMatchObject({
-      name: 'Auth (GoTrue)',
+    expect(rows.find((r) => r.container === 'realtime')).toMatchObject({
+      name: 'Realtime',
       health: 'healthy',
     });
   });

@@ -844,10 +844,9 @@ export async function executeDeployment(args, gatheredConfig) {
     // failure runCommandAsync includes captured stdout/stderr in the
     // thrown error — operator still sees what went wrong.
     // Plumb VITE_* build args through to docker build so the browser bundle
-    // ships with real values for VITE_SUPABASE_URL etc. Without these the
+    // ships with real client config (VITE_PUBLIC_URL etc.). Without these the
     // Dockerfile's ARG VITE_* defaults to empty strings and Vite inlines
-    // empty values, causing the client-side supabase init to throw at
-    // page load. Mirrors what docker-compose.yml's build.args block does
+    // empty values into the bundle. Mirrors what docker-compose.yml's build.args block does
     // for local-dev `docker compose up --build`. See
     // src/lib/deploy/compose/build-args.js for the rationale.
     const { collectComposeBuildArgs, buildArgFlags } = await import('./compose/build-args.js');
@@ -911,8 +910,8 @@ export async function executeDeployment(args, gatheredConfig) {
     // wait. On a cold push deploy this is the dominant cost (~10 min).
     // Pass the VITE_* build args so ensureCIImageReady can seed them as repo
     // variables — the CI image bakes them at build time (Vite inlines them).
-    // Without this the GHCR image ships empty VITE_SUPABASE_* and the SPA
-    // crashes at page load. Mirrors the compose-local build-args path above.
+    // Without this the GHCR image ships empty client config (VITE_PUBLIC_URL,
+    // feature flags). Mirrors the compose-local build-args path above.
     const { collectComposeBuildArgs } = await import('./compose/build-args.js');
     const ciBuildArgs = collectComposeBuildArgs(process.cwd(), {
       projectName: projectConfig.projectName,

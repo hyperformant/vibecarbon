@@ -2,7 +2,7 @@
  * Unit tests for collectComposeBuildArgs + buildArgFlags.
  *
  * Verifies that VITE_* values flow through from .env.local into docker
- * --build-arg flags, with VITE_SUPABASE_URL + VITE_PROJECT_NAME rewritten
+ * --build-arg flags, with VITE_PUBLIC_URL + VITE_PROJECT_NAME rewritten
  * for production. Regression for vibecarbon.com 2026-05-19 where the
  * browser bundle shipped with empty VITE_* values.
  */
@@ -39,8 +39,7 @@ describe('collectComposeBuildArgs', () => {
     writeEnvLocal(
       [
         'VITE_PROJECT_NAME="my-app"',
-        'VITE_SUPABASE_URL="http://localhost:8000"',
-        'VITE_SUPABASE_ANON_KEY="anon-jwt"',
+        'VITE_PLAUSIBLE_DOMAIN="my-app.com"',
         'VITE_N8N_ENABLED="true"',
         'SUPABASE_URL="http://localhost:8000"', // not VITE_, must be excluded
         'DB_PASSWORD="secret"', // not VITE_, must be excluded
@@ -49,26 +48,20 @@ describe('collectComposeBuildArgs', () => {
     const args = collectComposeBuildArgs(tmpDir);
     expect(args).toEqual({
       VITE_PROJECT_NAME: 'my-app',
-      VITE_SUPABASE_URL: 'http://localhost:8000',
-      VITE_SUPABASE_ANON_KEY: 'anon-jwt',
+      VITE_PLAUSIBLE_DOMAIN: 'my-app.com',
       VITE_N8N_ENABLED: 'true',
     });
     expect(args).not.toHaveProperty('SUPABASE_URL');
     expect(args).not.toHaveProperty('DB_PASSWORD');
   });
 
-  it('rewrites VITE_SUPABASE_URL to the apex https://<domain> when domain is given', () => {
-    writeEnvLocal('VITE_SUPABASE_URL="http://localhost:8000"\nVITE_SUPABASE_ANON_KEY="k"');
-    const args = collectComposeBuildArgs(tmpDir, { domain: 'example.com' });
-    expect(args.VITE_SUPABASE_URL).toBe('https://example.com');
-    expect(args.VITE_SUPABASE_URL).not.toContain('api.');
-    expect(args.VITE_SUPABASE_ANON_KEY).toBe('k'); // unchanged
-  });
-
-  it('single-origin invariant: VITE_SUPABASE_URL equals VITE_PUBLIC_URL', () => {
+  // The browser talks only to the app's own origin (auth included, at
+  // /api/auth), so no gateway URL is synthesized into the bundle any more.
+  it('bakes no gateway URL into the client, even with a domain', () => {
     writeEnvLocal('VITE_PROJECT_NAME="x"');
     const args = collectComposeBuildArgs(tmpDir, { domain: 'example.com' });
-    expect(args.VITE_SUPABASE_URL).toBe(args.VITE_PUBLIC_URL);
+    expect(args).not.toHaveProperty('VITE_SUPABASE_URL');
+    expect(Object.keys(args).sort()).toEqual(['VITE_PROJECT_NAME', 'VITE_PUBLIC_URL']);
   });
 
   it('emits VITE_PUBLIC_URL as the apex domain (og: tags + sitemap) when domain is given', () => {
@@ -84,12 +77,6 @@ describe('collectComposeBuildArgs', () => {
     writeEnvLocal('VITE_PROJECT_NAME="dev-local"');
     const args = collectComposeBuildArgs(tmpDir, { projectName: 'my-real-project' });
     expect(args.VITE_PROJECT_NAME).toBe('my-real-project');
-  });
-
-  it('synthesizes VITE_SUPABASE_URL even when .env.local has no such key', () => {
-    writeEnvLocal('VITE_PROJECT_NAME="x"');
-    const args = collectComposeBuildArgs(tmpDir, { domain: 'foo.com' });
-    expect(args.VITE_SUPABASE_URL).toBe('https://foo.com');
   });
 
   it('passes other VITE_* feature flags through unchanged in prod context', () => {
@@ -114,46 +101,44 @@ describe('collectComposeBuildArgs', () => {
   // The client bundle must agree with the server runtime env: bundle.js ships
   // `.env` as the server baseline, so build-time VITE_* values must come from
   // `.env` when it has them. Regression for vibecarbon.com 2026-08-22: an
-  // .env.local migrated from another project baked that project's
-  // VITE_SUPABASE_ANON_KEY into the image while the server ran this project's
-  // JWT secret from .env — every browser auth call answered 401.
+  // .env.local migrated from another project baked that project's client key
+  // into the image while the server ran this project's secret from .env —
+  // every browser auth call answered 401.
   it('prefers a non-empty .env value over .env.local for the same VITE_ key', () => {
-    writeFileSync(join(tmpDir, '.env'), 'VITE_SUPABASE_ANON_KEY="prod-anon-jwt"\n');
-    writeEnvLocal('VITE_SUPABASE_ANON_KEY="old-project-anon-jwt"\n');
+    writeFileSync(join(tmpDir, '.env'), 'VITE_PLAUSIBLE_DOMAIN="prod-anon-jwt"\n');
+    writeEnvLocal('VITE_PLAUSIBLE_DOMAIN="old-project-anon-jwt"\n');
     const args = collectComposeBuildArgs(tmpDir);
-    expect(args.VITE_SUPABASE_ANON_KEY).toBe('prod-anon-jwt');
+    expect(args.VITE_PLAUSIBLE_DOMAIN).toBe('prod-anon-jwt');
   });
 
   it('falls back to .env.local for VITE_ keys empty or missing in .env', () => {
     writeFileSync(
       join(tmpDir, '.env'),
-      ['VITE_SUPABASE_ANON_KEY=""', 'VITE_PROJECT_NAME="my-app"'].join('\n'),
+      ['VITE_PLAUSIBLE_DOMAIN=""', 'VITE_PROJECT_NAME="my-app"'].join('\n'),
     );
-    writeEnvLocal(
-      ['VITE_SUPABASE_ANON_KEY="local-anon-jwt"', 'VITE_N8N_ENABLED="true"'].join('\n'),
-    );
+    writeEnvLocal(['VITE_PLAUSIBLE_DOMAIN="local-anon-jwt"', 'VITE_N8N_ENABLED="true"'].join('\n'));
     const args = collectComposeBuildArgs(tmpDir);
-    expect(args.VITE_SUPABASE_ANON_KEY).toBe('local-anon-jwt'); // empty in .env
+    expect(args.VITE_PLAUSIBLE_DOMAIN).toBe('local-anon-jwt'); // empty in .env
     expect(args.VITE_N8N_ENABLED).toBe('true'); // missing from .env
     expect(args.VITE_PROJECT_NAME).toBe('my-app');
   });
 
   it('collects VITE_ keys from .env alone when no .env.local exists', () => {
-    writeFileSync(join(tmpDir, '.env'), 'VITE_SUPABASE_ANON_KEY="prod-anon-jwt"\n');
+    writeFileSync(join(tmpDir, '.env'), 'VITE_PLAUSIBLE_DOMAIN="prod-anon-jwt"\n');
     const args = collectComposeBuildArgs(tmpDir);
-    expect(args.VITE_SUPABASE_ANON_KEY).toBe('prod-anon-jwt');
+    expect(args.VITE_PLAUSIBLE_DOMAIN).toBe('prod-anon-jwt');
   });
 });
 
 describe('buildArgFlags', () => {
   it('flattens a dict into alternating --build-arg / K=V tokens', () => {
     const flags = buildArgFlags({
-      VITE_SUPABASE_URL: 'https://example.com',
+      VITE_PUBLIC_URL: 'https://example.com',
       VITE_PROJECT_NAME: 'proj',
     });
     expect(flags).toEqual([
       '--build-arg',
-      'VITE_SUPABASE_URL=https://example.com',
+      'VITE_PUBLIC_URL=https://example.com',
       '--build-arg',
       'VITE_PROJECT_NAME=proj',
     ]);

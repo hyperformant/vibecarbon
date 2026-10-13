@@ -220,6 +220,9 @@ export function findEnvDrift(cwd = process.cwd()) {
  * present (see findMissingRequiredEnv).
  */
 export const COMPOSE_REQUIRED_ENV_FALLBACK = Object.freeze([
+  'ADMIN_EMAIL',
+  'ADMIN_PASSWORD',
+  'BETTER_AUTH_SECRET',
   'DB_ENC_KEY',
   'JWT_SECRET',
   'PG_META_CRYPTO_KEY',

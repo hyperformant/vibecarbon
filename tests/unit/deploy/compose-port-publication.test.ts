@@ -138,15 +138,10 @@ describe('compose overlays clear inherited port publications with !reset, never 
   });
 
   it('kong is bound to LOOPBACK in prod — never removed, never on 0.0.0.0', () => {
-    // Kong is a special case among the seven. It cannot simply lose its
-    // publication: createAdminUser reaches the gateway over
-    // `ssh -L <port>:localhost:8000` (compose/index.js), and an -L forward
-    // target resolves ON THE SERVER, so with nothing bound to the host's 8000
-    // the tunnel fails hard (ExitOnForwardFailure=yes) and admin-user
-    // provisioning breaks on every compose deploy.
-    //
-    // 127.0.0.1 satisfies both halves: the tunnel still works, and the
-    // gateway is unreachable from off-box no matter what the firewall says.
+    // Kong is a special case among the seven: it keeps a publication so an
+    // operator can reach the gateway on the box (or over
+    // `ssh -L <port>:localhost:8000`), but only on 127.0.0.1, so it is
+    // unreachable from off-box no matter what the firewall says.
     // `!override` (replace the list) rather than `!reset` (remove the key).
     const prod = readFileSync(join(repoRoot, 'carbon/docker-compose.prod.yml'), 'utf-8');
     const rawBlock = prod.split(/^ {2}kong:\s*$/m)[1]?.split(/\n {2}\w[\w-]*:\s*$/m)[0] ?? '';

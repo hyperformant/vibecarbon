@@ -128,8 +128,7 @@ export async function buildLocalImage(projectDir, options) {
   if (rebuild) args.push('--no-cache');
   // Vite inlines import.meta.env.VITE_* at build time, so the browser bundle
   // bakes whatever these ARGs resolve to. Without passing them the bundle ships
-  // empty VITE_SUPABASE_* and crashes at page load with "Missing Supabase
-  // environment variables" — k8s shipped exactly this because buildAppImage
+  // empty client config — k8s once shipped exactly this because buildAppImage
   // passed no build args (compose plumbs them via collectComposeBuildArgs).
   for (const [k, v] of Object.entries(buildArgs)) {
     if (v !== undefined && v !== null && v !== '') args.push('--build-arg', `${k}=${v}`);

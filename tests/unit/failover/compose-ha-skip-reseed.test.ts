@@ -40,7 +40,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     if (c.includes('pg_promote')) return 't'; // promotion succeeds
     if (c.includes('WALG_AUDIT')) return auditPayload; // backup audit verdict
     // new-primary app tier serves — the gate needs every labeled probe up
-    if (c.includes('%{http_code}')) return 'rest=200 auth=200';
+    if (c.includes('%{http_code}')) return 'rest=200';
     return '';
   };
   // See compose-ha-wireguard.test.ts: sshRunChecked calls the module-LOCAL
@@ -161,12 +161,13 @@ describe('failoverComposeHA — standby already streaming', () => {
     const restart = sshCalls.find((c) => c.command.includes('docker restart'));
     expect(restart, 'app-tier restart invocation missing').toBeDefined();
     expect(restart?.ip).toBe('2.2.2.2'); // the promoted standby
-    for (const svc of ['supavisor', 'auth', 'rest', 'realtime', 'app']) {
+    for (const svc of ['supavisor', 'rest', 'realtime', 'app']) {
       expect(restart?.command).toContain(`myapp-${svc}`);
     }
-    // The storage container no longer exists: naming it would make `docker
-    // restart` exit non-zero for the whole list.
+    // The storage and auth containers no longer exist: naming either would
+    // make `docker restart` exit non-zero for the whole list.
     expect(restart?.command).not.toContain('myapp-storage');
+    expect(restart?.command).not.toContain('myapp-auth');
     // The 3/3-failing shape must never come back.
     expect(sshCalls.some((c) => /docker compose restart(?! db)/.test(c.command))).toBe(false);
   });
@@ -283,12 +284,13 @@ describe('failoverComposeHA — standby already streaming', () => {
     );
     expect(stopIdx).toBeGreaterThanOrEqual(0);
     expect(demoteIdx).toBeGreaterThan(stopIdx);
-    for (const svc of ['supavisor', 'auth', 'rest', 'realtime', 'app']) {
+    for (const svc of ['supavisor', 'rest', 'realtime', 'app']) {
       expect(sshCalls[stopIdx].command).toContain(`myapp-${svc}`);
     }
     // A missing container makes `docker stop` exit non-zero, which reads as
     // the split-brain warning.
     expect(sshCalls[stopIdx].command).not.toContain('myapp-storage');
+    expect(sshCalls[stopIdx].command).not.toContain('myapp-auth');
     expect(sshCalls.some((c) => /docker compose stop app/.test(c.command))).toBe(false);
   });
 

@@ -355,6 +355,10 @@ export async function deployK8sGitOps(args) {
 export function buildPerEnvSecrets(envLocal) {
   const infra = {
     DB_PASSWORD: envLocal.DB_PASSWORD,
+    // The app's session signing key; the app pod envFrom's the Secret.
+    BETTER_AUTH_SECRET: envLocal.BETTER_AUTH_SECRET,
+    // Still read by the Supabase services that remain (Kong, Studio,
+    // Realtime, PostgREST); the app itself reads none of these three.
     JWT_SECRET: envLocal.JWT_SECRET,
     SUPABASE_ANON_KEY: envLocal.SUPABASE_ANON_KEY || envLocal.ANON_KEY,
     SUPABASE_SERVICE_ROLE_KEY: envLocal.SUPABASE_SERVICE_ROLE_KEY || envLocal.SERVICE_ROLE_KEY,

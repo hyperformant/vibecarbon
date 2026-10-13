@@ -410,8 +410,6 @@ async function addService(serviceName, options) {
   const variables = {
     PROJECT_NAME: project.projectName,
     DB_PASSWORD: envVars.POSTGRES_PASSWORD || envVars.DB_PASSWORD || '',
-    ANON_KEY: envVars.SUPABASE_ANON_KEY || '',
-    SERVICE_ROLE_KEY: envVars.SUPABASE_SERVICE_ROLE_KEY || '',
     DOMAIN: envVars.DOMAIN || 'localhost',
   };
 

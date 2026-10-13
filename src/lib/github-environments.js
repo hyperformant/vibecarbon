@@ -15,11 +15,11 @@
  * the session 2026-04-20 discussion:
  *   Org-level:       HETZNER_API_TOKEN, CLOUDFLARE_API_TOKEN,
  *                    S3_ACCESS_KEY, S3_SECRET_KEY
- *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, JWT_SECRET,
- *                    SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
- *                    REALTIME_SECRET, DB_ENC_KEY, VAULT_ENC_KEY,
- *                    PG_META_CRYPTO_KEY, LOGFLARE_API_KEY,
- *                    ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*
+ *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, BETTER_AUTH_SECRET,
+ *                    JWT_SECRET, SUPABASE_ANON_KEY,
+ *                    SUPABASE_SERVICE_ROLE_KEY, REALTIME_SECRET,
+ *                    DB_ENC_KEY, VAULT_ENC_KEY, PG_META_CRYPTO_KEY,
+ *                    LOGFLARE_API_KEY, ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*
  *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL, DNS_PROVIDER
  */
 
@@ -123,11 +123,11 @@ export async function seedOrgSecrets(providerCreds = {}) {
  * Seed repo-level GitHub Actions variables that the build workflow
  * (vibecarbon-build.yml) reads as `--build-arg` inputs. Vite inlines these
  * VITE_* values into the browser bundle at image-build time; without them the
- * CI-built GHCR image ships empty VITE_SUPABASE_* and crashes at page load
- * ("Missing Supabase environment variables").
+ * CI-built GHCR image ships empty client config (VITE_PUBLIC_URL, feature
+ * flags).
  *
- * These are non-secret build inputs (VITE_SUPABASE_ANON_KEY is a publishable
- * client key shipped to browsers), so they go to repo VARIABLES, not secrets.
+ * These are non-secret build inputs (everything VITE_* is shipped to
+ * browsers), so they go to repo VARIABLES, not secrets.
  * Repo-level (not per-environment) because vibecarbon-build.yml builds one
  * push-triggered image per repo — it reflects the most recent push-mode
  * deploy's domain/config. Multi-domain setups should use local-build deploys

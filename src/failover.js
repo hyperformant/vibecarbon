@@ -535,17 +535,11 @@ async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
 /**
  * Build the argv for a public-ingress probe against the promoted master. Uses
  * `--resolve <domain>:443:127.0.0.1` so the probe traverses the REAL public path
- * (traefik hostPort → kong/app) on the promoted node without waiting on DNS
+ * (traefik hostPort → app) on the promoted node without waiting on DNS
  * propagation — the DNS A record was flipped moments ago and the test runner's
  * resolver may still be cached. Mirrors compose/ha.js newPrimaryApiProbeCmd.
- *
- * `anonKey` (when known) is sent as the `apikey` header: kong's declarative
- * config runs a key-auth plugin on `/auth/v1/*`, so a keyless probe gets 401
- * from kong before GoTrue is reached and the auth half of the gate can never
- * confirm (2026-07-08 matrix: every k8s failover burned the full 300s budget
- * on "last auth=401"). Harmless on the un-gated app routes.
  */
-export function promotedProbeArgv(domain, path, anonKey) {
+export function promotedProbeArgv(domain, path) {
   return [
     'curl',
     '-sk',
@@ -557,58 +551,21 @@ export function promotedProbeArgv(domain, path, anonKey) {
     '5',
     '--resolve',
     `${domain}:443:127.0.0.1`,
-    ...(anonKey ? ['-H', `apikey: ${anonKey}`] : []),
     `https://${domain}${path}`,
   ];
 }
 
 /**
- * Read the anon key from the promoted cluster's own `vibecarbon-secrets`
- * Secret (the same key the app pods consume). Sourced from the cluster rather
- * than the local .env so failover works from any operator machine with SSH
- * access, even if the local project files drifted. Best-effort: returns ''
- * on any failure — the probe then runs keyless and the gate soft-fails
- * exactly as before, it just can't confirm the auth path.
- */
-export async function getPromotedAnonKey(ip, sshKeyPath, opts = {}) {
-  const { kubectl = sshKubectl } = opts;
-  try {
-    const b64 = await kubectl(
-      ip,
-      sshKeyPath,
-      [
-        'get',
-        'secret',
-        'vibecarbon-secrets',
-        '-n',
-        'vibecarbon',
-        '-o',
-        'jsonpath={.data.ANON_KEY}',
-      ],
-      // 15s cap (not sshRun's 120s default): this runs mid-failover against a
-      // possibly-sick apiserver, and a slow secret read must not stall the
-      // gate — '' falls back to a keyless probe.
-      { silent: true, timeout: 15_000 },
-    );
-    const raw = typeof b64 === 'string' ? b64.trim() : '';
-    if (!raw) return '';
-    return Buffer.from(raw, 'base64').toString('utf8').trim();
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Poll the promoted cluster's public API until it actually SERVES — the app
- * health endpoint (/api/health) AND an auth-path endpoint (/auth/v1/health)
- * both return 200 within a budget (k8s path-based routing → kong → gotrue).
+ * Poll the promoted cluster's public API until it actually SERVES — the app's
+ * liveness (/api/health) AND its readiness (/api/health/ready: the app answers
+ * against the promoted database) both return 200 within a budget. Auth runs
+ * inside the app on that database, so readiness is also "sign-in works".
  *
  * This is the k8s mirror of compose/ha.js waitForNewPrimaryApi: `vibecarbon
  * failover` returns via the skip-if-streaming fast path in ~44s (promotion ~9s),
- * but the promoted cluster's supabase services then spend a window
- * restarting/reconnecting — auth 502s and PostgREST serves schema-cache misses
- * against the (present!) tables. failover used to report "complete" straight
- * into that window and verify-failover (which does not retry) caught it.
+ * but the promoted cluster's pods then spend a window starting/reconnecting.
+ * failover used to report "complete" straight into that window and
+ * verify-failover (which does not retry) caught it.
  *
  * Best-effort, matching compose: returns false + a LOUD warning on timeout
  * rather than throwing — a not-yet-confirmed promoted API is still better than
@@ -620,14 +577,13 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
     runner = sshRun,
     poll = pollUntil,
     healthPath = '/api/health',
-    authPath = '/auth/v1/health',
-    anonKey = '',
+    readyPath = '/api/health/ready',
     initialDelayMs = 3000,
     maxDelayMs = 15_000,
   } = opts;
   let last = '';
   const codeOf = async (path) => {
-    const out = await runner(ip, sshKeyPath, promotedProbeArgv(domain, path, anonKey), {
+    const out = await runner(ip, sshKeyPath, promotedProbeArgv(domain, path), {
       silent: true,
       timeout: 12_000,
     });
@@ -639,9 +595,9 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
       last = `health=${health || 'none'}`;
       return false;
     }
-    const auth = await codeOf(authPath);
-    if (auth !== '200') {
-      last = `auth=${auth || 'none'}`;
+    const ready = await codeOf(readyPath);
+    if (ready !== '200') {
+      last = `ready=${ready || 'none'}`;
       return false;
     }
     return true;
@@ -651,7 +607,7 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
       budgetMs,
       initialDelayMs,
       maxDelayMs,
-      description: `promoted API to serve ${domain} (health + auth)`,
+      description: `promoted API to serve ${domain} (health + ready)`,
     });
     return true;
   } catch {
@@ -723,20 +679,11 @@ export async function gatePromotedApiReadiness(domain, promotedIp, sshKeyPath, s
     p.log.warn('No domain configured, skipping public API readiness probe');
     return;
   }
-  // The auth probe is kong-key-gated (see promotedProbeArgv); without the
-  // anon key the gate can never confirm and always times out.
-  const anonKey = await getPromotedAnonKey(promotedIp, sshKeyPath, { kubectl });
-  if (!anonKey) {
-    p.log.warn('Could not read ANON_KEY from the promoted cluster, auth probe will run keyless');
-  }
-  s.start('Waiting for promoted API to serve (health + auth)');
-  const ready = await waitForPromotedApiServing(domain, promotedIp, sshKeyPath, {
-    anonKey,
-    runner,
-  });
+  s.start('Waiting for promoted API to serve (health + ready)');
+  const ready = await waitForPromotedApiServing(domain, promotedIp, sshKeyPath, { runner });
   s.stop(
     ready
-      ? 'Promoted API serving (health + auth 200)'
+      ? 'Promoted API serving (health + ready 200)'
       : 'Promoted API not confirmed, proceeding (see warning)',
   );
 }
@@ -1954,7 +1901,7 @@ export async function run(args) {
 }
 
 // Exported for tests. (failoverHA, swapHaRoles, gatePromotedApiReadiness,
-// waitForPromotedApiServing, promotedProbeArgv, getPromotedAnonKey,
+// waitForPromotedApiServing, promotedProbeArgv,
 // preflightPilotFailover, provisionStandbyCapacity, and AbortProvisioningError
 // are exported inline at their definitions above.)
 export { getReplPasswordFromSecret, reseedAndPromoteOrAbort, reseedStandbyFromPrimary, SPEC };

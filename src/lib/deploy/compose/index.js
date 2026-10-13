@@ -6,16 +6,14 @@
  * Provisioning is Hetzner (automated): the HetznerProvider API creates the VPS.
  */
 
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
-import { parseDotenv } from '../../dotenv.js';
-import { buildHostKeyOpts, SSH_TUNNEL_NO_MUX_OPTS } from '../../host-keys.js';
+import { buildHostKeyOpts } from '../../host-keys.js';
 import { perfAsync, perfTimer } from '../../perf.js';
 import { pollUntil } from '../../retry.js';
 import { shEscape } from '../../shell.js';
@@ -25,7 +23,12 @@ import {
   runWithTransportRetry,
   sshRunScript,
 } from '../../ssh.js';
-import { postAdminUser, waitForGotrueHealth } from '../admin-user.js';
+import {
+  ADMIN_PROBE_EXIT,
+  adminNotReadyHint,
+  adminReadyProbeScript,
+  describeAdminProbeExit,
+} from '../admin-ready.js';
 // DNS_NOT_SETTLED_RETRY_DELAYS_MS: shared with remote-build.js's own
 // DNS-not-settled ladder so the two can't drift apart — see that file's
 // docstring on the constant for the sizing rationale.
@@ -831,7 +834,7 @@ async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 1
 /**
  * App-health probe backoff ramp (F4).
  *
- * verifyAppHealth runs LAST (after migrations + admin-user), so the app is
+ * verifyAppHealth runs LAST (after migrations + wait-admin-ready), so the app is
  * usually already serving and the very first probe passes. When it isn't, the
  * app typically binds :3000 within ~10-30s — probe fast (2s) for the first
  * few gaps so a fast-converging app is detected within ~2s instead of waiting
@@ -900,7 +903,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       if (out.endsWith('2xx')) {
         // App is serving, but Supabase services may still be warming up
         // their healthchecks. The e2e harness's verify-deploy probes
-        // auth/rest endpoints immediately after deploy returns — a 502
+        // rest/realtime endpoints immediately after deploy returns — a 502
         // from a service still 60s from healthy would fail otherwise-valid
         // deploys. Wait for all compose-managed services
         // with healthchecks to reach "healthy". Bounded: 3 min budget
@@ -943,6 +946,73 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
     `--- docker compose ps ---\n${ps.trim()}\n` +
     `--- app container log tail ---\n${logs.trim()}`;
   return { healthy: false, status: lastStatus, details };
+}
+
+/**
+ * Wait until the app reports its super admin ready (`adminReady: true` on
+ * its own /api/health). The app creates the admin at startup from
+ * ADMIN_EMAIL / ADMIN_PASSWORD, which reach the container through the
+ * bundled `.env` (env_file); the prod overlay refuses to start without them,
+ * and deploy's required-env preflight checks them before anything is
+ * provisioned. The probe runs inside the app container with its own `node`
+ * (see src/lib/deploy/admin-ready.js), so no tunnel or published port is
+ * involved.
+ *
+ * Polls on the same ramp as verifyAppHealth: the app starts with the stack,
+ * before migrations, and creates the admin a few seconds after the schema
+ * lands. Throws, with the app's log tail, if it never does: a deploy the
+ * operator cannot sign in to is not a successful deploy.
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ * @param {{attempts?: number, delayMs?: number, sshRun?: typeof sshRunAsync}} [options]
+ *   `sshRun` is a test seam (defaults to sshRunAsync).
+ * @returns {Promise<{message: string}>}
+ */
+export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {}) {
+  const { attempts = 18, delayMs, sshRun = sshRunAsync } = options;
+  const delayFor = (i) => delayMs ?? healthProbeDelayMs(i);
+  const remoteDir = `/opt/${projectName}`;
+  const scriptB64 = Buffer.from(adminReadyProbeScript()).toString('base64');
+  // `echo exit=$?` so the probe's own exit code reaches us as text whatever
+  // docker compose exec does with it.
+  const probeCmd = `cd ${remoteDir} && echo ${scriptB64} | base64 -d | docker compose exec -T app node - 2>&1; echo "exit=$?"`;
+
+  let lastCode = null;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, delayFor(i)));
+    try {
+      const out =
+        (await sshRun(ip, sshKeyPath, probeCmd, { timeout: 15_000, ignoreError: true })) || '';
+      const m = /exit=(\d+)\s*$/.exec(out.trim());
+      lastCode = m ? Number(m[1]) : null;
+      if (lastCode === ADMIN_PROBE_EXIT.READY) {
+        return { message: 'Super admin ready' };
+      }
+    } catch {
+      lastCode = null;
+    }
+  }
+
+  let logs = '';
+  try {
+    logs =
+      (await sshRun(
+        ip,
+        sshKeyPath,
+        `cd ${remoteDir} && docker compose logs --tail=40 app 2>&1 | tail -40`,
+        { timeout: 15_000, ignoreError: true },
+      )) || '';
+  } catch {
+    /* best effort */
+  }
+  throw new Error(
+    `The app did not report its super admin ready after ${attempts} probes ` +
+      `(last: ${describeAdminProbeExit(lastCode)}).\n` +
+      `${adminNotReadyHint(`ssh in, then: cd ${remoteDir} && docker compose logs app`)}\n` +
+      `--- app container log tail ---\n${logs.trim()}`,
+  );
 }
 
 /**
@@ -1468,480 +1538,4 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
 
   // 7. Bring the app back up
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start app`);
-}
-
-/**
- * Extract the admin credentials a deploy needs to provision the super-admin
- * out of a project `.env` file's text.
- *
- * `create` writes these with `formatDotenvLine` (src/lib/dotenv.js), so the
- * on-disk shape is whichever of bare / `"…"` / `'…'` the portable grammar
- * picked for each value. Decoding MUST go through `parseDotenv` — the reader
- * that grammar targets — or quote wrappers leak into the value and GoTrue
- * provisions a password the operator can never type.
- *
- * @param {string} envContent
- * @returns {{adminEmail?: string, adminPassword?: string, serviceRoleKey?: string}}
- */
-export function readAdminCredentials(envContent) {
-  const env = parseDotenv(envContent);
-  return {
-    adminEmail: env.ADMIN_EMAIL,
-    adminPassword: env.ADMIN_PASSWORD,
-    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// createAdminUser Phase B: the `ssh -N -L <local>:localhost:8000` tunnel to
-// Kong. Constants + helpers live at module scope so the tunnel's diagnostics
-// are greppable from a deploy log and unit-testable through createAdminUser's
-// injected `spawnImpl` seam.
-// ---------------------------------------------------------------------------
-
-/** Operator-side base port for the GoTrue admin tunnel. */
-const ADMIN_TUNNEL_BASE_PORT = 19876;
-/**
- * How many consecutive local ports the bind may walk before giving up. Ten
- * covers a full local e2e matrix several times over — the only producers of
- * concurrent compose admin tunnels on one machine.
- */
-const ADMIN_TUNNEL_PORT_WALK = 10;
-/** Bounded stderr tail kept per tunnel child. */
-const ADMIN_TUNNEL_STDERR_TAIL_LINES = 10;
-const ADMIN_TUNNEL_STDERR_TAIL_CHARS = 2000;
-/** Grace for a dying ssh child's stderr to flush when 'close' never arrives. */
-const ADMIN_TUNNEL_EXIT_FLUSH_MS = 500;
-/** OpenSSH's own wording for a local-forward bind collision. */
-const ADMIN_TUNNEL_BIND_CONFLICT =
-  /address already in use|cannot listen to port|could not request local forwarding/i;
-
-/**
- * Last-N-lines tail of an ssh child's stderr, bounded by chars first and then
- * lines so neither a chatty session nor one runaway line can paste a whole
- * log into a deploy error.
- *
- * @param {string} text
- * @returns {string}
- */
-function tailStderr(text) {
-  return text
-    .slice(-ADMIN_TUNNEL_STDERR_TAIL_CHARS)
-    .split('\n')
-    .slice(-ADMIN_TUNNEL_STDERR_TAIL_LINES)
-    .join('\n');
-}
-
-/**
- * Flatten a fetch rejection into one log-safe line.
- *
- * Node's fetch throws a bland `TypeError: fetch failed` and hides the part
- * that actually discriminates the failure (ECONNREFUSED = nothing listening
- * on the forwarded port, vs ETIMEDOUT / socket hang up = the tunnel is up but
- * Kong/GoTrue isn't answering) in `.cause`.
- *
- * @param {unknown} err
- * @returns {string}
- */
-function describeFetchError(err) {
-  if (!err) return 'no fetch error recorded';
-  if (!(err instanceof Error)) return String(err);
-  const cause = err.cause;
-  const detail = cause instanceof Error ? cause.message : cause ? String(cause) : '';
-  const code = (cause instanceof Error ? /** @type {any} */ (cause).code : undefined) ?? err.code;
-  let text = detail && detail !== err.message ? `${err.message} (${detail})` : err.message;
-  if (code && !text.includes(code)) text += ` [${code}]`;
-  return text;
-}
-
-/**
- * Open the Phase B admin tunnel, wrapped with the evidence its failure paths
- * need: a bounded stderr tail, the exit code/signal (or spawn error), and a
- * `settled` promise that resolves the moment the child dies.
- *
- * `ExitOnForwardFailure=yes` is what turns a local bind collision from a
- * SILENT failure into a classifiable one: a plain `ssh -N -L` whose bind
- * fails keeps the session alive with no forward, so the health poll below
- * just times out and the deploy blames an unreachable auth service (the
- * 2026-07-31 compose-ha warm-redeploy incident). stderr is PIPED for the same
- * reason — it is the only channel carrying ssh's own diagnosis, and the
- * previous `stdio: 'ignore'` discarded it.
- *
- * @param {object} args
- * @param {number} args.localPort
- * @param {string} args.serverIp
- * @param {string} args.sshKeyPath
- * @param {typeof spawn} args.spawnImpl
- */
-function openAdminTunnel({ localPort, serverIp, sshKeyPath, spawnImpl }) {
-  const child = spawnImpl(
-    'ssh',
-    [
-      // BEFORE the shared opts: OpenSSH takes the FIRST value obtained for
-      // each option (ssh_config(5)), so the opt-out must precede the shared
-      // opts' ControlMaster=auto or it is inert — run 31927810430 proved the
-      // appended form still muxed (a muxed -L tunnel races its forward
-      // registration through the shared master; run 31921730114 — every
-      // first attempt ECONNREFUSED).
-      ...SSH_TUNNEL_NO_MUX_OPTS,
-      // shell-safety-ignore: argv form (no shell); composeSshOpts() bakes in BatchMode=yes
-      ...composeSshOpts(sshKeyPath),
-      '-i',
-      sshKeyPath,
-      '-o',
-      'ExitOnForwardFailure=yes',
-      '-N',
-      '-L',
-      `${localPort}:localhost:8000`,
-      `root@${serverIp}`,
-    ],
-    { stdio: ['ignore', 'ignore', 'pipe'] },
-  );
-
-  let stderr = '';
-  /** @type {{code: number|null, signal: string|null}|null} */
-  let exitInfo = null;
-  /** @type {Error|null} */
-  let spawnError = null;
-  /** @type {ReturnType<typeof setTimeout>|null} */
-  let flushTimer = null;
-  let resolveSettled = () => {};
-  const settled = new Promise((resolve) => {
-    resolveSettled = resolve;
-  });
-  const finish = () => {
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = null;
-    resolveSettled();
-  };
-
-  child.stderr?.on?.('data', (chunk) => {
-    stderr = tailStderr(stderr + String(chunk));
-  });
-  // A spawn-level failure ('error', e.g. ENOENT) must not crash the deploy as
-  // an unhandled ChildProcess event — it stays folded into the same retry
-  // budget as any other reach failure, but now carries its message.
-  child.on('error', (err) => {
-    spawnError = err;
-    finish();
-  });
-  // Settle on 'close' where possible (stderr is flushed by then); 'exit' can
-  // fire with data still queued on the pipe. If 'close' never arrives, the
-  // grace timer settles anyway so an attempt can't hang waiting for it.
-  child.on('close', finish);
-  child.on('exit', (code, signal) => {
-    exitInfo = { code, signal };
-    if (!flushTimer) flushTimer = setTimeout(finish, ADMIN_TUNNEL_EXIT_FLUSH_MS);
-  });
-
-  return {
-    localPort,
-    /** Resolves once the child has died (never, for a healthy tunnel). */
-    settled,
-    get dead() {
-      return exitInfo !== null || spawnError !== null;
-    },
-    /** True when ssh's stderr names a local-forward bind collision. */
-    get bindConflict() {
-      return ADMIN_TUNNEL_BIND_CONFLICT.test(stderr);
-    },
-    /** One-line `ssh: …` clause for a deploy error / retry log line. */
-    describe() {
-      if (spawnError) return `ssh: spawn failed: ${spawnError.message}`;
-      const tail = stderr.trim().replace(/\s*\n\s*/g, ' / ');
-      let state;
-      if (exitInfo === null) state = 'still running';
-      else if (exitInfo.code === null || exitInfo.code === undefined)
-        state = `killed by ${exitInfo.signal ?? 'an unknown signal'}`;
-      else state = `exited ${exitInfo.code}${exitInfo.signal ? ` (${exitInfo.signal})` : ''}`;
-      return tail ? `ssh: ${state}; ${tail}` : `ssh: ${state}, no stderr`;
-    },
-    /** Idempotent teardown — safe to call on every exit path. */
-    close() {
-      try {
-        child.kill();
-      } catch {
-        // already gone
-      }
-      child.stderr?.destroy?.();
-      if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = null;
-    },
-  };
-}
-
-/**
- * Create the admin user in production Supabase via the GoTrue admin API.
- *
- * The user created during `vibecarbon create` only exists in the local Docker
- * Compose Supabase. Production needs its own admin user. The API returns 422
- * if the user already exists, making this idempotent.
- *
- * Fast-follow to M3 Task 9h (mirrors k3s.js#provisionAdminUser's fix, adapted
- * to compose's mechanics): a transient failure here used to log a warning
- * ("Run `vibecarbon deploy` again to retry") and let the deploy report
- * SUCCESS with no admin.users row — the exact bug class 9h killed on the k8s
- * path, on the path that actually runs production (vibecarbon.com is
- * compose, not k8s).
- *
- * Unlike k8s, compose has no upstream gate equivalent to `helm upgrade
- * --wait` (which already confirms GoTrue Available before
- * provisionAdminUser ever runs there): `startComposeStack` only waits for
- * `docker compose up -d` to CREATE the containers, and `verifyAppHealth` (the
- * closest thing to a readiness gate) runs LAST, AFTER this step. So the
- * auth-readiness poll below (Phase A) is folded into the retried unit rather
- * than treated as an already-guaranteed precondition the way k8s's
- * port-forward retry can be.
- *
- * Credentials-missing (no ADMIN_EMAIL/ADMIN_PASSWORD/SUPABASE_SERVICE_ROLE_KEY
- * resolvable from the project's `.env`, including a missing `.env` file) is
- * NOT retryable (there's nothing to poll for) and is NOT a soft return:
- * `create` always writes these into `.env`, and they're also
- * GH-Environment-managed CI secrets (see github-environments.js) — a real
- * customer CI run with a missing/misnamed secret hits this exact branch and
- * would otherwise ship the identical half-configured stack. Throws.
- *
- * @param {string} serverIp - IP of the server running Supabase
- * @param {string} sshKeyPath - Path to SSH private key
- * @param {string} projectName - Project name (for remote dir)
- * @param {{spawnImpl?: typeof spawn, fetchImpl?: typeof fetch}} [opts]
- *   (The former `retryDelaysMs` reach-and-provision ladder is removed —
- *   band-aid removal 2026-08-16. One attempt: the pg_isready gate closes the
- *   db-driven GoTrue 500s the ladder absorbed, Phase A still polls auth's own
- *   health up to ~52.5s, and Phase B owns per-attempt tunnel teardown. A
- *   genuinely wedged auth container fails the deploy loudly with per-phase
- *   diagnostics.)
- *
- *   `spawnImpl` / `fetchImpl` — injection seams for the `ssh -L` tunnel child
- *   and the health-poll fetch (same DI convention as admin-user.js's
- *   `fetchImpl`). Production callers omit both; tests inject fakes so the
- *   tunnel's diagnostics can be asserted without mocking `node:child_process`
- *   (builtin-module mocks are not reliably scoped per file under the parallel
- *   unit run — see compose-admin-user-retry.test.ts's header).
- * @returns {Promise<{success: boolean, message: string}>} resolves only on
- *   success (admin created, or already exists — idempotent).
- * @throws {Error} if required admin credentials are missing from `.env`, or
- *   if GoTrue stays unreachable (or the admin-user POST keeps failing)
- *   through the whole retry budget.
- */
-export async function createAdminUser(
-  serverIp,
-  sshKeyPath,
-  projectName,
-  { spawnImpl = spawn, fetchImpl = fetch } = {},
-) {
-  const envPath = join(process.cwd(), '.env');
-  const envContent = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
-  const { adminEmail, adminPassword, serviceRoleKey } = readAdminCredentials(envContent);
-
-  if (!adminEmail || !adminPassword || !serviceRoleKey) {
-    const missing = [
-      !adminEmail && 'ADMIN_EMAIL',
-      !adminPassword && 'ADMIN_PASSWORD',
-      !serviceRoleKey && 'SUPABASE_SERVICE_ROLE_KEY',
-    ].filter(Boolean);
-    throw new Error(
-      `Admin credentials missing (${missing.join(', ')}) — admin login will not work. Expected ` +
-        `as keys in the project's .env for a local deploy, or as the matching per-environment ` +
-        `GitHub Environment secret(s) for a CI deploy.`,
-    );
-  }
-
-  const remoteDir = `/opt/${projectName}`;
-  // The retry ladder that lived here is REMOVED (band-aid removal,
-  // 2026-08-16): its trigger — GoTrue answering /health but 500ing the admin
-  // POST while its DB session pool was refused — is closed at the source by
-  // the pg_isready gate below. One attempt; a failure is loud and carries the
-  // per-phase cause.
-  const attemptErrors = [];
-
-  // One attempt: wait for auth to answer its own health check (Phase A),
-  // then open a fresh SSH port-forward, wait for it to answer through Kong,
-  // POST the admin user, and always tear the tunnel down (Phase B). Mirrors
-  // k3s.js#provisionAdminUser's per-attempt tunnel lifecycle (open → use →
-  // teardown in `finally`) so a wedged tunnel from a failed attempt can't
-  // block the next attempt from re-opening the same localPort.
-  // Phase A0: gate on the DATABASE accepting connections before touching the
-  // app tier at all (mitigation-audit cluster 5, 2026-08-16). The GoTrue 500s
-  // the retry ladder below absorbs are db-driven: auth can answer its /health
-  // while its session pool is still refused by a mid-lifecycle Postgres.
-  // pg_isready exits 0 only when the server would accept a connection — the
-  // condition, polled once at the source instead of rediscovered per attempt.
-  // Bounded and non-fatal on exhaustion: the health/attempt machinery below
-  // remains the loud failure path with its richer diagnostics.
-  for (let i = 0; i < 30; i++) {
-    let ready = false;
-    try {
-      ready = Boolean(
-        await sshRunAsync(
-          serverIp,
-          sshKeyPath,
-          `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres -t 3`,
-          { silent: true },
-        ),
-      );
-    } catch {
-      // A probe transport error is "not ready yet", never a hard failure:
-      // Phase A below owns the loud diagnostics for a genuinely unreachable
-      // host, with three distinguishable outcomes this gate must not preempt.
-    }
-    if (ready) break;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-
-  const attemptOnce = async () => {
-    // Phase A: poll the auth container's own health endpoint directly over
-    // SSH exec (bypassing the tunnel) before spending a port on it. Short
-    // initial interval catches the fast path (GoTrue is typically healthy
-    // 15-25s after the stack starts); backs off after 5 tries so we're not
-    // hammering `docker compose exec` during a slow boot.
-    let authReady = false;
-    // What the LAST probe actually produced. Three outcomes are worth telling
-    // apart in the failure message: the SSH exec never ran (null — the hop
-    // itself is broken, not the container), the container answered with
-    // nothing (still booting / crash-looping), or something answered that
-    // isn't GoTrue.
-    let lastProbe = 'no probe ran';
-    for (let i = 0; i < 30; i++) {
-      const health = await sshRunAsync(
-        serverIp,
-        sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T auth wget -qO- http://localhost:9999/health 2>/dev/null || true`,
-        { timeout: 10_000, ignoreError: true },
-      );
-      if (health?.includes('GoTrue')) {
-        authReady = true;
-        break;
-      }
-      if (health === null || health === false) {
-        lastProbe = 'the SSH health probe itself failed (see the [retry] ssh lines above)';
-      } else {
-        const out = String(health).trim();
-        lastProbe = out
-          ? `last probe output: ${out.slice(-200)}`
-          : 'the auth container answered with nothing';
-      }
-      const interval = i < 5 ? 500 : 2000;
-      await new Promise((r) => setTimeout(r, interval));
-    }
-    if (!authReady) {
-      throw new Error(
-        `Auth service not ready; the docker compose health check never reported GoTrue ` +
-          `across 30 polls (${lastProbe})`,
-      );
-    }
-
-    // Phase B: create admin user via GoTrue admin API through an SSH
-    // port-forward. Uses native fetch to avoid shell escaping issues with
-    // special chars in passwords.
-    //
-    // The local port is WALKED (19876 → 19885) rather than pinned. A leaked
-    // tunnel from an earlier run — or a sibling compose deploy on the same
-    // operator machine, which the local e2e matrix produces by running
-    // compose and compose-ha concurrently — holds the base port, and every
-    // attempt then fails identically for a reason that has nothing to do
-    // with the server. Same bind-race resilience and same rationale as
-    // registry-push.js#openTunnelOrWalk: "ssh bound it" is the only truthful
-    // free-port signal, so probe-then-bind would just be a TOCTOU race.
-    // (k3s.js#provisionAdminUser deliberately does NOT walk: there the HA
-    // primary/standby pair provisions in parallel on adjacent fixed bases and
-    // a walk could step one cluster's retry onto the other's. The compose
-    // path has no such sibling — compose-ha provisions the admin on the
-    // PRIMARY only, one tunnel at a time.)
-    //
-    // A squatting tunnel is walked PAST, never pkill'd: the only pattern that
-    // would match it (`ssh.*-L.*<port>:localhost:8000`) matches a sibling
-    // deploy's LIVE forward just as well. Same call as registry-push.js.
-    const bindFailures = [];
-    for (let probe = 0; probe < ADMIN_TUNNEL_PORT_WALK; probe++) {
-      const localPort = ADMIN_TUNNEL_BASE_PORT + probe;
-      const tunnel = openAdminTunnel({ localPort, serverIp, sshKeyPath, spawnImpl });
-      try {
-        // Record the last health-poll fetch error through waitForGotrueHealth's
-        // existing `fetchImpl` seam. That helper returns a bare boolean by
-        // design (k3s.js reads it the same way), so wrapping the fetch here
-        // keeps the cause without changing a contract shared with the k8s path.
-        let lastFetchError = null;
-        const probeFetch = async (url, init) => {
-          // The tunnel is already gone; fail fast instead of spending the rest
-          // of the poll's budget fetching a closed port.
-          if (tunnel.dead) throw new Error('ssh tunnel exited');
-          try {
-            const res = await fetchImpl(url, init);
-            if (!res.ok) lastFetchError = new Error(`HTTP ${res.status} from ${url}`);
-            return res;
-          } catch (err) {
-            lastFetchError = err;
-            throw err;
-          }
-        };
-
-        // Race the reach poll against the tunnel's own death so a bind
-        // collision (or a rejected SSH connection) is classified immediately
-        // instead of after the poll burns its full ~7.5s budget.
-        const outcome = await Promise.race([
-          waitForGotrueHealth(`http://localhost:${localPort}/auth/v1/health`, {
-            attempts: 15,
-            intervalMs: 500,
-            fetchImpl: probeFetch,
-          }).then((ok) => (ok ? 'healthy' : 'unreachable')),
-          tunnel.settled.then(() => 'tunnel-died'),
-        ]);
-
-        if (outcome === 'tunnel-died' && tunnel.bindConflict) {
-          bindFailures.push(`port ${localPort}: ${tunnel.describe()}`);
-          progressLog(
-            `[compose] admin tunnel: local port ${localPort} is already bound ` +
-              `(${tunnel.describe()}), trying ${localPort + 1}.`,
-          );
-          continue;
-        }
-        if (outcome !== 'healthy') {
-          // Everything the next RCA needs, on one line: which port, what the
-          // last HTTP attempt actually said, and what ssh itself reported.
-          throw new Error(
-            `Could not reach auth service via SSH tunnel on localhost:${localPort} ` +
-              `(last error: ${describeFetchError(lastFetchError)}; ${tunnel.describe()})`,
-          );
-        }
-
-        // POST through Kong, which rewrites /auth/v1 → GoTrue's /.
-        const result = await postAdminUser({
-          adminUsersUrl: `http://localhost:${localPort}/auth/v1/admin/users`,
-          serviceRoleKey,
-          adminEmail,
-          adminPassword,
-        });
-        if (!result.success) {
-          throw new Error(result.message);
-        }
-        return result;
-      } finally {
-        // Every exit path — success, unreachable, POST failure, throw, and
-        // the `continue` above — reaps this attempt's tunnel.
-        tunnel.close();
-      }
-    }
-    throw new Error(
-      `Could not open an SSH tunnel to the GoTrue admin API on any local port in ` +
-        `[${ADMIN_TUNNEL_BASE_PORT}, ${ADMIN_TUNNEL_BASE_PORT + ADMIN_TUNNEL_PORT_WALK - 1}], ` +
-        `every candidate was already bound (a leaked tunnel from an earlier run, or a sibling ` +
-        `deploy on this machine). Errors: ${bindFailures.join(' | ')}`,
-    );
-  };
-
-  try {
-    return await attemptOnce();
-  } catch (err) {
-    attemptErrors.push(err instanceof Error ? err.message : String(err));
-    // Loud failure (fast-follow to M3 Task 9h): no warn-and-continue crutch.
-    // States what failed, the consequence, and what was attempted so the
-    // operator/CI log is actionable without re-running to discover it.
-    // Numbered per-attempt, same shape as k3s.js#provisionAdminUser /
-    // pushImageOverSshTunnel's exhausted-attempts errors.
-    throw new Error(
-      `GoTrue admin-user provisioning failed after ${attemptErrors.length} attempt${attemptErrors.length === 1 ? '' : 's'} — ` +
-        `admin login will not work. Errors: ${attemptErrors.map((m, i) => `[#${i + 1}] ${m}`).join(' | ')}`,
-    );
-  }
 }

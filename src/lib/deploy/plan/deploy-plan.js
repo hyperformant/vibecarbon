@@ -9,11 +9,9 @@
  * plan is a fixed sequence whose conditionals live in the steps' when-gates.
  */
 import {
-  createAdminUserStep,
   dockerhubLoginStep,
   ghcrLoginStep,
   haConfigureReplicationStep,
-  haCreateAdminUserStep,
   haFinalizeConfigStep,
   haK8sConfigureReplicationStep,
   haK8sFinalizeStep,
@@ -36,6 +34,7 @@ import {
   haStartComposeStackStep,
   haUpdateDnsStep,
   haVerifyStreamingStep,
+  haWaitAdminReadyStep,
   haWaitDockerReadyStep,
   haWaitForSshStep,
   haWaitPrimaryPostgresStep,
@@ -51,6 +50,7 @@ import {
   updateDnsStep,
   verifyHealthStep,
   verifyTlsReadyStep,
+  waitAdminReadyStep,
 } from './steps.js';
 
 /**
@@ -70,7 +70,7 @@ export function planDeploy(tier, _config) {
       updateDnsStep(),
       startComposeStackStep(),
       runMigrationsStep(),
-      createAdminUserStep(),
+      waitAdminReadyStep(),
       verifyHealthStep(),
       verifyTlsReadyStep(),
       setupBackupCronStep(),
@@ -96,7 +96,7 @@ export function planDeploy(tier, _config) {
       haUpdateDnsStep(),
       haStartComposeStackStep(),
       haRunMigrationsStep(),
-      haCreateAdminUserStep(),
+      haWaitAdminReadyStep(),
       haWaitPrimaryPostgresStep(),
       haWriteReplicationOverlayStep(),
       haConfigureReplicationStep(),

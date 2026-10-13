@@ -69,8 +69,8 @@
  *     required — the registry may never be LOOSER than the app schema).
  *
  * Keep this aligned with what `configure` writes (src/configure.js) and what
- * the app/auth services read (carbon/src/server/lib/env.ts + the GoTrue
- * `auth` service wiring in carbon/docker-compose.yml). Dependency-free on
+ * the app reads (carbon/src/server/lib/env.ts; auth runs inside the app, so
+ * every key here reaches it through its own environment). Dependency-free on
  * purpose so deploy code can import it without pulling in @clack/prompts.
  */
 
@@ -287,7 +287,7 @@ export const CONFIG_KEYS = [
     scope: 'billing',
   },
 
-  // ---- OAuth: Google (consumed by the GoTrue auth service) ----
+  // ---- OAuth: Google (read by the app's auth, carbon/src/server/auth/) ----
   {
     key: 'GOOGLE_ENABLED',
     class: 'runtime-config',
@@ -368,7 +368,7 @@ export const CONFIG_KEYS = [
     scope: 'oauth',
   },
 
-  // ---- SMTP / Email (shared by the app and the auth service) ----
+  // ---- SMTP / Email (auth emails and transactional emails, both sent by the app) ----
   // Canonical name is SMTP_PASS everywhere (app env.ts, compose, manifests).
   {
     key: 'SMTP_HOST',
@@ -436,23 +436,8 @@ export const CONFIG_KEYS = [
     kind: 'id',
     // Optional: a cosmetic default exists — carbon/src/server/lib/email.ts:40-42
     // falls back to plain SMTP_ADMIN_EMAIL as the From address when this is
-    // blank, and GOTRUE_SMTP_SENDER_NAME in docker-compose.yml/the k8s values
-    // default to empty. Never load-bearing.
+    // blank. Never load-bearing.
     optional: true,
-    where: '.env',
-    scope: 'smtp',
-  },
-  // Carries GoTrue's value directly (true = SKIP the confirmation email —
-  // compose env interpolation cannot negate, so no friendlier inverted
-  // name). The configure SMTP wizard writes it; deploy templates default
-  // to true because a false without working SMTP 500s every signup.
-  {
-    key: 'GOTRUE_MAILER_AUTOCONFIRM',
-    class: 'runtime-config',
-    feature: 'smtp',
-    kind: 'flag',
-    shape: TRUE_FALSE_SHAPE,
-    sample: 'true',
     where: '.env',
     scope: 'smtp',
   },

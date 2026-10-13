@@ -85,10 +85,10 @@ describeDocker('Docker Services Smoke Test', () => {
     let services: string[];
     if (traefikAvailable && fullStackAvailable) {
       // Full stack with Traefik and app
-      services = ['db', 'kong', 'auth', 'rest', 'realtime', 'meta', 'traefik', 'app'];
+      services = ['db', 'kong', 'rest', 'realtime', 'meta', 'traefik', 'app'];
     } else if (fullStackAvailable) {
       // Full Supabase stack without Traefik
-      services = ['db', 'kong', 'auth', 'rest', 'realtime', 'meta'];
+      services = ['db', 'kong', 'rest', 'realtime', 'meta'];
     } else {
       // Database only
       services = ['db'];
@@ -433,39 +433,6 @@ describeDocker('Docker Services Smoke Test', () => {
     });
   });
 
-  describe('GoTrue Auth', () => {
-    it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('auth');
-    });
-
-    it('health endpoint responds via Kong', async ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      // Auth health is available at /auth/v1/health through Kong
-      // Requires apikey header for Kong authentication
-      const headers = { apikey: projectEnv.SUPABASE_ANON_KEY || projectEnv.VITE_SUPABASE_ANON_KEY };
-      const healthy = await waitForHttpHealth('http://localhost:8000/auth/v1/health', {
-        timeout: 60000,
-        headers,
-        label: 'GoTrue health',
-      });
-      expect(healthy).toBe(true);
-    }, 60000);
-  });
-
   describe('Realtime', () => {
     it('container is running', ({ skip }) => {
       if (!realtimeAvailable) skip();
@@ -560,6 +527,29 @@ describeDocker('Docker Services Smoke Test', () => {
       });
       expect(response.ok).toBe(true);
     });
+
+    // Auth runs inside the app: there is no auth container. The app creates
+    // the super admin from ADMIN_EMAIL / ADMIN_PASSWORD once the schema exists
+    // (the Migrations block above applied it) and reports it on /api/health,
+    // the same flag every `vibecarbon deploy` waits for.
+    it('creates the super admin from ADMIN_EMAIL/ADMIN_PASSWORD (adminReady)', async ({ skip }) => {
+      if (!traefikAvailable) skip();
+      const deadline = Date.now() + 90_000;
+      let last = '';
+      while (Date.now() < deadline) {
+        try {
+          const response = await fetchWithTimeout('http://localhost/api/health', 5000, {
+            headers: { Host: 'localhost' },
+          });
+          last = response.body;
+          if (response.ok && JSON.parse(response.body).adminReady === true) break;
+        } catch {
+          // app still starting
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      expect(JSON.parse(last || '{}').adminReady, `last /api/health: ${last}`).toBe(true);
+    }, 120_000);
 
     it('serves the frontend via Traefik', async ({ skip }) => {
       if (!traefikAvailable) skip();

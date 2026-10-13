@@ -72,9 +72,12 @@ export const startComposeStackStep = () =>
 export const runMigrationsStep = () =>
   defineStep({ name: 'run-migrations', effect: 'runMigrations' });
 
-/** Create the production super-admin via GoTrue admin API (shipped-bug guard). */
-export const createAdminUserStep = () =>
-  defineStep({ name: 'create-admin-user', effect: 'createAdminUser' });
+/**
+ * Wait for the app to report its super admin ready: the app creates it at
+ * startup from ADMIN_EMAIL / ADMIN_PASSWORD (shipped-bug guard).
+ */
+export const waitAdminReadyStep = () =>
+  defineStep({ name: 'wait-admin-ready', effect: 'waitAdminReady' });
 
 /** Gate deploy success on the app's own /api/health probe. */
 export const verifyHealthStep = () => defineStep({ name: 'verify-health', effect: 'verifyHealth' });
@@ -98,7 +101,7 @@ export const setupBackupCronStep = () =>
 // These mirror, block-for-block, the operations the (now removed) inlined
 // `deployComposeHA` ran over the primary+standby pair, in order. Step NAMES
 // reuse the single-compose names where the operation is conceptually shared
-// (setup-server-files, start-compose-stack, run-migrations, create-admin-user,
+// (setup-server-files, start-compose-stack, run-migrations, wait-admin-ready,
 // update-dns, setup-backup-cron) so the read symmetry with the single plan is
 // visible; the EFFECTS are HA-specific (`ha*` registry keys) because they
 // fan out across two nodes and carry `deploy.ha.compose.*` perf labels — a
@@ -178,9 +181,9 @@ export const haStartComposeStackStep = () =>
 export const haRunMigrationsStep = () =>
   defineStep({ name: 'run-migrations', effect: 'haRunMigrations' });
 
-/** Create the production super-admin on the PRIMARY (shipped-bug guard). */
-export const haCreateAdminUserStep = () =>
-  defineStep({ name: 'create-admin-user', effect: 'haCreateAdminUser' });
+/** Wait for the PRIMARY's app to report its super admin ready (shipped-bug guard). */
+export const haWaitAdminReadyStep = () =>
+  defineStep({ name: 'wait-admin-ready', effect: 'haWaitAdminReady' });
 
 /** Poll the primary's Postgres until it accepts connections (pre-replication). */
 export const haWaitPrimaryPostgresStep = () =>

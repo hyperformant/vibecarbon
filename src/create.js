@@ -49,7 +49,6 @@ import {
   generateJWT,
   generatePassword,
   generateReplPassword,
-  hashPassword,
 } from './lib/secrets.js';
 import { projectPathFor, templatePathFor } from './lib/template-paths.js';
 import { createTracker } from './lib/tracker.js';
@@ -94,7 +93,6 @@ const PLACEHOLDERS = {
   SITE_URL: '{{SITE_URL}}',
   ADMIN_EMAIL: '{{ADMIN_EMAIL}}',
   ADMIN_PASSWORD: '{{ADMIN_PASSWORD}}',
-  ADMIN_PASSWORD_HASH: '{{ADMIN_PASSWORD_HASH}}',
 };
 
 // Placeholders that are NEVER substituted into checked-in template files at
@@ -104,14 +102,6 @@ const PLACEHOLDERS = {
 // secret into a file that lands in `git ls-files` and trips the preflight
 // secret-scan during the next `vibecarbon deploy` — the exact regression
 // fixed by this set (k8s/values/supabase.values.yaml ADMIN_PASSWORD).
-//
-// ADMIN_PASSWORD_HASH is intentionally NOT in this set: volumes/db/super-admin.sql
-// is a Postgres init script with no deploy-time substitution layer, so its
-// bcrypt hash must be substituted at create time for first-boot admin user
-// creation to work. The scanner does not match `password_hash :=` (its regex
-// requires `password\s*[:=]`, not `password_hash\s*:=`), so a hash leak there
-// is benign for the scanner. If a future template adds a hash to another
-// file, treat it as a separate fix.
 const SECRET_PLACEHOLDERS = new Set([
   'DB_PASSWORD',
   'JWT_SECRET',
@@ -781,7 +771,6 @@ async function bootstrap(cliArgs) {
     SITE_URL: 'http://localhost:5173',
     ADMIN_EMAIL: adminEmail,
     ADMIN_PASSWORD: adminPassword || '',
-    ADMIN_PASSWORD_HASH: adminPassword ? hashPassword(adminPassword) : '',
   };
 
   // Create project
@@ -1570,16 +1559,11 @@ ${formatDotenvLine('VITE_PROJECT_NAME', projectName)}
 # can re-substitute it into updated template files.
 ${formatDotenvLine('PROJECT_DISPLAY_NAME', variables.PROJECT_DISPLAY_NAME)}
 
-# Supabase URLs
+# Supabase services (Kong, Studio, Realtime, PostgREST). The app reads none of
+# these: auth runs inside the app and signs sessions with BETTER_AUTH_SECRET.
 ${formatDotenvLine('SUPABASE_URL', 'http://localhost:8000')}
-${formatDotenvLine('VITE_SUPABASE_URL', 'http://localhost:8000')}
-
-# Supabase Keys
 ${formatDotenvLine('SUPABASE_ANON_KEY', variables.ANON_KEY)}
-${formatDotenvLine('VITE_SUPABASE_ANON_KEY', variables.ANON_KEY)}
 ${formatDotenvLine('SUPABASE_SERVICE_ROLE_KEY', variables.SERVICE_ROLE_KEY)}
-
-# JWT Secret (for token generation)
 ${formatDotenvLine('JWT_SECRET', variables.JWT_SECRET)}
 
 # Signs the app's session cookies and auth tokens. Changing it signs everyone out.
@@ -1609,8 +1593,9 @@ ${formatDotenvLine('REPL_PASSWORD', variables.REPL_PASSWORD)}
 # ADMIN CREDENTIALS
 # =============================================================================
 
-# Admin user with dashboard access (created during project setup)
-# Note: Password stored here for your reference only. Database stores bcrypt hash.
+# The app creates this super admin the first time it starts (locally and on
+# every deploy) if the account doesn't exist yet. Changing the password here
+# later does not reset it: change it in the app instead.
 ${formatDotenvLine('ADMIN_EMAIL', variables.ADMIN_EMAIL)}
 ${formatDotenvLine('ADMIN_PASSWORD', variables.ADMIN_PASSWORD)}
 
@@ -1623,11 +1608,10 @@ ${formatDotenvLine('VITE_PUBLIC_URL', 'http://localhost:5173')}
 # =============================================================================
 # OAUTH PROVIDERS (optional)
 # =============================================================================
-# Self-hosted GoTrue reads these from the environment — docker-compose maps them
-# to GOTRUE_EXTERNAL_GOOGLE_* / GOTRUE_EXTERNAL_AZURE_*. They are NOT set in
-# Supabase Studio. Run \`vibecarbon configure\` (OAuth) to fill them in; deploy
-# ships them automatically. In the provider console (Google Cloud / Microsoft
-# Entra) set the authorized redirect URI to <SITE_URL>/auth/v1/callback.
+# The app reads these from its environment. Run \`vibecarbon configure\` (OAuth)
+# to fill them in; deploy ships them automatically. In the provider console
+# (Google Cloud / Microsoft Entra) set the authorized redirect URI to
+# <SITE_URL>/api/auth/callback/google or <SITE_URL>/api/auth/callback/microsoft.
 
 ${formatDotenvLine('GOOGLE_ENABLED', 'false')}
 ${formatDotenvLine('GOOGLE_CLIENT_ID', '')}
@@ -1646,19 +1630,15 @@ ${formatDotenvLine('MICROSOFT_TENANT_ID', '')}
 ${formatDotenvLine('STRIPE_SECRET_KEY', '')}
 ${formatDotenvLine('STRIPE_WEBHOOK_SECRET', '')}
 
-# SMTP Email (shared by Supabase Auth and app transactional emails)
+# SMTP Email (auth emails and transactional emails). While SMTP_HOST is empty,
+# signups need no email verification and auth emails are logged, not sent.
+# Once SMTP is set, new signups confirm their address before signing in.
 ${formatDotenvLine('SMTP_HOST', '')}
 ${formatDotenvLine('SMTP_PORT', '587')}
 ${formatDotenvLine('SMTP_USER', '')}
 ${formatDotenvLine('SMTP_PASS', '')}
 ${formatDotenvLine('SMTP_ADMIN_EMAIL', '')}
 ${formatDotenvLine('SMTP_SENDER_NAME', variables.PROJECT_DISPLAY_NAME)}
-# "true" auto-confirms signups WITHOUT a verification email (required while
-# SMTP is unset, or every signup errors on the unsendable message).
-# If you fill in SMTP_* by hand above, ALSO set GOTRUE_MAILER_AUTOCONFIRM=false
-# so signups get real confirmation emails. \`vibecarbon configure\` -> SMTP
-# sets both together automatically.
-${formatDotenvLine('GOTRUE_MAILER_AUTOCONFIRM', 'true')}
 
 # =============================================================================
 # ANALYTICS (optional - Plausible)

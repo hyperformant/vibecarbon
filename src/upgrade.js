@@ -74,7 +74,6 @@ const PLACEHOLDERS = {
   SITE_URL: '{{SITE_URL}}',
   ADMIN_EMAIL: '{{ADMIN_EMAIL}}',
   ADMIN_PASSWORD: '{{ADMIN_PASSWORD}}',
-  ADMIN_PASSWORD_HASH: '{{ADMIN_PASSWORD_HASH}}',
 };
 
 // Mirrors SECRET_PLACEHOLDERS in src/create.js — placeholders that must never
@@ -182,6 +181,25 @@ export function healShortVaultEncKey(cwd) {
   return true;
 }
 
+/**
+ * Give a project created before auth moved into the app the session signing
+ * key it now needs. The app refuses to start in production without
+ * BETTER_AUTH_SECRET (docker-compose.prod.yml `:?`, env.ts min 32), so an
+ * upgraded project that lacks one could not deploy. Written to BOTH .env.local
+ * (local dev) and .env (the file a deploy ships). Generating one is safe:
+ * no session exists that was signed with anything else.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {boolean} true when a secret was (or, under -dry, would be) written
+ */
+export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
+  const current = loadEnvVariables(cwd).BETTER_AUTH_SECRET || '';
+  if (current.length >= 32) return false;
+  if (!dryRun) setEnvVar('BETTER_AUTH_SECRET', generatePassword(64), cwd);
+  return true;
+}
+
 function reconstructVariables(cwd, { dryRun = false } = {}) {
   // Runs BEFORE the env is read below, so the reconstructed variables (and any
   // template rendered from them) see the healed value rather than the short
@@ -189,6 +207,13 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
   // `-dry` it reports what it would re-encode and writes nothing.
   repairLegacyEnvQuoting(cwd, { dryRun });
   healShortVaultEncKey(cwd);
+  if (ensureBetterAuthSecret(cwd, { dryRun })) {
+    p.log.info(
+      dryRun
+        ? 'Would add BETTER_AUTH_SECRET (the app now signs its own sessions)'
+        : 'Added BETTER_AUTH_SECRET to .env.local and .env (the app now signs its own sessions)',
+    );
+  }
   const env = loadEnvVariables(cwd);
   const manifest = loadManifest(cwd);
 
@@ -213,8 +238,6 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
     SITE_URL: env.SITE_URL || 'http://localhost:5173',
     ADMIN_EMAIL: env.ADMIN_EMAIL || '',
     ADMIN_PASSWORD: env.ADMIN_PASSWORD || '',
-    // ADMIN_PASSWORD_HASH can't be reconstructed, but only appears in NEVER files
-    ADMIN_PASSWORD_HASH: '',
   };
 
   return variables;
