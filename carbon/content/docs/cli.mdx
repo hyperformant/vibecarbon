@@ -415,6 +415,8 @@ Files are classified into three categories:
 - **Merge**: always shown for review (e.g. `docker-compose.yml`, `package.json`)
 - **Never**: your code, never touched (e.g. `src/**`, `supabase/**`, `.env`)
 
+A project created before sign-in moved into the app gets a `BETTER_AUTH_SECRET` in `.env.local` and `.env`, and `upgrade` warns you that a server you already deployed needs a fresh database: accounts are not carried over, and the old tables still point at the previous auth service. Run `vibecarbon backup` if you want a copy of the old data, then `vibecarbon destroy` and `vibecarbon deploy`.
+
 {/* BEGIN GENERATED: flags upgrade */}
 | Flag | Description |
 |------|-------------|

@@ -194,7 +194,10 @@ export function healShortVaultEncKey(cwd) {
  *
  * @param {string} cwd
  * @param {{dryRun?: boolean}} [opts]
- * @returns {boolean} true when a secret was (or, under -dry, would be) written
+ * @returns {'generated' | 'copied' | null} what was (or, under -dry, would
+ *   be) written: a new key ('generated', the sign the project predates
+ *   in-app auth), a valid key copied to the file that lacked it ('copied'),
+ *   or nothing (null)
  */
 export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
   const valid = (v) => typeof v === 'string' && v.length >= 32;
@@ -204,10 +207,44 @@ export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
   const base = hasBase
     ? parseDotenv(readFileSync(basePath, 'utf-8')).BETTER_AUTH_SECRET
     : undefined;
-  if (valid(local) && (!hasBase || valid(base))) return false;
-  const value = valid(local) ? local : valid(base) ? base : generatePassword(64);
-  if (!dryRun) setEnvVar('BETTER_AUTH_SECRET', value, cwd);
-  return true;
+  if (valid(local) && (!hasBase || valid(base))) return null;
+  const existing = valid(local) ? local : valid(base) ? base : null;
+  if (!dryRun) setEnvVar('BETTER_AUTH_SECRET', existing ?? generatePassword(64), cwd);
+  return existing ? 'copied' : 'generated';
+}
+
+/**
+ * What `upgrade` tells the user about BETTER_AUTH_SECRET. A generated key
+ * means the project predates in-app auth, and a database a server already
+ * runs for it can't carry over: sign-in accounts lived in the old auth
+ * service and are not migrated, and the old tables' user foreign keys still
+ * point at its schema. So that case also warns, with the commands that get
+ * a fresh database.
+ *
+ * @param {'generated' | 'copied' | null} status from ensureBetterAuthSecret
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {{info?: string, warn?: string}}
+ */
+export function betterAuthUpgradeNotes(status, { dryRun = false } = {}) {
+  if (!status) return {};
+  if (status === 'copied') {
+    return {
+      info: dryRun
+        ? 'Would copy BETTER_AUTH_SECRET into the .env file that lacks it'
+        : 'Copied BETTER_AUTH_SECRET into the .env file that lacked it, so local dev and deploys sign sessions with the same key',
+    };
+  }
+  return {
+    info: dryRun
+      ? 'Would add BETTER_AUTH_SECRET (the app now signs its own sessions)'
+      : 'Added BETTER_AUTH_SECRET to .env.local and .env (the app now signs its own sessions)',
+    warn:
+      'Sign-in now runs inside your app, so a server you already deployed needs a fresh database. ' +
+      'Accounts are not carried over, and the old tables still point at the previous auth service. ' +
+      'To keep a copy of the old data, run `vibecarbon backup` first. ' +
+      'Then `vibecarbon destroy` and `vibecarbon deploy` give you a fresh one. ' +
+      'Locally, `vibecarbon down` and say yes to deleting the data volumes, then start again.',
+  };
 }
 
 function reconstructVariables(cwd, { dryRun = false } = {}) {
@@ -217,13 +254,9 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
   // `-dry` it reports what it would re-encode and writes nothing.
   repairLegacyEnvQuoting(cwd, { dryRun });
   healShortVaultEncKey(cwd);
-  if (ensureBetterAuthSecret(cwd, { dryRun })) {
-    p.log.info(
-      dryRun
-        ? 'Would add BETTER_AUTH_SECRET (the app now signs its own sessions)'
-        : 'Added BETTER_AUTH_SECRET to .env.local and .env (the app now signs its own sessions)',
-    );
-  }
+  const authNotes = betterAuthUpgradeNotes(ensureBetterAuthSecret(cwd, { dryRun }), { dryRun });
+  if (authNotes.info) p.log.info(authNotes.info);
+  if (authNotes.warn) p.log.warn(authNotes.warn);
   const env = loadEnvVariables(cwd);
   const manifest = loadManifest(cwd);
 
