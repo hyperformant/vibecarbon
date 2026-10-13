@@ -38,6 +38,8 @@ const ADMIN_DB_ALLOWLIST: Record<string, string> = {
     "social-link hook: removes an unverified account's password and sessions (auth tables are server-only)",
   'auth/assurance.ts':
     'marks a session two-factor verified and counts wrong step-up codes (auth tables are server-only)',
+  'auth/forwardauth-token.ts':
+    'mints and resolves the hashed ForwardAuth token and its bound session (auth tables are server-only)',
   'auth/impersonation.ts':
     "reads an impersonation target's role to refuse super admins (auth tables are server-only)",
   'auth/sign-in-record.ts':

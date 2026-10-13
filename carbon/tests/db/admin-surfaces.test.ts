@@ -325,12 +325,81 @@ describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {
       expect(res.status).toBe(401);
     });
 
-    it('the raw session token is not a usable app session cookie', async () => {
+    const sessionTokenOf = async (userId: string) =>
+      (await db.query('select token from public.session where user_id = $1', [userId])).rows[0]
+        .token as string;
+    const tokenRows = (userId: string) =>
+      db
+        .query<{ identifier: string; expires_at: Date }>(
+          `select v.identifier, v.expires_at from public.verification v
+             join public.session s on s.id::text = v.value
+            where s.user_id = $1 and v.identifier like 'forwardauth:%'`,
+          [userId]
+        )
+        .then((r) => r.rows);
+
+    it('the cookie carries a dedicated token: never the session token, stored only as a hash', async () => {
       const admin = await superAdmin();
       await mint(admin.jar);
-      const token = admin.jar.cookies.get('vc-admin-token') as string;
-      const res = await get('/api/v1/me', `${SESSION_COOKIE}=${token}`);
-      expect(res.status).toBe(401);
+      const token = decodeURIComponent(admin.jar.cookies.get('vc-admin-token') as string);
+      const sessionToken = await sessionTokenOf(admin.id);
+      expect(token).not.toBe(sessionToken);
+      expect(token).not.toContain(sessionToken);
+      expect(sessionToken).not.toContain(token);
+      expect(Buffer.from(token, 'base64url')).toHaveLength(32);
+      // Useless against the app's own API.
+      expect((await get('/api/v1/me', `${SESSION_COOKIE}=${token}`)).status).toBe(401);
+      // One row for the session, 1 h, holding a hash and no raw token.
+      const rows = await tokenRows(admin.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].identifier).not.toContain(token);
+      expect(rows[0].identifier).toMatch(/^forwardauth:[0-9a-f]{64}$/);
+      expect(rows[0].expires_at.getTime() - Date.now()).toBeLessThanOrEqual(3600_000);
+      expect(rows[0].expires_at.getTime() - Date.now()).toBeGreaterThan(3500_000);
+    });
+
+    it('an expired token is refused', async () => {
+      const admin = await superAdmin();
+      await mint(admin.jar);
+      const cookie = admin.jar.only('vc-admin-token');
+      expect((await verify(cookie)).status).toBe(200);
+      await db.query(
+        `update public.verification set expires_at = now() - interval '1 second'
+          where identifier like 'forwardauth:%' and value = (select id::text from public.session where user_id = $1)`,
+        [admin.id]
+      );
+      expect((await verify(cookie)).status).toBe(401);
+    });
+
+    it('a revoked session takes its token with it', async () => {
+      const admin = await superAdmin();
+      await mint(admin.jar);
+      const cookie = admin.jar.only('vc-admin-token');
+      await db.query('delete from public.session where user_id = $1', [admin.id]);
+      expect((await verify(cookie)).status).toBe(401);
+    });
+
+    it('DELETE forgets the token and clears the cookie', async () => {
+      const admin = await superAdmin();
+      await mint(admin.jar);
+      const cookie = admin.jar.only('vc-admin-token');
+      const res = await send('DELETE', '/api/v1/admin/forwardauth-cookie', admin.jar);
+      expect(res.status).toBe(204);
+      expect(admin.jar.cookies.has('vc-admin-token')).toBe(false);
+      expect((await verify(cookie)).status).toBe(401);
+      expect(await tokenRows(admin.id)).toHaveLength(0);
+    });
+
+    it("minting again replaces the session's previous token", async () => {
+      const admin = await superAdmin();
+      await mint(admin.jar);
+      const first = admin.jar.only('vc-admin-token');
+      await mint(admin.jar);
+      const second = admin.jar.only('vc-admin-token');
+      expect(second).not.toBe(first);
+      expect((await verify(first)).status).toBe(401);
+      expect((await verify(second)).status).toBe(200);
+      expect(await tokenRows(admin.id)).toHaveLength(1);
     });
 
     it('a regular user gets no cookie', async () => {

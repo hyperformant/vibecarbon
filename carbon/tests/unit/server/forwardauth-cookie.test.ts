@@ -5,8 +5,17 @@ vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
 
-const { mfaOn } = vi.hoisted(() => ({ mfaOn: vi.fn(async () => false) }));
+const { mfaOn, mint, revoke } = vi.hoisted(() => ({
+  mfaOn: vi.fn(async () => false),
+  mint: vi.fn(async (_sessionId: string) => 'minted-forwardauth-token'),
+  revoke: vi.fn(async (_token: string) => undefined),
+}));
 vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: mfaOn }));
+vi.mock('@server/auth/forwardauth-token', () => ({
+  FORWARDAUTH_TTL_SECONDS: 3600,
+  mintForwardAuthToken: mint,
+  revokeForwardAuthToken: revoke,
+}));
 
 const { parentCookieDomain } = await import('@server/lib/cookie-domain');
 const { forwardAuthCookieRoutes } = await import('@server/routes/v1/forwardauth-cookie');
@@ -106,7 +115,9 @@ describe('POST /api/v1/admin/forwardauth-cookie', () => {
     expect(res.status).toBe(204);
     expect(await res.text()).toBe('');
     const cookie = res.headers.get('Set-Cookie') || '';
-    expect(cookie).toContain('vc-admin-token=the-session-token');
+    expect(cookie).toContain('vc-admin-token=minted-forwardauth-token');
+    expect(mint).toHaveBeenCalledWith('s1');
+    expect(cookie).not.toContain('the-session-token');
     expect(cookie).not.toContain('attacker-chosen');
     expect(cookie).toContain('HttpOnly');
     expect(cookie).toContain('SameSite=Lax');
@@ -129,6 +140,15 @@ describe('POST /api/v1/admin/forwardauth-cookie', () => {
 });
 
 describe('DELETE /api/v1/admin/forwardauth-cookie', () => {
+  it('forgets the token it carries', async () => {
+    const res = await appWithUser(null).request('/api/v1/admin/forwardauth-cookie', {
+      method: 'DELETE',
+      headers: { Cookie: 'vc-admin-token=old-token' },
+    });
+    expect(res.status).toBe(204);
+    expect(revoke).toHaveBeenCalledWith('old-token');
+  });
+
   it('clears the cookie', async () => {
     process.env.SITE_URL = 'https://example.com';
     const res = await appWithUser(null).request('/api/v1/admin/forwardauth-cookie', {

@@ -1,7 +1,7 @@
-import { makeSignature } from 'better-auth/crypto';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
-import { auth } from '../../auth';
+import { resolveForwardAuthToken } from '../../auth/forwardauth-token';
+import { dbErrorForLog } from '../../db/errors';
 import { logger } from '../../lib/logger';
 import { isMfaGloballyEnabled } from '../../lib/mfa-settings';
 import type { HonoVariables } from '../../types';
@@ -46,11 +46,12 @@ function getValidatedSiteUrl(): string {
  *   GET /api/_internal/verify-role?roles=editor,super_admin (any of these)
  *
  * Authentication: ONLY the HttpOnly `vc-admin-token` cookie, minted by
- * POST /api/v1/admin/forwardauth-cookie for super admins. It carries the
- * admin's session token (unsigned); this route signs it the way the auth
- * library signs its own session cookie and asks the auth API for the
- * session, from the database (never the session cache), so a signed-out,
- * revoked or banned session is refused at once. NOT accepted:
+ * POST /api/v1/admin/forwardauth-cookie for super admins. It carries a
+ * dedicated 1-hour ForwardAuth token (auth/forwardauth-token.ts), never a
+ * session token. This route looks the token up by its hash, then the
+ * session it is bound to, from the database every time (no cache, no
+ * refresh), so an expired or forgotten token, or a signed-out, revoked or
+ * banned session, is refused at once. NOT accepted:
  *   - the app's own session cookie (host-only; possession of it must never
  *     gate admin infra, and it is never sent to admin subdomains anyway);
  *   - `Authorization: Bearer` / `X-Forwarded-Access-Token`: no client holds
@@ -79,20 +80,6 @@ function getValidatedSiteUrl(): string {
  */
 
 const verifyRoleRoutes = new Hono<{ Variables: HonoVariables }>();
-
-/**
- * The request headers the auth API would see from a browser holding this
- * session: one cookie, the session token signed with the auth secret (the
- * library's own signing helper and cookie name, `__Secure-` prefix included
- * on https).
- */
-async function sessionCookieHeaders(token: string): Promise<Headers> {
-  const ctx = await auth.$context;
-  const signed = `${token}.${await makeSignature(token, ctx.secret)}`;
-  return new Headers({
-    cookie: `${ctx.authCookies.sessionToken.name}=${encodeURIComponent(signed)}`,
-  });
-}
 
 function isBanned(user: { banned?: boolean | null; banExpires?: Date | null }): boolean {
   if (!user.banned) return false;
@@ -139,12 +126,9 @@ verifyRoleRoutes.all('/', async (c) => {
   }
 
   try {
-    // Uncached (database) and without the sliding refresh: this check must
-    // see a revocation at once, and never extends the session.
-    const data = await auth.api.getSession({
-      headers: await sessionCookieHeaders(token),
-      query: { disableCookieCache: true, disableRefresh: true },
-    });
+    // From the database every time: a revocation counts at once, and the
+    // session is never extended from here.
+    const data = await resolveForwardAuthToken(token);
 
     if (!data || isBanned(data.user)) {
       logger.debug('verify-role: Invalid or ended session');
@@ -181,7 +165,7 @@ verifyRoleRoutes.all('/', async (c) => {
     logger.debug({ userId: user.id, userRole }, 'verify-role: Access granted');
     return c.text('OK', 200);
   } catch (err) {
-    logger.error({ error: err }, 'verify-role: Unexpected error');
+    logger.error({ err: dbErrorForLog(err) }, 'verify-role: Unexpected error');
     return c.text('Internal Server Error', 500);
   }
 });

@@ -232,14 +232,20 @@ describe('Session cookies: the split-cookie contract holds', () => {
     expect(verifyRole).not.toMatch(/header\(\s*['"](Authorization|X-Forwarded-Access-Token)['"]/i);
   });
 
-  it('verify-role reads the session uncached and never refreshes it', () => {
-    expect(verifyRole).toMatch(/disableCookieCache:\s*true,\s*disableRefresh:\s*true/);
+  it('verify-role resolves the dedicated ForwardAuth token, never a session cookie', () => {
+    expect(verifyRole).toContain('resolveForwardAuthToken(token)');
+    expect(verifyRole).not.toContain('getSession');
   });
 
-  it('the ForwardAuth cookie is HttpOnly and carries the server-side session token', () => {
+  it('the ForwardAuth cookie is HttpOnly and carries a dedicated token, never the session token', () => {
     expect(forwardAuthCookie).toMatch(/httpOnly:\s*true/);
-    expect(forwardAuthCookie).toContain('session.token');
+    expect(forwardAuthCookie).toContain('mintForwardAuthToken(session.id)');
+    expect(forwardAuthCookie).not.toContain('session.token');
     expect(forwardAuthCookie).not.toMatch(/header\(\s*['"]Authorization['"]/);
+    // Only the hash is stored.
+    const store = read('src/server/auth/forwardauth-token.ts');
+    expect(store).toContain("createHash('sha256')");
+    expect(store).toContain('randomBytes(32)');
   });
 
   it('impersonation goes through the auth API only (no app impersonation route)', () => {

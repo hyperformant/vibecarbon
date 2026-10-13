@@ -1,7 +1,14 @@
 import { Hono } from 'hono';
-import { deleteCookie, setCookie } from 'hono/cookie';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import {
+  FORWARDAUTH_TTL_SECONDS,
+  mintForwardAuthToken,
+  revokeForwardAuthToken,
+} from '../../auth/forwardauth-token';
+import { dbErrorForLog } from '../../db/errors';
 import { isSuperAdmin } from '../../lib/auth';
 import { parentCookieDomain } from '../../lib/cookie-domain';
+import { logger } from '../../lib/logger';
 import { requireAal2 } from '../../middleware/requireAal2';
 import type { HonoVariables } from '../../types';
 
@@ -9,16 +16,17 @@ import type { HonoVariables } from '../../types';
  * FORWARDAUTH ADMIN COOKIE (Super Admin only)
  *
  * SECURITY: vc-admin-token is the ONLY cookie /api/_internal/verify-role
- * accepts. It is HttpOnly (XSS cannot read it), lives 1 hour, and carries
- * the caller's own session token, taken server-side from the session the
- * middleware verified (never from the request body, never echoed in a
- * response body). Unsigned: verify-role signs it to look the session up,
- * so the value alone is not a usable app session cookie. Only super admins
- * ever receive it, from an aal2 session while MFA is globally on (the same
- * rule as Better Auth's admin endpoints), and never from an impersonation
+ * accepts. It is HttpOnly (XSS cannot read it), lives 1 hour, and carries a
+ * dedicated ForwardAuth token (auth/forwardauth-token.ts), never the
+ * session token: the parent-domain cookie reaches the admin tools behind
+ * ForwardAuth, so what it carries is good for verify-role only, for one
+ * hour, and only while the session it was minted from is alive. Minting
+ * again replaces the session's previous token. Only super admins ever
+ * receive it, from an aal2 session while MFA is globally on (the same rule
+ * as Better Auth's admin endpoints), and never from an impersonation
  * session. Regular users carry no domain-wide cookie at all. The SPA mints
  * it on load and sign-in (AuthProvider.syncAdminCookie) and clears it on
- * sign-out; signing out also ends the session it names. See spec
+ * sign-out (DELETE forgets the token too). See spec
  * 2026-07-24-session-cookie-split.
  */
 export const FORWARDAUTH_COOKIE = 'vc-admin-token';
@@ -31,7 +39,7 @@ function forwardAuthCookieOpts() {
     sameSite: 'Lax' as const,
     domain: parentCookieDomain(siteUrl),
     path: '/',
-    maxAge: 3600,
+    maxAge: FORWARDAUTH_TTL_SECONDS,
   };
 }
 
@@ -54,13 +62,28 @@ forwardAuthCookieRoutes.post(
   async (c) => {
     // biome-ignore lint/style/noNonNullAssertion: checked by the handler above
     const session = c.get('session')!;
-    // verify-role revalidates this session on every gated request.
-    setCookie(c, FORWARDAUTH_COOKIE, session.token, forwardAuthCookieOpts());
+    let token: string;
+    try {
+      token = await mintForwardAuthToken(session.id);
+    } catch (err) {
+      logger.error({ err: dbErrorForLog(err) }, 'Could not mint the ForwardAuth token');
+      return c.json({ error: 'Could not set the admin cookie' }, 500);
+    }
+    setCookie(c, FORWARDAUTH_COOKIE, token, forwardAuthCookieOpts());
     return c.body(null, 204);
   }
 );
 
 forwardAuthCookieRoutes.delete('/', async (c) => {
+  const token = getCookie(c, FORWARDAUTH_COOKIE);
+  if (token) {
+    try {
+      await revokeForwardAuthToken(token);
+    } catch (err) {
+      // The cookie still goes, and the token dies with its hour or session.
+      logger.warn({ err: dbErrorForLog(err) }, 'Could not forget the ForwardAuth token');
+    }
+  }
   deleteCookie(c, FORWARDAUTH_COOKIE, forwardAuthCookieOpts());
   return c.body(null, 204);
 });
