@@ -8,13 +8,13 @@ vi.mock('@server/lib/logger', () => ({
 const { mfaOn, mint, revoke } = vi.hoisted(() => ({
   mfaOn: vi.fn(async () => false),
   mint: vi.fn(async (_sessionId: string) => 'minted-forwardauth-token'),
-  revoke: vi.fn(async (_token: string) => undefined),
+  revoke: vi.fn(async (_args: { rawToken?: string | null; sessionId?: string | null }) => undefined),
 }));
 vi.mock('@server/lib/mfa-settings', () => ({ isMfaGloballyEnabled: mfaOn }));
 vi.mock('@server/auth/forwardauth-token', () => ({
   FORWARDAUTH_TTL_SECONDS: 3600,
   mintForwardAuthToken: mint,
-  revokeForwardAuthToken: revoke,
+  revokeForwardAuthTokens: revoke,
 }));
 
 const { parentCookieDomain } = await import('@server/lib/cookie-domain');
@@ -146,7 +146,16 @@ describe('DELETE /api/v1/admin/forwardauth-cookie', () => {
       headers: { Cookie: 'vc-admin-token=old-token' },
     });
     expect(res.status).toBe(204);
-    expect(revoke).toHaveBeenCalledWith('old-token');
+    expect(revoke).toHaveBeenCalledWith({ rawToken: 'old-token', sessionId: undefined });
+  });
+
+  it('with no cookie, forgets the caller session tokens', async () => {
+    revoke.mockClear();
+    const res = await appWithUser(superAdmin).request('/api/v1/admin/forwardauth-cookie', {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(204);
+    expect(revoke).toHaveBeenCalledWith({ rawToken: undefined, sessionId: 's1' });
   });
 
   it('clears the cookie', async () => {

@@ -427,6 +427,29 @@ describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {
       expect(await tokenRows(admin.id)).toHaveLength(2);
     });
 
+    it('DELETE forgets every token of the session, not just the cookie one', async () => {
+      const admin = await superAdmin();
+      await mint(admin.jar);
+      const first = admin.jar.only('vc-admin-token');
+      await mint(admin.jar);
+      const second = admin.jar.only('vc-admin-token');
+      expect(await tokenRows(admin.id)).toHaveLength(2);
+      expect((await send('DELETE', '/api/v1/admin/forwardauth-cookie', admin.jar)).status).toBe(204);
+      expect((await verify(first)).status).toBe(401);
+      expect((await verify(second)).status).toBe(401);
+      expect(await tokenRows(admin.id)).toHaveLength(0);
+    });
+
+    it('DELETE without the cookie still forgets the caller session tokens', async () => {
+      const admin = await superAdmin();
+      await mint(admin.jar);
+      const token = admin.jar.only('vc-admin-token');
+      admin.jar.cookies.delete('vc-admin-token');
+      expect((await send('DELETE', '/api/v1/admin/forwardauth-cookie', admin.jar)).status).toBe(204);
+      expect((await verify(token)).status).toBe(401);
+      expect(await tokenRows(admin.id)).toHaveLength(0);
+    });
+
     it('two concurrent mints both leave a working token, whichever response lands last', async () => {
       const admin = await superAdmin();
       const cookieOf = (res: Response) =>

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, eq, gt, like, lte, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, like, lte, sql } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { session as sessionTable, user as userTable, verification } from '../db/schema';
 
@@ -72,9 +72,44 @@ export async function mintForwardAuthToken(sessionId: string): Promise<string> {
   return raw;
 }
 
-/** Forget a token (DELETE /api/v1/admin/forwardauth-cookie). */
-export async function revokeForwardAuthToken(rawToken: string): Promise<void> {
-  await adminDb.delete(verification).where(eq(verification.identifier, identifierFor(rawToken)));
+/**
+ * Forget every ForwardAuth token of a session (DELETE
+ * /api/v1/admin/forwardauth-cookie, which every sign-out calls first). A
+ * session can hold two live tokens (see mintForwardAuthToken), so removing
+ * only the cookie's own would leave its sibling valid for up to an hour.
+ * The session is the one the cookie's token is bound to (expired or not),
+ * and/or the caller's own session, so either is enough.
+ */
+export async function revokeForwardAuthTokens({
+  rawToken,
+  sessionId,
+}: {
+  rawToken?: string | null;
+  sessionId?: string | null;
+}): Promise<void> {
+  const sessionIds = new Set<string>();
+  if (sessionId) sessionIds.add(sessionId);
+  await adminDb.transaction(async (tx) => {
+    if (rawToken) {
+      const [row] = await tx
+        .select({ value: verification.value })
+        .from(verification)
+        .where(eq(verification.identifier, identifierFor(rawToken)))
+        .limit(1);
+      if (row) sessionIds.add(row.value);
+      // The cookie's own row goes even if it names no known session.
+      await tx.delete(verification).where(eq(verification.identifier, identifierFor(rawToken)));
+    }
+    if (sessionIds.size === 0) return;
+    await tx
+      .delete(verification)
+      .where(
+        and(
+          like(verification.identifier, `${PREFIX}%`),
+          inArray(verification.value, [...sessionIds])
+        )
+      );
+  });
 }
 
 export type ForwardAuthIdentity = {

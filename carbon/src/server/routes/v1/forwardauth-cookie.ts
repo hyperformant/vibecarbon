@@ -3,7 +3,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import {
   FORWARDAUTH_TTL_SECONDS,
   mintForwardAuthToken,
-  revokeForwardAuthToken,
+  revokeForwardAuthTokens,
 } from '../../auth/forwardauth-token';
 import { dbErrorForLog } from '../../db/errors';
 import { isSuperAdmin } from '../../lib/auth';
@@ -76,9 +76,12 @@ forwardAuthCookieRoutes.post(
 
 forwardAuthCookieRoutes.delete('/', async (c) => {
   const token = getCookie(c, FORWARDAUTH_COOKIE);
-  if (token) {
+  const sessionId = c.get('session')?.id;
+  if (token || sessionId) {
     try {
-      await revokeForwardAuthToken(token);
+      // Every token of the session, not just the cookie's (a session can
+      // hold two); found from the cookie, the caller's session, or both.
+      await revokeForwardAuthTokens({ rawToken: token, sessionId });
     } catch (err) {
       // The cookie still goes, and the token dies with its hour or session.
       logger.warn({ err: dbErrorForLog(err) }, 'Could not forget the ForwardAuth token');
