@@ -19,6 +19,7 @@ import { logger } from './lib/logger';
 import { allowedOrigins } from './lib/origins';
 import { createRateLimiter } from './lib/rate-limiter';
 import { createSeoShell } from './lib/seo';
+import { applyAuthRateLimits } from './middleware/auth-rate-limits';
 import { crawlerTracking } from './middleware/crawler-tracking';
 import { csrfProtection } from './middleware/csrf';
 import { sessionMiddleware } from './middleware/session';
@@ -133,14 +134,10 @@ app.use('/api/v1/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 app.use('/api/health', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 app.use('/api/health/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 
-// Auth endpoints: the general budget, plus a strict per-IP cap on password
-// and magic-link sign-in on top of the per-(email, IP) account lockout. The
-// lockout is per email, so without this an attacker gets the whole budget of
-// cross-email credential stuffing (a fresh lockout bucket per email).
-// 10/15min/IP closes that without letting an attacker lock a victim out on
-// the victim's own IP.
-app.use('/api/auth/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
-app.use('/api/auth/sign-in/*', createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10 }));
+// Auth endpoints: a general budget plus strict per-IP caps on sign-in,
+// sign-up, password reset, verification email and second factor (see
+// middleware/auth-rate-limits.ts for each cap and why).
+applyAuthRateLimits(app);
 
 // Rate limiting for internal endpoints (higher threshold for infrastructure)
 // These are called by Traefik for auth verification on each request
