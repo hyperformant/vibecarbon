@@ -235,6 +235,7 @@ still untranslated. English cannot be removed: it is i18next's `fallbackLng`.
 
 | Table | Purpose |
 |-------|---------|
+| `user`, `session`, `account`, `verification`, `two_factor` | Auth (Better Auth). Server-only: RLS on with no policies, `app_user` has no privileges. `user.role = 'super_admin'` is the platform admin. Every `user_id` FK references `"user"(id)` |
 | `organizations` | Multi-tenant organizations (name, slug, plan) |
 | `memberships` | User-org relationships (role: OWNER, ADMIN, MEMBER) |
 | `customers` | Billing customer records (user or org, any provider) |
@@ -376,7 +377,8 @@ Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-spli
 - **MUST** enable RLS on every new table: `ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;`
 - **MUST** give every `UPDATE`/`INSERT` policy a `WITH CHECK` that mirrors the full scope of its `USING`. Postgres evaluates `USING` (which rows you may target) and `WITH CHECK` (what the row may become) **independently** — a `WITH CHECK` that drops the org/owner scope lets a user rewrite a row they can see into a tenant they cannot, a cross-tenant takeover. Never rely on the implicit `WITH CHECK = USING` default for a boundary column.
 - **MUST** use `(SELECT app.user_id())` in RLS policies, not bare `app.user_id()` — the subquery form prevents the query planner from re-evaluating per row. User requests run as role `app_user` with `app.user_id` set for the transaction (`NULL` when anonymous); `auth.uid()` is never set on that path, so a policy reading it silently matches nothing
-- **MUST** read roles in policies via `is_super_admin()`, which reads the caller's `app_metadata` role (`auth.users.raw_app_meta_data`), **never** `user_metadata` (user-writable)
+- **MUST** read roles in policies via `is_super_admin()`, which reads the caller's server-controlled `"user".role` (SECURITY DEFINER, since `app_user` cannot read the auth tables)
+- **NEVER** add a policy or grant for `app_user` on the auth tables (`user`, `session`, `account`, `verification`, `two_factor`): they hold password hashes, session tokens and TOTP secrets. Expose what a user may see through a server route
 - **MUST** `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated, app_user` on any `SECURITY DEFINER` function not meant for direct client RPC (functions get `app_user` EXECUTE by default privileges) — PostgREST exposes `public` functions at `/rest/v1/rpc/<name>`, and SECURITY DEFINER bypasses RLS
 - **MUST** use `SECURITY DEFINER` + `SET search_path = ''` on all helper functions used in RLS policies
 - **NEVER** disable RLS on existing tables

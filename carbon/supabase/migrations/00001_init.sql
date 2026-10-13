@@ -2,6 +2,7 @@
 -- Complete database schema with multi-tenancy, billing, notifications, and security
 --
 -- Tables:
+--   - user, session, account, verification, two_factor: Auth (server-only)
 --   - organizations: Multi-tenant organization management
 --   - memberships: User-organization relationships
 --   - customers: Stripe billing customers
@@ -88,6 +89,128 @@ END;
 $$;
 
 -- ============================================================================
+-- AUTH TABLES (user, session, account, verification, two_factor)
+-- ============================================================================
+-- The app's own accounts, written and read by Better Auth (drizzle adapter,
+-- server-side only, through adminDb). Column names follow Better Auth's
+-- generated schema in snake_case; ids are uuid with a database default
+-- (Better Auth runs with advanced.database.generateId: false) so every other
+-- table's `user_id UUID` foreign key points straight at "user"(id).
+-- `role`, `banned`, `ban_reason`, `ban_expires` and session.impersonated_by
+-- belong to the admin plugin; user.two_factor_enabled and the two_factor
+-- table to the twoFactor plugin. `onboarding_completed` and
+-- session.two_factor_verified are this app's additional fields.
+--
+-- These tables hold password hashes, session tokens, OAuth tokens and TOTP
+-- secrets. RLS is enabled with NO policies and every request role's
+-- privileges are revoked below: only the server's adminDb (BYPASSRLS) reads
+-- or writes them. Never add an app_user policy here; expose what a user may
+-- see through a server route instead.
+
+CREATE TABLE IF NOT EXISTS "user" (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  email_verified BOOLEAN DEFAULT FALSE NOT NULL,
+  image TEXT,
+  -- Admin plugin. 'super_admin' is the operator role is_super_admin() checks.
+  role TEXT,
+  banned BOOLEAN DEFAULT FALSE,
+  ban_reason TEXT,
+  ban_expires TIMESTAMPTZ,
+  two_factor_enabled BOOLEAN DEFAULT FALSE,
+  onboarding_completed BOOLEAN DEFAULT FALSE NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  ip_address TEXT,
+  user_agent TEXT,
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  impersonated_by UUID REFERENCES "user"(id) ON DELETE CASCADE,
+  two_factor_verified BOOLEAN DEFAULT FALSE NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_user_id ON session(user_id);
+CREATE INDEX IF NOT EXISTS idx_session_impersonated_by
+  ON session(impersonated_by)
+  WHERE impersonated_by IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS account (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  access_token TEXT,
+  refresh_token TEXT,
+  id_token TEXT,
+  access_token_expires_at TIMESTAMPTZ,
+  refresh_token_expires_at TIMESTAMPTZ,
+  scope TEXT,
+  password TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_user_id ON account(user_id);
+
+CREATE TABLE IF NOT EXISTS verification (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  identifier TEXT NOT NULL,
+  value TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_verification_identifier ON verification(identifier);
+
+CREATE TABLE IF NOT EXISTS two_factor (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  secret TEXT NOT NULL,
+  backup_codes TEXT NOT NULL,
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  verified BOOLEAN DEFAULT TRUE,
+  failed_verification_count INTEGER DEFAULT 0,
+  locked_until TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_two_factor_secret ON two_factor(secret);
+CREATE INDEX IF NOT EXISTS idx_two_factor_user_id ON two_factor(user_id);
+
+ALTER TABLE "user" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE session ENABLE ROW LEVEL SECURITY;
+ALTER TABLE account ENABLE ROW LEVEL SECURITY;
+ALTER TABLE verification ENABLE ROW LEVEL SECURITY;
+ALTER TABLE two_factor ENABLE ROW LEVEL SECURITY;
+
+-- Server-only: revoke every request role, including what the GRANT ON ALL
+-- TABLES above (re-run on every deploy) and the default privileges just gave
+-- app_user. anon/authenticated are the legacy PostgREST roles; metabase gets
+-- default SELECT on public tables when the analytics service is enabled.
+REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;
+DO $$
+DECLARE
+  r TEXT;
+BEGIN
+  FOREACH r IN ARRAY ARRAY['app_user', 'anon', 'authenticated', 'metabase'] LOOP
+    IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = r) THEN
+      EXECUTE format(
+        'REVOKE ALL ON TABLE public."user", public.session, public.account, public.verification, public.two_factor FROM %I',
+        r
+      );
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- ============================================================================
 -- ORGANIZATIONS TABLE
 -- ============================================================================
 
@@ -109,7 +232,7 @@ CREATE TABLE IF NOT EXISTS organizations (
 CREATE TABLE IF NOT EXISTS memberships (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   role TEXT DEFAULT 'MEMBER' CHECK (role IN ('OWNER', 'ADMIN', 'MEMBER')),
-  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
   updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
@@ -125,7 +248,7 @@ CREATE INDEX IF NOT EXISTS idx_memberships_organization_id ON memberships(organi
 
 CREATE TABLE IF NOT EXISTS customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES "user"(id) ON DELETE CASCADE,
   organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
   stripe_customer_id TEXT NOT NULL UNIQUE,
   email TEXT,
@@ -178,7 +301,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   action_label TEXT,
   action_url TEXT,
   is_active BOOLEAN DEFAULT true,
-  created_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_by UUID REFERENCES "user"(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
   updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
@@ -191,7 +314,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_org
   ON notifications(organization_id)
   WHERE organization_id IS NOT NULL;
 
--- Covering index for the created_by FK (avoids seq scans on auth.users deletes).
+-- Covering index for the created_by FK (avoids seq scans on "user" deletes).
 CREATE INDEX IF NOT EXISTS idx_notifications_created_by
   ON notifications(created_by)
   WHERE created_by IS NOT NULL;
@@ -199,7 +322,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_created_by
 CREATE TABLE IF NOT EXISTS notification_dismissals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   notification_id UUID NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   dismissed_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
   UNIQUE(notification_id, user_id)
 );
@@ -227,11 +350,11 @@ CREATE INDEX IF NOT EXISTS idx_failed_login_attempts_time
 CREATE TABLE IF NOT EXISTS app_settings (
   key TEXT PRIMARY KEY,
   value JSONB NOT NULL DEFAULT '{}'::jsonb,
-  updated_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  updated_by UUID REFERENCES "user"(id) ON DELETE SET NULL,
   updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
 
--- Covering index for the updated_by FK (avoids seq scans on auth.users deletes).
+-- Covering index for the updated_by FK (avoids seq scans on "user" deletes).
 CREATE INDEX IF NOT EXISTS idx_app_settings_updated_by
   ON app_settings(updated_by)
   WHERE updated_by IS NOT NULL;
@@ -312,10 +435,10 @@ AS $$
   WHERE c.organization_id IN (SELECT public.get_user_org_ids());
 $$;
 
--- Check if the current user is a super admin. The role lives in the user's
--- app_metadata (raw_app_meta_data: server-controlled, set via the service
--- role), NEVER user_metadata (user-writable). SECURITY DEFINER so app_user
--- needs no access to auth.users.
+-- Check if the current user is a super admin. The role is "user".role, which
+-- only the server sets (Better Auth's admin plugin; the column is not
+-- user-writable through any auth endpoint). SECURITY DEFINER because app_user
+-- has no privileges on "user" (see AUTH TABLES above).
 CREATE OR REPLACE FUNCTION is_super_admin()
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -325,10 +448,10 @@ SET search_path = ''
 AS $$
   SELECT COALESCE(
     (
-      SELECT u.raw_app_meta_data ->> 'role'
-      FROM auth.users u
+      SELECT u.role = 'super_admin'
+      FROM public."user" u
       WHERE u.id = (SELECT app.user_id())
-    ) = 'super_admin',
+    ),
     false
   );
 $$;

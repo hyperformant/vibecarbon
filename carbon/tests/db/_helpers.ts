@@ -62,23 +62,19 @@ export interface TestUser {
 }
 
 /**
- * Insert a user straight into auth.users (the connection role can). `appRole`
- * lands in raw_app_meta_data, the server-controlled metadata is_super_admin()
- * reads; `userMetaRole` lands in the user-writable raw_user_meta_data, which
- * must never grant anything.
+ * Insert a user straight into public."user" (the connection role can; app_user
+ * has no privileges on it). `role` is the server-controlled column
+ * is_super_admin() reads.
  */
 export async function createTestUser(
   client: pg.Client,
-  opts: { appRole?: string; userMetaRole?: string } = {},
+  opts: { role?: string } = {},
 ): Promise<TestUser> {
   const id = randomUUID();
   const email = `db-test-${id}@example.test`;
-  const appMeta = opts.appRole ? { role: opts.appRole } : {};
-  const userMeta = opts.userMetaRole ? { role: opts.userMetaRole } : {};
   await client.query(
-    `insert into auth.users (id, email, aud, role, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
-     values ($1, $2, 'authenticated', 'authenticated', $3::jsonb, $4::jsonb, now(), now())`,
-    [id, email, JSON.stringify(appMeta), JSON.stringify(userMeta)],
+    'insert into public."user" (id, name, email, role) values ($1, $2, $3, $4)',
+    [id, 'DB Test', email, opts.role ?? null],
   );
   return { id, email };
 }
@@ -118,6 +114,6 @@ export async function cleanupTestData(
     ]);
   }
   if (data.userIds.length) {
-    await client.query('delete from auth.users where id = any($1::uuid[])', [data.userIds]);
+    await client.query('delete from public."user" where id = any($1::uuid[])', [data.userIds]);
   }
 }

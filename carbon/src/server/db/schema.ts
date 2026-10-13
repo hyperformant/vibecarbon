@@ -30,6 +30,99 @@ const tz = { withTimezone: true, mode: 'string' } as const;
 const createdAt = () => timestamp('created_at', tz).defaultNow().notNull();
 const updatedAt = () => timestamp('updated_at', tz).defaultNow().notNull();
 
+// ---------------------------------------------------------------------------
+// Auth tables, read and written only by Better Auth's drizzle adapter (and
+// other server code through adminDb; app_user has no privileges on them).
+// The export names (user, session, account, verification, twoFactor) are
+// Better Auth's model names and its field names are the property keys, so the
+// adapter maps them without a rename table. Shape follows `npx auth generate`
+// for the admin + twoFactor plugins, with uuid ids defaulting in the database
+// (generateId: false) and timestamptz columns. As for every table here, the
+// SQL owns uniqueness and foreign keys. Timestamps use the default
+// `date` mode here because Better Auth reads and writes Date objects.
+// ---------------------------------------------------------------------------
+
+const authTz = { withTimezone: true } as const;
+const authCreatedAt = () => timestamp('created_at', authTz).defaultNow().notNull();
+const authUpdatedAt = () =>
+  timestamp('updated_at', authTz)
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull();
+
+export const user = pgTable('user', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+  emailVerified: boolean('email_verified').default(false).notNull(),
+  image: text('image'),
+  // admin plugin
+  role: text('role'),
+  banned: boolean('banned').default(false),
+  banReason: text('ban_reason'),
+  banExpires: timestamp('ban_expires', authTz),
+  // twoFactor plugin
+  twoFactorEnabled: boolean('two_factor_enabled').default(false),
+  // additional field
+  onboardingCompleted: boolean('onboarding_completed').default(false).notNull(),
+  createdAt: authCreatedAt(),
+  updatedAt: authUpdatedAt(),
+});
+
+export const session = pgTable('session', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  expiresAt: timestamp('expires_at', authTz).notNull(),
+  token: text('token').notNull(),
+  ipAddress: text('ip_address'),
+  userAgent: text('user_agent'),
+  userId: uuid('user_id').notNull(),
+  // admin plugin
+  impersonatedBy: uuid('impersonated_by'),
+  // additional field: true once this session passed a second factor
+  twoFactorVerified: boolean('two_factor_verified').default(false).notNull(),
+  createdAt: authCreatedAt(),
+  updatedAt: authUpdatedAt(),
+});
+
+export const account = pgTable('account', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: text('account_id').notNull(),
+  providerId: text('provider_id').notNull(),
+  userId: uuid('user_id').notNull(),
+  accessToken: text('access_token'),
+  refreshToken: text('refresh_token'),
+  idToken: text('id_token'),
+  accessTokenExpiresAt: timestamp('access_token_expires_at', authTz),
+  refreshTokenExpiresAt: timestamp('refresh_token_expires_at', authTz),
+  scope: text('scope'),
+  password: text('password'),
+  createdAt: authCreatedAt(),
+  updatedAt: authUpdatedAt(),
+});
+
+export const verification = pgTable('verification', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  identifier: text('identifier').notNull(),
+  value: text('value').notNull(),
+  expiresAt: timestamp('expires_at', authTz).notNull(),
+  createdAt: authCreatedAt(),
+  updatedAt: authUpdatedAt(),
+});
+
+export const twoFactor = pgTable('two_factor', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  secret: text('secret').notNull(),
+  backupCodes: text('backup_codes').notNull(),
+  userId: uuid('user_id').notNull(),
+  verified: boolean('verified').default(true),
+  failedVerificationCount: integer('failed_verification_count').default(0),
+  lockedUntil: timestamp('locked_until', authTz),
+});
+
+// ---------------------------------------------------------------------------
+// App tables
+// ---------------------------------------------------------------------------
+
 export const organizations = pgTable('organizations', {
   id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),

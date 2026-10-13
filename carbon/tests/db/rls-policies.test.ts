@@ -21,7 +21,7 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
   let userA: TestUser;
   let userB: TestUser;
   let superAdmin: TestUser;
-  let selfPromoted: TestUser;
+  let nearMiss: TestUser;
   let orgA: string;
   let orgB: string;
   const notificationIds: string[] = [];
@@ -32,8 +32,8 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
     db = await connectTestDb();
     userA = await createTestUser(db);
     userB = await createTestUser(db);
-    superAdmin = await createTestUser(db, { appRole: 'super_admin' });
-    selfPromoted = await createTestUser(db, { userMetaRole: 'super_admin' });
+    superAdmin = await createTestUser(db, { role: 'super_admin' });
+    nearMiss = await createTestUser(db, { role: 'admin' });
     orgA = await createOrgWithOwner(db, userA);
     orgB = await createOrgWithOwner(db, userB);
 
@@ -76,7 +76,7 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
       stripeCustomerId,
     ]);
     await cleanupTestData(db, {
-      userIds: [userA, userB, superAdmin, selfPromoted].filter(Boolean).map((u) => u.id),
+      userIds: [userA, userB, superAdmin, nearMiss].filter(Boolean).map((u) => u.id),
       orgIds: [orgA, orgB].filter(Boolean),
     });
     await db.end();
@@ -185,7 +185,7 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
     expect(asA.rowCount).toBe(0);
   });
 
-  it('super admin (raw_app_meta_data.role) reads every setting; app_metadata is the only source', async () => {
+  it('super admin ("user".role) reads every setting; nobody else does', async () => {
     const asAdmin = await asUser(db, superAdmin.id, (c) =>
       c.query<{ is_admin: boolean }>(
         'select public.is_super_admin() as is_admin, (select count(*) from public.app_settings where key = $1)::int as n',
@@ -204,11 +204,37 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
     );
     expect(anon.rows[0].is_admin).toBe(false);
 
-    // user_metadata is user-writable: a role there must grant nothing.
-    const selfSet = await asUser(db, selfPromoted.id, (c) =>
+    // Only the exact 'super_admin' role counts, not any admin-sounding one.
+    const other = await asUser(db, nearMiss.id, (c) =>
       c.query<{ is_admin: boolean }>('select public.is_super_admin() as is_admin'),
     );
-    expect(selfSet.rows[0].is_admin).toBe(false);
+    expect(other.rows[0].is_admin).toBe(false);
+  });
+
+  it('super admin passes the is_super_admin()-gated notification write policies; a member does not', async () => {
+    const insert = (c: pg.Client) =>
+      c.query(
+        "insert into public.notifications (title, visibility) values ('db-test admin write', 'all') returning id",
+      );
+    const asAdmin = await asUser(db, superAdmin.id, insert);
+    expect(asAdmin.rowCount).toBe(1);
+    await expect(asUser(db, userA.id, insert)).rejects.toThrow(/row-level security/);
+  });
+
+  it('app_user has no privileges on the auth tables, signed in or not', async () => {
+    for (const table of ['"user"', 'session', 'account', 'verification', 'two_factor']) {
+      for (const who of [superAdmin.id, userA.id, null]) {
+        await expect(
+          asUser(db, who, (c) => c.query(`select 1 from public.${table} limit 1`)),
+          `${table} as ${who ?? 'anonymous'}`,
+        ).rejects.toThrow(/permission denied/);
+      }
+    }
+    await expect(
+      asUser(db, userA.id, (c) =>
+        c.query('update public."user" set role = \'super_admin\' where id = $1', [userA.id]),
+      ),
+    ).rejects.toThrow(/permission denied/);
   });
 
   it('notifications: anonymous sees public-only, signed-in sees authenticated-only, org-scoped stays in its org', async () => {

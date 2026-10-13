@@ -61,14 +61,69 @@ describe('RLS: UPDATE WITH CHECK mirrors the org scope of USING', () => {
   });
 });
 
-describe('RLS: role checks read the server-controlled claim', () => {
-  it('is_super_admin reads app_metadata for app.user_id(), never the user-writable user_metadata', () => {
+describe('RLS: role checks read the server-controlled role column', () => {
+  it('is_super_admin reads "user".role for app.user_id(), SECURITY DEFINER with an empty search_path', () => {
     const fn = sql.match(/FUNCTION\s+(?:public\.)?is_super_admin[\s\S]*?\$\$;/i);
     expect(fn, 'is_super_admin not found').not.toBeNull();
     const body = fn?.[0] ?? '';
-    expect(body).toMatch(/raw_app_meta_data/);
+    expect(body).toMatch(/\brole\s*=\s*'super_admin'/);
+    expect(body).toMatch(/FROM\s+public\."user"/i);
     expect(body).toMatch(/app\.user_id\(\)/);
-    expect(body).not.toMatch(/user_meta/);
+    expect(body).toMatch(/SECURITY DEFINER/i);
+    expect(body).toMatch(/SET search_path = ''/i);
+    expect(body).not.toMatch(/auth\.users|meta_?data/i);
+  });
+});
+
+describe('Auth tables are server-only', () => {
+  // Password hashes, session tokens, OAuth tokens and TOTP secrets: only the
+  // server (adminDb, BYPASSRLS) may touch them. RLS on with no policies, and
+  // the request role's grants revoked, so neither a stray policy nor a
+  // blanket GRANT alone can expose them.
+  const AUTH_TABLES = ['"user"', 'session', 'account', 'verification', 'two_factor'];
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  it('no migration references the old auth.users table', () => {
+    expect(sql.replace(/--.*$/gm, '')).not.toMatch(/auth\.users/i);
+  });
+
+  it('enables RLS on every auth table and defines no policy on any', () => {
+    for (const t of AUTH_TABLES) {
+      expect(sql, `${t}: RLS not enabled`).toMatch(
+        new RegExp(`ALTER TABLE\\s+(?:public\\.)?${esc(t)}\\s+ENABLE ROW LEVEL SECURITY`, 'i'),
+      );
+      expect(sql, `${t}: has a policy`).not.toMatch(
+        new RegExp(`CREATE POLICY[^;]*\\bON\\s+(?:public\\.)?${esc(t)}[\\s;]`, 'i'),
+      );
+    }
+  });
+
+  it('revokes every auth table from PUBLIC and, per role, from app_user', () => {
+    const tableList =
+      'public."user", public.session, public.account, public.verification, public.two_factor';
+    expect(sql).toContain(`REVOKE ALL ON TABLE ${tableList} FROM %I`);
+    expect(sql).toMatch(/FOREACH r IN ARRAY ARRAY\['app_user'/);
+    expect(sql).toContain(
+      'REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;',
+    );
+  });
+
+  it('every former auth.users foreign key points at "user"(id)', () => {
+    for (const [table, column, onDelete] of [
+      ['memberships', 'user_id', 'CASCADE'],
+      ['customers', 'user_id', 'CASCADE'],
+      ['notifications', 'created_by', 'SET NULL'],
+      ['notification_dismissals', 'user_id', 'CASCADE'],
+      ['app_settings', 'updated_by', 'SET NULL'],
+    ]) {
+      const body = sql.match(
+        new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n\\);`, 'i'),
+      )?.[1];
+      expect(body, `${table} not found`).toBeDefined();
+      expect(body, `${table}.${column}`).toMatch(
+        new RegExp(`\\b${column} UUID[^,\\n]*REFERENCES "user"\\(id\\) ON DELETE ${onDelete}`),
+      );
+    }
   });
 });
 
