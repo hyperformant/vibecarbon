@@ -10,9 +10,9 @@
 - MUST enable RLS on every new table, with policies `TO app_user` reading `(SELECT app.user_id())`, and a `WITH CHECK` mirroring `USING` on every write policy
 - NEVER build SQL text from input: use Drizzle's query builder or the `sql` template (bound parameters), never `sql.raw()` with user input
 - MUST log database errors as `dbErrorForLog(err)`, never `err.message` (it carries the SQL and bound values)
-- MUST use `createAuthClient()` for `signInWithPassword()` — never the `supabaseAdmin` singleton
+- MUST read the signed-in user from the session middleware (`c.get('user')`, `c.get('session')`); check super admin with `isSuperAdmin(user)` from `src/server/lib/auth.ts`
 - NEVER return raw database errors to clients
-- NEVER expose `SUPABASE_SERVICE_ROLE_KEY` to the client
+- NEVER expose `BETTER_AUTH_SECRET` (or any server-only secret) to the client: nothing secret may carry a `VITE_` prefix
 
 ## Stack
 - Frontend: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4
@@ -43,10 +43,10 @@
 - New table: migration in `supabase/migrations/` (RLS + policies in the same file), then its Drizzle definition in `src/server/db/schema.ts`
 - Use `(SELECT app.user_id())` in RLS policies (not bare `app.user_id()`), so it is evaluated once per statement
 
-### Supabase (Auth only)
-- Client-side (`src/client/lib/supabase.ts`): sign-in and session only
-- Server-side (`src/server/lib/supabase.ts`): `supabaseAdmin.auth.admin.*` for user management; never `.from()`
-- Auth is handled by Supabase - don't implement custom auth
+### Auth (Better Auth, in-process)
+- Server: the auth instance lives in `src/server/auth/`, mounted at `/api/auth`; sessions are HttpOnly cookies
+- Client: use `useAuth()` from `src/client/components/auth/AuthProvider.tsx`; never handle tokens in page code
+- Don't build a parallel auth path: extend the existing auth instance (plugins, hooks) instead
 
 ### API Routes
 - Create in `src/server/routes/v1/`, mount in `src/server/index.ts`

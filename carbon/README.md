@@ -78,7 +78,7 @@ flowchart TD
 
 ## Features
 
-- **Auth**: Email/password, OAuth (Google, Microsoft, GitHub, Apple, Discord), magic links, MFA
+- **Auth**: Email/password, OAuth (Google, Microsoft), magic links, MFA
 - **Billing**: Multi-provider (Stripe, Paddle, Polar) subscriptions, checkout, portal, plan gating, webhooks
 - **Teams**: Multi-tenant organizations with RBAC (Owner, Admin, Member)
 - **Admin Panel**: User management, org management, notifications, jobs, contact, newsletter, impersonation, infrastructure dashboard

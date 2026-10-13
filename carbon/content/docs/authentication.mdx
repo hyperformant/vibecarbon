@@ -21,10 +21,10 @@ The `useAuth()` hook (from `AuthProvider`) exposes everything you need for auth 
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `user` | `User \| null` | Current Supabase user object |
-| `session` | `Session \| null` | Current session with tokens |
+| `user` | `User \| null` | Signed-in user (`id`, `email`, `name`, `image`, `role`) |
+| `session` | `Session \| null` | Current session (no tokens: it lives in an HttpOnly cookie) |
 | `isLoading` | `boolean` | `true` while session is being validated |
-| `isSuperAdmin` | `boolean` | User has `super_admin` role in `app_metadata` |
+| `isSuperAdmin` | `boolean` | User's `role` is `super_admin` |
 | `mfaRequired` | `boolean` | MFA is enforced app-wide (set by admin) |
 | `hasMfaEnabled` | `boolean` | Current user has enrolled a TOTP factor |
 | `signIn` | `object` | Sign-in methods (see below) |

@@ -130,7 +130,14 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
     ...yamlUnder('volumes/traefik'),
     ...yamlUnder('k8s'),
   ];
+  // YAML comments (`#`), for the routing files.
   const uncommented = (text: string) => text.replace(/^\s*#.*$/gm, '');
+  // TypeScript comments: block comments, and `//` to end of line when it
+  // starts a line or follows whitespace (so `https://` in a string stays).
+  // A commented-out `trustedOrigins: ['*']` must not trip the checks below,
+  // and a live one must not hide behind a `#`-only strip.
+  const uncommentedTs = (text: string) =>
+    text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
 
   it('nothing routes /auth/v1 (no external auth service behind any edge)', () => {
     expect(routingFiles).toContain('volumes/kong/kong.yml');
@@ -161,7 +168,7 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
 
   it('trustedOrigins is the exact-origin list, never a wildcard', () => {
     expect(authConfig).toContain('trustedOrigins: allowedOrigins()');
-    expect(uncommented(authConfig)).not.toMatch(/trustedOrigins:\s*\[?\s*['"`]\*/);
+    expect(uncommentedTs(authConfig)).not.toMatch(/trustedOrigins:\s*\[?\s*['"`]\*/);
     // allowedOrigins() refuses a glob in SITE_URL and CORS_ORIGINS.
     const origins = read('src/server/lib/origins.ts');
     expect(origins).toContain('/[*?]/.test(origin)');
@@ -179,10 +186,23 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
     expect(Number(m?.[1])).toBeGreaterThanOrEqual(8);
   });
 
+  it('the TS comment strip removes comments but keeps code and URLs', () => {
+    const src = [
+      '/* trustedOrigins: ["*"] */',
+      "// domain: 'example.com'",
+      "const u = 'https://example.com'; // domain: x",
+      'const live = 1;',
+    ].join('\n');
+    const out = uncommentedTs(src);
+    expect(out).not.toMatch(/trustedOrigins|domain:/);
+    expect(out).toContain("'https://example.com'");
+    expect(out).toContain('const live = 1;');
+  });
+
   it('the session cookie stays host-only (no parent-domain scope)', () => {
     // A parent-domain session cookie would reach every admin subdomain.
     expect(authConfig).not.toContain('crossSubDomainCookies');
-    expect(uncommented(authConfig)).not.toMatch(/\bdomain:/);
+    expect(uncommentedTs(authConfig)).not.toMatch(/\bdomain:/);
   });
 });
 
