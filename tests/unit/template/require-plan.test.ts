@@ -42,7 +42,7 @@ interface RequirePlanContext {
   billingConfigured: boolean;
   customer: { id: string } | null;
   // The resolved active/trialing subscription (the real middleware queries
-  // .in('status', ['active', 'trialing']), so anything returned is valid).
+  // inArray(subscriptions.status, ['active', 'trialing']), so anything returned is valid).
   subscription: { stripe_price_id: string; status: string } | null;
   priceIds: { starter?: string; pro?: string };
 }
@@ -313,7 +313,7 @@ describe('drift guards (carbon/ source)', () => {
 
   it('requirePlan resolves the current plan via planIdFromPriceId with provider price IDs', () => {
     const src = read('carbon/src/server/middleware/requirePlan.ts');
-    expect(src).toMatch(/planIdFromPriceId\(sub\.stripe_price_id, priceIds\)/);
+    expect(src).toMatch(/planIdFromPriceId\(sub\.stripePriceId, priceIds\)/);
     expect(src).toMatch(/getProviderPriceIds\(\)/);
     // No yearly price handling — yearly pricing was deferred.
     expect(src).not.toMatch(/yearly/i);
@@ -321,7 +321,7 @@ describe('drift guards (carbon/ source)', () => {
 
   it('the active-plan query includes trialing subscriptions', () => {
     const src = read('carbon/src/server/middleware/requirePlan.ts');
-    expect(src).toMatch(/\.in\('status', \['active', 'trialing'\]\)/);
+    expect(src).toMatch(/inArray\(subscriptions\.status, \['active', 'trialing'\]\)/);
   });
 
   it('provider price IDs are starter/pro only (no yearly variants)', () => {

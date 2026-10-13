@@ -178,7 +178,7 @@ app.use(
   })
 );
 
-// Supabase session middleware - inject user and client into context
+// Session middleware - verify the bearer token and inject the user into context
 // Skip for health endpoint (no auth needed, avoids unnecessary getUser() call)
 app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/health' || c.req.path === '/api/health/ready') {
@@ -189,15 +189,14 @@ app.use('/api/*', async (c, next) => {
   }
 
   const authHeader = c.req.header('Authorization');
-  const supabase = getSupabaseClient(authHeader);
-  c.set('supabase', supabase);
-
-  // Verify the JWT and get user info
+  // Verify the JWT and get user info. This client is for auth.getUser() only;
+  // data goes through db/client.ts (withUserDb / adminDb).
   if (authHeader?.startsWith('Bearer ')) {
+    const authClient = getSupabaseClient(authHeader);
     const {
       data: { user },
       error,
-    } = await supabase.auth.getUser();
+    } = await authClient.auth.getUser();
     if (!error && user) {
       c.set('user', user);
       // Token signature already verified by getUser() above — safe to read claims.

@@ -1,22 +1,20 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { planIdFromPriceId, plans } from '../../../shared/pricing';
 import { getBillingProvider, getProviderPriceIds, isBillingConfigured } from '../../billing';
+import { adminDb } from '../../db/client';
+import { customers, organizations, subscriptions } from '../../db/schema';
+import { isoTimestamp } from '../../db/values';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { createRateLimiter } from '../../lib/rate-limiter';
-import { supabaseAdmin } from '../../lib/supabase';
 import { requireAal2 } from '../../middleware/requireAal2';
 import { requireOrgRole } from '../../middleware/requireOrgRole';
 import type { HonoVariables } from '../../types';
 
 // Organization billing actions require an owner/admin of the target org.
 const ORG_BILLING_ROLES = ['OWNER', 'ADMIN'];
-
-// Helper to access tables not yet in generated types
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
 
 const billingRoutes = new Hono<{ Variables: HonoVariables }>();
 
@@ -82,40 +80,43 @@ async function getOrCreateCustomer(
 ): Promise<{ customerId: string; providerCustomerId: string }> {
   const provider = getBillingProvider();
 
-  // Build query based on type
-  const query = adminDb.from('customers').select('id, stripe_customer_id');
-
-  if (type === 'user') {
-    query.eq('user_id', userId).is('organization_id', null);
-  } else {
-    if (!organizationId) {
-      throw new Error('Organization ID is required for organization billing');
-    }
-    query.eq('organization_id', organizationId).is('user_id', null);
+  if (type === 'organization' && !organizationId) {
+    throw new Error('Organization ID is required for organization billing');
   }
 
-  const { data: existingCustomer, error: fetchError } = await query.maybeSingle();
+  // The customer row for this user (personal) or organization
+  const owner =
+    type === 'user'
+      ? and(eq(customers.userId, userId), isNull(customers.organizationId))
+      : and(eq(customers.organizationId, organizationId as string), isNull(customers.userId));
 
-  if (fetchError) {
-    throw new Error(`Failed to fetch customer: ${fetchError.message}`);
+  let existingCustomer: { id: string; stripeCustomerId: string } | undefined;
+  try {
+    [existingCustomer] = await adminDb
+      .select({ id: customers.id, stripeCustomerId: customers.stripeCustomerId })
+      .from(customers)
+      .where(owner)
+      .limit(1);
+  } catch (fetchError) {
+    throw new Error(`Failed to fetch customer: ${(fetchError as Error).message}`);
   }
 
   // Return existing customer if found
   if (existingCustomer) {
     return {
       customerId: existingCustomer.id,
-      providerCustomerId: existingCustomer.stripe_customer_id,
+      providerCustomerId: existingCustomer.stripeCustomerId,
     };
   }
 
   // Get organization name if applicable
   let customerName = email;
   if (type === 'organization' && organizationId) {
-    const { data: org } = await adminDb
-      .from('organizations')
-      .select('name')
-      .eq('id', organizationId)
-      .single();
+    const [org] = await adminDb
+      .select({ name: organizations.name })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId))
+      .limit(1);
     if (org) {
       customerName = org.name;
     }
@@ -135,39 +136,29 @@ async function getOrCreateCustomer(
   // Create database record
   // NOTE: stripe_customer_id column stores the provider's customer ID regardless
   // of which provider is active. The column name is kept for backward compatibility.
-  // Single explicit shape (not a discriminated union of two object literals):
-  // PostgREST's insert overload rejects the union because the org branch's
-  // `user_id?: undefined` is incompatible with the user branch's `user_id: string`.
-  // `organizationId` is guaranteed defined in the org path by the guard above.
-  const insertData: {
-    user_id?: string;
-    organization_id?: string;
-    stripe_customer_id: string;
-    email: string;
-  } =
-    type === 'user'
-      ? { user_id: userId, stripe_customer_id: providerCustomerId, email }
-      : { organization_id: organizationId, stripe_customer_id: providerCustomerId, email };
-
-  const { data: newCustomer, error: insertError } = await adminDb
-    .from('customers')
-    .insert(insertData)
-    .select('id, stripe_customer_id')
-    .single();
-
-  if (insertError) {
+  let newCustomer: { id: string; stripeCustomerId: string };
+  try {
+    [newCustomer] = await adminDb
+      .insert(customers)
+      .values(
+        type === 'user'
+          ? { userId, stripeCustomerId: providerCustomerId, email }
+          : { organizationId, stripeCustomerId: providerCustomerId, email }
+      )
+      .returning({ id: customers.id, stripeCustomerId: customers.stripeCustomerId });
+  } catch (insertError) {
     // Clean up provider customer if DB insert fails
     try {
       await provider.deleteCustomer(providerCustomerId);
     } catch {
       // Best-effort cleanup; the orphaned customer can be cleaned up manually
     }
-    throw new Error(`Failed to create customer record: ${insertError.message}`);
+    throw new Error(`Failed to create customer record: ${(insertError as Error).message}`);
   }
 
   return {
     customerId: newCustomer.id,
-    providerCustomerId: newCustomer.stripe_customer_id,
+    providerCustomerId: newCustomer.stripeCustomerId,
   };
 }
 
@@ -272,19 +263,26 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
   const organizationId = c.req.query('organizationId');
 
   try {
-    // Build customer query
-    let customerQuery = adminDb.from('customers').select('id, stripe_customer_id');
-
-    if (type === 'user') {
-      customerQuery = customerQuery.eq('user_id', user.id).is('organization_id', null);
-    } else {
-      if (!organizationId) {
-        return c.json({ error: 'Organization ID is required' }, 400);
-      }
-      customerQuery = customerQuery.eq('organization_id', organizationId).is('user_id', null);
+    // requireOrgRole gates only type=organization, so any other type must not
+    // fall through to the organization lookup below.
+    if (type !== 'user' && type !== 'organization') {
+      return c.json({ error: 'Invalid billing type' }, 400);
     }
 
-    const { data: customer } = await customerQuery.maybeSingle();
+    if (type === 'organization' && !organizationId) {
+      return c.json({ error: 'Organization ID is required' }, 400);
+    }
+
+    // The customer row for this user (personal) or organization
+    const [customer] = await adminDb
+      .select({ id: customers.id, stripeCustomerId: customers.stripeCustomerId })
+      .from(customers)
+      .where(
+        type === 'user'
+          ? and(eq(customers.userId, user.id), isNull(customers.organizationId))
+          : and(eq(customers.organizationId, organizationId as string), isNull(customers.userId))
+      )
+      .limit(1);
 
     if (!customer) {
       return c.json({
@@ -293,13 +291,13 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
       });
     }
 
-    // Get subscription from database
-    const { data: subscription } = await adminDb
-      .from('subscriptions')
-      .select('*')
-      .eq('customer_id', customer.id)
-      .eq('status', 'active')
-      .maybeSingle();
+    // Get subscription from database (newest active one)
+    const [subscription] = await adminDb
+      .select()
+      .from(subscriptions)
+      .where(and(eq(subscriptions.customerId, customer.id), eq(subscriptions.status, 'active')))
+      .orderBy(desc(subscriptions.createdAt))
+      .limit(1);
 
     if (!subscription) {
       return c.json({
@@ -317,7 +315,7 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
 
     if (provider.type === 'stripe') {
       // Use the existing Stripe price cache for backward compatibility
-      const price = (await getCachedPrice(subscription.stripe_price_id)) as {
+      const price = (await getCachedPrice(subscription.stripePriceId)) as {
         id: string;
         unit_amount: number | null;
         currency: string;
@@ -338,8 +336,8 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
       // For Paddle/Polar, fetch subscription details from the provider API
       try {
         const subInfo = await provider.getSubscription({
-          customerId: customer.stripe_customer_id,
-          subscriptionId: subscription.stripe_subscription_id,
+          customerId: customer.stripeCustomerId,
+          subscriptionId: subscription.stripeSubscriptionId,
         });
         if (subInfo) {
           priceInfo = subInfo.price;
@@ -350,20 +348,20 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
       }
     }
 
-    const resolvedPlanId = planIdFromPriceId(subscription.stripe_price_id, providerPriceIds);
+    const resolvedPlanId = planIdFromPriceId(subscription.stripePriceId, providerPriceIds);
 
     return c.json({
       subscription: {
         id: subscription.id,
         status: subscription.status,
-        priceId: subscription.stripe_price_id,
+        priceId: subscription.stripePriceId,
         planId: resolvedPlanId,
-        currentPeriodEnd: subscription.current_period_end,
-        cancelAtPeriodEnd: subscription.cancel_at_period_end,
+        currentPeriodEnd: isoTimestamp(subscription.currentPeriodEnd),
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
         product: productInfo,
         price: priceInfo
           ? {
-              id: subscription.stripe_price_id,
+              id: subscription.stripePriceId,
               unitAmount: priceInfo.unitAmount,
               currency: priceInfo.currency,
               interval: priceInfo.interval,
@@ -582,17 +580,21 @@ billingRoutes.post('/portal', requireAal2, requireOrgRole(ORG_BILLING_ROLES), as
 
   try {
     // Find existing customer
-    const query = adminDb.from('customers').select('stripe_customer_id');
-
-    if (body.type === 'user') {
-      query.eq('user_id', user.id).is('organization_id', null);
-    } else {
-      query.eq('organization_id', body.organizationId).is('user_id', null);
-    }
-
-    const { data: customer, error: fetchError } = await query.maybeSingle();
-
-    if (fetchError) {
+    let customer: { stripeCustomerId: string } | undefined;
+    try {
+      [customer] = await adminDb
+        .select({ stripeCustomerId: customers.stripeCustomerId })
+        .from(customers)
+        .where(
+          body.type === 'user'
+            ? and(eq(customers.userId, user.id), isNull(customers.organizationId))
+            : and(
+                eq(customers.organizationId, body.organizationId as string),
+                isNull(customers.userId)
+              )
+        )
+        .limit(1);
+    } catch (fetchError) {
       return c.json({ error: sanitizeError(fetchError, 'Failed to fetch customer') }, 500);
     }
 
@@ -608,7 +610,7 @@ billingRoutes.post('/portal', requireAal2, requireOrgRole(ORG_BILLING_ROLES), as
       defaultReturnUrl;
 
     const result = await provider.createPortalSession({
-      customerId: customer.stripe_customer_id,
+      customerId: customer.stripeCustomerId,
       returnUrl,
     });
 

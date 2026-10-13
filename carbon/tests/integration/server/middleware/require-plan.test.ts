@@ -1,17 +1,19 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryChain } from '../../../_helpers/drizzle-mock';
 import type { HonoVariables } from '@server/types';
 
 // Mutable state driving the mocked billing config + DB rows.
 const { state } = vi.hoisted(() => ({
   state: {
     configured: true,
-    // resolveHighestPlan queries: personal customer (maybeSingle), memberships
-    // (await), org customers (await), subscriptions (await).
+    // resolveHighestPlan queries, in order: personal customer, memberships,
+    // org customers (only when there are memberships), subscriptions.
     personalCustomer: null as { id: string } | null,
-    memberships: [] as Array<{ organization_id: string | null }>,
+    memberships: [] as Array<{ organizationId: string | null }>,
     orgCustomers: [] as Array<{ id: string }>,
-    subscriptions: [] as Array<{ stripe_price_id: string; status: string }>,
+    subscriptions: [] as Array<{ stripePriceId: string; status: string }>,
+    customerQueries: 0,
   },
 }));
 
@@ -23,31 +25,35 @@ vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
 
-// biome-ignore lint/suspicious/noExplicitAny: minimal thenable query-builder double
-function builder(onAwait: any, onMaybeSingle: any): any {
-  // biome-ignore lint/suspicious/noExplicitAny: builder is intentionally untyped
-  const b: any = {};
-  for (const m of ['select', 'eq', 'is', 'in', 'order']) b[m] = () => b;
-  b.maybeSingle = () => Promise.resolve(onMaybeSingle);
-  // Thenable so `await builder` resolves to onAwait.
-  b.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
-    Promise.resolve(onAwait).then(resolve, reject);
-  return b;
-}
-
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: (table: string) => {
-      if (table === 'customers') {
-        // personal path uses maybeSingle; org path is awaited (.in())
-        return builder({ data: state.orgCustomers }, { data: state.personalCustomer });
-      }
-      if (table === 'memberships') return builder({ data: state.memberships }, { data: null });
-      if (table === 'subscriptions') return builder({ data: state.subscriptions }, { data: null });
-      return builder({ data: null }, { data: null });
+// adminDb.select(...).from(table) resolves to the rows for that table. The
+// first customers query is the personal lookup, the second the org lookup.
+vi.mock('@server/db/client', async () => {
+  const { getTableName } = await import('drizzle-orm');
+  return {
+    adminDb: {
+      select: () => ({
+        // biome-ignore lint/suspicious/noExplicitAny: any drizzle table
+        from: (table: any) =>
+          queryChain(() => {
+            switch (getTableName(table)) {
+              case 'customers':
+                state.customerQueries += 1;
+                if (state.customerQueries === 1) {
+                  return state.personalCustomer ? [state.personalCustomer] : [];
+                }
+                return state.orgCustomers;
+              case 'memberships':
+                return state.memberships;
+              case 'subscriptions':
+                return state.subscriptions;
+              default:
+                return [];
+            }
+          }),
+      }),
     },
-  },
-}));
+  };
+});
 
 const { requirePlan } = await import('@server/middleware/requirePlan');
 
@@ -68,6 +74,7 @@ beforeEach(() => {
   state.memberships = [];
   state.orgCustomers = [];
   state.subscriptions = [];
+  state.customerQueries = 0;
 });
 
 describe('requirePlan (provider-agnostic + org-level subscriptions)', () => {
@@ -84,18 +91,25 @@ describe('requirePlan (provider-agnostic + org-level subscriptions)', () => {
   });
 
   it('grants access via an ORGANIZATION subscription the user belongs to', async () => {
-    state.memberships = [{ organization_id: 'org1' }];
+    state.memberships = [{ organizationId: 'org1' }];
     state.orgCustomers = [{ id: 'cust_org1' }];
-    state.subscriptions = [{ stripe_price_id: 'price_pro', status: 'active' }];
+    state.subscriptions = [{ stripePriceId: 'price_pro', status: 'active' }];
     const res = await app().request('/pro');
     expect(res.status).toBe(200);
   });
 
   it('does not grant pro access for an org subscription only at the starter tier', async () => {
-    state.memberships = [{ organization_id: 'org1' }];
+    state.memberships = [{ organizationId: 'org1' }];
     state.orgCustomers = [{ id: 'cust_org1' }];
-    state.subscriptions = [{ stripe_price_id: 'price_starter', status: 'active' }];
+    state.subscriptions = [{ stripePriceId: 'price_starter', status: 'active' }];
     const res = await app().request('/pro');
     expect(res.status).toBe(403);
+  });
+
+  it('grants access via the PERSONAL subscription', async () => {
+    state.personalCustomer = { id: 'cust_me' };
+    state.subscriptions = [{ stripePriceId: 'price_pro', status: 'active' }];
+    const res = await app().request('/pro');
+    expect(res.status).toBe(200);
   });
 });

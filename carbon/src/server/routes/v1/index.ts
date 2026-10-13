@@ -1,21 +1,26 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb, type UserDb, withUserDb } from '../../db/client';
+import {
+  customers,
+  memberships,
+  notificationDismissals,
+  notifications,
+  organizations,
+} from '../../db/schema';
+import { isoTimestamp, isUuid, pgErrorCode } from '../../db/values';
 import { orgInviteEmail } from '../../emails/templates';
 import { isSuperAdmin } from '../../lib/auth';
 import { sendEmail } from '../../lib/email';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
-import { type getSupabaseClient, supabaseAdmin } from '../../lib/supabase';
+import { supabaseAdmin } from '../../lib/supabase';
 import { assertAal2, requireAal2 } from '../../middleware/requireAal2';
 import type { HonoVariables } from '../../types';
 import { forwardAuthCookieRoutes } from './forwardauth-cookie';
 import { impersonationRoutes } from './impersonation';
 import { setupRoutes } from './setup';
-
-// Helper to access tables not yet in generated types (notifications, etc.)
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
 
 const v1Routes = new Hono<{ Variables: HonoVariables }>();
 
@@ -87,30 +92,90 @@ const adminPaginationSchema = z.object({
 
 type OrgRole = 'OWNER' | 'ADMIN' | 'MEMBER';
 
-// Helper to get user's role in an organization
+/**
+ * `userId`'s role in an organization, as RLS lets the caller of `tx` see it:
+ * a caller only sees memberships of organizations they belong to, so this is
+ * null for any org the caller is not in. A malformed org id is simply "no
+ * role".
+ */
 async function getUserOrgRole(
-  supabase: ReturnType<typeof getSupabaseClient>,
+  tx: UserDb,
   userId: string,
   organizationId: string
 ): Promise<OrgRole | null> {
-  const { data } = await supabase
-    .from('memberships')
-    .select('role')
-    .eq('user_id', userId)
-    .eq('organization_id', organizationId)
-    .single();
+  if (!isUuid(userId) || !isUuid(organizationId)) return null;
+  const [row] = await tx
+    .select({ role: memberships.role })
+    .from(memberships)
+    .where(and(eq(memberships.userId, userId), eq(memberships.organizationId, organizationId)))
+    .limit(1);
 
-  return (data?.role as OrgRole) || null;
+  return (row?.role as OrgRole) || null;
 }
 
 // Helper to check if user has admin access (OWNER or ADMIN)
-async function hasOrgAdminAccess(
-  supabase: ReturnType<typeof getSupabaseClient>,
-  userId: string,
-  organizationId: string
-): Promise<boolean> {
-  const role = await getUserOrgRole(supabase, userId, organizationId);
+async function hasOrgAdminAccess(userId: string, organizationId: string): Promise<boolean> {
+  const role = await withUserDb(userId, (tx) => getUserOrgRole(tx, userId, organizationId));
   return role === 'OWNER' || role === 'ADMIN';
+}
+
+/** Creating an org: the owner membership insert failed (the org rolls back with it). */
+class MembershipInsertError extends Error {
+  constructor(cause: unknown) {
+    super('Failed to create membership', { cause });
+    this.name = 'MembershipInsertError';
+  }
+}
+
+type OrganizationRow = typeof organizations.$inferSelect;
+
+/** An organization row in the snake_case shape the API has always returned. */
+function organizationJson(org: OrganizationRow) {
+  return {
+    id: org.id,
+    name: org.name,
+    slug: org.slug,
+    plan: org.plan,
+    created_at: isoTimestamp(org.createdAt),
+    updated_at: isoTimestamp(org.updatedAt),
+  };
+}
+
+type NotificationRow = typeof notifications.$inferSelect;
+
+/** The fields every notification listing shares (user and admin views). */
+function notificationBaseJson(n: NotificationRow) {
+  return {
+    id: n.id,
+    title: n.title,
+    message: n.message,
+    type: n.type,
+  };
+}
+
+/** A notification as an end user (or anonymous visitor) sees it. */
+function userNotificationJson(n: NotificationRow) {
+  return {
+    ...notificationBaseJson(n),
+    dismissible: n.dismissible,
+    action: n.actionLabel && n.actionUrl ? { label: n.actionLabel, url: n.actionUrl } : undefined,
+    createdAt: isoTimestamp(n.createdAt),
+  };
+}
+
+/** A notification as the super-admin management screens see it. */
+function adminNotificationJson(n: NotificationRow) {
+  return {
+    ...notificationBaseJson(n),
+    visibility: n.visibility,
+    dismissible: n.dismissible,
+    organizationId: n.organizationId,
+    startsAt: isoTimestamp(n.startsAt),
+    endsAt: isoTimestamp(n.endsAt),
+    actionLabel: n.actionLabel,
+    actionUrl: n.actionUrl,
+    isActive: n.isActive,
+  };
 }
 
 // ============================================================================
@@ -125,22 +190,28 @@ v1Routes.get('/me', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  // Fetch user's organizations/memberships
-  const supabase = c.get('supabase');
-  const { data: memberships, error } = await supabase.from('memberships').select(`
-      id,
-      role,
-      organization:organizations (
-        id,
-        name,
-        slug,
-        plan,
-        created_at,
-        updated_at
-      )
-    `);
-
-  if (error) {
+  // Fetch the user's own memberships with their organizations. RLS would also
+  // show the other members of the user's orgs, so filter to the user's rows:
+  // the client reads `role` from here as the caller's role in each org.
+  let userMemberships: Array<{
+    id: string;
+    role: string | null;
+    organization: ReturnType<typeof organizationJson>;
+  }>;
+  try {
+    const rows = await withUserDb(user.id, (tx) =>
+      tx
+        .select({ id: memberships.id, role: memberships.role, organization: organizations })
+        .from(memberships)
+        .innerJoin(organizations, eq(organizations.id, memberships.organizationId))
+        .where(eq(memberships.userId, user.id))
+    );
+    userMemberships = rows.map((m) => ({
+      id: m.id,
+      role: m.role,
+      organization: organizationJson(m.organization),
+    }));
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch memberships') }, 500);
   }
 
@@ -153,7 +224,7 @@ v1Routes.get('/me', async (c) => {
       emailVerified: user.email_confirmed_at !== null,
       role: user.app_metadata?.role || null,
     },
-    memberships,
+    memberships: userMemberships,
   });
 });
 
@@ -174,24 +245,24 @@ v1Routes.delete('/me', requireAal2, async (c) => {
   }
 
   // Check if user is the sole member of any organization
-  const { data: memberships } = await supabaseAdmin
-    .from('memberships')
-    .select('organization_id')
-    .eq('user_id', user.id);
+  const userMemberships = await adminDb
+    .select({ organizationId: memberships.organizationId })
+    .from(memberships)
+    .where(eq(memberships.userId, user.id));
 
-  if (memberships && memberships.length > 0) {
-    for (const membership of memberships) {
-      const { count } = await supabaseAdmin
-        .from('memberships')
-        .select('*', { count: 'exact', head: true })
-        .eq('organization_id', membership.organization_id);
+  if (userMemberships.length > 0) {
+    for (const membership of userMemberships) {
+      const [{ value: memberCount }] = await adminDb
+        .select({ value: count() })
+        .from(memberships)
+        .where(eq(memberships.organizationId, membership.organizationId));
 
-      if (count === 1) {
-        const { data: org } = await supabaseAdmin
-          .from('organizations')
-          .select('name')
-          .eq('id', membership.organization_id)
-          .single();
+      if (memberCount === 1) {
+        const [org] = await adminDb
+          .select({ name: organizations.name })
+          .from(organizations)
+          .where(eq(organizations.id, membership.organizationId))
+          .limit(1);
 
         return c.json(
           {
@@ -204,20 +275,19 @@ v1Routes.delete('/me', requireAal2, async (c) => {
   }
 
   // Cancel any active Stripe subscriptions
-  const { data: customer } = await adminDb
-    .from('customers')
-    .select('stripe_customer_id')
-    .eq('user_id', user.id)
-    .is('organization_id', null)
-    .maybeSingle();
+  const [customer] = await adminDb
+    .select({ stripeCustomerId: customers.stripeCustomerId })
+    .from(customers)
+    .where(and(eq(customers.userId, user.id), isNull(customers.organizationId)))
+    .limit(1);
 
-  if (customer?.stripe_customer_id) {
+  if (customer?.stripeCustomerId) {
     try {
       const { isStripeConfigured, getStripe } = await import('../../lib/stripe');
       if (isStripeConfigured()) {
         const stripe = getStripe();
         const subscriptions = await stripe.subscriptions.list({
-          customer: customer.stripe_customer_id,
+          customer: customer.stripeCustomerId,
           status: 'active',
         });
         for (const sub of subscriptions.data) {
@@ -272,35 +342,38 @@ v1Routes.post('/organizations', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  // Use admin client to create org (bypasses RLS for insert)
-  const { data: org, error: orgError } = await supabaseAdmin
-    .from('organizations')
-    .insert({ name: body.name, slug: body.slug })
-    .select()
-    .single();
-
-  if (orgError) {
+  // The org row and the creator's OWNER membership go in through adminDb, in
+  // one transaction: the creator is not a member until the membership exists,
+  // so RLS would hide the new org from them, and a failed membership insert
+  // must not leave an ownerless org behind.
+  let org: OrganizationRow;
+  try {
+    org = await adminDb.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(organizations)
+        .values({ name: body.name, slug: body.slug })
+        .returning();
+      try {
+        await tx
+          .insert(memberships)
+          .values({ userId: user.id, organizationId: created.id, role: 'OWNER' });
+      } catch (memberError) {
+        throw new MembershipInsertError(memberError);
+      }
+      return created;
+    });
+  } catch (error) {
+    if (error instanceof MembershipInsertError) {
+      return c.json({ error: sanitizeError(error.cause, 'Failed to create membership') }, 400);
+    }
     // Check for unique constraint violation
-    if (orgError.code === '23505') {
+    if (pgErrorCode(error) === '23505') {
       return c.json({ error: 'An organization with this slug already exists' }, 400);
     }
-    return c.json({ error: sanitizeError(orgError, 'Failed to create organization') }, 400);
+    return c.json({ error: sanitizeError(error, 'Failed to create organization') }, 400);
   }
 
-  // Create membership for the creator as OWNER
-  const { error: memberError } = await supabaseAdmin.from('memberships').insert({
-    user_id: user.id,
-    organization_id: org.id,
-    role: 'OWNER',
-  });
-
-  if (memberError) {
-    // Rollback org creation
-    await supabaseAdmin.from('organizations').delete().eq('id', org.id);
-    return c.json({ error: sanitizeError(memberError, 'Failed to create membership') }, 400);
-  }
-
-  return c.json({ organization: org }, 201);
+  return c.json({ organization: organizationJson(org) }, 201);
 });
 
 // List user's organizations
@@ -311,14 +384,13 @@ v1Routes.get('/organizations', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const supabase = c.get('supabase');
-  const { data, error } = await supabase.from('organizations').select('*');
-
-  if (error) {
+  // RLS returns exactly the organizations the user belongs to.
+  try {
+    const rows = await withUserDb(user.id, (tx) => tx.select().from(organizations));
+    return c.json({ organizations: rows.map(organizationJson) });
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch organizations') }, 500);
   }
-
-  return c.json({ organizations: data });
 });
 
 // ============================================================================
@@ -333,26 +405,29 @@ v1Routes.get('/organizations/:orgId/members', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const orgId = c.req.param('orgId');
-  const supabase = c.get('supabase');
+  // biome-ignore lint/style/noNonNullAssertion: orgId is always defined when this route matches
+  const orgId = c.req.param('orgId')!;
 
-  // Check if user is a member of this organization (RLS will handle this)
-  const { data: members, error } = await supabase
-    .from('memberships')
-    .select(`
-      id,
-      role,
-      created_at,
-      user_id
-    `)
-    .eq('organization_id', orgId);
-
-  if (error) {
+  // RLS returns rows only if the caller is a member of this organization.
+  let members: Array<{ id: string; role: string | null; createdAt: string; userId: string }>;
+  try {
+    members = await withUserDb(user.id, (tx) =>
+      tx
+        .select({
+          id: memberships.id,
+          role: memberships.role,
+          createdAt: memberships.createdAt,
+          userId: memberships.userId,
+        })
+        .from(memberships)
+        .where(eq(memberships.organizationId, orgId))
+    );
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch members') }, 500);
   }
 
   // If no members returned, either org doesn't exist or user isn't a member
-  if (!members || members.length === 0) {
+  if (members.length === 0) {
     return c.json({ error: 'Organization not found or access denied' }, 404);
   }
 
@@ -373,9 +448,9 @@ v1Routes.get('/organizations/:orgId/members', async (c) => {
     const batch = members.slice(i, i + MEMBER_LOOKUP_CONCURRENCY);
     await Promise.all(
       batch.map(async (member) => {
-        const { data, error } = await supabaseAdmin.auth.admin.getUserById(member.user_id);
+        const { data, error } = await supabaseAdmin.auth.admin.getUserById(member.userId);
         if (!error && data?.user) {
-          userDetailsMap.set(member.user_id, {
+          userDetailsMap.set(member.userId, {
             id: data.user.id,
             email: data.user.email,
             name: data.user.user_metadata?.full_name || data.user.user_metadata?.name,
@@ -390,8 +465,8 @@ v1Routes.get('/organizations/:orgId/members', async (c) => {
   const membersWithDetails = members.map((member) => ({
     id: member.id,
     role: member.role,
-    createdAt: member.created_at,
-    user: userDetailsMap.get(member.user_id) || null,
+    createdAt: isoTimestamp(member.createdAt),
+    user: userDetailsMap.get(member.userId) || null,
   }));
 
   return c.json({ members: membersWithDetails });
@@ -405,11 +480,11 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const orgId = c.req.param('orgId');
-  const supabase = c.get('supabase');
+  // biome-ignore lint/style/noNonNullAssertion: orgId is always defined when this route matches
+  const orgId = c.req.param('orgId')!;
 
   // Check if user has admin access
-  if (!(await hasOrgAdminAccess(supabase, user.id, orgId))) {
+  if (!(await hasOrgAdminAccess(user.id, orgId))) {
     return c.json({ error: 'You must be an admin to add members' }, 403);
   }
 
@@ -458,29 +533,24 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
   }
 
   // Check if user is already a member
-  const { data: existingMembership } = await supabaseAdmin
-    .from('memberships')
-    .select('id')
-    .eq('user_id', targetUser.id)
-    .eq('organization_id', orgId)
-    .single();
+  const [existingMembership] = await adminDb
+    .select({ id: memberships.id })
+    .from(memberships)
+    .where(and(eq(memberships.userId, targetUser.id), eq(memberships.organizationId, orgId)))
+    .limit(1);
 
   if (existingMembership) {
     return c.json({ error: 'User is already a member of this organization' }, 400);
   }
 
   // Add membership using admin client
-  const { data: membership, error: memberError } = await supabaseAdmin
-    .from('memberships')
-    .insert({
-      user_id: targetUser.id,
-      organization_id: orgId,
-      role: body.role,
-    })
-    .select()
-    .single();
-
-  if (memberError) {
+  let membership: typeof memberships.$inferSelect;
+  try {
+    [membership] = await adminDb
+      .insert(memberships)
+      .values({ userId: targetUser.id, organizationId: orgId, role: body.role })
+      .returning();
+  } catch (memberError) {
     return c.json({ error: sanitizeError(memberError, 'Failed to add member') }, 500);
   }
 
@@ -490,11 +560,11 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
   );
 
   // Send invite email (fire-and-forget, don't block response)
-  const { data: orgData } = await supabaseAdmin
-    .from('organizations')
-    .select('name')
-    .eq('id', orgId)
-    .single();
+  const [orgData] = await adminDb
+    .select({ name: organizations.name })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
 
   if (targetUser.email && orgData) {
     const inviterName =
@@ -516,7 +586,7 @@ v1Routes.post('/organizations/:orgId/members', async (c) => {
       member: {
         id: membership.id,
         role: membership.role,
-        createdAt: membership.created_at,
+        createdAt: isoTimestamp(membership.createdAt),
         user: {
           id: targetUser.id,
           email: targetUser.email,
@@ -536,9 +606,10 @@ v1Routes.patch('/organizations/:orgId/members/:userId', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const orgId = c.req.param('orgId');
-  const targetUserId = c.req.param('userId');
-  const supabase = c.get('supabase');
+  // biome-ignore lint/style/noNonNullAssertion: orgId is always defined when this route matches
+  const orgId = c.req.param('orgId')!;
+  // biome-ignore lint/style/noNonNullAssertion: userId is always defined when this route matches
+  const targetUserId = c.req.param('userId')!;
 
   // Parse and validate request body
   let body: z.infer<typeof updateMemberRoleSchema>;
@@ -565,15 +636,15 @@ v1Routes.patch('/organizations/:orgId/members/:userId', async (c) => {
     if (blocked) return blocked;
   }
 
-  // Get current user's role
-  const currentUserRole = await getUserOrgRole(supabase, user.id, orgId);
+  // Current user's role and the target's, both read as the caller under RLS
+  const { currentUserRole, targetUserRole } = await withUserDb(user.id, async (tx) => ({
+    currentUserRole: await getUserOrgRole(tx, user.id, orgId),
+    targetUserRole: await getUserOrgRole(tx, targetUserId, orgId),
+  }));
 
   if (!currentUserRole) {
     return c.json({ error: 'Organization not found or access denied' }, 404);
   }
-
-  // Get target user's current role
-  const targetUserRole = await getUserOrgRole(supabase, targetUserId, orgId);
 
   if (!targetUserRole) {
     return c.json({ error: 'Member not found' }, 404);
@@ -597,24 +668,25 @@ v1Routes.patch('/organizations/:orgId/members/:userId', async (c) => {
     return c.json({ error: 'You cannot change your own role' }, 400);
   }
 
-  // Update the role using admin client
-  const { error: updateError } = await supabaseAdmin
-    .from('memberships')
-    .update({ role: body.role })
-    .eq('user_id', targetUserId)
-    .eq('organization_id', orgId);
+  // Update the role using admin client. An ownership transfer also demotes
+  // the current owner to admin, in the same transaction so the org never ends
+  // up with two owners or none.
+  try {
+    await adminDb.transaction(async (tx) => {
+      await tx
+        .update(memberships)
+        .set({ role: body.role })
+        .where(and(eq(memberships.userId, targetUserId), eq(memberships.organizationId, orgId)));
 
-  if (updateError) {
+      if (body.role === 'OWNER' && user.id !== targetUserId) {
+        await tx
+          .update(memberships)
+          .set({ role: 'ADMIN' })
+          .where(and(eq(memberships.userId, user.id), eq(memberships.organizationId, orgId)));
+      }
+    });
+  } catch (updateError) {
     return c.json({ error: sanitizeError(updateError, 'Failed to update role') }, 500);
-  }
-
-  // If transferring ownership, demote current owner to admin
-  if (body.role === 'OWNER' && user.id !== targetUserId) {
-    await supabaseAdmin
-      .from('memberships')
-      .update({ role: 'ADMIN' })
-      .eq('user_id', user.id)
-      .eq('organization_id', orgId);
   }
 
   logger.info(
@@ -633,19 +705,20 @@ v1Routes.delete('/organizations/:orgId/members/:userId', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const orgId = c.req.param('orgId');
-  const targetUserId = c.req.param('userId');
-  const supabase = c.get('supabase');
+  // biome-ignore lint/style/noNonNullAssertion: orgId is always defined when this route matches
+  const orgId = c.req.param('orgId')!;
+  // biome-ignore lint/style/noNonNullAssertion: userId is always defined when this route matches
+  const targetUserId = c.req.param('userId')!;
 
-  // Get current user's role
-  const currentUserRole = await getUserOrgRole(supabase, user.id, orgId);
+  // Current user's role and the target's, both read as the caller under RLS
+  const { currentUserRole, targetUserRole } = await withUserDb(user.id, async (tx) => ({
+    currentUserRole: await getUserOrgRole(tx, user.id, orgId),
+    targetUserRole: await getUserOrgRole(tx, targetUserId, orgId),
+  }));
 
   if (!currentUserRole) {
     return c.json({ error: 'Organization not found or access denied' }, 404);
   }
-
-  // Get target user's role
-  const targetUserRole = await getUserOrgRole(supabase, targetUserId, orgId);
 
   if (!targetUserRole) {
     return c.json({ error: 'Member not found' }, 404);
@@ -661,13 +734,12 @@ v1Routes.delete('/organizations/:orgId/members/:userId', async (c) => {
   if (isSelf) {
     // Check if user is the only owner
     if (targetUserRole === 'OWNER') {
-      const { count } = await supabaseAdmin
-        .from('memberships')
-        .select('*', { count: 'exact', head: true })
-        .eq('organization_id', orgId)
-        .eq('role', 'OWNER');
+      const [{ value: ownerCount }] = await adminDb
+        .select({ value: count() })
+        .from(memberships)
+        .where(and(eq(memberships.organizationId, orgId), eq(memberships.role, 'OWNER')));
 
-      if (count === 1) {
+      if (ownerCount === 1) {
         return c.json({ error: 'You are the only owner. Transfer ownership before leaving.' }, 400);
       }
     }
@@ -687,13 +759,11 @@ v1Routes.delete('/organizations/:orgId/members/:userId', async (c) => {
   }
 
   // Remove the membership
-  const { error: deleteError } = await supabaseAdmin
-    .from('memberships')
-    .delete()
-    .eq('user_id', targetUserId)
-    .eq('organization_id', orgId);
-
-  if (deleteError) {
+  try {
+    await adminDb
+      .delete(memberships)
+      .where(and(eq(memberships.userId, targetUserId), eq(memberships.organizationId, orgId)));
+  } catch (deleteError) {
     return c.json({ error: sanitizeError(deleteError, 'Failed to remove member') }, 500);
   }
 
@@ -715,10 +785,9 @@ v1Routes.delete('/organizations/:orgId', requireAal2, async (c) => {
 
   // biome-ignore lint/style/noNonNullAssertion: orgId is always defined when this route matches
   const orgId = c.req.param('orgId')!;
-  const supabase = c.get('supabase');
 
   // Only the owner can delete
-  const role = await getUserOrgRole(supabase, user.id, orgId);
+  const role = await withUserDb(user.id, (tx) => getUserOrgRole(tx, user.id, orgId));
 
   if (!role) {
     return c.json({ error: 'Organization not found or access denied' }, 404);
@@ -729,32 +798,26 @@ v1Routes.delete('/organizations/:orgId', requireAal2, async (c) => {
   }
 
   // Cannot delete the user's last organization
-  const { count: orgCount } = await supabaseAdmin
-    .from('memberships')
-    .select('*', { count: 'exact', head: true })
-    .eq('user_id', user.id);
+  const [{ value: orgCount }] = await adminDb
+    .select({ value: count() })
+    .from(memberships)
+    .where(eq(memberships.userId, user.id));
 
-  if (orgCount != null && orgCount <= 1) {
+  if (orgCount <= 1) {
     return c.json(
       { error: 'You cannot delete your only organization. Create another organization first.' },
       400
     );
   }
 
-  // Delete all memberships first, then the organization
-  const { error: memberError } = await supabaseAdmin
-    .from('memberships')
-    .delete()
-    .eq('organization_id', orgId);
-
-  if (memberError) {
-    return c.json({ error: sanitizeError(memberError, 'Failed to delete organization') }, 500);
-  }
-
-  const { error: orgError } = await supabaseAdmin.from('organizations').delete().eq('id', orgId);
-
-  if (orgError) {
-    return c.json({ error: sanitizeError(orgError, 'Failed to delete organization') }, 500);
+  // Delete all memberships first, then the organization, as one unit
+  try {
+    await adminDb.transaction(async (tx) => {
+      await tx.delete(memberships).where(eq(memberships.organizationId, orgId));
+      await tx.delete(organizations).where(eq(organizations.id, orgId));
+    });
+  } catch (error) {
+    return c.json({ error: sanitizeError(error, 'Failed to delete organization') }, 500);
   }
 
   logger.info({ orgId, deletedBy: user.id }, 'Organization deleted');
@@ -795,47 +858,62 @@ v1Routes.get('/admin/organizations', async (c) => {
   const { search, sortBy, sortOrder, page, limit } = queryResult.data;
   const offset = (page - 1) * limit;
 
-  // Build query using admin client (bypasses RLS)
-  let query = supabaseAdmin
-    .from('organizations')
-    .select('*, memberships(count)', { count: 'exact' });
+  // Search filter (input validated to [a-zA-Z0-9@.\-_ ] via Zod schema, and
+  // bound as a parameter). Underscore acts as a single-char wildcard in ILIKE,
+  // acceptable for admin search.
+  const where = search
+    ? or(ilike(organizations.name, `%${search}%`), ilike(organizations.slug, `%${search}%`))
+    : undefined;
 
-  // Apply search filter (safe: input validated to [a-zA-Z0-9@.\-_ ] via Zod schema)
-  // Note: underscore acts as single-char wildcard in SQL ILIKE - acceptable for admin search
-  if (search) {
-    query = query.or(`name.ilike.%${search}%,slug.ilike.%${search}%`);
-  }
+  // Sorting (validated against allowed values; 'email' does not apply here)
+  const sortColumns = {
+    name: organizations.name,
+    slug: organizations.slug,
+    plan: organizations.plan,
+    created_at: organizations.createdAt,
+  } as const;
+  const sortColumn = sortBy in sortColumns ? sortColumns[sortBy as keyof typeof sortColumns] : null;
+  const orderBy = sortColumn ? [sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn)] : [];
 
-  // Apply sorting (validated against allowed values)
-  const ascending = sortOrder === 'asc';
-  if (sortBy === 'name' || sortBy === 'slug' || sortBy === 'plan' || sortBy === 'created_at') {
-    query = query.order(sortBy, { ascending });
-  }
-
-  // Apply pagination
-  query = query.range(offset, offset + limit - 1);
-
-  const { data: organizations, error, count } = await query;
-
-  if (error) {
+  let rows: Array<OrganizationRow & { memberCount: number }>;
+  let total: number;
+  try {
+    // Admin client (bypasses RLS)
+    rows = await adminDb
+      .select({
+        id: organizations.id,
+        name: organizations.name,
+        slug: organizations.slug,
+        plan: organizations.plan,
+        createdAt: organizations.createdAt,
+        updatedAt: organizations.updatedAt,
+        memberCount: sql<number>`(select count(*) from ${memberships} where ${memberships.organizationId} = ${organizations.id})::int`,
+      })
+      .from(organizations)
+      .where(where)
+      .orderBy(...orderBy)
+      .limit(limit)
+      .offset(offset);
+    [{ value: total }] = await adminDb.select({ value: count() }).from(organizations).where(where);
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch organizations') }, 500);
   }
 
   return c.json({
-    organizations: (organizations || []).map((org) => ({
+    organizations: rows.map((org) => ({
       id: org.id,
       name: org.name,
       slug: org.slug,
       plan: org.plan,
-      memberCount: Array.isArray(org.memberships) ? org.memberships[0]?.count || 0 : 0,
-      createdAt: org.created_at,
-      updatedAt: org.updated_at,
+      memberCount: org.memberCount || 0,
+      createdAt: isoTimestamp(org.createdAt),
+      updatedAt: isoTimestamp(org.updatedAt),
     })),
     pagination: {
       page,
       limit,
-      total: count || 0,
-      totalPages: Math.ceil((count || 0) / limit),
+      total: total || 0,
+      totalPages: Math.ceil((total || 0) / limit),
     },
   });
 });
@@ -922,15 +1000,18 @@ v1Routes.get('/admin/users', async (c) => {
 
   // Get membership counts for each user
   const userIds = users.map((u) => u.id);
-  const { data: memberships } = await supabaseAdmin
-    .from('memberships')
-    .select('user_id, organization_id')
-    .in('user_id', userIds);
+  const userMemberships =
+    userIds.length > 0
+      ? await adminDb
+          .select({ userId: memberships.userId })
+          .from(memberships)
+          .where(inArray(memberships.userId, userIds))
+      : [];
 
   const membershipCounts = new Map<string, number>();
-  memberships?.forEach((m) => {
-    membershipCounts.set(m.user_id, (membershipCounts.get(m.user_id) || 0) + 1);
-  });
+  for (const m of userMemberships) {
+    membershipCounts.set(m.userId, (membershipCounts.get(m.userId) || 0) + 1);
+  }
 
   return c.json({
     users: users.map((u) => ({
@@ -970,68 +1051,47 @@ v1Routes.get('/notifications', async (c) => {
   if (!user) {
     // Serve public notifications for unauthenticated visitors via admin client with explicit filtering
     const now = new Date().toISOString();
-    const { data: notifications, error } = await adminDb
-      .from('notifications')
-      .select('*')
-      .eq('is_active', true)
-      .in('visibility', ['all', 'public'])
-      .is('organization_id', null)
-      .or(`starts_at.is.null,starts_at.lte.${now}`)
-      .or(`ends_at.is.null,ends_at.gt.${now}`)
-      .order('created_at', { ascending: false });
-
-    if (error) {
+    try {
+      const rows = await adminDb
+        .select()
+        .from(notifications)
+        .where(
+          and(
+            eq(notifications.isActive, true),
+            inArray(notifications.visibility, ['all', 'public']),
+            isNull(notifications.organizationId),
+            or(isNull(notifications.startsAt), lte(notifications.startsAt, now)),
+            or(isNull(notifications.endsAt), gt(notifications.endsAt, now))
+          )
+        )
+        .orderBy(desc(notifications.createdAt));
+      return c.json({ notifications: rows.map(userNotificationJson) });
+    } catch (error) {
       return c.json({ error: sanitizeError(error, 'Failed to fetch notifications') }, 500);
     }
-
-    return c.json({
-      notifications: (notifications || []).map((n) => ({
-        id: n.id,
-        title: n.title,
-        message: n.message,
-        type: n.type,
-        dismissible: n.dismissible,
-        action:
-          n.action_label && n.action_url ? { label: n.action_label, url: n.action_url } : undefined,
-        createdAt: n.created_at,
-      })),
-    });
   }
 
-  // Cast to any to access tables not yet in generated types
-  // biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-  const supabase = c.get('supabase') as SupabaseClient<any>;
-
-  // Fetch active notifications (RLS handles visibility)
-  const { data: notifications, error } = await supabase
-    .from('notifications')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (error) {
+  // Active notifications (RLS handles visibility) and the user's dismissals
+  // (RLS limits them to the user's own), in one transaction.
+  let visible: NotificationRow[];
+  let dismissedIds: Set<string>;
+  try {
+    ({ visible, dismissedIds } = await withUserDb(user.id, async (tx) => {
+      const rows = await tx.select().from(notifications).orderBy(desc(notifications.createdAt));
+      const dismissals = await tx
+        .select({ notificationId: notificationDismissals.notificationId })
+        .from(notificationDismissals)
+        .where(eq(notificationDismissals.userId, user.id));
+      return { visible: rows, dismissedIds: new Set(dismissals.map((d) => d.notificationId)) };
+    }));
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch notifications') }, 500);
   }
 
-  // Fetch user's dismissals
-  const { data: dismissals } = await supabase
-    .from('notification_dismissals')
-    .select('notification_id');
-
-  const dismissedIds = new Set(dismissals?.map((d) => d.notification_id) || []);
-
   // Filter out dismissed notifications and format response
-  const activeNotifications = (notifications || [])
+  const activeNotifications = visible
     .filter((n) => !dismissedIds.has(n.id))
-    .map((n) => ({
-      id: n.id,
-      title: n.title,
-      message: n.message,
-      type: n.type,
-      dismissible: n.dismissible,
-      action:
-        n.action_label && n.action_url ? { label: n.action_label, url: n.action_url } : undefined,
-      createdAt: n.created_at,
-    }));
+    .map(userNotificationJson);
 
   return c.json({ notifications: activeNotifications });
 });
@@ -1045,34 +1105,42 @@ v1Routes.post('/notifications/:notificationId/dismiss', async (c) => {
   }
 
   const notificationId = c.req.param('notificationId');
-  // biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-  const supabase = c.get('supabase') as SupabaseClient<any>;
 
-  // Check if notification exists and is dismissible
-  const { data: notification, error: notifError } = await supabase
-    .from('notifications')
-    .select('id, dismissible')
-    .eq('id', notificationId)
-    .single();
-
-  if (notifError || !notification) {
+  // A malformed id can name no notification
+  if (!isUuid(notificationId)) {
     return c.json({ error: 'Notification not found' }, 404);
   }
 
-  if (!notification.dismissible) {
-    return c.json({ error: 'This notification cannot be dismissed' }, 400);
+  let outcome: 'not_found' | 'not_dismissible' | 'dismissed';
+  try {
+    outcome = await withUserDb(user.id, async (tx) => {
+      // Check the notification exists (as RLS lets this user see it) and is dismissible
+      const [notification] = await tx
+        .select({ id: notifications.id, dismissible: notifications.dismissible })
+        .from(notifications)
+        .where(eq(notifications.id, notificationId))
+        .limit(1);
+
+      if (!notification) return 'not_found';
+      if (!notification.dismissible) return 'not_dismissible';
+
+      // Create dismissal record; an existing one (already dismissed) is fine
+      await tx
+        .insert(notificationDismissals)
+        .values({ notificationId, userId: user.id })
+        .onConflictDoNothing();
+      return 'dismissed';
+    });
+  } catch (dismissError) {
+    return c.json({ error: sanitizeError(dismissError, 'Failed to dismiss notification') }, 500);
   }
 
-  // Create dismissal record
-  const { error: dismissError } = await supabase
-    .from('notification_dismissals')
-    .insert({ notification_id: notificationId, user_id: user.id });
+  if (outcome === 'not_found') {
+    return c.json({ error: 'Notification not found' }, 404);
+  }
 
-  if (dismissError) {
-    // Ignore duplicate key errors (already dismissed)
-    if (dismissError.code !== '23505') {
-      return c.json({ error: sanitizeError(dismissError, 'Failed to dismiss notification') }, 500);
-    }
+  if (outcome === 'not_dismissible') {
+    return c.json({ error: 'This notification cannot be dismissed' }, 400);
   }
 
   return c.json({ success: true });
@@ -1095,32 +1163,19 @@ v1Routes.get('/admin/notifications', async (c) => {
   }
 
   // Use admin client to see all notifications
-  const { data: notifications, error } = await adminDb
-    .from('notifications')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (error) {
+  let rows: NotificationRow[];
+  try {
+    rows = await adminDb.select().from(notifications).orderBy(desc(notifications.createdAt));
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch notifications') }, 500);
   }
 
   return c.json({
-    notifications: (notifications || []).map((n) => ({
-      id: n.id,
-      title: n.title,
-      message: n.message,
-      type: n.type,
-      visibility: n.visibility,
-      dismissible: n.dismissible,
-      organizationId: n.organization_id,
-      startsAt: n.starts_at,
-      endsAt: n.ends_at,
-      actionLabel: n.action_label,
-      actionUrl: n.action_url,
-      isActive: n.is_active,
-      createdBy: n.created_by,
-      createdAt: n.created_at,
-      updatedAt: n.updated_at,
+    notifications: rows.map((n) => ({
+      ...adminNotificationJson(n),
+      createdBy: n.createdBy,
+      createdAt: isoTimestamp(n.createdAt),
+      updatedAt: isoTimestamp(n.updatedAt),
     })),
   });
 });
@@ -1153,26 +1208,26 @@ v1Routes.post('/admin/notifications', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  const { data: notification, error } = await adminDb
-    .from('notifications')
-    .insert({
-      title: body.title,
-      message: body.message,
-      type: body.type,
-      visibility: body.visibility,
-      dismissible: body.dismissible,
-      organization_id: body.organizationId,
-      starts_at: body.startsAt,
-      ends_at: body.endsAt,
-      action_label: body.actionLabel,
-      action_url: body.actionUrl,
-      is_active: body.isActive,
-      created_by: user.id,
-    })
-    .select()
-    .single();
-
-  if (error) {
+  let notification: NotificationRow;
+  try {
+    [notification] = await adminDb
+      .insert(notifications)
+      .values({
+        title: body.title,
+        message: body.message,
+        type: body.type,
+        visibility: body.visibility,
+        dismissible: body.dismissible,
+        organizationId: body.organizationId,
+        startsAt: body.startsAt,
+        endsAt: body.endsAt,
+        actionLabel: body.actionLabel,
+        actionUrl: body.actionUrl,
+        isActive: body.isActive,
+        createdBy: user.id,
+      })
+      .returning();
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to create notification') }, 500);
   }
 
@@ -1181,19 +1236,8 @@ v1Routes.post('/admin/notifications', async (c) => {
   return c.json(
     {
       notification: {
-        id: notification.id,
-        title: notification.title,
-        message: notification.message,
-        type: notification.type,
-        visibility: notification.visibility,
-        dismissible: notification.dismissible,
-        organizationId: notification.organization_id,
-        startsAt: notification.starts_at,
-        endsAt: notification.ends_at,
-        actionLabel: notification.action_label,
-        actionUrl: notification.action_url,
-        isActive: notification.is_active,
-        createdAt: notification.created_at,
+        ...adminNotificationJson(notification),
+        createdAt: isoTimestamp(notification.createdAt),
       },
     },
     201
@@ -1230,28 +1274,36 @@ v1Routes.patch('/admin/notifications/:notificationId', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  // Build update object with snake_case keys
-  const updateData: Record<string, unknown> = {};
+  // Only the fields the request carried
+  const updateData: Partial<typeof notifications.$inferInsert> = {};
   if (body.title !== undefined) updateData.title = body.title;
   if (body.message !== undefined) updateData.message = body.message;
   if (body.type !== undefined) updateData.type = body.type;
   if (body.visibility !== undefined) updateData.visibility = body.visibility;
   if (body.dismissible !== undefined) updateData.dismissible = body.dismissible;
-  if (body.organizationId !== undefined) updateData.organization_id = body.organizationId;
-  if (body.startsAt !== undefined) updateData.starts_at = body.startsAt;
-  if (body.endsAt !== undefined) updateData.ends_at = body.endsAt;
-  if (body.actionLabel !== undefined) updateData.action_label = body.actionLabel;
-  if (body.actionUrl !== undefined) updateData.action_url = body.actionUrl;
-  if (body.isActive !== undefined) updateData.is_active = body.isActive;
+  if (body.organizationId !== undefined) updateData.organizationId = body.organizationId;
+  if (body.startsAt !== undefined) updateData.startsAt = body.startsAt;
+  if (body.endsAt !== undefined) updateData.endsAt = body.endsAt;
+  if (body.actionLabel !== undefined) updateData.actionLabel = body.actionLabel;
+  if (body.actionUrl !== undefined) updateData.actionUrl = body.actionUrl;
+  if (body.isActive !== undefined) updateData.isActive = body.isActive;
 
-  const { data: notification, error } = await adminDb
-    .from('notifications')
-    .update(updateData)
-    .eq('id', notificationId)
-    .select()
-    .single();
-
-  if (error) {
+  let notification: NotificationRow | undefined;
+  try {
+    // An empty body changes nothing; answer with the row as it stands.
+    [notification] =
+      Object.keys(updateData).length > 0
+        ? await adminDb
+            .update(notifications)
+            .set(updateData)
+            .where(eq(notifications.id, notificationId))
+            .returning()
+        : await adminDb
+            .select()
+            .from(notifications)
+            .where(eq(notifications.id, notificationId))
+            .limit(1);
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to update notification') }, 500);
   }
 
@@ -1263,19 +1315,8 @@ v1Routes.patch('/admin/notifications/:notificationId', async (c) => {
 
   return c.json({
     notification: {
-      id: notification.id,
-      title: notification.title,
-      message: notification.message,
-      type: notification.type,
-      visibility: notification.visibility,
-      dismissible: notification.dismissible,
-      organizationId: notification.organization_id,
-      startsAt: notification.starts_at,
-      endsAt: notification.ends_at,
-      actionLabel: notification.action_label,
-      actionUrl: notification.action_url,
-      isActive: notification.is_active,
-      updatedAt: notification.updated_at,
+      ...adminNotificationJson(notification),
+      updatedAt: isoTimestamp(notification.updatedAt),
     },
   });
 });
@@ -1294,9 +1335,9 @@ v1Routes.delete('/admin/notifications/:notificationId', async (c) => {
 
   const notificationId = c.req.param('notificationId');
 
-  const { error } = await adminDb.from('notifications').delete().eq('id', notificationId);
-
-  if (error) {
+  try {
+    await adminDb.delete(notifications).where(eq(notifications.id, notificationId));
+  } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to delete notification') }, 500);
   }
 
