@@ -60,11 +60,19 @@ import { dropUnprovenSecondFactor } from './account-linking';
  *   that proved that factor. Otherwise an aal1 session (a magic link from a
  *   read mailbox, say) could read the secret and mint aal2 for itself, or
  *   swap or remove the factor.
- * - enabling 2FA on an account with no password (social or magic link only,
- *   `allowPasswordless`) needs a session signed in within the last 10
- *   minutes: there is no password to ask for, so recency stands in for it,
- *   and a stolen long-lived cookie cannot enroll the thief's authenticator.
- *   A password account gives its password (Better Auth checks it).
+ * - on an account with no password (social or magic link only,
+ *   `allowPasswordless`) and no confirmed factor, every enrollment step
+ *   (enable, read the URI, regenerate backup codes, confirm the first code)
+ *   needs a session signed in within the last 10 minutes: there is no
+ *   password to ask for, so recency stands in for it, and a stolen
+ *   long-lived cookie cannot enroll or finish enrolling the thief's
+ *   authenticator. A password account gives its password (Better Auth
+ *   checks it). Disabling 2FA with nothing confirmed is refused (it would
+ *   only re-issue the session with a fresh createdAt).
+ * - code attempts from a session on an unconfirmed factor share the same
+ *   atomic budget as step-up.
+ * - a session cookie whose session is gone gets 401 from every gated path,
+ *   never Better Auth's 60 s cookie-cache fallback.
  *
  * Better Auth's admin endpoints (/admin/*) need aal2 while MFA is globally
  * on, the same rule `requireAal2` applies to the app's own routes.
@@ -133,12 +141,14 @@ async function hasPassword(userId: string): Promise<boolean> {
 }
 
 /**
- * Reserve one step-up attempt, atomically. Returns false when the factor is
- * locked (no attempt left). An expired lock starts a fresh budget. Reaching
- * the cap sets the lock; the attempt that reached it still runs, and a
- * success clears it.
+ * Reserve one code attempt made from a session (step-up, or confirming an
+ * enrollment), atomically. Returns false when the factor is locked (no
+ * attempt left). An expired lock starts a fresh budget. Reaching the cap
+ * sets the lock; the attempt that reached it still runs, and a success
+ * clears it. Applies to an unconfirmed factor too, so an abandoned
+ * enrollment cannot be brute-forced from an aal1 session.
  */
-async function reserveStepUpAttempt(userId: string): Promise<boolean> {
+async function reserveCodeAttempt(userId: string): Promise<boolean> {
   const { rows } = await adminDb.execute<{ n: number }>(sql`
     update public.two_factor
        set failed_verification_count = case
@@ -152,7 +162,6 @@ async function reserveStepUpAttempt(userId: string): Promise<boolean> {
              else locked_until
            end
      where user_id = ${userId}
-       and verified
        and (locked_until is null or locked_until <= now())
      returning failed_verification_count as n`);
   return rows.length > 0;
@@ -178,32 +187,56 @@ function dropSetCookie(headers: Headers | undefined, name: string): void {
 const VERIFY_FIRST =
   'Verify a code from your authenticator app (POST /api/auth/two-factor/verify-totp) first.';
 
+/**
+ * A passwordless account (no credential) with no confirmed factor has no
+ * secret to ask for, so recency stands in for it: every factor-management
+ * step (enable, read the URI, regenerate backup codes, confirm the first
+ * code) needs a session signed in within the last 10 minutes. `createdAt`
+ * comes from the database (authoritative read), and no path a stale session
+ * can reach re-issues it: disable is refused without a confirmed factor,
+ * and every other re-issuing path needs a password or aal2.
+ */
+async function requireFreshIfPasswordless(current: SessionLike): Promise<void> {
+  if (await hasPassword(current.user.id)) return;
+  const created = current.session.createdAt ? new Date(current.session.createdAt).getTime() : 0;
+  if (Date.now() - created > FRESH_SESSION_MS) {
+    throw new APIError('FORBIDDEN', {
+      code: 'REAUTH_REQUIRED',
+      error: 'reauth_required',
+      message: 'For your security, sign in again, then set up two-factor authentication.',
+    });
+  }
+}
+
 async function gateFactorManagement(path: string, current: SessionLike): Promise<void> {
   const verified = current.session.twoFactorVerified === true;
   const factor = await factorOf(current.user.id);
   const enrolled = current.user.twoFactorEnabled === true || factor === 'confirmed';
 
-  if (enrolled && !verified) {
-    throw mfaRequired(
-      `Changing your two-factor settings needs a session that passed two-factor verification. ${VERIFY_FIRST}`
-    );
+  if (enrolled) {
+    if (!verified) {
+      throw mfaRequired(
+        `Changing your two-factor settings needs a session that passed two-factor verification. ${VERIFY_FIRST}`
+      );
+    }
+    return;
   }
 
-  if (path === '/two-factor/enable' && !enrolled && !(await hasPassword(current.user.id))) {
-    const created = current.session.createdAt ? new Date(current.session.createdAt).getTime() : 0;
-    if (Date.now() - created > FRESH_SESSION_MS) {
-      throw new APIError('FORBIDDEN', {
-        code: 'REAUTH_REQUIRED',
-        error: 'reauth_required',
-        message: 'For your security, sign in again, then set up two-factor authentication.',
-      });
-    }
+  // Nothing confirmed. Disabling would only re-issue the session (a new
+  // createdAt that would pass the freshness rule below), so refuse it.
+  if (path === '/two-factor/disable') {
+    throw new APIError('FORBIDDEN', {
+      code: 'TWO_FACTOR_NOT_ENABLED',
+      message: 'Two-factor authentication is not enabled.',
+    });
   }
+  await requireFreshIfPasswordless(current);
 }
 
 async function gateVerify(path: string, current: SessionLike): Promise<void> {
   const factor = await factorOf(current.user.id);
-  if (factor !== 'confirmed') {
+  if (factor === 'none') return; // the endpoint refuses: nothing to verify
+  if (factor === 'unconfirmed') {
     // Confirming a new enrollment takes an authenticator code, never a
     // backup code. (verify-totp on an unconfirmed factor is that confirm.)
     if (path === '/two-factor/verify-backup-code') {
@@ -212,14 +245,35 @@ async function gateVerify(path: string, current: SessionLike): Promise<void> {
         message: 'Finish setting up two-factor authentication with a code from your app first.',
       });
     }
-    return;
+    await requireFreshIfPasswordless(current);
   }
-  if (!(await reserveStepUpAttempt(current.user.id))) {
+  if (!(await reserveCodeAttempt(current.user.id))) {
     throw new APIError('TOO_MANY_REQUESTS', {
       code: 'ACCOUNT_TEMPORARILY_LOCKED',
       message: 'Too many wrong codes. Try again in a few minutes.',
     });
   }
+}
+
+/**
+ * The caller's session, read from the database. When the request carries a
+ * session cookie but its session is gone (revoked, expired, banned), answer
+ * 401 here: returning would let Better Auth's own endpoint fall back to the
+ * session-cache cookie (valid up to 60 s) and act on the dead session past
+ * every gate above. No session cookie at all: null (server-side call, or a
+ * sign-in finishing its second factor).
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Better Auth's middleware context
+async function liveSession(ctx: any): Promise<SessionLike | null> {
+  const current = (await getAuthoritativeSessionFromCtx(ctx)) as SessionLike | null;
+  if (current) return current;
+  if (ctx.getCookie(ctx.context.authCookies.sessionToken.name)) {
+    throw new APIError('UNAUTHORIZED', {
+      code: 'SESSION_EXPIRED',
+      message: 'Your session has ended. Please sign in again.',
+    });
+  }
+  return null;
 }
 
 const before = createAuthMiddleware(async (ctx) => {
@@ -242,8 +296,9 @@ const before = createAuthMiddleware(async (ctx) => {
     if (typeof email !== 'string') return;
     try {
       await dropUnprovenSecondFactor(email);
-    } catch {
-      // Logged inside. The link stays unused, so a retry redoes this.
+    } catch (err) {
+      // The link stays unused, so a retry redoes this.
+      logger.error({ err: dbErrorForLog(err) }, 'Magic-link second-factor cleanup failed');
       throw new APIError('INTERNAL_SERVER_ERROR', {
         code: 'MAGIC_LINK_CLEANUP_FAILED',
         message: 'Sign-in could not be completed. Please open the link again.',
@@ -255,8 +310,8 @@ const before = createAuthMiddleware(async (ctx) => {
   if (isAdminPath(path)) {
     // No request headers: a server-side call (the startup bootstrap).
     if (!ctx.request && !ctx.headers) return;
-    const current = (await getAuthoritativeSessionFromCtx(ctx)) as SessionLike | null;
-    // No session: the endpoint itself answers 401.
+    const current = await liveSession(ctx);
+    // No session cookie: the endpoint itself answers 401.
     if (!current || current.session.twoFactorVerified === true) return;
     if (!(await isMfaGloballyEnabled())) return;
     throw mfaRequired(
@@ -266,8 +321,8 @@ const before = createAuthMiddleware(async (ctx) => {
   }
 
   if (FACTOR_MANAGEMENT_PATHS.has(path)) {
-    const current = (await getAuthoritativeSessionFromCtx(ctx)) as SessionLike | null;
-    if (!current) return; // the endpoint answers 401
+    const current = await liveSession(ctx);
+    if (!current) return; // no session cookie: the endpoint answers 401
     await gateFactorManagement(path, current);
     return;
   }
@@ -275,7 +330,7 @@ const before = createAuthMiddleware(async (ctx) => {
   if (VERIFY_PATHS.has(path)) {
     // Read the session from the database, not the cookie cache, so the
     // endpoint below acts on a live session (it reuses this one).
-    const current = (await getAuthoritativeSessionFromCtx(ctx)) as SessionLike | null;
+    const current = await liveSession(ctx);
     // No session: finishing a sign-in, which Better Auth locks itself.
     if (!current) return;
     await gateVerify(path, current);
@@ -320,7 +375,9 @@ const after = createAuthMiddleware(async (ctx) => {
       .where(and(eq(sessionTable.id, target.session.id), eq(sessionTable.userId, target.user.id)))
       .returning({ id: sessionTable.id });
     marked = rows.length > 0;
-    if (current?.session && !ctx.context.newSession) await resetFailures(current.user.id);
+    // A session-mode attempt (step-up or confirm) reserved a unit; clear the
+    // budget on success. Sign-in attempts are Better Auth's to reset.
+    if (current?.session) await resetFailures(current.user.id);
   } catch (err) {
     logger.error({ err: dbErrorForLog(err) }, 'Failed to mark a session as two-factor verified');
     throw new APIError('INTERNAL_SERVER_ERROR', {

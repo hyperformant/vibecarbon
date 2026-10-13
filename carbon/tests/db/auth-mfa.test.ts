@@ -643,4 +643,82 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
       expect(await state()).toEqual({ email_verified: true, factors: 0, trusted: 0 });
     });
   });
+  describe('fix round 2', () => {
+    const ageSessions = async (email: string) =>
+      db.query(
+        `update public.session set created_at = now() - interval '11 minutes' where user_id = $1`,
+        [await userIdOf(email)],
+      );
+
+    it('disable with no confirmed factor is refused (it cannot renew a stale session)', async () => {
+      const email = newEmail();
+      const jar = await googleSignIn(email);
+      await ageSessions(email);
+      const disable = await post('/api/auth/two-factor/disable', {}, jar);
+      expect(disable.status).toBe(403);
+      // So the stale session still cannot enroll.
+      const enable = await post('/api/auth/two-factor/enable', {}, jar);
+      expect(enable.status).toBe(403);
+      expect(await enable.json()).toMatchObject({ error: 'reauth_required' });
+    });
+
+    it('a stale passwordless session cannot finish an abandoned enrollment', async () => {
+      const email = newEmail();
+      const owner = await googleSignIn(email);
+      const enable = await post('/api/auth/two-factor/enable', {}, owner);
+      const { totpURI } = (await enable.json()) as { totpURI: string };
+      // The owner walks away; later a thief holds the (now stale) cookie.
+      await ageSessions(email);
+      for (const path of ['/api/auth/two-factor/get-totp-uri', '/api/auth/two-factor/generate-backup-codes']) {
+        const res = await post(path, {}, owner);
+        expect(res.status, path).toBe(403);
+        expect(await res.json()).toMatchObject({ error: 'reauth_required' });
+      }
+      const confirm = await post('/api/auth/two-factor/verify-totp', { code: totpCode(totpURI) }, owner);
+      expect(confirm.status).toBe(403);
+      expect((await whoami(owner))?.aal).toBe('aal1');
+    });
+
+    it('guessing the code of an unconfirmed enrollment is capped too', async () => {
+      const { email, jar } = await passwordUser();
+      const enable = await post('/api/auth/two-factor/enable', { password: PASSWORD }, jar);
+      const { totpURI } = (await enable.json()) as { totpURI: string };
+      const results = await Promise.all(
+        Array.from({ length: 25 }, () =>
+          post('/api/auth/two-factor/verify-totp', { code: wrongTotpCode(totpURI) }, jar).then(
+            (r) => r.status,
+          ),
+        ),
+      );
+      expect(results.filter((s) => s === 401).length).toBeLessThanOrEqual(10);
+      const { rows } = await db.query(
+        'select failed_verification_count as n from public.two_factor where user_id = $1',
+        [await userIdOf(email)],
+      );
+      expect(rows[0].n).toBeLessThanOrEqual(10);
+    });
+
+    it('a confirmed enrollment starts with a clean failure count', async () => {
+      const { email, jar } = await passwordUser();
+      const enable = await post('/api/auth/two-factor/enable', { password: PASSWORD }, jar);
+      const { totpURI } = (await enable.json()) as { totpURI: string };
+      await post('/api/auth/two-factor/verify-totp', { code: wrongTotpCode(totpURI) }, jar);
+      expect((await post('/api/auth/two-factor/verify-totp', { code: totpCode(totpURI) }, jar)).status).toBe(200);
+      const { rows } = await db.query(
+        'select failed_verification_count as n from public.two_factor where user_id = $1',
+        [await userIdOf(email)],
+      );
+      expect(rows[0].n).toBe(0);
+    });
+
+    it('a revoked session still in the cookie cache is refused, not served from the cache', async () => {
+      const { email, jar } = await passwordUser();
+      await enroll(jar);
+      // The jar now holds the cache cookie for an aal2 session.
+      await db.query('delete from public.session where user_id = $1', [await userIdOf(email)]);
+      const res = await post('/api/auth/two-factor/get-totp-uri', { password: PASSWORD }, jar);
+      expect(res.status).toBe(401);
+      expect(JSON.stringify(await res.json())).not.toContain('otpauth');
+    });
+  });
 });
