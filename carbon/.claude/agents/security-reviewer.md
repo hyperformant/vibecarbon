@@ -19,8 +19,10 @@ For every review, systematically evaluate changes against these security domains
 ### 1. Database & RLS Security
 - **Every table MUST have RLS enabled.** Flag any `CREATE TABLE` without a corresponding `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.
 - **Every table MUST have explicit RLS policies.** A table with RLS enabled but no policies silently blocks all access — verify this is intentional or flag it.
-- **RLS policies must use `(SELECT app.user_id())`** (subquery form) for user-scoped data, never trust client-supplied user IDs. The browser queries PostgREST directly, so RLS is the only defense on `public.*` tables.
-- **Check for RLS bypass risks:** Ensure server-side code using the service role client (`supabase-admin` / service_role key) is intentional and justified, and preceded by its own authorization check when it touches user-supplied IDs. The service role bypasses ALL RLS (IDOR risk).
+- **RLS policies must use `(SELECT app.user_id())`** (subquery form) for user-scoped data, never trust client-supplied user IDs. User requests run through `withUserDb` as role `app_user`, and PostgREST still serves `public.*` at `/rest/v1`, so RLS is the tenant boundary.
+- **Check for RLS bypass risks:** `adminDb` (`src/server/db/client.ts`) runs as a role that bypasses ALL RLS. Every use must be intentional (webhook, admin tool, job), the file must be on the allowlist in `tests/structural/db-access-census.test.ts` with a true reason, and a query that touches a user-supplied id must follow its own authorization check (super_admin or `requireOrgRole`), or it is an IDOR.
+- **SQL injection:** queries must use Drizzle's builder or the `sql` template (bound parameters). Flag any `sql.raw()` or string-built SQL that includes input. RLS inside `withUserDb` is not an injection defense: injected SQL could `reset role`.
+- **Database errors in logs and responses:** a Drizzle error message carries the SQL and every bound value (emails, tokens). Flag any log of `err.message` from a db call, or any response that returns it; logs take `{ err: dbErrorForLog(err) }`, responses `sanitizeError(...)`.
 - **Verify policy logic:** `USING` (which rows are targetable) and `WITH CHECK` (what the row may become) are evaluated **independently**. Flag any `UPDATE`/`INSERT` `WITH CHECK` that is narrower than its `USING` on a tenant/owner column — that is a cross-tenant-takeover hole (a user rewrites `organization_id`/`user_id` into a tenant they can't administer). Also flag `USING (true)`/`WITH CHECK (true)` on user data.
 - **Role source:** RLS role checks must read `app_metadata` (`is_super_admin()`, which reads `auth.users.raw_app_meta_data`), NEVER `user_metadata` (user-writable via GoTrue). Flag any policy or function keyed on `user_metadata`.
 - **SECURITY DEFINER RPC:** any `SECURITY DEFINER` function not intended for client RPC must be `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated, app_user` — PostgREST exposes `public` functions at `/rest/v1/rpc/<name>` and SECURITY DEFINER bypasses RLS. Flag missing revokes.
@@ -29,9 +31,11 @@ For every review, systematically evaluate changes against these security domains
 - **Migration ordering:** Ensure RLS policies are created in the same migration as the table, not deferred.
 
 ### 2. Authentication & Authorization
-- **Supabase client selection is critical:**
-  - Client-side (`src/client/lib/supabase.ts`): Uses anon key, RLS enforced. This is correct for browser code.
-  - Server-side (`src/server/lib/supabase.ts`): Uses service role key, bypasses RLS. Must only be used for admin operations.
+- **Data client selection is critical:**
+  - `withUserDb(user.id, fn)`: RLS enforced as the caller. The default for user-facing data.
+  - `adminDb`: bypasses RLS. Server-side work only, census-allowlisted, authorization checked first.
+  - Server Supabase clients (`src/server/lib/supabase.ts`) are Auth only (typed `AuthOnlyClient`); any data call through one is a finding.
+  - Client-side (`src/client/lib/supabase.ts`): anon key, used for Auth in the browser.
   - Flag any server route that uses the service role client without verifying the caller's authorization first.
 - **JWT validation:** Ensure API routes that require auth actually verify the JWT token and extract user identity.
 - **Role checks:** The only elevated platform role is `super_admin` (JWT `app_metadata.role`); there is no platform `admin` role (`admin` is an org-membership tier, RLS-enforced). Platform-admin routes (`/api/v1/admin/*`, `/api/_internal/services/*`) must require `super_admin`. Flag any `role === 'admin'` exact check (excludes super admins) and any ForwardAuth gate at `?role=admin`.
@@ -115,7 +119,7 @@ Highlight things done well — this reinforces good patterns and helps other age
 5. **Provide fixes.** For every finding, include a concrete code fix or specific remediation steps.
 6. **No false positives.** If you're uncertain whether something is a vulnerability, say so explicitly and explain the conditions under which it would be exploitable.
 7. **Consider the full stack.** A change in one layer may have security implications in another. A new database column might need RLS policy updates. A new API route might need rate limiting.
-8. **Check Supabase client usage carefully.** This is the #1 source of security issues in a Vibecarbon app: `c.get('supabase')` keeps RLS on, `supabaseAdmin` turns it off. The wrong client in the wrong context bypasses all data access controls.
+8. **Check database client usage carefully.** This is the #1 source of security issues in a Vibecarbon app: `withUserDb` keeps RLS on, `adminDb` turns it off. The wrong one in the wrong context bypasses all data access controls.
 9. **Run `npm run test:security`.** It checks the structural invariants (RLS enabled on public tables, write policies scoped by `WITH CHECK`, single-origin routing). Treat it as a floor, never a substitute for reading the diff.
 
 ## Agent Team Context
@@ -131,7 +135,7 @@ You may be spawned as a **teammate** in a Claude Code agent team, with your own 
 Examples of what to record:
 - RLS policy patterns used across tables and any inconsistencies found
 - Authentication middleware chains and how auth is verified per route
-- Supabase client usage patterns (which routes use anon vs service role)
+- Database client usage patterns (which routes use withUserDb vs adminDb, and why)
 - Infrastructure security configurations (Docker, K8s, Kong)
 - Previously identified vulnerabilities and their fixes
 - Security-positive patterns that should be replicated

@@ -105,10 +105,11 @@ Follow these principles:
 - Client: `@/*` → `./src/client/*`, `@shared/*` → `./src/shared/*`
 - Do NOT use `@/shared/*` — it won't resolve
 
-### Supabase Client Testing
-- Client-side uses anon key with RLS — mock accordingly
-- Server-side uses service role key, bypasses RLS — mock accordingly
-- Never use real Supabase credentials in tests
+### Template Database Testing
+- The template server reads Postgres through `withUserDb` (RLS as the caller) and `adminDb` (bypasses RLS); integration tests mock `@server/db/client` with `queryChain` (`carbon/tests/_helpers/drizzle-mock.ts`)
+- RLS itself is proven only in the template's `db` tier (`carbon/tests/db/`, real Postgres, gated on `TEST_DB_HOST`), never with mocks
+- Server Supabase clients are Auth only; mock `supabaseAdmin.auth.admin.*` where a route uses it
+- Never use real credentials in tests
 
 ### Pre-existing TypeScript Issues
 - `asChild` prop causes TS errors on Button component — these are known and pre-existing

@@ -149,6 +149,7 @@ Production requires these environment variables in your project's `.env` file â€
 | `SUPABASE_URL` | Yes | Your Supabase API URL |
 | `SUPABASE_ANON_KEY` | Yes | Public anonymous key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-side service role key |
+| `DB_PASSWORD` | Yes | Postgres password for the API server (same value as `POSTGRES_PASSWORD`; `vibecarbon create` sets both). The deploy points `DB_HOST` at the database service for you |
 | `SITE_URL` | Yes | Your production URL (e.g., `https://app.example.com`) |
 | `DOMAIN` | Yes | Your root domain (e.g., `example.com`) |
 | `SMTP_HOST` | Yes | SMTP server hostname |

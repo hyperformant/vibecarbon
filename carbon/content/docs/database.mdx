@@ -156,15 +156,24 @@ const { data: newItem, error: insertError } = await supabase
 
 ## Server-Side Queries
 
-```typescript
-// User-context (respects RLS)
-const supabase = c.get('supabase');
-const { data } = await supabase.from('my_table').select('*');
+The API server talks to Postgres directly with [Drizzle](https://orm.drizzle.team). Tables are defined in `src/server/db/schema.ts` (add yours there after its migration), and every query goes through `src/server/db/client.ts`:
 
-// Admin operations (bypasses RLS)
-import { supabaseAdmin } from '@/server/lib/supabase';
-const { data } = await supabaseAdmin.from('my_table').select('*');
+```typescript
+import { eq } from 'drizzle-orm';
+import { adminDb, withUserDb } from '../../db/client';
+import { myTable } from '../../db/schema';
+
+// As the signed-in user (row-level security applies). Use this by default.
+const rows = await withUserDb(user.id, (tx) =>
+  tx.select().from(myTable).where(eq(myTable.organizationId, orgId))
+);
+
+// As the server itself (bypasses RLS): webhooks, admin tools, jobs only,
+// and only after you have checked the caller may touch these rows.
+const all = await adminDb.select().from(myTable);
 ```
+
+Values you pass to Drizzle are sent as query parameters, never pasted into the SQL, so input cannot change the query. Keep it that way: never build SQL text from user input.
 
 ## TanStack Query
 

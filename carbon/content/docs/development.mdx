@@ -112,6 +112,8 @@ Wrap with `<ProtectedRoute>` to require authentication, or omit it for public pa
 ```typescript
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { withUserDb } from '../../db/client';
+import { items as itemsTable } from '../../db/schema';
 import type { HonoVariables } from '../../types';
 
 const items = new Hono<{ Variables: HonoVariables }>();
@@ -124,10 +126,13 @@ items.get('/', async (c) => {
   const user = c.get('user');
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
 
-  const supabase = c.get('supabase');
-  const { data, error } = await supabase.from('items').select('*');
-  if (error) return c.json({ error: 'Failed to fetch items' }, 500);
-  return c.json(data);
+  // Runs as the signed-in user: row-level security decides which rows come back.
+  try {
+    const rows = await withUserDb(user.id, (tx) => tx.select().from(itemsTable));
+    return c.json(rows);
+  } catch {
+    return c.json({ error: 'Failed to fetch items' }, 500);
+  }
 });
 
 items.post('/', async (c) => {
@@ -140,14 +145,14 @@ items.post('/', async (c) => {
     return c.json({ error: result.error.issues.map((e) => e.message).join(', ') }, 400);
   }
 
-  const supabase = c.get('supabase');
-  const { data, error } = await supabase
-    .from('items')
-    .insert(result.data)
-    .select()
-    .single();
-  if (error) return c.json({ error: 'Failed to create item' }, 500);
-  return c.json({ item: data }, 201);
+  try {
+    const [item] = await withUserDb(user.id, (tx) =>
+      tx.insert(itemsTable).values({ ...result.data, userId: user.id }).returning()
+    );
+    return c.json({ item }, 201);
+  } catch {
+    return c.json({ error: 'Failed to create item' }, 500);
+  }
 });
 
 export { items };

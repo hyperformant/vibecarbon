@@ -6,7 +6,7 @@ Guidance for AI coding agents working on this codebase. The **Security Rules** s
 
 - **Frontend**: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4, i18next
 - **Backend**: Hono (lightweight Node.js framework), Pino logger, Zod validation, nodemailer (SMTP email)
-- **Auth/Database**: Self-hosted Supabase (PostgreSQL, Auth, REST API, Realtime); file uploads go to S3 object storage via presigned URLs
+- **Auth/Database**: Self-hosted Supabase (PostgreSQL, Auth, Realtime); the API server queries Postgres directly with Drizzle ORM (node-postgres); file uploads go to S3 object storage via presigned URLs
 - **Billing**: Multi-provider — Stripe, Paddle, Polar (subscriptions, checkout, webhooks, plan gating)
 - **Content**: MDX (blog, changelog, docs) with remark/rehype plugins
 - **Tooling**: Biome (lint/format), TypeScript, esbuild, Vitest
@@ -27,7 +27,7 @@ npm run typecheck       # TypeScript type checking
 npm test                # Run every tier (unit + component + integration)
 npm run test:unit       # Pure functions, validators, shared lib
 npm run test:component  # React components + hooks (RTL + jsdom)
-npm run test:integration # Hono routes with mocked Supabase/Stripe/SMTP
+npm run test:integration # Hono routes with mocked database/Auth/Stripe/SMTP
 npm run test:watch      # Vitest watch mode
 npm run test:coverage   # Generate coverage/ report (v8)
 npm run test:prepush    # What the pre-push git hook runs
@@ -55,8 +55,9 @@ src/
 ├── server/                  # Hono API (Node.js on :3000)
 │   ├── index.ts             # App entry, middleware, route mounting
 │   ├── routes/              # health.ts, v1/, webhooks/, _internal/
+│   ├── db/                  # client.ts (withUserDb, adminDb), schema.ts (Drizzle tables), errors.ts
 │   ├── emails/              # React Email templates
-│   └── lib/                 # supabase.ts, env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
+│   └── lib/                 # supabase.ts (Auth only), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
 ├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
 content/                     # MDX content (blog/, changelog/, docs/)
 supabase/migrations/         # SQL migrations (run with npm run db:migrate)
@@ -106,32 +107,36 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 
 1. **Client-side**: Supabase JS handles auth (email/password, OAuth, magic links, MFA)
 2. **API requests**: Client sends JWT in `Authorization: Bearer <token>` header
-3. **Server middleware**: Extracts token, calls `supabase.auth.getUser()`, sets `c.get('user')`
-4. **RLS**: Database queries respect row-level security based on authenticated user
+3. **Server middleware**: Extracts token, calls `auth.getUser()` on an auth-only Supabase client, sets `c.get('user')`
+4. **RLS**: Routes run user queries through `withUserDb(user.id, ...)`, so row-level security decides what the caller sees
 
-## Supabase Client Usage
+## Database Access
 
-This is the #1 source of bugs. Three clients exist:
+This is the #1 source of bugs. The server talks to Postgres through `src/server/db/client.ts` and nothing else:
 
-**Client-side** (`src/client/lib/supabase.ts`) — uses anon key, RLS enforced:
 ```typescript
-import { supabase } from '@/lib/supabase';
-const { data } = await supabase.from('organizations').select('*'); // RLS enforced
+import { and, eq } from 'drizzle-orm';
+import { adminDb, withUserDb } from '../../db/client';
+import { items } from '../../db/schema';
+
+// Anything done for a user (or an anonymous visitor: pass null). Runs in one
+// transaction as role app_user with app.user_id set, so RLS applies to every
+// statement inside. This is the default.
+const rows = await withUserDb(user.id, (tx) =>
+  tx.select().from(items).where(eq(items.organizationId, orgId))
+);
+
+// Only where the server acts for itself: webhooks, admin tools, jobs.
+// adminDb BYPASSES RLS and sees every row of every user.
+await adminDb.insert(items).values({ ... });
 ```
 
-**Server-side** (`src/server/lib/supabase.ts`) — two options:
-```typescript
-// User-context queries (respects RLS) — use for most routes
-const supabase = c.get('supabase');
-
-// Admin operations (bypasses RLS) — use only when necessary
-import { supabaseAdmin } from '@/server/lib/supabase';
-
-// Auth operations — NEVER use supabaseAdmin for signInWithPassword
-// (stores session state on singleton, contaminates subsequent queries)
-import { createAuthClient } from '@/server/lib/supabase';
-const authClient = createAuthClient();
-```
+- **Default to `withUserDb`.** `adminDb` is allowed only in the files listed (with a reason each) in `tests/structural/db-access-census.test.ts`; that test fails on any other import. Adding a file there is a security decision.
+- **Before any `adminDb` query that takes a user-supplied id**, check authorization yourself (super_admin, or org membership via `requireOrgRole`). RLS is not there to catch you.
+- **Never build SQL text from input.** Use Drizzle's query builder or the `sql` template, which binds values as parameters. Never `sql.raw()` user input. RLS inside `withUserDb` catches logic mistakes (a missing `where`), not injection: injected SQL could `reset role`.
+- **Log database errors through `dbErrorForLog(err)`** (`src/server/db/errors.ts`), and never log or return `err.message` of one: Drizzle puts the SQL and every bound value (emails, tokens) in it. The logger strips them from `err`/`error` fields as a backstop.
+- **Supabase clients are for Auth only** (`src/server/lib/supabase.ts`, typed `AuthOnlyClient`): `supabaseAdmin.auth.admin.*` for user management, `createAuthClient()` for `signInWithPassword()` (never the shared `supabaseAdmin`: it would keep the user's session). A `.from()` on a Supabase client fails the census.
+- **New table**: add its Drizzle definition to `src/server/db/schema.ts`; `tests/db/schema-drift.test.ts` fails when it and the migrations disagree.
 
 ## Key Patterns
 
@@ -162,10 +167,10 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
 1. Create migration in `supabase/migrations/` with:
    - Table with `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`, `created_at`, `updated_at`
    - Index on foreign key columns
-   - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` **in the same migration** (clients query PostgREST directly — an un-RLS'd `public` table is public)
+   - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` **in the same migration** (PostgREST still serves `/rest/v1`, so an un-RLS'd `public` table is public)
    - RLS policies using `(SELECT app.user_id())` and the org helpers for user-scoped access, with `WITH CHECK` mirroring `USING` on every write policy (see `00001_init.sql` and Security Rules → Database Security)
    - `update_updated_at()` trigger
-2. Run `npm run db:migrate` and add types to `src/shared/types.ts`
+2. Run `npm run db:migrate`, add the table to `src/server/db/schema.ts` (Drizzle), and add API types to `src/shared/types.ts`
 
 ### Data Fetching (TanStack Query)
 
@@ -261,7 +266,8 @@ Three tiers — pick the narrowest one that exercises the regression you're worr
 |---|---|---|---|
 | `unit` | node | Pure functions, validators, pricing/format/business helpers, structural invariants (e.g. i18n parity) | `tests/unit/`, `tests/structural/` |
 | `component` | jsdom | React components + custom hooks via React Testing Library | `tests/component/` |
-| `integration` | node | Hono route handlers end-to-end via `app.request()`, with Supabase/Stripe/SMTP mocked at the module boundary | `tests/integration/` |
+| `integration` | node | Hono route handlers end-to-end via `app.request()`, with the database, Supabase Auth, Stripe and SMTP mocked at the module boundary | `tests/integration/` |
+| `db` | node | RLS policies and SQL against a real Postgres (skipped unless `TEST_DB_HOST` is set; see `TESTING.md`) | `tests/db/` |
 
 Helpers live in `tests/_helpers/`:
 
@@ -273,7 +279,8 @@ Helpers live in `tests/_helpers/`:
 - `setup-integration.ts` — seeds plausible Supabase env values so server modules load without zod-validation errors.
 
 **Mocking conventions:**
-- Supabase: `vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { from: () => ({ insert: vi.fn() }) } }))`.
+- Database: `vi.mock('@server/db/client', () => ({ adminDb: { select: () => queryChain(() => rows) }, withUserDb: ... }))`. `queryChain` (`tests/_helpers/drizzle-mock.ts`) stands in for any Drizzle chain. Prove RLS itself in the `db` tier, never with mocks.
+- Supabase Auth: `vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { auth: { admin: { ... } } } }))`.
 - Stripe: `vi.mock('@server/lib/stripe', () => ({ stripe: { ... } }))`.
 - fetch (client side): `vi.stubGlobal('fetch', vi.fn(...))` + `vi.unstubAllGlobals()` in afterEach.
 - TanStack Query: wrap with a fresh `QueryClient` per render (`retry: false`) — see `tests/component/use-auth-settings.test.tsx`.
@@ -337,7 +344,7 @@ The rules below are mandatory — violations introduce real vulnerabilities. The
 
 1. **Always check auth** — every endpoint must verify `c.get('user')` and return 401 if null
 2. **Always validate input** — use Zod schemas for all API request bodies before processing
-3. **Use `c.get('supabase')` for user data** — never use `supabaseAdmin` for queries shown to end users; it bypasses RLS
+3. **Use `withUserDb(user.id, ...)` for user data** — never use `adminDb` for queries shown to end users; it bypasses RLS
 
 ## Role Model & Authorization
 
@@ -364,7 +371,7 @@ Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-spli
 
 ## Database Security (RLS)
 
-**Why this is load-bearing:** the browser queries PostgREST **directly** through Kong (`/rest/v1`) with the anon key + user JWT. RLS is the *only* thing between a `public.*` table and the internet — a missing or under-scoped policy is a live data breach, not a theoretical one. Enable RLS + write policies in the **same migration** that creates the table, before it ships.
+**Why this is load-bearing:** every user request's queries run through `withUserDb` as role `app_user`, and PostgREST still serves `public` tables at `/rest/v1` through Kong. RLS is what stands between one tenant's rows and another's (and the internet) — a missing or under-scoped policy is a live data breach, not a theoretical one. Enable RLS + write policies in the **same migration** that creates the table, before it ships.
 
 - **MUST** enable RLS on every new table: `ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;`
 - **MUST** give every `UPDATE`/`INSERT` policy a `WITH CHECK` that mirrors the full scope of its `USING`. Postgres evaluates `USING` (which rows you may target) and `WITH CHECK` (what the row may become) **independently** — a `WITH CHECK` that drops the org/owner scope lets a user rewrite a row they can see into a tenant they cannot, a cross-tenant takeover. Never rely on the implicit `WITH CHECK = USING` default for a boundary column.
@@ -374,7 +381,7 @@ Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-spli
 - **MUST** use `SECURITY DEFINER` + `SET search_path = ''` on all helper functions used in RLS policies
 - **NEVER** disable RLS on existing tables
 - **NEVER** use `USING (true)` as a policy for user data — every table needs real ownership checks
-- **NEVER** add a client `INSERT`/`UPDATE` policy on a table written only by the server (e.g. billing `customers`/`subscriptions`) — leave it server-only (service role) rather than opening needless write surface
+- **NEVER** add an `app_user` `INSERT`/`UPDATE` policy on a table written only by the server (e.g. billing `customers`/`subscriptions`) — leave it server-only (`adminDb`) rather than opening needless write surface
 - **NEVER** grant direct table access to `anon`, `authenticated`, or `app_user` beyond what RLS policies allow
 
 ### RLS Helper Functions
@@ -425,21 +432,23 @@ CREATE POLICY "dangerous_update"
 
 - **MUST** check authentication on every endpoint: `const user = c.get('user'); if (!user) return c.json({ error: 'Unauthorized' }, 401);`
 - **MUST** validate all input with Zod schemas before processing
-- **MUST** use `c.get('supabase')` for user-facing database queries — this client respects RLS
+- **MUST** use `withUserDb(user.id, ...)` for user-facing database queries — RLS applies inside it
 - **MUST** validate redirect URLs against an allowlist — never redirect to arbitrary user-supplied URLs
 - **MUST** use `createAuthClient()` for `signInWithPassword()` operations — never use the `supabaseAdmin` singleton for auth flows (it stores session state and contaminates subsequent queries)
 - **MUST** verify webhook signatures before processing webhook payloads (Stripe uses `stripe.webhooks.constructEvent()`)
-- **MUST** perform your own authorization check (super_admin, or org membership via `requireOrgRole`) **before** any `supabaseAdmin` query that touches user-supplied IDs — the service role bypasses ALL RLS, so a missing check is a direct IDOR
-- **NEVER** use `supabaseAdmin` for data shown to end users — it bypasses RLS
-- **NEVER** return raw database errors to clients — always return a generic error message
+- **MUST** perform your own authorization check (super_admin, or org membership via `requireOrgRole`) **before** any `adminDb` query that touches user-supplied IDs — `adminDb` bypasses ALL RLS, so a missing check is a direct IDOR
+- **NEVER** use `adminDb` for data shown to end users — it bypasses RLS
+- **NEVER** build SQL text from input — query builder or the `sql` template only (values become bound parameters)
+- **NEVER** return raw database errors to clients (`sanitizeError(err, 'Failed to ...')`), and log them as `{ err: dbErrorForLog(err) }` — a Drizzle error message carries the query's bound values
 
-### Supabase Client Selection
+### Data and Auth Client Selection
 
-| Client | Import / Access | RLS | Use For |
-|--------|----------------|-----|---------|
-| `c.get('supabase')` | Hono context (middleware-injected) | Enforced | All user-facing queries |
-| `supabaseAdmin` | `import { supabaseAdmin } from '@/server/lib/supabase'` | Bypassed | Admin operations, webhooks, background jobs |
-| `createAuthClient()` | `import { createAuthClient } from '@/server/lib/supabase'` | N/A | `signInWithPassword()` and other auth flows |
+| Client | Import | RLS | Use For |
+|--------|--------|-----|---------|
+| `withUserDb(userId, fn)` | `src/server/db/client.ts` | Enforced (`app_user`) | All user-facing queries; `null` user for anonymous reads |
+| `adminDb` | `src/server/db/client.ts` | Bypassed | Webhooks, admin tools, jobs; census allowlist only |
+| `supabaseAdmin` | `src/server/lib/supabase.ts` | N/A (Auth only) | `auth.admin.*` user management, token checks |
+| `createAuthClient()` | `src/server/lib/supabase.ts` | N/A (Auth only) | `signInWithPassword()` and other session-creating auth flows |
 
 ### API Endpoint Pattern
 
@@ -456,13 +465,17 @@ myRoutes.post('/', async (c) => {
     return c.json({ error: result.error.issues.map(e => e.message).join(', ') }, 400);
   }
 
-  // 3. Use RLS-enforced client
-  const supabase = c.get('supabase');
-  const { data, error } = await supabase.from('items').insert(result.data).select().single();
-
-  // 4. Generic error response
-  if (error) return c.json({ error: 'Failed to create item' }, 500);
-  return c.json({ item: data }, 201);
+  // 3. Query as the user: RLS decides what this insert may write
+  try {
+    const [item] = await withUserDb(user.id, (tx) =>
+      tx.insert(items).values({ ...result.data, createdBy: user.id }).returning()
+    );
+    return c.json({ item }, 201);
+  } catch (err) {
+    // 4. Generic error response; params stripped from the log
+    logger.error({ err: dbErrorForLog(err) }, 'Failed to create item');
+    return c.json({ error: 'Failed to create item' }, 500);
+  }
 });
 ```
 

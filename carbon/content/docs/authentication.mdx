@@ -219,12 +219,15 @@ The middleware chain runs on every request:
 
 1. **Extract token** from `Authorization: Bearer <token>` header
 2. **Validate** with `supabase.auth.getUser()` (server-side verification)
-3. **Set context**: `c.set('user', user)` and `c.set('supabase', client)` where `supabase` is a user-scoped client that respects RLS
+3. **Set context**: `c.set('user', user)`, which routes read with `c.get('user')`
 
-For operations that need to bypass RLS (admin tasks, webhooks), use the service role client:
+Routes then query the database as that user with `withUserDb(user.id, ...)`, so row-level security applies. For operations that need to bypass RLS (admin tasks, webhooks), the server uses `adminDb`, after checking the caller may do it:
 
 ```typescript
-import { supabaseAdmin } from '@/server/lib/supabase';
+import { adminDb } from '../../db/client';
+import { organizations } from '../../db/schema';
 
-const { data } = await supabaseAdmin.from('organizations').select('*');
+const all = await adminDb.select().from(organizations);
 ```
+
+See [Database](/docs/database) for both.
