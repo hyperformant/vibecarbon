@@ -6,8 +6,10 @@
 
 - MUST check auth on every endpoint: `if (!c.get('user')) return c.json({ error: 'Unauthorized' }, 401)`
 - MUST validate all input with Zod schemas before processing
-- MUST use `c.get('supabase')` for user-facing queries (respects RLS) — never `supabaseAdmin`
-- MUST enable RLS on every new table with `(SELECT auth.uid())` in policies
+- MUST run user-facing queries through `withUserDb(user.id, (tx) => ...)` from `src/server/db/client.ts` (runs as role `app_user`, RLS applies). `adminDb` bypasses RLS: only in the files `tests/structural/db-access-census.test.ts` allows, and only after checking the caller may touch the rows
+- MUST enable RLS on every new table, with policies `TO app_user` reading `(SELECT app.user_id())`, and a `WITH CHECK` mirroring `USING` on every write policy
+- NEVER build SQL text from input: use Drizzle's query builder or the `sql` template (bound parameters), never `sql.raw()` with user input
+- MUST log database errors as `dbErrorForLog(err)`, never `err.message` (it carries the SQL and bound values)
 - MUST use `createAuthClient()` for `signInWithPassword()` — never the `supabaseAdmin` singleton
 - NEVER return raw database errors to clients
 - NEVER expose `SUPABASE_SERVICE_ROLE_KEY` to the client
@@ -15,7 +17,8 @@
 ## Stack
 - Frontend: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4
 - Backend: Hono (Node.js), Pino logger, Zod validation
-- Auth/Database: Self-hosted Supabase (PostgreSQL, Auth, REST API, Realtime, Storage)
+- Database: PostgreSQL via Drizzle ORM (`src/server/db/`), RLS on every table
+- Auth: Self-hosted Supabase Auth (GoTrue)
 - Tooling: Biome (lint/format), TypeScript, esbuild, Vitest
 
 ## Commands
@@ -34,16 +37,21 @@
 
 ## Key Patterns
 
-### Supabase
-- Client-side (`src/client/lib/supabase.ts`): anon key, RLS enforced
-- Server-side (`src/server/lib/supabase.ts`): service role key, bypasses RLS
+### Database access
+- The browser never queries the database: it calls `/api/v1` routes (via `apiJson` in `src/client/lib/api.ts`)
+- Server: `withUserDb(userId | null, fn)` for anything done for a user or anonymous visitor (default); `adminDb` for webhooks, admin tools, jobs (bypasses RLS)
+- New table: migration in `supabase/migrations/` (RLS + policies in the same file), then its Drizzle definition in `src/server/db/schema.ts`
+- Use `(SELECT app.user_id())` in RLS policies (not bare `app.user_id()`), so it is evaluated once per statement
+
+### Supabase (Auth only)
+- Client-side (`src/client/lib/supabase.ts`): sign-in and session only
+- Server-side (`src/server/lib/supabase.ts`): `supabaseAdmin.auth.admin.*` for user management; never `.from()`
 - Auth is handled by Supabase - don't implement custom auth
-- Use `(SELECT auth.uid())` in RLS policies (not `auth.uid()` directly)
 
 ### API Routes
 - Create in `src/server/routes/v1/`, mount in `src/server/index.ts`
 - Validate input with Zod schemas
-- Get user via `c.get('user')`, get Supabase client via `c.get('supabase')`
+- Get user via `c.get('user')`, query via `withUserDb(user.id, (tx) => ...)`
 
 ### React Pages
 - Protected pages: wrap with `<ProtectedRoute>` in `App.tsx`
@@ -64,7 +72,7 @@
 - Shared hooks in `src/client/hooks/api/`
 - Invalidate related queries after mutations: `queryClient.invalidateQueries({ queryKey: ['items'] })`
 
-### Database
+### Database (migrations)
 - Migrations in `supabase/migrations/` with incrementing prefix
 - Always enable RLS on new tables
 - Helper functions: `get_user_org_ids()`, `get_user_admin_org_ids()`, `is_super_admin()`

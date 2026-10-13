@@ -6,7 +6,7 @@ Four tiers, picked to mirror what each tier actually proves:
 |---|---|---|---|
 | `unit` | node | <1s | Pure functions, validators, pricing/format helpers, cross-cutting invariants |
 | `component` | jsdom | a few s | React components + custom hooks via React Testing Library |
-| `integration` | node | <30s | Hono route handlers end-to-end with externals (Supabase, Stripe, SMTP) mocked |
+| `integration` | node | <30s | Hono route handlers end-to-end with externals (database, Supabase Auth, Stripe, SMTP) mocked |
 | `db` | node | a few s | RLS policies and SQL against a real Postgres (skipped unless `TEST_DB_HOST` is set) |
 
 Run them:
@@ -91,7 +91,8 @@ All under `tests/_helpers/`:
 |---|---|
 | `app.ts` → `mountRoute(prefix, routes)` | Building a one-route Hono app for an integration test. No global middleware so assertions stay focused. |
 | `app.ts` → `jsonPost(body)` | POSTing JSON to `app.request()` without re-typing headers. |
-| `factories.ts` → `makeUser`, `makeOrg`, `makeContactSubmission` | Plausible domain objects to hand to mocked Supabase resolved values. |
+| `factories.ts` → `makeUser`, `makeOrg`, `makeContactSubmission` | Plausible domain objects to hand back from a mocked query. |
+| `drizzle-mock.ts` → `queryChain(run)` | Standing in for a Drizzle query: every builder method returns the chain, and awaiting it calls `run` for the rows (or throws, to simulate a failed query). |
 | `jwt.ts` → `mockJwt(payload, secret?)` | HS256-signed bearer token for auth-protected routes. |
 | `env.ts` → `mockEnv({...})` | Temporarily swap process.env vars for one test; returns a restore closure. |
 | `setup-rtl.ts` | Wired into the `component` project — loads jest-dom matchers and runs RTL's cleanup between tests. |
@@ -101,10 +102,28 @@ All under `tests/_helpers/`:
 
 Server-side modules are imported with their relative paths inside `src/server/`. Pass the path alias `@server/...` to `vi.mock` — vitest matches by resolved file path, so it'll intercept whichever path the production code happens to use.
 
+The database seam is `@server/db/client`. Replace `adminDb` and `withUserDb` with `queryChain` doubles, so the route logic runs without Postgres; the `db` tier above is where queries meet the real engine and RLS.
+
 ```ts
-// Supabase
+import { queryChain } from '../../../_helpers/drizzle-mock';
+
+// Database: one chain per query; `run` returns the rows the query would.
+const { rows } = vi.hoisted(() => ({ rows: [] as { id: string }[] }));
+vi.mock('@server/db/client', () => {
+  const db = {
+    select: () => queryChain(() => rows),
+    insert: () => queryChain(() => [{ id: 'new-id' }]),
+  };
+  return {
+    adminDb: db,
+    // Run the callback against the same double; RLS is the db tier's job.
+    withUserDb: (_userId: string | null, fn: (tx: typeof db) => unknown) => fn(db),
+  };
+});
+
+// Supabase Auth (the only thing the Supabase clients still do)
 vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: { from: () => ({ insert: vi.fn().mockResolvedValue({ error: null }) }) },
+  supabaseAdmin: { auth: { admin: { getUserById: vi.fn() } } },
 }));
 
 // Stripe
@@ -159,7 +178,7 @@ const { result } = renderHook(() => useMyHook(), { wrapper: makeWrapper() });
 
 ## What we deliberately don't do (yet)
 
-- **No real Postgres in `integration`.** The Supabase dev container doesn't expose Postgres on the host. Mocking at the Supabase client boundary gives fast, deterministic tests and covers the route logic. If you need SQL-level coverage (RLS, triggers, complex joins), add testcontainers or expose a dev port and write a `tests/database/` tier — the boundary stays the same.
+- **No real Postgres in `integration`.** Mocking `@server/db/client` keeps route tests fast and deterministic. SQL-level coverage (RLS, triggers, joins, schema drift) lives in the `db` tier, which runs against the real engine (see "Database tier").
 - **No E2E / Playwright.** Add when you actually have flows worth black-box testing through the browser.
 - **No snapshot tests.** Brittle and noisy in a fast-moving template; assert behavior instead.
 - **No MSW.** `vi.stubGlobal('fetch', ...)` covers the seed cases; adopt MSW if your fetch surface grows.

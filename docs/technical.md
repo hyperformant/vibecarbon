@@ -13,7 +13,7 @@ Complete technical reference for developing with Vibecarbon.
 | **Frontend** | React 19 + Vite + Shadcn UI | Ultra-fast development with modern styling |
 | **Backend** | Hono 4 + Node.js | Lightweight API framework (~13KB) with full type safety |
 | **Auth & API** | Supabase (GoTrue, PostgREST, Realtime, Storage) | Authentication, auto-generated REST API, WebSocket subscriptions |
-| **Database** | PostgreSQL 17 | Database with Row Level Security |
+| **Database** | PostgreSQL 17 + Drizzle ORM | The API server queries Postgres directly; Row Level Security on every table |
 | **Gateway** | Kong | API Gateway with rate limiting and routing |
 | **Orchestration** | Docker Compose + Kubernetes | Container orchestration with auto-scaling |
 | **Proxy** | Traefik | Reverse proxy with automatic HTTPS |
@@ -171,15 +171,16 @@ app.get('/api/protected', (c) => {
   return c.json({ user });
 });
 
-// Or use supabase admin client for server operations
-import { supabaseAdmin } from '../lib/supabase';
+// Query as the signed-in user: RLS scopes every statement to their rows
+import { withUserDb } from '../db/client';
+import { organizations } from '../db/schema';
 
-app.get('/api/users', async (c) => {
-  const { data, error } = await supabaseAdmin
-    .from('users')
-    .select('*');
+app.get('/api/v1/organizations', async (c) => {
+  const user = c.get('user');
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
 
-  return c.json(data);
+  const orgs = await withUserDb(user.id, (tx) => tx.select().from(organizations));
+  return c.json({ organizations: orgs });
 });
 ```
 
@@ -211,6 +212,15 @@ function MyComponent() {
 
 ### Database & Row Level Security
 
+The browser never queries Postgres. It calls the Hono API (`/api/v1/...`), and the API server queries Postgres directly with Drizzle through `src/server/db/client.ts`, which exports two handles:
+
+- **`withUserDb(userId, fn)`** opens a transaction, switches to the `app_user` role, and sets `app.user_id` for that transaction in one parameterized statement (`select set_config('role', 'app_user', true), set_config('app.user_id', $1, true)`). Every statement `fn` runs is filtered by RLS. `userId = null` is an anonymous request: `app.user_id()` reads `NULL`, so user-scoped policies match nothing. This is the default for anything done on behalf of a user.
+- **`adminDb`** runs as the connection role (`DB_USER`, default `postgres`), which bypasses RLS. It is reserved for the server acting for itself (webhooks, admin tools, background jobs); `tests/structural/db-access-census.test.ts` lists the files allowed to import it.
+
+At startup the server checks that the connection role bypasses RLS and is a member of `app_user`, and exits if not, so `adminDb` can never silently become RLS-scoped. The connection comes from discrete env vars (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`), never a URL, so passwords need no URL-encoding.
+
+Policies target `app_user` and read the caller from `app.user_id()`:
+
 ```sql
 -- supabase/migrations/00001_init.sql
 
@@ -225,28 +235,30 @@ CREATE TABLE organizations (
 -- Enable RLS
 ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
 
--- Policy: Users can only see orgs they belong to
+-- Policy: Users can only see orgs they belong to.
+-- get_user_org_ids() is a SECURITY DEFINER helper that reads
+-- memberships for (SELECT app.user_id()).
 CREATE POLICY "Users can view their organizations"
   ON organizations FOR SELECT
-  USING (id IN (
-    SELECT organization_id FROM memberships
-    WHERE user_id = auth.uid()
-  ));
+  TO app_user
+  USING (id IN (SELECT get_user_org_ids()));
 ```
 
-### Querying with supabase-js
+### Querying with Drizzle
 
 ```typescript
-// Client-side - RLS automatically filters results
-const { data: orgs } = await supabase
-  .from('organizations')
-  .select('*');
+import { adminDb, withUserDb } from '../db/client';
+import { organizations } from '../db/schema';
 
-// Server-side with service role - bypasses RLS
-const { data: allOrgs } = await supabaseAdmin
-  .from('organizations')
-  .select('*');
+// On behalf of a user: RLS returns only their organizations
+const orgs = await withUserDb(user.id, (tx) => tx.select().from(organizations));
+
+// As the server itself (webhook, admin tool, job): bypasses RLS, so check
+// the caller's authorization yourself before passing in any user-supplied id
+const allOrgs = await adminDb.select().from(organizations);
 ```
+
+The client reads through TanStack Query and `apiJson('/api/v1/organizations')` from `src/client/lib/api.ts`. Drizzle binds every value as a query parameter; never build SQL text from input. The real-Postgres `db` test tier (`carbon/tests/db/`, `npm run test:db`) proves the policies against the engine that enforces them.
 
 ### Realtime Subscriptions
 
@@ -307,9 +319,10 @@ const { data: { publicUrl: thumbnailUrl } } = supabase.storage
 
 ## API Routes & Patterns
 
-### Supabase Client Usage
-- **Client-side**: `src/client/lib/supabase.ts` - uses anon key, RLS enforced
-- **Server-side**: `src/server/lib/supabase.ts` - uses service role key, bypasses RLS
+### Data and Auth Clients
+- **Data (server only)**: `src/server/db/client.ts` - `withUserDb` (RLS as `app_user`, the default) and `adminDb` (bypasses RLS, census-listed files only)
+- **Auth, client-side**: `src/client/lib/supabase.ts` - sign-in and session (the access token `apiJson` sends)
+- **Auth, server-side**: `src/server/lib/supabase.ts` - `supabaseAdmin.auth.admin.*` user management only, never `.from()`
 
 ### Route Conventions
 | Route | Purpose |
@@ -424,15 +437,16 @@ When accessing an admin dashboard without a valid session:
 - **CORS** - Configured for SPA origin with credentials
 
 ### Database Security
-- **Row Level Security** - Policies enforced at database level
-- **Role separation** - anon (SELECT), authenticated (CRUD), service_role (ALL)
+- **Row Level Security** - Policies enforced at database level; user requests run as `app_user` with `app.user_id` set per transaction
+- **Role separation** - `app_user` (user requests, RLS enforced), `postgres` (the API server's connection role, bypasses RLS, used by `adminDb`)
 - **JWT validation** - Kong validates tokens before reaching PostgREST
 
 ### Database Roles
 
 | Role | Used By | Purpose |
 |------|---------|---------|
-| `postgres` | Admin operations | Superuser for migrations |
+| `postgres` | API server (`adminDb`), migrations | Connection role; bypasses RLS and is a member of `app_user` |
+| `app_user` | API server (`withUserDb`) | NOLOGIN; every user request switches to it, RLS enforced |
 | `authenticator` | PostgREST | API gateway connection, switches roles based on JWT |
 | `supabase_admin` | Realtime, Meta, Studio | Admin operations on database |
 | `supabase_auth_admin` | GoTrue | Manages auth schema and user records |

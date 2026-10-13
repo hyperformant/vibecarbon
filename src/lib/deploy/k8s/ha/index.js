@@ -644,15 +644,15 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   //     restarted only `app`, but the public probe still returned a
   //     19-byte `404 page not found`. cert-manager state
   //     was clean (vibecarbon-tls READY=True, Order=valid), but app
-  //     pods kept failing readiness 503. The app's
-  //     `/api/health/ready` queries `supabaseAdmin.from(...)`, which
-  //     hits SUPABASE_URL=http://supabase-supabase-kong:8000 → kong
-  //     → supabase-supabase-rest → postgres. When primary postgres
-  //     restarted, supabase-rest + auth + realtime + meta held onto
-  //     stale connections; restarting only `app` left the readiness
-  //     path broken. Service `app` then had zero Ready endpoints and
-  //     Traefik's IngressRoute fell through to its default 404
-  //     backend on the public probe.
+  //     pods kept failing readiness 503. At the time the app's
+  //     `/api/health/ready` went through Kong to PostgREST; it is now
+  //     a direct db ping (`select 1` on the app's own pg pool, which
+  //     reconnects on its own). The other postgres clients are still
+  //     the problem: when primary postgres restarted, supabase-rest +
+  //     auth + realtime + meta held onto stale connections, and
+  //     restarting only `app` left them broken. Service `app` then had
+  //     zero Ready endpoints and Traefik's IngressRoute fell through
+  //     to its default 404 backend on the public probe.
   //
   //     We restart specifically the deployments that hold direct
   //     postgres connections. We do NOT restart:

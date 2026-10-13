@@ -1,12 +1,12 @@
 ---
 title: "Database"
-description: "Work with Supabase PostgreSQL, migrations, and row-level security."
+description: "Work with PostgreSQL through Drizzle, migrations, and row-level security."
 order: 5
 ---
 
 ## Overview
 
-Your application uses self-hosted Supabase with PostgreSQL. All database operations go through Supabase's client libraries, which provide built-in support for row-level security (RLS).
+Your application runs on PostgreSQL. The browser never talks to the database: it calls your API (`/api/v1/...`), and the API server queries Postgres with [Drizzle](https://orm.drizzle.team). Row-level security (RLS) still guards every table, because each user request runs as a restricted database role that only sees that user's rows.
 
 ## Schema Overview
 
@@ -62,22 +62,27 @@ CREATE INDEX IF NOT EXISTS idx_my_table_user_id ON my_table(user_id);
 -- Enable RLS
 ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;
 
--- CRUD policies
+-- CRUD policies. TO app_user: the role every user request runs as.
 CREATE POLICY "Users can view their own items"
   ON my_table FOR SELECT
-  USING (user_id = (SELECT auth.uid()));
+  TO app_user
+  USING (user_id = (SELECT app.user_id()));
 
 CREATE POLICY "Users can create their own items"
   ON my_table FOR INSERT
-  WITH CHECK (user_id = (SELECT auth.uid()));
+  TO app_user
+  WITH CHECK (user_id = (SELECT app.user_id()));
 
 CREATE POLICY "Users can update their own items"
   ON my_table FOR UPDATE
-  USING (user_id = (SELECT auth.uid()));
+  TO app_user
+  USING (user_id = (SELECT app.user_id()))
+  WITH CHECK (user_id = (SELECT app.user_id()));
 
 CREATE POLICY "Users can delete their own items"
   ON my_table FOR DELETE
-  USING (user_id = (SELECT auth.uid()));
+  TO app_user
+  USING (user_id = (SELECT app.user_id()));
 
 -- Auto-update updated_at
 CREATE TRIGGER my_table_updated_at
@@ -88,7 +93,15 @@ CREATE TRIGGER my_table_updated_at
 
 ## Row-Level Security
 
-Every table has RLS enabled. Policies use helper functions defined in the initial migration:
+Every table has RLS enabled. Here is how a request reaches it: your route calls `withUserDb(user.id, ...)`, which opens a transaction, switches to the `app_user` role, and sets `app.user_id` to the signed-in user's id (empty for an anonymous visitor). Policies read that id back with `app.user_id()`, which returns the user's UUID, or `NULL` when nobody is signed in.
+
+A few rules keep policies correct:
+
+- Write `(SELECT app.user_id())`, not bare `app.user_id()`, so Postgres evaluates it once per statement instead of once per row.
+- Give every `UPDATE` policy a `WITH CHECK` that mirrors its `USING`. `USING` decides which rows you may change, `WITH CHECK` decides what they may become, and Postgres checks them separately.
+- Target policies `TO app_user`, the role user requests run as.
+
+Policies also use helper functions defined in the initial migration:
 
 ### RLS Helper Functions
 
@@ -109,7 +122,8 @@ All helper functions use `SECURITY DEFINER` so they can read the `memberships` t
 ```sql
 CREATE POLICY "Users can view their own items"
   ON my_table FOR SELECT
-  USING (user_id = (SELECT auth.uid()));
+  TO app_user
+  USING (user_id = (SELECT app.user_id()));
 ```
 
 **Organization data**: rows belong to an org the user is a member of:
@@ -117,6 +131,7 @@ CREATE POLICY "Users can view their own items"
 ```sql
 CREATE POLICY "Members can view org data"
   ON my_table FOR SELECT
+  TO app_user
   USING (organization_id IN (SELECT get_user_org_ids()));
 ```
 
@@ -125,7 +140,9 @@ CREATE POLICY "Members can view org data"
 ```sql
 CREATE POLICY "Admins can update org data"
   ON my_table FOR UPDATE
-  USING (organization_id IN (SELECT get_user_admin_org_ids()));
+  TO app_user
+  USING (organization_id IN (SELECT get_user_admin_org_ids()))
+  WITH CHECK (organization_id IN (SELECT get_user_admin_org_ids()));
 ```
 
 **Super admin access**: full access for super admins:
@@ -133,30 +150,17 @@ CREATE POLICY "Admins can update org data"
 ```sql
 CREATE POLICY "Super admins can do anything"
   ON my_table FOR ALL
-  USING (is_super_admin());
-```
-
-## Client-Side Queries
-
-```typescript
-import { supabase } from '@/lib/supabase';
-
-// Fetch data (RLS enforced automatically)
-const { data: items, error: fetchError } = await supabase
-  .from('my_table')
-  .select('*');
-
-// Insert data
-const { data: newItem, error: insertError } = await supabase
-  .from('my_table')
-  .insert({ name: 'New item' })
-  .select()
-  .single();
+  TO app_user
+  USING (is_super_admin())
+  WITH CHECK (is_super_admin());
 ```
 
 ## Server-Side Queries
 
-The API server talks to Postgres directly with [Drizzle](https://orm.drizzle.team). Tables are defined in `src/server/db/schema.ts` (add yours there after its migration), and every query goes through `src/server/db/client.ts`:
+The API server talks to Postgres directly with [Drizzle](https://orm.drizzle.team). Tables are defined in `src/server/db/schema.ts` (add yours there after its migration), and every query goes through `src/server/db/client.ts`, which gives you two ways in:
+
+- **`withUserDb(userId, fn)`** runs `fn` as the signed-in user (pass `null` for an anonymous visitor). RLS applies to every statement inside, so a forgotten `where` still cannot leak another user's rows. Use this by default.
+- **`adminDb`** runs as the server itself and bypasses RLS. Use it only for work no user is behind (webhooks, admin tools, background jobs), and check yourself that the caller may touch the rows first.
 
 ```typescript
 import { eq } from 'drizzle-orm';
@@ -175,23 +179,78 @@ const all = await adminDb.select().from(myTable);
 
 Values you pass to Drizzle are sent as query parameters, never pasted into the SQL, so input cannot change the query. Keep it that way: never build SQL text from user input.
 
+### Exposing data to the browser
+
+The browser gets data by calling one of your own `/api/v1` routes. Add a route in `src/server/routes/v1/`, check the user, and query through `withUserDb`:
+
+```typescript
+// src/server/routes/v1/items.ts
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { withUserDb } from '../../db/client';
+import { myTable } from '../../db/schema';
+import { sanitizeError } from '../../lib/errors';
+import type { HonoVariables } from '../../types';
+
+export const itemRoutes = new Hono<{ Variables: HonoVariables }>();
+
+itemRoutes.get('/', async (c) => {
+  const user = c.get('user');
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  try {
+    // RLS returns only this user's rows; no where clause needed for safety.
+    const items = await withUserDb(user.id, (tx) => tx.select().from(myTable));
+    return c.json({ items });
+  } catch (error) {
+    return c.json({ error: sanitizeError(error, 'Failed to fetch items') }, 500);
+  }
+});
+
+const createItem = z.object({ name: z.string().min(1).max(200) });
+
+itemRoutes.post('/', async (c) => {
+  const user = c.get('user');
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+  const parsed = createItem.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: 'Invalid item' }, 400);
+
+  try {
+    // The INSERT policy's WITH CHECK rejects a user_id that is not the caller's.
+    const [item] = await withUserDb(user.id, (tx) =>
+      tx.insert(myTable).values({ userId: user.id, name: parsed.data.name }).returning()
+    );
+    return c.json({ item }, 201);
+  } catch (error) {
+    return c.json({ error: sanitizeError(error, 'Failed to create item') }, 500);
+  }
+});
+```
+
+Mount it in `src/server/index.ts` with `app.route('/api/v1/items', itemRoutes)`.
+
 ## TanStack Query
 
-Use TanStack Query for client-side data fetching with caching, deduplication, and automatic refetching.
+Use TanStack Query for client-side data fetching with caching, deduplication, and automatic refetching. `apiJson` from `src/client/lib/api.ts` calls your API with the user's session token attached, and throws on an error response so TanStack Query sees it.
 
 ### Fetching Data
 
 ```typescript
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase';
+import { apiJson } from '@/lib/api';
+
+interface Item {
+  id: string;
+  name: string;
+}
 
 export function useItems() {
   return useQuery({
     queryKey: ['items'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('items').select('*');
-      if (error) throw error;
-      return data;
+      const { items } = await apiJson<{ items: Item[] }>('/api/v1/items');
+      return items;
     },
   });
 }
@@ -201,20 +260,18 @@ export function useItems() {
 
 ```typescript
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase';
+import { apiJson } from '@/lib/api';
 
 export function useCreateItem() {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (item: { name: string }) => {
-      const { data, error } = await supabase
-        .from('items')
-        .insert(item)
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      const { item: created } = await apiJson<{ item: Item }>('/api/v1/items', {
+        method: 'POST',
+        body: item,
+      });
+      return created;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['items'] });
