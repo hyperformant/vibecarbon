@@ -35,6 +35,7 @@ import { registerProject } from './lib/config.js';
 import { titleizeSlug } from './lib/display-name.js';
 import { dotenvValueProblem, formatDotenvLine } from './lib/dotenv.js';
 import { writeLogoSvgs } from './lib/logo-generator.js';
+import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import {
   adaptDockerfileForPackageManager,
   getPackageManagerVersion,
@@ -543,6 +544,7 @@ async function bootstrap(cliArgs) {
 
   // Start interactive UI
   introCommand('create');
+  warnAboutOrphanStacks();
 
   // Gather configuration.
   // projectName is the basename; it's also the directory name created in cwd.

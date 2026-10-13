@@ -2,7 +2,24 @@
 # Use with: docker compose -f docker-compose.yml -f docker-compose.observability.yml -f docker-compose.observability.override.yml up -d
 
 services:
+  # Dev stacks cap restarts and don't come back on their own after a reboot:
+  # a project folder deleted or moved while its stack existed otherwise
+  # crash-loops forever. Run `vibecarbon up` after a reboot. Prod keeps
+  # unless-stopped (this file is never deployed).
+  prometheus:
+    restart: on-failure:5
+
+  loki:
+    restart: on-failure:5
+
+  promtail:
+    restart: on-failure:5
+
+  postgres-exporter:
+    restart: on-failure:5
+
   grafana:
+    restart: on-failure:5
     environment:
       # Dev drops the ForwardAuth middleware (see labels), so the trusted proxy
       # that sets X-Authenticated-User is gone. Turn the auth-proxy OFF here too —

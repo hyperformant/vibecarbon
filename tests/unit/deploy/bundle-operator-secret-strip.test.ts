@@ -169,3 +169,39 @@ describe('renderBundle strips operator-secret keys from the raw .env baseline', 
     }
   });
 });
+
+describe('renderBundle strips the local COMPOSE_PROJECT_NAME pin', () => {
+  let cwdBackup: string;
+  let projectDir: string;
+
+  beforeEach(() => {
+    cwdBackup = process.cwd();
+  });
+
+  afterEach(() => {
+    process.chdir(cwdBackup);
+    if (projectDir) rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it('never ships the local pin, so servers keep deriving the name from /opt/<project>', () => {
+    projectDir = makeProjectDir(
+      [
+        'COMPOSE_PROJECT_NAME=carbon',
+        'export COMPOSE_PROJECT_NAME=carbon',
+        '  COMPOSE_PROJECT_NAME = carbon',
+        'PROJECT_NAME=vibecarbon',
+      ].join('\n'),
+    );
+    process.chdir(projectDir);
+
+    const stage = renderBundle('myproj', {});
+
+    try {
+      const raw = readFileSync(join(stage, '.env'), 'utf-8');
+      expect(raw).not.toMatch(/COMPOSE_PROJECT_NAME/);
+      expect(parseDotenv(raw).PROJECT_NAME).toBe('myproj');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+});

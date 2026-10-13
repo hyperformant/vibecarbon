@@ -2,7 +2,12 @@
 # Use with: docker compose -f docker-compose.yml -f docker-compose.metabase.yml -f docker-compose.metabase.override.yml up -d
 
 services:
+  # Dev stacks cap restarts and don't come back on their own after a reboot:
+  # a project folder deleted or moved while its stack existed otherwise
+  # crash-loops forever. Run `vibecarbon up` after a reboot. Prod keeps
+  # unless-stopped (this file is never deployed).
   metabase:
+    restart: on-failure:5
     labels:
       # Dev: No auth required (same as studio/traefik in local dev)
       # Production uses ForwardAuth via docker-compose.metabase.yml labels

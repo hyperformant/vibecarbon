@@ -14,8 +14,11 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
+import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-project-name.js';
 import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
+import { formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
+import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
@@ -228,6 +231,28 @@ function setSubnetPrefix(prefix, cwd) {
   writeFileSync(envPath, content, { mode: 0o600 });
 }
 
+/**
+ * Write COMPOSE_PROJECT_NAME to .env (NOT .env.local), same reasoning as
+ * setSubnetPrefix: compose interpolates only .env, including for a bare
+ * `docker compose down`. Pinning keeps the stack (and its db volume) stable
+ * when the project folder is renamed.
+ */
+export function setComposeProjectName(name, cwd) {
+  const envPath = join(cwd, '.env');
+  let content = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
+  const line = formatDotenvLine('COMPOSE_PROJECT_NAME', name);
+  const regex = /^\s*(?:export\s+)?COMPOSE_PROJECT_NAME\s*=.*$/m;
+
+  if (regex.test(content)) {
+    content = content.replace(regex, () => line);
+  } else {
+    const body = content.trimEnd();
+    content = `${body ? `${body}\n\n` : ''}# Local Docker stack name (pinned by vibecarbon up so renaming the folder keeps your data)\n${line}\n`;
+  }
+
+  writeFileSync(envPath, content, { mode: 0o600 });
+}
+
 /** True if the Docker daemon answers `docker info`. */
 function dockerInfoOk() {
   try {
@@ -289,6 +314,45 @@ export async function run(args = []) {
   // Docker must be running before any of the port/subnet probes (which call
   // docker) or dev:start — otherwise the user gets a raw daemon-socket error.
   assertDockerRunning();
+
+  // Pin the compose project name so renaming this folder keeps its database,
+  // adopt a stack whose folder moved, and refuse to hijack a copy's stack.
+  // The pin is read from .env only: compose interpolates nothing else.
+  const envFile = join(cwd, '.env');
+  const pinned = existsSync(envFile)
+    ? parseDotenv(readFileSync(envFile, 'utf-8')).COMPOSE_PROJECT_NAME || null
+    : null;
+  const projectName = getEnvValue('PROJECT_NAME', cwd);
+  const stacks = listVibecarbonStacks();
+  const resolved = resolveComposeProjectName({
+    cwd,
+    projectName,
+    pinned,
+    stacks,
+  });
+  if (resolved.action === 'refuse') {
+    p.log.error(`${projectName} already has a local stack from ${formatStackPath(resolved.from)}`);
+    p.log.info(
+      'if this folder is a copy, give it its own PROJECT_NAME in .env and .env.local, or run `vibecarbon down` in the other folder first',
+    );
+    process.exit(1);
+  }
+  if (resolved.action === 'adopt') {
+    p.log.info(
+      `this project moved from ${formatStackPath(resolved.from)}, so vibecarbon is reusing its local database`,
+    );
+  }
+  if (resolved.action === 'pin' || resolved.action === 'adopt') {
+    setComposeProjectName(resolved.name, cwd);
+  }
+  if (resolved.action === 'adopt' && !releaseMovedStack(resolved.name, { cwd })) {
+    p.log.warn(
+      'could not stop the old containers, so they may keep pointing at the previous folder',
+    );
+  }
+  process.env.COMPOSE_PROJECT_NAME = resolved.name;
+  // dev:start recreates the resolved stack, so it is never an orphan of itself.
+  warnAboutOrphanStacks({ exclude: [resolved.name], list: () => stacks });
 
   // Check for port conflicts (excluding ports already bound by this project's containers)
   const ports = getProjectPorts(cwd);

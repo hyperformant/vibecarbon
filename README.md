@@ -130,6 +130,7 @@ vibecarbon <command> [options]
 | **`create <project-name>`** | Create a new Vibecarbon project |
 | **`up`** | Start the local development environment |
 | **`down`** | Stop the local development environment |
+| **`down -orphans`** | Remove local stacks whose project folder is gone or moved |
 | **`status`** | Show project and deployment status |
 | **`reset`** | Reset the local environment (**removes all data**) |
 | **`configure`** | Configure external services and settings: billing, OAuth, SMTP, CI/CD, globalization, and more |
