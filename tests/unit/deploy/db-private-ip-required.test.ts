@@ -1,10 +1,10 @@
 /**
- * supabasePrivateIp is REQUIRED in provider-generic k8s-ha code — no
+ * dbPrivateIp is REQUIRED in provider-generic k8s-ha code — no
  * `10.0.1.2` fallback anywhere outside Hetzner-owned files.
  *
  * Class (d4 audit, 2026-08-27): "statically-pinned Hetzner private-IP default
  * leaking into provider-generic code". Hetzner's IaC program pins the
- * supabase node to 10.0.1.2 (hetzner-k8s.js ServerNetwork), and that literal
+ * database node to 10.0.1.2 (hetzner-k8s.js ServerNetwork), and that literal
  * had metastasized into defaults/fallbacks in the shared HA transport,
  * re-seed, and helm-values paths. On DigitalOcean the VPC is 10.10.0.0/20
  * with DHCP-assigned addresses, so every fallback site is a silent breakage:
@@ -34,51 +34,51 @@ const ROOT = join(__dirname, '../../..');
 const baseTransportArgs = {
   primaryIp: '203.0.113.10',
   standbyIp: '203.0.113.20',
-  primarySupabaseIp: '203.0.113.11',
-  standbySupabaseIp: '203.0.113.21',
+  primaryDbIp: '203.0.113.11',
+  standbyDbIp: '203.0.113.21',
   sshKeyPath: '/tmp/nonexistent-test-key',
 };
 
-describe('supabasePrivateIp is required (no 10.0.1.2 fallback)', () => {
-  it('prepareReplicationTransport throws when primarySupabasePrivateIp is absent', async () => {
+describe('dbPrivateIp is required (no 10.0.1.2 fallback)', () => {
+  it('prepareReplicationTransport throws when primaryDbPrivateIp is absent', async () => {
     await expect(
       prepareReplicationTransport({
         ...baseTransportArgs,
-        standbySupabasePrivateIp: '10.10.0.5',
+        standbyDbPrivateIp: '10.10.0.5',
       }),
-    ).rejects.toThrow(/primarySupabasePrivateIp.*required/i);
+    ).rejects.toThrow(/primaryDbPrivateIp.*required/i);
   });
 
-  it('prepareReplicationTransport throws when standbySupabasePrivateIp is absent', async () => {
+  it('prepareReplicationTransport throws when standbyDbPrivateIp is absent', async () => {
     await expect(
       prepareReplicationTransport({
         ...baseTransportArgs,
-        primarySupabasePrivateIp: '10.10.0.4',
+        primaryDbPrivateIp: '10.10.0.4',
       }),
-    ).rejects.toThrow(/standbySupabasePrivateIp.*required/i);
+    ).rejects.toThrow(/standbyDbPrivateIp.*required/i);
   });
 
   it('reestablishReplicationTransport throws when the private IPs are absent', async () => {
     await expect(reestablishReplicationTransport({ ...baseTransportArgs })).rejects.toThrow(
-      /SupabasePrivateIp.*required/i,
+      /DbPrivateIp.*required/i,
     );
   });
 
   it('setupReplication throws when the private IPs are absent (before any password read)', async () => {
     await expect(setupReplication({ ...baseTransportArgs })).rejects.toThrow(
-      /SupabasePrivateIp.*required/i,
+      /DbPrivateIp.*required/i,
     );
   });
 
-  it('reseedStandbyFromPrimary throws when standbySupabasePrivateIp is absent', async () => {
+  it('reseedStandbyFromPrimary throws when standbyDbPrivateIp is absent', async () => {
     await expect(
       reseedStandbyFromPrimary('203.0.113.20', '/tmp/nonexistent-test-key', {
-        standbySupabaseIp: '203.0.113.21',
+        standbyDbIp: '203.0.113.21',
       }),
-    ).rejects.toThrow(/standbySupabasePrivateIp.*required/i);
+    ).rejects.toThrow(/standbyDbPrivateIp.*required/i);
   });
 
-  it('installSupabase throws when supabasePrivateIp is absent (before any shell-out)', async () => {
+  it('installSupabase throws when dbPrivateIp is absent (before any shell-out)', async () => {
     await expect(
       installSupabase({
         kubeconfig: '/tmp/nonexistent-kubeconfig',
@@ -91,7 +91,7 @@ describe('supabasePrivateIp is required (no 10.0.1.2 fallback)', () => {
         backupBucketName: 'b',
         storageClass: 'hcloud-volumes',
       }),
-    ).rejects.toThrow(/supabasePrivateIp.*required/i);
+    ).rejects.toThrow(/dbPrivateIp.*required/i);
   });
 });
 

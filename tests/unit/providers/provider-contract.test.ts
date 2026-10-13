@@ -181,13 +181,13 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       }
     });
 
-    it('getRegionDefaults returns a valid {masterType, supabaseType, workerType} shape for every known region', () => {
+    it('getRegionDefaults returns a valid {masterType, dbType, workerType} shape for every known region', () => {
       for (const region of Object.keys(Provider.REGIONS)) {
         const defaults = Provider.getRegionDefaults(region);
         expect(typeof defaults.masterType).toBe('string');
         expect(defaults.masterType.length).toBeGreaterThan(0);
-        expect(typeof defaults.supabaseType).toBe('string');
-        expect(defaults.supabaseType.length).toBeGreaterThan(0);
+        expect(typeof defaults.dbType).toBe('string');
+        expect(defaults.dbType.length).toBeGreaterThan(0);
         expect(typeof defaults.workerType).toBe('string');
         expect(defaults.workerType.length).toBeGreaterThan(0);
       }
@@ -197,8 +197,8 @@ describe.each(Object.entries(PROVIDERS))('Provider contract: %s', (id, Provider)
       const defaults = Provider.getRegionDefaults('nonexistent-region');
       expect(typeof defaults.masterType).toBe('string');
       expect(defaults.masterType.length).toBeGreaterThan(0);
-      expect(typeof defaults.supabaseType).toBe('string');
-      expect(defaults.supabaseType.length).toBeGreaterThan(0);
+      expect(typeof defaults.dbType).toBe('string');
+      expect(defaults.dbType.length).toBeGreaterThan(0);
       expect(typeof defaults.workerType).toBe('string');
       expect(defaults.workerType.length).toBeGreaterThan(0);
     });

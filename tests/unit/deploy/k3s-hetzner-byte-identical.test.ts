@@ -3,7 +3,7 @@
  *
  * The k8s pipeline's static-IP + image literals (`10.0.1.1`/`10.0.1.2`
  * registry refs, `ubuntu-24.04` node image) became data driven by
- * `infraOutputs.masterPrivateIp`/`supabasePrivateIp` and the new
+ * `infraOutputs.masterPrivateIp`/`dbPrivateIp` and the new
  * `ProviderClass.K8S_IMAGE` static — required because DigitalOcean's VPC
  * can't pin private IPs the way Hetzner's Pulumi program does. THE
  * NON-NEGOTIABLE this file proves: Hetzner's rendered artifacts stay

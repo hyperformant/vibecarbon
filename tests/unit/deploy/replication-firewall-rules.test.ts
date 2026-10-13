@@ -1,7 +1,7 @@
 /**
  * Symmetric replication firewall (RCA 2026-07-05 follow-on, superseded 2026-07-06
  * by the WireGuard transport): deploy opens the WireGuard tunnel port on the
- * Hetzner firewall so the two supabase nodes' repl-gateway pods can reach each
+ * Hetzner firewall so the two database nodes' repl-gateway pods can reach each
  * other cross-cluster. buildReplicationFirewallRules is the pure rule
  * computation; deployK8sHA applies it to BOTH clusters' firewalls with the
  * peer IP swapped.

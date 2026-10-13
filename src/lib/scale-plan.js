@@ -24,7 +24,7 @@ import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './deploy/utils.js';
  * back to the interactive multiselect prompt.
  *
  * `changes[]` elements are the string ids the caller dispatches on:
- * 'masterType' | 'supabaseType' | 'workerType' | 'workerBounds'.
+ * 'masterType' | 'dbType' | 'workerType' | 'workerBounds'.
  *
  * envConfig is accepted for signature parity with the interactive caller; the
  * non-interactive branches are a pure function of `parsed`.
@@ -39,9 +39,9 @@ export function planK8sScaleChanges(parsed, _envConfig) {
   if (parsed.yes && parsed.type) {
     // `--type X` means "scale every node role to X" for parity with compose's
     // `--type X` (which resizes the one VPS).
-    const changes = ['masterType', 'supabaseType', 'workerType'];
+    const changes = ['masterType', 'dbType', 'workerType'];
     newValues.masterType = parsed.type;
-    newValues.supabaseType = parsed.type;
+    newValues.dbType = parsed.type;
     newValues.workerType = parsed.type;
     // Allow --type and bounds to be combined in one invocation.
     if (parsed.minWorkers != null || parsed.maxWorkers != null) {
@@ -78,7 +78,7 @@ export function planK8sScaleChanges(parsed, _envConfig) {
  * @param {string} inputs.location              Cluster region.
  * @param {Record<string, unknown>} inputs.newValues   Plan output; may set *Type/*Workers.
  * @param {string} inputs.currentMasterType
- * @param {string} inputs.currentSupabaseType
+ * @param {string} inputs.currentDbType
  * @param {string} inputs.currentWorkerType
  * @param {number|undefined} inputs.persistedMinWorkers   envConfig.minWorkers
  * @param {number|undefined} inputs.persistedMaxWorkers   envConfig.maxWorkers
@@ -96,7 +96,7 @@ export function buildProgramConfig({
   location,
   newValues,
   currentMasterType,
-  currentSupabaseType,
+  currentDbType,
   currentWorkerType,
   persistedMinWorkers,
   persistedMaxWorkers,
@@ -116,7 +116,7 @@ export function buildProgramConfig({
     existingSshKeyId,
     location,
     masterServerType: newValues.masterType ?? currentMasterType,
-    supabaseServerType: newValues.supabaseType ?? currentSupabaseType,
+    dbServerType: newValues.dbType ?? currentDbType,
     workerServerType: newValues.workerType ?? currentWorkerType,
     // minWorkers is Pulumi's static worker floor; maxWorkers flows to the CA
     // patch (not consumed by Pulumi). Replay persisted values when the operator

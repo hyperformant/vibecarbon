@@ -2,8 +2,8 @@
 # VIBECARBON REPLICATION GATEWAY (HA k8s only)
 # =============================================================================
 # Cross-cluster PostgreSQL streaming replication runs over a point-to-point
-# WireGuard tunnel between the two clusters' supabase nodes (wg0, UDP 51821).
-# This gateway is a hostNetwork socat relay pinned to the supabase node; it
+# WireGuard tunnel between the two clusters' database nodes (wg0, UDP 51821).
+# This gateway is a hostNetwork socat relay pinned to the database node; it
 # bridges the intra-cluster db pod to the tunnel.
 #
 #   standby db pod ──tcp <node-priv-ip>:15433──► standby repl-gateway (this pod)
@@ -22,7 +22,7 @@
 # Placeholders (patched at apply time by setupReplication — NEVER at runtime):
 #   __RELAY_LISTEN__       socat listen address spec  (differs per primary/standby)
 #   __RELAY_TARGET__       socat downstream target    (differs per primary/standby)
-#   __SUPABASE_PRIVATE_IP__  this cluster's supabase node private IP (egress netpol)
+#   __DB_PRIVATE_IP__      this cluster's database node private IP (egress netpol)
 # =============================================================================
 apiVersion: v1
 kind: Pod
@@ -36,15 +36,15 @@ spec:
   # tunnel IP and reach the host WireGuard device.
   hostNetwork: true
   dnsPolicy: ClusterFirstWithHostNet
-  # The supabase node carries a dedicated taint; without this toleration the
-  # pod stays Pending ("untolerated taint {dedicated: supabase}").
+  # The database node carries a dedicated taint; without this toleration the
+  # pod stays Pending ("untolerated taint {dedicated: db}").
   tolerations:
     - key: dedicated
       operator: Equal
-      value: supabase
+      value: db
       effect: NoSchedule
   nodeSelector:
-    dedicated: supabase
+    dedicated: db
   restartPolicy: Always
   containers:
     - name: relay
@@ -94,7 +94,7 @@ spec:
   egress:
     - to:
         - ipBlock:
-            cidr: __SUPABASE_PRIVATE_IP__/32
+            cidr: __DB_PRIVATE_IP__/32
       ports:
         - protocol: TCP
           port: 15433

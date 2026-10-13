@@ -90,7 +90,7 @@ describe('K8s profile options', () => {
     for (const profile of K8S_PROFILES) {
       const variant = profile.types;
       expect(HetznerProvider.FALLBACK_SERVER_TYPES[variant.master]).toBeDefined();
-      expect(HetznerProvider.FALLBACK_SERVER_TYPES[variant.supabase]).toBeDefined();
+      expect(HetznerProvider.FALLBACK_SERVER_TYPES[variant.db]).toBeDefined();
       expect(HetznerProvider.FALLBACK_SERVER_TYPES[variant.worker]).toBeDefined();
     }
   });

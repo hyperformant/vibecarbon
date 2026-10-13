@@ -499,7 +499,7 @@ confirmations.
 | `-region <id>` | Primary region (provider-specific, e.g. hel1 on Hetzner, nyc3 on DigitalOcean) |
 | `-standby-region <id>` | HA standby/failover region (defaults to a same-continent partner of -region) |
 | `-mode <mode>` | Deploy mode: compose, compose-ha, k8s, or k8s-ha |
-| `-server-type <id>` | Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/supabase/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default. |
+| `-server-type <id>` | Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/database/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
 | `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). Skips migrations; the restored DB is authoritative. k8s and k8s-ha only. |
 | `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |

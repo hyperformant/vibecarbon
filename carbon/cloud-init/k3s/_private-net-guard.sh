@@ -1,6 +1,6 @@
 # ===========================================================================
 # Private-NIC address guard - SHARED SNIPPET, spliced into master-init.sh /
-# supabase-init.sh / worker-init.sh by the `# @include` directive that
+# db-init.sh / worker-init.sh by the `# @include` directive that
 # loadCloudInit() resolves (src/lib/iac/cloud-init.js). Requires
 # PRIVATE_IFACE + PRIVATE_IP, so it must sit AFTER the private-NIC wait loop.
 #

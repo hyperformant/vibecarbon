@@ -79,7 +79,7 @@ echo "Droplet ID: $DROPLET_ID"
 
 # Configure containerd to mirror pulls for the local registry running on
 # the master, to the master's private IP. The master's private IP IS
-# known at render time here (the supabase node is rendered with the
+# known at render time here (the database node is rendered with the
 # master already created -- see digitalocean-k8s.js, M3 Task 5), so this
 # is a template var (${master_ip}) exactly like do-worker-init.sh's own
 # registry mirror, NOT a metadata-derived runtime var like
@@ -121,14 +121,14 @@ if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
   echo "Warning: Master may not be fully ready, attempting to join anyway..."
 fi
 
-# Install k3s agent as dedicated Supabase node.
+# Install k3s agent as dedicated database node.
 # --node-ip is this node's PRIVATE (VPC) IP -- see do-master-init.sh's
 # k3s-install comment for why this provider's --node-ip carries none of
-# supabase-init.sh's public-vs-firewall tension (that provider's CCM
+# db-init.sh's public-vs-firewall tension (that provider's CCM
 # matches nodes by public --node-ip; this provider's CCM matches by
 # providerID, pre-seeded below). --node-label/--node-taint pin Supabase
-# workloads to this node and repel everything else (dedicated=supabase),
-# mirroring supabase-init.sh's node-pool isolation exactly -- applied as
+# workloads to this node and repel everything else (dedicated=db),
+# mirroring db-init.sh's node-pool isolation exactly -- applied as
 # BOOT-TIME k3s agent flags here rather than a post-join `kubectl label`/
 # `kubectl taint` step, so the node is never briefly schedulable for
 # general workloads between join and label (M3 Task 5 review adjudication).
@@ -140,9 +140,9 @@ for attempt in 1 2 3 4 5; do
       --flannel-iface "eth1" \
       --kubelet-arg="cloud-provider=external" \
       --kubelet-arg="provider-id=digitalocean://$DROPLET_ID" \
-      --node-label="dedicated=supabase" \
-      --node-label="node-pool=supabase-pool" \
-      --node-taint="dedicated=supabase:NoSchedule"; then
+      --node-label="dedicated=db" \
+      --node-label="node-pool=db-pool" \
+      --node-taint="dedicated=db:NoSchedule"; then
     K3S_INSTALL_OK=true
     break
   fi
@@ -154,7 +154,7 @@ if [ "$K3S_INSTALL_OK" != "true" ]; then
   exit 1
 fi
 
-echo "k3s supabase node installation complete!"
+echo "k3s database node installation complete!"
 
 # Pre-warm containerd image cache in the background so the Supabase HelmRelease
 # doesn't pay the full ~400MB postgres pull on its critical path. We only

@@ -51,7 +51,7 @@ const workerVars = {
   master_ip: '10.0.1.1',
   cluster_name: 'acme-prod',
 };
-const supabaseVars = {
+const dbVars = {
   k3s_version: 'v1.31.5+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.0.1.1',
@@ -60,13 +60,13 @@ const supabaseVars = {
 async function hetznerRenders() {
   return {
     master: await HetznerProvider.getK8sMasterUserData(masterVars),
-    supabase: await HetznerProvider.getK8sSupabaseUserData(supabaseVars),
+    db: await HetznerProvider.getK8sDbUserData(dbVars),
     worker: await HetznerProvider.getK8sWorkerUserData(workerVars),
   };
 }
 
 describe('private-NIC guard is wired into every Hetzner k3s role', () => {
-  it('installs the watchdog + its systemd unit in master, supabase, AND worker user-data', async () => {
+  it('installs the watchdog + its systemd unit in master, database, AND worker user-data', async () => {
     const renders = await hetznerRenders();
     for (const [role, script] of Object.entries(renders)) {
       expect(script, role).toContain('/usr/local/sbin/vibecarbon-private-net-guard');

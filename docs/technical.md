@@ -616,8 +616,8 @@ specifically.
 The standby cluster is deployed as a cost-optimized, non-serving replica designed to minimize idle cost while remaining ready for rapid failover:
 
 **Idle State:**
-- **2 nodes only:** master (control plane, ingress, cert-manager, replication gateway, in-cluster registry) + dedicated supabase node (the streaming replica database)
-- Same server types as the primary's master and supabase nodes: cost savings come from eliminating workers and the warm app tier, not from downsizing
+- **2 nodes only:** master (control plane, ingress, cert-manager, replication gateway, in-cluster registry) + dedicated database node (the streaming replica database)
+- Same server types as the primary's master and database nodes: cost savings come from eliminating workers and the warm app tier, not from downsizing
 - **Cold app tier, declaratively:** All app-tier workloads (the app Deployment, `auth`, `rest`, `realtime`, `storage`, `meta`, `kong`, `studio`, `imgproxy`, cluster-autoscaler) are set to `replicas: 0`; the only active workloads are the db StatefulSet and replication gateway
 - **Seeded on first boot:** The standby database is initialized by a seed container running `pg_basebackup` at deploy time, booting as a live streaming replica. The 200s stage/swap/reboot reseed cycle is eliminated
 

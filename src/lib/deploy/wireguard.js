@@ -28,7 +28,7 @@ export const WG_STANDBY_IP = '10.99.0.2';
 // the host.
 export const REPL_GATEWAY_PORT = 15433;
 
-// The on-node WireGuard private key. Generated on each supabase node with
+// The on-node WireGuard private key. Generated on each database node with
 // umask 077 and NEVER read back into this process — only the derived public
 // key ever crosses the wire.
 const WG_KEY_PATH = '/etc/vibecarbon-wg.key';
@@ -176,9 +176,9 @@ export function buildWireguardPersistInstall({
 }
 
 /**
- * Generate a WireGuard keypair on each supabase node, cross-distribute the
+ * Generate a WireGuard keypair on each database node, cross-distribute the
  * PUBLIC keys, and bring up the point-to-point wg0 tunnel between the two
- * clusters' supabase nodes.
+ * clusters' database nodes.
  *
  * Key-exchange security contract:
  *   - The private key is generated ON the node (`wg genkey`, umask 077) into
@@ -189,14 +189,14 @@ export function buildWireguardPersistInstall({
  *     is configured with the PEER's public key + the peer's `<public-ip>:WG_PORT`
  *     endpoint.
  *
- * `primaryIp` / `standbyIp` are the two supabase nodes' PUBLIC IPv4 addresses —
+ * `primaryIp` / `standbyIp` are the two database nodes' PUBLIC IPv4 addresses —
  * they are BOTH the WireGuard endpoints (UDP WG_PORT) AND the SSH targets. All
  * SSH runs go through `sshRun`, which pins host keys and passes
  * `-o BatchMode=yes`.
  *
  * @param {object} o
- * @param {string} o.primaryIp - primary supabase node public IP (SSH + WG endpoint)
- * @param {string} o.standbyIp - standby supabase node public IP (SSH + WG endpoint)
+ * @param {string} o.primaryIp - primary database node public IP (SSH + WG endpoint)
+ * @param {string} o.standbyIp - standby database node public IP (SSH + WG endpoint)
  * @param {string} o.sshKeyPath - path to the shared HA SSH private key
  * @returns {Promise<{primaryPubKey: string, standbyPubKey: string}>}
  */

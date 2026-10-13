@@ -253,14 +253,14 @@ done
 # csi-do-node (the CSI NODE plugin, a DaemonSet) ships from upstream with
 # NO tolerations at all (confirmed against the v4.17.0 driver.yaml itself
 # -- its spec.template.spec has no tolerations key), so it never schedules
-# onto the tainted dedicated=supabase node (do-supabase-init.sh taints it
-# dedicated=supabase:NoSchedule). That node's CSINode object then never
+# onto the tainted dedicated=db node (do-db-init.sh taints it
+# dedicated=db:NoSchedule). That node's CSINode object then never
 # gets the driver's `region` topologyKey, so the block-storage PV bound to
 # supabase-db's PVC (which carries nodeAffinity: region In [<region>]) can
 # never satisfy scheduling there, and supabase-db sits Pending forever
 # ("volume node affinity conflict" -- RCA: DO d3 rig, battery kept-rig
 # deploy iteration 2, verified live: `kubectl get csinode` showed EMPTY
-# topologyKeys for the supabase node while master/worker-1 both showed
+# topologyKeys for the database node while master/worker-1 both showed
 # ["region"], and `kubectl get ds -n kube-system` showed csi-do-node with
 # no tolerations and pods only on master + worker-1).
 #
@@ -274,7 +274,7 @@ done
 # {operator: Exists} (no key, no effect) is a strict superset of that
 # three-entry set for anything that actually blocks scheduling: it
 # tolerates every NoSchedule/NoExecute taint that set does, plus any
-# custom key (dedicated=supabase included) with neither key- nor
+# custom key (dedicated=db included) with neither key- nor
 # effect-scoping needed. It also tolerates PreferNoSchedule, which was
 # never a scheduling blocker to begin with, so the broader match is
 # harmless. This is a deliberate delta vs upstream csi-digitalocean --

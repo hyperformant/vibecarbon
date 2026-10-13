@@ -104,7 +104,7 @@ const SPEC = {
       name: 'server-type',
       value: '<id>',
       description:
-        'Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/supabase/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default.',
+        'Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/database/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default.',
     },
     {
       name: 'full',
@@ -184,7 +184,7 @@ function buildLegacyArgs(values, positional) {
     // unchanged.
     masterServerType: null,
     workerServerType: null,
-    supabaseServerType: null,
+    dbServerType: null,
     domain: null,
     dnsProvider: null,
     s3AccessKey: null,

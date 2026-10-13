@@ -11,11 +11,11 @@
  *   - Firewall
  *   - Floating IP
  *   - Master server (cloud-init: master-init.sh)
- *   - Supabase server (cloud-init: supabase-init.sh)
+ *   - Database server (cloud-init: db-init.sh)
  *   - Worker servers × N (cloud-init: worker-init.sh)
  *   - Placement group for workers (spread)
  *
- * Outputs: masterIp, masterPrivateIp, supabaseIp, workerIps, floatingIp,
+ * Outputs: masterIp, masterPrivateIp, dbIp, workerIps, floatingIp,
  * networkId, sshKeyId, k3sToken.
  */
 
@@ -67,7 +67,7 @@ export function networkZoneFor(location) {
  *                                      networkZone is derived from this (see
  *                                      `networkZoneFor` above) — not a config field.
  * @property {string} masterServerType
- * @property {string} supabaseServerType
+ * @property {string} dbServerType
  * @property {string} workerServerType
  * @property {number} minWorkers   Static floor of worker servers (provisioned by Pulumi). Default 1.
  * @property {number} maxWorkers   Upper bound for cluster-autoscaler. Not consumed by Pulumi; flows to the CA Deployment in applyK3sManifests. Default 3.
@@ -115,7 +115,7 @@ export function buildHetznerK8sProgram(config) {
   const minWorkers = config.minWorkers ?? 1;
 
   const masterInitTemplate = loadCloudInit('master-init.sh');
-  const supabaseInitTemplate = loadCloudInit('supabase-init.sh');
+  const dbInitTemplate = loadCloudInit('db-init.sh');
   const workerInitTemplate = loadCloudInit('worker-init.sh');
 
   return async () => {
@@ -292,36 +292,36 @@ export function buildHetznerK8sProgram(config) {
       serverId: master.id.apply((id) => Number.parseInt(id, 10)),
     });
 
-    // Supabase server — joins master via k3s agent. master_ip MUST be the
+    // Database server — joins master via k3s agent. master_ip MUST be the
     // master's private IP: Hetzner firewall (above) restricts public 6443
-    // to operator IPs only, so the supabase node cannot reach the master's
+    // to operator IPs only, so the database node cannot reach the master's
     // public IP on 6443 at all. Mirrors the worker-init pattern below.
     // Hardcoding 10.0.1.1 also drops the master.ipv4Address.apply() wrapper,
     // removing a needless cross-resource dep that delayed cloud-init render.
-    const supabaseUserData = renderScript(supabaseInitTemplate, {
+    const dbUserData = renderScript(dbInitTemplate, {
       k3s_version: config.k3sVersion,
       k3s_token: k3sToken,
       master_ip: '10.0.1.1',
     });
     // NOTE: previously `dependsOn: [master]` — we dropped that so Hetzner
-    // provisions master + supabase in parallel, saving ~30-60s on the
-    // critical path. The supabase cloud-init (supabase-init.sh) already
+    // provisions master + database in parallel, saving ~30-60s on the
+    // critical path. The supabase cloud-init (db-init.sh) already
     // polls the master k3s API with a 120-attempt retry loop, so it
     // tolerates master coming up slightly later.
-    const supabase = new hcloud.Server(
-      'supabase',
+    const dbServer = new hcloud.Server(
+      'db',
       {
-        name: `${clusterName}-supabase`,
-        serverType: config.supabaseServerType,
+        name: `${clusterName}-db`,
+        serverType: config.dbServerType,
         image: 'ubuntu-24.04',
         location: config.location,
         sshKeys: [sshKeyId],
         firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
-        labels: { ...labels, role: 'supabase', 'node-pool': 'supabase-pool' },
+        labels: { ...labels, role: 'db', 'node-pool': 'db-pool' },
         networks: [
           { networkId: network.id.apply((id) => Number.parseInt(id, 10)), ip: '10.0.1.2' },
         ],
-        userData: supabaseUserData,
+        userData: dbUserData,
       },
       { dependsOn: [subnet] },
     );
@@ -375,8 +375,8 @@ export function buildHetznerK8sProgram(config) {
     return {
       masterIp: master.ipv4Address,
       masterPrivateIp: '10.0.1.1',
-      supabaseIp: supabase.ipv4Address,
-      supabasePrivateIp: '10.0.1.2',
+      dbIp: dbServer.ipv4Address,
+      dbPrivateIp: '10.0.1.2',
       workerIps: workers.map((w) => w.ipv4Address),
       floatingIp: floatingIp.ipAddress,
       networkId: network.id,

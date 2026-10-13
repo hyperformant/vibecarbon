@@ -40,7 +40,7 @@ if [ -z "$K3S_TARGET_VERSION" ]; then
 fi
 echo "Installing k3s version: $K3S_TARGET_VERSION"
 
-# IDENTICAL block in master-init.sh / worker-init.sh / supabase-init.sh - keep in sync.
+# IDENTICAL block in master-init.sh / worker-init.sh / db-init.sh - keep in sync.
 # (Three-way duplication is acceptable here because the cloud-init scripts are
 # rendered independently per role; extracting a shared snippet would require
 # restructuring the renderScript() pipeline. Out of scope for Phase 1.)
@@ -129,7 +129,7 @@ PRIVATE_IP=$(ip -4 addr show "$PRIVATE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d
 # via loadCloudInit's @include, so the three copies cannot drift.
 # ===========================================================================
 # Private-NIC address guard - SHARED SNIPPET, spliced into master-init.sh /
-# supabase-init.sh / worker-init.sh by the `# @include` directive that
+# db-init.sh / worker-init.sh by the `# @include` directive that
 # loadCloudInit() resolves (src/lib/iac/cloud-init.js). Requires
 # PRIVATE_IFACE + PRIVATE_IP, so it must sit AFTER the private-NIC wait loop.
 #
@@ -428,7 +428,7 @@ if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
   echo "Warning: Master may not be fully ready, attempting to join anyway..."
 fi
 
-# Install k3s agent as dedicated Supabase node.
+# Install k3s agent as dedicated database node.
 # --node-ip must be the PUBLIC IP so Hetzner CCM can match it (see master-init.sh).
 # Bash retry loop around the whole pipeline - the k3s install script fetches
 # from github.com which returns transient 504s under load. 5 attempts, 20s backoff.
@@ -439,9 +439,9 @@ for attempt in 1 2 3 4 5; do
       --node-external-ip "$PUBLIC_IP" \
       --flannel-iface "$PRIVATE_IFACE" \
       --kubelet-arg="cloud-provider=external" \
-      --node-label="dedicated=supabase" \
-      --node-label="node-pool=supabase-pool" \
-      --node-taint="dedicated=supabase:NoSchedule"; then
+      --node-label="dedicated=db" \
+      --node-label="node-pool=db-pool" \
+      --node-taint="dedicated=db:NoSchedule"; then
     K3S_INSTALL_OK=true
     break
   fi
@@ -453,7 +453,7 @@ if [ "$K3S_INSTALL_OK" != "true" ]; then
   exit 1
 fi
 
-echo "k3s supabase node installation complete!"
+echo "k3s database node installation complete!"
 
 # Pre-warm containerd image cache in the background so the Supabase HelmRelease
 # doesn't pay the full ~400MB postgres pull on its critical path. We only

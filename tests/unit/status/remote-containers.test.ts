@@ -18,7 +18,7 @@ describe('planContainerTargets', () => {
   // Shapes below are what the product writes, not invented ones:
   //   compose-ha (effects/compose-ha.js)   { name: '<proj>-<env>-primary', ip, role: 'primary' }
   //   compose-ha (orchestrator.js ~1452)   { name: 'primary', ip, region, serverType }   (no role)
-  //   kubernetes-ha (orchestrator.js ~1440) { name: 'primary', ip, supabaseIp, region }  (no role)
+  //   kubernetes-ha (orchestrator.js ~1440) { name: 'primary', ip, dbIp, region }  (no role)
   //                                        + ha.primary.masterIp / ha.standby.masterIp
   it('compose-ha (effects shape): role-tagged primary and standby, both compose', () => {
     expect(
@@ -72,8 +72,8 @@ describe('planContainerTargets', () => {
       planContainerTargets({
         deployMode: 'kubernetes',
         servers: [
-          { name: 'master', ip: '1.1.1.1', supabaseIp: '3.3.3.3', role: 'master' },
-          { name: 'supabase', ip: '3.3.3.3', role: 'supabase' },
+          { name: 'master', ip: '1.1.1.1', dbIp: '3.3.3.3', role: 'master' },
+          { name: 'db', ip: '3.3.3.3', role: 'db' },
           { name: 'worker-1', ip: '4.4.4.4', role: 'worker' },
         ],
       }),
@@ -94,8 +94,8 @@ describe('planContainerTargets', () => {
       planContainerTargets({
         deployMode: 'kubernetes-ha',
         servers: [
-          { name: 'primary', ip: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
-          { name: 'standby', ip: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
+          { name: 'primary', ip: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
+          { name: 'standby', ip: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
         ],
       }),
     ).toEqual([
@@ -111,12 +111,12 @@ describe('planContainerTargets', () => {
         deployMode: 'kubernetes-ha',
         ha: {
           enabled: true,
-          primary: { masterIp: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
-          standby: { masterIp: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
+          primary: { masterIp: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
+          standby: { masterIp: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
         },
         servers: [
-          { name: 'primary', ip: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
-          { name: 'standby', ip: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
+          { name: 'primary', ip: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
+          { name: 'standby', ip: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
         ],
       }),
     ).toEqual([

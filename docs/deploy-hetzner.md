@@ -53,7 +53,7 @@ migration = `destroy` + fresh deploy with `-restore`).
 |------|--------------------|
 | `compose` | Single VPS running the full stack under Docker Compose |
 | `compose-ha` | Primary + standby VPS in two regions, Postgres streaming replication, one-command manual failover |
-| `k8s` | k3s cluster (master + workers + dedicated Supabase node) |
+| `k8s` | k3s cluster (master + workers + dedicated database node) |
 | `k8s-ha` | Primary + standby k3s clusters in two regions, pilot-light standby (2-node idle floor, cold app tier), Postgres streaming replication, manual failover with IaC provisioning |
 
 Server types are picked automatically per region based on live availability
@@ -75,7 +75,7 @@ server type can still arrive as raw text:
 | `scale -type cax…` | exits 1 |
 | `failover -server-type cax…` | exits 1 |
 | `failover` on a persisted ARM `ha.standbyWorkerSpec.serverType` | aborts before adding any capacity; the primary is untouched |
-| `failover` on a persisted ARM `ha.standby.masterServerType` / `ha.standby.supabaseServerType` | same abort: all three persisted types are checked, so a partly-migrated standby is caught too |
+| `failover` on a persisted ARM `ha.standby.masterServerType` / `ha.standby.dbServerType` | same abort: all three persisted types are checked, so a partly-migrated standby is caught too |
 
 ### Migrating an environment created before this
 
@@ -120,7 +120,7 @@ depends on the rest of the standby's topology:
   node already exists as arm64 hardware, and Hetzner cannot rescale a server
   across architectures, so the only route is the replace + restore above.
 
-Check `ha.standby.masterServerType` and `ha.standby.supabaseServerType` in
+Check `ha.standby.masterServerType` and `ha.standby.dbServerType` in
 `.vibecarbon.json` to tell which case you are in before you rely on the flag.
 Either way, complete the replace + restore afterwards so the persisted config
 stops carrying an ARM type.
@@ -322,7 +322,7 @@ Fail-back) describes **k8s-ha** specifically.
 ### Standby Architecture (Pilot-Light, k8s-ha only)
 
 The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
-- **Idle floor: 2 nodes**, a master (control plane, ingress, replication gateway) and a dedicated supabase node (the streaming replica database)
+- **Idle floor: 2 nodes**, a master (control plane, ingress, replication gateway) and a dedicated database node (the streaming replica database)
 - **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app, auth, rest, realtime, storage, meta, kong, studio, imgproxy, cluster-autoscaler)
 - **Seeded at deploy:** The database boots from a seed snapshot on first start, immediately becoming a live streaming replica, with no separate reseed cycle
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance

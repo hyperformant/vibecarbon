@@ -453,7 +453,7 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /** @returns {Promise<never>} */
-  static async getK8sSupabaseUserData() {
+  static async getK8sDbUserData() {
     throw new Error("Scaleway's k8s tier is not built — SUPPORTED_TIERS is compose-only");
   }
 
@@ -581,12 +581,12 @@ export class ScalewayProvider extends BaseProvider {
    * set) and carries the master/worker roles for cost; supabase gets the
    * baseline type.
    * @param {string} _region - interface parity; unused
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     return {
       masterType: 'DEV1-M',
-      supabaseType: ScalewayProvider.DEFAULT_TYPE,
+      dbType: ScalewayProvider.DEFAULT_TYPE,
       workerType: 'DEV1-M',
     };
   }
@@ -630,7 +630,7 @@ export class ScalewayProvider extends BaseProvider {
     if (available) {
       if (available.has(serverType)) return serverType;
       const defaults = ScalewayProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.supabaseType) return defaults.supabaseType;
+      if (serverType === defaults.dbType) return defaults.dbType;
       return defaults.masterType;
     }
 

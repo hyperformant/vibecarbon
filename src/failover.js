@@ -135,16 +135,16 @@ export function identifyServers(envName, envConfig, _projectConfig) {
     return {
       primary: {
         ip: envConfig.ha.primary.masterIp,
-        supabaseIp: envConfig.ha.primary.supabaseIp,
-        supabasePrivateIp: envConfig.ha.primary.supabasePrivateIp,
+        dbIp: envConfig.ha.primary.dbIp,
+        dbPrivateIp: envConfig.ha.primary.dbPrivateIp,
         floatingIp: envConfig.ha.primary.floatingIp || envConfig.ha.primary.masterIp,
         region: envConfig.ha.primary.region,
         envKey: envName,
       },
       standby: {
         ip: envConfig.ha.standby.masterIp,
-        supabaseIp: envConfig.ha.standby.supabaseIp,
-        supabasePrivateIp: envConfig.ha.standby.supabasePrivateIp,
+        dbIp: envConfig.ha.standby.dbIp,
+        dbPrivateIp: envConfig.ha.standby.dbPrivateIp,
         floatingIp: envConfig.ha.standby.floatingIp || envConfig.ha.standby.masterIp,
         region: envConfig.ha.standby.region,
         envKey: envName,
@@ -174,15 +174,15 @@ export function identifyServers(envName, envConfig, _projectConfig) {
     return {
       primary: {
         ip: primary.ip,
-        supabaseIp: primary.supabaseIp,
-        supabasePrivateIp: primary.supabasePrivateIp,
+        dbIp: primary.dbIp,
+        dbPrivateIp: primary.dbPrivateIp,
         region: primaryRegion,
         envKey: envName,
       },
       standby: {
         ip: standby.ip,
-        supabaseIp: standby.supabaseIp,
-        supabasePrivateIp: standby.supabasePrivateIp,
+        dbIp: standby.dbIp,
+        dbPrivateIp: standby.dbPrivateIp,
         region: standbyRegion,
         envKey: envName,
       },
@@ -272,14 +272,14 @@ async function reseedAndPromoteOrAbort(servers, sshKeyPath, s) {
     s.start('Re-seeding standby from primary (pg_basebackup)');
     let result;
     try {
-      // standby.supabaseIp: the node the standby db pod is pinned to — the
+      // standby.dbIp: the node the standby db pod is pinned to — the
       // re-seed's node-side PGDATA swap ssh's there (roles are not yet swapped;
       // the re-seed runs BEFORE promotion, so the deploy-time gateway relay
       // directions still hold and the re-seed dials the standby's LOCAL
       // WireGuard relay — no primary IP needed, no gateway re-render).
       result = await reseedStandbyFromPrimary(servers.standby.ip, sshKeyPath, {
-        standbySupabaseIp: servers.standby.supabaseIp,
-        standbySupabasePrivateIp: servers.standby.supabasePrivateIp,
+        standbyDbIp: servers.standby.dbIp,
+        standbyDbPrivateIp: servers.standby.dbPrivateIp,
       });
     } catch (err) {
       s.stop('Re-seed failed, aborting failover');
@@ -873,9 +873,7 @@ async function summarizeStandbyStack({ envConfig, standbyStack, creds, projectNa
 async function prePullStandbyImages({ servers, envName, workerIps }) {
   const { prePullChartImages } = await import('./lib/deploy/k8s/k3s.js');
   const { knownHostsPath } = await import('./lib/host-keys.js');
-  const nodeIps = [servers.standby.ip, servers.standby.supabaseIp, ...(workerIps ?? [])].filter(
-    Boolean,
-  );
+  const nodeIps = [servers.standby.ip, servers.standby.dbIp, ...(workerIps ?? [])].filter(Boolean);
   return prePullChartImages({
     nodeIps,
     sshKeyPath: getSSHKeyPath(envName),
@@ -969,7 +967,7 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
  * @param {string} args.envName
  * @param {object} args.envConfig
  * @param {object} args.projectConfig
- * @param {{ standby: { ip: string, supabaseIp?: string } }} args.servers
+ * @param {{ standby: { ip: string, dbIp?: string } }} args.servers
  * @param {{ count: number, serverType: string }} args.workerSpec  Persisted spec.
  * @param {string|null} [args.serverTypeOverride]  `-server-type` — wins over spec.
  * @param {{ converge?: Function, kubectl?: Function, sleep?: Function, creds?: any }} [args.deps]
@@ -1001,7 +999,7 @@ async function _provisionStandbyCapacityImpl({
   const count = workerSpec.count;
   const serverType = serverTypeOverride || workerSpec.serverType;
 
-  // The standby's region-resolved master/supabase types persisted at deploy
+  // The standby's region-resolved master/database types persisted at deploy
   // (may differ from the primary's when the standby region doesn't stock the
   // same SKU). Pinning them on EVERY converge (the up AND the
   // 0-worker revert) keeps buildProgramConfig's current-type slots matched to
@@ -1009,7 +1007,7 @@ async function _provisionStandbyCapacityImpl({
   // (reboot) of the standby's master/db node mid-failover. Undefined on envs
   // that predate this persist → falls back to envConfig, matching prior behavior.
   const standbyMasterType = envConfig.ha?.standby?.masterServerType;
-  const standbySupabaseType = envConfig.ha?.standby?.supabaseServerType;
+  const standbyDbType = envConfig.ha?.standby?.dbServerType;
 
   // Architecture gate on every type that will actually reach Pulumi.
   // `-server-type` was already checked in run(); what this adds is the three
@@ -1058,9 +1056,9 @@ async function _provisionStandbyCapacityImpl({
       flagFixable: false,
     },
     {
-      type: standbySupabaseType,
+      type: standbyDbType,
       role: 'standby database',
-      source: '.vibecarbon.json ha.standby.supabaseServerType',
+      source: '.vibecarbon.json ha.standby.dbServerType',
       flagFixable: false,
     },
   ];
@@ -1115,12 +1113,12 @@ async function _provisionStandbyCapacityImpl({
     isHA: true,
     // DR-flavored abort wording (the converge module defaults to 'scale').
     action: 'failover',
-    // Pin the standby's resolved master/supabase types on both the up and the
-    // revert (see standbyMasterType/standbySupabaseType above). The per-call
+    // Pin the standby's resolved master/database types on both the up and the
+    // revert (see standbyMasterType/standbyDbType above). The per-call
     // overrides (minWorkers/workerServerType) win when spread last.
     overrides: {
       ...(standbyMasterType ? { masterServerType: standbyMasterType } : {}),
-      ...(standbySupabaseType ? { supabaseServerType: standbySupabaseType } : {}),
+      ...(standbyDbType ? { dbServerType: standbyDbType } : {}),
       ...overrides,
     },
     label: standbyStack,
@@ -1531,23 +1529,20 @@ export async function failoverHA(
   const { workerSpec, scaleUpList, creds, standbyOutputs } = await preflight(envName, envConfig);
 
   // Freshness refresh: prefer the LIVE stack output over the persisted
-  // deploy-time snapshot for the standby supabase node's private IP — the
+  // deploy-time snapshot for the standby database node's private IP — the
   // re-seed dials it, and on DO it is DHCP-assigned (a droplet replacement
   // hands out a new one, silently rotting the persisted value). Hetzner pins
   // it statically, so fresh === persisted there and this is a no-op.
-  const freshSupabasePrivateIp = standbyOutputs?.supabasePrivateIp;
-  if (freshSupabasePrivateIp) {
-    if (
-      servers.standby.supabasePrivateIp &&
-      servers.standby.supabasePrivateIp !== freshSupabasePrivateIp
-    ) {
+  const freshDbPrivateIp = standbyOutputs?.dbPrivateIp;
+  if (freshDbPrivateIp) {
+    if (servers.standby.dbPrivateIp && servers.standby.dbPrivateIp !== freshDbPrivateIp) {
       p.log.warn(
         `Standby supabase private IP moved since deploy ` +
-          `(${servers.standby.supabasePrivateIp} → ${freshSupabasePrivateIp}); ` +
+          `(${servers.standby.dbPrivateIp} → ${freshDbPrivateIp}); ` +
           `using the live stack output.`,
       );
     }
-    servers.standby.supabasePrivateIp = freshSupabasePrivateIp;
+    servers.standby.dbPrivateIp = freshDbPrivateIp;
   }
 
   // STEP 2 — Provision standby worker capacity (0→N). The ONLY step that adds

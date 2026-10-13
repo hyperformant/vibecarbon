@@ -47,7 +47,7 @@ spec:
       name: supabase-values
       valuesKey: values.yaml
   # Expose PostgreSQL port 5432 on the node's interface so cross-cluster
-  # replication works. The standby cluster's supabase node opens a TCP
+  # replication works. The standby cluster's database node opens a TCP
   # connection to the primary's public IP on 5432 during pg_basebackup and
   # subsequent streaming. Without hostPort the service is only reachable
   # via ClusterIP or NodePort; NodePort cross-cluster was historically

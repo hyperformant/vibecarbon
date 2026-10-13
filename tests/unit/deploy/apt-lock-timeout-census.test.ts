@@ -116,7 +116,7 @@ describe('apt lock-timeout census', () => {
     for (const p of ['digitalocean', 'linode', 'vultr', 'scaleway']) {
       expect(files).toContain(`src/lib/iac/programs/${p}-compose.js`);
     }
-    for (const s of ['supabase', 'master', 'worker', 'do-supabase', 'do-master', 'do-worker']) {
+    for (const s of ['db', 'master', 'worker', 'do-db', 'do-master', 'do-worker']) {
       expect(files).toContain(`carbon/cloud-init/k3s/${s}-init.sh`);
     }
   });

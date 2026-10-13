@@ -415,7 +415,7 @@ describe('HetznerProvider', () => {
     // the EU answer either — it reads available:false in all three EU
     // locations, which is why the offline EU default is cpx*2.
     it('returns current-generation cpx defaults for EU regions', () => {
-      const eu = { masterType: 'cpx22', supabaseType: 'cpx32', workerType: 'cpx22' };
+      const eu = { masterType: 'cpx22', dbType: 'cpx32', workerType: 'cpx22' };
       expect(HetznerProvider.getRegionDefaults('fsn1')).toEqual(eu);
       expect(HetznerProvider.getRegionDefaults('nbg1')).toEqual(eu);
       expect(HetznerProvider.getRegionDefaults('hel1')).toEqual(eu);
@@ -426,7 +426,7 @@ describe('HetznerProvider', () => {
       for (const region of HetznerProvider.EU_REGIONS) {
         const d = HetznerProvider.getRegionDefaults(region);
         expect(retiredInEu).not.toContain(d.masterType);
-        expect(retiredInEu).not.toContain(d.supabaseType);
+        expect(retiredInEu).not.toContain(d.dbType);
         expect(retiredInEu).not.toContain(d.workerType);
       }
     });
@@ -434,7 +434,7 @@ describe('HetznerProvider', () => {
     it('every offline default is a known catalog SKU', () => {
       for (const region of [...HetznerProvider.EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
         const d = HetznerProvider.getRegionDefaults(region);
-        for (const t of [d.masterType, d.supabaseType, d.workerType]) {
+        for (const t of [d.masterType, d.dbType, d.workerType]) {
           expect(HetznerProvider.FALLBACK_SERVER_TYPES).toHaveProperty(t);
         }
       }
@@ -443,12 +443,12 @@ describe('HetznerProvider', () => {
     it('returns x86 (cpx) defaults for US regions', () => {
       expect(HetznerProvider.getRegionDefaults('ash')).toEqual({
         masterType: 'cpx11',
-        supabaseType: 'cpx21',
+        dbType: 'cpx21',
         workerType: 'cpx11',
       });
       expect(HetznerProvider.getRegionDefaults('hil')).toEqual({
         masterType: 'cpx11',
-        supabaseType: 'cpx21',
+        dbType: 'cpx21',
         workerType: 'cpx11',
       });
     });
@@ -457,7 +457,7 @@ describe('HetznerProvider', () => {
       // Unknown regions are not in US_REGIONS, so they take the EU branch.
       expect(HetznerProvider.getRegionDefaults('unknown')).toEqual({
         masterType: 'cpx22',
-        supabaseType: 'cpx32',
+        dbType: 'cpx32',
         workerType: 'cpx22',
       });
     });

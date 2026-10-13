@@ -80,7 +80,7 @@ const REPL_GATEWAY_MANIFEST = join(
  *     standby db pod dials.
  *
  * @param {'primary'|'standby'} role
- * @param {string} nodePrivateIp - this cluster's supabase node private IP
+ * @param {string} nodePrivateIp - this cluster's database node private IP
  * @returns {{relayListen: string, relayTarget: string}}
  */
 export function buildReplGatewaySocatArgs(role, nodePrivateIp) {
@@ -108,7 +108,7 @@ export function buildReplGatewaySocatArgs(role, nodePrivateIp) {
  * @param {object} o
  * @param {string} o.template - the raw repl-gateway.yaml
  * @param {'primary'|'standby'} o.role
- * @param {string} o.nodePrivateIp - this cluster's supabase node private IP
+ * @param {string} o.nodePrivateIp - this cluster's database node private IP
  * @returns {string}
  */
 export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
@@ -116,7 +116,7 @@ export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
   return template
     .replaceAll('__RELAY_LISTEN__', relayListen)
     .replaceAll('__RELAY_TARGET__', relayTarget)
-    .replaceAll('__SUPABASE_PRIVATE_IP__', nodePrivateIp);
+    .replaceAll('__DB_PRIVATE_IP__', nodePrivateIp);
 }
 
 /**
@@ -156,7 +156,7 @@ export function buildDbHostPortPatch() {
 
 /**
  * Apply the repl-gateway manifest to both clusters and bring up the WireGuard
- * tunnel between the two supabase nodes. Shared by setupReplication (the
+ * tunnel between the two database nodes. Shared by setupReplication (the
  * serial path) and prepareReplicationTransport (the deploy fan-out overlap) so
  * the two paths cannot drift. Idempotent: kubectl apply reconciles the gateway
  * pod/netpol, and exchangeAndBringUpTunnel regenerates + re-exchanges keys on
@@ -165,10 +165,10 @@ export function buildDbHostPortPatch() {
 async function applyGatewaysAndBringUpTunnel({
   primaryIp,
   standbyIp,
-  primarySupabaseIp,
-  standbySupabaseIp,
-  primarySupabasePrivateIp,
-  standbySupabasePrivateIp,
+  primaryDbIp,
+  standbyDbIp,
+  primaryDbPrivateIp,
+  standbyDbPrivateIp,
   sshOpts,
   sshKeyPath,
 }) {
@@ -215,7 +215,7 @@ async function applyGatewaysAndBringUpTunnel({
     renderReplGatewayManifest({
       template: gatewayTemplate,
       role: 'primary',
-      nodePrivateIp: primarySupabasePrivateIp,
+      nodePrivateIp: primaryDbPrivateIp,
     }),
   );
   await applyGatewayPod(
@@ -223,17 +223,17 @@ async function applyGatewaysAndBringUpTunnel({
     renderReplGatewayManifest({
       template: gatewayTemplate,
       role: 'standby',
-      nodePrivateIp: standbySupabasePrivateIp,
+      nodePrivateIp: standbyDbPrivateIp,
     }),
   );
 
-  // Generate a keypair on each supabase node, cross-distribute PUBLIC keys, and
+  // Generate a keypair on each database node, cross-distribute PUBLIC keys, and
   // bring up wg0. Private keys are generated on-node and never leave it (see
   // exchangeAndBringUpTunnel). The WG endpoints/SSH targets are the supabase
   // nodes' PUBLIC IPs.
   await exchangeAndBringUpTunnel({
-    primaryIp: primarySupabaseIp,
-    standbyIp: standbySupabaseIp,
+    primaryIp: primaryDbIp,
+    standbyIp: standbyDbIp,
     sshKeyPath,
   });
 }
@@ -272,7 +272,7 @@ export async function waitForNamespace(
 /**
  * Deploy-fan-out transport prep: bring up the replication transport (gateway
  * pods + WireGuard tunnel) while the two clusters are still installing
- * manifests/helm — this work only needs the supabase NODES and each cluster's
+ * manifests/helm — this work only needs the database NODES and each cluster's
  * k3s apiserver, both available minutes before the cluster deploys finish.
  * The one k8s-level prerequisite is the vibecarbon namespace (applyBase
  * creates it early in each cluster's applyManifests), so wait for it on both
@@ -285,30 +285,30 @@ export async function waitForNamespace(
 export async function prepareReplicationTransport({
   primaryIp,
   standbyIp,
-  primarySupabaseIp,
-  standbySupabaseIp,
-  primarySupabasePrivateIp,
-  standbySupabasePrivateIp,
+  primaryDbIp,
+  standbyDbIp,
+  primaryDbPrivateIp,
+  standbyDbPrivateIp,
   sshKeyPath,
 }) {
   if (!primaryIp || !standbyIp || !sshKeyPath) {
     throw new Error('prepareReplicationTransport requires primaryIp, standbyIp, and sshKeyPath');
   }
-  // The supabase nodes' PRIVATE IPs are real IaC outputs on every provider
+  // The database nodes' PRIVATE IPs are real IaC outputs on every provider
   // (Hetzner pins 10.0.1.2 statically; DO exports the Pulumi-assigned VPC
   // address). A missing value means the infra step result is incomplete —
   // never assume a Hetzner-shaped address here: socat would bind a
   // nonexistent IP and the egress NetworkPolicy would scope to a /32 that
   // exists on no node.
-  if (!primarySupabasePrivateIp) {
+  if (!primaryDbPrivateIp) {
     throw new Error(
-      'prepareReplicationTransport: primarySupabasePrivateIp is required — the IaC program ' +
+      'prepareReplicationTransport: primaryDbPrivateIp is required — the IaC program ' +
         'outputs it; a missing value means the infra step result is incomplete',
     );
   }
-  if (!standbySupabasePrivateIp) {
+  if (!standbyDbPrivateIp) {
     throw new Error(
-      'prepareReplicationTransport: standbySupabasePrivateIp is required — the IaC program ' +
+      'prepareReplicationTransport: standbyDbPrivateIp is required — the IaC program ' +
         'outputs it; a missing value means the infra step result is incomplete',
     );
   }
@@ -336,10 +336,10 @@ export async function prepareReplicationTransport({
     await applyGatewaysAndBringUpTunnel({
       primaryIp,
       standbyIp,
-      primarySupabaseIp: primarySupabaseIp || primaryIp,
-      standbySupabaseIp: standbySupabaseIp || standbyIp,
-      primarySupabasePrivateIp,
-      standbySupabasePrivateIp,
+      primaryDbIp: primaryDbIp || primaryIp,
+      standbyDbIp: standbyDbIp || standbyIp,
+      primaryDbPrivateIp,
+      standbyDbPrivateIp,
       sshOpts,
       sshKeyPath,
     });
@@ -348,7 +348,7 @@ export async function prepareReplicationTransport({
 
 /**
  * Belt for the k8s-ha scale flow (item I-1): re-establish the replication
- * TRANSPORT after a node resize rebooted the supabase node(s). It does NOT
+ * TRANSPORT after a node resize rebooted the database node(s). It does NOT
  * re-seed — streaming replication resumes on its own once the tunnel + gateway
  * are back; this only restores the plumbing that the reboot dropped.
  *
@@ -356,7 +356,7 @@ export async function prepareReplicationTransport({
  * it), wg0 is already recreated at boot — but this belt makes recovery prompt
  * and self-healing regardless:
  *   1. Re-run exchangeAndBringUpTunnel (idempotent): recreates wg0 on both
- *      supabase nodes AND (re)installs the systemd unit, so an env deployed
+ *      database nodes AND (re)installs the systemd unit, so an env deployed
  *      before this fix gets persistence retrofitted during scale.
  *   2. Per cluster: delete the crash-looped `repl-gateway` Pod (it couldn't
  *      bind its tunnel IP while wg0 was gone) then re-apply the gateway
@@ -371,10 +371,10 @@ export async function prepareReplicationTransport({
  * @param {string} options.primaryIp - primary master node IP (SSH/kubectl target)
  * @param {string} options.standbyIp - standby master node IP (SSH/kubectl target)
  * @param {string} options.sshKeyPath - shared HA SSH key
- * @param {string} [options.primarySupabaseIp] - primary supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} [options.standbySupabaseIp] - standby supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} [options.primarySupabasePrivateIp] - primary supabase node private IP (gateway bind + netpol)
- * @param {string} [options.standbySupabasePrivateIp] - standby supabase node private IP (gateway bind + netpol)
+ * @param {string} [options.primaryDbIp] - primary database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} [options.standbyDbIp] - standby database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} [options.primaryDbPrivateIp] - primary database node private IP (gateway bind + netpol)
+ * @param {string} [options.standbyDbPrivateIp] - standby database node private IP (gateway bind + netpol)
  */
 export async function reestablishReplicationTransport(options) {
   const { primaryIp, standbyIp, sshKeyPath } = options;
@@ -383,13 +383,13 @@ export async function reestablishReplicationTransport(options) {
       'reestablishReplicationTransport requires primaryIp, standbyIp, and sshKeyPath',
     );
   }
-  const primarySupabaseIp = options.primarySupabaseIp || primaryIp;
-  const standbySupabaseIp = options.standbySupabaseIp || standbyIp;
+  const primaryDbIp = options.primaryDbIp || primaryIp;
+  const standbyDbIp = options.standbyDbIp || standbyIp;
   // Required, never defaulted — see prepareReplicationTransport's guard for why.
-  const { primarySupabasePrivateIp, standbySupabasePrivateIp } = options;
-  if (!primarySupabasePrivateIp || !standbySupabasePrivateIp) {
+  const { primaryDbPrivateIp, standbyDbPrivateIp } = options;
+  if (!primaryDbPrivateIp || !standbyDbPrivateIp) {
     throw new Error(
-      'reestablishReplicationTransport: primarySupabasePrivateIp and standbySupabasePrivateIp ' +
+      'reestablishReplicationTransport: primaryDbPrivateIp and standbyDbPrivateIp ' +
         'are required — the IaC program outputs them; redeploy to persist them if absent',
     );
   }
@@ -399,18 +399,18 @@ export async function reestablishReplicationTransport(options) {
   await seedKnownHosts(khPath, standbyIp);
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
 
-  // 1. Recreate wg0 on both supabase nodes (+ retrofit the systemd unit).
+  // 1. Recreate wg0 on both database nodes (+ retrofit the systemd unit).
   await exchangeAndBringUpTunnel({
-    primaryIp: primarySupabaseIp,
-    standbyIp: standbySupabaseIp,
+    primaryIp: primaryDbIp,
+    standbyIp: standbyDbIp,
     sshKeyPath,
   });
 
   // 2. Bounce + re-apply the repl-gateway on each cluster.
   const gatewayTemplate = readFileSync(REPL_GATEWAY_MANIFEST, 'utf-8');
   for (const [masterIp, role, nodePrivateIp] of [
-    [primaryIp, 'primary', primarySupabasePrivateIp],
-    [standbyIp, 'standby', standbySupabasePrivateIp],
+    [primaryIp, 'primary', primaryDbPrivateIp],
+    [standbyIp, 'standby', standbyDbPrivateIp],
   ]) {
     await runCommandAsync(
       [
@@ -744,31 +744,31 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {string} options.primaryIp - Primary master node IP (for SSH)
  * @param {string} options.standbyIp - Standby master node IP (for SSH)
  * @param {string} options.sshKeyPath - Path to shared SSH key
- * @param {string} options.primarySupabaseIp - Primary supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} options.standbySupabaseIp - Standby supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} [options.primarySupabasePrivateIp] - Primary supabase node private IP (gateway bind + egress netpol)
- * @param {string} [options.standbySupabasePrivateIp] - Standby supabase node private IP (gateway bind + egress netpol)
+ * @param {string} options.primaryDbIp - Primary database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} options.standbyDbIp - Standby database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} [options.primaryDbPrivateIp] - Primary database node private IP (gateway bind + egress netpol)
+ * @param {string} [options.standbyDbPrivateIp] - Standby database node private IP (gateway bind + egress netpol)
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
  * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba, restart, dependent-deployment rollout) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
  * @returns {Promise<{streaming: boolean}>} Replication status
  */
 export async function setupReplication(options) {
   const { primaryIp, standbyIp, sshKeyPath } = options;
-  // The supabase node PUBLIC IPs are BOTH the WireGuard tunnel endpoints and the
+  // The database node PUBLIC IPs are BOTH the WireGuard tunnel endpoints and the
   // SSH targets for the gateway bring-up. Fall back to master IP if not provided.
-  const _primarySupabaseIp = options.primarySupabaseIp || primaryIp;
-  const _standbySupabaseIp = options.standbySupabaseIp || standbyIp;
-  // The supabase nodes' PRIVATE IPs — real IaC outputs on every provider
+  const _primaryDbIp = options.primaryDbIp || primaryIp;
+  const _standbyDbIp = options.standbyDbIp || standbyIp;
+  // The database nodes' PRIVATE IPs — real IaC outputs on every provider
   // (Hetzner pins them statically; DO exports the Pulumi-assigned VPC
   // address), threaded through the deploy outputs. Used for the repl-gateway
   // socat bind + the egress NetworkPolicy scope on each cluster. Required,
   // never defaulted — a Hetzner-shaped assumption here silently breaks every
   // other provider.
-  const _primarySupabasePrivateIp = options.primarySupabasePrivateIp;
-  const _standbySupabasePrivateIp = options.standbySupabasePrivateIp;
-  if (!_primarySupabasePrivateIp || !_standbySupabasePrivateIp) {
+  const _primaryDbPrivateIp = options.primaryDbPrivateIp;
+  const _standbyDbPrivateIp = options.standbyDbPrivateIp;
+  if (!_primaryDbPrivateIp || !_standbyDbPrivateIp) {
     throw new Error(
-      'setupReplication: primarySupabasePrivateIp and standbySupabasePrivateIp are required — ' +
+      'setupReplication: primaryDbPrivateIp and standbyDbPrivateIp are required — ' +
         'the IaC program outputs them; a missing value means the infra step result is incomplete',
     );
   }
@@ -801,7 +801,7 @@ export async function setupReplication(options) {
   // 1a. Stand up the WireGuard replication transport.
   //
   // Replication runs over a point-to-point WireGuard tunnel (wg0, UDP
-  // WG_PORT=51821) between the two clusters' supabase nodes, relayed by a
+  // WG_PORT=51821) between the two clusters' database nodes, relayed by a
   // hostNetwork `repl-gateway` socat pod on each cluster:
   //
   //   standby db pod ─tcp <priv>:15433─► standby repl-gateway ─wg0→10.99.0.1:15433─►
@@ -828,10 +828,10 @@ export async function setupReplication(options) {
       applyGatewaysAndBringUpTunnel({
         primaryIp,
         standbyIp,
-        primarySupabaseIp: _primarySupabaseIp,
-        standbySupabaseIp: _standbySupabaseIp,
-        primarySupabasePrivateIp: _primarySupabasePrivateIp,
-        standbySupabasePrivateIp: _standbySupabasePrivateIp,
+        primaryDbIp: _primaryDbIp,
+        standbyDbIp: _standbyDbIp,
+        primaryDbPrivateIp: _primaryDbPrivateIp,
+        standbyDbPrivateIp: _standbyDbPrivateIp,
         sshOpts,
         sshKeyPath,
       }),
@@ -879,7 +879,7 @@ export async function setupReplication(options) {
   // netpol; the standby gateway relays it through the WireGuard tunnel to the
   // primary gateway, which forwards to the primary postgres hostPort. Plaintext
   // (no PGSSLMODE/PGSSLROOTCERT) — WireGuard is the encryption layer.
-  const primaryHost = _standbySupabasePrivateIp;
+  const primaryHost = _standbyDbPrivateIp;
   const primaryPort = String(REPL_GATEWAY_PORT);
   const dbSts = 'supabase-supabase-db';
   const dbPod = 'supabase-supabase-db-0';
@@ -890,7 +890,7 @@ export async function setupReplication(options) {
   // reseeded PGDATA boots. Plaintext (sslmode=disable) — WireGuard encrypts the
   // wire. The password is delivered over stdin (never argv).
   const standbyConninfo = buildPrimaryConninfo({
-    primaryHost: _standbySupabasePrivateIp,
+    primaryHost: _standbyDbPrivateIp,
     replPassword,
     port: REPL_GATEWAY_PORT,
   });
@@ -1065,7 +1065,7 @@ export async function setupReplication(options) {
             `local relay ${primaryHost}:${primaryPort} after ${PROBE_ATTEMPTS} attempts ` +
             `(~${(PROBE_ATTEMPTS * PROBE_DELAY_S) / 60} min), so nothing was staged and the ` +
             `standby keeps its independent postgres. Check the repl-gateway pods and the ` +
-            `WireGuard tunnel (wg show) on both supabase nodes.`,
+            `WireGuard tunnel (wg show) on both database nodes.`,
         );
       }
       if (!swapText.includes('RESEED_SWAPPED')) {

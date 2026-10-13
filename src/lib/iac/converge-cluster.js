@@ -73,8 +73,8 @@ function abort(lines) {
  * @param {boolean|string} args.isHA             HA topology (truthy → shared-key path).
  * @param {Record<string, unknown>} [args.overrides]  buildProgramConfig `newValues` slot.
  *   Accepts BOTH the short type keys buildProgramConfig reads
- *   (`masterType`/`supabaseType`/`workerType`) and the long-form persisted spec
- *   keys (`masterServerType`/`supabaseServerType`/`workerServerType`, matching
+ *   (`masterType`/`dbType`/`workerType`) and the long-form persisted spec
+ *   keys (`masterServerType`/`dbServerType`/`workerServerType`, matching
  *   envConfig.ha.standby.*). Long-form keys are mapped to short when the short
  *   key is absent, so a caller using either vocabulary reaches Pulumi — `scale`
  *   passes short keys, the pilot-light `failover` provisioning passes long keys.
@@ -132,7 +132,7 @@ export async function convergeClusterInfra({
   // would either replace the managed SshKey (single-cluster) or — for
   // HA — try to *create* a brand-new SshKey resource that the original
   // deploy never managed. The new resource has a different id,
-  // master/supabase/worker `sshKeys: [sshKeyId]` diffs against state,
+  // master/database/worker `sshKeys: [sshKeyId]` diffs against state,
   // and Pulumi plans a destructive replace of every node (etcd loss).
   // The k3sToken probe (further down) is necessary but insufficient
   // for HA — we ALSO need to mirror the deploy's `existingSshKeyId`
@@ -227,13 +227,13 @@ export async function convergeClusterInfra({
   // caller (providerFor(envConfig) at the call site) — see the @param doc above.
   const fallbackType = envConfig.serverType || Provider.DEFAULT_COMPOSE_TYPE;
   const currentMasterType = envConfig.masterServerType || fallbackType;
-  const currentSupabaseType = envConfig.supabaseServerType || fallbackType;
+  const currentDbType = envConfig.dbServerType || fallbackType;
   const currentWorkerType = envConfig.workerServerType || fallbackType;
   const allowedCidrs = (projectConfig.operatorCidrs ?? []).map((e) => e.cidr);
   // Normalize long-form server-type override keys to the short keys
   // buildProgramConfig reads. `scale` passes the short keys verbatim; the
   // pilot-light `failover` provisioning passes the persisted long-form spec
-  // keys (workerServerType/masterServerType/supabaseServerType, matching
+  // keys (workerServerType/masterServerType/dbServerType, matching
   // envConfig.ha.standby.*). Without this, a `-server-type` override and the
   // persisted standby types are silently dropped and Pulumi plans an in-place
   // resize of the standby's master/db node mid-failover. Map long→short only
@@ -243,8 +243,8 @@ export async function convergeClusterInfra({
     normalizedOverrides.workerType = overrides.workerServerType;
   if (normalizedOverrides.masterType == null && overrides.masterServerType != null)
     normalizedOverrides.masterType = overrides.masterServerType;
-  if (normalizedOverrides.supabaseType == null && overrides.supabaseServerType != null)
-    normalizedOverrides.supabaseType = overrides.supabaseServerType;
+  if (normalizedOverrides.dbType == null && overrides.dbServerType != null)
+    normalizedOverrides.dbType = overrides.dbServerType;
   const programConfig = buildProgramConfig({
     projectName: projectConfig.projectName,
     environment: clusterEnv,
@@ -254,7 +254,7 @@ export async function convergeClusterInfra({
     location: clusterRegion,
     newValues: normalizedOverrides,
     currentMasterType,
-    currentSupabaseType,
+    currentDbType,
     currentWorkerType,
     persistedMinWorkers: envConfig.minWorkers,
     persistedMaxWorkers: envConfig.maxWorkers,

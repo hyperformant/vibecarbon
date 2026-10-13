@@ -199,7 +199,7 @@ In `--ha` mode both clusters use the same `--min-workers/--max-workers` bounds â
 
 **Hetzner project quota**
 
-Trial Hetzner Cloud projects cap at ~50 servers across all resource types; verified accounts get higher limits. If you set `--max-workers` aggressively, make sure your project quota covers the worst case across all clusters in the project (master + supabase + workers + CA-spawned, x2 in HA).
+Trial Hetzner Cloud projects cap at ~50 servers across all resource types; verified accounts get higher limits. If you set `--max-workers` aggressively, make sure your project quota covers the worst case across all clusters in the project (master + database + workers + CA-spawned, x2 in HA).
 
 **Token requirement: Read+Write**
 

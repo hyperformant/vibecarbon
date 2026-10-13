@@ -57,7 +57,7 @@ const base = {
   },
   servers: {
     primary: { ip: '10.0.0.1' },
-    standby: { ip: '10.0.0.9', supabaseIp: '10.0.0.10' },
+    standby: { ip: '10.0.0.9', dbIp: '10.0.0.10' },
   },
   workerSpec: { count: 2, serverType: 'cx23' },
 };
@@ -94,11 +94,11 @@ describe('provisionStandbyCapacity', () => {
     );
   });
 
-  // I5: pin the standby's persisted region-resolved master/supabase types (and
+  // I5: pin the standby's persisted region-resolved master/database types (and
   // the failover action word) on the converge, so buildProgramConfig's
   // current-type slots match the standby's reality and the converge never plans
   // an in-place resize of the standby's master/db node mid-failover.
-  it('pins the persisted standby master/supabase types + failover action on every converge', async () => {
+  it('pins the persisted standby master/database types + failover action on every converge', async () => {
     const converge = vi.fn(async () => ({ outputs: {} }));
     await provisionStandbyCapacity({
       ...base,
@@ -110,7 +110,7 @@ describe('provisionStandbyCapacity', () => {
             region: 'ash',
             masterIp: '10.0.0.9',
             masterServerType: 'cpx31',
-            supabaseServerType: 'cpx41',
+            dbServerType: 'cpx41',
           },
         },
       },
@@ -124,7 +124,7 @@ describe('provisionStandbyCapacity', () => {
           minWorkers: 2,
           workerServerType: 'cx23',
           masterServerType: 'cpx31',
-          supabaseServerType: 'cpx41',
+          dbServerType: 'cpx41',
         }),
       }),
     );
@@ -229,7 +229,7 @@ describe('provisionStandbyCapacity', () => {
   });
 
   // The worker spec is one of THREE persisted types this function feeds to the
-  // converge: `ha.standby.masterServerType` and `ha.standby.supabaseServerType`
+  // converge: `ha.standby.masterServerType` and `ha.standby.dbServerType`
   // land in the same `overrides` object and reach buildProgramConfig just as
   // verbatim. Guarding only the worker type held on a uniformly-ARM legacy env
   // (the worker guard fires first) but not on a hand-mixed one, so the stated
@@ -242,7 +242,7 @@ describe('provisionStandbyCapacity', () => {
 
     it.each([
       ['masterServerType', 'standby master', 'cax21', 'cpx32'],
-      ['supabaseServerType', 'standby database', 'cax31', 'cpx42'],
+      ['dbServerType', 'standby database', 'cax31', 'cpx42'],
     ])(
       'rejects an ARM %s before any converge, naming the key and an x86 equivalent',
       async (key, role, armType, suggestion) => {
@@ -289,7 +289,7 @@ describe('provisionStandbyCapacity', () => {
       const err = await provisionStandbyCapacity({
         ...base,
         serverTypeOverride: 'cpx31',
-        envConfig: withStandby({ masterServerType: 'cpx31', supabaseServerType: 'cax41' }),
+        envConfig: withStandby({ masterServerType: 'cpx31', dbServerType: 'cax41' }),
         deps: { converge, kubectl: readyKubectl(2) },
       }).catch((e) => e);
 
@@ -302,14 +302,14 @@ describe('provisionStandbyCapacity', () => {
       const converge = vi.fn(async () => ({ outputs: {} }));
       await provisionStandbyCapacity({
         ...base,
-        envConfig: withStandby({ masterServerType: 'cpx31', supabaseServerType: 'cpx41' }),
+        envConfig: withStandby({ masterServerType: 'cpx31', dbServerType: 'cpx41' }),
         deps: { converge, kubectl: readyKubectl(2) },
       });
       expect(converge).toHaveBeenCalledWith(
         expect.objectContaining({
           overrides: expect.objectContaining({
             masterServerType: 'cpx31',
-            supabaseServerType: 'cpx41',
+            dbServerType: 'cpx41',
           }),
         }),
       );
@@ -472,8 +472,8 @@ async function runFailoverHA(opts: RunOpts) {
     standby: {
       ip: '10.0.0.9',
       floatingIp: '10.0.0.99',
-      supabaseIp: '10.0.0.10',
-      supabasePrivateIp: '10.0.1.2',
+      dbIp: '10.0.0.10',
+      dbPrivateIp: '10.0.1.2',
       region: 'ash',
     },
   };
@@ -520,9 +520,7 @@ async function runFailoverHA(opts: RunOpts) {
         captured.scaleDown = { list, replicas };
       }
     },
-    reseedPromote: async (srv: {
-      standby: { supabasePrivateIp?: string; supabaseIp?: string };
-    }) => {
+    reseedPromote: async (srv: { standby: { dbPrivateIp?: string; dbIp?: string } }) => {
       captured.reseedStandby = { ...srv.standby };
       if (alreadyPromoted) {
         order.push('alreadyPromoted');
@@ -729,28 +727,24 @@ describe('failoverHA step order', () => {
     expect(order).toEqual(['preflight', 'provision', 'exit(1)']);
   });
 
-  it('prefers the LIVE stack-output supabasePrivateIp over the persisted one', async () => {
+  it('prefers the LIVE stack-output dbPrivateIp over the persisted one', async () => {
     // DO assigns VPC addresses dynamically — a droplet replacement hands out
     // a new private IP and the persisted value silently rots. The preflight
     // already reads the standby stack's outputs; the reseed must dial the
     // fresh address, not the deploy-time snapshot.
     const { captured } = await runFailoverHA({
       primaryReachable: true,
-      standbyOutputs: { supabasePrivateIp: '10.10.0.42' },
+      standbyOutputs: { dbPrivateIp: '10.10.0.42' },
     });
-    expect((captured.reseedStandby as { supabasePrivateIp?: string }).supabasePrivateIp).toBe(
-      '10.10.0.42',
-    );
+    expect((captured.reseedStandby as { dbPrivateIp?: string }).dbPrivateIp).toBe('10.10.0.42');
   });
 
-  it('keeps the persisted supabasePrivateIp when the stack outputs lack it', async () => {
+  it('keeps the persisted dbPrivateIp when the stack outputs lack it', async () => {
     const { captured } = await runFailoverHA({
       primaryReachable: true,
       standbyOutputs: { workerIps: [] },
     });
-    expect((captured.reseedStandby as { supabasePrivateIp?: string }).supabasePrivateIp).toBe(
-      '10.0.1.2',
-    );
+    expect((captured.reseedStandby as { dbPrivateIp?: string }).dbPrivateIp).toBe('10.0.1.2');
   });
 
   it('persists the role swap only at the very end (after dns)', async () => {
@@ -809,13 +803,13 @@ describe('preflightPilotFailover exit branches', () => {
       },
       {
         resolveCreds: async () => creds,
-        readStackOutputs: async () => ({ workerIps: [], supabasePrivateIp: '10.10.0.9' }),
+        readStackOutputs: async () => ({ workerIps: [], dbPrivateIp: '10.10.0.9' }),
       },
     );
     expect(out).toMatchObject({ standbyStack: 'e4-standby', scaleUpList: SCALE_UP_LIST, creds });
     // The stack read doubles as the freshness source: outputs surface so the
-    // caller can prefer the live supabasePrivateIp over the persisted one.
-    expect(out.standbyOutputs).toMatchObject({ supabasePrivateIp: '10.10.0.9' });
+    // caller can prefer the live dbPrivateIp over the persisted one.
+    expect(out.standbyOutputs).toMatchObject({ dbPrivateIp: '10.10.0.9' });
   });
 });
 

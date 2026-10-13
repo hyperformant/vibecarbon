@@ -200,20 +200,20 @@ describe('convergeClusterInfra', () => {
     expect(long.programCalls[0].workerServerType).toBe('cpx41');
   });
 
-  // I5: the long-form master/supabase server-type overrides (what
+  // I5: the long-form master/database server-type overrides (what
   // provisionStandbyCapacity pins from envConfig.ha.standby.*ServerType) must
   // also reach the program config, or the failover converge re-derives them
   // from the primary's types and plans an in-place resize of the standby's
   // master/db node.
-  it('(e2) maps long-form master/supabase server-type overrides into the program config', async () => {
+  it('(e2) maps long-form master/database server-type overrides into the program config', async () => {
     const { Provider, programCalls } = makeProvider();
     await convergeClusterInfra({
       ...baseArgs(),
       Provider,
-      overrides: { masterServerType: 'cpx31', supabaseServerType: 'cpx41' },
+      overrides: { masterServerType: 'cpx31', dbServerType: 'cpx41' },
     });
     expect(programCalls[0].masterServerType).toBe('cpx31');
-    expect(programCalls[0].supabaseServerType).toBe('cpx41');
+    expect(programCalls[0].dbServerType).toBe('cpx41');
   });
 
   // Minor: the master-replace abort weaves the caller's action word so a DR

@@ -698,14 +698,12 @@ export function buildPgdataSwapPodManifest({
       restartPolicy: 'Never',
       securityContext: { runAsUser: 0, runAsGroup: 0, fsGroup: 0 },
       // Same placement contract as the db StatefulSet (supabase.values.yaml):
-      // the selector ATTRACTS the pod to the dedicated supabase node (see the
+      // the selector ATTRACTS the pod to the dedicated database node (see the
       // doc comment — CSI zonal topology does not), and the toleration lets it
-      // pass the node's dedicated=supabase:NoSchedule taint (live-hit
+      // pass the node's dedicated=db:NoSchedule taint (live-hit
       // 2026-07-07: without it the pod sat Unschedulable forever).
-      nodeSelector: { dedicated: 'supabase' },
-      tolerations: [
-        { key: 'dedicated', operator: 'Equal', value: 'supabase', effect: 'NoSchedule' },
-      ],
+      nodeSelector: { dedicated: 'db' },
+      tolerations: [{ key: 'dedicated', operator: 'Equal', value: 'db', effect: 'NoSchedule' }],
       containers: [
         {
           name: 'swap',
@@ -1261,11 +1259,11 @@ $$;
  *     (best-effort) so the standby is never left down; its original PGDATA is
  *     untouched until the atomic swap succeeds.
  *
- * Transport: the standby dials its OWN supabase node's private IP on the
+ * Transport: the standby dials its OWN database node's private IP on the
  * repl-gateway relay port (REPL_GATEWAY_PORT) — the standby gateway relays
  * through the WireGuard tunnel to the primary gateway, which forwards to the
  * primary postgres hostPort. This is the EXACT path the deploy-time seed uses;
- * the old direct `primarySupabaseIp:5432` dial is dead post-WireGuard (the
+ * the old direct `primaryDbIp:5432` dial is dead post-WireGuard (the
  * firewall admits only UDP 51821, and the primary db's hostPort 5433 is
  * localhost-relayed). The gateway relay directions were configured at deploy
  * for the CURRENT roles, and this re-seed always runs while those roles still
@@ -1277,15 +1275,15 @@ $$;
  * @param {string} standbyIp - standby cluster master IP (kubectl target)
  * @param {string} sshKeyPath
  * @param {object} opts
- * @param {string} opts.standbySupabaseIp - standby SUPABASE node public IP.
+ * @param {string} opts.standbyDbIp - standby DATABASE node public IP.
  *   No longer a swap target (the swap runs in a cluster-side helper pod), but
  *   still REQUIRED as a precondition that the standby HA cluster is fully
  *   identified — a re-seed must not run against a half-identified env.
- * @param {string} opts.standbySupabasePrivateIp - the standby supabase
+ * @param {string} opts.standbyDbPrivateIp - the standby supabase
  *   node's PRIVATE IP: the local repl-gateway relay endpoint the basebackup +
  *   primary_conninfo dial. REQUIRED — a real IaC output on every provider
  *   (Hetzner pins it statically; DO exports the Pulumi-assigned VPC address),
- *   persisted under envConfig.ha.*.supabasePrivateIp at deploy time. A
+ *   persisted under envConfig.ha.*.dbPrivateIp at deploy time. A
  *   Hetzner-shaped fallback here would make the re-seed's reachability probe
  *   fail closed into 'skipped' on other providers — promotion without
  *   re-seed.
@@ -1296,25 +1294,25 @@ $$;
 export async function reseedStandbyFromPrimary(
   standbyIp,
   sshKeyPath,
-  { standbySupabaseIp, standbySupabasePrivateIp, detachSettleMs = 25_000 } = {},
+  { standbyDbIp, standbyDbPrivateIp, detachSettleMs = 25_000 } = {},
 ) {
-  if (!standbySupabasePrivateIp) {
-    // Same precondition class as the standbySupabaseIp check below: a
+  if (!standbyDbPrivateIp) {
+    // Same precondition class as the standbyDbIp check below: a
     // missing private IP signals a half-identified HA env (or a pre-M3
     // persisted config). Never assume an address — redeploy to persist it.
     throw new Error(
-      're-seed aborted: standbySupabasePrivateIp is required — the standby supabase ' +
+      're-seed aborted: standbyDbPrivateIp is required — the standby supabase ' +
         "node's private IP is a deploy output persisted in the environment config; " +
         'redeploy to persist it before re-seeding',
     );
   }
-  if (!standbySupabaseIp) {
+  if (!standbyDbIp) {
     // Precondition: a fully-identified HA standby cluster. The PGDATA swap runs
     // in a cluster-side helper pod now (not a node-side ssh), so this IP is no
-    // longer a swap target — but a missing supabase node still signals a
+    // longer a swap target — but a missing database node still signals a
     // half-identified env we must NOT run a destructive re-seed against.
     throw new Error(
-      're-seed aborted: standby supabase node IP is unknown; the standby HA ' +
+      're-seed aborted: standby database node IP is unknown; the standby HA ' +
         'cluster is not fully identified. Cannot safely re-seed; redeploy to ' +
         'persist the standby supabase IP.',
     );
@@ -1347,7 +1345,7 @@ export async function reseedStandbyFromPrimary(
       '--',
       'pg_isready',
       '-h',
-      standbySupabasePrivateIp,
+      standbyDbPrivateIp,
       '-p',
       String(REPL_GATEWAY_PORT),
       '-t',
@@ -1395,13 +1393,13 @@ export async function reseedStandbyFromPrimary(
   // (sslmode=disable) — WireGuard encrypts the wire.
   const script = buildStagedBasebackupScript({
     replPassword,
-    primaryHost: standbySupabasePrivateIp,
+    primaryHost: standbyDbPrivateIp,
     primaryPort: String(REPL_GATEWAY_PORT),
     probeFirst: false,
     swap: false,
     stagingDir: RESEED_STAGING_DIR,
     primaryConninfo: buildPrimaryConninfo({
-      primaryHost: standbySupabasePrivateIp,
+      primaryHost: standbyDbPrivateIp,
       replPassword,
       port: REPL_GATEWAY_PORT,
     }),

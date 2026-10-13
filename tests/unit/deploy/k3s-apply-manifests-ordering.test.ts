@@ -299,8 +299,8 @@ function baseArgs(projectDir: string) {
     maxWorkers: 3,
     workerServerType: 'cx23',
     // Required since the d4 lift — installSupabase refuses to assume the
-    // Hetzner-static relay host. See supabase-private-ip-required.test.ts.
-    supabasePrivateIp: '10.0.1.2',
+    // Hetzner-static relay host. See db-private-ip-required.test.ts.
+    dbPrivateIp: '10.0.1.2',
     k3sToken: 'k3s-token',
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',

@@ -8,7 +8,7 @@ const envConfig = {
   deployMode: 'kubernetes',
   region: 'nbg1',
   masterServerType: 'cx23',
-  supabaseServerType: 'cx23',
+  dbServerType: 'cx23',
   workerServerType: 'cx23',
   minWorkers: 1,
   maxWorkers: 3,
@@ -18,9 +18,9 @@ describe('planK8sScaleChanges', () => {
   it('-yes -type resizes all three node roles', () => {
     const plan = planK8sScaleChanges({ yes: true, type: 'cpx31' }, envConfig);
     expect(plan).not.toBeNull();
-    expect(plan.changes).toEqual(['masterType', 'supabaseType', 'workerType']);
+    expect(plan.changes).toEqual(['masterType', 'dbType', 'workerType']);
     expect(plan.newValues.masterType).toBe('cpx31');
-    expect(plan.newValues.supabaseType).toBe('cpx31');
+    expect(plan.newValues.dbType).toBe('cpx31');
     expect(plan.newValues.workerType).toBe('cpx31');
     // bounds untouched when no bounds flags passed
     expect(plan.newValues.minWorkers).toBeUndefined();
@@ -32,7 +32,7 @@ describe('planK8sScaleChanges', () => {
       { yes: true, type: 'cpx31', minWorkers: 2, maxWorkers: 5 },
       envConfig,
     );
-    expect(plan.changes).toEqual(['masterType', 'supabaseType', 'workerType', 'workerBounds']);
+    expect(plan.changes).toEqual(['masterType', 'dbType', 'workerType', 'workerBounds']);
     expect(plan.newValues.workerType).toBe('cpx31');
     expect(plan.newValues.minWorkers).toBe(2);
     expect(plan.newValues.maxWorkers).toBe(5);
@@ -76,9 +76,9 @@ describe('buildProgramConfig', () => {
       allowedCidrs: ['203.0.113.5/32'],
       existingSshKeyId: undefined,
       location: 'nbg1',
-      newValues: { masterType: 'cpx31', supabaseType: 'cpx31', workerType: 'cpx31' },
+      newValues: { masterType: 'cpx31', dbType: 'cpx31', workerType: 'cpx31' },
       currentMasterType: 'cx23',
-      currentSupabaseType: 'cx23',
+      currentDbType: 'cx23',
       currentWorkerType: 'cx23',
       persistedMinWorkers: 1,
       persistedMaxWorkers: 3,
@@ -95,7 +95,7 @@ describe('buildProgramConfig', () => {
       existingSshKeyId: undefined,
       location: 'nbg1',
       masterServerType: 'cpx31',
-      supabaseServerType: 'cpx31',
+      dbServerType: 'cpx31',
       workerServerType: 'cpx31',
       minWorkers: 1,
       maxWorkers: 3,
@@ -118,7 +118,7 @@ describe('buildProgramConfig', () => {
       location: 'ash',
       newValues: { minWorkers: 2, maxWorkers: 6 },
       currentMasterType: 'cpx21',
-      currentSupabaseType: 'cpx21',
+      currentDbType: 'cpx21',
       currentWorkerType: 'cpx21',
       persistedMinWorkers: 1,
       persistedMaxWorkers: 3,
@@ -135,7 +135,7 @@ describe('buildProgramConfig', () => {
       existingSshKeyId: '987654',
       location: 'ash',
       masterServerType: 'cpx21',
-      supabaseServerType: 'cpx21',
+      dbServerType: 'cpx21',
       workerServerType: 'cpx21',
       minWorkers: 2,
       maxWorkers: 6,
@@ -155,7 +155,7 @@ describe('buildProgramConfig', () => {
       location: 'fsn1',
       newValues: {},
       currentMasterType: 'cx23',
-      currentSupabaseType: 'cx23',
+      currentDbType: 'cx23',
       currentWorkerType: 'cx23',
       persistedMinWorkers: undefined,
       persistedMaxWorkers: undefined,

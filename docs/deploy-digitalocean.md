@@ -46,7 +46,7 @@ This guide covers setup prerequisites, cloud resource handling, and operational 
 
 Server sizes can be selected interactively during deploy or pre-configured in `.vibecarbon.json`:
 - Standard Droplets: `s-2vcpu-4gb` (minimum for compose/k3s nodes: the 4 GB floor is enforced by the size picker)
-- Larger workloads: `s-4vcpu-8gb` for PostgreSQL / Supabase nodes
+- Larger workloads: `s-4vcpu-8gb` for PostgreSQL / Database nodes
 
 ---
 

@@ -571,14 +571,14 @@ export async function gatherDeploymentConfig(args) {
   const regionDefaults = Provider.getRegionDefaults(region);
 
   // Server Type Selection (Streamlined)
-  let serverType, masterServerType, workerServerType, supabaseServerType;
+  let serverType, masterServerType, workerServerType, dbServerType;
 
   if (isComposeDeploy) {
     // Compose = single-host Supabase stack, so use the medium-tier default
-    // (2+ vCPU, 4+ GB) for the whole box. regionDefaults.supabaseType is
+    // (2+ vCPU, 4+ GB) for the whole box. regionDefaults.dbType is
     // live-catalog-derived so it avoids retired SKUs like cpx21 in EU.
-    serverType = args.serverType || envConfig.serverType || regionDefaults.supabaseType;
-    masterServerType = workerServerType = supabaseServerType = serverType;
+    serverType = args.serverType || envConfig.serverType || regionDefaults.dbType;
+    masterServerType = workerServerType = dbServerType = serverType;
   } else {
     // `args.serverType` acts as a blanket fallback for all three node roles
     // when a role-specific value isn't set. Matches the compose case's simpler
@@ -589,11 +589,7 @@ export async function gatherDeploymentConfig(args) {
     const blanket = args.serverType || envConfig.serverType;
     masterServerType =
       args.masterServerType || envConfig.masterServerType || blanket || regionDefaults.masterType;
-    supabaseServerType =
-      args.supabaseServerType ||
-      envConfig.supabaseServerType ||
-      blanket ||
-      regionDefaults.supabaseType;
+    dbServerType = args.dbServerType || envConfig.dbServerType || blanket || regionDefaults.dbType;
     workerServerType =
       args.workerServerType || envConfig.workerServerType || blanket || regionDefaults.workerType;
     serverType = workerServerType;
@@ -610,7 +606,7 @@ export async function gatherDeploymentConfig(args) {
   for (const [label, value] of [
     ['serverType', serverType],
     ['masterServerType', masterServerType],
-    ['supabaseServerType', supabaseServerType],
+    ['dbServerType', dbServerType],
     ['workerServerType', workerServerType],
   ]) {
     try {
@@ -884,7 +880,7 @@ export async function gatherDeploymentConfig(args) {
     secondaryRegion,
     serverType,
     masterServerType,
-    supabaseServerType,
+    dbServerType,
     workerServerType,
     minWorkers: args.minWorkers ?? DEFAULT_WORKER_MIN,
     maxWorkers: args.maxWorkers ?? DEFAULT_WORKER_MAX,

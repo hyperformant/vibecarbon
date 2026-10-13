@@ -189,7 +189,7 @@ describe('classifyFailure', () => {
       errorMessage:
         'HA deploy failed — standby: installSupabase: helm upgrade --install failed ... ' +
         '0/1 Supabase pods are Ready; 1 never became Ready: supabase-supabase-db-0 (Pending). ' +
-        'Node(s) NotReady: testapp-e4-standby-supabase (Ready=Unknown) — the pod may be stuck ' +
+        'Node(s) NotReady: testapp-e4-standby-db (Ready=Unknown) — the pod may be stuck ' +
         'because its HOST died or lost its kubelet, not because of the workload.',
     });
     expect(withNode.category).toBe('infra');

@@ -76,7 +76,7 @@ const SPEC = {
   description: [
     'What you can change:',
     '  Compose / Compose HA   VPS server type (blue-green; zero downtime)',
-    '  Kubernetes             Worker / master / supabase server types (in-place)',
+    '  Kubernetes             Worker / master / database server types (in-place)',
     '  Kubernetes             Worker bounds (autoscaler floor + ceiling)',
   ].join('\n'),
   positional: [
@@ -179,7 +179,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   // where `cpx21` (the previous literal) stopped being orderable on 2026-01-01,
   // so it seeded the picker's initialValue with a type the region no longer
   // sells. getRegionDefaults tracks the live catalog and the EU/US split.
-  const currentType = envConfig.serverType || Provider.getRegionDefaults(region).supabaseType;
+  const currentType = envConfig.serverType || Provider.getRegionDefaults(region).dbType;
 
   // Display current configuration
   const pad = 18;
@@ -851,7 +851,7 @@ async function scaleServers(ctx) {
 
       // Update server entry in the config. We spread the original `server`
       // entry first so any field we don't explicitly touch (e.g.
-      // `supabaseIp` on shapes that have it) carries over verbatim — then
+      // `dbIp` on shapes that have it) carries over verbatim — then
       // override the fields that actually changed during the migration.
       // We deliberately keep `server.name` (the role label —
       // 'master' / 'primary' / 'standby') because failover.js, diagnose.js,
@@ -1103,14 +1103,14 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
 
   // Per-role types are optional in the deploy. The orchestrator saves only
   // `serverType` (the unified default) to .vibecarbon.json — the master/
-  // supabase/worker types only appear here after a previous `scale` set
+  // database/worker types only appear here after a previous `scale` set
   // them. Fall back to envConfig.serverType so we don't send the em-dash
   // placeholder to Pulumi: doing so triggered ~serverType against the
-  // already-provisioned `cx23` master/supabase servers and Hetzner replied
+  // already-provisioned `cx23` master/database servers and Hetzner replied
   // 'server type — not found'. `Provider` was resolved once above.
   const fallbackType = envConfig.serverType || Provider.DEFAULT_COMPOSE_TYPE;
   const currentMasterType = envConfig.masterServerType || fallbackType;
-  const currentSupabaseType = envConfig.supabaseServerType || fallbackType;
+  const currentDbType = envConfig.dbServerType || fallbackType;
   const currentWorkerType = envConfig.workerServerType || fallbackType;
 
   // 3. Display current config
@@ -1126,7 +1126,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   }
   configLines.push(
     `${'Master type'.padEnd(pad)} ${c.bold(currentMasterType)}`,
-    `${'Supabase type'.padEnd(pad)} ${c.bold(currentSupabaseType)}`,
+    `${'Supabase type'.padEnd(pad)} ${c.bold(currentDbType)}`,
     `${'Worker type'.padEnd(pad)} ${c.bold(currentWorkerType)}`,
   );
   p.note(configLines.join('\n'), 'Current Configuration');
@@ -1149,7 +1149,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
     Object.assign(newValues, plan.newValues);
     if (changes.includes('masterType')) {
       p.log.info(
-        `Scaling all node roles (master, supabase, worker) to ${c.bold(parsed.type)} ${c.dim('(in-place resize, ~2 min downtime per node)')}`,
+        `Scaling all node roles (master, database, worker) to ${c.bold(parsed.type)} ${c.dim('(in-place resize, ~2 min downtime per node)')}`,
       );
     } else {
       p.log.info(
@@ -1168,8 +1168,8 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
           label: 'Master server type (~2 min control-plane downtime)',
         },
         {
-          value: 'supabaseType',
-          label: 'Supabase server type (database restart: back up first)',
+          value: 'dbType',
+          label: 'Database server type (database restart: back up first)',
         },
       ],
       required: true,
@@ -1200,17 +1200,17 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
           exitCancelled();
         }
         newValues.masterType = val;
-      } else if (change === 'supabaseType') {
+      } else if (change === 'dbType') {
         p.log.warn('Changing Supabase type will restart the database. Back up first!');
         const val = await p.select({
-          message: 'New Supabase server type:',
+          message: 'New database server type:',
           options: serverTypeOptions,
-          initialValue: serverTypeOptions.find((t) => t.value === currentSupabaseType)?.value,
+          initialValue: serverTypeOptions.find((t) => t.value === currentDbType)?.value,
         });
         if (p.isCancel(val)) {
           exitCancelled();
         }
-        newValues.supabaseType = val;
+        newValues.dbType = val;
       }
     }
   }
@@ -1218,7 +1218,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   // Server type changes apply via Pulumi up → Hetzner in-place resize per
   // node (~2 min reboot each).
   const infraChanges = changes.filter(
-    (c) => c === 'workerType' || c === 'masterType' || c === 'supabaseType',
+    (c) => c === 'workerType' || c === 'masterType' || c === 'dbType',
   );
 
   // isHATier(tier) is behavior-identical to `envConfig.ha?.enabled` for the k8s
@@ -1280,7 +1280,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
     changes,
     newValues,
     // currentWorkerType is still consumed by the CA re-patch below;
-    // master/supabase current types are re-derived inside convergeClusterInfra
+    // master/database current types are re-derived inside convergeClusterInfra
     // from envConfig, so they no longer need to ride in ctx.
     currentWorkerType,
     apiToken,
@@ -1396,7 +1396,7 @@ async function scaleApplyK8sChanges(ctx) {
     changes,
     newValues,
     // Only currentWorkerType is still read here (CA re-patch). The converge
-    // seam re-derives master/supabase current types from envConfig.
+    // seam re-derives master/database current types from envConfig.
     currentWorkerType,
     apiToken,
     infraChanges,
@@ -1625,14 +1625,14 @@ async function scaleApplyK8sChanges(ctx) {
 
 /**
  * k8s-ha `re-establish-ha-tunnel` effect (item I-1): after a resize rebooted
- * the supabase node(s), the imperative host `wg0` is gone, the hostNetwork
+ * the database node(s), the imperative host `wg0` is gone, the hostNetwork
  * repl-gateway Pod crash-loops (can't bind its tunnel IP), and the primary's
  * post-resize pods-Ready wait (below) would then time out for 10 min and fail
  * scale. Recreate wg0 (also retrofits the boot-persistence systemd unit) and
  * bounce the gateway on both clusters BEFORE that wait.
  *
  * Gated at the plan level to HA (`when: ctx.isHA`); here we further no-op
- * unless the SUPABASE node type actually changed — only a supabase-node resize
+ * unless the DATABASE node type actually changed — only a database-node resize
  * reboots the node that owns wg0, so on a master/worker-only resize the tunnel
  * survives and we must NOT needlessly tear down a healthy wg0. Best-effort: a
  * failure warns (the operator can `vibecarbon deploy` to fully restore) and the
@@ -1641,11 +1641,11 @@ async function scaleApplyK8sChanges(ctx) {
 async function scaleReestablishHaTunnel(ctx) {
   const { environment, envConfig, projectConfig, isHA, infraChanges } = ctx;
   if (!isHA) return; // single-cluster k8s has no replication tunnel
-  if (!infraChanges?.includes('supabaseType')) {
-    // Master/worker-only resize: the supabase node (owner of wg0) never
+  if (!infraChanges?.includes('dbType')) {
+    // Master/worker-only resize: the database node (owner of wg0) never
     // rebooted, so the tunnel is intact — leave the healthy wg0 alone.
     p.log.info(
-      'Supabase node type unchanged, skipping WireGuard tunnel re-establish (wg0 not disrupted).',
+      'Database node type unchanged, skipping WireGuard tunnel re-establish (wg0 not disrupted).',
     );
     return;
   }
@@ -1653,24 +1653,24 @@ async function scaleReestablishHaTunnel(ctx) {
   const { identifyServers } = await import('./failover.js');
   const { reestablishReplicationTransport } = await import('./lib/deploy/k8s/index.js');
   const servers = identifyServers(environment, envConfig, projectConfig);
-  if (!servers?.primary?.supabaseIp || !servers?.standby?.supabaseIp) {
+  if (!servers?.primary?.dbIp || !servers?.standby?.dbIp) {
     p.log.warn(
-      'Could not resolve HA supabase node IPs from config, skipping post-resize WireGuard ' +
+      'Could not resolve HA database node IPs from config, skipping post-resize WireGuard ' +
         're-establish. If replication is down, run `vibecarbon deploy` to restore it.',
     );
     return;
   }
   const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
   const s = spinner();
-  s.start('Re-establishing WireGuard replication tunnel after supabase-node resize');
+  s.start('Re-establishing WireGuard replication tunnel after database-node resize');
   try {
     await reestablishReplicationTransport({
       primaryIp: servers.primary.ip,
       standbyIp: servers.standby.ip,
-      primarySupabaseIp: servers.primary.supabaseIp,
-      standbySupabaseIp: servers.standby.supabaseIp,
-      primarySupabasePrivateIp: servers.primary.supabasePrivateIp,
-      standbySupabasePrivateIp: servers.standby.supabasePrivateIp,
+      primaryDbIp: servers.primary.dbIp,
+      standbyDbIp: servers.standby.dbIp,
+      primaryDbPrivateIp: servers.primary.dbPrivateIp,
+      standbyDbPrivateIp: servers.standby.dbPrivateIp,
       sshKeyPath,
     });
     s.stop('WireGuard tunnel re-established (wg0 recreated, repl-gateway restarted)');
@@ -1800,7 +1800,7 @@ async function scaleVerifyK8sReady(ctx) {
     // Wait for the Hetzner CSI driver DaemonSet to register on every
     // node BEFORE checking pod-Ready. RCA from k8s-ha standby failure
     // 2026-04-28 (live cluster repro under triple-node-reboot):
-    // kubelet can flip the supabase node Ready before hcloud-csi-node
+    // kubelet can flip the database node Ready before hcloud-csi-node
     // pod registers; supabase-db-0 then tries to mount its PVC and
     // hits "MountVolume.MountDevice failed... driver name
     // csi.hetzner.cloud not found in the list of registered CSI
@@ -1984,7 +1984,7 @@ done`,
 
 /**
  * k8s/k8s-ha `update-project-config` effect: persist the new sizing inputs
- * (worker/master/supabase serverType + cluster-autoscaler bounds) into
+ * (worker/master/database serverType + cluster-autoscaler bounds) into
  * .vibecarbon.json. Hetzner server_type changes are in-place resizes (not
  * replaces) per the master-replace guard's design comment above — the public
  * IP survives the type bump, so the persisted `servers[]` block still points
@@ -1998,7 +1998,7 @@ async function scaleUpdateK8sConfig(ctx) {
       serverType: newValues.workerType,
     }),
     ...(newValues.masterType && { masterServerType: newValues.masterType }),
-    ...(newValues.supabaseType && { supabaseServerType: newValues.supabaseType }),
+    ...(newValues.dbType && { dbServerType: newValues.dbType }),
     // Phase 8: persist CA bounds so subsequent `vibecarbon deploy` and
     // `vibecarbon scale` runs replay the operator's most recent choice
     // rather than falling back to defaults.

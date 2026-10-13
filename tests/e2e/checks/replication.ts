@@ -201,7 +201,7 @@ export function extractPgHbaRejectIps(logText: string | null | undefined): strin
 interface RawEnvConfig {
   region?: string;
   secondaryRegion?: string;
-  servers?: Array<{ ip: string; name?: string; role?: string; supabaseIp?: string }>;
+  servers?: Array<{ ip: string; name?: string; role?: string; dbIp?: string }>;
   ha?: {
     failoverRegion?: string;
     primary?: { masterIp?: string };

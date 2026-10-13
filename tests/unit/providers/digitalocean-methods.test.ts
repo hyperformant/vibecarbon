@@ -103,9 +103,9 @@ describe('encodeLabel / encodeLabels', () => {
       encodeLabel('cluster', 'demo-cluster'),
       encodeLabel('managed-by', 'vibecarbon'),
       encodeLabel('role', 'worker'),
-      encodeLabel('role', 'supabase'),
+      encodeLabel('role', 'db'),
       encodeLabel('node-pool', 'worker-pool'),
-      encodeLabel('node-pool', 'supabase-pool'),
+      encodeLabel('node-pool', 'db-pool'),
       encodeLabel('os-flavor', 'k3s'),
     ]);
     expect(encoded.size).toBe(9);

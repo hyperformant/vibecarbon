@@ -33,7 +33,7 @@ export const ENV_IDENTITY_FIELDS = Object.freeze([
   'secondaryRegion',
   'serverType',
   'masterServerType',
-  'supabaseServerType',
+  'dbServerType',
   'workerServerType',
 ]);
 

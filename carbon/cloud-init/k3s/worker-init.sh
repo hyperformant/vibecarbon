@@ -39,7 +39,7 @@ if [ -z "$K3S_TARGET_VERSION" ]; then
 fi
 echo "Installing k3s version: $K3S_TARGET_VERSION"
 
-# IDENTICAL block in master-init.sh / worker-init.sh / supabase-init.sh - keep in sync.
+# IDENTICAL block in master-init.sh / worker-init.sh / db-init.sh - keep in sync.
 # (Three-way duplication is acceptable here because the cloud-init scripts are
 # rendered independently per role; extracting a shared snippet would require
 # restructuring the renderScript() pipeline. Out of scope for Phase 1.)

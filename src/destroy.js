@@ -494,7 +494,7 @@ async function cleanupAutoscalerWorkers(provider, clusterName) {
 
   // Match strategy: label-primary, in-network-without-role-label fallback.
   // Pulumi-managed roles for compatibility with pre-Phase-3 deploys.
-  const PULUMI_ROLES = new Set(['master', 'supabase', 'worker']);
+  const PULUMI_ROLES = new Set(['master', 'db', 'worker']);
   const caServers = servers.filter((server) => {
     const inClusterNetwork = provider.serverNetworkIds(server).includes(clusterNetwork.id);
     if (!inClusterNetwork) return false;
@@ -2092,7 +2092,7 @@ async function destroyK8sTier({
   const Provider = providerFor(envConfig);
   const provider = new Provider(providerToken);
 
-  // Volume IDs collected from ALL cluster servers (master, supabase, workers)
+  // Volume IDs collected from ALL cluster servers (master, database, workers)
   // AND from each cluster's own PersistentVolumes. Both providers' CSI drivers
   // name volumes pvc-<uuid> — not the cluster name — and the labels the bumped
   // Hetzner driver stamps are project-scoped, not environment-scoped (DO stamps

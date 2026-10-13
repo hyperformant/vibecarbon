@@ -392,23 +392,23 @@ describe('buildPgdataSwapPodManifest', () => {
     expect(manifest.spec.securityContext.runAsUser).toBe(0);
   });
 
-  it('tolerates dedicated=supabase:NoSchedule (local-path PV pins the pod to the tainted node)', () => {
+  it('tolerates dedicated=db:NoSchedule (local-path PV pins the pod to the tainted node)', () => {
     // Live-hit 2026-07-07: without this the swap pod sat Unschedulable —
-    // "1 node(s) had untolerated taint {dedicated: supabase}, 2 node(s) had
+    // "1 node(s) had untolerated taint {dedicated: db}, 2 node(s) had
     // volume node affinity conflict". Harmless on CSI rigs (tolerations only
     // widen schedulability).
     expect(manifest.spec.tolerations).toEqual([
-      { key: 'dedicated', operator: 'Equal', value: 'supabase', effect: 'NoSchedule' },
+      { key: 'dedicated', operator: 'Equal', value: 'db', effect: 'NoSchedule' },
     ]);
   });
 
-  it('pins to the dedicated supabase node like the db StatefulSet (CSI topology is only zonal)', () => {
+  it('pins to the dedicated database node like the db StatefulSet (CSI topology is only zonal)', () => {
     // RCA 2026-07-16 (gate run 29504041478): a detached csi.hetzner.cloud
     // volume does not attract the pod to the node it detached from, so the
     // scheduler placed the swap pod on a worker that never ran the db — the
     // cold multi-GB wal-g image pull blew the 180s swap budget. The selector
     // makes placement deterministic: cached image + node-local re-attach.
-    expect(manifest.spec.nodeSelector).toEqual({ dedicated: 'supabase' });
+    expect(manifest.spec.nodeSelector).toEqual({ dedicated: 'db' });
   });
 });
 
@@ -506,7 +506,7 @@ describe('swapPgdataViaHelperPod', () => {
 
   it('fails FAST on Unschedulable (terminal — waiting cannot fix a taint/affinity conflict)', async () => {
     const schedMsg =
-      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: supabase}, ' +
+      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: db}, ' +
       '2 node(s) had volume node affinity conflict.';
     const { kubectl, calls } = mkKubectl({
       phase: 'Pending',
@@ -515,7 +515,7 @@ describe('swapPgdataViaHelperPod', () => {
     // The error names the exact scheduler conflict (not a generic timeout) and
     // surfaces on the FIRST poll — no budget wait.
     await expect(swapPgdataViaHelperPod(kubectl, inputs)).rejects.toThrow(
-      /could not be scheduled[\s\S]*untolerated taint \{dedicated: supabase\}/,
+      /could not be scheduled[\s\S]*untolerated taint \{dedicated: db\}/,
     );
     // The pod is still cleaned up (finally).
     expect(calls.map((c) => c.argv.join(' ')).some((c) => c.includes('delete pod'))).toBe(true);

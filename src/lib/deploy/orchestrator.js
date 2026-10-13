@@ -288,7 +288,7 @@ export async function executeDeployment(args, gatheredConfig) {
     secondaryRegion,
     serverType,
     masterServerType,
-    supabaseServerType,
+    dbServerType,
     workerServerType,
     minWorkers,
     maxWorkers,
@@ -1004,7 +1004,7 @@ export async function executeDeployment(args, gatheredConfig) {
     region,
     secondaryRegion,
     masterServerType,
-    supabaseServerType,
+    dbServerType,
     workerServerType,
     serverType,
     minWorkers,
@@ -1209,7 +1209,7 @@ export async function executeDeployment(args, gatheredConfig) {
         'Cluster + app ready',
       );
       // Fall through to Step 6 so .vibecarbon.json persists the serverlist —
-      // without it, `vibecarbon destroy` can't find the master/supabase IPs
+      // without it, `vibecarbon destroy` can't find the master/database IPs
       // and the cluster leaks.
     }
 
@@ -1488,30 +1488,30 @@ export async function executeDeployment(args, gatheredConfig) {
   }
 
   // --- STEP 6: Finalize Config (Consolidated) ---
-  // Persist supabaseIp alongside masterIp for k8s deploys. The failover flow
-  // in src/failover.js needs the supabase node IP (where the postgres pod
+  // Persist dbIp alongside masterIp for k8s deploys. The failover flow
+  // in src/failover.js needs the database node IP (where the postgres pod
   // runs) to pg_basebackup-reseed standby from primary — without it, the
   // failover uses whatever (potentially stale) state standby has. Compose
-  // deploys only have a single masterIp so supabaseIp is omitted there.
+  // deploys only have a single masterIp so dbIp is omitted there.
   const servers = [];
   if (deployResult.primary) {
-    // k8s-HA shape: { primary: { masterIp, supabaseIp }, standby: {...} }
+    // k8s-HA shape: { primary: { masterIp, dbIp }, standby: {...} }
     servers.push(
       {
         name: 'primary',
         ip: deployResult.primary.masterIp,
-        supabaseIp: deployResult.primary.supabaseIp,
+        dbIp: deployResult.primary.dbIp,
         region,
       },
       {
         name: 'standby',
         ip: deployResult.standby.masterIp,
-        supabaseIp: deployResult.standby.supabaseIp,
+        dbIp: deployResult.standby.dbIp,
         region: secondaryRegion,
       },
     );
   } else if (deployResult.primaryIp && deployResult.standbyIp) {
-    // compose-HA shape: { primaryIp, standbyIp } — no supabaseIp because
+    // compose-HA shape: { primaryIp, standbyIp } — no dbIp because
     // compose-HA runs Supabase on the same VM as the app.
     servers.push(
       { name: 'primary', ip: deployResult.primaryIp, region, serverType },
@@ -1519,7 +1519,7 @@ export async function executeDeployment(args, gatheredConfig) {
     );
   } else if (deployResult.masterIp) {
     // Single-server fall-through: hit by compose (one VPS) and k8s
-    // (master + supabase + worker[s]) deploys.
+    // (master + database + worker[s]) deploys.
     //
     // Compose: persist the Hetzner-assigned `id` + literal name (e.g.
     // `${projectName}-${environment}`) so `vibecarbon destroy` can locate
@@ -1539,8 +1539,8 @@ export async function executeDeployment(args, gatheredConfig) {
     // e2e verify-scale) can enumerate every IP without having to
     // re-derive worker IPs from Pulumi outputs. Master stays at index 0 —
     // a handful of compose-only paths read `envConfig.servers?.[0]`, and
-    // preserving that contract is cheap. `supabaseIp` is also kept on the
-    // master entry so failover.js can read `servers[0].supabaseIp` without
+    // preserving that contract is cheap. `dbIp` is also kept on the
+    // master entry so failover.js can read `servers[0].dbIp` without
     // first iterating to find the supabase entry — redundant with the
     // dedicated supabase entry below, but keeps the existing failover
     // path working.
@@ -1554,21 +1554,21 @@ export async function executeDeployment(args, gatheredConfig) {
       // firewall (Hetzner: applied by the Pulumi program; DO: attached by tag).
       ...(deployResult.firewallId && { firewallId: deployResult.firewallId }),
       ip: deployResult.masterIp,
-      supabaseIp: deployResult.supabaseIp,
+      dbIp: deployResult.dbIp,
       region,
       serverType,
       ...(isComposeTier(tier) ? {} : { role: 'master' }),
     });
-    // K8s only — compose has neither a separate supabase node nor worker
+    // K8s only — compose has neither a separate database node nor worker
     // pool. Compose deploys leave servers as a single-element array.
     if (isK8sTier(tier)) {
-      if (deployResult.supabaseIp) {
+      if (deployResult.dbIp) {
         servers.push({
-          name: 'supabase',
-          ip: deployResult.supabaseIp,
+          name: 'db',
+          ip: deployResult.dbIp,
           region,
           serverType,
-          role: 'supabase',
+          role: 'db',
         });
       }
       const workerIps = Array.isArray(deployResult.workerIps) ? deployResult.workerIps : [];
@@ -1660,7 +1660,7 @@ export async function executeDeployment(args, gatheredConfig) {
           // warm/degraded standby, which the inner deploy flags on deployResult.
           replication: deployResult?.degraded ? 'degraded' : 'streaming',
           degraded: !!deployResult?.degraded,
-          // Persist per-cluster floatingIp + supabaseIp under ha.primary /
+          // Persist per-cluster floatingIp + dbIp under ha.primary /
           // ha.standby so failover.identifyServers takes the structured
           // path that surfaces floatingIp. Without these, identifyServers
           // falls through to the flat `servers[]` lookup which has only
@@ -1674,12 +1674,12 @@ export async function executeDeployment(args, gatheredConfig) {
               primary: {
                 masterIp: deployResult.primary.masterIp,
                 floatingIp: deployResult.primary.floatingIp,
-                supabaseIp: deployResult.primary.supabaseIp,
-                // The supabase node's PRIVATE IP — the local WireGuard-relay
+                dbIp: deployResult.primary.dbIp,
+                // The database node's PRIVATE IP — the local WireGuard-relay
                 // endpoint the failover/restore re-seed dials (deterministic
                 // 10.0.1.2 in the IaC program; persisted so identifyServers
                 // can surface it without hardcoding).
-                supabasePrivateIp: deployResult.primary.supabasePrivateIp,
+                dbPrivateIp: deployResult.primary.dbPrivateIp,
                 // The region + server types this side ACTUALLY deployed to,
                 // from the fan-out result (fall back to the options value only
                 // if absent). A failover/scale converge reads these back for the
@@ -1688,7 +1688,7 @@ export async function executeDeployment(args, gatheredConfig) {
                 // options-level flags or the shared primary types.
                 region: deployResult.primary.region ?? region,
                 masterServerType: deployResult.primary.masterServerType,
-                supabaseServerType: deployResult.primary.supabaseServerType,
+                dbServerType: deployResult.primary.dbServerType,
                 // Task 6/7: cluster identity (Pulumi stack name). A redeploy
                 // reads THIS back as `envConfig.ha.primary.stack` (see the
                 // haStacks derivation above, ~line 702) so a post-failover
@@ -1699,14 +1699,14 @@ export async function executeDeployment(args, gatheredConfig) {
               standby: {
                 masterIp: deployResult.standby.masterIp,
                 floatingIp: deployResult.standby.floatingIp,
-                supabaseIp: deployResult.standby.supabaseIp,
-                supabasePrivateIp: deployResult.standby.supabasePrivateIp,
+                dbIp: deployResult.standby.dbIp,
+                dbPrivateIp: deployResult.standby.dbPrivateIp,
                 region: deployResult.standby.region ?? secondaryRegion,
                 // The standby's region-resolved types (may differ from the
                 // primary's) — provisionStandbyCapacity pins them so a failover
                 // converge never resizes the standby's master/db node.
                 masterServerType: deployResult.standby.masterServerType,
-                supabaseServerType: deployResult.standby.supabaseServerType,
+                dbServerType: deployResult.standby.dbServerType,
                 stack: deployResult.standby.stack,
               },
               // Pilot-light failover config: what `vibecarbon failover` will
@@ -1766,12 +1766,12 @@ export async function executeDeployment(args, gatheredConfig) {
         // Without `minWorkers/maxWorkers` here, scale.js would read
         // `envConfig.minWorkers/maxWorkers` as `undefined` and fall back to
         // built-in defaults — which on a clean type-bump made Pulumi plan a
-        // delete of `worker-1`, replacing master+supabase along the way
-        // (etcd loss). Master/supabase/worker types are also persisted so
+        // delete of `worker-1`, replacing master+database along the way
+        // (etcd loss). Master/database/worker types are also persisted so
         // the per-role split survives across deploy → scale.
         ...(deployMode === 'kubernetes' && {
           masterServerType,
-          supabaseServerType,
+          dbServerType,
           workerServerType,
           // Single (non-HA) k8s's floating/reserved ingress IP (M3 Task 9f).
           // `status.js` has read `envConfig.floatingIp` for a long time, but

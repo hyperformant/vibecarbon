@@ -57,7 +57,7 @@ secret:
 # Override the db image with vibecarbon's wal-g-equipped build (carbon/db/
 # Dockerfile: FROM supabase/postgres + wal-g v3.0.9). The stock chart image
 # has no wal-g, which is why k8s historically had no WAL archiving / PITR.
-# Built + sideloaded to the supabase node by deployK3s (k3s-db-build /
+# Built + sideloaded to the database node by deployK3s (k3s-db-build /
 # k3s-db-sideload); IfNotPresent so the sideloaded image is used, not pulled.
 # {{DB_IMAGE}}/{{DB_IMAGE_TAG}} substituted at deploy time in installSupabase.
 image:
@@ -85,13 +85,13 @@ deployment:
     # Log-shipper — disable; conflicts with the optional observability stack.
     enabled: false
   db:
-    # Pin postgres to the dedicated supabase node (taint applied by Pulumi).
+    # Pin postgres to the dedicated database node (taint applied by Pulumi).
     nodeSelector:
-      dedicated: supabase
+      dedicated: db
     tolerations:
       - key: dedicated
         operator: Equal
-        value: supabase
+        value: db
         effect: NoSchedule
     # Headroom for the daily wal-g base backup, which runs INSIDE this
     # container's cgroup (via `kubectl exec`, see k8s/base/backup/cronjob.yaml).

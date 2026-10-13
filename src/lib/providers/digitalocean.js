@@ -330,7 +330,7 @@ export class DigitalOceanProvider extends BaseProvider {
 
   /**
    * Base droplet image slug DO's k8s Pulumi program (`digitalocean-k8s.js`,
-   * M3 Task 5) provisions master/supabase/worker nodes with — matches
+   * M3 Task 5) provisions master/database/worker nodes with — matches
    * `COMPOSE_IMAGE` below (same `ubuntu-24-04-x64` base image, no separate
    * k8s-tier image on DO). `renderCarbonAutoscalerConfig` reads this for
    * the CA-spawned worker node group's `image` field.
@@ -387,11 +387,11 @@ export class DigitalOceanProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s supabase-node boot user-data — wraps the new
-   * `carbon/cloud-init/k3s/do-supabase-init.sh` template (M3 Task 5) via
-   * loadCloudInit/renderScript. do-supabase-init.sh is do-worker-init.sh
+   * Render this provider's k3s database-node boot user-data — wraps the new
+   * `carbon/cloud-init/k3s/do-db-init.sh` template (M3 Task 5) via
+   * loadCloudInit/renderScript. do-db-init.sh is do-worker-init.sh
    * plus boot-time `--node-label`/`--node-taint` k3s agent flags (dedicated
-   * Supabase node-pool isolation, applied at join time rather than a
+   * Database node-pool isolation, applied at join time rather than a
    * post-join `kubectl label`/`kubectl taint` step) and an async
    * containerd image-prewarm block — see the template's own comments. Same
    * var set as getK8sWorkerUserData (master_ip is a template var here too,
@@ -407,9 +407,9 @@ export class DigitalOceanProvider extends BaseProvider {
    *   output, same as getK8sWorkerUserData's vars.
    * @returns {Promise<string>}
    */
-  static async getK8sSupabaseUserData(vars) {
+  static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('do-supabase-init.sh'), vars);
+    return renderScript(loadCloudInit('do-db-init.sh'), vars);
   }
 
   // ── Compose-tier replacement-server identity — see base.js's doc block ──
@@ -567,12 +567,12 @@ export class DigitalOceanProvider extends BaseProvider {
    * doesn't need Hetzner's per-region preference-list walk.
    * @param {string} _region - Region slug (accepted for interface parity
    *   with HetznerProvider.getRegionDefaults; unused — see above)
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     return {
       masterType: 's-2vcpu-2gb',
-      supabaseType: DigitalOceanProvider.DEFAULT_TYPE,
+      dbType: DigitalOceanProvider.DEFAULT_TYPE,
       workerType: 's-2vcpu-2gb',
     };
   }
@@ -625,7 +625,7 @@ export class DigitalOceanProvider extends BaseProvider {
       if (available.has(serverType)) return serverType;
 
       const defaults = DigitalOceanProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.supabaseType) return defaults.supabaseType;
+      if (serverType === defaults.dbType) return defaults.dbType;
       return defaults.masterType;
     }
 
@@ -1817,7 +1817,7 @@ export class DigitalOceanProvider extends BaseProvider {
    * static-load graph — mirrors getComposeProgram's shape exactly, and
    * HetznerProvider.getK8sProgram's dispatch pattern.
    * @param {import('../iac/programs/digitalocean-k8s.js').K8sStackConfig} config
-   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, supabaseIp: string, supabasePrivateIp: string, workerIps: string[], floatingIp: string, networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
+   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr: string}>>}
    *   `vpcCidr` (M3 Task 9c) is the Vpc's actual `ipRange` — see
    *   getS3EgressExtraCidrs above.
    */

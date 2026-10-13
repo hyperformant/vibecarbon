@@ -390,7 +390,7 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /** @returns {Promise<never>} */
-  static async getK8sSupabaseUserData() {
+  static async getK8sDbUserData() {
     throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
   }
 
@@ -524,12 +524,12 @@ export class LinodeProvider extends BaseProvider {
    * Region-appropriate default server types. Fixed roles — Linode's Standard
    * line is uniform across regions, so no per-region preference walk.
    * @param {string} _region - Accepted for interface parity; unused
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     return {
       masterType: 'g6-standard-1',
-      supabaseType: LinodeProvider.DEFAULT_TYPE,
+      dbType: LinodeProvider.DEFAULT_TYPE,
       workerType: 'g6-standard-1',
     };
   }
@@ -584,7 +584,7 @@ export class LinodeProvider extends BaseProvider {
       if (available.has(serverType)) return serverType;
 
       const defaults = LinodeProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.supabaseType) return defaults.supabaseType;
+      if (serverType === defaults.dbType) return defaults.dbType;
       return defaults.masterType;
     }
 

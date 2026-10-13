@@ -188,7 +188,7 @@ describe('cleanupAutoscalerWorkers', () => {
     expect(result).toEqual({ deleted: [], failed: [], volumeIds: [] });
   });
 
-  it('excludes Pulumi-managed servers tagged with role=master/supabase/worker', async () => {
+  it('excludes Pulumi-managed servers tagged with role=master/database/worker', async () => {
     installFetchRouter({
       networks: [{ id: NETWORK_ID, name: `${CLUSTER_NAME}-network` }],
       servers: [
@@ -202,7 +202,7 @@ describe('cleanupAutoscalerWorkers', () => {
           id: 402,
           name: 'supabase-1',
           private_net: [{ network_id: NETWORK_ID }],
-          labels: { role: 'supabase' },
+          labels: { role: 'db' },
         },
         {
           id: 403,

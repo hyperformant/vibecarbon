@@ -54,7 +54,7 @@ export const SPEC = {
     {
       name: 'node',
       description:
-        'Substring of a server name (e.g. "master", "supabase", or a full name like "myproject-prod-master")',
+        'Substring of a server name (e.g. "master", "db", or a full name like "myproject-prod-master")',
     },
   ],
   flags: [

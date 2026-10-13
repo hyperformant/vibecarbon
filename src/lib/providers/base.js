@@ -79,7 +79,7 @@ export class BaseProvider {
   static DEFAULT_COMPOSE_TYPE = '';
 
   /**
-   * Default node server type (master/supabase/worker) for a k3s deploy when
+   * Default node server type (master/database/worker) for a k3s deploy when
    * the caller didn't specify one.
    * @type {string}
    */
@@ -230,7 +230,7 @@ export class BaseProvider {
    * This provider's cluster VPC/private-network CIDR, used ONLY as
    * `deployK3s`'s (src/lib/deploy/k8s/k3s.js) resume-compat fallback when a
    * persisted `k3s-infra` step result predates the `vpcCidr` Pulumi output
-   * field (mirrors the masterPrivateIp/supabasePrivateIp fallback-default
+   * field (mirrors the masterPrivateIp/dbPrivateIp fallback-default
    * pattern already established there). Empty on the base class — a
    * provider whose S3 endpoints never need the extra allowance (Hetzner)
    * has no reason to carry one.
@@ -304,17 +304,17 @@ export class BaseProvider {
   }
 
   /**
-   * Render this provider's k3s SUPABASE-node boot user-data — the dedicated
-   * node (`node-pool: supabase-pool`, `dedicated=supabase` label + NoSchedule
+   * Render this provider's k3s DATABASE-node boot user-data — the dedicated
+   * node (`node-pool: db-pool`, `dedicated=db` label + NoSchedule
    * taint) the Supabase HelmRelease's node-affinity pins onto. Not part of
-   * carbon-autoscaler's node groups (the supabase node is Pulumi-static,
+   * carbon-autoscaler's node groups (the database node is Pulumi-static,
    * never CA-spawned) — see getK8sMasterUserData's doc for the
    * dynamic-import + vars-contract note, which applies identically here.
    * @param {Record<string, unknown>} vars - Template vars; provider-specific.
    * @returns {Promise<string>}
    */
-  static async getK8sSupabaseUserData(_vars) {
-    throw new Error('getK8sSupabaseUserData() must be implemented by subclass');
+  static async getK8sDbUserData(_vars) {
+    throw new Error('getK8sDbUserData() must be implemented by subclass');
   }
 
   /**
@@ -968,7 +968,7 @@ export class BaseProvider {
   /**
    * Returns region-appropriate default server types.
    * @param {string} region - Region ID
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     throw new Error('getRegionDefaults() must be implemented by subclass');
@@ -1156,7 +1156,7 @@ export class BaseProvider {
   // HetznerProvider.getComposeProgram/getK8sProgram for the verified-against-
   // reality field list and the one documented default-on-absence case):
   //   compose: { serverIp, serverId, firewallId, sshKeyId }
-  //   k8s:     { masterIp, masterPrivateIp, supabaseIp, supabasePrivateIp,
+  //   k8s:     { masterIp, masterPrivateIp, dbIp, dbPrivateIp,
   //              workerIps, floatingIp, networkId, sshKeyId, k3sToken,
   //              clusterName }
   //   k8s (DO-only additive, M3 Task 9c): vpcCidr — the Vpc's actual
@@ -1184,7 +1184,7 @@ export class BaseProvider {
    * MUST dynamic-import the provider's program module inside the method
    * body — see the IAC PROGRAM DISPATCH block above.
    * @param {object} config - Provider-specific k8s stack config
-   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, supabaseIp: string, supabasePrivateIp: string, workerIps: string[], floatingIp: string, networkId: string|number, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr?: string}>>}
+   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string|number, sshKeyId: string, k3sToken: string, clusterName: string, vpcCidr?: string}>>}
    */
   static async getK8sProgram(_config) {
     throw new Error('getK8sProgram() must be implemented by subclass');

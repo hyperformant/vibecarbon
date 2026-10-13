@@ -17,7 +17,7 @@
  * ── ctx contract (multi-cluster) ──
  *   Inputs (set by the orchestrator before runPlan):
  *     options = the deploymentConfig object deployK8sHA consumed (projectName,
- *               environment, region, secondaryRegion, master/supabase/worker
+ *               environment, region, secondaryRegion, master/database/worker
  *               server types, serverType, min/maxWorkers, apiToken,
  *               dnsToken, dnsZoneId, domain,
  *               s3Config, operatorCidrs, allowDegraded, restore, dnsProvider,
@@ -133,17 +133,17 @@ async function haK8sProvisionClusters(ctx) {
   // standardization.
   const resolve = (type) => Provider.resolveServerTypeForRegion(type, standbyRegion);
   const standbyMasterType = resolve(options.masterServerType || options.serverType);
-  const standbySupabaseType = resolve(options.supabaseServerType || options.serverType);
+  const standbyDbType = resolve(options.dbServerType || options.serverType);
   const standbyWorkerType = resolve(options.workerServerType || options.serverType);
 
   if (
     standbyMasterType !== options.masterServerType ||
-    standbySupabaseType !== options.supabaseServerType ||
+    standbyDbType !== options.dbServerType ||
     standbyWorkerType !== options.workerServerType
   ) {
     p.log.info(
       `Standby server types adjusted for ${standbyRegion}: ` +
-        `master=${standbyMasterType}, supabase=${standbySupabaseType}, worker=${standbyWorkerType}`,
+        `master=${standbyMasterType}, supabase=${standbyDbType}, worker=${standbyWorkerType}`,
     );
   }
 
@@ -180,7 +180,7 @@ async function haK8sProvisionClusters(ctx) {
   // Pilot-light sizing: primary gets full sizing (role: 'primary',
   // minWorkers/maxWorkers as configured); standby is a dormant DR target, not
   // a live mirror of primary's capacity — it deploys with minWorkers: 0 (no
-  // Pulumi-provisioned worker nodes, just master + supabase) and its
+  // Pulumi-provisioned worker nodes, just master + database) and its
   // cluster-autoscaler zeroed in applyK3sManifests. `caBoundsMin` carries
   // primary's minWorkers through anyway so the bounds pre-rendered into the
   // carbon-autoscaler-config Secret are ALREADY sized for the day standby is
@@ -246,7 +246,7 @@ async function haK8sProvisionClusters(ctx) {
       environment: standbyEnv,
       state: standbyState,
       masterServerType: standbyMasterType,
-      supabaseServerType: standbySupabaseType,
+      dbServerType: standbyDbType,
       workerServerType: standbyWorkerType,
       serverType: standbyWorkerType,
       sharedSshKeyPath,
@@ -302,16 +302,16 @@ async function haK8sProvisionClusters(ctx) {
       provider: options.apiToken ? new Provider(options.apiToken) : null,
       projectName: options.projectName,
       environment: options.environment,
-      primarySupabaseIp: pInfra.supabaseIp,
-      standbySupabaseIp: sInfra.supabaseIp,
+      primaryDbIp: pInfra.dbIp,
+      standbyDbIp: sInfra.dbIp,
     });
     await prepareReplicationTransport({
       primaryIp: pInfra.masterIp,
       standbyIp: sInfra.masterIp,
-      primarySupabaseIp: pInfra.supabaseIp,
-      standbySupabaseIp: sInfra.supabaseIp,
-      primarySupabasePrivateIp: pInfra.supabasePrivateIp,
-      standbySupabasePrivateIp: sInfra.supabasePrivateIp,
+      primaryDbIp: pInfra.dbIp,
+      standbyDbIp: sInfra.dbIp,
+      primaryDbPrivateIp: pInfra.dbPrivateIp,
+      standbyDbPrivateIp: sInfra.dbPrivateIp,
       sshKeyPath: sharedSshKeyPath,
     });
     console.error('[k8s-ha] replication transport prepared during the cluster fan-out');
@@ -387,8 +387,7 @@ async function haK8sProvisionClusters(ctx) {
     region: primaryRegion,
     masterServerType:
       options.masterServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
-    supabaseServerType:
-      options.supabaseServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
+    dbServerType: options.dbServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
     workerServerType:
       options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
   };
@@ -397,7 +396,7 @@ async function haK8sProvisionClusters(ctx) {
     stack: standbyEnv,
     region: standbyRegion,
     masterServerType: standbyMasterType || Provider.DEFAULT_K8S_NODE_TYPE,
-    supabaseServerType: standbySupabaseType || Provider.DEFAULT_K8S_NODE_TYPE,
+    dbServerType: standbyDbType || Provider.DEFAULT_K8S_NODE_TYPE,
     workerServerType: standbyWorkerType || Provider.DEFAULT_K8S_NODE_TYPE,
   };
   // Bounded: the prep task's namespace wait + WG bring-up finish well inside
@@ -414,8 +413,8 @@ async function haK8sProvisionClusters(ctx) {
  * Open the WireGuard tunnel port (UDP 51821) in BOTH clusters' cloud
  * firewalls (provider-routed: findFirewallByName →
  * buildReplicationFirewallRules → setFirewallRules, implemented by every HA
- * provider), each admitting its PEER supabase node's PUBLIC IP — the
- * WG endpoints are the supabase nodes' public IPs, and the firewall's default
+ * provider), each admitting its PEER database node's PUBLIC IP — the
+ * WG endpoints are the database nodes' public IPs, and the firewall's default
  * udp rule only admits the private range. Symmetric on both clusters: the
  * standby streams from the primary at deploy time, and the post-failover
  * reverse re-seed dials the promoted standby (neither failover.js nor
@@ -432,15 +431,15 @@ async function openReplicationFirewallForPeers({
   provider,
   projectName,
   environment,
-  primarySupabaseIp,
-  standbySupabaseIp,
+  primaryDbIp,
+  standbyDbIp,
 }) {
   if (!provider) return;
-  for (const [clusterRole, peerSupabaseIp] of [
-    ['primary', standbySupabaseIp],
-    ['standby', primarySupabaseIp],
+  for (const [clusterRole, peerDbIp] of [
+    ['primary', standbyDbIp],
+    ['standby', primaryDbIp],
   ]) {
-    if (!peerSupabaseIp) continue;
+    if (!peerDbIp) continue;
     const firewallName = `${projectName}-${environment}-${clusterRole}-firewall`;
     try {
       const firewall = await provider.findFirewallByName(firewallName);
@@ -453,7 +452,7 @@ async function openReplicationFirewallForPeers({
         );
         continue;
       }
-      const updatedRules = provider.buildReplicationFirewallRules(firewall, peerSupabaseIp);
+      const updatedRules = provider.buildReplicationFirewallRules(firewall, peerDbIp);
       if (updatedRules) {
         await provider.setFirewallRules(firewall.id, updatedRules);
       }
@@ -485,8 +484,8 @@ async function haK8sOpenReplicationFirewall(ctx) {
     provider: options.apiToken ? new Provider(options.apiToken) : null,
     projectName: options.projectName,
     environment: options.environment,
-    primarySupabaseIp: primaryResult.supabaseIp,
-    standbySupabaseIp: standbyResult.supabaseIp,
+    primaryDbIp: primaryResult.dbIp,
+    standbyDbIp: standbyResult.dbIp,
   });
 }
 
@@ -522,10 +521,10 @@ async function haK8sConfigureReplication(ctx) {
     const replResult = await setupReplication({
       primaryIp: primaryResult.masterIp,
       standbyIp: standbyResult.masterIp,
-      primarySupabaseIp: primaryResult.supabaseIp,
-      standbySupabaseIp: standbyResult.supabaseIp,
-      primarySupabasePrivateIp: primaryResult.supabasePrivateIp,
-      standbySupabasePrivateIp: standbyResult.supabasePrivateIp,
+      primaryDbIp: primaryResult.dbIp,
+      standbyDbIp: standbyResult.dbIp,
+      primaryDbPrivateIp: primaryResult.dbPrivateIp,
+      standbyDbPrivateIp: standbyResult.dbPrivateIp,
       sshKeyPath: sharedSshKeyPath,
       transportPrepared: ctx.transportPrepared === true,
       primaryConfigured: ctx.primaryReplicationConfigured === true,

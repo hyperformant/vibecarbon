@@ -120,7 +120,7 @@ describe('offered SKUs never escape the live catalog', () => {
     it(`getRegionDefaults returns only catalog members (${label})`, () => {
       seed({ testregion: new Set(names) });
       const d = HetznerProvider.getRegionDefaults('testregion');
-      for (const t of [d.masterType, d.supabaseType, d.workerType]) {
+      for (const t of [d.masterType, d.dbType, d.workerType]) {
         expect(names).toContain(t);
       }
     });
@@ -171,7 +171,7 @@ describe('offline constants are coherent', () => {
   it('every offline EU default avoids permanently retired SKUs', () => {
     for (const region of HetznerProvider.EU_REGIONS) {
       const d = HetznerProvider.getRegionDefaults(region);
-      for (const t of [d.masterType, d.supabaseType, d.workerType]) {
+      for (const t of [d.masterType, d.dbType, d.workerType]) {
         expect(RETIRED_IN_EU).not.toContain(t);
         expect(RETIRED_EVERYWHERE).not.toContain(t);
       }
@@ -181,7 +181,7 @@ describe('offline constants are coherent', () => {
   it('no default anywhere names a globally retired SKU', () => {
     for (const region of [...HetznerProvider.EU_REGIONS, ...HetznerProvider.US_REGIONS]) {
       const d = HetznerProvider.getRegionDefaults(region);
-      for (const t of [d.masterType, d.supabaseType, d.workerType]) {
+      for (const t of [d.masterType, d.dbType, d.workerType]) {
         expect(RETIRED_EVERYWHERE).not.toContain(t);
       }
     }

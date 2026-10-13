@@ -1322,7 +1322,7 @@ export async function runLifecycle(
   // drive the cluster-autoscaler ceiling. Without these flags, deploy
   // defaults to (1, 3) and the test can only spawn 2 extra workers before
   // hitting MAX — not a meaningful end-to-end CA test. The (1, 5) shape
-  // means baseline = 3 nodes (master + supabase + 1 worker) and a 6-pod
+  // means baseline = 3 nodes (master + database + 1 worker) and a 6-pod
   // loadgen Deployment forces CA to spawn 4 extra workers + leave the 6th
   // replica Pending.
   const isK8sMode = config.mode === 'k8s' || config.mode === 'k8s-ha';
@@ -1581,10 +1581,10 @@ export async function runLifecycle(
               // modes can be asymmetric (one cluster healthy, the other not).
               //
               // getServerIps returns
-              //   [primary_master, primary_supabase, standby_master, standby_supabase]
+              //   [primary_master, primary_db, standby_master, standby_db]
               // for k8s-ha (see tests/e2e/utils/ssh.ts). We want the two
               // master IPs (k3s API server runs there); slice(0,2) was picking
-              // [primary_master, primary_supabase] and the standby kubectl was
+              // [primary_master, primary_db] and the standby kubectl was
               // hitting a node with no API server → "connection refused: dial
               // tcp [::1]:8080" floods (k8s-ha matrix #7 verify-failover, PR 1BF).
               const clusterIps =
@@ -2281,7 +2281,7 @@ export async function runLifecycle(
   //
   // Pre-condition: cluster was deployed with --min-workers=1 / --max-workers=5
   // (the lifecycle's deploy step does this when options.expanded === true on
-  // a k8s/k8s-ha scenario). Baseline node count is 3 — master + supabase + 1
+  // a k8s/k8s-ha scenario). Baseline node count is 3 — master + database + 1
   // worker. CA's MAX is therefore (5 - 1) = 4 extra workers; ceiling node
   // count is 7.
   //
@@ -2330,7 +2330,7 @@ export async function runLifecycle(
       }
 
       // For k8s-ha, getServerIps returns
-      //   [primary_master, primary_supabase, standby_master, standby_supabase]
+      //   [primary_master, primary_db, standby_master, standby_db]
       // Primary master = serverIps[0]. For k8s, serverIps[0] is also the
       // master. Either way we kubectl from there.
       const primaryMasterIp = serverIps[0];
@@ -2378,7 +2378,7 @@ export async function runLifecycle(
         }
       };
 
-      // 1. Capture baseline. Expect 3 (master + supabase + 1 worker) on a
+      // 1. Capture baseline. Expect 3 (master + database + 1 worker) on a
       //    k8s/k8s-ha primary cluster deployed with --min-workers=1.
       const baseline = countReadyNodes();
       if (baseline == null) {
@@ -2457,7 +2457,7 @@ EOF`;
         throw new Error(`verify-autoscale: scale-up failed: ${scaleUp.stdout.slice(0, 500)}`);
       }
 
-      // 4. Poll for scale-up. Expected ceiling = 7 nodes (master + supabase +
+      // 4. Poll for scale-up. Expected ceiling = 7 nodes (master + database +
       //    5 workers). Hetzner server-create + cloud-init + k3s-join is
       //    typically 2-4 min/node; 4 nodes serially is well within 12 min.
       const SCALE_UP_BUDGET_MS = 12 * 60_000;
@@ -3478,9 +3478,9 @@ EOF`;
           //    under -y).
           //
           //    K8s / k8s-HA: scale.js's `--type X` widens to all roles
-          //    (master + supabase + worker) — Hetzner server_type changes
+          //    (master + database + worker) — Hetzner server_type changes
           //    are in-place resizes, so the master-replace guard does not
-          //    trip. Every persisted IP (master + supabase + each worker,
+          //    trip. Every persisted IP (master + database + each worker,
           //    plus standby for HA) MUST be on the target.
           //
           //    The previous "sorted-type-lists differ" heuristic passed
@@ -4008,7 +4008,7 @@ EOF`;
               }
 
               // Refresh cached server info — the reconverged ex-primary's
-              // supabase/worker topology changed shape (scaled to
+              // database/worker topology changed shape (scaled to
               // pilot-light).
               serverIps = getServerIps(config.projectDir, config.envPrefix);
               sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);

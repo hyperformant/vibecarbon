@@ -129,15 +129,15 @@ export class HetznerProvider extends BaseProvider {
   //   compose (hetzner-compose.js buildHetznerComposeProgram): serverIp,
   //     serverId, firewallId, sshKeyId.
   //   k8s (hetzner-k8s.js buildHetznerK8sProgram): masterIp, masterPrivateIp,
-  //     supabaseIp, supabasePrivateIp, workerIps, floatingIp, networkId,
+  //     dbIp, dbPrivateIp, workerIps, floatingIp, networkId,
   //     sshKeyId, k3sToken, clusterName.
-  //   supabasePrivateIp IS exported unconditionally by the program today —
+  //   dbPrivateIp IS exported unconditionally by the program today —
   //   hardcoded '10.0.1.2' (hetzner-k8s.js return statement), same as
   //   masterPrivateIp's hardcoded '10.0.1.1'. deployK3s (k3s.js) separately
-  //   destructures `supabasePrivateIp = '10.0.1.2'` off the STORED step
+  //   destructures `dbPrivateIp = '10.0.1.2'` off the STORED step
   //   output with a matching default — that default exists for backward
   //   compatibility with state-tracker files persisted before
-  //   supabasePrivateIp was added to the program's output, not because the
+  //   dbPrivateIp was added to the program's output, not because the
   //   program can omit the key today.
 
   /**
@@ -157,7 +157,7 @@ export class HetznerProvider extends BaseProvider {
    * cluster. Dynamic import (never top-level) keeps `@pulumi/hcloud` and
    * `@pulumi/pulumi` out of this module's static-load graph.
    * @param {import('../iac/programs/hetzner-k8s.js').K8sStackConfig} config
-   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, supabaseIp: string, supabasePrivateIp: string, workerIps: string[], floatingIp: string, networkId: string|number, sshKeyId: string, k3sToken: string, clusterName: string}>>}
+   * @returns {Promise<() => Promise<{masterIp: string, masterPrivateIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], floatingIp: string, networkId: string|number, sshKeyId: string, k3sToken: string, clusterName: string}>>}
    *   No `vpcCidr` — Hetzner's S3 endpoints resolve to public IPs, so it
    *   never needs the DO-only S3-egress VPC allowance (see base.js's
    *   DEFAULT_VPC_CIDR / getS3EgressExtraCidrs, M3 Task 9c).
@@ -428,8 +428,8 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Render this provider's k3s supabase-node boot user-data — wraps
-   * `carbon/cloud-init/k3s/supabase-init.sh` via loadCloudInit/renderScript
+   * Render this provider's k3s database-node boot user-data — wraps
+   * `carbon/cloud-init/k3s/db-init.sh` via loadCloudInit/renderScript
    * (M3 Task 5), the SAME template hetzner-k8s.js's Pulumi program renders
    * directly today (lib/iac/programs/hetzner-k8s.js:118,268). See
    * getK8sMasterUserData's doc for why that call site is left untouched.
@@ -438,13 +438,13 @@ export class HetznerProvider extends BaseProvider {
    *   k3s_token: string,
    *   master_ip: string,
    * }} vars - Passed straight through to renderScript; must match
-   *   hetzner-k8s.js's own supabaseUserData renderScript call vars EXACTLY
+   *   hetzner-k8s.js's own dbUserData renderScript call vars EXACTLY
    *   for byte-identical output.
    * @returns {Promise<string>}
    */
-  static async getK8sSupabaseUserData(vars) {
+  static async getK8sDbUserData(vars) {
     const { loadCloudInit, renderScript } = await import('../iac/cloud-init.js');
-    return renderScript(loadCloudInit('supabase-init.sh'), vars);
+    return renderScript(loadCloudInit('db-init.sh'), vars);
   }
 
   /**
@@ -603,7 +603,7 @@ export class HetznerProvider extends BaseProvider {
    * Shared-vCPU x86 for cluster nodes. Prefer tiers in this order for
    * each role, falling back to the first available:
    *   - master/worker: 2 vCPU, 2–4 GB RAM
-   *   - supabase:      2–4 vCPU, 4+ GB RAM
+   *   - db:            2–4 vCPU, 4+ GB RAM
    */
   static getRegionDefaults(region) {
     const available = HetznerProvider._locationTypes?.[region];
@@ -627,8 +627,8 @@ export class HetznerProvider extends BaseProvider {
     // backwards: `cpx11`/`cpx21` are exactly the SKUs that went unorderable
     // across all four EU+APAC locations.
     const offline = HetznerProvider.US_REGIONS.includes(region)
-      ? { masterType: 'cpx11', supabaseType: 'cpx21', workerType: 'cpx11' }
-      : { masterType: 'cpx22', supabaseType: 'cpx32', workerType: 'cpx22' };
+      ? { masterType: 'cpx11', dbType: 'cpx21', workerType: 'cpx11' }
+      : { masterType: 'cpx22', dbType: 'cpx32', workerType: 'cpx22' };
 
     const pickAvailable = (prefs, fallback) => {
       if (available) {
@@ -640,7 +640,7 @@ export class HetznerProvider extends BaseProvider {
     if (available) {
       return {
         masterType: pickAvailable(smallShared, offline.masterType),
-        supabaseType: pickAvailable(mediumShared, offline.supabaseType),
+        dbType: pickAvailable(mediumShared, offline.dbType),
         workerType: pickAvailable(smallShared, offline.workerType),
       };
     }
@@ -756,7 +756,7 @@ export class HetznerProvider extends BaseProvider {
       const suffix = requested.replace(/^[a-z]+/, '');
       const defaults = HetznerProvider.getRegionDefaults(targetRegion);
       if (suffix.startsWith('1')) return defaults.masterType;
-      if (suffix.startsWith('2')) return defaults.supabaseType;
+      if (suffix.startsWith('2')) return defaults.dbType;
       return defaults.workerType;
     }
 
@@ -1372,7 +1372,7 @@ export class HetznerProvider extends BaseProvider {
    * pre-extracted rules array — see BaseProvider's abstract doc.
    * @param {object} firewall - The firewall object as returned by
    *   findFirewallByName. Hetzner's flat `rules` field is extracted here.
-   * @param {string} peerIp - The peer supabase node's public IPv4.
+   * @param {string} peerIp - The peer database node's public IPv4.
    * @returns {Array<object>|null} Updated rules, or null if already correct.
    */
   buildReplicationFirewallRules(firewall, peerIp) {

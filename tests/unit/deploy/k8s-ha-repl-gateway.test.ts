@@ -176,7 +176,7 @@ describe('renderReplGatewayManifest', () => {
     });
     expect(out).not.toContain('__RELAY_LISTEN__');
     expect(out).not.toContain('__RELAY_TARGET__');
-    expect(out).not.toContain('__SUPABASE_PRIVATE_IP__');
+    expect(out).not.toContain('__DB_PRIVATE_IP__');
     expect(out).toContain('bind=10.0.1.2');
     expect(out).toContain('cidr: 10.0.1.2/32');
     expect(out).toContain('allow-db-repl-gateway-egress');
@@ -187,10 +187,10 @@ describe('reestablishReplicationTransport — post-resize belt (item I-1)', () =
   const opts = {
     primaryIp: '1.1.1.1',
     standbyIp: '2.2.2.2',
-    primarySupabaseIp: '167.233.150.173',
-    standbySupabaseIp: '157.180.115.19',
-    primarySupabasePrivateIp: '10.0.1.2',
-    standbySupabasePrivateIp: '10.0.1.2',
+    primaryDbIp: '167.233.150.173',
+    standbyDbIp: '157.180.115.19',
+    primaryDbPrivateIp: '10.0.1.2',
+    standbyDbPrivateIp: '10.0.1.2',
     sshKeyPath: '/tmp/key',
   };
 
@@ -248,10 +248,10 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
   const opts = {
     primaryIp: '1.1.1.1',
     standbyIp: '2.2.2.2',
-    primarySupabaseIp: '167.233.150.173',
-    standbySupabaseIp: '157.180.115.19',
-    primarySupabasePrivateIp: '10.0.1.2',
-    standbySupabasePrivateIp: '10.0.1.2',
+    primaryDbIp: '167.233.150.173',
+    standbyDbIp: '157.180.115.19',
+    primaryDbPrivateIp: '10.0.1.2',
+    standbyDbPrivateIp: '10.0.1.2',
     sshKeyPath: '/tmp/key',
   };
 
@@ -531,7 +531,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
   it('fails FAST with the scheduler message when the swap pod is Unschedulable, and still scales back up', async () => {
     vi.mocked(runCommandAsync).mockClear();
     const schedMsg =
-      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: supabase}, ' +
+      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: db}, ' +
       '2 node(s) had volume node affinity conflict.';
     vi.mocked(runCommandAsync).mockImplementation(
       happyExec({
@@ -543,14 +543,14 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     // Terminal on the FIRST poll (a taint/affinity conflict never self-heals) —
     // the error names the exact scheduler conflict, not a generic timeout.
     await expect(runWithFakeTimers(() => setupReplication(opts))).rejects.toThrow(
-      /could not be scheduled[\s\S]*untolerated taint \{dedicated: supabase\}/,
+      /could not be scheduled[\s\S]*untolerated taint \{dedicated: db\}/,
     );
 
     const cmds = vi
       .mocked(runCommandAsync)
       .mock.calls.map(([argv]) => (argv as string[]).join(' '));
-    // The swap pod manifest carries the dedicated=supabase toleration (the
-    // local-path PV pins the pod to the tainted supabase node).
+    // The swap pod manifest carries the dedicated=db toleration (the
+    // local-path PV pins the pod to the tainted database node).
     const swapApply = vi
       .mocked(runCommandAsync)
       .mock.calls.find(
@@ -561,7 +561,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const swapManifest = (swapApply?.[1] as { input?: string })?.input ?? '';
     expect(swapManifest).toContain('"tolerations"');
     expect(swapManifest).toContain('"dedicated"');
-    expect(swapManifest).toContain('"supabase"');
+    expect(swapManifest).toContain('"db"');
     expect(swapManifest).toContain('"NoSchedule"');
     // finally-scale-1: the sts comes back up even on the unschedulable path.
     const scale0 = cmds.findIndex((c) => c.includes('--replicas=0'));

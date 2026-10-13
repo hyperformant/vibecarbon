@@ -133,8 +133,8 @@ const baseArgs = {
   // chart inherit the cluster default. See k3s-supabase-storage-class.test.ts.
   storageClass: 'hcloud-volumes',
   // Required since the d4 lift — installSupabase refuses to assume the
-  // Hetzner-static relay host. See supabase-private-ip-required.test.ts.
-  supabasePrivateIp: '10.0.1.2',
+  // Hetzner-static relay host. See db-private-ip-required.test.ts.
+  dbPrivateIp: '10.0.1.2',
 };
 
 async function runInstall(overrides: Record<string, unknown> = {}) {

@@ -2,7 +2,7 @@
  * k3s-on-Hetzner deploy backend.
  *
  * The Pulumi program is `hetzner-k8s.js`; cloud-init scripts are
- * `carbon/cloud-init/k3s/{master,supabase,worker}-init.sh`.
+ * `carbon/cloud-init/k3s/{master,db,worker}-init.sh`.
  *
  * End-to-end flow on a cold deploy:
  *   1. Preflight: docker, ssh, kubectl, helm on PATH; server-type architecture.
@@ -19,7 +19,7 @@
  * Warm path: skip 1-5; rebuild image (6); sideload (7) skipping unchanged tag;
  * apply changed manifests (8); rollout (10).
  *
- * Target cold-deploy time: ≤ 3 min for single-master + supabase + 0 workers.
+ * Target cold-deploy time: ≤ 3 min for single-master + database + 0 workers.
  * Spike on 2026-04-25 measured 82s for cluster bring-up alone.
  */
 
@@ -811,7 +811,7 @@ export async function captureClusterAutoscalerDiagnostics({ env } = {}) {
  *
  * `nodeGroups['worker-pool'].image` is `ProviderClass.K8S_IMAGE` (M3 Task
  * 2) — MUST match the base image slug that provider's k8s Pulumi program
- * boots master/supabase/worker nodes with, or a CA-spawned worker would
+ * boots master/database/worker nodes with, or a CA-spawned worker would
  * come up on a different image than the rest of the cluster.
  *
  * `cloudInit` is rendered through `ProviderClass.getK8sWorkerUserData(vars)`
@@ -1065,7 +1065,7 @@ export function buildDnsProviderSecret({ dnsProvider, dnsToken }) {
  * @property {string} region
  * @property {string} [secondaryRegion]
  * @property {string} masterServerType
- * @property {string} supabaseServerType
+ * @property {string} dbServerType
  * @property {string} workerServerType
  * @property {string} serverType
  * @property {number} minWorkers   Static floor (Pulumi-provisioned). Default 1.
@@ -1593,8 +1593,8 @@ export async function buildAppImage(
  * Wait until the `k3s` binary is installed and on PATH on a given node.
  *
  * waitForK3sReady only polls the master's /tmp/k3s-ready marker. Workers
- * and the supabase node run their own k3s install asynchronously
- * (worker-init.sh / supabase-init.sh) which can take 1-3 min after the
+ * and the database node run their own k3s install asynchronously
+ * (worker-init.sh / db-init.sh) which can take 1-3 min after the
  * master is ready (apt update, dpkg locks, k3s install script). If
  * sideload runs in that window, the remote `k3s ctr images import -`
  * exits 127 ("command not found") and one node's import fails,
@@ -2500,17 +2500,17 @@ export async function installSupabase({
   dbImageTag,
   backupBucketName,
   walgRole = 'primary',
-  supabasePrivateIp,
+  dbPrivateIp,
   role,
   storageClass,
 }) {
-  if (!supabasePrivateIp) {
+  if (!dbPrivateIp) {
     // Rendered into {{REPL_RELAY_HOST}} below. A real IaC output on every
     // provider (Hetzner pins 10.0.1.2 statically; DO exports the
     // Pulumi-assigned VPC address) — never assume a Hetzner-shaped address:
     // a standby's seed init would dial a relay that exists on no node.
     throw new Error(
-      'installSupabase: supabasePrivateIp is required — the IaC program outputs it; ' +
+      'installSupabase: dbPrivateIp is required — the IaC program outputs it; ' +
         'a missing value means the infra step result is incomplete',
     );
   }
@@ -2605,10 +2605,10 @@ export async function installSupabase({
       envLocal?.GOTRUE_MAILER_AUTOCONFIRM === 'false' ? 'false' : 'true',
     )
     // Repl-gateway relay endpoint for the standby seed init: the standby's
-    // OWN supabase-node private IP + the relay port (see the seed-standby
+    // OWN database-node private IP + the relay port (see the seed-standby
     // init in the values file). Rendered on every tier; only a standby's
     // first boot ever dials it.
-    .replace(/\{\{REPL_RELAY_HOST\}\}/g, supabasePrivateIp)
+    .replace(/\{\{REPL_RELAY_HOST\}\}/g, dbPrivateIp)
     .replace(/\{\{REPL_RELAY_PORT\}\}/g, String(REPL_GATEWAY_PORT));
   const tmpValues = join(tmpdir(), `vibecarbon-supabase-values-${process.pid}-${Date.now()}.yaml`);
   // SECURITY: the rendered values contain ADMIN_EMAIL/ADMIN_PASSWORD and live
@@ -3660,7 +3660,7 @@ export function renderS3EgressVpcManifest(template, vpcCidrs) {
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: string|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, supabasePrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: string|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
  *   `restore` (when set, e.g. 'latest' or an ISO timestamp) skips applyMigrations
  *   — the wal-g-restored DB already carries schema_migrations.
  */
@@ -3723,11 +3723,11 @@ export async function applyK3sManifests({
   localTunnelPort = 5000,
   // perfPrefix tags internal sub-stage perf timings — see deployK3s.
   perfPrefix = 'k3s',
-  // The supabase node's Hetzner private-network IP (deterministic in the IaC
+  // The database node's Hetzner private-network IP (deterministic in the IaC
   // program; deployK3s threads it through from infraOutputs). Rendered into
   // the seed-standby init's SEED_PRIMARY_HOST via installSupabase — see
   // installSupabase's {{REPL_RELAY_HOST}} replace.
-  supabasePrivateIp,
+  dbPrivateIp,
   // The master's private-network IP (deterministic on Hetzner — static
   // 10.0.1.1 — but a real Pulumi output on DO, which can't pin VPC IPs).
   // deployK3s threads it through from infraOutputs. Passed to
@@ -4698,7 +4698,7 @@ export async function applyK3sManifests({
       dbImageTag,
       backupBucketName,
       walgRole,
-      supabasePrivateIp,
+      dbPrivateIp,
       role,
       // The chart's PVCs must NOT inherit the cluster's default StorageClass —
       // on k3s that can be node-local `local-path`, which silently breaks
@@ -5091,7 +5091,7 @@ export async function applyK3sManifests({
  * App install + sideload land in a follow-up commit (Task 7).
  *
  * @param {K3sDeployOptions} options
- * @returns {Promise<{masterIp: string, floatingIp: string, supabaseIp: string, supabasePrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string}>}
+ * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string}>}
  */
 /**
  * Probe an existing Pulumi stack for its k3s token so a re-deploy replays it.
@@ -5180,7 +5180,7 @@ export async function deployK3s(options) {
   // when Hetzner recycles a public IP).
   const khPath = knownHostsPath(options.environment, projectDir);
 
-  // 3. Pulumi up — provisions network, firewall, master, supabase, workers,
+  // 3. Pulumi up — provisions network, firewall, master, database, workers,
   //    floating IP. Cloud-init runs k3s install + hcloud-ccm/csi on each node.
   // Phase 5: Pulumi sees `minWorkers` (static floor) only; `maxWorkers`
   // is consumed by the cluster-autoscaler patch in applyK3sManifests
@@ -5192,7 +5192,7 @@ export async function deployK3s(options) {
   const infraInputs = {
     region: options.region,
     masterType: options.masterServerType,
-    supabaseType: options.supabaseServerType,
+    dbType: options.dbServerType,
     workerType: options.workerServerType,
     minWorkers,
     maxWorkers,
@@ -5214,8 +5214,7 @@ export async function deployK3s(options) {
       location: options.region,
       masterServerType:
         options.masterServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
-      supabaseServerType:
-        options.supabaseServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
+      dbServerType: options.dbServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
       workerServerType:
         options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
       minWorkers,
@@ -5282,22 +5281,22 @@ export async function deployK3s(options) {
     // (redeploy) to refresh the persisted outputs.
     masterPrivateIp,
     floatingIp,
-    supabaseIp,
-    supabasePrivateIp,
+    dbIp,
+    dbPrivateIp,
     workerIps,
     networkId,
     // DO-only real Pulumi output (the Vpc's actual ipRange). Fallback
     // default (Provider.DEFAULT_VPC_CIDR — empty string on Hetzner,
     // '10.10.0.0/20' on DO) covers state.json step results persisted
     // before this field existed, same reasoning as
-    // masterPrivateIp/supabasePrivateIp above. HetznerProvider.
+    // masterPrivateIp/dbPrivateIp above. HetznerProvider.
     // getS3EgressExtraCidrs ignores this value entirely, so an unused ''
     // fallback there is harmless.
     vpcCidr = Provider.DEFAULT_VPC_CIDR,
   } = infraOutputs;
-  if (!masterPrivateIp || !supabasePrivateIp) {
+  if (!masterPrivateIp || !dbPrivateIp) {
     throw new Error(
-      'k3s-infra step result is missing masterPrivateIp/supabasePrivateIp — the IaC ' +
+      'k3s-infra step result is missing masterPrivateIp/dbPrivateIp — the IaC ' +
         'program outputs both; a stale persisted step result predates them. ' +
         'Re-run the infra step (redeploy) to refresh the outputs.',
     );
@@ -5329,7 +5328,7 @@ export async function deployK3s(options) {
   // per-IP line). Best-effort: if ssh-keyscan can't reach a node we fall back
   // to accept-new TOFU. See host-keys.js seedKnownHosts for the full security
   // rationale (why only provisioning re-seeds).
-  for (const seedIp of [masterIp, supabaseIp, ...(workerIps ?? [])].filter(Boolean)) {
+  for (const seedIp of [masterIp, dbIp, ...(workerIps ?? [])].filter(Boolean)) {
     await seedKnownHosts(khPath, seedIp);
   }
 
@@ -5340,7 +5339,7 @@ export async function deployK3s(options) {
   // callback is not awaited and must never fail this deploy.
   if (typeof options.onInfraReady === 'function') {
     try {
-      options.onInfraReady({ masterIp, floatingIp, supabaseIp, supabasePrivateIp });
+      options.onInfraReady({ masterIp, floatingIp, dbIp, dbPrivateIp });
     } catch {
       // opportunistic hook — a listener bug must not break the deploy
     }
@@ -5355,7 +5354,7 @@ export async function deployK3s(options) {
   // exactly as before.
   const prePullStart = Date.now();
   prePullChartImages({
-    nodeIps: [masterIp, supabaseIp, ...(workerIps ?? [])],
+    nodeIps: [masterIp, dbIp, ...(workerIps ?? [])],
     sshKeyPath: privateKeyPath,
     khPath,
   })
@@ -5425,10 +5424,10 @@ export async function deployK3s(options) {
   //     `docker save | ssh ... gunzip | k3s ctr import` against disjoint
   //     image refs on the same target nodes — kernel disk buffer + sshd
   //     multiplex two parallel streams. Critical path = max(app, db).
-  //     The db image only NEEDS the supabase node (db is pinned there), but
+  //     The db image only NEEDS the database node (db is pinned there), but
   //     sideloading to all nodes is harmless and keeps the target list shared.
   const sshTargets = [`root@${masterIp}`];
-  if (supabaseIp) sshTargets.push(`root@${supabaseIp}`);
+  if (dbIp) sshTargets.push(`root@${dbIp}`);
   for (const wIp of workerIps ?? []) sshTargets.push(`root@${wIp}`);
   const sideloadInputs = { imageTag, targets: sshTargets.join(',') };
   const sideloadTasks = [];
@@ -5519,10 +5518,10 @@ export async function deployK3s(options) {
         // for `localhost:5000` on the operator host. Single-cluster
         // deploys leave it undefined → applyK3sManifests defaults to 5000.
         localTunnelPort: options.localTunnelPort,
-        // The supabase node's own private IP — installSupabase renders it
+        // The database node's own private IP — installSupabase renders it
         // into the seed-standby init's SEED_PRIMARY_HOST (repl-gateway relay
         // endpoint). Already in scope from infraOutputs (returned below).
-        supabasePrivateIp,
+        dbPrivateIp,
         // M3 Task 2: the master's own private IP — renderCarbonAutoscalerConfig
         // (CA-spawned worker join target) and pushImageToLocalRegistry
         // (registry-ref host, must match buildAppImage's masterPrivateIp
@@ -5565,12 +5564,12 @@ export async function deployK3s(options) {
   return {
     masterIp,
     floatingIp,
-    supabaseIp,
-    // The supabase node's Hetzner private-network IP (deterministic in the IaC
+    dbIp,
+    // The database node's Hetzner private-network IP (deterministic in the IaC
     // program, but threaded through the output rather than hardcoded at the use
     // site). setupReplication renders it into the repl-gateway egress
     // NetworkPolicy + socat bind for this cluster.
-    supabasePrivateIp,
+    dbPrivateIp,
     workerIps,
     networkId,
     kubeconfig,

@@ -11,7 +11,7 @@
  *     scale the StatefulSet to zero, swap PGDATA in a short-lived HELPER POD
  *     that mounts the released PVC (uniform for local-path AND CSI volumes),
  *     scale back up, and confirm recovery,
- *   - dial the standby's LOCAL WireGuard relay (own supabase-node private IP :
+ *   - dial the standby's LOCAL WireGuard relay (own database-node private IP :
  *     repl-gateway port 15433) for the probe, basebackup, AND primary_conninfo
  *     — the deploy-time transport. The old direct `primary:5432` dial is dead
  *     post-WireGuard (firewall admits only UDP 51821).
@@ -39,7 +39,7 @@ const b64 = (s: string) => Buffer.from(s, 'utf-8').toString('base64');
 
 // The standby's node addresses: public (ssh target for the node-side swap) and
 // private (the local repl-gateway relay endpoint the basebackup dials).
-const STANDBY_OPTS = { standbySupabaseIp: '10.0.0.8', standbySupabasePrivateIp: '10.0.1.2' };
+const STANDBY_OPTS = { standbyDbIp: '10.0.0.8', standbyDbPrivateIp: '10.0.1.2' };
 
 // The swap-pod inputs come from the db pod spec: PVC claimName, the subPath the
 // chart mounts the volume at (postgres-data), and the db container image (reused
@@ -162,13 +162,13 @@ describe('reseedStandbyFromPrimary', () => {
     );
   });
 
-  it('HARD-ERRORS when the standby supabase node IP is unknown (node-side swap target)', async () => {
+  it('HARD-ERRORS when the standby database node IP is unknown (node-side swap target)', async () => {
     await expect(
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbySupabaseIp: undefined,
-        standbySupabasePrivateIp: '10.0.1.2',
+        standbyDbIp: undefined,
+        standbyDbPrivateIp: '10.0.1.2',
       }),
-    ).rejects.toThrow(/standby supabase node IP is unknown/);
+    ).rejects.toThrow(/standby database node IP is unknown/);
   });
 
   it('returns "skipped" WITHOUT any destructive work when the primary is unreachable', async () => {
@@ -322,8 +322,8 @@ describe('reseedStandbyFromPrimary', () => {
     // reachability probe fail closed into 'skipped' (promotion without
     // re-seed). A missing persisted value must abort, not assume.
     await expect(
-      reseedStandbyFromPrimary('10.0.0.2', '/k', { standbySupabaseIp: '10.0.0.8' }),
-    ).rejects.toThrow(/standbySupabasePrivateIp is required/);
+      reseedStandbyFromPrimary('10.0.0.2', '/k', { standbyDbIp: '10.0.0.8' }),
+    ).rejects.toThrow(/standbyDbPrivateIp is required/);
   });
 
   it('dials the PERSISTED relay host (threaded, never assumed)', async () => {
@@ -336,8 +336,8 @@ describe('reseedStandbyFromPrimary', () => {
     );
     await expect(
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbySupabaseIp: '10.0.0.8',
-        standbySupabasePrivateIp: '10.10.0.7',
+        standbyDbIp: '10.0.0.8',
+        standbyDbPrivateIp: '10.10.0.7',
         detachSettleMs: 0,
       }),
     ).resolves.toBe('reseeded');
@@ -362,7 +362,7 @@ describe('reseedStandbyFromPrimary', () => {
 
   it('fails FAST with the scheduler message when the swap pod is Unschedulable, and scales back up', async () => {
     const schedMsg =
-      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: supabase}, ' +
+      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: db}, ' +
       '2 node(s) had volume node affinity conflict.';
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(
       happyKubectl({
@@ -374,7 +374,7 @@ describe('reseedStandbyFromPrimary', () => {
     // Terminal on the FIRST poll (a taint/affinity conflict never self-heals):
     // no budget wait, and the error names the exact scheduler conflict.
     await expect(reseedStandbyFromPrimary('10.0.0.2', '/k', STANDBY_OPTS)).rejects.toThrow(
-      /could not be scheduled[\s\S]*untolerated taint \{dedicated: supabase\}/,
+      /could not be scheduled[\s\S]*untolerated taint \{dedicated: db\}/,
     );
 
     const calls = (ssh.sshKubectl as ReturnType<typeof vi.fn>).mock.calls.map(
@@ -589,8 +589,8 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
     await expect(
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbySupabaseIp: '10.0.0.8',
-        standbySupabasePrivateIp: '10.10.0.7',
+        standbyDbIp: '10.0.0.8',
+        standbyDbPrivateIp: '10.10.0.7',
         detachSettleMs: 0,
       }),
     ).resolves.toBe('reseeded');
@@ -603,8 +603,8 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
     await expect(
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbySupabaseIp: '10.0.0.8',
-        standbySupabasePrivateIp: '10.10.0.7',
+        standbyDbIp: '10.0.0.8',
+        standbyDbPrivateIp: '10.10.0.7',
         detachSettleMs: 0,
       }),
     ).rejects.toThrow(/timed out waiting/);
@@ -616,8 +616,8 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
     await expect(
       reseedStandbyFromPrimary('10.0.0.2', '/k', {
-        standbySupabaseIp: '10.0.0.8',
-        standbySupabasePrivateIp: '10.10.0.7',
+        standbyDbIp: '10.0.0.8',
+        standbyDbPrivateIp: '10.10.0.7',
         detachSettleMs: 0,
       }),
     ).rejects.toThrow(/timed out waiting/);
@@ -640,8 +640,8 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
     });
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockImplementation(fn);
     await reseedStandbyFromPrimary('10.0.0.2', '/k', {
-      standbySupabaseIp: '10.0.0.8',
-      standbySupabasePrivateIp: '10.10.0.7',
+      standbyDbIp: '10.0.0.8',
+      standbyDbPrivateIp: '10.10.0.7',
       detachSettleMs: 0,
     });
     expect(sequence.indexOf('detach-wait')).toBeGreaterThan(-1);

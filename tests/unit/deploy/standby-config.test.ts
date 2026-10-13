@@ -80,7 +80,7 @@ describe('deriveScaleUpList', () => {
         '    enabled: true\n' +
         '    # then another comment\n' +
         '    nodeSelector:\n' +
-        '      dedicated: supabase\n' +
+        '      dedicated: db\n' +
         '    replicaCount: 3\n',
     );
     const list = deriveScaleUpList(args);

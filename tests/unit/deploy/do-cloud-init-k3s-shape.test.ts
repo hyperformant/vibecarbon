@@ -74,7 +74,7 @@ describe('M3 Task 3 — do-master-init.sh shape', () => {
 
   it('M3 Task 9d: patches csi-do-node with a universal toleration, AFTER the driver install and BEFORE the ready marker', () => {
     // csi-do-node ships from upstream with NO tolerations at all, so it
-    // never schedules onto the tainted dedicated=supabase node -- the
+    // never schedules onto the tainted dedicated=db node -- the
     // node's CSINode object then never gets the driver's `region`
     // topologyKey and any PV bound there hits a permanent volume node
     // affinity conflict (RCA: DO d3 rig, battery kept-rig deploy
@@ -146,18 +146,18 @@ describe('M3 Task 3 — do-worker-init.sh shape', () => {
   });
 });
 
-describe('M3 Task 5 — do-supabase-init.sh shape', () => {
-  const supabase = loadCloudInit('do-supabase-init.sh');
+describe('M3 Task 5 — do-db-init.sh shape', () => {
+  const supabase = loadCloudInit('do-db-init.sh');
 
   it('pre-seeds the provider-id kubelet arg and cloud-provider=external', () => {
     expect(supabase).toContain('--kubelet-arg="provider-id=digitalocean://$DROPLET_ID"');
     expect(supabase).toContain('--kubelet-arg="cloud-provider=external"');
   });
 
-  it('pins the supabase node-pool via BOOT-TIME k3s agent flags (label + taint), not a post-join kubectl step', () => {
-    expect(supabase).toContain('--node-label="dedicated=supabase"');
-    expect(supabase).toContain('--node-label="node-pool=supabase-pool"');
-    expect(supabase).toContain('--node-taint="dedicated=supabase:NoSchedule"');
+  it('pins the database node-pool via BOOT-TIME k3s agent flags (label + taint), not a post-join kubectl step', () => {
+    expect(supabase).toContain('--node-label="dedicated=db"');
+    expect(supabase).toContain('--node-label="node-pool=db-pool"');
+    expect(supabase).toContain('--node-taint="dedicated=db:NoSchedule"');
     expect(supabase).not.toMatch(/kubectl (label|taint) node/);
   });
 

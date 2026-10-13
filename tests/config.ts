@@ -223,7 +223,7 @@ export const testConfig = {
       // Hetzner's per-DC capacity flux, so a single pair is sufficient (no
       // fallback tiers). This ONE pair backs every DO reference scenario —
       // d1/d2 (compose/compose-ha), d3 (k8s) and d4 (k8s-ha) — the k8s
-      // tiers blanket-apply it to master/supabase/worker exactly like the
+      // tiers blanket-apply it to master/database/worker exactly like the
       // hetzner k8s entries (e3/e4) blanket-apply their single typePair
       // across those same roles.
       digitalocean: {

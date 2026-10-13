@@ -262,7 +262,7 @@ export class VultrProvider extends BaseProvider {
   }
 
   /** @returns {Promise<never>} */
-  static async getK8sSupabaseUserData() {
+  static async getK8sDbUserData() {
     throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
   }
 
@@ -384,12 +384,12 @@ export class VultrProvider extends BaseProvider {
    * Region-appropriate default server types — fixed roles (the vc2 line is
    * near-uniform; per-region gaps are handled by resolveServerTypeForRegion).
    * @param {string} _region - interface parity; unused
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     return {
       masterType: 'vc2-1c-2gb',
-      supabaseType: VultrProvider.DEFAULT_TYPE,
+      dbType: VultrProvider.DEFAULT_TYPE,
       workerType: 'vc2-1c-2gb',
     };
   }
@@ -435,7 +435,7 @@ export class VultrProvider extends BaseProvider {
     if (available) {
       if (available.has(serverType)) return serverType;
       const defaults = VultrProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.supabaseType) return defaults.supabaseType;
+      if (serverType === defaults.dbType) return defaults.dbType;
       return defaults.masterType;
     }
 

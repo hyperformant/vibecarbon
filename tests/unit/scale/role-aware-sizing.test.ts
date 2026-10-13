@@ -326,7 +326,7 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
       environment: 'prod',
       envConfig,
       projectConfig,
-      newValues: { workerType: 'cx33', masterType: 'cx33', supabaseType: 'cx33' },
+      newValues: { workerType: 'cx33', masterType: 'cx33', dbType: 'cx33' },
       isHA: true,
     });
 

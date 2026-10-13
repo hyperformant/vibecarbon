@@ -28,7 +28,7 @@ const workerVars = {
   master_ip: '10.10.0.2',
 };
 
-const supabaseVars = {
+const dbVars = {
   k3s_version: 'v1.31.5+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.10.0.2',
@@ -125,19 +125,19 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
     });
   });
 
-  describe('getK8sSupabaseUserData', () => {
-    it('renders carbon/cloud-init/k3s/do-supabase-init.sh with no unrendered placeholders given the full vars set', async () => {
-      const rendered = await DigitalOceanProvider.getK8sSupabaseUserData(supabaseVars);
+  describe('getK8sDbUserData', () => {
+    it('renders carbon/cloud-init/k3s/do-db-init.sh with no unrendered placeholders given the full vars set', async () => {
+      const rendered = await DigitalOceanProvider.getK8sDbUserData(dbVars);
       expect(rendered).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     });
 
-    it('template var contract: do-supabase-init.sh placeholder set is EXACTLY {k3s_version, k3s_token, master_ip}', () => {
-      const raw = loadCloudInit('do-supabase-init.sh');
-      expect(templatePlaceholders(raw)).toEqual(new Set(Object.keys(supabaseVars)));
+    it('template var contract: do-db-init.sh placeholder set is EXACTLY {k3s_version, k3s_token, master_ip}', () => {
+      const raw = loadCloudInit('do-db-init.sh');
+      expect(templatePlaceholders(raw)).toEqual(new Set(Object.keys(dbVars)));
     });
 
     it('includes the DigitalOcean metadata paths (id, public, private)', async () => {
-      const rendered = await DigitalOceanProvider.getK8sSupabaseUserData(supabaseVars);
+      const rendered = await DigitalOceanProvider.getK8sDbUserData(dbVars);
       expect(rendered).toContain('http://169.254.169.254/metadata/v1/');
       expect(rendered).toContain('fetch_metadata "id"');
       expect(rendered).toContain('fetch_metadata "interfaces/public/0/ipv4/address"');
@@ -145,21 +145,21 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
     });
 
     it('joins the master via the rendered master_ip on :6443', async () => {
-      const rendered = await DigitalOceanProvider.getK8sSupabaseUserData(supabaseVars);
+      const rendered = await DigitalOceanProvider.getK8sDbUserData(dbVars);
       expect(rendered).toContain('K3S_URL="https://10.10.0.2:6443"');
       expect(rendered).toContain('"https://10.10.0.2:6443/readyz"');
     });
 
-    it('pre-seeds the provider-id kubelet arg and pins the supabase node-pool label/taint', async () => {
-      const rendered = await DigitalOceanProvider.getK8sSupabaseUserData(supabaseVars);
+    it('pre-seeds the provider-id kubelet arg and pins the database node-pool label/taint', async () => {
+      const rendered = await DigitalOceanProvider.getK8sDbUserData(dbVars);
       expect(rendered).toContain('--kubelet-arg="provider-id=digitalocean://$DROPLET_ID"');
-      expect(rendered).toContain('--node-label="dedicated=supabase"');
-      expect(rendered).toContain('--node-label="node-pool=supabase-pool"');
-      expect(rendered).toContain('--node-taint="dedicated=supabase:NoSchedule"');
+      expect(rendered).toContain('--node-label="dedicated=db"');
+      expect(rendered).toContain('--node-label="node-pool=db-pool"');
+      expect(rendered).toContain('--node-taint="dedicated=db:NoSchedule"');
     });
 
     it('carries zero hetzner|hcloud|floating|10.0.1. tokens (case-insensitive)', async () => {
-      const rendered = await DigitalOceanProvider.getK8sSupabaseUserData(supabaseVars);
+      const rendered = await DigitalOceanProvider.getK8sDbUserData(dbVars);
       expect(rendered).not.toMatch(/hetzner|hcloud|floating|10\.0\.1\./i);
     });
   });
@@ -167,7 +167,7 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
   it('do-{master,worker,supabase}-init.sh ship in carbon/cloud-init/k3s/', () => {
     expect(() => loadCloudInit('do-master-init.sh')).not.toThrow();
     expect(() => loadCloudInit('do-worker-init.sh')).not.toThrow();
-    expect(() => loadCloudInit('do-supabase-init.sh')).not.toThrow();
+    expect(() => loadCloudInit('do-db-init.sh')).not.toThrow();
   });
 
   // Mirrors transliterateToAscii's own codePoint check (digitalocean-compose.js)
@@ -183,7 +183,7 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
   it('all three templates are pure ASCII (DO user-data wire contract — see digitalocean-compose.js ASCII_TRANSLITERATION_MAP RCA)', () => {
     const masterPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-master-init.sh');
     const workerPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-worker-init.sh');
-    const supabasePath = join(__dirname, '../../../carbon/cloud-init/k3s/do-supabase-init.sh');
+    const supabasePath = join(__dirname, '../../../carbon/cloud-init/k3s/do-db-init.sh');
     expect(isPureAscii(readFileSync(masterPath, 'utf-8'))).toBe(true);
     expect(isPureAscii(readFileSync(workerPath, 'utf-8'))).toBe(true);
     expect(isPureAscii(readFileSync(supabasePath, 'utf-8'))).toBe(true);
