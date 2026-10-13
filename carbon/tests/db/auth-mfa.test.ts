@@ -44,7 +44,7 @@ function buildApp() {
   app.get('/api/v1/whoami', (c) => {
     const user = c.get('user');
     if (!user) return c.json({ error: 'Unauthorized' }, 401);
-    return c.json({ id: user.id, sessionId: c.get('session')?.id, aal: c.get('aal') });
+    return c.json({ id: user.id, sessionId: c.get('session')?.id, aal: c.get('session')?.twoFactorVerified ? 'aal2' : 'aal1' });
   });
   app.delete('/api/v1/gated', requireAal2, (c) => c.json({ ok: true }));
   return app;
@@ -460,11 +460,25 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
       expect((await get('/api/auth/admin/list-users', jar)).status).toBe(200);
     });
 
-    it('stop-impersonating is not gated (an impersonation session is aal1)', async () => {
-      const { jar } = await passwordUser();
+    it('MFA on: an aal2 admin impersonates, and the aal1 impersonation session can stop', async () => {
+      const { jar } = await superAdmin();
+      await enroll(jar);
+      const adminSession = (await whoami(jar))?.sessionId;
+      const { email: targetEmail } = await passwordUser();
       await setMfa(true);
-      const res = await post('/api/auth/admin/stop-impersonating', {}, jar);
-      expect(res.status).not.toBe(403);
+
+      const start = await post(
+        '/api/auth/admin/impersonate-user',
+        { userId: await userIdOf(targetEmail) },
+        jar,
+      );
+      expect(start.status).toBe(200);
+      const as = await whoami(jar);
+      expect(as).toMatchObject({ id: await userIdOf(targetEmail), aal: 'aal1' });
+
+      const stop = await post('/api/auth/admin/stop-impersonating', {}, jar);
+      expect(stop.status).toBe(200);
+      expect(await whoami(jar)).toMatchObject({ sessionId: adminSession, aal: 'aal2' });
     });
 
     it.each([
@@ -515,6 +529,118 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
         factors: 0,
         accounts: 0,
       });
+    });
+  });
+  describe('fix round 1', () => {
+    it('an unconfirmed enrollment cannot reach aal2 with a backup code', async () => {
+      const { email, jar } = await passwordUser();
+      const enable = await post('/api/auth/two-factor/enable', { password: PASSWORD }, jar);
+      const { backupCodes } = (await enable.json()) as { backupCodes: string[] };
+      // The user never confirmed a code from the authenticator app.
+      const res = await post('/api/auth/two-factor/verify-backup-code', { code: backupCodes[0] }, jar);
+      expect(res.status).toBe(400);
+      expect((await whoami(jar))?.aal).toBe('aal1');
+      const { rows } = await db.query(
+        'select two_factor_verified from public.session where user_id = $1',
+        [await userIdOf(email)],
+      );
+      expect(rows.every((r) => r.two_factor_verified === false)).toBe(true);
+    });
+
+    it('a passwordless account enrolls only from a fresh session (re-sign-in after 10 minutes)', async () => {
+      const email = newEmail();
+      const jar = await googleSignIn(email);
+      await db.query(
+        `update public.session set created_at = now() - interval '11 minutes'
+          where user_id = $1`,
+        [await userIdOf(email)],
+      );
+      const stale = await post('/api/auth/two-factor/enable', {}, jar);
+      expect(stale.status).toBe(403);
+      expect(await stale.json()).toMatchObject({ error: 'reauth_required' });
+      const { rows } = await db.query('select count(*)::int as n from public.two_factor where user_id = $1', [
+        await userIdOf(email),
+      ]);
+      expect(rows[0].n).toBe(0);
+
+      // A fresh sign-in may enroll.
+      const fresh = await googleSignIn(email);
+      expect((await post('/api/auth/two-factor/enable', {}, fresh)).status).toBe(200);
+    });
+
+    it('an aal1 session cannot re-enroll over an enrolled factor', async () => {
+      const { email, jar: first } = await passwordUser();
+      await enroll(first);
+      const secret = async () =>
+        (await db.query('select secret from public.two_factor where user_id = $1', [await userIdOf(email)]))
+          .rows[0].secret;
+      const before = await secret();
+      const jar = await magicLinkSignIn(email);
+      const res = await post('/api/auth/two-factor/enable', { password: PASSWORD }, jar);
+      expect(res.status).toBe(403);
+      expect((await res.json()).code).toBe('MFA_REQUIRED');
+      expect(await secret()).toBe(before);
+    });
+
+    it('concurrent wrong step-up codes never exceed the cap', async () => {
+      const { email, jar: first } = await passwordUser();
+      const { totpURI } = await enroll(first);
+      const jar = await magicLinkSignIn(email);
+      const results = await Promise.all(
+        Array.from({ length: 25 }, () =>
+          post('/api/auth/two-factor/verify-totp', { code: wrongTotpCode(totpURI) }, jar).then(
+            (r) => r.status,
+          ),
+        ),
+      );
+      expect(results.filter((s) => s === 401).length).toBeLessThanOrEqual(10);
+      expect(results.filter((s) => s === 429).length).toBeGreaterThanOrEqual(15);
+      const { rows } = await db.query(
+        'select failed_verification_count as n, locked_until from public.two_factor where user_id = $1',
+        [await userIdOf(email)],
+      );
+      expect(rows[0].n).toBeLessThanOrEqual(10);
+      expect(rows[0].locked_until).not.toBeNull();
+    });
+
+    it('a failed magic-link factor cleanup aborts the verification; the retry finishes it', async () => {
+      const { email, jar } = await passwordUser({ verified: false });
+      await enroll(jar);
+      const userId = await userIdOf(email);
+      // A trusted-device record the attacker's browser holds.
+      await db.query(
+        `insert into public.verification (identifier, value, expires_at)
+         values ($1, $2, now() + interval '1 day')`,
+        [`trust-device-${randomUUID()}`, userId],
+      );
+      sentEmails.length = 0;
+      expect((await post('/api/auth/sign-in/magic-link', { email })).status).toBe(200);
+      const link = new URL(sentEmails.at(-1)?.url as string);
+      const path = `${link.pathname}${link.search}`;
+
+      const tx = vi.spyOn(adminDb, 'transaction').mockRejectedValueOnce(new Error('db down'));
+      const failed = await app.request(path);
+      tx.mockRestore();
+      expect(failed.headers.getSetCookie().join('')).not.toMatch(/session_token=[^;]/);
+      const state = async () =>
+        (
+          await db.query(
+            `select u.email_verified,
+                    (select count(*)::int from public.two_factor t where t.user_id = u.id) as factors,
+                    (select count(*)::int from public.verification v
+                      where v.identifier like 'trust-device-%' and v.value = u.id::text) as trusted
+               from public."user" u where u.id = $1`,
+            [userId],
+          )
+        ).rows[0];
+      expect(await state()).toEqual({ email_verified: false, factors: 1, trusted: 1 });
+
+      // The link was not used up: the owner clicks it again.
+      const victim = new CookieJar();
+      const retry = await get(path, victim);
+      expect([200, 302]).toContain(retry.status);
+      expect(await whoami(victim)).not.toBeNull();
+      expect(await state()).toEqual({ email_verified: true, factors: 0, trusted: 0 });
     });
   });
 });

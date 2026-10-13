@@ -1,8 +1,8 @@
 import { APIError } from 'better-auth/api';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, like } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { dbErrorForLog } from '../db/errors';
-import { account, session, twoFactor, user } from '../db/schema';
+import { account, session, twoFactor, user, verification } from '../db/schema';
 import { logger } from '../lib/logger';
 
 /**
@@ -190,36 +190,62 @@ export async function rejectOrphanedPasswordSession(
  * email verified. It does not touch the second factor, so an attacker who
  * pre-registered the address and enrolled their own authenticator would
  * leave it behind: the owner could not remove it (that needs aal2, which
- * needs the attacker's codes). This finishes the job. It runs as the
- * `user.update.after` database hook: in /magic-link/verify the only user
- * update is that helper's "mark verified" step.
+ * needs the attacker's codes). This finishes the job: it removes the
+ * factor and its trusted-device records, and turns 2FA off.
+ *
+ * Fail closed and retryable: it runs from a before hook on
+ * /magic-link/verify (auth/assurance.ts), BEFORE the link is used up and
+ * before the email is marked verified. If it fails, the link is refused
+ * unused and the account stays unverified, so the owner's retry runs it
+ * again. (Better Auth's user-update before hook cannot do this: it gets
+ * only the new values, not which user.) The `user.update.after` hook in
+ * auth/index.ts runs it once more after the email is marked verified, best
+ * effort, for a factor enrolled in the milliseconds between the two.
  *
  * Social sign-in never reaches that helper (secureSocialLink above covers
  * it, second factor included), and the two cannot fight: each deletes
  * rows the other may already have deleted.
  */
-export async function dropUnprovenSecondFactor(
+export async function dropUnprovenSecondFactor(email: string): Promise<void> {
+  const [owner] = await adminDb
+    .select({ id: user.id, emailVerified: user.emailVerified })
+    .from(user)
+    .where(eq(user.email, email.toLowerCase()));
+  if (!owner || owner.emailVerified) return;
+  await removeSecondFactor(owner.id, 'Magic link for an unverified address');
+}
+
+/** The after-update sweep (see dropUnprovenSecondFactor). */
+export async function sweepUnprovenSecondFactor(
   updated: { id: string; emailVerified?: boolean | null },
   path: string | undefined
 ): Promise<void> {
   if (path !== '/magic-link/verify' || !updated.emailVerified) return;
+  await removeSecondFactor(updated.id, 'Magic link proved an unverified address');
+}
+
+async function removeSecondFactor(userId: string, why: string): Promise<void> {
   try {
     await adminDb.transaction(async (tx) => {
       const removed = await tx
         .delete(twoFactor)
-        .where(eq(twoFactor.userId, updated.id))
+        .where(eq(twoFactor.userId, userId))
         .returning({ id: twoFactor.id });
-      await tx.update(user).set({ twoFactorEnabled: false }).where(eq(user.id, updated.id));
-      if (removed.length) {
-        logger.warn(
-          { userId: updated.id },
-          'Magic link proved an unverified address: removed a second factor nobody had proved'
+      // Trusted-device records: Better Auth stores them in verification
+      // with identifier `trust-device-<random>` and the user id as value.
+      await tx
+        .delete(verification)
+        .where(
+          and(like(verification.identifier, 'trust-device-%'), eq(verification.value, userId))
         );
+      await tx.update(user).set({ twoFactorEnabled: false }).where(eq(user.id, userId));
+      if (removed.length) {
+        logger.warn({ userId }, `${why}: removed a second factor nobody had proved`);
       }
     });
   } catch (err) {
     logger.error(
-      { err: dbErrorForLog(err), userId: updated.id },
+      { err: dbErrorForLog(err), userId },
       'Could not remove an unproven second factor; refusing the magic link'
     );
     throw new Error('Magic link refused: second-factor cleanup failed');

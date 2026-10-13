@@ -9,9 +9,9 @@ import { isEmailConfigured } from '../lib/email';
 import { env } from '../lib/env';
 import { allowedOrigins } from '../lib/origins';
 import {
-  dropUnprovenSecondFactor,
   rejectOrphanedPasswordSession,
   secureSocialLink,
+  sweepUnprovenSecondFactor,
 } from './account-linking';
 import { sessionAssurance } from './assurance';
 import { sendAuthEmail } from './email';
@@ -138,10 +138,12 @@ export const auth = betterAuth({
     },
     user: {
       update: {
-        // A magic link that proves an unverified address also drops any
-        // second factor enrolled on it (auth/account-linking.ts).
+        // A magic link that proves an unverified address drops any second
+        // factor enrolled on it. The fail-closed pass runs before the link
+        // is used (auth/assurance.ts); this is the best-effort second pass
+        // (auth/account-linking.ts, dropUnprovenSecondFactor).
         after: async (updated, ctx) => {
-          await dropUnprovenSecondFactor(updated, ctx?.path);
+          await sweepUnprovenSecondFactor(updated, ctx?.path);
         },
       },
     },

@@ -9,20 +9,23 @@ import { setCookieCache } from 'better-auth/cookies';
 import { and, eq, sql } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { dbErrorForLog } from '../db/errors';
-import { session as sessionTable, twoFactor } from '../db/schema';
+import { account, session as sessionTable, twoFactor, user as userTable } from '../db/schema';
 import { logger } from '../lib/logger';
 import { isMfaGloballyEnabled } from '../lib/mfa-settings';
+import { dropUnprovenSecondFactor } from './account-linking';
 
 /**
  * Per-session assurance level (AAL) on top of Better Auth's twoFactor plugin.
  *
  * A session is aal2 when `session.twoFactorVerified` is true, and the ONLY
  * writer of that column is the after hook below: a successful TOTP or
- * backup-code verification marks the session it was verified for. The field
- * is `input: false` (auth/index.ts), so no client body can set it, and
- * every new session starts at false (Better Auth re-applies the field
- * default on each createSession, so even the sessions that enable/disable
- * re-issue drop back to aal1).
+ * backup-code verification marks the session it was verified for, and only
+ * when the user really has an enrolled factor afterwards (a confirmed
+ * `two_factor` row and `twoFactorEnabled`). The field is `input: false`
+ * (auth/index.ts), so no client body can set it, and every new session
+ * starts at false (Better Auth re-applies the field default on each
+ * createSession, so even the sessions that enable/disable re-issue drop
+ * back to aal1).
  *
  * Which session the verification is "for":
  * - finishing a password sign-in that owed a second factor, or confirming
@@ -34,28 +37,45 @@ import { isMfaGloballyEnabled } from '../lib/mfa-settings';
  *   (`ctx.context.session`); that one is marked. This is how a user who
  *   signed in without the second factor reaches aal2 without signing out.
  *
+ * A backup code is not a way to confirm an enrollment: Better Auth's
+ * verify-backup-code does not check that the factor was confirmed, so it
+ * is refused here while the factor is unconfirmed (enable, then skipping
+ * the authenticator code, must not yield aal2).
+ *
  * Marking also rewrites the session-cache cookie, so the browser's own
  * get-session answer (cookie cached up to 60 s) shows aal2 at once. The API
  * session middleware never reads that cache anyway.
  *
  * Step-up guessing: Better Auth counts failed codes toward its per-account
  * lock only on the sign-in path. A step-up attempt from an aal1 session would
- * be bounded only by the per-IP rate limit, so this plugin counts those
- * failures on the same columns (`failed_verification_count`,
- * `locked_until`) with the same budget: 10 consecutive failures lock the
- * factor for 15 minutes, across sign-in and step-up.
+ * be bounded only by the per-IP rate limit, so each step-up attempt first
+ * reserves one unit of the same budget (`failed_verification_count`,
+ * `locked_until`) in ONE atomic UPDATE: 10 attempts without a success lock
+ * the factor for 15 minutes, across sign-in and step-up, and concurrent
+ * attempts cannot slip past the cap. A success resets the count.
  *
- * Managing an enrolled factor (read the TOTP URI, regenerate backup codes,
- * disable 2FA) needs a session that proved that factor. Otherwise an aal1
- * session (a magic link from a read mailbox, say) could read the secret and
- * mint aal2 for itself, or remove the factor. Enabling 2FA when none is
- * enrolled stays open to any session, as before.
+ * Enrolling and managing a factor:
+ * - reading the TOTP URI, regenerating backup codes, disabling 2FA, and
+ *   enabling it again while a confirmed factor exists all need a session
+ *   that proved that factor. Otherwise an aal1 session (a magic link from a
+ *   read mailbox, say) could read the secret and mint aal2 for itself, or
+ *   swap or remove the factor.
+ * - enabling 2FA on an account with no password (social or magic link only,
+ *   `allowPasswordless`) needs a session signed in within the last 10
+ *   minutes: there is no password to ask for, so recency stands in for it,
+ *   and a stolen long-lived cookie cannot enroll the thief's authenticator.
+ *   A password account gives its password (Better Auth checks it).
  *
  * Better Auth's admin endpoints (/admin/*) need aal2 while MFA is globally
  * on, the same rule `requireAal2` applies to the app's own routes.
  * stop-impersonating is exempt: an impersonation session is always aal1 and
  * must be able to end itself. Server-side calls with no request headers
  * (the startup admin bootstrap) carry no session and are not gated.
+ *
+ * Magic link onto an unverified account: before the link is used, any second
+ * factor enrolled on that account is removed (auth/account-linking.ts,
+ * dropUnprovenSecondFactor). A failure there refuses the link without using
+ * it up, so the owner's retry redoes the cleanup.
  */
 
 const VERIFY_PATHS: ReadonlySet<string> = new Set([
@@ -67,18 +87,22 @@ const FACTOR_MANAGEMENT_PATHS: ReadonlySet<string> = new Set([
   '/two-factor/get-totp-uri',
   '/two-factor/generate-backup-codes',
   '/two-factor/disable',
+  '/two-factor/enable',
 ]);
 
-const ADMIN_UNGATED: ReadonlySet<string> = new Set(['/admin/stop-impersonating']);
+const MAGIC_LINK_VERIFY = '/magic-link/verify';
 
-const INVALID_CODE_ERRORS: ReadonlySet<string> = new Set(['INVALID_CODE', 'INVALID_BACKUP_CODE']);
+const ADMIN_UNGATED: ReadonlySet<string> = new Set(['/admin/stop-impersonating']);
 
 /** Better Auth's own defaults for the per-account second-factor lock. */
 const MAX_FAILED_VERIFICATIONS = 10;
 const LOCK_MINUTES = 15;
 
+/** How recent a passwordless account's sign-in must be to enroll 2FA. */
+const FRESH_SESSION_MS = 10 * 60 * 1000;
+
 type SessionLike = {
-  session: { id: string; twoFactorVerified?: boolean | null };
+  session: { id: string; twoFactorVerified?: boolean | null; createdAt?: Date | string };
   user: { id: string; twoFactorEnabled?: boolean | null };
 };
 
@@ -90,25 +114,48 @@ function mfaRequired(message: string): APIError {
   return new APIError('FORBIDDEN', { code: 'MFA_REQUIRED', message });
 }
 
-async function lockedUntil(userId: string): Promise<Date | null> {
+/** The user's factor: none, enrolled but unconfirmed, or confirmed. */
+async function factorOf(userId: string): Promise<'none' | 'unconfirmed' | 'confirmed'> {
   const [row] = await adminDb
-    .select({ lockedUntil: twoFactor.lockedUntil })
+    .select({ verified: twoFactor.verified })
     .from(twoFactor)
-    .where(and(eq(twoFactor.userId, userId), eq(twoFactor.verified, true)));
-  return row?.lockedUntil && row.lockedUntil.getTime() > Date.now() ? row.lockedUntil : null;
+    .where(eq(twoFactor.userId, userId));
+  if (!row) return 'none';
+  return row.verified === false ? 'unconfirmed' : 'confirmed';
 }
 
-/** One failed step-up code, toward the shared per-account budget. */
-async function recordStepUpFailure(userId: string): Promise<void> {
-  await adminDb.execute(sql`
+async function hasPassword(userId: string): Promise<boolean> {
+  const [row] = await adminDb
+    .select({ id: account.id })
+    .from(account)
+    .where(and(eq(account.userId, userId), eq(account.providerId, 'credential')));
+  return Boolean(row);
+}
+
+/**
+ * Reserve one step-up attempt, atomically. Returns false when the factor is
+ * locked (no attempt left). An expired lock starts a fresh budget. Reaching
+ * the cap sets the lock; the attempt that reached it still runs, and a
+ * success clears it.
+ */
+async function reserveStepUpAttempt(userId: string): Promise<boolean> {
+  const { rows } = await adminDb.execute<{ n: number }>(sql`
     update public.two_factor
-       set failed_verification_count = coalesce(failed_verification_count, 0) + 1,
+       set failed_verification_count = case
+             when locked_until is not null and locked_until <= now() then 1
+             else coalesce(failed_verification_count, 0) + 1
+           end,
            locked_until = case
+             when locked_until is not null and locked_until <= now() then null
              when coalesce(failed_verification_count, 0) + 1 >= ${MAX_FAILED_VERIFICATIONS}
                then now() + make_interval(mins => ${LOCK_MINUTES})
              else locked_until
            end
-     where user_id = ${userId} and verified`);
+     where user_id = ${userId}
+       and verified
+       and (locked_until is null or locked_until <= now())
+     returning failed_verification_count as n`);
+  return rows.length > 0;
 }
 
 async function resetFailures(userId: string): Promise<void> {
@@ -128,8 +175,82 @@ function dropSetCookie(headers: Headers | undefined, name: string): void {
   for (const c of kept) headers.append('set-cookie', c);
 }
 
+const VERIFY_FIRST =
+  'Verify a code from your authenticator app (POST /api/auth/two-factor/verify-totp) first.';
+
+async function gateFactorManagement(path: string, current: SessionLike): Promise<void> {
+  const verified = current.session.twoFactorVerified === true;
+  const factor = await factorOf(current.user.id);
+  const enrolled = current.user.twoFactorEnabled === true || factor === 'confirmed';
+
+  if (enrolled && !verified) {
+    throw mfaRequired(
+      `Changing your two-factor settings needs a session that passed two-factor verification. ${VERIFY_FIRST}`
+    );
+  }
+
+  if (path === '/two-factor/enable' && !enrolled && !(await hasPassword(current.user.id))) {
+    const created = current.session.createdAt ? new Date(current.session.createdAt).getTime() : 0;
+    if (Date.now() - created > FRESH_SESSION_MS) {
+      throw new APIError('FORBIDDEN', {
+        code: 'REAUTH_REQUIRED',
+        error: 'reauth_required',
+        message: 'For your security, sign in again, then set up two-factor authentication.',
+      });
+    }
+  }
+}
+
+async function gateVerify(path: string, current: SessionLike): Promise<void> {
+  const factor = await factorOf(current.user.id);
+  if (factor !== 'confirmed') {
+    // Confirming a new enrollment takes an authenticator code, never a
+    // backup code. (verify-totp on an unconfirmed factor is that confirm.)
+    if (path === '/two-factor/verify-backup-code') {
+      throw new APIError('BAD_REQUEST', {
+        code: 'TWO_FACTOR_NOT_CONFIRMED',
+        message: 'Finish setting up two-factor authentication with a code from your app first.',
+      });
+    }
+    return;
+  }
+  if (!(await reserveStepUpAttempt(current.user.id))) {
+    throw new APIError('TOO_MANY_REQUESTS', {
+      code: 'ACCOUNT_TEMPORARILY_LOCKED',
+      message: 'Too many wrong codes. Try again in a few minutes.',
+    });
+  }
+}
+
 const before = createAuthMiddleware(async (ctx) => {
   const path = ctx.path;
+
+  if (path === MAGIC_LINK_VERIFY) {
+    const token = typeof ctx.query?.token === 'string' ? ctx.query.token : null;
+    // The pending link, read (not used up): auth/index.ts keeps magicLink's
+    // default plain token storage, so its identifier is `magic-link:<token>`.
+    const pending = token
+      ? await ctx.context.internalAdapter.findVerificationValue(`magic-link:${token}`)
+      : null;
+    if (!pending || new Date(pending.expiresAt).getTime() <= Date.now()) return;
+    let email: unknown;
+    try {
+      email = (JSON.parse(pending.value) as { email?: unknown }).email;
+    } catch {
+      return; // the endpoint refuses a malformed link
+    }
+    if (typeof email !== 'string') return;
+    try {
+      await dropUnprovenSecondFactor(email);
+    } catch {
+      // Logged inside. The link stays unused, so a retry redoes this.
+      throw new APIError('INTERNAL_SERVER_ERROR', {
+        code: 'MAGIC_LINK_CLEANUP_FAILED',
+        message: 'Sign-in could not be completed. Please open the link again.',
+      });
+    }
+    return;
+  }
 
   if (isAdminPath(path)) {
     // No request headers: a server-side call (the startup bootstrap).
@@ -147,12 +268,7 @@ const before = createAuthMiddleware(async (ctx) => {
   if (FACTOR_MANAGEMENT_PATHS.has(path)) {
     const current = (await getAuthoritativeSessionFromCtx(ctx)) as SessionLike | null;
     if (!current) return; // the endpoint answers 401
-    if (current.user.twoFactorEnabled && current.session.twoFactorVerified !== true) {
-      throw mfaRequired(
-        'Changing your two-factor settings needs a session that passed two-factor verification. ' +
-          'Verify a code from your authenticator app (POST /api/auth/two-factor/verify-totp) first.'
-      );
-    }
+    await gateFactorManagement(path, current);
     return;
   }
 
@@ -162,33 +278,16 @@ const before = createAuthMiddleware(async (ctx) => {
     const current = (await getAuthoritativeSessionFromCtx(ctx)) as SessionLike | null;
     // No session: finishing a sign-in, which Better Auth locks itself.
     if (!current) return;
-    if (await lockedUntil(current.user.id)) {
-      throw new APIError('TOO_MANY_REQUESTS', {
-        code: 'ACCOUNT_TEMPORARILY_LOCKED',
-        message: 'Too many wrong codes. Try again in a few minutes.',
-      });
-    }
+    await gateVerify(path, current);
   }
 });
 
 const after = createAuthMiddleware(async (ctx) => {
   const returned = ctx.context.returned;
+  // Failures need nothing here: a step-up attempt was counted before it ran.
+  if (isAPIError(returned) || returned === undefined || returned === null) return;
+
   const current = ctx.context.session as SessionLike | null;
-
-  if (isAPIError(returned)) {
-    // A wrong step-up code (a session was present): count it. Sign-in
-    // failures (no session) are counted by Better Auth itself.
-    if (current?.session && INVALID_CODE_ERRORS.has(String(returned.body?.code))) {
-      try {
-        await recordStepUpFailure(current.user.id);
-      } catch (err) {
-        logger.error({ err: dbErrorForLog(err) }, 'Failed to record a wrong two-factor code');
-      }
-    }
-    return;
-  }
-  if (returned === undefined || returned === null) return;
-
   // Success. The session the code was verified for: a new one (sign-in
   // finished, or an enrollment confirmed) or the current one (step-up).
   const target = (ctx.context.newSession as SessionLike | null) ?? current;
@@ -196,6 +295,25 @@ const after = createAuthMiddleware(async (ctx) => {
 
   let marked: boolean;
   try {
+    // Only with a factor the user really has now: a confirmed row and 2FA on.
+    const [enrolled] = await adminDb
+      .select({ id: twoFactor.id })
+      .from(twoFactor)
+      .innerJoin(userTable, eq(userTable.id, twoFactor.userId))
+      .where(
+        and(
+          eq(twoFactor.userId, target.user.id),
+          eq(twoFactor.verified, true),
+          eq(userTable.twoFactorEnabled, true)
+        )
+      );
+    if (!enrolled) {
+      logger.warn(
+        { userId: target.user.id },
+        'Second-factor code accepted without a confirmed factor: session left at aal1'
+      );
+      return;
+    }
     const rows = await adminDb
       .update(sessionTable)
       .set({ twoFactorVerified: true })
@@ -240,6 +358,7 @@ export const sessionAssurance = () =>
       before: [
         {
           matcher: (ctx) =>
+            ctx.path === MAGIC_LINK_VERIFY ||
             isAdminPath(ctx.path) ||
             FACTOR_MANAGEMENT_PATHS.has(ctx.path ?? '') ||
             VERIFY_PATHS.has(ctx.path ?? ''),
