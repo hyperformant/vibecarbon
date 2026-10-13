@@ -132,6 +132,17 @@ describe('create-vibecarbon E2E', () => {
       expect(envContent).toContain('DB_PASSWORD=');
     });
 
+    it('writes the local-S3 dev vars, agreeing with volumes/s3/s3.json', () => {
+      const env = parseDotenv(readFileSync(join(projectDir(), '.env.local'), 'utf-8'));
+      expect(env.S3_ENDPOINT).toBe('http://localhost:8333');
+      expect(env.S3_REGION).toBe('us-east-1');
+      expect(env.S3_BUCKET).toMatch(/-local$/);
+      const cred = JSON.parse(readFileSync(join(projectDir(), 'volumes/s3/s3.json'), 'utf-8'))
+        .identities[0].credentials[0];
+      expect(env.S3_ACCESS_KEY).toBe(cred.accessKey);
+      expect(env.S3_SECRET_KEY).toBe(cred.secretKey);
+    });
+
     it('replaces all template placeholders', () => {
       // Check docker-compose.yml for placeholder replacement
       const dockerCompose = readFileSync(join(projectDir(), 'docker-compose.yml'), 'utf-8');

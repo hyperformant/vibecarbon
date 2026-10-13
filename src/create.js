@@ -1554,6 +1554,10 @@ ${runCmd} test:prepush
 // GENERATOR FUNCTIONS
 // ============================================================================
 
+// Dev-only placeholders; must match carbon/volumes/s3/s3.json (and dev-init.js).
+const DEV_S3_ACCESS_KEY = 'local-dev-s3-access-key';
+const DEV_S3_SECRET_KEY = 'local-dev-s3-secret-key-not-for-production';
+
 function generateEnvLocal(projectName, variables) {
   // Every value-bearing line goes through formatDotenvLine (src/lib/dotenv.js):
   // the one grammar Node, Docker Compose and Vite all read identically. It
@@ -1674,6 +1678,19 @@ ${formatDotenvLine('VITE_PLAUSIBLE_SCRIPT_URL', 'https://plausible.io/js/script.
 
 ${formatDotenvLine('VITE_N8N_ENABLED', 'false')}
 ${formatDotenvLine('VITE_OBSERVABILITY_ENABLED', 'false')}
+
+# =============================================================================
+# LOCAL S3 (dev uploads)
+# =============================================================================
+# SeaweedFS from docker-compose.override.yml (dev-only, never deployed). The
+# keys match volumes/s3/s3.json. vibecarbon deploy overwrites every S3_* value
+# with the real bucket's. If you change DEV_S3_PORT, change S3_ENDPOINT too.
+
+${formatDotenvLine('S3_ENDPOINT', 'http://localhost:8333')}
+${formatDotenvLine('S3_REGION', 'us-east-1')}
+${formatDotenvLine('S3_BUCKET', `${projectName}-local`)}
+${formatDotenvLine('S3_ACCESS_KEY', DEV_S3_ACCESS_KEY)}
+${formatDotenvLine('S3_SECRET_KEY', DEV_S3_SECRET_KEY)}
 
 # =============================================================================
 # PORT CONFIGURATION (for running multiple projects)
