@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import type pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
+import { capImpersonationExpiry } from '@server/auth/impersonation';
 import { adminDb } from '@server/db/client';
 import { appSettings } from '@server/db/schema';
 import { __resetMfaSettingsCache } from '@server/lib/mfa-settings';
@@ -238,7 +239,29 @@ describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {
       it('may not start another impersonation', async () => {
         const { jar } = await asTarget();
         const other = await member();
-        expect((await impersonate(jar, other.id)).status).toBe(403);
+        const res = await impersonate(jar, other.id);
+        expect(res.status).toBe(403);
+        expect((await res.json()).code).toBe('IMPERSONATION_NOT_ALLOWED');
+      });
+
+      it('the expiry cap also holds when the endpoint context does not carry the session', async () => {
+        const { target } = await asTarget();
+        const { rows } = await db.query<{ token: string; expires_at: Date }>(
+          'select token, expires_at from public.session where user_id = $1 and impersonated_by is not null',
+          [target.id]
+        );
+        const authCtx = await auth.$context;
+        // What a refresh path that never set ctx.context.session would hand the hook.
+        const ctx = {
+          context: { authCookies: authCtx.authCookies, secret: authCtx.secret },
+          getSignedCookie: async () => rows[0].token,
+        };
+        const far = new Date(Date.now() + 7 * 24 * 3600_000);
+        expect(await capImpersonationExpiry({ expiresAt: far }, ctx)).toEqual({
+          data: { expiresAt: rows[0].expires_at },
+        });
+        // No request at all (a server-side call): nothing to cap.
+        expect(await capImpersonationExpiry({ expiresAt: far }, null)).toBeUndefined();
       });
 
       it('may not take sensitive actions (requireAal2 routes), even with MFA off', async () => {
@@ -390,16 +413,35 @@ describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {
       expect(await tokenRows(admin.id)).toHaveLength(0);
     });
 
-    it("minting again replaces the session's previous token", async () => {
+    it('a session keeps its newest two tokens: a third mint drops the oldest', async () => {
       const admin = await superAdmin();
-      await mint(admin.jar);
-      const first = admin.jar.only('vc-admin-token');
-      await mint(admin.jar);
-      const second = admin.jar.only('vc-admin-token');
-      expect(second).not.toBe(first);
-      expect((await verify(first)).status).toBe(401);
-      expect((await verify(second)).status).toBe(200);
-      expect(await tokenRows(admin.id)).toHaveLength(1);
+      const minted: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        await mint(admin.jar);
+        minted.push(admin.jar.only('vc-admin-token'));
+      }
+      expect(new Set(minted).size).toBe(3);
+      expect((await verify(minted[0])).status).toBe(401);
+      expect((await verify(minted[1])).status).toBe(200);
+      expect((await verify(minted[2])).status).toBe(200);
+      expect(await tokenRows(admin.id)).toHaveLength(2);
+    });
+
+    it('two concurrent mints both leave a working token, whichever response lands last', async () => {
+      const admin = await superAdmin();
+      const cookieOf = (res: Response) =>
+        (res.headers.getSetCookie().find((c) => c.startsWith('vc-admin-token=')) as string).split(
+          ';'
+        )[0];
+      const cookie = admin.jar.header;
+      const [a, b] = await Promise.all([
+        post('/api/v1/admin/forwardauth-cookie', {}, cookie),
+        post('/api/v1/admin/forwardauth-cookie', {}, cookie),
+      ]);
+      expect([a.status, b.status]).toEqual([204, 204]);
+      expect(cookieOf(a)).not.toBe(cookieOf(b));
+      expect((await verify(cookieOf(a))).status).toBe(200);
+      expect((await verify(cookieOf(b))).status).toBe(200);
     });
 
     it('a regular user gets no cookie', async () => {
@@ -476,6 +518,18 @@ describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {
       expect(await whoami(user.jar)).toBeNull();
     });
 
+    it('the only member of an organization is told to hand it over first', async () => {
+      const user = await member();
+      const slug = `solo-${randomUUID().slice(0, 8)}`;
+      const created = await post('/api/v1/organizations', { name: slug, slug }, user.jar);
+      expect(created.status).toBe(201);
+      orgIds.push((await created.json()).organization.id);
+      const res = await send('DELETE', '/api/v1/me', user.jar);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toContain('only member');
+      expect(await userIdOf(user.email)).toBe(user.id);
+    });
+
     it('a super admin cannot delete their own account', async () => {
       const admin = await superAdmin();
       expect((await send('DELETE', '/api/v1/me', admin.jar)).status).toBe(403);
@@ -530,6 +584,11 @@ describe.skipIf(!dbTestsEnabled)('admin surfaces (real database)', () => {
       ).json();
       expect(orgs.organizations).toHaveLength(1);
       expect(orgs.organizations[0].memberCount).toBe(1);
+      // "_" is matched literally, not as LIKE's one-character wildcard.
+      const literal = await (
+        await get(`/api/v1/admin/organizations?search=org_${tag}`, admin.jar)
+      ).json();
+      expect(literal.organizations).toHaveLength(0);
     });
 
     it('is super admin only', async () => {

@@ -92,7 +92,10 @@ verifyRoleRoutes.all('/', async (c) => {
   const requiredRoles = requiredRole
     ? [requiredRole]
     : requiredRolesParam
-      ? requiredRolesParam.split(',').map((r) => r.trim())
+      ? requiredRolesParam
+          .split(',')
+          .map((r) => r.trim())
+          .filter(Boolean)
       : [];
 
   if (requiredRoles.length === 0) {

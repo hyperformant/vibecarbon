@@ -40,3 +40,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export function isUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_RE.test(value);
 }
+
+/**
+ * An ILIKE pattern matching `search` anywhere, with LIKE's own wildcards
+ * (`%`, `_`) and the escape character escaped, so "a_b" matches literally.
+ * Bind it as a parameter (Drizzle's `ilike` does).
+ */
+export function containsPattern(search: string): string {
+  return `%${search.replace(/[\\%_]/g, '\\$&')}%`;
+}

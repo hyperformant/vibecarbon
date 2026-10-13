@@ -2,7 +2,7 @@ import type { BetterAuthPlugin } from 'better-auth';
 import { APIError, createAuthMiddleware, isAPIError } from 'better-auth/api';
 import { eq } from 'drizzle-orm';
 import { adminDb } from '../db/client';
-import { user as userTable } from '../db/schema';
+import { session as sessionTable, user as userTable } from '../db/schema';
 import { isUuid } from '../db/values';
 import { isSuperAdmin } from '../lib/auth';
 import { logger } from '../lib/logger';
@@ -123,22 +123,47 @@ const after = createAuthMiddleware(async (ctx) => {
   }
 });
 
+type CappedSession = { impersonatedBy?: string | null; expiresAt?: Date | string | null };
+
+/**
+ * The session an update is for, when the endpoint context does not carry it:
+ * the request's own session cookie names it. Null when there is no request
+ * (a server-side call) or no such session.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Better Auth's endpoint context
+async function sessionOfRequest(ctx: any): Promise<CappedSession | null> {
+  if (!ctx?.getSignedCookie || !ctx.context?.authCookies) return null;
+  const token = await ctx.getSignedCookie(
+    ctx.context.authCookies.sessionToken.name,
+    ctx.context.secret
+  );
+  if (typeof token !== 'string' || !token) return null;
+  const [row] = await adminDb
+    .select({ impersonatedBy: sessionTable.impersonatedBy, expiresAt: sessionTable.expiresAt })
+    .from(sessionTable)
+    .where(eq(sessionTable.token, token))
+    .limit(1);
+  return row ?? null;
+}
+
 /**
  * Session update hook (databaseHooks.session.update.before): an
  * impersonation session's expiry never moves later. get-session slides a
  * session's expiry forward (to the full session lifetime) when the browser
  * drops the plugin's "don't remember me" cookie, which a client controls.
- * The session being refreshed is the endpoint's `ctx.context.session`.
+ * The session being refreshed is the endpoint's `ctx.context.session`; when
+ * that is absent, the request's session cookie names it (read from the
+ * database), so a refresh path that does not set it is capped too.
  */
-export function capImpersonationExpiry(
+export async function capImpersonationExpiry(
   update: { expiresAt?: Date | string | null },
   // biome-ignore lint/suspicious/noExplicitAny: Better Auth's endpoint context
   ctx: any
-): { data: { expiresAt: Date } } | undefined {
-  const current = ctx?.context?.session?.session as
-    | { impersonatedBy?: string | null; expiresAt?: Date | string }
-    | undefined;
-  if (!update.expiresAt || !current?.impersonatedBy || !current.expiresAt) return;
+): Promise<{ data: { expiresAt: Date } } | undefined> {
+  if (!update.expiresAt) return;
+  const current: CappedSession | null =
+    (ctx?.context?.session?.session as CappedSession | undefined) ?? (await sessionOfRequest(ctx));
+  if (!current?.impersonatedBy || !current.expiresAt) return;
   const cap = new Date(current.expiresAt);
   if (new Date(update.expiresAt).getTime() <= cap.getTime()) return;
   return { data: { expiresAt: cap } };

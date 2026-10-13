@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, eq, gt, like, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gt, like, lte, sql } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { session as sessionTable, user as userTable, verification } from '../db/schema';
 
@@ -31,10 +31,21 @@ function identifierFor(rawToken: string): string {
   return `${PREFIX}${createHash('sha256').update(rawToken).digest('hex')}`;
 }
 
+/** How many live tokens a session keeps (see mintForwardAuthToken). */
+const KEEP_PER_SESSION = 2;
+
 /**
- * Mint a token bound to `sessionId`, replacing any earlier one for that
- * session, and sweep expired ForwardAuth rows. Returns the raw token (for
- * the cookie only; never log it).
+ * Mint a token bound to `sessionId` and return it raw (for the cookie only;
+ * never log it). The session keeps its newest two tokens and loses older
+ * ones; expired ForwardAuth rows are swept.
+ *
+ * Why two, not one: two mints can overlap (a page load and a sign-in step
+ * both refresh the cookie), and their responses can arrive in either order.
+ * If each mint deleted every sibling, the cookie could end up holding the
+ * token the later commit deleted. With the newest two kept, whichever
+ * response lands last still names a live token; a third mint drops the
+ * oldest. Concurrent mints never delete each other: each one's cleanup only
+ * sees rows already committed plus its own.
  */
 export async function mintForwardAuthToken(sessionId: string): Promise<string> {
   const raw = randomBytes(32).toString('base64url');
@@ -43,14 +54,20 @@ export async function mintForwardAuthToken(sessionId: string): Promise<string> {
     await tx
       .delete(verification)
       .where(
-        and(
-          like(verification.identifier, `${PREFIX}%`),
-          or(eq(verification.value, sessionId), lte(verification.expiresAt, new Date()))
-        )
+        and(like(verification.identifier, `${PREFIX}%`), lte(verification.expiresAt, new Date()))
       );
     await tx
       .insert(verification)
       .values({ identifier: identifierFor(raw), value: sessionId, expiresAt });
+    await tx.execute(sql`
+      delete from ${verification}
+       where identifier like ${`${PREFIX}%`}
+         and value = ${sessionId}
+         and id not in (
+           select id from ${verification}
+            where identifier like ${`${PREFIX}%`} and value = ${sessionId}
+            order by created_at desc, expires_at desc
+            limit ${KEEP_PER_SESSION})`);
   });
   return raw;
 }

@@ -5,8 +5,8 @@ import type { HonoVariables } from '../types';
 /**
  * Hono middleware: gate a route (or route group) behind the super_admin role.
  *
- * The role is read from the JWT's `app_metadata.role` (verified upstream by the
- * session middleware via `supabase.auth.getUser()`), matching stats.ts/theme.ts.
+ * The role is the server-controlled `user.role` of the session the session
+ * middleware read from the database (`isSuperAdmin`, exact match).
  *
  * Usage:
  *   adminRoutes.use('*', requireSuperAdmin);

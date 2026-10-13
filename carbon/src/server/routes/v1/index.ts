@@ -10,7 +10,7 @@ import {
   organizations,
   user as userTable,
 } from '../../db/schema';
-import { isoTimestamp, isUuid, pgErrorCode } from '../../db/values';
+import { containsPattern, isoTimestamp, isUuid, pgErrorCode } from '../../db/values';
 import { orgInviteEmail } from '../../emails/templates';
 import { isSuperAdmin } from '../../lib/auth';
 import { sendEmail } from '../../lib/email';
@@ -842,11 +842,11 @@ v1Routes.get('/admin/organizations', async (c) => {
   const { search, sortBy, sortOrder, page, limit } = queryResult.data;
   const offset = (page - 1) * limit;
 
-  // Search filter (input validated to [a-zA-Z0-9@.\-_ ] via Zod schema, and
-  // bound as a parameter). Underscore acts as a single-char wildcard in ILIKE,
-  // acceptable for admin search.
+  // Search filter (input validated by the Zod schema and bound as a
+  // parameter; LIKE wildcards escaped so "a_b" matches literally).
+  const pattern = containsPattern(search);
   const where = search
-    ? or(ilike(organizations.name, `%${search}%`), ilike(organizations.slug, `%${search}%`))
+    ? or(ilike(organizations.name, pattern), ilike(organizations.slug, pattern))
     : undefined;
 
   // Sorting (validated against allowed values; 'email' does not apply here)
@@ -936,7 +936,7 @@ v1Routes.get('/admin/users', async (c) => {
 
   // Search across every user (input validated by the Zod schema and bound as
   // a parameter; LIKE wildcards escaped so "a_b" matches literally).
-  const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
+  const pattern = containsPattern(search);
   const where = search
     ? or(ilike(userTable.email, pattern), ilike(userTable.name, pattern))
     : undefined;
