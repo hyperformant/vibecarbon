@@ -20,6 +20,16 @@ services:
       - "${DEV_DB_PORT:-5432}:5432"
     volumes:
       - ./volumes/db/super-admin.dev.sql:/tmp/super-admin.sql:Z
+    # WAL-G is off in development. The base file falls back to the app's S3
+    # vars, and in dev those name the local S3 on localhost:8333, which inside
+    # this container is the container itself: archive_command retries for
+    # minutes, pg_ctl cannot shut down during init, and the db never turns
+    # healthy. Empty values here win over the base file's interpolation.
+    environment:
+      WALG_S3_PREFIX: ""
+      AWS_ENDPOINT: ""
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
 
   # Traefik dev config: add extra_hosts so it can reach the Vite dev server on the host
   # Also mount dev middlewares that use host.docker.internal for ForwardAuth
