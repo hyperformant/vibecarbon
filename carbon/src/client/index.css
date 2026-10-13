@@ -7,7 +7,7 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 @import "tw-animate-css";
-@import "shadcn/tailwind.css";
+@import "./shadcn-tailwind.css";
 @import "./launch-ui.css";
 
 /* Base font size - increase for larger UI (default is 16px) */
