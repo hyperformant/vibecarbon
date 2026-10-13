@@ -1,3 +1,4 @@
+import type { BetterAuthPlugin } from 'better-auth';
 import { APIError, createAuthMiddleware, isAPIError } from 'better-auth/api';
 import { sql } from 'drizzle-orm';
 import { adminDb } from '../db/client';
@@ -11,9 +12,16 @@ import { logger } from '../lib/logger';
  * pair inside 15 minutes lock that pair until the window passes. A locked
  * pair gets 429 even with the right password; a successful sign-in clears it.
  *
- * Wired as Better Auth hooks on `/sign-in/email` (see auth/index.ts):
+ * Wired as a plugin (`lockoutPlugin`) with hooks on `/sign-in/email`:
  *   before: refuse when locked;
  *   after:  record a wrong password, clear on a new session.
+ *
+ * A plugin, not the top-level `hooks` option, because of ordering: Better
+ * Auth runs the top-level after hook BEFORE every plugin's after hooks, and
+ * the twoFactor plugin's after hook is what turns a correct password into
+ * a pending challenge (it drops `newSession`). The lockout must run after
+ * it, so it sees the challenge and neither clears nor records; plugins run
+ * in array order, so auth/index.ts lists this after twoFactor.
  */
 
 const SIGN_IN_PATH = '/sign-in/email';
@@ -89,3 +97,13 @@ export const lockoutAfter = createAuthMiddleware(async (ctx) => {
     logger.error({ err: dbErrorForLog(err) }, 'Failed to clear lockout records');
   }
 });
+
+/** The lockout hooks as a plugin. Register it AFTER twoFactor (see above). */
+export const lockoutPlugin = () =>
+  ({
+    id: 'account-lockout',
+    hooks: {
+      before: [{ matcher: (ctx) => ctx.path === SIGN_IN_PATH, handler: lockoutBefore }],
+      after: [{ matcher: (ctx) => ctx.path === SIGN_IN_PATH, handler: lockoutAfter }],
+    },
+  }) satisfies BetterAuthPlugin;

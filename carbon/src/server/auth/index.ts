@@ -8,7 +8,7 @@ import * as schema from '../db/schema';
 import { isEmailConfigured } from '../lib/email';
 import { env } from '../lib/env';
 import { sendAuthEmail } from './email';
-import { lockoutAfter, lockoutBefore } from './lockout';
+import { lockoutPlugin } from './lockout';
 import { socialProviders } from './providers';
 import { stripSessionToken } from './strip-session-token';
 
@@ -118,7 +118,12 @@ export const auth = betterAuth({
     '/admin/set-role',
     ...(env.MAGIC_LINK_ENABLED ? [] : ['/sign-in/magic-link', '/magic-link/verify']),
   ],
-  hooks: { before: lockoutBefore, after: lockoutAfter },
+  // ORDER MATTERS. After hooks run in this order, and each later plugin sees
+  // what the earlier ones returned:
+  //   admin, magicLink, twoFactor (MFA task), lockout, stripSessionToken.
+  // lockout must follow twoFactor (a pending 2FA challenge is neither a
+  // failure nor a success); stripSessionToken must be last (it rewrites
+  // every body the others produced).
   plugins: [
     admin({
       ac,
@@ -134,6 +139,8 @@ export const auth = betterAuth({
         await sendAuthEmail('magic link', email, url);
       },
     }),
+    // twoFactor goes here, before the lockout.
+    lockoutPlugin(),
     // Last, so it sees every other plugin's response: no session token in
     // any JSON body; the HttpOnly cookie is its only carrier.
     stripSessionToken(),
