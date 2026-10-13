@@ -262,7 +262,7 @@ const openApiSpec = {
       get: {
         summary: 'Get current user',
         tags: ['User'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'User info with memberships and role' },
           '401': { description: 'Unauthorized' },
@@ -273,7 +273,7 @@ const openApiSpec = {
       get: {
         summary: 'List organizations',
         tags: ['Organizations'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'List of organizations' },
           '401': { description: 'Unauthorized' },
@@ -282,7 +282,7 @@ const openApiSpec = {
       post: {
         summary: 'Create organization',
         tags: ['Organizations'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         requestBody: {
           required: true,
           content: {
@@ -309,7 +309,7 @@ const openApiSpec = {
       post: {
         summary: 'Create checkout session',
         tags: ['Billing'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         requestBody: {
           required: true,
           content: {
@@ -392,7 +392,7 @@ const openApiSpec = {
       get: {
         summary: 'List background jobs',
         tags: ['Admin'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'Job summaries and execution history' },
           '403': { description: 'Forbidden: requires super admin' },
@@ -403,7 +403,7 @@ const openApiSpec = {
       get: {
         summary: 'List contact submissions',
         tags: ['Admin'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'Paginated contact submissions' },
           '403': { description: 'Forbidden: requires super admin' },
@@ -414,7 +414,7 @@ const openApiSpec = {
       get: {
         summary: 'List newsletter subscribers',
         tags: ['Admin'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'Paginated subscriber list' },
           '403': { description: 'Forbidden: requires super admin' },
@@ -437,7 +437,7 @@ const openApiSpec = {
       get: {
         summary: 'Verify user role (ForwardAuth)',
         description:
-          'Internal endpoint for Traefik ForwardAuth. Verifies JWT and checks user role.',
+          'Internal endpoint for Traefik ForwardAuth. Verifies the vc-admin-token cookie and checks the user role.',
         tags: ['Internal'],
         parameters: [
           {
@@ -463,10 +463,14 @@ const openApiSpec = {
   },
   components: {
     securitySchemes: {
-      bearerAuth: {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
+      // The session cookie the auth API sets on sign-in (auth/index.ts). Better
+      // Auth prefixes it with __Secure- when SITE_URL is https. There is no
+      // Bearer token: a script must sign in and send the cookie, plus a
+      // matching Origin on writes (AGENTS.md "CSRF").
+      sessionCookie: {
+        type: 'apiKey',
+        in: 'cookie',
+        name: `${env.SITE_URL.startsWith('https://') ? '__Secure-' : ''}better-auth.session_token`,
       },
     },
   },

@@ -294,6 +294,17 @@ describe('Session cookies: the split-cookie contract holds', () => {
     });
   })('src/client');
 
+  it('the OpenAPI spec documents the session cookie, not a Bearer token', () => {
+    // The API reads only the session cookie; a spec promising Bearer auth
+    // sends integrators (and agents) after a header the server ignores.
+    const index = read('src/server/index.ts');
+    expect(index).not.toMatch(/bearerAuth|scheme:\s*'bearer'/);
+    expect(index).toMatch(/sessionCookie:\s*\{\s*type:\s*'apiKey',\s*in:\s*'cookie'/);
+    const uses = index.match(/security:\s*\[\{\s*(\w+):/g) ?? [];
+    expect(uses.length).toBeGreaterThan(0);
+    for (const u of uses) expect(u).toMatch(/sessionCookie/);
+  });
+
   it('the SPA keeps no session of its own: no client-side session module', () => {
     expect(
       exists('src/client/lib/supabase.ts'),

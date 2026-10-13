@@ -207,7 +207,7 @@ Brute force protection is built in. After **5 failed login attempts** from the s
 
 ## Server-Side Auth
 
-API requests include the user's JWT in the `Authorization` header. The server middleware validates it and makes the user available in route handlers:
+API requests carry the session cookie the browser holds (HttpOnly, so page JavaScript never sees it). The server middleware checks it and makes the user available in route handlers:
 
 ```typescript
 const user = c.get('user');
@@ -216,9 +216,11 @@ if (!user) return c.json({ error: 'Unauthorized' }, 401);
 
 The middleware chain runs on every request:
 
-1. **Extract token** from `Authorization: Bearer <token>` header
-2. **Validate** with `supabase.auth.getUser()` (server-side verification)
-3. **Set context**: `c.set('user', user)`, which routes read with `c.get('user')`
+1. **Read the session cookie** the auth API set at sign-in
+2. **Look up the session and its user** in the database, so a revoked session, a banned user or a changed role takes effect on the next request
+3. **Set context**: `c.set('user', user)` and `c.set('session', session)`, which routes read with `c.get('user')`
+
+Mutating requests that carry the cookie also pass a CSRF origin check, so a script that calls your API must send a matching `Origin` header.
 
 Routes then query the database as that user with `withUserDb(user.id, ...)`, so row-level security applies. For operations that need to bypass RLS (admin tasks, webhooks), the server uses `adminDb`, after checking the caller may do it:
 
