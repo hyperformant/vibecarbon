@@ -10,10 +10,6 @@
 --   - notification_dismissals: User dismissal tracking
 --   - failed_login_attempts: Brute force protection
 --   - app_settings: Global application settings
---
--- Storage Buckets:
---   - avatars: Public bucket for user profile pictures (2MB, images only)
---   - uploads: Private bucket for general file uploads (10MB)
 
 -- ============================================================================
 -- UPDATED_AT TRIGGER FUNCTION (used by multiple tables)
