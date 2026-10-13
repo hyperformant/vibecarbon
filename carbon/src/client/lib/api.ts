@@ -90,10 +90,12 @@ export class ApiError extends Error {
  * reports success, the request is retried once.
  */
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const headers = {
-    ...(typeof init.body === 'string' ? { 'Content-Type': 'application/json' } : {}),
-    ...(init.headers ?? {}),
-  };
+  // Any HeadersInit (object, array or Headers instance) survives; a spread
+  // would drop a Headers instance's entries. Caller's Content-Type wins.
+  const headers = new Headers(init.headers);
+  if (typeof init.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
   const send = () => fetch(path, { ...init, headers, credentials: 'same-origin' });
   const response = await send();
   if (!stepUpHandler) return response;

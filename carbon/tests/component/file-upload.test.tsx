@@ -57,7 +57,7 @@ describe('FileUpload', () => {
     expect(presignUrl).toBe('/api/v1/files/presign');
     expect(presignInit.method).toBe('POST');
     expect(presignInit.credentials).toBe('same-origin');
-    expect(presignInit.headers.Authorization).toBeUndefined();
+    expect(new Headers(presignInit.headers).has('Authorization')).toBe(false);
     expect(JSON.parse(presignInit.body)).toEqual({
       kind: 'private',
       contentType: 'application/pdf',

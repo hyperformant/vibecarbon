@@ -39,7 +39,7 @@ describe('Infrastructure fetchServicesStatus (migrated read)', () => {
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe('/api/_internal/services/status');
     expect(init.credentials).toBe('same-origin');
-    expect('Authorization' in (init.headers as Record<string, string>)).toBe(false);
+    expect(new Headers(init.headers as HeadersInit).has('Authorization')).toBe(false);
   });
 });
 

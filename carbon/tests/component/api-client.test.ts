@@ -33,21 +33,56 @@ describe('apiFetch', () => {
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe('/api/v1/thing');
     expect(init.credentials).toBe('same-origin');
-    expect(init.headers).toEqual({ 'X-Custom': 'yes' });
-    expect('Authorization' in init.headers).toBe(false);
+    const headers = new Headers(init.headers);
+    expect(headers.get('X-Custom')).toBe('yes');
+    expect(headers.has('Authorization')).toBe(false);
   });
+
+  const sentHeaders = (call: number) =>
+    Object.fromEntries(new Headers(fetchMock.mock.calls[call][1].headers).entries());
 
   it('marks a string body as JSON (caller headers win)', async () => {
     fetchMock.mockResolvedValue(json({}));
     await apiFetch('/api/v1/w', { method: 'POST', body: '{}' });
-    expect(fetchMock.mock.calls[0][1].headers).toEqual({ 'Content-Type': 'application/json' });
+    expect(sentHeaders(0)).toEqual({ 'content-type': 'application/json' });
 
     await apiFetch('/api/v1/w', {
       method: 'POST',
       body: 'a,b',
       headers: { 'Content-Type': 'text/csv' },
     });
-    expect(fetchMock.mock.calls[1][1].headers).toEqual({ 'Content-Type': 'text/csv' });
+    expect(sentHeaders(1)).toEqual({ 'content-type': 'text/csv' });
+  });
+
+  it('keeps every header of a Headers instance, and its Content-Type (any case)', async () => {
+    fetchMock.mockResolvedValue(json({}));
+    await apiFetch('/api/v1/w', {
+      method: 'POST',
+      body: 'a,b',
+      headers: new Headers({ 'content-type': 'text/csv', 'X-Request-Id': 'r1' }),
+    });
+    expect(sentHeaders(0)).toEqual({ 'content-type': 'text/csv', 'x-request-id': 'r1' });
+
+    await apiFetch('/api/v1/w', {
+      method: 'POST',
+      body: '{}',
+      headers: [['X-Trace', 't1']],
+    });
+    expect(sentHeaders(1)).toEqual({ 'content-type': 'application/json', 'x-trace': 't1' });
+
+    // A lower-case caller header is not doubled up with our default.
+    await apiFetch('/api/v1/w', { method: 'POST', body: 'x', headers: { 'content-type': 'text/plain' } });
+    expect(sentHeaders(2)).toEqual({ 'content-type': 'text/plain' });
+  });
+
+  it('sends the same headers on the step-up retry', async () => {
+    unregister = setStepUpHandler(async () => true);
+    fetchMock
+      .mockResolvedValueOnce(json({ error: 'mfa_required', mfa_enrolled: true }, 403))
+      .mockResolvedValueOnce(json({ ok: true }));
+    await apiFetch('/api/v1/w', { method: 'POST', body: '{}', headers: new Headers({ 'X-A': '1' }) });
+    expect(sentHeaders(1)).toEqual(sentHeaders(0));
+    expect(sentHeaders(1)['x-a']).toBe('1');
   });
 
   it('on 403 mfa_required (enrolled), steps up and retries the request once', async () => {
