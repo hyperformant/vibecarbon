@@ -44,8 +44,11 @@ const KEEP_PER_SESSION = 2;
  * If each mint deleted every sibling, the cookie could end up holding the
  * token the later commit deleted. With the newest two kept, whichever
  * response lands last still names a live token; a third mint drops the
- * oldest. Concurrent mints never delete each other: each one's cleanup only
- * sees rows already committed plus its own.
+ * oldest. Two concurrent mints never delete each other: each one's cleanup
+ * only sees rows already committed plus its own. Three at once can: the
+ * last to commit may carry the oldest created_at (it is the transaction's
+ * start time) and delete its own row, so its cookie names a dead token.
+ * verify-role then bounces once, and the next mint heals it.
  */
 export async function mintForwardAuthToken(sessionId: string): Promise<string> {
   const raw = randomBytes(32).toString('base64url');

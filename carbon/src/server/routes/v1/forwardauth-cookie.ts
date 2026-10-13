@@ -21,7 +21,8 @@ import type { HonoVariables } from '../../types';
  * session token: the parent-domain cookie reaches the admin tools behind
  * ForwardAuth, so what it carries is good for verify-role only, for one
  * hour, and only while the session it was minted from is alive. Minting
- * again replaces the session's previous token. Only super admins ever
+ * again keeps the session's two newest tokens (so overlapping mints both
+ * land on a live one) and drops older ones. Only super admins ever
  * receive it, from an aal2 session while MFA is globally on (the same rule
  * as Better Auth's admin endpoints), and never from an impersonation
  * session. Regular users carry no domain-wide cookie at all. The SPA mints
