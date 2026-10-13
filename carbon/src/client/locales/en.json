@@ -298,7 +298,8 @@
       "description": "You can always change this later.",
       "continueWithFree": "Continue with Free",
       "continueToCheckout": "Continue to Checkout",
-      "dayTrial": "{{days}}-day trial"
+      "dayTrial": "{{days}}-day trial",
+      "error": "Could not finish setting up your account. Try again."
     },
     "invite": {
       "title": "Invite your team",

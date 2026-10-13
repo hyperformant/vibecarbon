@@ -29,11 +29,18 @@ export default function Onboarding() {
   const { user, updateUser } = useAuth();
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
+  const [finishError, setFinishError] = useState('');
 
   async function completeOnboarding() {
-    // The provider re-reads the session, so the App.tsx gate sees the flag
-    // before the dashboard renders.
-    await updateUser({ onboardingCompleted: true });
+    setFinishError('');
+    try {
+      // The provider re-reads the session, so the App.tsx gate sees the flag
+      // before the dashboard renders.
+      await updateUser({ onboardingCompleted: true });
+    } catch {
+      setFinishError(t('onboarding.plan.error'));
+      return;
+    }
     navigate('/dashboard', { replace: true });
   }
 
@@ -74,7 +81,7 @@ export default function Onboarding() {
       <div className="w-full max-w-lg">
         {step === 0 && <ProfileStep defaultName={user?.name || ''} onNext={() => setStep(1)} />}
         {step === 1 && <OrgStep onNext={() => setStep(2)} onSkip={() => setStep(2)} />}
-        {step === 2 && <PlanStep onNext={completeOnboarding} />}
+        {step === 2 && <PlanStep onNext={completeOnboarding} error={finishError} />}
       </div>
     </div>
   );
@@ -191,7 +198,7 @@ function OrgStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void })
   );
 }
 
-function PlanStep({ onNext }: { onNext: () => void }) {
+function PlanStep({ onNext, error }: { onNext: () => void; error: string }) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<PlanId>('free');
 
@@ -249,6 +256,7 @@ function PlanStep({ onNext }: { onNext: () => void }) {
             <ArrowRight className="ml-2 size-4" />
           )}
         </Button>
+        {error && <p className="text-sm text-destructive">{error}</p>}
       </CardContent>
     </Card>
   );

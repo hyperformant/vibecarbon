@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Input } from '../components/ui/input';
 import { useAuthSettings } from '../hooks/api';
 import { authErrorKey } from '../lib/auth-errors';
+import { getSafeRedirect, leavesThisHost, performRedirect } from '../lib/safe-redirect';
 
 type OAuthProvider = 'google' | 'microsoft';
 
@@ -47,56 +48,6 @@ const providerConfig: Record<OAuthProvider, { label: string; icon: React.ReactNo
     ),
   },
 };
-
-/**
- * Validate a redirect URL is safe (not an open redirect).
- * Allows relative paths and absolute URLs to sibling subdomains
- * (e.g., n8n.localhost when the app is on localhost).
- */
-function getSafeRedirect(redirectParam: string | null): string {
-  const fallback = '/dashboard';
-  if (!redirectParam) return fallback;
-
-  // Relative paths: must start with / and not // (protocol-relative)
-  if (redirectParam.startsWith('/') && !redirectParam.startsWith('//')) {
-    return redirectParam;
-  }
-
-  // Absolute URLs: allow ONLY the current host or a subdomain of it. The login
-  // page is served on the app's own origin, so anchoring on
-  // window.location.hostname is exact — this preserves the admin-tool
-  // ForwardAuth flow (login on the apex, redirect back to studio./grafana.
-  // subdomains) while rejecting look-alikes. The previous "last two DNS
-  // labels" heuristic was an OPEN REDIRECT on multi-part public suffixes:
-  // on app.example.co.uk it treated `co.uk` as the base domain, so
-  // `https://evil.co.uk` matched and post-login users could be sent there.
-  try {
-    const url = new URL(redirectParam);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return fallback;
-
-    const host = window.location.hostname;
-    const target = url.hostname;
-    if (target === host || target.endsWith(`.${host}`)) {
-      return redirectParam; // same origin or a subdomain of it
-    }
-  } catch {
-    // Invalid URL
-  }
-
-  return fallback;
-}
-
-/**
- * Navigate to redirect target — uses window.location for absolute URLs
- * (cross-subdomain) and react-router navigate for relative paths.
- */
-function performRedirect(redirect: string, navigate: ReturnType<typeof useNavigate>) {
-  if (redirect.startsWith('http://') || redirect.startsWith('https://')) {
-    window.location.href = redirect;
-  } else {
-    navigate(redirect, { replace: true });
-  }
-}
 
 export default function Login() {
   const { t } = useTranslation();
@@ -142,11 +93,17 @@ export default function Login() {
   // Redirect if already logged in. Await the ForwardAuth-cookie mint first:
   // this effect IS the bounce path when an admin's vc-admin-token expired on
   // a subdomain tool (ForwardAuth 302s here with ?redirect=), so the cookie
-  // must be set before we send the browser back.
+  // must be set before we send the browser back. Minting needs a session
+  // that passed two-factor while MFA is on, so for a subdomain the mint may
+  // ask for a code first. Without the cookie, the subdomain would only send
+  // the browser back here: go to the dashboard instead.
   useEffect(() => {
     if (user) {
       const safeRedirect = getSafeRedirect(searchParams.get('redirect'));
-      syncAdminCookie(isSuperAdmin).finally(() => performRedirect(safeRedirect, navigate));
+      const away = leavesThisHost(safeRedirect);
+      syncAdminCookie(isSuperAdmin, { stepUp: away }).then((minted) =>
+        performRedirect(away && !minted ? '/dashboard' : safeRedirect, navigate)
+      );
     }
   }, [user, isSuperAdmin, navigate, searchParams]);
 

@@ -5,12 +5,7 @@ import { TwoFactorCodeForm } from '../components/auth/TwoFactorCodeForm';
 import { Wordmark } from '../components/Logo';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
-
-/** The intended destination, if it is a same-site path (never an open redirect). */
-function safeRedirect(param: string | null): string {
-  if (param?.startsWith('/') && !param.startsWith('//') && !param.includes(':')) return param;
-  return '/dashboard';
-}
+import { getSafeRedirect, leavesThisHost, performRedirect } from '../lib/safe-redirect';
 
 /**
  * Second step of a password sign-in for an account with two-factor on: the
@@ -26,9 +21,10 @@ export default function MFAVerify() {
   const handleVerify = async (code: string, kind: 'totp' | 'backup') => {
     const user = await mfa.verify(code, kind);
     // A fresh super-admin session needs its ForwardAuth cookie before any
-    // admin subdomain.
-    await syncAdminCookie(user?.role === 'super_admin');
-    navigate(safeRedirect(searchParams.get('redirect')), { replace: true });
+    // admin subdomain (the ForwardAuth bounce reaches here through /login).
+    const minted = await syncAdminCookie(user?.role === 'super_admin');
+    const target = getSafeRedirect(searchParams.get('redirect'));
+    performRedirect(leavesThisHost(target) && !minted ? '/dashboard' : target, navigate);
   };
 
   const handleCancel = async () => {

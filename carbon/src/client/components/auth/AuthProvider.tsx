@@ -11,7 +11,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router';
 import { useMfaRequired } from '../../hooks/api';
-import { type StepUpReason, setStepUpHandler } from '../../lib/api';
+import { apiFetch, type StepUpReason, setStepUpHandler } from '../../lib/api';
 import { type AuthSession, type AuthUser, authClient } from '../../lib/auth-client';
 import { AuthRequestError, unwrap } from '../../lib/auth-errors';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
@@ -21,18 +21,29 @@ import { TwoFactorCodeForm } from './TwoFactorCodeForm';
  * Mint (or refresh) the HttpOnly ForwardAuth cookie (`vc-admin-token`) for a
  * super admin: the only credential /api/_internal/verify-role accepts from a
  * browser. Everyone else carries no domain-wide cookie, so this is a no-op
- * for them. Failures are non-fatal: a ForwardAuth 401 routes back through
- * /login, which re-mints before bouncing.
+ * for them. Resolves true when the cookie was set.
+ *
+ * While MFA is globally on, the server mints it only for a session that
+ * passed two-factor. `stepUp: true` (the /login bounce to an admin
+ * subdomain) asks for a code when needed; the background refresh on every
+ * load does not, so an aal1 admin is never prompted just for opening the
+ * app. Failures are otherwise non-fatal: a ForwardAuth 401 routes back
+ * through /login, which re-mints before bouncing.
  */
-export async function syncAdminCookie(isSuperAdmin: boolean): Promise<void> {
-  if (!isSuperAdmin) return;
+export async function syncAdminCookie(
+  isSuperAdmin: boolean,
+  { stepUp = false }: { stepUp?: boolean } = {}
+): Promise<boolean> {
+  if (!isSuperAdmin) return false;
+  const init: RequestInit = { method: 'POST', credentials: 'same-origin' };
   try {
-    await fetch('/api/v1/admin/forwardauth-cookie', {
-      method: 'POST',
-      credentials: 'same-origin',
-    });
+    const res = stepUp
+      ? await apiFetch('/api/v1/admin/forwardauth-cookie', init)
+      : await fetch('/api/v1/admin/forwardauth-cookie', init);
+    return res.ok;
   } catch {
     // non-fatal: the next sign-in (or the /login bounce) retries
+    return false;
   }
 }
 
@@ -162,6 +173,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (isSuperAdmin && !impersonationTarget) syncAdminCookie(true);
   }, [isSuperAdmin, impersonationTarget]);
 
+  /**
+   * Best-effort local sign-out for the failure paths (a fresh sign-in is
+   * needed, or a restore failed): clear the ForwardAuth cookie, end the
+   * session, forget it here. Never throws.
+   */
+  const endSession = useCallback(async () => {
+    setPendingMfaChallenge(false);
+    await clearAdminCookie();
+    await authClient.signOut().catch(() => undefined);
+    setUser(null);
+    setSession(null);
+  }, []);
+
   const pathRef = useRef(location.pathname);
   pathRef.current = `${location.pathname}${location.search}`;
 
@@ -173,9 +197,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       if (reason === 'reauth') {
         const redirect = encodeURIComponent(pathRef.current);
-        await authClient.signOut().catch(() => undefined);
-        setUser(null);
-        setSession(null);
+        await endSession();
         navigate(`/login?reason=reauth&redirect=${redirect}`);
         return false;
       }
@@ -189,7 +211,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setStepUpOpen(true);
       return promise;
     },
-    [navigate]
+    [navigate, endSession]
   );
 
   const finishStepUp = (ok: boolean) => {
@@ -301,9 +323,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) {
       // Restore failed (session expired, cookie lost): fail closed to a
       // clean sign-out rather than staying in the target's session.
-      await authClient.signOut().catch(() => undefined);
-      setUser(null);
-      setSession(null);
+      await endSession();
       return;
     }
     await refreshSession();

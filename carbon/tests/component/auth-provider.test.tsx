@@ -39,7 +39,7 @@ import MFAVerify from '@/pages/MFAVerify';
 const location = () => screen.getByTestId('location').textContent;
 
 function Probe() {
-  const { user, signOut, impersonateUser, isImpersonating } = useAuth();
+  const { user, signOut, impersonateUser, stopImpersonating, isImpersonating } = useAuth();
   // The API answer's status lands in document.title (outlives re-renders).
   const setStatus = (s: string) => {
     document.title = s;
@@ -62,6 +62,9 @@ function Probe() {
       </button>
       <button type="button" onClick={() => impersonateUser('user-2').catch(() => undefined)}>
         impersonate
+      </button>
+      <button type="button" onClick={() => stopImpersonating()}>
+        stop-impersonating
       </button>
     </div>
   );
@@ -87,6 +90,17 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+/** The ForwardAuth cookie was cleared (DELETE) before the session ended. */
+function expectAdminCookieClearedBeforeSignOut() {
+  const del = fetchMock.mock.calls.findIndex(
+    ([u, init]) => String(u) === '/api/v1/admin/forwardauth-cookie' && init?.method === 'DELETE'
+  );
+  expect(del).toBeGreaterThanOrEqual(0);
+  expect(fetchMock.mock.invocationCallOrder[del]).toBeLessThan(
+    authClient.signOut.mock.invocationCallOrder[0]
+  );
+}
 
 async function submitLogin(email: string, password: string) {
   await userEvent.type(await screen.findByPlaceholderText('auth.emailPlaceholder'), email);
@@ -231,6 +245,98 @@ describe('sign-out', () => {
   });
 });
 
+describe('impersonation restore failure', () => {
+  it('signs out cleanly, ForwardAuth cookie included, when the admin session cannot be restored', async () => {
+    signedIn({ id: 'user-2', email: 'target@example.com' }, { impersonatedBy: 'admin-1' });
+    authClient.admin.stopImpersonating.mockResolvedValueOnce({
+      data: null,
+      error: { status: 500, message: 'Failed to find admin session' },
+    });
+    await renderApp('/probe', routes);
+    await screen.findByText('impersonating:true');
+    signedOut();
+    await userEvent.click(screen.getByRole('button', { name: 'stop-impersonating' }));
+    await waitFor(() => expect(authClient.signOut).toHaveBeenCalled());
+    expectAdminCookieClearedBeforeSignOut();
+    expect(await screen.findByText('user:none')).toBeInTheDocument();
+  });
+});
+
+describe('the ForwardAuth bounce (admin subdomain -> /login?redirect=)', () => {
+  const grafana = 'http://grafana.localhost/d/home';
+  const bounce = `/login?redirect=${encodeURIComponent(grafana)}`;
+  let assigned: string | null;
+  const realLocation = window.location;
+
+  beforeEach(() => {
+    assigned = null;
+    // Capture full-page navigations (jsdom cannot perform them).
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        hostname: 'localhost',
+        get href() {
+          return 'http://localhost/login';
+        },
+        set href(url: string) {
+          assigned = url;
+        },
+      },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
+  });
+
+  it('a super admin gets the cookie, then goes back to the subdomain', async () => {
+    signedIn({ role: 'super_admin' });
+    await renderApp(bounce, routes);
+    await waitFor(() => expect(assigned).toBe(grafana));
+    expect(
+      fetchMock.mock.calls.some(
+        ([u, init]) => String(u) === '/api/v1/admin/forwardauth-cookie' && init?.method === 'POST'
+      )
+    ).toBe(true);
+  });
+
+  it('without the cookie (mint refused) it goes to the dashboard instead of looping', async () => {
+    signedIn({ role: 'super_admin' });
+    fetchMock = stubFetch({
+      '/api/v1/admin/forwardauth-cookie': [
+        new Response(JSON.stringify({ error: 'Super admin access required' }), { status: 403 }),
+      ],
+    });
+    await renderApp(bounce, routes);
+    expect(await screen.findByText('dashboard-page')).toBeInTheDocument();
+    expect(assigned).toBeNull();
+  });
+
+  it('a regular user is never sent to an admin subdomain', async () => {
+    signedIn();
+    await renderApp(bounce, routes);
+    expect(await screen.findByText('dashboard-page')).toBeInTheDocument();
+    expect(assigned).toBeNull();
+  });
+
+  it('survives the two-factor step: MFAVerify sends the super admin back to the subdomain', async () => {
+    authClient.signIn.email.mockResolvedValueOnce({
+      data: { twoFactorRedirect: true, twoFactorMethods: ['totp'] },
+      error: null,
+    });
+    await renderApp(bounce, routes);
+    await submitLogin('admin@example.com', 'correct horse');
+    expect(await screen.findByText('auth.mfa.title')).toBeInTheDocument();
+
+    authClient.twoFactor.verifyTotp.mockImplementationOnce(async () => {
+      signedIn({ role: 'super_admin', twoFactorEnabled: true }, { twoFactorVerified: true });
+      return { data: {}, error: null };
+    });
+    await userEvent.type(screen.getByLabelText('auth.mfa.codeLabel'), '123456');
+    await waitFor(() => expect(assigned).toBe(grafana));
+  });
+});
+
 describe('step-up', () => {
   function queue403(body: object) {
     return new Response(JSON.stringify(body), { status: 403 });
@@ -300,6 +406,7 @@ describe('step-up', () => {
     await userEvent.click(screen.getByRole('button', { name: 'delete-org' }));
     await waitFor(() => expect(location()).toBe('at:/login?reason=reauth&redirect=%2Fprobe'));
     expect(authClient.signOut).toHaveBeenCalled();
+    expectAdminCookieClearedBeforeSignOut();
     expect(await screen.findByText('auth.errors.reauthRequired')).toBeInTheDocument();
   });
 
