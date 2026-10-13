@@ -8,6 +8,7 @@ import * as schema from '../db/schema';
 import { isEmailConfigured } from '../lib/email';
 import { env } from '../lib/env';
 import { allowedOrigins } from '../lib/origins';
+import { secureSocialLink } from './account-linking';
 import { sendAuthEmail } from './email';
 import { lockoutPlugin } from './lockout';
 import { socialProviders } from './providers';
@@ -99,6 +100,29 @@ export const auth = betterAuth({
     autoSignInAfterVerification: true,
     sendVerificationEmail: async ({ user, url }) => {
       await sendAuthEmail('verification', user.email, url);
+    },
+  },
+  account: {
+    accountLinking: {
+      enabled: true,
+      // No provider is trusted by name: a social sign-in links onto an
+      // existing account by email only when the provider says the email is
+      // verified. Local verification is not required (without SMTP nobody
+      // could verify), because secureSocialLink below removes any password
+      // set on an unverified address when such a link happens.
+      trustedProviders: [],
+      requireLocalEmailVerified: false,
+      allowDifferentEmails: false,
+    },
+  },
+  databaseHooks: {
+    account: {
+      create: {
+        // Pre-hijacking defence (auth/account-linking.ts).
+        after: async (created) => {
+          await secureSocialLink(created);
+        },
+      },
     },
   },
   socialProviders: {
