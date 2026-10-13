@@ -78,8 +78,10 @@ fileReadRoutes.get('/*', async (c) => {
     return c.notFound();
   }
 
-  // SECURITY: take the raw path and never decode it. parseObjectKey is a strict
-  // allowlist match, so encoded slashes and dot segments simply fail to parse.
+  // SECURITY: c.req.path is already decodeURI'd by Hono (`%2e%2e` arrives as
+  // `..`; `%2F` stays encoded). The defense is parseObjectKey: a strict anchored
+  // allowlist (kind/userId/uuid.ext), so dot segments, extra slashes and any
+  // leftover `%` simply fail to parse. Never loosen that regex.
   const raw = c.req.path.startsWith(READ_PREFIX) ? c.req.path.slice(READ_PREFIX.length) : '';
   const parsed = parseObjectKey(raw);
   if (!parsed) {
