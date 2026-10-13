@@ -46,7 +46,8 @@ function appWith(membershipRole: string | null) {
   app.use('*', async (c, next) => {
     // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
     c.set('user', { id: 'u1', email: 'u@test.com' } as any);
-    c.set('aal', 'aal2');
+    // biome-ignore lint/suspicious/noExplicitAny: minimal injected session (aal2)
+    c.set('session', { id: 's1', twoFactorVerified: true } as any);
     await next();
   });
   app.route('/api/v1/billing', billingRoutes);

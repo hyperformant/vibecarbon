@@ -43,7 +43,7 @@ function buildApp() {
       id: user.id,
       email: user.email,
       role: user.role,
-      aal: c.get('aal'),
+      aal: c.get('session')?.twoFactorVerified ? 'aal2' : 'aal1',
       serverSeesToken: Boolean(c.get('session')?.token),
     });
   });

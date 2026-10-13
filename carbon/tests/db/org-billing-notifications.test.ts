@@ -73,7 +73,6 @@ describe.skipIf(!dbTestsEnabled)('org, billing, and notification paths on Postgr
     app.use('*', async (c, next) => {
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
       c.set('user', u ? ({ id: u.id, email: u.email, name: 'DB Test', role: 'user' } as any) : null);
-      c.set('aal', u ? aal : null);
       // What the session middleware sets: requireAal2 reads the session row.
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected session
       c.set('session', u ? ({ id: 's1', twoFactorVerified: aal === 'aal2' } as any) : null);

@@ -4,9 +4,9 @@ import type { HonoVariables } from '../types';
 
 /**
  * Resolve the caller's session from the auth cookie and put it on the
- * context: `user`, `session`, and `aal` (the session's assurance level:
- * 'aal2' once this session passed a second factor, else 'aal1'; null when
- * signed out). Routes check `c.get('user')` and return 401 when it is null.
+ * context: `user` and `session` (its assurance level is
+ * `session.twoFactorVerified`, read by middleware/requireAal2.ts). Routes
+ * check `c.get('user')` and return 401 when it is null.
  *
  * Every lookup reads the database, never the signed session-cache cookie.
  * The cache would keep a revoked session, a banned user, a demoted super
@@ -34,7 +34,6 @@ export const sessionMiddleware = createMiddleware<{ Variables: HonoVariables }>(
   if (c.req.path === '/api/health' || c.req.path === '/api/health/ready') {
     c.set('user', null);
     c.set('session', null);
-    c.set('aal', null);
     await next();
     return;
   }
@@ -46,11 +45,9 @@ export const sessionMiddleware = createMiddleware<{ Variables: HonoVariables }>(
   if (data && !isBanned(data.user)) {
     c.set('user', data.user);
     c.set('session', data.session);
-    c.set('aal', data.session.twoFactorVerified ? 'aal2' : 'aal1');
   } else {
     c.set('user', null);
     c.set('session', null);
-    c.set('aal', null);
   }
   await next();
 });

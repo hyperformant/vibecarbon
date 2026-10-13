@@ -10,8 +10,10 @@ import type { AuthSession, AuthUser } from './auth';
 export type HonoVariables = {
   /** The signed-in user, or null. */
   user: AuthUser | null;
-  /** The caller's session row, or null when signed out. */
+  /**
+   * The caller's session row, or null when signed out. Its assurance level
+   * is `session.twoFactorVerified` (true = aal2); gate on it through
+   * middleware/requireAal2.ts.
+   */
   session: AuthSession | null;
-  /** 'aal2' once this session passed a second factor, 'aal1' otherwise, null when signed out. */
-  aal: 'aal1' | 'aal2' | null;
 };

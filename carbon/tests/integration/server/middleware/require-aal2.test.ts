@@ -26,7 +26,6 @@ function seed(c: { set: (k: never, v: never) => void }, user: unknown, aal: Aal)
   const set = c.set as (k: string, v: unknown) => void;
   set('user', user);
   set('session', user ? { id: 'session-1', twoFactorVerified: aal === 'aal2' } : null);
-  set('aal', aal);
 }
 
 // Build a fresh app whose injector middleware seeds user + session BEFORE the
@@ -101,18 +100,6 @@ describe('requireAal2', () => {
       mfa_enrolled: true,
       message: 'Confirm a code from your authenticator app to continue.',
     });
-  });
-
-  it('reads the session row, not the derived aal variable', async () => {
-    enableMfa();
-    const app = new Hono<{ Variables: HonoVariables }>();
-    app.use('*', async (c, next) => {
-      seed(c, aUser, 'aal1');
-      c.set('aal', 'aal2');
-      await next();
-    });
-    app.delete('/gated', requireAal2, (c) => c.json({ ok: true }));
-    expect((await app.request('/gated', { method: 'DELETE' })).status).toBe(403);
   });
 
   it('passes an aal1 session through when MFA is globally disabled (gate inert)', async () => {

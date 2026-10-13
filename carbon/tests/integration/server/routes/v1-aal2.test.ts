@@ -29,7 +29,6 @@ function appWith(aal: 'aal1' | 'aal2', user: unknown = { id: 'u1', email: 'u@tes
   app.use('*', async (c, next) => {
     // biome-ignore lint/suspicious/noExplicitAny: minimal injected context
     c.set('user', user as any);
-    c.set('aal', aal);
     // What the session middleware sets: the gate reads the session row.
     // biome-ignore lint/suspicious/noExplicitAny: minimal injected session
     c.set('session', { id: 's1', twoFactorVerified: aal === 'aal2' } as any);
