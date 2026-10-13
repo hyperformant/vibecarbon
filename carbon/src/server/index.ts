@@ -7,6 +7,7 @@ import { createMiddleware } from 'hono/factory';
 import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
+import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
 import { decodeAalFromJwt } from './lib/jwt';
@@ -75,17 +76,14 @@ app.use(
             ],
             styleSrc: ["'self'", "'unsafe-inline'"],
             imgSrc: ["'self'", 'data:', 'https:'],
-            connectSrc: [
-              "'self'",
-              // Production serves ONE origin: the SPA, the Hono API, and the
-              // Supabase gateway (path-routed to Kong) all live on SITE_URL,
-              // so 'self' + SITE_URL covers every first-party call. Fall back
-              // to SUPABASE_URL for prod-like environments without SITE_URL.
-              env.SITE_URL ?? env.SUPABASE_URL,
-              'https://cloudflareinsights.com',
-              'https://api.github.com',
+            // 'self' + SITE_URL, analytics, and the S3 endpoint origin (the
+            // browser PUTs uploads straight to the presigned URL).
+            connectSrc: buildConnectSrc({
+              siteUrl: env.SITE_URL,
+              supabaseUrl: env.SUPABASE_URL,
+              s3Endpoint: env.S3_ENDPOINT,
               plausibleOrigin,
-            ].filter(Boolean) as string[],
+            }),
             fontSrc: ["'self'", 'data:'],
             objectSrc: ["'none'"],
             frameAncestors: ["'none'"],
