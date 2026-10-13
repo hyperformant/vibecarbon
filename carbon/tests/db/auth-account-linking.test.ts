@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { handleOAuthUserInfo } from 'better-auth/oauth2';
 import type pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
+import { adminDb } from '@server/db/client';
+import { logger } from '@server/lib/logger';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
@@ -107,6 +109,51 @@ describe.skipIf(!dbTestsEnabled)('social sign-in onto an existing email (real da
     expect((await post('/api/auth/sign-in/email', { email, password: PASSWORD })).status).toBe(401);
     // The victim got a fresh session.
     expect(result.data?.session.userId).toBe(result.data?.user.id);
+  });
+
+  it('fails closed: if the cleanup fails, no link, no session, nothing changed', async () => {
+    const email = newEmail();
+    const signup = await post('/api/auth/sign-up/email', { email, password: PASSWORD, name: 'A' });
+    const attackerCookie = cookieOf(signup);
+
+    const boom = Object.assign(new Error('connection lost'), { code: '57P01' });
+    const tx = vi.spyOn(adminDb, 'transaction').mockRejectedValueOnce(boom);
+    const errors = vi.spyOn(logger, 'error');
+    try {
+      const result = await googleSignIn(email, true);
+      expect(result.error).toBeTruthy();
+      expect(result.data).toBeNull();
+      expect(tx).toHaveBeenCalledTimes(1);
+      const logged = errors.mock.calls.find((call) =>
+        String(call[1]).includes('refusing the link'),
+      );
+      expect(logged).toBeDefined();
+      // Logged through dbErrorForLog: the error is there, as a plain object.
+      expect((logged?.[0] as { err: { message?: string } }).err.message).toContain(
+        'connection lost',
+      );
+    } finally {
+      tx.mockRestore();
+      errors.mockRestore();
+    }
+
+    // State unchanged: no google account, the password and session are as
+    // they were, the email still unverified.
+    expect(await accountsOf(email)).toEqual(['credential']);
+    const { rows } = await db.query('select email_verified from public."user" where email = $1', [
+      email,
+    ]);
+    expect(rows[0].email_verified).toBe(false);
+    const still = await auth.api.getSession({
+      headers: new Headers({ cookie: attackerCookie }),
+      query: { disableCookieCache: true },
+    });
+    expect(still?.user.email).toBe(email);
+    const sessions = await db.query(
+      'select count(*)::int as n from public.session s join public."user" u on u.id = s.user_id where u.email = $1',
+      [email],
+    );
+    expect(sessions.rows[0].n).toBe(1);
   });
 
   it('a provider that does not vouch for the email cannot link at all', async () => {

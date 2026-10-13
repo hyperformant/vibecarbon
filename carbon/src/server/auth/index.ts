@@ -118,9 +118,11 @@ export const auth = betterAuth({
   databaseHooks: {
     account: {
       create: {
-        // Pre-hijacking defence (auth/account-linking.ts).
-        after: async (created) => {
-          await secureSocialLink(created);
+        // Pre-hijacking defence (auth/account-linking.ts). A before hook, so
+        // the cleanup commits before the link is written, and a failure
+        // (thrown) stops the link: fail closed.
+        before: async (linking) => {
+          await secureSocialLink(linking);
         },
       },
     },
