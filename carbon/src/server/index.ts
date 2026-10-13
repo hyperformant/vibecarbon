@@ -160,7 +160,7 @@ app.use(
 );
 
 // CSRF origin check on cookie-authenticated mutating requests, every content
-// type (see middleware/csrf.ts; skips /api/auth, /api/webhooks, /api/_internal).
+// type (see middleware/csrf.ts; skips /api/auth, /api/webhooks, /api/_internal/verify-role).
 app.use('/api/*', csrfProtection());
 
 // Auth endpoints (sign-up, sign-in, sign-out, sessions, OAuth callbacks,

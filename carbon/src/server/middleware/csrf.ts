@@ -8,10 +8,13 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
  * - /api/auth/: Better Auth checks the origin of its own endpoints.
  * - /api/webhooks/: providers post cross-site by design; each handler
  *   verifies the payload signature instead.
- * - /api/_internal/: reached through Traefik ForwardAuth and the admin
- *   tools, which relay the tool's own Origin; each route checks the role.
+ * - /api/_internal/verify-role: Traefik ForwardAuth relays the admin tool's
+ *   own Origin, and it reads only the vc-admin-token cookie, never the
+ *   session. Only that route: the rest of /api/_internal/ (services status,
+ *   restart) acts on the session cookie and gets the check like any route.
  */
-const EXEMPT_PREFIXES = ['/api/auth/', '/api/webhooks/', '/api/_internal/'];
+const EXEMPT_PREFIXES = ['/api/auth/', '/api/webhooks/'];
+const EXEMPT_EXACT = '/api/_internal/verify-role';
 
 /**
  * CSRF protection for cookie-authenticated API routes.
@@ -36,6 +39,8 @@ export function csrfProtection() {
     if (
       SAFE_METHODS.has(c.req.method) ||
       EXEMPT_PREFIXES.some((prefix) => path.startsWith(prefix)) ||
+      path === EXEMPT_EXACT ||
+      path.startsWith(`${EXEMPT_EXACT}/`) ||
       !c.req.header('cookie')
     ) {
       await next();

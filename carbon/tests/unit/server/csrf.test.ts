@@ -106,8 +106,18 @@ describe('csrfProtection', () => {
   it.each([
     '/api/auth/sign-out',
     '/api/webhooks/billing',
-    '/api/_internal/services/status/restart',
+    '/api/_internal/verify-role',
   ])('leaves %s to its own checks', async (path) => {
     expect((await send(path, { origin: EVIL })).status).toBe(200);
+  });
+
+  it.each([
+    '/api/_internal/services/status/restart',
+    '/api/_internal/services/status/restart/vibecarbon-db',
+    '/api/_internal/verify-role-lookalike',
+  ])('checks session-cookie mutators under /api/_internal (%s)', async (path) => {
+    expect((await send(path, { origin: EVIL })).status).toBe(403);
+    expect((await send(path, { 'sec-fetch-site': 'same-site' })).status).toBe(403);
+    expect((await send(path, { origin: SAME })).status).toBe(200);
   });
 });
