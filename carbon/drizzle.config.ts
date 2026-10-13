@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { defineConfig } from 'drizzle-kit';
+import { resolveDbPort } from './src/server/db/port';
 
 // drizzle-kit is a schema tool here, not a migration runner. The SQL files in
 // supabase/migrations/ stay the source of truth (`npm run db:migrate` applies
@@ -16,7 +17,7 @@ import { defineConfig } from 'drizzle-kit';
 // file `npm run dev:server` uses.
 if (existsSync('.env.local')) process.loadEnvFile('.env.local');
 
-const offset = Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
+const host = process.env.DB_HOST ?? 'localhost';
 
 export default defineConfig({
   dialect: 'postgresql',
@@ -24,10 +25,10 @@ export default defineConfig({
   out: './drizzle',
   schemaFilter: ['public'],
   dbCredentials: {
-    host: process.env.DB_HOST ?? 'localhost',
-    // Same rule as src/server/lib/env.ts: an explicit DEV_DB_PORT wins, else
-    // the base port shifted by DEV_PORT_OFFSET (how docker-up.js maps it).
-    port: Number(process.env.DEV_DB_PORT || Number(process.env.DB_PORT || 5432) + offset),
+    host,
+    // The server's own rule (src/server/db/port.ts): the dev port shift only
+    // for a localhost host outside production, so the two cannot drift.
+    port: Number(resolveDbPort({ ...process.env, DB_HOST: host }) ?? 5432),
     user: process.env.DB_USER ?? 'postgres',
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME ?? 'postgres',

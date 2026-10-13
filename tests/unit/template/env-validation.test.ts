@@ -31,6 +31,13 @@ const envSchema = z.object({
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
 
+  // Postgres (the API server connects directly; discrete vars, no URL)
+  DB_HOST: z.string().min(1),
+  DB_PORT: z.coerce.number().int().positive().default(5432),
+  DB_USER: z.string().min(1).default('postgres'),
+  DB_PASSWORD: z.string().min(1),
+  DB_NAME: z.string().min(1).default('postgres'),
+
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),
@@ -82,6 +89,8 @@ const validEnv = {
   SUPABASE_URL: 'http://localhost:8000',
   SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiJ9.test-anon-key',
   SUPABASE_SERVICE_ROLE_KEY: 'eyJhbGciOiJIUzI1NiJ9.test-service-role',
+  DB_HOST: 'localhost',
+  DB_PASSWORD: 'local-postgres-password',
 };
 
 describe('Environment variable validation', () => {
@@ -117,6 +126,40 @@ describe('Environment variable validation', () => {
       const { SUPABASE_SERVICE_ROLE_KEY, ...env } = validEnv;
       const result = envSchema.safeParse(env);
       expect(result.success).toBe(false);
+    });
+  });
+
+  describe('database variables', () => {
+    it('fails when DB_HOST is missing', () => {
+      const { DB_HOST, ...env } = validEnv;
+      expect(envSchema.safeParse(env).success).toBe(false);
+    });
+
+    it('fails when DB_PASSWORD is missing or empty', () => {
+      const { DB_PASSWORD, ...env } = validEnv;
+      expect(envSchema.safeParse(env).success).toBe(false);
+      expect(envSchema.safeParse({ ...validEnv, DB_PASSWORD: '' }).success).toBe(false);
+    });
+
+    it('defaults DB_PORT to 5432, DB_USER and DB_NAME to postgres', () => {
+      const result = envSchema.safeParse(validEnv);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.DB_PORT).toBe(5432);
+        expect(result.data.DB_USER).toBe('postgres');
+        expect(result.data.DB_NAME).toBe('postgres');
+      }
+    });
+
+    it('coerces DB_PORT and rejects a non-positive one', () => {
+      const ok = envSchema.safeParse({ ...validEnv, DB_PORT: '6543' });
+      expect(ok.success && ok.data.DB_PORT).toBe(6543);
+      expect(envSchema.safeParse({ ...validEnv, DB_PORT: '0' }).success).toBe(false);
+    });
+
+    it('keeps a password with URL-special characters verbatim (no URL to encode)', () => {
+      const result = envSchema.safeParse({ ...validEnv, DB_PASSWORD: 'p@ss:w/rd#?' });
+      expect(result.success && result.data.DB_PASSWORD).toBe('p@ss:w/rd#?');
     });
   });
 
@@ -343,6 +386,16 @@ describe('Environment variable validation', () => {
       // (A bare z.coerce.boolean() reference survives only in the explanatory
       // comment, so match the field-assignment form specifically.)
       expect(src).not.toMatch(/_ENABLED: z\.coerce\.boolean/);
+    });
+
+    it('declares the DB_* vars exactly as this mirror does', () => {
+      expect(src).toContain('DB_HOST: z.string().min(1),');
+      expect(src).toContain('DB_PORT: z.coerce.number().int().positive().default(5432),');
+      expect(src).toContain("DB_USER: z.string().min(1).default('postgres'),");
+      expect(src).toContain('DB_PASSWORD: z.string().min(1),');
+      expect(src).toContain("DB_NAME: z.string().min(1).default('postgres'),");
+      // Never a connection URL: a password would need URL-encoding.
+      expect(src).not.toMatch(/DATABASE_URL/);
     });
 
     it('has no yearly Stripe price env vars', () => {

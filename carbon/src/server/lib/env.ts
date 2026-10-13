@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolveDbPort } from '../db/port';
 
 /**
  * Parse a boolean env var strictly: only the literal string "true" is true.
@@ -125,16 +126,12 @@ if (process.env.NODE_ENV !== 'production' && portOffset !== 0) {
   }
 }
 
-// Same idea for the local database: .env carries the base DB_PORT and the
-// dev db container is published the way docker-up.js maps it, an explicit
-// DEV_DB_PORT, else 5432 + DEV_PORT_OFFSET. Only for a localhost DB_HOST:
-// a deployed app reaches the db by service name on its real port.
-if (process.env.NODE_ENV !== 'production') {
-  const host = process.env.DB_HOST;
-  if (host === 'localhost' || host === '127.0.0.1') {
-    const base = Number.parseInt(process.env.DB_PORT || '5432', 10);
-    process.env.DB_PORT = process.env.DEV_DB_PORT || String(base + portOffset);
-  }
+// Same idea for the local database (one rule, shared with drizzle.config.ts):
+// a localhost DB_HOST outside production dials DEV_DB_PORT, else the base
+// DB_PORT + DEV_PORT_OFFSET, the way docker-up.js publishes the dev db.
+{
+  const dbPort = resolveDbPort(process.env);
+  if (dbPort !== undefined) process.env.DB_PORT = dbPort;
 }
 
 // Treat empty-string env vars as unset before validating. Docker Compose
