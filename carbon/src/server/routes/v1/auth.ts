@@ -1,12 +1,12 @@
 import { inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { magicLinkAvailable } from '../../auth/email';
 import { socialProviders } from '../../auth/providers';
 import { adminDb } from '../../db/client';
 import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
 import { isoTimestamp } from '../../db/values';
-import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
@@ -159,7 +159,7 @@ authRoutes.get('/settings', async (c) => {
           google: socialProviders.google,
           microsoft: socialProviders.microsoft,
         },
-        magicLinkEnabled: env.MAGIC_LINK_ENABLED,
+        magicLinkEnabled: magicLinkAvailable(),
       },
     });
   } catch (error) {
@@ -174,7 +174,7 @@ authRoutes.get('/settings', async (c) => {
           google: socialProviders.google,
           microsoft: socialProviders.microsoft,
         },
-        magicLinkEnabled: env.MAGIC_LINK_ENABLED,
+        magicLinkEnabled: magicLinkAvailable(),
       },
     });
   }

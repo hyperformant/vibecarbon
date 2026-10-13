@@ -37,6 +37,8 @@ vi.mock('@server/auth/email', () => ({
   sendAuthEmail: async (kind: string, to: string, url: string) => {
     sentEmails.push({ kind, to, url });
   },
+  // Sign-in links can be sent (as with SMTP configured).
+  magicLinkAvailable: () => true,
 }));
 
 function buildApp() {

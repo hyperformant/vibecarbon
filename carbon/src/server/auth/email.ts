@@ -8,14 +8,25 @@ import { logger } from '../lib/logger';
  * SMTP mailer.
  *
  * Without SMTP the auth instance does not require email verification, and
- * these log a warning instead of sending, so sign-up and sign-in still work
- * in a fresh project. In development the warning includes the link, since
- * nothing else can deliver it; elsewhere it never does (the link is a
- * one-time credential).
+ * these log a warning instead of sending, so password sign-up and sign-in
+ * still work in a fresh project. Magic link is the exception: the link IS
+ * the sign-in, so without SMTP it is switched off (`magicLinkAvailable`).
+ * In development the warning includes the link, since nothing else can
+ * deliver it; elsewhere it never does (the link is a one-time credential).
  *
  * A send failure is logged, never thrown: the endpoints answer the same
  * whether or not an account exists, and an SMTP error must not change that.
  */
+
+/**
+ * Whether sign-in links can be offered: MAGIC_LINK_ENABLED and an SMTP
+ * server to deliver them. The public settings (routes/v1/auth.ts) show the
+ * option only then, and the send endpoint refuses otherwise
+ * (auth/index.ts), so nobody waits for an email that never comes.
+ */
+export function magicLinkAvailable(): boolean {
+  return env.MAGIC_LINK_ENABLED && isEmailConfigured();
+}
 
 type AuthEmailKind = 'verification' | 'password reset' | 'magic link';
 

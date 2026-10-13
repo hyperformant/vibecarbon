@@ -16,9 +16,10 @@ vi.mock('@server/lib/email', () => ({
   sendEmail: mail.send,
 }));
 vi.mock('@server/lib/logger', () => ({ logger: log }));
-vi.mock('@server/lib/env', () => ({ env: { NODE_ENV: 'production' } }));
+const envMock = vi.hoisted(() => ({ NODE_ENV: 'production', MAGIC_LINK_ENABLED: true }));
+vi.mock('@server/lib/env', () => ({ env: envMock }));
 
-const { sendAuthEmail } = await import('@server/auth/email');
+const { magicLinkAvailable, sendAuthEmail } = await import('@server/auth/email');
 const { magicLinkEmail, resetPasswordEmail, verifyEmailEmail } = await import(
   '@server/emails/templates'
 );
@@ -26,6 +27,19 @@ const { magicLinkEmail, resetPasswordEmail, verifyEmailEmail } = await import(
 afterEach(() => {
   vi.clearAllMocks();
   mail.configured = false;
+  envMock.MAGIC_LINK_ENABLED = true;
+});
+
+describe('magicLinkAvailable', () => {
+  it('is on only when MAGIC_LINK_ENABLED and SMTP can deliver the link', () => {
+    mail.configured = true;
+    expect(magicLinkAvailable()).toBe(true);
+    mail.configured = false;
+    expect(magicLinkAvailable()).toBe(false);
+    mail.configured = true;
+    envMock.MAGIC_LINK_ENABLED = false;
+    expect(magicLinkAvailable()).toBe(false);
+  });
 });
 
 describe('auth email templates', () => {

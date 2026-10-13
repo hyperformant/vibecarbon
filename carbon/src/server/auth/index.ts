@@ -1,5 +1,6 @@
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
+import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { admin, magicLink, twoFactor } from 'better-auth/plugins';
 import { createAccessControl } from 'better-auth/plugins/access';
 import { adminAc, defaultStatements, userAc } from 'better-auth/plugins/admin/access';
@@ -15,7 +16,7 @@ import {
   sweepUnprovenSecondFactor,
 } from './account-linking';
 import { sessionAssurance } from './assurance';
-import { sendAuthEmail } from './email';
+import { magicLinkAvailable, sendAuthEmail } from './email';
 import { capImpersonationExpiry, impersonationGuard } from './impersonation';
 import { lockoutPlugin } from './lockout';
 import { socialProviders } from './providers';
@@ -223,6 +224,21 @@ export const auth = betterAuth({
     '/two-factor/verify-otp',
     ...(env.MAGIC_LINK_ENABLED ? [] : ['/sign-in/magic-link', '/magic-link/verify']),
   ],
+  // Runs before every endpoint (and before the plugins' own hooks). A
+  // sign-in link with no SMTP to deliver it would leave the user waiting
+  // for an email that never comes, so the send is refused with a code the
+  // client can show; the settings route stops offering it too.
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path === '/sign-in/magic-link' && !magicLinkAvailable()) {
+        throw new APIError('BAD_REQUEST', {
+          code: 'MAGIC_LINK_UNAVAILABLE',
+          message:
+            'Sign-in links need email, and this app has no email server set up. Sign in with your password instead.',
+        });
+      }
+    }),
+  },
   // ORDER MATTERS. After hooks run in this order, and each later plugin sees
   // what the earlier ones returned:
   //   admin, magicLink, twoFactor, sessionAssurance, impersonationGuard,

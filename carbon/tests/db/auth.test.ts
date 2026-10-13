@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import type pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
 import { adminStatusAfter } from '@server/auth/admin-status';
 import {
@@ -15,6 +15,7 @@ import { isSuperAdmin } from '@server/lib/auth';
 import { logger } from '@server/lib/logger';
 import { csrfProtection } from '@server/middleware/csrf';
 import { sessionMiddleware } from '@server/middleware/session';
+import { authRoutes } from '@server/routes/v1/auth';
 import type { HonoVariables } from '@server/types';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
 
@@ -32,10 +33,14 @@ const PASSWORD = 'correct-horse-battery';
 
 // Capture auth emails instead of sending (or logging) them.
 const sentEmails = vi.hoisted(() => [] as { kind: string; to: string; url: string }[]);
+// Whether sign-in links can be emailed (MAGIC_LINK_ENABLED and SMTP); on by
+// default here so the magic-link flows run, switched off per test.
+const magicLink = vi.hoisted(() => ({ available: true }));
 vi.mock('@server/auth/email', () => ({
   sendAuthEmail: async (kind: string, to: string, url: string) => {
     sentEmails.push({ kind, to, url });
   },
+  magicLinkAvailable: () => magicLink.available,
 }));
 
 function buildApp() {
@@ -59,6 +64,7 @@ function buildApp() {
     return c.json({ ok: true });
   });
   app.post('/api/webhooks/test', (c) => c.json({ received: true }));
+  app.route('/api/v1/auth', authRoutes);
   app.get('/api/v1/admin/ping', (c) => {
     const user = c.get('user');
     if (!user) return c.json({ error: 'Unauthorized' }, 401);
@@ -596,6 +602,40 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       // update-user is not served over HTTP at all (auth/index.ts disabledPaths).
       expect(update.status).toBe(404);
       expect((await roleOf(target)).role).toBe('user');
+    });
+  });
+
+  describe('magic link without a way to email it', () => {
+    afterEach(() => {
+      magicLink.available = true;
+    });
+
+    it('the public settings advertise magic link only when it can be sent', async () => {
+      const enabled = async () =>
+        ((await (await app.request('/api/v1/auth/settings')).json()) as {
+          settings: { magicLinkEnabled: boolean };
+        }).settings.magicLinkEnabled;
+      expect(await enabled()).toBe(true);
+      magicLink.available = false;
+      expect(await enabled()).toBe(false);
+    });
+
+    it('the send endpoint refuses with a clear code, and nothing is stored or sent', async () => {
+      const email = newEmail();
+      await signUp(email);
+      sentEmails.length = 0;
+      magicLink.available = false;
+      const res = await post('/api/auth/sign-in/magic-link', { email });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; message: string };
+      expect(body.code).toBe('MAGIC_LINK_UNAVAILABLE');
+      expect(body.message).toMatch(/email/i);
+      expect(sentEmails).toHaveLength(0);
+      const { rows } = await db.query(
+        `select 1 from public.verification where identifier like 'magic-link:%' and value like $1`,
+        [`%${email}%`],
+      );
+      expect(rows).toHaveLength(0);
     });
   });
 

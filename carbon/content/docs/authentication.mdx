@@ -70,7 +70,7 @@ The `signIn.email()` method returns `{ requiresMfa: boolean }`. When `true`, the
 
 ### Magic Links
 
-Users receive a sign-in link via email; no password required. Requires SMTP to be configured.
+Users receive a sign-in link via email; no password required. It needs SMTP and `MAGIC_LINK_ENABLED` (on by default). Without SMTP the sign-in page hides the option, and the send endpoint answers 400 `MAGIC_LINK_UNAVAILABLE`, so nobody waits for an email that never comes.
 
 ```typescript
 const { signIn } = useAuth();

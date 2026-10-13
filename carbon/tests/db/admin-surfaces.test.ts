@@ -31,7 +31,10 @@ const ORIGIN = 'http://app.test'; // SITE_URL in tests/_helpers/setup-db.ts
 const PASSWORD = 'correct-horse-battery';
 const SESSION_COOKIE = 'better-auth.session_token';
 
-vi.mock('@server/auth/email', () => ({ sendAuthEmail: async () => undefined }));
+vi.mock('@server/auth/email', () => ({
+  sendAuthEmail: async () => undefined,
+  magicLinkAvailable: () => false,
+}));
 vi.mock('@server/lib/email', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@server/lib/email')>()),
   sendEmail: async () => ({}),
