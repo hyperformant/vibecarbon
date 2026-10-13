@@ -146,6 +146,7 @@ vibecarbon up
 Auto-detects the project's package manager and runs the `dev:start` script,
 which boots Docker services (PostgreSQL, Supabase, Traefik), runs database
 migrations, and starts the Hono API and Vite dev servers. If ports are already
+in use, a port offset is applied automatically.
 
 On first run, `up` pins the stack name in your project's `.env` as
 `COMPOSE_PROJECT_NAME`. That name ties your containers and database volumes to
