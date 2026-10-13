@@ -79,7 +79,6 @@ export default function Profile() {
           <CardContent className="space-y-6">
             {user && (
               <AvatarUpload
-                userId={user.id}
                 currentUrl={user.user_metadata?.avatar_url}
                 onUpload={handleAvatarUpload}
               />

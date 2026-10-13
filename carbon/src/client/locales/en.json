@@ -120,6 +120,19 @@
     "superAdminCannotDelete": "Super admin accounts cannot be deleted. Remove the super_admin role first, then try again.",
     "saved": "Profile saved"
   },
+  "upload": {
+    "dragOr": "Drag & drop or",
+    "browse": "browse",
+    "maxSize": "Max {{size}}MB",
+    "tooLarge": "File too large. Max size: {{size}}MB",
+    "notConfigured": "File uploads are not configured on this server.",
+    "typeNotAllowed": "This file type is not allowed.",
+    "tooManyRequests": "Too many uploads. Please wait a moment and try again.",
+    "failed": "Upload failed. Please try again.",
+    "changeAvatar": "Change avatar",
+    "avatarAlt": "Avatar",
+    "avatarHint": "JPG, PNG, GIF or WebP. Max 2MB."
+  },
   "billing": {
     "title": "Billing",
     "description": "Subscription and payment settings",

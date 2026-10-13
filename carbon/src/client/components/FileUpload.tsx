@@ -1,76 +1,117 @@
 import { IconLoader2 as Loader2, IconUpload as Upload, IconX as X } from '@tabler/icons-react';
+import type { TFunction } from 'i18next';
 import { useCallback, useRef, useState } from 'react';
-import { supabase } from '@/lib/supabase';
+import { useTranslation } from 'react-i18next';
+import { apiFetch } from '@/lib/api';
+import { resizeImage } from '@/lib/image-resize';
 import { cn } from '@/lib/utils';
 import { Button } from './ui/button';
 
 interface FileUploadProps {
-  bucket: string;
-  path: string;
+  /** 'avatar' is public-read through the app; 'private' is owner-only. */
+  kind: 'avatar' | 'private';
   accept?: string;
   maxSize?: number;
   onUpload: (url: string) => void;
   onError?: (error: string) => void;
+  /** Optional transform (e.g. resize) applied before presigning the exact bytes to PUT. */
+  prepare?: (file: File) => Promise<Blob>;
   className?: string;
   children?: React.ReactNode;
 }
 
+interface PresignResponse {
+  url: string;
+  headers: Record<string, string>;
+  fileUrl: string;
+}
+
+async function presignErrorMessage(res: Response, maxSize: number, t: TFunction): Promise<string> {
+  if (res.status === 503) return t('upload.notConfigured');
+  if (res.status === 429) return t('upload.tooManyRequests');
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (data.error === 'type_not_allowed') return t('upload.typeNotAllowed');
+  if (data.error === 'size_not_allowed') {
+    return t('upload.tooLarge', { size: Math.round(maxSize / 1024 / 1024) });
+  }
+  return t('upload.failed');
+}
+
 /**
- * Drag-and-drop file upload component using Supabase Storage.
+ * Drag-and-drop file upload component using signed URLs.
+ *
+ * The browser asks the API for a presigned PUT URL, uploads the bytes straight
+ * to object storage, then reports the app-relative `fileUrl` (`/api/files/...`),
+ * which works as an `<img src>` because the server redirects to a signed read.
+ * The server owns the object key; callers never choose a path.
  *
  * Usage:
  *   <FileUpload
- *     bucket="avatars"
- *     path={`${userId}/avatar`}
- *     accept="image/*"
- *     maxSize={2 * 1024 * 1024}
- *     onUpload={(url) => setAvatarUrl(url)}
+ *     kind="private"
+ *     accept="application/pdf"
+ *     maxSize={10 * 1024 * 1024}
+ *     onUpload={(fileUrl) => save(fileUrl)}
  *   />
  */
 export function FileUpload({
-  bucket,
-  path,
+  kind,
   accept,
   maxSize = 10 * 1024 * 1024,
   onUpload,
   onError,
+  prepare,
   className,
   children,
 }: FileUploadProps) {
+  const { t } = useTranslation();
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const upload = useCallback(
     async (file: File) => {
-      if (file.size > maxSize) {
-        onError?.(`File too large. Max size: ${Math.round(maxSize / 1024 / 1024)}MB`);
-        return;
-      }
-
       setUploading(true);
       try {
-        const ext = file.name.split('.').pop();
-        const filePath = ext ? `${path}.${ext}` : path;
+        const body: Blob = prepare ? await prepare(file) : file;
+        if (body.size > maxSize) {
+          onError?.(t('upload.tooLarge', { size: Math.round(maxSize / 1024 / 1024) }));
+          return;
+        }
 
-        const { error } = await supabase.storage.from(bucket).upload(filePath, file, {
-          upsert: true,
+        // Presign with the size of the exact Blob we will PUT; Content-Length is signed.
+        const presign = await apiFetch('/api/v1/files/presign', {
+          method: 'POST',
+          body: JSON.stringify({
+            kind,
+            contentType: body.type || file.type,
+            size: body.size,
+          }),
         });
+        if (!presign.ok) {
+          onError?.(await presignErrorMessage(presign, maxSize, t));
+          return;
+        }
+        const { url, headers, fileUrl } = (await presign.json()) as PresignResponse;
 
-        if (error) throw error;
+        // Browsers forbid setting Content-Length; fetch derives it from the Blob body.
+        const putHeaders: Record<string, string> = {};
+        for (const [name, value] of Object.entries(headers)) {
+          if (name.toLowerCase() !== 'content-length') putHeaders[name] = value;
+        }
+        const put = await fetch(url, { method: 'PUT', headers: putHeaders, body });
+        if (!put.ok) {
+          onError?.(t('upload.failed'));
+          return;
+        }
 
-        const {
-          data: { publicUrl },
-        } = supabase.storage.from(bucket).getPublicUrl(filePath);
-
-        onUpload(publicUrl);
-      } catch (err) {
-        onError?.(err instanceof Error ? err.message : 'Upload failed');
+        onUpload(fileUrl);
+      } catch {
+        onError?.(t('upload.failed'));
       } finally {
         setUploading(false);
       }
     },
-    [bucket, path, maxSize, onUpload, onError]
+    [kind, maxSize, prepare, onUpload, onError, t]
   );
 
   function handleDrop(e: React.DragEvent) {
@@ -133,10 +174,11 @@ export function FileUpload({
         <>
           <Upload className="mb-2 size-8 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">
-            Drag & drop or <span className="text-primary underline">browse</span>
+            {t('upload.dragOr')}{' '}
+            <span className="text-primary underline">{t('upload.browse')}</span>
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Max {Math.round(maxSize / 1024 / 1024)}MB
+            {t('upload.maxSize', { size: Math.round(maxSize / 1024 / 1024) })}
           </p>
         </>
       )}
@@ -144,20 +186,23 @@ export function FileUpload({
   );
 }
 
+const AVATAR_MAX_EDGE = 256;
+const resizeAvatar = (file: File) => resizeImage(file, AVATAR_MAX_EDGE, 'image/webp');
+
 /**
- * Avatar upload component with preview.
+ * Avatar upload component with preview. Resizes to a 256px WebP in the browser
+ * before uploading (GIFs are sent as-is to keep animation).
  */
 export function AvatarUpload({
-  userId,
   currentUrl,
   onUpload,
   size = 'lg',
 }: {
-  userId: string;
   currentUrl?: string | null;
   onUpload: (url: string) => void;
   size?: 'sm' | 'lg';
 }) {
+  const { t } = useTranslation();
   const [url, setUrl] = useState(currentUrl || '');
   const [error, setError] = useState('');
 
@@ -178,22 +223,22 @@ export function AvatarUpload({
         )}
       >
         {url ? (
-          <img src={url} alt="Avatar" className="size-full object-cover" />
+          <img src={url} alt={t('upload.avatarAlt')} className="size-full object-cover" />
         ) : (
           <span className="text-2xl text-muted-foreground">?</span>
         )}
       </div>
       <div className="space-y-1">
         <FileUpload
-          bucket="avatars"
-          path={`${userId}/avatar`}
+          kind="avatar"
+          prepare={resizeAvatar}
           accept="image/jpeg,image/png,image/gif,image/webp"
           maxSize={2 * 1024 * 1024}
           onUpload={handleUpload}
           onError={setError}
         >
           <Button type="button" variant="outline" size="sm">
-            Change avatar
+            {t('upload.changeAvatar')}
           </Button>
         </FileUpload>
         {error ? (
@@ -202,7 +247,7 @@ export function AvatarUpload({
             {error}
           </p>
         ) : (
-          <p className="text-xs text-muted-foreground">JPG, PNG or GIF. Max 2MB.</p>
+          <p className="text-xs text-muted-foreground">{t('upload.avatarHint')}</p>
         )}
       </div>
     </div>
