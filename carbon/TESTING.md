@@ -49,6 +49,8 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml \
   -f docker-compose.dev-init.yml down -v
 ```
 
+The tier also runs the server's own DB module (`src/server/db/client.ts`) against that database: `tests/_helpers/setup-db.ts` copies the `TEST_DB_*` values into the `DB_*` vars the server reads, so a suite can import `adminDb` and `withUserDb` directly. `with-user-db.test.ts` proves the wrapper rolls back and releases its connection on error and leaks no role or user id to the next pooled query; `schema-drift.test.ts` fails when `src/server/db/schema.ts` and the migrated tables disagree.
+
 `tests/db/_helpers.ts` has the pieces a new suite needs: `connectTestDb()`, `asUser(client, userId | null, fn)` (runs `fn` as `app_user` and always rolls back), `createTestUser`, `createOrgWithOwner`, `addMembership`, and `cleanupTestData`.
 
 ## Where to put a new test

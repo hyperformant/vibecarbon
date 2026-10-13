@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
+import { pingDb } from '../db/client';
 import { logger } from '../lib/logger';
-import { supabaseAdmin } from '../lib/supabase';
 import type { HonoVariables } from '../types';
 
 const healthRoutes = new Hono<{ Variables: HonoVariables }>();
@@ -14,16 +14,11 @@ healthRoutes.get('/', (c) => {
   });
 });
 
-// Readiness probe: returns 200 only when the app can serve traffic
-// (i.e., database/Supabase is reachable).
+// Readiness probe: returns 200 only when the app can serve traffic, i.e.
+// Postgres answers. pingDb never throws; while the db is unreachable (still
+// starting, restarting) this is a 503 and the server itself keeps running.
 healthRoutes.get('/ready', async (c) => {
-  try {
-    const { error } = await supabaseAdmin.from('organizations').select('id').limit(0);
-
-    if (error) {
-      throw error;
-    }
-
+  if (await pingDb()) {
     return c.json({
       status: 'ready',
       timestamp: new Date().toISOString(),
@@ -32,17 +27,16 @@ healthRoutes.get('/ready', async (c) => {
         supabase: 'connected',
       },
     });
-  } catch (error) {
-    logger.error({ error }, 'Readiness check failed');
-
-    return c.json(
-      {
-        status: 'not_ready',
-        timestamp: new Date().toISOString(),
-      },
-      503
-    );
   }
+
+  logger.error('Readiness check failed: database unreachable');
+  return c.json(
+    {
+      status: 'not_ready',
+      timestamp: new Date().toISOString(),
+    },
+    503
+  );
 });
 
 export { healthRoutes };

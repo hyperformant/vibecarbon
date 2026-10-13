@@ -55,6 +55,12 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
       notificationIds.push(rows[0].id);
     }
 
+    // One dismissal, owned by A: the per-user dismissal policy has a row to hide.
+    await db.query(
+      'insert into public.notification_dismissals (notification_id, user_id) values ($1, $2)',
+      [notificationIds[0], userA.id],
+    );
+
     await db.query("insert into public.app_settings (key, value) values ($1, '{}'::jsonb)", [
       privateSettingKey,
     ]);
@@ -137,6 +143,20 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
       expect(await membershipOrgIds(c)).toEqual([]);
       expect((await c.query('select 1 from public.customers')).rowCount).toBe(0);
       expect((await c.query('select 1 from public.notification_dismissals')).rowCount).toBe(0);
+    });
+  });
+
+  it("notification dismissals are per user: A sees A's dismissal, B and anonymous see none", async () => {
+    const dismissals = (c: pg.Client) =>
+      c.query<{ user_id: string }>('select user_id from public.notification_dismissals');
+    await asUser(db, userA.id, async (c) => {
+      expect((await dismissals(c)).rows.map((r) => r.user_id)).toEqual([userA.id]);
+    });
+    await asUser(db, userB.id, async (c) => {
+      expect((await dismissals(c)).rowCount).toBe(0);
+    });
+    await asUser(db, null, async (c) => {
+      expect((await dismissals(c)).rowCount).toBe(0);
     });
   });
 

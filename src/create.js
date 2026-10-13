@@ -1590,8 +1590,14 @@ ${formatDotenvLine('SUPABASE_SERVICE_ROLE_KEY', variables.SERVICE_ROLE_KEY)}
 # JWT Secret (for token generation)
 ${formatDotenvLine('JWT_SECRET', variables.JWT_SECRET)}
 
-# Database
+# Database. The API server connects with the DB_* vars. Local values: the dev
+# db container on localhost (DB_PORT is the base port; DEV_DB_PORT or
+# DEV_PORT_OFFSET is applied at runtime). Deploys override DB_HOST.
+${formatDotenvLine('DB_HOST', 'localhost')}
+${formatDotenvLine('DB_PORT', '5432')}
+${formatDotenvLine('DB_USER', 'postgres')}
 ${formatDotenvLine('DB_PASSWORD', variables.DB_PASSWORD)}
+${formatDotenvLine('DB_NAME', 'postgres')}
 ${formatDotenvLine('POSTGRES_PASSWORD', variables.DB_PASSWORD)}
 
 # Encryption Keys

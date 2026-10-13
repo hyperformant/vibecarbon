@@ -81,6 +81,7 @@ export default defineConfig({
           // the start-up steps. Files share one database, so run serially.
           environment: 'node',
           include: ['tests/db/**/*.test.ts'],
+          setupFiles: ['tests/_helpers/setup-db.ts'],
           fileParallelism: false,
           testTimeout: 15_000,
           hookTimeout: 30_000,

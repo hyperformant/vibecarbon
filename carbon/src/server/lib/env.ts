@@ -15,6 +15,15 @@ const envSchema = z.object({
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
 
+  // Postgres. Discrete vars, never a URL, so a password needs no URL-encoding.
+  // DB_USER must be able to bypass RLS (checked at startup, see db/startup.ts)
+  // and be a member of app_user (withUserDb switches to it per transaction).
+  DB_HOST: z.string().min(1),
+  DB_PORT: z.coerce.number().int().positive().default(5432),
+  DB_USER: z.string().min(1).default('postgres'),
+  DB_PASSWORD: z.string().min(1),
+  DB_NAME: z.string().min(1).default('postgres'),
+
   // Public site URL — used in CSP connectSrc so the client can reach Supabase
   // via the public domain (Traefik → Kong). Defaults to empty string in dev
   // (CSP is disabled in development).
@@ -113,6 +122,18 @@ if (process.env.NODE_ENV !== 'production' && portOffset !== 0) {
     } catch {
       // Leave invalid URLs for Zod to catch
     }
+  }
+}
+
+// Same idea for the local database: .env carries the base DB_PORT and the
+// dev db container is published the way docker-up.js maps it, an explicit
+// DEV_DB_PORT, else 5432 + DEV_PORT_OFFSET. Only for a localhost DB_HOST:
+// a deployed app reaches the db by service name on its real port.
+if (process.env.NODE_ENV !== 'production') {
+  const host = process.env.DB_HOST;
+  if (host === 'localhost' || host === '127.0.0.1') {
+    const base = Number.parseInt(process.env.DB_PORT || '5432', 10);
+    process.env.DB_PORT = process.env.DEV_DB_PORT || String(base + portOffset);
   }
 }
 

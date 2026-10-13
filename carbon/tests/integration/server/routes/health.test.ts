@@ -1,15 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mountRoute } from '../../../_helpers/app';
 
-// supabaseAdmin is invoked only by the readiness check. We give it a
-// chainable shape so .from(...).select(...).limit(...) resolves to a
-// controllable result; the test overrides the resolved value per case.
-const limitMock = vi.fn();
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({ select: () => ({ limit: limitMock }) }),
-  },
-}));
+// The readiness check asks the DB module whether Postgres answers. pingDb
+// never throws (an unreachable db is `false`), so each case sets its result.
+const { pingDb } = vi.hoisted(() => ({ pingDb: vi.fn<() => Promise<boolean>>() }));
+vi.mock('@server/db/client', () => ({ pingDb }));
 
 // Quiet the route's error log on the failure path — it's expected.
 vi.mock('@server/lib/logger', () => ({
@@ -32,8 +27,8 @@ describe('GET /api/health', () => {
 });
 
 describe('GET /api/health/ready', () => {
-  it('returns 200 when Supabase responds without error', async () => {
-    limitMock.mockResolvedValueOnce({ data: [], error: null });
+  it('returns 200 when the database answers', async () => {
+    pingDb.mockResolvedValueOnce(true);
     const res = await app.request('/api/health/ready');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -45,17 +40,21 @@ describe('GET /api/health/ready', () => {
     expect(body.services.supabase).toBe('connected');
   });
 
-  it('returns 503 when Supabase responds with an error', async () => {
-    limitMock.mockResolvedValueOnce({ data: null, error: new Error('db down') });
+  // Review Focus 5: the db container may still be starting. The server is up
+  // and says so: 503 not_ready, so the orchestrator holds traffic back.
+  it('returns 503 not_ready when the database is unreachable', async () => {
+    pingDb.mockResolvedValueOnce(false);
     const res = await app.request('/api/health/ready');
     expect(res.status).toBe(503);
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe('not_ready');
   });
 
-  it('returns 503 when the Supabase client throws', async () => {
-    limitMock.mockRejectedValueOnce(new Error('connection refused'));
-    const res = await app.request('/api/health/ready');
-    expect(res.status).toBe(503);
+  it('the liveness probe stays 200 while the database is down', async () => {
+    pingDb.mockReset();
+    pingDb.mockResolvedValue(false);
+    const res = await app.request('/api/health');
+    expect(res.status).toBe(200);
+    expect(pingDb).not.toHaveBeenCalled();
   });
 });

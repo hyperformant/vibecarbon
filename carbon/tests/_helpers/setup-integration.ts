@@ -11,6 +11,10 @@ const defaults: Record<string, string> = {
   SUPABASE_ANON_KEY: 'test-anon-key',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
   NODE_ENV: 'test',
+  // The DB pool connects lazily, so these are never dialed: routes that touch
+  // the database mock @server/db/client.
+  DB_HOST: 'db.test',
+  DB_PASSWORD: 'test-db-password',
 };
 
 for (const [key, value] of Object.entries(defaults)) {

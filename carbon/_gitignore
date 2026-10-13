@@ -6,6 +6,8 @@ npm-debug.log*
 dist
 .next
 out
+# `npx drizzle-kit pull` output (scratch; supabase/migrations is the source of truth)
+drizzle
 
 # Environment files (keep example)
 .env

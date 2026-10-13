@@ -7,6 +7,8 @@ import { createMiddleware } from 'hono/factory';
 import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
+import { pool } from './db/client';
+import { checkDbRoleAtStartup } from './db/startup';
 import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
@@ -621,6 +623,11 @@ const server = serve({
   port,
 });
 
+// Not awaited: the server must come up even while Postgres is still starting
+// (readiness reports it down meanwhile). It exits the process only if the
+// connection role turns out not to bypass RLS.
+void checkDbRoleAtStartup();
+
 // Graceful shutdown handler - drain in-flight requests before exiting
 let isShuttingDown = false;
 const SHUTDOWN_TIMEOUT_MS = 10000;
@@ -634,7 +641,7 @@ const shutdown = (signal: string) => {
   // Stop accepting new connections and wait for in-flight requests to finish
   server.close(() => {
     logger.info('All connections closed');
-    process.exit(0);
+    pool.end().finally(() => process.exit(0));
   });
 
   // Force exit if draining takes too long
