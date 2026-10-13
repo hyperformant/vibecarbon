@@ -41,9 +41,19 @@ async function presignErrorMessage(res: Response, maxSize: number, t: TFunction)
  * Drag-and-drop file upload component using signed URLs.
  *
  * The browser asks the API for a presigned PUT URL, uploads the bytes straight
- * to object storage, then reports the app-relative `fileUrl` (`/api/files/...`),
- * which works as an `<img src>` because the server redirects to a signed read.
+ * to object storage, then reports the app-relative `fileUrl` (`/api/files/...`).
  * The server owns the object key; callers never choose a path.
+ *
+ * Reading the file back:
+ * - `kind="avatar"`: the `fileUrl` works as a plain `<img src={fileUrl}>`; the
+ *   server redirects anyone to a signed read.
+ * - `kind="private"`: a plain `<a href>` or `<img src>` gets a 404, because the
+ *   API reads the session from the `Authorization` header only. Fetch it with
+ *   `apiFetch` (sends the session, follows the redirect) and use a blob URL:
+ *
+ *     const res = await apiFetch(fileUrl);
+ *     const href = URL.createObjectURL(await res.blob());
+ *     // <a href={href} download>; URL.revokeObjectURL(href) when done
  *
  * Usage:
  *   <FileUpload

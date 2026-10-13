@@ -309,6 +309,14 @@ Files go from the browser straight to the S3 bucket. They never touch the server
 - **Read**: `GET /api/files/<key>` answers with a 302 to a 5-minute signed URL. Anything the caller may not read is a 404, so key existence does not leak.
 - **Kinds**: `avatar` (max 2 MB; jpeg, png, gif, webp; readable by anyone through the app) and `private` (max 10 MB; jpeg, png, gif, webp, pdf, txt, csv; readable only by the owner and served as a download). Keys look like `avatars/<userId>/<uuid>.<ext>` and `private/<userId>/<uuid>.<ext>`.
 - **Components**: `FileUpload` takes a `kind` and an optional `prepare` hook that transforms the file before upload. `AvatarUpload` uses it to resize to a 256px WebP in the browser.
+- **Showing files**: an avatar `fileUrl` works as a plain `<img src={fileUrl}>`, since anyone may read it. A private `fileUrl` does not work as a plain `<a href>` or `<img src>` yet: the API reads the session from the `Authorization` header only, so a bare browser navigation arrives anonymous and gets a 404. Fetch it with `apiFetch`, which sends the session and follows the redirect (the bucket CORS allows `GET` from your origin), then hand the bytes to the page:
+
+  ```ts
+  const res = await apiFetch(fileUrl);
+  if (!res.ok) throw new Error(t('upload.failed'));
+  const href = URL.createObjectURL(await res.blob());
+  // <a href={href} download> or <img src={href}>; URL.revokeObjectURL(href) when done
+  ```
 - **Optional**: when any `S3_*` variable (`S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) is missing, presign returns `503 storage_not_configured` and reads return 404. The app still boots.
 - **Local dev**: a SeaweedFS `s3` service in `docker-compose.override.yml` listens on `127.0.0.1:8333`. `scripts/ensure-dev-bucket.js` creates the bucket and its CORS rules on dev start, and `vibecarbon create` writes the dev `S3_*` variables.
 - **Deployed**: `vibecarbon deploy` provisions your provider's native S3 bucket and sets its CORS for `https://<your-domain>`. The bucket stays private; never add public-read ACLs or bucket policies.
