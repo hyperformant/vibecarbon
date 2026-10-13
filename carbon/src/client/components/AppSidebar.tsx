@@ -27,7 +27,7 @@ import { useTheme } from 'next-themes';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -179,7 +179,7 @@ export function AppSidebar() {
     }
   };
 
-  const displayName = user?.user_metadata?.full_name || 'User';
+  const displayName = user?.name || 'User';
 
   return (
     <>
@@ -680,6 +680,7 @@ export function AppSidebar() {
             <DropdownMenuTrigger className="group/user flex w-full items-center rounded-md text-left text-sm hover:bg-sidebar-accent hover:text-sidebar-accent-foreground h-12 transition-colors group-data-[collapsible=icon]:size-10 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:p-0">
               <IconSlot>
                 <Avatar size="sm">
+                  {user?.image && <AvatarImage src={user.image} alt="" />}
                   <AvatarFallback>{getUserInitials(user)}</AvatarFallback>
                 </Avatar>
               </IconSlot>

@@ -1,13 +1,14 @@
-import type { Factor } from '@supabase/supabase-js';
 import {
   IconShieldCheck as ShieldCheck,
   IconShieldOff as ShieldOff,
   IconDeviceMobile as Smartphone,
 } from '@tabler/icons-react';
-import { useCallback, useEffect, useState } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router';
 import { useAuth } from '@/components/auth/AuthProvider';
+import { TwoFactorCodeForm } from '@/components/auth/TwoFactorCodeForm';
 import { PageHeader } from '@/components/PageHeader';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -19,127 +20,102 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { authErrorKey } from '@/lib/auth-errors';
 import { ContentPanel } from '../../components/ContentPanel';
 
+/** The base32 secret inside an otpauth:// URI, for typing in by hand. */
+function totpSecret(totpURI: string): string {
+  try {
+    return new URL(totpURI).searchParams.get('secret') ?? '';
+  } catch {
+    return '';
+  }
+}
+
+type Setup = { totpURI: string; backupCodes: string[] };
+
+/**
+ * Two-factor settings. Enrolling: (password, if the account has one) →
+ * scan the QR code and keep the backup codes → confirm with a code from the
+ * app. Turning it off needs a session that passed a code (the provider asks
+ * for one when the server says so) and, for a password account, the password.
+ */
 export default function Security() {
   const { t } = useTranslation();
   const { mfa, hasMfaEnabled, mfaRequired } = useAuth();
   const [searchParams] = useSearchParams();
 
-  const [factors, setFactors] = useState<Factor[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [hasPassword, setHasPassword] = useState<boolean | null>(null);
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  // 'enable' | 'disable' while the confirm dialog (password and/or warning) is open
+  const [confirming, setConfirming] = useState<'enable' | 'disable' | null>(null);
+  const [password, setPassword] = useState('');
+  const [setup, setSetup] = useState<Setup | null>(null);
 
-  // Enrollment state
-  const [enrolling, setEnrolling] = useState(false);
-  const [enrollmentData, setEnrollmentData] = useState<{
-    id: string;
-    qrCode: string;
-    secret: string;
-  } | null>(null);
-  const [verificationCode, setVerificationCode] = useState('');
-  const [verifying, setVerifying] = useState(false);
-
-  // Unenroll state
-  const [unenrolling, setUnenrolling] = useState(false);
-  const [factorToUnenroll, setFactorToUnenroll] = useState<string | null>(null);
-
-  // Show setup prompt if redirected from login with MFA required
   const setupRequired = searchParams.get('setup') === 'required';
 
-  const loadFactors = useCallback(async () => {
-    try {
-      const factorList = await mfa.listFactors();
-      setFactors(factorList.filter((f) => f.status === 'verified'));
-    } catch {
-      setError('Failed to load MFA factors');
-    } finally {
-      setLoading(false);
-    }
-  }, [mfa]);
-
-  // Load factors on mount
+  // biome-ignore lint/correctness/useExhaustiveDependencies: load once; mfa is rebuilt each render
   useEffect(() => {
-    loadFactors();
-  }, [loadFactors]);
+    mfa
+      .hasPassword()
+      .then(setHasPassword)
+      .catch(() => setHasPassword(true));
+  }, []);
 
-  const handleStartEnrollment = async () => {
-    setEnrolling(true);
-    setError('');
-
-    try {
-      const data = await mfa.enroll('Authenticator App');
-      if (data && data.type === 'totp' && 'totp' in data) {
-        setEnrollmentData({
-          id: data.id,
-          qrCode: data.totp.qr_code,
-          secret: data.totp.secret,
-        });
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start enrollment');
-      setEnrolling(false);
-    }
+  const closeConfirm = () => {
+    setConfirming(null);
+    setPassword('');
   };
 
-  const handleVerifyEnrollment = async () => {
-    if (!enrollmentData || verificationCode.length !== 6) return;
-
-    setVerifying(true);
+  const startEnrollment = async (pw?: string) => {
+    setBusy(true);
     setError('');
-
     try {
-      // Create challenge and verify
-      const challenge = await mfa.challenge(enrollmentData.id);
-      if (challenge) {
-        await mfa.verify(enrollmentData.id, challenge.id, verificationCode);
-      }
-
-      // Success - refresh factors and close dialog
-      await loadFactors();
-      setEnrollmentData(null);
-      setEnrolling(false);
-      setVerificationCode('');
+      setSetup(await mfa.enroll(pw));
+      closeConfirm();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Invalid verification code');
-      setVerificationCode('');
+      setError(t(authErrorKey(err, 'security.enrollFailed')));
     } finally {
-      setVerifying(false);
+      setBusy(false);
     }
   };
 
-  const handleCancelEnrollment = async () => {
-    // If we have an unverified factor, unenroll it
-    if (enrollmentData) {
-      try {
-        await mfa.unenroll(enrollmentData.id);
-      } catch {
-        // Ignore error - factor may not exist
-      }
-    }
-    setEnrollmentData(null);
-    setEnrolling(false);
-    setVerificationCode('');
+  const disable = async (pw?: string) => {
+    setBusy(true);
     setError('');
-  };
-
-  const handleUnenroll = async () => {
-    if (!factorToUnenroll) return;
-
-    setUnenrolling(true);
-    setError('');
-
     try {
-      await mfa.unenroll(factorToUnenroll);
-      await loadFactors();
-      setFactorToUnenroll(null);
+      await mfa.disable(pw);
+      closeConfirm();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to disable 2FA');
+      setError(t(authErrorKey(err, 'security.disableFailed')));
     } finally {
-      setUnenrolling(false);
+      setBusy(false);
     }
+  };
+
+  const onToggle = (checked: boolean) => {
+    setError('');
+    if (checked) {
+      if (hasPassword) setConfirming('enable');
+      else startEnrollment();
+    } else {
+      setConfirming('disable');
+    }
+  };
+
+  const onConfirm = () => {
+    const pw = hasPassword ? password : undefined;
+    if (confirming === 'enable') startEnrollment(pw);
+    else disable(pw);
+  };
+
+  const confirmEnrollment = async (code: string) => {
+    await mfa.confirmEnrollment(code);
+    setSetup(null);
   };
 
   return (
@@ -163,8 +139,10 @@ export default function Security() {
           </div>
         )}
 
-        {error && (
-          <div className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg">{error}</div>
+        {error && !confirming && !setup && (
+          <div role="alert" className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg">
+            {error}
+          </div>
         )}
 
         <Card>
@@ -177,61 +155,26 @@ export default function Security() {
                 </CardTitle>
                 <CardDescription>{t('security.twoFactorDescription')}</CardDescription>
               </div>
-              {!loading && (
+              {hasPassword !== null && (
                 <Switch
+                  aria-label={t('security.twoFactor')}
                   checked={hasMfaEnabled}
-                  disabled={enrolling || unenrolling || mfaRequired}
-                  onCheckedChange={(checked) => {
-                    if (checked) {
-                      handleStartEnrollment();
-                    } else if (factors.length > 0) {
-                      setFactorToUnenroll(factors[0].id);
-                    }
-                  }}
+                  disabled={busy}
+                  onCheckedChange={onToggle}
                 />
               )}
             </div>
           </CardHeader>
-          {!loading && (hasMfaEnabled || mfaRequired) && (
+          {(hasMfaEnabled || mfaRequired) && (
             <CardContent className="space-y-4">
               {hasMfaEnabled && (
-                <>
-                  <div className="flex items-center gap-3 p-3 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg">
-                    <ShieldCheck className="size-4 text-emerald-600 dark:text-emerald-500 shrink-0" />
-                    <p className="text-sm text-emerald-700 dark:text-emerald-300">
-                      {t('security.mfaEnabledDescription')}
-                    </p>
-                  </div>
-
-                  {factors.length > 0 && (
-                    <div className="space-y-2">
-                      <p className="text-sm font-medium">{t('security.enrolledAuthenticators')}</p>
-                      {factors.map((factor) => (
-                        <div
-                          key={factor.id}
-                          className="flex items-center justify-between p-3 border rounded-lg"
-                        >
-                          <div className="flex items-center gap-3">
-                            <Smartphone className="size-4 text-muted-foreground" />
-                            <span className="text-sm">
-                              {factor.friendly_name || t('security.authenticatorApp')}
-                            </span>
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-destructive hover:text-destructive"
-                            onClick={() => setFactorToUnenroll(factor.id)}
-                          >
-                            {t('common.remove')}
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
+                <div className="flex items-center gap-3 p-3 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg">
+                  <ShieldCheck className="size-4 text-emerald-600 dark:text-emerald-500 shrink-0" />
+                  <p className="text-sm text-emerald-700 dark:text-emerald-300">
+                    {t('security.mfaEnabledDescription')}
+                  </p>
+                </div>
               )}
-
               {mfaRequired && (
                 <p className="text-sm text-muted-foreground">{t('security.mfaRequiredByOrg')}</p>
               )}
@@ -240,104 +183,132 @@ export default function Security() {
         </Card>
       </ContentPanel>
 
-      {/* Enrollment Dialog */}
-      <Dialog open={!!enrollmentData} onOpenChange={() => handleCancelEnrollment()}>
+      {/* Password (and, for turning it off, the warning) before enable/disable */}
+      <Dialog open={confirming !== null} onOpenChange={(open) => !open && closeConfirm()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {confirming === 'disable' ? t('security.disableMfa') : t('security.setupMfa')}
+            </DialogTitle>
+            <DialogDescription>
+              {confirming === 'disable'
+                ? t('security.disableMfaDescription')
+                : t('security.passwordPrompt')}
+            </DialogDescription>
+          </DialogHeader>
+
+          {confirming === 'disable' && mfaRequired && (
+            <div className="p-3 text-sm text-amber-700 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded-lg">
+              {t('security.disableMfaWarning')}
+            </div>
+          )}
+
+          <form
+            id="security-confirm"
+            className="space-y-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onConfirm();
+            }}
+          >
+            {hasPassword && (
+              <>
+                <Label htmlFor="security-password">{t('security.passwordLabel')}</Label>
+                <Input
+                  id="security-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  autoFocus
+                />
+              </>
+            )}
+            {error && (
+              <div
+                role="alert"
+                className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg"
+              >
+                {error}
+              </div>
+            )}
+          </form>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="ghost" onClick={closeConfirm} disabled={busy}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              type="submit"
+              form="security-confirm"
+              variant={confirming === 'disable' ? 'destructive' : 'default'}
+              disabled={busy || (hasPassword === true && !password)}
+            >
+              {confirming === 'disable'
+                ? busy
+                  ? t('security.disabling')
+                  : t('security.disable2fa')
+                : busy
+                  ? t('security.settingUp')
+                  : t('common.continue')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Setup: QR code, manual secret, backup codes, then the first code */}
+      <Dialog open={setup !== null} onOpenChange={(open) => !open && setSetup(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>{t('security.setupMfa')}</DialogTitle>
             <DialogDescription>{t('security.setupMfaDescription')}</DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-6">
-            {/* QR Code */}
-            <div className="flex justify-center">
-              {enrollmentData?.qrCode && (
-                <div
-                  className="p-4 bg-white rounded-lg"
-                  // biome-ignore lint/security/noDangerouslySetInnerHtml: QR code is SVG from Supabase
-                  dangerouslySetInnerHTML={{ __html: enrollmentData.qrCode }}
-                />
-              )}
-            </div>
-
-            {/* Manual entry */}
-            <div className="space-y-2">
-              <p className="text-sm text-muted-foreground text-center">{t('security.cantScan')}</p>
-              <code className="block text-center text-sm bg-muted p-2 rounded font-mono break-all">
-                {enrollmentData?.secret}
-              </code>
-            </div>
-
-            {/* Verification code input */}
-            <div className="space-y-2">
-              <p className="text-sm font-medium text-center">{t('security.enterCode')}</p>
+          {setup && (
+            <div className="space-y-6">
               <div className="flex justify-center">
-                <InputOTP
-                  maxLength={6}
-                  value={verificationCode}
-                  onChange={setVerificationCode}
-                  onComplete={handleVerifyEnrollment}
-                  disabled={verifying}
-                >
-                  <InputOTPGroup>
-                    <InputOTPSlot index={0} />
-                    <InputOTPSlot index={1} />
-                    <InputOTPSlot index={2} />
-                    <InputOTPSlot index={3} />
-                    <InputOTPSlot index={4} />
-                    <InputOTPSlot index={5} />
-                  </InputOTPGroup>
-                </InputOTP>
+                <div className="p-4 bg-white rounded-lg">
+                  <QRCodeSVG value={setup.totpURI} size={176} title={t('security.qrTitle')} />
+                </div>
               </div>
-            </div>
 
-            {error && (
-              <div className="p-3 text-sm text-destructive bg-destructive/10 rounded-lg text-center">
-                {error}
+              <div className="space-y-2">
+                <p className="text-sm text-muted-foreground text-center">
+                  {t('security.cantScan')}
+                </p>
+                <code className="block text-center text-sm bg-muted p-2 rounded font-mono break-all">
+                  {totpSecret(setup.totpURI)}
+                </code>
               </div>
-            )}
-          </div>
 
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="ghost" onClick={handleCancelEnrollment} disabled={verifying}>
-              {t('common.cancel')}
-            </Button>
-            <Button
-              onClick={handleVerifyEnrollment}
-              disabled={verifying || verificationCode.length !== 6}
-            >
-              {verifying ? t('security.verifying') : t('security.verifyAndEnable')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              {setup.backupCodes.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-sm font-medium">{t('security.backupCodes')}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {t('security.backupCodesDescription')}
+                  </p>
+                  <ul
+                    aria-label={t('security.backupCodes')}
+                    className="grid grid-cols-2 gap-1 bg-muted p-3 rounded font-mono text-sm"
+                  >
+                    {setup.backupCodes.map((code) => (
+                      <li key={code}>{code}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
-      {/* Unenroll Confirmation Dialog */}
-      <Dialog open={!!factorToUnenroll} onOpenChange={() => setFactorToUnenroll(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t('security.disableMfa')}</DialogTitle>
-            <DialogDescription>{t('security.disableMfaDescription')}</DialogDescription>
-          </DialogHeader>
-
-          {mfaRequired && (
-            <div className="p-3 text-sm text-amber-700 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-300 rounded-lg">
-              {t('security.disableMfaWarning')}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-center">{t('security.enterCode')}</p>
+                <TwoFactorCodeForm
+                  onSubmit={(code) => confirmEnrollment(code)}
+                  submitLabel={t('security.verifyAndEnable')}
+                  allowBackupCode={false}
+                />
+              </div>
             </div>
           )}
-
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button
-              variant="ghost"
-              onClick={() => setFactorToUnenroll(null)}
-              disabled={unenrolling}
-            >
-              {t('common.cancel')}
-            </Button>
-            <Button variant="destructive" onClick={handleUnenroll} disabled={unenrolling}>
-              {unenrolling ? t('security.disabling') : t('security.disable2fa')}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </>

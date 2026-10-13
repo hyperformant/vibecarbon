@@ -47,13 +47,9 @@ async function presignErrorMessage(res: Response, maxSize: number, t: TFunction)
  * Reading the file back:
  * - `kind="avatar"`: the `fileUrl` works as a plain `<img src={fileUrl}>`; the
  *   server redirects anyone to a signed read.
- * - `kind="private"`: a plain `<a href>` or `<img src>` gets a 404, because the
- *   API reads the session from the `Authorization` header only. Fetch it with
- *   `apiFetch` (sends the session, follows the redirect) and use a blob URL:
- *
- *     const res = await apiFetch(fileUrl);
- *     const href = URL.createObjectURL(await res.blob());
- *     // <a href={href} download>; URL.revokeObjectURL(href) when done
+ * - `kind="private"`: also a plain `<a href={fileUrl} download>` or
+ *   `<img src={fileUrl}>`. The browser sends the HttpOnly session cookie with
+ *   the request, so the owner gets the signed read and anyone else a 404.
  *
  * Usage:
  *   <FileUpload

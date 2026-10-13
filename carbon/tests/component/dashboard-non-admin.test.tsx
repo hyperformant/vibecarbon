@@ -61,7 +61,7 @@ function renderDashboard() {
 describe('Dashboard (end-user home)', () => {
   it('renders for a non-super-admin without the platform KPI grid', () => {
     useAuthMock.mockReturnValue({
-      user: { email: 'user@example.com', user_metadata: {} },
+      user: { email: 'user@example.com', name: '' },
       isSuperAdmin: false,
     });
     renderDashboard();
@@ -75,7 +75,7 @@ describe('Dashboard (end-user home)', () => {
 
   it('shows the same end-user home for a super-admin (no KPI grid here)', () => {
     useAuthMock.mockReturnValue({
-      user: { email: 'admin@example.com', user_metadata: {} },
+      user: { email: 'admin@example.com', name: '' },
       isSuperAdmin: true,
     });
     renderDashboard();

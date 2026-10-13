@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createContext, type ReactNode, useCallback, useContext, useState } from 'react';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { getAuthHeaders } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 
 export type NotificationType = 'info' | 'warning' | 'error' | 'success';
 export type NotificationVisibility = 'all' | 'authenticated' | 'public';
@@ -34,9 +34,8 @@ type NotificationContextValue = {
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
 
-async function fetchNotifications(authenticated: boolean): Promise<Notification[]> {
-  const headers: HeadersInit = authenticated ? await getAuthHeaders() : {};
-  const response = await fetch('/api/v1/notifications', { headers });
+async function fetchNotifications(): Promise<Notification[]> {
+  const response = await apiFetch('/api/v1/notifications');
 
   if (!response.ok) {
     if (response.status === 401) {
@@ -50,10 +49,8 @@ async function fetchNotifications(authenticated: boolean): Promise<Notification[
 }
 
 async function dismissNotificationApi(notificationId: string): Promise<void> {
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/v1/notifications/${notificationId}/dismiss`, {
+  const response = await apiFetch(`/api/v1/notifications/${notificationId}/dismiss`, {
     method: 'POST',
-    headers,
   });
 
   if (!response.ok) {
@@ -73,7 +70,9 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     refetch,
   } = useQuery({
     queryKey: ['notifications', !!user],
-    queryFn: () => fetchNotifications(!!user),
+    // Keyed on sign-in state so signing in or out refetches (the cookie decides
+    // what the server returns).
+    queryFn: fetchNotifications,
     staleTime: Infinity, // Only fetch on page load
     refetchOnWindowFocus: false,
   });

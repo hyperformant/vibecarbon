@@ -183,12 +183,7 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
 // CORRECT: useQuery with auth guard
 const { data, isLoading } = useQuery({
   queryKey: ['items', orgId],
-  queryFn: async () => {
-    const headers = await getAuthHeaders();
-    const res = await fetch(`/api/v1/items?orgId=${orgId}`, { headers });
-    if (!res.ok) throw new Error('Failed to fetch items');
-    return res.json();
-  },
+  queryFn: () => apiJson<Item[]>(`/api/v1/items?orgId=${orgId}`, {}, 'Failed to fetch items'),
   enabled: !!user && !!orgId, // Skip fetch when unauthenticated or missing params
 });
 
@@ -199,8 +194,8 @@ useEffect(() => {
 ```
 
 Rules:
-- **Gate authenticated queries** with `enabled: !!user` (or `!!session`) to prevent 401s for logged-out users
-- **Use `getAuthHeaders()`** from `@/lib/api.ts` for auth headers — never duplicate it locally, never send empty `Authorization` headers
+- **Gate authenticated queries** with `enabled: !!user` to prevent 401s for logged-out users
+- **Call the API through `apiJson` / `apiFetch`** from `@/lib/api.ts`. The session is an HttpOnly cookie the browser sends same-origin; there is no token in page JS, so never add an `Authorization` header. When a route answers 403 `mfa_required`, `apiFetch` asks the user for a code (or sends them to enroll) and retries once; `reauth_required` sends them to sign in again
 - **Place reusable hooks** in `src/client/hooks/api/` — page-specific queries can live in the page file
 - **Invalidate related queries** after mutations: `queryClient.invalidateQueries({ queryKey: ['items'] })`
 - **Set `staleTime`** to control cache freshness (default is 5min via QueryClient config)
@@ -285,6 +280,7 @@ Helpers live in `tests/_helpers/`:
 **Mocking conventions:**
 - Database: `vi.mock('@server/db/client', () => ({ adminDb: { select: () => queryChain(() => rows) }, withUserDb: ... }))`. `queryChain` (`tests/_helpers/drizzle-mock.ts`) stands in for any Drizzle chain. Prove RLS itself in the `db` tier, never with mocks.
 - Supabase Auth: `vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { auth: { admin: { ... } } } }))`.
+- Client auth: `vi.mock('@/lib/auth-client', () => ({ authClient: { signIn: { email: vi.fn() }, getSession: vi.fn(), ... } }))`. Each call resolves `{ data, error }` and never throws. See `tests/component/auth-provider.test.tsx`.
 - Stripe: `vi.mock('@server/lib/stripe', () => ({ stripe: { ... } }))`.
 - fetch (client side): `vi.stubGlobal('fetch', vi.fn(...))` + `vi.unstubAllGlobals()` in afterEach.
 - TanStack Query: wrap with a fresh `QueryClient` per render (`retry: false`) — see `tests/component/use-auth-settings.test.tsx`.
@@ -320,7 +316,7 @@ Files go from the browser straight to the S3 bucket. They never touch the server
 - **Read**: `GET /api/files/<key>` answers with a 302 to a 5-minute signed URL. Anything the caller may not read is a 404, so key existence does not leak.
 - **Kinds**: `avatar` (max 2 MB; jpeg, png, gif, webp; readable by anyone through the app) and `private` (max 10 MB; jpeg, png, gif, webp, pdf, txt, csv; readable only by the owner and served as a download). Keys look like `avatars/<userId>/<uuid>.<ext>` and `private/<userId>/<uuid>.<ext>`.
 - **Components**: `FileUpload` takes a `kind` and an optional `prepare` hook that transforms the file before upload. `AvatarUpload` uses it to resize to a 256px WebP in the browser.
-- **Showing files**: an avatar `fileUrl` works as a plain `<img src={fileUrl}>`, since anyone may read it. A private `fileUrl` does not work as a plain `<a href>` or `<img src>` yet: the API reads the session from the `Authorization` header only, so a bare browser navigation arrives anonymous and gets a 404. Fetch it with `apiFetch`, which sends the session and follows the redirect (the bucket CORS allows `GET` from your origin), then hand the bytes to the page:
+- **Showing files**: a `fileUrl` works as a plain link. An avatar is `<img src={fileUrl}>`, since anyone may read it. A private file is `<a href={fileUrl} download>` or `<img src={fileUrl}>` too: the browser sends the HttpOnly session cookie with the request, so the owner gets the signed read and anyone else a 404. To hand the bytes to code instead (a preview, a parse), fetch them with `apiFetch`, which follows the redirect (the bucket CORS allows `GET` from your origin):
 
   ```ts
   const res = await apiFetch(fileUrl);
@@ -336,7 +332,7 @@ Files go from the browser straight to the S3 bucket. They never touch the server
 ## Important Notes
 
 - **Prefer existing patterns** — follow the established code style in existing routes/components
-- **Auth is handled by Supabase** — don't implement custom auth, use `supabase.auth.*` methods
+- **Auth is the in-process auth API** (`src/server/auth/`, `/api/auth/*`). On the client use `useAuth()` (`src/client/components/auth/AuthProvider.tsx`), which wraps `authClient` (`src/client/lib/auth-client.ts`); don't hand-roll sign-in, session or two-factor calls
 - **Two UI libraries** — build UI from **Shadcn UI** primitives (`src/client/components/ui/`) for interface elements (buttons, inputs, dialogs, dropdowns, tabs, tooltips, badges) and **Launch UI** blocks (MIT, vendored copy/paste; retinted to the OKLCH palette) for marketing/landing sections (hero, feature grids, pricing, FAQ, CTA). Write a custom component only when neither covers the need, and note what was missing in a short comment.
 - **Add Shadcn components** with `npx shadcn@latest add [component-name]`
 
@@ -369,9 +365,9 @@ Rules:
 
 Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-split`, invariants pinned in `tests/structural/security-invariants.test.ts`):
 
-- **`sb-auth-token`** is the SPA's supabase session store and **host-only** (apex). It holds the refresh token, so it **MUST NOT** get a `domain=` attribute — a parent-domain scope sends every user's refresh token to every admin subdomain, where XSS in any bundled tool (Grafana, Metabase, n8n) can read it. It is **NOT** a ForwardAuth credential.
+- **The session cookie** is set by the auth API (`/api/auth/*`): **HttpOnly** and **host-only** (apex). Page JS never sees it or any session token, and the SPA keeps no session store of its own. It **MUST NOT** get a `domain=` attribute: a parent-domain scope would send every user's session to every admin subdomain, where XSS in any bundled tool (Grafana, Metabase, n8n) could ride it. It is **NOT** a ForwardAuth credential.
 - **`vc-admin-token`** is the only cookie `/api/_internal/verify-role` accepts: **HttpOnly**, access token only, 1h, minted by `POST /api/v1/admin/forwardauth-cookie` for super_admins only. Regular users carry no domain-wide cookie at all. **NEVER** relax verify-role to read `sb-*` cookies again.
-- **Impersonation never client-stores the admin session.** The admin refresh token is parked in the HttpOnly, `SameSite=Strict`, path-scoped **`vc-impersonation-restore`** cookie (1h hard window); restore is the server round-trip `POST /api/v1/admin/impersonate/stop`. **NEVER** write a session into `localStorage`/`sessionStorage`.
+- **Impersonation never client-stores the admin session.** The client impersonates through the admin plugin (`POST /api/auth/admin/impersonate-user`, `stop-impersonating`), which keeps the admin's session server-side in its own HttpOnly signed cookie. The older `/api/v1/admin/impersonate` routes and their path-scoped **`vc-impersonation-restore`** cookie remain until the admin surfaces move to the auth API. **NEVER** write a session into `localStorage`/`sessionStorage`.
 
 ## Database Security (RLS)
 

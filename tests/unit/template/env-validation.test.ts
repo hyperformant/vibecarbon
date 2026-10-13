@@ -55,9 +55,6 @@ const envSchema = z.object({
   // OAuth (optional) — strict "true"-only booleans.
   GOOGLE_ENABLED: envBool(false),
   MICROSOFT_ENABLED: envBool(false),
-  GITHUB_ENABLED: envBool(false),
-  APPLE_ENABLED: envBool(false),
-  DISCORD_ENABLED: envBool(false),
   MAGIC_LINK_ENABLED: envBool(true),
 
   // SMTP (shared with Supabase Auth)
@@ -193,9 +190,6 @@ describe('Environment variable validation', () => {
       const result = envSchema.parse(validEnv);
       expect(result.GOOGLE_ENABLED).toBe(false);
       expect(result.MICROSOFT_ENABLED).toBe(false);
-      expect(result.GITHUB_ENABLED).toBe(false);
-      expect(result.APPLE_ENABLED).toBe(false);
-      expect(result.DISCORD_ENABLED).toBe(false);
     });
   });
 
@@ -248,9 +242,13 @@ describe('Environment variable validation', () => {
     });
 
     it('parses any other non-"true" string as false', () => {
-      const result = envSchema.parse({ ...validEnv, GITHUB_ENABLED: '1', DISCORD_ENABLED: 'yes' });
-      expect(result.GITHUB_ENABLED).toBe(false);
-      expect(result.DISCORD_ENABLED).toBe(false);
+      const result = envSchema.parse({
+        ...validEnv,
+        GOOGLE_ENABLED: '1',
+        MICROSOFT_ENABLED: 'yes',
+      });
+      expect(result.GOOGLE_ENABLED).toBe(false);
+      expect(result.MICROSOFT_ENABLED).toBe(false);
     });
 
     it('falls back to the declared default when unset', () => {

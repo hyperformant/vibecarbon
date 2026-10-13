@@ -7,14 +7,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/supabase', () => ({
-  supabase: {
-    auth: {
-      getSession: vi.fn(async () => ({ data: { session: { access_token: 'tok' } } })),
-    },
-  },
-}));
-
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (k: string) => k }),
 }));
@@ -64,7 +56,8 @@ describe('FileUpload', () => {
     const [presignUrl, presignInit] = fetchMock.mock.calls[0];
     expect(presignUrl).toBe('/api/v1/files/presign');
     expect(presignInit.method).toBe('POST');
-    expect(presignInit.headers.Authorization).toBe('Bearer tok');
+    expect(presignInit.credentials).toBe('same-origin');
+    expect(presignInit.headers.Authorization).toBeUndefined();
     expect(JSON.parse(presignInit.body)).toEqual({
       kind: 'private',
       contentType: 'application/pdf',

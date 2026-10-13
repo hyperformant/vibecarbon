@@ -174,35 +174,50 @@ describe('Rate limiting: abuse-prone routes are protected', () => {
 });
 
 describe('Session cookies: the split-cookie contract holds', () => {
-  // Spec 2026-07-24-session-cookie-split. Two cookies, two jobs, never merged:
-  //  - sb-auth-token: SPA session store, HOST-ONLY (holds the refresh token —
-  //    a domain= attribute would send it to every admin subdomain where any
-  //    bundled tool's XSS could read it).
-  //  - vc-admin-token: ForwardAuth credential, HttpOnly, access token only.
-  const clientSupabase = read('src/client/lib/supabase.ts');
+  // Two cookies, two jobs, never merged:
+  //  - the auth API's session cookie: HttpOnly, host-only, set by
+  //    /api/auth/*. Page JS never sees it or any session token.
+  //  - vc-admin-token: the ForwardAuth credential, HttpOnly, super admins only.
   const verifyRole = read('src/server/routes/_internal/verify-role.ts');
   const forwardAuthCookie = read('src/server/routes/v1/forwardauth-cookie.ts');
   const impersonation = read('src/server/routes/v1/impersonation.ts');
   const authProvider = read('src/client/components/auth/AuthProvider.tsx');
+  const clientSources = (function walk(dir: string): [string, string][] {
+    return readdirSync(join(ROOT, dir), { withFileTypes: true }).flatMap((e) => {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) return walk(rel);
+      return /\.(ts|tsx)$/.test(e.name) ? [[rel, read(rel)] as [string, string]] : [];
+    });
+  })('src/client');
 
-  it('the SPA session cookie write is host-only (no domain attribute)', () => {
-    // setItem's live write must not interpolate a domain. The only domain=
-    // usage allowed in the adapter is the legacy-cookie expiry.
-    const setItem = clientSupabase.match(/setItem[\s\S]*?document\.cookie = `[^`]*`/)?.[0] ?? '';
-    expect(setItem, 'cookieStorage.setItem not found').not.toBe('');
+  it('the SPA keeps no session of its own: no client-side session module', () => {
     expect(
-      setItem.includes('domain='),
-      'cookieStorage.setItem writes a domain-scoped session cookie — the ' +
-        'session (refresh token included) must stay host-only on the apex.',
+      exists('src/client/lib/supabase.ts'),
+      'A client session store is back. Sessions are HttpOnly cookies the auth ' +
+        'API sets; page JS must never hold a session or refresh token.'
     ).toBe(false);
+  });
+
+  it('client code never sends an Authorization header (the cookie is the credential)', () => {
+    for (const [rel, src] of clientSources) {
+      expect(
+        /Authorization['"]?\s*:/.test(src) || /Bearer \$\{/.test(src),
+        `${rel} attaches an Authorization header. Same-origin calls carry the ` +
+          'HttpOnly session cookie; there is no token in page JS to send.'
+      ).toBe(false);
+    }
+  });
+
+  it('API calls go out same-origin with credentials', () => {
+    const api = read('src/client/lib/api.ts');
+    expect(api).toContain("credentials: 'same-origin'");
   });
 
   it('verify-role does not accept the SPA session cookie as a ForwardAuth credential', () => {
     for (const legacy of ["'sb-auth-token'", "'sb-access-token'", "startsWith('sb-')"]) {
       expect(
         verifyRole.includes(legacy),
-        `verify-role parses ${legacy} — possession of the JS-readable SPA ` +
-          `session cookie must not gate admin infra; only vc-admin-token may.`,
+        `verify-role parses ${legacy}. Only vc-admin-token may gate admin infra.`
       ).toBe(false);
     }
     expect(verifyRole).toContain("'vc-admin-token'");
@@ -215,7 +230,7 @@ describe('Session cookies: the split-cookie contract holds', () => {
     ] as const) {
       expect(
         /httpOnly:\s*true/.test(src),
-        `${label} sets a cookie without httpOnly: true — XSS could read it.`,
+        `${label} sets a cookie without httpOnly: true. XSS could read it.`
       ).toBe(true);
     }
   });
@@ -225,16 +240,17 @@ describe('Session cookies: the split-cookie contract holds', () => {
     expect(impersonation).toMatch(/sameSite:\s*'Strict'/);
   });
 
-  it('the client never stores a session in localStorage (impersonation stash regression)', () => {
+  it('the client never stores a session in web storage (impersonation stash regression)', () => {
     expect(
       authProvider.includes('impersonation_admin_session'),
-      'The pre-split impersonation stash key is back — the admin session ' +
-        'must be parked server-side in the HttpOnly restore cookie only.',
+      'The pre-split impersonation stash key is back. The admin session stays ' +
+        'server-side, in an HttpOnly cookie.'
     ).toBe(false);
-    expect(
-      /localStorage\.setItem\([^)]*[sS]ession/.test(authProvider),
-      'AuthProvider writes a session into localStorage — sessions must never ' +
-        'be client-stored outside the supabase cookie adapter.',
-    ).toBe(false);
+    for (const [rel, src] of clientSources) {
+      expect(
+        /(localStorage|sessionStorage)\.setItem\([^)]*([sS]ession|[tT]oken)/.test(src),
+        `${rel} writes a session or token into web storage.`
+      ).toBe(false);
+    }
   });
 });

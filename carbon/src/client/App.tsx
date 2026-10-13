@@ -86,7 +86,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   // Redirect to onboarding if not completed (skip for settings/billing so checkout can complete)
   if (
-    !user.user_metadata?.onboarding_completed &&
+    !user.onboardingCompleted &&
     location.pathname !== '/onboarding' &&
     !location.pathname.startsWith('/settings/billing')
   ) {

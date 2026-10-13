@@ -126,9 +126,9 @@ describe('Project Scaffolding Integration', () => {
       const content = readFileSync(authProviderPath, 'utf-8');
 
       // Verify isSuperAdmin check uses super_admin
-      expect(content).toContain("user?.app_metadata?.role === 'super_admin'");
+      expect(content).toContain("user?.role === 'super_admin'");
       // Should NOT check for old 'admin' role
-      expect(content).not.toMatch(/app_metadata\?\.role\s*===\s*['"]admin['"]/);
+      expect(content).not.toMatch(/role\s*===\s*['"]admin['"]/);
     });
 
     it('API routes check for super_admin role', () => {

@@ -7,16 +7,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/supabase', () => ({
-  supabase: {
-    auth: {
-      getSession: vi.fn(async () => ({
-        data: { session: { access_token: 'tok-abc' } },
-      })),
-    },
-  },
-}));
-
 import { ApiError } from '@/lib/api';
 import { type CrawlerStatsResponse, fetchCrawlerStats } from '@/pages/admin/Crawlers';
 
@@ -32,7 +22,7 @@ afterEach(() => {
 });
 
 describe('Crawlers fetchCrawlerStats', () => {
-  it('requests the windowed endpoint with the bearer token and resolves the body', async () => {
+  it('requests the windowed endpoint with the session cookie and resolves the body', async () => {
     const payload: CrawlerStatsResponse = {
       windowDays: 30,
       totals: [{ crawler: 'GPTBot', operator: 'OpenAI', category: 'ai-training', hits: 12, errors: 0 }],
@@ -47,7 +37,8 @@ describe('Crawlers fetchCrawlerStats', () => {
 
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe('/api/v1/admin/crawlers?days=30');
-    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok-abc');
+    expect(init.credentials).toBe('same-origin');
+    expect('Authorization' in (init.headers as Record<string, string>)).toBe(false);
   });
 
   it('threads an explicit window through the days query parameter', async () => {

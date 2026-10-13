@@ -60,8 +60,7 @@
     "signUp": "Sign up",
     "signInAction": "Sign in",
     "magicLinkSent": "We sent a sign-in link to {{email}}",
-    "poweredBy": "Powered by Supabase Auth",
-    "magicLinkExpiry": "Click the link in your email to sign in. The link expires in 1 hour.",
+    "magicLinkExpiry": "Click the link in your email to sign in. The link expires in 5 minutes.",
     "backToSignIn": "Back to sign in",
     "passwordInstead": "Sign in with password instead",
     "namePlaceholder": "Name",
@@ -76,7 +75,79 @@
     "dontHaveAccount": "Don't have an account?",
     "authFailed": "Authentication failed",
     "magicLinkFailed": "Failed to send magic link",
-    "oauthFailed": "OAuth failed"
+    "oauthFailed": "Sign-in with that provider did not finish. Try again.",
+    "signInDescription": "Welcome back. Sign in to continue.",
+    "signUpDescription": "Create your account to get started.",
+    "verificationSent": "We sent a verification link to {{email}}",
+    "verificationHint": "Open the link in your email to confirm your address, then sign in.",
+    "completingSignIn": "Completing sign in...",
+    "errors": {
+      "invalidCredentials": "That email and password do not match.",
+      "accountLocked": "Too many failed attempts. Wait a few minutes, then try again.",
+      "userExists": "An account with that email already exists. Sign in instead.",
+      "passwordTooShort": "Use at least 8 characters for your password.",
+      "invalidPassword": "That password is not right.",
+      "emailNotVerified": "Confirm your email address first. Check your inbox for the link.",
+      "invalidToken": "This link is invalid or has expired.",
+      "invalidCode": "That code did not work. Try again.",
+      "tooManyCodes": "Too many wrong codes. Wait a few minutes, then try again.",
+      "challengeExpired": "Your sign-in timed out. Sign in again.",
+      "twoFactorNotConfirmed": "Finish setting up two-factor authentication with a code from your app first.",
+      "twoFactorNotEnabled": "Two-factor authentication is not on for this account.",
+      "mfaRequired": "This needs a code from your authenticator app first.",
+      "reauthRequired": "For your security, sign in again to continue.",
+      "impersonationNotAllowed": "Two-factor settings are not available while viewing as another user.",
+      "sessionExpired": "Your session ended. Sign in again.",
+      "passwordUnlinkNotAllowed": "Your password cannot be removed from this account.",
+      "rateLimited": "Too many requests. Wait a moment, then try again.",
+      "magicLinkFailed": "That sign-in link is invalid or has expired. Request a new one."
+    },
+    "mfa": {
+      "title": "Two-factor authentication",
+      "description": "Enter the 6-digit code from your authenticator app.",
+      "codeLabel": "Authenticator code",
+      "codeLength": "Enter the 6-digit code.",
+      "backupLabel": "Backup code",
+      "backupPlaceholder": "Backup code",
+      "useBackupCode": "Use a backup code instead",
+      "useAuthenticator": "Use your authenticator app instead",
+      "verify": "Verify",
+      "verifying": "Verifying...",
+      "cancel": "Cancel and sign out",
+      "help": "Open your authenticator app and enter the code shown for this account.",
+      "expiredTitle": "Session expired",
+      "expiredDescription": "Your sign-in timed out. Sign in again."
+    },
+    "stepUp": {
+      "title": "Confirm it is you",
+      "description": "This action needs a code from your authenticator app.",
+      "confirm": "Confirm"
+    },
+    "reset": {
+      "forgotTitle": "Reset password",
+      "forgotDescription": "Enter your email and we'll send you a reset link.",
+      "checkEmail": "Check your email for a reset link.",
+      "sentDetail": "If an account exists with that email, you'll receive a password reset link shortly.",
+      "didntReceive": "Didn't receive an email?",
+      "tryAgain": "Try again",
+      "sendLink": "Send reset link",
+      "sendFailed": "Unable to send the reset email. Try again later.",
+      "remember": "Remember your password?",
+      "title": "Set new password",
+      "description": "Enter your new password below.",
+      "newPassword": "New password",
+      "confirmPassword": "Confirm new password",
+      "update": "Update password",
+      "updating": "Updating...",
+      "mismatch": "The passwords do not match.",
+      "failed": "Could not reset your password. Request a new link and try again.",
+      "successTitle": "Password updated",
+      "successDetail": "Your password is updated, and you've been signed out everywhere else. Sign in with the new one.",
+      "redirecting": "Taking you to sign in...",
+      "invalidTitle": "Invalid or expired link",
+      "invalidDescription": "This password reset link is invalid or has expired. Request a new one.",
+      "requestNew": "Request new link"
+    }
   },
   "dashboard": {
     "title": "Dashboard",
@@ -118,7 +189,8 @@
     "deleteAccountConfirmDescription": "This action cannot be undone. Your account, profile data, and all associated information will be permanently deleted.",
     "deleteAccountConfirmButton": "Delete my account",
     "superAdminCannotDelete": "Super admin accounts cannot be deleted. Remove the super_admin role first, then try again.",
-    "saved": "Profile saved"
+    "saved": "Profile saved",
+    "saveFailed": "Could not save your profile. Try again."
   },
   "upload": {
     "dragOr": "Drag & drop or",
@@ -190,7 +262,14 @@
     "disableMfaDescription": "This will remove the authenticator from your account. You can set it up again at any time.",
     "disableMfaWarning": "Warning: Your organization requires two-factor authentication. You will need to set it up again before you can access your account.",
     "disabling": "Disabling...",
-    "disable2fa": "Disable 2FA"
+    "disable2fa": "Disable 2FA",
+    "passwordPrompt": "Enter your password to continue.",
+    "passwordLabel": "Password",
+    "qrTitle": "QR code for your authenticator app",
+    "backupCodes": "Backup codes",
+    "backupCodesDescription": "Save these somewhere safe. Each one signs you in once if you lose your authenticator.",
+    "enrollFailed": "Could not start two-factor setup. Try again.",
+    "disableFailed": "Could not turn off two-factor authentication. Try again."
   },
   "onboarding": {
     "getStarted": "Get Started",
@@ -204,7 +283,8 @@
       "title": "Welcome! What should we call you?",
       "description": "This helps personalize your experience.",
       "fullName": "Full Name",
-      "placeholder": "Jane Smith"
+      "placeholder": "Jane Smith",
+      "error": "Could not save your name. Try again."
     },
     "org": {
       "title": "Create your organization",

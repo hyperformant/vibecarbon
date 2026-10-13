@@ -14,7 +14,7 @@ import {
   ChartTooltipContent,
 } from '@/components/ui/chart';
 import { Skeleton } from '@/components/ui/skeleton';
-import { getAuthHeaders } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 
 interface PerformanceData {
   server: {
@@ -67,8 +67,7 @@ export function PerformanceMetrics() {
   const { data: perfData, isLoading: perfLoading } = useQuery<PerformanceData>({
     queryKey: ['admin', 'performance'],
     queryFn: async () => {
-      const headers = await getAuthHeaders();
-      const res = await fetch('/api/v1/admin/performance', { headers });
+      const res = await apiFetch('/api/v1/admin/performance');
       if (!res.ok) throw new Error('Failed to fetch performance data');
       return res.json();
     },
@@ -78,8 +77,7 @@ export function PerformanceMetrics() {
   const { data: statsData, isLoading: statsLoading } = useQuery<StatsResponse>({
     queryKey: ['admin', 'stats'],
     queryFn: async () => {
-      const headers = await getAuthHeaders();
-      const res = await fetch('/api/v1/admin/stats', { headers });
+      const res = await apiFetch('/api/v1/admin/stats');
       if (!res.ok) throw new Error('Failed to fetch stats');
       return res.json();
     },

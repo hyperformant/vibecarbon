@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getAuthHeaders } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 
 export type MemberRole = 'OWNER' | 'ADMIN' | 'MEMBER';
 
@@ -16,8 +16,7 @@ export type Member = {
 };
 
 async function fetchMembers(orgId: string): Promise<Member[]> {
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/v1/organizations/${orgId}/members`, { headers });
+  const response = await apiFetch(`/api/v1/organizations/${orgId}/members`);
 
   if (!response.ok) {
     const error = await response.json();
@@ -29,10 +28,8 @@ async function fetchMembers(orgId: string): Promise<Member[]> {
 }
 
 async function addMember(orgId: string, email: string, role: 'ADMIN' | 'MEMBER'): Promise<Member> {
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/v1/organizations/${orgId}/members`, {
+  const response = await apiFetch(`/api/v1/organizations/${orgId}/members`, {
     method: 'POST',
-    headers,
     body: JSON.stringify({ email, role }),
   });
 
@@ -46,10 +43,8 @@ async function addMember(orgId: string, email: string, role: 'ADMIN' | 'MEMBER')
 }
 
 async function updateMemberRole(orgId: string, userId: string, role: MemberRole): Promise<void> {
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/v1/organizations/${orgId}/members/${userId}`, {
+  const response = await apiFetch(`/api/v1/organizations/${orgId}/members/${userId}`, {
     method: 'PATCH',
-    headers,
     body: JSON.stringify({ role }),
   });
 
@@ -60,10 +55,8 @@ async function updateMemberRole(orgId: string, userId: string, role: MemberRole)
 }
 
 async function removeMember(orgId: string, userId: string): Promise<void> {
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/v1/organizations/${orgId}/members/${userId}`, {
+  const response = await apiFetch(`/api/v1/organizations/${orgId}/members/${userId}`, {
     method: 'DELETE',
-    headers,
   });
 
   if (!response.ok) {

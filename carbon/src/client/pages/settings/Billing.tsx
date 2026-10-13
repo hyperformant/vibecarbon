@@ -111,24 +111,24 @@ function formatDate(dateString: string): string {
 
 export default function Billing() {
   const { t } = useTranslation();
-  const { session } = useAuth();
+  const { user } = useAuth();
 
   const { data: billingStatus, isLoading: isLoadingStatus } = useQuery({
     queryKey: ['billing-status'],
     queryFn: fetchBillingStatus,
-    enabled: !!session,
+    enabled: !!user,
   });
 
   const { data: pricesData } = useQuery({
     queryKey: ['billing-prices'],
     queryFn: fetchPrices,
-    enabled: !!session,
+    enabled: !!user,
   });
 
   const { data: subscriptionData, isLoading: isLoadingSubscription } = useQuery({
     queryKey: ['subscription'],
     queryFn: fetchSubscription,
-    enabled: !!session && billingStatus?.configured,
+    enabled: !!user && billingStatus?.configured,
   });
 
   const checkoutMutation = useMutation({

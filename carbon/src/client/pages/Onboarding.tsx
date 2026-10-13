@@ -16,7 +16,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useOrganizations } from '@/hooks/useOrganizations';
-import { supabase } from '@/lib/supabase';
 import { cn } from '@/lib/utils';
 
 const STEPS = [
@@ -27,14 +26,14 @@ const STEPS = [
 
 export default function Onboarding() {
   const { t } = useTranslation();
-  const { user } = useAuth();
+  const { user, updateUser } = useAuth();
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
 
   async function completeOnboarding() {
-    await supabase.auth.updateUser({
-      data: { onboarding_completed: true },
-    });
+    // The provider re-reads the session, so the App.tsx gate sees the flag
+    // before the dashboard renders.
+    await updateUser({ onboardingCompleted: true });
     navigate('/dashboard', { replace: true });
   }
 
@@ -73,12 +72,7 @@ export default function Onboarding() {
 
       {/* Steps */}
       <div className="w-full max-w-lg">
-        {step === 0 && (
-          <ProfileStep
-            defaultName={user?.user_metadata?.full_name || ''}
-            onNext={() => setStep(1)}
-          />
-        )}
+        {step === 0 && <ProfileStep defaultName={user?.name || ''} onNext={() => setStep(1)} />}
         {step === 1 && <OrgStep onNext={() => setStep(2)} onSkip={() => setStep(2)} />}
         {step === 2 && <PlanStep onNext={completeOnboarding} />}
       </div>
@@ -88,15 +82,23 @@ export default function Onboarding() {
 
 function ProfileStep({ defaultName, onNext }: { defaultName: string; onNext: () => void }) {
   const { t } = useTranslation();
+  const { updateUser } = useAuth();
   const [name, setName] = useState(defaultName);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
-    await supabase.auth.updateUser({ data: { full_name: name.trim() } });
-    setSaving(false);
-    onNext();
+    setError('');
+    try {
+      await updateUser({ name: name.trim() });
+      onNext();
+    } catch {
+      setError(t('onboarding.profile.error'));
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -116,6 +118,7 @@ function ProfileStep({ defaultName, onNext }: { defaultName: string; onNext: () 
               placeholder={t('onboarding.profile.placeholder')}
               autoFocus
             />
+            {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
           <Button type="submit" className="w-full" disabled={saving}>
             {saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}

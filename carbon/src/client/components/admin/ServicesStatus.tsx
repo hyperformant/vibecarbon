@@ -17,7 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { getAuthHeaders } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
@@ -44,8 +44,7 @@ interface ServicesStatusResponse {
 }
 
 async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
-  const headers = await getAuthHeaders();
-  const response = await fetch('/api/_internal/services/status', { headers });
+  const response = await apiFetch('/api/_internal/services/status');
   if (!response.ok) {
     throw new Error('Failed to fetch services status');
   }
@@ -53,19 +52,15 @@ async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
 }
 
 async function restartService(container: string): Promise<{ success: boolean; error?: string }> {
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/_internal/services/status/restart/${container}`, {
+  const response = await apiFetch(`/api/_internal/services/status/restart/${container}`, {
     method: 'POST',
-    headers,
   });
   return response.json();
 }
 
 async function restartAllServices(): Promise<{ success: boolean }> {
-  const headers = await getAuthHeaders();
-  const response = await fetch('/api/_internal/services/status/restart', {
+  const response = await apiFetch('/api/_internal/services/status/restart', {
     method: 'POST',
-    headers,
   });
   return response.json();
 }
