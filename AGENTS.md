@@ -13,6 +13,9 @@ Vibecarbon is a CLI tool that generates production-ready software applications w
 3. **Test suite** (`tests/`): Comprehensive Vitest test suite
 
 ### CLI Commands
+
+The block below is generated from each command's `SPEC` by `pnpm docs:cli`. Don't edit inside the markers.
+
 <!-- BEGIN GENERATED: commands -->
 ```bash
 vibecarbon ?  /  vibecarbon next  # Tell me what to do next, and offer to run it
@@ -196,6 +199,8 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 - **Exit codes**: `0` success, `1` any failure (usage errors included: there is no exit-2 convention), `130`/`143` on SIGINT/SIGTERM. Fatal errors either `process.exit(1)` after printing context or throw to cli.js's central handler (which prints `Error: <msg>` and exits 1).
 - **Error output idioms** (pick by layer): argument/usage errors print `✗ <msg>` to stderr via `parseFlagsOrExit`; mid-flow interactive failures use `p.log.error(...)` (clack gutter); user-initiated cancels use `p.cancel(...)` + exit 0; only cli.js's top-level catch prints the bare `Error:` prefix. Don't hand-roll new variants.
 - **Command openers**: `introCommand('<name>')` (`src/lib/cli/intro.js`) prints the banner + `vibecarbon <name> v<VERSION>` intro; env-scoped deploy-side commands resolve their environment through `resolveEnvContext` (`src/lib/cli/env-context.js`).
+- **Context-sensitive messages are part of the feature.** When the CLI detects a specific scenario, its message names what happened, why it matters, and the exact command or edit that fixes it. Examples: a missing prerequisite, a conflicting stack, a refused action, or something left behind. Use the existing voice (lowercase hints via `p.log.info`, no em dashes). Unit tests assert the key strings for each scenario. A bare error with no next step is incomplete.
+- **Commands and flags document themselves.** A command's `SPEC` (summary, flag descriptions, `featured` for flags worth a README row) is the only place its interface is written. After changing a `SPEC`, run `pnpm docs:cli`. That regenerates the top-level help list, the `cli.mdx` flag tables, the README Commands tables and this file's command block. `tests/unit/docs/cli-docs-generated.test.ts` fails on drift. New commands go in `src/lib/cli/command-registry.js`. Behavior that flags can't express (scenarios, data safety, migrations) still gets hand-written prose in `cli.mdx` outside the generated markers.
 
 ## Template Placeholders
 
