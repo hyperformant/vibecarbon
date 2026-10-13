@@ -69,6 +69,29 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.log_cron_job(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated, app_user;
 
 -- =============================================================================
+-- Scheduled job list for the admin Jobs page
+-- =============================================================================
+
+-- The admin Jobs route (server, connection role) lists the scheduled jobs
+-- from here, including jobs that have not run yet. Only the name, schedule
+-- and active flag: the job's SQL (`command`) and its owner stay in cron.job.
+CREATE OR REPLACE FUNCTION public.get_cron_jobs()
+RETURNS TABLE (jobname TEXT, schedule TEXT, active BOOLEAN)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+-- Same hijack guard as log_cron_job: every reference is schema-qualified.
+SET search_path = ''
+AS $$
+  SELECT j.jobname::text, j.schedule::text, j.active
+  FROM cron.job j
+  ORDER BY j.jobname;
+$$;
+
+-- Server-only, like log_cron_job: no end-user role may enumerate the jobs.
+REVOKE EXECUTE ON FUNCTION public.get_cron_jobs() FROM PUBLIC, anon, authenticated, app_user;
+
+-- =============================================================================
 -- Schedule default jobs
 -- =============================================================================
 

@@ -2,14 +2,18 @@ import { and, desc, eq, isNotNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb } from '../../../db/client';
-import { dbErrorMessage } from '../../../db/errors';
+import { dbErrorForLog, dbErrorMessage } from '../../../db/errors';
 import { crawlerHits, crawlerHitsDaily, cronJobHistory, notifications } from '../../../db/schema';
 import { isoTimestamp } from '../../../db/values';
 import { sanitizeError } from '../../../lib/errors';
+import { logger } from '../../../lib/logger';
 import { requireSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
 
 type HistoryRow = typeof cronJobHistory.$inferSelect;
+
+/** A row of public.get_cron_jobs(). */
+type CronJobRow = { jobname: string; schedule: string; active: boolean };
 
 /** A history row as the API has always sent it (snake_case, ISO timestamps). */
 function historyJson(r: HistoryRow) {
@@ -35,63 +39,53 @@ const jobsRoutes = new Hono<{ Variables: HonoVariables }>();
 jobsRoutes.use('*', requireSuperAdmin);
 
 /**
- * List all scheduled cron jobs
+ * List the scheduled jobs with their latest outcome.
+ *
+ * The schedule comes from pg_cron through public.get_cron_jobs() (migration
+ * 00003), so a job shows up before its first run. Run state comes from the
+ * latest 100 history rows. If the schedule cannot be read, the error is
+ * logged and the list falls back to the jobs seen in history.
  */
 jobsRoutes.get('/', async (c) => {
   try {
-    // Ask the database for its pg_cron job list. If that function is not
-    // there (or fails), summarise the job history table instead.
-    let jobs: unknown[] | null = null;
+    const history = (
+      await adminDb.select().from(cronJobHistory).orderBy(desc(cronJobHistory.startedAt)).limit(100)
+    ).map(historyJson);
+
+    let scheduled: CronJobRow[] = [];
     try {
-      jobs = (await adminDb.execute(sql`select * from get_cron_jobs()`)).rows;
-    } catch {
-      jobs = null;
+      scheduled = (
+        await adminDb.execute<CronJobRow>(
+          sql`select jobname, schedule, active from public.get_cron_jobs()`
+        )
+      ).rows;
+    } catch (err) {
+      logger.error(
+        { err: dbErrorForLog(err) },
+        'Could not read the pg_cron schedule; listing jobs from history only'
+      );
     }
 
-    if (jobs === null) {
-      const history = (
-        await adminDb
-          .select({
-            jobName: cronJobHistory.jobName,
-            status: cronJobHistory.status,
-            startedAt: cronJobHistory.startedAt,
-            finishedAt: cronJobHistory.finishedAt,
-            durationMs: cronJobHistory.durationMs,
-            result: cronJobHistory.result,
-            error: cronJobHistory.error,
-          })
-          .from(cronJobHistory)
-          .orderBy(desc(cronJobHistory.startedAt))
-          .limit(100)
-      ).map((h) => ({
-        job_name: h.jobName,
-        status: h.status,
-        started_at: isoTimestamp(h.startedAt),
-        finished_at: h.finishedAt === null ? null : isoTimestamp(h.finishedAt),
-        duration_ms: h.durationMs,
-        result: h.result,
-        error: h.error,
-      }));
+    const names = [
+      ...new Set([...scheduled.map((j) => j.jobname), ...history.map((h) => h.job_name)]),
+    ];
+    const jobs = names.map((name) => {
+      const runs = history.filter((h) => h.job_name === name);
+      const latest = runs[0];
+      const cron = scheduled.find((j) => j.jobname === name);
+      return {
+        name,
+        schedule: cron?.schedule ?? null,
+        active: cron?.active ?? null,
+        lastRun: latest?.started_at ?? null,
+        lastStatus: latest?.status ?? 'unknown',
+        lastResult: latest?.result ?? null,
+        lastError: latest?.error ?? null,
+        runCount: runs.length,
+      };
+    });
 
-      // Derive job list from history
-      const jobNames = [...new Set(history.map((h) => h.job_name))];
-      const jobSummaries = jobNames.map((name) => {
-        const jobHistory = history.filter((h) => h.job_name === name);
-        const latest = jobHistory[0];
-        return {
-          name,
-          lastRun: latest?.started_at ?? null,
-          lastStatus: latest?.status ?? 'unknown',
-          lastResult: latest?.result ?? null,
-          lastError: latest?.error ?? null,
-          runCount: jobHistory.length,
-        };
-      });
-
-      return c.json({ jobs: jobSummaries, history });
-    }
-
-    return c.json({ jobs, history: [] });
+    return c.json({ jobs, history });
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch jobs') }, 500);
   }

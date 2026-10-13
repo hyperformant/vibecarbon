@@ -304,7 +304,7 @@ describe.skipIf(!dbTestsEnabled)('lockout, contact, newsletter, jobs on Postgres
     expect(history[0]).toMatchObject({ job_name: 'cleanup-login-attempts', status: 'succeeded' });
     expect(history[0].started_at).toMatch(/T/);
 
-    // The listing answers from get_cron_jobs() or the history summary.
+    // The listing answers from get_cron_jobs() (cron-jobs.test.ts pins its rows).
     const listed = await admin.request('/api/v1/admin/jobs');
     expect(listed.status).toBe(200);
     expect(Array.isArray(((await listed.json()) as { jobs: unknown[] }).jobs)).toBe(true);
