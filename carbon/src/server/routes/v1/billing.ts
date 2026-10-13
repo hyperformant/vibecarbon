@@ -98,7 +98,8 @@ async function getOrCreateCustomer(
       .where(owner)
       .limit(1);
   } catch (fetchError) {
-    throw new Error(`Failed to fetch customer: ${(fetchError as Error).message}`);
+    // The cause, not its message: a Drizzle message carries the query params.
+    throw new Error('Failed to fetch customer', { cause: fetchError });
   }
 
   // Return existing customer if found
@@ -153,7 +154,7 @@ async function getOrCreateCustomer(
     } catch {
       // Best-effort cleanup; the orphaned customer can be cleaned up manually
     }
-    throw new Error(`Failed to create customer record: ${(insertError as Error).message}`);
+    throw new Error('Failed to create customer record', { cause: insertError });
   }
 
   return {

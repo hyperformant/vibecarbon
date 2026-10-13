@@ -12,6 +12,7 @@ import { checkDbRoleAtStartup } from './db/startup';
 import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
+import { handleAppError } from './lib/errors';
 import { decodeAalFromJwt } from './lib/jwt';
 import { logger } from './lib/logger';
 import { createRateLimiter } from './lib/rate-limiter';
@@ -39,6 +40,12 @@ import { stripeWebhookRoutes } from './routes/webhooks/stripe';
 import type { HonoVariables } from './types';
 
 const app = new Hono<{ Variables: HonoVariables }>();
+
+// Anything a route throws without catching: generic 500 for the client, the
+// error (database params stripped) for the log. Hono's default handler would
+// console.error the raw error, and a Drizzle error's message carries every
+// bound value of the failed query.
+app.onError(handleAppError);
 
 // ============================================================================
 // SECURITY MIDDLEWARE

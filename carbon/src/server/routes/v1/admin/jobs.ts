@@ -2,6 +2,7 @@ import { and, desc, eq, isNotNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb } from '../../../db/client';
+import { dbErrorMessage } from '../../../db/errors';
 import { crawlerHits, crawlerHitsDaily, cronJobHistory, notifications } from '../../../db/schema';
 import { isoTimestamp } from '../../../db/values';
 import { sanitizeError } from '../../../lib/errors';
@@ -194,10 +195,10 @@ jobsRoutes.post('/trigger', async (c) => {
         status: 'failed',
         finishedAt: new Date().toISOString(),
         result: 'Manually triggered by admin',
+        // The Postgres message, never Drizzle's (it carries the SQL and params).
         error:
-          typeof jobError === 'object' && jobError !== null && 'message' in jobError
-            ? String((jobError as { message: unknown }).message)
-            : 'Unknown error',
+          dbErrorMessage(jobError) ??
+          (jobError instanceof Error ? jobError.message : 'Unknown error'),
       });
       return c.json({ error: sanitizeError(jobError, 'Failed to trigger job') }, 500);
     }

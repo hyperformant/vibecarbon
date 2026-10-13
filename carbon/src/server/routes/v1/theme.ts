@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
 import { isSuperAdmin } from '../../lib/auth';
 import { logger } from '../../lib/logger';
@@ -77,7 +78,7 @@ themeRoutes.get('/', async (c): Promise<Response> => {
 
     return c.json({ theme: row.value });
   } catch (err) {
-    logger.error({ error: err }, 'Failed to fetch app theme');
+    logger.error({ err: dbErrorForLog(err) }, 'Failed to fetch app theme');
     return c.json({ theme: {} });
   }
 });
@@ -120,7 +121,7 @@ themeRoutes.patch('/', async (c) => {
 
     return c.json({ success: true, theme });
   } catch (err) {
-    logger.error({ error: err, userId: user.id }, 'Failed to save app theme');
+    logger.error({ err: dbErrorForLog(err), userId: user.id }, 'Failed to save app theme');
     return c.json({ error: 'Failed to save theme' }, 500);
   }
 });

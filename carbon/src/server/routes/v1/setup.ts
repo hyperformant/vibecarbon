@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { isBillingConfigured } from '../../billing';
 import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
 import { isSuperAdmin } from '../../lib/auth';
 import { isEmailConfigured } from '../../lib/email';
@@ -71,7 +72,7 @@ setupRoutes.patch('/', async (c) => {
       .values({ key: BILLING_OPT_OUT_KEY, value, updatedBy: user.id })
       .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedBy: user.id } });
   } catch (error) {
-    logger.error({ error, userId: user.id }, 'Failed to save billing opt-out');
+    logger.error({ err: dbErrorForLog(error), userId: user.id }, 'Failed to save billing opt-out');
     return c.json({ error: 'Failed to save setting' }, 500);
   }
 

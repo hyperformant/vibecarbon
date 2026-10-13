@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { Context, Next } from 'hono';
 import { adminDb } from '../db/client';
+import { dbErrorForLog } from '../db/errors';
 import { crawlerHits } from '../db/schema';
 import { classifyCrawler } from '../lib/crawlers';
 import { logger } from '../lib/logger';
@@ -161,7 +162,7 @@ function logInsertFailure(error: unknown): void {
   const now = Date.now();
   if (now - lastErrorLoggedAt < ERROR_LOG_INTERVAL_MS) return;
   lastErrorLoggedAt = now;
-  logger.warn({ error }, 'Crawler hit insert failed (tracking is best-effort)');
+  logger.warn({ err: dbErrorForLog(error) }, 'Crawler hit insert failed (tracking is best-effort)');
 }
 
 /** False once this crawler has exhausted its budget for the current window. */

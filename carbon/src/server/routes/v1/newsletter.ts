@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { newsletterSubscribers } from '../../db/schema';
 import { isUuid } from '../../db/values';
 import { sendEmail } from '../../lib/email';
@@ -72,7 +73,7 @@ newsletterRoutes.post('/subscribe', async (c) => {
         .returning({ confirmationToken: newsletterSubscribers.confirmationToken });
       confirmationToken = subscriber?.confirmationToken ?? null;
     } catch (insertError) {
-      logger.error({ error: insertError }, 'Failed to create newsletter subscriber');
+      logger.error({ err: dbErrorForLog(insertError) }, 'Failed to create newsletter subscriber');
       return c.json({ error: sanitizeError(insertError, 'Failed to subscribe') }, 500);
     }
 

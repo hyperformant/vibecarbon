@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { contactSubmissions } from '../../db/schema';
 import { sendEmail } from '../../lib/email';
 import { env } from '../../lib/env';
@@ -55,7 +56,7 @@ contactRoutes.post('/submit', async (c) => {
         message: body.message,
       });
     } catch (insertError) {
-      logger.error({ error: insertError }, 'Failed to save contact submission');
+      logger.error({ err: dbErrorForLog(insertError) }, 'Failed to save contact submission');
       return c.json({ error: sanitizeError(insertError, 'Failed to submit') }, 500);
     }
 

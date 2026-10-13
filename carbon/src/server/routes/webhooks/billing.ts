@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { getBillingProvider, isBillingConfigured } from '../../billing';
 import { findCustomerByProviderId, upsertSubscriptionRow } from '../../billing/records';
 import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { customers, subscriptions } from '../../db/schema';
 import { paymentFailedEmail, subscriptionConfirmEmail } from '../../emails/templates';
 import { sendEmail } from '../../lib/email';
@@ -103,9 +104,8 @@ billingWebhookRoutes.post('/', async (c) => {
 
     return c.json({ received: true });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
     logger.error(
-      { error: message, eventType: event.type, provider: provider.type },
+      { err: dbErrorForLog(error), eventType: event.type, provider: provider.type },
       'Failed to process billing webhook event'
     );
     return c.json({ error: 'Webhook handler failed' }, 500);
@@ -152,7 +152,10 @@ async function handleCheckoutCompleted(data: Record<string, unknown>): Promise<v
         await upsertSubscriptionFromInfo(customer.id, subscriptionId, subInfo);
       }
     } catch (error) {
-      logger.warn({ error, subscriptionId }, 'Could not fetch subscription details after checkout');
+      logger.warn(
+        { err: dbErrorForLog(error), subscriptionId },
+        'Could not fetch subscription details after checkout'
+      );
     }
   }
 
@@ -221,7 +224,10 @@ async function handleSubscriptionDeleted(data: Record<string, unknown>): Promise
       .set({ status: 'canceled', canceledAt: new Date().toISOString() })
       .where(eq(subscriptions.stripeSubscriptionId, subscriptionId));
   } catch (error) {
-    logger.error({ error, subscriptionId }, 'Failed to update canceled subscription');
+    logger.error(
+      { err: dbErrorForLog(error), subscriptionId },
+      'Failed to update canceled subscription'
+    );
     throw error;
   }
 }
@@ -245,7 +251,10 @@ async function handlePaymentFailed(data: Record<string, unknown>): Promise<void>
       .set({ status: 'past_due' })
       .where(eq(subscriptions.stripeSubscriptionId, subscriptionId));
   } catch (error) {
-    logger.error({ error, subscriptionId }, 'Failed to update subscription status to past_due');
+    logger.error(
+      { err: dbErrorForLog(error), subscriptionId },
+      'Failed to update subscription status to past_due'
+    );
     throw error;
   }
 
@@ -311,7 +320,7 @@ async function upsertSubscriptionFromData(
       canceledAt: (data.canceledAt as string) ?? null,
     });
   } catch (error) {
-    logger.error({ error, subscriptionId }, 'Failed to upsert subscription');
+    logger.error({ err: dbErrorForLog(error), subscriptionId }, 'Failed to upsert subscription');
     throw error;
   }
 
@@ -342,7 +351,10 @@ async function upsertSubscriptionFromInfo(
       cancelAtPeriodEnd: info.cancelAtPeriodEnd,
     });
   } catch (error) {
-    logger.error({ error, subscriptionId }, 'Failed to upsert subscription from provider info');
+    logger.error(
+      { err: dbErrorForLog(error), subscriptionId },
+      'Failed to upsert subscription from provider info'
+    );
     throw error;
   }
 

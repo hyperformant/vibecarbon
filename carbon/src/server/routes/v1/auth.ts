@@ -2,6 +2,7 @@ import { inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { appSettings } from '../../db/schema';
 import { isoTimestamp } from '../../db/values';
 import { isSuperAdmin } from '../../lib/auth';
@@ -89,7 +90,7 @@ authRoutes.post('/login', async (c) => {
       }>(sql`select check_account_lockout(${email}, ${ipAddress}::inet) as lockout`);
       lockoutData = rows[0]?.lockout ?? null;
     } catch (lockoutError) {
-      logger.error({ error: lockoutError }, 'Failed to check lockout status');
+      logger.error({ err: dbErrorForLog(lockoutError) }, 'Failed to check lockout status');
       // Continue with login attempt even if lockout check fails
     }
 
@@ -118,7 +119,7 @@ authRoutes.post('/login', async (c) => {
         await adminDb.execute(sql`select record_failed_login(${email}, ${ipAddress}::inet)`);
         logger.warn({ email, ip: ipAddress }, 'Failed login attempt recorded');
       } catch (recordError) {
-        logger.error({ error: recordError }, 'Failed to record login attempt');
+        logger.error({ err: dbErrorForLog(recordError) }, 'Failed to record login attempt');
       }
 
       // SECURITY: return a single generic message regardless of the underlying
@@ -131,7 +132,7 @@ authRoutes.post('/login', async (c) => {
     try {
       await adminDb.execute(sql`select clear_failed_logins(${email}, ${ipAddress}::inet)`);
     } catch (clearError) {
-      logger.error({ error: clearError }, 'Failed to clear lockout records');
+      logger.error({ err: dbErrorForLog(clearError) }, 'Failed to clear lockout records');
     }
 
     // Return session data for client to use
@@ -151,7 +152,7 @@ authRoutes.post('/login', async (c) => {
       },
     });
   } catch (error) {
-    logger.error({ error }, 'Login error');
+    logger.error({ err: dbErrorForLog(error) }, 'Login error');
     return c.json({ error: sanitizeError(error, 'Login failed') }, 500);
   }
 });

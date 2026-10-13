@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import type Stripe from 'stripe';
 import { findCustomerByProviderId, upsertSubscriptionRow } from '../../billing/records';
 import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { subscriptions } from '../../db/schema';
 import { paymentFailedEmail, subscriptionConfirmEmail } from '../../emails/templates';
 import { sendEmail } from '../../lib/email';
@@ -65,8 +66,10 @@ stripeWebhookRoutes.post('/', async (c) => {
 
     return c.json({ received: true });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    logger.error({ error: message, eventType: event.type }, 'Failed to process webhook event');
+    logger.error(
+      { err: dbErrorForLog(error), eventType: event.type },
+      'Failed to process webhook event'
+    );
     return c.json({ error: 'Webhook handler failed' }, 500);
   }
 });
@@ -154,7 +157,7 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
       .where(eq(subscriptions.stripeSubscriptionId, subscription.id));
   } catch (error) {
     logger.error(
-      { error, subscriptionId: subscription.id },
+      { err: dbErrorForLog(error), subscriptionId: subscription.id },
       'Failed to update canceled subscription'
     );
     throw error;
@@ -184,7 +187,10 @@ async function handlePaymentFailed(invoice: Stripe.Invoice) {
       .set({ status: 'past_due' })
       .where(eq(subscriptions.stripeSubscriptionId, subscriptionId));
   } catch (error) {
-    logger.error({ error, subscriptionId }, 'Failed to update subscription status to past_due');
+    logger.error(
+      { err: dbErrorForLog(error), subscriptionId },
+      'Failed to update subscription status to past_due'
+    );
     throw error;
   }
 
@@ -243,7 +249,10 @@ async function upsertSubscription(customerId: string, subscription: Stripe.Subsc
         : null,
     });
   } catch (error) {
-    logger.error({ error, subscriptionId: subscription.id }, 'Failed to upsert subscription');
+    logger.error(
+      { err: dbErrorForLog(error), subscriptionId: subscription.id },
+      'Failed to upsert subscription'
+    );
     throw error;
   }
 

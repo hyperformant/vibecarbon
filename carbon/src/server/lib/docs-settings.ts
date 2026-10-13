@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { adminDb } from '../db/client';
+import { dbErrorForLog } from '../db/errors';
 import { appSettings } from '../db/schema';
 import { logger } from './logger';
 
@@ -47,7 +48,7 @@ export async function isApiDocsEnabled(): Promise<boolean> {
     return enabled;
   } catch (err) {
     logger.warn(
-      { err },
+      { err: dbErrorForLog(err) },
       'docs-settings: failed to read app_settings.api_docs_enabled; failing open'
     );
     return cache?.value ?? true;

@@ -3,6 +3,7 @@ import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import { env } from '../lib/env';
 import { logger } from '../lib/logger';
+import { dbErrorForLog } from './errors';
 import * as schema from './schema';
 
 /**
@@ -34,7 +35,10 @@ export const pool = new pg.Pool({
 // the pool; without a listener it is an uncaught error that kills the
 // process. The pool drops the dead client and the next checkout reconnects.
 pool.on('error', (err) => {
-  logger.error({ err }, 'Idle Postgres connection failed; the pool will reconnect');
+  logger.error(
+    { err: dbErrorForLog(err) },
+    'Idle Postgres connection failed; the pool will reconnect'
+  );
 });
 
 export const adminDb: NodePgDatabase<typeof schema> = drizzle({ client: pool, schema });

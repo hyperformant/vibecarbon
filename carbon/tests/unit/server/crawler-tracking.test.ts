@@ -345,7 +345,7 @@ describe('crawlerTracking — insert failures are swallowed', () => {
     expect(next).toHaveBeenCalledTimes(1);
 
     await vi.waitFor(() => expect(warnMock).toHaveBeenCalledTimes(1));
-    expect(warnMock.mock.calls[0][0]).toEqual({ error: denied });
+    expect(warnMock.mock.calls[0][0]).toEqual({ err: denied });
   });
 
   it('logs (does not throw) a rejected insert promise', async () => {

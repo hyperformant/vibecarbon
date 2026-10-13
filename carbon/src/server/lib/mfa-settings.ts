@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { adminDb } from '../db/client';
+import { dbErrorForLog } from '../db/errors';
 import { appSettings } from '../db/schema';
 import { logger } from './logger';
 
@@ -35,7 +36,10 @@ export async function isMfaGloballyEnabled(): Promise<boolean> {
     cache = { value: enabled, expiresAt: Date.now() + TTL_MS };
     return enabled;
   } catch (err) {
-    logger.warn({ err }, 'mfa-settings: failed to read app_settings.mfa_enabled; failing open');
+    logger.warn(
+      { err: dbErrorForLog(err) },
+      'mfa-settings: failed to read app_settings.mfa_enabled; failing open'
+    );
     return cache?.value ?? false;
   }
 }
