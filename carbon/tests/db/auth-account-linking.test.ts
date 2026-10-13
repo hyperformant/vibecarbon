@@ -3,6 +3,7 @@ import { handleOAuthUserInfo } from 'better-auth/oauth2';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { auth } from '@server/auth';
+import { rejectOrphanedPasswordSession, secureSocialLink } from '@server/auth/account-linking';
 import { adminDb } from '@server/db/client';
 import { logger } from '@server/lib/logger';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
@@ -154,6 +155,87 @@ describe.skipIf(!dbTestsEnabled)('social sign-in onto an existing email (real da
       [email],
     );
     expect(sessions.rows[0].n).toBe(1);
+  });
+
+  it("the cleanup also removes an attacker's TOTP enrollment", async () => {
+    const email = newEmail();
+    await post('/api/auth/sign-up/email', { email, password: PASSWORD, name: 'A' });
+    const { rows } = await db.query('select id from public."user" where email = $1', [email]);
+    const userId = rows[0].id;
+    await db.query('update public."user" set two_factor_enabled = true where id = $1', [userId]);
+    await db.query(
+      "insert into public.two_factor (secret, backup_codes, user_id) values ('s', 'b', $1)",
+      [userId],
+    );
+
+    expect((await googleSignIn(email, true)).error).toBeFalsy();
+
+    const after = await db.query(
+      'select two_factor_enabled, (select count(*)::int from public.two_factor where user_id = $1) as n from public."user" where id = $1',
+      [userId],
+    );
+    expect(after.rows[0]).toEqual({ two_factor_enabled: false, n: 0 });
+  });
+
+  it('a password sign-in racing the cleanup gets no session (read hash, cleanup, then insert)', async () => {
+    const email = newEmail();
+    await post('/api/auth/sign-up/email', { email, password: PASSWORD, name: 'A' });
+
+    const { rows: owner } = await db.query('select id from public."user" where email = $1', [
+      email,
+    ]);
+    const userId = owner[0].id as string;
+
+    // Deterministic interleaving: the attacker's sign-in has already read
+    // the credential hash; while it verifies the password, the victim's
+    // social link runs its cleanup to commit (the same hook the link runs,
+    // called directly: a nested full sign-in would inherit the attacker's
+    // request context); then the attacker's sign-in creates its session.
+    const passwords = (await auth.$context).password;
+    const realVerify = passwords.verify.bind(passwords);
+    const verify = vi.spyOn(passwords, 'verify').mockImplementationOnce(async (args) => {
+      const ok = await realVerify(args);
+      expect(await secureSocialLink({ userId, providerId: 'google' })).toBe(true);
+      return ok;
+    });
+    let attacker: Response;
+    try {
+      attacker = await post('/api/auth/sign-in/email', { email, password: PASSWORD });
+    } finally {
+      verify.mockRestore();
+    }
+
+    expect(attacker.status).toBe(401);
+    expect(attacker.headers.getSetCookie().join('')).not.toContain('session_token=');
+    expect(await accountsOf(email)).toEqual([]);
+    // The attacker's session was deleted; the victim then signs in normally.
+    expect((await googleSignIn(email, true)).error).toBeFalsy();
+    const { rows } = await db.query(
+      `select count(*)::int as n from public.session s join public."user" u on u.id = s.user_id
+        where u.email = $1`,
+      [email],
+    );
+    expect(rows[0].n).toBe(1);
+  });
+
+  it('the session check only touches password sign-ins', async () => {
+    const email = newEmail();
+    const result = await googleSignIn(email, true); // a social-only user
+    const created = result.data?.session as { id: string; userId: string };
+    const sessionCount = async () =>
+      (
+        await db.query<{ n: number }>('select count(*)::int as n from public.session where id = $1', [
+          created.id,
+        ])
+      ).rows[0].n;
+
+    await rejectOrphanedPasswordSession(created, '/callback/:id');
+    expect(await sessionCount()).toBe(1);
+
+    await expect(rejectOrphanedPasswordSession(created, '/sign-in/email')).rejects.toMatchObject({
+      statusCode: 401,
+    });
+    expect(await sessionCount()).toBe(0);
   });
 
   it('a provider that does not vouch for the email cannot link at all', async () => {

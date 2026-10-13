@@ -1,7 +1,8 @@
+import { APIError } from 'better-auth/api';
 import { and, eq } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { dbErrorForLog } from '../db/errors';
-import { account, session, user } from '../db/schema';
+import { account, session, twoFactor, user } from '../db/schema';
 import { logger } from '../lib/logger';
 
 /**
@@ -60,7 +61,13 @@ export async function secureSocialLink(linked: {
       if (removed.length === 0) return false;
 
       await tx.delete(session).where(eq(session.userId, linked.userId));
-      await tx.update(user).set({ emailVerified: true }).where(eq(user.id, linked.userId));
+      // The password's owner may have enrolled TOTP too; a pending or later
+      // second-factor step must not keep their factor on the account.
+      await tx.delete(twoFactor).where(eq(twoFactor.userId, linked.userId));
+      await tx
+        .update(user)
+        .set({ emailVerified: true, twoFactorEnabled: false })
+        .where(eq(user.id, linked.userId));
       logger.warn(
         { userId: linked.userId, email: owner.email, provider: linked.providerId },
         'Social sign-in claimed an unverified email: removed its password and ended its sessions'
@@ -74,4 +81,40 @@ export async function secureSocialLink(linked: {
     );
     throw new Error('Social account link refused: pre-link cleanup failed');
   }
+}
+
+/**
+ * Close the race with the cleanup above. A password sign-in reads the
+ * credential hash, spends time verifying it, then inserts its session. If
+ * the cleanup commits in between, that insert still succeeds (it only
+ * waited on the cleanup's row lock) and the attacker would hold a live
+ * session on the now-verified account. So after every session that
+ * `/sign-in/email` creates, check the credential it was granted on still
+ * exists; if not, delete the session and fail the sign-in. Both orderings
+ * are covered: a session inserted before the cleanup is deleted by it, one
+ * inserted after is deleted here.
+ *
+ * Runs as the `session.create.after` database hook; the thrown error ends
+ * the sign-in before its cookie is set.
+ */
+export async function rejectOrphanedPasswordSession(
+  created: { id: string; userId: string },
+  path: string | undefined
+): Promise<void> {
+  if (path !== '/sign-in/email') return;
+  const [credential] = await adminDb
+    .select({ id: account.id })
+    .from(account)
+    .where(and(eq(account.userId, created.userId), eq(account.providerId, 'credential')));
+  if (credential) return;
+  await adminDb.delete(session).where(eq(session.id, created.id));
+  logger.warn(
+    { userId: created.userId },
+    'Password sign-in finished after its password was removed: session deleted'
+  );
+  // The same answer as a wrong password, so the race reveals nothing.
+  throw new APIError('UNAUTHORIZED', {
+    code: 'INVALID_EMAIL_OR_PASSWORD',
+    message: 'Invalid email or password',
+  });
 }

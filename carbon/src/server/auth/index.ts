@@ -8,7 +8,7 @@ import * as schema from '../db/schema';
 import { isEmailConfigured } from '../lib/email';
 import { env } from '../lib/env';
 import { allowedOrigins } from '../lib/origins';
-import { secureSocialLink } from './account-linking';
+import { rejectOrphanedPasswordSession, secureSocialLink } from './account-linking';
 import { sendAuthEmail } from './email';
 import { lockoutPlugin } from './lockout';
 import { socialProviders } from './providers';
@@ -116,6 +116,15 @@ export const auth = betterAuth({
     },
   },
   databaseHooks: {
+    session: {
+      create: {
+        // The other half of the pre-hijacking defence: a password sign-in
+        // that raced the cleanup gets no session (auth/account-linking.ts).
+        after: async (created, ctx) => {
+          await rejectOrphanedPasswordSession(created, ctx?.path);
+        },
+      },
+    },
     account: {
       create: {
         // Pre-hijacking defence (auth/account-linking.ts). A before hook, so
