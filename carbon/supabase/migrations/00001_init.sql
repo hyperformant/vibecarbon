@@ -160,8 +160,11 @@ CREATE TABLE IF NOT EXISTS account (
 
 CREATE INDEX IF NOT EXISTS idx_account_user_id ON account(user_id);
 
+-- verification.id is TEXT, unlike the other auth ids: Better Auth writes its
+-- own non-uuid ids here for reservations (a hash of the identifier, e.g. the
+-- lock a magic link takes on an unverified account). Nothing references it.
 CREATE TABLE IF NOT EXISTS verification (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   identifier TEXT NOT NULL,
   value TEXT NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL,

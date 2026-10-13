@@ -85,11 +85,17 @@ describe.skipIf(!dbTestsEnabled)('Drizzle schema matches the migrated database',
   });
 
   it('auth table ids are uuids the database generates (Better Auth runs with generateId: false)', () => {
-    for (const table of ['user', 'session', 'account', 'verification', 'two_factor']) {
+    for (const table of ['user', 'session', 'account', 'two_factor']) {
       const id = columnInfo.get(`${table}.id`);
       expect(id?.data_type, `${table}.id`).toBe('uuid');
       expect(id?.column_default, `${table}.id`).toMatch(/gen_random_uuid\(\)/);
     }
+  });
+
+  it('verification ids are text: Better Auth writes its own non-uuid ids there', () => {
+    const id = columnInfo.get('verification.id');
+    expect(id?.data_type).toBe('text');
+    expect(id?.column_default).toMatch(/gen_random_uuid\(\)/);
   });
 
   it('every public table has a Drizzle definition with every column', () => {

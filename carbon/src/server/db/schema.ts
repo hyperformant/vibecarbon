@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
@@ -101,7 +102,9 @@ export const account = pgTable('account', {
 });
 
 export const verification = pgTable('verification', {
-  id: uuid('id').defaultRandom().primaryKey(),
+  // Text, not uuid: Better Auth writes its own non-uuid ids here for
+  // reservations (see 00001_init.sql).
+  id: text('id').default(sql`gen_random_uuid()::text`).primaryKey(),
   identifier: text('identifier').notNull(),
   value: text('value').notNull(),
   expiresAt: timestamp('expires_at', authTz).notNull(),
