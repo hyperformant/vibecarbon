@@ -100,15 +100,12 @@ describe.skipIf(!pnpmVersion)(`pnpm ${pnpmVersion} enforces the template's depen
     expect(lockfile).toContain('packages:');
   });
 
-  // Both of these sit BELOW their pinned floor when the overrides are ignored —
-  // measured on pnpm 11.18.0 with the pins left in package.json: fast-uri@3.1.4
-  // (floor >=3.1.2 is met, but the npm path lands 4.1.1) and unhead@2.1.16
-  // (floor >=2.1.13). They are the pair that visibly moves when the override
-  // location is right, which is what makes them the useful canaries here.
-  it.each([
-    { name: 'fast-uri', floor: '3.1.2', ignoredValue: '3.1.4' },
-    { name: 'unhead', floor: '2.1.13', ignoredValue: '2.1.16' },
-  ])(
+  // unhead sits BELOW its pinned floor when the overrides are ignored —
+  // measured on pnpm 11.18.0 with the pins left in package.json: unhead@2.1.16
+  // (floor >=2.1.13). It visibly moves when the override location is right,
+  // which is what makes it the useful canary here. fast-uri was the second
+  // canary until dropping the shadcn devDependency took it out of the tree.
+  it.each([{ name: 'unhead', floor: '2.1.13', ignoredValue: '2.1.16' }])(
     '$name is overridden, not left at the un-overridden $ignoredValue',
     ({ name, floor, ignoredValue }) => {
       const versions = resolvedVersions(name);
@@ -146,7 +143,7 @@ describe.skipIf(!pnpmVersion)(`pnpm ${pnpmVersion} enforces the template's depen
     const npmVersion = (name: string): string | undefined =>
       npmLock.packages[`node_modules/${name}`]?.version;
 
-    for (const name of ['fast-uri', 'unhead', 'postcss', 'ip-address']) {
+    for (const name of ['unhead', 'postcss']) {
       const locked = npmVersion(name);
       expect(locked, `${name} missing from the npm lockfile`).toBeTruthy();
       const versions = resolvedVersions(name);
