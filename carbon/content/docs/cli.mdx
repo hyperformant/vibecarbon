@@ -146,7 +146,18 @@ vibecarbon up
 Auto-detects the project's package manager and runs the `dev:start` script,
 which boots Docker services (PostgreSQL, Supabase, Traefik), runs database
 migrations, and starts the Hono API and Vite dev servers. If ports are already
-in use, a port offset is applied automatically.
+
+On first run, `up` pins the stack name in your project's `.env` as
+`COMPOSE_PROJECT_NAME`. That name ties your containers and database volumes to
+the project, so you can rename or move the folder and keep your local database.
+`up` notices the old stack, removes its containers (never its volumes), and
+recreates them from the new folder. It tells you when it does this, so you know
+your data came along.
+
+If you copy a project folder while the original's stack still exists, `up`
+refuses to start the copy so the two can't fight over one database. The message
+says what to change: give the copy its own `PROJECT_NAME`, or run
+`vibecarbon down` in the other folder first.
 
 ---
 
@@ -157,7 +168,7 @@ Stop the local development environment.
 {/* BEGIN GENERATED: flags down */}
 | Flag | Description |
 |------|-------------|
-| `-orphans` | Remove local stacks whose project folder is gone |
+| `-orphans` | Remove local stacks whose project folder is gone or moved |
 | `-y` | Skip the confirmation |
 {/* END GENERATED: flags down */}
 
@@ -167,6 +178,16 @@ vibecarbon down
 
 Stops all Docker Compose services for this project. Volumes (database data) are
 preserved.
+
+`-orphans` cleans up after projects you deleted or moved. It lists local stacks
+whose project folder is gone, or that were started from files that are no longer
+there (and have no running containers). You're asked before the containers and
+network are removed, and asked again, separately, before any data volumes are
+deleted. That second question defaults to No. `-y` and non-interactive runs
+never delete volumes.
+
+To reuse a moved project's data, set `COMPOSE_PROJECT_NAME=<old name>` in the
+new folder's `.env` before you run `vibecarbon up`.
 
 ---
 
@@ -479,7 +500,7 @@ confirmations.
 | `-mode <mode>` | Deploy mode: compose, compose-ha, k8s, or k8s-ha |
 | `-server-type <id>` | Server type (provider-specific, e.g. cpx22). Compose: the whole box; k8s: blanket for master/supabase/worker unless .vibecarbon.json sets them per role. Without it a scripted deploy takes the region default. |
 | `-full` | Clear resume state and redo every step from scratch |
-| `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). Skips migrations; the restored DB is authoritative. k8s only. |
+| `-restore <latest\|timestamp>` | Disaster recovery: seed the fresh DB from the latest wal-g backup in S3 (or PITR to an ISO-8601 timestamp). Skips migrations; the restored DB is authoritative. k8s and k8s-ha only. |
 | `-allow-degraded` | HA only: proceed even if the standby is not verifiably streaming (warm-standby / degraded DR). By default an HA deploy FAILS unless replication is confirmed streaming. |
 {/* END GENERATED: flags deploy */}
 

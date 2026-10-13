@@ -68,7 +68,7 @@ const ALL_VALID_SECTIONS = [...SECTIONS, ...OPTIONAL_SECTIONS];
 /** @type {import('./lib/cli/parse-flags.js').CommandSpec & { summary?: string, description?: string, examples?: Array<{ command: string, description?: string }> }} */
 export const SPEC = {
   name: 'diagnose',
-  summary: 'Dump full cluster state to ~/.vibecarbon/diag-*',
+  summary: 'Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*',
   description: [
     'Streams sections to stdout AND writes the full report to:',
     '  ~/.vibecarbon/diag-<env>-<timestamp>.txt',

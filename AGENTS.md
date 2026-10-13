@@ -19,7 +19,7 @@ vibecarbon ?  /  vibecarbon next  # Tell me what to do next, and offer to run it
 vibecarbon create <project-name>  # Create a new Vibecarbon project
 vibecarbon up                     # Start the local development environment
 vibecarbon down                   # Stop the local development environment
-vibecarbon down -orphans          # Remove local stacks whose project folder is gone
+vibecarbon down -orphans          # Remove local stacks whose project folder is gone or moved
 vibecarbon status                 # Show project and deployment status
 vibecarbon reset                  # Reset the local environment (removes all data)
 vibecarbon add [feature]          # Add features (observability, redis)
@@ -34,7 +34,7 @@ vibecarbon restore [env]          # Restore the database from a backup
 vibecarbon failover [env]         # Initiate failover to the standby region
 vibecarbon scale [env]            # Scale worker nodes and instance sizes
 vibecarbon shell [env]            # Open an interactive bash with KUBECONFIG and cloud credentials exported
-vibecarbon diagnose [env]         # Dump full cluster state to ~/.vibecarbon/diag-*
+vibecarbon diagnose [env]         # Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
 vibecarbon console <node>         # Open Hetzner's web VNC console for a node
 vibecarbon access [subcommand]    # Manage the SSH and k8s-API operator-CIDR allowlist
 vibecarbon activate [key]         # Bind a Graphene or Fullerene key to this project, unlocking Kubernetes and HA deploys. Run it inside the project

@@ -47,6 +47,11 @@ These are wrappers around the `npm` scripts listed below; use whichever you pref
 
 Vite proxies all `/api/*` requests to the Hono server, so the client can call `fetch('/api/v1/...')` without worrying about ports or CORS.
 
+Local dev services use `restart: on-failure:5`, so they don't start by
+themselves after a reboot. Run `vibecarbon up` (or `npm run dev:start`) to bring
+them back. This is deliberate: a deleted or moved project can't crash-loop in
+the background.
+
 ## Development URLs
 
 Traefik routes `*.localhost` subdomains to each service:

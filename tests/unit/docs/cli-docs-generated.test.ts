@@ -37,4 +37,14 @@ describe('generated CLI docs', () => {
     }
     expect(mdx).toContain('{/* BEGIN GENERATED: global-flags */}');
   });
+
+  it('every flags region in cli.mdx maps to a registry command', () => {
+    const mdx = onDisk.get('carbon/content/docs/cli.mdx') as string;
+    const names = new Set<string>(COMMANDS.map((c: { name: string }) => c.name));
+    const ids = [...mdx.matchAll(/BEGIN GENERATED: flags (\S+) \*\//g)].map((m) => m[1]);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(names.has(id), `stale "flags ${id}" region: no such command`).toBe(true);
+    }
+  });
 });

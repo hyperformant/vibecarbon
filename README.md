@@ -131,7 +131,7 @@ vibecarbon <command> [options]
 | **`create <project-name>`** | Create a new Vibecarbon project |
 | **`up`** | Start the local development environment |
 | **`down`** | Stop the local development environment |
-| **`down -orphans`** | Remove local stacks whose project folder is gone |
+| **`down -orphans`** | Remove local stacks whose project folder is gone or moved |
 | **`status`** | Show project and deployment status |
 | **`reset`** | Reset the local environment (removes all data) |
 | **`add [feature]`** | Add features (observability, redis) |
@@ -169,7 +169,7 @@ vibecarbon <command> [options]
 | Command | What it does |
 | :------ | :----------- |
 | **`shell [env]`** | Open an interactive bash with KUBECONFIG and cloud credentials exported |
-| **`diagnose [env]`** | Dump full cluster state to ~/.vibecarbon/diag-* |
+| **`diagnose [env]`** | Dump cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-* |
 | **`console <node>`** | Open Hetzner's web VNC console for a node |
 | **`access [subcommand]`** | Manage the SSH and k8s-API operator-CIDR allowlist |
 <!-- END GENERATED: commands debug -->
