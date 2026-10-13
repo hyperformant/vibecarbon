@@ -231,6 +231,49 @@ async function probePublicHealth(
  * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
  */
 /**
+ * Apply the browser-upload CORS rule to the app bucket. Runs on EVERY deploy,
+ * outside the skippable s3-setup step, so deployments that predate the rule
+ * (or whose rule was edited out-of-band) converge on re-run; the PUT is
+ * idempotent. A failure only costs browser uploads, so it warns and returns.
+ *
+ * SECURITY: never a `*` wildcard (setBucketCors refuses it). With a domain
+ * the rule allows exactly `https://<domain>`, the single public origin the
+ * app serves from. A domainless deploy has no browser origin to trust yet,
+ * so it gets localhost dev origins and a warning; re-run deploy once a
+ * domain is set.
+ *
+ * @param {object} opts
+ * @param {() => Promise<object>} opts.createProvider - builds a provider at the
+ *   APP bucket's region (the shared one may point at the state bucket's)
+ * @param {string} opts.bucket - app bucket name
+ * @param {string} [opts.domain]
+ * @param {{ start: Function, stop: Function }} opts.spin
+ * @param {{ warn: Function }} opts.log
+ */
+export async function applyAppBucketCors({ createProvider, bucket, domain, spin, log }) {
+  try {
+    spin.start('Configuring bucket CORS');
+    let corsOrigins;
+    if (domain) {
+      corsOrigins = [`https://${domain}`];
+    } else {
+      corsOrigins = ['http://localhost:3000', 'http://localhost:5173'];
+      log.warn(
+        'No domain configured, so bucket CORS only allows localhost dev origins. Re-run deploy with a domain to allow your production origin.',
+      );
+    }
+    const provider = await createProvider();
+    await provider.setBucketCors(bucket, corsOrigins);
+    spin.stop('Bucket CORS configured');
+  } catch (corsErr) {
+    spin.stop('Bucket CORS not set');
+    log.warn(
+      `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to apply it again, or set CORS on ${bucket} in your provider console.`,
+    );
+  }
+}
+
+/**
  * Refuse to provision against a bucket the provider has not made readable.
  * createBucket's visibility probe (HEAD+LIST+write, 120s) can exhaust its
  * budget: the provider acked the create but no frontend serves the bucket.
@@ -535,35 +578,6 @@ export async function executeDeployment(args, gatheredConfig) {
           : `S3 bucket exists: ${s3Config.bucket}`,
       );
 
-      try {
-        s3Spinner.start('Configuring bucket CORS');
-        // SECURITY: never fall back to a `*` wildcard — that would let any
-        // origin issue credentialed browser requests against the storage
-        // bucket. When a domain is configured we scope to its https origins
-        // (apex + api/app subdomains the app actually serves from); a
-        // domainless deploy has no browser origin to trust yet, so we scope
-        // to localhost dev origins and warn. The operator re-runs deploy once
-        // a domain is set to widen CORS to the real origin.
-        let corsOrigins;
-        if (domain) {
-          // Single public origin — Supabase/storage is served on the apex.
-          corsOrigins = [`https://${domain}`];
-        } else {
-          corsOrigins = ['http://localhost:3000', 'http://localhost:5173'];
-          p.log.warn(
-            'No domain configured — scoping bucket CORS to localhost dev origins instead of `*`. Re-run deploy with a domain to allow your production origin.',
-          );
-        }
-        await s3Provider.setBucketCors(s3Config.bucket, corsOrigins);
-        s3Spinner.stop('CORS configured');
-      } catch (corsErr) {
-        // Uploads are the only consumer, so this never fails the deploy.
-        s3Spinner.stop('Bucket CORS not set');
-        p.log.warn(
-          `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to try again, or set CORS on ${s3Config.bucket} in your provider console.`,
-        );
-      }
-
       // No try/catch here: a backup bucket that failed to create used to be
       // logged and skipped, and the deploy then died at wal-g's audit after
       // the VPS existed. The step's catch below reports and exits before
@@ -741,6 +755,23 @@ export async function executeDeployment(args, gatheredConfig) {
   // Every downstream iac call reads it via s3Config, and it's persisted into
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
+
+  // Browser uploads need CORS on the app bucket. Outside the s3-setup step on
+  // purpose: that step is skipped on re-run, and existing deployments must
+  // still pick the rule up.
+  await applyAppBucketCors({
+    createProvider: () =>
+      getObjectStorageProvider(
+        providerIdFor(envConfig),
+        s3Config.accessKey,
+        s3Config.secretKey,
+        s3Config.region,
+      ),
+    bucket: s3Config.bucket,
+    domain,
+    spin: s3Spinner,
+    log: p.log,
+  });
 
   // SKELETON SAVE: persist the minimum env entry that `vibecarbon destroy`
   // needs to recover, BEFORE any `pulumi up` runs. Without this, a crash
