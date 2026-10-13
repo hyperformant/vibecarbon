@@ -14,9 +14,6 @@ const values: Record<string, string> = {
   DB_NAME: test.TEST_DB_NAME ?? 'postgres',
   // TEST_DB_PORT is already the real port; never shift it.
   DEV_PORT_OFFSET: '0',
-  SUPABASE_URL: 'http://supabase.test',
-  SUPABASE_ANON_KEY: 'test-anon-key',
-  SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
   NODE_ENV: 'test',
   // Signs session cookies; any 32+ characters will do in tests.
   BETTER_AUTH_SECRET: 'test-auth-secret-at-least-32-characters-long',

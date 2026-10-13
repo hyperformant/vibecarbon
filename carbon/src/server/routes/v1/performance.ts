@@ -29,15 +29,6 @@ const HEALTH_CHECK_SERVICES: ServiceHealthCheck[] = [
     acceptCodes: [404],
   },
   {
-    name: 'Authentication',
-    url: isKubernetes
-      ? 'http://kong:8000/auth/v1/health'
-      : isDocker
-        ? 'http://auth:9999/health'
-        : 'http://localhost:8000/auth/v1/health',
-    acceptCodes: isDocker ? undefined : [200, 401],
-  },
-  {
     name: 'REST API',
     url: isKubernetes
       ? 'http://kong:8000/rest/v1/'
@@ -145,10 +136,13 @@ performanceRoutes.get('/', async (c) => {
   };
 
   // Check all service latencies in parallel
-  const items = await Promise.all(HEALTH_CHECK_SERVICES.map(checkServiceLatency));
+  const probed = await Promise.all(HEALTH_CHECK_SERVICES.map(checkServiceLatency));
+  // Authentication runs in this process (/api/auth), so it is up whenever
+  // this handler runs. Counted, but kept out of the latency average.
+  const items = [...probed, { name: 'Authentication', latencyMs: 0, status: 'healthy' as const }];
 
   const healthy = items.filter((s) => s.status === 'healthy').length;
-  const healthyItems = items.filter((s) => s.status === 'healthy');
+  const healthyItems = probed.filter((s) => s.status === 'healthy');
   const avgLatencyMs =
     healthyItems.length > 0
       ? Math.round(healthyItems.reduce((sum, s) => sum + s.latencyMs, 0) / healthyItems.length)

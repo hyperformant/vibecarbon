@@ -29,6 +29,8 @@ interface ServiceStatus {
   status: 'healthy' | 'unhealthy' | 'unknown';
   latencyMs?: number;
   error?: string;
+  /** Runs inside the app process: no container to restart or tail. */
+  inProcess?: boolean;
 }
 
 interface ServiceConfig {
@@ -76,17 +78,6 @@ const CORE_SERVICES: ServiceConfig[] = [
         : `http://localhost:${kongPort}/`,
     timeout: 2000,
     acceptCodes: [404], // 404 = running but no default route
-  },
-  {
-    name: 'Authentication',
-    container: 'auth',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/auth/v1/health'
-      : isDocker
-        ? 'http://auth:9999/health'
-        : `http://localhost:${kongPort}/auth/v1/health`,
-    timeout: 2000,
-    acceptCodes: isDocker ? undefined : [200, 401], // Via Kong requires API key
   },
   {
     name: 'REST API',
@@ -456,7 +447,10 @@ servicesStatusRoutes.get('/', async (c) => {
   const services = await getEnabledServices();
 
   // Check all services in parallel
-  const results = await Promise.all(services.map(checkServiceHealth));
+  const results = [
+    ...(await Promise.all(services.map(checkServiceHealth))),
+    ...inProcessServices(),
+  ];
 
   // Sort by name for consistent ordering
   results.sort((a, b) => a.name.localeCompare(b.name));
@@ -476,6 +470,17 @@ servicesStatusRoutes.get('/', async (c) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+/**
+ * Services that run inside this process. Authentication is the app's own
+ * /api/auth, so it is up whenever the app answers this request; there is no
+ * separate container to probe, restart, or read logs from.
+ */
+function inProcessServices(): ServiceStatus[] {
+  return [
+    { name: 'Authentication', container: 'auth', status: 'healthy', latencyMs: 0, inProcess: true },
+  ];
+}
 
 // All known container names (core + all optional)
 const ALL_KNOWN_CONTAINERS = [
@@ -671,7 +676,6 @@ async function getK8sApiEndpoint(): Promise<{ host: string; port: number } | nul
 const K8S_LABEL_NAMES: Record<string, string> = {
   'vibecarbon-app': 'App',
   'vibecarbon-kong': 'API Gateway',
-  'vibecarbon-auth': 'Authentication',
   'vibecarbon-rest': 'REST API',
   'vibecarbon-realtime': 'Realtime',
   'vibecarbon-studio': 'Studio',

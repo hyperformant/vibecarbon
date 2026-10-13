@@ -18,7 +18,7 @@
 - Frontend: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4
 - Backend: Hono (Node.js), Pino logger, Zod validation
 - Database: PostgreSQL via Drizzle ORM (`src/server/db/`), RLS on every table
-- Auth: Self-hosted Supabase Auth (GoTrue)
+- Auth: In-process auth in the API server (Better Auth, `src/server/auth/`)
 - Tooling: Biome (lint/format), TypeScript, esbuild, Vitest
 
 ## Commands

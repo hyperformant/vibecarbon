@@ -2,11 +2,12 @@
 /**
  * Quiet database migration runner for local dev (`npm run db:migrate`).
  *
- * Applies every /migrations/*.sql (lexical order) then /tmp/super-admin.sql
- * inside the running `db` compose service. psql runs with notices suppressed
- * (client_min_messages=warning), command tags silenced (-q), and stdout
- * discarded (>/dev/null), so a normal idempotent re-run prints ~one line per
- * file instead of ~200. Real WARNING/ERROR text is preserved on stderr and the
+ * Applies every /migrations/*.sql (lexical order) inside the running `db`
+ * compose service. The super admin is not seeded here: the app creates it at
+ * startup from ADMIN_EMAIL / ADMIN_PASSWORD (src/server/auth/bootstrap-admin.ts).
+ * psql runs with notices suppressed (client_min_messages=warning), command
+ * tags silenced (-q), and stdout discarded (>/dev/null), so a normal
+ * idempotent re-run prints ~one line per file instead of ~200. Real WARNING/ERROR text is preserved on stderr and the
  * first error aborts the run (ON_ERROR_STOP + set -e).
  */
 import { spawnSync } from 'node:child_process';
@@ -24,8 +25,6 @@ export function buildMigrateScript() {
     `  ${psql('"$f"')}`,
     '  echo "  ✓ $(basename "$f")"',
     'done',
-    psql('/tmp/super-admin.sql'),
-    'echo "  ✓ super-admin"',
   ].join('\n');
 }
 

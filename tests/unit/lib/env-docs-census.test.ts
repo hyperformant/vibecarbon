@@ -142,6 +142,12 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
     'carbon/docker-compose.n8n.yml:38 — N8N_ENCRYPTION_KEY defaults from the operator ' +
     'N8N_ENCRYPTION_KEY of the same name (a genuine self-referencing read, not just a same name).',
   N8N_HOST: 'carbon/docker-compose.n8n.yml:31 — N8N_HOST defaults from the operator N8N_HOST.',
+  SUPABASE_ANON_KEY:
+    'carbon/docker-compose.yml:276 (kong) and :420 (studio) interpolate the operator ' +
+    'SUPABASE_ANON_KEY. The gateway key; the app itself no longer reads it.',
+  SUPABASE_SERVICE_ROLE_KEY:
+    'carbon/docker-compose.yml:277 (kong) and :421 (studio, as SUPABASE_SERVICE_KEY) ' +
+    'interpolate the operator SUPABASE_SERVICE_ROLE_KEY. The app no longer reads it.',
   N8N_PROTOCOL:
     'carbon/docker-compose.n8n.yml:33 — N8N_PROTOCOL defaults from the operator N8N_PROTOCOL.',
   N8N_WEBHOOK_URL:

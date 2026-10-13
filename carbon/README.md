@@ -30,14 +30,14 @@ Sign in with the admin email and password you chose during `vibecarbon create`.
 | Frontend | React 19, Vite, React Router, TanStack Query, Shadcn UI, Tailwind CSS v4, i18next | SPA with client-side routing, UI components, and i18n |
 | Backend | Hono, Pino logger, Zod validation | Lightweight API server |
 | Database | PostgreSQL | Self-hosted Supabase + RLS |
-| Auth | Supabase Auth | Email, OAuth, magic links, MFA, & SSO |
+| Auth | Better Auth (in the API server) | Email, OAuth, magic links, MFA, & SSO |
 | Security | Traefik, Cloudflare (optional) | TLS termination, host and path routing, admin-surface auth in production |
 | Automation | Node, Docker, K8s, Pulumi | Auto scaling, Backups, Failover, High Availability |
 | Tooling | Biome (lint/format), TypeScript, Vitest | Linting, formatting, type checking, and tests |
 
 ## Architecture
 
-Traefik is the only public entrance. It routes the apex host to the Hono API, path-routes the Supabase APIs to Kong, and puts super-admin auth in front of Studio. The API reaches data through Kong with the Supabase client rather than a direct database connection, so every request arrives at PostgreSQL through the same gateway and the same policies.
+Traefik is the only public entrance. It routes the apex host to the Hono API, path-routes the Supabase APIs to Kong, and puts super-admin auth in front of Studio. The API handles sign-in itself (auth runs in-process at `/api/auth`) and queries PostgreSQL directly, running each user's queries under row-level security, so the same policies decide what every request can see.
 
 ```mermaid
 flowchart TD
@@ -49,19 +49,15 @@ flowchart TD
     CF --> TR
     NET -.->|"without Cloudflare"| TR
 
-    TR -->|"apex host"| APP["app<br/>Hono API · :3000"]
-    TR -->|"/auth/v1 · /rest/v1<br/>/realtime/v1"| KONG["kong<br/>Supabase gateway · :8000"]
+    TR -->|"apex host"| APP["app<br/>Hono API + auth · :3000"]
+    TR -->|"/rest/v1 · /realtime/v1"| KONG["kong<br/>Supabase gateway · :8000"]
     TR -->|"studio subdomain<br/>super-admin auth"| STUDIO["studio<br/>Supabase Studio"]
 
-    APP --> KONG
-
     subgraph SUPA["Supabase services"]
-        AUTH["auth<br/>GoTrue"]
         REST["rest<br/>PostgREST"]
         RT["realtime"]
     end
 
-    KONG --> AUTH
     KONG --> REST
     KONG --> RT
     STUDIO --> META["meta<br/>postgres-meta"]
@@ -74,10 +70,9 @@ flowchart TD
         DB --- FN
     end
 
-    AUTH --> DB
+    APP --> DB
     REST --> DB
     RT --> DB
-    STORE --> DB
     META --> DB
 ```
 

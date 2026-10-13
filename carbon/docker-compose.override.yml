@@ -6,8 +6,8 @@
 # This ensures auth cookies are shared across all *.localhost subdomains.
 #
 # Secrets (DB passwords, JWTs) are read from env vars at runtime — no dev-specific
-# SQL files needed for roles or service init. Only super-admin uses a dev override
-# (for the admin email and password hash).
+# SQL files needed for roles or service init. The super admin is created by the
+# app at startup from ADMIN_EMAIL / ADMIN_PASSWORD (src/server/auth/bootstrap-admin.ts).
 
 services:
   # Dev stacks cap restarts and don't come back on their own after a reboot:
@@ -18,8 +18,6 @@ services:
     restart: on-failure:5
     ports:
       - "${DEV_DB_PORT:-5432}:5432"
-    volumes:
-      - ./volumes/db/super-admin.dev.sql:/tmp/super-admin.sql:Z
     # WAL-G is off in development. The base file falls back to the app's S3
     # vars, and in dev those name the local S3 on localhost:8333, which inside
     # this container is the container itself: archive_command retries for
@@ -47,9 +45,6 @@ services:
     restart: on-failure:5
 
   kong:
-    restart: on-failure:5
-
-  auth:
     restart: on-failure:5
 
   rest:

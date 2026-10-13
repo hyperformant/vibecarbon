@@ -19,9 +19,12 @@ describe('buildMigrateScript', () => {
     expect(script).toContain('--single-transaction');
   });
 
-  it('runs every migration then the super-admin SQL, echoing one line per file', () => {
+  it('runs every migration, echoing one line per file', () => {
     expect(script).toContain('/migrations/*.sql');
-    expect(script).toContain('/tmp/super-admin.sql');
-    expect(script).toMatch(/✓.*basename|✓ super-admin/);
+    expect(script).toMatch(/✓.*basename/);
+  });
+
+  it('seeds no admin: the app creates the super admin at startup', () => {
+    expect(script).not.toContain('super-admin');
   });
 });

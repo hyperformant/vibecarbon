@@ -488,7 +488,7 @@ describe('config-registry ↔ carbon env.ts — registry is never looser than en
     // Guards the parser itself: env.ts must have real optional/required keys
     // to compare against, or this test would pass vacuously.
     expect(Object.keys(envOptionality).length).toBeGreaterThan(20);
-    expect(envOptionality.SUPABASE_URL).toBe(false);
+    expect(envOptionality.BETTER_AUTH_SECRET).toBe(false);
     expect(envOptionality.STRIPE_WEBHOOK_SECRET).toBe(true);
 
     const relevant = CONFIG_KEYS.filter((k) => CONFIGURE_FEATURES.has(k.feature));

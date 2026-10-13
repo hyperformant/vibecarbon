@@ -2,9 +2,6 @@
 -- Creates required roles and grants for Supabase services
 -- Passwords are set separately by set-passwords.sh (never hardcoded in SQL)
 
--- Drop auth.jwt() if it exists - GoTrue will recreate it with correct return type (jsonb)
-DROP FUNCTION IF EXISTS auth.jwt();
-
 -- Create roles if they don't exist (fallback for non-Supabase postgres images)
 DO $$
 BEGIN
@@ -31,11 +28,6 @@ BEGIN
     -- supabase_admin role
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'supabase_admin') THEN
         CREATE ROLE supabase_admin LOGIN;
-    END IF;
-
-    -- supabase_auth_admin role (for GoTrue)
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'supabase_auth_admin') THEN
-        CREATE ROLE supabase_auth_admin NOINHERIT CREATEROLE LOGIN;
     END IF;
 
     -- supabase_storage_admin role (for Storage)
@@ -71,12 +63,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE O
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO authenticated;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
-
--- Create auth schema for GoTrue (or fix ownership if it already exists)
-CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION supabase_auth_admin;
-ALTER SCHEMA auth OWNER TO supabase_auth_admin;
-GRANT ALL ON SCHEMA auth TO supabase_auth_admin;
-GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 
 -- Create storage schema for Storage (or fix ownership if it already exists)
 CREATE SCHEMA IF NOT EXISTS storage AUTHORIZATION supabase_storage_admin;

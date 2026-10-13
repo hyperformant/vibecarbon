@@ -3,9 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // env.ts validates process.env at import time and would call process.exit on
 // failure, so we always supply the required vars and only vary the booleans.
 const REQUIRED = {
-  SUPABASE_URL: 'http://supabase.test',
-  SUPABASE_ANON_KEY: 'anon',
-  SUPABASE_SERVICE_ROLE_KEY: 'service',
   BETTER_AUTH_SECRET: 'test-auth-secret-at-least-32-characters-long',
   SITE_URL: 'http://app.test',
   DB_HOST: 'db.test',

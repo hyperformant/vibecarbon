@@ -79,7 +79,7 @@ describe('parseChartImages', () => {
   const images = parseChartImages(FIXTURE, { exclude: PREPULL_EXCLUDED_COMPONENTS });
 
   it('normalizes bare Docker Hub repos to fully-qualified refs', () => {
-    expect(images).toContain('docker.io/supabase/gotrue:v2.177.0');
+    expect(images).toContain('docker.io/supabase/studio:2025.06.30-sha-6f5982d');
     expect(images).toContain('docker.io/postgrest/postgrest:v12.2.12');
     // Single-segment official image → library/ namespace.
     expect(images).toContain('docker.io/library/kong:2.8.1');
@@ -93,6 +93,7 @@ describe('parseChartImages', () => {
     expect(joined).not.toContain('edge-runtime'); // functions disabled
     expect(joined).not.toContain('minio'); // minio disabled
     expect(joined).not.toContain('imgproxy'); // imgproxy disabled
+    expect(joined).not.toContain('gotrue'); // auth disabled (runs in the app)
   });
 
   it('drops refs that fail the shell-safety character allowlist', () => {
@@ -185,7 +186,7 @@ describe('prePullChartImages', () => {
     for (const script of scripts) {
       const pulled = [...script.matchAll(/images pull (\S+)/g)].map((m) => m[1]);
       expect(pulled.slice(0, 2)).toEqual(clusterAutoscalerPodImages());
-      expect(pulled).toContain('docker.io/supabase/gotrue:v2.177.0');
+      expect(pulled).toContain('docker.io/postgrest/postgrest:v12.2.12');
     }
   });
 

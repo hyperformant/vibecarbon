@@ -33,8 +33,10 @@ describe('test.yml template-db job', () => {
     expect(job.defaults?.run?.['working-directory']).toBe('carbon');
   });
 
-  it('starts db + auth, migrates, then runs the db tier, in that order', () => {
-    const up = indexOfRun('up -d --wait db auth');
+  it('starts db (nothing else), migrates, then runs the db tier, in that order', () => {
+    const up = indexOfRun('up -d --wait db');
+    // Auth runs inside the app: the tier needs no separate auth container.
+    expect(runs[up]?.trimEnd().endsWith('up -d --wait db')).toBe(true);
     const migrate = indexOfRun('npm run db:migrate');
     const test = indexOfRun('npm run test:db');
     expect(indexOfRun('node scripts/dev-init.js')).toBeGreaterThanOrEqual(0);
@@ -56,14 +58,14 @@ describe('test.yml template-db job', () => {
   it('uses the compose files carbon/TESTING.md documents', () => {
     const files = job.env?.COMPOSE_FILES ?? '';
     const testing = read('carbon', 'TESTING.md');
-    for (const f of [
-      'docker-compose.yml',
-      'docker-compose.override.yml',
-      'docker-compose.dev-init.yml',
-    ]) {
+    for (const f of ['docker-compose.yml', 'docker-compose.override.yml']) {
       expect(files).toContain(`-f ${f}`);
       expect(testing).toContain(`-f ${f}`);
     }
+    // dev-init no longer writes a compose overlay (the super admin is created
+    // by the app, not seeded through a mounted SQL file).
+    expect(files).not.toContain('dev-init');
+    expect(testing).not.toContain('docker-compose.dev-init.yml');
   });
 
   it('needs no secrets, so it runs on every PR', () => {

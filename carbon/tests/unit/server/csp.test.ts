@@ -3,7 +3,6 @@ import { buildConnectSrc } from '@server/lib/csp';
 
 const base = {
   siteUrl: 'https://app.example.com',
-  supabaseUrl: undefined,
   s3Endpoint: undefined,
   plausibleOrigin: null,
 };
@@ -33,14 +32,8 @@ describe('buildConnectSrc', () => {
     expect(buildConnectSrc({ ...base, s3Endpoint: 'not a url' })).toHaveLength(4);
   });
 
-  it('falls back to SUPABASE_URL and appends the plausible origin', () => {
-    const src = buildConnectSrc({
-      ...base,
-      siteUrl: undefined,
-      supabaseUrl: 'https://api.example.com',
-      plausibleOrigin: 'https://plausible.io',
-    });
-    expect(src).toContain('https://api.example.com');
+  it('appends the plausible origin', () => {
+    const src = buildConnectSrc({ ...base, plausibleOrigin: 'https://plausible.io' });
     expect(src).toContain('https://plausible.io');
   });
 });

@@ -17,11 +17,9 @@ ARG NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b
 ARG BASE_IMAGE=${NODE_IMAGE}
 FROM ${BASE_IMAGE} AS builder
 
-# Build args for Vite (baked into client bundle at build time).
-# The anon key is a public value — it ships in the JS bundle to every browser.
+# Build args for Vite (baked into client bundle at build time). Every value
+# ships in the JS bundle to every browser, so never pass a secret here.
 ARG VITE_PROJECT_NAME
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_ANON_KEY
 # Optional service feature flags (set to "true" when the service is enabled)
 ARG VITE_N8N_ENABLED
 ARG VITE_METABASE_ENABLED
@@ -73,8 +71,6 @@ COPY src/ ./src/
 # from cache when only the other side moved.
 # VITE_ env vars are available from ARGs during build
 ENV VITE_PROJECT_NAME=$VITE_PROJECT_NAME
-ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
-ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
 ENV VITE_N8N_ENABLED=$VITE_N8N_ENABLED
 ENV VITE_METABASE_ENABLED=$VITE_METABASE_ENABLED
 ENV VITE_REDIS_ENABLED=$VITE_REDIS_ENABLED

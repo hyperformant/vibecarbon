@@ -179,7 +179,7 @@ Production requires these environment variables in your project's `.env` file â€
 
 ## SMTP Configuration
 
-SMTP credentials are shared between Supabase Auth (for email confirmation, password reset, magic links) and the application's email service (for welcome emails, team invitations, billing notifications).
+The app uses the SMTP credentials for auth emails (email confirmation, password reset, magic links) and for its other emails (welcome emails, team invitations, billing notifications).
 
 **Required variables**: `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`
 
@@ -199,7 +199,7 @@ Point your domain to the server's IP address:
 |--------|------|-------|
 | A | `app.example.com` | `<server-ip>` |
 
-The app is served from a single origin. Auth, REST, and realtime APIs are path-routed under it (`/auth/v1`, `/rest/v1`, `/realtime/v1`), so no separate `api.` record exists.
+The app is served from a single origin. Auth lives in the app (`/api/auth`), and the REST and realtime APIs are path-routed under the same origin (`/rest/v1`, `/realtime/v1`), so no separate `api.` record exists.
 
 If you have optional services enabled, add records for their subdomains too (e.g., `grafana.example.com`).
 

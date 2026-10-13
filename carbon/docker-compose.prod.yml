@@ -28,6 +28,8 @@ services:
       # Config.Env exposes every container's env (secrets included) host-wide.
       # The proxy is a write barrier, not a confidentiality boundary.
       - DOCKER_API_PROXY=http://docker-socket-proxy:2375
+      # Fail closed: without the secret the app cannot sign a session.
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET missing — vibecarbon create writes it to .env.local}
     labels:
       - "traefik.enable=true"
       # HTTP to HTTPS redirect (whole host — covers the Kong paths too)
@@ -335,11 +337,13 @@ services:
     labels:
       - "traefik.enable=true"
       # Supabase gateway on the apex — VERSIONED path prefixes only. Bare
-      # /auth is FORBIDDEN: the SPA owns /auth/callback and /reset-password.
-      # Same host as the app router, so the apex cert is shared (Traefik
-      # dedupes the ACME order); priority 10 beats the app catch-all (1).
-      # The :80 side needs no kong router — app-http redirects the whole host.
-      - "traefik.http.routers.kong.rule=Host(`${DOMAIN:-localhost}`) && (PathPrefix(`/auth/v1`) || PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`))"
+      # /rest or /realtime is FORBIDDEN, and no /auth prefix reaches Kong at
+      # all: auth is the app's own /api/auth, and the SPA owns /auth/callback
+      # and /reset-password. Same host as the app router, so the apex cert is
+      # shared (Traefik dedupes the ACME order); priority 10 beats the app
+      # catch-all (1). The :80 side needs no kong router — app-http redirects
+      # the whole host.
+      - "traefik.http.routers.kong.rule=Host(`${DOMAIN:-localhost}`) && (PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`))"
       - "traefik.http.routers.kong.priority=10"
       - "traefik.http.routers.kong.entrypoints=websecure"
       - "traefik.http.routers.kong.tls=true"
@@ -350,13 +354,6 @@ services:
         limits:
           cpus: '1.0'
           memory: 512M
-
-  auth:
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
 
   rest:
     deploy:

@@ -203,7 +203,8 @@ export default function AdminSettings() {
                 Email (SMTP)
               </CardTitle>
               <CardDescription>
-                Shared by Supabase Auth (auth emails) and the app (transactional emails).{' '}
+                Used for auth emails (verification, password reset, magic links) and transactional
+                emails.{' '}
                 <a
                   href="https://resend.com"
                   target="_blank"

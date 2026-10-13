@@ -92,7 +92,6 @@ app.use(
             // browser PUTs uploads straight to the presigned URL).
             connectSrc: buildConnectSrc({
               siteUrl: env.SITE_URL,
-              supabaseUrl: env.SUPABASE_URL,
               s3Endpoint: env.S3_ENDPOINT,
               plausibleOrigin,
             }),

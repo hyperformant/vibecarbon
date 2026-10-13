@@ -31,6 +31,8 @@ interface ServiceStatus {
   status: 'healthy' | 'unhealthy' | 'unknown';
   latencyMs?: number;
   error?: string;
+  /** Runs inside the app (authentication): nothing to restart. */
+  inProcess?: boolean;
 }
 
 interface ServicesStatusResponse {
@@ -139,7 +141,9 @@ export function ServicesStatus() {
     mutationFn: restartAllServices,
     onMutate: () => {
       if (data?.services) {
-        setRestartingContainers(new Set(data.services.map((s) => s.container)));
+        setRestartingContainers(
+          new Set(data.services.filter((s) => !s.inProcess).map((s) => s.container))
+        );
       }
     },
     onSettled: () => {
@@ -255,22 +259,29 @@ export function ServicesStatus() {
                     <span className="text-xs text-muted-foreground">Restarting...</span>
                   ) : isRefreshing ? (
                     <Loader2 className="size-3 animate-spin text-muted-foreground" />
-                  ) : service.latencyMs !== undefined && service.status === 'healthy' ? (
+                  ) : !service.inProcess &&
+                    service.latencyMs !== undefined &&
+                    service.status === 'healthy' ? (
                     <span className="text-xs text-muted-foreground">{service.latencyMs}ms</span>
                   ) : service.error ? (
                     <span className="text-xs text-destructive">{service.error}</span>
                   ) : null}
                   {isRestarting ? null : <StatusBadge status={service.status} />}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    onClick={() => handleRestart(service.container)}
-                    disabled={isAnyRestarting}
-                    title={`Restart ${service.name}`}
-                  >
-                    <Power className="size-3.5" />
-                  </Button>
+                  {service.inProcess ? (
+                    // Keeps the column aligned with the rows that have a button.
+                    <span className="size-7" />
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      onClick={() => handleRestart(service.container)}
+                      disabled={isAnyRestarting}
+                      title={`Restart ${service.name}`}
+                    >
+                      <Power className="size-3.5" />
+                    </Button>
+                  )}
                 </div>
               </div>
             );

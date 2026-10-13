@@ -183,12 +183,10 @@ SMTP_PORT=
 
 ### Production (.env.production)
 ```bash
-# Production URLs — ONE public origin: the apex serves the app, the Hono API,
-# and the Supabase gateway (Traefik path-routes /auth/v1, /rest/v1 and
-# /realtime/v1 to Kong). SUPABASE_URL is the server-side
-# (in-network) Kong address, never a public host.
+# Production URLs — ONE public origin: the apex serves the app, the Hono API
+# (auth included, at /api/auth), and the Supabase gateway (Traefik
+# path-routes /rest/v1 and /realtime/v1 to Kong).
 SITE_URL=https://yourdomain.com
-SUPABASE_URL=http://kong:8000
 
 # Real SMTP
 SMTP_HOST=smtp.sendgrid.net

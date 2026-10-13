@@ -117,12 +117,6 @@ export function getComposeFiles(manifest, options = {}) {
     files.push('docker-compose.override.yml');
   }
 
-  // dev-init.js generates this file to mount the admin SQL with real credentials
-  // (only exists when developing the CLI itself, not in derived projects)
-  if (!options.prod && existsSync(join(cwd, 'docker-compose.dev-init.yml'))) {
-    files.push('docker-compose.dev-init.yml');
-  }
-
   return files;
 }
 

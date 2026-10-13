@@ -6,14 +6,14 @@ order: 4
 
 ## Overview
 
-Authentication is handled by self-hosted Supabase Auth. It supports:
+Authentication runs inside the API server (`/api/auth`, Better Auth). It supports:
 
 - **Email/password** sign-up and sign-in
-- **OAuth** providers (Google, Microsoft, GitHub, Apple, Discord)
+- **OAuth** providers (Google, Microsoft)
 - **Magic links**: passwordless email authentication
 - **Multi-factor authentication** (TOTP)
 
-All auth state is managed through the `useAuth()` hook on the client and JWT middleware on the server.
+All auth state is managed through the `useAuth()` hook on the client and the session middleware on the server, which reads the HttpOnly session cookie.
 
 ## useAuth() Hook
 
@@ -81,22 +81,19 @@ await signIn.magicLink('user@example.com');
 
 ### OAuth Providers
 
-Enable social login by configuring providers. Each provider has a dedicated method:
+Google and Microsoft sign-in are built in. Each has a dedicated method:
 
 ```typescript
 const { signIn } = useAuth();
 
 await signIn.google();
-await signIn.github();
 await signIn.microsoft();
-await signIn.apple();
-await signIn.discord();
 ```
 
-To enable an OAuth provider (self-hosted auth reads these from environment variables, and there is no Supabase Studio step):
+To enable one (the app's auth reads its credentials from environment variables):
 
-1. Set the provider's credentials as environment variables. `vibecarbon configure` → **OAuth** does this for Google and Microsoft, writing `GOOGLE_ENABLED` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (and the Microsoft equivalents) to `.env` / `.env.local`. For other providers, set them by hand. `vibecarbon deploy` ships them to the server, where GoTrue reads them as `GOTRUE_EXTERNAL_*`.
-2. In the provider's developer console, set the **authorized redirect URI** to `<SUPABASE_URL>/auth/v1/callback` (the `configure` wizard prints the exact URL to paste).
+1. Set the provider's credentials. `vibecarbon configure` → **OAuth** writes `GOOGLE_ENABLED` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (and the Microsoft equivalents, plus `MICROSOFT_TENANT_ID`) to `.env` / `.env.local`, and `vibecarbon deploy` ships them to the server.
+2. In the provider's developer console, set the **authorized redirect URI** to `<SITE_URL>/api/auth/callback/google` (or `/microsoft`).
 3. The provider button automatically appears on the sign-in page.
 
 ## Sign-Up

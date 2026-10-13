@@ -97,28 +97,18 @@ describe('Project Scaffolding Integration', () => {
   });
 
   describe('Template Super Admin Role Patterns', () => {
-    it('super-admin.sql uses super_admin role', () => {
-      const sqlPath = join(TEMPLATE_DIR, 'volumes/db/super-admin.sql');
-      const content = readFileSync(sqlPath, 'utf-8');
-
-      // Verify the INSERT statement sets super_admin role
-      expect(content).toContain("'role', 'super_admin'");
-      // Verify the UPDATE statement sets super_admin role
-      expect(content).toContain('{"role": "super_admin"}');
-      // Should NOT contain old 'admin' role
-      expect(content).not.toMatch(/'role',\s*'admin'[^_]/);
-    });
-
-    it('super-admin.dev.sql uses super_admin role', () => {
-      const sqlPath = join(TEMPLATE_DIR, 'volumes/db/super-admin.dev.sql');
-      const content = readFileSync(sqlPath, 'utf-8');
-
-      // Verify the INSERT statement sets super_admin role
-      expect(content).toContain("'role', 'super_admin'");
-      // Verify the UPDATE statement sets super_admin role
-      expect(content).toContain('{"role": "super_admin"}');
-      // Should NOT contain old 'admin' role
-      expect(content).not.toMatch(/'role',\s*'admin'[^_]/);
+    it('the app bootstraps the admin as super_admin (no SQL seed ships)', () => {
+      // The super admin is created by the app at startup, not by a mounted
+      // SQL file: neither seed exists any more.
+      expect(existsSync(join(TEMPLATE_DIR, 'volumes/db/super-admin.sql'))).toBe(false);
+      expect(existsSync(join(TEMPLATE_DIR, 'volumes/db/super-admin.dev.sql'))).toBe(false);
+      const content = readFileSync(
+        join(TEMPLATE_DIR, 'src/server/auth/bootstrap-admin.ts'),
+        'utf-8',
+      );
+      expect(content).toContain("role: 'super_admin'");
+      // Should NOT grant the old 'admin' role
+      expect(content).not.toMatch(/role: 'admin'/);
     });
 
     it('AuthProvider checks for super_admin role', () => {

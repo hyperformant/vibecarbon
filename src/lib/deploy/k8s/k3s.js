@@ -1305,6 +1305,8 @@ const SUPABASE_HELM_TIMEOUT = '15m';
  */
 export const PREPULL_EXCLUDED_COMPONENTS = [
   'db',
+  // Auth runs inside the app (carbon/src/server/auth/).
+  'auth',
   'functions',
   'analytics',
   'vector',

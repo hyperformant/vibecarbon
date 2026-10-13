@@ -9,8 +9,6 @@
 # Drift guard: tests/unit/deploy/standby-overlay-drift.test.ts against
 # tests/fixtures/supabase-chart-workloads.json (regen on pin bump).
 deployment:
-  auth:
-    replicaCount: 0
   kong:
     replicaCount: 0
   meta:

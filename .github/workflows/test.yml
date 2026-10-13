@@ -302,9 +302,9 @@ jobs:
   # from the same carbon/db image a deploy uses, after the real migrations.
   #
   # Same steps as carbon/TESTING.md "Database tier", so a red run reproduces
-  # locally with the commands printed there. `auth` comes up too: GoTrue
-  # finishes auth.users, which the migrations' super-admin seed writes to.
-  # Every value is dev-init's fixed local default, so no secrets.
+  # locally with the commands printed there. Only `db` comes up: auth runs
+  # inside the app and its tables come from the migrations. Every value is a
+  # dev-init local default (its auth secret is random per run), so no secrets.
   template-db:
     name: Template DB Tests (carbon, real Postgres + RLS)
     runs-on: ubuntu-latest
@@ -313,7 +313,7 @@ jobs:
       run:
         working-directory: carbon
     env:
-      COMPOSE_FILES: -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.dev-init.yml
+      COMPOSE_FILES: -f docker-compose.yml -f docker-compose.override.yml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -327,11 +327,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Write the dev .env and compose overrides
+      - name: Write the dev .env
         run: node scripts/dev-init.js
 
-      - name: Start db + auth
-        run: docker compose $COMPOSE_FILES up -d --wait db auth
+      - name: Start db
+        run: docker compose $COMPOSE_FILES up -d --wait db
         timeout-minutes: 10
 
       - name: Apply migrations
@@ -345,9 +345,9 @@ jobs:
           # dev-init's fixed local-only POSTGRES_PASSWORD, not a secret.
           TEST_DB_PASSWORD: local-postgres-password-for-dev-only
 
-      - name: Show db + auth logs on failure
+      - name: Show db logs on failure
         if: failure()
-        run: docker compose $COMPOSE_FILES logs --no-color --tail=200 db auth
+        run: docker compose $COMPOSE_FILES logs --no-color --tail=200 db
 
       - name: Tear down
         if: always()

@@ -74,11 +74,12 @@ describe('RLS: write policies are scoped correctly', () => {
     ).toEqual([]);
   });
 
-  it('no policy is gated on user_metadata (user-writable via GoTrue)', () => {
-    // app_metadata is server/service-role controlled; user_metadata is set by
-    // the user's own updateUser call. Gating on it is self-service escalation.
+  it('no policy is gated on user_metadata (user-writable profile data)', () => {
+    // Roles live in the server-controlled "user".role, read through
+    // is_super_admin(). Profile fields are set by the user's own update call;
+    // gating on them is self-service escalation.
     const inPolicies = sql.match(/CREATE POLICY[\s\S]*?user_metadata/i);
-    expect(inPolicies, 'A policy references user_metadata — use app_metadata.').toBeNull();
+    expect(inPolicies, 'A policy references user_metadata — use is_super_admin().').toBeNull();
   });
 
   it('policies and helpers read the caller from app.user_id(), never auth.uid()', () => {
@@ -111,37 +112,77 @@ describe('Routing: single public origin is preserved', () => {
   });
 });
 
-describe('Auth config: GoTrue is not dangerously permissive', () => {
-  // GOTRUE_URI_ALLOW_LIST must be origin-scoped. "*" lets an attacker point an
-  // unauthenticated resetPasswordForEmail at their own domain and receive the
-  // victim's recovery tokens in the redirect fragment = account takeover.
-  const compose = exists('docker-compose.yml') ? read('docker-compose.yml') : '';
-  const k8sValues = exists('k8s/values/supabase.values.yaml')
-    ? read('k8s/values/supabase.values.yaml')
-    : '';
+describe('Auth: only the in-process auth exists, and it is not permissive', () => {
+  // Auth is the app's own /api/auth (src/server/auth/). A second, external
+  // auth service reachable at /auth/v1 would be a parallel sign-in path with
+  // its own users, sessions and redirect rules, outside every check here.
+  const yamlUnder = (function walk(dir: string): string[] {
+    if (!exists(dir)) return [];
+    return readdirSync(join(ROOT, dir), { withFileTypes: true }).flatMap((e) => {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) return walk(rel);
+      return /\.ya?ml$/.test(e.name) ? [rel] : [];
+    });
+  });
+  const routingFiles = [
+    ...readdirSync(ROOT).filter((f) => /^docker-compose.*\.ya?ml$/.test(f)),
+    ...yamlUnder('volumes/kong'),
+    ...yamlUnder('volumes/traefik'),
+    ...yamlUnder('k8s'),
+  ];
+  const uncommented = (text: string) => text.replace(/^\s*#.*$/gm, '');
 
-  it.runIf(compose)('compose redirect allow-list is not a wildcard', () => {
-    const m = compose.match(/GOTRUE_URI_ALLOW_LIST:\s*"?([^"\n]+)"?/);
-    expect(m, 'GOTRUE_URI_ALLOW_LIST not found').not.toBeNull();
-    expect(m?.[1]?.trim()).not.toBe('*');
+  it('nothing routes /auth/v1 (no external auth service behind any edge)', () => {
+    expect(routingFiles).toContain('volumes/kong/kong.yml');
+    expect(routingFiles).toContain('k8s/base/traefik/ingressroute.yaml');
+    const offenders = routingFiles.filter((f) => uncommented(read(f)).includes('/auth/v1'));
+    expect(
+      offenders,
+      `${offenders.join(', ')} route /auth/v1. Auth is the app's /api/auth; do not ` +
+        'route a public path to a separate auth service.'
+    ).toEqual([]);
   });
 
-  it.runIf(k8sValues)('k8s redirect allow-list is not a wildcard', () => {
-    // Value follows the `name: GOTRUE_URI_ALLOW_LIST` line.
-    const m = k8sValues.match(/GOTRUE_URI_ALLOW_LIST\s*\n\s*value:\s*"?([^"\n]+)"?/);
-    expect(m, 'GOTRUE_URI_ALLOW_LIST not found in k8s values').not.toBeNull();
-    expect(m?.[1]?.trim()).not.toBe('*');
-  });
-
-  it.runIf(compose && k8sValues)('a password minimum length (>=8) is set on both edges', () => {
-    for (const [label, cfg] of [
-      ['compose', compose],
-      ['k8s', k8sValues],
-    ] as const) {
-      const m = cfg.match(/GOTRUE_PASSWORD_MIN_LENGTH[":\s]+.*?(\d+)/);
-      expect(m, `GOTRUE_PASSWORD_MIN_LENGTH missing (${label})`).not.toBeNull();
-      expect(Number(m?.[1])).toBeGreaterThanOrEqual(8);
+  it('no compose file or chart value runs a separate auth service', () => {
+    for (const f of routingFiles.filter((f) => f.startsWith('docker-compose'))) {
+      expect(uncommented(read(f)), `${f} defines an auth service`).not.toMatch(/^ {2}auth:\s*$/m);
     }
+    expect(
+      read('k8s/values/supabase.values.yaml'),
+      "the chart's auth service must stay disabled"
+    ).toMatch(/^deployment:\n {2}auth:\n(?: {4}#.*\n)* {4}enabled: false$/m);
+  });
+
+  // trustedOrigins decides which origins may call the auth API with cookies
+  // and which callback / redirect targets it honours. "*" (or any glob) lets
+  // an attacker's page send a victim's password reset or magic link to their
+  // own domain = account takeover.
+  const authConfig = read('src/server/auth/index.ts');
+
+  it('trustedOrigins is the exact-origin list, never a wildcard', () => {
+    expect(authConfig).toContain('trustedOrigins: allowedOrigins()');
+    expect(uncommented(authConfig)).not.toMatch(/trustedOrigins:\s*\[?\s*['"`]\*/);
+    // allowedOrigins() refuses a glob in SITE_URL and CORS_ORIGINS.
+    const origins = read('src/server/lib/origins.ts');
+    expect(origins).toContain('/[*?]/.test(origin)');
+    expect(origins).toMatch(/throw new Error\(/);
+  });
+
+  it('the auth API keeps its own origin and CSRF checks on', () => {
+    expect(authConfig).toContain('disableOriginCheck: false');
+    expect(authConfig).toContain('disableCSRFCheck: false');
+  });
+
+  it('a password minimum length (>=8) is set', () => {
+    const m = authConfig.match(/minPasswordLength:\s*(\d+)/);
+    expect(m, 'minPasswordLength missing in src/server/auth/index.ts').not.toBeNull();
+    expect(Number(m?.[1])).toBeGreaterThanOrEqual(8);
+  });
+
+  it('the session cookie stays host-only (no parent-domain scope)', () => {
+    // A parent-domain session cookie would reach every admin subdomain.
+    expect(authConfig).not.toContain('crossSubDomainCookies');
+    expect(uncommented(authConfig)).not.toMatch(/\bdomain:/);
   });
 });
 
@@ -235,6 +276,14 @@ describe('Session cookies: the split-cookie contract holds', () => {
   it('verify-role resolves the dedicated ForwardAuth token, never a session cookie', () => {
     expect(verifyRole).toContain('resolveForwardAuthToken(token)');
     expect(verifyRole).not.toContain('getSession');
+  });
+
+  it('the ForwardAuth cookie lives one hour, scoped to the parent domain', () => {
+    expect(forwardAuthCookie).toContain('maxAge: FORWARDAUTH_TTL_SECONDS');
+    expect(forwardAuthCookie).toContain('domain: parentCookieDomain(siteUrl)');
+    expect(read('src/server/auth/forwardauth-token.ts')).toContain(
+      'export const FORWARDAUTH_TTL_SECONDS = 3600;'
+    );
   });
 
   it('the ForwardAuth cookie is HttpOnly and carries a dedicated token, never the session token', () => {

@@ -739,6 +739,8 @@ async function bootstrap(cliArgs) {
   // Generate secure secrets
   const dbPassword = generatePassword();
   const jwtSecret = generatePassword(64);
+  // Session signing key for the app's in-process auth (env.ts requires >= 32).
+  const betterAuthSecret = generatePassword(64);
   const realtimeSecret = generatePassword(64); // SECRET_KEY_BASE (min 64 chars)
   const logflareApiKey = generatePassword(32);
   // VAULT_ENC_KEY must be exactly 32 BYTES: Supavisor's tenant seed encrypts
@@ -767,6 +769,7 @@ async function bootstrap(cliArgs) {
     GITHUB_OWNER: projectName, // Default to project name; rewritten by `vibecarbon configure` → CI/CD (or by deploy's rewriteOwnerAndRepo fallback)
     DB_PASSWORD: dbPassword,
     JWT_SECRET: jwtSecret,
+    BETTER_AUTH_SECRET: betterAuthSecret,
     ANON_KEY: anonKey,
     SERVICE_ROLE_KEY: serviceRoleKey,
     REALTIME_SECRET: realtimeSecret,
@@ -925,7 +928,6 @@ async function bootstrap(cliArgs) {
     join(projectDir, 'volumes/db/wal-archive.sh'),
     variables,
   );
-  copyTemplate('volumes/db/jwt.sql', join(projectDir, 'volumes/db/jwt.sql'), variables);
   // pooler.sql + pooler.exs are bind-mount SOURCES (db init + supavisor
   // tenant seed). Same escape class as wal-archive.sh above: omit them here
   // and Docker mounts an auto-created empty DIRECTORY on the server —
@@ -940,16 +942,6 @@ async function bootstrap(cliArgs) {
     variables,
   );
   copyTemplate('volumes/db/realtime.sql', join(projectDir, 'volumes/db/realtime.sql'), variables);
-  copyTemplate(
-    'volumes/db/super-admin.sql',
-    join(projectDir, 'volumes/db/super-admin.sql'),
-    variables,
-  );
-  copyTemplate(
-    'volumes/db/super-admin.dev.sql',
-    join(projectDir, 'volumes/db/super-admin.dev.sql'),
-    variables,
-  );
   copyTemplate('volumes/s3/s3.json', join(projectDir, 'volumes/s3/s3.json'), variables);
   copyTemplate(
     'volumes/traefik/middlewares.yml',
@@ -1589,6 +1581,9 @@ ${formatDotenvLine('SUPABASE_SERVICE_ROLE_KEY', variables.SERVICE_ROLE_KEY)}
 
 # JWT Secret (for token generation)
 ${formatDotenvLine('JWT_SECRET', variables.JWT_SECRET)}
+
+# Signs the app's session cookies and auth tokens. Changing it signs everyone out.
+${formatDotenvLine('BETTER_AUTH_SECRET', variables.BETTER_AUTH_SECRET)}
 
 # Database. The API server connects with the DB_* vars. Local values: the dev
 # db container on localhost (DB_PORT is the base port; DEV_DB_PORT or

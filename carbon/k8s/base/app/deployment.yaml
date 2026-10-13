@@ -59,26 +59,19 @@ spec:
         env:
         - name: NODE_ENV
           value: production
-        - name: SUPABASE_URL
-          valueFrom:
-            configMapKeyRef:
-              name: vibecarbon-config
-              key: KONG_URL
         - name: SITE_URL
           valueFrom:
             configMapKeyRef:
               name: vibecarbon-config
               key: SITE_URL
-        - name: SUPABASE_ANON_KEY
+        # Auth runs in-process (src/server/auth/): its public URL is SITE_URL,
+        # and BETTER_AUTH_SECRET (session signing key) arrives through the
+        # vibecarbon-secrets envFrom above.
+        - name: BETTER_AUTH_URL
           valueFrom:
-            secretKeyRef:
-              name: vibecarbon-secrets
-              key: ANON_KEY
-        - name: SUPABASE_SERVICE_ROLE_KEY
-          valueFrom:
-            secretKeyRef:
-              name: vibecarbon-secrets
-              key: SERVICE_ROLE_KEY
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: SITE_URL
         # The API server talks to Postgres directly (src/server/db/client.ts).
         # Named explicitly, not left to envFrom, so a stray DB_HOST in the
         # Secret (e.g. the local-dev localhost) can never win. The host is the

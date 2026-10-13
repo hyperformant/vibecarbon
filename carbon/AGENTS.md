@@ -6,7 +6,7 @@ Guidance for AI coding agents working on this codebase. The **Security Rules** s
 
 - **Frontend**: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4, i18next
 - **Backend**: Hono (lightweight Node.js framework), Pino logger, Zod validation, nodemailer (SMTP email)
-- **Auth/Database**: Self-hosted Supabase (PostgreSQL, Auth, Realtime); the API server queries Postgres directly with Drizzle ORM (node-postgres); file uploads go to S3 object storage via presigned URLs
+- **Auth/Database**: In-process auth (Better Auth, `src/server/auth/`) on self-hosted Supabase (PostgreSQL, Realtime); the API server queries Postgres directly with Drizzle ORM (node-postgres); file uploads go to S3 object storage via presigned URLs
 - **Billing**: Multi-provider — Stripe, Paddle, Polar (subscriptions, checkout, webhooks, plan gating)
 - **Content**: MDX (blog, changelog, docs) with remark/rehype plugins
 - **Tooling**: Biome (lint/format), TypeScript, esbuild, Vitest
@@ -50,14 +50,15 @@ src/
 │   │   └── auth/            # AuthProvider, ProtectedRoute
 │   ├── hooks/               # Custom React hooks
 │   ├── pages/               # Route pages (admin/, settings/, organizations/)
-│   ├── lib/                 # supabase.ts, i18n.ts, utils.ts, blog/changelog/docs loaders
+│   ├── lib/                 # auth-client.ts, api.ts, i18n.ts, utils.ts, blog/changelog/docs loaders
 │   └── locales/             # i18n translation files
 ├── server/                  # Hono API (Node.js on :3000)
 │   ├── index.ts             # App entry, middleware, route mounting
 │   ├── routes/              # health.ts, v1/, webhooks/, _internal/
 │   ├── db/                  # client.ts (withUserDb, adminDb), schema.ts (Drizzle tables), errors.ts
 │   ├── emails/              # React Email templates
-│   └── lib/                 # supabase.ts (Auth only), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
+│   ├── auth/                # In-process auth (Better Auth): sessions, 2FA, impersonation, ForwardAuth tokens
+│   └── lib/                 # auth.ts (isSuperAdmin), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
 ├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
 content/                     # MDX content (blog/, changelog/, docs/)
 supabase/migrations/         # SQL migrations (run with npm run db:migrate)
@@ -265,7 +266,7 @@ Three tiers — pick the narrowest one that exercises the regression you're worr
 |---|---|---|---|
 | `unit` | node | Pure functions, validators, pricing/format/business helpers, structural invariants (e.g. i18n parity) | `tests/unit/`, `tests/structural/` |
 | `component` | jsdom | React components + custom hooks via React Testing Library | `tests/component/` |
-| `integration` | node | Hono route handlers end-to-end via `app.request()`, with the database, Supabase Auth, Stripe and SMTP mocked at the module boundary | `tests/integration/` |
+| `integration` | node | Hono route handlers end-to-end via `app.request()`, with the database, the auth API, Stripe and SMTP mocked at the module boundary | `tests/integration/` |
 | `db` | node | RLS policies and SQL against a real Postgres (skipped unless `TEST_DB_HOST` is set; see `TESTING.md`) | `tests/db/` |
 
 Helpers live in `tests/_helpers/`:
@@ -275,7 +276,7 @@ Helpers live in `tests/_helpers/`:
 - `jwt.ts` — `mockJwt(payload)` for HS256-signed test tokens.
 - `env.ts` — `mockEnv({...})` returning a restore closure (no globals).
 - `setup-rtl.ts` — vitest setup for the component project (jest-dom matchers + RTL cleanup).
-- `setup-integration.ts` — seeds plausible Supabase env values so server modules load without zod-validation errors.
+- `setup-integration.ts` — seeds plausible env values so server modules load without zod-validation errors.
 
 **Mocking conventions:**
 - Database: `vi.mock('@server/db/client', () => ({ adminDb: { select: () => queryChain(() => rows) }, withUserDb: ... }))`. `queryChain` (`tests/_helpers/drizzle-mock.ts`) stands in for any Drizzle chain. Prove RLS itself in the `db` tier, never with mocks.
@@ -482,15 +483,15 @@ myRoutes.post('/', async (c) => {
 
 - **MUST** protect Studio, the Traefik dashboard, n8n, Metabase, and Grafana with `super-admin-auth` (compose) / `admin-auth` (k8s) in production
 - **MUST** use Docker socket proxy in production — never mount `/var/run/docker.sock` directly into Traefik
-- **NEVER** expose internal Supabase services (Auth, PostgREST, Realtime) directly — they must go through Kong
+- **NEVER** expose internal Supabase services (PostgREST, Realtime) directly — they must go through Kong
 - **NEVER** remove ForwardAuth middleware from production compose files or Kubernetes manifests
 
 ### Public Exposure (single origin)
 
-The app has **one public origin** (the apex). Traefik path-routes only the **versioned** Supabase prefixes — `/auth/v1`, `/rest/v1`, `/realtime/v1` — to Kong; everything else is the app (SPA + Hono API). Rules:
+The app has **one public origin** (the apex). Traefik path-routes only the **versioned** Supabase prefixes — `/rest/v1`, `/realtime/v1` — to Kong; everything else is the app (SPA + Hono API, auth at `/api/auth`). Rules:
 
-- **NEVER** add a new public path that reaches Kong or an internal Supabase service, and **NEVER** use a **bare** `/auth` (or `/rest`/`/storage`/`/realtime`) prefix in a Traefik rule — the SPA owns `/auth/callback` and `/reset-password`; a bare `/auth` prefix sends the OAuth landing page to Kong (404) and breaks every login.
-- **NEVER** re-introduce an `api.<domain>` host for Supabase. `SITE_URL` is the single origin; it feeds GoTrue redirects, billing return URLs, and CSP.
+- **NEVER** add a new public path that reaches Kong or an internal Supabase service, and **NEVER** use a **bare** `/rest`/`/storage`/`/realtime` prefix, or any `/auth` prefix, in a Traefik rule — the SPA owns `/auth/callback` and `/reset-password`, and auth is the app's own `/api/auth`. **NEVER** run or route a separate auth service (`tests/structural/security-invariants.test.ts` fails on any `/auth/v1` route).
+- **NEVER** re-introduce an `api.<domain>` host for Supabase. `SITE_URL` is the single origin; it feeds auth links and OAuth callbacks, billing return URLs, and CSP.
 
 ### Adding a New Admin Service
 

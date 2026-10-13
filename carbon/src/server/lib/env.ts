@@ -16,13 +16,6 @@ const envSchema = z.object({
   // generates 64.
   BETTER_AUTH_SECRET: z.string().min(32),
 
-  // The Supabase services that still run beside the app (Kong, Studio,
-  // Realtime). Nothing in the server reads the two keys; they stay required
-  // only until the deploy plumbing stops passing them.
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_ANON_KEY: z.string().min(1),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
-
   // Postgres. Discrete vars, never a URL, so a password needs no URL-encoding.
   // DB_USER must be able to bypass RLS (checked at startup, see db/startup.ts)
   // and be a member of app_user (withUserDb switches to it per transaction).
@@ -126,11 +119,11 @@ const envSchema = z.object({
 });
 
 // Apply port offset to localhost URLs in development
-// SUPABASE_URL and SITE_URL are hardcoded to default ports in .env but
-// DEV_PORT_OFFSET shifts Docker ports (Kong on 8000+offset, Vite on 5173+offset).
+// SITE_URL is hardcoded to the default port in .env but DEV_PORT_OFFSET shifts
+// the dev ports (Vite on 5173+offset).
 const portOffset = Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
 if (process.env.NODE_ENV !== 'production' && portOffset !== 0) {
-  for (const key of ['SUPABASE_URL', 'SITE_URL'] as const) {
+  for (const key of ['SITE_URL'] as const) {
     const raw = process.env[key];
     if (!raw) continue;
     try {

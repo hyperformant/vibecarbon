@@ -10,7 +10,6 @@ resources:
   - ../../base/app/
   - ../../base/supabase/postgres/
   - ../../base/supabase/kong/
-  - ../../base/supabase/auth/
   - ../../base/supabase/rest/
   - ../../base/supabase/realtime/
   - ../../base/supabase/meta/
@@ -51,7 +50,6 @@ patches:
             sleep 5
             psql -U supabase_admin -h /var/run/postgresql -c "
               ALTER ROLE authenticator WITH PASSWORD 'local-dev-password-12345';
-              ALTER ROLE supabase_auth_admin WITH PASSWORD 'local-dev-password-12345';
               ALTER ROLE supabase_storage_admin WITH PASSWORD 'local-dev-password-12345';
               ALTER ROLE supabase_admin WITH PASSWORD 'local-dev-password-12345';
               CREATE SCHEMA IF NOT EXISTS _realtime;
@@ -104,14 +102,6 @@ patches:
   - target:
       kind: Deployment
       name: kong
-    patch: |-
-      - op: replace
-        path: /spec/replicas
-        value: 1
-
-  - target:
-      kind: Deployment
-      name: auth
     patch: |-
       - op: replace
         path: /spec/replicas

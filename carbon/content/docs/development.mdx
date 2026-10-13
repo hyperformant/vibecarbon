@@ -39,8 +39,8 @@ These are wrappers around the `npm` scripts listed below; use whichever you pref
 
 `npm run dev:start` runs three phases in sequence:
 
-1. **Docker startup**: starts PostgreSQL, Kong, GoTrue, PostgREST, Realtime, Studio, Traefik, and a local S3 service (SeaweedFS) for file uploads. Blocks until all services are healthy.
-2. **Migrations**: executes all SQL files in `supabase/migrations/` to set up the schema, RLS policies, and initial admin user.
+1. **Docker startup**: starts PostgreSQL, Kong, PostgREST, Realtime, Studio, Traefik, and a local S3 service (SeaweedFS) for file uploads. Blocks until all services are healthy.
+2. **Migrations**: executes all SQL files in `supabase/migrations/` to set up the schema and RLS policies. The API server creates the admin user (`ADMIN_EMAIL` / `ADMIN_PASSWORD`) when it starts.
 3. **Dev servers**: spawns two processes in parallel:
    - **Hono API** on port 3000 via `tsx watch` (auto-restarts on file changes)
    - **Vite** on port 5173 with full HMR (instant browser updates)
@@ -74,7 +74,7 @@ Optional services like observability (Grafana) get their own subdomains when ena
 
 ## Debugging
 
-**Container logs**: run `npm run docker:logs` to tail logs from all Docker services. Useful for debugging Supabase Auth errors, PostgREST issues, or Kong routing problems.
+**Container logs**: run `npm run docker:logs` to tail logs from all Docker services. Useful for debugging PostgREST issues or Kong routing problems (auth errors show up in the API server's own output).
 
 **Supabase Studio**: open [http://studio.localhost](http://studio.localhost) to browse your database, inspect tables, view RLS policies, and manage auth users directly.
 

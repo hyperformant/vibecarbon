@@ -13,8 +13,9 @@ describe('supabase chart workload snapshot', () => {
     // The app-tier Deployments the spec's zero-list must cover. If the chart
     // pin bump adds/removes one, regenerate the snapshot:
     //   node scripts/gen-chart-workloads-snapshot.mjs
-    // 6 since storage + imgproxy were disabled in supabase.values.yaml.
-    expect(snapshot.deployments.length).toBeGreaterThanOrEqual(6);
+    // 5 since storage + imgproxy, then auth (it runs inside the app now),
+    // were disabled in supabase.values.yaml.
+    expect(snapshot.deployments.length).toBeGreaterThanOrEqual(5);
     expect(snapshot.statefulsets).toContain('db');
     expect(snapshot.deployments).not.toContain('db');
   });

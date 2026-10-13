@@ -70,6 +70,10 @@ image:
 # Top-level `functions:`/`analytics:`/`vector:` are silently ignored
 # (was the bug behind the 2026-04-26 e2e helm-wait timeout).
 deployment:
+  auth:
+    # Auth runs inside the app (src/server/auth/, /api/auth), so the chart's
+    # auth service is off and nothing routes to it.
+    enabled: false
   functions:
     # Chart's edge-runtime expects a function source at /home/deno/functions.
     # The template doesn't ship a default `main/index.ts`, so the chart's
@@ -361,156 +365,6 @@ deployment:
 # Entries marked "vibecarbon:" are ours; unmarked entries are chart defaults
 # carried verbatim.
 environment:
-  auth:
-    # vibecarbon: public URLs point at the deployed domain (defaults:
-    # http://supabase.local).
-    - name: API_EXTERNAL_URL
-      value: https://{{DOMAIN}}
-    - name: GOTRUE_API_HOST
-      value: "0.0.0.0"
-    - name: GOTRUE_API_PORT
-      value: "9999"
-    - name: GOTRUE_SITE_URL
-      value: https://{{DOMAIN}}
-    # Redirect allow-list — MUST be origin-scoped, NEVER "*". GoTrue validates
-    # the `redirectTo` on recovery/magiclink/OAuth against this; "*" lets an
-    # attacker point an unauthenticated resetPasswordForEmail at their own
-    # domain and receive the victim's recovery tokens (account takeover).
-    # {{DOMAIN}} is patched at deploy (same as GOTRUE_SITE_URL above).
-    - name: GOTRUE_URI_ALLOW_LIST
-      value: "https://{{DOMAIN}}/**"
-    - name: GOTRUE_DISABLE_SIGNUP
-      value: "false"
-    # Minimum password length (GoTrue defaults to 6); signup client validates
-    # the same minimum before calling signUp.
-    - name: GOTRUE_PASSWORD_MIN_LENGTH
-      value: "8"
-    - name: GOTRUE_JWT_DEFAULT_GROUP_NAME
-      value: authenticated
-    - name: GOTRUE_JWT_ADMIN_ROLES
-      value: service_role
-    - name: GOTRUE_JWT_AUD
-      value: authenticated
-    - name: GOTRUE_JWT_EXP
-      value: "3600"
-    - name: GOTRUE_EXTERNAL_EMAIL_ENABLED
-      value: "true"
-    # Rendered at deploy time by installSupabase: "false" only when the
-    # operator opted into signup confirmation emails via `vibecarbon
-    # configure` → SMTP (GOTRUE_MAILER_AUTOCONFIRM=false in .env.local),
-    # otherwise "true" — without working SMTP every signup would return 500
-    # "Error sending confirmation email" (observed 2026-04-26 batch run #3 —
-    # k8s verify-deploy failed at the auth_signup check).
-    - name: GOTRUE_MAILER_AUTOCONFIRM
-      value: "{{GOTRUE_MAILER_AUTOCONFIRM}}"
-    - name: GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED
-      value: "false"
-    - name: GOTRUE_EXTERNAL_PHONE_ENABLED
-      value: "false"
-    - name: GOTRUE_SMS_AUTOCONFIRM
-      value: "false"
-    - name: GOTRUE_MAILER_URLPATHS_INVITE
-      value: /auth/v1/verify
-    - name: GOTRUE_MAILER_URLPATHS_CONFIRMATION
-      value: /auth/v1/verify
-    - name: GOTRUE_MAILER_URLPATHS_RECOVERY
-      value: /auth/v1/verify
-    - name: GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE
-      value: /auth/v1/verify
-    # vibecarbon: SMTP wiring. Replaces the chart's junk placeholder literals
-    # (GOTRUE_SMTP_HOST: SMTP_HOST etc.) with OPTIONAL secretKeyRefs into
-    # vibecarbon-secrets — `vibecarbon configure` writes SMTP_* to .env.local,
-    # applyVibecarbonSecrets ships them into the Secret, and GoTrue reads them
-    # here. Absent key → env unset → GoTrue's own default (mirrors compose's
-    # `${SMTP_HOST:-}` fallbacks). Self-hosted GoTrue reads config ONLY from
-    # env at boot (Studio's Auth→Providers screen is a supabase.com hosted
-    # feature) — changing these post-deploy needs an auth pod restart.
-    - name: GOTRUE_SMTP_HOST
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: SMTP_HOST
-          optional: true
-    - name: GOTRUE_SMTP_PORT
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: SMTP_PORT
-          optional: true
-    - name: GOTRUE_SMTP_USER
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: SMTP_USER
-          optional: true
-    - name: GOTRUE_SMTP_PASS
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: SMTP_PASS
-          optional: true
-    - name: GOTRUE_SMTP_ADMIN_EMAIL
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: SMTP_ADMIN_EMAIL
-          optional: true
-    - name: GOTRUE_SMTP_SENDER_NAME
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: SMTP_SENDER_NAME
-          optional: true
-    # vibecarbon: OAuth providers (Google + Microsoft/Azure), same optional-
-    # secretKeyRef pattern as SMTP above. GOOGLE_*/MICROSOFT_* are written by
-    # `vibecarbon configure` → OAuth; an absent ENABLED key leaves the
-    # provider disabled (GoTrue default), exactly like compose's `:-false`.
-    # The redirect URI is rendered at deploy time from the domain; register
-    # it in the provider's developer console.
-    - name: GOTRUE_EXTERNAL_GOOGLE_ENABLED
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: GOOGLE_ENABLED
-          optional: true
-    - name: GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: GOOGLE_CLIENT_ID
-          optional: true
-    - name: GOTRUE_EXTERNAL_GOOGLE_SECRET
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: GOOGLE_CLIENT_SECRET
-          optional: true
-    - name: GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI
-      value: https://{{DOMAIN}}/auth/v1/callback
-    - name: GOTRUE_EXTERNAL_AZURE_ENABLED
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: MICROSOFT_ENABLED
-          optional: true
-    - name: GOTRUE_EXTERNAL_AZURE_CLIENT_ID
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: MICROSOFT_CLIENT_ID
-          optional: true
-    - name: GOTRUE_EXTERNAL_AZURE_SECRET
-      valueFrom:
-        secretKeyRef:
-          name: vibecarbon-secrets
-          key: MICROSOFT_CLIENT_SECRET
-          optional: true
-    # {{AZURE_TENANT_URL}} = https://login.microsoftonline.com/<MICROSOFT_
-    # TENANT_ID|common>, rendered by installSupabase (mirrors compose's
-    # `${MICROSOFT_TENANT_ID:-common}` interpolation, which k8s env
-    # valueFrom cannot express).
-    - name: GOTRUE_EXTERNAL_AZURE_URL
-      value: "{{AZURE_TENANT_URL}}"
   realtime:
     - name: DB_USER
       value: supabase_admin

@@ -32,7 +32,7 @@ const fileMounts = [...new Set(composeSources)].filter((p) =>
 
 describe('compose file bind-mount sources', () => {
   it('found the known mounts (sanity — regex still matches the compose files)', () => {
-    expect(fileMounts.length).toBeGreaterThanOrEqual(9);
+    expect(fileMounts.length).toBeGreaterThanOrEqual(8);
     expect(fileMounts).toContain('volumes/db/pooler.sql');
     expect(fileMounts).toContain('volumes/pooler/pooler.exs');
   });

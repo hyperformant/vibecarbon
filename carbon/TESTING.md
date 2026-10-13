@@ -6,7 +6,7 @@ Four tiers, picked to mirror what each tier actually proves:
 |---|---|---|---|
 | `unit` | node | <1s | Pure functions, validators, pricing/format helpers, cross-cutting invariants |
 | `component` | jsdom | a few s | React components + custom hooks via React Testing Library |
-| `integration` | node | <30s | Hono route handlers end-to-end with externals (database, Supabase Auth, Stripe, SMTP) mocked |
+| `integration` | node | <30s | Hono route handlers end-to-end with externals (database, auth API, Stripe, SMTP) mocked |
 | `db` | node | a few s | RLS policies and SQL against a real Postgres (skipped unless `TEST_DB_HOST` is set) |
 
 Run them:
@@ -28,25 +28,23 @@ The pre-push hook is installed automatically by `vibecarbon create` — bypass w
 
 RLS is the boundary between tenants, and only the engine that enforces it can prove it. The `db` tier (`tests/db/`) runs against a real Postgres: each test opens a transaction, switches to the `app_user` role with `app.user_id` set, and checks which rows come back. Every suite skips itself unless `TEST_DB_HOST` is set, so `npm test` stays fast and offline.
 
-To run it, start the local database and auth service, apply the migrations, then point the tests at it:
+To run it, start the local database, apply the migrations, then point the tests at it:
 
 ```bash
-node scripts/dev-init.js        # once: writes .env and the generated compose files
-docker compose -f docker-compose.yml -f docker-compose.override.yml \
-  -f docker-compose.dev-init.yml up -d --wait db auth
+node scripts/dev-init.js        # once: writes .env and .env.local
+docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --wait db
 npm run db:migrate
 TEST_DB_HOST=localhost TEST_DB_PASSWORD=<POSTGRES_PASSWORD from .env> npm run test:db
 ```
 
-`auth` comes up alongside `db` because it finishes the `auth.users` table that the migrations' super-admin seed writes to. The tests themselves only need `db`.
+Only `db` is needed: auth runs inside the app, and its tables come from the migrations.
 
 Optional overrides: `TEST_DB_PORT` (default 5432), `TEST_DB_USER` (default `postgres`, the app's connection role, which bypasses RLS and is a member of `app_user`), `TEST_DB_NAME` (default `postgres`). The suites insert their own users and orgs with random ids and delete them afterwards.
 
 When you are done, tear the stack down (`-v` drops the database volume):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.override.yml \
-  -f docker-compose.dev-init.yml down -v
+docker compose -f docker-compose.yml -f docker-compose.override.yml down -v
 ```
 
 The tier also runs the server's own DB module (`src/server/db/client.ts`) against that database: `tests/_helpers/setup-db.ts` copies the `TEST_DB_*` values into the `DB_*` vars the server reads, so a suite can import `adminDb` and `withUserDb` directly. `with-user-db.test.ts` proves the wrapper rolls back and releases its connection on error and leaks no role or user id to the next pooled query; `schema-drift.test.ts` fails when `src/server/db/schema.ts` and the migrated tables disagree.

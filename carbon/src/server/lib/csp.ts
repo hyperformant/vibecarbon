@@ -11,10 +11,9 @@ function originOf(url: string | undefined): string | null {
 /**
  * Production CSP `connect-src` list.
  *
- * Production serves ONE origin: the SPA, the Hono API, and the Supabase gateway
- * (path-routed to Kong) all live on SITE_URL, so 'self' + SITE_URL covers every
- * first-party call. Fall back to SUPABASE_URL for prod-like environments without
- * SITE_URL.
+ * Production serves ONE origin: the SPA, the Hono API (auth included), and the
+ * Supabase gateway (path-routed to Kong) all live on SITE_URL, so 'self' +
+ * SITE_URL covers every first-party call.
  *
  * The S3 endpoint origin is needed because the browser PUTs uploads straight to
  * the presigned URL. The S3 client uses `forcePathStyle: true`, so presigned
@@ -22,14 +21,13 @@ function originOf(url: string | undefined): string | null {
  * virtual-hosted `<bucket>.<host>` form).
  */
 export function buildConnectSrc(opts: {
-  siteUrl: string | undefined;
-  supabaseUrl: string | undefined;
+  siteUrl: string;
   s3Endpoint: string | undefined;
   plausibleOrigin: string | null;
 }): string[] {
   return [
     "'self'",
-    opts.siteUrl ?? opts.supabaseUrl,
+    opts.siteUrl,
     'https://cloudflareinsights.com',
     'https://api.github.com',
     opts.plausibleOrigin,

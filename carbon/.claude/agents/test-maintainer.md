@@ -31,7 +31,7 @@ When invoked, follow this systematic process:
 - Three Vitest projects, one directory each (`vitest.config.ts`, documented in `TESTING.md`):
   - `tests/unit/` — pure functions, validators, pricing math, shared types (node env). `tests/structural/` runs in this project too and holds the security invariants.
   - `tests/component/` — React components and custom hooks via React Testing Library (jsdom env)
-  - `tests/integration/` — Hono route handlers end-to-end via `app.request()`, with the database, Supabase Auth, Stripe and SMTP mocked at the module boundary (node env)
+  - `tests/integration/` — Hono route handlers end-to-end via `app.request()`, with the database, the auth API, Stripe and SMTP mocked at the module boundary (node env)
   - `tests/db/` — RLS policies and SQL against a real Postgres; skipped unless `TEST_DB_HOST` is set (see `TESTING.md`)
 - Shared helpers live in `tests/_helpers/`: `app.ts` (`mountRoute`, `jsonPost`), `factories.ts` (`makeUser`, `makeOrg`), `jwt.ts` (`mockJwt`), `env.ts` (`mockEnv`)
 - Use Vitest (`describe`, `it`, `expect`, `vi` for mocking)

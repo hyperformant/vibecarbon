@@ -51,13 +51,13 @@ const TOPOLOGY_LAYERS = [
     name: 'API Gateway',
     icon: Shield,
     services: ['kong'],
-    description: 'Authentication & rate limiting',
+    description: 'Supabase API keys & routing',
   },
   {
     name: 'Application',
     icon: Server,
     services: ['auth', 'rest', 'realtime', 'meta', 'studio'],
-    description: 'Core Supabase services',
+    description: 'In-app auth & Supabase services',
   },
   {
     name: 'Data',
@@ -221,10 +221,7 @@ export default function Infrastructure() {
                 value={import.meta.env.VITE_ENVIRONMENT || import.meta.env.MODE || 'development'}
               />
               <InfoRow label="Version" value={import.meta.env.VITE_APP_VERSION || '0.1.0'} />
-              <InfoRow
-                label="Supabase URL"
-                value={import.meta.env.VITE_SUPABASE_URL || 'Not configured'}
-              />
+              <InfoRow label="Site URL" value={window.location.origin} />
               <InfoRow
                 label="HA Mode"
                 value={

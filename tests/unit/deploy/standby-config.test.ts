@@ -48,26 +48,26 @@ describe('deriveScaleUpList', () => {
     // operator-authored override would look like.
     args.sharedValuesText = args.sharedValuesText.replace(
       /^deployment:\n/m,
-      'deployment:\n  auth:\n    replicaCount: 3\n',
+      'deployment:\n  realtime:\n    replicaCount: 3\n',
     );
     const list = deriveScaleUpList(args);
-    expect(list.find((e) => e.name === 'supabase-supabase-auth')?.replicas).toBe(3);
+    expect(list.find((e) => e.name === 'supabase-supabase-realtime')?.replicas).toBe(3);
   });
 
   it('never derives a replicaCount from a same-named block under another top-level map', () => {
     const args = real();
-    // Adversarial: `environment:` legitimately has its own `auth:` key
+    // Adversarial: `environment:` legitimately has its own `realtime:` key
     // (an env-var LIST, chart shape environment.<comp>), never deployment
     // config. Plant a 4-space-indented `replicaCount: 9` line inside it,
     // with NO override under `deployment:`. If the parse isn't scoped
     // structurally to the `deployment:` block, this same-named sibling
-    // leaks in and auth "derives" 9 instead of the correct default of 1.
+    // leaks in and realtime "derives" 9 instead of the correct default of 1.
     args.sharedValuesText = args.sharedValuesText.replace(
-      /^environment:\n {2}auth:\n/m,
-      'environment:\n  auth:\n    replicaCount: 9\n',
+      /^environment:\n {2}realtime:\n/m,
+      'environment:\n  realtime:\n    replicaCount: 9\n',
     );
     const list = deriveScaleUpList(args);
-    expect(list.find((e) => e.name === 'supabase-supabase-auth')?.replicas).toBe(1);
+    expect(list.find((e) => e.name === 'supabase-supabase-realtime')?.replicas).toBe(1);
   });
 
   it('finds a replicaCount override buried behind several preceding lines in the deployment: block', () => {
@@ -75,7 +75,7 @@ describe('deriveScaleUpList', () => {
     args.sharedValuesText = args.sharedValuesText.replace(
       /^deployment:\n/m,
       'deployment:\n' +
-        '  auth:\n' +
+        '  realtime:\n' +
         '    # first a comment\n' +
         '    enabled: true\n' +
         '    # then another comment\n' +
@@ -84,7 +84,7 @@ describe('deriveScaleUpList', () => {
         '    replicaCount: 3\n',
     );
     const list = deriveScaleUpList(args);
-    expect(list.find((e) => e.name === 'supabase-supabase-auth')?.replicas).toBe(3);
+    expect(list.find((e) => e.name === 'supabase-supabase-realtime')?.replicas).toBe(3);
   });
 });
 

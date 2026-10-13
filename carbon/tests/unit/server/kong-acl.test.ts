@@ -3,12 +3,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-// The server's user-context Supabase clients authenticate to Kong with the
-// ANON key (see supabase-client.test.ts — fail-safe RLS design). Kong's ACL
-// must therefore admit the anon consumer on every route those clients hit,
-// or every authenticated user-context query fails 403 before reaching
-// PostgREST. Row security is enforced by RLS from the Authorization JWT, not
-// by Kong's consumer ACL.
+// Browser clients of the Supabase gateway authenticate to Kong with the ANON
+// key. Kong's ACL must therefore admit the anon consumer on the REST route,
+// or every such query fails 403 before reaching PostgREST. Row security is
+// enforced by RLS from the Authorization JWT, not by Kong's consumer ACL.
 
 interface KongPlugin {
   name: string;
@@ -38,14 +36,9 @@ describe('kong.yml ACLs', () => {
     expect(kongConfig.acls).toContainEqual({ consumer: 'anon', group: 'anon' });
   });
 
-  it('SECURITY/AVAILABILITY: rest-v1 admits the anon consumer (user-context clients use the anon apikey)', () => {
+  it('SECURITY/AVAILABILITY: rest-v1 admits the anon consumer (browser clients use the anon apikey)', () => {
     const allow = aclAllowList('rest-v1');
     expect(allow).toContain('anon');
     expect(allow).toContain('admin');
-  });
-
-  it('auth-v1 admits the anon consumer (login/signup happen pre-auth)', () => {
-    const allow = aclAllowList('auth-v1');
-    expect(allow).toContain('anon');
   });
 });
