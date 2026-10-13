@@ -64,7 +64,7 @@ spec:
       ports:
         - protocol: TCP
           port: 6443
-    # Allow outbound HTTPS (Stripe, SMTP provider, external APIs)
+    # Allow outbound HTTPS (Stripe, OAuth providers, email APIs, external APIs)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -75,6 +75,28 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # Allow outbound SMTP: the app sends its own auth emails (verification,
+    # password reset, magic link) and transactional email through SMTP_HOST
+    # on SMTP_PORT. 587 (submission/STARTTLS) is the configure default; 465
+    # (implicit TLS), 25 and 2525 (the alternate port Resend, Postmark,
+    # SendGrid and Mailgun offer where 25/587 are blocked) cover the rest.
+    # Public destinations only, like HTTPS above.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 25
+        - protocol: TCP
+          port: 465
+        - protocol: TCP
+          port: 587
+        - protocol: TCP
+          port: 2525
     # Allow connection to Redis (if configured)
     - to:
         - podSelector:
