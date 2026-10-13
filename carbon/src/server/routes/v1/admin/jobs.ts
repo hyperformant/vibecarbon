@@ -1,13 +1,29 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { and, desc, eq, isNotNull, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb } from '../../../db/client';
+import { crawlerHits, crawlerHitsDaily, cronJobHistory, notifications } from '../../../db/schema';
+import { isoTimestamp } from '../../../db/values';
 import { sanitizeError } from '../../../lib/errors';
-import { supabaseAdmin } from '../../../lib/supabase';
 import { requireSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
 
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
+type HistoryRow = typeof cronJobHistory.$inferSelect;
+
+/** A history row as the API has always sent it (snake_case, ISO timestamps). */
+function historyJson(r: HistoryRow) {
+  return {
+    id: r.id,
+    job_name: r.jobName,
+    status: r.status,
+    started_at: isoTimestamp(r.startedAt),
+    finished_at: r.finishedAt === null ? null : isoTimestamp(r.finishedAt),
+    duration_ms: r.durationMs,
+    result: r.result,
+    error: r.error,
+    created_at: isoTimestamp(r.createdAt),
+  };
+}
 
 const jobsRoutes = new Hono<{ Variables: HonoVariables }>();
 
@@ -22,29 +38,45 @@ jobsRoutes.use('*', requireSuperAdmin);
  */
 jobsRoutes.get('/', async (c) => {
   try {
-    // Query pg_cron's job table directly
-    const { data: jobs, error } = await adminDb.rpc('get_cron_jobs');
+    // Ask the database for its pg_cron job list. If that function is not
+    // there (or fails), summarise the job history table instead.
+    let jobs: unknown[] | null = null;
+    try {
+      jobs = (await adminDb.execute(sql`select * from get_cron_jobs()`)).rows;
+    } catch {
+      jobs = null;
+    }
 
-    if (error) {
-      // Fallback: query cron.job directly via raw SQL isn't available via RPC,
-      // so we return the job history as a summary instead
-      const { data: history, error: historyError } = await adminDb
-        .from('cron_job_history')
-        .select('job_name, status, started_at, finished_at, duration_ms, result, error')
-        .order('started_at', { ascending: false })
-        .limit(100);
-
-      if (historyError) {
-        return c.json({ error: sanitizeError(historyError, 'Failed to fetch jobs') }, 500);
-      }
+    if (jobs === null) {
+      const history = (
+        await adminDb
+          .select({
+            jobName: cronJobHistory.jobName,
+            status: cronJobHistory.status,
+            startedAt: cronJobHistory.startedAt,
+            finishedAt: cronJobHistory.finishedAt,
+            durationMs: cronJobHistory.durationMs,
+            result: cronJobHistory.result,
+            error: cronJobHistory.error,
+          })
+          .from(cronJobHistory)
+          .orderBy(desc(cronJobHistory.startedAt))
+          .limit(100)
+      ).map((h) => ({
+        job_name: h.jobName,
+        status: h.status,
+        started_at: isoTimestamp(h.startedAt),
+        finished_at: h.finishedAt === null ? null : isoTimestamp(h.finishedAt),
+        duration_ms: h.durationMs,
+        result: h.result,
+        error: h.error,
+      }));
 
       // Derive job list from history
-      const jobNames = [...new Set((history || []).map((h: { job_name: string }) => h.job_name))];
+      const jobNames = [...new Set(history.map((h) => h.job_name))];
       const jobSummaries = jobNames.map((name) => {
-        const jobHistory = (history || []).filter((h: { job_name: string }) => h.job_name === name);
-        const latest = jobHistory[0] as
-          | { status: string; started_at: string; result: string | null; error: string | null }
-          | undefined;
+        const jobHistory = history.filter((h) => h.job_name === name);
+        const latest = jobHistory[0];
         return {
           name,
           lastRun: latest?.started_at ?? null,
@@ -55,10 +87,10 @@ jobsRoutes.get('/', async (c) => {
         };
       });
 
-      return c.json({ jobs: jobSummaries, history: history || [] });
+      return c.json({ jobs: jobSummaries, history });
     }
 
-    return c.json({ jobs: jobs || [], history: [] });
+    return c.json({ jobs, history: [] });
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch jobs') }, 500);
   }
@@ -72,23 +104,14 @@ jobsRoutes.get('/history', async (c) => {
   const limit = Math.min(Number(c.req.query('limit') || '50'), 200);
 
   try {
-    let query = adminDb
-      .from('cron_job_history')
-      .select('*')
-      .order('started_at', { ascending: false })
-      .limit(limit);
+    const rows = await adminDb
+      .select()
+      .from(cronJobHistory)
+      .where(jobName ? eq(cronJobHistory.jobName, jobName) : undefined)
+      .orderBy(desc(cronJobHistory.startedAt))
+      .limit(Number.isFinite(limit) && limit > 0 ? limit : 50);
 
-    if (jobName) {
-      query = query.eq('job_name', jobName);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to fetch job history') }, 500);
-    }
-
-    return c.json({ history: data || [] });
+    return c.json({ history: rows.map(historyJson) });
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch job history') }, 500);
   }
@@ -128,56 +151,48 @@ jobsRoutes.post('/trigger', async (c) => {
       return c.json({ error: 'Unknown job name' }, 400);
     }
 
-    // Execute the job's SQL directly.
-    //
-    // supabase-js RESOLVES with `{ error }` instead of throwing, so every branch
-    // must capture it. Without this the `await` swallows the failure, the catch
-    // below never fires, and a permission-denied RPC or a blocked DELETE gets
-    // written to cron_job_history as 'succeeded' and reported to the admin as a
-    // successful run — the job silently never happens.
+    // Run the job and capture its failure, so a permission-denied function or
+    // a blocked DELETE is written to cron_job_history as 'failed' and reported
+    // to the admin, rather than recorded as a success.
     let jobError: unknown = null;
 
-    if (body.jobName === 'cleanup-login-attempts') {
-      jobError = (await adminDb.rpc('cleanup_old_login_attempts', { p_retention_hours: 24 })).error;
-    } else if (body.jobName === 'cleanup-expired-notifications') {
-      jobError = (
+    try {
+      if (body.jobName === 'cleanup-login-attempts') {
+        await adminDb.execute(sql`select public.cleanup_old_login_attempts(${24}::integer)`);
+      } else if (body.jobName === 'cleanup-expired-notifications') {
         await adminDb
-          .from('notifications')
-          .delete()
-          .not('expires_at', 'is', null)
-          .lt('expires_at', new Date().toISOString())
-      ).error;
-    } else if (body.jobName === 'cleanup-job-history') {
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      jobError = (await adminDb.from('cron_job_history').delete().lt('created_at', thirtyDaysAgo))
-        .error;
-    } else if (body.jobName === 'rollup-crawler-hits') {
-      // Aggregation can't be expressed through PostgREST — the same idempotent
-      // SECURITY DEFINER function the nightly cron job runs (migration 00008).
-      // Null p_day = yesterday (UTC).
-      jobError = (await adminDb.rpc('rollup_crawler_hits', { p_day: null })).error;
-    } else if (body.jobName === 'cleanup-crawler-hits') {
-      // Mirrors the scheduled job in 00008: prune raw hits at 90 days AND the
-      // rollup at 400, so a manual run does the same work as the nightly one.
-      const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-      const fourHundredDaysAgo = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
-        .toISOString()
-        .slice(0, 10);
-      const rawResult = await adminDb.from('crawler_hits').delete().lt('hit_at', ninetyDaysAgo);
-      const dailyResult = await adminDb
-        .from('crawler_hits_daily')
-        .delete()
-        .lt('day', fourHundredDaysAgo);
-      jobError = rawResult.error ?? dailyResult.error;
+          .delete(notifications)
+          .where(
+            and(isNotNull(notifications.endsAt), lt(notifications.endsAt, new Date().toISOString()))
+          );
+      } else if (body.jobName === 'cleanup-job-history') {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        await adminDb.delete(cronJobHistory).where(lt(cronJobHistory.createdAt, thirtyDaysAgo));
+      } else if (body.jobName === 'rollup-crawler-hits') {
+        // The same idempotent SECURITY DEFINER function the nightly cron job
+        // runs (migration 00008). Null p_day = yesterday (UTC).
+        await adminDb.execute(sql`select public.rollup_crawler_hits(${null}::date)`);
+      } else if (body.jobName === 'cleanup-crawler-hits') {
+        // Mirrors the scheduled job in 00008: prune raw hits at 90 days AND the
+        // rollup at 400, so a manual run does the same work as the nightly one.
+        const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+        const fourHundredDaysAgo = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        await adminDb.delete(crawlerHits).where(lt(crawlerHits.hitAt, ninetyDaysAgo));
+        await adminDb.delete(crawlerHitsDaily).where(lt(crawlerHitsDaily.day, fourHundredDaysAgo));
+      }
+    } catch (err) {
+      jobError = err;
     }
 
     if (jobError) {
       // Record the real outcome, then surface it. An admin who clicks "run now"
       // must not be told it worked when it did not.
-      await adminDb.from('cron_job_history').insert({
-        job_name: body.jobName,
+      await adminDb.insert(cronJobHistory).values({
+        jobName: body.jobName,
         status: 'failed',
-        finished_at: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
         result: 'Manually triggered by admin',
         error:
           typeof jobError === 'object' && jobError !== null && 'message' in jobError
@@ -188,10 +203,10 @@ jobsRoutes.post('/trigger', async (c) => {
     }
 
     // Log the manual trigger
-    await adminDb.from('cron_job_history').insert({
-      job_name: body.jobName,
+    await adminDb.insert(cronJobHistory).values({
+      jobName: body.jobName,
       status: 'succeeded',
-      finished_at: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
       result: 'Manually triggered by admin',
     });
 

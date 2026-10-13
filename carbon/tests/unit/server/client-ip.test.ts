@@ -15,7 +15,7 @@ vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
 
-const { getClientIp } = await import('@server/lib/client-ip');
+const { getClientIp, lockoutIp } = await import('@server/lib/client-ip');
 
 // Minimal context double: only needs req.header(name).
 function ctx(headers: Record<string, string>) {
@@ -72,5 +72,21 @@ describe('getClientIp — trusted-proxy-aware resolution', () => {
   it('falls back to localhost in development', () => {
     fakeEnv.NODE_ENV = 'development';
     expect(getClientIp(ctx({}))).toBe('localhost');
+  });
+});
+
+describe('lockoutIp (login lockout takes a Postgres inet)', () => {
+  it('passes real IPv4 and IPv6 addresses through', () => {
+    expect(lockoutIp('203.0.113.7')).toBe('203.0.113.7');
+    expect(lockoutIp('2001:db8::1')).toBe('2001:db8::1');
+  });
+
+  it("maps the dev sentinel 'localhost' to a valid shared address", () => {
+    expect(lockoutIp('localhost')).toBe('0.0.0.0');
+  });
+
+  it("maps the 'unknown' sentinel and hex-looking junk to the shared address", () => {
+    expect(lockoutIp('unknown')).toBe('0.0.0.0');
+    expect(lockoutIp('deadbeef')).toBe('0.0.0.0');
   });
 });

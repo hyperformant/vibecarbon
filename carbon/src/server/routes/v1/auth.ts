@@ -1,18 +1,27 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb } from '../../db/client';
+import { appSettings } from '../../db/schema';
+import { isoTimestamp } from '../../db/values';
 import { isSuperAdmin } from '../../lib/auth';
-import { getClientIp } from '../../lib/client-ip';
+import { getClientIp, lockoutIp } from '../../lib/client-ip';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
-import { createAuthClient, supabaseAdmin } from '../../lib/supabase';
+import { createAuthClient } from '../../lib/supabase';
 import type { HonoVariables } from '../../types';
 
-// Helper to access tables not yet in generated types
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
+/**
+ * Upsert one app_settings flag as `{ enabled }`, stamped with the admin who set it.
+ */
+async function setFlag(key: string, enabled: boolean, updatedBy: string): Promise<void> {
+  await adminDb
+    .insert(appSettings)
+    .values({ key, value: { enabled }, updatedBy })
+    .onConflictDoUpdate({ target: appSettings.key, set: { value: { enabled }, updatedBy } });
+}
 
 const authRoutes = new Hono<{ Variables: HonoVariables }>();
 
@@ -66,20 +75,25 @@ authRoutes.post('/login', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  const ipAddress = getClientIp(c);
+  // The lockout functions take a Postgres inet, so an unresolvable client IP
+  // ('localhost' in dev, 'unknown' behind no proxy) shares one valid bucket.
+  const ipAddress = lockoutIp(getClientIp(c));
   const email = body.email.toLowerCase();
 
   try {
     // Step 1: Check if account is locked
-    const { data: lockoutData, error: lockoutError } = await adminDb.rpc('check_account_lockout', {
-      p_email: email,
-      p_ip_address: ipAddress,
-    });
-
-    if (lockoutError) {
+    let lockoutData: { locked?: boolean; remaining_minutes: number } | null = null;
+    try {
+      const { rows } = await adminDb.execute<{
+        lockout: { locked?: boolean; remaining_minutes: number };
+      }>(sql`select check_account_lockout(${email}, ${ipAddress}::inet) as lockout`);
+      lockoutData = rows[0]?.lockout ?? null;
+    } catch (lockoutError) {
       logger.error({ error: lockoutError }, 'Failed to check lockout status');
       // Continue with login attempt even if lockout check fails
-    } else if (lockoutData?.locked) {
+    }
+
+    if (lockoutData?.locked) {
       return c.json(
         {
           error: `Account temporarily locked due to too many failed attempts. Please try again in ${lockoutData.remaining_minutes} minute${lockoutData.remaining_minutes === 1 ? '' : 's'}.`,
@@ -101,10 +115,7 @@ authRoutes.post('/login', async (c) => {
     if (authError || !authData.session) {
       // Step 3a: Record failed attempt
       try {
-        await adminDb.rpc('record_failed_login', {
-          p_email: email,
-          p_ip_address: ipAddress,
-        });
+        await adminDb.execute(sql`select record_failed_login(${email}, ${ipAddress}::inet)`);
         logger.warn({ email, ip: ipAddress }, 'Failed login attempt recorded');
       } catch (recordError) {
         logger.error({ error: recordError }, 'Failed to record login attempt');
@@ -118,10 +129,7 @@ authRoutes.post('/login', async (c) => {
 
     // Step 3b: Clear failed attempts on success
     try {
-      await adminDb.rpc('clear_failed_logins', {
-        p_email: email,
-        p_ip_address: ipAddress,
-      });
+      await adminDb.execute(sql`select clear_failed_logins(${email}, ${ipAddress}::inet)`);
     } catch (clearError) {
       logger.error({ error: clearError }, 'Failed to clear lockout records');
     }
@@ -182,13 +190,7 @@ authRoutes.post('/admin/unlock-account', async (c) => {
   }
 
   try {
-    const { error } = await adminDb.rpc('admin_unlock_account', {
-      p_email: body.email.toLowerCase(),
-    });
-
-    if (error) {
-      throw error;
-    }
+    await adminDb.execute(sql`select admin_unlock_account(${body.email.toLowerCase()})`);
 
     logger.info({ email: body.email, unlockedBy: user.id }, 'Account unlocked by admin');
 
@@ -213,26 +215,21 @@ authRoutes.get('/admin/locked-accounts', async (c) => {
   }
 
   try {
-    const { data, error } = await adminDb.rpc('get_locked_accounts');
-
-    if (error) {
-      throw error;
-    }
+    const { rows } = await adminDb.execute<{
+      email: string;
+      attempt_count: string | number;
+      first_attempt: string;
+      last_attempt: string;
+    }>(sql`select email, attempt_count, first_attempt, last_attempt from get_locked_accounts()`);
 
     return c.json({
-      lockedAccounts: (data || []).map(
-        (account: {
-          email: string;
-          attempt_count: number;
-          first_attempt: string;
-          last_attempt: string;
-        }) => ({
-          email: account.email,
-          attemptCount: account.attempt_count,
-          firstAttempt: account.first_attempt,
-          lastAttempt: account.last_attempt,
-        })
-      ),
+      lockedAccounts: rows.map((account) => ({
+        email: account.email,
+        // count(*) is a bigint, which the driver returns as text.
+        attemptCount: Number(account.attempt_count),
+        firstAttempt: isoTimestamp(String(account.first_attempt)),
+        lastAttempt: isoTimestamp(String(account.last_attempt)),
+      })),
     });
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch locked accounts') }, 500);
@@ -248,19 +245,20 @@ authRoutes.get('/admin/locked-accounts', async (c) => {
  */
 authRoutes.get('/settings', async (c) => {
   try {
-    const { data, error } = await adminDb
-      .from('app_settings')
-      .select('key, value')
-      .in('key', ['mfa_enabled', 'user_docs_enabled', 'api_docs_enabled']);
-
-    // If table doesn't exist or query fails, return defaults
-    if (error) {
-      logger.debug({ error: error.message }, 'app_settings query failed, using defaults');
+    // If the table doesn't exist or the query fails, return defaults
+    let rows: { key: string; value: unknown }[] = [];
+    try {
+      rows = await adminDb
+        .select({ key: appSettings.key, value: appSettings.value })
+        .from(appSettings)
+        .where(inArray(appSettings.key, ['mfa_enabled', 'user_docs_enabled', 'api_docs_enabled']));
+    } catch (error) {
+      logger.debug({ error }, 'app_settings query failed, using defaults');
     }
 
     // Convert to object
     const settings: Record<string, unknown> = {};
-    for (const row of data || []) {
+    for (const row of rows) {
       settings[row.key] = row.value;
     }
 
@@ -334,29 +332,13 @@ authRoutes.patch('/admin/settings', async (c) => {
   try {
     // Update MFA setting if provided
     if (body.mfa_enabled !== undefined) {
-      const { error } = await adminDb.from('app_settings').upsert({
-        key: 'mfa_enabled',
-        value: { enabled: body.mfa_enabled },
-        updated_by: user.id,
-      });
-
-      if (error) {
-        throw error;
-      }
+      await setFlag('mfa_enabled', body.mfa_enabled, user.id);
 
       logger.info({ mfaEnabled: body.mfa_enabled, updatedBy: user.id }, 'MFA setting updated');
     }
 
     if (body.user_docs_enabled !== undefined) {
-      const { error } = await adminDb.from('app_settings').upsert({
-        key: 'user_docs_enabled',
-        value: { enabled: body.user_docs_enabled },
-        updated_by: user.id,
-      });
-
-      if (error) {
-        throw error;
-      }
+      await setFlag('user_docs_enabled', body.user_docs_enabled, user.id);
 
       logger.info(
         { userDocsEnabled: body.user_docs_enabled, updatedBy: user.id },
@@ -365,15 +347,7 @@ authRoutes.patch('/admin/settings', async (c) => {
     }
 
     if (body.api_docs_enabled !== undefined) {
-      const { error } = await adminDb.from('app_settings').upsert({
-        key: 'api_docs_enabled',
-        value: { enabled: body.api_docs_enabled },
-        updated_by: user.id,
-      });
-
-      if (error) {
-        throw error;
-      }
+      await setFlag('api_docs_enabled', body.api_docs_enabled, user.id);
 
       logger.info(
         { apiDocsEnabled: body.api_docs_enabled, updatedBy: user.id },

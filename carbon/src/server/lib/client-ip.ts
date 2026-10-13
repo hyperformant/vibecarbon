@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { env } from './env';
 import { logger } from './logger';
 
@@ -65,4 +66,19 @@ export function getClientIp(c: HasHeader, hops: number = env.TRUSTED_PROXY_HOPS)
   }
 
   return 'unknown';
+}
+
+/** Shared bucket for clients whose address could not be resolved. */
+export const UNRESOLVED_LOCKOUT_IP = '0.0.0.0';
+
+/**
+ * The address to hand the login-lockout SQL functions, whose `ip_address`
+ * parameter is a Postgres `inet`. `getClientIp` can return 'localhost'
+ * (development, no proxy) or 'unknown' (no trusted proxy header); neither
+ * casts to `inet`, which made the lockout calls fail. Unresolvable clients
+ * share one bucket instead, the same fail-closed choice `getClientIp` makes
+ * for rate limiting, so the lockout still works for them.
+ */
+export function lockoutIp(ip: string): string {
+  return isIP(ip) !== 0 ? ip : UNRESOLVED_LOCKOUT_IP;
 }

@@ -13,10 +13,8 @@ const { insertMock, sendEmailMock, fakeEnv } = vi.hoisted(() => ({
   } as Record<string, unknown>,
 }));
 
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({ insert: insertMock }),
-  },
+vi.mock('@server/db/client', () => ({
+  adminDb: { insert: () => ({ values: insertMock }) },
 }));
 
 // Email is fired-and-forgotten on success — stub it so tests don't try
@@ -56,7 +54,7 @@ beforeEach(() => {
 
 describe('POST /api/v1/contact/submit', () => {
   it('inserts the submission and returns 200 on the happy path', async () => {
-    insertMock.mockResolvedValueOnce({ error: null });
+    insertMock.mockResolvedValueOnce(undefined);
 
     const payload = makeContactSubmission();
     const res = await app.request('/api/v1/contact/submit', jsonPost(payload));
@@ -110,7 +108,7 @@ describe('POST /api/v1/contact/submit', () => {
   });
 
   it('returns 500 when the insert fails', async () => {
-    insertMock.mockResolvedValueOnce({ error: { message: 'db down' } });
+    insertMock.mockRejectedValueOnce(new Error('db down'));
 
     const res = await app.request('/api/v1/contact/submit', jsonPost(makeContactSubmission()));
 
@@ -121,7 +119,7 @@ describe('POST /api/v1/contact/submit', () => {
 
   it('fires the admin notification email when SMTP_ADMIN_EMAIL is set', async () => {
     fakeEnv.SMTP_ADMIN_EMAIL = 'admin@example.test';
-    insertMock.mockResolvedValueOnce({ error: null });
+    insertMock.mockResolvedValueOnce(undefined);
 
     const payload = makeContactSubmission({ subject: 'Bug report' });
     const res = await app.request('/api/v1/contact/submit', jsonPost(payload));
@@ -141,7 +139,7 @@ describe('POST /api/v1/contact/submit', () => {
 
   it('escapes HTML in the notification email body', async () => {
     fakeEnv.SMTP_ADMIN_EMAIL = 'admin@example.test';
-    insertMock.mockResolvedValueOnce({ error: null });
+    insertMock.mockResolvedValueOnce(undefined);
 
     await app.request(
       '/api/v1/contact/submit',

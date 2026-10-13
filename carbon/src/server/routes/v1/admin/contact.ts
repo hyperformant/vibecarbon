@@ -1,13 +1,12 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { count, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb } from '../../../db/client';
+import { contactSubmissions } from '../../../db/schema';
+import { isoTimestamp, isUuid } from '../../../db/values';
 import { sanitizeError } from '../../../lib/errors';
-import { supabaseAdmin } from '../../../lib/supabase';
 import { requireSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
-
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
 
 const adminContactRoutes = new Hono<{ Variables: HonoVariables }>();
 
@@ -26,25 +25,30 @@ adminContactRoutes.get('/', async (c) => {
   const offset = (page - 1) * limit;
 
   try {
-    let query = adminDb
-      .from('contact_submissions')
-      .select('*', { count: 'exact' })
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    if (status) {
-      query = query.eq('status', status);
-    }
-
-    const { data, error, count } = await query;
-
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to fetch submissions') }, 500);
-    }
+    const where = status ? eq(contactSubmissions.status, status) : undefined;
+    const [rows, [totals]] = await Promise.all([
+      adminDb
+        .select()
+        .from(contactSubmissions)
+        .where(where)
+        .orderBy(desc(contactSubmissions.createdAt))
+        .limit(limit)
+        .offset(offset),
+      adminDb.select({ total: count() }).from(contactSubmissions).where(where),
+    ]);
 
     return c.json({
-      submissions: data || [],
-      total: count || 0,
+      submissions: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        email: r.email,
+        subject: r.subject,
+        message: r.message,
+        status: r.status,
+        created_at: isoTimestamp(r.createdAt),
+        updated_at: isoTimestamp(r.updatedAt),
+      })),
+      total: totals?.total ?? 0,
       page,
       limit,
     });
@@ -75,15 +79,15 @@ adminContactRoutes.patch('/:id', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  try {
-    const { error } = await adminDb
-      .from('contact_submissions')
-      .update({ status: body.status })
-      .eq('id', id);
+  if (!isUuid(id)) {
+    return c.json({ error: 'Submission not found' }, 404);
+  }
 
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to update submission') }, 500);
-    }
+  try {
+    await adminDb
+      .update(contactSubmissions)
+      .set({ status: body.status })
+      .where(eq(contactSubmissions.id, id));
 
     return c.json({ success: true });
   } catch (error) {
@@ -97,12 +101,12 @@ adminContactRoutes.patch('/:id', async (c) => {
 adminContactRoutes.delete('/:id', async (c) => {
   const id = c.req.param('id');
 
-  try {
-    const { error } = await adminDb.from('contact_submissions').delete().eq('id', id);
+  if (!isUuid(id)) {
+    return c.json({ error: 'Submission not found' }, 404);
+  }
 
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to delete submission') }, 500);
-    }
+  try {
+    await adminDb.delete(contactSubmissions).where(eq(contactSubmissions.id, id));
 
     return c.json({ success: true });
   } catch (error) {
