@@ -147,7 +147,7 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
     expect(left).toEqual([]);
     expect(pool.waitingCount).toBe(0);
     expect(pool.idleCount).toBe(pool.totalCount);
-    expect(await pingDb()).toBe(true);
+    expect(await pingDb()).toEqual({ ok: true });
   });
 
   it('rolls back and releases the connection when SQL inside the callback fails', async () => {
@@ -194,16 +194,33 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
   });
 
   it('pingDb reports a reachable database', async () => {
-    expect(await pingDb()).toBe(true);
+    expect(await pingDb()).toEqual({ ok: true });
   });
 
-  // Review Focus 5: an unreachable database is a `false`, never a throw.
+  // Review Focus 5: an unreachable database is `{ ok: false }`, never a
+  // throw, and carries the cause so readiness can log why.
   it('pingDb reports an unreachable database as down without throwing', async () => {
     const dead = new pg.Pool({ host: '127.0.0.1', port: 1, connectionTimeoutMillis: 2000 });
     try {
-      expect(await pingDb(dead)).toBe(false);
+      const ping = await pingDb(dead);
+      expect(ping.ok).toBe(false);
+      expect(ping.ok ? undefined : (ping.error as { code?: string }).code).toBe('ECONNREFUSED');
     } finally {
       await dead.end();
     }
+  });
+
+  // A request Hono already timed out must not pin a pooled connection: the
+  // server cancels long statements and ends idle-in-transaction sessions.
+  it('every pooled session carries the statement and idle-in-transaction timeouts', async () => {
+    const { rows } = await adminDb.execute<{ statement: string; idleTx: string }>(
+      sql`select current_setting('statement_timeout') as statement,
+        current_setting('idle_in_transaction_session_timeout') as "idleTx"`,
+    );
+    expect(rows[0]).toEqual({ statement: '30s', idleTx: '30s' });
+    const inside = await withUserDb(null, (tx) =>
+      tx.execute<{ statement: string }>(sql`select current_setting('statement_timeout') as statement`),
+    );
+    expect(inside.rows[0].statement).toBe('30s');
   });
 });

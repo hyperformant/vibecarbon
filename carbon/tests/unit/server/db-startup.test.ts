@@ -1,3 +1,4 @@
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { describe, expect, it, vi } from 'vitest';
 
 // The DB module validates env at import; the pool connects lazily and is
@@ -12,11 +13,23 @@ vi.mock('@server/lib/logger', () => ({
   logger: { fatal: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
 
-const { assertBypassRole, DbNotMigratedError, DbRoleError } = await import('@server/db/client');
-const { checkDbRoleAtStartup } = await import('@server/db/startup');
+const { assertBypassRole, DbNotMigratedError, DbRoleError, pool } = await import(
+  '@server/db/client'
+);
+const { checkDbRoleAtStartup, isDbAuthFailure } = await import('@server/db/startup');
 
 function fakeLog() {
-  return { fatal: vi.fn(), info: vi.fn(), warn: vi.fn() };
+  return { fatal: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
+}
+
+/** A pg error as Drizzle surfaces it: the SQLSTATE sits on the cause. */
+function wrappedPgError(code: string) {
+  const pgErr = Object.assign(new Error('password authentication failed for user "postgres"'), {
+    code,
+    severity: 'FATAL',
+    detail: undefined,
+  });
+  return new DrizzleQueryError('select current_user', [], pgErr);
 }
 
 describe('checkDbRoleAtStartup', () => {
@@ -70,6 +83,65 @@ describe('checkDbRoleAtStartup', () => {
     assert.mockResolvedValueOnce(undefined);
     await checkDbRoleAtStartup({ assert, log, exit: vi.fn(), retryMs: 0 });
     expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('checkDbRoleAtStartup: rejected credentials', () => {
+  it('recognises 28P01 and 28000, directly or on a cause, and nothing else', () => {
+    expect(isDbAuthFailure(wrappedPgError('28P01'))).toBe(true);
+    expect(isDbAuthFailure(Object.assign(new Error('no pg_hba.conf entry'), { code: '28000' }))).toBe(
+      true
+    );
+    expect(isDbAuthFailure(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }))).toBe(
+      false
+    );
+    expect(isDbAuthFailure(new DbNotMigratedError())).toBe(false);
+  });
+
+  // Waiting never fixes a wrong password, so this is not "still starting":
+  // error level, repeated every authRelogMs while it persists.
+  it('logs a persistent auth failure at error level, again once per interval', async () => {
+    const log = fakeLog();
+    const exit = vi.fn();
+    let clock = 0;
+    const assert = vi.fn();
+    // Ten failures, 15 s apart (0..135 s), then the fix lands.
+    for (let i = 0; i < 10; i++) assert.mockRejectedValueOnce(wrappedPgError('28P01'));
+    assert.mockResolvedValueOnce(undefined);
+    await checkDbRoleAtStartup({
+      assert: async () => {
+        try {
+          return await assert();
+        } finally {
+          clock += 15_000;
+        }
+      },
+      log,
+      exit,
+      retryMs: 0,
+      authRelogMs: 60_000,
+      now: () => clock,
+    });
+    // Logged at t=15 s, 75 s, 135 s: first failure, then each full minute.
+    expect(log.error).toHaveBeenCalledTimes(3);
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledTimes(1);
+    // Logged through dbErrorForLog: the SQLSTATE survives, the SQL does not.
+    const [fields] = log.error.mock.calls[0] as [{ err: { code?: string; message?: string } }];
+    expect(fields.err.code).toBe('28P01');
+    expect(JSON.stringify(fields)).not.toContain('select current_user');
+  });
+});
+
+describe('pool', () => {
+  // A request Hono has timed out must not pin one of the pool's connections.
+  it('bounds statements, idle transactions, and unanswered queries', () => {
+    const options = pool.options as unknown as Record<string, unknown>;
+    expect(options.statement_timeout).toBe(30_000);
+    expect(options.idle_in_transaction_session_timeout).toBe(30_000);
+    expect(options.query_timeout).toBe(35_000);
+    expect(options.max).toBe(10);
   });
 });
 

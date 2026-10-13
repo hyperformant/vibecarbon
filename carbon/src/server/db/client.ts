@@ -29,6 +29,16 @@ export const pool = new pg.Pool({
   // Fail a checkout instead of waiting forever when the db is unreachable,
   // so /api/health/ready answers 503 promptly.
   connectionTimeoutMillis: 5_000,
+  // A request Hono has already timed out keeps running its query, and the
+  // pooled connection stays checked out until the query ends. Postgres
+  // cancels any statement past 30 s and ends a transaction left idle for
+  // 30 s (a callback stuck awaiting something else), so neither can hold
+  // one of the 10 connections indefinitely. The client-side query_timeout
+  // is the backstop for a database that stops answering at all; it sits
+  // above statement_timeout so the server's cleaner cancel normally wins.
+  statement_timeout: 30_000,
+  idle_in_transaction_session_timeout: 30_000,
+  query_timeout: 35_000,
 });
 
 // An idle client can die under us (db restart, failover). pg emits that on
@@ -134,12 +144,19 @@ export async function assertBypassRole(db: Executor = adminDb): Promise<void> {
   if (!row.member) throw new DbRoleError(role, 'not-app-user-member');
 }
 
-/** `true` when Postgres answers a trivial query. Never throws. */
-export async function pingDb(target: pg.Pool = pool): Promise<boolean> {
+/** What `pingDb` found: the database answered, or the error it failed with. */
+export type DbPing = { ok: true } | { ok: false; error: unknown };
+
+/**
+ * Ask Postgres a trivial query. Never throws: an unreachable database is
+ * `{ ok: false, error }`, so the caller can log why (through `dbErrorForLog`)
+ * without a try/catch of its own.
+ */
+export async function pingDb(target: pg.Pool = pool): Promise<DbPing> {
   try {
     await target.query('select 1');
-    return true;
-  } catch {
-    return false;
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
   }
 }
