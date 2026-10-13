@@ -12,6 +12,67 @@
 --   - app_settings: Global application settings
 
 -- ============================================================================
+-- REQUEST ROLE AND IDENTITY (app_user + app.user_id())
+-- ============================================================================
+-- The server connects as a role that bypasses RLS (adminDb, `postgres`) and
+-- runs every user request in a transaction that starts with ONE parameterized
+-- statement:
+--
+--   select set_config('role', 'app_user', true),
+--          set_config('app.user_id', $1, true)
+--
+-- so the rest of the transaction runs as `app_user` and every policy below
+-- reads the caller from app.user_id(). Both settings are transaction-local
+-- (is_local = true) and reset at COMMIT/ROLLBACK, so nothing leaks to the next
+-- pooled request. An anonymous request sets app.user_id to '' and
+-- app.user_id() returns NULL, which matches no owner/org check.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'app_user') THEN
+    CREATE ROLE app_user NOLOGIN;
+  END IF;
+END
+$$;
+
+-- set_config('role', ...) requires membership. `postgres` is the app's
+-- connection role (BYPASSRLS + LOGIN in the db image; adminDb runs as it).
+GRANT app_user TO postgres;
+
+CREATE SCHEMA IF NOT EXISTS app;
+
+-- The caller's user id for this transaction, or NULL when anonymous. STABLE
+-- and read through `(SELECT app.user_id())` in policies so the planner
+-- evaluates it once per statement, not once per row.
+CREATE OR REPLACE FUNCTION app.user_id()
+RETURNS UUID
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+  SELECT nullif(current_setting('app.user_id', true), '')::uuid;
+$$;
+
+GRANT USAGE ON SCHEMA public, app TO app_user;
+GRANT EXECUTE ON FUNCTION app.user_id() TO app_user;
+
+-- Table access is broad on purpose: RLS (enabled on every table below) is
+-- the boundary, exactly as it was for the old `authenticated` role.
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
+
+-- Functions get EXECUTE through default privileges at creation time (the RLS
+-- helpers below need it, since policies run as app_user). There is
+-- deliberately no `GRANT EXECUTE ON ALL FUNCTIONS`: migrations re-run on every
+-- deploy, and a blanket re-grant would re-open the server-only SECURITY
+-- DEFINER functions (lockout, cron log, crawler rollup) until each file's
+-- REVOKE ran again. Every such function MUST `REVOKE EXECUTE ... FROM PUBLIC,
+-- anon, authenticated, app_user` in the migration that creates it.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT EXECUTE ON FUNCTIONS TO app_user;
+
+-- ============================================================================
 -- UPDATED_AT TRIGGER FUNCTION (used by multiple tables)
 -- ============================================================================
 
@@ -175,13 +236,10 @@ CREATE INDEX IF NOT EXISTS idx_app_settings_updated_by
   ON app_settings(updated_by)
   WHERE updated_by IS NOT NULL;
 
--- WARNING: This table is publicly readable by the anonymous role to support
--- pre-authentication flows (e.g. checking if MFA is enforced).
+-- WARNING: whitelisted keys in this table are readable by anonymous requests
+-- to support pre-authentication flows (e.g. checking if MFA is enforced).
 -- DO NOT STORE SECRETS, TOKENS, OR SENSITIVE ENVIRONMENT VARIABLES HERE.
--- Public access is strictly controlled via RLS policy below.
-
--- Grant access to anon since we removed the default global grant
-GRANT SELECT ON app_settings TO anon;
+-- Public access is strictly controlled via the RLS policy below.
 
 INSERT INTO app_settings (key, value)
 VALUES ('mfa_enabled', '{"enabled": false}'::jsonb)
@@ -212,7 +270,7 @@ SECURITY DEFINER
 STABLE
 SET search_path = ''
 AS $$
-  SELECT organization_id FROM public.memberships WHERE user_id = auth.uid();
+  SELECT organization_id FROM public.memberships WHERE user_id = app.user_id();
 $$;
 
 -- Get organization IDs where user is owner/admin
@@ -224,7 +282,7 @@ STABLE
 SET search_path = ''
 AS $$
   SELECT organization_id FROM public.memberships
-  WHERE user_id = auth.uid() AND role IN ('OWNER', 'ADMIN');
+  WHERE user_id = app.user_id() AND role IN ('OWNER', 'ADMIN');
 $$;
 
 -- Get organization IDs where user is owner
@@ -236,7 +294,7 @@ STABLE
 SET search_path = ''
 AS $$
   SELECT organization_id FROM public.memberships
-  WHERE user_id = auth.uid() AND role = 'OWNER';
+  WHERE user_id = app.user_id() AND role = 'OWNER';
 $$;
 
 -- Get customer IDs for the current user
@@ -248,13 +306,16 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
   SELECT c.id FROM public.customers c
-  WHERE c.user_id = (SELECT auth.uid())
+  WHERE c.user_id = (SELECT app.user_id())
   UNION
   SELECT c.id FROM public.customers c
   WHERE c.organization_id IN (SELECT public.get_user_org_ids());
 $$;
 
--- Check if user is a super admin
+-- Check if the current user is a super admin. The role lives in the user's
+-- app_metadata (raw_app_meta_data: server-controlled, set via the service
+-- role), NEVER user_metadata (user-writable). SECURITY DEFINER so app_user
+-- needs no access to auth.users.
 CREATE OR REPLACE FUNCTION is_super_admin()
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -263,10 +324,25 @@ STABLE
 SET search_path = ''
 AS $$
   SELECT COALESCE(
-    (SELECT auth.jwt() -> 'app_metadata' ->> 'role') = 'super_admin',
+    (
+      SELECT u.raw_app_meta_data ->> 'role'
+      FROM auth.users u
+      WHERE u.id = (SELECT app.user_id())
+    ) = 'super_admin',
     false
   );
 $$;
+
+-- Policies run as app_user, so it must be able to call the helpers. Explicit
+-- (not only via default privileges) so a database migrated before app_user
+-- existed gets the grant on re-run too.
+GRANT EXECUTE ON FUNCTION
+  get_user_org_ids(),
+  get_user_admin_org_ids(),
+  get_user_owner_org_ids(),
+  get_user_customer_ids(),
+  is_super_admin()
+TO app_user;
 
 -- ============================================================================
 -- ORGANIZATIONS POLICIES
@@ -280,7 +356,7 @@ CREATE POLICY "Users can view their organizations"
 DROP POLICY IF EXISTS "Authenticated users can create organizations" ON organizations;
 CREATE POLICY "Authenticated users can create organizations"
   ON organizations FOR INSERT
-  WITH CHECK ((SELECT auth.uid()) IS NOT NULL);
+  WITH CHECK ((SELECT app.user_id()) IS NOT NULL);
 
 DROP POLICY IF EXISTS "Owners and admins can update organizations" ON organizations;
 CREATE POLICY "Owners and admins can update organizations"
@@ -352,7 +428,7 @@ DROP POLICY IF EXISTS "Users can leave or be removed by owners/admins" ON member
 CREATE POLICY "Users can leave or be removed by owners/admins"
   ON memberships FOR DELETE
   USING (
-    user_id = (SELECT auth.uid())
+    user_id = (SELECT app.user_id())
     OR organization_id IN (SELECT get_user_admin_org_ids())
   );
 
@@ -364,7 +440,7 @@ DROP POLICY IF EXISTS "Users can view their own customer records" ON customers;
 CREATE POLICY "Users can view their own customer records"
   ON customers FOR SELECT
   USING (
-    user_id = (SELECT auth.uid()) OR
+    user_id = (SELECT app.user_id()) OR
     organization_id IN (SELECT get_user_org_ids())
   );
 
@@ -392,12 +468,17 @@ CREATE POLICY "Users can view their own subscriptions"
 -- NOTIFICATIONS POLICIES
 -- ============================================================================
 
+-- The two notification read policies split on whether the request carries a
+-- user id: both target app_user, so the id check is what keeps an anonymous
+-- request from seeing 'authenticated'-only notifications (and a signed-in one
+-- from seeing 'public'-only ones, matching the old anon/authenticated split).
 DROP POLICY IF EXISTS "Authenticated users can view relevant notifications" ON notifications;
 CREATE POLICY "Authenticated users can view relevant notifications"
   ON notifications FOR SELECT
-  TO authenticated
+  TO app_user
   USING (
-    is_active = true
+    (SELECT app.user_id()) IS NOT NULL
+    AND is_active = true
     AND (starts_at IS NULL OR starts_at <= NOW())
     AND (ends_at IS NULL OR ends_at > NOW())
     AND (visibility IN ('all', 'authenticated'))
@@ -410,9 +491,10 @@ CREATE POLICY "Authenticated users can view relevant notifications"
 DROP POLICY IF EXISTS "Anonymous users can view public notifications" ON notifications;
 CREATE POLICY "Anonymous users can view public notifications"
   ON notifications FOR SELECT
-  TO anon
+  TO app_user
   USING (
-    is_active = true
+    (SELECT app.user_id()) IS NULL
+    AND is_active = true
     AND (starts_at IS NULL OR starts_at <= NOW())
     AND (ends_at IS NULL OR ends_at > NOW())
     AND (visibility IN ('all', 'public'))
@@ -442,17 +524,17 @@ CREATE POLICY "Super admins can delete notifications"
 DROP POLICY IF EXISTS "Users can view their dismissals" ON notification_dismissals;
 CREATE POLICY "Users can view their dismissals"
   ON notification_dismissals FOR SELECT
-  USING (user_id = (SELECT auth.uid()));
+  USING (user_id = (SELECT app.user_id()));
 
 DROP POLICY IF EXISTS "Users can dismiss notifications" ON notification_dismissals;
 CREATE POLICY "Users can dismiss notifications"
   ON notification_dismissals FOR INSERT
-  WITH CHECK (user_id = (SELECT auth.uid()));
+  WITH CHECK (user_id = (SELECT app.user_id()));
 
 DROP POLICY IF EXISTS "Users can remove their dismissals" ON notification_dismissals;
 CREATE POLICY "Users can remove their dismissals"
   ON notification_dismissals FOR DELETE
-  USING (user_id = (SELECT auth.uid()));
+  USING (user_id = (SELECT app.user_id()));
 
 -- ============================================================================
 -- APP SETTINGS POLICIES
@@ -608,14 +690,15 @@ AS $$
   ORDER BY last_attempt DESC;
 $$;
 
--- These functions are called server-side via the service role key (adminDb).
--- Revoke direct execution by end users to prevent abuse.
-REVOKE EXECUTE ON FUNCTION check_account_lockout(TEXT, INET, INTEGER, INTEGER) FROM PUBLIC, anon, authenticated;
-REVOKE EXECUTE ON FUNCTION record_failed_login(TEXT, INET) FROM PUBLIC, anon, authenticated;
-REVOKE EXECUTE ON FUNCTION clear_failed_logins(TEXT, INET) FROM PUBLIC, anon, authenticated;
-REVOKE EXECUTE ON FUNCTION admin_unlock_account(TEXT) FROM PUBLIC, anon, authenticated;
-REVOKE EXECUTE ON FUNCTION cleanup_old_login_attempts(INTEGER) FROM PUBLIC, anon, authenticated;
-REVOKE EXECUTE ON FUNCTION get_locked_accounts(INTEGER, INTEGER) FROM PUBLIC, anon, authenticated;
+-- These functions are called server-side only (adminDb, which bypasses RLS).
+-- Revoke execution from every request role (app_user, and the legacy
+-- PostgREST roles anon/authenticated) to prevent abuse.
+REVOKE EXECUTE ON FUNCTION check_account_lockout(TEXT, INET, INTEGER, INTEGER) FROM PUBLIC, anon, authenticated, app_user;
+REVOKE EXECUTE ON FUNCTION record_failed_login(TEXT, INET) FROM PUBLIC, anon, authenticated, app_user;
+REVOKE EXECUTE ON FUNCTION clear_failed_logins(TEXT, INET) FROM PUBLIC, anon, authenticated, app_user;
+REVOKE EXECUTE ON FUNCTION admin_unlock_account(TEXT) FROM PUBLIC, anon, authenticated, app_user;
+REVOKE EXECUTE ON FUNCTION cleanup_old_login_attempts(INTEGER) FROM PUBLIC, anon, authenticated, app_user;
+REVOKE EXECUTE ON FUNCTION get_locked_accounts(INTEGER, INTEGER) FROM PUBLIC, anon, authenticated, app_user;
 
 -- ============================================================================
 -- TRIGGERS

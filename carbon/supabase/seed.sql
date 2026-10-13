@@ -11,6 +11,6 @@
 -- Then add the first user as owner:
 -- INSERT INTO memberships (user_id, organization_id, role)
 -- SELECT
---   auth.uid(),
+--   '<your-user-id>'::uuid,
 --   (SELECT id FROM organizations WHERE slug = 'demo-org'),
 --   'OWNER';

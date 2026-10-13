@@ -299,7 +299,7 @@
   - Pagination search input validated against safe character regex
 - Error sanitization in production (generic messages to client, full details logged server-side)
 - Row Level Security (RLS) enabled on all tables
-  - All policies use `(SELECT auth.uid())` subquery form to prevent per-row re-evaluation
+  - All policies use `(SELECT app.user_id())` subquery form to prevent per-row re-evaluation
   - `SECURITY DEFINER` + `SET search_path = ''` on all helper functions
 - Privilege separation: user-context Supabase client for user queries, admin client only where required
 - Disposable auth client for `signInWithPassword` (prevents session state contamination)

@@ -134,7 +134,7 @@ $$;
 -- /rest/v1/rpc/<name>, so without this REVOKE any anon/authenticated caller
 -- could rewrite the rollup table at will. Only the server (service_role) and
 -- pg_cron (postgres, the owner) may run it.
-REVOKE EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) FROM PUBLIC, anon, authenticated, app_user;
 -- roles.sql's `GRANT ALL ON ALL ROUTINES` ran at DB init, before this function
 -- existed, and its ALTER DEFAULT PRIVILEGES covers tables/sequences only — so
 -- service_role needs an explicit grant here for the admin Jobs trigger to work.

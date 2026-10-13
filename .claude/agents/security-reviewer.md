@@ -19,11 +19,11 @@ For every review, systematically evaluate changes against these security domains
 ### 1. Database & RLS Security
 - **Every table MUST have RLS enabled.** Flag any `CREATE TABLE` without a corresponding `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.
 - **Every table MUST have explicit RLS policies.** A table with RLS enabled but no policies silently blocks all access — verify this is intentional or flag it.
-- **RLS policies must use `(SELECT auth.uid())`** (subquery form) for user-scoped data, never trust client-supplied user IDs. The browser queries PostgREST directly, so RLS is the only defense on `public.*` tables.
+- **RLS policies must use `(SELECT app.user_id())`** (subquery form) for user-scoped data, never trust client-supplied user IDs. The browser queries PostgREST directly, so RLS is the only defense on `public.*` tables.
 - **Check for RLS bypass risks:** Ensure server-side code using the service role client (`supabase-admin` / service_role key) is intentional and justified, and preceded by its own authorization check when it touches user-supplied IDs. The service role bypasses ALL RLS (IDOR risk).
 - **Verify policy logic:** `USING` (which rows are targetable) and `WITH CHECK` (what the row may become) are evaluated **independently**. Flag any `UPDATE`/`INSERT` `WITH CHECK` that is narrower than its `USING` on a tenant/owner column — that is a cross-tenant-takeover hole (a user rewrites `organization_id`/`user_id` into a tenant they can't administer). Also flag `USING (true)`/`WITH CHECK (true)` on user data.
-- **Role source:** RLS role checks must read `app_metadata` (`is_super_admin()` / `auth.jwt() -> 'app_metadata'`), NEVER `user_metadata` (user-writable via GoTrue). Flag any policy or function keyed on `user_metadata`.
-- **SECURITY DEFINER RPC:** any `SECURITY DEFINER` function not intended for client RPC must be `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` — PostgREST exposes `public` functions at `/rest/v1/rpc/<name>` and SECURITY DEFINER bypasses RLS. Flag missing revokes.
+- **Role source:** RLS role checks must read `app_metadata` (`is_super_admin()`, which reads `auth.users.raw_app_meta_data`), NEVER `user_metadata` (user-writable via GoTrue). Flag any policy or function keyed on `user_metadata`.
+- **SECURITY DEFINER RPC:** any `SECURITY DEFINER` function not intended for client RPC must be `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated, app_user` — PostgREST exposes `public` functions at `/rest/v1/rpc/<name>` and SECURITY DEFINER bypasses RLS. Flag missing revokes.
 - **Needless write surface:** flag client `INSERT`/`UPDATE` policies on tables written only by the server (billing `customers`/`subscriptions`).
 - **Check for SQL injection** in any raw SQL queries, dynamic query construction, or string interpolation in SQL.
 - **Migration ordering:** Ensure RLS policies are created in the same migration as the table, not deferred.

@@ -66,7 +66,7 @@ $$;
 -- /rest/v1/rpc/log_cron_job to inject fabricated "system" rows the admin panel
 -- presents as trusted job output (log spoofing) and grow the table unbounded
 -- (storage DoS; pruned only weekly). Matches the failed-login lockdown pattern.
-REVOKE EXECUTE ON FUNCTION public.log_cron_job(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.log_cron_job(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated, app_user;
 
 -- =============================================================================
 -- Schedule default jobs

@@ -3,10 +3,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * RLS boundary invariants (2026-07-23 security audit). The browser queries
- * PostgREST directly through Kong (`/rest/v1`), so RLS is the ONLY data-layer
- * defense — a single under-scoped policy is a cross-tenant hole for every
- * tenant on the stack. These static guards pin the audit's fixes so the bug
+ * RLS boundary invariants (2026-07-23 security audit; app_user contract
+ * 2026-10-13). User requests run as role app_user with app.user_id() set per
+ * transaction, and RLS is the data-layer boundary: a single under-scoped
+ * policy is a cross-tenant hole for every tenant on the stack. These static guards pin the audit's fixes so the bug
  * class cannot silently return in a future migration edit.
  */
 
@@ -62,12 +62,49 @@ describe('RLS: UPDATE WITH CHECK mirrors the org scope of USING', () => {
 });
 
 describe('RLS: role checks read the server-controlled claim', () => {
-  it('is_super_admin reads app_metadata, never the user-writable user_metadata', () => {
+  it('is_super_admin reads app_metadata for app.user_id(), never the user-writable user_metadata', () => {
     const fn = sql.match(/FUNCTION\s+(?:public\.)?is_super_admin[\s\S]*?\$\$;/i);
     expect(fn, 'is_super_admin not found').not.toBeNull();
     const body = fn?.[0] ?? '';
-    expect(body).toMatch(/app_metadata/);
-    expect(body).not.toMatch(/user_metadata/);
+    expect(body).toMatch(/raw_app_meta_data/);
+    expect(body).toMatch(/app\.user_id\(\)/);
+    expect(body).not.toMatch(/user_meta/);
+  });
+});
+
+describe('RLS: policies read the request identity from app.user_id()', () => {
+  // User requests run as role app_user with app.user_id set per transaction.
+  // auth.uid()/auth.jwt() are never set on that path: a policy or helper that
+  // still reads them silently matches nothing (or, worse, something else if a
+  // JWT claim setting ever leaked in).
+  it('no migration calls auth.uid() or auth.jwt()', () => {
+    const code = sql.replace(/--.*$/gm, '');
+    expect(code).not.toMatch(/auth\.uid\(\)/i);
+    expect(code).not.toMatch(/auth\.jwt\(\)/i);
+  });
+
+  it('no policy targets the PostgREST roles anon/authenticated', () => {
+    expect(sql).not.toMatch(/CREATE POLICY[^;]*\bTO\s+(anon|authenticated)\b/i);
+  });
+
+  it('defines app_user (NOLOGIN), app.user_id(), and grants app_user to the connection role', () => {
+    expect(sql).toMatch(/CREATE ROLE app_user NOLOGIN/i);
+    expect(sql).toMatch(/GRANT app_user TO postgres/i);
+    const fn = sql.match(/FUNCTION\s+app\.user_id\(\)[\s\S]*?\$\$;/i);
+    expect(fn, 'app.user_id() not found').not.toBeNull();
+    expect(fn?.[0]).toMatch(/nullif\(current_setting\('app\.user_id', true\), ''\)::uuid/i);
+    expect(fn?.[0]).toMatch(/\bSTABLE\b/i);
+  });
+
+  it('the notification read policies split on whether app.user_id() is set', () => {
+    const authed = sql.match(
+      /CREATE POLICY "Authenticated users can view relevant notifications"[\s\S]*?;/i,
+    );
+    const anon = sql.match(
+      /CREATE POLICY "Anonymous users can view public notifications"[\s\S]*?;/i,
+    );
+    expect(authed?.[0]).toMatch(/app\.user_id\(\)\)\s+IS NOT NULL/i);
+    expect(anon?.[0]).toMatch(/app\.user_id\(\)\)\s+IS NULL/i);
   });
 });
 
@@ -76,6 +113,13 @@ describe('RLS: SECURITY DEFINER RPC surface is locked down', () => {
     expect(sql).toMatch(
       /REVOKE EXECUTE ON FUNCTION\s+(?:public\.)?log_cron_job[^;]*FROM[^;]*\b(anon|PUBLIC)\b/i,
     );
+  });
+
+  it('every REVOKE EXECUTE also revokes from app_user (functions default to app_user EXECUTE)', () => {
+    const revokes = [...sql.matchAll(/REVOKE EXECUTE ON FUNCTION[^;]*;/gi)].map((m) => m[0]);
+    expect(revokes.length).toBeGreaterThan(0);
+    const missing = revokes.filter((r) => !/\bapp_user\b/.test(r));
+    expect(missing, `REVOKEs missing app_user: ${missing.join(' | ')}`).toEqual([]);
   });
 
   it('the billing customers table has no client INSERT policy', () => {

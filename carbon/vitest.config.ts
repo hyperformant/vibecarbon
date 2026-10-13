@@ -1,12 +1,14 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
-// Three-tier vitest setup mirroring vibecarbon's own layout (slimmed for an
+// Tiered vitest setup mirroring vibecarbon's own layout (slimmed for an
 // app — no real-infra e2e tier).
 //
 //   unit         pure functions, validators, shared lib       — node env, fast
 //   component    React components + hooks via RTL             — jsdom env
 //   integration  Hono route handlers w/ mocked externals      — node env
+//   db           RLS + SQL against a real Postgres             — node env,
+//                skipped unless TEST_DB_HOST is set (TESTING.md)
 //
 // `npm test` runs the full set; `npm run test:unit` etc. pick one tier.
 //
@@ -67,6 +69,21 @@ export default defineConfig({
           include: ['tests/integration/**/*.test.ts'],
           setupFiles: ['tests/_helpers/setup-integration.ts'],
           testTimeout: 15_000,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'db',
+          // Real Postgres (the dev `db` container, migrations applied). RLS
+          // can only be proven against the engine that enforces it. Every
+          // suite skips itself unless TEST_DB_HOST is set; TESTING.md has
+          // the start-up steps. Files share one database, so run serially.
+          environment: 'node',
+          include: ['tests/db/**/*.test.ts'],
+          fileParallelism: false,
+          testTimeout: 15_000,
+          hookTimeout: 30_000,
         },
       },
     ],

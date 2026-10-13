@@ -163,7 +163,7 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
    - Table with `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`, `created_at`, `updated_at`
    - Index on foreign key columns
    - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` **in the same migration** (clients query PostgREST directly — an un-RLS'd `public` table is public)
-   - RLS policies using `(SELECT auth.uid())` and the org helpers for user-scoped access, with `WITH CHECK` mirroring `USING` on every write policy (see `00001_init.sql` and Security Rules → Database Security)
+   - RLS policies using `(SELECT app.user_id())` and the org helpers for user-scoped access, with `WITH CHECK` mirroring `USING` on every write policy (see `00001_init.sql` and Security Rules → Database Security)
    - `update_updated_at()` trigger
 2. Run `npm run db:migrate` and add types to `src/shared/types.ts`
 
@@ -368,14 +368,14 @@ Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-spli
 
 - **MUST** enable RLS on every new table: `ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;`
 - **MUST** give every `UPDATE`/`INSERT` policy a `WITH CHECK` that mirrors the full scope of its `USING`. Postgres evaluates `USING` (which rows you may target) and `WITH CHECK` (what the row may become) **independently** — a `WITH CHECK` that drops the org/owner scope lets a user rewrite a row they can see into a tenant they cannot, a cross-tenant takeover. Never rely on the implicit `WITH CHECK = USING` default for a boundary column.
-- **MUST** use `(SELECT auth.uid())` in RLS policies, not bare `auth.uid()` — the subquery form prevents the query planner from re-evaluating per row
-- **MUST** read roles in policies from `auth.jwt() -> 'app_metadata' ->> 'role'` (via `is_super_admin()`), **never** `user_metadata` (user-writable)
-- **MUST** `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` on any `SECURITY DEFINER` function not meant for direct client RPC — PostgREST exposes `public` functions at `/rest/v1/rpc/<name>`, and SECURITY DEFINER bypasses RLS
+- **MUST** use `(SELECT app.user_id())` in RLS policies, not bare `app.user_id()` — the subquery form prevents the query planner from re-evaluating per row. User requests run as role `app_user` with `app.user_id` set for the transaction (`NULL` when anonymous); `auth.uid()` is never set on that path, so a policy reading it silently matches nothing
+- **MUST** read roles in policies via `is_super_admin()`, which reads the caller's `app_metadata` role (`auth.users.raw_app_meta_data`), **never** `user_metadata` (user-writable)
+- **MUST** `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated, app_user` on any `SECURITY DEFINER` function not meant for direct client RPC (functions get `app_user` EXECUTE by default privileges) — PostgREST exposes `public` functions at `/rest/v1/rpc/<name>`, and SECURITY DEFINER bypasses RLS
 - **MUST** use `SECURITY DEFINER` + `SET search_path = ''` on all helper functions used in RLS policies
 - **NEVER** disable RLS on existing tables
 - **NEVER** use `USING (true)` as a policy for user data — every table needs real ownership checks
 - **NEVER** add a client `INSERT`/`UPDATE` policy on a table written only by the server (e.g. billing `customers`/`subscriptions`) — leave it server-only (service role) rather than opening needless write surface
-- **NEVER** grant direct table access to `anon` or `authenticated` roles beyond what RLS policies allow
+- **NEVER** grant direct table access to `anon`, `authenticated`, or `app_user` beyond what RLS policies allow
 
 ### RLS Helper Functions
 
@@ -395,7 +395,7 @@ Use these existing functions in policies instead of writing inline queries:
 -- Correct: subquery form
 CREATE POLICY "Users can view own data"
   ON my_table FOR SELECT
-  USING (user_id = (SELECT auth.uid()));
+  USING (user_id = (SELECT app.user_id()));
 
 -- Correct: using helper function
 CREATE POLICY "Users can view org data"
@@ -411,7 +411,7 @@ CREATE POLICY "Org admins can update org rows"
 -- WRONG: bare function call (performance issue)
 CREATE POLICY "bad_policy"
   ON my_table FOR SELECT
-  USING (user_id = auth.uid());
+  USING (user_id = app.user_id());
 
 -- WRONG: WITH CHECK narrower than USING → cross-tenant takeover
 -- (an admin can rewrite organization_id into an org they don't administer)

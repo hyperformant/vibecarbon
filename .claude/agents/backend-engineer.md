@@ -71,7 +71,7 @@ When your changes affect documented behavior, update the relevant `.md` files in
 ### Database Migrations
 1. **Always create a new timestamped migration file**: `supabase/migrations/YYYYMMDDHHMMSS_descriptive_name.sql`
 2. **Every table MUST have RLS enabled in the SAME migration**: `ALTER TABLE table_name ENABLE ROW LEVEL SECURITY;` — the browser queries PostgREST directly, so an un-RLS'd `public` table is internet-readable/writable.
-3. **Every table MUST have appropriate RLS policies** restricting access via `(SELECT auth.uid())` (subquery form) and the org helpers. Every `UPDATE`/`INSERT` policy needs a `WITH CHECK` that mirrors the full scope of its `USING` (a narrower `WITH CHECK` on a tenant column = cross-tenant takeover). Role checks read `app_metadata` (`is_super_admin()`), never `user_metadata`.
+3. **Every table MUST have appropriate RLS policies** restricting access via `(SELECT app.user_id())` (subquery form) and the org helpers. Every `UPDATE`/`INSERT` policy needs a `WITH CHECK` that mirrors the full scope of its `USING` (a narrower `WITH CHECK` on a tenant column = cross-tenant takeover). Role checks read `app_metadata` (`is_super_admin()`), never `user_metadata`.
 4. **Include both UP logic in the migration** - write migrations that are safe to re-run where possible
 5. **Add appropriate indexes** for columns used in WHERE clauses, JOINs, and ORDER BY
 6. **Use proper data types**: `uuid` for IDs (with `gen_random_uuid()` default), `timestamptz` for timestamps, `text` over `varchar` unless length constraint is meaningful
@@ -80,20 +80,20 @@ When your changes affect documented behavior, update the relevant `.md` files in
 
 ### RLS Policy Patterns
 ```sql
--- Standard user-owns-row pattern (subquery form — never bare auth.uid())
+-- Standard user-owns-row pattern (subquery form — never bare app.user_id())
 CREATE POLICY "Users can view own rows" ON table_name
-  FOR SELECT USING ((SELECT auth.uid()) = user_id);
+  FOR SELECT USING ((SELECT app.user_id()) = user_id);
 
 CREATE POLICY "Users can insert own rows" ON table_name
-  FOR INSERT WITH CHECK ((SELECT auth.uid()) = user_id);
+  FOR INSERT WITH CHECK ((SELECT app.user_id()) = user_id);
 
 -- UPDATE: WITH CHECK MUST mirror USING (both bound to the owner)
 CREATE POLICY "Users can update own rows" ON table_name
-  FOR UPDATE USING ((SELECT auth.uid()) = user_id)
-  WITH CHECK ((SELECT auth.uid()) = user_id);
+  FOR UPDATE USING ((SELECT app.user_id()) = user_id)
+  WITH CHECK ((SELECT app.user_id()) = user_id);
 
 CREATE POLICY "Users can delete own rows" ON table_name
-  FOR DELETE USING ((SELECT auth.uid()) = user_id);
+  FOR DELETE USING ((SELECT app.user_id()) = user_id);
 
 -- Team/org membership pattern
 CREATE POLICY "Team members can view" ON table_name
@@ -101,7 +101,7 @@ CREATE POLICY "Team members can view" ON table_name
     EXISTS (
       SELECT 1 FROM team_members
       WHERE team_members.team_id = table_name.team_id
-      AND team_members.user_id = (SELECT auth.uid())
+      AND team_members.user_id = (SELECT app.user_id())
     )
   );
 ```

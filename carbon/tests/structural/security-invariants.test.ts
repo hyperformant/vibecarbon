@@ -80,6 +80,15 @@ describe('RLS: write policies are scoped correctly', () => {
     const inPolicies = sql.match(/CREATE POLICY[\s\S]*?user_metadata/i);
     expect(inPolicies, 'A policy references user_metadata — use app_metadata.').toBeNull();
   });
+
+  it('policies and helpers read the caller from app.user_id(), never auth.uid()', () => {
+    // User requests run as role app_user with app.user_id set for the
+    // transaction. auth.uid() is never set on that path, so a policy reading
+    // it matches nothing and the feature silently returns empty results.
+    const code = sql.replace(/--.*$/gm, '');
+    expect(code, 'Use (SELECT app.user_id()) instead of auth.uid().').not.toMatch(/auth\.uid\(\)/i);
+    expect(code, 'Use is_super_admin() instead of auth.jwt().').not.toMatch(/auth\.jwt\(\)/i);
+  });
 });
 
 describe('Routing: single public origin is preserved', () => {

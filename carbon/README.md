@@ -69,7 +69,7 @@ flowchart TD
     subgraph PG["db · PostgreSQL 17"]
         DB[("Tables + migrations")]
         RLS["RLS policies<br/>per-table · per-role"]
-        FN["Helper functions<br/>auth.uid · org membership"]
+        FN["Helper functions<br/>app.user_id · org membership"]
         DB --- RLS
         DB --- FN
     end
