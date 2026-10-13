@@ -21,6 +21,13 @@ describe('generated CLI docs', () => {
     }
   });
 
+  it('README has a region for every category', () => {
+    const readme = onDisk.get('README.md') as string;
+    for (const cat of ['dev', 'deploy', 'debug', 'license']) {
+      expect(readme).toContain(`<!-- BEGIN GENERATED: commands ${cat} -->`);
+    }
+  });
+
   it('cli.mdx has a flags region for every registry command', () => {
     const mdx = onDisk.get('carbon/content/docs/cli.mdx') as string;
     for (const { name } of COMMANDS) {

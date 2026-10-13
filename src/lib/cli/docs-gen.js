@@ -124,7 +124,7 @@ export async function generateAll(files, rows) {
         next = replaceRegion(next, `flags ${entry.name}`, renderFlagTable(spec), 'mdx');
       }
     } else if (path.endsWith('README.md')) {
-      for (const cat of ['dev', 'deploy', 'license']) {
+      for (const cat of ['dev', 'deploy', 'debug', 'license']) {
         next = replaceRegion(next, `commands ${cat}`, renderCommandTable(specs, cat), 'md');
       }
     } else if (path.endsWith('AGENTS.md')) {

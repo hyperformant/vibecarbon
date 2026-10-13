@@ -165,12 +165,14 @@ vibecarbon <command> [options]
 
 ### Debug: look under the hood
 
+<!-- BEGIN GENERATED: commands debug -->
 | Command | What it does |
 | :------ | :----------- |
-| **`shell [environment]`** | Interactive bash with `KUBECONFIG` + cloud creds exported |
-| **`diagnose [environment]`** | Dump full cluster state to `~/.vibecarbon/diag-*` |
+| **`shell [env]`** | Open an interactive bash with KUBECONFIG and cloud credentials exported |
+| **`diagnose [env]`** | Dump full cluster state to ~/.vibecarbon/diag-* |
 | **`console <node>`** | Open Hetzner's web VNC console for a node |
-| **`access [subcommand]`** | Manage the SSH + k8s-API operator-CIDR allowlist |
+| **`access [subcommand]`** | Manage the SSH and k8s-API operator-CIDR allowlist |
+<!-- END GENERATED: commands debug -->
 
 > [!WARNING]
 > `reset` and `destroy` are destructive. Both are confirmation-gated, but read the prompt before you say yes.

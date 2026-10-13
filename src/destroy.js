@@ -164,7 +164,11 @@ const SPEC = {
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
     { name: 'v', boolean: true, description: 'Show version' },
-    { name: 'y', boolean: true, description: 'Skip confirmation prompts' },
+    {
+      name: 'y',
+      boolean: true,
+      description: 'Skip confirmation prompts (does not skip the prod type-to-confirm)',
+    },
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
       name: 'orphans',
@@ -174,13 +178,14 @@ const SPEC = {
     {
       name: 'purge',
       boolean: true,
-      description: 'Also delete the backup S3 bucket (default: preserved)',
+      description:
+        'Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved)',
     },
     {
       name: 'confirm',
       value: '<value>',
       description:
-        'Production only: supply the type-to-confirm value on the command line (scripts / no TTY)',
+        'Production only: supply the type-to-confirm value (project and env joined by a dash, like my-saas-prod) on the command line (scripts / no TTY)',
     },
   ],
   examples: [

@@ -119,7 +119,7 @@ optionally runs `npm install`, and creates the admin user in Supabase Auth.
 | Flag | Description |
 |------|-------------|
 | `-y` | Skip prompts (requires -admin-email and -admin-password) |
-| `-install` | Run the package manager's install during create (default: off) |
+| `-install` | Run the package manager's install during create (default: deferred to first vibecarbon up) |
 | `-skip-lockfile` | Skip lockfile generation (faster; deploy will need `vibecarbon up` first to install) |
 | `-pm <name>` | Package manager: npm (default), pnpm, or bun |
 | `-admin-email <email>` | Admin email for dashboard access (required with -y) |
@@ -534,11 +534,11 @@ deletes it along with the backup bucket.
 {/* BEGIN GENERATED: flags destroy */}
 | Flag | Description |
 |------|-------------|
-| `-y` | Skip confirmation prompts |
+| `-y` | Skip confirmation prompts (does not skip the prod type-to-confirm) |
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-orphans` | Destroy stray Pulumi stacks not tracked in config |
-| `-purge` | Also delete the backup S3 bucket (default: preserved) |
-| `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |
+| `-purge` | Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved) |
+| `-confirm <value>` | Production only: supply the type-to-confirm value (project and env joined by a dash, like my-saas-prod) on the command line (scripts / no TTY) |
 {/* END GENERATED: flags destroy */}
 
 ---
@@ -678,7 +678,7 @@ vibecarbon scale -env prod -type cx33 -y
 |------|-------------|
 | `-y` | Skip confirmations (required with -type) |
 | `-env <name>` | Environment seed (alternative to positional) |
-| `-type <id>` | Server type to scale to (e.g. cx33). Compose: resizes the VPS. K8s: resizes all roles. |
+| `-type <id>` | Server type to scale to, from the environment's own provider catalog (e.g. cx33 on Hetzner, s-4vcpu-8gb on DigitalOcean). Compose: resizes the VPS. K8s: resizes all roles. |
 {/* END GENERATED: flags scale */}
 
 ---

@@ -95,7 +95,7 @@ const SPEC = {
       name: 'type',
       value: '<id>',
       description:
-        'Server type to scale to (e.g. cx33). Compose: resizes the VPS. K8s: resizes all roles.',
+        "Server type to scale to, from the environment's own provider catalog (e.g. cx33 on Hetzner, s-4vcpu-8gb on DigitalOcean). Compose: resizes the VPS. K8s: resizes all roles.",
     },
   ],
   examples: [

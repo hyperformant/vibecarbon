@@ -170,7 +170,8 @@ const SPEC = {
     {
       name: 'install',
       boolean: true,
-      description: "Run the package manager's install during create (default: off)",
+      description:
+        "Run the package manager's install during create (default: deferred to first vibecarbon up)",
     },
     {
       name: 'skip-lockfile',
