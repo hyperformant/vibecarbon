@@ -20,8 +20,11 @@
 /** Exit codes of the in-container probe. */
 export const ADMIN_PROBE_EXIT = Object.freeze({
   READY: 0,
-  /** /api/health answered something other than 2xx JSON. */
-  UNHEALTHY: 1,
+  /**
+   * /api/health answered something other than 2xx JSON. Not 1: that is what
+   * `kubectl exec` / `docker compose exec` return for their own failures.
+   */
+  UNHEALTHY: 8,
   /** Connection refused / reset: the server is not listening yet. */
   UNREACHABLE: 2,
   TIMEOUT: 3,
@@ -41,6 +44,17 @@ const TERMINAL = new Set([
   ADMIN_PROBE_EXIT.ADMIN_SKIPPED,
   ADMIN_PROBE_EXIT.ADMIN_FAILED,
 ]);
+
+const PROBE_CODES = new Set(Object.values(ADMIN_PROBE_EXIT));
+
+/**
+ * @param {number|null|undefined} code
+ * @returns {boolean} true when the exit code came from the probe itself (not
+ *   from kubectl / docker failing to run it)
+ */
+export function isAdminProbeExit(code) {
+  return code != null && PROBE_CODES.has(code);
+}
 
 /**
  * @param {number|null|undefined} code

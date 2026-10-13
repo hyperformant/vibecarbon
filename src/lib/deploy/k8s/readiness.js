@@ -42,6 +42,7 @@ import {
   adminNotReadyHint,
   adminReadyProbeScript,
   describeAdminProbeExit,
+  isAdminProbeExit,
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
 
@@ -300,9 +301,11 @@ export async function awaitAppAdminReady({
               { terminal: true },
             );
           }
-          if (Number.isInteger(code) && code >= 1 && code <= 4) {
+          if (isAdminProbeExit(code) && code !== 0) {
             throw new Error(describeAdminProbeExit(code));
           }
+          // kubectl itself failed (no pod yet, apiserver blip): keep its
+          // message, stderr included.
           throw err;
         }
       },

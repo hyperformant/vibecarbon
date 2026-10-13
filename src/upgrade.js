@@ -31,6 +31,7 @@ import { spinner } from './lib/cli/progress.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { resolveDisplayName } from './lib/display-name.js';
+import { parseDotenv } from './lib/dotenv.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
 import {
   adaptDockerfileForPackageManager,
@@ -185,18 +186,27 @@ export function healShortVaultEncKey(cwd) {
  * Give a project created before auth moved into the app the session signing
  * key it now needs. The app refuses to start in production without
  * BETTER_AUTH_SECRET (docker-compose.prod.yml `:?`, env.ts min 32), so an
- * upgraded project that lacks one could not deploy. Written to BOTH .env.local
- * (local dev) and .env (the file a deploy ships). Generating one is safe:
- * no session exists that was signed with anything else.
+ * upgraded project that lacks one could not deploy. Checks BOTH .env.local
+ * (local dev) and .env (the file a deploy ships): a valid key in either is
+ * copied to the other, never rotated (that would sign everyone out);
+ * otherwise a new one is generated. Generating is safe: no session exists
+ * that was signed with anything else.
  *
  * @param {string} cwd
  * @param {{dryRun?: boolean}} [opts]
  * @returns {boolean} true when a secret was (or, under -dry, would be) written
  */
 export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
-  const current = loadEnvVariables(cwd).BETTER_AUTH_SECRET || '';
-  if (current.length >= 32) return false;
-  if (!dryRun) setEnvVar('BETTER_AUTH_SECRET', generatePassword(64), cwd);
+  const valid = (v) => typeof v === 'string' && v.length >= 32;
+  const local = loadEnvVariables(cwd).BETTER_AUTH_SECRET;
+  const basePath = join(cwd, '.env');
+  const hasBase = existsSync(basePath);
+  const base = hasBase
+    ? parseDotenv(readFileSync(basePath, 'utf-8')).BETTER_AUTH_SECRET
+    : undefined;
+  if (valid(local) && (!hasBase || valid(base))) return false;
+  const value = valid(local) ? local : valid(base) ? base : generatePassword(64);
+  if (!dryRun) setEnvVar('BETTER_AUTH_SECRET', value, cwd);
   return true;
 }
 

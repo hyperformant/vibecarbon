@@ -46,6 +46,26 @@ describe('BETTER_AUTH_SECRET reaches every project', () => {
     expect(secretIn(dir, '.env')).toBe(existing);
   });
 
+  it('heals .env from a valid .env.local key (the deploy ships .env)', () => {
+    const existing = 'L'.repeat(48);
+    const dir = mkdtempSync(join(tmpdir(), 'vc-bas-'));
+    writeFileSync(join(dir, '.env.local'), `BETTER_AUTH_SECRET=${existing}\n`);
+    writeFileSync(join(dir, '.env'), 'PROJECT_NAME=demo\n');
+    expect(ensureBetterAuthSecret(dir)).toBe(true);
+    expect(secretIn(dir, '.env')).toBe(existing);
+    expect(secretIn(dir, '.env.local')).toBe(existing);
+  });
+
+  it('heals .env.local from a valid .env key instead of rotating it', () => {
+    const existing = 'E'.repeat(48);
+    const dir = mkdtempSync(join(tmpdir(), 'vc-bas-'));
+    writeFileSync(join(dir, '.env.local'), 'PROJECT_NAME=demo\n');
+    writeFileSync(join(dir, '.env'), `BETTER_AUTH_SECRET=${existing}\n`);
+    expect(ensureBetterAuthSecret(dir)).toBe(true);
+    expect(secretIn(dir, '.env.local')).toBe(existing);
+    expect(secretIn(dir, '.env')).toBe(existing);
+  });
+
   it('writes nothing under -dry', () => {
     const dir = project(null);
     expect(ensureBetterAuthSecret(dir, { dryRun: true })).toBe(true);

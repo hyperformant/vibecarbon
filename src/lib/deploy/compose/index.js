@@ -28,6 +28,7 @@ import {
   adminNotReadyHint,
   adminReadyProbeScript,
   describeAdminProbeExit,
+  isAdminProbeExit,
   isTerminalAdminProbeExit,
 } from '../admin-ready.js';
 // DNS_NOT_SETTLED_RETRY_DELAYS_MS: shared with remote-build.js's own
@@ -959,9 +960,9 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
  * (see src/lib/deploy/admin-ready.js), so no tunnel or published port is
  * involved.
  *
- * Polls on the same ramp as verifyAppHealth: the app starts with the stack,
- * before migrations, and creates the admin a few seconds after the schema
- * lands. Stops at once when the app reports a terminal status (refused,
+ * Polls with the shared pollUntil (2 s doubling to 10 s, 150 s budget): the
+ * app starts with the stack, before migrations, and creates the admin a few
+ * seconds after the schema lands. Stops at once when the app reports a terminal status (refused,
  * skipped, failed), and throws, with the reason and the app's log tail, if
  * the admin is not ready: a deploy the operator cannot sign in to is not a
  * successful deploy.
@@ -969,38 +970,50 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
  * @param {string} ip
  * @param {string} sshKeyPath
  * @param {string} projectName
- * @param {{attempts?: number, delayMs?: number, sshRun?: typeof sshRunAsync}} [options]
- *   `sshRun` is a test seam (defaults to sshRunAsync).
+ * @param {{budgetMs?: number, initialDelayMs?: number, maxDelayMs?: number, sshRun?: typeof sshRunAsync, poll?: typeof pollUntil}} [options]
+ *   `sshRun` / `poll` are test seams.
  * @returns {Promise<{message: string}>}
  */
 export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {}) {
-  const { attempts = 18, delayMs, sshRun = sshRunAsync } = options;
-  const delayFor = (i) => delayMs ?? healthProbeDelayMs(i);
+  const {
+    budgetMs = 150_000,
+    initialDelayMs = 2000,
+    maxDelayMs = 10_000,
+    sshRun = sshRunAsync,
+    poll = pollUntil,
+  } = options;
   const remoteDir = `/opt/${projectName}`;
   const scriptB64 = Buffer.from(adminReadyProbeScript()).toString('base64');
   // `echo exit=$?` so the probe's own exit code reaches us as text whatever
-  // docker compose exec does with it.
+  // docker compose exec does with it; 2>&1 keeps docker's own stderr (an
+  // exec that never reached node) for the error below.
   const probeCmd = `cd ${remoteDir} && echo ${scriptB64} | base64 -d | docker compose exec -T app node - 2>&1; echo "exit=$?"`;
 
   let lastCode = null;
-  let probes = 0;
-  for (let i = 0; i < attempts; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, delayFor(i)));
-    probes = i + 1;
-    try {
-      const out =
-        (await sshRun(ip, sshKeyPath, probeCmd, { timeout: 15_000, ignoreError: true })) || '';
-      const m = /exit=(\d+)\s*$/.exec(out.trim());
-      lastCode = m ? Number(m[1]) : null;
-      if (lastCode === ADMIN_PROBE_EXIT.READY) {
-        return { message: 'Super admin ready' };
-      }
-    } catch {
-      lastCode = null;
-    }
-    // The app settled on an outcome waiting cannot change: stop now.
-    if (isTerminalAdminProbeExit(lastCode)) break;
+  let lastOutput = '';
+  const probe = async () => {
+    const out =
+      (await sshRun(ip, sshKeyPath, probeCmd, { timeout: 15_000, ignoreError: true })) || '';
+    const m = /exit=(\d+)\s*$/.exec(out.trim());
+    lastCode = m ? Number(m[1]) : null;
+    lastOutput = out
+      .trim()
+      .replace(/exit=\d+\s*$/, '')
+      .trim();
+    // Ready, or a terminal status waiting cannot change: stop polling.
+    return lastCode === ADMIN_PROBE_EXIT.READY || isTerminalAdminProbeExit(lastCode);
+  };
+  try {
+    await poll(probe, {
+      budgetMs,
+      initialDelayMs,
+      maxDelayMs,
+      description: 'the app to report its super admin ready',
+    });
+  } catch {
+    // Budget spent; the error below says what the last probe saw.
   }
+  if (lastCode === ADMIN_PROBE_EXIT.READY) return { message: 'Super admin ready' };
 
   let logs = '';
   try {
@@ -1014,12 +1027,15 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
   } catch {
     /* best effort */
   }
+  const known = isAdminProbeExit(lastCode);
   const headline = isTerminalAdminProbeExit(lastCode)
     ? `The app's super admin is not ready: ${describeAdminProbeExit(lastCode)}.`
-    : `The app did not report its super admin ready after ${probes} probes ` +
+    : `The app did not report its super admin ready within ${Math.round(budgetMs / 1000)}s ` +
       `(last: ${describeAdminProbeExit(lastCode)}).`;
   throw new Error(
     `${headline}\n` +
+      // docker compose exec's own failure (no app container, daemon error).
+      (!known && lastOutput ? `--- probe output ---\n${lastOutput.slice(-1000)}\n` : '') +
       `${adminNotReadyHint(`ssh in, then: cd ${remoteDir} && docker compose logs app`)}\n` +
       `--- app container log tail ---\n${logs.trim()}`,
   );

@@ -146,7 +146,7 @@ describe('waitForAdminReady (compose, compose-ha)', () => {
     const sshRun = vi.fn(async () => outputs.shift() ?? 'exit=0');
     const result = await waitForAdminReady('1.2.3.4', '/key', 'proj', {
       sshRun,
-      delayMs: 0,
+      initialDelayMs: 0,
     });
     expect(result.message).toMatch(/ready/i);
     expect(sshRun).toHaveBeenCalledTimes(3);
@@ -162,20 +162,29 @@ describe('waitForAdminReady (compose, compose-ha)', () => {
       cmd.includes('logs') ? 'An account with ADMIN_EMAIL (a@b.c) already exists' : 'exit=4',
     );
     await expect(
-      waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, delayMs: 0, attempts: 3 }),
+      waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, initialDelayMs: 0, budgetMs: 20 }),
     ).rejects.toThrow(
-      /did not report its super admin ready after 3 probes[\s\S]*has not reported its super admin ready[\s\S]*ADMIN_EMAIL and ADMIN_PASSWORD[\s\S]*already exists/,
+      /did not report its super admin ready within 0s \(last: app is serving but[\s\S]*has not reported its super admin ready[\s\S]*ADMIN_EMAIL and ADMIN_PASSWORD[\s\S]*already exists/,
     );
   });
 });
 
 describe('waitForAdminReady: a terminal status fails fast with its reason', () => {
+  it("keeps docker's own output when the exec never reached the probe", async () => {
+    const sshRun = vi.fn(async (_ip: string, _key: string, cmd: string) =>
+      cmd.includes('logs') ? '' : 'service "app" is not running\nexit=1',
+    );
+    await expect(
+      waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, initialDelayMs: 0, budgetMs: 20 }),
+    ).rejects.toThrow(/probe could not run \(exit 1\)[\s\S]*service "app" is not running/);
+  });
+
   it('stops at the first refused answer and says why', async () => {
     const sshRun = vi.fn(async (_ip: string, _key: string, cmd: string) =>
       cmd.includes('logs') ? 'password does not match ADMIN_PASSWORD' : 'exit=5',
     );
     await expect(
-      waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, delayMs: 0, attempts: 18 }),
+      waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, initialDelayMs: 0 }),
     ).rejects.toThrow(
       /super admin is not ready: the app refused to make ADMIN_EMAIL a super admin[\s\S]*password does not match/,
     );
@@ -192,7 +201,7 @@ describe('waitForAdminReady: a terminal status fails fast with its reason', () =
         cmd.includes('logs') ? '' : exit,
       );
       await expect(
-        waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, delayMs: 0 }),
+        waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, initialDelayMs: 0 }),
       ).rejects.toThrow(reason);
       expect(sshRun).toHaveBeenCalledTimes(2);
     }
@@ -221,6 +230,27 @@ describe('awaitAppAdminReady (k8s, k8s-ha)', () => {
       '--',
     ]);
     expect(argv).not.toContain('port-forward');
+  });
+
+  it("keeps kubectl's own error when exec itself fails (exit 1 is not a probe code)", async () => {
+    let t = 0;
+    const exec = vi.fn().mockRejectedValue(
+      Object.assign(new Error('error: unable to upgrade connection: container not found'), {
+        status: 1,
+      }),
+    );
+    await expect(
+      awaitAppAdminReady({
+        env: {},
+        exec,
+        budgetMs: 5000,
+        sleep: async () => {},
+        nowFn: () => {
+          t += 2000;
+          return t;
+        },
+      }),
+    ).rejects.toThrow(/container not found/);
   });
 
   it('fails at once on a terminal status, with the reason and the log command', async () => {
