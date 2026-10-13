@@ -1,15 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryChain } from '../../_helpers/drizzle-mock';
 
-const { maybeSingleMock, warnMock } = vi.hoisted(() => ({
-  maybeSingleMock: vi.fn(),
+const { selectMock, warnMock } = vi.hoisted(() => ({
+  selectMock: vi.fn(),
   warnMock: vi.fn(),
 }));
 
-// supabaseAdmin.from('app_settings').select('value').eq('key','mfa_enabled').maybeSingle()
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: maybeSingleMock }) }) }),
-  },
+// adminDb.select().from(appSettings).where(key = 'mfa_enabled').limit(1)
+vi.mock('@server/db/client', () => ({
+  adminDb: { select: () => queryChain(selectMock) },
 }));
 
 vi.mock('@server/lib/logger', () => ({
@@ -20,44 +19,44 @@ const { isMfaGloballyEnabled, __resetMfaSettingsCache } = await import('@server/
 
 beforeEach(() => {
   __resetMfaSettingsCache();
-  maybeSingleMock.mockReset();
+  selectMock.mockReset();
   warnMock.mockReset();
 });
 
 describe('isMfaGloballyEnabled', () => {
   it('returns true when the setting is { enabled: true }', async () => {
-    maybeSingleMock.mockResolvedValueOnce({ data: { value: { enabled: true } }, error: null });
+    selectMock.mockResolvedValueOnce([{ value: { enabled: true } }]);
     expect(await isMfaGloballyEnabled()).toBe(true);
   });
 
   it('returns false when the setting is { enabled: false }', async () => {
-    maybeSingleMock.mockResolvedValueOnce({ data: { value: { enabled: false } }, error: null });
+    selectMock.mockResolvedValueOnce([{ value: { enabled: false } }]);
     expect(await isMfaGloballyEnabled()).toBe(false);
   });
 
   it('returns false when the row is missing', async () => {
-    maybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
+    selectMock.mockResolvedValueOnce([]);
     expect(await isMfaGloballyEnabled()).toBe(false);
   });
 
   it('caches within the TTL — a second call issues no query', async () => {
-    maybeSingleMock.mockResolvedValueOnce({ data: { value: { enabled: true } }, error: null });
+    selectMock.mockResolvedValueOnce([{ value: { enabled: true } }]);
     expect(await isMfaGloballyEnabled()).toBe(true);
     expect(await isMfaGloballyEnabled()).toBe(true);
-    expect(maybeSingleMock).toHaveBeenCalledTimes(1);
+    expect(selectMock).toHaveBeenCalledTimes(1);
   });
 
   it('__resetMfaSettingsCache forces a re-query', async () => {
-    maybeSingleMock.mockResolvedValueOnce({ data: { value: { enabled: true } }, error: null });
+    selectMock.mockResolvedValueOnce([{ value: { enabled: true } }]);
     expect(await isMfaGloballyEnabled()).toBe(true);
     __resetMfaSettingsCache();
-    maybeSingleMock.mockResolvedValueOnce({ data: { value: { enabled: false } }, error: null });
+    selectMock.mockResolvedValueOnce([{ value: { enabled: false } }]);
     expect(await isMfaGloballyEnabled()).toBe(false);
-    expect(maybeSingleMock).toHaveBeenCalledTimes(2);
+    expect(selectMock).toHaveBeenCalledTimes(2);
   });
 
   it('fails open to false (gate inert) and warns when the read throws', async () => {
-    maybeSingleMock.mockRejectedValueOnce(new Error('db down'));
+    selectMock.mockRejectedValueOnce(new Error('db down'));
     expect(await isMfaGloballyEnabled()).toBe(false);
     expect(warnMock).toHaveBeenCalledTimes(1);
   });

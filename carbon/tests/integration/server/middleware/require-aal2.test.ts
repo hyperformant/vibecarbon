@@ -1,16 +1,16 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryChain } from '../../../_helpers/drizzle-mock';
 import type { HonoVariables } from '@server/types';
 
-const { maybeSingleMock, warnMock } = vi.hoisted(() => ({
-  maybeSingleMock: vi.fn(),
+const { selectMock, warnMock } = vi.hoisted(() => ({
+  selectMock: vi.fn(),
   warnMock: vi.fn(),
 }));
 
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: maybeSingleMock }) }) }),
-  },
+// The app_settings.mfa_enabled read: adminDb.select().from().where().limit(1)
+vi.mock('@server/db/client', () => ({
+  adminDb: { select: () => queryChain(selectMock) },
 }));
 vi.mock('@server/lib/logger', () => ({
   logger: { error: vi.fn(), info: vi.fn(), warn: warnMock, debug: vi.fn() },
@@ -38,15 +38,15 @@ function gatedApp(opts: { user: unknown; aal: Aal }) {
 const aUser = { id: 'user-1', email: 'u@test.com' };
 
 function enableMfa() {
-  maybeSingleMock.mockResolvedValue({ data: { value: { enabled: true } }, error: null });
+  selectMock.mockResolvedValue([{ value: { enabled: true } }]);
 }
 function disableMfa() {
-  maybeSingleMock.mockResolvedValue({ data: { value: { enabled: false } }, error: null });
+  selectMock.mockResolvedValue([{ value: { enabled: false } }]);
 }
 
 beforeEach(() => {
   __resetMfaSettingsCache();
-  maybeSingleMock.mockReset();
+  selectMock.mockReset();
   warnMock.mockReset();
 });
 
@@ -54,7 +54,7 @@ describe('requireAal2', () => {
   it('passes an aal2 session through (no settings read needed)', async () => {
     const res = await gatedApp({ user: aUser, aal: 'aal2' }).request('/gated', { method: 'DELETE' });
     expect(res.status).toBe(200);
-    expect(maybeSingleMock).not.toHaveBeenCalled();
+    expect(selectMock).not.toHaveBeenCalled();
   });
 
   it('blocks an aal1 session with 403 mfa_required when MFA is globally enabled', async () => {
@@ -93,7 +93,7 @@ describe('requireAal2', () => {
   });
 
   it('fails open (allows) and warns when the settings read throws', async () => {
-    maybeSingleMock.mockRejectedValueOnce(new Error('db down'));
+    selectMock.mockRejectedValueOnce(new Error('db down'));
     const res = await gatedApp({ user: aUser, aal: 'aal1' }).request('/gated', { method: 'DELETE' });
     expect(res.status).toBe(200);
     expect(warnMock).toHaveBeenCalledWith(

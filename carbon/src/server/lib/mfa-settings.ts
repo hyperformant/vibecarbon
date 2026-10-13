@@ -1,5 +1,7 @@
+import { eq } from 'drizzle-orm';
+import { adminDb } from '../db/client';
+import { appSettings } from '../db/schema';
 import { logger } from './logger';
-import { supabaseAdmin } from './supabase';
 
 const TTL_MS = 60_000;
 let cache: { value: boolean; expiresAt: number } | null = null;
@@ -23,13 +25,12 @@ export async function isMfaGloballyEnabled(): Promise<boolean> {
     return cache.value;
   }
   try {
-    const { data, error } = await supabaseAdmin
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'mfa_enabled')
-      .maybeSingle();
-    if (error) throw error;
-    const value = (data?.value ?? null) as { enabled?: boolean } | null;
+    const [row] = await adminDb
+      .select({ value: appSettings.value })
+      .from(appSettings)
+      .where(eq(appSettings.key, 'mfa_enabled'))
+      .limit(1);
+    const value = (row?.value ?? null) as { enabled?: boolean } | null;
     const enabled = value?.enabled === true;
     cache = { value: enabled, expiresAt: Date.now() + TTL_MS };
     return enabled;

@@ -1,5 +1,7 @@
+import { eq } from 'drizzle-orm';
+import { adminDb } from '../db/client';
+import { appSettings } from '../db/schema';
 import { logger } from './logger';
-import { supabaseAdmin } from './supabase';
 
 // Shorter TTL than the MFA gate (60s): flipping docs visibility is an
 // interactive admin action, and an operator who turns the API surface off
@@ -33,13 +35,12 @@ export async function isApiDocsEnabled(): Promise<boolean> {
     return cache.value;
   }
   try {
-    const { data, error } = await supabaseAdmin
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'api_docs_enabled')
-      .maybeSingle();
-    if (error) throw error;
-    const value = (data?.value ?? null) as { enabled?: boolean } | null;
+    const [row] = await adminDb
+      .select({ value: appSettings.value })
+      .from(appSettings)
+      .where(eq(appSettings.key, 'api_docs_enabled'))
+      .limit(1);
+    const value = (row?.value ?? null) as { enabled?: boolean } | null;
     // Absent row means the migration has not run yet — treat as enabled.
     const enabled = value?.enabled !== false;
     cache = { value: enabled, expiresAt: Date.now() + TTL_MS };
