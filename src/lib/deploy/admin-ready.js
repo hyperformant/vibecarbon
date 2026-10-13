@@ -2,13 +2,15 @@
  * The deploy's "can the operator sign in?" gate, shared by every deploy mode.
  *
  * The app creates its own super admin at startup from ADMIN_EMAIL and
- * ADMIN_PASSWORD (carbon/src/server/auth/bootstrap-admin.ts, retried on
- * transient database errors by db/startup.ts) and reports the outcome on
- * `GET /api/health` as `adminReady` plus `adminStatus` (pending | ready |
- * skipped | refused | failed). A deploy therefore has two jobs and no auth
- * API to call: make sure those two keys (plus BETTER_AUTH_SECRET) reach the
- * app container, then wait for the app to say the admin exists, stopping
- * early when it reports a status waiting cannot change. Only the transport
+ * ADMIN_PASSWORD (carbon/src/server/auth/bootstrap-admin.ts, under a
+ * cross-replica advisory lock; db/startup.ts waits on the schema, the
+ * connection and a read-only standby) and reports it on `GET /api/health`
+ * as `adminReady` plus `adminStatus` (pending | ready | skipped | refused |
+ * failed). A deploy therefore has two jobs and no auth API to call: make
+ * sure those two keys (plus BETTER_AUTH_SECRET) reach the app container,
+ * then wait for the app to say the admin exists. It stops at the first
+ * skipped, refused or failed: those need the operator (failed is retried
+ * inside the app, but only fixing its cause makes it pass). Only the transport
  * differs per mode:
  *   - compose / compose-ha: `docker compose exec -T app node -` over SSH.
  *   - k8s / k8s-ha:         `kubectl exec deploy/app -c app -- node -e`.
@@ -34,7 +36,10 @@ export const ADMIN_PROBE_EXIT = Object.freeze({
   ADMIN_REFUSED: 5,
   /** Terminal: ADMIN_EMAIL / ADMIN_PASSWORD are not set in the app. */
   ADMIN_SKIPPED: 6,
-  /** Terminal: the bootstrap hit an error waiting cannot fix. */
+  /**
+   * The last bootstrap attempt hit a non-connection error. The app keeps
+   * retrying, but the cause needs the operator, so a deploy stops here.
+   */
   ADMIN_FAILED: 7,
 });
 
@@ -58,7 +63,8 @@ export function isAdminProbeExit(code) {
 
 /**
  * @param {number|null|undefined} code
- * @returns {boolean} true when the app reported a terminal admin status
+ * @returns {boolean} true when the app reported a status a deploy stops on
+ *   (skipped, refused, failed)
  */
 export function isTerminalAdminProbeExit(code) {
   return code != null && TERMINAL.has(code);
@@ -106,7 +112,7 @@ export function describeAdminProbeExit(code) {
     case ADMIN_PROBE_EXIT.ADMIN_SKIPPED:
       return 'the app has no ADMIN_EMAIL / ADMIN_PASSWORD, so it created no super admin';
     case ADMIN_PROBE_EXIT.ADMIN_FAILED:
-      return 'the app could not create its super admin (an error waiting will not fix)';
+      return 'the app could not create its super admin (the app log names the error)';
     case ADMIN_PROBE_EXIT.UNHEALTHY:
       return 'app answered /api/health with an error';
     case ADMIN_PROBE_EXIT.UNREACHABLE:
