@@ -21,7 +21,7 @@ import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
-import { runAppFunctionalChecks } from '../checks/app-functional.js';
+import { runAppFunctionalChecks, smtpConfiguredFromEnv } from '../checks/app-functional.js';
 import { runBackupEvidenceChecks } from '../checks/backup-evidence.js';
 import { resolveComposeFirewallServers, runCloudFirewallChecks } from '../checks/cloud-firewall.js';
 import {
@@ -257,6 +257,8 @@ interface SupabaseKeys {
   /** Admin credentials for the auth_admin_login check; absent on older bundles. */
   adminEmail?: string;
   adminPassword?: string;
+  /** The app requires email verification exactly when SMTP is configured. */
+  smtpConfigured: boolean;
 }
 
 /**
@@ -287,6 +289,7 @@ function readSupabaseKeys(projectDir: string): SupabaseKeys | null {
       serviceRoleKey,
       adminEmail: adminEmail || undefined,
       adminPassword: adminPassword || undefined,
+      smtpConfigured: smtpConfiguredFromEnv(vars),
     };
   } catch {
     return null;
@@ -1896,6 +1899,7 @@ export async function runLifecycle(
           supabaseKeys.adminEmail,
           supabaseKeys.adminPassword,
           config.domain,
+          supabaseKeys.smtpConfigured,
         );
         allResults.push(...appResults);
 

@@ -124,12 +124,23 @@ export async function fetchSessionUser(
 }
 
 /**
- * Sign-in failed because the address is unverified: the app has SMTP
- * configured and requires email verification, which a throwaway e2e address
- * can never complete. That is a precondition gap, not an auth failure.
+ * Whether the deployed app requires email verification. The server requires it
+ * exactly when SMTP is configured (carbon/src/server/lib/email.ts
+ * isEmailConfigured: a transporter from SMTP_HOST plus SMTP_ADMIN_EMAIL), so
+ * the harness derives it from the same keys in the project's env.
  */
-function isUnverifiedEmail(status: number, body: string): boolean {
-  return status === 403 && /EMAIL_NOT_VERIFIED/i.test(body);
+export function smtpConfiguredFromEnv(vars: Record<string, string | undefined>): boolean {
+  return Boolean(vars.SMTP_HOST?.trim() && vars.SMTP_ADMIN_EMAIL?.trim());
+}
+
+/**
+ * Sign-in failed because the address is unverified. Only a precondition gap
+ * (skip) when the harness KNOWS the app has SMTP configured, since a
+ * throwaway address can never verify then. Without SMTP the server does not
+ * require verification, so the same 403 is a regression and must fail.
+ */
+function isUnverifiedEmail(status: number, body: string, smtpConfigured: boolean): boolean {
+  return smtpConfigured && status === 403 && /EMAIL_NOT_VERIFIED/i.test(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -204,17 +215,26 @@ async function signInWithPassword(
   return { jar, status: res.status, body: await res.text() };
 }
 
-async function checkAuthSignin(
+export async function checkAuthSignin(
   domain: string,
   email: string,
   password: string,
+  smtpConfigured = false,
+  fetcher: typeof safeFetch = safeFetch,
 ): Promise<{ result: VerificationResult; jar?: CookieJar; unverified?: boolean }> {
   const start = Date.now();
   try {
-    const { jar, status, body } = await signInWithPassword(domain, email, password);
+    const { jar, status, body } = await signInWithPassword(domain, email, password, fetcher);
 
     if (status < 200 || status >= 300) {
-      if (isUnverifiedEmail(status, body)) {
+      if (status === 429) {
+        return {
+          result: result('auth_signin', 'fail', start, {
+            errorMessage: `Signin returned 429: hit the per-IP sign-in cap (10 per 15 min), not an auth regression; wait out the window. ${body.slice(0, 200)}`,
+          }),
+        };
+      }
+      if (isUnverifiedEmail(status, body, smtpConfigured)) {
         return {
           result: skip(
             'auth_signin',
@@ -404,6 +424,7 @@ async function runAuthChecks(
   domain: string,
   adminEmail?: string,
   adminPassword?: string,
+  smtpConfigured = false,
 ): Promise<{ results: VerificationResult[]; jar?: CookieJar }> {
   const results: VerificationResult[] = [];
 
@@ -432,7 +453,7 @@ async function runAuthChecks(
   }
 
   // Sign in
-  const signinOutcome = await checkAuthSignin(domain, email, password);
+  const signinOutcome = await checkAuthSignin(domain, email, password, smtpConfigured);
   results.push(signinOutcome.result);
   if (!signinOutcome.jar) {
     const why = signinOutcome.unverified
@@ -937,13 +958,14 @@ export async function runAppFunctionalChecks(
   adminEmail?: string,
   adminPassword?: string,
   appDomain: string = domain,
+  smtpConfigured = false,
 ): Promise<VerificationResult[]> {
   const results: VerificationResult[] = [];
 
   // Run check groups sequentially — auth creates state the others do not
   // depend on, but sequential execution keeps resource usage predictable
   // and makes logs easier to follow during long e2e runs.
-  const auth = await runAuthChecks(appDomain, adminEmail, adminPassword);
+  const auth = await runAuthChecks(appDomain, adminEmail, adminPassword, smtpConfigured);
   results.push(...auth.results);
 
   const dbResults = await runDbChecks(domain, serviceRoleKey);

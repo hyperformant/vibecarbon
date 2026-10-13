@@ -6,7 +6,13 @@
  */
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import { CookieJar, checkAdminLogin, fetchSessionUser } from '../../e2e/checks/app-functional.js';
+import {
+  CookieJar,
+  checkAdminLogin,
+  checkAuthSignin,
+  fetchSessionUser,
+  smtpConfiguredFromEnv,
+} from '../../e2e/checks/app-functional.js';
 import { dnsSafeFetch } from '../../e2e/checks/health.js';
 
 function hdrs(init?: RequestInit): Record<string, string> {
@@ -165,5 +171,44 @@ describe('checkAdminLogin', () => {
     );
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toMatch(/no session/);
+  });
+});
+
+describe('checkAuthSignin verification and cap handling', () => {
+  const unverified = () => new Response('{"code":"EMAIL_NOT_VERIFIED"}', { status: 403 });
+  const run = (smtp: boolean, res: () => Response) =>
+    checkAuthSignin(
+      'app.example.com',
+      'a@b.c',
+      'pw',
+      smtp,
+      vi.fn(async (_u: string, _i?: RequestInit) => res()),
+    );
+
+  it('skips on EMAIL_NOT_VERIFIED when SMTP is configured', async () => {
+    const out = await run(true, unverified);
+    expect(out.result.status).toBe('skip');
+    expect(out.unverified).toBe(true);
+  });
+
+  it('fails with the 403 body when SMTP is not configured (a regression)', async () => {
+    const out = await run(false, unverified);
+    expect(out.result.status).toBe('fail');
+    expect(out.result.errorMessage).toMatch(/403.*EMAIL_NOT_VERIFIED/);
+  });
+
+  it('names the per-IP cap on a 429', async () => {
+    const out = await run(false, () => new Response('{}', { status: 429 }));
+    expect(out.result.status).toBe('fail');
+    expect(out.result.errorMessage).toMatch(/per-IP sign-in cap \(10 per 15 min\)/);
+  });
+});
+
+describe('smtpConfiguredFromEnv', () => {
+  it('needs both SMTP_HOST and SMTP_ADMIN_EMAIL, as the server does', () => {
+    expect(smtpConfiguredFromEnv({ SMTP_HOST: 'h', SMTP_ADMIN_EMAIL: 'a@b.c' })).toBe(true);
+    expect(smtpConfiguredFromEnv({ SMTP_HOST: 'h' })).toBe(false);
+    expect(smtpConfiguredFromEnv({ SMTP_HOST: '', SMTP_ADMIN_EMAIL: 'a@b.c' })).toBe(false);
+    expect(smtpConfiguredFromEnv({})).toBe(false);
   });
 });
