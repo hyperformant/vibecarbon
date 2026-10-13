@@ -20,6 +20,15 @@ const envSchema = z.object({
   // (CSP is disabled in development).
   SITE_URL: z.string().url().optional(),
 
+  // App storage bucket (provider-native S3, provisioned by `vibecarbon deploy`).
+  // All optional: when any is missing, uploads are disabled (503) and the app
+  // still boots.
+  S3_ENDPOINT: z.string().url().optional(),
+  S3_REGION: z.string().optional(),
+  S3_BUCKET: z.string().optional(),
+  S3_ACCESS_KEY: z.string().optional(),
+  S3_SECRET_KEY: z.string().optional(),
+
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(3000),

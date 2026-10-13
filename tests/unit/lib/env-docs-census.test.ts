@@ -156,16 +156,9 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
   METABASE_SITE_URL:
     'carbon/docker-compose.metabase.yml:29 — the container MB_SITE_URL defaults from the ' +
     'operator METABASE_SITE_URL.',
-  S3_ENDPOINT: 'carbon/docker-compose.yml:228 — the wal-g AWS_ENDPOINT defaults from S3_ENDPOINT.',
-  S3_BUCKET:
-    'carbon/docker-compose.yml:224 — the WALG_S3_PREFIX bucket segment falls back to S3_BUCKET.',
-  S3_REGION: 'carbon/docker-compose.yml:229 — the wal-g AWS_REGION defaults from S3_REGION.',
-  S3_ACCESS_KEY:
-    'carbon/docker-compose.yml:226,479 — the wal-g/storage AWS_ACCESS_KEY_ID defaults from ' +
-    'S3_ACCESS_KEY.',
-  S3_SECRET_KEY:
-    'carbon/docker-compose.yml:227,480 — the wal-g/storage AWS_SECRET_ACCESS_KEY defaults ' +
-    'from S3_SECRET_KEY.',
+  // S3_ENDPOINT/S3_BUCKET/S3_REGION/S3_ACCESS_KEY/S3_SECRET_KEY were REMOVED (2026-10-13): the
+  // app storage module (carbon/src/server/lib/storage.ts + env.ts) now reads them directly, so
+  // the census counts them as real carbon/src reads and they no longer need an exemption.
   // N8N_DB_PASSWORD was REMOVED (2026-09-19 code review): carbon/docker-compose.n8n.yml:87 sets
   // the container's N8N_DB_PASSWORD FROM POSTGRES_PASSWORD — it assigns a container var NAMED
   // N8N_DB_PASSWORD from a DIFFERENT source and never reads the operator's N8N_DB_PASSWORD at
