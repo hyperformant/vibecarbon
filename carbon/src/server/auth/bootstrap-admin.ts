@@ -16,7 +16,8 @@ export type BootstrapResult = 'skipped' | 'created' | 'promoted' | 'unchanged' |
  * - no account with that email: create it with the password, as a verified
  *   super admin past onboarding;
  * - the account is already super_admin: nothing to do (its password is
- *   never touched, so changing ADMIN_PASSWORD later resets nothing);
+ *   never touched, so changing ADMIN_PASSWORD later resets nothing),
+ *   unless it has no password at all, which is refused with a fix;
  * - the account exists but is not super_admin: promote it ONLY if its own
  *   password verifies against ADMIN_PASSWORD. Sign-up is open and, without
  *   SMTP, unverified, so anyone could register the admin address before
@@ -49,7 +50,17 @@ export async function bootstrapAdmin(
     id: string;
     role: string | null;
   }): Promise<BootstrapResult> => {
-    if (isSuperAdmin(existing)) return 'unchanged';
+    if (isSuperAdmin(existing)) {
+      if (await hasPassword(existing.id)) return 'unchanged';
+      logger.error(
+        { email },
+        `The super admin ${email} has no password, so it cannot sign in with ADMIN_PASSWORD ` +
+          '(a bootstrap interrupted before the password was saved, or an account that only ' +
+          'uses social sign-in). Request a password reset for it, or delete the account and ' +
+          'restart to recreate it from ADMIN_EMAIL and ADMIN_PASSWORD.'
+      );
+      return 'refused';
+    }
     if (!(await passwordMatches(existing.id, password))) {
       logger.error(
         { email },
@@ -88,19 +99,28 @@ export async function bootstrapAdmin(
   }
 }
 
+async function credentialHash(userId: string): Promise<string | null> {
+  const [credential] = await adminDb
+    .select({ hash: account.password })
+    .from(account)
+    .where(and(eq(account.userId, userId), eq(account.providerId, 'credential')));
+  return credential?.hash ?? null;
+}
+
+async function hasPassword(userId: string): Promise<boolean> {
+  return (await credentialHash(userId)) !== null;
+}
+
 /**
  * Whether the user's email + password credential verifies against
  * `password`, with Better Auth's own hasher (never a hand comparison).
  * False when the account has no password (OAuth or magic-link only).
  */
 async function passwordMatches(userId: string, password: string): Promise<boolean> {
-  const [credential] = await adminDb
-    .select({ hash: account.password })
-    .from(account)
-    .where(and(eq(account.userId, userId), eq(account.providerId, 'credential')));
-  if (!credential?.hash) return false;
+  const hash = await credentialHash(userId);
+  if (!hash) return false;
   const ctx = await auth.$context;
-  return ctx.password.verify({ hash: credential.hash, password });
+  return ctx.password.verify({ hash, password });
 }
 
 /** Startup wrapper: never throws, logs the outcome. */

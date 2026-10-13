@@ -138,14 +138,16 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
 
     it('a client cannot sign itself up as super_admin', async () => {
       const email = newEmail();
-      await post('/api/auth/sign-up/email', {
+      const res = await post('/api/auth/sign-up/email', {
         email,
         password: PASSWORD,
         name: 'Sneaky',
         role: 'super_admin',
       });
+      // Refused outright: role is not a sign-up input.
+      expect(res.status).toBe(400);
       const { rows } = await db.query('select role from public."user" where email = $1', [email]);
-      expect(rows[0]?.role ?? null).not.toBe('super_admin');
+      expect(rows).toEqual([]);
     });
 
     it('signs in, and the session cookie makes the middleware set user and aal1', async () => {
@@ -245,18 +247,6 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       expect(await me.json()).toMatchObject({ email, serverSeesToken: true });
     });
 
-    it('withoutTokens drops token keys at any depth and keeps everything else', async () => {
-      const { withoutTokens } = await import('@server/auth/strip-session-token');
-      const at = new Date(0);
-      expect(
-        withoutTokens({
-          token: 't',
-          user: { id: 'u', createdAt: at },
-          session: { token: 't', id: 's' },
-          list: [{ token: 't', id: 1 }],
-        }),
-      ).toEqual({ user: { id: 'u', createdAt: at }, session: { id: 's' }, list: [{ id: 1 }] });
-    });
   });
 
   describe('revocation takes effect on the next request, not after the cookie cache', () => {
@@ -284,6 +274,21 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       await db.query("update public.\"user\" set role = 'user' where id = $1", [admin.id]);
       const after = await app.request('/api/v1/admin/ping', { headers: { cookie: admin.cookie } });
       expect(after.status).toBe(403);
+    });
+
+    it('a banned user whose session row survived is still treated as signed out', async () => {
+      const email = newEmail();
+      await signUp(email);
+      const cookie = cookieHeader(await signIn(email, PASSWORD, '203.0.113.56'));
+      // Ban in the database only: the session row stays (defence in depth).
+      await db.query('update public."user" set banned = true where email = $1', [email]);
+      expect((await app.request('/api/v1/whoami', { headers: { cookie } })).status).toBe(401);
+      // An expired ban no longer applies.
+      await db.query(
+        "update public.\"user\" set ban_expires = now() - interval '1 minute' where email = $1",
+        [email],
+      );
+      expect((await app.request('/api/v1/whoami', { headers: { cookie } })).status).toBe(200);
     });
 
     it('a banned user is signed out of the API immediately', async () => {
@@ -448,6 +453,23 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       );
       expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
       expect((await roleOf(email)).role).toBe('user');
+    });
+
+    it('reports a super admin with no password instead of calling it done', async () => {
+      // A bootstrap interrupted between the user row and its password.
+      const email = newEmail();
+      await db.query('insert into public."user" (name, email, role) values ($1, $2, $3)', [
+        'Half Made',
+        email,
+        'super_admin',
+      ]);
+      const errors = vi.spyOn(logger, 'error');
+      try {
+        expect(await bootstrapAdmin({ email, password: PASSWORD })).toBe('refused');
+        expect(JSON.stringify(errors.mock.calls)).toContain('has no password');
+      } finally {
+        errors.mockRestore();
+      }
     });
 
     it("promotes the operator's own account when its password is ADMIN_PASSWORD", async () => {

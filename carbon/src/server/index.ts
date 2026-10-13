@@ -2,7 +2,6 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { cors } from 'hono/cors';
 import { createMiddleware } from 'hono/factory';
 import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
@@ -16,10 +15,10 @@ import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
 import { handleAppError } from './lib/errors';
 import { logger } from './lib/logger';
-import { allowedOrigins } from './lib/origins';
 import { createRateLimiter } from './lib/rate-limiter';
 import { createSeoShell } from './lib/seo';
 import { applyAuthRateLimits } from './middleware/auth-rate-limits';
+import { apiCors } from './middleware/cors';
 import { crawlerTracking } from './middleware/crawler-tracking';
 import { csrfProtection } from './middleware/csrf';
 import { sessionMiddleware } from './middleware/session';
@@ -148,16 +147,7 @@ app.use('/api/_internal/*', createRateLimiter({ windowMs: 60 * 1000, max: 1000 }
 app.use('/api/webhooks/*', createRateLimiter({ windowMs: 60 * 1000, max: 500 }));
 
 // CORS for SPA - restrict to allowed origins
-app.use(
-  '/api/*',
-  cors({
-    origin: (origin) => (allowedOrigins().includes(origin) ? origin : null),
-    allowHeaders: ['Content-Type', 'Authorization', 'apikey'],
-    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    credentials: true,
-    maxAge: 3600, // 1 hour
-  })
-);
+app.use('/api/*', apiCors());
 
 // Request body size limit. bodyLimit enforces the cap while READING the stream,
 // not just by trusting the Content-Length header (which a client can under-state

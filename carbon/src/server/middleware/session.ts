@@ -20,6 +20,16 @@ import type { HonoVariables } from '../types';
  *
  * The health probes skip the lookup: they are public and polled often.
  */
+/**
+ * A banned user (ban not yet expired) is treated as signed out. Banning
+ * already deletes the user's sessions and blocks new ones; this covers a
+ * session that outlived that (defence in depth).
+ */
+function isBanned(user: { banned?: boolean | null; banExpires?: Date | null }): boolean {
+  if (!user.banned) return false;
+  return !user.banExpires || new Date(user.banExpires).getTime() > Date.now();
+}
+
 export const sessionMiddleware = createMiddleware<{ Variables: HonoVariables }>(async (c, next) => {
   if (c.req.path === '/api/health' || c.req.path === '/api/health/ready') {
     c.set('user', null);
@@ -33,7 +43,7 @@ export const sessionMiddleware = createMiddleware<{ Variables: HonoVariables }>(
     headers: c.req.raw.headers,
     query: { disableCookieCache: true },
   });
-  if (data) {
+  if (data && !isBanned(data.user)) {
     c.set('user', data.user);
     c.set('session', data.session);
     c.set('aal', data.session.twoFactorVerified ? 'aal2' : 'aal1');

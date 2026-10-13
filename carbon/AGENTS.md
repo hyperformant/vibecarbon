@@ -106,8 +106,8 @@ supabase/migrations/         # SQL migrations (run with npm run db:migrate)
 
 ### Authentication Flow
 
-1. **Client-side**: Supabase JS handles auth (email/password, OAuth, magic links, MFA)
-2. **API requests**: Client sends JWT in `Authorization: Bearer <token>` header
+1. **Auth endpoints**: the in-process auth (`src/server/auth/`, Better Auth) at `/api/auth/*` handles sign-up, sign-in (email/password, Google/Microsoft, magic link), sign-out and sessions, and sets an HttpOnly session cookie
+2. **API requests**: the browser sends that cookie with every same-origin request; page JS never sees a session token (no `Authorization` header, no token in any response body)
 3. **Server middleware** (`src/server/middleware/session.ts`): reads the session cookie with `auth.api.getSession()` (`src/server/auth/`), sets `c.get('user')`, `c.get('session')` and `c.get('aal')`
 4. **RLS**: Routes run user queries through `withUserDb(user.id, ...)`, so row-level security decides what the caller sees
 
@@ -359,7 +359,7 @@ Rules:
 
 - **MUST** read the role only through `isSuperAdmin(user)` (exact match on `user.role`) or `is_super_admin()` in SQL. **NEVER** gate anything on a field the user can write (`name`, `image`, `onboardingCompleted`, anything set through `/api/auth/update-user`): that is a self-service privilege escalation.
 - **MUST** keep every admin-gated surface accepting `super_admin`. If you ever introduce a user-defined tier below super_admin, the ForwardAuth gate must be `?roles=<tier>,super_admin` (any-of) and the code check `isSuperAdmin(user) || is<Tier>(user)` — a bare `role === 'admin'` / `?role=admin` **locks super admins out** and is a bug.
-- **MUST NOT** trust the `X-User-Id` / `X-User-Email` / `X-User-Role` / `X-Authenticated-User` request headers as auth input. Traefik sets them for downstream services (e.g. Grafana) and strips client-supplied copies; app code derives identity **only** from the verified JWT via `c.get('user')`.
+- **MUST NOT** trust the `X-User-Id` / `X-User-Email` / `X-User-Role` / `X-Authenticated-User` request headers as auth input. Traefik sets them for downstream services (e.g. Grafana) and strips client-supplied copies; app code derives identity **only** from the cookie session the session middleware verified: `c.get('user')` / `c.get('session')`.
 - **MUST NOT** add a public route or client flow against `/api/_internal/verify-role` — it is the ForwardAuth trust anchor, denied on the public edge and called by Traefik internally only.
 - **NEVER** add an API path that writes `user.role`. Role assignment is operator-bootstrap only: the app makes `ADMIN_EMAIL` a super admin at startup (`src/server/auth/bootstrap-admin.ts`), the admin plugin's set-role path is disabled, and the `super_admin` access-control role has no `set-role` permission.
 
@@ -533,14 +533,18 @@ Sessions are cookies, so every mutating `/api/*` request that carries one passes
 
 ## Rate Limiting
 
-These limits are configured in `src/server/index.ts`:
+These limits are configured in `src/server/index.ts` (the `/api/auth` caps in `src/server/middleware/auth-rate-limits.ts`):
 
 | Route Pattern | Limit | Reason |
 |--------------|-------|--------|
 | `/api/v1/*` | 100/min per IP | Standard API endpoints |
 | `/api/webhooks/*` | 500/min per IP | External services (Stripe) send bursts |
 | `/api/auth/*` | 100/min per IP | Auth endpoints |
-| `/api/auth/sign-in/*` | 10/15min per IP | Credential stuffing across emails (the account lockout is per email + IP) |
+| `/api/auth/sign-in/email` | 10/15min per IP | Credential stuffing across emails (the account lockout is per email + IP) |
+| `/api/auth/sign-in/social` | 10/min per IP | Starts an OAuth redirect |
+| `/api/auth/sign-in/magic-link` | 5/min per IP | Sends an email |
+| `/api/auth/sign-up/*`, `change-password`, `change-email`, `two-factor/*` | 3/10s per IP | Account creation and credential changes |
+| `/api/auth/request-password-reset`, `send-verification-email` | 3/min per IP | Sends an email |
 | `/api/_internal/*` | 1000/min per IP | Infrastructure calls (Traefik ForwardAuth) |
 
 When adding new route groups, assign an appropriate rate limit tier.
