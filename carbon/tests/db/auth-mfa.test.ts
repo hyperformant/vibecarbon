@@ -721,4 +721,106 @@ describe.skipIf(!dbTestsEnabled)('two-factor and session assurance (real databas
       expect(JSON.stringify(await res.json())).not.toContain('otpauth');
     });
   });
+  describe('fix round 3', () => {
+    it('the password cannot be unlinked, so a session thief cannot drop it and enroll without it', async () => {
+      // A verified password user who also linked Google.
+      const { email, jar } = await passwordUser();
+      await googleSignIn(email);
+      const accounts = (await (await get('/api/auth/list-accounts', jar)).json()) as {
+        id: string;
+        providerId: string;
+      }[];
+      const credential = accounts.find((a) => a.providerId === 'credential');
+      expect(credential).toBeDefined();
+
+      const unlink = await post('/api/auth/unlink-account', { accountId: credential?.id }, jar);
+      expect(unlink.status).toBe(403);
+      const { rows } = await db.query(
+        `select count(*)::int as n from public.account where user_id = $1 and provider_id = 'credential'`,
+        [await userIdOf(email)],
+      );
+      expect(rows[0].n).toBe(1);
+      // Enrolling still needs the password.
+      expect((await post('/api/auth/two-factor/enable', {}, jar)).status).toBe(400);
+    });
+
+    it('a credential row without a password does not count as a password', async () => {
+      const email = newEmail();
+      const jar = await googleSignIn(email);
+      const userId = await userIdOf(email);
+      await db.query(
+        `insert into public.account (account_id, provider_id, user_id, password)
+         values ($1, 'credential', $2, null)`,
+        [userId, userId],
+      );
+      await db.query(
+        `update public.session set created_at = now() - interval '11 minutes' where user_id = $1`,
+        [userId],
+      );
+      const res = await post('/api/auth/two-factor/enable', {}, jar);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ error: 'reauth_required' });
+    });
+
+    describe('an impersonation session cannot touch two-factor', () => {
+      const impersonate = async (victimEmail: string) => {
+        const admin = await passwordUser();
+        await db.query(`update public."user" set role = 'super_admin' where email = $1`, [
+          admin.email,
+        ]);
+        await setMfa(false);
+        const res = await post(
+          '/api/auth/admin/impersonate-user',
+          { userId: await userIdOf(victimEmail) },
+          admin.jar,
+        );
+        expect(res.status).toBe(200);
+        return admin.jar;
+      };
+
+      it("an admin cannot enroll their own authenticator on the victim's account", async () => {
+        const email = newEmail();
+        await googleSignIn(email); // passwordless victim
+        const jar = await impersonate(email);
+        const res = await post('/api/auth/two-factor/enable', {}, jar);
+        expect(res.status).toBe(403);
+        expect((await res.json()).code).toBe('IMPERSONATION_NOT_ALLOWED');
+        const { rows } = await db.query(
+          'select count(*)::int as n from public.two_factor where user_id = $1',
+          [await userIdOf(email)],
+        );
+        expect(rows[0].n).toBe(0);
+      });
+
+      it('nor confirm an enrollment (which would re-issue a full-lifetime session)', async () => {
+        const email = newEmail();
+        const owner = await googleSignIn(email);
+        const { totpURI } = (await (await post('/api/auth/two-factor/enable', {}, owner)).json()) as {
+          totpURI: string;
+        };
+        const jar = await impersonate(email);
+        const res = await post('/api/auth/two-factor/verify-totp', { code: totpCode(totpURI) }, jar);
+        expect(res.status).toBe(403);
+        const { rows } = await db.query(
+          'select verified from public.two_factor where user_id = $1',
+          [await userIdOf(email)],
+        );
+        expect(rows[0].verified).toBe(false);
+      });
+
+      it.each([
+        '/api/auth/two-factor/disable',
+        '/api/auth/two-factor/get-totp-uri',
+        '/api/auth/two-factor/generate-backup-codes',
+        '/api/auth/two-factor/verify-backup-code',
+      ])('%s is refused', async (path) => {
+        const { email, jar: owner } = await passwordUser();
+        await enroll(owner);
+        const jar = await impersonate(email);
+        const res = await post(path, { password: PASSWORD, code: '00000000' }, jar);
+        expect(res.status).toBe(403);
+        expect((await res.json()).code).toBe('IMPERSONATION_NOT_ALLOWED');
+      });
+    });
+  });
 });

@@ -6,7 +6,7 @@ import {
   isAPIError,
 } from 'better-auth/api';
 import { setCookieCache } from 'better-auth/cookies';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, sql } from 'drizzle-orm';
 import { adminDb } from '../db/client';
 import { dbErrorForLog } from '../db/errors';
 import { account, session as sessionTable, twoFactor, user as userTable } from '../db/schema';
@@ -73,6 +73,9 @@ import { dropUnprovenSecondFactor } from './account-linking';
  *   atomic budget as step-up.
  * - a session cookie whose session is gone gets 401 from every gated path,
  *   never Better Auth's 60 s cookie-cache fallback.
+ * - the password (credential account) cannot be unlinked: that would make a
+ *   password account passwordless, and so enrollable without the password.
+ * - an impersonation session may not touch two-factor at all.
  *
  * Better Auth's admin endpoints (/admin/*) need aal2 while MFA is globally
  * on, the same rule `requireAal2` applies to the app's own routes.
@@ -100,6 +103,8 @@ const FACTOR_MANAGEMENT_PATHS: ReadonlySet<string> = new Set([
 
 const MAGIC_LINK_VERIFY = '/magic-link/verify';
 
+const UNLINK_ACCOUNT = '/unlink-account';
+
 const ADMIN_UNGATED: ReadonlySet<string> = new Set(['/admin/stop-impersonating']);
 
 /** Better Auth's own defaults for the per-account second-factor lock. */
@@ -110,7 +115,12 @@ const LOCK_MINUTES = 15;
 const FRESH_SESSION_MS = 10 * 60 * 1000;
 
 type SessionLike = {
-  session: { id: string; twoFactorVerified?: boolean | null; createdAt?: Date | string };
+  session: {
+    id: string;
+    twoFactorVerified?: boolean | null;
+    createdAt?: Date | string;
+    impersonatedBy?: string | null;
+  };
   user: { id: string; twoFactorEnabled?: boolean | null };
 };
 
@@ -132,12 +142,62 @@ async function factorOf(userId: string): Promise<'none' | 'unconfirmed' | 'confi
   return row.verified === false ? 'unconfirmed' : 'confirmed';
 }
 
+/**
+ * Whether the user has a password, the way Better Auth decides whether to
+ * ask for one (utils/password.mjs shouldRequirePassword): a credential
+ * account WITH a password hash. A credential row without one is no password.
+ */
 async function hasPassword(userId: string): Promise<boolean> {
   const [row] = await adminDb
     .select({ id: account.id })
     .from(account)
-    .where(and(eq(account.userId, userId), eq(account.providerId, 'credential')));
+    .where(
+      and(
+        eq(account.userId, userId),
+        eq(account.providerId, 'credential'),
+        isNotNull(account.password)
+      )
+    );
   return Boolean(row);
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The password cannot be unlinked. Otherwise a fresh stolen session (Better
+ * Auth's unlink only needs a session under 24 h old) could remove it, turn
+ * the account passwordless, and then enroll the thief's authenticator
+ * without the password (allowPasswordless) and reach aal2. The owner keeps
+ * changing or resetting the password as before.
+ */
+async function refuseCredentialUnlink(accountId: unknown): Promise<void> {
+  if (typeof accountId !== 'string' || !UUID.test(accountId)) return; // endpoint: not found
+  const [row] = await adminDb
+    .select({ providerId: account.providerId })
+    .from(account)
+    .where(eq(account.id, accountId));
+  if (row?.providerId === 'credential') {
+    throw new APIError('FORBIDDEN', {
+      code: 'PASSWORD_UNLINK_NOT_ALLOWED',
+      message: 'Your password cannot be removed. Change or reset it instead.',
+    });
+  }
+}
+
+/**
+ * An impersonation session acts as the user but is not the user: it may
+ * not enroll, read, regenerate, remove or confirm a factor, or step up.
+ * (A super admin could otherwise enroll their own authenticator on the
+ * account, and confirming an enrollment re-issues the session with a full
+ * lifetime, past the impersonation time limit.)
+ */
+function refuseImpersonation(current: SessionLike): void {
+  if (current.session.impersonatedBy) {
+    throw new APIError('FORBIDDEN', {
+      code: 'IMPERSONATION_NOT_ALLOWED',
+      message: 'Two-factor settings cannot be changed while impersonating a user.',
+    });
+  }
 }
 
 /**
@@ -279,6 +339,11 @@ async function liveSession(ctx: any): Promise<SessionLike | null> {
 const before = createAuthMiddleware(async (ctx) => {
   const path = ctx.path;
 
+  if (path === UNLINK_ACCOUNT) {
+    await refuseCredentialUnlink((ctx.body as { accountId?: unknown } | undefined)?.accountId);
+    return;
+  }
+
   if (path === MAGIC_LINK_VERIFY) {
     const token = typeof ctx.query?.token === 'string' ? ctx.query.token : null;
     // The pending link, read (not used up): auth/index.ts keeps magicLink's
@@ -323,6 +388,7 @@ const before = createAuthMiddleware(async (ctx) => {
   if (FACTOR_MANAGEMENT_PATHS.has(path)) {
     const current = await liveSession(ctx);
     if (!current) return; // no session cookie: the endpoint answers 401
+    refuseImpersonation(current);
     await gateFactorManagement(path, current);
     return;
   }
@@ -333,6 +399,7 @@ const before = createAuthMiddleware(async (ctx) => {
     const current = await liveSession(ctx);
     // No session: finishing a sign-in, which Better Auth locks itself.
     if (!current) return;
+    refuseImpersonation(current);
     await gateVerify(path, current);
   }
 });
@@ -416,6 +483,7 @@ export const sessionAssurance = () =>
         {
           matcher: (ctx) =>
             ctx.path === MAGIC_LINK_VERIFY ||
+            ctx.path === UNLINK_ACCOUNT ||
             isAdminPath(ctx.path) ||
             FACTOR_MANAGEMENT_PATHS.has(ctx.path ?? '') ||
             VERIFY_PATHS.has(ctx.path ?? ''),
