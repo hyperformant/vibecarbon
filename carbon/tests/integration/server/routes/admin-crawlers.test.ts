@@ -2,7 +2,7 @@
  * Integration coverage for GET /api/v1/admin/crawlers (AI Visibility).
  *
  * Follows the admin-newsletter.test.ts pattern: mount the real route behind a
- * middleware that injects the session user, mock Supabase at the module
+ * middleware that injects the session user, mock the db client at the module
  * boundary, and drive it through `app.request()`.
  *
  * What matters here is the response *contract* the admin page renders from —
@@ -11,6 +11,7 @@
  */
 
 import type { User } from '@supabase/supabase-js';
+import { getTableName } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HonoVariables } from '@server/types';
@@ -20,22 +21,27 @@ const { rawMock, dailyMock } = vi.hoisted(() => ({
   dailyMock: vi.fn(),
 }));
 
-// crawler_hits:       .select().gte().order().limit()
-// crawler_hits_daily: .select().gte().lt().order().limit()
+// crawler_hits:       select().from().where().orderBy().limit()
+// crawler_hits_daily: select().from().where().orderBy().limit()
 // Both branches are row-capped (MAX_RAW_ROWS / MAX_ROLLUP_ROWS) so a wide
-// window can never pull an unbounded result set into the API process.
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: (table: string) => {
-      if (table === 'crawler_hits') {
-        return { select: () => ({ gte: () => ({ order: () => ({ limit: rawMock }) }) }) };
-      }
-      if (table === 'crawler_hits_daily') {
-        return {
-          select: () => ({ gte: () => ({ lt: () => ({ order: () => ({ limit: dailyMock }) }) }) }),
-        };
-      }
-      throw new Error(`unexpected table: ${table}`);
+// window can never pull an unbounded result set into the API process. The
+// chain is awaited, so the mocks below stand in for the awaited query, keyed
+// by which table `.from()` was given.
+vi.mock('@server/db/client', () => ({
+  adminDb: {
+    select: () => {
+      let table: unknown;
+      const chain: Record<string, unknown> = {};
+      for (const m of ['where', 'orderBy', 'limit']) chain[m] = () => chain;
+      chain.from = (t: unknown) => {
+        table = t;
+        return chain;
+      };
+      chain.then = (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
+        Promise.resolve()
+          .then(() => (getTableName(table as never) === 'crawler_hits' ? rawMock() : dailyMock()))
+          .then(resolve, reject);
+      return chain;
     },
   },
 }));
@@ -87,17 +93,17 @@ async function getStats(query = '', user: Partial<User> | null = SUPER_ADMIN) {
   return { res, body: (await res.json()) as CrawlerStatsBody };
 }
 
-/** A raw hit row as PostgREST returns it. */
+/** A raw hit row as the query returns it. */
 function rawHit(crawler: string, path: string, day = TODAY, status: number | null = 200) {
-  return { crawler, path, status, hit_at: `${day}T09:00:00.000Z` };
+  return { crawler, path, status, hitAt: `${day}T09:00:00.000Z` };
 }
 
 beforeEach(() => {
   vi.setSystemTime(NOW);
   rawMock.mockReset();
   dailyMock.mockReset();
-  rawMock.mockResolvedValue({ data: [], error: null });
-  dailyMock.mockResolvedValue({ data: [], error: null });
+  rawMock.mockResolvedValue([]);
+  dailyMock.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -133,8 +139,7 @@ describe('GET /api/v1/admin/crawlers — access control', () => {
 
 describe('GET /api/v1/admin/crawlers — response contract', () => {
   beforeEach(() => {
-    rawMock.mockResolvedValue({
-      data: [
+    rawMock.mockResolvedValue([
         rawHit('GPTBot', '/docs/seo'),
         rawHit('GPTBot', '/docs/seo'),
         rawHit('GPTBot', '/docs/seo'),
@@ -143,19 +148,14 @@ describe('GET /api/v1/admin/crawlers — response contract', () => {
         // Written by an older deploy whose registry entry has since been
         // renamed/removed — the response has no shape for it, so it is dropped.
         rawHit('RetiredBot', '/ghost'),
-      ],
-      error: null,
-    });
-    dailyMock.mockResolvedValue({
-      data: [
+      ]);
+    dailyMock.mockResolvedValue([
         { day: ROLLUP_DAY, crawler: 'GPTBot', path: '/docs/seo', hits: 10 },
         { day: ROLLUP_DAY, crawler: 'Bingbot', path: '/', hits: 2 },
         // Zero-hit and unregistered rollup rows are both skipped.
         { day: ROLLUP_DAY, crawler: 'CCBot', path: '/quiet', hits: 0 },
         { day: ROLLUP_DAY, crawler: 'RetiredBot', path: '/ghost', hits: 99 },
-      ],
-      error: null,
-    });
+      ]);
   });
 
   it('unions raw hits with the daily rollup into per-crawler totals, sorted desc', async () => {
@@ -231,20 +231,16 @@ describe('GET /api/v1/admin/crawlers — response contract', () => {
 
 describe('GET /api/v1/admin/crawlers — server errors served to crawlers', () => {
   it('counts raw 5xx hits and rollup errors per crawler and per path', async () => {
-    rawMock.mockResolvedValue({
-      data: [
+    rawMock.mockResolvedValue([
         rawHit('Googlebot', '/docs/cli', TODAY, 503),
         rawHit('Googlebot', '/docs/cli', TODAY, 200),
         // 4xx is not a server error; null is a row from before the status column existed.
         rawHit('Googlebot', '/missing', TODAY, 404),
         rawHit('Googlebot', '/docs/cli', TODAY, null),
-      ],
-      error: null,
-    });
-    dailyMock.mockResolvedValue({
-      data: [{ day: ROLLUP_DAY, crawler: 'Googlebot', path: '/docs/cli', hits: 5, errors: 2 }],
-      error: null,
-    });
+      ]);
+    dailyMock.mockResolvedValue([
+      { day: ROLLUP_DAY, crawler: 'Googlebot', path: '/docs/cli', hits: 5, errors: 2 },
+    ]);
 
     const { body } = await getStats();
 
@@ -268,7 +264,7 @@ describe('GET /api/v1/admin/crawlers — topPaths cap', () => {
       const path = `/p-${String(i).padStart(2, '0')}`;
       for (let n = 0; n < 12 - i; n++) data.push(rawHit('GPTBot', path));
     }
-    rawMock.mockResolvedValue({ data, error: null });
+    rawMock.mockResolvedValue(data);
 
     const { body } = await getStats();
 
@@ -325,7 +321,7 @@ describe('GET /api/v1/admin/crawlers — ?days clamping', () => {
 
 describe('GET /api/v1/admin/crawlers — query failures', () => {
   it('returns 500 when the raw-hits query errors', async () => {
-    rawMock.mockResolvedValue({ data: null, error: { message: 'permission denied' } });
+    rawMock.mockRejectedValue(new Error('permission denied'));
 
     const res = await appWithUser(SUPER_ADMIN).request(BASE);
     expect(res.status).toBe(500);
@@ -333,7 +329,7 @@ describe('GET /api/v1/admin/crawlers — query failures', () => {
   });
 
   it('returns 500 when the rollup query errors', async () => {
-    dailyMock.mockResolvedValue({ data: null, error: { message: 'relation does not exist' } });
+    dailyMock.mockRejectedValue(new Error('relation does not exist'));
 
     const res = await appWithUser(SUPER_ADMIN).request(BASE);
     expect(res.status).toBe(500);

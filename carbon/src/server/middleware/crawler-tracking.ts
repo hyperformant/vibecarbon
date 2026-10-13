@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import type { Context, Next } from 'hono';
+import { adminDb } from '../db/client';
+import { crawlerHits } from '../db/schema';
 import { classifyCrawler } from '../lib/crawlers';
 import { logger } from '../lib/logger';
-import { supabaseAdmin } from '../lib/supabase';
 import type { HonoVariables } from '../types';
 
 /**
@@ -196,18 +197,17 @@ function recordHit(
   if (!admitHit(crawler)) return;
 
   // NOT awaited: the response must not wait on (or fail because of) this write.
-  // PostgREST reports failures in the resolved value, so both paths are handled.
-  supabaseAdmin
-    .from('crawler_hits')
-    .insert({
+  // A rejected insert is handled by the second `.then` argument; a synchronous
+  // throw while building the query is caught by the caller's try/catch.
+  adminDb
+    .insert(crawlerHits)
+    .values({
       crawler,
       path: normalizeTrackedPath(path),
-      user_agent: userAgent ? userAgent.slice(0, MAX_USER_AGENT_LENGTH) : null,
+      userAgent: userAgent ? userAgent.slice(0, MAX_USER_AGENT_LENGTH) : null,
       status,
     })
-    .then((result) => {
-      if (result.error) logInsertFailure(result.error);
-    }, logInsertFailure);
+    .then(undefined, logInsertFailure);
 }
 
 export async function crawlerTracking(
