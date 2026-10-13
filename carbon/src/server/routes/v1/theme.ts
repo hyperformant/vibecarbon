@@ -1,8 +1,10 @@
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb } from '../../db/client';
+import { appSettings } from '../../db/schema';
 import { isSuperAdmin } from '../../lib/auth';
 import { logger } from '../../lib/logger';
-import { supabaseAdmin } from '../../lib/supabase';
 import type { HonoVariables } from '../../types';
 
 const themeRoutes = new Hono<{ Variables: HonoVariables }>();
@@ -62,18 +64,18 @@ const themeSchema = z.object({
 
 themeRoutes.get('/', async (c): Promise<Response> => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('app_settings')
-      .select('value')
-      .eq('key', 'app_theme')
-      .single();
+    const [row] = await adminDb
+      .select({ value: appSettings.value })
+      .from(appSettings)
+      .where(eq(appSettings.key, 'app_theme'))
+      .limit(1);
 
-    if (error || !data) {
-      logger.debug({ error }, 'No app_theme found, returning default');
+    if (!row) {
+      logger.debug('No app_theme found, returning default');
       return c.json({ theme: {} });
     }
 
-    return c.json({ theme: data.value });
+    return c.json({ theme: row.value });
   } catch (err) {
     logger.error({ error: err }, 'Failed to fetch app theme');
     return c.json({ theme: {} });
@@ -106,14 +108,13 @@ themeRoutes.patch('/', async (c) => {
   const theme = parsed.data;
 
   try {
-    const { error } = await supabaseAdmin
-      .from('app_settings')
-      .upsert({ key: 'app_theme', value: theme, updated_by: user.id }, { onConflict: 'key' });
-
-    if (error) {
-      logger.error({ error, userId: user.id }, 'Failed to save app theme');
-      return c.json({ error: 'Failed to save theme' }, 500);
-    }
+    await adminDb
+      .insert(appSettings)
+      .values({ key: 'app_theme', value: theme, updatedBy: user.id })
+      .onConflictDoUpdate({
+        target: appSettings.key,
+        set: { value: theme, updatedBy: user.id },
+      });
 
     logger.info({ userId: user.id }, 'App theme updated');
 

@@ -1,11 +1,13 @@
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { isBillingConfigured } from '../../billing';
+import { adminDb } from '../../db/client';
+import { appSettings } from '../../db/schema';
 import { isSuperAdmin } from '../../lib/auth';
 import { isEmailConfigured } from '../../lib/email';
 import { env } from '../../lib/env';
 import { logger } from '../../lib/logger';
-import { supabaseAdmin } from '../../lib/supabase';
 import type { HonoVariables } from '../../types';
 
 /**
@@ -21,12 +23,12 @@ const setupRoutes = new Hono<{ Variables: HonoVariables }>();
 const BILLING_OPT_OUT_KEY = 'billing_opt_out';
 
 async function readBillingOptOut(): Promise<boolean> {
-  const { data } = await supabaseAdmin
-    .from('app_settings')
-    .select('value')
-    .eq('key', BILLING_OPT_OUT_KEY)
-    .single();
-  return (data?.value as { optedOut?: boolean } | null)?.optedOut === true;
+  const [row] = await adminDb
+    .select({ value: appSettings.value })
+    .from(appSettings)
+    .where(eq(appSettings.key, BILLING_OPT_OUT_KEY))
+    .limit(1);
+  return (row?.value as { optedOut?: boolean } | null)?.optedOut === true;
 }
 
 function analyticsConfigured(): boolean {
@@ -62,16 +64,13 @@ setupRoutes.patch('/', async (c) => {
   const parsed = patchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
 
-  const { error } = await supabaseAdmin.from('app_settings').upsert(
-    {
-      key: BILLING_OPT_OUT_KEY,
-      value: { optedOut: parsed.data.billingOptOut },
-      updated_by: user.id,
-    },
-    { onConflict: 'key' }
-  );
-
-  if (error) {
+  try {
+    const value = { optedOut: parsed.data.billingOptOut };
+    await adminDb
+      .insert(appSettings)
+      .values({ key: BILLING_OPT_OUT_KEY, value, updatedBy: user.id })
+      .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedBy: user.id } });
+  } catch (error) {
     logger.error({ error, userId: user.id }, 'Failed to save billing opt-out');
     return c.json({ error: 'Failed to save setting' }, 500);
   }
