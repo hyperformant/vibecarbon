@@ -39,6 +39,10 @@ describe.skipIf(!dbTestsEnabled)('settings, theme, setup, crawlers, stats on Pos
     app.use('*', async (c, next) => {
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected super admin
       c.set('user', { id: userIds[0], role: 'super_admin' } as any);
+      // An aal2 session: super-admin routes need a verified second factor
+      // while MFA is globally on (middleware/requireSuperAdmin.ts).
+      // biome-ignore lint/suspicious/noExplicitAny: minimal injected session
+      c.set('session', { id: 's1', twoFactorVerified: true } as any);
       await next();
     });
     mount(app);
