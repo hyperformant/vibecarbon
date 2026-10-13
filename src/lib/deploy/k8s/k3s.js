@@ -60,7 +60,6 @@ import { scpWithRetry } from '../../ssh.js';
 import { postAdminUser, waitForGotrueHealth } from '../admin-user.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { digestDir, digestPaths } from '../digest.js';
-import { withMigrationDeadlockRetry } from '../migration-deadlock.js';
 import { pushImageOverSshTunnel } from '../registry-push.js';
 import { buildStandbySeedInitScript } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
@@ -2846,35 +2845,29 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
   for (const file of files) {
     const sql = readFileSync(join(migrationsDir, file), 'utf-8');
     try {
-      // Deadlock-only retry: our boot-window DDL can deadlock against a
-      // Supabase service's own first-boot DDL on the same relations
-      // (2026-08-30 RCA — see migration-deadlock.js). --single-transaction
-      // makes the re-run safe; every other failure stays one-shot fatal.
-      await withMigrationDeadlockRetry(
-        () =>
-          runCommandAsync(
-            [
-              'kubectl',
-              '-n',
-              'vibecarbon',
-              'exec',
-              '-i',
-              'supabase-supabase-db-0',
-              '--',
-              'psql',
-              '-U',
-              'supabase_admin',
-              '-d',
-              'postgres',
-              '-v',
-              'ON_ERROR_STOP=1',
-              // Each migration file is atomic — a mid-file failure must not leave
-              // partial schema behind (see docs/rca/2026-08-25-migration-drift.md).
-              '--single-transaction',
-            ],
-            { env, input: sql, silent: true },
-          ),
-        file,
+      // One shot: nothing else running writes the relations our migrations
+      // touch, so any failure, a deadlock included, is ours and fatal.
+      await runCommandAsync(
+        [
+          'kubectl',
+          '-n',
+          'vibecarbon',
+          'exec',
+          '-i',
+          'supabase-supabase-db-0',
+          '--',
+          'psql',
+          '-U',
+          'supabase_admin',
+          '-d',
+          'postgres',
+          '-v',
+          'ON_ERROR_STOP=1',
+          // Each migration file is atomic — a mid-file failure must not leave
+          // partial schema behind (see docs/rca/2026-08-25-migration-drift.md).
+          '--single-transaction',
+        ],
+        { env, input: sql, silent: true },
       );
     } catch (err) {
       // silent:true buffers stdout/stderr instead of streaming them
