@@ -58,6 +58,16 @@ describe('dev restart policy', () => {
     }
   });
 
+  it('dev-only s3 publishes its port on loopback only (fixed dev credentials)', () => {
+    const s3 = (
+      load('carbon/docker-compose.override.yml') as {
+        services?: Record<string, { ports?: string[] }>;
+      }
+    ).services?.s3;
+    expect(s3?.ports?.length).toBeGreaterThan(0);
+    for (const port of s3?.ports ?? []) expect(port.startsWith('127.0.0.1:')).toBe(true);
+  });
+
   it('one-shot services keep restart "no"', () => {
     for (const [base, override] of PAIRS) {
       const services = load(override).services ?? {};

@@ -70,7 +70,7 @@ services:
     restart: on-failure:5
     command: server -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data -master.volumeSizeLimitMB=256
     ports:
-      - "${DEV_S3_PORT:-8333}:8333"
+      - "127.0.0.1:${DEV_S3_PORT:-8333}:8333"
     volumes:
       - ./volumes/s3/s3.json:/etc/seaweedfs/s3.json:ro
       - s3_data:/data
