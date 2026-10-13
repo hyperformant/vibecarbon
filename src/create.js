@@ -805,6 +805,7 @@ async function bootstrap(cliArgs) {
     'volumes/kong',
     'volumes/db',
     'volumes/traefik',
+    'volumes/s3',
     '.github/workflows',
     'k8s/base/app',
     'k8s/base/backup',
@@ -949,6 +950,7 @@ async function bootstrap(cliArgs) {
     join(projectDir, 'volumes/db/super-admin.dev.sql'),
     variables,
   );
+  copyTemplate('volumes/s3/s3.json', join(projectDir, 'volumes/s3/s3.json'), variables);
   copyTemplate(
     'volumes/traefik/middlewares.yml',
     join(projectDir, 'volumes/traefik/middlewares.yml'),

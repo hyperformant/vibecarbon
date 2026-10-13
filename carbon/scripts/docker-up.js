@@ -194,6 +194,17 @@ if (hasOptionalServices) {
   }
 }
 
+// Dev only: the local S3 container (docker-compose.override.yml) starts empty.
+// Create its bucket + browser-upload CORS. Idempotent; non-fatal (the script
+// warns and exits 0 on failure, and skips when S3_* is unset).
+if (!args.prod) {
+  try {
+    execSync('node scripts/ensure-dev-bucket.js', { stdio: 'inherit' });
+  } catch {
+    // Never block dev startup on storage.
+  }
+}
+
 /**
  * Check unhealthy containers for common issues and print helpful messages.
  */

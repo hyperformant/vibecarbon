@@ -59,3 +59,23 @@ services:
 
   studio:
     restart: on-failure:5
+
+  # Local S3 for development uploads (SeaweedFS). Dev-only: this file is never
+  # deployed; production uses the cloud provider object storage. The browser PUTs
+  # to presigned URLs on this port, so it is published to the host. The bucket and
+  # its CORS rules are created by scripts/ensure-dev-bucket.js (run from docker-up).
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    container_name: ${PROJECT_NAME}-s3
+    restart: on-failure:5
+    command: server -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data -master.volumeSizeLimitMB=256
+    ports:
+      - "${DEV_S3_PORT:-8333}:8333"
+    volumes:
+      - ./volumes/s3/s3.json:/etc/seaweedfs/s3.json:ro
+      - s3_data:/data
+    networks:
+      - vibecarbon-network
+
+volumes:
+  s3_data:

@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "local-dev",
+      "credentials": [
+        {
+          "accessKey": "local-dev-s3-access-key",
+          "secretKey": "local-dev-s3-secret-key-not-for-production"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

@@ -36,6 +36,9 @@ const DEV = {
   ),
   ADMIN_EMAIL: 'admin@example.com',
   ADMIN_PASSWORD: 'local-admin-password',
+  // Must match volumes/s3/s3.json (dev-only placeholders, never used in deploys).
+  S3_ACCESS_KEY: 'local-dev-s3-access-key',
+  S3_SECRET_KEY: 'local-dev-s3-secret-key-not-for-production',
 };
 
 function signDevJwt(role, secret) {
@@ -123,6 +126,14 @@ const envLines = [
   formatDotenvLine('SMTP_PASS', ''),
   '# SMTP_ADMIN_EMAIL=""',
   formatDotenvLine('SMTP_SENDER_NAME', DEV.PROJECT_NAME),
+  '',
+  '# Local S3 for uploads (SeaweedFS from docker-compose.override.yml, dev-only keys',
+  '# matching volumes/s3/s3.json). If you change DEV_S3_PORT, change S3_ENDPOINT to match.',
+  formatDotenvLine('S3_ENDPOINT', 'http://localhost:8333'),
+  formatDotenvLine('S3_REGION', 'us-east-1'),
+  formatDotenvLine('S3_BUCKET', `${DEV.PROJECT_NAME}-local`),
+  formatDotenvLine('S3_ACCESS_KEY', DEV.S3_ACCESS_KEY),
+  formatDotenvLine('S3_SECRET_KEY', DEV.S3_SECRET_KEY),
   '',
   '# Optional services',
   formatDotenvLine('VITE_N8N_ENABLED', 'false'),

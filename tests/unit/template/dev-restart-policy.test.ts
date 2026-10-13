@@ -49,7 +49,11 @@ describe('dev restart policy', () => {
 
   it.each(PAIRS)('%s override defines no service missing from the base', (base, override) => {
     const baseNames = new Set(Object.keys(load(base).services ?? {}));
+    // Dev-only services live ONLY in the override (it is never deployed), so
+    // they cannot exist in the base: the local S3 stand-in for uploads.
+    const devOnly = new Set(base === 'carbon/docker-compose.yml' ? ['s3'] : []);
     for (const name of Object.keys(load(override).services ?? {})) {
+      if (devOnly.has(name)) continue;
       expect(baseNames.has(name), `${override} defines ${name}`).toBe(true);
     }
   });
