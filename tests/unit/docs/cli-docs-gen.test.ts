@@ -53,6 +53,13 @@ describe('renderFlagTable', () => {
     );
   });
 
+  it('escapes backslashes before pipes, so a literal \\| cannot end the cell early', () => {
+    const out = renderFlagTable({
+      flags: [{ name: 'path', value: '<dir>', description: 'Windows style: C:\\| works' }],
+    });
+    expect(out).toContain('| Windows style: C:\\\\\\| works |');
+  });
+
   it('renders a placeholder when there are no flags beyond h and v', () => {
     expect(renderFlagTable({ flags: SPEC.flags.slice(0, 2) })).toBe('_No flags beyond -h and -v._');
     expect(renderFlagTable({})).toBe('_No flags beyond -h and -v._');

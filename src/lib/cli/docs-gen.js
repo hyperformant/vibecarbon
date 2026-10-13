@@ -18,7 +18,12 @@ export const DOC_TARGETS = ['carbon/content/docs/cli.mdx', 'README.md', 'AGENTS.
 const UNIVERSAL = new Set(['h', 'v']);
 const NO_FLAGS = '_No flags beyond -h and -v._';
 
-const cell = (s) => String(s ?? '').replace(/\|/g, '\\|');
+// Backslashes first: escaping `|` alone would turn a literal `\|` into `\\|`,
+// which GFM reads as an escaped backslash followed by a cell delimiter.
+const cell = (s) =>
+  String(s ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|');
 const flagLabel = (f) => (f.value ? `-${f.name} ${f.value}` : `-${f.name}`);
 const ownFlags = (spec) => (spec?.flags ?? []).filter((f) => !UNIVERSAL.has(f.name));
 
