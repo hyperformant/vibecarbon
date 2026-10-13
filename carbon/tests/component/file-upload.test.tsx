@@ -24,7 +24,9 @@ import { FileUpload } from '@/components/FileUpload';
 const presignOk = {
   key: 'private/u1/abc.pdf',
   url: 'https://s3.example.com/put?sig=1',
-  headers: { 'Content-Type': 'application/pdf' },
+  // Content-Length is signed server-side, but browsers forbid setting it; the
+  // component must drop it and let fetch derive it from the body.
+  headers: { 'Content-Type': 'application/pdf', 'Content-Length': '11' },
   expiresIn: 300,
   fileUrl: '/api/files/private/u1/abc.pdf',
 };
@@ -72,8 +74,42 @@ describe('FileUpload', () => {
     const [putUrl, putInit] = fetchMock.mock.calls[1];
     expect(putUrl).toBe(presignOk.url);
     expect(putInit.method).toBe('PUT');
-    expect(putInit.headers).toEqual(presignOk.headers);
+    expect(putInit.headers).toEqual({ 'Content-Type': 'application/pdf' });
+    expect(Object.keys(putInit.headers).map((h) => h.toLowerCase())).not.toContain(
+      'content-length'
+    );
     expect(putInit.body).toBe(file);
+  });
+
+  it('presigns and PUTs the prepared Blob, not the original file', async () => {
+    const original = new File([new Uint8Array(5000)], 'photo.png', { type: 'image/png' });
+    const prepared = new Blob([new Uint8Array(1234)], { type: 'image/webp' });
+    const prepare = vi.fn(async () => prepared);
+    const presignAvatar = {
+      key: 'avatars/u1/abc.webp',
+      url: 'https://s3.example.com/put?sig=2',
+      headers: { 'Content-Type': 'image/webp', 'Content-Length': '1234' },
+      expiresIn: 300,
+      fileUrl: '/api/files/avatars/u1/abc.webp',
+    };
+    fetchMock
+      .mockResolvedValueOnce(json(200, presignAvatar))
+      .mockResolvedValueOnce(new Response(null));
+    const onUpload = vi.fn();
+    const { container } = render(
+      <FileUpload kind="avatar" prepare={prepare} onUpload={onUpload} />
+    );
+    pick(container, original);
+
+    await waitFor(() => expect(onUpload).toHaveBeenCalledWith(presignAvatar.fileUrl));
+    expect(prepare).toHaveBeenCalledWith(original);
+
+    const presignBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(presignBody).toEqual({ kind: 'avatar', contentType: 'image/webp', size: 1234 });
+
+    const [, putInit] = fetchMock.mock.calls[1];
+    expect(putInit.body).toBe(prepared);
+    expect(putInit.headers).toEqual({ 'Content-Type': 'image/webp' });
   });
 
   it('reports a translated error when storage is not configured (503)', async () => {
