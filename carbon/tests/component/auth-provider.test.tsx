@@ -300,6 +300,20 @@ describe('the ForwardAuth bounce (admin subdomain -> /login?redirect=)', () => {
     ).toBe(true);
   });
 
+  it('the provider and the sign-in page mint together: one POST, so no two tokens race for the cookie', async () => {
+    signedIn({ role: 'super_admin' });
+    await renderApp(bounce, routes);
+    await waitFor(() => expect(assigned).toBe(grafana));
+    // Let any straggling effect fire.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    const posts = fetchMock.mock.calls.filter(
+      ([u, init]) => String(u) === '/api/v1/admin/forwardauth-cookie' && init?.method === 'POST'
+    );
+    expect(posts).toHaveLength(1);
+  });
+
   it('without the cookie (mint refused) it goes to the dashboard instead of looping', async () => {
     signedIn({ role: 'super_admin' });
     fetchMock = stubFetch({

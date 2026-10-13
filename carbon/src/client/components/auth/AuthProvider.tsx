@@ -29,21 +29,45 @@ import { TwoFactorCodeForm } from './TwoFactorCodeForm';
  * load does not, so an aal1 admin is never prompted just for opening the
  * app. Failures are otherwise non-fatal: a ForwardAuth 401 routes back
  * through /login, which re-mints before bouncing.
+ *
+ * Concurrent callers share one request (the provider's on-load refresh and
+ * a sign-in page often mint in the same render). Every mint issues a new
+ * token, so parallel POSTs would race for the cookie. A caller that wants
+ * the step-up prompt and finds a plain mint in flight waits for it, and
+ * runs its own (prompting) mint only if that one failed.
  */
+let mintInFlight: { promise: Promise<boolean>; stepUp: boolean } | null = null;
+
 export async function syncAdminCookie(
   isSuperAdmin: boolean,
   { stepUp = false }: { stepUp?: boolean } = {}
 ): Promise<boolean> {
   if (!isSuperAdmin) return false;
+  const running = mintInFlight;
+  if (running) {
+    const ok = await running.promise;
+    if (ok || !stepUp || running.stepUp) return ok;
+    // The shared mint did not prompt and failed: fall through to one that does.
+    if (mintInFlight && mintInFlight !== running) return syncAdminCookie(true, { stepUp });
+  }
   const init: RequestInit = { method: 'POST', credentials: 'same-origin' };
+  const promise = (async () => {
+    try {
+      const res = stepUp
+        ? await apiFetch('/api/v1/admin/forwardauth-cookie', init)
+        : await fetch('/api/v1/admin/forwardauth-cookie', init);
+      return res.ok;
+    } catch {
+      // non-fatal: the next sign-in (or the /login bounce) retries
+      return false;
+    }
+  })();
+  const entry = { promise, stepUp };
+  mintInFlight = entry;
   try {
-    const res = stepUp
-      ? await apiFetch('/api/v1/admin/forwardauth-cookie', init)
-      : await fetch('/api/v1/admin/forwardauth-cookie', init);
-    return res.ok;
-  } catch {
-    // non-fatal: the next sign-in (or the /login bounce) retries
-    return false;
+    return await promise;
+  } finally {
+    if (mintInFlight === entry) mintInFlight = null;
   }
 }
 
@@ -174,17 +198,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [isSuperAdmin, impersonationTarget]);
 
   /**
-   * Best-effort local sign-out for the failure paths (a fresh sign-in is
-   * needed, or a restore failed): clear the ForwardAuth cookie, end the
-   * session, forget it here. Never throws.
+   * The one sign-out path: optionally return from an impersonation first,
+   * clear the ForwardAuth cookie (by default), end the session, forget it
+   * here. Returns the auth API's answer; the failure paths (a fresh sign-in
+   * is needed, a restore failed) ignore it, signOut() surfaces it.
    */
-  const endSession = useCallback(async () => {
-    setPendingMfaChallenge(false);
-    await clearAdminCookie();
-    await authClient.signOut().catch(() => undefined);
-    setUser(null);
-    setSession(null);
-  }, []);
+  const endSession = useCallback(
+    async ({
+      restoreAdmin = false,
+      clearCookie = true,
+    }: {
+      restoreAdmin?: boolean;
+      clearCookie?: boolean;
+    } = {}) => {
+      setPendingMfaChallenge(false);
+      if (restoreAdmin) {
+        // Back to the admin session first, so signing out ends that one too
+        // instead of leaving it parked in the admin plugin's cookie.
+        await authClient.admin.stopImpersonating().catch(() => undefined);
+      }
+      if (clearCookie) await clearAdminCookie();
+      const result = await authClient.signOut();
+      setUser(null);
+      setSession(null);
+      return result;
+    },
+    []
+  );
 
   const pathRef = useRef(location.pathname);
   pathRef.current = `${location.pathname}${location.search}`;
@@ -197,7 +237,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       if (reason === 'reauth') {
         const redirect = encodeURIComponent(pathRef.current);
-        await endSession();
+        await endSession().catch(() => undefined);
         navigate(`/login?reason=reauth&redirect=${redirect}`);
         return false;
       }
@@ -292,17 +332,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
-    setPendingMfaChallenge(false);
-    if (impersonationTarget) {
-      // Back to the admin session first, so signing out ends that one too
-      // instead of leaving it parked in the admin plugin's cookie.
-      await authClient.admin.stopImpersonating().catch(() => undefined);
-    }
-    if (isSuperAdmin || impersonationTarget) await clearAdminCookie();
-    const result = await authClient.signOut();
-    setUser(null);
-    setSession(null);
-    unwrap(result);
+    unwrap(
+      await endSession({
+        restoreAdmin: impersonationTarget !== null,
+        // Only an admin (or one impersonating) carries the cookie.
+        clearCookie: isSuperAdmin || impersonationTarget !== null,
+      })
+    );
   };
 
   const updateUser = async (fields: ProfileFields) => {
@@ -323,7 +359,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) {
       // Restore failed (session expired, cookie lost): fail closed to a
       // clean sign-out rather than staying in the target's session.
-      await endSession();
+      await endSession().catch(() => undefined);
       return;
     }
     await refreshSession();
