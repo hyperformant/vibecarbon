@@ -89,7 +89,11 @@ describe('vibecarbon deactivate', () => {
   it('prints help', async () => {
     const r = await runCliAsync('deactivate', ['-h'], { cwd: project });
     assertSuccess(r);
-    assertExitWith(r, 0, 'Release the license key from this project');
+    assertExitWith(
+      r,
+      0,
+      'Release the key from this project, confirmed by a link emailed to the buyer (-rm removes only the local file)',
+    );
     const out = `${r.stdout}\n${r.stderr}`;
     expect(out).toContain('-rm');
     // -all removed both a project file and a global HOME file. There is only

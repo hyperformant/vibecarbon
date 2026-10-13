@@ -81,7 +81,11 @@ describe('vibecarbon activate', () => {
   it('prints help', async () => {
     const r = await runCliAsync('activate', ['-h'], { cwd: project });
     assertSuccess(r);
-    assertExitWith(r, 0, 'Bind a Vibecarbon license key');
+    assertExitWith(
+      r,
+      0,
+      'Bind a Graphene or Fullerene key to this project, unlocking Kubernetes and HA deploys. Run it inside the project',
+    );
     const out = `${r.stdout}\n${r.stderr}`;
     // The v2 key format and the refresh flag are both gone: a key names no
     // project and no plan, so there is nothing local left to refresh.
