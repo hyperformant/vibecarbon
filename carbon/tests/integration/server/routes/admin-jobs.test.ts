@@ -29,7 +29,7 @@ vi.mock('@server/lib/logger', () => ({ logger }));
 
 const { jobsRoutes } = await import('@server/routes/v1/admin/jobs');
 
-const SECRET = 'job-param-secret@example.test';
+const PARAM_MARKER = 'job-param-secret@example.test';
 
 function adminApp() {
   const app = new Hono<{ Variables: HonoVariables }>();
@@ -56,7 +56,7 @@ describe('POST /api/v1/admin/jobs/trigger: a failed job', () => {
       detail: undefined,
     });
     db.execute.mockRejectedValue(
-      new DrizzleQueryError('select public.cleanup_old_login_attempts($1)', [SECRET], cause)
+      new DrizzleQueryError('select public.cleanup_old_login_attempts($1)', [PARAM_MARKER], cause)
     );
     const res = await adminApp().request('/api/v1/admin/jobs/trigger', {
       method: 'POST',
@@ -64,13 +64,13 @@ describe('POST /api/v1/admin/jobs/trigger: a failed job', () => {
       body: JSON.stringify({ jobName: 'cleanup-login-attempts' }),
     });
     expect(res.status).toBe(500);
-    expect(await res.text()).not.toContain(SECRET);
+    expect(await res.text()).not.toContain(PARAM_MARKER);
     expect(db.inserted).toHaveLength(1);
     expect(db.inserted[0]).toMatchObject({
       status: 'failed',
       error: 'permission denied for function cleanup',
     });
-    expect(JSON.stringify(db.inserted)).not.toContain(SECRET);
+    expect(JSON.stringify(db.inserted)).not.toContain(PARAM_MARKER);
   });
 });
 
@@ -128,7 +128,7 @@ describe('GET /api/v1/admin/jobs', () => {
       detail: undefined,
     });
     db.execute.mockRejectedValue(
-      new DrizzleQueryError('select jobname from public.get_cron_jobs()', [SECRET], cause)
+      new DrizzleQueryError('select jobname from public.get_cron_jobs()', [PARAM_MARKER], cause)
     );
     const res = await adminApp().request('/api/v1/admin/jobs');
     expect(res.status).toBe(200);
@@ -138,6 +138,6 @@ describe('GET /api/v1/admin/jobs', () => {
     ]);
     expect(logger.error).toHaveBeenCalledTimes(1);
     expect(logger.error.mock.calls[0][0]).toMatchObject({ err: { code: '42883' } });
-    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(SECRET);
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(PARAM_MARKER);
   });
 });

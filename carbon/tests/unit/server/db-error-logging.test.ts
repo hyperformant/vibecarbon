@@ -12,7 +12,7 @@ import { loggerOptions } from '@server/lib/logger';
  */
 
 const EMAIL = 'leak-check@example.test';
-const TOKEN = 'unsubscribe-token-3f9c1a';
+const UNSUBSCRIBE_VALUE = 'unsubscribe-token-3f9c1a';
 
 /** A pg server error shaped like pg-protocol's DatabaseError. */
 function pgError(): Error {
@@ -22,7 +22,7 @@ function pgError(): Error {
       severity: 'ERROR',
       code: '23505',
       detail: `Key (email)=(${EMAIL}) already exists.`,
-      where: `SQL statement with ${TOKEN}`,
+      where: `SQL statement with ${UNSUBSCRIBE_VALUE}`,
       schema: 'public',
       table: 'newsletter_subscribers',
       constraint: 'newsletter_email_key',
@@ -34,7 +34,7 @@ function pgError(): Error {
 function queryError(): DrizzleQueryError {
   return new DrizzleQueryError(
     'insert into "newsletter_subscribers" ("email", "token") values ($1, $2)',
-    [EMAIL, TOKEN],
+    [EMAIL, UNSUBSCRIBE_VALUE],
     pgError()
   );
 }
@@ -62,7 +62,7 @@ describe('db error logging', () => {
     it(`a DrizzleQueryError under "${key}" never puts params in the record`, () => {
       const line = logLine(loggerOptions, { [key]: queryError() });
       expect(line).not.toContain(EMAIL);
-      expect(line).not.toContain(TOKEN);
+      expect(line).not.toContain(UNSUBSCRIBE_VALUE);
       expect(line).not.toContain('Failed query');
       // ...and still says what went wrong.
       const record = JSON.parse(line)[key];
@@ -80,13 +80,13 @@ describe('db error logging', () => {
     const wrapped = new Error('Failed to fetch customer', { cause: queryError() });
     const line = logLine(loggerOptions, { err: wrapped });
     expect(line).not.toContain(EMAIL);
-    expect(line).not.toContain(TOKEN);
+    expect(line).not.toContain(UNSUBSCRIBE_VALUE);
   });
 
   it('a bare pg error drops detail and where', () => {
     const line = logLine(loggerOptions, { err: pgError() });
     expect(line).not.toContain(EMAIL);
-    expect(line).not.toContain(TOKEN);
+    expect(line).not.toContain(UNSUBSCRIBE_VALUE);
     expect(JSON.parse(line).err.code).toBe('23505');
   });
 
