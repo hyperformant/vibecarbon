@@ -209,3 +209,67 @@ function formatUsage(spec) {
 function capitalize(s) {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
 }
+
+const CATEGORY_HEADINGS = [
+  ['dev', 'DEV COMMANDS'],
+  ['deploy', 'DEPLOY COMMANDS'],
+  ['debug', 'DEBUG COMMANDS'],
+  ['license', 'LICENSE COMMANDS'],
+];
+
+/** Greedy word wrap to `max` columns (a word longer than `max` gets its own line). */
+function wrapWords(text, max) {
+  const lines = [];
+  let line = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (line && line.length + 1 + word.length > max) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/**
+ * Render the grouped command list shown by top-level `vibecarbon -h`.
+ *
+ * Name (plus aliases) and usage share one padded column; a summary too long
+ * for `width` visible columns wraps under the summary column, never truncated.
+ *
+ * @param {Array<{ name: string, aliases?: string[], category: string, usage?: string, summary?: string }>} rows
+ *   in display order
+ * @param {{ width?: number }} [opts]
+ * @returns {string}
+ */
+export function renderCommandList(rows, { width = 80 } = {}) {
+  const labelOf = (r) => {
+    const names = [...(r.aliases ?? []), r.name];
+    const plain = names.join(' | ') + (r.usage ? ` ${r.usage}` : '');
+    const colored = names.map((n) => c.info(n)).join(' | ') + (r.usage ? ` ${r.usage}` : '');
+    return { plain, colored };
+  };
+  const indent = 2;
+  const gap = 2;
+  const labelWidth = Math.max(0, ...rows.map((r) => labelOf(r).plain.length));
+  const summaryCol = indent + labelWidth + gap;
+  const summaryWidth = Math.max(20, width - summaryCol);
+
+  const sections = [];
+  for (const [category, heading] of CATEGORY_HEADINGS) {
+    const group = rows.filter((r) => r.category === category);
+    if (group.length === 0) continue;
+    const lines = [c.bold(heading)];
+    for (const r of group) {
+      const { plain, colored } = labelOf(r);
+      const wrapped = wrapWords(r.summary ?? '', summaryWidth);
+      const pad = ' '.repeat(labelWidth - plain.length + gap);
+      lines.push(`${' '.repeat(indent)}${colored}${pad}${wrapped[0] ?? ''}`.trimEnd());
+      for (const rest of wrapped.slice(1)) lines.push(`${' '.repeat(summaryCol)}${rest}`);
+    }
+    sections.push(lines.join('\n'));
+  }
+  return sections.join('\n\n');
+}

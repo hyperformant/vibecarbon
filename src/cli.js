@@ -16,8 +16,9 @@ import dns from 'node:dns';
 import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { loadAllSpecs } from './lib/cli/command-registry.js';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
-import { formatExamples } from './lib/cli/help.js';
+import { formatExamples, renderCommandList } from './lib/cli/help.js';
 import { c } from './lib/colors.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
@@ -151,43 +152,18 @@ const GLOBAL_EXAMPLES = [
   },
 ];
 
-function showHelp() {
+async function showHelp() {
+  const rows = (await loadAllSpecs()).map(({ entry, spec }) => ({
+    ...entry,
+    summary: spec.summary,
+  }));
   console.log(`
 ${c.bold('Vibecarbon CLI')} ${c.dim(`v${VERSION}`)}
 
 ${c.bold('USAGE')}
   ${c.info('vibecarbon')} <command> [flags]
 
-${c.bold('DEV COMMANDS')}
-  ${c.info('?')} | ${c.info('next')}                 Guided help process for what's next if you get stuck
-  ${c.info('create')} <project-name>    Create a new Vibecarbon project
-  ${c.info('up')}                       Start local development environment
-  ${c.info('down')}                     Stop local development environment
-  ${c.info('status')}                   Show project and deployment status
-  ${c.info('reset')}                    Reset local environment (removes all data)
-  ${c.info('add')} [feature]            Add features (observability, redis)
-  ${c.info('remove')} [feature]         Remove features from a project
-  ${c.info('configure')}                Configure external services and project settings (billing, OAuth, SMTP, CI/CD, globalization, etc.)
-  ${c.info('upgrade')}                  Upgrade infrastructure files to latest template
-  ${c.info('telemetry')} [on|off]       Control anonymous usage analytics (status by default)
-
-${c.bold('DEPLOY COMMANDS')}
-  ${c.info('deploy')} [env]             Deploy an environment
-  ${c.info('destroy')} [env]            Tear down an existing environment
-  ${c.info('backup')} [env]             Create, list, or download database backups
-  ${c.info('restore')} [env]            Restore database from backup
-  ${c.info('failover')} [env]           Initiate failover to standby region
-  ${c.info('scale')} [env]              Scale worker nodes and instance sizes
-
-${c.bold('DEBUG COMMANDS')}
-  ${c.info('shell')} [env]              Interactive bash with KUBECONFIG + cloud credentials exported
-  ${c.info('diagnose')} [env]           Dump full cluster state (nodes, pods, Flux, network) to ~/.vibecarbon/diag-*
-  ${c.info('console')} <node>           Open the cloud provider's web console for a node (last-resort kernel-boot debug)
-  ${c.info('access')} [subcommand]      Manage SSH + k8s-API operator-CIDR allowlist
-
-${c.bold('LICENSE COMMANDS')}
-  ${c.info('activate')} [key]           Bind a license key to this project
-  ${c.info('deactivate')}               Release the license from this project (confirmed by email)
+${renderCommandList(rows)}
 
 ${c.bold('GLOBAL FLAGS')}
   ${c.dim('-h')}    Show help for a command
@@ -223,7 +199,7 @@ async function main() {
 
   // Handle no arguments
   if (args.length === 0) {
-    showHelp();
+    await showHelp();
     process.exit(0);
   }
 
@@ -237,7 +213,7 @@ async function main() {
   // Top-level help / version. Single-dash only — `--help` falls through
   // to the unknown-command branch, matching the per-command flag policy.
   if (command === '-h') {
-    showHelp();
+    await showHelp();
     process.exit(0);
   }
 
