@@ -211,26 +211,6 @@ async function probePublicHealth(
 }
 
 /**
- * Where the SERVING cluster's kubeconfig lives. Exported for unit tests.
- *
- * HA deploys split into kubeconfig-<env>-primary / -standby; standalone uses
- * just kubeconfig-<env>. The cluster that decides whether the domain serves
- * is the one holding the PRIMARY ROLE — and stacks keep their birth names
- * while roles flip at failover (envConfig.ha.primary.stack is the role
- * pointer), so "prefer the -primary FILE" is only right until the first
- * failover. d4 run 7 RCA (2026-08-28): during the post-failover reconverge,
- * the health probe's ACME watchdog keyed off the -primary file and inspected
- * the DEMOTED cluster — all certs Ready, nothing to repair — while the
- * SERVING (`-standby`-named) cluster's invalid Order sat unrepairable for
- * the probe's whole 20-minute budget. Follow the role first; fall back to
- * the old file preference for configs that never recorded one. Returns the
- * standalone path when nothing exists so the caller surfaces a
- * file-not-found rather than a silent skip.
- *
- * @param {string} environment
- * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
- */
-/**
  * Apply the browser-upload CORS rule to the app bucket. Runs on EVERY deploy,
  * outside the skippable s3-setup step, so deployments that predate the rule
  * (or whose rule was edited out-of-band) converge on re-run; the PUT is
@@ -298,6 +278,26 @@ export function assertBucketReady(result, role) {
   );
 }
 
+/**
+ * Where the SERVING cluster's kubeconfig lives. Exported for unit tests.
+ *
+ * HA deploys split into kubeconfig-<env>-primary / -standby; standalone uses
+ * just kubeconfig-<env>. The cluster that decides whether the domain serves
+ * is the one holding the PRIMARY ROLE — and stacks keep their birth names
+ * while roles flip at failover (envConfig.ha.primary.stack is the role
+ * pointer), so "prefer the -primary FILE" is only right until the first
+ * failover. d4 run 7 RCA (2026-08-28): during the post-failover reconverge,
+ * the health probe's ACME watchdog keyed off the -primary file and inspected
+ * the DEMOTED cluster — all certs Ready, nothing to repair — while the
+ * SERVING (`-standby`-named) cluster's invalid Order sat unrepairable for
+ * the probe's whole 20-minute budget. Follow the role first; fall back to
+ * the old file preference for configs that never recorded one. Returns the
+ * standalone path when nothing exists so the caller surfaces a
+ * file-not-found rather than a silent skip.
+ *
+ * @param {string} environment
+ * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
+ */
 export function resolveKubeconfigPath(environment, envConfig) {
   const roleStack = envConfig?.ha?.primary?.stack;
   const candidates = [
