@@ -147,7 +147,7 @@ describe('Project Scaffolding Integration', () => {
     });
 
     it('init migration uses super_admin in RLS', () => {
-      const migrationPath = join(TEMPLATE_DIR, 'supabase/migrations/00001_init.sql');
+      const migrationPath = join(TEMPLATE_DIR, 'db/migrations/00001_init.sql');
       const content = readFileSync(migrationPath, 'utf-8');
 
       // Verify is_super_admin function checks for super_admin

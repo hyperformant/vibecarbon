@@ -25,7 +25,7 @@ These are wrappers around the `npm` scripts listed below; use whichever you pref
 | `npm run dev:reset` | Remove containers, volumes, and built images (run `npm run dev:start` to restart) |
 | `npm run docker:up` | Start Supabase and infrastructure services |
 | `npm run docker:down` | Stop all Docker services |
-| `npm run db:migrate` | Run SQL migrations from `supabase/migrations/` |
+| `npm run db:migrate` | Run SQL migrations from `db/migrations/` |
 | `npm run build` | Build client (Vite) and server (esbuild) for production |
 | `npm run lint` | Biome linting and formatting check |
 | `npm run lint:fix` | Auto-fix lint and formatting issues |
@@ -40,7 +40,7 @@ These are wrappers around the `npm` scripts listed below; use whichever you pref
 `npm run dev:start` runs three phases in sequence:
 
 1. **Docker startup**: starts PostgreSQL, Kong, PostgREST, Realtime, Studio, Traefik, and a local S3 service (SeaweedFS) for file uploads. Blocks until all services are healthy.
-2. **Migrations**: executes all SQL files in `supabase/migrations/` to set up the schema and RLS policies. The API server creates the admin user (`ADMIN_EMAIL` / `ADMIN_PASSWORD`) when it starts.
+2. **Migrations**: executes all SQL files in `db/migrations/` to set up the schema and RLS policies. The API server creates the admin user (`ADMIN_EMAIL` / `ADMIN_PASSWORD`) when it starts.
 3. **Dev servers**: spawns two processes in parallel:
    - **Hono API** on port 3000 via `tsx watch` (auto-restarts on file changes)
    - **Vite** on port 5173 with full HMR (instant browser updates)

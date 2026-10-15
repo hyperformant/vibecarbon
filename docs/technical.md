@@ -222,7 +222,7 @@ At startup the server checks that the connection role bypasses RLS and is a memb
 Policies target `app_user` and read the caller from `app.user_id()`:
 
 ```sql
--- supabase/migrations/00001_init.sql
+-- db/migrations/00001_init.sql
 
 -- Organizations table
 CREATE TABLE organizations (

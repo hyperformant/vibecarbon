@@ -499,7 +499,7 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   'backup/',
   'ha/',
   'k8s/',
-  'supabase/',
+  'db/',
   'cloud-init/',
   'volumes/',
   // Docs and metadata

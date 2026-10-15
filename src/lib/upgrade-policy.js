@@ -88,7 +88,8 @@ const MERGE_PATTERNS = [
 const NEVER_PATTERNS = [
   'src/**',
   'content/**',
-  'supabase/**',
+  'db/migrations/**',
+  'db/seed.sql',
   '.env',
   '.env.local',
   '.env.example',

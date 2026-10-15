@@ -2735,7 +2735,7 @@ export async function installSupabase({
 }
 
 /**
- * Apply the project's `supabase/migrations/*.sql` against the chart-installed
+ * Apply the project's `db/migrations/*.sql` against the chart-installed
  * supabase-postgres pod. Runs each file in lexicographic order via
  * `kubectl exec -i ... psql -U supabase_admin -d postgres`. Errors per file
  * are surfaced — unlike compose's `|| true` swallow — so a broken migration
@@ -2748,7 +2748,7 @@ export async function installSupabase({
  */
 export async function applyMigrations({ kubeconfig, projectDir }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const migrationsDir = join(projectDir, 'supabase', 'migrations');
+  const migrationsDir = join(projectDir, 'db', 'migrations');
   if (!existsSync(migrationsDir)) {
     // Project has no migrations directory — skip silently. Matches compose
     // behaviour (which `|| true`'s past a missing dir).

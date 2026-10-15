@@ -15,7 +15,7 @@ import {
 } from 'drizzle-orm/pg-core';
 
 /**
- * Drizzle mirror of the tables in supabase/migrations/.
+ * Drizzle mirror of the tables in db/migrations/.
  *
  * The SQL migrations are the source of truth: they own constraints, indexes,
  * foreign keys, triggers and every RLS policy. This file only describes the

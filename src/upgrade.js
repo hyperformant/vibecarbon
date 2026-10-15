@@ -99,7 +99,7 @@ const SPEC = {
     'Files are classified into three categories:',
     "  Safe    Auto-replaced if you haven't modified them",
     '  Merge   Always shown for review (docker-compose.yml, package.json, etc.)',
-    '  Never   Your code, never touched (src/**, supabase/**, .env, etc.)',
+    '  Never   Your code, never touched (src/**, db/migrations/**, .env, etc.)',
   ].join('\n'),
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },

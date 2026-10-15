@@ -242,7 +242,7 @@ export async function setupServerFiles(host, sshKeyPath, projectName, options = 
       'mkdir',
       '-p',
       `${remoteDir}/volumes/db`,
-      `${remoteDir}/supabase/migrations`,
+      `${remoteDir}/db/migrations`,
     ],
     { silent: true, ignoreError: true },
   );
@@ -290,15 +290,15 @@ export async function setupServerFiles(host, sshKeyPath, projectName, options = 
     }
   }
 
-  // Copy supabase migrations directory
-  const migrationsDir = join(cwd, 'supabase', 'migrations');
+  // Copy the migrations directory
+  const migrationsDir = join(cwd, 'db', 'migrations');
   if (existsSync(migrationsDir)) {
     await scpWithRetry(
       [
         ...sshOpts.split(' '),
         '-r',
         `${migrationsDir}/*`,
-        `root@${host}:${remoteDir}/supabase/migrations/`,
+        `root@${host}:${remoteDir}/db/migrations/`,
       ],
       { ignoreError: true }, // handle the 2>/dev/null || true semantics
     );

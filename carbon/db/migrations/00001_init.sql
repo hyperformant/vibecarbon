@@ -58,7 +58,7 @@ GRANT USAGE ON SCHEMA public, app TO app_user;
 GRANT EXECUTE ON FUNCTION app.user_id() TO app_user;
 
 -- Table access is broad on purpose: RLS (enabled on every table below) is
--- the boundary, exactly as it was for the old `authenticated` role.
+-- the boundary.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
@@ -69,7 +69,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 -- deploy, and a blanket re-grant would re-open the server-only SECURITY
 -- DEFINER functions (lockout, cron log, crawler rollup) until each file's
 -- REVOKE ran again. Every such function MUST `REVOKE EXECUTE ... FROM PUBLIC,
--- anon, authenticated, app_user` in the migration that creates it.
+-- app_user` in the migration that creates it.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT EXECUTE ON FUNCTIONS TO app_user;
 
@@ -195,24 +195,26 @@ ALTER TABLE account ENABLE ROW LEVEL SECURITY;
 ALTER TABLE verification ENABLE ROW LEVEL SECURITY;
 ALTER TABLE two_factor ENABLE ROW LEVEL SECURITY;
 
--- Server-only: revoke every request role, including what the GRANT ON ALL
--- TABLES above (re-run on every deploy) and the default privileges just gave
--- app_user. anon/authenticated/service_role are the PostgREST roles (it still
--- serves `public` through Kong, and the service key would otherwise read
--- password hashes and session tokens there); metabase gets default SELECT on
--- public tables when the analytics service is enabled.
+-- Server-only: revoke every role that is neither a superuser nor RLS-bypass,
+-- including what the GRANT ON ALL TABLES above (re-run on every deploy) and
+-- the default privileges just gave app_user. Role-agnostic on purpose: the
+-- loop also catches roles the database image or an optional service creates
+-- (metabase gets default SELECT on public tables), so only the owner and the
+-- connection role behind adminDb can read password hashes and session tokens.
+-- Postgres' predefined pg_* roles are operator grants and are left alone.
 REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;
 DO $$
 DECLARE
   r TEXT;
 BEGIN
-  FOREACH r IN ARRAY ARRAY['app_user', 'anon', 'authenticated', 'service_role', 'metabase'] LOOP
-    IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = r) THEN
-      EXECUTE format(
-        'REVOKE ALL ON TABLE public."user", public.session, public.account, public.verification, public.two_factor FROM %I',
-        r
-      );
-    END IF;
+  FOR r IN
+    SELECT rolname FROM pg_catalog.pg_roles
+    WHERE NOT rolsuper AND NOT rolbypassrls AND rolname NOT LIKE 'pg\_%'
+  LOOP
+    EXECUTE format(
+      'REVOKE ALL ON TABLE public."user", public.session, public.account, public.verification, public.two_factor FROM %I',
+      r
+    );
   END LOOP;
 END
 $$;
@@ -575,10 +577,10 @@ CREATE POLICY "Users can view their own customer records"
   );
 
 -- No client INSERT policy on `customers`: every customer row is created
--- server-side by getOrCreateCustomer via the service-role client (which
--- bypasses RLS), exactly like `subscriptions`. A client INSERT policy here was
--- needless write surface on a billing table — it let any authenticated user
--- POST /rest/v1/customers with an arbitrary stripe_customer_id (squatting a
+-- server-side by getOrCreateCustomer through adminDb (which bypasses RLS),
+-- exactly like `subscriptions`. A client INSERT policy here was needless write
+-- surface on a billing table: it let any signed-in user insert a customer row
+-- with an arbitrary stripe_customer_id (squatting a
 -- not-yet-created provider id to break a victim's future checkout via the
 -- UNIQUE constraint). Dropped; recreated on every deploy as a no-op.
 DROP POLICY IF EXISTS "Users can create customer records for themselves" ON customers;
@@ -601,7 +603,7 @@ CREATE POLICY "Users can view their own subscriptions"
 -- The two notification read policies split on whether the request carries a
 -- user id: both target app_user, so the id check is what keeps an anonymous
 -- request from seeing 'authenticated'-only notifications (and a signed-in one
--- from seeing 'public'-only ones, matching the old anon/authenticated split).
+-- from seeing 'public'-only ones).
 DROP POLICY IF EXISTS "Authenticated users can view relevant notifications" ON notifications;
 CREATE POLICY "Authenticated users can view relevant notifications"
   ON notifications FOR SELECT
@@ -821,14 +823,14 @@ AS $$
 $$;
 
 -- These functions are called server-side only (adminDb, which bypasses RLS).
--- Revoke execution from every request role (app_user, and the legacy
--- PostgREST roles anon/authenticated) to prevent abuse.
-REVOKE EXECUTE ON FUNCTION check_account_lockout(TEXT, INET, INTEGER, INTEGER) FROM PUBLIC, anon, authenticated, app_user;
-REVOKE EXECUTE ON FUNCTION record_failed_login(TEXT, INET) FROM PUBLIC, anon, authenticated, app_user;
-REVOKE EXECUTE ON FUNCTION clear_failed_logins(TEXT, INET) FROM PUBLIC, anon, authenticated, app_user;
-REVOKE EXECUTE ON FUNCTION admin_unlock_account(TEXT) FROM PUBLIC, anon, authenticated, app_user;
-REVOKE EXECUTE ON FUNCTION cleanup_old_login_attempts(INTEGER) FROM PUBLIC, anon, authenticated, app_user;
-REVOKE EXECUTE ON FUNCTION get_locked_accounts(INTEGER, INTEGER) FROM PUBLIC, anon, authenticated, app_user;
+-- Revoke execution from the request role (app_user) and PUBLIC, so only the
+-- owner and the connection role behind adminDb can run them.
+REVOKE EXECUTE ON FUNCTION check_account_lockout(TEXT, INET, INTEGER, INTEGER) FROM PUBLIC, app_user;
+REVOKE EXECUTE ON FUNCTION record_failed_login(TEXT, INET) FROM PUBLIC, app_user;
+REVOKE EXECUTE ON FUNCTION clear_failed_logins(TEXT, INET) FROM PUBLIC, app_user;
+REVOKE EXECUTE ON FUNCTION admin_unlock_account(TEXT) FROM PUBLIC, app_user;
+REVOKE EXECUTE ON FUNCTION cleanup_old_login_attempts(INTEGER) FROM PUBLIC, app_user;
+REVOKE EXECUTE ON FUNCTION get_locked_accounts(INTEGER, INTEGER) FROM PUBLIC, app_user;
 
 -- ============================================================================
 -- TRIGGERS

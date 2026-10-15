@@ -61,7 +61,7 @@ src/
 │   └── lib/                 # auth.ts (isSuperAdmin), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
 ├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
 content/                     # MDX content (blog/, changelog/, docs/)
-supabase/migrations/         # SQL migrations (run with npm run db:migrate)
+db/migrations/               # SQL migrations (run with npm run db:migrate)
 ```
 
 ### API Routes
@@ -168,7 +168,7 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
 
 ### Adding a Database Table
 
-1. Create migration in `supabase/migrations/` with:
+1. Create migration in `db/migrations/` with:
    - Table with `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`, `created_at`, `updated_at`
    - Index on foreign key columns
    - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` **in the same migration** (PostgREST still serves `/rest/v1`, so an un-RLS'd `public` table is public)
@@ -380,12 +380,12 @@ Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-spli
 - **MUST** use `(SELECT app.user_id())` in RLS policies, not bare `app.user_id()` — the subquery form prevents the query planner from re-evaluating per row. User requests run as role `app_user` with `app.user_id` set for the transaction (`NULL` when anonymous); `auth.uid()` is never set on that path, so a policy reading it silently matches nothing
 - **MUST** read roles in policies via `is_super_admin()`, which reads the caller's server-controlled `"user".role` (SECURITY DEFINER, since `app_user` cannot read the auth tables)
 - **NEVER** add a policy or grant for `app_user` on the auth tables (`user`, `session`, `account`, `verification`, `two_factor`): they hold password hashes, session tokens and TOTP secrets. Expose what a user may see through a server route
-- **MUST** `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated, app_user` on any `SECURITY DEFINER` function not meant for direct client RPC (functions get `app_user` EXECUTE by default privileges) — PostgREST exposes `public` functions at `/rest/v1/rpc/<name>`, and SECURITY DEFINER bypasses RLS
+- **MUST** `REVOKE EXECUTE ... FROM PUBLIC, app_user` on any `SECURITY DEFINER` function meant only for the server (functions get `app_user` EXECUTE by default privileges, and SECURITY DEFINER bypasses RLS), so only `adminDb` can call it
 - **MUST** use `SECURITY DEFINER` + `SET search_path = ''` on all helper functions used in RLS policies
 - **NEVER** disable RLS on existing tables
 - **NEVER** use `USING (true)` as a policy for user data — every table needs real ownership checks
 - **NEVER** add an `app_user` `INSERT`/`UPDATE` policy on a table written only by the server (e.g. billing `customers`/`subscriptions`) — leave it server-only (`adminDb`) rather than opening needless write surface
-- **NEVER** grant direct table access to `anon`, `authenticated`, or `app_user` beyond what RLS policies allow
+- **NEVER** grant direct table access to `app_user` beyond what RLS policies allow
 
 ### RLS Helper Functions
 

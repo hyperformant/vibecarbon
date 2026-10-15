@@ -205,8 +205,8 @@ function makeProjectDir({
     // (an empty migrations dir makes applyMigrations a silent no-op
     // regardless of the standby gate, which would make the assertion
     // vacuous).
-    mkdirSync(join(dir, 'supabase', 'migrations'), { recursive: true });
-    writeFileSync(join(dir, 'supabase', 'migrations', '0001_init.sql'), 'select 1;\n');
+    mkdirSync(join(dir, 'db', 'migrations'), { recursive: true });
+    writeFileSync(join(dir, 'db', 'migrations', '0001_init.sql'), 'select 1;\n');
   }
   if (withStandbyOverlay) {
     // installSupabase (Task 4) requires this overlay whenever role ===

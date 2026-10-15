@@ -230,9 +230,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./volumes/db/wal-archive.sh:/etc/postgresql/wal-archive.sh:ro,Z
-      - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/98-roles.sql:Z
-      - ./volumes/db/set-passwords.sh:/docker-entrypoint-initdb.d/zz-set-passwords.sh:Z
-      - ./supabase/migrations:/migrations:ro
+      - ./db/migrations:/migrations:ro
     networks:
       - vibecarbon-network
 

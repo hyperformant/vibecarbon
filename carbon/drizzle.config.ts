@@ -3,7 +3,7 @@ import { defineConfig } from 'drizzle-kit';
 import { resolveDbPort } from './src/server/db/port';
 
 // drizzle-kit is a schema tool here, not a migration runner. The SQL files in
-// supabase/migrations/ stay the source of truth (`npm run db:migrate` applies
+// db/migrations/ stay the source of truth (`npm run db:migrate` applies
 // them); src/server/db/schema.ts mirrors them for typed queries, and
 // tests/db/schema-drift.test.ts fails if the two disagree.
 //

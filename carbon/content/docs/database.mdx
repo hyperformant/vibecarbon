@@ -10,7 +10,7 @@ Your application runs on PostgreSQL. The browser never talks to the database: it
 
 ## Schema Overview
 
-The initial migration (`supabase/migrations/00001_init.sql`) creates the following tables:
+The initial migration (`db/migrations/00001_init.sql`) creates the following tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -28,7 +28,7 @@ The initial migration (`supabase/migrations/00001_init.sql`) creates the followi
 
 ## Migrations
 
-SQL migrations live in `supabase/migrations/`. Run them with:
+SQL migrations live in `db/migrations/`. Run them with:
 
 ```bash
 npm run db:migrate
@@ -47,7 +47,7 @@ npm run db:migrate
 Create a migration file with the table, index, RLS policies, and trigger:
 
 ```sql
--- supabase/migrations/00002_my_table.sql
+-- db/migrations/00002_my_table.sql
 
 CREATE TABLE IF NOT EXISTS my_table (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

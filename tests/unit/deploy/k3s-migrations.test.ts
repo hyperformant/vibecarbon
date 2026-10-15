@@ -40,7 +40,7 @@ const k3sModulePromise = import('../../../src/lib/deploy/k8s/k3s.js');
 
 function makeProject(): string {
   const projectDir = mkdtempSync(join(tmpdir(), 'vc-mig-'));
-  mkdirSync(join(projectDir, 'supabase', 'migrations'), { recursive: true });
+  mkdirSync(join(projectDir, 'db', 'migrations'), { recursive: true });
   return projectDir;
 }
 
@@ -59,8 +59,8 @@ describe('applyMigrations (PR 1C)', () => {
     }) as unknown as typeof spawn);
 
     const projectDir = makeProject();
-    writeFileSync(join(projectDir, 'supabase', 'migrations', '00002_b.sql'), '-- 2nd');
-    writeFileSync(join(projectDir, 'supabase', 'migrations', '00001_a.sql'), '-- 1st');
+    writeFileSync(join(projectDir, 'db', 'migrations', '00002_b.sql'), '-- 2nd');
+    writeFileSync(join(projectDir, 'db', 'migrations', '00001_a.sql'), '-- 1st');
 
     await applyMigrations({ kubeconfig: '/tmp/kc', projectDir });
 
@@ -112,14 +112,14 @@ describe('applyMigrations (PR 1C)', () => {
     );
 
     const projectDir = makeProject();
-    writeFileSync(join(projectDir, 'supabase', 'migrations', '00001_init.sql'), 'BAD SQL;');
+    writeFileSync(join(projectDir, 'db', 'migrations', '00001_init.sql'), 'BAD SQL;');
 
     await expect(applyMigrations({ kubeconfig: '/tmp/kc', projectDir })).rejects.toThrow(
       /00001_init\.sql/,
     );
   });
 
-  it('skips silently when supabase/migrations does not exist', async () => {
+  it('skips silently when db/migrations does not exist', async () => {
     const { applyMigrations } = await k3sModulePromise;
     const { spawn } = await import('node:child_process');
     const mocked = vi.mocked(spawn);

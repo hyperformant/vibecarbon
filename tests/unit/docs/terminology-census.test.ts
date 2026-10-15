@@ -264,7 +264,7 @@ describe('terminology census', () => {
     // cover both or it proves nothing about the surface that would actually
     // host it. Scoped to code directories on purpose: the name legitimately
     // survives in a historical migration comment
-    // (carbon/supabase/migrations/00005_localization_languages.sql), which
+    // (carbon/db/migrations/00005_localization_languages.sql), which
     // records the move away from the mechanism and must not trip this.
     const codeFiles = [
       ...walkJsFiles(join(ROOT, 'src')),

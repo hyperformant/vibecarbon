@@ -1,5 +1,13 @@
 import { execSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
@@ -85,7 +93,7 @@ describe('create-vibecarbon E2E', () => {
         'src/client/pages',
         'src/client/lib',
         'src/shared',
-        'supabase/migrations',
+        'db/migrations',
         'volumes/db',
       ];
 
@@ -248,8 +256,14 @@ describe('create-vibecarbon E2E', () => {
       }
     });
 
-    it('generates migration files', () => {
-      expect(existsSync(join(projectDir(), 'supabase/migrations/00001_init.sql'))).toBe(true);
+    it('scaffolds every template migration and the seed file', () => {
+      // The whole of carbon/db/migrations, not just 00001: a scaffold missing
+      // later template migrations ships code whose schema never gets created
+      // (docs/rca/2026-08-25-migration-drift.md).
+      const template = readdirSync(join(process.cwd(), 'carbon/db/migrations')).sort();
+      expect(template.length).toBeGreaterThan(1);
+      expect(readdirSync(join(projectDir(), 'db/migrations')).sort()).toEqual(template);
+      expect(existsSync(join(projectDir(), 'db/seed.sql'))).toBe(true);
     });
 
     it('ships the test-seed scaffolding (tiered vitest setup + helpers)', () => {

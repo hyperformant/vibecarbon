@@ -1130,9 +1130,9 @@ export async function runMigrations(ip, sshKeyPath, projectName) {
     ip,
     sshKeyPath,
     `cd ${remoteDir} && ` +
-      `for f in $(ls supabase/migrations/ 2>/dev/null | sort); do ` +
+      `for f in $(ls db/migrations/ 2>/dev/null | sort); do ` +
       `echo "[migrate] applying $f"; ` +
-      `cat "supabase/migrations/$f" | docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction || ` +
+      `cat "db/migrations/$f" | docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction || ` +
       `{ echo "[migrate] FAILED applying $f" >&2; exit 1; }; ` +
       `done`,
     { timeout: 300_000 },

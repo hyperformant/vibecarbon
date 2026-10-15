@@ -472,7 +472,7 @@ async function startComposeStack(ctx) {
 /**
  * Apply app migrations. Shipped-bug guard: the inlined
  * single-compose path once skipped this and shipped an EMPTY app schema.
- * runMigrations waits for supabase_admin, applies each supabase/migrations/*
+ * runMigrations waits for supabase_admin, applies each db/migrations/*
  * with ON_ERROR_STOP=1 (a real failure aborts the deploy), runs the two
  * ground-truth audits against the live system — RLS (rls-audit.js) and wal-g
  * backups (walg-audit.js), each of which FAILS the deploy.

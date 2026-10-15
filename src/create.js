@@ -747,8 +747,7 @@ async function bootstrap(cliArgs) {
     'src/client/pages',
     'src/client/lib',
     'src/shared',
-    'supabase/migrations',
-    'db',
+    'db/migrations',
     'public',
     'backup',
     'volumes/db',
@@ -850,12 +849,6 @@ async function bootstrap(cliArgs) {
   await tick();
 
   s.message('Generating backend files');
-  copyTemplate('volumes/db/roles.sql', join(projectDir, 'volumes/db/roles.sql'), variables);
-  copyTemplate(
-    'volumes/db/set-passwords.sh',
-    join(projectDir, 'volumes/db/set-passwords.sh'),
-    variables,
-  );
   // wal-archive.sh is postgres's archive_command. It was missing from this copy
   // list, so scaffolds shipped no source file — Docker then bind-mounted an
   // empty DIRECTORY at /etc/postgresql/wal-archive.sh and postgres failed
@@ -893,12 +886,6 @@ async function bootstrap(cliArgs) {
   // explicitly opts in. Direct deploy is the default; shipping the workflow
   // files in fresh projects would silently flip ciAvailable() and force
   // every deploy through GitHub Actions.
-  copyTemplate(
-    'supabase/migrations/00001_init.sql',
-    join(projectDir, 'supabase/migrations/00001_init.sql'),
-    variables,
-  );
-  copyTemplate('supabase/seed.sql', join(projectDir, 'supabase/seed.sql'), variables);
   // Copy entire src directory (server, client, shared)
   copyTemplateDir('src', join(projectDir, 'src'), variables);
 
@@ -915,7 +902,9 @@ async function bootstrap(cliArgs) {
   // Blog content
   copyTemplateDir('content', join(projectDir, 'content'), variables);
 
-  // Custom database files (WAL-G Dockerfile)
+  // Database files: every migration (db/migrations/), seed.sql and the WAL-G
+  // Dockerfile. The whole directory, so a scaffold gets every template
+  // migration, not just 00001 (docs/rca/2026-08-25-migration-drift.md).
   copyTemplateDir('db', join(projectDir, 'db'), variables);
 
   // Kubernetes manifests (exclude optional features like n8n - they're added via `vibecarbon add`)
@@ -935,7 +924,6 @@ async function bootstrap(cliArgs) {
   // Make shell scripts executable
   const shellScripts = [
     'docker-entrypoint.sh',
-    'volumes/db/set-passwords.sh',
     // Postgres execs this directly as its archive_command, so it MUST be +x.
     // copyTemplate (copyFileSync) drops the source's exec bit, and omitting it
     // here shipped a 0644 script → archive_command failed with exit 126 ("not

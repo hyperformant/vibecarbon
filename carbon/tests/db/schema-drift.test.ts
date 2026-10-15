@@ -6,7 +6,7 @@ import * as schema from '@server/db/schema';
 import { connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
- * src/server/db/schema.ts mirrors supabase/migrations/ by hand. If a migration
+ * src/server/db/schema.ts mirrors db/migrations/ by hand. If a migration
  * renames or drops a column the Drizzle mirror still names, queries fail at
  * runtime; this catches it at test time instead. It also fails when a public
  * table has no Drizzle definition at all, so a new migration cannot ship a

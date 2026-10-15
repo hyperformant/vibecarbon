@@ -32,9 +32,8 @@ const fileMounts = [...new Set(composeSources)].filter((p) =>
 
 describe('compose file bind-mount sources', () => {
   it('found the known mounts (sanity — regex still matches the compose files)', () => {
-    expect(fileMounts.length).toBeGreaterThanOrEqual(3);
+    expect(fileMounts.length).toBeGreaterThanOrEqual(1);
     expect(fileMounts).toContain('volumes/db/wal-archive.sh');
-    expect(fileMounts).toContain('volumes/db/roles.sql');
   });
 
   it.each(fileMounts)('%s is scaffolded by create.js', (rel) => {

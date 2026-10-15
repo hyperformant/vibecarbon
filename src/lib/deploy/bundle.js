@@ -403,9 +403,9 @@ export function renderBundle(projectName, options = {}) {
     }
   };
 
+  // db/ carries the migrations (db/migrations/) along with the db image files.
   copyDirIfExist('db', 'db');
   copyDirIfExist('volumes/db', 'volumes/db');
-  copyDirIfExist('supabase/migrations', 'supabase/migrations');
 
   // volumes/traefik/ — dynamic-config directory mounted into Traefik.
   // Always ensure the dir exists in the bundle so Traefik's file provider

@@ -70,7 +70,7 @@ const QUALIFIED_PROBE_TABLE = `public.${REPL_PROBE_TABLE}`;
  * statement batch. Belt #1 against the deploy-time RLS audit
  * (src/lib/deploy/rls-audit.js), which fails any warm-deploy/restore/
  * reconverge that finds a public table with RLS disabled. supabase_admin is
- * a postgres SUPERUSER (carbon/volumes/db/roles.sql), and superusers always
+ * a postgres SUPERUSER (the db image's own init creates it), and superusers always
  * bypass RLS regardless of table ownership or FORCE ROW LEVEL SECURITY — so
  * enabling RLS here never blocks the probe's own reads/writes, which all run
  * as supabase_admin.

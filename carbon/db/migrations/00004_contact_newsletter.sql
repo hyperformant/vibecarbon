@@ -26,12 +26,11 @@ CREATE POLICY "Super admins can manage contact submissions"
   ON public.contact_submissions FOR ALL
   USING (public.is_super_admin());
 
--- SECURITY: No direct-client (anon/authenticated) write policy exists on this
--- table. The public contact form POSTs to /api/v1/newsletter/../contact, which
--- writes via the server's service_role client (BYPASSRLS) — see
--- routes/v1/contact.ts. A permissive `WITH CHECK (true)` INSERT policy would let
--- ANY logged-in user (authenticated holds table INSERT grant, roles.sql) inject
--- rows straight into PostgREST with no legitimate purpose. The DROP below is kept
+-- SECURITY: No user-request (app_user) write policy exists on this table. The
+-- public contact form POSTs to /api/v1/contact, which writes through adminDb
+-- (the BYPASSRLS connection role), see routes/v1/contact.ts. A permissive
+-- `WITH CHECK (true)` INSERT policy would let ANY user request (app_user holds
+-- the table INSERT grant, 00001) inject rows with no legitimate purpose. The DROP below is kept
 -- (without a matching CREATE) so re-applying this migration scrubs any
 -- previously-created permissive policy.
 DROP POLICY IF EXISTS "Anyone can submit contact form" ON public.contact_submissions;
@@ -67,21 +66,21 @@ CREATE POLICY "Super admins can manage newsletter subscribers"
   ON public.newsletter_subscribers FOR ALL
   USING (public.is_super_admin());
 
--- SECURITY: No direct-client (anon/authenticated) write policy exists on this
--- table. The ENTIRE newsletter lifecycle is server-mediated via the service_role
--- client (BYPASSRLS) in routes/v1/newsletter.ts:
+-- SECURITY: No user-request (app_user) write policy exists on this table. The
+-- ENTIRE newsletter lifecycle is server-mediated through adminDb (BYPASSRLS) in
+-- routes/v1/newsletter.ts:
 --   - subscribe  -> adminDb.upsert(...)   (double opt-in, server-set token)
 --   - confirm    -> adminDb.update(...).eq('confirmation_token', token)
 --   - unsubscribe-> adminDb.update(...).eq('email', email)
 -- The previous `FOR UPDATE USING (true) WITH CHECK (true)` policy was
--- world-writable: because `authenticated` holds a table-level UPDATE grant
--- (roles.sql), any logged-in user could PATCH /rest/v1/newsletter_subscribers
--- directly and blind-overwrite EVERY subscriber row (status, email, token).
+-- world-writable: because app_user holds a table-level UPDATE grant (00001),
+-- any user request could blind-overwrite EVERY subscriber row (status, email,
+-- token).
 -- The previous `FOR INSERT WITH CHECK (true)` policy was equally unscoped and let
 -- anyone inject rows / bypass double opt-in — with no legitimate use, since real
--- signups insert via service_role. Both are removed. The DROPs are kept (without
+-- signups insert through adminDb. Both are removed. The DROPs are kept (without
 -- matching CREATEs) so re-applying this migration scrubs any previously-created
--- permissive policy. Legitimate access remains: service_role (server) bypasses
+-- permissive policy. Legitimate access remains: adminDb (server) bypasses
 -- RLS; super admins use the "Super admins can manage" policy above.
 DROP POLICY IF EXISTS "Anyone can subscribe to newsletter" ON public.newsletter_subscribers;
 DROP POLICY IF EXISTS "Anyone can confirm or unsubscribe" ON public.newsletter_subscribers;

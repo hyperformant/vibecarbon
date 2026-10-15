@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
  * class cannot silently return in a future migration edit.
  */
 
-const MIGRATIONS_DIR = join(process.cwd(), 'carbon/supabase/migrations');
+const MIGRATIONS_DIR = join(process.cwd(), 'carbon/db/migrations');
 
 function allMigrationsSql(): string {
   return readdirSync(MIGRATIONS_DIR)
@@ -102,14 +102,15 @@ describe('Auth tables are server-only', () => {
     const tableList =
       'public."user", public.session, public.account, public.verification, public.two_factor';
     expect(sql).toContain(`REVOKE ALL ON TABLE ${tableList} FROM %I`);
-    // app_user (the request role), anon/authenticated (PostgREST), service_role
-    // (PostgREST with the service key, still served until the Supabase services
-    // go) and metabase (default SELECT on public tables). Dropping any one
-    // re-exposes password hashes and session tokens to that role.
-    const roles = sql.match(/FOREACH r IN ARRAY ARRAY\[([^\]]*)\]/)?.[1] ?? '';
-    for (const role of ['app_user', 'anon', 'authenticated', 'service_role', 'metabase']) {
-      expect(roles, `${role} missing from the auth-table revoke`).toContain(`'${role}'`);
-    }
+    // Every role that is neither superuser nor RLS-bypass, so app_user,
+    // metabase (default SELECT on public tables) and any role the image or an
+    // optional service creates. A fixed list would miss a role it never named
+    // and re-expose password hashes and session tokens to it.
+    const loop = sql.match(
+      /FOR r IN\s+SELECT rolname FROM pg_catalog\.pg_roles\s+WHERE ([^\n]*)/,
+    )?.[1];
+    expect(loop, 'auth-table revoke loop not found').toBeDefined();
+    expect(loop).toMatch(/NOT rolsuper AND NOT rolbypassrls/);
     expect(sql).toContain(
       'REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;',
     );
@@ -145,8 +146,18 @@ describe('RLS: policies read the request identity from app.user_id()', () => {
     expect(code).not.toMatch(/auth\.jwt\(\)/i);
   });
 
-  it('no policy targets the PostgREST roles anon/authenticated', () => {
-    expect(sql).not.toMatch(/CREATE POLICY[^;]*\bTO\s+(anon|authenticated)\b/i);
+  it('no grant, revoke or policy names a role that plain Postgres lacks', () => {
+    // The migrations must apply on a stock postgres image, where only
+    // postgres, app_user and the optional service roles exist. Comments,
+    // quoted identifiers and string literals ('authenticated' is a
+    // notification visibility value) are stripped before the check.
+    const code = sql.replace(/--.*$/gm, '');
+    const statements = [
+      ...code.matchAll(/\b(?:GRANT|REVOKE|CREATE POLICY|ALTER DEFAULT PRIVILEGES)\b[^;]*;/gi),
+    ].map((m) => m[0].replace(/'[^']*'|"[^"]*"/g, ''));
+    const foreign = /\b(anon|authenticated|service_role|authenticator|pgbouncer|supabase_\w+)\b/i;
+    const bad = statements.filter((st) => foreign.test(st));
+    expect(bad, `statements naming a missing role: ${bad.join(' | ')}`).toEqual([]);
   });
 
   it('defines app_user (NOLOGIN), app.user_id(), and grants app_user to the connection role', () => {
@@ -171,9 +182,9 @@ describe('RLS: policies read the request identity from app.user_id()', () => {
 });
 
 describe('RLS: SECURITY DEFINER RPC surface is locked down', () => {
-  it('log_cron_job is revoked from public/anon/authenticated', () => {
+  it('log_cron_job is revoked from PUBLIC', () => {
     expect(sql).toMatch(
-      /REVOKE EXECUTE ON FUNCTION\s+(?:public\.)?log_cron_job[^;]*FROM[^;]*\b(anon|PUBLIC)\b/i,
+      /REVOKE EXECUTE ON FUNCTION\s+(?:public\.)?log_cron_job[^;]*FROM[^;]*\bPUBLIC\b/i,
     );
   });
 

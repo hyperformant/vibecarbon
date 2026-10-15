@@ -14,7 +14,7 @@
 -- URLs collapse to the literal '<other>'), so primary-key cardinality is
 -- days x crawlers x known-routes, and both tables age out on a schedule.
 --
--- Writes come exclusively from the server's service_role client
+-- Writes come exclusively from the server's adminDb
 -- (src/server/middleware/crawler-tracking.ts) and from the pg_cron rollup.
 -- Nothing here stores an IP address or any other personal data.
 -- =============================================================================
@@ -46,11 +46,10 @@ CREATE POLICY "Super admins can read crawler hits"
   USING (public.is_super_admin());
 
 -- SECURITY: there is deliberately NO INSERT/UPDATE/DELETE policy on this table.
--- The `authenticated` role holds a blanket table-level INSERT/UPDATE/DELETE
--- grant (volumes/db/roles.sql), so RLS is the only gate — any permissive write
--- policy would let any logged-in user POST /rest/v1/crawler_hits directly and
+-- app_user holds a blanket table-level INSERT/UPDATE/DELETE grant (00001), so
+-- RLS is the only gate: any permissive write policy would let any user request
 -- forge dashboard data or grow the table without bound (storage DoS). Real
--- writes go through the server's service_role client, which bypasses RLS.
+-- writes go through the server's adminDb, which bypasses RLS.
 
 -- ========== DAILY ROLLUP ==========
 
@@ -77,8 +76,8 @@ CREATE POLICY "Super admins can read crawler hit rollups"
   USING (public.is_super_admin());
 
 -- SECURITY: no client write policy here either — same reasoning as above. The
--- rollup runs as `postgres` via pg_cron / as service_role via the admin Jobs
--- route, both of which bypass RLS.
+-- rollup runs as `postgres` via pg_cron and through adminDb from the admin
+-- Jobs route, both of which bypass RLS.
 
 DROP TRIGGER IF EXISTS update_crawler_hits_daily_updated_at ON public.crawler_hits_daily;
 CREATE TRIGGER update_crawler_hits_daily_updated_at
@@ -88,7 +87,7 @@ CREATE TRIGGER update_crawler_hits_daily_updated_at
 -- =============================================================================
 -- Rollup function
 --
--- Aggregation can't be expressed through PostgREST, so both the nightly cron
+-- Aggregation lives in SQL, so both the nightly cron
 -- job and the admin panel's manual "run now" button call this one function.
 -- Recomputing a whole day and upserting makes it idempotent: running it twice
 -- (or re-running an old day) produces the same counts, never doubled ones.
@@ -130,15 +129,10 @@ END;
 $$;
 
 -- This SECURITY DEFINER function reads and writes tables that are super-admin
--- read-only under RLS. PostgREST exposes every `public` function at
--- /rest/v1/rpc/<name>, so without this REVOKE any anon/authenticated caller
--- could rewrite the rollup table at will. Only the server (service_role) and
--- pg_cron (postgres, the owner) may run it.
-REVOKE EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) FROM PUBLIC, anon, authenticated, app_user;
--- roles.sql's `GRANT ALL ON ALL ROUTINES` ran at DB init, before this function
--- existed, and its ALTER DEFAULT PRIVILEGES covers tables/sequences only — so
--- service_role needs an explicit grant here for the admin Jobs trigger to work.
-GRANT EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) TO service_role;
+-- read-only under RLS. app_user gets EXECUTE on new functions by default, so
+-- without this REVOKE any user request could rewrite the rollup table at will.
+-- Only the server (adminDb) and pg_cron (postgres, the owner) may run it.
+REVOKE EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) FROM PUBLIC, app_user;
 
 -- =============================================================================
 -- Scheduled jobs (pattern: 00003_pg_cron.sql)

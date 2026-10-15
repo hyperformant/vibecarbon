@@ -61,12 +61,12 @@ $$;
 
 -- This SECURITY DEFINER function bypasses RLS on cron_job_history (super-admin
 -- read-only). The pg_cron jobs run it as `postgres` and the admin Jobs route
--- calls it via the service role, so end users must NOT reach it: without this
--- REVOKE, PostgREST exposes it and any anon/authenticated caller could POST
--- /rest/v1/rpc/log_cron_job to inject fabricated "system" rows the admin panel
--- presents as trusted job output (log spoofing) and grow the table unbounded
--- (storage DoS; pruned only weekly). Matches the failed-login lockdown pattern.
-REVOKE EXECUTE ON FUNCTION public.log_cron_job(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated, app_user;
+-- calls it through adminDb, so end users must NOT reach it: without this
+-- REVOKE, a user request (app_user, which gets EXECUTE on new functions by
+-- default) could inject fabricated "system" rows the admin panel presents as
+-- trusted job output (log spoofing) and grow the table unbounded (storage
+-- DoS; pruned only weekly). Matches the failed-login lockdown pattern.
+REVOKE EXECUTE ON FUNCTION public.log_cron_job(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, app_user;
 
 -- =============================================================================
 -- Scheduled job list for the admin Jobs page
@@ -89,7 +89,7 @@ AS $$
 $$;
 
 -- Server-only, like log_cron_job: no end-user role may enumerate the jobs.
-REVOKE EXECUTE ON FUNCTION public.get_cron_jobs() FROM PUBLIC, anon, authenticated, app_user;
+REVOKE EXECUTE ON FUNCTION public.get_cron_jobs() FROM PUBLIC, app_user;
 
 -- =============================================================================
 -- Schedule default jobs

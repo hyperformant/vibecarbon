@@ -38,7 +38,7 @@ src/shared/          # Shared TypeScript types between client and server
 - `docker-compose.yml` - Local dev with full Supabase stack
 - `docker-compose.prod.yml` - Production overlay
 - `k8s/` - Kubernetes manifests with Kustomize overlays (includes HA overlays for multi-region)
-- `supabase/migrations/` - SQL migration files
+- `db/migrations/` - SQL migration files
 
 ### Template Database Access Rules (CRITICAL)
 - **`withUserDb(user.id, (tx) => ...)`** (`carbon/src/server/db/client.ts`): one transaction as role `app_user` with `app.user_id` set, so RLS scopes every statement. The default for anything done for a user (`null` for anonymous).
@@ -73,7 +73,7 @@ When your changes affect documented behavior, update the relevant `.md` files in
 ## Engineering Standards
 
 ### Database Migrations
-1. **Always create a new timestamped migration file**: `supabase/migrations/YYYYMMDDHHMMSS_descriptive_name.sql`
+1. **Always create a new timestamped migration file**: `db/migrations/YYYYMMDDHHMMSS_descriptive_name.sql`
 2. **Every table MUST have RLS enabled in the SAME migration**: `ALTER TABLE table_name ENABLE ROW LEVEL SECURITY;` — user requests rely on it inside `withUserDb`, and PostgREST still serves `/rest/v1`, so an un-RLS'd `public` table is internet-readable/writable.
 3. **Every table MUST have appropriate RLS policies** restricting access via `(SELECT app.user_id())` (subquery form) and the org helpers. Every `UPDATE`/`INSERT` policy needs a `WITH CHECK` that mirrors the full scope of its `USING` (a narrower `WITH CHECK` on a tenant column = cross-tenant takeover). Role checks read `app_metadata` (`is_super_admin()`), never `user_metadata`.
 4. **Include both UP logic in the migration** - write migrations that are safe to re-run where possible

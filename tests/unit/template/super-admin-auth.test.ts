@@ -31,7 +31,7 @@ describe('isSuperAdmin (carbon/src/server/lib/auth.ts)', () => {
 
   it('is an exact match on user.role, like SQL is_super_admin()', () => {
     expect(src).toContain("return user.role === 'super_admin';");
-    const sql = read('carbon/supabase/migrations/00001_init.sql');
+    const sql = read('carbon/db/migrations/00001_init.sql');
     expect(sql).toMatch(/u\.role = 'super_admin'/);
   });
 

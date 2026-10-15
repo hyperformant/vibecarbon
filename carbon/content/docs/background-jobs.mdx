@@ -31,7 +31,7 @@ Super admins can view and manage jobs from **Admin > Jobs**:
 To add a new scheduled job, create a new SQL migration:
 
 ```sql
--- supabase/migrations/XXXXXX_my_custom_job.sql
+-- db/migrations/XXXXXX_my_custom_job.sql
 
 SELECT cron.schedule(
   'my-job-name',           -- unique job name

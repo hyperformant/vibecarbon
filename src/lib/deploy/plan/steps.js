@@ -66,7 +66,7 @@ export const startComposeStackStep = () =>
   defineStep({ name: 'start-compose-stack', effect: 'startComposeStack' });
 
 /**
- * Apply supabase/migrations/* + the two ground-truth audits (RLS, wal-g
+ * Apply db/migrations/* + the two ground-truth audits (RLS, wal-g
  * backups) (shipped-bug guard). Either audit fails the step.
  */
 export const runMigrationsStep = () =>

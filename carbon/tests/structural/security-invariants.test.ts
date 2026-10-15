@@ -20,7 +20,7 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf-8');
 const exists = (rel: string) => existsSync(join(ROOT, rel));
 
 function allMigrationsSql(): string {
-  const dir = join(ROOT, 'supabase', 'migrations');
+  const dir = join(ROOT, 'db', 'migrations');
   if (!existsSync(dir)) return '';
   return readdirSync(dir)
     .filter((f) => f.endsWith('.sql'))

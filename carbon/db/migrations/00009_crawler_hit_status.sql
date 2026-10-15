@@ -47,5 +47,4 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) FROM PUBLIC, anon, authenticated, app_user;
-GRANT EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.rollup_crawler_hits(DATE) FROM PUBLIC, app_user;
