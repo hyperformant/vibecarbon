@@ -27,6 +27,7 @@ import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
+import { completionSummaryLines, entryIpFor } from './completion-summary.js';
 import { assertNoComposeHaRoleSwap } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
@@ -1823,7 +1824,18 @@ export async function executeDeployment(args, gatheredConfig) {
 
   const { formatted: timeStr } = tracker.finish();
   p.log.success(`Deployment to ${c.bold(environment)} complete! ${c.dim(`(${timeStr})`)}`);
-  if (domain) p.log.info(`URL: ${c.info(`https://${domain}`)}`);
+  p.note(
+    formatCommandNote(
+      completionSummaryLines({
+        environment,
+        domain,
+        dnsProvider,
+        entryIp: entryIpFor(deployResult),
+        servers,
+      }),
+    ),
+    'Your app is live',
+  );
 
   // Terminal state reached: config persisted, DR gate cleared. Disarm the
   // silent-success guard so a clean exit-0 is accepted as a real success.
