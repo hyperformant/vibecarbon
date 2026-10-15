@@ -62,18 +62,6 @@ spec:
             secretKeyRef:
               name: vibecarbon-secrets
               key: DB_PASSWORD
-        - name: SUPABASE_URL
-          value: http://kong:8000
-        - name: SUPABASE_ANON_KEY
-          valueFrom:
-            secretKeyRef:
-              name: vibecarbon-secrets
-              key: ANON_KEY
-        - name: SUPABASE_SERVICE_ROLE_KEY
-          valueFrom:
-            secretKeyRef:
-              name: vibecarbon-secrets
-              key: SERVICE_ROLE_KEY
         - name: N8N_SECURE_COOKIE
           value: 'true'
         volumeMounts:

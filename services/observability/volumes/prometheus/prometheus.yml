@@ -16,14 +16,6 @@ scrape_configs:
     static_configs:
       - targets: ['postgres-exporter:9187']
 
-  # Kong API Gateway metrics
-  # Note: Requires Kong prometheus plugin to be enabled
-  - job_name: 'kong'
-    static_configs:
-      - targets: ['kong:8001']
-    metrics_path: '/metrics'
-    scrape_interval: 30s
-
   # n8n workflow automation (if enabled)
   # n8n exposes metrics at /metrics when N8N_METRICS=true
   - job_name: 'n8n'

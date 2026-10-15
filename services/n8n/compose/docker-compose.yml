@@ -34,16 +34,13 @@ services:
       - DB_POSTGRESDB_USER=n8n
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
 
-      # Supabase Integration (for workflows)
-      # Use these in your n8n workflows to connect to your app's backend
-      - SUPABASE_URL=http://kong:8000
-      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
-      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
-      - SUPABASE_DB_HOST=db
-      - SUPABASE_DB_PORT=5432
-      - SUPABASE_DB_NAME=postgres
-      - SUPABASE_DB_USER=supabase_admin
-      - SUPABASE_DB_PASSWORD=${POSTGRES_PASSWORD}
+      # App database (for workflows)
+      # Admin access to your app's data, for the n8n Postgres node
+      - APP_DB_HOST=db
+      - APP_DB_PORT=5432
+      - APP_DB_NAME=postgres
+      - APP_DB_USER=postgres
+      - APP_DB_PASSWORD=${POSTGRES_PASSWORD}
 
       # Queue mode (requires Redis — added automatically with n8n)
       - EXECUTIONS_MODE=queue

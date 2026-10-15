@@ -1,13 +1,13 @@
-# n8n Integration with Supabase
+# n8n Integration with your app database
 
-This guide shows how to connect n8n workflows to your Vibecarbon application's Supabase backend.
+This guide shows how to connect n8n workflows to your Vibecarbon application's database.
 
 ## Overview
 
 n8n is pre-configured with:
 - Dedicated PostgreSQL database (`n8n`) for workflow storage
-- Environment variables for easy Supabase integration
-- Network access to all your app's services
+- Environment variables for connecting workflows to your app's database
+- Network access to your app's services
 
 ## Quick Start
 
@@ -23,50 +23,49 @@ open http://n8n.localhost
 
 **Login:** Use your admin email and the password set during project creation. In development, n8n uses its own built-in authentication (ForwardAuth SSO only applies in production).
 
-### 2. Use Supabase in Workflows
+### 2. Use your app database in workflows
 
-n8n has the following environment variables available:
+On Docker Compose, n8n has these environment variables available:
 
 ```bash
-SUPABASE_URL=http://kong:8000          # Internal Supabase API Gateway
-SUPABASE_ANON_KEY=your_anon_key        # Public API key
-SUPABASE_SERVICE_ROLE_KEY=your_key     # Admin API key
-SUPABASE_DB_HOST=db                    # Direct database access
-SUPABASE_DB_PORT=5432
-SUPABASE_DB_NAME=postgres
-SUPABASE_DB_USER=postgres
-SUPABASE_DB_PASSWORD=your_password
+APP_DB_HOST=db
+APP_DB_PORT=5432
+APP_DB_NAME=postgres
+APP_DB_USER=postgres
+APP_DB_PASSWORD=your_password
 ```
+
+These give workflows admin access to your app's data. Row-level security does not apply to them, so treat any workflow that uses them as trusted code.
+
+On Kubernetes these variables are not set. Add a Postgres credential in n8n yourself (host `vibecarbon-postgres`, port `5432`), ideally with a role that has only the access your workflows need.
 
 ## Example Workflows
 
-### Example 1: Query Supabase Database
+### Example 1: Query the database
 
 Use the **Postgres** node:
 
 ```
 Connection Settings:
-- Host: {{$env.SUPABASE_DB_HOST}}
-- Port: {{$env.SUPABASE_DB_PORT}}
-- Database: {{$env.SUPABASE_DB_NAME}}
-- User: {{$env.SUPABASE_DB_USER}}
-- Password: {{$env.SUPABASE_DB_PASSWORD}}
+- Host: {{$env.APP_DB_HOST}}
+- Port: {{$env.APP_DB_PORT}}
+- Database: {{$env.APP_DB_NAME}}
+- User: {{$env.APP_DB_USER}}
+- Password: {{$env.APP_DB_PASSWORD}}
 
 Query:
 SELECT * FROM users WHERE created_at > NOW() - INTERVAL '1 day';
 ```
 
-### Example 2: Call Supabase REST API
+### Example 2: Call your app's API
 
 Use the **HTTP Request** node:
 
 ```
 Method: POST
-URL: {{$env.SUPABASE_URL}}/rest/v1/todos
+URL: http://app:3000/api/todos
 
 Headers:
-- apikey: {{$env.SUPABASE_SERVICE_ROLE_KEY}}
-- Authorization: Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}
 - Content-Type: application/json
 
 Body (JSON):
@@ -76,11 +75,11 @@ Body (JSON):
 }
 ```
 
-### Example 3: Listen to Supabase Webhooks
+### Example 3: Receive webhooks
 
 1. Create a **Webhook** node in n8n
 2. Copy the webhook URL (e.g., `http://localhost:5678/webhook/my-webhook`)
-3. In Supabase (or your app), configure a webhook to call this URL
+3. In your app, configure a webhook to call this URL
 
 ### Example 4: Trigger on Database Changes
 
@@ -121,7 +120,7 @@ Action 3: Send email (Email node)
 ```
 Trigger: Webhook (from external service)
 Action 1: Transform data (Code node)
-Action 2: Insert into Supabase (HTTP Request or Postgres node)
+Action 2: Insert into your database (Postgres node)
 Action 3: Notify users (Push notification)
 ```
 
@@ -131,8 +130,8 @@ Action 3: Notify users (Push notification)
 
 Instead of hardcoding credentials, always use:
 ```
-{{$env.SUPABASE_URL}}
-{{$env.SUPABASE_SERVICE_ROLE_KEY}}
+{{$env.APP_DB_USER}}
+{{$env.APP_DB_PASSWORD}}
 ```
 
 ### 2. Error Handling
@@ -145,11 +144,10 @@ Use the **Manual Trigger** node during development.
 
 ### 4. Security
 
-- Use `SUPABASE_SERVICE_ROLE_KEY` only for admin operations
-- Use `SUPABASE_ANON_KEY` for public operations
-- Never expose service role key in client-side workflows
+- `APP_DB_*` is admin access to your app's data, so keep those workflows private
+- Prefer a narrower database role for workflows that only need a few tables
+- Never put database credentials in client-facing workflows
 
 ## Learn More
 
 - [n8n Documentation](https://docs.n8n.io/)
-- [Supabase API Reference](https://supabase.com/docs/reference/javascript/introduction)
