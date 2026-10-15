@@ -30,7 +30,6 @@ import {
   runConfigCanaryChecks,
 } from '../checks/config-canary.js';
 import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
-import { runEdgeFunctionChecks } from '../checks/feature-functions.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
@@ -53,7 +52,6 @@ import {
   writeReplicationMarker,
 } from '../checks/replication.js';
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
-import { runSupavisorPoolerChecks } from '../checks/supavisor-pooler.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
 import {
@@ -248,12 +246,10 @@ const TIMEOUTS: Record<string, number> = {
 const EXPECTED_VERIFY_FAILURES: Record<string, Partial<Record<StepName, string[]>>> = {};
 
 // ---------------------------------------------------------------------------
-// .env.local key parser
+// .env.local admin credentials
 // ---------------------------------------------------------------------------
 
-interface SupabaseKeys {
-  anonKey: string;
-  serviceRoleKey: string;
+interface AdminCredentials {
   /** Admin credentials for the auth_admin_login check; absent on older bundles. */
   adminEmail?: string;
   adminPassword?: string;
@@ -262,54 +258,22 @@ interface SupabaseKeys {
 }
 
 /**
- * Read Supabase keys from the project's .env.local file — deliberately
+ * Read the admin credentials from the project's .env.local file — deliberately
  * `.env.local` ONLY (never `.env`): that is where `create.js` writes every
- * Supabase/admin secret for a scaffolded project, so there is no second file
- * to layer against `readEnvFiles`.
- * Looks for SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY (the names the
- * generator writes; the bare ANON_KEY / SERVICE_ROLE_KEY forms are read for
- * older bundles). Only the services Kong still fronts (PostgREST, Realtime)
- * use them: the app and its auth API read none. Plus ADMIN_EMAIL/
- * ADMIN_PASSWORD so the functional checks can verify the operator can
- * actually log into their deployed app as the super-admin.
+ * admin secret for a scaffolded project, so there is no second file to layer
+ * against `readEnvFiles`. ADMIN_EMAIL/ADMIN_PASSWORD let the functional checks
+ * verify the operator can actually log into their deployed app as the
+ * super-admin. Null only when the file cannot be read.
  */
-function readSupabaseKeys(projectDir: string): SupabaseKeys | null {
+function readAdminCredentials(projectDir: string): AdminCredentials | null {
   try {
     const envPath = join(projectDir, '.env.local');
     const vars = parseDotenv(readFileSync(envPath, 'utf-8'));
-
-    const anonKey = vars.SUPABASE_ANON_KEY ?? vars.ANON_KEY ?? '';
-    const serviceRoleKey = vars.SERVICE_ROLE_KEY ?? vars.SUPABASE_SERVICE_ROLE_KEY ?? '';
-    const adminEmail = vars.ADMIN_EMAIL ?? '';
-    const adminPassword = vars.ADMIN_PASSWORD ?? '';
-
-    if (!anonKey || !serviceRoleKey) return null;
     return {
-      anonKey,
-      serviceRoleKey,
-      adminEmail: adminEmail || undefined,
-      adminPassword: adminPassword || undefined,
+      adminEmail: vars.ADMIN_EMAIL || undefined,
+      adminPassword: vars.ADMIN_PASSWORD || undefined,
       smtpConfigured: smtpConfiguredFromEnv(vars),
     };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Read POSTGRES_PASSWORD from the scaffolded project's `.env.local` — the
- * supavisor-pooler check needs it to authenticate as the tenant user
- * (postgres.<PROJECT_NAME>) through the pooler. `.env.local`-only, same
- * reason as readSupabaseKeys above; like it, a duplicated key now resolves
- * last-wins (parseDotenv) where the old line scan took the first — create
- * never writes the key twice.
- */
-function readPostgresPassword(projectDir: string): string | null {
-  try {
-    const value = parseDotenv(
-      readFileSync(join(projectDir, '.env.local'), 'utf-8'),
-    ).POSTGRES_PASSWORD;
-    return value || null;
   } catch {
     return null;
   }
@@ -1293,7 +1257,7 @@ export async function runLifecycle(
   // one scenario live without interleaving with the others in a parallel run.
 
   // Cache for values resolved after deploy
-  let supabaseKeys: SupabaseKeys | null = null;
+  let adminCreds: AdminCredentials | null = null;
   let serverIps: string[] = [];
   let sshKeyPath: string | null = null;
 
@@ -1503,7 +1467,7 @@ export async function runLifecycle(
     // while spa_auth_callback, auth_signin, auth_admin_login, db_schema and
     // storage_upload hit the DEMOTED node (app tier deliberately stopped) and
     // failed. None of the failing request ids appeared in the promoted node's
-    // Kong access log; everything healed at TTL expiry.
+    // proxy access log; everything healed at TTL expiry.
     //
     // Inside this pin every HTTP check dials the promoted node directly while
     // keeping the domain as Host + TLS SNI, so serving correctness (name-based
@@ -1622,7 +1586,7 @@ export async function runLifecycle(
                   `kubectl get deployment/app -n vibecarbon -o jsonpath='{.spec.template.spec.containers[0].image}' 2>&1 || echo "(no app deployment)"`,
                 );
                 console.log(`${tag} [diag][${label}] deployment/app.image=${appImage}`);
-                // Full deployment+statefulset image table for kong/postgres/etc.
+                // Full deployment+statefulset image table for app/postgres/etc.
                 const deployments = ssh(
                   `kubectl get deployments,statefulsets -n vibecarbon -o wide 2>&1 | head -25 || echo "(no deployments)"`,
                 );
@@ -1718,20 +1682,19 @@ export async function runLifecycle(
           throw new Error(`Domain ${config.domain} did not become healthy within timeout`);
         }
 
-        // Resolve keys if not already cached
-        if (!supabaseKeys) {
-          supabaseKeys = readSupabaseKeys(config.projectDir);
+        // Resolve admin credentials if not already cached
+        if (!adminCreds) {
+          adminCreds = readAdminCredentials(config.projectDir);
         }
-        if (!supabaseKeys) {
-          throw new Error('Could not read Supabase keys from .env.local');
+        if (!adminCreds) {
+          throw new Error('Could not read admin credentials from .env.local');
         }
 
         // Run all check groups
         const allResults: VerificationResult[] = [];
 
-        // Single public origin in every mode: Traefik path-routes the versioned
-        // Supabase prefixes (/rest/v1, /realtime/v1) on
-        // the apex to Kong — there is no api. subdomain. Optional add-ons
+        // Single public origin in every mode: Traefik routes the whole apex to
+        // the app — there is no api. subdomain. Optional add-ons
         // (grafana/n8n/...) still use subdomains on compose, hence isCompose.
         const isCompose = config.mode.startsWith('compose');
         const apiDomain = config.domain;
@@ -1780,7 +1743,7 @@ export async function runLifecycle(
         // DNS-propagation gate for verify-failover: a fast failover (71.6s
         // post apikey-fix, run 2 2026-07-09) can finish before the A-record
         // flip reaches the pinned resolvers — the checks then hit the OLD
-        // scaled-down primary (Kong 502 upstream, "missing" tables) and fail
+        // scaled-down primary (502 upstream, "missing" tables) and fail
         // spuriously. Wait (bounded) until the domain resolves to the promoted
         // IP; both modes rewrite .vibecarbon.json on failover (compose-ha in
         // failoverComposeHA, k8s-ha via swapHaRoles' terminal write), so a
@@ -1877,7 +1840,7 @@ export async function runLifecycle(
         }
 
         // Infrastructure health checks (app endpoint, always on main domain)
-        const healthResults = await runHealthChecks(config.domain, supabaseKeys.anonKey);
+        const healthResults = await runHealthChecks(config.domain);
         allResults.push(...healthResults);
 
         // Evidence for any SSH-unreachability diagnosis raised later in this
@@ -1889,22 +1852,28 @@ export async function runLifecycle(
           healthResults.length > 0 && healthResults.every((r) => r.status === 'pass'),
         );
 
-        // App functional checks (auth, real-schema assertion, DB write
-        // round-trip, file upload round-trip, realtime via Kong path-routed
-        // on the apex)
-        const appResults = await runAppFunctionalChecks(
-          apiDomain,
-          supabaseKeys.anonKey,
-          supabaseKeys.serviceRoleKey,
-          supabaseKeys.adminEmail,
-          supabaseKeys.adminPassword,
-          config.domain,
-          supabaseKeys.smtpConfigured,
-        );
+        // App functional checks (auth, real-schema assertion and DB write
+        // round-trip as direct SQL over SSH, file upload round-trip)
+        const appResults = await runAppFunctionalChecks({
+          domain: config.domain,
+          db:
+            sshCheckMasterIp && sshKeyPath
+              ? {
+                  ip: sshCheckMasterIp,
+                  sshKeyPath,
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  label: 'primary',
+                }
+              : null,
+          adminEmail: adminCreds.adminEmail,
+          adminPassword: adminCreds.adminPassword,
+          smtpConfigured: adminCreds.smtpConfigured,
+        });
         allResults.push(...appResults);
 
         // App API-layer checks — the app's own /api/v1/* Hono routes on the MAIN
-        // domain (distinct from the Kong/api-subdomain surface above). Catches a
+        // domain. Catches a
         // broken app backend that 500s while the platform stays green.
         const appApiResults = await runAppApiChecks(config.domain);
         allResults.push(...appApiResults);
@@ -1966,48 +1935,6 @@ export async function runLifecycle(
           const firewallResults = await runCloudFirewallChecks(fwProvider, fwServers);
           allResults.push(...firewallResults);
         }
-
-        // Supavisor pooler — compose/compose-ha only (k8s ships no pooler),
-        // verify-deploy only. Proves tenant routing through both pooler modes
-        // from inside the rig AND external reachability through the
-        // operator-scoped firewall rules (see checks/supavisor-pooler.ts).
-        // Closes docs/security.md's "not yet covered by an automated
-        // end-to-end test" caveat.
-        if (isCompose && stepName === 'verify-deploy') {
-          const postgresPassword = readPostgresPassword(config.projectDir);
-          if (!postgresPassword) {
-            allResults.push({
-              checkName: 'supavisor_session_tenant_routing',
-              status: 'fail',
-              errorMessage: 'POSTGRES_PASSWORD not found in .env.local — cannot probe the pooler',
-            });
-          } else {
-            const poolerResults = await runSupavisorPoolerChecks({
-              domain: config.domain,
-              masterIp: sshCheckMasterIp,
-              sshKeyPath: sshKeyPath ?? undefined,
-              projectName: config.projectName,
-              postgresPassword,
-              phase: stepName,
-            });
-            allResults.push(...poolerResults);
-          }
-        }
-
-        // Edge-functions runtime health (compose only; SSH-based since :9000
-        // isn't publicly routed). Catches a crash-looping edge-runtime container.
-        // Edge functions are opt-in (off by default in both compose and k8s since
-        // 2026-05-26). Only assert runtime health when a scenario actually enables
-        // them via `--features=functions`; otherwise the container is intentionally
-        // absent and the check self-skips.
-        const edgeResults = await runEdgeFunctionChecks(
-          sshCheckMasterIp,
-          sshKeyPath ?? undefined,
-          config.projectName,
-          isCompose,
-          config.features.includes('functions'),
-        );
-        allResults.push(...edgeResults);
 
         // Feature-specific checks (only if the feature is enabled)
         if (config.features.includes('observability')) {
@@ -3058,7 +2985,7 @@ EOF`;
             // Cache deployment info for subsequent steps
             serverIps = getServerIps(config.projectDir, config.envPrefix);
             sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
-            supabaseKeys = readSupabaseKeys(config.projectDir);
+            adminCreds = readAdminCredentials(config.projectDir);
 
             console.log(`${tag} Deploy complete. Server IPs: [${serverIps.join(', ')}]`);
 
@@ -3772,7 +3699,7 @@ EOF`;
           }
 
           // Refresh server info after restore
-          supabaseKeys = readSupabaseKeys(config.projectDir);
+          adminCreds = readAdminCredentials(config.projectDir);
         }),
     },
 

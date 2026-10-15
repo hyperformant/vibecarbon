@@ -99,14 +99,14 @@ describe('assessStatusJson with a retired compose-ha node', () => {
             'letsgo-prod-standby': {
               kind: 'compose',
               ip: '2.2.2.2',
-              rows: [row('db', 'healthy'), row('app', 'healthy'), row('kong', 'healthy')],
+              rows: [row('db', 'healthy'), row('app', 'healthy'), row('traefik', 'healthy')],
             },
             'letsgo-prod-primary': {
               kind: 'compose',
               ip: '1.1.1.1',
               rows: [
                 row('db', 'healthy'),
-                row('kong', 'healthy'),
+                row('traefik', 'healthy'),
                 ...APP_TIER_RESTART_SERVICES.map((svc) =>
                   row(svc, 'unhealthy', 'exited', 'Exited (0) 2 minutes ago'),
                 ),
@@ -146,7 +146,7 @@ describe('assessStatusJson with a retired compose-ha node', () => {
   it('fails when the retired node has an unlisted container exited', () => {
     const j = composeHa();
     j.environments.prod.checks.containers['letsgo-prod-primary'].rows[1] = row(
-      'kong',
+      'traefik',
       'unhealthy',
       'exited',
       'Exited (128) 2 minutes ago',
@@ -154,7 +154,7 @@ describe('assessStatusJson with a retired compose-ha node', () => {
     expect(assessStatusJson(j, 'prod', { retired })).toMatchObject({
       ok: false,
       retryable: false,
-      problems: ['letsgo-prod-primary: kong exited Exited (128) 2 minutes ago'],
+      problems: ['letsgo-prod-primary: traefik exited Exited (128) 2 minutes ago'],
     });
   });
   it('an allowed container that is unhealthy but not exited still fails on the retired node', () => {
@@ -221,7 +221,7 @@ describe('checkStatusHealth', () => {
   it('fails immediately on a non-retryable problem', async () => {
     const j = structuredClone(green);
     j.environments.prod.checks.containers.p.rows.push(
-      row('kong', 'unhealthy', 'exited', 'Exited (1)'),
+      row('traefik', 'unhealthy', 'exited', 'Exited (1)'),
     );
     const runCli = vi.fn(async () => ({ exitCode: 0, stdout: JSON.stringify(j), stderr: '' }));
     const r = await checkStatusHealth({
@@ -232,7 +232,7 @@ describe('checkStatusHealth', () => {
       runCli: runCli as never,
     });
     expect(r.status).toBe('fail');
-    expect(r.errorMessage).toContain('kong exited Exited (1)');
+    expect(r.errorMessage).toContain('traefik exited Exited (1)');
     expect(runCli).toHaveBeenCalledTimes(1);
   });
   it('fails when the CLI exits non-zero or emits invalid JSON', async () => {

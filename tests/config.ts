@@ -74,8 +74,8 @@ export const testConfig = {
     // Ports required for basic Docker smoke tests (database only)
     requiredPorts: [5432],
 
-    // Additional ports for full stack tests (Kong API gateway)
-    fullStackPorts: [8000],
+    // Local S3 (dev-only SeaweedFS from docker-compose.override.yml)
+    s3Ports: [8333],
 
     // Ports for Traefik reverse proxy (optional - tests skip if unavailable)
     // Note: Dashboard is now protected by admin-auth and accessed via traefik.localhost

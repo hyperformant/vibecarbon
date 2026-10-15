@@ -84,7 +84,7 @@ function timeoutSignal(ms: number): AbortSignal {
  * resolvers (1.1.1.1/8.8.8.8) — the same resolvers every check's dnsSafeFetch
  * uses. verify-failover calls this before its check battery: after a fast
  * failover the A-record flip may not have propagated yet, and the checks
- * would otherwise hit the OLD scaled-down primary (Kong 502 upstream /
+ * would otherwise hit the OLD scaled-down primary (502 upstream /
  * "missing" tables — overnight 2026-07-09 run 2; masked before by the buggy
  * 4m48s readiness-gate stall). Best-effort: returns false on timeout so the
  * caller can proceed and let the checks fail loudly with fresh context.
@@ -331,7 +331,7 @@ function percentile(sorted: number[], p: number): number {
 const REQUEST_TIMEOUT_MS = 10_000;
 
 // Adaptive backoff between health-check retries: fast on the happy path
-// (most failures recover within a couple of seconds once DNS/Kong propagate)
+// (most failures recover within a couple of seconds once DNS propagates)
 // while still tolerating ~35s of cold-start latency. Was 8 fixed retries ×
 // 10s = 80s — over-budget for the typical sub-second recovery.
 //
@@ -476,129 +476,49 @@ async function checkAuthHealth(domain: string): Promise<VerificationResult> {
 }
 
 /**
- * The SPA owns /auth/callback (the page a sign-in lands on after the provider
- * round trip) — routing must send it to the app, NOT to Kong. Only versioned
- * Kong prefixes (/rest/v1, /realtime/v1, ...) belong to Kong; a bare /auth
- * prefix rule would swallow this page and break every OAuth login. Regression
- * probe for the routing-priority contract.
+ * The app owns every path on the apex: Traefik routes `/` to it in every mode
+ * and nothing else sits behind a path prefix. A path the app does not know is
+ * a real 404 rendered by the app (an HTML NotFound page), never a Traefik
+ * "404 page not found" (text/plain, no router matched) and never a 200 soft
+ * 404. `/rest/v1/` is the probe because it is the path a stale gateway route
+ * would still answer: if anything other than the app serves it, the deployed
+ * routing is not the lean stack. Single attempt by design: it runs after
+ * api_health has already proven the app serves this origin.
  */
-async function checkSpaAuthCallback(domain: string): Promise<VerificationResult> {
-  const url = `https://${domain}/auth/callback`;
-  const start = process.hrtime();
-  const MAX_RETRIES = HEALTH_RETRY_DELAYS_MS.length;
-  let lastErr: string | null = null;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await dnsSafeFetch(url);
-      const responseTimeMs = elapsedMs(start);
-      const contentType = res.headers.get('content-type') ?? '';
-      const body = await res.text().catch(() => '');
-
-      if (res.status === 200 && contentType.includes('text/html')) {
-        return {
-          checkName: 'spa_auth_callback',
-          status: 'pass',
-          responseTimeMs,
-          details: { httpStatus: res.status, contentType, attempt },
-        };
-      }
-      lastErr = `Expected 200 text/html (SPA), got ${res.status} ${contentType} — /auth/callback is being swallowed by Kong`;
-      if (attempt === MAX_RETRIES) {
-        return {
-          checkName: 'spa_auth_callback',
-          status: 'fail',
-          responseTimeMs,
-          errorMessage: lastErr,
-          details: {
-            httpStatus: res.status,
-            contentType,
-            body: body.slice(0, 256),
-            attempts: attempt + 1,
-          },
-        };
-      }
-    } catch (err) {
-      lastErr = err instanceof Error ? err.message : String(err);
-      if (attempt === MAX_RETRIES) {
-        return {
-          checkName: 'spa_auth_callback',
-          status: 'fail',
-          responseTimeMs: elapsedMs(start),
-          errorMessage: lastErr,
-          details: { attempts: attempt + 1 },
-        };
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, HEALTH_RETRY_DELAYS_MS[attempt]));
-  }
-
-  return {
-    checkName: 'spa_auth_callback',
-    status: 'fail',
-    responseTimeMs: elapsedMs(start),
-    errorMessage: lastErr ?? 'Exhausted retries',
-  };
-}
-
-async function checkRestApi(domain: string, anonKey?: string): Promise<VerificationResult> {
+export async function checkUnknownPathNotFound(
+  domain: string,
+  fetchFn: typeof dnsSafeFetch = dnsSafeFetch,
+): Promise<VerificationResult> {
   const url = `https://${domain}/rest/v1/`;
   const start = process.hrtime();
-
-  const headers: Record<string, string> = {};
-  if (anonKey) {
-    headers.apikey = anonKey;
-  }
-
-  // Retry on the same DNS/cold-start race as api_health (Kong can come up
-  // after the app router on the shared apex). Adaptive backoff
-  // (HEALTH_RETRY_DELAYS_MS) — fast happy path, ~35s total.
-  const MAX_RETRIES = HEALTH_RETRY_DELAYS_MS.length;
-  let lastErr: Error | null = null;
-  let lastStatus = 0;
-  let lastBody = '';
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await dnsSafeFetch(url, { headers });
-      const responseTimeMs = elapsedMs(start);
-      const body = await res.text().catch(() => '');
-
-      // PostgREST returns 200 (with apikey) or 401 (missing apikey).
-      // Either confirms the endpoint is reachable and PostgREST is running.
-      if (res.status === 200 || res.status === 401) {
-        return {
-          checkName: 'rest_api',
-          status: 'pass',
-          responseTimeMs,
-          details: { httpStatus: res.status, body: body.slice(0, 256), attempt },
-        };
-      }
-      lastStatus = res.status;
-      lastBody = body;
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
+  try {
+    const res = await fetchFn(url);
+    const responseTimeMs = elapsedMs(start);
+    const contentType = res.headers.get('content-type') ?? '';
+    const body = await res.text().catch(() => '');
+    if (res.status === 404 && contentType.includes('text/html')) {
+      return {
+        checkName: 'unknown_path_not_found',
+        status: 'pass',
+        responseTimeMs,
+        details: { httpStatus: res.status, contentType },
+      };
     }
-
-    if (attempt < MAX_RETRIES) {
-      await new Promise((r) => setTimeout(r, HEALTH_RETRY_DELAYS_MS[attempt]));
-    }
+    return {
+      checkName: 'unknown_path_not_found',
+      status: 'fail',
+      responseTimeMs,
+      errorMessage: `Expected the app's HTML 404 for /rest/v1/, got ${res.status} ${contentType || 'without a content type'}`,
+      details: { httpStatus: res.status, contentType, body: body.slice(0, 256) },
+    };
+  } catch (err) {
+    return {
+      checkName: 'unknown_path_not_found',
+      status: 'fail',
+      responseTimeMs: elapsedMs(start),
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
   }
-
-  return {
-    checkName: 'rest_api',
-    status: 'fail',
-    responseTimeMs: elapsedMs(start),
-    errorMessage: lastErr
-      ? `${lastErr.message}${(lastErr as Error & { cause?: unknown }).cause ? ` (cause: ${String((lastErr as Error & { cause?: unknown }).cause)})` : ''}`
-      : `Expected HTTP 200 or 401, got ${lastStatus} after ${MAX_RETRIES + 1} attempts`,
-    details: {
-      httpStatus: lastStatus,
-      body: lastBody.slice(0, 256),
-      attempts: MAX_RETRIES + 1,
-      lastErrorName: lastErr?.name,
-    },
-  };
 }
 
 // Internal sentinel union for checkSslValid: 'retry' means "cert error on the
@@ -754,16 +674,12 @@ export async function checkSslValid(
  * All checks are fault-tolerant -- they catch errors and return a fail status
  * rather than throwing.
  */
-export async function runHealthChecks(
-  domain: string,
-  anonKey?: string,
-): Promise<VerificationResult[]> {
+export async function runHealthChecks(domain: string): Promise<VerificationResult[]> {
   // Run checks concurrently -- they are independent of each other.
   const results = await Promise.all([
     checkApiHealth(domain),
     checkAuthHealth(domain),
-    checkRestApi(domain, anonKey),
-    checkSpaAuthCallback(domain),
+    checkUnknownPathNotFound(domain),
     checkSslValid(domain),
   ]);
 

@@ -237,21 +237,6 @@ export async function waitForPostgres(
   );
 }
 
-/**
- * Wait for Kong to be healthy
- */
-export async function waitForKong(
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options: WaitOptions = {},
-): Promise<boolean> {
-  return waitForDockerCommand(
-    'docker compose exec -T kong kong health',
-    { cwd, env, encoding: 'utf-8' },
-    { label: 'Kong healthy', timeout: testConfig.smoke.timeouts.serviceReady, ...options },
-  );
-}
-
 // =============================================================================
 // DOCKER CLEANUP WITH FALLBACK
 // =============================================================================

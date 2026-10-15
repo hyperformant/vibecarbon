@@ -7,9 +7,7 @@ import {
   arePortsAvailable,
   cleanupDocker,
   fetchWithTimeout,
-  waitForDockerCommand,
   waitForHttpHealth,
-  waitForKong,
   waitForPostgres,
 } from '../../_shared/docker-utils.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
@@ -25,8 +23,7 @@ describeDocker('Docker Services Smoke Test', () => {
   let tempDir: string;
   let projectEnv: Record<string, string>;
   let portsAvailable = false;
-  let fullStackAvailable = false;
-  let realtimeAvailable = false;
+  let s3Available = false;
   let traefikAvailable = false;
   const projectName = 'test-smoke-docker';
   const projectDir = () => join(tempDir, projectName);
@@ -45,12 +42,12 @@ describeDocker('Docker Services Smoke Test', () => {
     }
     portsAvailable = true;
 
-    // Check if full stack ports are available (Kong on 8000)
-    const fullStackCheck = await arePortsAvailable(testConfig.smoke.fullStackPorts);
-    fullStackAvailable = fullStackCheck.available;
-    if (!fullStackAvailable) {
+    // Check if the local S3 port is available (SeaweedFS on 8333, dev-only)
+    const s3Check = await arePortsAvailable(testConfig.smoke.s3Ports);
+    s3Available = s3Check.available;
+    if (!s3Available) {
       console.log(
-        `Full stack tests will be skipped: ports not available (${fullStackCheck.unavailablePorts.join(', ')})`,
+        `Local S3 tests will be skipped: ports not available (${s3Check.unavailablePorts.join(', ')})`,
       );
     }
 
@@ -81,18 +78,12 @@ describeDocker('Docker Services Smoke Test', () => {
     projectEnv.PROJECT_NAME = projectName;
     projectEnv.POSTGRES_PASSWORD = projectEnv.DB_PASSWORD || 'postgres';
 
-    // Determine which services to start based on available ports
-    let services: string[];
-    if (traefikAvailable && fullStackAvailable) {
-      // Full stack with Traefik and app
-      services = ['db', 'kong', 'rest', 'realtime', 'meta', 'traefik', 'app'];
-    } else if (fullStackAvailable) {
-      // Full Supabase stack without Traefik
-      services = ['db', 'kong', 'rest', 'realtime', 'meta'];
-    } else {
-      // Database only
-      services = ['db'];
-    }
+    // The local stack is db, app and traefik, plus the dev-only s3
+    // (SeaweedFS) from docker-compose.override.yml. Start what the free ports
+    // allow; the database is the minimum.
+    const services = ['db'];
+    if (s3Available) services.push('s3');
+    if (traefikAvailable) services.push('traefik', 'app');
 
     execSync(`docker compose up -d ${services.join(' ')}`, {
       cwd: projectDir(),
@@ -105,44 +96,6 @@ describeDocker('Docker Services Smoke Test', () => {
     const dbReady = await waitForPostgres(projectDir(), getExecEnv());
     if (!dbReady) {
       throw new Error('PostgreSQL failed to become ready');
-    }
-
-    // If full stack, wait for Kong and Realtime to be healthy
-    if (fullStackAvailable) {
-      const kongReady = await waitForKong(projectDir(), getExecEnv());
-      if (!kongReady) {
-        throw new Error('Kong failed to become healthy');
-      }
-
-      // Wait for Realtime (Erlang/Elixir runtime is slow to cold-start in CI)
-      // Non-fatal: if Realtime isn't available, only its tests are skipped
-      realtimeAvailable = await waitForDockerCommand(
-        'docker compose exec -T realtime curl -sf http://localhost:4000/',
-        { cwd: projectDir(), env: getExecEnv(), encoding: 'utf-8' },
-        { timeout: testConfig.smoke.timeouts.serviceReady, label: 'Realtime ready' },
-      );
-      if (!realtimeAvailable) {
-        // Dump container state for CI debugging
-        try {
-          const ps = execSync('docker compose ps --format json', {
-            cwd: projectDir(),
-            encoding: 'utf-8',
-            timeout: 10000,
-            env: getExecEnv(),
-          });
-          const containers = ps
-            .trim()
-            .split('\n')
-            .filter(Boolean)
-            .map((l) => JSON.parse(l));
-          const rt = containers.find((c: { Service: string }) => c.Service === 'realtime');
-          console.warn(
-            `[Smoke] Realtime not healthy. State: ${rt?.State ?? 'not found'}, Health: ${rt?.Health ?? 'N/A'}`,
-          );
-        } catch {
-          /* ignore */
-        }
-      }
     }
 
     // If Traefik available, wait for it to be ready
@@ -364,23 +317,12 @@ describeDocker('Docker Services Smoke Test', () => {
   });
 
   // =========================================================================
-  // Full Stack Tests (Kong, Auth, PostgREST)
+  // Local S3 (dev-only SeaweedFS for uploads)
   // =========================================================================
 
-  describe('API Gateway (Kong)', () => {
-    it('is healthy', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose exec -T kong kong health', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-      expect(result).toContain('healthy');
-    });
-
+  describe('Local S3', () => {
     it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
+      if (!s3Available) skip();
       const result = execSync('docker compose ps --format json', {
         cwd: projectDir(),
         encoding: 'utf-8',
@@ -394,62 +336,7 @@ describeDocker('Docker Services Smoke Test', () => {
         .filter((c: { State: string }) => c.State === 'running')
         .map((c: { Service: string }) => c.Service);
 
-      expect(runningServices).toContain('kong');
-    });
-
-    it('responds on port 8000', async ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      // Kong should respond (even if with an error, it means the gateway is up)
-      const response = await fetchWithTimeout('http://localhost:8000/', 5000);
-      expect(response.status).toBeGreaterThan(0);
-    });
-  });
-
-  describe('PostgREST API', () => {
-    it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('rest');
-    });
-
-    it('responds via Kong gateway', async ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      // PostgREST is available at /rest/v1/ through Kong
-      const response = await fetchWithTimeout('http://localhost:8000/rest/v1/', 5000);
-      // Should get a response (401 without auth is expected)
-      expect(response.status).toBeGreaterThan(0);
-    });
-  });
-
-  describe('Realtime', () => {
-    it('container is running', ({ skip }) => {
-      if (!realtimeAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('realtime');
+      expect(runningServices).toContain('s3');
     });
   });
 

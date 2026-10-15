@@ -1,21 +1,20 @@
 /**
  * Application-level functional verification checks.
  *
- * Tests that actual application features (auth, database CRUD, file uploads,
- * realtime) work against a deployed environment. Every check is
- * fault-tolerant — errors are captured, never thrown.
+ * Tests that actual application features (auth, database CRUD, file uploads)
+ * work against a deployed environment. Every check is fault-tolerant — errors
+ * are captured, never thrown.
  */
 
 import crypto from 'node:crypto';
 import type { VerificationResult } from '../scenarios/types.js';
 import { createPresignedTransfer, type PresignedTransfer } from '../utils/presigned-transfer.js';
-import { dnsSafeFetch, resolveCheckIp } from './health.js';
+import { dnsSafeFetch } from './health.js';
+import { type PsqlResult, type ReplTarget, runPsql } from './replication.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-const TIMEOUT_MS = 10_000;
 
 /** fetch() wrapper that bypasses system DNS cache. */
 async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -477,13 +476,13 @@ async function runAuthChecks(
 // Database CRUD checks
 // ---------------------------------------------------------------------------
 
-// Core application tables created by supabase/migrations/00001_init.sql. If
-// any of these is missing from PostgREST's schema cache, the migration didn't
-// run (or PostgREST never reloaded) and every DB-backed feature is broken.
+// Core application tables from the app's Drizzle schema
+// (carbon/src/server/db/schema.ts). If any of these is missing, the migration
+// didn't run and every DB-backed feature is broken.
 // RCA prod-1 2026-05-26: the old check tested a synthetic `e2e_test_table`
 // that no migration creates, so it 404'd and skip()'d to PASS every run —
 // a deploy with 0 application tables sailed through e2e green.
-const CORE_TABLES = [
+export const CORE_TABLES = [
   'notifications',
   'organizations',
   'memberships',
@@ -491,44 +490,59 @@ const CORE_TABLES = [
   'app_settings',
 ] as const;
 
-async function runDbChecks(domain: string, serviceRoleKey: string): Promise<VerificationResult[]> {
-  const results: VerificationResult[] = [];
-  const headers: Record<string, string> = {
-    apikey: serviceRoleKey,
-    Authorization: `Bearer ${serviceRoleKey}`,
-    'Content-Type': 'application/json',
-    Prefer: 'return=representation',
-  };
+/** Runs one single-line SQL statement against the deployed database. */
+export type SqlRunner = (sql: string) => Promise<PsqlResult>;
 
-  // --- db_schema: assert the real app tables exist & are queryable ---------
-  // A `limit=1` read via PostgREST (service role bypasses RLS). 200 proves the
-  // table exists AND PostgREST sees it in its schema cache. 404 (PGRST205) is
-  // the exact prod-1 failure mode. This FAILS — it does not skip.
-  const schemaStart = Date.now();
-  const missing: string[] = [];
-  const tableErrors: Record<string, string> = {};
-  for (const table of CORE_TABLES) {
-    try {
-      const res = await safeFetch(`https://${domain}/rest/v1/${table}?limit=1`, {
-        method: 'GET',
-        headers,
-      });
-      if (res.status === 200) continue;
-      const body = await res.text();
-      // 404 + PGRST205 => table not in schema cache (missing migration or
-      // unreloaded PostgREST). Any other non-200 is also a real problem.
-      missing.push(table);
-      tableErrors[table] = `HTTP ${res.status}: ${body.slice(0, 160)}`;
-    } catch (err) {
-      missing.push(table);
-      tableErrors[table] = err instanceof Error ? err.message : String(err);
-    }
+/** psql -tA output → one trimmed value per non-empty line. */
+function psqlLines(output: string): string[] {
+  return output
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Real-schema assertion + write round-trip, as direct SQL inside the deployed
+ * database (the same SSH + `docker compose exec` / `kubectl exec` path the
+ * replication checks use — see runPsql in ./replication.ts). The app has no
+ * public table API to probe from outside, so the database is asked directly.
+ * `sql` is null when the run has no SSH handle to the database host; both
+ * checks then skip (a skip is never a pass).
+ */
+export async function runDbChecks(sql: SqlRunner | null): Promise<VerificationResult[]> {
+  if (!sql) {
+    return [
+      skip('db_schema', 'Skipped: no SSH handle to the database host'),
+      skip('db_write_roundtrip', 'Skipped: no SSH handle to the database host'),
+    ];
   }
+  const results: VerificationResult[] = [];
+
+  // --- db_schema: assert the real app tables exist -------------------------
+  // One catalog query for all of them. A missing table is the exact prod-1
+  // failure mode. This FAILS — it does not skip.
+  const schemaStart = Date.now();
+  const tableList = CORE_TABLES.map((t) => `'${t}'`).join(',');
+  const schema = await sql(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN (${tableList})`,
+  );
+  if (!schema.ok) {
+    results.push(
+      result('db_schema', 'fail', schemaStart, {
+        errorMessage: `Schema query failed: ${schema.error ?? 'unknown error'}`,
+        details: { checked: CORE_TABLES },
+      }),
+    );
+    results.push(skip('db_write_roundtrip', 'Skipped: schema query failed (see db_schema)'));
+    return results;
+  }
+  const present = new Set(psqlLines(schema.output));
+  const missing = CORE_TABLES.filter((t) => !present.has(t));
   if (missing.length > 0) {
     results.push(
       result('db_schema', 'fail', schemaStart, {
-        errorMessage: `Missing/unqueryable core tables: ${missing.join(', ')} (migrations likely didn't run or PostgREST didn't reload)`,
-        details: { missing, tableErrors, checked: CORE_TABLES },
+        errorMessage: `Missing core tables: ${missing.join(', ')} (migrations likely didn't run)`,
+        details: { missing, checked: CORE_TABLES },
       }),
     );
     // Schema is broken — a CRUD round-trip can't work, so don't muddy the
@@ -541,72 +555,48 @@ async function runDbChecks(domain: string, serviceRoleKey: string): Promise<Veri
   );
 
   // --- db_write_roundtrip: prove insert/query/delete on a REAL table -------
-  // Use notifications with is_active:false so the row is never surfaced to the
-  // public/authenticated notification feed even if cleanup somehow fails.
-  const uid = crypto.randomUUID();
-  const marker = `e2e-probe-${uid}`;
-  const notifUrl = `https://${domain}/rest/v1/notifications`;
+  // notifications with is_active=false so the row is never surfaced to any
+  // notification feed even if cleanup somehow fails. The marker is a UUID, so
+  // the single-quoted literal can never break out of the statement.
+  const marker = `e2e-probe-${crypto.randomUUID()}`;
+  const deleteSql = `DELETE FROM public.notifications WHERE title = '${marker}' RETURNING title`;
   const roundtripStart = Date.now();
-  try {
-    // Insert
-    const insertRes = await safeFetch(notifUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ title: marker, is_active: false, visibility: 'authenticated' }),
-    });
-    if (!insertRes.ok) {
-      const body = await insertRes.text();
-      results.push(
-        result('db_write_roundtrip', 'fail', roundtripStart, {
-          errorMessage: `Insert returned ${insertRes.status}: ${body.slice(0, 200)}`,
-          details: { step: 'insert' },
-        }),
-      );
-      return results;
-    }
+  const fail = (step: string, errorMessage: string): VerificationResult =>
+    result('db_write_roundtrip', 'fail', roundtripStart, { errorMessage, details: { step } });
 
-    // Query
-    const queryRes = await safeFetch(`${notifUrl}?title=eq.${marker}&select=id,title`, {
-      method: 'GET',
-      headers,
-    });
-    const rows = queryRes.ok
-      ? ((await queryRes.json()) as Array<{ id: string; title: string }>)
-      : [];
-    const found = rows.some((r) => r.title === marker);
+  const insert = await sql(
+    `INSERT INTO public.notifications (title, is_active, visibility) VALUES ('${marker}', false, 'authenticated') RETURNING title`,
+  );
+  if (!insert.ok || !psqlLines(insert.output).includes(marker)) {
+    results.push(fail('insert', `Insert failed: ${insert.error ?? insert.output.slice(0, 200)}`));
+    // The INSERT may have committed even if its output was lost in transit.
+    await sql(deleteSql);
+    return results;
+  }
 
-    // Delete (best-effort cleanup, always attempt)
-    await safeFetch(`${notifUrl}?title=eq.${marker}`, { method: 'DELETE', headers }).catch(
-      () => undefined,
+  const query = await sql(`SELECT title FROM public.notifications WHERE title = '${marker}'`);
+  const found = query.ok && psqlLines(query.output).includes(marker);
+  const cleanup = await sql(deleteSql);
+  const deleted = cleanup.ok && psqlLines(cleanup.output).includes(marker);
+
+  if (!found) {
+    results.push(
+      fail('query', `Inserted row not found on read-back${query.error ? `: ${query.error}` : ''}`),
     );
-
-    if (!found) {
-      results.push(
-        result('db_write_roundtrip', 'fail', roundtripStart, {
-          errorMessage: 'Inserted row not found on read-back',
-          details: { step: 'query', rowsReturned: rows.length },
-        }),
-      );
-      return results;
-    }
-
+  } else if (!deleted) {
+    results.push(
+      fail(
+        'delete',
+        `Delete did not remove the probe row${cleanup.error ? `: ${cleanup.error}` : ''}`,
+      ),
+    );
+  } else {
     results.push(
       result('db_write_roundtrip', 'pass', roundtripStart, {
         details: { table: 'notifications', insert: true, query: true, cleanup: true },
       }),
     );
-  } catch (err) {
-    // Best-effort cleanup on unexpected error
-    await safeFetch(`${notifUrl}?title=eq.${marker}`, { method: 'DELETE', headers }).catch(
-      () => undefined,
-    );
-    results.push(
-      result('db_write_roundtrip', 'fail', roundtripStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
-    );
   }
-
   return results;
 }
 
@@ -764,223 +754,39 @@ export async function checkFileUploadRoundtrip(
 }
 
 // ---------------------------------------------------------------------------
-// Realtime check
-// ---------------------------------------------------------------------------
-
-async function runRealtimeCheck(domain: string, anonKey: string): Promise<VerificationResult[]> {
-  // Primary: Try WebSocket connection (requires Node 21+ for global WebSocket).
-  // Fallback: HTTP request to the realtime endpoint via dnsSafeFetch.
-  //
-  // The WebSocket constructor uses dns.lookup() (system resolver), which may
-  // have stale cache entries for newly created domains. Our HTTP checks use
-  // dnsSafeFetch which resolves via Cloudflare/Google DNS, bypassing the cache.
-  // When WebSocket fails, we fall back to HTTP to verify the service is running.
-  //
-  // The WebSocket handshake is therefore the ONE probe here that a
-  // verify-failover resolution pin cannot cover (no lookup hook on the global
-  // WebSocket constructor). It is not a hole: the pin exists so a stale record
-  // can't produce a spurious FAILURE, and a WebSocket that lands on the retired
-  // node simply fails and drops into the PINNED HTTP fallback below, which
-  // decides the check. It can never turn a broken deployment green — a pass
-  // still requires a real response from the node the pin dialed.
-  //
-  // TLS: the WebSocket handshake is the one check with no per-call TLS opt-out
-  // — it uses the process default. That default used to be "verify nothing"
-  // (the runner's NODE_TLS_REJECT_UNAUTHORIZED=0); it is now "system roots plus
-  // the Let's Encrypt staging roots" (tests/e2e/utils/e2e-env.js), so a staging
-  // rig still connects while a bogus certificate no longer does. A cert
-  // rejection here is not fatal — it drops through to the HTTP fallback below,
-  // which reports a pass with a note.
-
-  // Resolve the domain through the shared check seam (pin-aware: under a
-  // verify-failover resolution pin this is the promoted node's IP, so the
-  // precondition can't be satisfied by a stale record pointing at the retired
-  // one). Used only as an existence precondition + a diagnostic detail.
-  const resolvedIp = await resolveCheckIp(domain);
-  if (!resolvedIp) {
-    return [skip('realtime_connect', `DNS not yet resolving for ${domain} — skipped`)];
-  }
-
-  // Try WebSocket first (best proof of realtime working)
-  if (typeof globalThis.WebSocket !== 'undefined') {
-    const wsResult = await tryWebSocket(domain, anonKey);
-    if (wsResult.status === 'pass') {
-      return [wsResult];
-    }
-    // WebSocket failed — fall through to HTTP fallback
-    console.log(`[realtime] WebSocket failed (${wsResult.errorMessage}), trying HTTP fallback...`);
-  }
-
-  // Fallback: verify realtime service is reachable via HTTP (uses dnsSafeFetch
-  // which resolves DNS through Cloudflare/Google, bypassing stale system cache).
-  // Retry on timeout — realtime may take longer to come up after server restarts
-  // (e.g. post-scale reboots).
-  const start = Date.now();
-  // This HTTP fallback only runs when the WebSocket handshake (tried first) fails,
-  // so its whole budget is failure-path. 3×10s=30s rides out a slow post-scale
-  // realtime cold start without doubling the previous 4×15s=60s tail.
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_MS = 10_000;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await safeFetch(
-        `https://${domain}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`,
-        { method: 'GET' },
-      );
-      // The realtime endpoint returns an HTTP upgrade error or a response —
-      // any non-timeout response proves the service is reachable.
-      return [
-        result('realtime_connect', 'pass', start, {
-          details: {
-            method: 'http_fallback',
-            statusCode: res.status,
-            resolvedIp,
-            attempt,
-            note: 'WebSocket DNS failed; HTTP fallback confirmed service reachable',
-          },
-        }),
-      ];
-    } catch (err) {
-      if (attempt < MAX_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-        continue;
-      }
-      return [
-        result('realtime_connect', 'fail', start, {
-          errorMessage: `Both WebSocket and HTTP fallback failed: ${err instanceof Error ? err.message : String(err)}`,
-          details: { attempts: attempt + 1 },
-        }),
-      ];
-    }
-  }
-
-  // Unreachable
-  return [result('realtime_connect', 'fail', start, { errorMessage: 'Exhausted retries' })];
-}
-
-/** Attempt a WebSocket connection to the realtime service. */
-function tryWebSocket(domain: string, anonKey: string): Promise<VerificationResult> {
-  const start = Date.now();
-
-  return new Promise<VerificationResult>((resolve) => {
-    const timer = setTimeout(() => {
-      try {
-        ws.close();
-      } catch {
-        /* best effort */
-      }
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: 'Timed out waiting for Phoenix join reply (10 s)',
-        }),
-      );
-    }, TIMEOUT_MS);
-
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(`wss://${domain}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`);
-    } catch (err) {
-      clearTimeout(timer);
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: err instanceof Error ? err.message : String(err),
-        }),
-      );
-      return;
-    }
-
-    ws.addEventListener('error', (event) => {
-      clearTimeout(timer);
-      try {
-        ws.close();
-      } catch {
-        /* best effort */
-      }
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: 'message' in event ? (event as ErrorEvent).message : 'WebSocket error',
-        }),
-      );
-    });
-
-    ws.addEventListener('open', () => {
-      // Send Phoenix join message
-      const joinMsg = JSON.stringify({
-        topic: 'phoenix',
-        event: 'heartbeat',
-        payload: {},
-        ref: '1',
-      });
-      ws.send(joinMsg);
-    });
-
-    ws.addEventListener('message', (event) => {
-      try {
-        const msg = JSON.parse(typeof event.data === 'string' ? event.data : '') as {
-          ref?: string;
-        };
-        // Any reply to our ref means the realtime server is responsive
-        if (msg.ref === '1') {
-          clearTimeout(timer);
-          ws.close();
-          resolve(result('realtime_connect', 'pass', start));
-        }
-      } catch {
-        // Ignore malformed frames; keep waiting for our reply
-      }
-    });
-
-    ws.addEventListener('close', () => {
-      // If we haven't resolved yet, the connection was closed unexpectedly
-      clearTimeout(timer);
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: 'WebSocket closed before receiving a join reply',
-        }),
-      );
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /**
  * Run all application functional checks against a deployed environment.
- * Returns array of individual check results.
+ * Returns array of individual check results. `db` is the SSH target that
+ * fronts the database (null when the run has no SSH handle).
  */
-export async function runAppFunctionalChecks(
-  domain: string,
-  anonKey: string,
-  serviceRoleKey: string,
-  adminEmail?: string,
-  adminPassword?: string,
-  appDomain: string = domain,
-  smtpConfigured = false,
-): Promise<VerificationResult[]> {
+export async function runAppFunctionalChecks(opts: {
+  domain: string;
+  db: ReplTarget | null;
+  adminEmail?: string;
+  adminPassword?: string;
+  smtpConfigured?: boolean;
+}): Promise<VerificationResult[]> {
+  const { domain, db, adminEmail, adminPassword, smtpConfigured = false } = opts;
   const results: VerificationResult[] = [];
 
   // Run check groups sequentially — auth creates state the others do not
   // depend on, but sequential execution keeps resource usage predictable
   // and makes logs easier to follow during long e2e runs.
-  const auth = await runAuthChecks(appDomain, adminEmail, adminPassword, smtpConfigured);
+  const auth = await runAuthChecks(domain, adminEmail, adminPassword, smtpConfigured);
   results.push(...auth.results);
 
-  const dbResults = await runDbChecks(domain, serviceRoleKey);
-  results.push(...dbResults);
+  results.push(...(await runDbChecks(db ? (sql) => runPsql(db, sql) : null)));
 
   // Uploads are an app feature (presign + read routes on the app domain), so
   // they run as the signed-in throwaway user from the auth checks above.
   results.push(
     auth.jar
-      ? await checkFileUploadRoundtrip(appDomain, auth.jar)
+      ? await checkFileUploadRoundtrip(domain, auth.jar)
       : skip('file_upload_roundtrip', 'Skipped because no signed-in user (auth checks failed)'),
   );
-
-  const realtimeResults = await runRealtimeCheck(domain, anonKey);
-  results.push(...realtimeResults);
 
   return results;
 }

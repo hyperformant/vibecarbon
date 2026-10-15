@@ -351,7 +351,7 @@ export function classifySshExecFailure(
   return { kind, transient };
 }
 
-interface PsqlResult {
+export interface PsqlResult {
   ok: boolean;
   output: string;
   error?: string;
@@ -455,8 +455,12 @@ async function sshExecWithRetry(
   };
 }
 
-/** Run a psql statement on `target` over SSH (retried). Never throws. */
-async function runPsql(target: ReplTarget, sql: string): Promise<PsqlResult> {
+/**
+ * Run a psql statement on `target` over SSH (retried). Never throws. Shared
+ * with the app-functional db checks so every direct-SQL e2e probe reaches the
+ * database the same way (one place to change the role or the pod name).
+ */
+export async function runPsql(target: ReplTarget, sql: string): Promise<PsqlResult> {
   const remote = buildPsqlCommand(target.mode, target.projectName, sql);
   const res = await sshExecWithRetry(target, remote);
   if (res.ok) return { ok: true, output: res.stdout };
