@@ -20,14 +20,6 @@ spec:
         - protocol: TCP
           port: 3000
   egress:
-    # Allow connection to Kong (Supabase API gateway)
-    - to:
-        - podSelector:
-            matchLabels:
-              app: vibecarbon-kong
-      ports:
-        - protocol: TCP
-          port: 8000
     # Allow connection to the database: the API server queries Postgres
     # directly (src/server/db/client.ts). Selects the Supabase chart's db pod
     # by the labels the chart generates (release `supabase`), the same pair
@@ -142,11 +134,3 @@ spec:
       ports:
         - protocol: TCP
           port: 3100
-    # Allow health checks to Studio (for admin services-status API)
-    - to:
-        - podSelector:
-            matchLabels:
-              app: vibecarbon-studio
-      ports:
-        - protocol: TCP
-          port: 3000

@@ -111,14 +111,15 @@ function makeProjectDir({ withStandbyOverlay = false } = {}): string {
   mkdirSync(join(dir, 'k8s/values'), { recursive: true });
   writeFileSync(
     join(dir, 'k8s/values/supabase.values.yaml'),
-    'secret:\n  dashboard:\n    username: {{ADMIN_EMAIL}}\n    password: {{ADMIN_PASSWORD}}\ndomain: {{DOMAIN}}\n',
+    'image:\n  db:\n    repository: {{DB_IMAGE}}\n    tag: {{DB_IMAGE_TAG}}\n',
   );
   if (withStandbyOverlay) {
-    // Mirrors carbon/k8s/values/supabase.standby.values.yaml's shape (Task
-    // 2): scalar replicaCount keys only, no {{PLACEHOLDER}} tokens.
+    // Mirrors carbon/k8s/values/supabase.standby.values.yaml's shape: scalar
+    // maps only (empty while the chart renders only the db), no
+    // {{PLACEHOLDER}} tokens.
     writeFileSync(
       join(dir, 'k8s/values/supabase.standby.values.yaml'),
-      'deployment:\n  auth:\n    replicaCount: 0\n  kong:\n    replicaCount: 0\n',
+      'deployment: {}\npersistence: {}\n',
     );
   }
   return dir;
@@ -127,7 +128,6 @@ function makeProjectDir({ withStandbyOverlay = false } = {}): string {
 const baseArgs = {
   kubeconfig: '/tmp/fake-kubeconfig',
   projectName: 'testproj',
-  domain: 'test.example.com',
   dbImageTag: 'ghcr.io/test/postgres:17-walg1',
   // Required since the storage-class pin — installSupabase refuses to let the
   // chart inherit the cluster default. See k3s-supabase-storage-class.test.ts.
@@ -181,7 +181,7 @@ describe('installSupabase', () => {
     const fIdx = helmUpgrade?.flatMap((a, i) => (a === '-f' ? [i] : [])) ?? [];
     expect(fIdx).toHaveLength(2);
     const overlayContent = helmFileSnapshots[helmUpgrade?.[fIdx[1] + 1] ?? ''];
-    expect(overlayContent).toContain('replicaCount: 0');
+    expect(overlayContent).toContain('deployment: {}');
     expect(overlayContent).not.toMatch(/\{\{/);
   });
 

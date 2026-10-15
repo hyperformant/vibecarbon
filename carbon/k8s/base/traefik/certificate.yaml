@@ -8,7 +8,7 @@
 #   - dnsNames → [domain] for manual (HTTP-01) issuers;
 #                [domain, "*.domain"] for DNS-01 (cloudflare/hetzner) issuers.
 #     DNS-01 allows a wildcard SAN so one cert covers every subdomain
-#     (api, studio, dashboard, grafana, n8n, ...) without separate ACME orders.
+#     (api, dashboard, grafana, n8n, ...) without separate ACME orders.
 #
 # The placeholders below keep this template valid for kustomize; they are
 # overwritten before cert-manager ever sees a Certificate request.

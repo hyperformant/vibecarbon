@@ -43,21 +43,26 @@ describe('single-origin routing: compose prod', () => {
 describe('single-origin routing: k8s ingress', () => {
   const ingress = read('carbon/k8s/base/traefik/ingressroute.yaml');
 
-  it('routes only the VERSIONED Supabase prefixes to kong, on both entrypoints', () => {
-    const rule = 'PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`)';
-    const count = ingress.split(rule).length - 1;
-    expect(count).toBe(2); // websecure + web(redirect)
-    expect(ingress).not.toContain('/storage/v1');
-    expect(ingress).not.toContain('/auth/v1');
+  it('routes no database gateway prefix: every public path is the app', () => {
+    for (const prefix of ['/rest', '/realtime', '/auth', '/storage']) {
+      expect(ingress).not.toContain(`${prefix}/v1`);
+    }
+    // Both entrypoints keep their app catch-all.
+    expect(ingress.split('PathPrefix(`/`)').length - 1).toBe(2); // websecure + web(redirect)
   });
 
-  it('never uses bare (unversioned) Supabase prefixes — the SPA owns /auth/callback', () => {
+  it('routes no admin console from the chart', () => {
+    expect(ingress).not.toMatch(/supabase-supabase-/);
+    expect(ingress).not.toMatch(/PathPrefix\(`\/(_next|project|admin\/studio)`\)/);
+  });
+
+  it('never uses bare (unversioned) gateway prefixes — the SPA owns /auth/callback', () => {
     for (const bare of ['/auth', '/rest', '/realtime', '/storage']) {
       expect(ingress).not.toMatch(new RegExp(`PathPrefix\\(\`${bare}\`\\)`));
     }
   });
 
-  it('never exposes postgres-meta (/pg) publicly', () => {
+  it('never exposes a database-admin path (/pg) publicly', () => {
     expect(ingress).not.toMatch(/PathPrefix\(`\/pg/);
   });
 });

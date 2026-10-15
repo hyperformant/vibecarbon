@@ -433,12 +433,6 @@ describe('applyK3sManifests re-pins the CSI sidecars before Supabase installs', 
 });
 
 describe('every consuming reference resolves through the mirror', () => {
-  it('the local overlay’s placeholder app image is the mirrored pause', () => {
-    expect(read('carbon/k8s/overlays/local/kustomization.yaml')).toContain(
-      `value: ${pauseImageRef()}`,
-    );
-  });
-
   it('the e2e scale-trigger workload builds its image ref from images.js', () => {
     // Not a literal: this file is the one that proves the mirror works on a
     // real node, so it must pull the ref from the same constant the deploy does.

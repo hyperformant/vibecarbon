@@ -31,55 +31,6 @@ spec:
           port: 3000
       middlewares:
         - name: security-headers
-    # API routes go to Kong (Supabase gateway)
-    # Versioned prefixes ONLY, and no /auth prefix at all: auth is the app's
-    # own /api/auth, and the SPA owns /auth/callback and /reset-password.
-    - match: PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`)
-      kind: Rule
-      priority: 10
-      services:
-        - name: supabase-supabase-kong
-          port: 8000
-      middlewares:
-        - name: security-headers
-    # Admin routes - protected by ForwardAuth (requires admin role)
-    # Studio dashboard
-    - match: PathPrefix(`/admin/studio`)
-      kind: Rule
-      priority: 20
-      services:
-        - name: supabase-supabase-studio
-          port: 3000
-      middlewares:
-        - name: strip-proxy-headers
-        - name: admin-auth
-        - name: security-headers
-        - name: strip-admin-studio-prefix
-    # Next.js static assets for Studio (/_next/... paths are absolute in Next.js builds).
-    # The main app uses Vite, so /_next/ requests only ever originate from Studio's HTML.
-    # Priority 15: higher than the app catch-all (1), lower than explicit admin routes (20).
-    - match: PathPrefix(`/_next`)
-      kind: Rule
-      priority: 15
-      middlewares:
-        - name: strip-proxy-headers
-        - name: admin-auth
-      services:
-        - name: supabase-supabase-studio
-          port: 3000
-    # Studio's internal Next.js routes. After strip-prefix serves the root HTML,
-    # Studio redirects the browser to /project/default (the default project dashboard).
-    # These routes are protected by admin-auth so only super admins can access them.
-    - match: PathPrefix(`/project`)
-      kind: Rule
-      priority: 15
-      services:
-        - name: supabase-supabase-studio
-          port: 3000
-      middlewares:
-        - name: strip-proxy-headers
-        - name: admin-auth
-        - name: security-headers
   tls:
     secretName: vibecarbon-tls
 ---
@@ -103,16 +54,6 @@ spec:
       services:
         - name: app
           port: 3000
-      middlewares:
-        - name: redirect-https
-    # Versioned prefixes ONLY, and no /auth prefix at all: auth is the app's
-    # own /api/auth, and the SPA owns /auth/callback and /reset-password.
-    - match: PathPrefix(`/rest/v1`) || PathPrefix(`/realtime/v1`)
-      kind: Rule
-      priority: 10
-      services:
-        - name: supabase-supabase-kong
-          port: 8000
       middlewares:
         - name: redirect-https
 ---

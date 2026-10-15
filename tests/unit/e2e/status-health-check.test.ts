@@ -37,12 +37,12 @@ describe('assessStatusJson', () => {
   it('fails, non-retryable, on an unhealthy row and names it', () => {
     const j = structuredClone(green);
     j.environments.prod.checks.containers.p.rows.push(
-      row('supabase-kong', 'unhealthy', 'CrashLoopBackOff', 'restarts 3'),
+      row('traefik', 'unhealthy', 'CrashLoopBackOff', 'restarts 3'),
     );
     expect(assessStatusJson(j, 'prod')).toEqual({
       ok: false,
       retryable: false,
-      problems: ['p: supabase-kong CrashLoopBackOff restarts 3'],
+      problems: ['p: traefik CrashLoopBackOff restarts 3'],
     });
   });
   it('is retryable on starting rows only', () => {

@@ -185,7 +185,7 @@ function makeProjectDir({
   mkdirSync(join(dir, 'k8s', 'values'), { recursive: true });
   writeFileSync(
     join(dir, 'k8s', 'values', 'supabase.values.yaml'),
-    'image:\n  db:\n    repository: {{DB_IMAGE}}\n    tag: {{DB_IMAGE_TAG}}\ndomain: {{DOMAIN}}\n',
+    'image:\n  db:\n    repository: {{DB_IMAGE}}\n    tag: {{DB_IMAGE_TAG}}\n',
   );
   if (withObservability) {
     // The isolated observability stack applies via `kubectl apply -k
@@ -214,7 +214,7 @@ function makeProjectDir({
     // shape — see tests/unit/deploy/k3s-install-supabase.test.ts.
     writeFileSync(
       join(dir, 'k8s', 'values', 'supabase.standby.values.yaml'),
-      'deployment:\n  auth:\n    replicaCount: 0\n  kong:\n    replicaCount: 0\n',
+      'deployment: {}\npersistence: {}\n',
     );
   }
   return dir;
@@ -588,8 +588,6 @@ describe('applyK3sManifests pilot-standby role', () => {
     // applyMigrations skipped — would exec against a pod that's fine, but
     // there's nothing to migrate FOR (no app tier reading the schema yet).
     expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(false);
-    // reloadPostgrest skipped.
-    expect(cmdCalls.some((a) => a.some((s) => s.includes('reload schema')))).toBe(false);
 
     // Registry wait + push stay: failover pulls the app image from it.
     expect(
@@ -628,7 +626,9 @@ describe('applyK3sManifests pilot-standby role', () => {
       ),
     ).toBe(true);
     expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(true);
-    expect(cmdCalls.some((a) => a.some((s) => s.includes('reload schema')))).toBe(true);
+    // No schema-cache reload after migrations: nothing in the cluster caches
+    // the schema now that the chart runs only the db.
+    expect(cmdCalls.some((a) => a.some((s) => s.includes('reload schema')))).toBe(false);
     // Control for the standby skip above: with the same observability dir a
     // PRIMARY still applies the isolated stack.
     expect(cmdCalls.some(isObservabilityApply)).toBe(true);

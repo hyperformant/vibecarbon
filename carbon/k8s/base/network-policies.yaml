@@ -9,10 +9,9 @@
 
 ---
 # Default deny all INGRESS for the namespace. We don't deny egress by
-# default — that broke the Supabase community chart whose subcharts
-# (auth, rest, realtime, storage, analytics) init-container against the
-# `supabase-supabase-db` service and don't have vibecarbon-app labels
-# our specific allow-policies matched.
+# default — that broke the community chart's components, which
+# init-container against the `supabase-supabase-db` service and don't have
+# the vibecarbon-app labels our specific allow-policies matched.
 #
 # The chart-internal east/west traffic is fine inside the namespace;
 # external egress restrictions are enforced by the Hetzner firewall
@@ -28,8 +27,8 @@ spec:
     - Ingress
 
 ---
-# Allow ALL ingress from other pods in the same namespace. Chart
-# subcharts need to reach the db / kong / each other without us
+# Allow ALL ingress from other pods in the same namespace. The app, the
+# backup jobs and the add-ons need to reach the db and each other without us
 # having to enumerate every label combination the chart might use.
 # External ingress still gates through traefik-policy + app-policy etc.
 apiVersion: networking.k8s.io/v1
@@ -52,8 +51,8 @@ spec:
 # allow-intra-namespace ingress policy above. Required because
 # `allow-dns` below selects all pods with Egress policyType, which
 # implicitly switches the namespace to default-deny-egress for those
-# pods. Without this, the Supabase subchart init containers can resolve
-# `supabase-supabase-db` via DNS but the TCP connect to :5432 is
+# pods. Without this, the chart's init containers could resolve
+# `supabase-supabase-db` via DNS but the TCP connect to :5432 was
 # dropped, causing a 25-minute wait-for-db loop on every cold install.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

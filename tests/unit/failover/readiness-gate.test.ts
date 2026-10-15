@@ -24,10 +24,14 @@ import {
   waitForPromotedApiServing,
 } from '../../../src/failover.js';
 
-/** Persisted scale-up list: app + supabase-* (vibecarbon) + CA (kube-system). */
+/**
+ * Persisted scale-up list: app + another vibecarbon-namespace Deployment + CA
+ * (kube-system). The middle entry is a stand-in for any extra Deployment a
+ * persisted list can carry, including a stale one the cluster no longer runs.
+ */
 const SCALE_UP_LIST = [
   { name: 'app', namespace: 'vibecarbon', replicas: 2 },
-  { name: 'supabase-supabase-rest', namespace: 'vibecarbon', replicas: 1 },
+  { name: 'retired-worker', namespace: 'vibecarbon', replicas: 1 },
   { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
 ];
 
@@ -54,7 +58,7 @@ describe('gatePromotedApiReadiness', () => {
     const rollouts = trace.filter((t) => t.startsWith('rollout:'));
     expect(rollouts).toEqual([
       'rollout:deployment/app',
-      'rollout:deployment/supabase-supabase-rest',
+      'rollout:deployment/retired-worker',
       'rollout:deployment/cluster-autoscaler',
     ]);
     // Each rollout targets its persisted namespace (CA lives in kube-system).
@@ -139,8 +143,8 @@ describe('gatePromotedApiReadiness', () => {
   it('swallows a per-deployment rollout failure so one bad name cannot sink the gate', async () => {
     const runner = vi.fn(async () => '200');
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (argv.includes('deployment/supabase-supabase-rest')) {
-        throw new Error('deployments.apps "supabase-supabase-rest" not found');
+      if (argv.includes('deployment/retired-worker')) {
+        throw new Error('deployments.apps "retired-worker" not found');
       }
       return '';
     });

@@ -179,26 +179,3 @@ fi
 
 echo "k3s database node installation complete!"
 
-# Pre-warm containerd image cache in the background so the Supabase HelmRelease
-# doesn't pay the full ~400MB postgres pull on its critical path. We only
-# pre-pull stable-name images that supabase-community pins conservatively;
-# version drift just means a cache miss (not wrong data).
-#
-# Runs async so the node can be marked Ready immediately - the main deploy
-# doesn't block on this. If the pull is still in-flight when the chart
-# schedules a pod, containerd deduplicates the concurrent pulls anyway.
-nohup bash -c '
-  for i in $(seq 1 60); do
-    [ -S /run/k3s/containerd/containerd.sock ] && break
-    sleep 5
-  done
-  # Heaviest base images in the Supabase stack (~400MB combined). Pinned
-  # tags match supabase-community chart defaults at time of authoring.
-  for img in \
-    docker.io/supabase/postgres:15.1.1.78 \
-    docker.io/library/kong:2.8.1 \
-  ; do
-    /usr/local/bin/k3s crictl pull "$img" 2>&1 || echo "Pre-pull skipped: $img"
-  done
-' > /var/log/supabase-image-prewarm.log 2>&1 &
-

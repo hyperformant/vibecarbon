@@ -1,33 +1,19 @@
 # Pilot-light standby overlay (spec: 2026-07-16-pilot-light-standby-design).
-# Passed as a SECOND `-f` by installSupabase ONLY when role=standby. Renders
-# every app-tier Deployment at 0 replicas: realtime cannot boot
-# against the seeded read-only replica (Ecto lock_for_migrations, ERROR
-# 25006), the 2-node floor has no capacity for app pods, and anything
-# Pending would hang `helm --wait`. The db StatefulSet stays at 1.
+# Passed as a SECOND `-f` by installSupabase ONLY when role=standby. Its job
+# is to render every chart Deployment at 0 replicas (the 2-node floor has no
+# capacity for app-tier pods, and anything Pending would hang `helm --wait`)
+# and to disable persistence for every chart PVC whose only consumer is a
+# zeroed Deployment (WaitForFirstConsumer + 0 consumers = Pending forever).
+# The db StatefulSet stays at 1.
+#
+# Today the chart renders NO Deployment and no PVC beyond the db's own
+# (supabase.values.yaml disables every other component), so there is nothing
+# to zero and both maps are empty. The app's own Deployment is zeroed by the
+# deploy itself, not by this file.
+#
 # ONLY scalar keys belong here (chart >= 0.7.1 replaces LISTS wholesale —
 # an env list in this file would wipe the primary defaults).
 # Drift guard: tests/unit/deploy/standby-overlay-drift.test.ts against
 # tests/fixtures/supabase-chart-workloads.json (regen on pin bump).
-deployment:
-  kong:
-    replicaCount: 0
-  meta:
-    replicaCount: 0
-  realtime:
-    replicaCount: 0
-  rest:
-    replicaCount: 0
-  studio:
-    replicaCount: 0
-# Persistence for zeroed components is disabled: their PVCs bind
-# WaitForFirstConsumer, and with 0 consumers they sit Pending forever —
-# blocking helm --wait's PVC readiness check until its 15m timeout (RCA
-# 2026-07-17 e4 rig: supabase-{storage,imgproxy,snippets} Pending while the
-# db had been Ready since minute 9; storage/imgproxy are disabled outright
-# in supabase.values.yaml now). Data-safe: snippets is Studio scratch, and a
-# standby's local PVC contents are never replicated anyway — the reconverge deploy
-# re-renders persistence when this cluster becomes primary. db + pgsodium
-# are exempt: the db StatefulSet stays at 1 and binds them immediately.
-persistence:
-  snippets:
-    enabled: false
+deployment: {}
+persistence: {}

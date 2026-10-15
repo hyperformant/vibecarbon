@@ -9,12 +9,12 @@ spec:
   replicas: 2
   # 900s (15m) — cold k8s deploys race the rollout window: `kubectl set image`
   # triggers the rollout BEFORE `helm install supabase --wait` returns, and the
-  # app's readiness probe (/api/health/ready) stays 503 until kong is up. On
-  # the slow HA path the sideload + helm install consumed >29m before kong was
-  # reachable; the old 120s deadline tripped before kong existed and the
-  # subsequent `kubectl rollout status` failed even though pods were healthy
-  # by then. 900s covers worst-observed cold path; warm rollouts still finish
-  # in <60s so this only matters on the cold cycle.
+  # app's readiness probe (/api/health/ready) stays 503 until the db answers.
+  # On the slow HA path the sideload + helm install consumed >29m; the old
+  # 120s deadline tripped before the db existed and the subsequent
+  # `kubectl rollout status` failed even though pods were healthy by then.
+  # 900s covers worst-observed cold path; warm rollouts still finish in <60s
+  # so this only matters on the cold cycle.
   progressDeadlineSeconds: 900
   strategy:
     type: RollingUpdate

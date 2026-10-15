@@ -79,10 +79,13 @@ describe('parseChartImages', () => {
   const images = parseChartImages(FIXTURE, { exclude: PREPULL_EXCLUDED_COMPONENTS });
 
   it('normalizes bare Docker Hub repos to fully-qualified refs', () => {
-    expect(images).toContain('docker.io/supabase/studio:2025.06.30-sha-6f5982d');
-    expect(images).toContain('docker.io/postgrest/postgrest:v12.2.12');
+    // No exclusions: every component our values disable is excluded, so the
+    // normalization is exercised on the unfiltered list.
+    const all = parseChartImages(FIXTURE, { exclude: [] });
+    expect(all).toContain('docker.io/supabase/studio:2025.06.30-sha-6f5982d');
+    expect(all).toContain('docker.io/postgrest/postgrest:v12.2.12');
     // Single-segment official image → library/ namespace.
-    expect(images).toContain('docker.io/library/kong:2.8.1');
+    expect(all).toContain('docker.io/library/kong:2.8.1');
   });
 
   it('excludes the db image (sideloaded, never pulled) and disabled components', () => {
@@ -94,6 +97,13 @@ describe('parseChartImages', () => {
     expect(joined).not.toContain('minio'); // minio disabled
     expect(joined).not.toContain('imgproxy'); // imgproxy disabled
     expect(joined).not.toContain('gotrue'); // auth disabled (runs in the app)
+    expect(joined).not.toContain('kong'); // gateway disabled
+    expect(joined).not.toContain('postgrest'); // rest disabled
+    expect(joined).not.toContain('studio'); // studio disabled
+  });
+
+  it('leaves no chart image to pre-pull: the chart runs only the db', () => {
+    expect(images).toEqual([]);
   });
 
   it('drops refs that fail the shell-safety character allowlist', () => {
@@ -113,8 +123,9 @@ describe('exclusion list stays in lockstep with the values file', () => {
     const disabled = [...values.matchAll(/^ {2}([a-z]+):\n(?: {4}#.*\n)* {4}enabled: false/gm)].map(
       (m) => m[1],
     );
-    // functions, analytics, vector, storage, imgproxy today
-    expect(disabled.length).toBeGreaterThanOrEqual(5);
+    // auth, functions, analytics, vector, storage, imgproxy, kong, rest,
+    // realtime, meta, studio today
+    expect(disabled.length).toBeGreaterThanOrEqual(11);
     for (const comp of disabled) {
       expect(PREPULL_EXCLUDED_COMPONENTS).toContain(comp);
     }
@@ -186,7 +197,6 @@ describe('prePullChartImages', () => {
     for (const script of scripts) {
       const pulled = [...script.matchAll(/images pull (\S+)/g)].map((m) => m[1]);
       expect(pulled.slice(0, 2)).toEqual(clusterAutoscalerPodImages());
-      expect(pulled).toContain('docker.io/postgrest/postgrest:v12.2.12');
     }
   });
 

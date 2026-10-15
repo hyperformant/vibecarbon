@@ -53,8 +53,7 @@ function pvcFiles(): string[] {
       } else if (/\.ya?ml$/.test(entry.name)) {
         const content = readFileSync(full, 'utf-8');
         // Column-0 `kind:` only — a kustomize overlay mentions the kind
-        // INDENTED under `target:` when it patches a PVC it does not define
-        // (carbon/k8s/overlays/local pins local-path that way, deliberately).
+        // INDENTED under `target:` when it patches a PVC it does not define.
         if (/^kind:\s*PersistentVolumeClaim/m.test(content)) found.push(full);
       }
     }

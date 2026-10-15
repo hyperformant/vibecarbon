@@ -160,10 +160,10 @@ export function podDisplayName(pod) {
       result = owner.name.replace(POD_TEMPLATE_HASH_RE, '');
     }
   }
-  // The Supabase Helm chart is installed with release name `supabase` and
-  // chart name `supabase`, so every workload doubles the prefix
-  // (`supabase-supabase-kong`). Collapse exactly one leading duplication so
-  // display names match the spec's `supabase-kong` / `supabase-db-0`.
+  // The db's Helm chart is installed with release name `supabase` and chart
+  // name `supabase`, so every workload doubles the prefix
+  // (`supabase-supabase-db`). Collapse exactly one leading duplication so the
+  // display name reads `supabase-db-0`.
   return result.replace(/^supabase-supabase-/, 'supabase-');
 }
 

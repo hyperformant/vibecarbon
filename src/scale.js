@@ -1733,8 +1733,8 @@ async function scaleVerifyK8sReady(ctx) {
     : [{ env: environment, label: region, isStandby: false }];
   // 10 min is the floor that holds for HA (k8s-ha rerun 2026-04-28: standby
   // timed out 12/12 pods at 5 min — supabase-db-0 alone needs ~60-90s to
-  // start postgres after a node reboot, then auth/kong/realtime/etc.
-  // dependency-chain off it, then app pulls images that may not be cached
+  // start postgres after a node reboot, then the rest of the tier
+  // dependency-chains off it, then app pulls images that may not be cached
   // on the freshly-rebooted node). Single-cluster k8s only used ~70s of
   // its old 300s budget, so the bump costs nothing on the happy path.
   const WAIT_TIMEOUT_SEC = 600;
@@ -1850,8 +1850,7 @@ async function scaleVerifyK8sReady(ctx) {
     //
     // HA standby exception: skip the pod-Ready wait entirely when this
     // is the standby cluster. The standby's DB is supposed to be a
-    // streaming replica (read-only), and the supabase chart's
-    // app-tier pods (app/kong/rest/auth/realtime/storage) currently
+    // streaming replica (read-only), and the app-tier pods currently
     // can't satisfy their readiness probes against a read-only DB —
     // their probes call /api/health/ready (or similar) which times out
     // upstream and returns 503. `kubectl wait --all` then blocks until

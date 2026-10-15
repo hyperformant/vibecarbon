@@ -293,13 +293,13 @@ describe('podDisplayName', () => {
       podDisplayName(
         pod({
           metadata: {
-            name: 'supabase-kong-5f6d7c8b9-xyz12',
+            name: 'metabase-5f6d7c8b9-xyz12',
             namespace: 'vibecarbon',
-            ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-kong-5f6d7c8b9' }],
+            ownerReferences: [{ kind: 'ReplicaSet', name: 'metabase-5f6d7c8b9' }],
           },
         }),
       ),
-    ).toBe('supabase-kong');
+    ).toBe('metabase');
   });
 
   it('keeps the ordinal for StatefulSet pods', () => {
@@ -359,13 +359,13 @@ describe('podDisplayName', () => {
   it('collapses the Helm release/chart double prefix for ReplicaSet-owned pods', () => {
     const p = pod({
       metadata: {
-        name: 'supabase-supabase-kong-5b8f9c7dxz-q2w4r',
+        name: 'supabase-supabase-worker-5b8f9c7dxz-q2w4r',
         namespace: 'vibecarbon',
         labels: { 'pod-template-hash': '5b8f9c7dxz' },
-        ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-supabase-kong-5b8f9c7dxz' }],
+        ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-supabase-worker-5b8f9c7dxz' }],
       },
     });
-    expect(podDisplayName(p)).toBe('supabase-kong');
+    expect(podDisplayName(p)).toBe('supabase-worker');
   });
 
   it('collapses the Helm release/chart double prefix for StatefulSet-owned pods', () => {

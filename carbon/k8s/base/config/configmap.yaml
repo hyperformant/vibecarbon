@@ -33,13 +33,5 @@ data:
   DB_PORT: "5432"
   DB_NAME: "postgres"
 
-  # Internal Service URLs. Supabase community chart gives each subchart a
-  # fullnameOverride of `supabase-supabase-<name>`, so these are the ACTUAL
-  # in-cluster service names as of supabase-community chart v0.5.5.
-  KONG_URL: "http://supabase-supabase-kong:8000"
-  REST_URL: "http://supabase-supabase-rest:3000"
-  REALTIME_URL: "http://supabase-supabase-realtime:4000"
-  META_URL: "http://supabase-supabase-meta:8080"
-
   # Backup Configuration
   BACKUP_RETENTION_DAYS: "7"

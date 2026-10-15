@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 // Fake child for the async `spawn` path — used by applyMigrations' per-file
 // psql exec (routed through the shared async exec layer, which itself calls
-// `spawn`) and by execKubectlOnce.
+// `spawn`).
 function makeFakeChild(stdout = '1', exitCode = 0): EventEmitter {
   const c = new EventEmitter() as EventEmitter & {
     stdout: PassThrough;
@@ -128,49 +128,5 @@ describe('applyMigrations (PR 1C)', () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'vc-mig-empty-'));
     await expect(applyMigrations({ kubeconfig: '/tmp/kc', projectDir })).resolves.toBeUndefined();
     expect(mocked).not.toHaveBeenCalled();
-  });
-});
-
-describe('reloadPostgrest', () => {
-  it('issues NOTIFY pgrst reload schema via kubectl exec on the db pod', async () => {
-    const { reloadPostgrest } = await k3sModulePromise;
-    const { spawn } = await import('node:child_process');
-    const mocked = vi.mocked(spawn);
-    mocked.mockReset();
-    // execKubectlOnce uses the async spawn path — exit 0.
-    mocked.mockImplementation(() => makeFakeChild('', 0) as unknown as ReturnType<typeof spawn>);
-
-    await reloadPostgrest({ kubeconfig: '/tmp/kc' });
-
-    expect(mocked).toHaveBeenCalledTimes(1);
-    const [bin, argv] = mocked.mock.calls[0] as unknown as [string, string[]];
-    expect(bin).toBe('kubectl');
-    expect(argv).toEqual([
-      '-n',
-      'vibecarbon',
-      'exec',
-      '-i',
-      '--request-timeout=15s',
-      'supabase-supabase-db-0',
-      '--',
-      'psql',
-      '-U',
-      'supabase_admin',
-      '-d',
-      'postgres',
-      '-c',
-      "NOTIFY pgrst, 'reload schema'",
-    ]);
-  });
-
-  it('is best-effort — does not throw when the reload exec fails', async () => {
-    const { reloadPostgrest } = await k3sModulePromise;
-    const { spawn } = await import('node:child_process');
-    const mocked = vi.mocked(spawn);
-    mocked.mockReset();
-    // Non-zero exit (e.g. db-channel disabled / pod momentarily unreachable).
-    mocked.mockImplementation(() => makeFakeChild('', 1) as unknown as ReturnType<typeof spawn>);
-
-    await expect(reloadPostgrest({ kubeconfig: '/tmp/kc' })).resolves.toBeUndefined();
   });
 });

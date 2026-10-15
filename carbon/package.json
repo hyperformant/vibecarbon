@@ -47,10 +47,6 @@
     "db:reset": "node scripts/docker-down.js -v && node scripts/docker-up.js",
     "k8s:apply": "node scripts/k8s-apply.js",
     "k8s:delete": "node scripts/k8s-delete.js",
-    "k8s:local:up": "./k8s/test-local.sh",
-    "k8s:local:status": "./k8s/test-local.sh status",
-    "k8s:local:debug": "./k8s/test-local.sh debug",
-    "k8s:local:down": "./k8s/test-local.sh delete",
     "stripe:listen": "stripe listen --forward-to localhost:3000/api/webhooks/stripe"
   },
   "dependencies": {

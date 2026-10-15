@@ -469,7 +469,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // would SCP an unrendered SQL file and replication auth would break.
   // Perf slices: this function was the largest un-instrumented block of the
   // k8s-ha deploy (~185s opaque tail in run 29354358889 — silent:true
-  // throughout, so the log showed nothing between reloadPostgrest and the
+  // throughout, so the log showed nothing between the app rollout and the
   // final reseed grep-line). Each phase below gets a deploy.ha.replication.*
   // marker so perf_substep can attribute the tail. Wrappers only — the
   // operations, their order, and their throw semantics are unchanged.
@@ -636,97 +636,41 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
     }
   });
 
-  // 3b. Rollout-restart the postgres-dependent Deployments on primary
-  //     so they drop stale connection pools to the (now-restarted)
-  //     postgres.
+  // 3b. Rollout-restart the app on primary so it drops connections to the
+  //     (now-restarted) postgres.
   //
-  //     RCA from k8s-ha 2026-04-28 deploy runs: an earlier version
-  //     restarted only `app`, but the public probe still returned a
-  //     19-byte `404 page not found`. cert-manager state
-  //     was clean (vibecarbon-tls READY=True, Order=valid), but app
-  //     pods kept failing readiness 503. At the time the app's
-  //     `/api/health/ready` went through Kong to PostgREST; it is now
-  //     a direct db ping (`select 1` on the app's own pg pool, which
-  //     reconnects on its own). The other postgres clients are still
-  //     the problem: when primary postgres restarted, supabase-rest +
-  //     realtime + meta (and, back then, a separate auth service) held
-  //     onto stale connections, and
-  //     restarting only `app` left them broken. Service `app` then had
-  //     zero Ready endpoints and Traefik's IngressRoute fell through
-  //     to its default 404 backend on the public probe.
+  //     RCA from k8s-ha 2026-04-28 deploy runs: after the primary postgres
+  //     restart, the db clients held stale connections, Service `app` had
+  //     zero Ready endpoints, and Traefik's IngressRoute fell through to its
+  //     default 404 backend on the public probe. The app's
+  //     `/api/health/ready` is now a direct db ping on its own pg pool, which
+  //     reconnects on its own, but the restart keeps the post-restart state
+  //     deterministic: the app is the only Deployment that holds postgres
+  //     connections now that the chart runs only the db.
   //
-  //     We restart specifically the deployments that hold direct
-  //     postgres connections. We do NOT restart:
-  //       - traefik          — hostPort 80/443; RollingUpdate races
-  //                            with itself (new pod can't bind ports
-  //                            while old pod still listens) and
-  //                            traefik doesn't talk to postgres.
-  //       - supabase-kong    — supabase community chart runs kong in
-  //                            DB-less mode (declarative config),
-  //                            no postgres connection.
-  //       - supabase-studio  — talks via meta/kong, no direct conn.
-  //
-  //     Verified on a live standby cluster on 2026-04-28: restarting
-  //     all 10 deployments hung on traefik (10 min progress deadline)
-  //     and the since-removed storage service (RWO PVC stuck attaching).
-  //     The selective list below completes in <2 min.
-  const postgresDependentDeployments = [
-    'app',
-    'supabase-supabase-rest',
-    'supabase-supabase-realtime',
-    'supabase-supabase-meta',
-  ];
-  // Restart + status-wait the postgres-dependent deployments in parallel.
-  // All share the same apiserver but live in independent ReplicaSets — kubelet
-  // can roll them concurrently and rollout-status only blocks on its own
-  // deployment. Previously serial: total ≈ Σ(per-deploy rollout) = 5 × ~30-60s
-  // worst case = 2.5-5 min. Parallel: total ≈ max(per-deploy) = ~30-60s.
-  // perfAsync wraps the whole batch so the next run's perf_substep shows the
-  // critical-path cost in one place (uninstrumented before).
+  //     Traefik is deliberately NOT restarted: hostPort 80/443 makes a
+  //     RollingUpdate race itself (the new pod can't bind while the old one
+  //     still listens), and it doesn't talk to postgres. Verified on a live
+  //     standby cluster on 2026-04-28: restarting every deployment hung on
+  //     traefik (10 min progress deadline).
   await perfAsync('deploy.ha.replication.rolloutRestart', () =>
-    Promise.all(
-      postgresDependentDeployments.map((deploy) =>
-        runCommandAsync(
-          [
-            'ssh',
-            ...sshOpts,
-            `root@${primaryIp}`,
-            `kubectl rollout restart deployment/${deploy} -n vibecarbon`,
-          ],
-          { silent: true, ignoreError: true },
-        ),
-      ),
-    ),
-  );
-  await perfAsync('deploy.ha.replication.rolloutStatus', () =>
-    Promise.all(
-      postgresDependentDeployments.map((deploy) =>
-        runCommandAsync(
-          [
-            'ssh',
-            ...sshOpts,
-            `root@${primaryIp}`,
-            `kubectl rollout status deployment/${deploy} -n vibecarbon --timeout=300s`,
-          ],
-          { silent: true, ignoreError: true },
-        ),
-      ),
-    ),
-  );
-
-  // Mirror of reloadPostgrest() in the base k8s path. The rollout-restart of
-  // supabase-supabase-rest above already refreshes its schema cache, but issue
-  // the canonical NOTIFY explicitly so the app tables stay visible to PostgREST
-  // even if that restart list ever changes — same PGRST205 class the base
-  // deploy guards against. Best-effort (ignoreError): a missed reload
-  // self-heals on the next rest restart.
-  await perfAsync('deploy.ha.replication.reloadPostgrest', () =>
     runCommandAsync(
       [
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        `kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin -d postgres -c "NOTIFY pgrst, 'reload schema'"`,
+        'kubectl rollout restart deployment/app -n vibecarbon',
+      ],
+      { silent: true, ignoreError: true },
+    ),
+  );
+  await perfAsync('deploy.ha.replication.rolloutStatus', () =>
+    runCommandAsync(
+      [
+        'ssh',
+        ...sshOpts,
+        `root@${primaryIp}`,
+        'kubectl rollout status deployment/app -n vibecarbon --timeout=300s',
       ],
       { silent: true, ignoreError: true },
     ),

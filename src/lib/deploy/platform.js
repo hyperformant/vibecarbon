@@ -18,9 +18,9 @@
  *   - **Hetzner ARM exists in only 3 of 6 locations** (fsn1/hel1/nbg1 — absent
  *     in ash/hil/sin), in only 4 SKUs (cax11/21/31/41), all inside the
  *     "Cost-Optimized / Limited availability" tier.
- *   - Everything the stack depends on — the full Supabase stack, Traefik,
- *     Kong, cert-manager, the Hetzner CCM/CSI drivers, cluster-autoscaler,
- *     registry:2, and the add-ons — publishes amd64 without question.
+ *   - Everything the stack depends on — Postgres, Traefik, cert-manager,
+ *     the Hetzner CCM/CSI drivers, cluster-autoscaler, registry:2, and the
+ *     add-ons — publishes amd64 without question.
  *
  * So a single pinned architecture buys correctness (no silent arch mismatch)
  * at zero real cost in provider reach.

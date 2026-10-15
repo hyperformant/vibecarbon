@@ -222,7 +222,7 @@ export function digestAppSource(projectDir) {
  *   - `buildArgsDigest` — the `VITE_*` `--build-arg` values, which Vite INLINES
  *     into the browser bundle. They come from `.env.local`, which
  *     `.dockerignore` keeps out of the context entirely, so no source digest
- *     can see them: rotating the anon key or flipping a feature flag changes
+ *     can see them: rotating a public key or flipping a feature flag changes
  *     the shipped bundle with the whole tree byte-identical. Digested rather
  *     than carried as values so a public-but-sensitive key never lands in
  *     `.vibecarbon/deploy-state-<env>.json` if the state format ever starts
@@ -315,8 +315,7 @@ export function buildK3sApplyInputs({ imageTag, dbImageTag, restore, projectDir,
  *
  * `k3s-apply` loads `.env.local` and feeds it to applyVibecarbonSecrets (the
  * whole vibecarbon-secrets Secret — every configure-managed OAuth/SMTP/billing
- * key plus REDIS_*), to the Supabase values render (ADMIN_EMAIL,
- * ADMIN_PASSWORD), and to ACME_CA_SERVER. None of that was in the gate. `.env.local` sits in neither
+ * key plus REDIS_*) and to ACME_CA_SERVER. None of that was in the gate. `.env.local` sits in neither
  * digested manifest tree, and .dockerignore keeps it out of the build context
  * so no source digest sees it either.
  *
@@ -346,9 +345,8 @@ export function digestEnvLocalSecrets(projectDir) {
   const envLocal = loadEnvLocal(envPath);
   if (!envLocal) return 'no-env-local';
   const hash = createHash('sha256');
-  // Sorted so key ORDER in the file is not a change. SECRET_KEYS already
-  // carries ADMIN_EMAIL/ADMIN_PASSWORD (also read by the values render);
-  // ACME_CA_SERVER joins because the issuer pick reads it directly.
+  // Sorted so key ORDER in the file is not a change. ACME_CA_SERVER joins
+  // SECRET_KEYS because the issuer pick reads it directly.
   const watched = [...new Set([...SECRET_KEYS, 'ACME_CA_SERVER'])].sort();
   for (const key of watched) {
     const value = envLocal[key];
@@ -924,7 +922,7 @@ export function pickIssuerName({ dnsProvider, acmeServer }) {
  *
  * DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — cert-manager
  * can obtain `*.${domain}` in a single ACME order, covering every subdomain
- * (api, studio, dashboard, grafana, n8n …) without separate per-subdomain
+ * (api, dashboard, grafana, n8n …) without separate per-subdomain
  * certificates. One wildcard cert = no per-router cert-resolver needed =
  * no per-domain ACME rate-limit risk.
  *
@@ -1293,6 +1291,10 @@ const SUPABASE_HELM_TIMEOUT = '15m';
  * (deployment.<comp>.enabled: false) so their pods never exist. A unit
  * drift-guard (k3s-prepull-images.test.ts) keeps this list in lockstep with
  * the values file.
+ *
+ * With every non-db component off, the chart contributes no image to the
+ * pre-pull: only the cluster-autoscaler pair is pulled. The enumeration goes
+ * away with the chart.
  */
 export const PREPULL_EXCLUDED_COMPONENTS = [
   'db',
@@ -1307,6 +1309,16 @@ export const PREPULL_EXCLUDED_COMPONENTS = [
   // minioClient's init-bucket container is template-gated on
   // deployment.minio.enabled — off in our values, so it never runs.
   'minioClient',
+  // The chart's gateway, REST, realtime, meta and studio: the app reaches the
+  // database directly and Traefik routes every public path to the app.
+  'kong',
+  'rest',
+  'realtime',
+  'meta',
+  'studio',
+  // initDb is the wait-for-db init container of the auth and rest
+  // Deployments only, both off, so nothing runs it.
+  'initDb',
 ];
 
 /**
@@ -1964,8 +1976,7 @@ const INFRA_SECRET_KEYS = [
   'REPL_PASSWORD',
   // The app's session signing key (carbon/src/server/auth/).
   'BETTER_AUTH_SECRET',
-  // The app creates its super admin from these at startup, and Studio's
-  // dashboard login reuses them (rendered into the chart values).
+  // The app creates its super admin from these at startup.
   'ADMIN_EMAIL',
   'ADMIN_PASSWORD',
 ];
@@ -2146,7 +2157,7 @@ export async function applyObservabilitySecrets({ kubeconfig, envLocal, domain }
  * tests/unit/deploy/k3s-supabase-storage-class.test.ts's drift guard; regenerate
  * with `node scripts/gen-chart-workloads-snapshot.mjs` and update this list.
  */
-export const SUPABASE_PVC_KEYS = ['db', 'pgsodium', 'snippets'];
+export const SUPABASE_PVC_KEYS = ['db', 'pgsodium'];
 
 /**
  * The PVC objects whose StorageClass decides the DATABASE's durability model:
@@ -2469,15 +2480,13 @@ async function describeSupabasePods(env) {
  * Direct `helm upgrade --install` keeps Flux off the deploy path; Flux
  * is opt-in via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, domain: string, storageClass: string, envLocal?: Record<string,string>, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, storageClass: string, role?: 'primary'|'standby'}} args
  */
 export async function installSupabase({
   kubeconfig,
   projectDir,
   projectName,
-  domain,
   s3Config,
-  envLocal,
   dbImageTag,
   backupBucketName,
   walgRole = 'primary',
@@ -2540,8 +2549,6 @@ export async function installSupabase({
     ? `s3://${walgBucket}/backups/${projectName || 'vibecarbon'}/walg`
     : '';
   const rendered = readFileSync(valuesTemplatePath, 'utf-8')
-    .replace(/\{\{DOMAIN\}\}/g, domain || 'localhost')
-    .replace(/\{\{PROJECT_NAME\}\}/g, projectName || 'vibecarbon')
     .replace(/\{\{S3_BACKUP_BUCKET\}\}/g, walgBucket)
     .replace(/\{\{WALG_S3_PREFIX\}\}/g, walgS3Prefix)
     .replace(/\{\{WALG_ROLE\}\}/g, walgRole)
@@ -2549,11 +2556,6 @@ export async function installSupabase({
     .replace(/\{\{S3_REGION\}\}/g, s3Config?.region ?? '')
     .replace(/\{\{DB_IMAGE\}\}/g, dbImageRepo)
     .replace(/\{\{DB_IMAGE_TAG\}\}/g, dbImageVer)
-    // Studio dashboard creds — sourced from .env.local at deploy time. Empty
-    // string fallback keeps yaml valid; chart inlines them into the
-    // chart-generated supabase-dashboard secret.
-    .replace(/\{\{ADMIN_EMAIL\}\}/g, envLocal?.ADMIN_EMAIL ?? '')
-    .replace(/\{\{ADMIN_PASSWORD\}\}/g, envLocal?.ADMIN_PASSWORD ?? '')
     // Repl-gateway relay endpoint for the standby seed init: the standby's
     // OWN database-node private IP + the relay port (see the seed-standby
     // init in the values file). Rendered on every tier; only a standby's
@@ -2561,8 +2563,8 @@ export async function installSupabase({
     .replace(/\{\{REPL_RELAY_HOST\}\}/g, dbPrivateIp)
     .replace(/\{\{REPL_RELAY_PORT\}\}/g, String(REPL_GATEWAY_PORT));
   const tmpValues = join(tmpdir(), `vibecarbon-supabase-values-${process.pid}-${Date.now()}.yaml`);
-  // SECURITY: the rendered values contain ADMIN_EMAIL/ADMIN_PASSWORD and live
-  // for the whole `helm upgrade --wait` window — write 0o600, never 0o644.
+  // Written 0o600 like every rendered deploy file: it lives for the whole
+  // `helm upgrade --wait` window and carries the bucket + endpoint wiring.
   writeSecretFile(tmpValues, rendered);
   // Declared here (not inside the `if`) so the `finally` below can always
   // reach it for cleanup, whether or not role === 'standby' set it.
@@ -2733,53 +2735,6 @@ export async function installSupabase({
 }
 
 /**
- * Single bounded kubectl exec: spawn-based (non-blocking), per-call kill
- * backstop on top of kubectl's own `--request-timeout`. Caller passes argv
- * starting after `kubectl`. Returns { status, stdout, stderr } with status
- * `null` if killed by the backstop.
- *
- * @param {string[]} argv
- * @param {{env: NodeJS.ProcessEnv, input?: string, killAfterMs: number}} opts
- */
-function execKubectlOnce(argv, { env, input, killAfterMs }) {
-  return new Promise((resolveFn) => {
-    const child = spawn('kubectl', argv, {
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (b) => {
-      stdout += b.toString();
-    });
-    child.stderr.on('data', (b) => {
-      stderr += b.toString();
-    });
-    const killTimer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* ignore */
-      }
-    }, killAfterMs);
-    child.on('error', () => {
-      clearTimeout(killTimer);
-      resolveFn({ status: null, stdout, stderr });
-    });
-    child.on('close', (code) => {
-      clearTimeout(killTimer);
-      resolveFn({ status: code, stdout, stderr });
-    });
-    if (input != null) {
-      child.stdin.write(input);
-      child.stdin.end();
-    } else {
-      child.stdin.end();
-    }
-  });
-}
-
-/**
  * Apply the project's `supabase/migrations/*.sql` against the chart-installed
  * supabase-postgres pod. Runs each file in lexicographic order via
  * `kubectl exec -i ... psql -U supabase_admin -d postgres`. Errors per file
@@ -2845,9 +2800,9 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
 
   // Ground-truth RLS audit (see src/lib/deploy/rls-audit.js): query the live
   // catalog and refuse to proceed if any public table reached the schema
-  // without row-level security — the browser reaches public tables directly
-  // through PostgREST, so an un-RLS'd table is a live data breach regardless
-  // of how it was created (migration, hand edit, dependency).
+  // without row-level security — RLS is what scopes every query the app runs
+  // on a user's behalf, so an un-RLS'd table hands every signed-in user every
+  // row regardless of how it was created (migration, hand edit, dependency).
   const auditOut = await runCommandAsync(
     [
       'kubectl',
@@ -2906,52 +2861,6 @@ export async function verifyWalgBackups({ kubeconfig, dbPod = 'supabase-supabase
       return typeof out === 'string' ? out : '';
     },
   });
-}
-
-/**
- * Reload PostgREST's schema cache after applyMigrations.
- *
- * The chart's `rest` (supabase-supabase-rest) pod comes up during helm
- * `--wait`, BEFORE applyMigrations runs — so its in-memory schema cache
- * predates the app tables. Reads of /rest/v1/<table> then 404 with PGRST205
- * ("Could not find the table ... in the schema cache") until PostgREST
- * reloads. No DDL-watch event trigger exists in the app migrations or db init
- * to auto-NOTIFY (verified), so issue the canonical reload explicitly.
- *
- * This is the k8s mirror of the compose fix (compose/index.js): same intent —
- * `NOTIFY pgrst, 'reload schema'` on the db — via `kubectl exec` instead of
- * `docker compose exec`. Best-effort: a missed reload self-heals whenever the
- * rest pod next restarts (e.g. the k8s-ha replication path rollout-restarts it
- * anyway), so a failure here is logged, not fatal.
- *
- * @param {{kubeconfig: string}} args
- */
-export async function reloadPostgrest({ kubeconfig }) {
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const { status, stderr } = await execKubectlOnce(
-    [
-      '-n',
-      'vibecarbon',
-      'exec',
-      '-i',
-      '--request-timeout=15s',
-      'supabase-supabase-db-0',
-      '--',
-      'psql',
-      '-U',
-      'supabase_admin',
-      '-d',
-      'postgres',
-      '-c',
-      "NOTIFY pgrst, 'reload schema'",
-    ],
-    { env, killAfterMs: 20_000 },
-  );
-  if (status !== 0) {
-    progressLog(
-      `[migrate] PostgREST schema reload NOTIFY failed (non-fatal, self-heals on rest restart): ${(stderr || '').trim().slice(-200)}`,
-    );
-  }
 }
 
 /**
@@ -4166,9 +4075,7 @@ export async function applyK3sManifests({
       kubeconfig,
       projectDir,
       projectName,
-      domain,
       s3Config,
-      envLocal,
       dbImageTag,
       backupBucketName,
       walgRole,
@@ -4361,17 +4268,6 @@ export async function applyK3sManifests({
   } else {
     await perfAsync(`deploy.${perfPrefix}.applyMigrations`, async () =>
       applyMigrations({ kubeconfig, projectDir }),
-    );
-  }
-  // 8b. Reload PostgREST's schema cache so it sees the tables applyMigrations
-  //     just created. rest came up during helm --wait (before migrations) and
-  //     no DDL-watch trigger exists to auto-NOTIFY — without this, /rest/v1/*
-  //     404s with PGRST205 until rest restarts. Mirrors the compose fix.
-  if (pilotStandby) {
-    console.error('[pilot-standby] skipping reloadPostgrest, app tier is zeroed until failover');
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.reloadPostgrest`, async () =>
-      reloadPostgrest({ kubeconfig }),
     );
   }
   // 9. Wait for app rollout. The deployment template already has

@@ -13,9 +13,8 @@ describe('supabase chart workload snapshot', () => {
     // The app-tier Deployments the spec's zero-list must cover. If the chart
     // pin bump adds/removes one, regenerate the snapshot:
     //   node scripts/gen-chart-workloads-snapshot.mjs
-    // 5 since storage + imgproxy, then auth (it runs inside the app now),
-    // were disabled in supabase.values.yaml.
-    expect(snapshot.deployments.length).toBeGreaterThanOrEqual(5);
+    // None: supabase.values.yaml disables every component but the db.
+    expect(snapshot.deployments).toEqual([]);
     expect(snapshot.statefulsets).toContain('db');
     expect(snapshot.deployments).not.toContain('db');
   });
@@ -63,8 +62,15 @@ describe('standby zero overlay', () => {
   it('does not zero components the chart never renders (dead weight)', () => {
     const deployBlock = topBlock(overlay(), 'deployment');
     const comps = [...deployBlock.matchAll(/^ {2}([a-z]+):$/gm)].map((m) => m[1]);
-    expect(comps.length).toBeGreaterThan(0);
     for (const comp of comps) expect(snapshot().deployments).toContain(comp);
+  });
+
+  it('zeroes nothing while the chart renders only the db', () => {
+    // Guards against a stale zero-list: replicaCount keys for components the
+    // chart no longer renders are dead weight that reads as live config.
+    expect(snapshot().deployments).toEqual([]);
+    expect(overlay()).toMatch(/^deployment: \{\}$/m);
+    expect(overlay()).toMatch(/^persistence: \{\}$/m);
   });
 
   it('disables persistence for every chart PVC not bound by the db StatefulSet', () => {
@@ -87,7 +93,6 @@ describe('standby zero overlay', () => {
 
   it('fixture records the chart PVC set (regen on pin bump)', () => {
     expect(Array.isArray(snapshot().pvcs)).toBe(true);
-    expect(snapshot().pvcs).toContain('db');
-    expect(snapshot().pvcs).toContain('snippets');
+    expect(snapshot().pvcs).toEqual(['db', 'pgsodium']);
   });
 });

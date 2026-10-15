@@ -111,17 +111,18 @@ describe('Routing: the app is the only public data path', () => {
   // and rate limits. A gateway path to the database (a REST layer, a
   // websocket feed) would be a second way in with none of those checks.
   // There is no separate api.<domain> host either.
-  const composeAndTraefik = [...composeFiles, ...yamlUnder('volumes/traefik')];
+  const routingSurfaces = [...composeFiles, ...yamlUnder('volumes/traefik'), ...yamlUnder('k8s')];
 
   it('the routing surfaces are found (the checks below are not vacuous)', () => {
-    expect(composeAndTraefik).toContain('docker-compose.yml');
-    expect(composeAndTraefik).toContain('docker-compose.prod.yml');
-    expect(composeAndTraefik).toContain('volumes/traefik/middlewares.yml');
+    expect(routingSurfaces).toContain('docker-compose.yml');
+    expect(routingSurfaces).toContain('docker-compose.prod.yml');
+    expect(routingSurfaces).toContain('volumes/traefik/middlewares.yml');
+    expect(routingSurfaces).toContain('k8s/base/traefik/ingressroute.yaml');
   });
 
   it('nothing routes /rest, /realtime or /storage (versioned or bare)', () => {
     const gatewayPath = /\/(rest|realtime|storage)\/v1|PathPrefix\(`\/(rest|realtime|storage)`\)/;
-    const offenders = composeAndTraefik.filter((f) => gatewayPath.test(uncommented(read(f))));
+    const offenders = routingSurfaces.filter((f) => gatewayPath.test(uncommented(read(f))));
     expect(
       offenders,
       `Gateway paths routed in ${offenders.join(', ')}. Serve data through ` +
@@ -140,6 +141,21 @@ describe('Routing: the app is the only public data path', () => {
             'docker-socket-proxy; reach the database through `vibecarbon shell`.'
         ).toBe(false);
       }
+    }
+  });
+
+  it('no k8s route or policy targets a gateway, database API or admin console', () => {
+    // The k8s twin of the compose check above: the chart still hosts the db,
+    // so its other components must stay off and nothing may point at them.
+    const chartService = /supabase-supabase-(kong|rest|realtime|meta|studio)\b|app: vibecarbon-(kong|studio)\b/;
+    const offenders = yamlUnder('k8s').filter((f) => chartService.test(uncommented(read(f))));
+    expect(offenders, `Chart gateway/console referenced in ${offenders.join(', ')}.`).toEqual([]);
+    const values = uncommented(read('k8s/values/supabase.values.yaml'));
+    for (const name of ['kong', 'rest', 'realtime', 'meta', 'studio']) {
+      expect(
+        new RegExp(`^ {2}${name}:\\n {4}enabled: false$`, 'm').test(values),
+        `k8s/values/supabase.values.yaml must keep deployment.${name}.enabled: false.`
+      ).toBe(true);
     }
   });
 

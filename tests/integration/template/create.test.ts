@@ -152,20 +152,21 @@ describe('create-vibecarbon E2E', () => {
       expect(dockerCompose.length).toBeGreaterThan(100);
     });
 
-    it('keeps {{ADMIN_PASSWORD}} as a placeholder in k8s/values/supabase.values.yaml', () => {
-      // installSupabase() in src/lib/deploy/k8s/k3s.js patches {{ADMIN_PASSWORD}}
-      // at deploy time from .env.local. Substituting it at create-time bakes a
-      // high-entropy password into a checked-in file and trips the preflight
-      // secret-scan during `vibecarbon deploy` (regression from a brand-new
-      // project). Non-secret placeholders like {{ADMIN_EMAIL}} and {{PROJECT_NAME}}
-      // are still substituted normally.
+    it('k8s/values/supabase.values.yaml carries no admin credentials, only deploy-time placeholders', () => {
+      // The chart's admin console is off, so the values file has no reason to
+      // hold the admin login: a password substituted at create time would be
+      // a high-entropy secret in a checked-in file, tripping the preflight
+      // secret-scan during `vibecarbon deploy`. The deploy-time placeholders
+      // installSupabase() renders (src/lib/deploy/k8s/k3s.js) stay unsubstituted.
       const valuesYaml = readFileSync(
         join(projectDir(), 'k8s/values/supabase.values.yaml'),
         'utf-8',
       );
-      expect(valuesYaml).toContain('{{ADMIN_PASSWORD}}');
-      expect(valuesYaml).not.toContain('{{ADMIN_EMAIL}}');
-      expect(valuesYaml).not.toContain('{{PROJECT_NAME}}');
+      expect(valuesYaml).not.toMatch(/ADMIN_(EMAIL|PASSWORD)|username:/);
+      // The only password mapping left is the db secretRef key name.
+      expect(valuesYaml.match(/^\s*password:.*$/gm)).toEqual(['      password: DB_PASSWORD']);
+      expect(valuesYaml).toContain('{{DB_IMAGE}}');
+      expect(valuesYaml).toContain('{{WALG_S3_PREFIX}}');
     });
 
     it('copies binary icon assets byte-identical to the template (no UTF-8 corruption)', () => {

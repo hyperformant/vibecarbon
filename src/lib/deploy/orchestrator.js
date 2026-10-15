@@ -1416,7 +1416,7 @@ export async function executeDeployment(args, gatheredConfig) {
           const recentEvents = events.split('\n').slice(-30).join('\n');
           // Direct curl probes — surface the actual TLS/HTTP error from the
           // public side (cert-manager not yet issued, traefik not routing,
-          // kong 503, etc.). curl exits non-zero on connect/TLS errors so we
+          // app 503, etc.). curl exits non-zero on connect/TLS errors so we
           // route through safeRun. -k skips cert validation — we want the
           // body even if origin's cert is staging or self-signed.
           const curlVerbose = await safeRun('curl', [

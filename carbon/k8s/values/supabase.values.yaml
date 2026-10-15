@@ -8,7 +8,7 @@
 # bigQuery. Component toggles live under `deployment.<comp>.enabled` —
 # top-level keys like `functions:` or `analytics:` are silently ignored.
 #
-# Placeholders like {{DOMAIN}} are substituted at deploy time in
+# Placeholders like {{DB_IMAGE}} are substituted at deploy time in
 # installSupabase — do not hand-edit after deploy.
 #
 # We intentionally do NOT set fullnameOverride/nameOverride: the chart's
@@ -17,33 +17,20 @@
 # and the production overlay reference the chart-generated names directly
 # (`supabase-supabase-<component>`).
 
-# Shared secret wiring — every component reads from the vibecarbon-secrets
-# Secret created by applyVibecarbonSecrets before helm install runs. The
-# chart's `secretRef` + `secretRefKey` map the chart's internal field
-# names to keys in our secret; plain `secretName: vibecarbon-secrets`
-# does NOT work — the chart silently falls back to generating its own
-# supabase-jwt/supabase-dashboard secrets with random values (hit on
-# 2026-04-19 run #3 — Kong rejected our app's SERVICE_ROLE_KEY because
-# it was signed with our JWT_SECRET while the chart-generated
-# supabase-jwt.secret was a different string).
+# Secret wiring — the db reads from the vibecarbon-secrets Secret created by
+# applyVibecarbonSecrets before helm install runs. The chart's `secretRef` +
+# `secretRefKey` map the chart's internal field names to keys in our secret;
+# plain `secretName: vibecarbon-secrets` does NOT work — the chart silently
+# falls back to generating its own secrets with random values.
 secret:
   jwt:
+    # Required by the chart's db until replaced: its StatefulSet carries a
+    # non-optional secretKeyRef for JWT_SECRET (templates/db/statefulset.yaml).
+    # The anonKey/serviceKey fields were only read by the components disabled
+    # below, so they are left unmapped. Goes away with the chart.
     secretRef: vibecarbon-secrets
     secretRefKey:
-      anonKey: ANON_KEY
-      serviceKey: SERVICE_ROLE_KEY
       secret: JWT_SECRET
-  dashboard:
-    # Inline values — dashboard.openAiApiKey is chart-required and we don't
-    # ship one in vibecarbon-secrets. Using secretRef here would force the
-    # chart to read EVERY dashboard field from the secret (including
-    # openAiApiKey), and kubelet would fail the studio StatefulSet with
-    # "couldn't find key openAiApiKey in Secret vibecarbon/vibecarbon-secrets".
-    # Inline values are rendered into the chart's own supabase-dashboard
-    # secret at install time — still secure, just not deduped into ours.
-    username: "{{ADMIN_EMAIL}}"
-    password: "{{ADMIN_PASSWORD}}"
-    openAiApiKey: ""
   db:
     secretRef: vibecarbon-secrets
     # When secretRef is set, the chart uses secret keys for every db.* value
@@ -69,6 +56,11 @@ image:
 # Component enable toggles — chart's path is deployment.<comp>.enabled.
 # Top-level `functions:`/`analytics:`/`vector:` are silently ignored
 # (was the bug behind the 2026-04-26 e2e helm-wait timeout).
+#
+# The chart only hosts the Postgres StatefulSet: every other component is off.
+# The app talks to the database directly (src/server/db/client.ts) and
+# Traefik routes every public path to the app, so nothing reaches the chart's
+# gateway, REST, realtime, meta or studio services any more.
 deployment:
   auth:
     # Auth runs inside the app (src/server/auth/, /api/auth), so the chart's
@@ -79,8 +71,7 @@ deployment:
     # The template doesn't ship a default `main/index.ts`, so the chart's
     # default deployment fetches `https://deno.land/x/jose@v4.14.4/index.ts`
     # at boot — and the network policy + missing function source produce
-    # a CrashLoopBackOff that holds up `helm --wait`. Re-enable once a
-    # project actually defines a function.
+    # a CrashLoopBackOff that holds up `helm --wait`.
     enabled: false
   analytics:
     # Logflare — disable until we need it. Adds ClickHouse + BigQuery deps.
@@ -96,6 +87,17 @@ deployment:
   imgproxy:
     # Image transforms only served the storage service above; avatars are
     # resized in the browser before upload.
+    enabled: false
+  # Gateway, REST, realtime, meta and studio: see the header above.
+  kong:
+    enabled: false
+  rest:
+    enabled: false
+  realtime:
+    enabled: false
+  meta:
+    enabled: false
+  studio:
     enabled: false
   db:
     # Pin postgres to the dedicated database node (taint applied by Pulumi).
@@ -365,37 +367,6 @@ deployment:
 # Entries marked "vibecarbon:" are ours; unmarked entries are chart defaults
 # carried verbatim.
 environment:
-  realtime:
-    - name: DB_USER
-      value: supabase_admin
-    - name: DB_SSL
-      value: "false"
-    - name: PORT
-      value: "4000"
-    - name: FLY_ALLOC_ID
-      value: fly123
-    - name: FLY_APP_NAME
-      value: realtime
-    - name: ENABLE_TAILSCALE
-      value: "false"
-    - name: DB_AFTER_CONNECT_QUERY
-      value: SET search_path TO _realtime
-    - name: ERL_AFLAGS
-      value: -proto_dist inet_tcp
-    - name: DNS_NODES
-      value: "''"
-    - name: RLIMIT_NOFILE
-      value: "10000"
-    - name: APP_NAME
-      value: realtime
-    - name: SEED_SELF_HOST
-      value: "true"
-    - name: RUN_JANITOR
-      value: "true"
-    # NOTE: no DB_NAME entry here — the pre-0.7.1 values carried one, but the
-    # chart's realtime template already sources DB_NAME from the db secretRef
-    # (vibecarbon-secrets/DB_NAME via secret.db.secretRefKey.database), and a
-    # values entry would shadow the secret-sourced one (last env wins).
   db:
     - name: POSTGRES_HOST
       value: /var/run/postgresql
@@ -434,48 +405,16 @@ environment:
     # so it's helm-owned and survives every upgrade with no db restart.
     - name: AWS_SHARED_CREDENTIALS_FILE
       value: /etc/walg/credentials
-  studio:
-    - name: HOSTNAME
-      value: "::"
-    - name: STUDIO_PORT
-      value: "3000"
-    - name: POSTGRES_PORT
-      value: "5432"
-    - name: DEFAULT_ORGANIZATION_NAME
-      value: Default Organization
-    - name: DEFAULT_PROJECT_NAME
-      value: Default Project
-    # vibecarbon: public URL points at the deployed domain.
-    - name: SUPABASE_PUBLIC_URL
-      value: https://{{DOMAIN}}
-    - name: NEXT_PUBLIC_ENABLE_LOGS
-      value: "true"
-    - name: NEXT_ANALYTICS_BACKEND_PROVIDER
-      value: postgres
-    # vibecarbon: not a chart default — kept from the pre-0.7.1 values for
-    # effective-env parity (the chart default also sets
-    # DEFAULT_ORGANIZATION_NAME above; whichever the studio image reads).
-    - name: STUDIO_DEFAULT_ORGANIZATION
-      value: "{{PROJECT_NAME}}"
-  # Kong reads its declarative config from /usr/local/kong/kong.yml — written
-  # by the chart's kong-entrypoint.sh after env substitution. The chart's
-  # default `KONG_DECLARATIVE_CONFIG` already points at this path, so leave
-  # it un-overridden. (Setting it to `/usr/local/kong/declarative/kong.yml`
-  # — which doesn't exist — was the cause of the 2026-04-26 e2e kong
-  # CrashLoopBackOff.)
 
-# We front Kong with our own Traefik IngressRoute (k8s/base/traefik) — the
-# chart's ingress object is off so we don't end up with two ingresses
-# pointing at the same Service.
+# Public traffic enters through our own Traefik IngressRoute (k8s/base/traefik)
+# and goes to the app; the chart's ingress object stays off.
 ingress:
   enabled: false
 
 # Persistence:
-# - db: bump default 5Gi → 10Gi.
-# - functions: disable PVC creation. The chart's persistence.functions PVC
-#   is independent of deployment.functions.enabled — without this, studio
-#   stays Pending forever waiting for a `supabase-functions` PVC that
-#   persistence.yaml gates on `deployment.functions.enabled` (off here).
+# - db: bump default 5Gi → 10Gi. Every other chart PVC is gated on its
+#   component's deployment.<comp>.enabled (chart templates/persistence.yaml),
+#   so with those components off only db + pgsodium render.
 #
 # storageClassName is DELIBERATELY absent here: the deploy pins it with
 # `helm --set persistence.<key>.storageClassName=<ProviderClass.K8S_STORAGE_CLASS>`
@@ -489,5 +428,3 @@ persistence:
   db:
     enabled: true
     size: 10Gi
-  functions:
-    enabled: false

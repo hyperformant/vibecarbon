@@ -427,11 +427,11 @@ describe('waitForStandbyCaughtUp (planned zero-data-loss gate)', () => {
 // readiness-gate.test.ts, one level up.
 // ============================================================================
 
-/** Persisted scale-up list shape (Task 7): app + supabase-* + CA in kube-system. */
+/** Persisted scale-up list shape (Task 7): app + extra vibecarbon Deployments + CA in kube-system. */
 const SCALE_UP_LIST = [
   { name: 'app', namespace: 'vibecarbon', replicas: 2 },
-  { name: 'supabase-supabase-auth', namespace: 'vibecarbon', replicas: 1 },
-  { name: 'supabase-supabase-rest', namespace: 'vibecarbon', replicas: 1 },
+  { name: 'worker-a', namespace: 'vibecarbon', replicas: 1 },
+  { name: 'worker-b', namespace: 'vibecarbon', replicas: 1 },
   { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
 ];
 

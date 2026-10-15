@@ -102,7 +102,7 @@ function makeProjectDir(): string {
   mkdirSync(join(dir, 'k8s/values'), { recursive: true });
   writeFileSync(
     join(dir, 'k8s/values/supabase.values.yaml'),
-    'secret:\n  dashboard:\n    username: {{ADMIN_EMAIL}}\n    password: {{ADMIN_PASSWORD}}\ndomain: {{DOMAIN}}\n',
+    'image:\n  db:\n    repository: {{DB_IMAGE}}\n    tag: {{DB_IMAGE_TAG}}\n',
   );
   return dir;
 }
@@ -110,7 +110,6 @@ function makeProjectDir(): string {
 const baseArgs = {
   kubeconfig: '/tmp/fake-kubeconfig',
   projectName: 'testproj',
-  domain: 'test.example.com',
   dbImageTag: 'ghcr.io/test/postgres:17-walg1',
   storageClass: 'hcloud-volumes',
   // Required since the d4 lift — installSupabase refuses to assume the
@@ -181,7 +180,7 @@ describe('installSupabase — provider StorageClass is pinned on every chart PVC
     const dir = makeProjectDir();
     writeFileSync(
       join(dir, 'k8s/values/supabase.standby.values.yaml'),
-      'deployment:\n  auth:\n    replicaCount: 0\n',
+      'deployment: {}\npersistence: {}\n',
     );
     await runInstall({ projectDir: dir, role: 'standby', walgRole: 'standby' });
     const argv = helmUpgradeArgv() ?? [];
@@ -232,7 +231,7 @@ describe('installSupabase — wrong-StorageClass guard (db-critical PVCs)', () =
       {
         match: 'get pvc',
         stdout:
-          'supabase-db=hcloud-volumes\nsupabase-pgsodium=hcloud-volumes\nsupabase-snippets=local-path\n',
+          'supabase-db=hcloud-volumes\nsupabase-pgsodium=hcloud-volumes\nsupabase-scratch=local-path\n',
       },
     ];
     await expect(runInstall()).resolves.not.toThrow();

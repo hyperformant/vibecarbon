@@ -172,15 +172,11 @@ describe('M3 Task 5 — do-db-init.sh shape', () => {
     expect(supabase).not.toContain('dhcpcd');
   });
 
-  it('pre-warms the heavy Supabase images asynchronously (does not block node readiness)', () => {
-    const prewarmIdx = supabase.indexOf('supabase-image-prewarm.log');
-    expect(prewarmIdx).toBeGreaterThan(-1);
-    // The prewarm block backgrounds itself (`&` at the end of the nohup
-    // pipeline) rather than blocking the script's exit.
-    const prewarmBlock = supabase.slice(supabase.indexOf('nohup bash -c'));
-    expect(prewarmBlock.trimEnd().endsWith('&')).toBe(true);
-    expect(supabase).toContain('docker.io/supabase/postgres:15.1.1.78');
-    expect(supabase).toContain('docker.io/library/kong:2.8.1');
+  it('pre-pulls no chart image: the db image is published and pulled at deploy time', () => {
+    // The old background pre-warm pulled a stale postgres tag and the chart
+    // gateway, neither of which the deploy runs.
+    expect(supabase).not.toContain('crictl pull');
+    expect(supabase).not.toContain('image-prewarm');
   });
 
   it('carries zero hetzner|hcloud|floating|10.0.1. tokens (case-insensitive)', () => {

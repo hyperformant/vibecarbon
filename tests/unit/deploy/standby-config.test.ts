@@ -18,7 +18,22 @@ const real = () => ({
   appManifestText: readFileSync(join(carbon, 'base/app/deployment.yaml'), 'utf-8'),
 });
 
+// The real overlay zeroes nothing today (the chart renders no Deployment), so
+// the override-parsing cases run against an overlay that zeroes one
+// hypothetical chart component, `worker`.
+const withZeroedWorker = () => ({
+  ...real(),
+  overlayText: 'deployment:\n  worker:\n    replicaCount: 0\npersistence: {}\n',
+});
+
 describe('deriveScaleUpList', () => {
+  it('brings up only the app and the autoscaler: the chart renders no Deployment', () => {
+    expect(deriveScaleUpList(real())).toEqual([
+      { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+      { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
+    ]);
+  });
+
   it('inverts the zero overlay: one entry per zeroed component + app + CA', () => {
     const list = deriveScaleUpList(real());
     const fixture = JSON.parse(
@@ -40,7 +55,7 @@ describe('deriveScaleUpList', () => {
   });
 
   it('honors a replicaCount override in the shared values', () => {
-    const args = real();
+    const args = withZeroedWorker();
     // Insert (not append) the override right after the `deployment:` root
     // key so it genuinely lands inside the map deriveScaleUpList reads —
     // appending at end-of-file would nest it under whatever top-level key
@@ -48,34 +63,35 @@ describe('deriveScaleUpList', () => {
     // operator-authored override would look like.
     args.sharedValuesText = args.sharedValuesText.replace(
       /^deployment:\n/m,
-      'deployment:\n  realtime:\n    replicaCount: 3\n',
+      'deployment:\n  worker:\n    replicaCount: 3\n',
     );
     const list = deriveScaleUpList(args);
-    expect(list.find((e) => e.name === 'supabase-supabase-realtime')?.replicas).toBe(3);
+    expect(list.find((e) => e.name === 'supabase-supabase-worker')?.replicas).toBe(3);
   });
 
   it('never derives a replicaCount from a same-named block under another top-level map', () => {
-    const args = real();
-    // Adversarial: `environment:` legitimately has its own `realtime:` key
-    // (an env-var LIST, chart shape environment.<comp>), never deployment
-    // config. Plant a 4-space-indented `replicaCount: 9` line inside it,
-    // with NO override under `deployment:`. If the parse isn't scoped
-    // structurally to the `deployment:` block, this same-named sibling
-    // leaks in and realtime "derives" 9 instead of the correct default of 1.
+    const args = withZeroedWorker();
+    // Adversarial: `environment:` holds per-component keys (env-var LISTS,
+    // chart shape environment.<comp>), never deployment config. Plant a
+    // same-named `worker:` block with a 4-space-indented `replicaCount: 9`
+    // inside it, with NO override under `deployment:`. If the parse isn't
+    // scoped structurally to the `deployment:` block, this sibling leaks in
+    // and worker "derives" 9 instead of the correct default of 1.
     args.sharedValuesText = args.sharedValuesText.replace(
-      /^environment:\n {2}realtime:\n/m,
-      'environment:\n  realtime:\n    replicaCount: 9\n',
+      /^environment:\n/m,
+      'environment:\n  worker:\n    replicaCount: 9\n',
     );
+    expect(args.sharedValuesText).toContain('  worker:\n    replicaCount: 9');
     const list = deriveScaleUpList(args);
-    expect(list.find((e) => e.name === 'supabase-supabase-realtime')?.replicas).toBe(1);
+    expect(list.find((e) => e.name === 'supabase-supabase-worker')?.replicas).toBe(1);
   });
 
   it('finds a replicaCount override buried behind several preceding lines in the deployment: block', () => {
-    const args = real();
+    const args = withZeroedWorker();
     args.sharedValuesText = args.sharedValuesText.replace(
       /^deployment:\n/m,
       'deployment:\n' +
-        '  realtime:\n' +
+        '  worker:\n' +
         '    # first a comment\n' +
         '    enabled: true\n' +
         '    # then another comment\n' +
@@ -84,7 +100,7 @@ describe('deriveScaleUpList', () => {
         '    replicaCount: 3\n',
     );
     const list = deriveScaleUpList(args);
-    expect(list.find((e) => e.name === 'supabase-supabase-realtime')?.replicas).toBe(3);
+    expect(list.find((e) => e.name === 'supabase-supabase-worker')?.replicas).toBe(3);
   });
 });
 
@@ -93,14 +109,16 @@ describe('deriveScaleUpList persistence-block isolation', () => {
     // The overlay carries a `persistence:` map whose child keys can collide
     // with deployment component names — the comp scan must stay scoped to the
     // overlay's `deployment:` block.
-    const list = deriveScaleUpList(real());
+    const list = deriveScaleUpList({
+      ...real(),
+      overlayText:
+        'deployment:\n  worker:\n    replicaCount: 0\n' +
+        'persistence:\n  worker:\n    enabled: false\n  scratch:\n    enabled: false\n',
+    });
     const names = list.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
-    // storage + imgproxy are disabled in supabase.values.yaml: the chart renders
-    // no Deployment for them, so a scale-up entry would fail on promotion.
-    expect(names).not.toContain('supabase-supabase-storage');
-    expect(names).not.toContain('supabase-supabase-imgproxy');
-    // `snippets` is a persistence key, NOT a deployment component
-    expect(names).not.toContain('supabase-supabase-snippets');
+    expect(names).toContain('supabase-supabase-worker');
+    // A persistence-only key is never a deployment component.
+    expect(names).not.toContain('supabase-supabase-scratch');
   });
 });

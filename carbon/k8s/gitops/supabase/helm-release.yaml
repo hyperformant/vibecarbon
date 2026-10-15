@@ -1,7 +1,7 @@
 ---
 # Flux-managed replacement for the former imperative `helm install supabase`
 # in deploy.js. The values shape comes straight from supabase.values.yaml;
-# {{DOMAIN}} and {{PROJECT_NAME}} are substituted at deploy time.
+# its {{PLACEHOLDER}} tokens are substituted at deploy time.
 #
 # The HelmRelease reads secrets from the pre-created vibecarbon-secrets
 # Secret in the vibecarbon namespace (populated by our deploy flow before

@@ -762,7 +762,6 @@ async function bootstrap(cliArgs) {
     'k8s/infra/cert-manager-resources',
     'k8s/infra/traefik-crds',
     'k8s/overlays/production',
-    'k8s/overlays/local',
     'k8s/flux/clusters/primary',
     'k8s/flux/clusters/standby',
     'k8s/gitops/supabase',
@@ -935,7 +934,6 @@ async function bootstrap(cliArgs) {
 
   // Make shell scripts executable
   const shellScripts = [
-    'k8s/test-local.sh',
     'docker-entrypoint.sh',
     'volumes/db/set-passwords.sh',
     // Postgres execs this directly as its archive_command, so it MUST be +x.

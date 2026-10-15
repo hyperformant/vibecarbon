@@ -1081,7 +1081,7 @@ export class BaseProvider {
     throw new Error(
       `${source}: '${serverType}' is an ARM (aarch64) ${NAME} server type. ` +
         `vibecarbon is x86-64 (amd64) only; the app image and every dependency ` +
-        `it runs alongside (the Supabase stack, Traefik, Kong, cert-manager, the ` +
+        `it runs alongside (Postgres, Traefik, cert-manager, the ` +
         `cloud-controller/CSI drivers, cluster-autoscaler) are published for ` +
         `linux/amd64. Choose an x86 server type instead (e.g. ${suggestion}).`,
     );
