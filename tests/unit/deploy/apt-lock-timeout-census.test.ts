@@ -39,9 +39,9 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage', '.next', 
  * has to be argued for in this list instead of silently existing.
  */
 const EXEMPT: Record<string, string> = {
-  // carbon/db/Dockerfile was exempt here while it ran apt-get in an image
-  // build; the PG17/Alpine move removed its last apt-get, so the census is
-  // exemption-free. Argue any new entry in a comment like this one.
+  // The template's own db Dockerfile was exempt here while it ran apt-get in
+  // an image build; the db image is now pulled, never built in the template,
+  // so the census is exemption-free. Argue any new entry in a comment like this one.
 };
 
 // A site is a literal `apt-get …` OR a call to the shared helper — the .js

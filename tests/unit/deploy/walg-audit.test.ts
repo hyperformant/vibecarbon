@@ -1,7 +1,7 @@
 /**
  * Deploy-time wal-g audit — unit coverage with the exec seam mocked.
  *
- * The gap this closes: `carbon/db/Dockerfile`'s `wal-g --version` proves the
+ * The gap this closes: `docker/postgres-walg/Dockerfile`'s `wal-g --version` proves the
  * BINARY runs, and deploy asserts `archive_mode=on`, but nothing proved wal-g
  * could reach the configured bucket from the deployed container. Wrong
  * credentials / a missing bucket / blocked egress shipped a green deploy with

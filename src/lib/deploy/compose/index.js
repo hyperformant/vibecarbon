@@ -1055,8 +1055,9 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
  * WHY: rate limit vs DNS vs timeout) discarded. A failed pull now rejects
  * with that stderr attached, so the step that broke is the step that fails.
  *
- * `--ignore-buildable` stays: db/app carry `build:` sections and local-only
- * tags — they are built or sideloaded, never pulled, and pulling them 401s.
+ * `--ignore-buildable` stays for any service that carries a `build:` section
+ * and a local-only tag (built or sideloaded, never pulled; pulling 401s). The
+ * db is not one of them: it is the published image and is pulled here.
  * `--policy missing` stays: warm nodes must not re-download ~2GB.
  * Pinned by tests/unit/deploy/pull-images-loud.test.ts.
  */

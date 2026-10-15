@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
 import { formatDotenvLine } from '../dotenv.js';
+import { DB_IMAGE, DB_IMAGE_TAG } from '../images.js';
 import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
 import { registryEnsureShell } from './compose/registry-config.js';
 
@@ -331,6 +332,12 @@ export function renderBundle(projectName, options = {}) {
     .join('\n');
 
   const envOverrides = { ...(options.envOverrides || {}) };
+  // The db image is the CLI's, never the project's: docker-compose.yml pulls
+  // ${DB_IMAGE}:${DB_IMAGE_TAG}, and every server runs the tag of the CLI that
+  // deployed it. Set after the caller's overrides so a replayed older .env
+  // (scale) cannot pin a stale tag.
+  envOverrides.DB_IMAGE = DB_IMAGE;
+  envOverrides.DB_IMAGE_TAG = DB_IMAGE_TAG;
   if (options.domain) {
     envOverrides.DOMAIN = options.domain;
     envOverrides.ACME_EMAIL = `admin@${options.domain}`;
@@ -403,7 +410,7 @@ export function renderBundle(projectName, options = {}) {
     }
   };
 
-  // db/ carries the migrations (db/migrations/) along with the db image files.
+  // db/ carries the migrations (db/migrations/) and the seed.
   copyDirIfExist('db', 'db');
   copyDirIfExist('volumes/db', 'volumes/db');
 

@@ -153,6 +153,10 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
   METABASE_SITE_URL:
     'carbon/docker-compose.metabase.yml:29 — the container MB_SITE_URL defaults from the ' +
     'operator METABASE_SITE_URL.',
+  DB_IMAGE:
+    'carbon/docker-compose.yml — the db service image is DB_IMAGE:DB_IMAGE_TAG, ' +
+    'written by create/upgrade/deploy from src/lib/images.js.',
+  DB_IMAGE_TAG: 'carbon/docker-compose.yml — the db service image tag, written with DB_IMAGE.',
   // S3_ENDPOINT/S3_BUCKET/S3_REGION/S3_ACCESS_KEY/S3_SECRET_KEY were REMOVED (2026-10-13): the
   // app storage module (carbon/src/server/lib/storage.ts + env.ts) now reads them directly, so
   // the census counts them as real carbon/src reads and they no longer need an exemption.

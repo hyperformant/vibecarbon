@@ -20,9 +20,10 @@ services:
       - "${DEV_DB_PORT:-5432}:5432"
     # WAL-G is off in development. The base file falls back to the app's S3
     # vars, and in dev those name the local S3 on localhost:8333, which inside
-    # this container is the container itself: archive_command retries for
-    # minutes, pg_ctl cannot shut down during init, and the db never turns
-    # healthy. Empty values here win over the base file's interpolation.
+    # this container is the container itself: every WAL segment would wait
+    # out wal-archive.sh's attempts and then be dropped with a
+    # WAL_ARCHIVE_FAILED line. Empty values here win over the base file's
+    # interpolation.
     environment:
       WALG_S3_PREFIX: ""
       AWS_ENDPOINT: ""

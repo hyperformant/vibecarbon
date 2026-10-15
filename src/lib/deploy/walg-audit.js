@@ -8,8 +8,8 @@
  *
  * WHY THIS EXISTS
  * ---------------
- * `carbon/db/Dockerfile` proves the wal-g BINARY executes (`wal-g --version`
- * runs in the build, so a wrong-arch or glibc-mismatched download fails there).
+ * `docker/postgres-walg/Dockerfile` proves the wal-g BINARY executes (`wal-g --version`
+ * runs in the image build, so a wrong-arch binary fails there).
  * Deploy then asserts `archive_mode=on`. Neither says anything about whether
  * wal-g can actually TALK TO THE BUCKET from the deployed container. Wrong or
  * expired S3 keys, a bucket that doesn't exist, a mistyped endpoint/region, or

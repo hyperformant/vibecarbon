@@ -14,20 +14,19 @@ on:
 permissions:
   contents: read
 jobs:
-  # The static wal-g binary image publishes FIRST: the db image below (and
-  # carbon/db/Dockerfile on every target server) COPY --froms it, so `needs:`
+  # The static wal-g binary image publishes FIRST: the db image below
+  # COPY --froms it, so `needs:`
   # in this one workflow is what serializes a same-push bump of both — two
   # workflows racing the same push was the alternative, and the db leg would
   # lose it.
   #
   # multi-arch (amd64 + arm64) with NO QEMU: docker/wal-g/Dockerfile builds
   # on $BUILDPLATFORM and cross-compiles per TARGETARCH, so both platforms
-  # are native-speed `go build`s. arm64's consumer is local dev — an Apple
-  # Silicon machine building carbon/db pulls this image. Guarded by
+  # are native-speed `go build`s. Its one consumer is the db image's own
+  # multi-arch build below. Guarded by
   # tests/unit/deploy/workflow-platforms.test.ts.
   #
-  # The ghcr package must be PUBLIC: target servers pull it anonymously
-  # during compose builds (same rule as ghcr.io/hyperformant/postgres).
+  # The ghcr package must be PUBLIC (same rule as ghcr.io/hyperformant/postgres).
   publish-walg:
     runs-on: ubuntu-latest
     environment: e2e-infra
@@ -72,44 +71,23 @@ jobs:
           IMG=$(grep -oP "DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
           TAG=$(grep -oP "DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
           echo "image=$IMG:$TAG" >> "$GITHUB_OUTPUT"
-      # amd64-only, deliberately — and note this is NOT the same question as
-      # "does anything arm64 build this Dockerfile?".
+      # amd64 + arm64, because every mode PULLS this image: compose and
+      # compose-ha servers (carbon/docker-compose.yml's
+      # `image: ${DB_IMAGE}:${DB_IMAGE_TAG}`), k8s nodes (the chart values),
+      # and local `vibecarbon up` on developer machines, Apple Silicon
+      # included. That local pull is the arm64 consumer. Servers stay x86-64
+      # (decision 2026-07-30).
       #
-      # WHO PULLS THIS IMAGE: k8s deploys, and only k8s deploys. The ref is
-      # substituted into carbon/k8s/values/supabase.values.yaml's {{DB_IMAGE}}/
-      # {{DB_IMAGE_TAG}} placeholders by installSupabase (src/lib/deploy/k8s/
-      # k3s.js) and materialized by containerd on the k3s nodes. It is never
-      # sideloaded, and `helm` running locally does not pull it — the remote
-      # cluster does.
-      #
-      # WHO DOES NOT: local development. The generated project's compose stack
-      # BUILDS the db from carbon/db/Dockerfile (`build: {context: ./db}` +
-      # `pull_policy: build` in carbon/docker-compose.yml) — including for
-      # compose *deploys*, where reconcile.sh runs `docker compose up` on the
-      # server itself. So no developer machine, Apple Silicon or otherwise,
-      # ever pulls this image, and dropping arm64 here cannot break local dev.
-      #
-      # That is why carbon/db/Dockerfile and docker/postgres-walg/Dockerfile
-      # KEEP their arm64 TARGETARCH branches: those are build-time paths that
-      # still run on arm64 hosts, and the `wal-g --version` exec in them is the
-      # only place a wrong-arch or glibc-mismatched binary fails loudly. Single
-      # published platform + arch-correct Dockerfiles is intentional.
-      #
-      # vibecarbon standardizes on x86-64 servers (decision 2026-07-30):
-      # DigitalOcean has no ARM instances at all, and Hetzner ARM is 4 SKUs in
-      # 3 of 6 locations behind a "limited availability" tier.
-      #
-      # No foreign architecture is built, so docker/setup-qemu-action is gone.
-      # Measured on run 30456193724 (the last multi-arch publish): setup-qemu
-      # 9s + a 2m20s two-arch build-push out of a 4m07s job — the emulated
-      # arm64 leg (apt-get + wal-g download + `wal-g --version` under QEMU) is
-      # roughly half of that build, so expect ~1m15s back per run.
-      #
-      # Bonus: the smoke-test step below only ever exercised the amd64 image
-      # even while arm64 was published. Now that amd64 is all we publish, the
-      # smoke test covers 100% of the artifact instead of half of it.
+      # QEMU, for this image only: the builder stage compiles pg_cron (C, PGXS)
+      # inside the target platform's postgres image, against that platform's
+      # server headers. Cross-compiling would need a second toolchain and a
+      # foreign sysroot; emulating one small `make` is cheaper and keeps the
+      # build identical on both platforms. The final stage's `wal-g --version`
+      # and pg_cron file checks then run under emulation too, so the arm64
+      # image is proven in-build, not just assembled.
       #
       # Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
@@ -119,7 +97,7 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: docker/postgres-walg
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.ref.outputs.image }}
       - name: Smoke-test wal-g on the published amd64 image

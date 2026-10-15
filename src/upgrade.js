@@ -32,6 +32,7 @@ import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { resolveDisplayName } from './lib/display-name.js';
 import { parseDotenv } from './lib/dotenv.js';
+import { DB_IMAGE, DB_IMAGE_TAG } from './lib/images.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
 import {
   adaptDockerfileForPackageManager,
@@ -158,6 +159,31 @@ export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
 }
 
 /**
+ * Point the project's .env files at this CLI's database image.
+ * docker-compose.yml pulls `${DB_IMAGE}:${DB_IMAGE_TAG}`, so the upgraded
+ * template files and the image they run on move together. A project created
+ * before the image was pulled has neither key and could not start its db.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {boolean} whether either file was (or, under -dry, would be) changed
+ */
+export function ensureDbImageEnv(cwd, { dryRun = false } = {}) {
+  const want = { DB_IMAGE, DB_IMAGE_TAG };
+  let changed = false;
+  for (const file of ['.env.local', '.env']) {
+    const path = join(cwd, file);
+    if (!existsSync(path)) continue;
+    const env = parseDotenv(readFileSync(path, 'utf-8'));
+    if (Object.entries(want).some(([k, v]) => env[k] !== v)) changed = true;
+  }
+  if (changed && !dryRun) {
+    for (const [k, v] of Object.entries(want)) setEnvVar(k, v, cwd);
+  }
+  return changed;
+}
+
+/**
  * What `upgrade` tells the user about BETTER_AUTH_SECRET. A generated key
  * means the project predates in-app auth, and a database a server already
  * runs for it can't carry over: sign-in accounts lived in the old auth
@@ -207,6 +233,13 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
   const authNotes = betterAuthUpgradeNotes(ensureBetterAuthSecret(cwd, { dryRun }), { dryRun });
   if (authNotes.info) p.log.info(authNotes.info);
   if (authNotes.warn) p.log.warn(authNotes.warn);
+  if (ensureDbImageEnv(cwd, { dryRun })) {
+    p.log.info(
+      dryRun
+        ? `Would set the database image to ${DB_IMAGE}:${DB_IMAGE_TAG} in .env and .env.local`
+        : `Set the database image to ${DB_IMAGE}:${DB_IMAGE_TAG} in .env and .env.local`,
+    );
+  }
   const env = loadEnvVariables(cwd);
   const manifest = loadManifest(cwd);
 

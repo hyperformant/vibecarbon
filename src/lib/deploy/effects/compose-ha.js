@@ -724,21 +724,19 @@ async function haWriteReplicationOverlay(ctx) {
       // Materialize the db image EXPLICITLY before recreating the service.
       //
       // On the standby this can be the FIRST time the db image exists: the
-      // deploy's compose-up does not necessarily start db there, and db is
-      // `pull_policy: build` (never pulled). Before 2026-08-23 the `up -d db`
-      // below did this implicitly — a full build including the base-image
-      // pull, racing the step's 60s ssh timeout. Hetzner's bandwidth won that
-      // race; vultr's lost it (runs 32614839037/32620567017), dying as an
-      // opaque timeout with the build half-done. Explicit build = its own
-      // command, a pull-scale 600s budget, and the builder's stderr naming
-      // any real failure. Warm nodes no-op in seconds (cache hit).
+      // deploy's compose-up does not necessarily start db there. Left to the
+      // `up -d db` below, the pull would race that step's 60s ssh timeout
+      // (the 2026-08-23 vultr runs 32614839037/32620567017 lost exactly that
+      // race when this was still an on-server build). An explicit pull is its
+      // own command with a pull-scale 600s budget, and its stderr names any
+      // real failure. Warm nodes no-op in seconds (image already present).
       await sshRunAsync(
         ip,
         sshKeyPath,
         `cd /opt/${projectName} || exit 1; ` +
           `FLAGS=$(sed -n 's/^docker compose \\(.*\\) \\$(\\[ -f docker-compose.replication.yml.*up -d --remove-orphans$/\\1/p' reconcile.sh | tail -1); ` +
           `[ -n "$FLAGS" ] || FLAGS='${REPL_COMPOSE_FLAGS_BASE}'; ` +
-          `docker compose $FLAGS -f docker-compose.replication.yml build db 2>&1`,
+          `docker compose $FLAGS -f docker-compose.replication.yml pull db 2>&1`,
         { timeout: 600_000 },
       );
       // Pull reconcile.sh's own ${composeFlags} (the text before the runtime

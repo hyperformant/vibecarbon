@@ -1,15 +1,14 @@
 # syntax=docker/dockerfile:1
 # Static wal-g, built ONCE and published to ghcr.io/hyperformant/wal-g —
-# the single build point for the binary both database images copy in
-# (carbon/db/Dockerfile and docker/postgres-walg/Dockerfile).
+# the single build point for the binary the db image copies in
+# (docker/postgres-walg/Dockerfile).
 #
-# WHY BUILD FROM SOURCE: supabase/postgres 17.x is Alpine/musl; upstream
-# wal-g releases are glibc-only (the alpine variant was retired upstream in
-# 2026-04). Our backup config uses lz4 compression (pure Go) and no
-# libsodium/PGP, so CGO_ENABLED=0 with no build tags produces a fully
-# static binary that runs on musl and glibc alike. This also retires the
-# release-asset BUMP TRAP (upstream renamed assets in v3.0.8) — we pin a
-# source tag instead of a release asset name.
+# WHY BUILD FROM SOURCE: upstream wal-g releases are glibc-only. Our backup
+# config uses lz4 compression (pure Go) and no libsodium/PGP, so
+# CGO_ENABLED=0 with no build tags produces a fully static binary that runs
+# on any libc. This also retires the release-asset BUMP TRAP (upstream
+# renamed assets in v3.0.8) — we pin a source tag instead of a release
+# asset name.
 #
 # Cross-compile on the BUILD platform (no QEMU): Go targets TARGETARCH
 # directly, so the multi-arch publish is two `go build`s, not emulation.

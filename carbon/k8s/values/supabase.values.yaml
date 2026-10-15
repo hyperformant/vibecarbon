@@ -41,11 +41,9 @@ secret:
       password: DB_PASSWORD
       database: DB_NAME
 
-# Override the db image with vibecarbon's wal-g-equipped build (carbon/db/
-# Dockerfile: FROM supabase/postgres + wal-g v3.0.9). The stock chart image
-# has no wal-g, which is why k8s historically had no WAL archiving / PITR.
-# Built + sideloaded to the database node by deployK3s (k3s-db-build /
-# k3s-db-sideload); IfNotPresent so the sideloaded image is used, not pulled.
+# Override the db image with vibecarbon's published db image (built from
+# docker/postgres-walg in the vibecarbon repo: official postgres Alpine +
+# pg_cron + wal-g), the same image every compose mode pulls.
 # {{DB_IMAGE}}/{{DB_IMAGE_TAG}} substituted at deploy time in installSupabase.
 image:
   db:

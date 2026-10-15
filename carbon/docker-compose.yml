@@ -109,15 +109,13 @@ services:
 
   # PostgreSQL Database
   db:
-    build:
-      context: ./db
-    image: ${PROJECT_NAME}-db:latest
-    # The db image is built locally from ./db (no registry to pull from).
-    # Without this, compose's default `pull_policy: missing` first attempts
-    # a Docker Hub pull, which 401s with "pull access denied for {image}"
-    # before falling back to the local build. Functional but scary noise on
-    # every `docker compose up` invocation.
-    pull_policy: build
+    # vibecarbon's published db image (official postgres Alpine + pg_cron +
+    # wal-g + a baked postgresql.conf, built once from docker/postgres-walg in
+    # the vibecarbon repo). Pulled, never built: locally, on compose servers
+    # and on k8s alike. DB_IMAGE / DB_IMAGE_TAG are written into .env by
+    # `vibecarbon create` and refreshed by `vibecarbon upgrade` and every
+    # deploy, so the tag always matches the CLI that manages the project.
+    image: ${DB_IMAGE:?DB_IMAGE missing, run vibecarbon upgrade to write it to .env}:${DB_IMAGE_TAG:?DB_IMAGE_TAG missing, run vibecarbon upgrade to write it to .env}
     container_name: ${PROJECT_NAME}-db
     restart: unless-stopped
     security_opt:
@@ -127,8 +125,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-      # First-time init runs all Supabase migrations + WAL-G init before the
-      # server accepts TCP connections (~60-150s under fanout-3 load — observed
+      # First-time init (initdb plus the entrypoint's temporary server) runs
+      # before the server accepts TCP connections (it took ~60-150s on the
+      # previous image under fanout-3 load — observed
       # restore re-deploy failing at deploy.compose.up=160s while the same db
       # eventually became healthy ~3min later, fanout9 e1 2026-05-01). Without
       # start_period, retries × interval = 50s expires before first init
@@ -152,10 +151,10 @@ services:
       # then logs "WAL_ARCHIVE_FAILED" to stderr and exits 0 so PG can recycle
       # the segment instead of pinning the entire pg_wal directory. Without
       # this, a single archive failure pins WAL forever and fills the disk
-      # within days (~20 GiB/day of WAL on an idle Supabase DB given
-      # archive_timeout below, because supabase extensions like pg_cron,
-      # pg_stat_statements and replication publications generate background
-      # writes every minute). RCA: prod-1 2026-05-26, 58 GiB of WAL retained
+      # within days (~20 GiB/day of WAL on an idle database given
+      # archive_timeout below, measured on the previous image, whose bundled
+      # extensions generated background writes every minute; pg_cron still
+      # writes when jobs run). RCA: prod-1 2026-05-26, 58 GiB of WAL retained
       # in 3 days because wal-g couldn't reach the configured S3 bucket;
       # disk filled, db went into Error state, /api/v1/notifications 500'd,
       # whole stack down. Trade-off: a persistent archive outage leaves a
@@ -169,10 +168,10 @@ services:
       # the file mode, so the fault-tolerant wrapper always runs.
       - archive_command=bash /etc/postgresql/wal-archive.sh %p
       - -c
-      # 60s was too aggressive — on an idle Supabase DB, that forces a
+      # 60s was too aggressive — on an idle database, that forces a
       # 16 MiB segment switch every minute regardless of write volume (PG14+
-      # is supposed to skip empty switches but supabase's bundled extensions
-      # write enough every minute to trip it). 23 GiB/day of WAL baseline.
+      # is supposed to skip empty switches, but background writes such as
+      # pg_cron's job runs are enough to trip it). 23 GiB/day of WAL baseline.
       # 900s (15 min) drops baseline to ~1.5 GiB/day with an RPO cap that's
       # plenty for SaaS workloads. Override via postgresql.conf or compose
       # if tighter RPO is needed.
@@ -184,7 +183,7 @@ services:
       # otherwise return "database is not accepting connections / Hot
       # standby mode is disabled" and pg_promote can't be invoked).
       # No-op on the primary — hot_standby only affects standbys. The PG
-      # default is on, but supabase's image config has shipped it off
+      # default is on, but the previous image's config shipped it off
       # (seen on 15.8.1.085), so set it explicitly rather than trusting
       # the image. RCA: compose-ha 2026-05-01 fanout13 failover —
       # pg_promote retried 5 times against an unreachable standby psql
@@ -198,6 +197,9 @@ services:
       # reach it through `vibecarbon shell` / SSH. See docs/security.md.
       - max_connections=200
     environment:
+      # The official image's superuser. Named explicitly so `docker compose
+      # exec db` scripts (metabase-init.sh, n8n-init.sh) get it as their user.
+      POSTGRES_USER: postgres
       POSTGRES_HOST: /var/run/postgresql
       PGPORT: 5432
       POSTGRES_PORT: 5432

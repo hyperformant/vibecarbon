@@ -5,7 +5,7 @@
  * docs/tests.md ("success must cite evidence"). Everything upstream of it
  * proves *capability*, never *effect*:
  *
- *   - `carbon/db/Dockerfile` proves the wal-g BINARY runs (executed in the
+ *   - `docker/postgres-walg/Dockerfile` proves the wal-g BINARY runs (executed in the
  *     same build layer, pinned by walg-dockerfile-arch.test.ts).
  *   - `src/lib/deploy/walg-audit.js` proves wal-g can REACH the bucket — but
  *     its own docblock is explicit that an EMPTY `backup-list` is a PASS, so

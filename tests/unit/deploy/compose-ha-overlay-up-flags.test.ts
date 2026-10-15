@@ -146,15 +146,15 @@ describe('haWriteReplicationOverlay flag extraction', () => {
 describe('overlay db materialization is explicit, never implicit (2026-08-23)', () => {
   /**
    * Runs 32614839037/32620567017 (vultr compose-ha): the standby's FIRST db
-   * image materialization happened inside this step's `up -d db` — an
-   * IMPLICIT compose build (db carries `pull_policy: build`), whose base
-   * image pull alone can exceed the step's 60s ssh timeout on a slow
-   * provider link. Hetzner won that race on bandwidth; vultr could not, and
-   * the failure surfaced as an opaque timeout with the build half-done.
+   * image materialization happened inside this step's `up -d db` (then an
+   * IMPLICIT on-server build), whose image pull alone can exceed the step's
+   * 60s ssh timeout on a slow provider link. Hetzner won that race on
+   * bandwidth; vultr could not, and the failure surfaced as an opaque timeout.
+   * The db image is now pulled, never built, and the pull is just as large.
    *
-   * Contract: build db EXPLICITLY (its own command, pull-scale timeout, its
+   * Contract: pull db EXPLICITLY (its own command, pull-scale timeout, its
    * own stderr) BEFORE the recreate, and run the recreate with `--no-build`
-   * so a missing image can never again turn into a silent under-timed build.
+   * so the recreate never materializes anything under the short timeout.
    */
   const fnStart = EFFECTS_SRC.indexOf('async function haWriteReplicationOverlay');
   const fnBody = EFFECTS_SRC.slice(
@@ -162,20 +162,21 @@ describe('overlay db materialization is explicit, never implicit (2026-08-23)', 
     EFFECTS_SRC.indexOf('\nconst REPL_COMPOSE_FLAGS_BASE', fnStart),
   );
 
-  it('builds the db image explicitly before the up', () => {
+  it('pulls the db image explicitly before the up', () => {
     expect(fnStart).toBeGreaterThan(-1);
-    const buildAt = fnBody.indexOf('build db');
+    const pullAt = fnBody.indexOf('pull db');
     const upAt = fnBody.indexOf('up -d --no-build db');
-    expect(buildAt, 'explicit `compose build db` missing').toBeGreaterThan(-1);
+    expect(pullAt, 'explicit `compose pull db` missing').toBeGreaterThan(-1);
+    expect(fnBody, 'the db image is pulled, never built on the server').not.toMatch(/ build db/);
     expect(upAt, '`up -d db` must carry --no-build').toBeGreaterThan(-1);
-    expect(buildAt, 'build must precede the up').toBeLessThan(upAt);
+    expect(pullAt, 'pull must precede the up').toBeLessThan(upAt);
   });
 
-  it('gives the explicit build a pull-scale timeout, not the 60s step timeout', () => {
-    // The build pulls the db base image (~GBs cold); 60s is a bandwidth
-    // lottery. Same 600s budget as pullComposeImages.
-    const buildAt = fnBody.indexOf('build db');
-    const window = fnBody.slice(buildAt, buildAt + 400);
+  it('gives the explicit pull a pull-scale timeout, not the 60s step timeout', () => {
+    // A cold db image pull is hundreds of MB; 60s is a bandwidth lottery.
+    // Same 600s budget as pullComposeImages.
+    const pullAt = fnBody.indexOf('pull db');
+    const window = fnBody.slice(pullAt, pullAt + 400);
     expect(window).toMatch(/timeout:\s*600_000/);
   });
 

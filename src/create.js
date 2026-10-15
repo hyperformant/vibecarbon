@@ -34,6 +34,7 @@ import { gitSafeEnv, runCommand } from './lib/command.js';
 import { registerProject } from './lib/config.js';
 import { titleizeSlug } from './lib/display-name.js';
 import { dotenvValueProblem, formatDotenvLine } from './lib/dotenv.js';
+import { DB_IMAGE, DB_IMAGE_TAG } from './lib/images.js';
 import { writeLogoSvgs } from './lib/logo-generator.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import {
@@ -1499,6 +1500,11 @@ ${formatDotenvLine('POSTGRES_PASSWORD', variables.DB_PASSWORD)}
 
 # HA PostgreSQL replication (used by HA deploy modes: -mode compose-ha / k8s-ha)
 ${formatDotenvLine('REPL_PASSWORD', variables.REPL_PASSWORD)}
+
+# The database image docker-compose.yml pulls. Set by the vibecarbon CLI:
+# \`vibecarbon upgrade\` and every deploy rewrite it to the CLI's own version.
+${formatDotenvLine('DB_IMAGE', DB_IMAGE)}
+${formatDotenvLine('DB_IMAGE_TAG', DB_IMAGE_TAG)}
 
 # =============================================================================
 # ADMIN CREDENTIALS

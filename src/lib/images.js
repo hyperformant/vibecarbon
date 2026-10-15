@@ -1,19 +1,25 @@
 /**
- * Single source of truth for the pre-published db image (supabase/postgres +
- * wal-g). Built once per version by .github/workflows/publish-db-image.yml
- * for linux/amd64 ONLY — vibecarbon standardizes on x86-64 servers, and this
- * image's only consumer is the supabase db pod on a k3s node. (Compose does
- * not pull it at all; it builds carbon/db/ on the host that runs the stack.)
- * Bumping the tag here + Dockerfile is the whole version-bump surface.
+ * Single source of truth for the pre-published db image: the official
+ * postgres Alpine image plus pg_cron, wal-g and a baked postgresql.conf
+ * (docker/postgres-walg/). Built once per version by
+ * .github/workflows/publish-db-image.yml for linux/amd64 and linux/arm64, and
+ * PULLED by every mode: compose and compose-ha (docker-compose.yml's
+ * `image: ${DB_IMAGE}:${DB_IMAGE_TAG}`, written into the project's .env by
+ * create, upgrade and every deploy bundle), k8s and k8s-ha (the chart values),
+ * and local `vibecarbon up` (arm64 is for Apple Silicon machines). Nothing
+ * builds a db image on a server. Bumping the tag here + the Dockerfile is the
+ * whole version-bump surface; `pnpm db-image:build-local` builds an
+ * unpublished tag into the local Docker image store for testing.
  */
 // Publish to ghcr (GitHub Container Registry) under the hyperformant org
 // (this repo is hyperformant/vibecarbon). The package must be set to PUBLIC
-// so k3s/compose nodes pull without a secret. Single source of truth for the
-// tag — bump here + the Dockerfile to cut a new version.
+// so servers and developer machines pull without a secret. Tag scheme:
+// <PostgreSQL major.minor>-walg<wal-g version>, read from the Dockerfile's
+// two pins (guarded by tests/unit/deploy/walg-dockerfile-arch.test.ts).
 export const DB_IMAGE = 'ghcr.io/hyperformant/postgres';
-export const DB_IMAGE_TAG = '17.11.0.002-walg3.0.9';
+export const DB_IMAGE_TAG = '17.11-walg3.0.9';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11.0.002-walg3.0.9" */
+/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9" */
 export function dbImageRef() {
   return `${DB_IMAGE}:${DB_IMAGE_TAG}`;
 }

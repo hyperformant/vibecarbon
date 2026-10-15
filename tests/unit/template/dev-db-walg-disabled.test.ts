@@ -7,9 +7,10 @@ import { describe, expect, it } from 'vitest';
  * The base compose file points WAL-G at the app's S3 vars (WALG_S3_PREFIX
  * falls back to S3_BUCKET, AWS_ENDPOINT is S3_ENDPOINT). In dev those vars
  * name the local S3 on `localhost:8333`, which from inside the db container is
- * the container itself: WAL-G retried archive_command for minutes, pg_ctl
- * could not shut down during init, and the db never became healthy. The
- * dev-only override blanks all four so WAL-G stays off in development.
+ * the container itself, so every WAL segment would fail to archive. (It used
+ * to also crash the first boot; that root cause is fixed in the image, see
+ * tests/unit/deploy/db-image-first-boot.test.ts.) The dev-only override
+ * blanks all four so WAL-G stays off in development.
  */
 
 const ROOT = join(__dirname, '..', '..', '..');
