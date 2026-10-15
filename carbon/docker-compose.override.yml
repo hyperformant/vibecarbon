@@ -1,5 +1,5 @@
 # Development overrides - automatically loaded by docker compose
-# Note: Admin services (studio, traefik) have no auth in local dev - auth added via prod overlay
+# Note: Admin services (traefik) have no auth in local dev - auth added via prod overlay
 #
 # IMPORTANT: For ForwardAuth to work with admin services (n8n, metabase, etc.),
 # access the app at http://app.localhost instead of http://localhost:5173.
@@ -42,21 +42,6 @@ services:
       - ./volumes/traefik/middlewares.dev.yml:/etc/traefik/dynamic/middlewares.yml:ro
 
   app:
-    restart: on-failure:5
-
-  kong:
-    restart: on-failure:5
-
-  rest:
-    restart: on-failure:5
-
-  realtime:
-    restart: on-failure:5
-
-  meta:
-    restart: on-failure:5
-
-  studio:
     restart: on-failure:5
 
   # Local S3 for development uploads (SeaweedFS). Dev-only: this file is never

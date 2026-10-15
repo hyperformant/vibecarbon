@@ -9,11 +9,11 @@ import { describe, expect, it } from 'vitest';
  * Docker auto-create an empty DIRECTORY at the mount source — the service
  * then dies with "Is a directory".
  *
- * This class has now bitten THREE times: wal-archive.sh (postgres archive
- * exit 126, see create.js's comment), then pooler.sql AND pooler.exs
- * together (db init aborted before set-passwords → every db-connected
- * service crash-looped on SASL auth; supavisor cat-crash-looped — RCA: kept
- * compose rig e1, 2026-08-06). Grep-level, so it runs in the unit tier.
+ * This class has bitten THREE times: wal-archive.sh (postgres archive exit
+ * 126, see create.js's comment), then two db init mount sources together
+ * (db init aborted, every db-connected service crash-looped on SASL auth —
+ * RCA: kept compose rig e1, 2026-08-06). Grep-level, so it runs in the unit
+ * tier.
  */
 
 const ROOT = join(__dirname, '..', '..', '..');
@@ -32,9 +32,9 @@ const fileMounts = [...new Set(composeSources)].filter((p) =>
 
 describe('compose file bind-mount sources', () => {
   it('found the known mounts (sanity — regex still matches the compose files)', () => {
-    expect(fileMounts.length).toBeGreaterThanOrEqual(8);
-    expect(fileMounts).toContain('volumes/db/pooler.sql');
-    expect(fileMounts).toContain('volumes/pooler/pooler.exs');
+    expect(fileMounts.length).toBeGreaterThanOrEqual(3);
+    expect(fileMounts).toContain('volumes/db/wal-archive.sh');
+    expect(fileMounts).toContain('volumes/db/roles.sql');
   });
 
   it.each(fileMounts)('%s is scaffolded by create.js', (rel) => {

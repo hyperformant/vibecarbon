@@ -11,11 +11,11 @@ import { describe, expect, it } from 'vitest';
  * restart <services>` resolve service names against docker-compose.yml
  * ONLY — the `-f` overlay chain is baked into reconcile.sh/systemd at
  * deploy time and is NOT in scope for ad-hoc SSH commands. A service
- * defined only in an overlay (supavisor lives in docker-compose.prod.yml)
+ * defined only in an overlay (as the pooler did, in docker-compose.prod.yml)
  * makes the WHOLE command exit 1 in ~2s having touched nothing. That is
  * how the failover app-tier restart never once executed: 3/3 failovers
  * "restarted" six services in two seconds, two verify passes rode on
- * PostgREST self-recovery, and the third failed verify-failover.
+ * self-recovery, and the third failed verify-failover.
  *
  * The overlay-only set is DERIVED from the compose files, so a service
  * moving between base and overlay redraws the banned set automatically.
@@ -55,12 +55,12 @@ describe('bare docker-compose invocations never name overlay-only services', () 
   const overlayOnly = [...prod].filter((svc) => !base.has(svc));
 
   it('sanity: the derivation sees real services on both sides', () => {
-    // Mutation-check anchors: db/app are base; supavisor is the overlay-only
-    // member that caused the failover bug. If parsing breaks, these fail
-    // before the sweep can vacuously pass.
+    // Mutation-check anchors: db/app are base; docker-socket-proxy is
+    // overlay-only (the failover bug's service, the pooler, was one too).
+    // If parsing breaks, these fail before the sweep can vacuously pass.
     expect(base.has('db')).toBe(true);
     expect(base.has('app')).toBe(true);
-    expect(overlayOnly).toContain('supavisor');
+    expect(overlayOnly).toContain('docker-socket-proxy');
   });
 
   it('src/lib/deploy has no bare compose verb naming an overlay-only service', () => {

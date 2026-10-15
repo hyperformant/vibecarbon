@@ -17,7 +17,7 @@ case "$MODE" in
     sed "s/ISODOMAIN/${DOMAIN}/" volumes/traefik/router-combined.yml.tpl > volumes/traefik/router.yml
     ;;
   disjoint)
-    # No wildcard anywhere: apex + studio.<domain> each get their own order
+    # No wildcard anywhere: apex + dashboard.<domain> each get their own order
     # at their own _acme-challenge name.
     printf "tls:\n  stores:\n    default: {}\n" > volumes/traefik/tls-default.yml
     sed "s/ISODOMAIN/${DOMAIN}/" volumes/traefik/router-disjoint.yml.tpl > volumes/traefik/router.yml
@@ -27,8 +27,8 @@ case "$MODE" in
     sed "s/ISODOMAIN/${DOMAIN}/" volumes/traefik/router.yml.tpl > volumes/traefik/router.yml
     ;;
 esac
-# In disjoint mode the second expected name is studio.<domain>, not the wildcard.
-SECOND="\*.$DOMAIN"; [ "$MODE" = "disjoint" ] && SECOND="studio.$DOMAIN"
+# In disjoint mode the second expected name is dashboard.<domain>, not the wildcard.
+SECOND="\*.$DOMAIN"; [ "$MODE" = "disjoint" ] && SECOND="dashboard.$DOMAIN"
 # Fresh per-trial ACME store OUTSIDE the repo (root-owned acme.json inside
 # the tree breaks census walks and user-level cleanup — see compose file).
 ACME_STORE_DIR="$(mktemp -d /tmp/acme-iso-XXXXXX)"

@@ -84,11 +84,6 @@ http:
           - super-admin-forward-auth
 
     # Strip prefix middlewares for path-based admin routing
-    strip-admin-studio:
-      stripPrefix:
-        prefixes:
-          - "/admin/studio"
-
     strip-admin-traefik:
       stripPrefix:
         prefixes:

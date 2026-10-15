@@ -82,7 +82,6 @@ export default defineConfig(({ mode }) => {
               id.includes('node_modules/react-router')
             )
               return 'vendor-react';
-            if (id.includes('node_modules/@supabase/')) return 'vendor-supabase';
             if (id.includes('node_modules/@tanstack/react-query')) return 'vendor-query';
             // DO NOT split recharts into its own chunk. With rolldown-vite (Vite 8 +
             // rolldown 1.x), splitting a CJS-React consumer causes rolldown to bundle

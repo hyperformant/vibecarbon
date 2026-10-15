@@ -794,7 +794,6 @@ async function bootstrap(cliArgs) {
     'db',
     'public',
     'backup',
-    'volumes/kong',
     'volumes/db',
     'volumes/traefik',
     'volumes/s3',
@@ -895,12 +894,6 @@ async function bootstrap(cliArgs) {
   await tick();
 
   s.message('Generating backend files');
-  copyTemplate('volumes/kong/kong.yml', join(projectDir, 'volumes/kong/kong.yml'), variables);
-  copyTemplate(
-    'volumes/kong/docker-entrypoint.sh',
-    join(projectDir, 'volumes/kong/docker-entrypoint.sh'),
-    variables,
-  );
   copyTemplate('volumes/db/roles.sql', join(projectDir, 'volumes/db/roles.sql'), variables);
   copyTemplate(
     'volumes/db/set-passwords.sh',
@@ -917,20 +910,6 @@ async function bootstrap(cliArgs) {
     join(projectDir, 'volumes/db/wal-archive.sh'),
     variables,
   );
-  // pooler.sql + pooler.exs are bind-mount SOURCES (db init + supavisor
-  // tenant seed). Same escape class as wal-archive.sh above: omit them here
-  // and Docker mounts an auto-created empty DIRECTORY on the server —
-  // "could not read from input file: Is a directory" aborts db init before
-  // set-passwords, and every db-connected service crash-loops on SASL auth
-  // (RCA: kept compose rig e1, 2026-08-06). Guarded by
-  // tests/unit/create/volume-mount-sources.test.ts.
-  copyTemplate('volumes/db/pooler.sql', join(projectDir, 'volumes/db/pooler.sql'), variables);
-  copyTemplate(
-    'volumes/pooler/pooler.exs',
-    join(projectDir, 'volumes/pooler/pooler.exs'),
-    variables,
-  );
-  copyTemplate('volumes/db/realtime.sql', join(projectDir, 'volumes/db/realtime.sql'), variables);
   copyTemplate('volumes/s3/s3.json', join(projectDir, 'volumes/s3/s3.json'), variables);
   copyTemplate(
     'volumes/traefik/middlewares.yml',
@@ -1001,7 +980,6 @@ async function bootstrap(cliArgs) {
   const shellScripts = [
     'k8s/test-local.sh',
     'docker-entrypoint.sh',
-    'volumes/kong/docker-entrypoint.sh',
     'volumes/db/set-passwords.sh',
     // Postgres execs this directly as its archive_command, so it MUST be +x.
     // copyTemplate (copyFileSync) drops the source's exec bit, and omitting it

@@ -409,19 +409,7 @@ export function renderBundle(projectName, options = {}) {
 
   copyDirIfExist('db', 'db');
   copyDirIfExist('volumes/db', 'volumes/db');
-  // Supavisor tenant seed — bind-mounted by docker-compose.prod.yml. Missing
-  // from the bundle = Docker auto-creates a directory over it on the server
-  // and the pooler crash-loops on `cat: /etc/pooler/pooler.exs: Is a
-  // directory` (same class as the functions/ note below).
-  copyDirIfExist('volumes/pooler', 'volumes/pooler');
   copyDirIfExist('supabase/migrations', 'supabase/migrations');
-  copyDirIfExist('volumes/kong', 'volumes/kong');
-  // Edge functions: docker-compose.prod.yml bind-mounts ./functions and starts
-  // the edge-runtime with `--main-service /home/deno/functions/main`. If this
-  // isn't bundled, the mount auto-creates an empty dir on the server and the
-  // runtime crash-loops with "could not find an appropriate entrypoint". The
-  // template ships a stub at functions/main/index.ts. RCA: prod-1 2026-05-26.
-  copyDirIfExist('functions', 'functions');
 
   // volumes/traefik/ — dynamic-config directory mounted into Traefik.
   // Always ensure the dir exists in the bundle so Traefik's file provider

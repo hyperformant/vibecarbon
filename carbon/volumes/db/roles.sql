@@ -1,6 +1,6 @@
--- Supabase Roles Setup
--- Creates required roles and grants for Supabase services
--- Passwords are set separately by set-passwords.sh (never hardcoded in SQL)
+-- Database roles setup
+-- Creates the roles and grants the migrations reference. No role here logs in
+-- with a password; the app connects as the database owner (DB_USER).
 
 -- Create roles if they don't exist (fallback for non-Supabase postgres images)
 DO $$
@@ -20,28 +20,12 @@ BEGIN
         CREATE ROLE service_role NOLOGIN NOINHERIT BYPASSRLS;
     END IF;
 
-    -- authenticator role (PostgREST uses this)
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
-        CREATE ROLE authenticator NOINHERIT LOGIN;
-    END IF;
-
     -- supabase_admin role
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'supabase_admin') THEN
         CREATE ROLE supabase_admin LOGIN;
     END IF;
-
-    -- supabase_storage_admin role (for Storage)
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'supabase_storage_admin') THEN
-        CREATE ROLE supabase_storage_admin NOINHERIT CREATEROLE LOGIN;
-    END IF;
 END
 $$;
-
--- Grant role memberships
-GRANT anon TO authenticator;
-GRANT authenticated TO authenticator;
-GRANT service_role TO authenticator;
-GRANT supabase_admin TO authenticator;
 
 -- Grant schema permissions (principle of least privilege)
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
@@ -63,12 +47,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE O
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO authenticated;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
-
--- Create storage schema for Storage (or fix ownership if it already exists)
-CREATE SCHEMA IF NOT EXISTS storage AUTHORIZATION supabase_storage_admin;
-ALTER SCHEMA storage OWNER TO supabase_storage_admin;
-GRANT ALL ON SCHEMA storage TO supabase_storage_admin;
-GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role;
 
 -- Create extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;

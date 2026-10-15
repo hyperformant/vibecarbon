@@ -12,7 +12,7 @@ http:
       tls:
         certResolver: letsencrypt
     iso-sub:
-      rule: Host(`studio.ISODOMAIN`)
+      rule: Host(`dashboard.ISODOMAIN`)
       entryPoints: [websecure]
       service: noop@internal
       tls:

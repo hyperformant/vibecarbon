@@ -6,9 +6,9 @@ import { describe, expect, it } from 'vitest';
  * Security invariants — the dev-time net.
  *
  * These assert the security properties that keep this app safe as you extend
- * it. They run under `npm test` and in CI, so a change that would introduce
- * the classic self-hosted-Supabase holes fails fast, with a clear message,
- * before it can ship. (The deploy also re-checks RLS against the live database
+ * it. They run under `npm test` and in CI, so a change that would reopen a
+ * known hole (an un-RLS'd table, a second public data path, a permissive
+ * auth config) fails fast, with a clear message, before it can ship. (The deploy also re-checks RLS against the live database
  * as a ground-truth backstop — this catches it earlier and explains why.)
  *
  * If a test here fails, DO NOT delete the assertion — fix the code. Each guards
@@ -32,8 +32,9 @@ function allMigrationsSql(): string {
 const sql = allMigrationsSql();
 
 describe('RLS: every public table is protected', () => {
-  // The browser queries PostgREST directly (/rest/v1). A `public` table without
-  // RLS is readable AND writable by anyone on the internet.
+  // User requests run through withUserDb() as role app_user, so RLS is what
+  // scopes every row they see. A `public` table without RLS is readable AND
+  // writable by every signed-in user.
   it('every CREATE TABLE has a matching ENABLE ROW LEVEL SECURITY', () => {
     const created = new Set<string>();
     for (const m of sql.matchAll(/CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:public\.)?"?(\w+)"?/gi)) {
@@ -92,23 +93,63 @@ describe('RLS: write policies are scoped correctly', () => {
   });
 });
 
-describe('Routing: single public origin is preserved', () => {
-  // Only the VERSIONED Supabase prefixes route to Kong; the SPA owns
-  // /auth/callback. A bare /auth prefix sends the OAuth landing page to Kong
-  // (404) and breaks login. There is no separate api.<domain> host.
-  const composeProd = exists('docker-compose.prod.yml') ? read('docker-compose.prod.yml') : '';
+// The routing surfaces: every compose file plus the Traefik dynamic config.
+const composeFiles = readdirSync(ROOT).filter((f) => /^docker-compose.*\.ya?ml$/.test(f));
+const yamlUnder = (function walk(dir: string): string[] {
+  if (!exists(dir)) return [];
+  return readdirSync(join(ROOT, dir), { withFileTypes: true }).flatMap((e) => {
+    const rel = `${dir}/${e.name}`;
+    if (e.isDirectory()) return walk(rel);
+    return /\.ya?ml$/.test(e.name) ? [rel] : [];
+  });
+});
+// YAML comments (`#`), for the routing files.
+const uncommented = (text: string) => text.replace(/^\s*#.*$/gm, '');
 
-  it.runIf(composeProd)('no bare /auth|/rest|/realtime|/storage Traefik prefix', () => {
-    for (const bare of ['/auth', '/rest', '/realtime', '/storage']) {
-      expect(
-        composeProd.includes(`PathPrefix(\`${bare}\`)`),
-        `Bare ${bare} prefix found — use the versioned form (${bare}/v1).`,
-      ).toBe(false);
+describe('Routing: the app is the only public data path', () => {
+  // The app's own /api is the one way in to the data, behind sessions, RLS
+  // and rate limits. A gateway path to the database (a REST layer, a
+  // websocket feed) would be a second way in with none of those checks.
+  // There is no separate api.<domain> host either.
+  const composeAndTraefik = [...composeFiles, ...yamlUnder('volumes/traefik')];
+
+  it('the routing surfaces are found (the checks below are not vacuous)', () => {
+    expect(composeAndTraefik).toContain('docker-compose.yml');
+    expect(composeAndTraefik).toContain('docker-compose.prod.yml');
+    expect(composeAndTraefik).toContain('volumes/traefik/middlewares.yml');
+  });
+
+  it('nothing routes /rest, /realtime or /storage (versioned or bare)', () => {
+    const gatewayPath = /\/(rest|realtime|storage)\/v1|PathPrefix\(`\/(rest|realtime|storage)`\)/;
+    const offenders = composeAndTraefik.filter((f) => gatewayPath.test(uncommented(read(f))));
+    expect(
+      offenders,
+      `Gateway paths routed in ${offenders.join(', ')}. Serve data through ` +
+        "the app's /api routes instead."
+    ).toEqual([]);
+  });
+
+  it('no compose file defines a gateway, database API or admin console service', () => {
+    const forbidden = ['kong', 'rest', 'realtime', 'meta', 'studio', 'supavisor', 'edge-functions'];
+    for (const f of composeFiles) {
+      const text = uncommented(read(f));
+      for (const name of forbidden) {
+        expect(
+          new RegExp(`^ {2}${name}:\\s*$`, 'm').test(text),
+          `${f} defines a "${name}" service. The stack is app, db, traefik and ` +
+            'docker-socket-proxy; reach the database through `vibecarbon shell`.'
+        ).toBe(false);
+      }
     }
   });
 
-  it.runIf(composeProd)('Supabase is not re-exposed on an api.<domain> host', () => {
-    expect(composeProd).not.toContain('Host(`api.');
+  it('the service-name check sees a top-level service key', () => {
+    // Guards the regex above against silently matching nothing.
+    expect(/^ {2}app:\s*$/m.test(read('docker-compose.yml'))).toBe(true);
+  });
+
+  it('nothing is re-exposed on an api.<domain> host', () => {
+    for (const f of composeFiles) expect(read(f), f).not.toContain('Host(`api.');
   });
 });
 
@@ -116,22 +157,7 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
   // Auth is the app's own /api/auth (src/server/auth/). A second, external
   // auth service reachable at /auth/v1 would be a parallel sign-in path with
   // its own users, sessions and redirect rules, outside every check here.
-  const yamlUnder = (function walk(dir: string): string[] {
-    if (!exists(dir)) return [];
-    return readdirSync(join(ROOT, dir), { withFileTypes: true }).flatMap((e) => {
-      const rel = `${dir}/${e.name}`;
-      if (e.isDirectory()) return walk(rel);
-      return /\.ya?ml$/.test(e.name) ? [rel] : [];
-    });
-  });
-  const routingFiles = [
-    ...readdirSync(ROOT).filter((f) => /^docker-compose.*\.ya?ml$/.test(f)),
-    ...yamlUnder('volumes/kong'),
-    ...yamlUnder('volumes/traefik'),
-    ...yamlUnder('k8s'),
-  ];
-  // YAML comments (`#`), for the routing files.
-  const uncommented = (text: string) => text.replace(/^\s*#.*$/gm, '');
+  const routingFiles = [...composeFiles, ...yamlUnder('volumes/traefik'), ...yamlUnder('k8s')];
   // TypeScript comments: block comments, and `//` to end of line when it
   // starts a line or follows whitespace (so `https://` in a string stays).
   // A commented-out `trustedOrigins: ['*']` must not trip the checks below,
@@ -140,7 +166,7 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
     text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
 
   it('nothing routes /auth/v1 (no external auth service behind any edge)', () => {
-    expect(routingFiles).toContain('volumes/kong/kong.yml');
+    expect(routingFiles).toContain('docker-compose.prod.yml');
     expect(routingFiles).toContain('k8s/base/traefik/ingressroute.yaml');
     const offenders = routingFiles.filter((f) => uncommented(read(f)).includes('/auth/v1'));
     expect(

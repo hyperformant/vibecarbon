@@ -86,7 +86,6 @@ describe('create-vibecarbon E2E', () => {
         'src/client/lib',
         'src/shared',
         'supabase/migrations',
-        'volumes/kong',
         'volumes/db',
       ];
 

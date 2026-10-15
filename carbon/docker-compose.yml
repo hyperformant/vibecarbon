@@ -1,5 +1,5 @@
 # Vibecarbon Docker Compose
-# Supabase self-hosted + Hono API + Traefik reverse proxy
+# PostgreSQL + Hono API + Traefik reverse proxy
 
 services:
   # ===========================================
@@ -104,7 +104,7 @@ services:
       - "traefik.http.services.app.loadbalancer.server.port=3000"
 
   # ===========================================
-  # SUPABASE CORE SERVICES
+  # DATABASE
   # ===========================================
 
   # PostgreSQL Database
@@ -154,7 +154,7 @@ services:
       # this, a single archive failure pins WAL forever and fills the disk
       # within days (~20 GiB/day of WAL on an idle Supabase DB given
       # archive_timeout below, because supabase extensions like pg_cron,
-      # pg_stat_statements, realtime publications all generate background
+      # pg_stat_statements and replication publications generate background
       # writes every minute). RCA: prod-1 2026-05-26, 58 GiB of WAL retained
       # in 3 days because wal-g couldn't reach the configured S3 bucket;
       # disk filled, db went into Error state, /api/v1/notifications 500'd,
@@ -192,11 +192,10 @@ services:
       - hot_standby=on
       - -c
       # Explicit connection ceiling (image default is 100). Real consumers —
-      # PostgREST pool + the app + realtime + meta + Supavisor's server
-      # pool + replication + superuser_reserved — sum to ~65; 200 leaves
-      # headroom for the HA standby and scale-ups so the ceiling can't be hit.
-      # Connection pooling for EXTERNAL direct-DB clients is Supavisor (prod
-      # overlay); the internal stack connects directly. See docs/security.md.
+      # the app's pools + replication + superuser_reserved — sit well below
+      # it; 200 leaves headroom for the HA standby and scale-ups so the
+      # ceiling can't be hit. The database has no public port: operators
+      # reach it through `vibecarbon shell` / SSH. See docs/security.md.
       - max_connections=200
     environment:
       POSTGRES_HOST: /var/run/postgresql
@@ -206,8 +205,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: postgres
       POSTGRES_DB: postgres
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_EXP: 3600
       # WAL-G Configuration
       # `:-` defaults so local dev (no .env-set S3 creds) doesn't trigger
       # `WARN The "S3_*" variable is not set` for every compose invocation.
@@ -233,208 +230,9 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./volumes/db/wal-archive.sh:/etc/postgresql/wal-archive.sh:ro,Z
-      - ./volumes/db/pooler.sql:/docker-entrypoint-initdb.d/init-scripts/97-pooler.sql:Z
       - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/98-roles.sql:Z
-      - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
       - ./volumes/db/set-passwords.sh:/docker-entrypoint-initdb.d/zz-set-passwords.sh:Z
       - ./supabase/migrations:/migrations:ro
-    networks:
-      - vibecarbon-network
-
-  # Kong API Gateway
-  kong:
-    image: kong:3.9.1
-    container_name: ${PROJECT_NAME}-kong
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - SETGID
-      - SETUID
-    read_only: true
-    tmpfs:
-      - /tmp
-    ports:
-      - "${DEV_KONG_PORT:-8000}:8000/tcp"
-      - "${DEV_KONG_SSL_PORT:-8443}:8443/tcp"
-    healthcheck:
-      test: ["CMD", "kong", "health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    entrypoint: /home/kong/docker-entrypoint.sh
-    environment:
-      KONG_DATABASE: "off"
-      KONG_PREFIX: /tmp/kong
-      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
-      KONG_DNS_ORDER: LAST,A,CNAME
-      KONG_PLUGINS: request-transformer,cors,key-auth,acl
-      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
-      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-    volumes:
-      - ./volumes/kong/kong.yml:/home/kong/kong.yml.template:ro
-      - ./volumes/kong/docker-entrypoint.sh:/home/kong/docker-entrypoint.sh:ro
-    # Kong runs in DB-less mode (KONG_DATABASE: "off") — config comes from
-    # the declarative kong.yml volume. No postgres dependency at all, so
-    # we intentionally don't list `db` here. Kong can boot in parallel
-    # with the database, shaving ~20s off the compose cold start.
-    networks:
-      - vibecarbon-network
-
-  # PostgREST API
-  rest:
-    image: postgrest/postgrest:v14.6
-    container_name: ${PROJECT_NAME}-rest
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    read_only: true
-    tmpfs:
-      - /tmp
-    environment:
-      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
-      PGRST_DB_SCHEMAS: public,storage,graphql_public
-      PGRST_DB_ANON_ROLE: anon
-      PGRST_JWT_SECRET: ${JWT_SECRET}
-      PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
-      PGRST_APP_SETTINGS_JWT_EXP: 3600
-      # Explicit DB connection pool (= PostgREST's default, made intentional)
-      # plus a fail-fast acquisition timeout so a saturated pool returns a clear
-      # error instead of hanging. Part of the max_connections budget on `db`.
-      PGRST_DB_POOL: "10"
-      PGRST_DB_POOL_ACQUISITION_TIMEOUT: "10"
-    command: postgrest
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - vibecarbon-network
-
-  # Realtime Server
-  realtime:
-    image: supabase/realtime:v2.76.5
-    container_name: ${PROJECT_NAME}-realtime
-    restart: unless-stopped
-    # compose-ha holds this at 0 on the standby: Realtime migrates on boot and
-    # a hot-standby Postgres rejects the write (SQLSTATE 25006), so it would
-    # crash-loop until promotion. Failover flips it to 1 on the promoted node
-    # and back to 0 on the demoted one (composeRoleEnv, src/lib/deploy/
-    # walg-role.js). Non-HA deploys never set the variable.
-    deploy:
-      replicas: ${REALTIME_REPLICAS:-1}
-    cap_drop:
-      - ALL
-    cap_add:
-      - SETUID
-      - SETGID
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /app/rel/realtime/tmp
-      - /app/rel/realtime/releases/2.76.5
-    healthcheck:
-      test: ["CMD-SHELL", "curl -so /dev/null -w '%{http_code}' http://localhost:4000/ | grep -qE '^[0-9]+$'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    environment:
-      PORT: 4000
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_USER: supabase_admin
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
-      DB_NAME: postgres
-      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
-      DB_ENC_KEY: ${DB_ENC_KEY:-devdbencryptkey1}
-      API_JWT_SECRET: ${JWT_SECRET}
-      SECRET_KEY_BASE: ${REALTIME_SECRET:-realtimesecret}
-      ERL_AFLAGS: -proto_dist inet_tcp
-      DNS_NODES: "''"
-      RLIMIT_NOFILE: "10000"
-      APP_NAME: realtime
-      SEED_SELF_HOST: "true"
-      FLY_ALLOC_ID: fly123
-      FLY_APP_NAME: realtime
-      REPLICATION_MODE: RLS
-      REPLICATION_POLL_INTERVAL: 100
-      SECURE_CHANNELS: "true"
-      SLOT_NAME: supabase_realtime_rls
-      TEMPORARY_SLOT: "true"
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - vibecarbon-network
-
-  # ===========================================
-  # SUPABASE MANAGEMENT
-  # ===========================================
-
-  meta:
-    image: supabase/postgres-meta:v0.95.2
-    container_name: ${PROJECT_NAME}-meta
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    environment:
-      PG_META_PORT: 8080
-      PG_META_DB_HOST: db
-      PG_META_DB_PORT: 5432
-      PG_META_DB_NAME: postgres
-      PG_META_DB_USER: supabase_admin
-      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY:-pgmetacryptokey}
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - vibecarbon-network
-
-  studio:
-    image: supabase/studio:2026.03.16-sha-5528817
-    container_name: ${PROJECT_NAME}-studio
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    healthcheck:
-      disable: true
-    environment:
-      STUDIO_PG_META_URL: http://meta:8080
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      DEFAULT_ORGANIZATION_NAME: ${PROJECT_NAME}
-      DEFAULT_PROJECT_NAME: ${PROJECT_NAME}
-      SUPABASE_URL: http://kong:8000
-      SUPABASE_PUBLIC_URL: ${SITE_URL}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
-      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      AUTH_JWT_SECRET: ${JWT_SECRET}
-      LOGFLARE_API_KEY: ${LOGFLARE_API_KEY:-logflarekey}
-      LOGFLARE_URL: http://analytics:4000
-      NEXT_PUBLIC_ENABLE_LOGS: "false"
-      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
-    labels:
-      - "traefik.enable=true"
-      # Subdomain routing - auth added via prod overlay (docker-compose.prod.yml)
-      - "traefik.http.routers.studio.rule=Host(`studio.${DOMAIN:-localhost}`)"
-      - "traefik.http.routers.studio.entrypoints=web"
-      - "traefik.http.services.studio.loadbalancer.server.port=3000"
-    depends_on:
-      db:
-        condition: service_healthy
-      meta:
-        condition: service_started
     networks:
       - vibecarbon-network
 

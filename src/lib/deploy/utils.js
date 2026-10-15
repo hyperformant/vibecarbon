@@ -242,7 +242,6 @@ export async function setupServerFiles(host, sshKeyPath, projectName, options = 
       'mkdir',
       '-p',
       `${remoteDir}/volumes/db`,
-      `${remoteDir}/volumes/kong`,
       `${remoteDir}/supabase/migrations`,
     ],
     { silent: true, ignoreError: true },
@@ -303,20 +302,6 @@ export async function setupServerFiles(host, sshKeyPath, projectName, options = 
       ],
       { ignoreError: true }, // handle the 2>/dev/null || true semantics
     );
-  }
-
-  // Copy kong configuration
-  const volumesKongDir = join(cwd, 'volumes', 'kong');
-  if (existsSync(volumesKongDir)) {
-    for (const file of readdirSync(volumesKongDir)) {
-      const filePath = join(volumesKongDir, file);
-      if (existsSync(filePath)) {
-        await scpWithRetry(
-          [...sshOpts.split(' '), filePath, `root@${host}:${remoteDir}/volumes/kong/`],
-          { ignoreError: true },
-        );
-      }
-    }
   }
 
   // Copy local .env file if it exists

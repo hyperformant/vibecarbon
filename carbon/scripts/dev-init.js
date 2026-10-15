@@ -10,35 +10,21 @@
  *   node scripts/dev-init.js --force   # Overwrite existing files
  */
 
-import { createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
 import { formatDotenvLine, readEnvFiles } from './lib/dotenv.js';
 
 const force = process.argv.includes('--force');
 
 // Fixed local dev values (BETTER_AUTH_SECRET excepted, see below).
-// Note: ANON_KEY / SERVICE_ROLE_KEY are NOT hardcoded here — they're
-// signed at runtime against JWT_SECRET below. Committing literal JWT
-// strings tripped GitHub's secret-scanner on every push; signing on
-// the fly keeps the dev workflow deterministic without leaking
-// service-role-shaped values into git history.
 const DEV = {
   PROJECT_NAME: 'vibecarbon',
-  JWT_SECRET: 'local-dev-jwt-secret-must-be-at-least-32-chars-padded-padded',
   // Random per checkout (64 characters, like `vibecarbon create`): it signs
   // session cookies, so a value shared by every checkout would let any of them
   // forge sessions for another. An existing one (from either env file) is
   // kept, so --force and a half-present pair don't sign everyone out.
   BETTER_AUTH_SECRET: existingAuthSecret() ?? randomBytes(48).toString('base64url'),
-  DB_ENC_KEY: 'devdbencryptkey1',
-  VAULT_ENC_KEY: 'local-vault-encryption-key-1234567890',
-  REALTIME_SECRET: 'local-realtime-secret-pad',
   DB_PASSWORD: 'local-postgres-password-for-dev-only',
-  ANON_KEY: signDevJwt('anon', 'local-dev-jwt-secret-must-be-at-least-32-chars-padded-padded'),
-  SERVICE_ROLE_KEY: signDevJwt(
-    'service_role',
-    'local-dev-jwt-secret-must-be-at-least-32-chars-padded-padded',
-  ),
   ADMIN_EMAIL: 'admin@example.com',
   ADMIN_PASSWORD: 'local-admin-password',
   // Must match volumes/s3/s3.json (dev-only placeholders, never used in deploys).
@@ -49,25 +35,6 @@ const DEV = {
 function existingAuthSecret() {
   const secret = readEnvFiles('.').BETTER_AUTH_SECRET;
   return secret && secret.length >= 32 ? secret : undefined;
-}
-
-function signDevJwt(role, secret) {
-  const b64url = (buf) =>
-    Buffer.from(buf)
-      .toString('base64')
-      .replace(/=+$/, '')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_');
-  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const payload = b64url(
-    JSON.stringify({
-      iss: 'supabase-demo',
-      role,
-      exp: Math.floor(Date.now() / 1000) + 100 * 365 * 24 * 60 * 60,
-    }),
-  );
-  const sig = b64url(createHmac('sha256', secret).update(`${header}.${payload}`).digest());
-  return `${header}.${payload}.${sig}`;
 }
 
 // Every KEY=value line is built with formatDotenvLine so the generated file
@@ -83,29 +50,17 @@ const envLines = [
   formatDotenvLine('PROJECT_NAME', DEV.PROJECT_NAME),
   formatDotenvLine('VITE_PROJECT_NAME', DEV.PROJECT_NAME),
   '',
-  '# Supabase gateway keys (Kong, Studio; signed against JWT_SECRET below)',
-  formatDotenvLine('SUPABASE_ANON_KEY', DEV.ANON_KEY),
-  formatDotenvLine('SUPABASE_SERVICE_ROLE_KEY', DEV.SERVICE_ROLE_KEY),
-  '',
-  '# JWT Secret',
-  formatDotenvLine('JWT_SECRET', DEV.JWT_SECRET),
-  '',
   '# Auth session signing key (in-process auth, random per checkout)',
   formatDotenvLine('BETTER_AUTH_SECRET', DEV.BETTER_AUTH_SECRET),
   '',
-  '# Database. The API server connects with the DB_* vars (base port, like the',
-  '# URLs above: DEV_DB_PORT or DEV_PORT_OFFSET is applied at runtime by env.ts)',
+  '# Database. The API server connects with the DB_* vars (base port:',
+  '# DEV_DB_PORT or DEV_PORT_OFFSET is applied at runtime by env.ts)',
   formatDotenvLine('DB_HOST', 'localhost'),
   formatDotenvLine('DB_PORT', '5432'),
   formatDotenvLine('DB_USER', 'postgres'),
   formatDotenvLine('DB_PASSWORD', DEV.DB_PASSWORD),
   formatDotenvLine('DB_NAME', 'postgres'),
   formatDotenvLine('POSTGRES_PASSWORD', DEV.DB_PASSWORD),
-  '',
-  '# Encryption keys (DB_ENC_KEY must be exactly 16 bytes for Realtime AES-128-ECB)',
-  formatDotenvLine('DB_ENC_KEY', DEV.DB_ENC_KEY),
-  formatDotenvLine('VAULT_ENC_KEY', DEV.VAULT_ENC_KEY),
-  formatDotenvLine('REALTIME_SECRET', DEV.REALTIME_SECRET),
   '',
   '# Super admin, created by the app at startup (password: at least 8 characters)',
   formatDotenvLine('ADMIN_EMAIL', DEV.ADMIN_EMAIL),
