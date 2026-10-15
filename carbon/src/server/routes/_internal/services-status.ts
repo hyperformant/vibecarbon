@@ -4,7 +4,10 @@ import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import { promisify } from 'node:util';
+import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
+import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
 import { fetchContainerLogs, listProjectContainers } from '../../lib/docker-api';
 import { logger } from '../../lib/logger';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
@@ -56,74 +59,91 @@ function localPort(envKey: string, defaultPort: number): number {
   return defaultPort + offset;
 }
 
-const kongPort = localPort('DEV_KONG_PORT', 8000);
 const traefikPort = localPort('DEV_TRAEFIK_PORT', 80);
 
-// Core Supabase services - always present
+// The app reaches the Docker API through the read-only socket proxy in a
+// production compose deployment (docker-compose.prod.yml sets this). Local
+// dev talks to the host socket and k8s has no Docker API, so neither runs
+// the proxy and neither lists it.
+const dockerApiProxy = process.env.DOCKER_API_PROXY;
+
+// The per-server stack: the app, its Postgres, Traefik in front, and (in a
+// production compose deployment) the socket proxy Traefik and this page read
+// Docker through.
 const CORE_SERVICES: ServiceConfig[] = [
+  {
+    name: 'App',
+    container: 'app',
+    // This process: if it is answering this request, it is up.
+    healthUrl: 'self://app',
+    timeout: 0,
+  },
   {
     name: 'PostgreSQL',
     container: 'db',
-    // In k8s: checked indirectly via PostgREST through Kong (handled specially in checkServiceHealth)
-    healthUrl: isDocker ? 'http://db:5432' : `http://localhost:${localPort('DEV_DB_PORT', 5432)}`,
+    // Checked with `select 1` over the app's own connection (checkDatabase).
+    healthUrl: 'db://db',
     timeout: 2000,
   },
   {
-    name: 'API Gateway',
-    container: 'kong',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/'
-      : isDocker
-        ? 'http://kong:8000/'
-        : `http://localhost:${kongPort}/`,
+    name: 'Traefik',
+    container: 'traefik',
+    healthUrl: isKubernetes || isDocker ? 'http://traefik:80/' : `http://localhost:${traefikPort}/`,
     timeout: 2000,
-    acceptCodes: [404], // 404 = running but no default route
+    // No router matches the bare service name: 404 means Traefik answered.
+    // A redirect to HTTPS is an answer too.
+    acceptCodes: [200, 301, 302, 307, 308, 404],
   },
-  {
-    name: 'REST API',
-    container: 'rest',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/rest/v1/'
-      : isDocker
-        ? 'http://rest:3000/'
-        : `http://localhost:${kongPort}/rest/v1/`,
-    timeout: 2000,
-    acceptCodes: [200, 401], // 401 = running but requires auth
-  },
-  {
-    name: 'Realtime',
-    container: 'realtime',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/realtime/v1/'
-      : isDocker
-        ? 'http://realtime:4000/api/tenants'
-        : `http://localhost:${kongPort}/realtime/v1/`,
-    timeout: 2000,
-    acceptCodes: [200, 401, 403, 426], // May require auth or websocket upgrade
-  },
-  {
-    name: 'Studio',
-    container: 'studio',
-    healthUrl: isKubernetes
-      ? 'http://studio:3000/'
-      : isDocker
-        ? 'http://studio:3000/'
-        : `http://studio.localhost:${traefikPort}/`,
-    timeout: 3000,
-    acceptCodes: [200, 307], // 307 redirect is fine
-  },
-  {
-    name: 'DB Management',
-    container: 'meta',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/pg/'
-      : isDocker
-        ? 'http://meta:8080/health'
-        : `http://localhost:${kongPort}/pg/`,
-    timeout: 2000,
-    acceptCodes: [200, 401], // May require auth via Kong
-  },
+  ...(dockerApiProxy && !isKubernetes
+    ? [
+        {
+          name: 'Docker Socket Proxy',
+          container: 'docker-socket-proxy',
+          healthUrl: `${dockerApiProxy.replace(/\/$/, '')}/_ping`,
+          timeout: 2000,
+        },
+      ]
+    : []),
 ];
+
+/** Anything that can run a raw statement: `adminDb` or a stand-in. */
+type Executor = Pick<typeof adminDb, 'execute'>;
+
+const DB_CHECK_TIMEOUT_MS = 2000;
+
+/**
+ * Ask Postgres `select 1` through the app's own connection, giving up after
+ * `timeoutMs`. Never throws. The error text of a failed query never reaches
+ * the response (it can carry connection details); it goes to the server log
+ * through dbErrorForLog.
+ */
+export async function checkDatabase(
+  db: Executor = adminDb,
+  timeoutMs: number = DB_CHECK_TIMEOUT_MS
+): Promise<ServiceStatus> {
+  const start = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+  });
+  const base = { name: 'PostgreSQL', container: 'db' };
+  try {
+    const outcome = await Promise.race([
+      db.execute(sql`select 1`).then(() => 'ok' as const),
+      timedOut,
+    ]);
+    const latencyMs = Date.now() - start;
+    if (outcome === 'timeout') {
+      return { ...base, status: 'unhealthy', latencyMs, error: 'Timeout' };
+    }
+    return { ...base, status: 'healthy', latencyMs };
+  } catch (err) {
+    logger.warn({ err: dbErrorForLog(err) }, 'Services status: database check failed');
+    return { ...base, status: 'unhealthy', latencyMs: Date.now() - start, error: 'Not reachable' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Optional services - added based on environment configuration
 const OPTIONAL_SERVICES: Record<string, ServiceConfig[]> = {
@@ -316,41 +336,13 @@ async function checkServiceHealth(service: ServiceConfig): Promise<ServiceStatus
     }
   }
 
-  // Special case for PostgreSQL - we can't HTTP check it, rely on other services
-  if (service.container === 'db') {
-    // Check if PostgREST can connect (implies DB is healthy)
-    const postgrestUrl = isKubernetes
-      ? 'http://kong:8000/rest/v1/'
-      : isDocker
-        ? 'http://rest:3000/'
-        : `http://localhost:${kongPort}/rest/v1/`;
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), service.timeout);
+  // The app itself: answering this request is the health check.
+  if (service.healthUrl === 'self://app') {
+    return { name: service.name, container: service.container, status: 'healthy', latencyMs: 0 };
+  }
 
-      const response = await fetch(postgrestUrl, {
-        method: 'GET',
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      // 401 via Kong is fine - means PostgREST (and thus DB) is running
-      const isHealthy = response.ok || response.status === 401;
-
-      return {
-        name: service.name,
-        container: service.container,
-        status: isHealthy ? 'healthy' : 'unhealthy',
-        latencyMs: Date.now() - start,
-      };
-    } catch {
-      return {
-        name: service.name,
-        container: service.container,
-        status: 'unknown',
-        error: 'Cannot verify (checked via PostgREST)',
-      };
-    }
+  if (service.healthUrl === 'db://db') {
+    return checkDatabase(adminDb, service.timeout);
   }
 
   // Special case: TCP check for services without an HTTP health endpoint (e.g. Redis)
@@ -523,7 +515,9 @@ servicesStatusRoutes.post('/restart', async (c) => {
   logger.info('Restarting all services');
 
   const services = await getEnabledServices();
-  const containers = services.map((s) => s.container);
+  // Not the app itself: restarting the process answering this request would
+  // drop the reply. Restart it on its own (POST /restart/app).
+  const containers = services.map((s) => s.container).filter((c) => c !== 'app');
 
   const results = await Promise.all(
     containers.map(async (container) => {
@@ -665,12 +659,8 @@ async function getK8sApiEndpoint(): Promise<{ host: string; port: number } | nul
 /** Human-readable names for k8s app labels */
 const K8S_LABEL_NAMES: Record<string, string> = {
   'vibecarbon-app': 'App',
-  'vibecarbon-kong': 'API Gateway',
-  'vibecarbon-rest': 'REST API',
-  'vibecarbon-realtime': 'Realtime',
-  'vibecarbon-studio': 'Studio',
-  'vibecarbon-meta': 'DB Management',
-  'vibecarbon-postgres': 'PostgreSQL',
+  'vibecarbon-db': 'PostgreSQL',
+  'vibecarbon-traefik': 'Traefik',
   n8n: 'n8n',
   metabase: 'Metabase',
   prometheus: 'Prometheus',

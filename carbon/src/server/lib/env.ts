@@ -50,7 +50,6 @@ const envSchema = z.object({
   DEV_VITE_PORT: z.coerce.number().optional(),
   DEV_API_PORT: z.coerce.number().optional(),
   DEV_DB_PORT: z.coerce.number().optional(),
-  DEV_KONG_PORT: z.coerce.number().optional(),
   DEV_TRAEFIK_PORT: z.coerce.number().optional(),
   DEV_GRAFANA_PORT: z.coerce.number().optional(),
   DEV_PROMETHEUS_PORT: z.coerce.number().optional(),

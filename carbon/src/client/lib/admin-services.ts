@@ -1,6 +1,5 @@
 import {
   IconChartBar as BarChart3,
-  IconDatabase as Database,
   type TablerIcon as IconComponent,
   IconChartLine as LineChart,
   IconNetwork as Network,
@@ -15,7 +14,7 @@ export interface AdminService {
   icon: IconComponent;
   subdomain: string;
   /**
-   * Path-based URL for production k8s routing (e.g., '/admin/studio').
+   * Path-based URL for production k8s routing (e.g., '/admin/grafana').
    * null = service is internal only (no external URL, requires kubectl port-forward).
    * undefined = fall back to subdomain routing.
    */
@@ -27,18 +26,6 @@ export interface AdminService {
 }
 
 const adminServices: AdminService[] = [
-  {
-    id: 'database',
-    name: 'Supabase',
-    description: 'Supabase Studio',
-    subtitle: 'Manage tables, run queries, view data',
-    icon: Database,
-    subdomain: 'studio',
-    // K8s: /admin/studio is strip-prefixed to /, then Studio redirects to /project/default.
-    // Compose: subdomain routing (studio.domain) serves Studio at root directly.
-    adminPath: '/admin/studio',
-    alwaysEnabled: true,
-  },
   {
     id: 'gateway',
     name: 'Traefik',
@@ -87,7 +74,7 @@ const adminServices: AdminService[] = [
  * Get the full URL for an admin service, or null if the service has no external URL.
  *
  * Routing mode is determined by VITE_ROUTING_MODE:
- * - 'subdomain' (default, compose): subdomain routing (e.g., studio.example.com)
+ * - 'subdomain' (default, compose): subdomain routing (e.g., grafana.example.com)
  * - 'path' (k8s): path-based routing via adminPath (e.g., /project/default)
  *
  * Localhost always uses subdomain routing regardless of VITE_ROUTING_MODE.
@@ -97,7 +84,7 @@ export function getServiceUrl(service: AdminService): string | null {
   const routingMode = import.meta.env.VITE_ROUTING_MODE || 'subdomain';
 
   if (hostname.includes('localhost')) {
-    // Dev: subdomain routing via docker-compose (e.g., studio.localhost).
+    // Dev: subdomain routing via docker-compose (e.g., grafana.localhost).
     // Port-shifted stacks (DEV_PORT_OFFSET, set by `vibecarbon up` when
     // another project holds the defaults) serve traefik at 80+offset — a
     // port-less link would land on whichever OTHER project owns :80.
@@ -119,7 +106,7 @@ export function getServiceUrl(service: AdminService): string | null {
 
   // Compose / fallback: subdomain routing. The app is served at Host(${DOMAIN})
   // and the panels at <subdomain>.${DOMAIN}, so the current hostname IS the
-  // base domain — stripping a label would break apex domains (studio.com).
+  // base domain — stripping a label would break apex domains (example.com).
   return `${protocol}//${service.subdomain}.${hostname}`;
 }
 
@@ -127,7 +114,7 @@ export function getServiceUrl(service: AdminService): string | null {
  * Get list of enabled admin services.
  *
  * Services are enabled if:
- * 1. They have alwaysEnabled: true (core infrastructure like Supabase, Traefik)
+ * 1. They have alwaysEnabled: true (core infrastructure like Traefik)
  * 2. Their VITE_*_ENABLED env var is set to 'true'
  * 3. In development mode, they can also be enabled via the services status API
  *

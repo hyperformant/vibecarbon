@@ -42,7 +42,6 @@ healthRoutes.get('/ready', async (c) => {
       timestamp: new Date().toISOString(),
       services: {
         database: 'connected',
-        supabase: 'connected',
       },
     });
   }

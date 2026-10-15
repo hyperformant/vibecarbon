@@ -47,7 +47,6 @@ async function fetchRunningServices(): Promise<Set<string>> {
 
 // Map container names to admin service IDs
 const containerToServiceId: Record<string, string> = {
-  studio: 'database',
   traefik: 'gateway',
   grafana: 'monitoring',
   n8n: 'automation',

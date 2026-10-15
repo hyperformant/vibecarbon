@@ -85,7 +85,7 @@ export function PricingSection() {
         { text: t('landing.pricing.graphite.features.backups'), included: true },
         { text: t('landing.pricing.graphite.features.cicd'), included: true },
         { text: t('landing.pricing.graphite.features.addOns'), included: true },
-        { text: t('landing.pricing.graphite.features.supabase'), included: true },
+        { text: t('landing.pricing.graphite.features.stack'), included: true },
         { text: t('landing.pricing.graphite.features.fairSource'), included: true },
         { text: t('landing.pricing.graphite.features.community'), included: true },
       ],

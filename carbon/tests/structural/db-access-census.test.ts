@@ -54,6 +54,8 @@ const ADMIN_DB_ALLOWLIST: Record<string, string> = {
   'lib/mfa-settings.ts': 'reads app_settings.mfa_enabled for the MFA gate',
   'middleware/crawler-tracking.ts': 'records anonymous crawler hits',
   'middleware/requirePlan.ts': "reads the caller's subscription for plan gating",
+  'routes/_internal/services-status.ts':
+    'super-admin Infrastructure page: `select 1` health check, reads no rows',
   'routes/v1/admin/contact.ts': 'super-admin contact inbox',
   'routes/v1/admin/crawlers.ts': 'super-admin crawler analytics',
   'routes/v1/admin/jobs.ts': 'super-admin job list and manual job runs',
@@ -63,6 +65,7 @@ const ADMIN_DB_ALLOWLIST: Record<string, string> = {
   'routes/v1/contact.ts': 'anonymous contact form insert',
   'routes/v1/index.ts':
     'super-admin endpoints, account deletion, org creation and invites (user reads use withUserDb)',
+  'routes/v1/performance.ts': 'super-admin performance page: `select 1` latency, reads no rows',
   'routes/v1/newsletter.ts': 'anonymous subscribe, confirm and unsubscribe by token',
   'routes/v1/setup.ts': 'super-admin setup settings',
   'routes/v1/stats.ts': 'super-admin dashboard counts',

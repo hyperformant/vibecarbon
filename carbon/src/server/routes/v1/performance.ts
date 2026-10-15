@@ -1,5 +1,7 @@
 import { statfsSync } from 'node:fs';
+import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
+import { adminDb } from '../../db/client';
 import { logger } from '../../lib/logger';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
@@ -11,79 +13,63 @@ const isKubernetes = !!process.env.KUBERNETES_SERVICE_HOST;
 const isDocker =
   !isKubernetes && (process.env.NODE_ENV === 'production' || process.env.DOCKER === 'true');
 
-interface ServiceHealthCheck {
-  name: string;
-  url: string;
-  acceptCodes?: number[];
-}
-
-// Core services to check latency against (subset of services-status.ts)
-const HEALTH_CHECK_SERVICES: ServiceHealthCheck[] = [
-  {
-    name: 'API Gateway',
-    url: isKubernetes
-      ? 'http://kong:8000/'
-      : isDocker
-        ? 'http://kong:8000/'
-        : 'http://localhost:8000/',
-    acceptCodes: [404],
-  },
-  {
-    name: 'REST API',
-    url: isKubernetes
-      ? 'http://kong:8000/rest/v1/'
-      : isDocker
-        ? 'http://rest:3000/'
-        : 'http://localhost:8000/rest/v1/',
-    acceptCodes: [200, 401],
-  },
-  {
-    name: 'Realtime',
-    url: isKubernetes
-      ? 'http://kong:8000/realtime/v1/'
-      : isDocker
-        ? 'http://realtime:4000/api/tenants'
-        : 'http://localhost:8000/realtime/v1/',
-    acceptCodes: [200, 401, 403, 426],
-  },
-  {
-    name: 'DB Management',
-    url: isKubernetes
-      ? 'http://kong:8000/pg/'
-      : isDocker
-        ? 'http://meta:8080/health'
-        : 'http://localhost:8000/pg/',
-    acceptCodes: [200, 401],
-  },
-];
+type Latency = { name: string; latencyMs: number; status: 'healthy' | 'unhealthy' | 'unknown' };
 
 const SERVICE_TIMEOUT_MS = 2000;
 
-async function checkServiceLatency(
-  service: ServiceHealthCheck
-): Promise<{ name: string; latencyMs: number; status: 'healthy' | 'unhealthy' | 'unknown' }> {
+// Local dev publishes Traefik on DEV_TRAEFIK_PORT (default 80 plus
+// DEV_PORT_OFFSET, the logic of scripts/docker-up.js).
+function devTraefikPort(): number {
+  const explicit = process.env.DEV_TRAEFIK_PORT;
+  if (explicit) return Number.parseInt(explicit, 10);
+  return 80 + Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
+}
+
+const TRAEFIK_URL =
+  isKubernetes || isDocker ? 'http://traefik:80/' : `http://localhost:${devTraefikPort()}/`;
+
+/** Time `fn`, giving up after SERVICE_TIMEOUT_MS. A throw or timeout is unhealthy. */
+async function timed(
+  name: string,
+  fn: (signal: AbortSignal) => Promise<boolean>
+): Promise<Latency> {
   const start = performance.now();
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(false);
+    }, SERVICE_TIMEOUT_MS);
+  });
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), SERVICE_TIMEOUT_MS);
-
-    const response = await fetch(service.url, {
-      method: 'GET',
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    const latencyMs = Math.round(performance.now() - start);
-
-    const isHealthy = service.acceptCodes
-      ? service.acceptCodes.includes(response.status)
-      : response.status >= 200 && response.status < 400;
-
-    return { name: service.name, latencyMs, status: isHealthy ? 'healthy' : 'unhealthy' };
+    const ok = await Promise.race([fn(controller.signal), timedOut]);
+    return {
+      name,
+      latencyMs: Math.round(performance.now() - start),
+      status: ok ? 'healthy' : 'unhealthy',
+    };
   } catch {
-    const latencyMs = Math.round(performance.now() - start);
-    return { name: service.name, latencyMs, status: 'unhealthy' };
+    return { name, latencyMs: Math.round(performance.now() - start), status: 'unhealthy' };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/** Round trip from the app to Postgres over its own connection. */
+function checkDatabaseLatency(): Promise<Latency> {
+  return timed('Database', async () => {
+    await adminDb.execute(sql`select 1`);
+    return true;
+  });
+}
+
+/** Round trip from the app to Traefik. No router matches the bare name, so 404 is an answer. */
+function checkTraefikLatency(): Promise<Latency> {
+  return timed('Traefik', async (signal) => {
+    const res = await fetch(TRAEFIK_URL, { method: 'GET', redirect: 'manual', signal });
+    return res.status === 404 || (res.status >= 200 && res.status < 400);
+  });
 }
 
 // ============================================================================
@@ -135,7 +121,7 @@ performanceRoutes.get('/', async (c) => {
   };
 
   // Check all service latencies in parallel
-  const probed = await Promise.all(HEALTH_CHECK_SERVICES.map(checkServiceLatency));
+  const probed = await Promise.all([checkDatabaseLatency(), checkTraefikLatency()]);
   // Authentication runs in this process (/api/auth), so it is up whenever
   // this handler runs. Counted, but kept out of the latency average.
   const items = [...probed, { name: 'Authentication', latencyMs: 0, status: 'healthy' as const }];

@@ -57,11 +57,10 @@ describe('GET /api/health/ready', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       status: string;
-      services: { database: string; supabase: string };
+      services: Record<string, string>;
     };
     expect(body.status).toBe('ready');
-    expect(body.services.database).toBe('connected');
-    expect(body.services.supabase).toBe('connected');
+    expect(body.services).toEqual({ database: 'connected' });
   });
 
   // Review Focus 5: the db container may still be starting. The server is up

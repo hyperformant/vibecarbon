@@ -36,8 +36,8 @@ describe('mapContainerList', () => {
     },
     {
       Id: 'bbb',
-      Names: ['/my-app-kong'],
-      Labels: { 'com.docker.compose.service': 'kong' },
+      Names: ['/my-app-traefik'],
+      Labels: { 'com.docker.compose.service': 'traefik' },
     },
     // The docker `name` filter matches substrings, so a sibling project with
     // a shared prefix leaks through the API query — the exact-prefix filter
@@ -48,14 +48,14 @@ describe('mapContainerList', () => {
       Labels: { 'com.docker.compose.service': 'db' },
     },
     // No compose labels: service falls back to name minus the project prefix.
-    { Id: 'ddd', Names: ['/my-app-meta'], Labels: {} },
+    { Id: 'ddd', Names: ['/my-app-app'], Labels: {} },
   ];
 
   it('keeps only exact-prefix matches and resolves service names', () => {
     expect(mapContainerList(entries, 'my-app')).toEqual([
       { id: 'aaa', name: 'my-app-db', service: 'db' },
-      { id: 'bbb', name: 'my-app-kong', service: 'kong' },
-      { id: 'ddd', name: 'my-app-meta', service: 'meta' },
+      { id: 'bbb', name: 'my-app-traefik', service: 'traefik' },
+      { id: 'ddd', name: 'my-app-app', service: 'app' },
     ]);
   });
 

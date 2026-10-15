@@ -54,7 +54,8 @@ const DEFAULT_FAQ_ITEMS: FAQItemProps[] = [
           React 19, Vite, Tailwind CSS v4, and Shadcn UI on the front end, typed end to end.
         </p>
         <p className="text-muted-foreground mb-4 max-w-[640px] text-balance">
-          Supabase handles data, auth, and storage; TanStack Query handles server state.
+          Your own Postgres, Better Auth, and Drizzle run on one server. TanStack Query handles
+          server state.
         </p>
       </>
     ),

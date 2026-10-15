@@ -155,7 +155,6 @@
     "signedInAs": "Signed in as",
     "nextSteps": "Getting Started",
     "nextStepsDescription": "Set up the remaining integrations for your app.",
-    "exploreStudio": "Explore Supabase Studio",
     "configureOAuth": "Configure OAuth Providers",
     "setupStripe": "Set up Stripe Billing",
     "deployProduction": "Deploy to Production",
@@ -467,7 +466,7 @@
           "backups": "Backups, restore & scaling",
           "cicd": "Push-to-deploy CI/CD",
           "addOns": "Every add-on included",
-          "supabase": "Complete Vibecarbon stack",
+          "stack": "Complete Vibecarbon stack",
           "fairSource": "Fair Source — audit, fork, use commercially",
           "community": "Community support"
         }
@@ -504,7 +503,7 @@
       "subheading": "Common questions, direct answers.",
       "q1": {
         "question": "What do I get out of the box?",
-        "answer": "A full-stack app with React 19, Hono API, self-hosted Supabase, auth, billing, file uploads, blog, docs, i18n, Kubernetes manifests, and Docker Compose for local dev."
+        "answer": "A full-stack app with React 19 and a Hono API on your own Postgres, with Better Auth and Drizzle, on one server. Billing, file uploads, blog, docs, i18n, Kubernetes manifests, and Docker Compose for local dev come with it."
       },
       "q2": {
         "question": "Can I modify or customize everything?",

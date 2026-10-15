@@ -9,7 +9,7 @@ describe('checkRemoteHealth', () => {
       json: async () => ({
         status: 'ready',
         timestamp: '2026-09-18T00:00:00.000Z',
-        services: { database: 'connected', supabase: 'connected' },
+        services: { database: 'connected' },
       }),
     }));
     const out = await checkRemoteHealth('example.test', {

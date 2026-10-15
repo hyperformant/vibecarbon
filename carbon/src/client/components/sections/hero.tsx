@@ -36,7 +36,7 @@ const DEFAULT_HERO_BUTTONS: HeroButtonProps[] = [
 
 // The marketing eyebrow reuses the landing hero's ShimmerBadge (same component).
 const DEFAULT_HERO_BADGE = (
-  <ShimmerBadge className="animate-appear">React · Supabase · Stripe</ShimmerBadge>
+  <ShimmerBadge className="animate-appear">React · Postgres · Stripe</ShimmerBadge>
 );
 
 // Neutral placeholder — swap for a <Screenshot .../> of your own app.

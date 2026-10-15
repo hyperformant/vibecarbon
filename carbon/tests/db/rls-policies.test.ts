@@ -237,25 +237,31 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
     ).rejects.toThrow(/permission denied/);
   });
 
-  it('the PostgREST roles hold no privilege on the auth tables either', async () => {
-    // PostgREST still serves `public` through Kong: anon/authenticated with
-    // the anon key, service_role with the service key. None may read hashes,
-    // session tokens or TOTP secrets.
+  it('only superuser and RLS-bypass roles hold any privilege on the auth tables', async () => {
+    // Password hashes, session tokens and TOTP secrets are reachable through
+    // the app's connection role and nothing else: no other login role, and
+    // not app_user, may read or write them. Postgres' own pg_* predefined
+    // roles (pg_read_all_data and friends) are grants an operator makes on
+    // purpose, so they are not counted.
     const { rows } = await db.query<{ role: string; tbl: string; priv: string }>(
       `select r.rolname as role, t.tbl, p.priv
          from pg_roles r
          cross join unnest(array['public."user"', 'public.session', 'public.account',
                                  'public.verification', 'public.two_factor']) as t(tbl)
          cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as p(priv)
-        where r.rolname in ('anon', 'authenticated', 'service_role', 'app_user')
+        where not r.rolsuper
+          and not r.rolbypassrls
+          and r.rolname not like 'pg\\_%'
           and has_table_privilege(r.rolname, t.tbl, p.priv)`,
     );
     expect(rows).toEqual([]);
-    const pinned = await db.query<{ authenticated: boolean; service_role: boolean }>(
-      `select has_table_privilege('authenticated', 'public.account', 'SELECT') as authenticated,
-              has_table_privilege('service_role', 'public.account', 'SELECT') as service_role`,
+    // Not vacuous: app_user is one of the roles checked, and holds nothing.
+    const pinned = await db.query<{ checked: boolean; reads: boolean }>(
+      `select exists (select 1 from pg_roles
+                       where rolname = 'app_user' and not rolsuper and not rolbypassrls) as checked,
+              has_table_privilege('app_user', 'public.account', 'SELECT') as reads`,
     );
-    expect(pinned.rows[0]).toEqual({ authenticated: false, service_role: false });
+    expect(pinned.rows[0]).toEqual({ checked: true, reads: false });
   });
 
   it('notifications: anonymous sees public-only, signed-in sees authenticated-only, org-scoped stays in its org', async () => {

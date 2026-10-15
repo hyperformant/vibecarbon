@@ -140,7 +140,7 @@ describe('formatServerLines', () => {
 });
 
 describe('formatHealthLines', () => {
-  it('renders the db/supabase detail from the real /ready shape', () => {
+  it('renders the db detail from the real /ready shape', () => {
     const lines = formatHealthLines({
       url: 'https://x/api/health/ready',
       ok: true,
@@ -149,13 +149,13 @@ describe('formatHealthLines', () => {
       data: {
         status: 'ready',
         timestamp: 't',
-        services: { database: 'connected', supabase: 'connected' },
+        services: { database: 'connected' },
       },
     }).map(strip);
     expect(lines).toEqual([
       'Health',
       '  https://x/api/health/ready',
-      '  ● healthy  42ms  (db: connected, supabase: connected, ready)',
+      '  ● healthy  42ms  (db: connected, ready)',
     ]);
   });
   it('renders a failed probe with its error or status', () => {

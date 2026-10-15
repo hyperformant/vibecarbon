@@ -4,13 +4,13 @@ import {
   IconCertificate,
   IconComponents,
   IconDeviceSdCard,
-  IconFunction,
   IconKey,
+  IconLock,
   IconMail,
   IconMarkdown,
-  IconPlugConnected,
-  IconRouter,
   IconShieldLock,
+  IconTable,
+  IconUserShield,
 } from '@tabler/icons-react';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -37,7 +37,6 @@ import reactQueryLogo from '../assets/logos/tech-reactquery.svg';
 import reactRouterLogo from '../assets/logos/tech-reactrouter.svg';
 import redisLogo from '../assets/logos/tech-redis.svg';
 import stripeLogo from '../assets/logos/tech-stripe.svg';
-import supabaseLogo from '../assets/logos/tech-supabase.svg';
 import swaggerLogo from '../assets/logos/tech-swagger.svg';
 import tailwindLogo from '../assets/logos/tech-tailwindcss.svg';
 import traefikLogo from '../assets/logos/tech-traefikproxy.svg';
@@ -95,10 +94,10 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
     key: 'api',
     tech: [
       { name: 'Hono', imgs: [honoLogo] },
-      { name: 'Supabase', imgs: [supabaseLogo] },
       { name: 'PostgreSQL', imgs: [postgresqlLogo] },
-      { name: 'Supavisor', icon: IconPlugConnected },
-      { name: 'Edge Functions', icon: IconFunction },
+      { name: 'Better Auth', icon: IconUserShield },
+      { name: 'Drizzle ORM', icon: IconTable },
+      { name: 'Row-level security', icon: IconLock },
       { name: 'OpenAPI + Swagger docs', imgs: [swaggerLogo] },
       { name: 'Redis', imgs: [redisLogo] },
     ],
@@ -116,7 +115,6 @@ const LAYERS: Array<{ key: LayerKey; tech: Chip[] }> = [
     key: 'edge',
     tech: [
       { name: 'Traefik', imgs: [traefikLogo] },
-      { name: 'Kong gateway', icon: IconRouter },
       { name: "Let's Encrypt TLS", icon: IconCertificate },
       { name: 'Cloudflare DNS', imgs: [cloudflareLogo] },
       { name: 'WireGuard', icon: IconShieldLock },

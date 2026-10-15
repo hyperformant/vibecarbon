@@ -1062,9 +1062,8 @@ function formatServerLines(servers, checks) {
 
 /**
  * Lines for the "Health" block: header, probe URL, and a verdict line built
- * from the real `/api/health/ready` shape (db/supabase nest under
- * `services`, with a top-level `services`/`database`/`supabase` fallback for
- * older payload shapes).
+ * from the real `/api/health/ready` shape (the db state nests under
+ * `services`, with a top-level `database` fallback).
  *
  * @param {{url: string, ok: boolean, status?: number|null, latencyMs: number, data?: object|null, error?: string}} remoteHealth
  * @returns {string[]}
@@ -1079,9 +1078,7 @@ function formatHealthLines(remoteHealth) {
     if (data && typeof data === 'object') {
       const parts = [];
       const db = data.services?.database ?? data.database;
-      const supabase = data.services?.supabase ?? data.supabase;
       if (db) parts.push(`db: ${db}`);
-      if (supabase) parts.push(`supabase: ${supabase}`);
       if (data.status) parts.push(data.status);
       if (parts.length > 0) details = c.dim(`  (${parts.join(', ')})`);
     }

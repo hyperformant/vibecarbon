@@ -104,7 +104,7 @@ function CreateVisual() {
   const structure = [
     { name: 'my-app/', icon: FolderOpen, level: 0, delay: 0.2 },
     { name: 'src/', icon: Folder, level: 1, delay: 0.3 },
-    { name: 'supabase/', icon: Folder, level: 1, delay: 0.4 },
+    { name: 'migrations/', icon: Folder, level: 1, delay: 0.4 },
     { name: 'k8s/', icon: Folder, level: 1, delay: 0.5 },
     { name: 'docker-compose.yml', icon: Layers, level: 1, delay: 0.6 },
     { name: 'package.json', icon: FileCode, level: 1, delay: 0.7 },
@@ -222,8 +222,8 @@ function BuildVisual() {
   const services = [
     { name: 'Vite', port: '5173', status: 'ready', icon: Zap, color: 'text-secondary-accent' },
     { name: 'API', port: '3000', status: 'ready', icon: Server, color: 'text-primary' },
-    { name: 'Supabase', port: '8000', status: 'ready', icon: Database, color: 'text-green-400' },
-    { name: 'Studio', port: '3001', status: 'ready', icon: Globe, color: 'text-blue-400' },
+    { name: 'Postgres', port: '5432', status: 'ready', icon: Database, color: 'text-green-400' },
+    { name: 'Traefik', port: '80', status: 'ready', icon: Globe, color: 'text-blue-400' },
   ];
 
   return (

@@ -11,9 +11,8 @@ function originOf(url: string | undefined): string | null {
 /**
  * Production CSP `connect-src` list.
  *
- * Production serves ONE origin: the SPA, the Hono API (auth included), and the
- * Supabase gateway (path-routed to Kong) all live on SITE_URL, so 'self' +
- * SITE_URL covers every first-party call.
+ * Production serves ONE origin: the SPA and the Hono API (auth included) both
+ * live on SITE_URL, so 'self' + SITE_URL covers every first-party call.
  *
  * The S3 endpoint origin is needed because the browser PUTs uploads straight to
  * the presigned URL. The S3 client uses `forcePathStyle: true`, so presigned

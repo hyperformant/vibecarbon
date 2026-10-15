@@ -10,7 +10,6 @@ import {
   IconLoader2 as Loader2,
   IconNetwork as Network,
   IconServer as Server,
-  IconShield as Shield,
 } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
 import { ServicesStatus } from '@/components/admin/ServicesStatus';
@@ -44,20 +43,14 @@ const TOPOLOGY_LAYERS = [
   {
     name: 'Edge',
     icon: Globe,
-    services: ['traefik'],
-    description: 'Load balancer & reverse proxy',
-  },
-  {
-    name: 'API Gateway',
-    icon: Shield,
-    services: ['kong'],
-    description: 'Supabase API keys & routing',
+    services: ['traefik', 'docker-socket-proxy'],
+    description: 'Reverse proxy, TLS & read-only Docker access',
   },
   {
     name: 'Application',
     icon: Server,
-    services: ['auth', 'rest', 'realtime', 'meta', 'studio'],
-    description: 'In-app auth & Supabase services',
+    services: ['app', 'auth'],
+    description: 'Your app, with sign-in built in',
   },
   {
     name: 'Data',
