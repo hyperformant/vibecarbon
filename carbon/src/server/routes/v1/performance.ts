@@ -1,75 +1,31 @@
 import { statfsSync } from 'node:fs';
-import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { adminDb } from '../../db/client';
+import { pingDb } from '../../db/client';
 import { logger } from '../../lib/logger';
+import { probeTraefik } from '../../lib/traefik-probe';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
 const performanceRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Detect runtime environment (same logic as services-status.ts)
-const isKubernetes = !!process.env.KUBERNETES_SERVICE_HOST;
-const isDocker =
-  !isKubernetes && (process.env.NODE_ENV === 'production' || process.env.DOCKER === 'true');
-
 type Latency = { name: string; latencyMs: number; status: 'healthy' | 'unhealthy' | 'unknown' };
 
 const SERVICE_TIMEOUT_MS = 2000;
 
-// Local dev publishes Traefik on DEV_TRAEFIK_PORT (default 80 plus
-// DEV_PORT_OFFSET, the logic of scripts/docker-up.js).
-function devTraefikPort(): number {
-  const explicit = process.env.DEV_TRAEFIK_PORT;
-  if (explicit) return Number.parseInt(explicit, 10);
-  return 80 + Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
-}
-
-const TRAEFIK_URL =
-  isKubernetes || isDocker ? 'http://traefik:80/' : `http://localhost:${devTraefikPort()}/`;
-
-/** Time `fn`, giving up after SERVICE_TIMEOUT_MS. A throw or timeout is unhealthy. */
-async function timed(
-  name: string,
-  fn: (signal: AbortSignal) => Promise<boolean>
-): Promise<Latency> {
-  const start = performance.now();
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<false>((resolve) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      resolve(false);
-    }, SERVICE_TIMEOUT_MS);
-  });
-  try {
-    const ok = await Promise.race([fn(controller.signal), timedOut]);
-    return {
-      name,
-      latencyMs: Math.round(performance.now() - start),
-      status: ok ? 'healthy' : 'unhealthy',
-    };
-  } catch {
-    return { name, latencyMs: Math.round(performance.now() - start), status: 'unhealthy' };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /** Round trip from the app to Postgres over its own connection. */
-function checkDatabaseLatency(): Promise<Latency> {
-  return timed('Database', async () => {
-    await adminDb.execute(sql`select 1`);
-    return true;
-  });
+async function checkDatabaseLatency(): Promise<Latency> {
+  const ping = await pingDb(undefined, { timeoutMs: SERVICE_TIMEOUT_MS });
+  return { name: 'Database', latencyMs: ping.latencyMs, status: ping.ok ? 'healthy' : 'unhealthy' };
 }
 
-/** Round trip from the app to Traefik. No router matches the bare name, so 404 is an answer. */
-function checkTraefikLatency(): Promise<Latency> {
-  return timed('Traefik', async (signal) => {
-    const res = await fetch(TRAEFIK_URL, { method: 'GET', redirect: 'manual', signal });
-    return res.status === 404 || (res.status >= 200 && res.status < 400);
-  });
+/** Round trip from the app to Traefik (lib/traefik-probe.ts). */
+async function checkTraefikLatency(): Promise<Latency> {
+  const probe = await probeTraefik(SERVICE_TIMEOUT_MS);
+  return {
+    name: 'Traefik',
+    latencyMs: probe.latencyMs,
+    status: probe.ok ? 'healthy' : 'unhealthy',
+  };
 }
 
 // ============================================================================

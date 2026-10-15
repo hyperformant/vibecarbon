@@ -144,19 +144,58 @@ export async function assertBypassRole(db: Executor = adminDb): Promise<void> {
   if (!row.member) throw new DbRoleError(role, 'not-app-user-member');
 }
 
-/** What `pingDb` found: the database answered, or the error it failed with. */
-export type DbPing = { ok: true } | { ok: false; error: unknown };
+/**
+ * What `pingDb` found: the database answered, or the error it failed with.
+ * `latencyMs` is the round trip either way; `timedOut` marks a ping that gave
+ * up after `timeoutMs` (its `error` is then a plain timeout Error).
+ */
+export type DbPing =
+  | { ok: true; latencyMs: number }
+  | { ok: false; latencyMs: number; error: unknown; timedOut?: true };
+
+/** Anything `pingDb` can ask: the pool, or a stand-in in tests. */
+export type Pingable = { query(text: string): Promise<unknown> };
 
 /**
- * Ask Postgres a trivial query. Never throws: an unreachable database is
- * `{ ok: false, error }`, so the caller can log why (through `dbErrorForLog`)
- * without a try/catch of its own.
+ * Ask Postgres `select 1`. The one database health check: readiness, the
+ * admin Infrastructure page and the performance page all use it.
+ *
+ * Never throws: an unreachable database is `{ ok: false, error }`, so the
+ * caller can log why (through `dbErrorForLog`) without a try/catch of its
+ * own. With `timeoutMs`, a query that has not answered by then is reported
+ * as `{ ok: false, timedOut: true }`; the query itself is left to the pool's
+ * own timeouts (it cannot be cancelled from here).
  */
-export async function pingDb(target: pg.Pool = pool): Promise<DbPing> {
+export async function pingDb(
+  target: Pingable = pool,
+  opts: { timeoutMs?: number } = {}
+): Promise<DbPing> {
+  const start = Date.now();
+  const elapsed = () => Date.now() - start;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await target.query('select 1');
-    return { ok: true };
+    const query = target.query('select 1').then(() => 'answered' as const);
+    const outcome =
+      opts.timeoutMs === undefined
+        ? await query
+        : await Promise.race([
+            query,
+            new Promise<'timeout'>((resolve) => {
+              timer = setTimeout(() => resolve('timeout'), opts.timeoutMs);
+            }),
+          ]);
+    if (outcome === 'timeout') {
+      return {
+        ok: false,
+        latencyMs: elapsed(),
+        error: new Error(`select 1 did not answer within ${opts.timeoutMs} ms`),
+        timedOut: true,
+      };
+    }
+    return { ok: true, latencyMs: elapsed() };
   } catch (error) {
-    return { ok: false, error };
+    return { ok: false, latencyMs: elapsed(), error };
+  } finally {
+    clearTimeout(timer);
   }
 }

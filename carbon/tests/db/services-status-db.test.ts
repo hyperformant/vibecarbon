@@ -22,19 +22,19 @@ describe.skipIf(!dbTestsEnabled)('services status: database check', () => {
 
   it('reports PostgreSQL unhealthy when the query throws, without echoing the error text', async () => {
     const failing = {
-      execute: async () => {
+      query: async () => {
         throw new Error('connect ECONNREFUSED 10.0.0.5:5432 secret-detail');
       },
     };
-    const result = await checkDatabase(failing as never);
+    const result = await checkDatabase(failing);
     expect(result).toMatchObject({ name: 'PostgreSQL', container: 'db', status: 'unhealthy' });
     expect(result.error).toBe('Not reachable');
     expect(JSON.stringify(result)).not.toContain('secret-detail');
   });
 
   it('reports PostgreSQL unhealthy with a timeout when the query never answers', async () => {
-    const hanging = { execute: () => new Promise(() => {}) };
-    const result = await checkDatabase(hanging as never, 50);
+    const hanging = { query: () => new Promise(() => {}) };
+    const result = await checkDatabase(hanging, 50);
     expect(result).toMatchObject({ status: 'unhealthy', error: 'Timeout' });
     expect(result.latencyMs).toBeGreaterThanOrEqual(40);
   });

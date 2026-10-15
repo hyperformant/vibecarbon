@@ -375,6 +375,30 @@
         "userDocsUpdateFailed": "Failed to update user docs setting",
         "apiDocsUpdateFailed": "Failed to update API docs setting"
       }
+    },
+    "infrastructure": {
+      "layers": {
+        "edge": {
+          "name": "Edge",
+          "description": "Reverse proxy, TLS & read-only Docker access"
+        },
+        "application": {
+          "name": "Application",
+          "description": "Your app, with sign-in built in"
+        },
+        "data": {
+          "name": "Data",
+          "description": "PostgreSQL & caching"
+        },
+        "observability": {
+          "name": "Observability",
+          "description": "Monitoring & logging"
+        },
+        "tooling": {
+          "name": "Tooling",
+          "description": "Automation & analytics"
+        }
+      }
     }
   },
   "landing": {

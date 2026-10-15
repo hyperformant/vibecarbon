@@ -17,8 +17,10 @@ vi.mock('@server/lib/logger', () => ({
 }));
 
 // The database row is a `select 1` over the app's connection, not a fetch.
-const dbExecute = vi.fn(async () => ({ rows: [{ '?column?': 1 }] }));
-vi.mock('@server/db/client', () => ({ adminDb: { execute: dbExecute } }));
+const { pingDb } = vi.hoisted(() => ({
+  pingDb: vi.fn(async () => ({ ok: true as const, latencyMs: 1 })),
+}));
+vi.mock('@server/db/client', () => ({ pingDb }));
 
 const { servicesStatusRoutes } = await import('@server/routes/_internal/services-status');
 const { performanceRoutes } = await import('@server/routes/v1/performance');
@@ -94,7 +96,7 @@ describe('admin performance: Authentication is in-process', () => {
     const auth = body.services.items.find((i) => i.name === 'Authentication');
     expect(auth).toEqual({ name: 'Authentication', status: 'healthy', latencyMs: 0 });
     // Probed: Postgres (select 1) and Traefik (fetch). Authentication is not.
-    expect(dbExecute).toHaveBeenCalled();
+    expect(pingDb).toHaveBeenCalled();
     expect(body.services.total).toBe(fetchMock.mock.calls.length + 2);
     for (const url of dialed()) {
       expect(url).not.toContain('/auth/v1');

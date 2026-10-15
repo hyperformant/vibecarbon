@@ -4,12 +4,12 @@ import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import { promisify } from 'node:util';
-import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { adminDb } from '../../db/client';
+import { type Pingable, pingDb } from '../../db/client';
 import { dbErrorForLog } from '../../db/errors';
 import { fetchContainerLogs, listProjectContainers } from '../../lib/docker-api';
 import { logger } from '../../lib/logger';
+import { probeTraefik, TRAEFIK_HEALTH_URL } from '../../lib/traefik-probe';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 
 const execAsync = promisify(exec);
@@ -50,17 +50,6 @@ const isKubernetes = !!process.env.KUBERNETES_SERVICE_HOST;
 const isDocker =
   !isKubernetes && (process.env.NODE_ENV === 'production' || process.env.DOCKER === 'true');
 
-// Local dev port resolution: respects DEV_PORT_OFFSET and explicit per-service overrides
-// (mirrors the logic in scripts/docker-up.js)
-function localPort(envKey: string, defaultPort: number): number {
-  const explicit = process.env[envKey];
-  if (explicit) return Number.parseInt(explicit, 10);
-  const offset = Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
-  return defaultPort + offset;
-}
-
-const traefikPort = localPort('DEV_TRAEFIK_PORT', 80);
-
 // The app reaches the Docker API through the read-only socket proxy in a
 // production compose deployment (docker-compose.prod.yml sets this). Local
 // dev talks to the host socket and k8s has no Docker API, so neither runs
@@ -88,11 +77,10 @@ const CORE_SERVICES: ServiceConfig[] = [
   {
     name: 'Traefik',
     container: 'traefik',
-    healthUrl: isKubernetes || isDocker ? 'http://traefik:80/' : `http://localhost:${traefikPort}/`,
+    // Probed by probeTraefik (lib/traefik-probe.ts), which knows where
+    // Traefik is on k8s, compose and local dev, and never follows redirects.
+    healthUrl: TRAEFIK_HEALTH_URL,
     timeout: 2000,
-    // No router matches the bare service name: 404 means Traefik answered.
-    // A redirect to HTTPS is an answer too.
-    acceptCodes: [200, 301, 302, 307, 308, 404],
   },
   ...(dockerApiProxy && !isKubernetes
     ? [
@@ -106,43 +94,33 @@ const CORE_SERVICES: ServiceConfig[] = [
     : []),
 ];
 
-/** Anything that can run a raw statement: `adminDb` or a stand-in. */
-type Executor = Pick<typeof adminDb, 'execute'>;
-
 const DB_CHECK_TIMEOUT_MS = 2000;
 
 /**
- * Ask Postgres `select 1` through the app's own connection, giving up after
- * `timeoutMs`. Never throws. The error text of a failed query never reaches
- * the response (it can carry connection details); it goes to the server log
- * through dbErrorForLog.
+ * The PostgreSQL row: `select 1` over the app's own connection (pingDb),
+ * giving up after `timeoutMs`. Never throws. The error text of a failed query
+ * never reaches the response (it can carry connection details); it goes to
+ * the server log through dbErrorForLog.
  */
 export async function checkDatabase(
-  db: Executor = adminDb,
+  target?: Pingable,
   timeoutMs: number = DB_CHECK_TIMEOUT_MS
 ): Promise<ServiceStatus> {
-  const start = Date.now();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<'timeout'>((resolve) => {
-    timer = setTimeout(() => resolve('timeout'), timeoutMs);
-  });
-  const base = { name: 'PostgreSQL', container: 'db' };
-  try {
-    const outcome = await Promise.race([
-      db.execute(sql`select 1`).then(() => 'ok' as const),
-      timedOut,
-    ]);
-    const latencyMs = Date.now() - start;
-    if (outcome === 'timeout') {
-      return { ...base, status: 'unhealthy', latencyMs, error: 'Timeout' };
-    }
-    return { ...base, status: 'healthy', latencyMs };
-  } catch (err) {
-    logger.warn({ err: dbErrorForLog(err) }, 'Services status: database check failed');
-    return { ...base, status: 'unhealthy', latencyMs: Date.now() - start, error: 'Not reachable' };
-  } finally {
-    clearTimeout(timer);
-  }
+  const ping = await pingDb(target, { timeoutMs });
+  const base = { name: 'PostgreSQL', container: 'db', latencyMs: ping.latencyMs };
+  if (ping.ok) return { ...base, status: 'healthy' };
+  if (ping.timedOut) return { ...base, status: 'unhealthy', error: 'Timeout' };
+  logger.warn({ err: dbErrorForLog(ping.error) }, 'Services status: database check failed');
+  return { ...base, status: 'unhealthy', error: 'Not reachable' };
+}
+
+/** The Traefik row (see lib/traefik-probe.ts). */
+async function checkTraefik(service: ServiceConfig): Promise<ServiceStatus> {
+  const probe = await probeTraefik(service.timeout);
+  const base = { name: service.name, container: service.container, latencyMs: probe.latencyMs };
+  return probe.ok
+    ? { ...base, status: 'healthy' }
+    : { ...base, status: 'unhealthy', error: probe.error };
 }
 
 // Optional services - added based on environment configuration
@@ -342,7 +320,11 @@ async function checkServiceHealth(service: ServiceConfig): Promise<ServiceStatus
   }
 
   if (service.healthUrl === 'db://db') {
-    return checkDatabase(adminDb, service.timeout);
+    return checkDatabase(undefined, service.timeout);
+  }
+
+  if (service.container === 'traefik') {
+    return checkTraefik(service);
   }
 
   // Special case: TCP check for services without an HTTP health endpoint (e.g. Redis)
@@ -377,8 +359,11 @@ async function checkServiceHealth(service: ServiceConfig): Promise<ServiceStatus
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), service.timeout);
 
+    // A redirect is the service answering; following it could chase a
+    // public URL the app cannot reach and report a running service as down.
     const response = await fetch(service.healthUrl, {
       method: 'GET',
+      redirect: 'manual',
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -517,7 +502,7 @@ servicesStatusRoutes.post('/restart', async (c) => {
   const services = await getEnabledServices();
   // Not the app itself: restarting the process answering this request would
   // drop the reply. Restart it on its own (POST /restart/app).
-  const containers = services.map((s) => s.container).filter((c) => c !== 'app');
+  const containers = services.map((s) => s.container).filter((name) => name !== 'app');
 
   const results = await Promise.all(
     containers.map(async (container) => {
@@ -659,6 +644,8 @@ async function getK8sApiEndpoint(): Promise<{ host: string; port: number } | nul
 /** Human-readable names for k8s app labels */
 const K8S_LABEL_NAMES: Record<string, string> = {
   'vibecarbon-app': 'App',
+  // The db StatefulSet that replaces the Helm chart labels its pod
+  // `app: vibecarbon-db` (PR B); until then the chart's pod has no `app` label.
   'vibecarbon-db': 'PostgreSQL',
   'vibecarbon-traefik': 'Traefik',
   n8n: 'n8n',

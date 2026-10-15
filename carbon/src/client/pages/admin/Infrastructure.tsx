@@ -12,6 +12,8 @@ import {
   IconServer as Server,
 } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 import { ServicesStatus } from '@/components/admin/ServicesStatus';
 import { ContentPanel } from '@/components/ContentPanel';
 import { PageHeader } from '@/components/PageHeader';
@@ -39,38 +41,45 @@ export async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
 }
 
 // Service topology: layers from top (user-facing) to bottom (data)
-const TOPOLOGY_LAYERS = [
-  {
-    name: 'Edge',
-    icon: Globe,
-    services: ['traefik', 'docker-socket-proxy'],
-    description: 'Reverse proxy, TLS & read-only Docker access',
-  },
-  {
-    name: 'Application',
-    icon: Server,
-    services: ['app', 'auth'],
-    description: 'Your app, with sign-in built in',
-  },
-  {
-    name: 'Data',
-    icon: Database,
-    services: ['db', 'redis'],
-    description: 'PostgreSQL & caching',
-  },
-  {
-    name: 'Observability',
-    icon: Activity,
-    services: ['prometheus', 'grafana', 'loki'],
-    description: 'Monitoring & logging',
-  },
-  {
-    name: 'Tooling',
-    icon: Container,
-    services: ['n8n', 'metabase'],
-    description: 'Automation & analytics',
-  },
-] as const;
+function topologyLayers(t: TFunction) {
+  return [
+    {
+      key: 'edge',
+      name: t('admin.infrastructure.layers.edge.name'),
+      icon: Globe,
+      services: ['traefik', 'docker-socket-proxy'],
+      description: t('admin.infrastructure.layers.edge.description'),
+    },
+    {
+      key: 'application',
+      name: t('admin.infrastructure.layers.application.name'),
+      icon: Server,
+      services: ['app', 'auth'],
+      description: t('admin.infrastructure.layers.application.description'),
+    },
+    {
+      key: 'data',
+      name: t('admin.infrastructure.layers.data.name'),
+      icon: Database,
+      services: ['db', 'redis'],
+      description: t('admin.infrastructure.layers.data.description'),
+    },
+    {
+      key: 'observability',
+      name: t('admin.infrastructure.layers.observability.name'),
+      icon: Activity,
+      services: ['prometheus', 'grafana', 'loki'],
+      description: t('admin.infrastructure.layers.observability.description'),
+    },
+    {
+      key: 'tooling',
+      name: t('admin.infrastructure.layers.tooling.name'),
+      icon: Container,
+      services: ['n8n', 'metabase'],
+      description: t('admin.infrastructure.layers.tooling.description'),
+    },
+  ] as const;
+}
 
 function StatusDot({ status }: { status: 'healthy' | 'unhealthy' | 'unknown' | 'not_running' }) {
   return (
@@ -87,6 +96,8 @@ function StatusDot({ status }: { status: 'healthy' | 'unhealthy' | 'unknown' | '
 }
 
 export default function Infrastructure() {
+  const { t } = useTranslation();
+  const layers = topologyLayers(t);
   const { data, isLoading } = useQuery({
     queryKey: ['services-status'],
     queryFn: fetchServicesStatus,
@@ -137,7 +148,7 @@ export default function Infrastructure() {
               </div>
             ) : (
               <div className="space-y-3">
-                {TOPOLOGY_LAYERS.map((layer, i) => {
+                {layers.map((layer, i) => {
                   const layerServices = layer.services
                     .map((name) => ({
                       name,
@@ -148,7 +159,7 @@ export default function Infrastructure() {
                   if (layerServices.length === 0) return null;
 
                   return (
-                    <div key={layer.name}>
+                    <div key={layer.key}>
                       {/* Layer */}
                       <div className="rounded-lg border p-4">
                         <div className="mb-3 flex items-center gap-2 text-sm text-muted-foreground">
@@ -185,7 +196,7 @@ export default function Infrastructure() {
                       </div>
 
                       {/* Connector */}
-                      {i < TOPOLOGY_LAYERS.length - 1 && layerServices.length > 0 && (
+                      {i < layers.length - 1 && layerServices.length > 0 && (
                         <div className="flex justify-center py-1">
                           <div className="h-3 w-px bg-border" />
                         </div>

@@ -147,7 +147,7 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
     expect(left).toEqual([]);
     expect(pool.waitingCount).toBe(0);
     expect(pool.idleCount).toBe(pool.totalCount);
-    expect(await pingDb()).toEqual({ ok: true });
+    expect(await pingDb()).toMatchObject({ ok: true });
   });
 
   it('rolls back and releases the connection when SQL inside the callback fails', async () => {
@@ -194,7 +194,7 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
   });
 
   it('pingDb reports a reachable database', async () => {
-    expect(await pingDb()).toEqual({ ok: true });
+    expect(await pingDb()).toMatchObject({ ok: true });
   });
 
   // Review Focus 5: an unreachable database is `{ ok: false }`, never a
