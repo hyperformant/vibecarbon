@@ -63,17 +63,27 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     projectEnv = parseDotenv(readFileSync(join(projectDir(), '.env.local'), 'utf-8'));
     projectEnv.PROJECT_NAME = projectName;
     projectEnv.POSTGRES_PASSWORD = projectEnv.DB_PASSWORD || 'postgres';
+    // Drive compose with the file set `vibecarbon up` uses in dev (the
+    // project's scripts/lib/manifest.js getComposeFiles: base, service, service
+    // override, main override last). Leaving out docker-compose.override.yml ran
+    // a db no user runs: WAL-G pointed at the dev S3 on localhost:8333, which in
+    // the container is the container itself, so pg_ctl could not stop the init
+    // server and the db crash-restarted on every first boot. COMPOSE_FILE also
+    // reaches cleanupDocker's `down -v`, so the observability volumes go too.
+    projectEnv.COMPOSE_FILE = [
+      'docker-compose.yml',
+      'docker-compose.observability.yml',
+      'docker-compose.observability.override.yml',
+      'docker-compose.override.yml',
+    ].join(':');
 
     // Start db and observability services
-    execSync(
-      'docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d db prometheus grafana loki promtail postgres-exporter',
-      {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: testConfig.smoke.timeouts.dockerUp,
-        env: getExecEnv(),
-      },
-    );
+    execSync('docker compose up -d db prometheus grafana loki promtail postgres-exporter', {
+      cwd: projectDir(),
+      encoding: 'utf-8',
+      timeout: testConfig.smoke.timeouts.dockerUp,
+      env: getExecEnv(),
+    });
 
     // Wait for database to be ready (with exponential backoff)
     const dbReady = await waitForPostgres(projectDir(), getExecEnv());
@@ -89,10 +99,12 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     if (!lokiAvailable) {
       // Dump container state for CI debugging
       try {
-        const ps = execSync(
-          'docker compose -f docker-compose.yml -f docker-compose.observability.yml ps --format json',
-          { cwd: projectDir(), encoding: 'utf-8', timeout: 10000, env: getExecEnv() },
-        );
+        const ps = execSync('docker compose ps --format json', {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          timeout: 10000,
+          env: getExecEnv(),
+        });
         const containers = ps
           .trim()
           .split('\n')
@@ -114,7 +126,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
       () => {
         try {
           const out = execSync(
-            'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T grafana wget -qO- http://localhost:3000/api/health',
+            'docker compose exec -T grafana wget -qO- http://localhost:3000/api/health',
             { cwd: projectDir(), encoding: 'utf-8', timeout: 10000, env: getExecEnv() },
           );
           return out.includes('database');
@@ -151,18 +163,30 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     cleanupTempDir(tempDir);
   }, 120000);
 
+  describe('Database', () => {
+    // A first boot that crashes is invisible to the health checks below: the
+    // restarted container skips init and turns healthy anyway. Assert the db
+    // came up in one pass so a broken init fails here every time instead of
+    // flaking compose's dependency wait.
+    it('initializes without a crash-restart', ({ skip }) => {
+      if (!observabilityAvailable) skip();
+      const restarts = execSync(`docker inspect --format '{{.RestartCount}}' ${projectName}-db`, {
+        encoding: 'utf-8',
+        timeout: 10000,
+      }).trim();
+      expect(restarts).toBe('0');
+    });
+  });
+
   describe('Prometheus', () => {
     it('container is running', ({ skip }) => {
       if (!observabilityAvailable) skip();
-      const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml ps --format json',
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
+      const result = execSync('docker compose ps --format json', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: getExecEnv(),
+      });
 
       const lines = result.trim().split('\n').filter(Boolean);
       const containers = lines.map((line) => JSON.parse(line));
@@ -177,7 +201,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
       if (!observabilityAvailable) skip();
       // Query Prometheus via docker exec since it's not exposed externally
       const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T prometheus wget -qO- http://localhost:9090/-/ready',
+        'docker compose exec -T prometheus wget -qO- http://localhost:9090/-/ready',
         {
           cwd: projectDir(),
           encoding: 'utf-8',
@@ -192,15 +216,12 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
   describe('Grafana', () => {
     it('container is running', ({ skip }) => {
       if (!observabilityAvailable) skip();
-      const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml ps --format json',
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
+      const result = execSync('docker compose ps --format json', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: getExecEnv(),
+      });
 
       const lines = result.trim().split('\n').filter(Boolean);
       const containers = lines.map((line) => JSON.parse(line));
@@ -215,7 +236,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
       if (!observabilityAvailable) skip();
       // H-9: no host port — query /api/health from inside the container.
       const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T grafana wget -qO- http://localhost:3000/api/health',
+        'docker compose exec -T grafana wget -qO- http://localhost:3000/api/health',
         { cwd: projectDir(), encoding: 'utf-8', timeout: 10000, env: getExecEnv() },
       );
       expect(result).toContain('database');
@@ -226,7 +247,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
       // H-9: no host port, and anonymous auth is disabled, so an unauthenticated
       // request now lands on the login page. Fetch it from inside the container.
       const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T grafana wget -qO- http://localhost:3000/login',
+        'docker compose exec -T grafana wget -qO- http://localhost:3000/login',
         { cwd: projectDir(), encoding: 'utf-8', timeout: 10000, env: getExecEnv() },
       );
       expect(result).toContain('Grafana');
@@ -236,7 +257,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
       if (!observabilityAvailable) skip();
       // Check datasources via Grafana API (requires auth, so we check via docker)
       const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T grafana ls /etc/grafana/provisioning/datasources/',
+        'docker compose exec -T grafana ls /etc/grafana/provisioning/datasources/',
         {
           cwd: projectDir(),
           encoding: 'utf-8',
@@ -249,15 +270,12 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
 
     it('has dashboards provisioned', async ({ skip }) => {
       if (!observabilityAvailable) skip();
-      const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T grafana ls /var/lib/grafana/dashboards/',
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
+      const result = execSync('docker compose exec -T grafana ls /var/lib/grafana/dashboards/', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: getExecEnv(),
+      });
       // Should have at least one dashboard
       expect(result.trim().length).toBeGreaterThan(0);
     });
@@ -266,15 +284,12 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
   describe('Loki', () => {
     it('container is running', ({ skip }) => {
       if (!lokiAvailable) skip();
-      const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml ps --format json',
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
+      const result = execSync('docker compose ps --format json', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: getExecEnv(),
+      });
 
       const lines = result.trim().split('\n').filter(Boolean);
       const containers = lines.map((line) => JSON.parse(line));
@@ -294,7 +309,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
           try {
             // Check /metrics endpoint which is less strict than /ready
             const result = execSync(
-              'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T loki wget -qO- http://localhost:3100/metrics 2>&1 | head -5 || echo "error"',
+              'docker compose exec -T loki wget -qO- http://localhost:3100/metrics 2>&1 | head -5 || echo "error"',
               {
                 cwd: projectDir(),
                 encoding: 'utf-8',
@@ -317,15 +332,12 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
   describe('Promtail', () => {
     it('container is running', ({ skip }) => {
       if (!observabilityAvailable) skip();
-      const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml ps --format json',
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
+      const result = execSync('docker compose ps --format json', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: getExecEnv(),
+      });
 
       const lines = result.trim().split('\n').filter(Boolean);
       const containers = lines.map((line) => JSON.parse(line));
@@ -340,7 +352,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
       if (!observabilityAvailable) skip();
       // Check Promtail targets via docker exec
       const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T promtail wget -qO- http://localhost:9080/ready || echo "ready"',
+        'docker compose exec -T promtail wget -qO- http://localhost:9080/ready || echo "ready"',
         {
           cwd: projectDir(),
           encoding: 'utf-8',
@@ -356,15 +368,12 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
   describe('Postgres Exporter', () => {
     it('container is running', ({ skip }) => {
       if (!observabilityAvailable) skip();
-      const result = execSync(
-        'docker compose -f docker-compose.yml -f docker-compose.observability.yml ps --format json',
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
+      const result = execSync('docker compose ps --format json', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 10000,
+        env: getExecEnv(),
+      });
 
       const lines = result.trim().split('\n').filter(Boolean);
       const containers = lines.map((line) => JSON.parse(line));
@@ -383,7 +392,7 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
         () => {
           try {
             const result = execSync(
-              'docker compose -f docker-compose.yml -f docker-compose.observability.yml exec -T postgres-exporter wget -qO- http://localhost:9187/metrics | grep -m1 "pg_" || echo ""',
+              'docker compose exec -T postgres-exporter wget -qO- http://localhost:9187/metrics | grep -m1 "pg_" || echo ""',
               {
                 cwd: projectDir(),
                 encoding: 'utf-8',
