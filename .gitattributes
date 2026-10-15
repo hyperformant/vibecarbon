@@ -1,0 +1,4 @@
+# The db image's inputs are fingerprinted byte for byte
+# (tests/unit/deploy/db-image-fingerprint.test.ts), so a CRLF checkout must not
+# change them. The shell entrypoint must stay LF to run in the container anyway.
+docker/postgres-walg/** text eol=lf

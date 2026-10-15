@@ -20,9 +20,20 @@ pinned by digest:
   WAL archiving off the init-time temporary server, so a first boot with an
   unreachable backup bucket cannot crash (the script explains why).
 
-Published for **linux/amd64 and linux/arm64**: servers are x86-64, and arm64 is
-for local development on Apple Silicon. The arm64 leg is built under QEMU,
-because pg_cron is compiled inside the target platform's postgres image.
+Published for **linux/amd64 and linux/arm64**. Servers are amd64 only
+(`src/lib/deploy/platform.js`); the arm64 child exists solely so local
+`vibecarbon up` on an Apple Silicon machine runs Postgres natively, since local
+dev pulls this image like every other mode.
+
+Each arch is built **natively**, never under QEMU: `publish-db-image.yml`'s
+`build-db` job runs one leg on `ubuntu-24.04` (amd64) and one on
+`ubuntu-24.04-arm` (arm64). pg_cron is compiled inside that arch's own postgres
+image, and before anything is pushed each leg smoke-tests the image it just
+built on its own hardware: `postgres --version`, `wal-g --version`, then an
+initdb into a temp dir, a server start with the baked config (which preloads
+pg_cron.so), and `CREATE EXTENSION pg_cron`. Each leg pushes by digest only;
+the `publish` job then joins the two digests under the one tag with
+`docker buildx imagetools create`, so the tag never names a half-built image.
 
 Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>-r<N>` e.g. `17.11-walg3.0.9-r1`,
 where `PG_VERSION` is the base image's major.minor and `-r<N>` is OUR revision.
@@ -73,6 +84,6 @@ may pull, so ask Brandon before running it.
    project's `npm run test:db` against it.
 4. Merge. `.github/workflows/publish-db-image.yml` runs on any push to main
    touching `docker/postgres-walg/**`, `docker/wal-g/**` or `src/lib/images.js`,
-   builds both platforms and pushes.
+   builds and smoke-tests each platform natively, then pushes the tag.
 5. Verify: `docker run --rm --entrypoint wal-g ghcr.io/hyperformant/postgres:<tag> --version`
    (the workflow already runs this against the published image).

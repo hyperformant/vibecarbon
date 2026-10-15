@@ -35,6 +35,15 @@
  *
  * The server-type half of the same decision lives on the provider classes:
  * `BaseProvider.isArmServerType` / `BaseProvider.assertAmd64ServerType`.
+ *
+ * ## The one arm64 image: the db image, for local development only
+ *
+ * ghcr.io/hyperformant/postgres (docker/postgres-walg) is ALSO published for
+ * linux/arm64, built natively on GitHub's arm64 runner, solely so that local
+ * `vibecarbon up` on an Apple Silicon machine runs Postgres natively (every
+ * mode pulls that image, local dev included). Servers remain amd64: nothing
+ * here or in the provider ARM rejection changes, and no server ever pulls the
+ * arm64 child.
  */
 
 /** Docker platform string every vibecarbon image is built for. */

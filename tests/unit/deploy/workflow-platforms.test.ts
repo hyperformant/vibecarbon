@@ -16,47 +16,81 @@
  *     reason to emulate, also fails here.
  *
  * THE arm64 IMAGES: ghcr.io/hyperformant/postgres, and the wal-g image it is
- * built from. Every mode PULLS the db image, local `vibecarbon up` included
- * (carbon/docker-compose.yml's `image: ${DB_IMAGE}:${DB_IMAGE_TAG}`), so an
- * Apple Silicon developer pulls its arm64 child. wal-g cross-compiles (GOARCH
- * from TARGETARCH on $BUILDPLATFORM); the db image compiles pg_cron inside the
- * target platform's postgres image, which is the one place QEMU is used. See
- * the comment above the build step in publish-db-image.yml.
+ * built from. Servers stay amd64; the db image's arm64 child exists solely so
+ * local `vibecarbon up` on Apple Silicon runs Postgres natively (every mode,
+ * local dev included, pulls that image). wal-g cross-compiles (GOARCH from
+ * TARGETARCH on $BUILDPLATFORM); the db image builds natively per arch on
+ * GitHub's ubuntu-24.04 / ubuntu-24.04-arm runners and a merge job joins the
+ * two digests under one tag. No workflow sets up QEMU.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 
+type Step = { uses?: string; run?: string; with?: Record<string, unknown> };
+type Job = {
+  'runs-on'?: string;
+  needs?: string | string[];
+  strategy?: { matrix?: { include?: Array<Record<string, string>> } };
+  steps?: Step[];
+};
+const jobsOf = (workflow: string) =>
+  (loadYaml(read(workflow)) as { jobs: Record<string, Job> }).jobs;
+/** A literal GitHub expression, without tripping the template-string lint. */
+const expr = (inner: string) => `$${'{{'} ${inner} }}`;
+const isBuildPush = (step: Step) => /docker\/build-push-action@/.test(step.uses ?? '');
+
 /**
- * Every workflow that runs docker/build-push-action, with the platform list it
- * is intended to publish and WHO pulls the result. If you are here because
- * this test failed, change the reasoning first — not just the string.
+ * The platforms a job builds, with `${{ matrix.platform }}` expanded over the
+ * job's matrix legs. Sorted and de-duplicated: the db legs build twice (once
+ * to load for the smoke test, once to push), which is still one platform.
+ */
+function builtPlatforms(job: Job): string[] {
+  const legs = job.strategy?.matrix?.include ?? [{}];
+  const out = new Set<string>();
+  for (const step of (job.steps ?? []).filter(isBuildPush)) {
+    const raw = String(step.with?.platforms ?? '');
+    for (const leg of legs) {
+      const value = raw.replace(/\$\{\{\s*matrix\.(\w+)\s*\}\}/g, (_, k) => leg[k] ?? '');
+      for (const p of value.split(',')) if (p) out.add(p.trim());
+    }
+  }
+  return [...out].sort();
+}
+
+/**
+ * Every job that runs docker/build-push-action, with the platforms it is
+ * intended to publish and WHO pulls the result. If you are here because this
+ * test failed, change the reasoning first — not just the string.
  */
 const PUBLISHED_IMAGES = [
   {
     workflow: '.github/workflows/publish-db-image.yml',
+    job: 'publish-walg',
     image: 'ghcr.io/hyperformant/wal-g (static wal-g binary)',
-    platforms: 'linux/amd64,linux/arm64',
+    platforms: ['linux/amd64', 'linux/arm64'],
     consumers:
-      'docker/postgres-walg COPY --froms this image in its own multi-arch build, so it needs ' +
-      'both platforms. The Dockerfile cross-compiles on $BUILDPLATFORM (no QEMU for this leg).',
+      'docker/postgres-walg COPY --froms this image in both of its native per-arch builds. ' +
+      'The Dockerfile cross-compiles on $BUILDPLATFORM, so no QEMU.',
   },
   {
     workflow: '.github/workflows/publish-db-image.yml',
+    job: 'build-db',
     image: 'ghcr.io/hyperformant/postgres (official postgres Alpine + pg_cron + wal-g)',
-    platforms: 'linux/amd64,linux/arm64',
+    platforms: ['linux/amd64', 'linux/arm64'],
     consumers:
-      'every mode pulls it: compose and compose-ha servers (docker-compose.yml pulls DB_IMAGE:DB_IMAGE_TAG from .env), ' +
-      'k3s nodes (the chart values), and local `vibecarbon up` ' +
-      'on developer machines, Apple Silicon included. That local pull is the arm64 consumer.',
+      'servers (amd64 only, src/lib/deploy/platform.js) pull the amd64 child; the arm64 child ' +
+      'exists solely for local `vibecarbon up` on Apple Silicon, which pulls this image too.',
   },
   {
     workflow: '.github/workflows/publish-images.yml',
+    job: 'publish',
     image: 'ghcr.io/hyperformant/carbon-autoscaler',
-    platforms: 'linux/amd64',
+    platforms: ['linux/amd64'],
     consumers:
       'k8s only — the `carbon-autoscaler` sidecar in ' +
       'carbon/k8s/base/cluster-autoscaler/deployment.yaml, nodeSelector-pinned to ' +
@@ -65,27 +99,14 @@ const PUBLISHED_IMAGES = [
   },
   {
     workflow: 'carbon/.github/workflows/vibecarbon-build.yml',
+    job: 'build',
     image: "the generated project's app image (ghcr.io/<owner>/<repo>)",
-    platforms: 'linux/amd64',
+    platforms: ['linux/amd64'],
     consumers:
       'servers only — pulled by `vibecarbon deploy` (compose push mode via APP_IMAGE, and the ' +
       'k8s app Deployment) onto provisioned x86-64 servers.',
   },
 ] as const;
-
-// A workflow may publish more than one image (publish-db-image.yml builds the
-// wal-g binary image, then the db image that COPY --froms it — `needs:` inside
-// ONE workflow is what serializes that dependency), so assertions run per
-// workflow over the multiset of its images' intended platform lists.
-/**
- * Workflows allowed to set up QEMU, each with the reason. Only an image whose
- * build must EXECUTE target-platform code (compiling a C extension inside the
- * target's own postgres image) belongs here; a Go cross-compile never does.
- */
-const QEMU_ALLOWED: Record<string, string> = {
-  '.github/workflows/publish-db-image.yml':
-    'the db image compiles pg_cron with PGXS inside the arm64 postgres image',
-};
 
 const WORKFLOWS = [...new Set(PUBLISHED_IMAGES.map((p) => p.workflow))].map((workflow) => ({
   workflow,
@@ -93,54 +114,89 @@ const WORKFLOWS = [...new Set(PUBLISHED_IMAGES.map((p) => p.workflow))].map((wor
 }));
 
 describe.each(WORKFLOWS)('$workflow publishes its intended platforms', ({ workflow, images }) => {
-  const wf = read(workflow);
-  // Comments are ALLOWED to name arm64 and setup-qemu-action — that is where
-  // the reasoning for their absence lives. Only executable YAML is checked.
-  const code = wf
+  const jobs = jobsOf(workflow);
+  // Comments are ALLOWED to name setup-qemu-action — that is where the
+  // reasoning for its absence lives. Only executable YAML is checked.
+  const code = read(workflow)
     .split('\n')
     .filter((line) => !/^\s*#/.test(line))
     .join('\n');
   const why = `\n\n${images
-    .map((i) => `Image: ${i.image}\nConsumers: ${i.consumers}\nIntended platforms: ${i.platforms}`)
+    .map(
+      (i) =>
+        `Image: ${i.image} (job ${i.job})\nConsumers: ${i.consumers}\n` +
+        `Intended platforms: ${i.platforms.join(',')}`,
+    )
     .join('\n\n')}`;
 
-  it('pins exactly the intended platform list per published image', () => {
-    const found = [...code.matchAll(/^\s*platforms:\s*(\S.*?)\s*$/gm)].map((m) => m[1]);
-    const intended = images.map((i) => i.platforms);
-    expect(
-      found.sort(),
-      `${workflow} must declare exactly one \`platforms:\` line per published image.${why}`,
-    ).toEqual(intended.sort());
+  it('every image-building job is registered here', () => {
+    const building = Object.entries(jobs)
+      .filter(([, job]) => (job.steps ?? []).some(isBuildPush))
+      .map(([id]) => id)
+      .sort();
+    expect(building, `${workflow}: unregistered build-push job.${why}`).toEqual(
+      images.map((i) => i.job).sort(),
+    );
   });
 
-  it('sets up QEMU only where an image must emulate its build', () => {
-    // setup-qemu-action only exists to register binfmt handlers for foreign
-    // architectures. A Go image cross-compiles and needs none; the db image's
-    // pg_cron builder is the one exception, and it is argued in QEMU_ALLOWED.
-    const uses = [...code.matchAll(/setup-qemu-action/g)].length;
-    if (QEMU_ALLOWED[workflow]) {
-      expect(uses, `${workflow}: ${QEMU_ALLOWED[workflow]}, so it sets up QEMU once`).toBe(1);
-    } else {
-      expect(
-        uses,
-        `${workflow} added docker/setup-qemu-action. QEMU is only needed to EMULATE a ` +
-          `foreign architecture, and nothing this workflow builds does.${why}`,
-      ).toBe(0);
-    }
+  it.each(images.map((i) => [i.job, i] as const))(
+    'job %s builds exactly its intended platforms',
+    (_, image) => {
+      expect(builtPlatforms(jobs[image.job]), `${workflow}#${image.job}.${why}`).toEqual(
+        [...image.platforms].sort(),
+      );
+    },
+  );
+
+  it('never sets up QEMU (multi-arch is cross-compiled or built natively per arch)', () => {
+    expect(
+      code,
+      `${workflow} added docker/setup-qemu-action. QEMU is only needed to EMULATE a foreign ` +
+        `architecture: Go images cross-compile, and the db image builds on a native runner ` +
+        `per arch.${why}`,
+    ).not.toMatch(/setup-qemu-action/);
+  });
+});
+
+describe('the db image builds natively per arch and merges into one tag', () => {
+  const WORKFLOW = '.github/workflows/publish-db-image.yml';
+  const jobs = jobsOf(WORKFLOW);
+  const build = jobs['build-db'];
+  const merge = jobs.publish;
+
+  it('one matrix leg per arch, each on its own native runner', () => {
+    expect(build['runs-on']).toBe(expr('matrix.runner'));
+    expect(build.strategy?.matrix?.include).toEqual([
+      { platform: 'linux/amd64', runner: 'ubuntu-24.04' },
+      { platform: 'linux/arm64', runner: 'ubuntu-24.04-arm' },
+    ]);
   });
 
-  it('references arm64 nowhere but intended platforms lines', () => {
-    const withoutPlatformLines = code
-      .split('\n')
-      .filter((line) => !/^\s*platforms:/.test(line))
-      .join('\n');
-    const anyArmIntended = images.some((i) => i.platforms.includes('arm64'));
-    expect(
-      withoutPlatformLines,
-      `${workflow} references arm64 outside a \`platforms:\` line${
-        anyArmIntended ? '' : ' (and none of its images intend arm64 at all)'
-      }.${why}`,
-    ).not.toMatch(/arm64|aarch64/);
+  it('each leg builds ONE platform, smoke-tests it, then pushes by digest only', () => {
+    const steps = build.steps ?? [];
+    const pushes = steps.filter(isBuildPush);
+    for (const step of pushes) expect(step.with?.platforms).toBe(expr('matrix.platform'));
+    const smokeAt = steps.findIndex((s) => /CREATE EXTENSION pg_cron/.test(s.run ?? ''));
+    const pushAt = steps.findIndex(
+      (s) => isBuildPush(s) && /push-by-digest=true/.test(String(s.with?.outputs ?? '')),
+    );
+    expect(smokeAt, 'no smoke step that loads pg_cron').toBeGreaterThan(-1);
+    expect(pushAt, 'no push-by-digest step').toBeGreaterThan(smokeAt);
+    const smoke = steps[smokeAt].run ?? '';
+    expect(smoke).toMatch(/postgres db-smoke:local --version/);
+    expect(smoke).toMatch(/wal-g db-smoke:local --version/);
+    expect(smoke).toMatch(/initdb -D \/tmp\//);
+    // The leg never tags: only the merge job names the image.
+    for (const step of pushes) expect(step.with?.tags ?? 'db-smoke:local').toBe('db-smoke:local');
+  });
+
+  it('the merge job creates the multi-arch tag from both digests after both legs', () => {
+    expect(merge.needs).toBe('build-db');
+    expect(build.needs).toBe('publish-walg');
+    const run = (merge.steps ?? []).map((s) => s.run ?? '').join('\n');
+    expect(run).toMatch(/docker buildx imagetools create -t "\$IMAGE"/);
+    expect(run).toMatch(/-eq 2/);
+    expect((merge.steps ?? []).some(isBuildPush)).toBe(false);
   });
 });
 
@@ -156,7 +212,7 @@ describe('arm64 build support survives in the db image delivery chain', () => {
   });
 
   it('docker/postgres-walg/Dockerfile executes wal-g --version at build time', () => {
-    // Executing the binary during the build (under QEMU for arm64) is the only
+    // Executing the binary during the build (natively on each arch) is the only
     // place a wrong-arch wal-g fails loudly instead of shipping a database
     // with silently dead backups behind green health checks.
     expect(read('docker/postgres-walg/Dockerfile')).toMatch(/wal-g --version/);
