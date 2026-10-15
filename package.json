@@ -31,7 +31,7 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:cli": "vitest run --project integration tests/integration/cli",
-    "test:docker": "DOCKER_INTEGRATION=true vitest run --project integration tests/integration/docker",
+    "test:docker": "DOCKER_INTEGRATION=true vitest run --project integration --no-file-parallelism tests/integration/docker",
     "test:template": "vitest run --project integration tests/integration/template",
     "test:modules": "vitest run --project integration tests/integration/modules",
     "test:coverage": "vitest run --coverage",

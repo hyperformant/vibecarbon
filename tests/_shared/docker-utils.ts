@@ -223,7 +223,12 @@ export async function waitForDockerCommand(
 }
 
 /**
- * Wait for PostgreSQL to be ready
+ * Wait for PostgreSQL to be ready.
+ *
+ * Probes over TCP (`-h localhost`), like the compose healthcheck. The default
+ * unix-socket probe passes against the temporary socket-only server the image
+ * runs during first-boot init, then the real server restarts and the next
+ * query fails with "the database system is shutting down".
  */
 export async function waitForPostgres(
   cwd: string,
@@ -231,7 +236,7 @@ export async function waitForPostgres(
   options: WaitOptions = {},
 ): Promise<boolean> {
   return waitForDockerCommand(
-    'docker compose exec -T db pg_isready -U postgres',
+    'docker compose exec -T db pg_isready -h localhost -U postgres',
     { cwd, env, encoding: 'utf-8' },
     { label: 'PostgreSQL ready', timeout: testConfig.smoke.timeouts.serviceReady, ...options },
   );
