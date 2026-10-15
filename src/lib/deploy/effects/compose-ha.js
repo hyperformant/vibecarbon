@@ -506,11 +506,6 @@ async function haSetupServerFiles(ctx) {
  * prefix on both nodes (so the standby can READ the primary's base backups);
  * WALG_ROLE=standby makes wal-archive.sh + compose-backup.sh no-op on the
  * standby so it never WRITES into the shared prefix (split-brain guard).
- *
- * REALTIME_REPLICAS rides the same write (composeRoleEnv): the standby holds
- * Realtime at 0 because its boot migration cannot run against a hot-standby
- * Postgres and would crash-loop for the life of the node. Failover's role swap
- * is what brings it to 1 on the promoted node (compose/ha.js).
  */
 async function haMergeWalgRole(ctx) {
   const projectName = ctx.projectConfig.projectName;

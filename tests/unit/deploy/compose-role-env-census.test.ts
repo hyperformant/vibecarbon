@@ -1,34 +1,19 @@
 /**
  * Census: every compose-side node-role write goes through `composeRoleEnv`.
  *
- * The compose-ha standby runs the full app tier against a hot-standby
- * (read-only) Postgres. Supabase Realtime runs Ecto migrations on every boot
- * and Ecto's migrator unconditionally issues `CREATE TABLE IF NOT EXISTS
- * schema_migrations`, which a read-only transaction rejects (SQLSTATE 25006).
- * Realtime exits 1, `restart: unless-stopped` brings it back, and the standby
- * crash-loops it at ~50s cadence for its whole life (63 restarts in 51 minutes
- * on the 2026-09-19 kept rig). Auth and Storage also migrate on boot but only
- * WRITE when something is pending, so they are fine.
- *
- * The fix rides the role knob that already exists: `WALG_ROLE` is written into
- * `/opt/<project>/.env` at deploy (haMergeWalgRole) and re-written at failover
- * (restoreComposeWalgRole / demoteComposeWalgRole). `REALTIME_REPLICAS` is the
- * second half of the same pair — `deploy.replicas: ${REALTIME_REPLICAS:-1}` on
- * the realtime service — and MUST move with it, or a promoted node would carry
- * `WALG_ROLE=primary` with Realtime still held at 0. This census makes that
- * drift unrepresentable: no line in either compose-side file may spell the
- * `WALG_ROLE` object key itself; the only place that key is written is
- * `composeRoleEnv` in walg-role.js, which emits both halves together.
+ * `WALG_ROLE` is written into `/opt/<project>/.env` at deploy
+ * (haMergeWalgRole) and re-written at failover (restoreComposeWalgRole /
+ * demoteComposeWalgRole). `composeRoleEnv` in walg-role.js is the one place
+ * that key is spelled, and it refuses a role it does not know, so a caller
+ * cannot arm wal-g archiving on a node whose role it guessed. This census
+ * keeps it that way: no code line in either compose-side file may spell the
+ * `WALG_ROLE` object key itself.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import {
-  composeRoleEnv,
-  REALTIME_REPLICAS_ENV,
-  WALG_ROLE_ENV,
-} from '../../../src/lib/deploy/walg-role.js';
+import { composeRoleEnv, WALG_ROLE_ENV } from '../../../src/lib/deploy/walg-role.js';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 
@@ -51,26 +36,19 @@ function isRoleKeyWrite(line: string): boolean {
 }
 
 describe('composeRoleEnv', () => {
-  it('names the knobs the compose template reads', () => {
+  it('names the knob the compose template reads', () => {
     expect(WALG_ROLE_ENV).toBe('WALG_ROLE');
-    expect(REALTIME_REPLICAS_ENV).toBe('REALTIME_REPLICAS');
   });
 
-  it('primary: write-guard on, Realtime at 1', () => {
-    expect(composeRoleEnv('primary')).toEqual({
-      WALG_ROLE: 'primary',
-      REALTIME_REPLICAS: '1',
-    });
+  it('primary: write-guard on', () => {
+    expect(composeRoleEnv('primary')).toEqual({ WALG_ROLE: 'primary' });
   });
 
-  it('standby: write-guard off, Realtime held at 0 (its boot migration cannot run read-only)', () => {
-    expect(composeRoleEnv('standby')).toEqual({
-      WALG_ROLE: 'standby',
-      REALTIME_REPLICAS: '0',
-    });
+  it('standby: write-guard off', () => {
+    expect(composeRoleEnv('standby')).toEqual({ WALG_ROLE: 'standby' });
   });
 
-  it('emits both halves as STRINGS, because mergeRemoteDotenv writes a dotenv file', () => {
+  it('emits STRINGS, because mergeRemoteDotenv writes a dotenv file', () => {
     for (const role of ['primary', 'standby'] as const) {
       for (const v of Object.values(composeRoleEnv(role))) expect(typeof v).toBe('string');
     }
@@ -112,9 +90,8 @@ describe('census: compose-side role writes only happen through composeRoleEnv', 
       }
       expect(
         offenders,
-        `Every compose-side role write must be \`composeRoleEnv(role)\` so WALG_ROLE and ` +
-          `REALTIME_REPLICAS cannot drift apart (a promoted node with Realtime still held at 0, ` +
-          `or a standby crash-looping Realtime against a read-only Postgres).`,
+        `Every compose-side role write must be \`composeRoleEnv(role)\`, the one place the ` +
+          `role is validated before it reaches a node's write-guard.`,
       ).toEqual([]);
     });
 

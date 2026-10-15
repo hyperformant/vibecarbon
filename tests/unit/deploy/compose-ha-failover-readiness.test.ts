@@ -1,21 +1,20 @@
 /**
  * Regression guard for the compose-ha failover-readiness race — TWO RCAs deep.
  *
- * RCA 2026-05-30: Failover Step 1b runs `docker restart … rest app …` to force
+ * RCA 2026-05-30: Failover Step 1b runs `docker restart <project>-app` to force
  * a clean reconnect against the freshly-promoted read-write DB, but restart
- * returns when containers START, not when they're READY. PostgREST then spends
- * ~10-30s rebuilding its schema cache; until it does, /api/v1/notifications
- * 500s. failover returned straight into that window and verify-failover caught
- * it. Fix: waitForNewPrimaryApi polls the endpoint locally on the new primary
+ * returns when the container STARTS, not when it is READY; until it is,
+ * /api/v1/notifications 500s. failover returned straight into that window and
+ * verify-failover caught it. Fix: waitForNewPrimaryApi polls the endpoint locally on the new primary
  * (curl --resolve, DNS-independent) until it serves 200.
  *
  * RCA 2026-08-19 (DO compose-ha, run 32309395314): the gate proved ONE of the
  * restarted services and declared the whole app tier serving while a slower
  * one was still down. Fix: the probe covers every restarted service it can
  * prove, and the census below holds every restarted service to "probed or
- * exempted". (The service that lagged then, Supabase storage, has since been
- * removed; so has the separate auth service: auth runs inside the app, so
- * the app's DB-backed 200 covers sign-in too.)
+ * exempted". (Every service but the app has since left the restart list: auth
+ * runs inside the app, so the app's DB-backed 200 covers sign-in too, and the
+ * app is the only app-tier service holding database connections.)
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -27,10 +26,10 @@ import {
 
 const noSleep = () => Promise.resolve();
 
-const allUp = 'rest=200';
+const allUp = 'app=200';
 
 describe('newPrimaryApiProbeCmd', () => {
-  it('probes rest/app, pinned to loopback, ignoring the staging cert', () => {
+  it('probes the app, pinned to loopback, ignoring the staging cert', () => {
     const cmd = newPrimaryApiProbeCmd('e2.appcarbon.dev');
     expect(cmd).toContain('https://e2.appcarbon.dev/api/v1/notifications');
     expect(cmd).not.toContain('/auth/v1/');
@@ -44,7 +43,7 @@ describe('newPrimaryApiProbeCmd', () => {
       expect(c).toContain('-sk');
     }
     // Output is labeled so the poller can name the lagging service.
-    expect(cmd).toMatch(/rest=/);
+    expect(cmd).toMatch(/app=/);
   });
 });
 
@@ -59,11 +58,11 @@ describe('waitForNewPrimaryApi', () => {
     expect(runner).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps polling through the PostgREST cold-cache 500 window, then passes on recovery', async () => {
+  it('keeps polling through the post-restart 500 window, then passes on recovery', async () => {
     const runner = vi
       .fn()
-      .mockReturnValueOnce('rest=500')
-      .mockReturnValueOnce('rest=500')
+      .mockReturnValueOnce('app=500')
+      .mockReturnValueOnce('app=500')
       .mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
@@ -76,8 +75,8 @@ describe('waitForNewPrimaryApi', () => {
   it('treats a gateway timeout (504) and silence (000) as not-ready', async () => {
     const runner = vi
       .fn()
-      .mockReturnValueOnce('rest=000')
-      .mockReturnValueOnce('rest=504')
+      .mockReturnValueOnce('app=000')
+      .mockReturnValueOnce('app=504')
       .mockReturnValue(allUp);
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
@@ -113,7 +112,7 @@ describe('waitForNewPrimaryApi', () => {
   });
 
   it('returns false (best-effort, never throws) after exhausting attempts', async () => {
-    const runner = vi.fn().mockReturnValue('rest=502');
+    const runner = vi.fn().mockReturnValue('app=502');
     const ok = await waitForNewPrimaryApi('1.2.3.4', '/key', 'e2.appcarbon.dev', {
       runner,
       sleep: noSleep,
@@ -152,14 +151,13 @@ describe('serve-gate coverage census', () => {
 // service is proven through. Kept in the TEST deliberately — an independent
 // opinion of what the cmd must contain, not an echo of how it builds it.
 const NEW_PRIMARY_PROBE_URLS_BY_SERVICE: Record<string, string> = {
-  rest: '/api/v1/notifications',
   app: '/api/v1/notifications',
 };
 
 describe('the restart list names only containers the stack runs', () => {
   // `docker restart` of a container that does not exist fails the whole
   // command, so a removed service left in the list breaks every failover.
-  it('no longer restarts or stops the removed auth service', () => {
-    expect(APP_TIER_RESTART_SERVICES).not.toContain('auth');
+  it('restarts and stops exactly the app (the only app-tier service on a database connection)', () => {
+    expect(APP_TIER_RESTART_SERVICES).toEqual(['app']);
   });
 });

@@ -57,33 +57,13 @@ export const WALG_DB_STATEFULSET = 'supabase-supabase-db';
 export const WALG_ROLE_ENV = 'WALG_ROLE';
 
 /**
- * The compose knob that holds Realtime off a replica-backed standby
- * (`deploy.replicas: ${REALTIME_REPLICAS:-1}` on the realtime service in
- * carbon/docker-compose.yml). Compose-side only: the k8s standby scales its
- * app tier to zero through a different mechanism (k8s/standby-config.js).
- */
-export const REALTIME_REPLICAS_ENV = 'REALTIME_REPLICAS';
-
-/**
- * The compose node-role env pair, written wherever a compose node's role is.
+ * The compose node-role env, written wherever a compose node's role is.
  *
- * `WALG_ROLE` is the wal-g write-guard (see the module docblock).
- * `REALTIME_REPLICAS` keeps Supabase Realtime off a replica-backed standby:
- * Realtime runs Ecto migrations on every boot, and Ecto's migrator
- * unconditionally issues `CREATE TABLE IF NOT EXISTS schema_migrations`, which
- * a hot-standby Postgres rejects (SQLSTATE 25006, read_only_sql_transaction).
- * It exits 1, `restart: unless-stopped` brings it back, and the standby
- * crash-loops it at ~50s cadence for its whole life — 63 restarts in 51
- * minutes on the 2026-09-19 kept compose-ha rig. Auth and Storage also migrate
- * on boot but only WRITE when something is pending, so they are fine; PostgREST
- * retries its `LISTEN` every ~32s and serves reads, which is the warm-failover
- * point of the standby, so it is left alone.
- *
- * Every compose-side role write (deploy's haMergeWalgRole, failover's
- * restoreComposeWalgRole / demoteComposeWalgRole) goes through here so the two
- * halves cannot drift: a promoted node with Realtime still held at 0, or a
- * standby crash-looping it, are both single-key mistakes this makes
- * unrepresentable. compose-role-env-census.test.ts enforces it.
+ * `WALG_ROLE` is the wal-g write-guard (see the module docblock). Every
+ * compose-side role write (deploy's haMergeWalgRole, failover's
+ * restoreComposeWalgRole / demoteComposeWalgRole) goes through here, so the
+ * role is validated in one place: an unknown role throws instead of silently
+ * arming (or disarming) archiving. compose-role-env-census.test.ts enforces it.
  *
  * Values are strings because the destination is a dotenv file.
  *
@@ -94,10 +74,7 @@ export function composeRoleEnv(role) {
   if (role !== 'primary' && role !== 'standby') {
     throw new Error(`composeRoleEnv: unknown role ${role}`);
   }
-  return {
-    [WALG_ROLE_ENV]: role,
-    [REALTIME_REPLICAS_ENV]: role === 'primary' ? '1' : '0',
-  };
+  return { [WALG_ROLE_ENV]: role };
 }
 
 /**

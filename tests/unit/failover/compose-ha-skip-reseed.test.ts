@@ -40,7 +40,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     if (c.includes('pg_promote')) return 't'; // promotion succeeds
     if (c.includes('WALG_AUDIT')) return auditPayload; // backup audit verdict
     // new-primary app tier serves — the gate needs every labeled probe up
-    if (c.includes('%{http_code}')) return 'rest=200';
+    if (c.includes('%{http_code}')) return 'app=200';
     return '';
   };
   // See compose-ha-wireguard.test.ts: sshRunChecked calls the module-LOCAL
@@ -145,29 +145,24 @@ describe('failoverComposeHA — standby already streaming', () => {
 
   // The bug this guards (2026-08-09, round-A d2 verify-failover failure —
   // 3/3 deterministic across e2/d2 runs): the app-tier restart ran as bare
-  // `docker compose restart supavisor auth rest ...`, but supavisor is
-  // defined ONLY in docker-compose.prod.yml, so bare compose (no -f chain
-  // on the remote invocation) failed service-name resolution and exited in
-  // ~2s having restarted NOTHING. Two runs got lucky (the step-1c API wait
-  // let PostgREST self-recover); the third hit stale supavisor/auth pools
-  // and verify-failover failed on app_api_me_authenticated +
-  // db_write_roundtrip. Container names (container_name:
-  // ${PROJECT_NAME}-<svc>, stamped on every service) bypass compose
-  // file resolution entirely — the hand-rolled-compose-invocation-drifts
-  // family (see compose-invocation-service-names census).
+  // `docker compose restart <svc> ...`, and a service defined ONLY in
+  // docker-compose.prod.yml failed service-name resolution (no -f chain on
+  // the remote invocation), so it exited in ~2s having restarted NOTHING and
+  // verify-failover failed on app_api_me_authenticated + db_write_roundtrip.
+  // Container names (container_name: ${PROJECT_NAME}-<svc>, stamped on every
+  // service) bypass compose file resolution entirely — the
+  // hand-rolled-compose-invocation-drifts family (see
+  // compose-invocation-service-names census).
   it('restarts the new-primary app tier by CONTAINER name, never bare compose service names', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
     const restart = sshCalls.find((c) => c.command.includes('docker restart'));
     expect(restart, 'app-tier restart invocation missing').toBeDefined();
     expect(restart?.ip).toBe('2.2.2.2'); // the promoted standby
-    for (const svc of ['supavisor', 'rest', 'realtime', 'app']) {
-      expect(restart?.command).toContain(`myapp-${svc}`);
-    }
-    // The storage and auth containers no longer exist: naming either would
-    // make `docker restart` exit non-zero for the whole list.
-    expect(restart?.command).not.toContain('myapp-storage');
-    expect(restart?.command).not.toContain('myapp-auth');
+    // Exactly the app: every other container the old stack restarted has been
+    // removed, and naming one that does not exist makes `docker restart` exit
+    // non-zero for the whole list.
+    expect(restart?.command).toBe('docker restart myapp-app');
     // The 3/3-failing shape must never come back.
     expect(sshCalls.some((c) => /docker compose restart(?! db)/.test(c.command))).toBe(false);
   });
@@ -185,13 +180,10 @@ describe('failoverComposeHA — standby already streaming', () => {
     // 33273372657/33276113128).
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
-    // REALTIME_REPLICAS rides the same write (composeRoleEnv): Realtime's
-    // boot migration cannot run against a hot-standby Postgres, so the
-    // standby holds it at 0 and promotion is what brings it to 1.
     expect(envMerges).toEqual([
-      { ip: '2.2.2.2', updates: { WALG_ROLE: 'primary', REALTIME_REPLICAS: '1' } },
+      { ip: '2.2.2.2', updates: { WALG_ROLE: 'primary' } },
       { ip: '2.2.2.2', updates: { ACME_DISARMED_CA_SERVER: '' } },
-      { ip: '1.1.1.1', updates: { WALG_ROLE: 'standby', REALTIME_REPLICAS: '0' } },
+      { ip: '1.1.1.1', updates: { WALG_ROLE: 'standby' } },
       {
         ip: '1.1.1.1',
         updates: { ACME_DISARMED_CA_SERVER: 'https://acme-disarmed.invalid/directory' },
@@ -199,50 +191,17 @@ describe('failoverComposeHA — standby already streaming', () => {
     ]);
   });
 
-  // The standby was deployed with REALTIME_REPLICAS=0 (see composeRoleEnv), so
-  // the promoted node has NO realtime container when failover begins. The
-  // app-tier `docker restart` names `${project}-realtime` by container name;
-  // if nothing created it first, that restart fails on a name that does not
-  // exist and Realtime never comes up on the new primary.
-  it("starts Realtime on the promoted node (with the node's -f set) BEFORE the app-tier restart names it", async () => {
+  // The role-gated container reconcile is gone with the service it held off
+  // the standby: no `up -d --no-deps <svc>` other than the db and traefik
+  // recreates may run on either node during a failover.
+  it('recreates nothing but db and traefik during the role swap', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
-    const upIdx = sshCalls.findIndex(
-      (c) => c.ip === '2.2.2.2' && c.command.includes('up -d --no-deps realtime'),
-    );
-    const restartIdx = sshCalls.findIndex(
-      (c) => c.ip === '2.2.2.2' && c.command.includes('docker restart'),
-    );
-    expect(upIdx, 'realtime up on the promoted node missing').toBeGreaterThanOrEqual(0);
-    expect(restartIdx).toBeGreaterThan(upIdx);
-    // Never bare compose: `deploy.replicas` reads .env either way, but a bare
-    // `up` would resolve docker-compose.yml alone and drop the prod overlay's
-    // fail-closed env + resource limits from the recreated container.
-    expect(sshCalls[upIdx].command).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
-    expect(sshCalls[upIdx].command).toContain('docker-compose.replication.yml');
-    // The env merge that sets REALTIME_REPLICAS=1 has to land before the up
-    // reads it, or compose interpolates the deployed 0 and removes nothing.
-    const roleMergeBeforeUp = envMerges.findIndex(
-      (m) => m.ip === '2.2.2.2' && m.updates.REALTIME_REPLICAS === '1',
-    );
-    expect(roleMergeBeforeUp).toBeGreaterThanOrEqual(0);
-  });
-
-  it('removes Realtime from the demoted node AFTER its app tier is stopped', async () => {
-    await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
-
-    // `up -d --no-deps realtime` at REALTIME_REPLICAS=0 removes the (already
-    // stopped) container, so the retired node cannot crash-loop Realtime
-    // against its now-standby-role database when it comes back.
-    const stopIdx = sshCalls.findIndex(
-      (c) => c.ip === '1.1.1.1' && c.command.includes('docker stop myapp-app'),
-    );
-    const downIdx = sshCalls.findIndex(
-      (c) => c.ip === '1.1.1.1' && c.command.includes('up -d --no-deps realtime'),
-    );
-    expect(stopIdx).toBeGreaterThanOrEqual(0);
-    expect(downIdx).toBeGreaterThan(stopIdx);
-    expect(sshCalls[downIdx].command).toContain('-f docker-compose.yml -f docker-compose.prod.yml');
+    const recreated = sshCalls
+      .map((c) => /up -d --no-deps ([\w-]+)/.exec(c.command)?.[1])
+      .filter((svc): svc is string => Boolean(svc));
+    expect(recreated.length).toBeGreaterThan(0);
+    expect(new Set(recreated)).toEqual(new Set(['db', 'traefik']));
   });
 
   it('gates failover completion on the domain serving trusted TLS (post-DNS-flip)', async () => {
@@ -273,9 +232,9 @@ describe('failoverComposeHA — standby already streaming', () => {
     // flipped yet either), so demoting before the stop would bounce the
     // database out from under live traffic.
     // CONTAINER names, same RCA as the restart test above: the old shape
-    // (`docker compose stop app auth … supavisor`) could not resolve the
-    // overlay-only supavisor and exited ~2s having stopped NOTHING — the
-    // old primary kept serving writes behind the SPLIT-BRAIN warning.
+    // (`docker compose stop app …`) could not resolve an overlay-only service
+    // and exited ~2s having stopped NOTHING — the old primary kept serving
+    // writes behind the SPLIT-BRAIN warning.
     const stopIdx = sshCalls.findIndex(
       (c) => c.ip === '1.1.1.1' && c.command.includes('docker stop myapp-app'),
     );
@@ -284,13 +243,9 @@ describe('failoverComposeHA — standby already streaming', () => {
     );
     expect(stopIdx).toBeGreaterThanOrEqual(0);
     expect(demoteIdx).toBeGreaterThan(stopIdx);
-    for (const svc of ['supavisor', 'rest', 'realtime', 'app']) {
-      expect(sshCalls[stopIdx].command).toContain(`myapp-${svc}`);
-    }
-    // A missing container makes `docker stop` exit non-zero, which reads as
-    // the split-brain warning.
-    expect(sshCalls[stopIdx].command).not.toContain('myapp-storage');
-    expect(sshCalls[stopIdx].command).not.toContain('myapp-auth');
+    // Exactly the app: a missing container makes `docker stop` exit non-zero,
+    // which reads as the split-brain warning.
+    expect(sshCalls[stopIdx].command).toBe('docker stop myapp-app');
     expect(sshCalls.some((c) => /docker compose stop app/.test(c.command))).toBe(false);
   });
 

@@ -61,9 +61,9 @@ describe('WALG_ROLE is exposed to the db container as the write-guard signal', (
     // The .env merge moved out of the deployComposeHA orchestration into the
     // compose-ha deploy effect (haMergeWalgRole) when the tier was converted to
     // the step-plan; the write-guard behavior is unchanged. The literal key is
-    // now spelled ONLY in composeRoleEnv (walg-role.js), which pairs it with
-    // REALTIME_REPLICAS — compose-role-env-census.test.ts bans the literal
-    // shape here, so assert the helper call and what it emits instead.
+    // now spelled ONLY in composeRoleEnv (walg-role.js), which validates the
+    // role — compose-role-env-census.test.ts bans the literal shape here, so
+    // assert the helper call and what it emits instead.
     const eff = read('src/lib/deploy/effects/compose-ha.js');
     expect(eff).toMatch(/composeRoleEnv\('primary'\)/);
     expect(eff).toMatch(/composeRoleEnv\('standby'\)/);
