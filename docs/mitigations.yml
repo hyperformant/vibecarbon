@@ -128,6 +128,9 @@ classes:
       - site: "src/lib/ssh.js :: SCP_RETRY_DELAY_MS"
       - site: "src/lib/deploy/remote-build.js :: SSH_PROBE_DELAYS_MS"
       - site: "tests/e2e/checks/replication.ts :: SSH_RETRY_DELAY_MS"
+        notes: >-
+          shared via runPsql: app-functional's db_schema and
+          db_write_roundtrip checks are callers too (same ladder, no new site)
       - site: "tests/e2e/checks/pilot-light.ts :: SSH_RETRY_DELAY_MS"
 
   - class: fresh-server-dns-settle

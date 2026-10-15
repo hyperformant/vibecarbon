@@ -21,7 +21,11 @@ import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
-import { runAppFunctionalChecks, smtpConfiguredFromEnv } from '../checks/app-functional.js';
+import {
+  missingDbHandle,
+  runAppFunctionalChecks,
+  smtpConfiguredFromEnv,
+} from '../checks/app-functional.js';
 import { runBackupEvidenceChecks } from '../checks/backup-evidence.js';
 import { resolveComposeFirewallServers, runCloudFirewallChecks } from '../checks/cloud-firewall.js';
 import {
@@ -1865,7 +1869,7 @@ export async function runLifecycle(
                   projectName: config.projectName,
                   label: 'primary',
                 }
-              : null,
+              : (missingDbHandle(sshCheckMasterIp, sshKeyPath) ?? 'no SSH handle'),
           adminEmail: adminCreds.adminEmail,
           adminPassword: adminCreds.adminPassword,
           smtpConfigured: adminCreds.smtpConfigured,

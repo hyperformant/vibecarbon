@@ -506,15 +506,21 @@ function psqlLines(output: string): string[] {
  * database (the same SSH + `docker compose exec` / `kubectl exec` path the
  * replication checks use — see runPsql in ./replication.ts). The app has no
  * public table API to probe from outside, so the database is asked directly.
- * `sql` is null when the run has no SSH handle to the database host; both
- * checks then skip (a skip is never a pass).
+ * `sql` is a string instead of a runner when the run has no SSH handle to the
+ * database host; it names the missing handle (see missingDbHandle). Both
+ * checks then FAIL, never skip: every scenario that reaches a verify step has
+ * deployed servers and a deploy key, so a missing handle is a broken harness,
+ * and a skip would let the prod-1 regression guard below go quietly unrun.
  */
-export async function runDbChecks(sql: SqlRunner | null): Promise<VerificationResult[]> {
-  if (!sql) {
-    return [
-      skip('db_schema', 'Skipped: no SSH handle to the database host'),
-      skip('db_write_roundtrip', 'Skipped: no SSH handle to the database host'),
-    ];
+export async function runDbChecks(sql: SqlRunner | string): Promise<VerificationResult[]> {
+  if (typeof sql === 'string') {
+    const errorMessage = `Cannot reach the database: ${sql}`;
+    return ['db_schema', 'db_write_roundtrip'].map((checkName) => ({
+      checkName,
+      status: 'fail' as const,
+      errorMessage,
+      details: { missing: sql },
+    }));
   }
   const results: VerificationResult[] = [];
 
@@ -758,13 +764,23 @@ export async function checkFileUploadRoundtrip(
 // ---------------------------------------------------------------------------
 
 /**
+ * Which SSH handle to the database host is missing, in the same words as the
+ * config-canary checks, or null when both are present.
+ */
+export function missingDbHandle(ip?: string | null, sshKeyPath?: string | null): string | null {
+  if (ip && sshKeyPath) return null;
+  if (!ip) return sshKeyPath ? 'no serverIp (sshKeyPath present)' : 'no serverIp and no sshKeyPath';
+  return 'no sshKeyPath (serverIp present)';
+}
+
+/**
  * Run all application functional checks against a deployed environment.
  * Returns array of individual check results. `db` is the SSH target that
- * fronts the database (null when the run has no SSH handle).
+ * fronts the database, or the missingDbHandle() reason when there is none.
  */
 export async function runAppFunctionalChecks(opts: {
   domain: string;
-  db: ReplTarget | null;
+  db: ReplTarget | string;
   adminEmail?: string;
   adminPassword?: string;
   smtpConfigured?: boolean;
@@ -778,7 +794,7 @@ export async function runAppFunctionalChecks(opts: {
   const auth = await runAuthChecks(domain, adminEmail, adminPassword, smtpConfigured);
   results.push(...auth.results);
 
-  results.push(...(await runDbChecks(db ? (sql) => runPsql(db, sql) : null)));
+  results.push(...(await runDbChecks(typeof db === 'string' ? db : (sql) => runPsql(db, sql))));
 
   // Uploads are an app feature (presign + read routes on the app domain), so
   // they run as the signed-in throwaway user from the auth checks above.

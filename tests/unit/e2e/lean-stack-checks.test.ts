@@ -6,7 +6,12 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { CORE_TABLES, runDbChecks, type SqlRunner } from '../../e2e/checks/app-functional.js';
+import {
+  CORE_TABLES,
+  missingDbHandle,
+  runDbChecks,
+  type SqlRunner,
+} from '../../e2e/checks/app-functional.js';
 import { checkUnknownPathNotFound } from '../../e2e/checks/health.js';
 
 const ok = (output: string) => ({ ok: true, output });
@@ -93,12 +98,20 @@ describe('runDbChecks (direct SQL)', () => {
     expect(db.statements.at(-1)).toMatch(/^DELETE/);
   });
 
-  it('skips both checks when there is no SSH handle to the database', async () => {
-    const results = await runDbChecks(null);
+  it('FAILS both checks (never skips) when there is no SSH handle, naming it', async () => {
+    const results = await runDbChecks('no sshKeyPath (serverIp present)');
     expect(results.map((r) => [r.checkName, r.status])).toEqual([
-      ['db_schema', 'skip'],
-      ['db_write_roundtrip', 'skip'],
+      ['db_schema', 'fail'],
+      ['db_write_roundtrip', 'fail'],
     ]);
+    for (const r of results) expect(r.errorMessage).toContain('no sshKeyPath (serverIp present)');
+  });
+
+  it('missingDbHandle names which handle is absent', () => {
+    expect(missingDbHandle('1.2.3.4', '/k')).toBeNull();
+    expect(missingDbHandle(undefined, '/k')).toBe('no serverIp (sshKeyPath present)');
+    expect(missingDbHandle(undefined, null)).toBe('no serverIp and no sshKeyPath');
+    expect(missingDbHandle('1.2.3.4', null)).toBe('no sshKeyPath (serverIp present)');
   });
 });
 
