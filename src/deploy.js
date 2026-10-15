@@ -23,7 +23,11 @@ import {
 } from './lib/deploy/github.js';
 import { executeDeployment } from './lib/deploy/orchestrator.js';
 import { assertOperatorConfig, operatorCheckEnvs } from './lib/deploy/preflight.js';
-import { gatherDeploymentConfig, resolveDeployMode } from './lib/deploy/prompts.js';
+import {
+  gatherDeploymentConfig,
+  promptEnvironmentName,
+  resolveDeployMode,
+} from './lib/deploy/prompts.js';
 // New modular imports
 import {
   DEFAULT_WORKER_MAX,
@@ -296,6 +300,11 @@ async function main(values, positional) {
   // orchestrator both read. Field translations live in buildLegacyArgs;
   // the orchestration code stays untouched.
   const args = buildLegacyArgs(values, positional);
+
+  // A bare `vibecarbon deploy` asks which environment, defaulting to prod.
+  // Asked here, before the env-scoped preflight below, so every gate checks
+  // the environment the operator actually picked.
+  args.env = await promptEnvironmentName(args);
 
   // 0e. Gate 1 (operator config hygiene, spec §3): refuse a malformed
   // operator credential before the FIRST network call this command makes.
