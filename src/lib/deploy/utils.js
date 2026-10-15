@@ -322,7 +322,6 @@ export async function setupServerFiles(host, sshKeyPath, projectName, options = 
     envOverrides.ACME_EMAIL = `admin@${options.domain}`;
     // Single public origin (mirror of renderBundle's overrides in bundle.js).
     envOverrides.SITE_URL = `https://${options.domain}`;
-    envOverrides.SUPABASE_URL = 'http://kong:8000';
   }
 
   if (Object.keys(envOverrides).length > 0) {

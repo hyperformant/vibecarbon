@@ -262,9 +262,9 @@ async function main(values, positional) {
     repairLegacyEnvQuoting(process.cwd());
     const { findEnvDrift, findMissingRequiredEnv } = await import('./lib/project.js');
     // 0d-i. HARD STOP for keys the compose stack refuses to start without
-    // (`${KEY:?}` in docker-compose.prod.yml — JWT_SECRET, POSTGRES_PASSWORD,
-    // …). A missing `.env` is the usual cause: it is gitignored, so a fresh
-    // clone or a second worktree has none. Warning here and failing at
+    // (`${KEY:?}` in docker-compose.prod.yml — BETTER_AUTH_SECRET,
+    // POSTGRES_PASSWORD, …). A missing `.env` is the usual cause: it is
+    // gitignored, so a fresh clone or a second worktree has none. Warning here and failing at
     // `start-compose-stack` meant a server was provisioned, the image pushed
     // and DNS repointed first (vibecarbon-web prod move, 2026-09-15). The
     // stack was never going to start; stop before anything is created.

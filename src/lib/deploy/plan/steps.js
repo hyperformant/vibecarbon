@@ -67,7 +67,7 @@ export const startComposeStackStep = () =>
 
 /**
  * Apply supabase/migrations/* + the two ground-truth audits (RLS, wal-g
- * backups) + reload PostgREST (shipped-bug guard). Either audit fails the step.
+ * backups) (shipped-bug guard). Either audit fails the step.
  */
 export const runMigrationsStep = () =>
   defineStep({ name: 'run-migrations', effect: 'runMigrations' });

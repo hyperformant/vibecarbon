@@ -13,19 +13,11 @@ import { BaseProvider } from './base.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
 // C9 — operator firewall access. Verbatim value-move of operator-ip.js's old
-// module-level SSH_PORT/K8S_API_PORT constants, plus the Supavisor pooler
-// ports (compose deploys scope 5432/6543 to operator CIDRs, so access
-// add/remove/prune must rewrite them in lockstep with SSH).
+// module-level SSH_PORT/K8S_API_PORT constants. The database has no public
+// port: operators reach it through `vibecarbon shell` / SSH.
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
-const POOLER_SESSION_PORT = '5432';
-const POOLER_TRANSACTION_PORT = '6543';
-const OPERATOR_LOCKED_PORTS = new Set([
-  SSH_PORT,
-  K8S_API_PORT,
-  POOLER_SESSION_PORT,
-  POOLER_TRANSACTION_PORT,
-]);
+const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 
 export class HetznerProvider extends BaseProvider {
   /**
@@ -1359,10 +1351,8 @@ export class HetznerProvider extends BaseProvider {
    * retired NodePort 30432 rule (SNAT masked the source IP, breaking the /32
    * pg_hba scope) and the superseded 5433 rule — plus any udp/51821 rule
    * pointing at a previous peer IP (server replacement). tcp/5432 is NOT
-   * scrubbed: compose deploys now carry a legitimate operator-scoped
-   * Supavisor pooler rule on 5432 (+6543), and this reconcile runs on
-   * compose-ha too (compose/ha.js) — the replication-era direct-5432 rule
-   * the scrub once targeted never worked and predates every live rig.
+   * scrubbed: the replication-era direct-5432 rule the scrub once targeted
+   * never worked and predates every live rig.
    *
    * (Moved verbatim from deploy/replication.js onto the provider class — see
    * BaseProvider.buildReplicationFirewallRules for why: the rule-JSON shape is

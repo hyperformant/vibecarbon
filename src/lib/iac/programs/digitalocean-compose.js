@@ -235,11 +235,6 @@ export function buildDigitalOceanComposeProgram(config) {
         { protocol: 'tcp', portRange: '22', sourceAddresses: allowedSshIps },
         { protocol: 'tcp', portRange: '80', sourceAddresses: ['0.0.0.0/0', '::/0'] },
         { protocol: 'tcp', portRange: '443', sourceAddresses: ['0.0.0.0/0', '::/0'] },
-        // Supavisor pooler ports — operator-CIDR-scoped like SSH, NEVER
-        // world-open (password auth straight into Postgres). Kept in
-        // lockstep with SSH by applyOperatorCidrs (OPERATOR_LOCKED_PORTS).
-        { protocol: 'tcp', portRange: '5432', sourceAddresses: allowedSshIps },
-        { protocol: 'tcp', portRange: '6543', sourceAddresses: allowedSshIps },
       ],
       outboundRules: [
         { protocol: 'tcp', portRange: '1-65535', destinationAddresses: ['0.0.0.0/0', '::/0'] },

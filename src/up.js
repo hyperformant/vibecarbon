@@ -79,14 +79,6 @@ function getProjectPorts(cwd) {
   const offset = Number.parseInt(getEnvValue('DEV_PORT_OFFSET', cwd) || '0', 10);
 
   return [
-    {
-      name: 'Kong (Supabase API)',
-      port: Number(getEnvValue('DEV_KONG_PORT', cwd)) || 8000 + offset,
-    },
-    {
-      name: 'Kong SSL',
-      port: Number(getEnvValue('DEV_KONG_SSL_PORT', cwd)) || 8443 + offset,
-    },
     { name: 'Traefik', port: Number(getEnvValue('DEV_TRAEFIK_PORT', cwd)) || 80 + offset },
     { name: 'Vite', port: Number(getEnvValue('DEV_VITE_PORT', cwd)) || 5173 + offset },
     { name: 'API', port: Number(getEnvValue('DEV_API_PORT', cwd)) || 3000 + offset },
@@ -147,14 +139,7 @@ function getOwnDockerPorts(cwd) {
  */
 async function findFreeOffset(_cwd) {
   for (let offset = 100; offset <= 500; offset += 100) {
-    const ports = [
-      8000 + offset,
-      8443 + offset,
-      80 + offset,
-      5173 + offset,
-      3000 + offset,
-      5432 + offset,
-    ];
+    const ports = [80 + offset, 5173 + offset, 3000 + offset, 5432 + offset];
     const results = await Promise.all(ports.map(isPortInUse));
     if (results.every((inUse) => !inUse)) return offset;
   }
@@ -192,7 +177,7 @@ export function setPortOffset(offset, cwd) {
 
   // Client-visible twin: vite only exposes VITE_-prefixed vars, and the admin
   // panel's service links (getServiceUrl in carbon admin-services.ts) need the
-  // offset to build `studio.localhost:<80+offset>` — without it every link
+  // offset to build `traefik.localhost:<80+offset>` — without it every link
   // points at port 80, i.e. whichever OTHER project owns the default ports
   // (RCA 2026-07-17: swim2's admin panel linked into my-app's traefik).
   // Kept in lockstep with DEV_PORT_OFFSET by writing both here.

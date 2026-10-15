@@ -51,7 +51,7 @@ const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
 const REPLICATION_SLOT = 'vibecarbon_standby_slot';
 
 // The single replication port for BOTH HA modes. compose publishes db:5432 →
-// host:5433 (supavisor owns host 5432); k8s uses a hostPort 5433 → container
+// host:5433 (over WireGuard only); k8s uses a hostPort 5433 → container
 // 5432. One port keeps primary_conninfo / pg_basebackup byte-identical.
 export const REPL_PORT = 5433;
 

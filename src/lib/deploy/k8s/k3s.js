@@ -1949,9 +1949,7 @@ export async function pushImageToLocalRegistry({
 
 /**
  * Generated infra secrets that must land in the in-cluster vibecarbon-secrets
- * Secret. The Supabase Helm chart reads JWT_SECRET + ANON_KEY +
- * SERVICE_ROLE_KEY via secretRef from this Secret (the app reads none of the
- * three); the app Deployment reads DB_PASSWORD, BETTER_AUTH_SECRET and
+ * Secret. The app Deployment reads DB_PASSWORD, BETTER_AUTH_SECRET and
  * ADMIN_EMAIL/ADMIN_PASSWORD via envFrom.
  *
  * These are generated at deploy time (not user-configured), so they stay
@@ -1959,14 +1957,10 @@ export async function pushImageToLocalRegistry({
  */
 const INFRA_SECRET_KEYS = [
   'DB_PASSWORD',
+  // Required only by the Helm chart's db: its StatefulSet reads JWT_SECRET
+  // from this Secret (secret.jwt in k8s/values/supabase.values.yaml).
+  // Removed when our own db StatefulSet replaces the chart.
   'JWT_SECRET',
-  'ANON_KEY',
-  'SERVICE_ROLE_KEY',
-  'REALTIME_SECRET',
-  'LOGFLARE_API_KEY',
-  'VAULT_ENC_KEY',
-  'PG_META_CRYPTO_KEY',
-  'DB_ENC_KEY',
   'REPL_PASSWORD',
   // The app's session signing key (carbon/src/server/auth/).
   'BETTER_AUTH_SECRET',
@@ -2010,17 +2004,6 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
   const stringData = {};
   for (const key of SECRET_KEYS) {
     if (envLocal[key]) stringData[key] = envLocal[key];
-  }
-  // .env.local stores Supabase keys with the SUPABASE_ prefix (matches the
-  // app's runtime env vars), but the supabase Helm chart's secretRefKey
-  // mapping reads them under their bare names from this Secret. Translate.
-  // Without this, kubelet fails kong/storage/studio/app pods with
-  // "couldn't find key ANON_KEY in Secret vibecarbon/vibecarbon-secrets".
-  if (!stringData.ANON_KEY && envLocal.SUPABASE_ANON_KEY) {
-    stringData.ANON_KEY = envLocal.SUPABASE_ANON_KEY;
-  }
-  if (!stringData.SERVICE_ROLE_KEY && envLocal.SUPABASE_SERVICE_ROLE_KEY) {
-    stringData.SERVICE_ROLE_KEY = envLocal.SUPABASE_SERVICE_ROLE_KEY;
   }
   // Supabase chart's db.secretRefKey.database maps to DB_NAME in this Secret.
   // Neither .env.local nor SECRET_KEYS supplies it, so the chart-canonical

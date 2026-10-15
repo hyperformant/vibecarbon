@@ -27,12 +27,12 @@ describe('formatServerLines', () => {
         'prod-primary': {
           kind: 'compose',
           ip: '1.1.1.1',
-          rows: [row('db', 'healthy'), row('kong', 'healthy')],
+          rows: [row('db', 'healthy'), row('app', 'healthy')],
         },
         'prod-standby': {
           kind: 'compose',
           ip: '2.2.2.2',
-          rows: [row('db', 'healthy'), row('kong', 'healthy')],
+          rows: [row('db', 'healthy'), row('app', 'healthy')],
         },
       },
     }).map(strip);
@@ -52,9 +52,9 @@ describe('formatServerLines', () => {
           ip: '1.1.1.1',
           rows: [
             row('db', 'healthy'),
-            row('kong', 'unhealthy', 'exited', 'Exited (128) 3 hours ago'),
+            row('app', 'unhealthy', 'exited', 'Exited (128) 3 hours ago'),
             row('x-setup', 'done'),
-            row('rest', 'starting'),
+            row('traefik', 'starting'),
           ],
         },
       },
@@ -62,8 +62,8 @@ describe('formatServerLines', () => {
     expect(lines).toEqual([
       '  prod-primary     1.1.1.1         cpx31',
       '    containers ● 1/3 healthy',
-      '      kong                        ● exited  Exited (128) 3 hours ago',
-      '      rest                        ● starting  ',
+      '      app                         ● exited  Exited (128) 3 hours ago',
+      '      traefik                     ● starting  ',
     ]);
   });
 

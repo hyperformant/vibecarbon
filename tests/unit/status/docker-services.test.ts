@@ -3,12 +3,11 @@ import {
   checkDockerContainers,
   classifyContainer,
   formatDockerServiceLines,
-  parseKongHostPort,
 } from '../../../src/status.js';
 
 describe('classifyContainer', () => {
   it('maps a running container with a passing healthcheck to healthy', () => {
-    expect(classifyContainer('realtime', 'running', 'Up 15 minutes (healthy)')).toEqual({
+    expect(classifyContainer('app', 'running', 'Up 15 minutes (healthy)')).toEqual({
       health: 'healthy',
       label: 'healthy',
       detail: '',
@@ -16,7 +15,7 @@ describe('classifyContainer', () => {
   });
 
   it('maps a running container with a failing healthcheck to unhealthy', () => {
-    expect(classifyContainer('realtime', 'running', 'Up 15 minutes (unhealthy)')).toEqual({
+    expect(classifyContainer('app', 'running', 'Up 15 minutes (unhealthy)')).toEqual({
       health: 'unhealthy',
       label: 'unhealthy',
       detail: '',
@@ -40,7 +39,7 @@ describe('classifyContainer', () => {
   });
 
   it('reports an exited container as unhealthy with the Docker status as detail', () => {
-    expect(classifyContainer('kong', 'exited', 'Exited (128) 24 minutes ago')).toEqual({
+    expect(classifyContainer('app', 'exited', 'Exited (128) 24 minutes ago')).toEqual({
       health: 'unhealthy',
       label: 'exited',
       detail: 'Exited (128) 24 minutes ago',
@@ -68,7 +67,7 @@ describe('classifyContainer', () => {
   });
 
   it('reports restarting as unhealthy with the Docker status as detail', () => {
-    expect(classifyContainer('realtime', 'restarting', 'Restarting (1) 5 seconds ago')).toEqual({
+    expect(classifyContainer('app', 'restarting', 'Restarting (1) 5 seconds ago')).toEqual({
       health: 'unhealthy',
       label: 'restarting',
       detail: 'Restarting (1) 5 seconds ago',
@@ -93,171 +92,60 @@ describe('classifyContainer', () => {
   });
 });
 
-describe('parseKongHostPort', () => {
-  it('returns the host port from docker port output', () => {
-    expect(parseKongHostPort('0.0.0.0:8000\n[::]:8000\n')).toBe(8000);
-  });
-
-  it('honours a non-default binding', () => {
-    expect(parseKongHostPort('0.0.0.0:8100\n')).toBe(8100);
-  });
-
-  it('returns null for empty output (container not running)', () => {
-    expect(parseKongHostPort('')).toBeNull();
-    expect(parseKongHostPort(null)).toBeNull();
-  });
-
-  it('returns null for unparseable output', () => {
-    expect(parseKongHostPort('Error: No such container: letsgo-kong')).toBeNull();
-  });
-});
-
-// Build a runCommand stub keyed on the docker subcommand. `docker ps -a`
-// returns the tab-separated listing; `docker port` returns the binding.
-function fakeDocker({ ps = '', port = '' }: { ps?: string; port?: string }) {
+// `docker ps -a` returns the tab-separated listing; nothing else is called.
+function fakeDocker({ ps = '' }: { ps?: string }) {
   return vi.fn((argv: string[]) => {
     if (argv[1] === 'ps') return ps;
-    if (argv[1] === 'port') return port;
     throw new Error(`unexpected docker call: ${argv.join(' ')}`);
   });
 }
 
-function okFetch(status = 200) {
-  return vi.fn(async () => ({ status })) as unknown as typeof fetch;
-}
-
 const LETSGO_PS = [
-  'letsgo-studio\trunning\tUp 15 minutes (healthy)',
-  'letsgo-realtime\trunning\tUp 15 minutes (healthy)',
-  'letsgo-meta\trunning\tUp 15 minutes',
-  'letsgo-app\trunning\tUp 15 minutes',
-  'letsgo-rest\trunning\tUp 15 minutes',
-  'letsgo-kong\texited\tExited (128) 24 minutes ago',
+  'letsgo-socket-proxy\trunning\tUp 15 minutes',
+  'letsgo-app\texited\tExited (128) 24 minutes ago',
   'letsgo-db\trunning\tUp 15 minutes (healthy)',
   'letsgo-traefik\trunning\tUp 15 minutes',
   // A different project sharing the host — must be ignored.
-  'vibecarbon-kong\trunning\tUp 20 minutes (healthy)',
+  'vibecarbon-db\trunning\tUp 20 minutes (healthy)',
   'vibecarbon-app\trunning\tUp 20 minutes',
 ].join('\n');
 
 describe('checkDockerContainers', () => {
   it('lists every container of the project, including exited ones, in core order', async () => {
     const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps: LETSGO_PS, port: '' }),
-      fetch: okFetch(),
+      runCommand: fakeDocker({ ps: LETSGO_PS }),
     });
-    expect(rows.map((r) => r.container)).toEqual([
-      'traefik',
-      'db',
-      'kong',
-      'rest',
-      'realtime',
-      'meta',
-      'studio',
-      'app',
+    expect(rows.map((r) => [r.container, r.name])).toEqual([
+      ['traefik', 'Traefik'],
+      ['app', 'App'],
+      ['db', 'PostgreSQL'],
+      ['socket-proxy', 'Docker socket proxy'],
     ]);
-    const kong = rows.find((r) => r.container === 'kong');
-    expect(kong).toMatchObject({
-      name: 'Kong Gateway',
+    expect(rows.find((r) => r.container === 'app')).toMatchObject({
       health: 'unhealthy',
       label: 'exited',
       detail: 'Exited (128) 24 minutes ago',
     });
-    expect(rows.find((r) => r.container === 'realtime')).toMatchObject({
-      name: 'Realtime',
+    expect(rows.find((r) => r.container === 'db')).toMatchObject({ health: 'healthy' });
+  });
+
+  it('takes health from Docker alone and runs only docker ps', async () => {
+    const run = fakeDocker({ ps: LETSGO_PS });
+    const rows = await checkDockerContainers('letsgo', { runCommand: run });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(rows.find((r) => r.container === 'traefik')).toMatchObject({
       health: 'healthy',
+      label: 'running',
+      latencyMs: 0,
     });
   });
 
   it('ignores containers belonging to other projects', async () => {
     const rows = await checkDockerContainers('letsgo', {
       runCommand: fakeDocker({ ps: LETSGO_PS }),
-      fetch: okFetch(),
     });
-    expect(rows.some((r) => r.name.includes('vibecarbon'))).toBe(false);
-    expect(rows.filter((r) => r.container === 'kong')).toHaveLength(1);
-  });
-
-  it('marks gateway-probed services unknown when kong is not running', async () => {
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps: LETSGO_PS, port: '' }),
-      fetch: okFetch(),
-    });
-    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
-      health: 'unknown',
-      label: 'unknown',
-      detail: 'gateway down',
-    });
-    expect(rows.find((r) => r.container === 'meta')).toMatchObject({ health: 'unknown' });
-  });
-
-  it('probes rest and meta through the host port kong actually bound', async () => {
-    const ps = LETSGO_PS.replace(
-      'letsgo-kong\texited\tExited (128) 24 minutes ago',
-      'letsgo-kong\trunning\tUp 1 minute (healthy)',
-    );
-    const fetchSpy = okFetch(401);
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '0.0.0.0:8100\n[::]:8100\n' }),
-      fetch: fetchSpy,
-    });
-    const urls = fetchSpy.mock.calls.map((call) => call[0]).sort();
-    expect(urls).toEqual(['http://localhost:8100/pg/', 'http://localhost:8100/rest/v1/']);
-    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
-      health: 'healthy',
-      label: 'healthy',
-    });
-    expect(rows.find((r) => r.container === 'rest')?.latencyMs).toBeGreaterThanOrEqual(0);
-  });
-
-  it('marks a gateway-probed service unhealthy on an unexpected status code', async () => {
-    const ps = LETSGO_PS.replace(
-      'letsgo-kong\texited\tExited (128) 24 minutes ago',
-      'letsgo-kong\trunning\tUp 1 minute (healthy)',
-    );
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '0.0.0.0:8000\n' }),
-      fetch: okFetch(503),
-    });
-    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
-      health: 'unhealthy',
-      label: 'unhealthy',
-      detail: 'HTTP 503',
-    });
-  });
-
-  it('marks a gateway-probed service unhealthy when the probe throws', async () => {
-    const ps = LETSGO_PS.replace(
-      'letsgo-kong\texited\tExited (128) 24 minutes ago',
-      'letsgo-kong\trunning\tUp 1 minute (healthy)',
-    );
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '0.0.0.0:8000\n' }),
-      fetch: vi.fn(async () => {
-        throw new Error('ECONNREFUSED');
-      }) as unknown as typeof fetch,
-    });
-    expect(rows.find((r) => r.container === 'meta')).toMatchObject({
-      health: 'unhealthy',
-      detail: 'ECONNREFUSED',
-    });
-  });
-
-  it('does not probe rest/meta when they are not running, even if kong is up', async () => {
-    const ps = [
-      'letsgo-kong\trunning\tUp 1 minute (healthy)',
-      'letsgo-rest\texited\tExited (1) 3 minutes ago',
-    ].join('\n');
-    const fetchSpy = okFetch();
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '0.0.0.0:8000\n' }),
-      fetch: fetchSpy,
-    });
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
-      health: 'unhealthy',
-      label: 'exited',
-    });
+    expect(rows.filter((r) => r.container === 'db')).toHaveLength(1);
+    expect(rows.filter((r) => r.container === 'app')).toHaveLength(1);
   });
 
   it('renders add-on containers under their compose service name, after core services', async () => {
@@ -269,8 +157,7 @@ describe('checkDockerContainers', () => {
       'letsgo-promtail\trunning\tUp 1 hour',
     ].join('\n');
     const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '' }),
-      fetch: okFetch(),
+      runCommand: fakeDocker({ ps }),
     });
     expect(rows.map((r) => [r.container, r.name, r.health, r.label])).toEqual([
       ['db', 'PostgreSQL', 'healthy', 'healthy'],
@@ -284,7 +171,6 @@ describe('checkDockerContainers', () => {
   it('returns an empty list when no containers of the project exist', async () => {
     const rows = await checkDockerContainers('letsgo', {
       runCommand: fakeDocker({ ps: 'vibecarbon-db\trunning\tUp 1 hour (healthy)\n' }),
-      fetch: okFetch(),
     });
     expect(rows).toEqual([]);
   });
@@ -294,49 +180,23 @@ describe('checkDockerContainers', () => {
       runCommand: vi.fn(() => {
         throw new Error('docker: command not found');
       }),
-      fetch: okFetch(),
     });
     expect(rows).toEqual([]);
   });
 
   it('returns an empty list without a project name', async () => {
     const run = fakeDocker({ ps: LETSGO_PS });
-    const rows = await checkDockerContainers(undefined, { runCommand: run, fetch: okFetch() });
+    const rows = await checkDockerContainers(undefined, { runCommand: run });
     expect(rows).toEqual([]);
     expect(run).not.toHaveBeenCalled();
-  });
-
-  it("keeps Docker's own verdict for rest/meta and skips the gateway probe", async () => {
-    const ps = LETSGO_PS.replace(
-      'letsgo-meta\trunning\tUp 15 minutes',
-      'letsgo-meta\trunning\tUp 15 minutes (healthy)',
-    ).replace(
-      'letsgo-rest\trunning\tUp 15 minutes',
-      'letsgo-rest\trunning\tUp 15 minutes (unhealthy)',
-    );
-    const fetchSpy = okFetch(200);
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '' }), // kong exited in LETSGO_PS
-      fetch: fetchSpy,
-    });
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect(rows.find((r) => r.container === 'meta')).toMatchObject({
-      health: 'healthy',
-      label: 'healthy',
-    });
-    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
-      health: 'unhealthy',
-      label: 'unhealthy',
-    });
   });
 
   it('accepts an async runCommand (the real default is runCommandAsync)', async () => {
     const run = vi.fn(async (argv: string[]) => {
       if (argv[1] === 'ps') return 'letsgo-db\trunning\tUp 1 hour (healthy)\n';
-      if (argv[1] === 'port') return '';
       throw new Error(`unexpected docker call: ${argv.join(' ')}`);
     });
-    const rows = await checkDockerContainers('letsgo', { runCommand: run, fetch: okFetch() });
+    const rows = await checkDockerContainers('letsgo', { runCommand: run });
     expect(rows).toEqual([
       {
         name: 'PostgreSQL',
@@ -352,7 +212,6 @@ describe('checkDockerContainers', () => {
   it('renders a malformed docker ps line (no tab fields) as unknown rather than crashing', async () => {
     const rows = await checkDockerContainers('letsgo', {
       runCommand: fakeDocker({ ps: 'letsgo-weird\n' }),
-      fetch: okFetch(),
     });
     expect(rows).toEqual([
       {
@@ -364,47 +223,6 @@ describe('checkDockerContainers', () => {
         latencyMs: 0,
       },
     ]);
-  });
-
-  it('says "gateway port not published" when kong runs but 8000/tcp is not bound', async () => {
-    const ps = [
-      'letsgo-kong\trunning\tUp 1 minute (healthy)',
-      'letsgo-rest\trunning\tUp 1 minute',
-    ].join('\n');
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '' }),
-      fetch: okFetch(),
-    });
-    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
-      health: 'unknown',
-      label: 'unknown',
-      detail: 'gateway port not published',
-    });
-  });
-
-  it('reports a probe that exceeds timeoutMs as a timeout, not a generic error', async () => {
-    const ps = [
-      'letsgo-kong\trunning\tUp 1 minute (healthy)',
-      'letsgo-rest\trunning\tUp 1 minute',
-    ].join('\n');
-    const hangingFetch = vi.fn(
-      (_url: string, init: { signal: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          init.signal.addEventListener('abort', () =>
-            reject(new Error('The operation was aborted')),
-          );
-        }),
-    ) as unknown as typeof fetch;
-    const rows = await checkDockerContainers('letsgo', {
-      runCommand: fakeDocker({ ps, port: '0.0.0.0:8000\n' }),
-      fetch: hangingFetch,
-      timeoutMs: 10,
-    });
-    expect(rows.find((r) => r.container === 'rest')).toMatchObject({
-      health: 'unhealthy',
-      label: 'unhealthy',
-      detail: 'timeout after 10ms',
-    });
   });
 });
 
@@ -428,19 +246,19 @@ describe('formatDockerServiceLines', () => {
         latencyMs: 0,
       },
       {
-        name: 'Kong Gateway',
-        container: 'kong',
+        name: 'App',
+        container: 'app',
         health: 'unhealthy',
         label: 'exited',
         detail: 'Exited (128) 24 minutes ago',
         latencyMs: 0,
       },
       {
-        name: 'REST (PostgREST)',
-        container: 'rest',
+        name: 'grafana',
+        container: 'grafana',
         health: 'unknown',
         label: 'unknown',
-        detail: 'gateway down',
+        detail: 'no status',
         latencyMs: 0,
       },
       {
@@ -463,8 +281,8 @@ describe('formatDockerServiceLines', () => {
 
     expect(lines[0]).toBe('Docker Services               ● 2/4 healthy');
     expect(lines[1]).toBe('  PostgreSQL                  ● healthy  ');
-    expect(lines[2]).toBe('  Kong Gateway                ● exited  Exited (128) 24 minutes ago');
-    expect(lines[3]).toBe('  REST (PostgREST)            ○ unknown  gateway down');
+    expect(lines[2]).toBe('  App                         ● exited  Exited (128) 24 minutes ago');
+    expect(lines[3]).toBe('  grafana                     ○ unknown  no status');
     expect(lines[4]).toBe('  Traefik                     ● running  ');
     expect(lines[5]).toBe('  metabase-setup              ○ done  ');
   });
@@ -472,15 +290,15 @@ describe('formatDockerServiceLines', () => {
   it('shows latency for probed rows', () => {
     const lines = formatDockerServiceLines([
       {
-        name: 'Meta',
-        container: 'meta',
+        name: 'App',
+        container: 'app',
         health: 'healthy',
         label: 'healthy',
         detail: '',
         latencyMs: 17,
       },
     ]).map(stripAnsi);
-    expect(lines[1]).toBe('  Meta                        ● healthy  17ms');
+    expect(lines[1]).toBe('  App                         ● healthy  17ms');
   });
 
   it('colours the summary green only when every counted row is healthy', () => {
@@ -513,8 +331,8 @@ describe('formatDockerServiceLines', () => {
         latencyMs: 0,
       },
       {
-        name: 'Kong Gateway',
-        container: 'kong',
+        name: 'App',
+        container: 'app',
         health: 'unhealthy',
         label: 'exited',
         detail: 'Exited (1) 1s ago',

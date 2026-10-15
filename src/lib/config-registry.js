@@ -14,9 +14,8 @@
  * credentials (Hetzner/DigitalOcean/Cloudflare/S3 tokens, Docker Hub, the
  * Pulumi state backend) plus the two operator-set runtime keys deploy reads
  * directly (ALLOWED_SSH_IPS, the ACME_CA_SERVER CA override). Infra secrets
- * (DB_PASSWORD/JWT_SECRET/ANON_KEY/…) are *generated*, not configured, and
- * carry k8s-specific Supabase-chart translation logic — they stay local to the
- * k8s deploy modules.
+ * (DB_PASSWORD/REPL_PASSWORD/BETTER_AUTH_SECRET/…) are *generated*, not
+ * configured, so they stay local to the k8s deploy modules.
  *
  * Classification:
  *   - 'client-build'    → baked into the client bundle at image build time

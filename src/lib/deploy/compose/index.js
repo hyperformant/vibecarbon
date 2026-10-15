@@ -1168,25 +1168,6 @@ export async function runMigrations(ip, sshKeyPath, projectName) {
       return typeof out === 'string' ? out : '';
     },
   });
-
-  // Reload PostgREST schema cache so it sees newly created tables. The old
-  // `docker compose exec rest kill -s SIGUSR1 1` never worked — the
-  // postgrest/postgrest image has no `kill` binary ("exec: kill: executable
-  // file not found in $PATH"), so the reload silently no-op'd and fresh tables
-  // stayed invisible (PGRST205) until rest happened to restart. RCA prod-1
-  // 2026-05-26. Use the canonical SQL NOTIFY on the pgrst channel instead
-  // (db-channel-enabled defaults on); fall back to restarting rest if NOTIFY
-  // doesn't land. Best-effort: a missed reload self-heals on the next deploy.
-  // Lives here so every caller — the compose and compose-ha migration effects
-  // (effects/index.js, effects/compose-ha.js) — gets a queryable schema
-  // instead of PGRST205.
-  await sshRunAsync(
-    ip,
-    sshKeyPath,
-    `cd ${remoteDir} && ` +
-      `docker compose exec -T db psql -U postgres -d postgres -c "NOTIFY pgrst, 'reload schema'" 2>/dev/null || ` +
-      `docker compose restart rest 2>/dev/null || true`,
-  );
 }
 
 /**

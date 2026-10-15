@@ -58,18 +58,11 @@ import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
-// sibling providers (SSH, k8s API for future parity, Supavisor poolers).
+// sibling providers (SSH, k8s API for future parity).
 // Numeric: Scaleway rules carry dest_port_from/dest_port_to as numbers.
 const SSH_PORT = 22;
 const K8S_API_PORT = 6443;
-const POOLER_SESSION_PORT = 5432;
-const POOLER_TRANSACTION_PORT = 6543;
-const OPERATOR_LOCKED_PORTS = new Set([
-  SSH_PORT,
-  K8S_API_PORT,
-  POOLER_SESSION_PORT,
-  POOLER_TRANSACTION_PORT,
-]);
+const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 
 // WireGuard replication port (wireguard.js WG_PORT) — only reachable via
 // compose-ha (declared since tier-parity wave 1). Numeric (see above).

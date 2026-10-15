@@ -535,8 +535,8 @@ describe('checkRemoteContainers', () => {
   it('compose: runs docker ps -a per server and classifies rows', async () => {
     const sshRun = vi.fn(async (ip: string) =>
       ip === '1.1.1.1'
-        ? 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-kong\trunning\tUp 1h (healthy)\n'
-        : 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-kong\texited\tExited (128) 3 hours ago\n',
+        ? 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-app\trunning\tUp 1h (healthy)\n'
+        : 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-app\texited\tExited (128) 3 hours ago\n',
     );
     const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
     expect(sshRun).toHaveBeenCalledTimes(2);
@@ -568,8 +568,8 @@ describe('checkRemoteContainers', () => {
           latencyMs: 0,
         },
         {
-          name: 'Kong Gateway',
-          container: 'kong',
+          name: 'App',
+          container: 'app',
           health: 'healthy',
           label: 'healthy',
           detail: '',
@@ -578,7 +578,7 @@ describe('checkRemoteContainers', () => {
       ],
     });
     expect(out?.s.rows[1]).toMatchObject({
-      container: 'kong',
+      container: 'app',
       health: 'unhealthy',
       label: 'exited',
       detail: 'Exited (128) 3 hours ago',

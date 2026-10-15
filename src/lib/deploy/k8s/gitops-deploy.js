@@ -340,8 +340,7 @@ export async function deployK8sGitOps(args) {
  */
 /**
  * Build the per-environment GitHub Environment secret map from a parsed
- * .env.local. Generated infra secrets are enumerated here (they carry the
- * Supabase ANON_KEY/SERVICE_ROLE_KEY alias logic); every configure-managed
+ * .env.local. Generated infra secrets are enumerated here; every configure-managed
  * feature key (billing/OAuth/SMTP — secret and non-secret) is folded in from
  * the config-registry so a new feature secret propagates with no edit here.
  *
@@ -357,16 +356,10 @@ export function buildPerEnvSecrets(envLocal) {
     DB_PASSWORD: envLocal.DB_PASSWORD,
     // The app's session signing key; the app pod envFrom's the Secret.
     BETTER_AUTH_SECRET: envLocal.BETTER_AUTH_SECRET,
-    // Still read by the Supabase services that remain (Kong, Studio,
-    // Realtime, PostgREST); the app itself reads none of these three.
+    // Required only by the k8s Helm chart's db (its StatefulSet reads
+    // JWT_SECRET from vibecarbon-secrets); removed when our own db
+    // StatefulSet replaces the chart. The app never reads it.
     JWT_SECRET: envLocal.JWT_SECRET,
-    SUPABASE_ANON_KEY: envLocal.SUPABASE_ANON_KEY || envLocal.ANON_KEY,
-    SUPABASE_SERVICE_ROLE_KEY: envLocal.SUPABASE_SERVICE_ROLE_KEY || envLocal.SERVICE_ROLE_KEY,
-    REALTIME_SECRET: envLocal.REALTIME_SECRET,
-    DB_ENC_KEY: envLocal.DB_ENC_KEY,
-    VAULT_ENC_KEY: envLocal.VAULT_ENC_KEY,
-    PG_META_CRYPTO_KEY: envLocal.PG_META_CRYPTO_KEY,
-    LOGFLARE_API_KEY: envLocal.LOGFLARE_API_KEY,
     ADMIN_EMAIL: envLocal.ADMIN_EMAIL,
     ADMIN_PASSWORD: envLocal.ADMIN_PASSWORD,
   };

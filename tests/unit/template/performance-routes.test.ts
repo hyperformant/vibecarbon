@@ -120,28 +120,23 @@ const defaultServerMetrics = {
   platform: 'linux x64',
 };
 
+// The lean stack's probes (carbon/src/server/routes/v1/performance.ts):
+// Database and Traefik, plus Authentication (in-process).
 const healthyServices: ServiceLatencyResult[] = [
-  { name: 'API Gateway', latencyMs: 12, status: 'healthy' },
-  { name: 'Authentication', latencyMs: 25, status: 'healthy' },
-  { name: 'REST API', latencyMs: 8, status: 'healthy' },
-  { name: 'Realtime', latencyMs: 15, status: 'healthy' },
-  { name: 'File Storage', latencyMs: 20, status: 'healthy' },
-  { name: 'DB Management', latencyMs: 10, status: 'healthy' },
+  { name: 'Database', latencyMs: 4, status: 'healthy' },
+  { name: 'Traefik', latencyMs: 12, status: 'healthy' },
+  { name: 'Authentication', latencyMs: 0, status: 'healthy' },
 ];
 
 const mixedServices: ServiceLatencyResult[] = [
-  { name: 'API Gateway', latencyMs: 12, status: 'healthy' },
-  { name: 'Authentication', latencyMs: 2000, status: 'unhealthy' },
-  { name: 'REST API', latencyMs: 8, status: 'healthy' },
-  { name: 'Realtime', latencyMs: 2000, status: 'unhealthy' },
-  { name: 'File Storage', latencyMs: 20, status: 'healthy' },
-  { name: 'DB Management', latencyMs: 10, status: 'healthy' },
+  { name: 'Database', latencyMs: 2000, status: 'unhealthy' },
+  { name: 'Traefik', latencyMs: 13, status: 'healthy' },
+  { name: 'Authentication', latencyMs: 0, status: 'healthy' },
 ];
 
 const allUnhealthyServices: ServiceLatencyResult[] = [
-  { name: 'API Gateway', latencyMs: 2000, status: 'unhealthy' },
-  { name: 'Authentication', latencyMs: 2000, status: 'unhealthy' },
-  { name: 'REST API', latencyMs: 2000, status: 'unhealthy' },
+  { name: 'Database', latencyMs: 2000, status: 'unhealthy' },
+  { name: 'Traefik', latencyMs: 2000, status: 'unhealthy' },
 ];
 
 // ============================================================================
@@ -242,21 +237,21 @@ describe('Performance Endpoint', () => {
 
     it('counts all healthy services correctly when all are healthy', () => {
       const result = performanceEndpoint(superAdmin, healthyServices, defaultServerMetrics);
-      expect(result.body.services.healthy).toBe(6);
-      expect(result.body.services.total).toBe(6);
+      expect(result.body.services.healthy).toBe(3);
+      expect(result.body.services.total).toBe(3);
     });
 
     it('counts healthy and total correctly with mixed statuses', () => {
       const result = performanceEndpoint(superAdmin, mixedServices, defaultServerMetrics);
-      expect(result.body.services.healthy).toBe(4);
-      expect(result.body.services.total).toBe(6);
+      expect(result.body.services.healthy).toBe(2);
+      expect(result.body.services.total).toBe(3);
     });
 
     it('computes average latency only from healthy services', () => {
       const result = performanceEndpoint(superAdmin, mixedServices, defaultServerMetrics);
-      // Healthy services: API Gateway (12), REST API (8), File Storage (20), DB Management (10)
-      // Average: (12 + 8 + 20 + 10) / 4 = 12.5 → rounded to 13
-      expect(result.body.services.avgLatencyMs).toBe(13);
+      // Healthy services: Traefik (13), Authentication (0)
+      // Average: (13 + 0) / 2 = 6.5 → rounded to 7
+      expect(result.body.services.avgLatencyMs).toBe(7);
     });
 
     it('returns avgLatencyMs of 0 when no services are healthy', () => {
@@ -302,14 +297,7 @@ describe('Performance Endpoint', () => {
     it('items preserve the original service order', () => {
       const result = performanceEndpoint(superAdmin, healthyServices, defaultServerMetrics);
       const names = result.body.services.items.map((i: ServiceLatencyResult) => i.name);
-      expect(names).toEqual([
-        'API Gateway',
-        'Authentication',
-        'REST API',
-        'Realtime',
-        'File Storage',
-        'DB Management',
-      ]);
+      expect(names).toEqual(['Database', 'Traefik', 'Authentication']);
     });
   });
 

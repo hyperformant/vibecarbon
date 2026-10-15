@@ -563,14 +563,14 @@ async function scaleServers(ctx) {
       s.stop('Docker installed');
 
       // Pull the OLD server's full /opt/<project>/.env so every variable the
-      // original deploy seeded (Supabase keys, S3 creds, SMTP, billing,
+      // original deploy seeded (auth secret, S3 creds, SMTP, billing,
       // Grafana, n8n encryption key, etc.) propagates to the new server.
       //
       // Why pull the whole file vs. re-deriving from project state:
       //   - The original deploy merges values from many sources — project
       //     `.env` + operator-secret env vars (S3 secret key) +
       //     orchestrator-derived overrides (DOMAIN, ACME_EMAIL, SITE_URL,
-      //     SUPABASE_URL, S3_*, S3_BACKUP_BUCKET, PROJECT_NAME, APP_IMAGE).
+      //     S3_*, S3_BACKUP_BUCKET, PROJECT_NAME, APP_IMAGE).
       //     Reconstructing all of those at scale time would mean re-prompting
       //     for credentials and re-running the same envOverrides logic.
       //   - The old server's `.env` already contains the resolved superset.

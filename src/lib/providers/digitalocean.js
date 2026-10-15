@@ -25,18 +25,10 @@ import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
-// touches, mirroring Hetzner's set: SSH, k8s API, and the Supavisor pooler
-// ports (compose deploys scope 5432/6543 to operator CIDRs).
+// touches, mirroring Hetzner's set: SSH and the k8s API.
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
-const POOLER_SESSION_PORT = '5432';
-const POOLER_TRANSACTION_PORT = '6543';
-const OPERATOR_LOCKED_PORTS = new Set([
-  SSH_PORT,
-  K8S_API_PORT,
-  POOLER_SESSION_PORT,
-  POOLER_TRANSACTION_PORT,
-]);
+const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 
 // The single replication port for the WireGuard tunnel (see wireguard.js —
 // WG_PORT=51821; 51820 is flannel-wg's). Shared by buildReplicationFirewallRules.

@@ -198,11 +198,11 @@ describe('HetznerProvider.applyOperatorCidrs (C9)', () => {
     );
   });
 
-  it('also rewrites the operator-scoped Supavisor pooler rules (5432/6543)', async () => {
-    // Compose deploys firewall the pooler ports to operator CIDRs, same as
-    // SSH — `vibecarbon access add/remove/prune` must keep them in lockstep
-    // or granting a teammate SSH would silently not grant pooler access.
-    const rulesWithPooler = [
+  it('rewrites only SSH and the k8s API, never a database port (5432/6543)', async () => {
+    // The database has no public port (operators use `vibecarbon shell` /
+    // SSH), so `vibecarbon access add/remove/prune` must never widen a
+    // leftover 5432/6543 rule to the operator allowlist.
+    const rulesWithDbPorts = [
       ...existingRules,
       { direction: 'in', protocol: 'tcp', port: '5432', source_ips: ['9.9.9.9/32'] },
       { direction: 'in', protocol: 'tcp', port: '6543', source_ips: ['9.9.9.9/32'] },
@@ -210,7 +210,7 @@ describe('HetznerProvider.applyOperatorCidrs (C9)', () => {
     fetchWithRetryMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        firewalls: [{ id: 7, name: 'proj-prod-firewall', rules: rulesWithPooler }],
+        firewalls: [{ id: 7, name: 'proj-prod-firewall', rules: rulesWithDbPorts }],
       }),
     });
     fetchWithRetryMock.mockResolvedValueOnce({ ok: true });
@@ -224,8 +224,9 @@ describe('HetznerProvider.applyOperatorCidrs (C9)', () => {
         .filter((r: HetznerRule) => r.direction === 'in')
         .map((r: HetznerRule) => [r.port, r]),
     );
-    expect(byPort['5432'].source_ips).toEqual(cidrs);
-    expect(byPort['6543'].source_ips).toEqual(cidrs);
+    expect(byPort['22'].source_ips).toEqual(cidrs);
+    expect(byPort['5432'].source_ips).toEqual(['9.9.9.9/32']);
+    expect(byPort['6543'].source_ips).toEqual(['9.9.9.9/32']);
     // Public web rules stay world-open; egress untouched.
     expect(byPort['443'].source_ips).toEqual(['0.0.0.0/0', '::/0']);
   });

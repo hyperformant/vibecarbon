@@ -65,13 +65,6 @@ const PLACEHOLDERS = {
   GITHUB_OWNER: '{{GITHUB_OWNER}}',
   DB_PASSWORD: '{{DB_PASSWORD}}',
   JWT_SECRET: '{{JWT_SECRET}}',
-  ANON_KEY: '{{ANON_KEY}}',
-  SERVICE_ROLE_KEY: '{{SERVICE_ROLE_KEY}}',
-  REALTIME_SECRET: '{{REALTIME_SECRET}}',
-  LOGFLARE_API_KEY: '{{LOGFLARE_API_KEY}}',
-  VAULT_ENC_KEY: '{{VAULT_ENC_KEY}}',
-  PG_META_CRYPTO_KEY: '{{PG_META_CRYPTO_KEY}}',
-  DB_ENC_KEY: '{{DB_ENC_KEY}}',
   SITE_URL: '{{SITE_URL}}',
   ADMIN_EMAIL: '{{ADMIN_EMAIL}}',
   ADMIN_PASSWORD: '{{ADMIN_PASSWORD}}',
@@ -80,18 +73,7 @@ const PLACEHOLDERS = {
 // Mirrors SECRET_PLACEHOLDERS in src/create.js — placeholders that must never
 // be substituted into checked-in files (deploy code patches them at runtime
 // from .env.local). Keep in sync with create.js.
-const SECRET_PLACEHOLDERS = new Set([
-  'DB_PASSWORD',
-  'JWT_SECRET',
-  'ANON_KEY',
-  'SERVICE_ROLE_KEY',
-  'REALTIME_SECRET',
-  'LOGFLARE_API_KEY',
-  'VAULT_ENC_KEY',
-  'PG_META_CRYPTO_KEY',
-  'DB_ENC_KEY',
-  'ADMIN_PASSWORD',
-]);
+const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'JWT_SECRET', 'ADMIN_PASSWORD']);
 
 // Files that contain {{PLACEHOLDER}} strings as their own substitution keys
 // (not vibecarbon template variables). Must be copied raw without replacement.
@@ -143,44 +125,6 @@ const SPEC = {
 // ============================================================================
 // VARIABLE RECONSTRUCTION
 // ============================================================================
-
-/**
- * Reconstruct template variables from the project's .env.local
- * Maps environment variable names back to template placeholder names
- *
- * @param {string} cwd - Project directory
- * @returns {object} - Variables keyed by placeholder name (without braces)
- */
-/**
- * Regenerate a too-short VAULT_ENC_KEY and WRITE IT BACK to .env.local.
- *
- * Supavisor's Cloak layer uses AES-256-GCM, which rejects any key that is not
- * exactly 32 bytes. `create` before 2026-08 generated 16 chars under a comment
- * claiming "32 hex chars = 16 bytes" — wrong on both counts — so the pooler
- * crash-looped in its tenant seed with "Unknown cipher or invalid key size".
- *
- * #251 fixed `create` and added a heal here, but the heal was INERT: it
- * computed a fresh key inside reconstructVariables, whose only consumer is
- * resolveTemplate — and resolveTemplate skips every key in SECRET_PLACEHOLDERS,
- * VAULT_ENC_KEY among them. Nothing in this file wrote .env.local at all, so
- * the new key was generated, never substituted, never persisted, discarded.
- * Every pre-2026-08 project kept its 16-char key and kept crash-looping;
- * only fresh `create`s were ever fixed. The guard that was supposed to cover
- * it asserted SOURCE TEXT via regex, so it passed against the dead code.
- *
- * Safe to rotate: nothing durable is encrypted under the old key. The pooler
- * tenant is re-seeded at container boot, and it never successfully seeded under
- * a short key in the first place.
- *
- * @param {string} cwd
- * @returns {boolean} true when a key was regenerated
- */
-export function healShortVaultEncKey(cwd) {
-  const current = loadEnvVariables(cwd).VAULT_ENC_KEY || '';
-  if (current.length >= 32) return false;
-  setEnvVar('VAULT_ENC_KEY', generatePassword(32), cwd, { localOnly: true });
-  return true;
-}
 
 /**
  * Give a project created before auth moved into the app the session signing
@@ -247,13 +191,19 @@ export function betterAuthUpgradeNotes(status, { dryRun = false } = {}) {
   };
 }
 
+/**
+ * Reconstruct template variables from the project's .env.local
+ * Maps environment variable names back to template placeholder names
+ *
+ * @param {string} cwd - Project directory
+ * @returns {object} - Variables keyed by placeholder name (without braces)
+ */
 function reconstructVariables(cwd, { dryRun = false } = {}) {
   // Runs BEFORE the env is read below, so the reconstructed variables (and any
-  // template rendered from them) see the healed value rather than the short
-  // one. Same hook configure/deploy/scale run at entry (project.js); under
-  // `-dry` it reports what it would re-encode and writes nothing.
+  // template rendered from them) see the repaired values. Same hook
+  // configure/deploy/scale run at entry (project.js); under `-dry` it reports
+  // what it would re-encode and writes nothing.
   repairLegacyEnvQuoting(cwd, { dryRun });
-  healShortVaultEncKey(cwd);
   const authNotes = betterAuthUpgradeNotes(ensureBetterAuthSecret(cwd, { dryRun }), { dryRun });
   if (authNotes.info) p.log.info(authNotes.info);
   if (authNotes.warn) p.log.warn(authNotes.warn);
@@ -268,16 +218,6 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
     GITHUB_OWNER: manifest.services?.cicd?.owner || env.PROJECT_NAME || '',
     DB_PASSWORD: env.DB_PASSWORD || env.POSTGRES_PASSWORD || '',
     JWT_SECRET: env.JWT_SECRET || '',
-    ANON_KEY: env.SUPABASE_ANON_KEY || '',
-    SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY || '',
-    REALTIME_SECRET: env.REALTIME_SECRET || env.SECRET_KEY_BASE || '',
-    LOGFLARE_API_KEY: env.LOGFLARE_API_KEY || '',
-    // Must be exactly 32 bytes (Supavisor's Cloak AES-256-GCM rejects other
-    // sizes). See healShortVaultEncKey — the heal PERSISTS to .env.local before
-    // this runs, so by here env.VAULT_ENC_KEY is already the healed value.
-    VAULT_ENC_KEY: env.VAULT_ENC_KEY || '',
-    PG_META_CRYPTO_KEY: env.PG_META_CRYPTO_KEY || '',
-    DB_ENC_KEY: (env.DB_ENC_KEY || '').slice(0, 16), // Realtime aes_128_ecb requires exactly 16 bytes
     SITE_URL: env.SITE_URL || 'http://localhost:5173',
     ADMIN_EMAIL: env.ADMIN_EMAIL || '',
     ADMIN_PASSWORD: env.ADMIN_PASSWORD || '',

@@ -1233,9 +1233,9 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       expect(putBody.tags).toEqual(['cluster:proj-prod']);
     });
 
-    it('also rewrites the operator-scoped Supavisor pooler rules (5432/6543)', async () => {
-      // Compose deploys firewall the pooler ports to operator CIDRs, same
-      // as SSH — access add/remove/prune must keep them in lockstep.
+    it('rewrites only SSH and the k8s API, never a database port (5432/6543)', async () => {
+      // The database has no public port (operators use `vibecarbon shell` /
+      // SSH), so access add/remove/prune must never widen a leftover rule.
       const existingRules = [
         { protocol: 'tcp', ports: '22', sources: { addresses: ['9.9.9.9/32'] } },
         { protocol: 'tcp', ports: '5432', sources: { addresses: ['9.9.9.9/32'] } },
@@ -1270,8 +1270,8 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       );
       expect(putBody.inbound_rules).toEqual([
         { protocol: 'tcp', ports: '22', sources: { addresses: cidrs } },
-        { protocol: 'tcp', ports: '5432', sources: { addresses: cidrs } },
-        { protocol: 'tcp', ports: '6543', sources: { addresses: cidrs } },
+        { protocol: 'tcp', ports: '5432', sources: { addresses: ['9.9.9.9/32'] } },
+        { protocol: 'tcp', ports: '6543', sources: { addresses: ['9.9.9.9/32'] } },
         { protocol: 'tcp', ports: '443', sources: { addresses: ['0.0.0.0/0', '::/0'] } },
       ]);
     });

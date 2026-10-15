@@ -125,9 +125,9 @@ describe('create-vibecarbon E2E', () => {
 
     it('generates .env.local with secrets', () => {
       const envContent = readFileSync(join(projectDir(), '.env.local'), 'utf-8');
-      expect(envContent).toContain('SUPABASE_ANON_KEY=');
-      expect(envContent).toContain('SUPABASE_SERVICE_ROLE_KEY=');
+      expect(envContent).toContain('BETTER_AUTH_SECRET=');
       expect(envContent).toContain('JWT_SECRET=');
+      expect(envContent).not.toContain('SUPABASE_');
       expect(envContent).toContain('DB_PASSWORD=');
     });
 
@@ -630,8 +630,7 @@ describe('create-vibecarbon E2E', () => {
       // are base64/base64url/JWT and the test password is alphanumeric, all in
       // the bare alphabet, so each is written unquoted.
       const BARE = '[A-Za-z0-9_./:@+=,%-]+';
-      expect(envLocal).toMatch(new RegExp(`^SUPABASE_ANON_KEY=${BARE}$`, 'm'));
-      expect(envLocal).toMatch(new RegExp(`^SUPABASE_SERVICE_ROLE_KEY=${BARE}$`, 'm'));
+      expect(envLocal).toMatch(new RegExp(`^BETTER_AUTH_SECRET=${BARE}$`, 'm'));
       expect(envLocal).toMatch(new RegExp(`^JWT_SECRET=${BARE}$`, 'm'));
       expect(envLocal).toMatch(new RegExp(`^DB_PASSWORD=${BARE}$`, 'm'));
       expect(envLocal).toMatch(/^ADMIN_PASSWORD=testpass123$/m);
@@ -639,8 +638,8 @@ describe('create-vibecarbon E2E', () => {
       // Secrets should be unique (not placeholders). Values are read back
       // through parseDotenv, the codebase's one dotenv reader.
       const env = parseDotenv(envLocal);
-      expect(env.SUPABASE_ANON_KEY).toBeTruthy();
-      expect(env.SUPABASE_ANON_KEY).not.toBe(env.SUPABASE_SERVICE_ROLE_KEY);
+      expect(env.BETTER_AUTH_SECRET).toBeTruthy();
+      expect(env.BETTER_AUTH_SECRET).not.toBe(env.JWT_SECRET);
     }, 60000);
 
     it('-display-name overrides the derived display name', () => {

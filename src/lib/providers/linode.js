@@ -19,18 +19,10 @@ import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
-// HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity, and
-// the Supavisor pooler ports, which compose deploys scope to operator CIDRs).
+// HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
-const POOLER_SESSION_PORT = '5432';
-const POOLER_TRANSACTION_PORT = '6543';
-const OPERATOR_LOCKED_PORTS = new Set([
-  SSH_PORT,
-  K8S_API_PORT,
-  POOLER_SESSION_PORT,
-  POOLER_TRANSACTION_PORT,
-]);
+const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
 
 // The single replication port for the WireGuard tunnel (see wireguard.js —
 // WG_PORT=51821). Only reachable via compose-ha, which Linode does not
@@ -1183,8 +1175,8 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Rewrite the operator-locked ports' inbound rules (SSH 22, k8s API 6443,
-   * pooler 5432/6543) on a named firewall to the given CIDR list, leaving
+   * Rewrite the operator-locked ports' inbound rules (SSH 22, k8s API 6443)
+   * on a named firewall to the given CIDR list, leaving
    * every other rule unchanged. CIDRs are split into Linode's per-family
    * `{ipv4, ipv6}` arrays (splitCidrsByFamily).
    * @param {{firewallName: string, cidrs: string[]}} args

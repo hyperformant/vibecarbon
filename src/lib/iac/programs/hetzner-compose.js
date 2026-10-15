@@ -94,25 +94,6 @@ export function buildHetznerComposeProgram(config) {
             sourceIps: ['0.0.0.0/0', '::/0'],
             description: 'HTTPS',
           },
-          // Supavisor pooler (compose prod overlay publishes 5432/6543).
-          // Operator-CIDR-scoped like SSH — NEVER world-open: this is
-          // password auth straight into Postgres. `vibecarbon access
-          // add/remove/prune` rewrites these in lockstep with the SSH rule
-          // (providers' applyOperatorCidrs OPERATOR_LOCKED_PORTS).
-          {
-            direction: 'in',
-            protocol: 'tcp',
-            port: '5432',
-            sourceIps: allowedSshIps,
-            description: 'Supavisor session pooler (operator CIDRs)',
-          },
-          {
-            direction: 'in',
-            protocol: 'tcp',
-            port: '6543',
-            sourceIps: allowedSshIps,
-            description: 'Supavisor transaction pooler (operator CIDRs)',
-          },
         ],
       },
       // Force recreate instead of an in-place Update: upstream

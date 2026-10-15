@@ -25,8 +25,6 @@ describe('Project Scaffolding Integration', () => {
         PROJECT_NAME: 'test-project',
         DB_PASSWORD: 'test-password',
         JWT_SECRET: 'test-jwt-secret',
-        ANON_KEY: 'test-anon-key',
-        SERVICE_ROLE_KEY: 'test-service-role-key',
       };
 
       const result = copyTemplate('package.json', destPath, variables);
@@ -57,9 +55,8 @@ describe('Project Scaffolding Integration', () => {
   describe('generateEnvLocal', () => {
     it('generates .env.local content', () => {
       const variables = {
-        ANON_KEY: 'test-anon-key',
-        SERVICE_ROLE_KEY: 'test-service-role-key',
         JWT_SECRET: 'test-jwt-secret',
+        BETTER_AUTH_SECRET: 'test-better-auth-secret',
         DB_PASSWORD: 'test-db-password',
         ADMIN_EMAIL: 'test@example.com',
         ADMIN_PASSWORD: 'test-admin-password',
@@ -69,18 +66,29 @@ describe('Project Scaffolding Integration', () => {
 
       // Every value line is emitted by formatDotenvLine: these all fit the
       // bare alphabet, so no quotes at all.
-      expect(content).toContain('\nSUPABASE_URL=http://localhost:8000\n');
-      expect(content).toContain('\nSUPABASE_ANON_KEY=test-anon-key\n');
-      expect(content).toContain('\nSUPABASE_SERVICE_ROLE_KEY=test-service-role-key\n');
       expect(content).toContain('\nJWT_SECRET=test-jwt-secret\n');
+      expect(content).toContain('\nBETTER_AUTH_SECRET=test-better-auth-secret\n');
       expect(content).toContain('\nDB_PASSWORD=test-db-password\n');
       expect(content).toContain('\nADMIN_EMAIL=test@example.com\n');
       expect(content).toContain('\nADMIN_PASSWORD=test-admin-password\n');
       expect(parseDotenv(content)).toMatchObject({
-        SUPABASE_URL: 'http://localhost:8000',
-        SUPABASE_ANON_KEY: 'test-anon-key',
+        BETTER_AUTH_SECRET: 'test-better-auth-secret',
         ADMIN_PASSWORD: 'test-admin-password',
       });
+      // The removed services' URL, keys and secrets are never written.
+      const keys = Object.keys(parseDotenv(content));
+      for (const gone of [
+        'SUPABASE_URL',
+        'SUPABASE_ANON_KEY',
+        'SUPABASE_SERVICE_ROLE_KEY',
+        'REALTIME_SECRET',
+        'LOGFLARE_API_KEY',
+        'VAULT_ENC_KEY',
+        'PG_META_CRYPTO_KEY',
+        'DB_ENC_KEY',
+      ]) {
+        expect(keys, gone).not.toContain(gone);
+      }
     });
   });
 
@@ -91,7 +99,8 @@ describe('Project Scaffolding Integration', () => {
       expect(readme).toContain('# test-project');
       expect(readme).toContain('Hono');
       expect(readme).toContain('React 19');
-      expect(readme).toContain('Supabase');
+      expect(readme).toContain('PostgreSQL');
+      expect(readme).not.toMatch(/Supabase|Kong|Studio/);
       expect(readme).toContain('npm run dev:start');
     });
   });

@@ -12,13 +12,13 @@ describe('rowsFromDockerPs', () => {
   it('keeps only this project’s containers and splits the three tab fields', () => {
     const listing = [
       'letsgo-db\trunning\tUp 1 hour (healthy)',
-      'letsgo-kong\texited\tExited (128) 24 minutes ago',
-      'vibecarbon-kong\trunning\tUp 2 hours (healthy)',
+      'letsgo-app\texited\tExited (128) 24 minutes ago',
+      'vibecarbon-app\trunning\tUp 2 hours (healthy)',
       '',
     ].join('\n');
     expect(rowsFromDockerPs(listing, 'letsgo')).toEqual([
       { container: 'db', state: 'running', status: 'Up 1 hour (healthy)' },
-      { container: 'kong', state: 'exited', status: 'Exited (128) 24 minutes ago' },
+      { container: 'app', state: 'exited', status: 'Exited (128) 24 minutes ago' },
     ]);
   });
 
@@ -37,8 +37,8 @@ describe('rowsFromDockerPs', () => {
 
 describe('formatContainerRow', () => {
   const row = (over: Record<string, unknown>) => ({
-    name: 'Kong Gateway',
-    container: 'kong',
+    name: 'Traefik',
+    container: 'traefik',
     health: 'healthy',
     label: 'healthy',
     detail: '',
@@ -48,7 +48,7 @@ describe('formatContainerRow', () => {
 
   it('renders healthy with a dim label and no tail', () => {
     expect(stripAnsi(formatContainerRow(row({})))).toBe(
-      '  Kong Gateway                ● healthy  ',
+      '  Traefik                     ● healthy  ',
     );
   });
 
@@ -59,29 +59,29 @@ describe('formatContainerRow', () => {
           row({ health: 'unhealthy', label: 'exited', detail: 'Exited (128) 3 hours ago' }),
         ),
       ),
-    ).toBe('  Kong Gateway                ● exited  Exited (128) 3 hours ago');
+    ).toBe('  Traefik                     ● exited  Exited (128) 3 hours ago');
   });
 
   it('renders latency when there is no detail', () => {
     expect(stripAnsi(formatContainerRow(row({ latencyMs: 17 })))).toBe(
-      '  Kong Gateway                ● healthy  17ms',
+      '  Traefik                     ● healthy  17ms',
     );
   });
 
   it('uses the hollow icon for done and unknown', () => {
     expect(stripAnsi(formatContainerRow(row({ health: 'done', label: 'done' })))).toBe(
-      '  Kong Gateway                ○ done  ',
+      '  Traefik                     ○ done  ',
     );
     expect(
       stripAnsi(
-        formatContainerRow(row({ health: 'unknown', label: 'unknown', detail: 'gateway down' })),
+        formatContainerRow(row({ health: 'unknown', label: 'unknown', detail: 'no status' })),
       ),
-    ).toBe('  Kong Gateway                ○ unknown  gateway down');
+    ).toBe('  Traefik                     ○ unknown  no status');
   });
 
   it('honours a custom indent', () => {
     expect(stripAnsi(formatContainerRow(row({}), '      '))).toBe(
-      '      Kong Gateway                ● healthy  ',
+      '      Traefik                     ● healthy  ',
     );
   });
 

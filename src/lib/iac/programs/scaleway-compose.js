@@ -162,9 +162,9 @@ export function buildScalewayComposeProgram(config) {
   const userData = loadScalewayComposeUserData();
 
   // One rule per (port × source) — Scaleway rules carry ONE ipRange each.
-  // World-open ports get the v4+v6 pair; operator-scoped ports (SSH +
-  // Supavisor poolers, kept in lockstep by applyOperatorCidrs'
-  // OPERATOR_LOCKED_PORTS) one rule per CIDR. Ports are NUMBERS in the
+  // World-open ports get the v4+v6 pair; the operator-scoped SSH port (kept
+  // in lockstep by applyOperatorCidrs' OPERATOR_LOCKED_PORTS) one rule per
+  // CIDR. Ports are NUMBERS in the
   // Pulumi shape (dest_port_from/to on the wire).
   const WORLD = ['0.0.0.0/0', '::/0'];
   const inboundRules = [
@@ -176,19 +176,6 @@ export function buildScalewayComposeProgram(config) {
     })),
     ...WORLD.map((cidr) => ({ action: 'accept', protocol: 'TCP', port: 80, ipRange: cidr })),
     ...WORLD.map((cidr) => ({ action: 'accept', protocol: 'TCP', port: 443, ipRange: cidr })),
-    // Supavisor pooler ports — operator-scoped like SSH, NEVER world-open.
-    ...allowedSshIps.map((cidr) => ({
-      action: 'accept',
-      protocol: 'TCP',
-      port: 5432,
-      ipRange: cidr,
-    })),
-    ...allowedSshIps.map((cidr) => ({
-      action: 'accept',
-      protocol: 'TCP',
-      port: 6543,
-      ipRange: cidr,
-    })),
   ];
 
   return async () => {

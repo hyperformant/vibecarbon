@@ -204,8 +204,8 @@ function composeFileFlags(options = {}) {
  *     One wildcard cert covers all subdomains, no per-subdomain ACME orders.
  *   - HTTP-01 (manual DNS): wildcards require DNS-01 (LE policy), so we list
  *     the explicit subdomains that are active for this deploy instead.
- *     `main` stays `${domain}` (the app root); `sans` lists api/studio/dashboard
- *     plus any enabled feature subdomains (grafana/prometheus, n8n, metabase).
+ *     `main` is `dashboard.${domain}` (always present); `sans` lists the
+ *     enabled feature subdomains (grafana/prometheus, n8n, metabase).
  *
  * The file is written into `volumes/traefik/` which is already bind-mounted
  * as `/etc/traefik/dynamic:ro`. Traefik hot-reloads files from that dir.
@@ -238,14 +238,13 @@ export function renderTraefikDefaultCert({ domain, dnsChallenge, features = {} }
     sans = [];
   } else {
     // HTTP-01: wildcards require DNS-01 (LE policy), so enumerate the active
-    // subdomains. `studio` and `dashboard` always exist; the rest are
-    // feature-gated. The apex (app + Hono API + Kong path-routes) is covered
-    // by its own router cert, not here.
-    const subs = ['dashboard'];
+    // subdomains. `dashboard` always exists; the rest are feature-gated. The
+    // apex (app + Hono API) is covered by its own router cert, not here.
+    const subs = [];
     if (features.observability) subs.push('grafana', 'prometheus');
     if (features.n8n) subs.push('n8n');
     if (features.metabase) subs.push('metabase');
-    main = `studio.${domain}`;
+    main = `dashboard.${domain}`;
     sans = subs.map((s) => `${s}.${domain}`);
   }
 
@@ -335,13 +334,10 @@ export function renderBundle(projectName, options = {}) {
   if (options.domain) {
     envOverrides.DOMAIN = options.domain;
     envOverrides.ACME_EMAIL = `admin@${options.domain}`;
-    // Single public origin: the apex serves the SPA, the Hono /api (auth
-    // included, at /api/auth) AND the remaining gateway routes (Traefik
-    // path-routes /rest/v1|/realtime/v1 to Kong). SITE_URL is that one
-    // origin — auth redirects and cookies, billing return URLs, and CSP/CORS
-    // all derive from it.
+    // Single public origin: the apex serves the SPA and the Hono /api (auth
+    // included, at /api/auth). SITE_URL is that one origin — auth redirects
+    // and cookies, billing return URLs, and CSP/CORS all derive from it.
     envOverrides.SITE_URL = `https://${options.domain}`;
-    envOverrides.SUPABASE_URL = 'http://kong:8000';
   }
   if (options.image) {
     envOverrides.APP_IMAGE = options.image;

@@ -167,6 +167,11 @@ services:
 
   # Add resource limits to core services in production
   db:
+    environment:
+      # Required (`:?`) so deploy's preflight refuses a .env without the
+      # database password before anything is created (findMissingRequiredEnv
+      # in src/lib/project.js reads these markers).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — vibecarbon create writes it to .env.local}
     deploy:
       resources:
         limits:

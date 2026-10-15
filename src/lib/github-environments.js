@@ -16,10 +16,9 @@
  *   Org-level:       HETZNER_API_TOKEN, CLOUDFLARE_API_TOKEN,
  *                    S3_ACCESS_KEY, S3_SECRET_KEY
  *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, BETTER_AUTH_SECRET,
- *                    JWT_SECRET, SUPABASE_ANON_KEY,
- *                    SUPABASE_SERVICE_ROLE_KEY, REALTIME_SECRET,
- *                    DB_ENC_KEY, VAULT_ENC_KEY, PG_META_CRYPTO_KEY,
- *                    LOGFLARE_API_KEY, ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*
+ *                    JWT_SECRET (the k8s chart's db only, until our own db
+ *                    StatefulSet replaces the chart), ADMIN_EMAIL,
+ *                    ADMIN_PASSWORD, SMTP_*
  *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL, DNS_PROVIDER
  */
 
