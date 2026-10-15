@@ -13,13 +13,27 @@
  */
 // Publish to ghcr (GitHub Container Registry) under the hyperformant org
 // (this repo is hyperformant/vibecarbon). The package must be set to PUBLIC
-// so servers and developer machines pull without a secret. Tag scheme:
-// <PostgreSQL major.minor>-walg<wal-g version>, read from the Dockerfile's
-// two pins (guarded by tests/unit/deploy/walg-dockerfile-arch.test.ts).
+// so servers and developer machines pull without a secret.
+//
+// Tag scheme: <PostgreSQL major.minor>-walg<wal-g version>-r<N>. The first two
+// parts are read from the Dockerfile's pins (guarded by
+// tests/unit/deploy/walg-dockerfile-arch.test.ts). -r<N> is OUR revision: it
+// must move whenever this image's own inputs change (the Dockerfile,
+// db-entrypoint.sh, postgresql.conf, the pg_cron pin), because compose pulls
+// with policy `missing` and k8s with IfNotPresent, so a republish under an
+// unchanged tag never reaches a server that already has it. Reset to -r1
+// when the PostgreSQL or wal-g version moves.
 export const DB_IMAGE = 'ghcr.io/hyperformant/postgres';
-export const DB_IMAGE_TAG = '17.11-walg3.0.9';
+export const DB_IMAGE_TAG = '17.11-walg3.0.9-r1';
 
-/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9" */
+// sha256 fingerprint of docker/postgres-walg's inputs (every file there but
+// README.md; see tests/unit/deploy/db-image-fingerprint.test.ts for the exact
+// hashing). Changing any input fails that test until you bump the -r revision
+// in DB_IMAGE_TAG above AND paste the new hash here: a deliberate two-line edit.
+export const DB_IMAGE_INPUTS_SHA256 =
+  '9ee77bc4a5f18a6b3aee95ba01429226bc444538be7badb30f71360cd9f25c5f';
+
+/** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r1" */
 export function dbImageRef() {
   return `${DB_IMAGE}:${DB_IMAGE_TAG}`;
 }

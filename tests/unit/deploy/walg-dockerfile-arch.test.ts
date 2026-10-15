@@ -159,11 +159,16 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
 
 describe('version lockstep across the delivery chain', () => {
   it('src/lib/images.js DB_IMAGE_TAG carries the same base version and wal-g version', () => {
-    // Tag scheme: <PG_VERSION>-walg<WALG_VERSION> — e.g. 17.11-walg3.0.9.
+    // Tag scheme: <PG_VERSION>-walg<WALG_VERSION>-r<N> — e.g. 17.11-walg3.0.9-r1.
     // Every mode pulls ghcr.io/hyperformant/postgres:<DB_IMAGE_TAG>, built from
     // docker/postgres-walg/Dockerfile, so the tag must describe that image.
+    // -r<N> is our own revision (moved by db-image-fingerprint.test.ts's guard).
     const pgVersion = PG_BASE.split(':')[1].replace(/-alpine.*$/, '');
-    expect(DB_IMAGE_TAG).toBe(`${pgVersion}-walg${WALG_VERSION.slice(1)}`);
+    const escaped = `${pgVersion}-walg${WALG_VERSION.slice(1)}`.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      '\\$&',
+    );
+    expect(DB_IMAGE_TAG).toMatch(new RegExp(`^${escaped}-r[1-9]\\d*$`));
   });
 });
 

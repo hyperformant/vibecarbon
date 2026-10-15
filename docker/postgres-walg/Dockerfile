@@ -22,8 +22,16 @@ FROM ghcr.io/hyperformant/wal-g:3.0.9 AS walg
 # --- pg_cron builder -------------------------------------------------------
 # Compiled from a pinned upstream release tag. ADD --checksum verifies the
 # tarball before a single byte of it is unpacked, so a retagged or tampered
-# release fails the build instead of shipping. The toolchain lives only in this
-# stage; the final stage copies out exactly the files `make install` produced.
+# release fails the build instead of shipping.
+#
+# The tarball is GitHub's on-the-fly archive of the tag, and GitHub has changed
+# those bytes before (a compression change) without the tag moving. So if this
+# checksum fails while upstream shows no change to the tag, re-download, verify
+# the contents against the tag, and re-pin the new checksum. Never remove or
+# bypass the check.
+#
+# The toolchain lives only in this stage; the final stage copies out exactly
+# the files `make install` produced.
 #
 # with_llvm=no: the base postgres is built --with-llvm, so PGXS would otherwise
 # also emit JIT bitcode and need clang + llvm (hundreds of MB) in the builder.

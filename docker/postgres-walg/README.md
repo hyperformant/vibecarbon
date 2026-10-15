@@ -24,18 +24,25 @@ Published for **linux/amd64 and linux/arm64**: servers are x86-64, and arm64 is
 for local development on Apple Silicon. The arm64 leg is built under QEMU,
 because pg_cron is compiled inside the target platform's postgres image.
 
-Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>` e.g. `17.11-walg3.0.9`, where
-`PG_VERSION` is the base image's major.minor.
+Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>-r<N>` e.g. `17.11-walg3.0.9-r1`,
+where `PG_VERSION` is the base image's major.minor and `-r<N>` is OUR revision.
 
-The tag names the two upstream versions this image composes and nothing else,
-so a change that leaves both of them alone (the OCI `LABEL` block, the baked
-config, the pg_cron pin) republishes the SAME tag with a new digest unless you
-move the tag yourself. Move it whenever the bits a running server uses change
-(config, entrypoint, pg_cron): `DB_IMAGE_TAG` is what compose and k8s pull, and
-nodes that already cached the old digest keep running it until the tag moves.
-A metadata-only republish can keep the tag, since every layer is identical.
+The revision exists because every consumer pulls with "only if missing"
+semantics (compose `pull_policy: missing`, k8s `IfNotPresent`): a republish
+under an unchanged tag never reaches a server that already has that tag, so
+it would keep running the old bits. Any change to this image's own inputs (the
+`Dockerfile`, `db-entrypoint.sh`, `postgresql.conf`, the pg_cron pin) must move
+`-r<N>`. `tests/unit/deploy/db-image-fingerprint.test.ts` enforces it: it hashes
+every file here except this README and compares with `DB_IMAGE_INPUTS_SHA256` in
+`src/lib/images.js`, failing with "image inputs changed: bump the -r revision
+and update the hash" (and printing the new hash). Bumping is a deliberate
+two-line edit in `src/lib/images.js`. When the PostgreSQL or wal-g version
+moves, reset the revision to `-r1`. Editing only this README never requires a
+new tag.
 
-## Testing an unpublished tag locally
+## Testing an unpublished tag
+
+Locally:
 
 ```bash
 pnpm db-image:build-local   # builds this directory, tags it DB_IMAGE:DB_IMAGE_TAG
@@ -45,6 +52,12 @@ Compose's default `pull_policy: missing` then uses the local image without
 contacting the registry, so a generated project's `vibecarbon up` (and
 `pnpm test:docker`) run against it. Nothing is pushed.
 
+On real infrastructure (a deploy or an e2e scenario), servers pull from ghcr,
+so the tag has to exist there first. The only way to get it there before merge
+is running `publish-db-image.yml` from the branch with `workflow_dispatch`.
+That IS a publish: it pushes a public image under a tag every future deploy
+may pull, so ask Brandon before running it.
+
 ## Bump procedure
 1. Edit `Dockerfile`: both `FROM postgres:...@sha256:...` lines together (they
    must stay identical), and/or `ARG PG_CRON_VERSION` plus the `ADD --checksum`
@@ -52,8 +65,10 @@ contacting the registry, so a generated project's `vibecarbon up` (and
    set by `ARG WALG_VERSION` in `docker/wal-g/Dockerfile`; bump both).
    Resolve a new base digest with
    `docker buildx imagetools inspect postgres:<major>.<minor>-alpine<alpine>`.
-2. Update `src/lib/images.js` (`DB_IMAGE_TAG`) and the pins in
-   `tests/unit/deploy/walg-dockerfile-arch.test.ts`.
+2. Update `src/lib/images.js`: `DB_IMAGE_TAG` (new versions, or the next `-r<N>`
+   for a change of our own) and `DB_IMAGE_INPUTS_SHA256` (the fingerprint test
+   prints the value). Update the pins in
+   `tests/unit/deploy/walg-dockerfile-arch.test.ts` if a version moved.
 3. `pnpm db-image:build-local`, then `pnpm test:docker` and a generated
    project's `npm run test:db` against it.
 4. Merge. `.github/workflows/publish-db-image.yml` runs on any push to main

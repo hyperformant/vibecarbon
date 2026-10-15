@@ -109,4 +109,18 @@ describeDocker('db image first boot with an unreachable backup bucket', () => {
     expect(psql('SHOW config_file')).toBe('/etc/postgresql/postgresql.conf');
     expect(psql('SHOW shared_preload_libraries')).toBe('pg_cron');
   });
+
+  it('a second boot (initialized volume, no temporary server) still archives', {
+    timeout: 300_000,
+  }, () => {
+    compose(['restart', 'db']);
+    // `up --wait` on a running service only waits for it to report healthy.
+    compose(['up', '-d', '--wait', 'db']);
+    const logs = compose(['logs', '--no-color', 'db']);
+    expect(logs).toContain(
+      'Database directory appears to contain a database; Skipping initialization',
+    );
+    expect(psql('SHOW archive_mode')).toBe('on');
+    expect(psql('SHOW archive_command')).toBe('bash /etc/postgresql/wal-archive.sh %p');
+  });
 });
