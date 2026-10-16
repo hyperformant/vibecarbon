@@ -37,6 +37,38 @@ vi.mock('@pulumi/pulumi/automation/index.js', () => ({
   },
 }));
 
+// The store's answer to "which region holds this bucket?", swapped per test.
+// A plain function, not vi.fn: the only thing under test is what
+// removeStackState does with each answer.
+let locateBucket: (bucket: string) => Promise<string | null> = async () => null;
+const locatedBuckets: string[] = [];
+vi.mock('../../../src/lib/providers/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/providers/index.js')>()),
+  getObjectStorageProvider: async () => ({
+    locateBucket: (bucket: string) => {
+      locatedBuckets.push(bucket);
+      return locateBucket(bucket);
+    },
+  }),
+}));
+
+// The exact `pulumi stack select` failure from the excitingai destroy
+// (2026-10-16): the deploy failed before the state bucket existed.
+const NO_SUCH_BUCKET =
+  'code: -2\n stdout: \n stderr: Command failed with exit code 1: pulumi stack select --stack prod --non-interactive\n' +
+  'error: error listing stacks: could not list bucket: blob (code=NotFound): operation error S3: ListObjectsV2, ' +
+  'https response error StatusCode: 404, RequestID: N/A, HostID: N/A, NoSuchBucket: The specified bucket does not exist.\n';
+
+const S3 = {
+  bucket: 'excitingai-88d16c-storage-2074c7',
+  stateBucket: 'excitingai-88d16c-storage-2074c7-pulumi-state',
+  region: 'fsn1',
+  endpoint: 'https://fsn1.your-objectstorage.com',
+  accessKey: 'ABCDEFGHIJ0123456789',
+  secretKey: 'x'.repeat(40),
+};
+const OPTS = { projectName: 'excitingai', provider: 'hetzner', s3Config: S3 };
+
 function makeStack() {
   return {
     workspace: { removeStack: vi.fn().mockResolvedValue(undefined) },
@@ -89,5 +121,48 @@ describe('removeStackState — state-only stack removal after out-of-band teardo
     await expect(removeStackState('civ1', { projectName: 'testproj' })).rejects.toThrow(
       /403 Forbidden/,
     );
+  });
+
+  describe('state bucket missing (NoSuchBucket)', () => {
+    beforeEach(() => {
+      locatedBuckets.length = 0;
+    });
+
+    it('counts the stack as absent when the state bucket exists in no region', async () => {
+      selectStackMock.mockRejectedValue(new Error(NO_SUCH_BUCKET));
+      locateBucket = async () => null;
+
+      const { removeStackState } = await import('../../../src/lib/iac/index.js');
+      const out = await removeStackState('prod', OPTS);
+
+      expect(out).toEqual({ removed: false, stateBucketMissing: true });
+      expect(locatedBuckets).toEqual([S3.stateBucket]);
+      expect(createStackMock).not.toHaveBeenCalled();
+    });
+
+    it('stays a failure when the bucket does exist in another region (wrong endpoint, real state)', async () => {
+      selectStackMock.mockRejectedValue(new Error(NO_SUCH_BUCKET));
+      locateBucket = async () => 'nbg1';
+
+      const { removeStackState } = await import('../../../src/lib/iac/index.js');
+      await expect(removeStackState('prod', OPTS)).rejects.toThrow(/NoSuchBucket/);
+    });
+
+    it('stays a failure when absence cannot be confirmed', async () => {
+      selectStackMock.mockRejectedValue(new Error(NO_SUCH_BUCKET));
+      locateBucket = () =>
+        Promise.reject(Object.assign(new Error('no answer'), { name: 'TimeoutError' }));
+
+      const { removeStackState } = await import('../../../src/lib/iac/index.js');
+      await expect(removeStackState('prod', OPTS)).rejects.toThrow(/NoSuchBucket/);
+    });
+
+    it('never probes for an unrelated failure', async () => {
+      selectStackMock.mockRejectedValue(new Error('403 Forbidden reading s3://state-bucket'));
+
+      const { removeStackState } = await import('../../../src/lib/iac/index.js');
+      await expect(removeStackState('prod', OPTS)).rejects.toThrow(/403 Forbidden/);
+      expect(locatedBuckets).toEqual([]);
+    });
   });
 });

@@ -29,7 +29,14 @@ vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/cli/tty-guard.js', () => ({ assertInteractiveStdin: vi.fn() }));
 
 const setEnvVarMock = vi.hoisted(() => vi.fn());
-vi.mock('../../../src/lib/project.js', () => ({ setEnvVar: setEnvVarMock }));
+vi.mock('../../../src/lib/project.js', () => ({
+  setEnvVar: setEnvVarMock,
+  describeCredentialSource: (keys: string[]) => ({
+    source: 'shell',
+    label: `your shell environment (${keys.join(', ')})`,
+    where: 'your shell environment',
+  }),
+}));
 
 const fetchMock = vi.hoisted(() => vi.fn());
 vi.stubGlobal('fetch', fetchMock);
@@ -261,7 +268,15 @@ describe('getS3Credentials — env-only lookup (A3: credentials-file leg removed
 
     const result = await getS3Credentials('my-project');
 
-    expect(result).toEqual({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
+    expect(result).toMatchObject({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
+    // The line names WHERE the keys came from: a stale or other-project
+    // export is the usual reason good-looking keys get rejected.
+    expect(result.source).toContain('shell environment');
+    expect(clackMock.log.info).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'from your shell environment (HETZNER_ACCESS_KEY, HETZNER_SECRET_KEY)',
+      ),
+    );
     expect(clackMock.text).not.toHaveBeenCalled();
   });
 
@@ -276,7 +291,7 @@ describe('getS3Credentials — env-only lookup (A3: credentials-file leg removed
     const result = await getS3Credentials('my-project', { force: true, save: false });
 
     expect(clackMock.text).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ accessKey: 'AK-fresh-1234', secretKey: 'SK-fresh-1234' });
+    expect(result).toMatchObject({ accessKey: 'AK-fresh-1234', secretKey: 'SK-fresh-1234' });
   });
 
   it('save acceptance persists both keys via setEnvVar with localOnly:true', async () => {
@@ -326,7 +341,7 @@ describe('getS3Credentials — env-only lookup (A3: credentials-file leg removed
 
     const result = await getS3Credentials('my-project', { skipPrompts: true });
 
-    expect(result).toEqual({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
+    expect(result).toMatchObject({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
     expect(clackMock.text).not.toHaveBeenCalled();
   });
 });

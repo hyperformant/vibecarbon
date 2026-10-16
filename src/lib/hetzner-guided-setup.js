@@ -19,8 +19,13 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import {
+  dotenvPromptProblem,
+  normalizeOperatorValue,
+  pastedKeyShapeProblem,
+  readOperatorVar,
+} from './operator-env.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 
 /**
  * Validate a Hetzner API token by making a lightweight API call.
@@ -151,13 +156,17 @@ export async function getApiToken(projectName, options = {}) {
     if (envToken) {
       const check = await validateHetznerToken(envToken);
       if (!check.valid) {
-        p.log.warn(`HETZNER_API_TOKEN environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `HETZNER_API_TOKEN from ${describeCredentialSource(['HETZNER_API_TOKEN']).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Hetzner API to verify token, proceeding with saved token');
         }
-        p.log.info('✓ Using Hetzner API token from HETZNER_API_TOKEN environment variable');
+        p.log.info(
+          `✓ Using Hetzner API token from ${describeCredentialSource(['HETZNER_API_TOKEN']).label}`,
+        );
         return envToken;
       }
     }
@@ -238,7 +247,7 @@ export async function getApiToken(projectName, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     // Check environment variables
@@ -246,8 +255,9 @@ export async function getS3Credentials(projectName, options = {}) {
     const envSecretKey = readOperatorVar('HETZNER_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
-      p.log.info('✓ Using S3 credentials from environment variables');
-      return { accessKey: envAccessKey, secretKey: envSecretKey };
+      const from = describeCredentialSource(['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY']);
+      p.log.info(`✓ Using S3 credentials from ${from.label}`);
+      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
     }
   }
 
@@ -267,7 +277,10 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your S3 Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return dotenvPromptProblem('HETZNER_ACCESS_KEY', v);
+      return (
+        pastedKeyShapeProblem('HETZNER_ACCESS_KEY', v) ??
+        dotenvPromptProblem('HETZNER_ACCESS_KEY', v)
+      );
     },
   });
 
@@ -279,7 +292,10 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your S3 Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return dotenvPromptProblem('HETZNER_SECRET_KEY', v);
+      return (
+        pastedKeyShapeProblem('HETZNER_SECRET_KEY', v) ??
+        dotenvPromptProblem('HETZNER_SECRET_KEY', v)
+      );
     },
   });
 
@@ -303,9 +319,20 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.HETZNER_ACCESS_KEY = accessKey;
   process.env.HETZNER_SECRET_KEY = secretKey;
 
+  const keys = { HETZNER_ACCESS_KEY: accessKey, HETZNER_SECRET_KEY: secretKey };
+  // deferSave: the caller verifies the keys against S3 first and calls
+  // save() only once they pass, so a rejected pair is never written.
+  if (deferSave) {
+    return {
+      accessKey,
+      secretKey,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
   if (save) {
-    await saveIfWanted({ HETZNER_ACCESS_KEY: accessKey, HETZNER_SECRET_KEY: secretKey });
+    await saveIfWanted(keys);
   }
 
-  return { accessKey, secretKey };
+  return { accessKey, secretKey, source: 'what you pasted' };
 }

@@ -134,7 +134,8 @@ describe('HetznerS3Provider', () => {
 
       const result = await provider.validateCredentials();
       expect(result.valid).toBe(false);
-      expect(result.error).toContain('Invalid Access Key');
+      expect(result.error).toContain("access key isn't recognized");
+      expect(result.rejected).toBe(true);
     });
 
     it('returns invalid for SignatureDoesNotMatch error', async () => {
@@ -146,7 +147,8 @@ describe('HetznerS3Provider', () => {
 
       const result = await provider.validateCredentials();
       expect(result.valid).toBe(false);
-      expect(result.error).toContain('Invalid Secret Key');
+      expect(result.error).toContain("secret key doesn't match");
+      expect(result.rejected).toBe(true);
     });
 
     it('returns invalid for AccessDenied error', async () => {
@@ -158,7 +160,8 @@ describe('HetznerS3Provider', () => {
 
       const result = await provider.validateCredentials();
       expect(result.valid).toBe(false);
-      expect(result.error).toContain('Access denied');
+      expect(result.error).toContain('AccessDenied');
+      expect(result.rejected).toBe(true);
     });
   });
 
@@ -478,8 +481,11 @@ describe('HetznerS3Provider', () => {
           makeErr({ name: 'Forbidden', $metadata: { httpStatusCode: 403 } }),
         );
 
+        mockSend.mockResolvedValueOnce({ Buckets: [] }); // ListBuckets: the keys are fine
+
         await expect(provider.bucketExists('taken')).rejects.toThrow(/owned by another account/);
-        expect(mockSend).toHaveBeenCalledTimes(1);
+        // HEAD (no retry) + one ListBuckets to tell wrong keys from a taken name.
+        expect(mockSend).toHaveBeenCalledTimes(2);
       });
 
       it('createBucket retries transient UnknownError then succeeds', async () => {

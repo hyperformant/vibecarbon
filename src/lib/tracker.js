@@ -9,9 +9,10 @@
  *   const { formatted } = tracker.finish();
  */
 
-import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { displayLine } from './cli/error-line.js';
 import { spinner } from './cli/progress.js';
 
 /**
@@ -112,9 +113,11 @@ class CommandTracker {
     this.startTime = performance.now();
     this.steps = []; // { label, durationMs }
     this._currentStep = null; // { label, startTime }
-    this._stream = null;
+    this._fd = null;
 
-    // Open log file
+    // Open log file. Written synchronously: commands end failures with
+    // process.exit(), which drops whatever an async stream has not flushed,
+    // and the failure is exactly the line a post-mortem needs.
     const logsDir = join(process.cwd(), '.vibecarbon', 'logs');
     try {
       if (!existsSync(logsDir)) {
@@ -124,7 +127,7 @@ class CommandTracker {
       const envSuffix = meta.environment ? `-${meta.environment}` : '';
       const filename = `${command}${envSuffix}-${timestamp}.log`;
       this.logPath = join(logsDir, filename);
-      this._stream = createWriteStream(this.logPath, { flags: 'a' });
+      this._fd = openSync(this.logPath, 'a');
 
       // Write header
       this._write(`=== vibecarbon ${command} ===`);
@@ -166,15 +169,19 @@ class CommandTracker {
       },
 
       stop(msg, code) {
+        // A raw command-error dump shows as its one informative line, in the
+        // spinner and the Stats box alike; the log keeps the full text.
+        const shown = displayLine(msg);
         if (tracker._currentStep) {
           const elapsed = performance.now() - tracker._currentStep.startTime;
-          tracker.steps.push({ label: msg || tracker._currentStep.label, durationMs: elapsed });
+          tracker.steps.push({ label: shown || tracker._currentStep.label, durationMs: elapsed });
           tracker._write(
-            `[${formatTime(new Date())}] DONE   ${msg || tracker._currentStep.label} (${formatDuration(elapsed)})`,
+            `[${formatTime(new Date())}] DONE   ${shown || tracker._currentStep.label} (${formatDuration(elapsed)})`,
           );
           tracker._currentStep = null;
         }
-        realSpinner.stop(msg, code);
+        if (shown !== msg) tracker._write(`  detail: ${msg}`);
+        realSpinner.stop(shown, code);
       },
 
       message(msg) {
@@ -212,10 +219,12 @@ class CommandTracker {
     this._write('');
     this._write(`Finished: ${new Date().toISOString()}`);
 
-    // Close stream
-    if (this._stream) {
-      this._stream.end();
-      this._stream = null;
+    // Close the log
+    if (this._fd !== null) {
+      try {
+        closeSync(this._fd);
+      } catch {}
+      this._fd = null;
     }
 
     // Print timing stats table to console (only if >1 step)
@@ -236,8 +245,11 @@ class CommandTracker {
    * @private
    */
   _write(line) {
-    if (this._stream) {
-      this._stream.write(`${line}\n`);
+    if (this._fd === null) return;
+    try {
+      writeSync(this._fd, `${line}\n`);
+    } catch {
+      // best-effort: a log write must never break the command
     }
   }
 }

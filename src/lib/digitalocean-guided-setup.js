@@ -18,8 +18,13 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import {
+  dotenvPromptProblem,
+  normalizeOperatorValue,
+  pastedKeyShapeProblem,
+  readOperatorVar,
+} from './operator-env.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.digitalocean.com/v2';
 
@@ -185,7 +190,7 @@ export async function getApiToken(projectName, options = {}) {
       const check = await validateDigitalOceanToken(envToken);
       if (!check.valid) {
         p.log.warn(
-          `DIGITALOCEAN_API_TOKEN environment variable is set but invalid: ${check.error}`,
+          `DIGITALOCEAN_API_TOKEN from ${describeCredentialSource(['DIGITALOCEAN_API_TOKEN']).where} is set but invalid: ${check.error}`,
         );
         // Fall through to interactive prompt
       } else {
@@ -195,7 +200,7 @@ export async function getApiToken(projectName, options = {}) {
           );
         }
         p.log.info(
-          '✓ Using DigitalOcean API token from DIGITALOCEAN_API_TOKEN environment variable',
+          `✓ Using DigitalOcean API token from ${describeCredentialSource(['DIGITALOCEAN_API_TOKEN']).label}`,
         );
         return envToken;
       }
@@ -275,7 +280,7 @@ export async function getApiToken(projectName, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     // Check environment variables
@@ -283,8 +288,9 @@ export async function getS3Credentials(projectName, options = {}) {
     const envSecretKey = readOperatorVar('DIGITALOCEAN_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
-      p.log.info('✓ Using Spaces credentials from environment variables');
-      return { accessKey: envAccessKey, secretKey: envSecretKey };
+      const from = describeCredentialSource(['DIGITALOCEAN_ACCESS_KEY', 'DIGITALOCEAN_SECRET_KEY']);
+      p.log.info(`✓ Using Spaces credentials from ${from.label}`);
+      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
     }
   }
 
@@ -304,7 +310,10 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Spaces Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return dotenvPromptProblem('DIGITALOCEAN_ACCESS_KEY', v);
+      return (
+        pastedKeyShapeProblem('DIGITALOCEAN_ACCESS_KEY', v) ??
+        dotenvPromptProblem('DIGITALOCEAN_ACCESS_KEY', v)
+      );
     },
   });
 
@@ -316,7 +325,10 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Spaces Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return dotenvPromptProblem('DIGITALOCEAN_SECRET_KEY', v);
+      return (
+        pastedKeyShapeProblem('DIGITALOCEAN_SECRET_KEY', v) ??
+        dotenvPromptProblem('DIGITALOCEAN_SECRET_KEY', v)
+      );
     },
   });
 
@@ -340,12 +352,23 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.DIGITALOCEAN_ACCESS_KEY = accessKey;
   process.env.DIGITALOCEAN_SECRET_KEY = secretKey;
 
+  const keys = {
+    DIGITALOCEAN_ACCESS_KEY: accessKey,
+    DIGITALOCEAN_SECRET_KEY: secretKey,
+  };
+  // deferSave: the caller verifies the keys against S3 first and calls
+  // save() only once they pass, so a rejected pair is never written.
+  if (deferSave) {
+    return {
+      accessKey,
+      secretKey,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
   if (save) {
-    await saveIfWanted({
-      DIGITALOCEAN_ACCESS_KEY: accessKey,
-      DIGITALOCEAN_SECRET_KEY: secretKey,
-    });
+    await saveIfWanted(keys);
   }
 
-  return { accessKey, secretKey };
+  return { accessKey, secretKey, source: 'what you pasted' };
 }

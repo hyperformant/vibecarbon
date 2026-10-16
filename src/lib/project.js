@@ -454,6 +454,33 @@ export function getBootstrappedKeys() {
   return bootstrappedKeys;
 }
 
+/**
+ * Where a set of operator credentials already in process.env came from, for
+ * the line that tells the operator which keys a command is using. Keys a
+ * stale or another project's export supplied are the usual cause of "my keys
+ * are right but S3 says no", so the line has to say which store to fix.
+ *
+ * `env-local` when bootstrapOperatorEnv loaded every key from the project's
+ * .env.local, else `shell` (an export, a CI secret, a parent process).
+ *
+ * `label` names the variables for the shell case; `where` is the bare place,
+ * for a line that already names the variable itself.
+ *
+ * @param {string[]} keys
+ * @returns {{ source: 'env-local' | 'shell', label: string, where: string }}
+ */
+export function describeCredentialSource(keys) {
+  if (keys.length > 0 && keys.every((k) => bootstrappedKeys.has(k))) {
+    const where = "your project's .env.local";
+    return { source: 'env-local', label: where, where };
+  }
+  return {
+    source: 'shell',
+    label: `your shell environment (${keys.join(', ')})`,
+    where: 'your shell environment',
+  };
+}
+
 // ============================================================================
 // GIT ADD ALLOWLIST
 // ============================================================================

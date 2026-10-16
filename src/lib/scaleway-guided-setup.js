@@ -78,7 +78,7 @@ import { registryEntry } from './config-registry.js';
 import { resolveNameservers } from './dns-propagation.js';
 import { DNS_PROVIDERS, getDnsProvider, locateDomainBackend } from './dns-provider.js';
 import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 import {
   EXTERNAL_DOMAIN_CHALLENGE_NAME,
   getExternalDomainRegistration,
@@ -96,6 +96,7 @@ const API_BASE = 'https://api.scaleway.com';
 // (SCALEWAY_SECRET_KEY). configure-providers.js reads this to persist and
 // summarize the full triple generically.
 export const EXTRA_ENV_KEYS = ['SCALEWAY_ACCESS_KEY', 'SCALEWAY_DEFAULT_PROJECT_ID'];
+const SCALEWAY_TRIPLE = ['SCALEWAY_SECRET_KEY', ...EXTRA_ENV_KEYS];
 
 // Access key: 20 chars, self-prefixed (SDK validator ^SCW[A-Z0-9]{17}$ —
 // validation/is.go). Secret key and Project ID are both plain UUIDs (same
@@ -320,13 +321,17 @@ export async function getApiToken(projectName, options = {}) {
       warnIfBadFormat(envSecret, 'secret key', UUID_FORMAT, 'a UUID');
       const check = await validateScalewaySecretKey(envSecret);
       if (!check.valid) {
-        p.log.warn(`SCALEWAY_SECRET_KEY environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `SCALEWAY_SECRET_KEY from ${describeCredentialSource(SCALEWAY_TRIPLE).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Scaleway API to verify key, proceeding with saved key');
         }
-        p.log.info('✓ Using Scaleway credentials from SCALEWAY_* environment variables');
+        p.log.info(
+          `✓ Using Scaleway credentials from ${describeCredentialSource(SCALEWAY_TRIPLE).label}`,
+        );
         return envSecret;
       }
     } else if (envSecret) {
@@ -746,17 +751,18 @@ export async function onboardDomain(secretKey, domain = null, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     const envAccessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
     const envSecretKey = readOperatorVar('SCALEWAY_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
+      const from = describeCredentialSource(['SCALEWAY_ACCESS_KEY', 'SCALEWAY_SECRET_KEY']);
       p.log.info(
-        '✓ Using Object Storage credentials from SCALEWAY_* environment variables (same IAM pair as compute)',
+        `✓ Using Object Storage credentials from ${from.label} (same IAM pair as compute)`,
       );
-      return { accessKey: envAccessKey, secretKey: envSecretKey };
+      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
     }
   }
 
@@ -766,10 +772,24 @@ export async function getS3Credentials(projectName, options = {}) {
 
   // The triple flow collects (and validates) the pair; force so a partial
   // env doesn't short-circuit the collection this call exists to do.
-  const secretKey = await getApiToken(projectName, { save, force: true });
+  const secretKey = await getApiToken(projectName, { save: save && !deferSave, force: true });
   const accessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
   if (!secretKey || !accessKey) return null;
 
   p.log.success('Object Storage credentials received!');
-  return { accessKey, secretKey };
+  if (deferSave) {
+    // The caller saves the triple once the pair passes its S3 check.
+    const keys = {
+      SCALEWAY_SECRET_KEY: secretKey,
+      SCALEWAY_ACCESS_KEY: accessKey,
+      SCALEWAY_DEFAULT_PROJECT_ID: readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value,
+    };
+    return {
+      accessKey,
+      secretKey,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
+  return { accessKey, secretKey, source: 'what you pasted' };
 }
