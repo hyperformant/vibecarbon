@@ -119,8 +119,9 @@ describeDocker('Docker Services Smoke Test', () => {
         throw new Error('Traefik failed to become ready');
       }
 
-      // Wait for app to be healthy (it needs to build first)
-      const appReady = await waitForHttpHealth('http://localhost/health', {
+      // Wait for app to be healthy (it needs to build first). The app's
+      // health route is /api/health; /health is a 404.
+      const appReady = await waitForHttpHealth('http://localhost/api/health', {
         timeout: testConfig.smoke.timeouts.appBuild,
         headers: { Host: 'localhost' },
         label: 'App health',
@@ -408,14 +409,18 @@ describeDocker('Docker Services Smoke Test', () => {
       expect(runningServices).toContain('traefik');
     });
 
-    it('dashboard responds via traefik.localhost (requires auth)', async ({ skip }) => {
+    it('dashboard responds via traefik.localhost', async ({ skip }) => {
       if (!traefikAvailable) skip();
-      // Dashboard is protected by admin-auth middleware
+      // The dev file set puts no middleware on the dashboard router; only the
+      // prod overlay adds super-admin-auth (pinned without docker by
+      // tests/unit/template/admin-surface-auth.test.ts). This smoke never ran
+      // for a non-root user until the port probe stopped reading EACCES on :80
+      // as busy, which is how its old 401/302 expectation went unnoticed.
       const response = await fetchWithTimeout('http://localhost/api/overview', 5000, {
         headers: { Host: 'traefik.localhost' },
       });
-      // Expect 401 or 302 redirect to login (auth required)
-      expect([401, 302]).toContain(response.status);
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body).providers).toContain('Docker');
     });
 
     it('routes traffic on port 80', async ({ skip }) => {
@@ -453,11 +458,11 @@ describeDocker('Docker Services Smoke Test', () => {
 
     it('health endpoint responds via Traefik', async ({ skip }) => {
       if (!traefikAvailable) skip();
-      // App health is available at /health through Traefik
-      const response = await fetchWithTimeout('http://localhost/health', 5000, {
+      const response = await fetchWithTimeout('http://localhost/api/health', 5000, {
         headers: { Host: 'localhost' },
       });
       expect(response.ok).toBe(true);
+      expect(JSON.parse(response.body).migrationStatus).toBe('applied');
     });
 
     // Auth runs inside the app: there is no auth container. The app creates

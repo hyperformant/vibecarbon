@@ -1,4 +1,5 @@
 import { type ExecSyncOptions, execFileSync, execSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
 import { connect, createServer } from 'node:net';
 import { delimiter } from 'node:path';
 import { testConfig } from '../config.js';
@@ -150,25 +151,40 @@ export async function arePortsAvailable(
 // =============================================================================
 
 /**
- * HTTP fetch with timeout and error handling
+ * HTTP GET (or `options.method`) with a timeout; never throws (status 0 on
+ * any transport error).
+ *
+ * Built on node:http, not fetch: fetch treats `Host` as a forbidden header
+ * and silently sends the URL's own host instead, so every Traefik case that
+ * routed by Host (`traefik.localhost`) actually reached the `localhost`
+ * router, and only the cases whose Host matched the URL could pass.
  */
-export async function fetchWithTimeout(
+export function fetchWithTimeout(
   url: string,
   timeoutMs: number,
-  options?: RequestInit,
+  options?: { method?: string; headers?: Record<string, string> },
 ): Promise<FetchResult> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    const body = await response.text();
-    return { ok: response.ok, status: response.status, body };
-  } catch {
-    return { ok: false, status: 0, body: '' };
-  } finally {
-    clearTimeout(timeout);
-  }
+  return new Promise((resolve) => {
+    const req = httpRequest(
+      url,
+      { method: options?.method ?? 'GET', headers: options?.headers, timeout: timeoutMs },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          resolve({ ok: status >= 200 && status < 300, status, body });
+        });
+        res.on('error', () => resolve({ ok: false, status: 0, body: '' }));
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', () => resolve({ ok: false, status: 0, body: '' }));
+    req.end();
+  });
 }
 
 // =============================================================================

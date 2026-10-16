@@ -5,9 +5,10 @@
  * (final review M8). EACCES now falls back to asking the port.
  */
 import { readFileSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer, type Server } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isPortAvailable, nothingListensOn } from '../../_shared/docker-utils.js';
+import { fetchWithTimeout, isPortAvailable, nothingListensOn } from '../../_shared/docker-utils.js';
 
 let server: Server | null = null;
 afterEach(async () => {
@@ -54,4 +55,33 @@ describe('isPortAvailable', () => {
       expect(await isPortAvailable(80)).toBe(true);
     },
   );
+});
+
+// fetch drops a caller's Host header, so the smoke's Host-routed Traefik
+// cases (traefik.localhost) silently hit the localhost router instead.
+describe('fetchWithTimeout', () => {
+  it('sends the Host header it is given', async () => {
+    const http = createHttpServer((req, res) => res.end(req.headers.host));
+    await new Promise<void>((r) => http.listen(0, '127.0.0.1', () => r()));
+    const { port } = http.address() as { port: number };
+    try {
+      const r = await fetchWithTimeout(`http://127.0.0.1:${port}/`, 2000, {
+        headers: { Host: 'traefik.localhost' },
+      });
+      expect(r).toEqual({ ok: true, status: 200, body: 'traefik.localhost' });
+    } finally {
+      await new Promise<void>((r) => http.close(() => r()));
+    }
+  });
+
+  it('a refused connection is status 0, never a throw', async () => {
+    const port = await listen();
+    await new Promise<void>((r) => server?.close(() => r()));
+    server = null;
+    expect(await fetchWithTimeout(`http://127.0.0.1:${port}/`, 2000)).toEqual({
+      ok: false,
+      status: 0,
+      body: '',
+    });
+  });
 });
