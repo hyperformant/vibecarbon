@@ -91,6 +91,14 @@ CREATE TRIGGER my_table_updated_at
   EXECUTE FUNCTION update_updated_at();
 ```
 
+### Migrating a live app
+
+Your app applies pending migrations itself when it starts, while the previous version may still be serving traffic. Three habits keep that safe:
+
+- **Set a lock timeout on busy tables.** Changing a table locks it. If a long query is already using the table, your migration waits for it, and every new query on that table waits behind your migration, so the app stalls. Start a migration that touches a busy table with `SET LOCAL lock_timeout = '5s';`. If the lock does not come in time, the migration fails cleanly, nothing is applied, and you can deploy again at a quieter moment.
+- **Expand, then contract.** During a rollout, old and new versions of your app run side by side against the new schema. So never drop or rename a column the old version still reads in the same deploy. Add the new column first and ship code that handles both, then remove the old column in a later deploy.
+- **Keep each migration short.** A deploy waits about 10 minutes on Kubernetes, and about 2.5 minutes on Docker Compose, for migrations to finish. A longer migration is still running when the deploy reports failure. Backfill big tables in batches (a script or a [background job](/docs/background-jobs)) rather than in one migration.
+
 ## Row-Level Security
 
 Every table has RLS enabled. Here is how a request reaches it: your route calls `withUserDb(user.id, ...)`, which opens a transaction, switches to the `app_user` role, and sets `app.user_id` to the signed-in user's id (empty for an anonymous visitor). Policies read that id back with `app.user_id()`, which returns the user's UUID, or `NULL` when nobody is signed in.
