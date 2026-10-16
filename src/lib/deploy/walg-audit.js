@@ -8,8 +8,8 @@
  *
  * WHY THIS EXISTS
  * ---------------
- * `carbon/db/Dockerfile` proves the wal-g BINARY executes (`wal-g --version`
- * runs in the build, so a wrong-arch or glibc-mismatched download fails there).
+ * `docker/postgres-walg/Dockerfile` proves the wal-g BINARY executes (`wal-g --version`
+ * runs in the image build, so a wrong-arch binary fails there).
  * Deploy then asserts `archive_mode=on`. Neither says anything about whether
  * wal-g can actually TALK TO THE BUCKET from the deployed container. Wrong or
  * expired S3 keys, a bucket that doesn't exist, a mistyped endpoint/region, or
@@ -54,7 +54,7 @@
  * Wherever wal-g is deployed, on both paths, gated on backups actually being
  * configured. Backups CAN be disabled (a deploy with no S3 bucket renders
  * `WALG_S3_PREFIX` as the empty-bucket form `s3:///backups/...` — see
- * carbon/docker-compose.yml and carbon/k8s/values/supabase.values.yaml), and
+ * carbon/docker-compose.yml and carbon/k8s/base/db/statefulset.yaml), and
  * the probe detects that from INSIDE the container and reports a skip. Testing
  * the env wal-g actually sees is the same technique
  * carbon/backup/compose-backup.sh uses, and it means the gate can never drift
@@ -98,6 +98,7 @@
 import { progressLog } from '../cli/progress.js';
 import { runWithRetry } from '../retry.js';
 import { parseWalgBackupList } from '../walg-backups.js';
+import { DB_POD } from './db-workload.js';
 
 /**
  * SQL read from `pg_stat_archiver`, written for `psql -tAX` (tuples-only,
@@ -158,7 +159,7 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
         // write-guard (the post-failover rot state); `t` = a node that is still
         // a replica and should never have been audited as a primary; empty =
         // psql could not answer, which changes neither.
-        `  REC="$(psql -U supabase_admin -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"`,
+        `  REC="$(psql -U postgres -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"`,
         '  echo "WALG_AUDIT=fail:stale-standby-role"; echo "WALG_AUDIT_PREFIX=$PFX"',
         '  echo "WALG_AUDIT_RECOVERY=$REC"; exit 0',
       ]
@@ -178,7 +179,7 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
     'fi',
     'LIST="$(wal-g backup-list --json 2>&1)"',
     'RC=$?',
-    `ARCHIVER="$(psql -U supabase_admin -d postgres -tAX -c "${WALG_ARCHIVER_SQL}" 2>/dev/null)"`,
+    `ARCHIVER="$(psql -U postgres -d postgres -tAX -c "${WALG_ARCHIVER_SQL}" 2>/dev/null)"`,
     'echo "WALG_AUDIT=probed"',
     'echo "WALG_AUDIT_PREFIX=$PFX"',
     'echo "WALG_AUDIT_RC=$RC"',
@@ -220,7 +221,7 @@ export const WALG_AUDIT_PROBE_TIMEOUT_MS = 120_000;
  */
 const VERIFY_HINTS = {
   compose: 'docker compose exec -T db wal-g backup-list',
-  k8s: 'kubectl -n vibecarbon exec supabase-supabase-db-0 -- wal-g backup-list',
+  k8s: `kubectl -n vibecarbon exec ${DB_POD} -- wal-g backup-list`,
 };
 
 /** Keep operator-facing error bodies bounded without losing the useful tail. */
@@ -644,12 +645,12 @@ export function composeWalgAuditShell(opts = {}) {
 
 /**
  * kubectl argv (without the leading `kubectl`) that runs the probe in the
- * supabase-db pod. Same probe, same evaluator — only the exec seam differs.
+ * db pod. Same probe, same evaluator — only the exec seam differs.
  *
  * @param {string} [dbPod]
  * @param {{requirePrimary?: boolean}} [opts]
  * @returns {string[]}
  */
-export function k8sWalgAuditArgv(dbPod = 'supabase-supabase-db-0', opts = {}) {
+export function k8sWalgAuditArgv(dbPod = DB_POD, opts = {}) {
   return ['-n', 'vibecarbon', 'exec', dbPod, '--', 'bash', '-c', buildWalgAuditProbe(opts)];
 }

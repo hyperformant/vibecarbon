@@ -1,36 +1,38 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { isSuperAdmin } from '../../lib/auth';
-import { getClientIp } from '../../lib/client-ip';
-import { env } from '../../lib/env';
+import { magicLinkAvailable } from '../../auth/email';
+import { socialProviders } from '../../auth/providers';
+import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
+import { appSettings } from '../../db/schema';
+import { isoTimestamp } from '../../db/values';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
-import { createRateLimiter } from '../../lib/rate-limiter';
-import { createAuthClient, supabaseAdmin } from '../../lib/supabase';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
-// Helper to access tables not yet in generated types
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
+/**
+ * Upsert one app_settings flag as `{ enabled }`, stamped with the admin who set it.
+ */
+async function setFlag(key: string, enabled: boolean, updatedBy: string): Promise<void> {
+  await adminDb
+    .insert(appSettings)
+    .values({ key, value: { enabled }, updatedBy })
+    .onConflictDoUpdate({ target: appSettings.key, set: { value: { enabled }, updatedBy } });
+}
 
+/**
+ * App settings and the account-lockout admin tools. Sign-in itself is the
+ * in-process auth API at /api/auth (server/auth/), whose lockout plugin
+ * (auth/lockout.ts) records and clears the failures these endpoints list
+ * and unlock.
+ */
 const authRoutes = new Hono<{ Variables: HonoVariables }>();
-
-// Strict per-IP limiter on login, on top of the app-wide 100/min and the
-// per-(email,ip) DB lockout. The lockout is per-email, so without this an
-// attacker gets 100 req/min/IP of CROSS-email credential stuffing (a fresh
-// lockout bucket per email). 10/15min/IP closes the stuffing + GoTrue-load gap
-// without letting an attacker lock a victim out on the victim's own IP.
-authRoutes.use('/login', createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10 }));
 
 // ============================================================================
 // VALIDATION SCHEMAS
 // ============================================================================
-
-const loginSchema = z.object({
-  email: z.string().email('Valid email is required'),
-  password: z.string().min(1, 'Password is required'),
-});
 
 const unlockAccountSchema = z.object({
   email: z.string().email('Valid email is required'),
@@ -40,112 +42,6 @@ const updateSettingsSchema = z.object({
   mfa_enabled: z.boolean().optional(),
   user_docs_enabled: z.boolean().optional(),
   api_docs_enabled: z.boolean().optional(),
-});
-
-// ============================================================================
-// LOGIN ENDPOINT (consolidated lockout + auth)
-// ============================================================================
-
-/**
- * Login with email/password
- * Handles lockout checking, authentication, and lockout recording in a single request
- */
-authRoutes.post('/login', async (c) => {
-  let body: z.infer<typeof loginSchema>;
-  try {
-    const rawBody = await c.req.json();
-    const result = loginSchema.safeParse(rawBody);
-
-    if (!result.success) {
-      const errors = result.error.issues.map((e: { message: string }) => e.message).join(', ');
-      return c.json({ error: errors }, 400);
-    }
-
-    body = result.data;
-  } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
-
-  const ipAddress = getClientIp(c);
-  const email = body.email.toLowerCase();
-
-  try {
-    // Step 1: Check if account is locked
-    const { data: lockoutData, error: lockoutError } = await adminDb.rpc('check_account_lockout', {
-      p_email: email,
-      p_ip_address: ipAddress,
-    });
-
-    if (lockoutError) {
-      logger.error({ error: lockoutError }, 'Failed to check lockout status');
-      // Continue with login attempt even if lockout check fails
-    } else if (lockoutData?.locked) {
-      return c.json(
-        {
-          error: `Account temporarily locked due to too many failed attempts. Please try again in ${lockoutData.remaining_minutes} minute${lockoutData.remaining_minutes === 1 ? '' : 's'}.`,
-          locked: true,
-          remainingMinutes: lockoutData.remaining_minutes,
-        },
-        429
-      );
-    }
-
-    // Step 2: Attempt login via fresh auth client
-    // Uses a disposable client to avoid contaminating supabaseAdmin's session state
-    const authClient = createAuthClient();
-    const { data: authData, error: authError } = await authClient.auth.signInWithPassword({
-      email,
-      password: body.password,
-    });
-
-    if (authError || !authData.session) {
-      // Step 3a: Record failed attempt
-      try {
-        await adminDb.rpc('record_failed_login', {
-          p_email: email,
-          p_ip_address: ipAddress,
-        });
-        logger.warn({ email, ip: ipAddress }, 'Failed login attempt recorded');
-      } catch (recordError) {
-        logger.error({ error: recordError }, 'Failed to record login attempt');
-      }
-
-      // SECURITY: return a single generic message regardless of the underlying
-      // auth error so responses can't be used to enumerate which emails exist
-      // or distinguish "wrong password" from "no such user".
-      return c.json({ error: 'Invalid credentials' }, 401);
-    }
-
-    // Step 3b: Clear failed attempts on success
-    try {
-      await adminDb.rpc('clear_failed_logins', {
-        p_email: email,
-        p_ip_address: ipAddress,
-      });
-    } catch (clearError) {
-      logger.error({ error: clearError }, 'Failed to clear lockout records');
-    }
-
-    // Return session data for client to use
-    return c.json({
-      session: {
-        access_token: authData.session.access_token,
-        refresh_token: authData.session.refresh_token,
-        expires_in: authData.session.expires_in,
-        expires_at: authData.session.expires_at,
-        token_type: authData.session.token_type,
-      },
-      user: {
-        id: authData.user.id,
-        email: authData.user.email,
-        app_metadata: authData.user.app_metadata,
-        user_metadata: authData.user.user_metadata,
-      },
-    });
-  } catch (error) {
-    logger.error({ error }, 'Login error');
-    return c.json({ error: sanitizeError(error, 'Login failed') }, 500);
-  }
 });
 
 // ============================================================================
@@ -162,9 +58,8 @@ authRoutes.post('/admin/unlock-account', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   let body: z.infer<typeof unlockAccountSchema>;
   try {
@@ -182,13 +77,7 @@ authRoutes.post('/admin/unlock-account', async (c) => {
   }
 
   try {
-    const { error } = await adminDb.rpc('admin_unlock_account', {
-      p_email: body.email.toLowerCase(),
-    });
-
-    if (error) {
-      throw error;
-    }
+    await adminDb.execute(sql`select admin_unlock_account(${body.email.toLowerCase()})`);
 
     logger.info({ email: body.email, unlockedBy: user.id }, 'Account unlocked by admin');
 
@@ -208,31 +97,25 @@ authRoutes.get('/admin/locked-accounts', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   try {
-    const { data, error } = await adminDb.rpc('get_locked_accounts');
-
-    if (error) {
-      throw error;
-    }
+    const { rows } = await adminDb.execute<{
+      email: string;
+      attempt_count: string | number;
+      first_attempt: string;
+      last_attempt: string;
+    }>(sql`select email, attempt_count, first_attempt, last_attempt from get_locked_accounts()`);
 
     return c.json({
-      lockedAccounts: (data || []).map(
-        (account: {
-          email: string;
-          attempt_count: number;
-          first_attempt: string;
-          last_attempt: string;
-        }) => ({
-          email: account.email,
-          attemptCount: account.attempt_count,
-          firstAttempt: account.first_attempt,
-          lastAttempt: account.last_attempt,
-        })
-      ),
+      lockedAccounts: rows.map((account) => ({
+        email: account.email,
+        // count(*) is a bigint, which the driver returns as text.
+        attemptCount: Number(account.attempt_count),
+        firstAttempt: isoTimestamp(String(account.first_attempt)),
+        lastAttempt: isoTimestamp(String(account.last_attempt)),
+      })),
     });
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch locked accounts') }, 500);
@@ -248,19 +131,20 @@ authRoutes.get('/admin/locked-accounts', async (c) => {
  */
 authRoutes.get('/settings', async (c) => {
   try {
-    const { data, error } = await adminDb
-      .from('app_settings')
-      .select('key, value')
-      .in('key', ['mfa_enabled', 'user_docs_enabled', 'api_docs_enabled']);
-
-    // If table doesn't exist or query fails, return defaults
-    if (error) {
-      logger.debug({ error: error.message }, 'app_settings query failed, using defaults');
+    // If the table doesn't exist or the query fails, return defaults
+    let rows: { key: string; value: unknown }[] = [];
+    try {
+      rows = await adminDb
+        .select({ key: appSettings.key, value: appSettings.value })
+        .from(appSettings)
+        .where(inArray(appSettings.key, ['mfa_enabled', 'user_docs_enabled', 'api_docs_enabled']));
+    } catch (error) {
+      logger.debug({ err: dbErrorForLog(error) }, 'app_settings query failed, using defaults');
     }
 
     // Convert to object
     const settings: Record<string, unknown> = {};
-    for (const row of data || []) {
+    for (const row of rows) {
       settings[row.key] = row.value;
     }
 
@@ -272,31 +156,25 @@ authRoutes.get('/settings', async (c) => {
         apiDocsEnabled:
           (settings.api_docs_enabled as { enabled?: boolean } | undefined)?.enabled ?? true,
         providers: {
-          google: env.GOOGLE_ENABLED,
-          microsoft: env.MICROSOFT_ENABLED,
-          github: env.GITHUB_ENABLED,
-          apple: env.APPLE_ENABLED,
-          discord: env.DISCORD_ENABLED,
+          google: socialProviders.google,
+          microsoft: socialProviders.microsoft,
         },
-        magicLinkEnabled: env.MAGIC_LINK_ENABLED,
+        magicLinkEnabled: magicLinkAvailable(),
       },
     });
   } catch (error) {
     // Return defaults on any error
-    logger.debug({ error }, 'app_settings fetch failed, using defaults');
+    logger.debug({ err: dbErrorForLog(error) }, 'app_settings fetch failed, using defaults');
     return c.json({
       settings: {
         mfaEnabled: false,
         userDocsEnabled: true,
         apiDocsEnabled: true,
         providers: {
-          google: env.GOOGLE_ENABLED,
-          microsoft: env.MICROSOFT_ENABLED,
-          github: env.GITHUB_ENABLED,
-          apple: env.APPLE_ENABLED,
-          discord: env.DISCORD_ENABLED,
+          google: socialProviders.google,
+          microsoft: socialProviders.microsoft,
         },
-        magicLinkEnabled: env.MAGIC_LINK_ENABLED,
+        magicLinkEnabled: magicLinkAvailable(),
       },
     });
   }
@@ -312,9 +190,8 @@ authRoutes.patch('/admin/settings', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   let body: z.infer<typeof updateSettingsSchema>;
   try {
@@ -334,29 +211,13 @@ authRoutes.patch('/admin/settings', async (c) => {
   try {
     // Update MFA setting if provided
     if (body.mfa_enabled !== undefined) {
-      const { error } = await adminDb.from('app_settings').upsert({
-        key: 'mfa_enabled',
-        value: { enabled: body.mfa_enabled },
-        updated_by: user.id,
-      });
-
-      if (error) {
-        throw error;
-      }
+      await setFlag('mfa_enabled', body.mfa_enabled, user.id);
 
       logger.info({ mfaEnabled: body.mfa_enabled, updatedBy: user.id }, 'MFA setting updated');
     }
 
     if (body.user_docs_enabled !== undefined) {
-      const { error } = await adminDb.from('app_settings').upsert({
-        key: 'user_docs_enabled',
-        value: { enabled: body.user_docs_enabled },
-        updated_by: user.id,
-      });
-
-      if (error) {
-        throw error;
-      }
+      await setFlag('user_docs_enabled', body.user_docs_enabled, user.id);
 
       logger.info(
         { userDocsEnabled: body.user_docs_enabled, updatedBy: user.id },
@@ -365,15 +226,7 @@ authRoutes.patch('/admin/settings', async (c) => {
     }
 
     if (body.api_docs_enabled !== undefined) {
-      const { error } = await adminDb.from('app_settings').upsert({
-        key: 'api_docs_enabled',
-        value: { enabled: body.api_docs_enabled },
-        updated_by: user.id,
-      });
-
-      if (error) {
-        throw error;
-      }
+      await setFlag('api_docs_enabled', body.api_docs_enabled, user.id);
 
       logger.info(
         { apiDocsEnabled: body.api_docs_enabled, updatedBy: user.id },

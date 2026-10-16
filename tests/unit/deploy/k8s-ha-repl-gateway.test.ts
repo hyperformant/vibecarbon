@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 // `postgres-data`), and the db container image (reused for the swap pod). No PV
 // node-path walk anymore — the swap runs in a helper pod that mounts the PVC, so
 // it works for local-path AND csi.hetzner.cloud volumes alike.
-const DB_IMAGE = 'supabase/postgres:15.8.1.060';
+const DB_IMAGE = 'postgres:17';
 // Pretty-printed (null, 2) like real kubectl -o json output: the ha/index
 // self-heal waits on the literal substring `"phase": "Running"` before reading
 // the pod spec.
@@ -15,7 +15,7 @@ const POD_JSON = JSON.stringify(
     spec: {
       containers: [
         {
-          name: 'supabase-db',
+          name: 'db',
           image: DB_IMAGE,
           volumeMounts: [
             {
@@ -29,7 +29,7 @@ const POD_JSON = JSON.stringify(
       volumes: [
         {
           name: 'postgres-volume',
-          persistentVolumeClaim: { claimName: 'data-supabase-supabase-db-0' },
+          persistentVolumeClaim: { claimName: 'data-db-0' },
         },
       ],
     },
@@ -61,7 +61,7 @@ function happyExec({
   let reseeded = false;
   return async (argv: string[]) => {
     const cmd = Array.isArray(argv) ? argv.join(' ') : String(argv);
-    if (cmd.includes('scale statefulset supabase-supabase-db') && cmd.includes('--replicas=0')) {
+    if (cmd.includes('scale statefulset db') && cmd.includes('--replicas=0')) {
       reseeded = true;
     }
     // Swap-pod lifecycle (must precede the generic db-pod matchers below).
@@ -176,7 +176,7 @@ describe('renderReplGatewayManifest', () => {
     });
     expect(out).not.toContain('__RELAY_LISTEN__');
     expect(out).not.toContain('__RELAY_TARGET__');
-    expect(out).not.toContain('__SUPABASE_PRIVATE_IP__');
+    expect(out).not.toContain('__DB_PRIVATE_IP__');
     expect(out).toContain('bind=10.0.1.2');
     expect(out).toContain('cidr: 10.0.1.2/32');
     expect(out).toContain('allow-db-repl-gateway-egress');
@@ -187,10 +187,10 @@ describe('reestablishReplicationTransport — post-resize belt (item I-1)', () =
   const opts = {
     primaryIp: '1.1.1.1',
     standbyIp: '2.2.2.2',
-    primarySupabaseIp: '167.233.150.173',
-    standbySupabaseIp: '157.180.115.19',
-    primarySupabasePrivateIp: '10.0.1.2',
-    standbySupabasePrivateIp: '10.0.1.2',
+    primaryDbIp: '167.233.150.173',
+    standbyDbIp: '157.180.115.19',
+    primaryDbPrivateIp: '10.0.1.2',
+    standbyDbPrivateIp: '10.0.1.2',
     sshKeyPath: '/tmp/key',
   };
 
@@ -201,7 +201,7 @@ describe('reestablishReplicationTransport — post-resize belt (item I-1)', () =
 
     await reestablishReplicationTransport(opts);
 
-    // Tunnel recreated once, with the supabase PUBLIC IPs (self-heals the unit too).
+    // Tunnel recreated once, with the database nodes' PUBLIC IPs (self-heals the unit too).
     expect(exchangeAndBringUpTunnel).toHaveBeenCalledTimes(1);
     expect(exchangeAndBringUpTunnel).toHaveBeenCalledWith({
       primaryIp: '167.233.150.173',
@@ -248,10 +248,10 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
   const opts = {
     primaryIp: '1.1.1.1',
     standbyIp: '2.2.2.2',
-    primarySupabaseIp: '167.233.150.173',
-    standbySupabaseIp: '157.180.115.19',
-    primarySupabasePrivateIp: '10.0.1.2',
-    standbySupabasePrivateIp: '10.0.1.2',
+    primaryDbIp: '167.233.150.173',
+    standbyDbIp: '157.180.115.19',
+    primaryDbPrivateIp: '10.0.1.2',
+    standbyDbPrivateIp: '10.0.1.2',
     sshKeyPath: '/tmp/key',
   };
 
@@ -287,7 +287,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(applyInputs.some((i) => i.includes('TCP:127.0.0.1:5433'))).toBe(true);
     expect(applyInputs.some((i) => i.includes('TCP:10.99.0.1:15433'))).toBe(true);
 
-    // Tunnel bring-up called once, with the supabase PUBLIC IPs as endpoints.
+    // Tunnel bring-up called once, with the database nodes' PUBLIC IPs as endpoints.
     expect(exchangeAndBringUpTunnel).toHaveBeenCalledTimes(1);
     expect(exchangeAndBringUpTunnel).toHaveBeenCalledWith({
       primaryIp: '167.233.150.173',
@@ -297,9 +297,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
 
     // The db hostPort patch is STILL applied (primary gateway relays to it).
     expect(
-      calls.some(([argv]) =>
-        (argv as string[]).join(' ').includes('patch statefulset supabase-supabase-db'),
-      ),
+      calls.some(([argv]) => (argv as string[]).join(' ').includes('patch statefulset db')),
     ).toBe(true);
 
     // No TLS-era plumbing anywhere in the SSH stream.
@@ -337,12 +335,15 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(script).toContain('host replication replicator 10.42.0.0/16 scram-sha-256');
     expect(script).not.toContain('hostssl');
 
-    // Durable location: the supabase image's live hba (/etc, container-
-    // ephemeral) is copied into PGDATA, hba_file is repointed via ALTER SYSTEM
-    // (applied by the step-3 restart), and appends are idempotent.
+    // Durable location: the rules go into the hba file postgres actually
+    // reads (SHOW hba_file), which on our image is PGDATA/pg_hba.conf on the
+    // PVC; the script refuses any other location rather than appending to a
+    // file a restart would revert. Appends are idempotent; the step-3 restart
+    // loads them.
     expect(script).toContain('SHOW hba_file');
-    expect(script).toContain('HBA_DURABLE=/var/lib/postgresql/data/pg_hba.conf');
-    expect(script).toContain('ALTER SYSTEM SET hba_file');
+    expect(script).toContain('/var/lib/postgresql/data/*) ;;');
+    expect(script).toMatch(/not under PGDATA[^\n]*exit 1/);
+    expect(script).not.toContain('ALTER SYSTEM SET hba_file');
     expect(script).toContain('grep -qxF');
 
     // It targets the PRIMARY cluster (1.1.1.1), before the step-3 pod restart.
@@ -377,19 +378,19 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     // replicas=0 with no db pod — scale to 1 and wait for Running BEFORE
     // reading the pod spec (a healthy rig no-ops through this).
     const heal1 = joined.findIndex((c) =>
-      c.includes('scale statefulset supabase-supabase-db -n vibecarbon --replicas=1'),
+      c.includes('scale statefulset db -n vibecarbon --replicas=1'),
     );
-    const podRead = joined.findIndex((c) => c.includes('get pod supabase-supabase-db-0'));
+    const podRead = joined.findIndex((c) => c.includes('get pod db-0'));
     expect(heal1).toBeGreaterThanOrEqual(0);
     expect(podRead).toBeGreaterThan(heal1);
 
     // Clean StatefulSet-controller quiesce: scale to 0 THEN back to 1 (the
     // final scale-1 is the finally-block one, after the self-heal's).
     const scale0 = joined.findIndex((c) =>
-      c.includes('scale statefulset supabase-supabase-db -n vibecarbon --replicas=0'),
+      c.includes('scale statefulset db -n vibecarbon --replicas=0'),
     );
     const scale1 = joined.findLastIndex((c) =>
-      c.includes('scale statefulset supabase-supabase-db -n vibecarbon --replicas=1'),
+      c.includes('scale statefulset db -n vibecarbon --replicas=1'),
     );
     expect(scale0).toBeGreaterThan(heal1);
     expect(scale1).toBeGreaterThan(scale0);
@@ -397,7 +398,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     // The basebackup stages into a subdir of PGDATA (on the PVC) and does NOT
     // swap in-pod (swap:false) — the helper pod does the atomic swap.
     const stageCall = calls.find(([argv, o]) =>
-      (argv as string[]).join(' ').includes('exec -i -n vibecarbon supabase-supabase-db-0 -- bash')
+      (argv as string[]).join(' ').includes('exec -i -n vibecarbon db-0 -- bash')
         ? (o as { input?: string })?.input?.includes('.reseed_staging')
         : false,
     );
@@ -408,9 +409,9 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(stageInput).not.toMatch(/find \/var\/lib\/postgresql\/data -mindepth 1 -delete/);
     // conninfo is folded into the staged basebackup (present at first boot).
     expect(stageInput).toContain('primary_conninfo');
-    // hot_standby forced on in the staged auto.conf — the image's wal-g.conf
-    // ships hot_standby=off, which would make the reseeded standby refuse
-    // read-only connections while streaming fine.
+    // hot_standby pinned on in the staged auto.conf (read last): with it off,
+    // the reseeded standby would stream fine but refuse read-only connections,
+    // whatever the image config says.
     expect(stageInput).toContain('hot_standby = on');
 
     // The swap runs in a helper pod applied on the standby MASTER (2.2.2.2), NOT
@@ -424,7 +425,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(swapApply).toBeTruthy();
     expect(((swapApply as unknown[])[0] as string[]).join(' ')).toContain('2.2.2.2');
     const swapManifest = (swapApply?.[1] as { input?: string })?.input ?? '';
-    expect(swapManifest).toContain('data-supabase-supabase-db-0'); // same PVC
+    expect(swapManifest).toContain('data-db-0'); // same PVC
     expect(swapManifest).toContain(DB_IMAGE); // image reuse (already pulled)
     expect(swapManifest).toContain('bash'); // command runs the swap script
     // Mount the WHOLE PVC (no subPath) at /pgdata-vol; PGDATA = <root>/<subPath>.
@@ -478,7 +479,9 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     vi.useFakeTimers();
     try {
       const promise = setupReplication(opts);
-      const assertion = expect(promise).rejects.toThrow(/hot_standby is OFF .* wal-g\.conf/s);
+      const assertion = expect(promise).rejects.toThrow(
+        /hot_standby is OFF .* must pin hot_standby = on/s,
+      );
       await vi.runAllTimersAsync();
       await assertion;
     } finally {
@@ -497,9 +500,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const stageCall = vi
       .mocked(runCommandAsync)
       .mock.calls.find(([argv, o]) =>
-        (argv as string[])
-          .join(' ')
-          .includes('exec -i -n vibecarbon supabase-supabase-db-0 -- bash')
+        (argv as string[]).join(' ').includes('exec -i -n vibecarbon db-0 -- bash')
           ? ((o as { input?: string })?.input?.includes('pg_basebackup') ?? false)
           : false,
       );
@@ -531,7 +532,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
   it('fails FAST with the scheduler message when the swap pod is Unschedulable, and still scales back up', async () => {
     vi.mocked(runCommandAsync).mockClear();
     const schedMsg =
-      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: supabase}, ' +
+      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: db}, ' +
       '2 node(s) had volume node affinity conflict.';
     vi.mocked(runCommandAsync).mockImplementation(
       happyExec({
@@ -543,14 +544,14 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     // Terminal on the FIRST poll (a taint/affinity conflict never self-heals) —
     // the error names the exact scheduler conflict, not a generic timeout.
     await expect(runWithFakeTimers(() => setupReplication(opts))).rejects.toThrow(
-      /could not be scheduled[\s\S]*untolerated taint \{dedicated: supabase\}/,
+      /could not be scheduled[\s\S]*untolerated taint \{dedicated: db\}/,
     );
 
     const cmds = vi
       .mocked(runCommandAsync)
       .mock.calls.map(([argv]) => (argv as string[]).join(' '));
-    // The swap pod manifest carries the dedicated=supabase toleration (the
-    // local-path PV pins the pod to the tainted supabase node).
+    // The swap pod manifest carries the dedicated=db toleration (the
+    // local-path PV pins the pod to the tainted database node).
     const swapApply = vi
       .mocked(runCommandAsync)
       .mock.calls.find(
@@ -561,7 +562,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     const swapManifest = (swapApply?.[1] as { input?: string })?.input ?? '';
     expect(swapManifest).toContain('"tolerations"');
     expect(swapManifest).toContain('"dedicated"');
-    expect(swapManifest).toContain('"supabase"');
+    expect(swapManifest).toContain('"db"');
     expect(swapManifest).toContain('"NoSchedule"');
     // finally-scale-1: the sts comes back up even on the unschedulable path.
     const scale0 = cmds.findIndex((c) => c.includes('--replicas=0'));
@@ -589,7 +590,7 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     let statReads = 0;
     vi.mocked(runCommandAsync).mockImplementation(async (argv: string[]) => {
       const cmd = Array.isArray(argv) ? argv.join(' ') : String(argv);
-      if (cmd.includes('scale statefulset supabase-supabase-db') && cmd.includes('--replicas=0')) {
+      if (cmd.includes('scale statefulset db') && cmd.includes('--replicas=0')) {
         reseeded = true;
       }
       if (cmd.includes('pg_stat_replication')) {

@@ -3,10 +3,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * Guards the production DB connection budget + Supavisor pooler config against
- * silent drift. Raw-text assertions (the repo has no YAML parser dep) over the
- * template's compose files. Not a runtime check — see the spec's e2e caveat:
- * the db-connection-pooling-design spec
+ * Guards the production DB connection budget and the database's network
+ * exposure against silent drift. Raw-text assertions (the repo has no YAML
+ * parser dep) over the template's compose files. Not a runtime check.
  */
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const base = readFileSync(join(REPO_ROOT, 'carbon/docker-compose.yml'), 'utf-8');
@@ -16,23 +15,18 @@ describe('DB connection budget (carbon/docker-compose.yml)', () => {
   it('sets an explicit Postgres max_connections=200 on the db command', () => {
     expect(base).toContain('max_connections=200');
   });
-
-  it('caps the PostgREST connection pool explicitly', () => {
-    expect(base).toMatch(/PGRST_DB_POOL:\s*["']?\d+/);
-  });
-
-  it('sets a PostgREST pool acquisition timeout (fail fast, not hang)', () => {
-    expect(base).toMatch(/PGRST_DB_POOL_ACQUISITION_TIMEOUT:\s*["']?\d+/);
-  });
 });
 
-describe('Supavisor external pooler (carbon/docker-compose.prod.yml)', () => {
-  it('defines the supavisor service', () => {
-    expect(prod).toMatch(/^\s{2}supavisor:/m);
-  });
-
-  it('exposes the transaction (5432) and session (6543) pooler ports', () => {
-    expect(prod).toContain('5432:5432');
-    expect(prod).toContain('6543:6543');
+describe('the database has no public port in production', () => {
+  // Operators reach the database through `vibecarbon shell` / SSH. The only
+  // host publication of 5432 is the dev override's DEV_DB_PORT, which is never
+  // deployed.
+  it('neither the base file nor the prod overlay publishes 5432 or 6543', () => {
+    for (const [name, text] of [
+      ['docker-compose.yml', base],
+      ['docker-compose.prod.yml', prod],
+    ]) {
+      expect(text, `${name} publishes a database port`).not.toMatch(/["']?[\d.:]*(5432|6543):\d+/);
+    }
   });
 });

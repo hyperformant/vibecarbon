@@ -18,9 +18,9 @@
  *   - **Hetzner ARM exists in only 3 of 6 locations** (fsn1/hel1/nbg1 — absent
  *     in ash/hil/sin), in only 4 SKUs (cax11/21/31/41), all inside the
  *     "Cost-Optimized / Limited availability" tier.
- *   - Everything the stack depends on — the full Supabase stack, Traefik,
- *     Kong, cert-manager, the Hetzner CCM/CSI drivers, cluster-autoscaler,
- *     registry:2, and the add-ons — publishes amd64 without question.
+ *   - Everything the stack depends on — Postgres, Traefik, cert-manager,
+ *     the Hetzner CCM/CSI drivers, cluster-autoscaler, registry:2, and the
+ *     add-ons — publishes amd64 without question.
  *
  * So a single pinned architecture buys correctness (no silent arch mismatch)
  * at zero real cost in provider reach.
@@ -35,6 +35,17 @@
  *
  * The server-type half of the same decision lives on the provider classes:
  * `BaseProvider.isArmServerType` / `BaseProvider.assertAmd64ServerType`.
+ *
+ * ## The one arm64 image: the db image, for local development only
+ *
+ * ghcr.io/hyperformant/postgres (docker/postgres-walg) is built for
+ * linux/arm64 as well, natively on GitHub's arm64 runner, solely so that local
+ * `vibecarbon up` on an Apple Silicon machine runs Postgres natively (every
+ * mode pulls that image, local dev included). The arm64 child is published
+ * from the next release: no tag published before it carries one. (The wal-g
+ * image it copies from is built the same way.) Servers remain amd64: nothing
+ * here or in the provider ARM rejection changes, and no server ever pulls the
+ * arm64 child.
  */
 
 /** Docker platform string every vibecarbon image is built for. */
@@ -42,6 +53,15 @@ export const TARGET_PLATFORM = 'linux/amd64';
 
 /** `docker build` flag form of {@link TARGET_PLATFORM}. */
 export const PLATFORM_BUILD_FLAG = `--platform=${TARGET_PLATFORM}`;
+
+/**
+ * The binfmt installer the hint below tells an operator to run, pinned by tag
+ * and multi-arch index digest like every other image ref
+ * (tests/unit/deploy/image-digest-census.test.ts); mirrored in
+ * .github/image-pins/Dockerfile so Dependabot proposes its bumps.
+ */
+export const BINFMT_IMAGE =
+  'tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0';
 
 /**
  * Appended to every build-failure message raised by a pinned build.
@@ -57,4 +77,4 @@ export const AMD64_BUILD_HINT =
   `If you are building on an arm64 machine (e.g. Apple Silicon) and the failure ` +
   `looks like "exec format error" or "no match for platform", Docker needs amd64 ` +
   `emulation: Docker Desktop ships it, and on Linux you can register it with ` +
-  `\`docker run --privileged --rm tonistiigi/binfmt --install amd64\`.`;
+  `\`docker run --privileged --rm ${BINFMT_IMAGE} --install amd64\`.`;

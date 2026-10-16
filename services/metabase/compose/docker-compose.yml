@@ -2,8 +2,17 @@
 # Added via: vibecarbon add metabase
 
 services:
+  # Extend the db service: the metabase role-init script, and the role's own
+  # password for it (never the superuser's). Postgres runs the script at first
+  # boot; `vibecarbon up` reruns it on every dev start.
+  db:
+    environment:
+      METABASE_DB_PASSWORD: ${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
+    volumes:
+      - ./volumes/db/metabase-init.sh:/docker-entrypoint-initdb.d/zz-metabase-init.sh:Z
+
   metabase:
-    image: metabase/metabase:latest
+    image: metabase/metabase:v0.64.2.7@sha256:f69044cd03f1a9968cdd427f23e3f50b893666f0092e6cac1ef7e2e30e100a96
     container_name: {{PROJECT_NAME}}-metabase
     restart: unless-stopped
     ports:
@@ -14,7 +23,7 @@ services:
       MB_DB_DBNAME: metabase
       MB_DB_PORT: 5432
       MB_DB_USER: metabase
-      MB_DB_PASS: ${POSTGRES_PASSWORD}
+      MB_DB_PASS: ${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
       MB_DB_HOST: db
       # Performance settings
       JAVA_OPTS: "-Xmx1g"
@@ -40,7 +49,7 @@ services:
       - "traefik.http.services.metabase.loadbalancer.server.port=3000"
 
   metabase-setup:
-    image: alpine:latest
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     container_name: {{PROJECT_NAME}}-metabase-setup
     volumes:
       - ./volumes/metabase/scripts:/scripts:ro
@@ -53,8 +62,11 @@ services:
       APP_DB_HOST: db
       APP_DB_PORT: 5432
       APP_DB_NAME: postgres
-      APP_DB_USER: postgres
-      DB_PASSWORD: ${DB_PASSWORD}
+      # The metabase role and its own password, never the superuser's:
+      # metabase-init.sh makes it NOSUPERUSER BYPASSRLS, read-only, with the
+      # server-only tables revoked.
+      APP_DB_USER: metabase
+      APP_DB_PASSWORD: ${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
     entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq && sh /scripts/setup.sh"]
     depends_on:
       metabase:

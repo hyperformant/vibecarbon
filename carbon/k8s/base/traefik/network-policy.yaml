@@ -22,7 +22,7 @@ spec:
         - protocol: TCP
           port: 8080
   egress:
-    # Allow connection to all pods in namespace (Traefik routes to app, kong, studio)
+    # Allow connection to all pods in namespace (Traefik routes to the app and the admin add-ons)
     - to:
         - podSelector: {}
     # Allow DNS resolution

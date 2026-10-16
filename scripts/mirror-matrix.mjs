@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * Emit the ghcr mirror matrix as JSON: one {src, dst} pair per entry in
- * `MIRRORED_K8S_IMAGES` (src/lib/images.js).
+ * Emit the ghcr mirror matrix as JSON: one {src, dst, digest} entry per image
+ * in `MIRRORED_K8S_IMAGES` (src/lib/images.js). `dst` is the tag the job
+ * pushes; `digest` is the pinned upstream linux/amd64 manifest the job copies
+ * (and the digest every deployed ref carries).
  *
  * Consumed by the `mirror-matrix` job in
  * .github/workflows/publish-images.yml, which feeds it
@@ -20,11 +22,12 @@
  *
  * Usage: node scripts/mirror-matrix.mjs
  */
-import { MIRRORED_K8S_IMAGES, k8sMirrorRef, k8sUpstreamRef } from '../src/lib/images.js';
+import { MIRRORED_K8S_IMAGES, k8sMirrorTagRef, k8sUpstreamRef } from '../src/lib/images.js';
 
 const matrix = MIRRORED_K8S_IMAGES.map((image) => ({
   src: k8sUpstreamRef(image),
-  dst: k8sMirrorRef(image),
+  dst: k8sMirrorTagRef(image),
+  digest: image.digest,
 }));
 
 // Single line: the workflow assigns this to a $GITHUB_OUTPUT value, and

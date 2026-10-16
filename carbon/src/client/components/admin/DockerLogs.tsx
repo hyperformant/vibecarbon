@@ -16,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { adminServices, getServiceUrl } from '@/lib/admin-services';
-import { getAuthHeaders } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface LogsResponse {
@@ -63,14 +63,12 @@ async function fetchLogs(container: string, since: string, tail: number): Promis
   if (container !== 'all') {
     params.set('container', container);
   }
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/_internal/services/status/logs?${params}`, { headers });
+  const response = await apiFetch(`/api/_internal/services/status/logs?${params}`);
   return response.json();
 }
 
 async function fetchContainers(): Promise<ContainersResponse> {
-  const headers = await getAuthHeaders();
-  const response = await fetch('/api/_internal/services/status/logs/containers', { headers });
+  const response = await apiFetch('/api/_internal/services/status/logs/containers');
   return response.json();
 }
 

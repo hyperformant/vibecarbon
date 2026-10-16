@@ -1,7 +1,7 @@
 /**
  * `loadCloudInit()` include-directive resolution.
  *
- * The three Hetzner k3s role scripts (master/supabase/worker) each carry a
+ * The three Hetzner k3s role scripts (master/database/worker) each carry a
  * block that must be IDENTICAL across all three — the containerd registry
  * mirror already is, by hand-copied duplication, with a comment conceding
  * that "extracting a shared snippet would require restructuring the
@@ -81,10 +81,10 @@ describe('loadCloudInit include directive', () => {
   it('every shipped k3s template loads with all directives resolved', () => {
     for (const name of [
       'master-init.sh',
-      'supabase-init.sh',
+      'db-init.sh',
       'worker-init.sh',
       'do-master-init.sh',
-      'do-supabase-init.sh',
+      'do-db-init.sh',
       'do-worker-init.sh',
     ]) {
       expect(loadCloudInit(name), name).not.toMatch(/^#\s*@include\b/m);

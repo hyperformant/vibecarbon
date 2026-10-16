@@ -65,7 +65,7 @@ Follow these principles:
 - Test loading, error, and empty states
 - Test accessibility basics (roles, labels)
 - Use `@testing-library/react` with user-event for interactions
-- Mock Supabase client and TanStack Query when needed
+- Mock `fetch` (the `apiJson` seam) and TanStack Query when needed
 
 **For CLI Functions:**
 - Test argument parsing and validation
@@ -105,10 +105,11 @@ Follow these principles:
 - Client: `@/*` → `./src/client/*`, `@shared/*` → `./src/shared/*`
 - Do NOT use `@/shared/*` — it won't resolve
 
-### Supabase Client Testing
-- Client-side uses anon key with RLS — mock accordingly
-- Server-side uses service role key, bypasses RLS — mock accordingly
-- Never use real Supabase credentials in tests
+### Template Database Testing
+- The template server reads Postgres through `withUserDb` (RLS as the caller) and `adminDb` (bypasses RLS); integration tests mock `@server/db/client` with `queryChain` (`carbon/tests/_helpers/drizzle-mock.ts`)
+- RLS itself is proven only in the template's `db` tier (`carbon/tests/db/`, real Postgres, gated on `TEST_DB_HOST`), never with mocks
+- Auth is in-process (Better Auth); mock the session middleware's `c.get('user')` / `c.get('session')` where a route needs a signed-in caller
+- Never use real credentials in tests
 
 ### Pre-existing TypeScript Issues
 - `asChild` prop causes TS errors on Button component — these are known and pre-existing
@@ -143,7 +144,7 @@ You may be spawned as a **teammate** in a Claude Code agent team, with your own 
 
 Examples of what to record:
 - Testing patterns and conventions used in each test directory
-- Common mock setups (Supabase client, file system, CLI prompts)
+- Common mock setups (db client, file system, CLI prompts)
 - Tests that are known to be flaky or slow
 - Coverage gaps you've identified but couldn't address in the current session
 - Relationships between source files and their test files

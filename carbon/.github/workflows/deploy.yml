@@ -185,7 +185,7 @@ jobs:
     # (safe — kubectl apply --server-side is a no-op when state matches).
     #
     # After this job succeeds, Flux is in charge of reconciling
-    # k8s/gitops/{supabase,cert-manager-webhook-hetzner}/ and k8s/base/
+    # k8s/gitops/cert-manager-webhook-hetzner/ and k8s/base/
     # from the main branch. The apply-secrets job is what keeps the
     # per-env vibecarbon-secrets / cert-manager `hetzner` / hcloud Secrets
     # in sync with GitHub Environment secrets.
@@ -305,7 +305,7 @@ jobs:
           now="$(date -u +%FT%TZ)"
           kubectl -n flux-system annotate --overwrite gitrepository/vibecarbon \
             reconcile.fluxcd.io/requestedAt="$now" || true
-          for ks in vibecarbon-base vibecarbon-supabase vibecarbon-cert-manager-webhook-hetzner; do
+          for ks in vibecarbon-base vibecarbon-cert-manager-webhook-hetzner; do
             kubectl -n flux-system annotate --overwrite kustomization/"$ks" \
               reconcile.fluxcd.io/requestedAt="$now" || true
           done
@@ -315,20 +315,18 @@ jobs:
       # `if: failure()` job-step would run but wouldn't be in the failed-
       # step logs (which is what waitForLatestWorkflowRun fetches), so
       # debugging from the operator's machine would still be opaque.
-      - name: Wait for reconciliation (20 min budget)
+      - name: Wait for reconciliation (10 min budget)
         run: |
           set +e
           kubectl -n flux-system wait --for=condition=Ready kustomization/vibecarbon-base --timeout=10m
           BASE_RC=$?
-          kubectl -n flux-system wait --for=condition=Ready kustomization/vibecarbon-supabase --timeout=20m
-          SUPABASE_RC=$?
-          if [ $BASE_RC -ne 0 ] || [ $SUPABASE_RC -ne 0 ]; then
+          if [ $BASE_RC -ne 0 ]; then
             echo "=== RECONCILE FAILED — dumping Flux state ==="
-            echo "base=$BASE_RC supabase=$SUPABASE_RC"
+            echo "base=$BASE_RC"
             echo
             echo "=== Flux GitRepository ==="
             kubectl -n flux-system describe gitrepository/vibecarbon || true
-            for ks in vibecarbon-base vibecarbon-supabase vibecarbon-cert-manager-webhook-hetzner; do
+            for ks in vibecarbon-base vibecarbon-cert-manager-webhook-hetzner; do
               echo
               echo "=== Kustomization: $ks ==="
               kubectl -n flux-system describe kustomization/"$ks" || true

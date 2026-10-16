@@ -1,18 +1,20 @@
-# n8n Integration with Supabase
+# n8n Integration with Your App
 
 > **Parked for the MVP launch.** The n8n add-on is currently disabled in
 > `vibecarbon add` (`status: 'parked'` in `src/add.js`) and is not linked from
 > the README/docs indexes. This guide is retained for when the add-on returns
 > via the add-on marketplace.
 
-This guide shows how to connect n8n workflows to your Vibecarbon application's Supabase backend.
+This guide shows how to connect n8n workflows to your Vibecarbon application: its Postgres database and its API.
 
 ## Overview
 
 n8n is pre-configured with:
-- ✓ Dedicated PostgreSQL database (`n8n`) for workflow storage
-- ✓ Environment variables for easy Supabase integration
-- ✓ Network access to all your app's services
+- ✓ Its own PostgreSQL database and role (`n8n`) on your project's Postgres, for workflow storage
+- ✓ Queue mode on Redis for executions
+- ✓ Network access to your app's services (`db`, `app`) on the private Docker network
+
+n8n gets no credentials for your app's data by default. You add them in n8n's credential store, so each workflow uses exactly the access it needs.
 
 ## Quick Start
 
@@ -22,7 +24,7 @@ In **development**, n8n uses its own built-in authentication (ForwardAuth cannot
 
 ```bash
 # Start services (if not already running)
-pnpm docker:up
+npm run docker:up
 
 # Access n8n
 open http://n8n.localhost
@@ -30,76 +32,81 @@ open http://n8n.localhost
 
 **Development login:** Use your admin email and the password `changeme` (set by the setup sidecar).
 
-In **production**, n8n is protected by Traefik ForwardAuth. Only users with the `super_admin` role can access it — they are signed in automatically via their existing app session.
+In **production**, n8n is protected by Traefik ForwardAuth. Only users with the `super_admin` role can access it: opening it from the app's admin panel mints a short-lived `vc-admin-token` cookie (a dedicated ForwardAuth token, never the app session), and n8n signs them in from that (see `services/n8n/docs/SSO.md`).
 
-### 2. Use Supabase in Workflows
+### 2. Reach your app from a workflow
 
-n8n has the following environment variables available:
+Two ways in, pick by what the workflow does:
 
-```bash
-SUPABASE_URL=http://kong:8000          # Internal Supabase API Gateway
-SUPABASE_ANON_KEY=your_anon_key        # Public API key
-SUPABASE_SERVICE_ROLE_KEY=your_key     # Admin API key
-SUPABASE_DB_HOST=db                    # Direct database access
-SUPABASE_DB_PORT=5432
-SUPABASE_DB_NAME=postgres
-SUPABASE_DB_USER=postgres
-SUPABASE_DB_PASSWORD=your_password
-```
+| Path | Use it for | Access |
+|------|------------|--------|
+| **Your app's API** (`http://app:3000/api/v1/...`) | Anything a user-facing feature already does | Goes through your routes, validation and RLS |
+| **Postgres** (`db:5432`) | Reports, exports, bulk jobs | Whatever role you give the credential |
+
+Prefer the API: it keeps business rules in one place. Reach for Postgres when a workflow needs a query no route offers.
 
 ## Example Workflows
 
-### Example 1: Query Supabase Database
+### Example 1: Query the database
 
-Use the **Postgres** node:
+Create a **Postgres** credential in n8n:
 
 ```
-Connection Settings:
-- Host: {{$env.SUPABASE_DB_HOST}}
-- Port: {{$env.SUPABASE_DB_PORT}}
-- Database: {{$env.SUPABASE_DB_NAME}}
-- User: {{$env.SUPABASE_DB_USER}}
-- Password: {{$env.SUPABASE_DB_PASSWORD}}
-
-Query:
-SELECT * FROM users WHERE created_at > NOW() - INTERVAL '1 day';
+Host: db
+Port: 5432
+Database: postgres
+User: n8n
+Password: your N8N_DB_PASSWORD (from .env.local)
 ```
 
-### Example 2: Call Supabase REST API
+Never use `postgres` here: it is the superuser, so a workflow on it could read the auth tables and run shell commands in the db container (`COPY ... TO PROGRAM`). The `n8n` role is what the add-on sets up for this (`volumes/db/n8n-init.sh`, at first boot and on every `vibecarbon up` in development), with its own password: not a superuser, bypasses row-level security, read and write on your business tables, and no access to the server-only tables (`"user"`, `session`, `account`, `failed_login_attempts`, ...). A workflow on it sees and can change every business row.
 
-Use the **HTTP Request** node:
+A narrower role does not get you a "read-only view of everything" for free. Row-level security applies to every role without `BYPASSRLS`, and the policies decide by the app user a request runs as (`app.user_id()`). A report connection has no app user, so a plain role sees only what the policies allow it, which is no rows (or an error from a helper function it may not call). For a cross-tenant, read-only report, create a role that bypasses RLS but can only read the tables you grant (over `vibecarbon shell`, or psql against the local dev db):
+
+```sql
+CREATE ROLE n8n_reports LOGIN BYPASSRLS PASSWORD '...';
+GRANT CONNECT ON DATABASE postgres TO n8n_reports;
+GRANT USAGE ON SCHEMA public TO n8n_reports;
+GRANT SELECT ON public.organizations, public.memberships TO n8n_reports;
+```
+
+It still cannot read the auth tables (`"user"`, `session`, `account`, ...) or write anything, because it holds no grant for them.
+
+Then use the **Postgres** node:
+
+```sql
+SELECT id, name, created_at FROM organizations WHERE created_at > NOW() - INTERVAL '1 day';
+```
+
+### Example 2: Call your app's API
+
+Add a route for the job under `src/server/routes/` (an internal route that checks a shared secret header, or a webhook under `/api/webhooks/`), then call it from an **HTTP Request** node:
 
 ```
 Method: POST
-URL: {{$env.SUPABASE_URL}}/rest/v1/todos
+URL: http://app:3000/api/webhooks/my-job
 
 Headers:
-- apikey: {{$env.SUPABASE_SERVICE_ROLE_KEY}}
-- Authorization: Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}
+- X-Job-Secret: {{$env.MY_JOB_SECRET}}
 - Content-Type: application/json
 
 Body (JSON):
-{
-  "title": "New todo from n8n",
-  "completed": false
-}
+{ "title": "Created from n8n" }
 ```
 
-### Example 3: Listen to Supabase Webhooks
+### Example 3: Receive webhooks
 
 1. Create a **Webhook** node in n8n
-2. Copy the webhook URL (e.g., `http://localhost:5678/webhook/my-webhook`)
-3. In Supabase (or your app), configure a webhook to call this URL
+2. Copy the webhook URL (e.g., `http://n8n:5678/webhook/my-webhook` inside Docker)
+3. Call it from your app when the event happens (after the write commits)
 
-### Example 4: Trigger on Database Changes
+### Example 4: Trigger on database changes
 
-Use **Postgres Trigger** node:
+Use the **Postgres Trigger** node with the credential from Example 1:
 
 ```
-Connection Settings: (use environment variables as above)
-
 Trigger: On Row Insert
-Table: users
+Table: organizations
 
 Returns:
 - NEW row data
@@ -107,16 +114,14 @@ Returns:
 
 ## Common Use Cases
 
-### User Onboarding
+### Onboarding
 
 ```
-Trigger: Postgres Trigger (users table insert)
+Trigger: Webhook (your app calls it after sign-up)
 ↓
 Action 1: Send welcome email (Email node)
 ↓
-Action 2: Create user profile (HTTP Request to your API)
-↓
-Action 3: Add to analytics (HTTP Request to analytics service)
+Action 2: Add to your CRM (HTTP Request)
 ```
 
 ### Scheduled Reports
@@ -124,7 +129,7 @@ Action 3: Add to analytics (HTTP Request to analytics service)
 ```
 Trigger: Cron (daily at 9 AM)
 ↓
-Action 1: Query database for metrics (Postgres node)
+Action 1: Query database for metrics (Postgres node, read-only role)
 ↓
 Action 2: Generate report (Code node)
 ↓
@@ -138,20 +143,16 @@ Trigger: Webhook (from external service)
 ↓
 Action 1: Transform data (Code node)
 ↓
-Action 2: Insert into Supabase (HTTP Request or Postgres node)
+Action 2: Hand it to your app (HTTP Request to /api/webhooks/...)
 ↓
-Action 3: Notify users (Push notification)
+Action 3: Notify users (Email node)
 ```
 
 ## Best Practices
 
-### 1. Use Environment Variables
+### 1. Keep credentials in n8n's store
 
-Instead of hardcoding credentials, always use:
-```
-{{$env.SUPABASE_URL}}
-{{$env.SUPABASE_SERVICE_ROLE_KEY}}
-```
+Create a Postgres or Header Auth credential once and reference it from nodes. Never paste a password into a node or a Code block.
 
 ### 2. Error Handling
 
@@ -170,56 +171,9 @@ Manual Trigger → Your Workflow → Check Results
 
 ### 4. Security
 
-- Use `SUPABASE_SERVICE_ROLE_KEY` only for admin operations
-- Use `SUPABASE_ANON_KEY` for public operations
-- Never expose service role key in client-side workflows
-
-## Direct Database Access
-
-For complex queries, connect directly to PostgreSQL:
-
-```javascript
-// In a Code node
-const { Client } = require('pg');
-
-const client = new Client({
-  host: process.env.SUPABASE_DB_HOST,
-  port: process.env.SUPABASE_DB_PORT,
-  database: process.env.SUPABASE_DB_NAME,
-  user: process.env.SUPABASE_DB_USER,
-  password: process.env.SUPABASE_DB_PASSWORD,
-});
-
-await client.connect();
-const result = await client.query('SELECT * FROM users LIMIT 10');
-await client.end();
-
-return result.rows;
-```
-
-## Supabase Realtime Integration
-
-To react to real-time database changes:
-
-1. Use the **Postgres Trigger** node (recommended)
-2. Or set up a webhook in your app code:
-
-```typescript
-// In your app
-supabase
-  .channel('todos')
-  .on('postgres_changes',
-    { event: 'INSERT', schema: 'public', table: 'todos' },
-    (payload) => {
-      // Call n8n webhook
-      fetch('http://n8n:5678/webhook/todo-created', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-    }
-  )
-  .subscribe();
-```
+- Give each credential the narrowest role that does the job; `postgres` is for admin work only
+- Prefer your app's API, which applies RLS and validation, over direct table writes
+- Webhook routes verify a secret or signature before they act
 
 ## Troubleshooting
 
@@ -230,24 +184,16 @@ Check that services are running:
 docker compose ps
 ```
 
-All services should show "healthy" or "running".
-
-### Environment variables not found
-
-Restart n8n container:
-```bash
-docker compose restart n8n
-```
+All services should show "healthy" or "running". The host is `db` (the service name), never `localhost`, from inside n8n.
 
 ### Webhook not receiving data
 
 Ensure the webhook URL uses the correct hostname:
 - Inside Docker: `http://n8n:5678/webhook/...`
-- From your host: `http://localhost:5678/webhook/...`
+- From your host: `http://n8n.localhost/webhook/...`
 
 ## Learn More
 
 - [n8n Documentation](https://docs.n8n.io/)
-- [Supabase API Reference](https://supabase.com/docs/reference/javascript/introduction)
 - [PostgreSQL Node](https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.postgres/)
 - [HTTP Request Node](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/)

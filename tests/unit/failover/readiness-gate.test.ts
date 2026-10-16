@@ -4,29 +4,34 @@
  * Live RCA (k8s-ha full-lifecycle 2026-07-07 — failover PASSED first-ever):
  * `vibecarbon failover` returned in ~44s (promotion ~9s via the skip-if-
  * streaming fast path) BEFORE the promoted cluster's API layer was ready.
- * Post-promotion the promoted supabase services restart/reconnect; during that
- * window auth 502s and PostgREST serves schema-cache misses against the
- * (present) tables. verify-failover ran inside that window → auth_admin_login /
+ * Post-promotion the promoted cluster's API services (since folded into the
+ * app) restart/reconnect; during that window auth 502s and the REST layer
+ * serves schema-cache misses against the (present) tables. verify-failover ran inside that window → auth_admin_login /
  * auth_signup / db_schema all failed while the db was healthy ~5 min later.
  *
  * The gate (Task 10): rollout-status EACH persisted scale-up entry on the
  * PROMOTED cluster (best-effort — a stuck/missing deployment must not sink a
- * promotion that already happened), then poll the public API (health + auth)
- * until it actually serves 2xx. Best-effort throughout (loud warning, never
+ * promotion that already happened), then poll the public API (health + ready)
+ * until it actually serves 2xx. Auth runs inside the app on the promoted
+ * database, so the app's readiness (it answers against that database) is
+ * the sign-in condition; there is no separate auth service to probe. Best-effort throughout (loud warning, never
  * throws) — the promotion + DNS flip already happened.
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
   gatePromotedApiReadiness,
-  getPromotedAnonKey,
   promotedProbeArgv,
   waitForPromotedApiServing,
 } from '../../../src/failover.js';
 
-/** Persisted scale-up list: app + supabase-* (vibecarbon) + CA (kube-system). */
+/**
+ * Persisted scale-up list: app + another vibecarbon-namespace Deployment + CA
+ * (kube-system). The middle entry is a stand-in for any extra Deployment a
+ * persisted list can carry, including a stale one the cluster no longer runs.
+ */
 const SCALE_UP_LIST = [
   { name: 'app', namespace: 'vibecarbon', replicas: 2 },
-  { name: 'supabase-supabase-auth', namespace: 'vibecarbon', replicas: 1 },
+  { name: 'retired-worker', namespace: 'vibecarbon', replicas: 1 },
   { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
 ];
 
@@ -37,8 +42,7 @@ describe('gatePromotedApiReadiness', () => {
     const trace: string[] = [];
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       if (argv[0] === 'rollout' && argv[1] === 'status') trace.push(`rollout:${argv[2]}`);
-      else if (argv.includes('secret')) trace.push('secret');
-      return argv.includes('secret') ? Buffer.from('anon-jwt').toString('base64') : '';
+      return '';
     });
     const runner = vi.fn(async () => {
       trace.push('probe');
@@ -54,7 +58,7 @@ describe('gatePromotedApiReadiness', () => {
     const rollouts = trace.filter((t) => t.startsWith('rollout:'));
     expect(rollouts).toEqual([
       'rollout:deployment/app',
-      'rollout:deployment/supabase-supabase-auth',
+      'rollout:deployment/retired-worker',
       'rollout:deployment/cluster-autoscaler',
     ]);
     // Each rollout targets its persisted namespace (CA lives in kube-system).
@@ -89,7 +93,7 @@ describe('gatePromotedApiReadiness', () => {
         dispatched++;
         await barrier; // hold every rollout open until we release
       }
-      return argv.includes('secret') ? Buffer.from('anon-jwt').toString('base64') : '';
+      return '';
     });
     const runner = vi.fn(async () => '200');
 
@@ -117,7 +121,7 @@ describe('gatePromotedApiReadiness', () => {
     const kubectl = vi.fn(
       async (_ip: string, _key: string, argv: string[], opts?: { timeout?: number }) => {
         calls.push({ argv, opts });
-        return argv.includes('secret') ? Buffer.from('anon-jwt').toString('base64') : '';
+        return '';
       },
     );
     const runner = vi.fn(async () => '200');
@@ -139,10 +143,10 @@ describe('gatePromotedApiReadiness', () => {
   it('swallows a per-deployment rollout failure so one bad name cannot sink the gate', async () => {
     const runner = vi.fn(async () => '200');
     const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (argv.includes('deployment/supabase-supabase-auth')) {
-        throw new Error('deployments.apps "supabase-supabase-auth" not found');
+      if (argv.includes('deployment/retired-worker')) {
+        throw new Error('deployments.apps "retired-worker" not found');
       }
-      return argv.includes('secret') ? Buffer.from('anon-jwt').toString('base64') : '';
+      return '';
     });
 
     await expect(
@@ -182,56 +186,15 @@ describe('promotedProbeArgv', () => {
     expect(argv).toContain('%{http_code}');
   });
 
-  it('sends the apikey header when an anon key is provided', () => {
-    // Kong's declarative config has a key-auth plugin on /auth/v1/* — a
-    // keyless probe gets 401 from kong before GoTrue is even reached, so
-    // the gate could NEVER confirm auth and burned its full budget on
-    // every k8s failover (observed 2026-07-08 matrix: "last auth=401",
-    // 4m48s soft-fail). Same trap documented in tests/e2e/checks/health.ts.
-    const argv = promotedProbeArgv('app.example.com', '/auth/v1/health', 'anon-jwt');
-    const h = argv.indexOf('-H');
-    expect(h).toBeGreaterThan(-1);
-    expect(argv[h + 1]).toBe('apikey: anon-jwt');
-  });
-
-  it('omits the apikey header when no key is available', () => {
+  it('sends no gateway key: the app routes need none', () => {
     expect(promotedProbeArgv('app.example.com', '/api/health')).not.toContain('-H');
-  });
-});
-
-describe('getPromotedAnonKey', () => {
-  it('reads and base64-decodes ANON_KEY from vibecarbon-secrets on the promoted node', async () => {
-    const kubectl = vi.fn(async () => Buffer.from('anon-jwt').toString('base64'));
-    const key = await getPromotedAnonKey('9.9.9.9', '/key', { kubectl });
-    expect(key).toBe('anon-jwt');
-    expect(kubectl.mock.calls[0][0]).toBe('9.9.9.9');
-    expect(kubectl.mock.calls[0][2]).toEqual([
-      'get',
-      'secret',
-      'vibecarbon-secrets',
-      '-n',
-      'vibecarbon',
-      '-o',
-      'jsonpath={.data.ANON_KEY}',
-    ]);
-    // Bounded: the secret read happens mid-failover against a possibly-sick
-    // apiserver — it must not inherit sshRun's 120s default and stall the
-    // gate; the probes themselves run on 12s timeouts.
-    expect(kubectl.mock.calls[0][3]).toMatchObject({ timeout: 15_000 });
-  });
-
-  it('is best-effort: returns empty string when kubectl fails', async () => {
-    const kubectl = vi.fn(async () => {
-      throw new Error('secrets "vibecarbon-secrets" not found');
-    });
-    await expect(getPromotedAnonKey('9.9.9.9', '/key', { kubectl })).resolves.toBe('');
   });
 });
 
 describe('waitForPromotedApiServing', () => {
   const pathOf = (argv: string[]) => argv[argv.length - 1];
 
-  it('returns true only once health, auth, AND storage all serve 200', async () => {
+  it('returns true only once health AND ready both serve 200', async () => {
     const seen: string[] = [];
     const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       const url = pathOf(argv);
@@ -242,16 +205,16 @@ describe('waitForPromotedApiServing', () => {
     const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', { runner });
     expect(ok).toBe(true);
 
-    // Health is probed before auth, and every restarted Kong-routed upstream
-    // the verify suite single-shots is exercised — storage included (its
-    // absence is what let DO run 32309395314's compose sibling 502; the k8s
-    // gate had the same one-service-short premise).
-    expect(seen[0]).toContain('/api/health');
-    expect(seen.some((u) => u.includes('/auth/v1/health'))).toBe(true);
-    expect(seen.some((u) => u.includes('/storage/v1/status'))).toBe(true);
+    // Liveness first, then readiness (the app answers against the promoted
+    // database, which is also what sign-in needs). No gateway routes: auth
+    // runs inside the app, and the storage service is gone.
+    expect(seen[0]).toMatch(/\/api\/health$/);
+    expect(seen.some((u) => u.endsWith('/api/health/ready'))).toBe(true);
+    expect(seen.some((u) => u.includes('/auth/v1/'))).toBe(false);
+    expect(seen.some((u) => u.includes('/storage/v1/'))).toBe(false);
   });
 
-  it('does NOT probe auth while health is still non-200', async () => {
+  it('does NOT probe readiness while liveness is still non-200', async () => {
     const seen: string[] = [];
     const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
       seen.push(pathOf(argv));
@@ -264,41 +227,7 @@ describe('waitForPromotedApiServing', () => {
       budgetMs: 10,
     });
     expect(ok).toBe(false);
-    // Auth endpoint was never hit because health short-circuited the probe.
-    expect(seen.every((u) => !u.includes('/auth/v1/health'))).toBe(true);
-  });
-
-  it('does NOT pass while ONLY storage is still coming up (migration window)', async () => {
-    const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) =>
-      pathOf(argv).includes('/storage/v1/status') ? '502' : '200',
-    );
-
-    const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', {
-      runner,
-      budgetMs: 10,
-    });
-    expect(ok).toBe(false);
-  });
-
-  it('passes once storage finishes its boot-time migrations and serves 200', async () => {
-    let storageProbes = 0;
-    const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      if (pathOf(argv).includes('/storage/v1/status')) {
-        storageProbes++;
-        return storageProbes < 3 ? '502' : '200';
-      }
-      return '200';
-    });
-
-    const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', {
-      runner,
-      budgetMs: 60_000,
-      // keep the poll fast in unit time
-      initialDelayMs: 1,
-      maxDelayMs: 1,
-    });
-    expect(ok).toBe(true);
-    expect(storageProbes).toBe(3);
+    expect(seen.every((u) => !u.endsWith('/api/health/ready'))).toBe(true);
   });
 
   it('is best-effort: returns false (never throws) when the budget lapses', async () => {
@@ -306,23 +235,5 @@ describe('waitForPromotedApiServing', () => {
     await expect(
       waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', { runner, budgetMs: 10 }),
     ).resolves.toBe(false);
-  });
-
-  it('threads opts.anonKey into every probe as the apikey header', async () => {
-    const argvs: string[][] = [];
-    const runner = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
-      argvs.push(argv);
-      return '200';
-    });
-
-    const ok = await waitForPromotedApiServing('app.example.com', '9.9.9.9', '/key', {
-      runner,
-      anonKey: 'anon-jwt',
-    });
-    expect(ok).toBe(true);
-    expect(argvs.length).toBeGreaterThan(1);
-    for (const argv of argvs) {
-      expect(argv).toContain('apikey: anon-jwt');
-    }
   });
 });

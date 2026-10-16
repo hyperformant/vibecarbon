@@ -23,9 +23,9 @@ describe('getUserInitials', () => {
     expect(getUserInitials(null)).toBe('?');
   });
 
-  it('uses the first two name parts when full_name is present', () => {
+  it('uses the first two name parts when the name is set', () => {
     expect(
-      getUserInitials({ email: 'a@b.c', user_metadata: { full_name: 'Ada Lovelace' } }),
+      getUserInitials({ email: 'a@b.c', name: 'Ada Lovelace' }),
     ).toBe('AL');
   });
 
@@ -33,12 +33,12 @@ describe('getUserInitials', () => {
     expect(
       getUserInitials({
         email: 'm@a.c',
-        user_metadata: { full_name: 'Mary Anne Evans George Eliot' },
+        name: 'Mary Anne Evans George Eliot',
       }),
     ).toBe('MA');
   });
 
-  it('falls back to the email first character when no full_name', () => {
+  it('falls back to the email first character when there is no name', () => {
     expect(getUserInitials({ email: 'ada@example.com' })).toBe('A');
   });
 

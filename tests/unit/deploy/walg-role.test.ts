@@ -16,11 +16,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import { REPL_COMPOSE_FLAGS } from '../../../src/lib/deploy/compose/ha.js';
+import { DB_POD, DB_STATEFULSET } from '../../../src/lib/deploy/db-workload.js';
 import {
   composeDbRecreateShell,
   k8sDbRolloutStatusArgv,
   k8sSetWalgRoleArgv,
-  WALG_DB_STATEFULSET,
   WALG_ROLE_ENV,
   walgRoleDegradedMessage,
 } from '../../../src/lib/deploy/walg-role.js';
@@ -148,20 +148,20 @@ describe('composeDbRecreateShell', () => {
 });
 
 describe('k8s write-guard patch', () => {
-  it('sets WALG_ROLE on the supabase-db StatefulSet', () => {
+  it('sets WALG_ROLE on the db StatefulSet', () => {
     expect(k8sSetWalgRoleArgv('primary')).toEqual([
       '-n',
       'vibecarbon',
       'set',
       'env',
-      `statefulset/${WALG_DB_STATEFULSET}`,
+      `statefulset/${DB_STATEFULSET}`,
       'WALG_ROLE=primary',
     ]);
     expect(k8sSetWalgRoleArgv('standby').at(-1)).toBe('WALG_ROLE=standby');
   });
 
   it('targets the StatefulSet, not the pod — a pod patch would be lost on the next roll', () => {
-    expect(k8sSetWalgRoleArgv('primary')).not.toContain(`${WALG_DB_STATEFULSET}-0`);
+    expect(k8sSetWalgRoleArgv('primary')).not.toContain(DB_POD);
   });
 
   it('waits for the rollout, because the audit that follows reads the RUNNING pod', () => {
@@ -170,7 +170,7 @@ describe('k8s write-guard patch', () => {
       'vibecarbon',
       'rollout',
       'status',
-      `statefulset/${WALG_DB_STATEFULSET}`,
+      `statefulset/${DB_STATEFULSET}`,
       '--timeout=300s',
     ]);
   });
@@ -204,6 +204,6 @@ describe('walgRoleDegradedMessage', () => {
       promotedIp: '3.3.3.3',
       detail: 'x',
     });
-    expect(k8s).toContain(`kubectl -n vibecarbon exec ${WALG_DB_STATEFULSET}-0`);
+    expect(k8s).toContain(`kubectl -n vibecarbon exec ${DB_POD}`);
   });
 });

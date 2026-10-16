@@ -74,7 +74,7 @@ describe('M3 Task 3 — do-master-init.sh shape', () => {
 
   it('M3 Task 9d: patches csi-do-node with a universal toleration, AFTER the driver install and BEFORE the ready marker', () => {
     // csi-do-node ships from upstream with NO tolerations at all, so it
-    // never schedules onto the tainted dedicated=supabase node -- the
+    // never schedules onto the tainted dedicated=db node -- the
     // node's CSINode object then never gets the driver's `region`
     // topologyKey and any PV bound there hits a permanent volume node
     // affinity conflict (RCA: DO d3 rig, battery kept-rig deploy
@@ -146,49 +146,45 @@ describe('M3 Task 3 — do-worker-init.sh shape', () => {
   });
 });
 
-describe('M3 Task 5 — do-supabase-init.sh shape', () => {
-  const supabase = loadCloudInit('do-supabase-init.sh');
+describe('M3 Task 5 — do-db-init.sh shape', () => {
+  const dbInit = loadCloudInit('do-db-init.sh');
 
   it('pre-seeds the provider-id kubelet arg and cloud-provider=external', () => {
-    expect(supabase).toContain('--kubelet-arg="provider-id=digitalocean://$DROPLET_ID"');
-    expect(supabase).toContain('--kubelet-arg="cloud-provider=external"');
+    expect(dbInit).toContain('--kubelet-arg="provider-id=digitalocean://$DROPLET_ID"');
+    expect(dbInit).toContain('--kubelet-arg="cloud-provider=external"');
   });
 
-  it('pins the supabase node-pool via BOOT-TIME k3s agent flags (label + taint), not a post-join kubectl step', () => {
-    expect(supabase).toContain('--node-label="dedicated=supabase"');
-    expect(supabase).toContain('--node-label="node-pool=supabase-pool"');
-    expect(supabase).toContain('--node-taint="dedicated=supabase:NoSchedule"');
-    expect(supabase).not.toMatch(/kubectl (label|taint) node/);
+  it('pins the database node-pool via BOOT-TIME k3s agent flags (label + taint), not a post-join kubectl step', () => {
+    expect(dbInit).toContain('--node-label="dedicated=db"');
+    expect(dbInit).toContain('--node-label="node-pool=db-pool"');
+    expect(dbInit).toContain('--node-taint="dedicated=db:NoSchedule"');
+    expect(dbInit).not.toMatch(/kubectl (label|taint) node/);
   });
 
   it('does NOT install any CCM/CSI/secret (master-only)', () => {
-    expect(supabase).not.toContain('create secret generic digitalocean');
-    expect(supabase).not.toMatch(/digitalocean-cloud-controller-manager/);
-    expect(supabase).not.toMatch(/csi-digitalocean/);
+    expect(dbInit).not.toContain('create secret generic digitalocean');
+    expect(dbInit).not.toMatch(/digitalocean-cloud-controller-manager/);
+    expect(dbInit).not.toMatch(/csi-digitalocean/);
   });
 
   it('does NOT grep for a private-NIC interface name', () => {
-    expect(supabase).not.toContain('inet 10');
-    expect(supabase).not.toContain('dhcpcd');
+    expect(dbInit).not.toContain('inet 10');
+    expect(dbInit).not.toContain('dhcpcd');
   });
 
-  it('pre-warms the heavy Supabase images asynchronously (does not block node readiness)', () => {
-    const prewarmIdx = supabase.indexOf('supabase-image-prewarm.log');
-    expect(prewarmIdx).toBeGreaterThan(-1);
-    // The prewarm block backgrounds itself (`&` at the end of the nohup
-    // pipeline) rather than blocking the script's exit.
-    const prewarmBlock = supabase.slice(supabase.indexOf('nohup bash -c'));
-    expect(prewarmBlock.trimEnd().endsWith('&')).toBe(true);
-    expect(supabase).toContain('docker.io/supabase/postgres:15.1.1.78');
-    expect(supabase).toContain('docker.io/library/kong:2.8.1');
+  it('pre-pulls no chart image: the db image is published and pulled at deploy time', () => {
+    // The old background pre-warm pulled a stale postgres tag and the chart
+    // gateway, neither of which the deploy runs.
+    expect(dbInit).not.toContain('crictl pull');
+    expect(dbInit).not.toContain('image-prewarm');
   });
 
   it('carries zero hetzner|hcloud|floating|10.0.1. tokens (case-insensitive)', () => {
-    expect(supabase).not.toMatch(/hetzner|hcloud|floating|10\.0\.1\./i);
+    expect(dbInit).not.toMatch(/hetzner|hcloud|floating|10\.0\.1\./i);
   });
 
   it('uses the DigitalOcean metadata path root, not the Hetzner-shaped one', () => {
-    expect(supabase).toContain('169.254.169.254/metadata/v1/');
-    expect(supabase).not.toContain('/hetzner/v1/metadata/');
+    expect(dbInit).toContain('169.254.169.254/metadata/v1/');
+    expect(dbInit).not.toContain('/hetzner/v1/metadata/');
   });
 });

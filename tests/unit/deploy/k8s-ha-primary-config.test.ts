@@ -13,7 +13,7 @@ const src = readFileSync(join(__dirname, '../../../src/lib/deploy/k8s/ha/index.j
 describe('configurePrimaryForReplication', () => {
   it('is exported and owns the primary-side perf slices', () => {
     expect(src).toMatch(/export async function configurePrimaryForReplication/);
-    // the seven phases live INSIDE the extracted function (appear after its
+    // the six phases live INSIDE the extracted function (appear after its
     // declaration and before setupReplication's declaration)
     const fnStart = src.indexOf('export async function configurePrimaryForReplication');
     const setupStart = src.indexOf('export async function setupReplication');
@@ -25,10 +25,13 @@ describe('configurePrimaryForReplication', () => {
       'deploy.ha.replication.primaryRestart',
       'deploy.ha.replication.rolloutRestart',
       'deploy.ha.replication.rolloutStatus',
-      'deploy.ha.replication.reloadPostgrest',
     ]) {
       expect(body).toContain(slice);
     }
+    // The app is the only Deployment restarted after the primary restart;
+    // the schema-cache reload went with the chart's REST service.
+    expect(body).toContain('kubectl rollout restart deployment/app -n vibecarbon');
+    expect(body).not.toContain('reload schema');
   });
 
   it('setupReplication delegates and honors primaryConfigured', () => {

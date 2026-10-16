@@ -3,7 +3,7 @@ import { env } from './env';
 import { logger } from './logger';
 
 /**
- * Email service using SMTP (shared credentials with Supabase Auth).
+ * Email service using SMTP (auth emails and transactional emails).
  * Gracefully no-ops when not configured (matching isStripeConfigured() pattern).
  */
 

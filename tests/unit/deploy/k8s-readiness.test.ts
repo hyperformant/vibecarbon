@@ -155,7 +155,7 @@ describe('awaitPostgresAccepting', () => {
     });
     await awaitPostgresAccepting({
       env: {},
-      dbPod: 'supabase-supabase-db-0',
+      dbPod: 'db-0',
       exec,
       sleep: noSleep,
     });
@@ -180,7 +180,7 @@ describe('awaitPostgresAccepting', () => {
     });
     await awaitPostgresAccepting({
       env: {},
-      dbPod: 'supabase-supabase-db-0',
+      dbPod: 'db-0',
       exec,
       sleep: noSleep,
     });
@@ -189,13 +189,13 @@ describe('awaitPostgresAccepting', () => {
 
   it('surfaces the real failure at exhaustion', async () => {
     const exec = vi.fn(async () => {
-      throw new Error('error: unable to upgrade connection: container not found ("supabase-db")');
+      throw new Error('error: unable to upgrade connection: container not found ("db")');
     });
     let now = 0;
     await expect(
       awaitPostgresAccepting({
         env: {},
-        dbPod: 'supabase-supabase-db-0',
+        dbPod: 'db-0',
         exec,
         sleep: async () => {
           now += 30_000;

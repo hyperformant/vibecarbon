@@ -27,7 +27,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     // Answer the probes so the functions run to completion offline.
     if (c.includes('pg_is_in_recovery')) return 't';
     if (c.includes('pg_stat_replication')) return 'streaming';
-    if (c.includes('SHOW hba_file')) return '/etc/postgresql/pg_hba.conf';
+    if (c.includes('SHOW hba_file')) return '/var/lib/postgresql/data/pg_hba.conf';
     if (c.includes('pg_isready')) return 'accepting connections';
     // Staged-basebackup exec into the live db container: report staged.
     if (options?.input?.includes('pg_basebackup')) return 'COMPOSE_RESEED_STAGED';
@@ -211,8 +211,8 @@ describe('configureStandbyReplication — WireGuard transport', () => {
     expect(script).not.toMatch(/-S \S/);
     expect(script).toContain("primary_slot_name = 'vibecarbon_standby_slot'");
 
-    // hot_standby forced on in the staged auto.conf (image wal-g.conf ships
-    // it off — same image family as k8s).
+    // hot_standby pinned on in the staged auto.conf (read last), so no image
+    // config can leave the reseeded standby refusing read-only connections.
     expect(script).toContain('hot_standby = on');
 
     // No app-layer TLS anywhere.
@@ -359,5 +359,26 @@ describe('isComposeStandbyStreaming (standby-side wal-receiver signal for failov
     } finally {
       sshRunMock.mockImplementation(orig as never);
     }
+  });
+});
+
+describe('compose-ha replication + reseed connect as postgres', () => {
+  // The db image is postgres:17-alpine, whose only superuser is `postgres`.
+  // A leftover role from the previous image fails every one of these execs
+  // with `FATAL: role ... does not exist`, so the whole reseed must speak
+  // postgres, find pg_hba via SHOW hba_file, and chown the staged tree by name.
+  it('every psql/pg_isready names postgres or replicator, and nothing names a retired role', async () => {
+    await configurePrimaryReplication(PRIMARY, STANDBY, KEY, 'myapp');
+    await configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp');
+    const text = sshCalls.map((c) => `${c.command}\n${c.input ?? ''}`).join('\n');
+
+    expect(text).toContain('SHOW hba_file');
+    expect(text).toContain('chown postgres:postgres');
+
+    const users = [...text.matchAll(/(?:psql|pg_isready|pg_basebackup)\b[^\n]*?\s-U\s+(\S+)/g)].map(
+      (m) => m[1],
+    );
+    expect(users.length).toBeGreaterThan(0);
+    expect(new Set(users)).toEqual(new Set(['postgres', 'replicator']));
   });
 });

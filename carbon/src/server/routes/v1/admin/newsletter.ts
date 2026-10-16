@@ -1,22 +1,20 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { and, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb } from '../../../db/client';
+import { newsletterSubscribers } from '../../../db/schema';
+import { isoTimestamp, isUuid } from '../../../db/values';
 import { sendEmail } from '../../../lib/email';
 import { env } from '../../../lib/env';
 import { sanitizeError } from '../../../lib/errors';
 import { logger } from '../../../lib/logger';
-import { supabaseAdmin } from '../../../lib/supabase';
 import { requireSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
 
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
-
 const adminNewsletterRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Require super admin for all newsletter management endpoints (JWT-based role
-// check — see requireSuperAdmin). The prior `adminDb.from('auth.users')` guard
-// errored on the unexposed auth schema and fell closed for everyone.
+// Require super admin (plus a verified second factor while MFA is on) for all
+// newsletter management endpoints; see requireSuperAdmin.
 adminNewsletterRoutes.use('*', requireSuperAdmin);
 
 /**
@@ -47,29 +45,43 @@ adminNewsletterRoutes.get('/', async (c) => {
   const offset = (page - 1) * limit;
 
   try {
-    let query = adminDb
-      .from('newsletter_subscribers')
-      .select('*', { count: 'exact' })
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    if (status) {
-      query = query.eq('status', status);
-    }
-
+    const filters: SQL[] = [];
+    if (status) filters.push(eq(newsletterSubscribers.status, status));
     if (search) {
-      query = query.or(`email.ilike.%${search}%,name.ilike.%${search}%`);
+      // Escape LIKE wildcards so a search for "50%" or "a_b" matches literally.
+      const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
+      const match = or(
+        ilike(newsletterSubscribers.email, pattern),
+        ilike(newsletterSubscribers.name, pattern)
+      );
+      if (match) filters.push(match);
     }
+    const where = filters.length ? and(...filters) : undefined;
 
-    const { data, error, count } = await query;
-
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to fetch subscribers') }, 500);
-    }
+    const [rows, [totals]] = await Promise.all([
+      adminDb
+        .select()
+        .from(newsletterSubscribers)
+        .where(where)
+        .orderBy(desc(newsletterSubscribers.createdAt))
+        .limit(limit)
+        .offset(offset),
+      adminDb.select({ total: count() }).from(newsletterSubscribers).where(where),
+    ]);
 
     return c.json({
-      subscribers: data || [],
-      total: count || 0,
+      subscribers: rows.map((r) => ({
+        id: r.id,
+        email: r.email,
+        name: r.name,
+        status: r.status,
+        confirmation_token: r.confirmationToken,
+        subscribed_at: r.subscribedAt === null ? null : isoTimestamp(r.subscribedAt),
+        unsubscribed_at: r.unsubscribedAt === null ? null : isoTimestamp(r.unsubscribedAt),
+        created_at: isoTimestamp(r.createdAt),
+        updated_at: isoTimestamp(r.updatedAt),
+      })),
+      total: totals?.total ?? 0,
       page,
       limit,
     });
@@ -83,30 +95,17 @@ adminNewsletterRoutes.get('/', async (c) => {
  */
 adminNewsletterRoutes.get('/stats', async (c) => {
   try {
-    const { count: total } = await adminDb
-      .from('newsletter_subscribers')
-      .select('*', { count: 'exact', head: true });
-
-    const { count: active } = await adminDb
-      .from('newsletter_subscribers')
-      .select('*', { count: 'exact', head: true })
-      .eq('status', 'active');
-
-    const { count: pending } = await adminDb
-      .from('newsletter_subscribers')
-      .select('*', { count: 'exact', head: true })
-      .eq('status', 'pending');
-
-    const { count: unsubscribed } = await adminDb
-      .from('newsletter_subscribers')
-      .select('*', { count: 'exact', head: true })
-      .eq('status', 'unsubscribed');
+    const rows = await adminDb
+      .select({ status: newsletterSubscribers.status, n: count() })
+      .from(newsletterSubscribers)
+      .groupBy(newsletterSubscribers.status);
+    const byStatus = new Map(rows.map((r) => [r.status, r.n]));
 
     return c.json({
-      total: total || 0,
-      active: active || 0,
-      pending: pending || 0,
-      unsubscribed: unsubscribed || 0,
+      total: rows.reduce((sum, r) => sum + r.n, 0),
+      active: byStatus.get('active') ?? 0,
+      pending: byStatus.get('pending') ?? 0,
+      unsubscribed: byStatus.get('unsubscribed') ?? 0,
     });
   } catch (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch stats') }, 500);
@@ -137,16 +136,16 @@ adminNewsletterRoutes.post('/send', async (c) => {
   try {
     // Get all active subscribers. confirmation_token doubles as the per-subscriber
     // unsubscribe secret (see routes/v1/newsletter.ts).
-    const { data: subscribers, error } = await adminDb
-      .from('newsletter_subscribers')
-      .select('id, email, confirmation_token')
-      .eq('status', 'active');
+    const subscribers = await adminDb
+      .select({
+        id: newsletterSubscribers.id,
+        email: newsletterSubscribers.email,
+        confirmation_token: newsletterSubscribers.confirmationToken,
+      })
+      .from(newsletterSubscribers)
+      .where(eq(newsletterSubscribers.status, 'active'));
 
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to fetch subscribers') }, 500);
-    }
-
-    if (!subscribers || subscribers.length === 0) {
+    if (subscribers.length === 0) {
       return c.json({ error: 'No active subscribers' }, 400);
     }
 
@@ -188,12 +187,12 @@ adminNewsletterRoutes.post('/send', async (c) => {
 adminNewsletterRoutes.delete('/:id', async (c) => {
   const id = c.req.param('id');
 
-  try {
-    const { error } = await adminDb.from('newsletter_subscribers').delete().eq('id', id);
+  if (!isUuid(id)) {
+    return c.json({ error: 'Subscriber not found' }, 404);
+  }
 
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to delete subscriber') }, 500);
-    }
+  try {
+    await adminDb.delete(newsletterSubscribers).where(eq(newsletterSubscribers.id, id));
 
     return c.json({ success: true });
   } catch (error) {
@@ -206,26 +205,30 @@ adminNewsletterRoutes.delete('/:id', async (c) => {
  */
 adminNewsletterRoutes.get('/export', async (c) => {
   try {
-    const { data, error } = await adminDb
-      .from('newsletter_subscribers')
-      .select('email, name, status, subscribed_at, created_at')
-      .eq('status', 'active')
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to export') }, 500);
-    }
+    const data = await adminDb
+      .select({
+        email: newsletterSubscribers.email,
+        name: newsletterSubscribers.name,
+        status: newsletterSubscribers.status,
+        subscribedAt: newsletterSubscribers.subscribedAt,
+        createdAt: newsletterSubscribers.createdAt,
+      })
+      .from(newsletterSubscribers)
+      .where(eq(newsletterSubscribers.status, 'active'))
+      .orderBy(desc(newsletterSubscribers.createdAt));
 
     const csv = [
       'email,name,status,subscribed_at,created_at',
-      ...(data || []).map(
-        (s: {
-          email: string;
-          name: string | null;
-          status: string;
-          subscribed_at: string | null;
-          created_at: string;
-        }) => [s.email, s.name, s.status, s.subscribed_at, s.created_at].map(csvCell).join(',')
+      ...data.map((s) =>
+        [
+          s.email,
+          s.name,
+          s.status,
+          s.subscribedAt === null ? null : isoTimestamp(s.subscribedAt),
+          isoTimestamp(s.createdAt),
+        ]
+          .map(csvCell)
+          .join(',')
       ),
     ].join('\r\n');
 

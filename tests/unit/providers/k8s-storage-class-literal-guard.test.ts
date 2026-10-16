@@ -54,15 +54,6 @@ const PROVIDER_ROWS: Array<[string, string, string]> = Object.entries(PROVIDERS)
     join(SRC_ROOT, 'lib', 'providers', `${id}.js`),
   ],
 );
-// carbon/k8s/overlays/local/ is a kind/minikube dev overlay, out of scope
-// for M3 (it already hardcodes `local-path` for ALL providers via its own
-// kustomize patch — never `hcloud-volumes` as a live value). Its test
-// driver script documents that swap in a `#` comment, which the bare-word
-// pattern below can't distinguish from a real manifest value the way the
-// quoted-string pattern distinguishes JS doc comments (no backtick
-// convention in shell comments) — so it's exempted by path, same as the
-// EXEMPT_DIR precedent in no-hardcoded-provider-dispatch.test.ts.
-const LOCAL_OVERLAY_TEST_SCRIPT = join(CARBON_K8S_ROOT, 'test-local.sh');
 
 const bareLiteralPattern = (literal: string) => new RegExp(`\\b${literal}\\b`);
 const quotedLiteralPattern = (literal: string) => new RegExp(`['"]${literal}['"]`);
@@ -89,9 +80,7 @@ describe.each(PROVIDER_ROWS)(
   'no hardcoded %s StorageClass literal (%s) outside its own provider file',
   (_id, literal, homeFile) => {
     it('k8s manifests (carbon/k8s/, services/) never hardcode the bare scalar', () => {
-      const files = [...walkFiles(CARBON_K8S_ROOT), ...walkFiles(SERVICES_ROOT)].filter(
-        (f) => f !== LOCAL_OVERLAY_TEST_SCRIPT,
-      );
+      const files = [...walkFiles(CARBON_K8S_ROOT), ...walkFiles(SERVICES_ROOT)];
       expect(files.length).toBeGreaterThan(50); // sanity: the walk actually found the trees
 
       const offenders: Array<{ file: string; match: string }> = [];

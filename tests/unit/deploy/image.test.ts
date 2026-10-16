@@ -242,7 +242,7 @@ describe('buildLocalImage', () => {
         projectName: 'myproj',
         timestamp: '20260425143000',
         tagPrefix: '10.0.1.1:5000',
-        buildArgs: { VITE_SUPABASE_URL: 'https://x.example' },
+        buildArgs: { VITE_PUBLIC_URL: 'https://x.example' },
       },
     ]) {
       vi.mocked(runCommandAsync).mockClear();

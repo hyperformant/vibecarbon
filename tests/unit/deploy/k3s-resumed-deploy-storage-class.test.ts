@@ -4,12 +4,13 @@
  * What happened: a mid-deploy failure left `.vibecarbon/deploy-state-<env>.json`
  * with `k3s-apply` STARTED but never completed. The operator re-ran deploy
  * (`node scripts/iter-step.js k8s-ha deploy`), the resumed run re-executed the
- * primary's `installSupabase` — and the chart's PVCs came out on k3s'
- * node-local `local-path` instead of the Hetzner CSI `hcloud-volumes` the
- * standby had carried since its own deploy 4 days earlier. supabase-db +
- * supabase-pgsodium Pending; imgproxy/snippets/storage bound to node-local
- * disk. Customer impact: the DATABASE on a non-detachable volume, silently
- * breaking replication / failover / wal-g restore.
+ * primary's database install — and its PVCs came out on k3s' node-local
+ * `local-path` instead of the Hetzner CSI `hcloud-volumes` the standby had
+ * carried since its own deploy 4 days earlier: the database PVCs Pending, the
+ * cache PVCs bound to node-local disk. Customer impact: the DATABASE on a
+ * non-detachable volume, silently breaking replication / failover / wal-g
+ * restore. (The database then ran from a Helm chart; it is now our own
+ * StatefulSet, whose volumeClaimTemplate renders the class.)
  *
  * This file pins the two halves of the fix that a RESUMED deploy depends on:
  *
@@ -30,7 +31,9 @@ vi.mock('node:child_process', async () => {
   return { ...actual, spawn: vi.fn() };
 });
 
-const { buildK3sApplyInputs, installSupabase } = await import('../../../src/lib/deploy/k8s/k3s.js');
+const { buildDbManifestValues, buildK3sApplyInputs, renderK8sBase } = await import(
+  '../../../src/lib/deploy/k8s/k3s.js'
+);
 const { StateTracker } = await import('../../../src/lib/deploy/state.js');
 const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
@@ -67,12 +70,12 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
   beforeEach(() => {
     cmdCalls = [];
     dir = mkdtempSync(join(tmpdir(), 'vc-resume-sc-'));
-    mkdirSync(join(dir, 'k8s', 'base'), { recursive: true });
-    writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources: []\n');
-    mkdirSync(join(dir, 'k8s', 'values'), { recursive: true });
+    mkdirSync(join(dir, 'k8s', 'base', 'db'), { recursive: true });
+    writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
+    // The real StatefulSet, as `create` lays it down.
     writeFileSync(
-      join(dir, 'k8s', 'values', 'supabase.values.yaml'),
-      'domain: {{DOMAIN}}\npersistence:\n  db:\n    size: 10Gi\n',
+      join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
+      readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
     );
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
     vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
@@ -120,23 +123,27 @@ describe('state-resumed k8s deploy keeps the provider StorageClass', () => {
     expect(resumed.shouldSkip('k3s-apply', buildK3sApplyInputs(applyArgs()))).toBe(false);
   });
 
-  it('the resumed render pins the provider class on the db PVC', async () => {
+  it('the resumed render pins the provider class on the db PVC', () => {
     seedMidDeployFailureState();
-    // What the resumed k3s-apply does: applyK3sManifests → installSupabase,
-    // threading ProviderClass.K8S_STORAGE_CLASS.
-    await installSupabase({
-      kubeconfig: join(dir, 'kubeconfig'),
-      projectDir: dir,
-      projectName: 'proj',
-      domain: 'e4.example.test',
-      dbImageTag: 'ghcr.io/org/postgres:17-walg1',
-      storageClass: HetznerProvider.K8S_STORAGE_CLASS,
-      supabasePrivateIp: '10.0.1.2',
-    });
-    const helm = cmdCalls.find(([cmd, sub]) => cmd === 'helm' && sub === 'upgrade') ?? [];
-    const setArg = helm.find((a, i) => helm[i - 1] === '--set' && a.includes('storageClassName'));
-    expect(setArg).toContain('persistence.db.storageClassName=hcloud-volumes');
-    expect(setArg).toContain('persistence.pgsodium.storageClassName=hcloud-volumes');
+    // What the resumed k3s-apply does: applyK3sManifests renders k8s/base
+    // with ProviderClass.K8S_STORAGE_CLASS before applying it.
+    const rendered = renderK8sBase(
+      join(dir, 'k8s', 'base'),
+      buildDbManifestValues({
+        projectName: 'proj',
+        dbImageTag: 'ghcr.io/org/postgres:17-walg1',
+        storageClass: HetznerProvider.K8S_STORAGE_CLASS,
+        dbPrivateIp: '10.0.1.2',
+        walArchiveSha: 'abc',
+      }),
+    );
+    try {
+      const sts = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8');
+      expect(sts).toContain('storageClassName: "hcloud-volumes"');
+      expect(sts).not.toContain('{{K8S_STORAGE_CLASS}}');
+    } finally {
+      rmSync(rendered, { recursive: true, force: true });
+    }
   });
 
   it('a warm resume against a pre-fix state file cannot skip k3s-apply', () => {
@@ -183,13 +190,16 @@ describe('deployK3s threads the provider StorageClass end to end', () => {
     );
   });
 
-  it('applyK3sManifests hands the class to installSupabase (no silent default)', () => {
+  it('applyK3sManifests renders the db with the provider class (no silent default)', () => {
     const applyStart = K3S_SRC.indexOf('export async function applyK3sManifests(');
     expect(applyStart).toBeGreaterThan(-1);
     const body = K3S_SRC.slice(applyStart);
-    const installCall = body.slice(body.indexOf('installSupabase({'));
-    expect(installCall.slice(0, installCall.indexOf('}),'))).toContain(
-      'storageClass: ProviderClass?.K8S_STORAGE_CLASS',
+    expect(body).toContain('const storageClass = ProviderClass?.K8S_STORAGE_CLASS;');
+    const valuesCall = body.slice(body.indexOf('buildDbManifestValues({'));
+    expect(valuesCall.slice(0, valuesCall.indexOf('})'))).toMatch(/\n\s+storageClass,\n/);
+    // …and checks the cluster has it (and the PGDATA claim is on it) first.
+    expect(body.indexOf('assertDbStorageClass({ storageClass, env })')).toBeLessThan(
+      body.indexOf('renderK8sBase('),
     );
   });
 });

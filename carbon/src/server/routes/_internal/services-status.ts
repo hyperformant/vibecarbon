@@ -5,8 +5,17 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { promisify } from 'node:util';
 import { Hono } from 'hono';
-import { fetchContainerLogs, listProjectContainers } from '../../lib/docker-api';
+import { type Pingable, pingDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
+import {
+  type DockerContainer,
+  fetchContainerLogs,
+  listProjectContainers,
+} from '../../lib/docker-api';
 import { logger } from '../../lib/logger';
+import { isDocker, isKubernetes } from '../../lib/runtime-env';
+import { probeTraefik, TRAEFIK_HEALTH_URL } from '../../lib/traefik-probe';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 
 const execAsync = promisify(exec);
 
@@ -28,6 +37,8 @@ interface ServiceStatus {
   status: 'healthy' | 'unhealthy' | 'unknown';
   latencyMs?: number;
   error?: string;
+  /** The dashboard can restart this container here (see canRestart). */
+  restartable?: boolean;
 }
 
 interface ServiceConfig {
@@ -39,110 +50,160 @@ interface ServiceConfig {
   k8sUnavailable?: boolean; // Service cannot be checked in Kubernetes
 }
 
-// Detect runtime environment
-const isKubernetes = !!process.env.KUBERNETES_SERVICE_HOST;
-const isDocker =
-  !isKubernetes && (process.env.NODE_ENV === 'production' || process.env.DOCKER === 'true');
+// The app reaches the Docker API through the read-only socket proxy in a
+// production compose deployment (docker-compose.prod.yml sets this). Local
+// dev talks to the host socket and k8s has no Docker API, so neither runs
+// the proxy and neither lists it.
+const dockerApiProxy = process.env.DOCKER_API_PROXY;
 
-// Local dev port resolution: respects DEV_PORT_OFFSET and explicit per-service overrides
-// (mirrors the logic in scripts/docker-up.js)
-function localPort(envKey: string, defaultPort: number): number {
-  const explicit = process.env[envKey];
-  if (explicit) return Number.parseInt(explicit, 10);
-  const offset = Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
-  return defaultPort + offset;
-}
-
-const kongPort = localPort('DEV_KONG_PORT', 8000);
-const traefikPort = localPort('DEV_TRAEFIK_PORT', 80);
-
-// Core Supabase services - always present
+// The per-server stack: the app, its Postgres, Traefik in front, and (in a
+// production compose deployment) the socket proxy Traefik and this page read
+// Docker through. Authentication is not a row of its own: Better Auth runs
+// inside the app, so its check is folded into the App row (checkApp).
 const CORE_SERVICES: ServiceConfig[] = [
+  {
+    name: 'App',
+    container: 'app',
+    // This process answering, plus its in-process auth router (checkApp).
+    healthUrl: 'self://app',
+    timeout: 2000,
+  },
   {
     name: 'PostgreSQL',
     container: 'db',
-    // In k8s: checked indirectly via PostgREST through Kong (handled specially in checkServiceHealth)
-    healthUrl: isDocker ? 'http://db:5432' : `http://localhost:${localPort('DEV_DB_PORT', 5432)}`,
+    // Checked with `select 1` over the app's own connection (checkDatabase).
+    healthUrl: 'db://db',
     timeout: 2000,
   },
   {
-    name: 'API Gateway',
-    container: 'kong',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/'
-      : isDocker
-        ? 'http://kong:8000/'
-        : `http://localhost:${kongPort}/`,
+    name: 'Traefik',
+    container: 'traefik',
+    // Probed by probeTraefik (lib/traefik-probe.ts), which knows where
+    // Traefik is on k8s, compose and local dev, and never follows redirects.
+    healthUrl: TRAEFIK_HEALTH_URL,
     timeout: 2000,
-    acceptCodes: [404], // 404 = running but no default route
   },
+  ...(dockerApiProxy && !isKubernetes
+    ? [
+        {
+          name: 'Docker Socket Proxy',
+          container: 'docker-socket-proxy',
+          healthUrl: `${dockerApiProxy.replace(/\/$/, '')}/_ping`,
+          timeout: 2000,
+        },
+      ]
+    : []),
+];
+
+// Containers listed only when Docker reports them running. Garage is the
+// local S3 stand-in from docker-compose.override.yml: dev only, production
+// uses the cloud provider's object storage and runs no s3 container.
+const DISCOVERED_SERVICES: ServiceConfig[] = [
   {
-    name: 'Authentication',
-    container: 'auth',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/auth/v1/health'
-      : isDocker
-        ? 'http://auth:9999/health'
-        : `http://localhost:${kongPort}/auth/v1/health`,
-    timeout: 2000,
-    acceptCodes: isDocker ? undefined : [200, 401], // Via Kong requires API key
-  },
-  {
-    name: 'REST API',
-    container: 'rest',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/rest/v1/'
-      : isDocker
-        ? 'http://rest:3000/'
-        : `http://localhost:${kongPort}/rest/v1/`,
-    timeout: 2000,
-    acceptCodes: [200, 401], // 401 = running but requires auth
-  },
-  {
-    name: 'Realtime',
-    container: 'realtime',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/realtime/v1/'
-      : isDocker
-        ? 'http://realtime:4000/api/tenants'
-        : `http://localhost:${kongPort}/realtime/v1/`,
-    timeout: 2000,
-    acceptCodes: [200, 401, 403, 426], // May require auth or websocket upgrade
-  },
-  {
-    name: 'File Storage',
-    container: 'storage',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/storage/v1/status'
-      : isDocker
-        ? 'http://storage:5000/status'
-        : `http://localhost:${kongPort}/storage/v1/status`,
-    timeout: 2000,
-    acceptCodes: isDocker ? undefined : [200, 401], // Via Kong requires API key
-  },
-  {
-    name: 'Studio',
-    container: 'studio',
-    healthUrl: isKubernetes
-      ? 'http://studio:3000/'
-      : isDocker
-        ? 'http://studio:3000/'
-        : `http://studio.localhost:${traefikPort}/`,
-    timeout: 3000,
-    acceptCodes: [200, 307], // 307 redirect is fine
-  },
-  {
-    name: 'DB Management',
-    container: 'meta',
-    healthUrl: isKubernetes
-      ? 'http://kong:8000/pg/'
-      : isDocker
-        ? 'http://meta:8080/health'
-        : `http://localhost:${kongPort}/pg/`,
-    timeout: 2000,
-    acceptCodes: [200, 401], // May require auth via Kong
+    name: 'Storage (S3)',
+    container: 's3',
+    // Reported from the container's state in the Docker listing.
+    healthUrl: 'docker://s3',
+    timeout: 0,
   },
 ];
+
+const DB_CHECK_TIMEOUT_MS = 2000;
+
+type AuthHandler = (request: Request) => Promise<Response>;
+
+async function loadAuthHandler(): Promise<AuthHandler> {
+  // Imported lazily so this module stays loadable without the auth config.
+  const { auth } = await import('../../auth');
+  return auth.handler;
+}
+
+/**
+ * The App row. Answering this request proves the process is up; Better Auth
+ * runs in the same process, so the row also asks its router for
+ * GET /api/auth/ok, in-process with no network hop. The app is healthy only
+ * if both answer. Never throws.
+ */
+export async function checkApp(
+  handler?: AuthHandler,
+  timeoutMs: number = 2000
+): Promise<ServiceStatus> {
+  const base = { name: 'App', container: 'app' };
+  const origin = process.env.SITE_URL || 'http://localhost';
+  let start = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Load the module before timing, so the first check measures the auth
+    // router, not the one-off import.
+    const authHandler = handler ?? (await loadAuthHandler());
+    start = Date.now();
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), timeoutMs);
+    });
+    const res = await Promise.race([
+      authHandler(new Request(new URL('/api/auth/ok', origin), { method: 'GET' })),
+      timeout,
+    ]);
+    const latencyMs = Date.now() - start;
+    if (res === 'timeout')
+      return { ...base, status: 'unhealthy', latencyMs, error: 'Auth timeout' };
+    if (!res.ok) {
+      return { ...base, status: 'unhealthy', latencyMs, error: 'Auth not answering' };
+    }
+    return { ...base, status: 'healthy', latencyMs };
+  } catch (err) {
+    logger.warn({ err }, 'Services status: in-process auth check failed');
+    return {
+      ...base,
+      status: 'unhealthy',
+      latencyMs: Date.now() - start,
+      error: 'Auth not answering',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A row read from the Docker listing: running, and its healthcheck verdict. */
+function containerStateStatus(
+  service: ServiceConfig,
+  container: DockerContainer | undefined
+): ServiceStatus {
+  const base = { name: service.name, container: service.container };
+  if (!container) return { ...base, status: 'unhealthy', error: 'Not running' };
+  if (container.health === 'unhealthy') {
+    return { ...base, status: 'unhealthy', error: 'Container not healthy' };
+  }
+  if (container.health === 'starting') return { ...base, status: 'unknown', error: 'Starting up' };
+  return { ...base, status: 'healthy' };
+}
+
+/**
+ * The PostgreSQL row: `select 1` over the app's own connection (pingDb),
+ * giving up after `timeoutMs`. Never throws. The error text of a failed query
+ * never reaches the response (it can carry connection details); it goes to
+ * the server log through dbErrorForLog.
+ */
+export async function checkDatabase(
+  target?: Pingable,
+  timeoutMs: number = DB_CHECK_TIMEOUT_MS
+): Promise<ServiceStatus> {
+  const ping = await pingDb(target, { timeoutMs });
+  const base = { name: 'PostgreSQL', container: 'db', latencyMs: ping.latencyMs };
+  if (ping.ok) return { ...base, status: 'healthy' };
+  if (ping.timedOut) return { ...base, status: 'unhealthy', error: 'Timeout' };
+  logger.warn({ err: dbErrorForLog(ping.error) }, 'Services status: database check failed');
+  return { ...base, status: 'unhealthy', error: 'Not reachable' };
+}
+
+/** The Traefik row (see lib/traefik-probe.ts). */
+async function checkTraefik(service: ServiceConfig): Promise<ServiceStatus> {
+  const probe = await probeTraefik(service.timeout);
+  const base = { name: service.name, container: service.container, latencyMs: probe.latencyMs };
+  return probe.ok
+    ? { ...base, status: 'healthy' }
+    : { ...base, status: 'unhealthy', error: probe.error };
+}
 
 // Optional services - added based on environment configuration
 const OPTIONAL_SERVICES: Record<string, ServiceConfig[]> = {
@@ -210,16 +271,17 @@ const OPTIONAL_SERVICES: Record<string, ServiceConfig[]> = {
 };
 
 // Cache for running containers (refreshed on each status check)
-let runningContainersCache: Set<string> = new Set();
+let runningContainersCache: Map<string, DockerContainer> = new Map();
 let containersCacheTime = 0;
 const CACHE_TTL_MS = 5000; // 5 seconds
 
 /**
- * Detect which containers are currently running via Docker
+ * This project's running containers by compose service, or null when Docker
+ * cannot be asked (k8s, no PROJECT_NAME, API unreachable).
  */
-async function getRunningContainers(): Promise<Set<string>> {
+async function getRunningContainers(): Promise<Map<string, DockerContainer> | null> {
   // Docker is not available in Kubernetes
-  if (isKubernetes) return new Set();
+  if (isKubernetes) return null;
 
   const now = Date.now();
   if (now - containersCacheTime < CACHE_TTL_MS && runningContainersCache.size > 0) {
@@ -230,36 +292,48 @@ async function getRunningContainers(): Promise<Set<string>> {
   // CLI — it reaches the read-only docker-socket-proxy instead (local dev
   // uses the host socket directly). See lib/docker-api.ts.
   const project = process.env.PROJECT_NAME;
-  if (!project) return new Set();
+  if (!project) return null;
 
   try {
     const containers = await listProjectContainers(project);
-    const services = new Set(containers.map((c) => c.service));
+    const services = new Map(containers.map((c) => [c.service, c]));
     runningContainersCache = services;
     containersCacheTime = now;
     return services;
   } catch {
-    // If Docker check fails, return empty set (will only show core services)
-    return new Set();
+    // Docker could not be asked: fall back to core services + env flags.
+    return null;
   }
 }
 
 /**
- * Get all services to check - core + any running optional services
+ * Every row to check: the core stack, plus each discovered or optional
+ * service whose container is running. A container that is not there is never
+ * listed. Env flags stand in only where Docker cannot be asked (k8s, or the
+ * Docker API unreachable), since there they are the only signal.
  */
-async function getEnabledServices(): Promise<ServiceConfig[]> {
+async function getEnabledServices(): Promise<{
+  services: ServiceConfig[];
+  running: Map<string, DockerContainer> | null;
+}> {
   const services = [...CORE_SERVICES];
-  const runningContainers = await getRunningContainers();
+  const running = await getRunningContainers();
+
+  if (running) {
+    services.push(...DISCOVERED_SERVICES.filter((config) => running.has(config.container)));
+  }
 
   // Add optional services if their containers are running
   for (const [, configs] of Object.entries(OPTIONAL_SERVICES)) {
-    const isRunning = configs.some((config) => runningContainers.has(config.container));
+    const isRunning = configs.some((config) => running?.has(config.container));
     if (isRunning) {
       services.push(...configs);
     }
   }
 
-  // Also check env vars as fallback (for when Docker detection fails)
+  if (running) return { services, running };
+
+  // Env flags as the fallback where Docker cannot be asked.
   if (process.env.REDIS_ENABLED === 'true' && !services.some((s) => s.container === 'redis')) {
     services.push(...OPTIONAL_SERVICES.redis);
   }
@@ -279,7 +353,7 @@ async function getEnabledServices(): Promise<ServiceConfig[]> {
     services.push(...OPTIONAL_SERVICES.observability);
   }
 
-  return services;
+  return { services, running };
 }
 
 // List of optional service containers that should use Docker health check when not in Docker
@@ -292,8 +366,15 @@ const DOCKER_HEALTH_CHECK_CONTAINERS = [
   'loki',
 ];
 
-async function checkServiceHealth(service: ServiceConfig): Promise<ServiceStatus> {
+async function checkServiceHealth(
+  service: ServiceConfig,
+  running: Map<string, DockerContainer> | null
+): Promise<ServiceStatus> {
   const start = Date.now();
+
+  if (service.healthUrl.startsWith('docker://')) {
+    return containerStateStatus(service, running?.get(service.container));
+  }
 
   // Services that cannot be reached from the app pod in Kubernetes
   if (isKubernetes && service.k8sUnavailable) {
@@ -335,41 +416,16 @@ async function checkServiceHealth(service: ServiceConfig): Promise<ServiceStatus
     }
   }
 
-  // Special case for PostgreSQL - we can't HTTP check it, rely on other services
-  if (service.container === 'db') {
-    // Check if PostgREST can connect (implies DB is healthy)
-    const postgrestUrl = isKubernetes
-      ? 'http://kong:8000/rest/v1/'
-      : isDocker
-        ? 'http://rest:3000/'
-        : `http://localhost:${kongPort}/rest/v1/`;
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), service.timeout);
+  if (service.healthUrl === 'self://app') {
+    return checkApp(undefined, service.timeout);
+  }
 
-      const response = await fetch(postgrestUrl, {
-        method: 'GET',
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
+  if (service.healthUrl === 'db://db') {
+    return checkDatabase(undefined, service.timeout);
+  }
 
-      // 401 via Kong is fine - means PostgREST (and thus DB) is running
-      const isHealthy = response.ok || response.status === 401;
-
-      return {
-        name: service.name,
-        container: service.container,
-        status: isHealthy ? 'healthy' : 'unhealthy',
-        latencyMs: Date.now() - start,
-      };
-    } catch {
-      return {
-        name: service.name,
-        container: service.container,
-        status: 'unknown',
-        error: 'Cannot verify (checked via PostgREST)',
-      };
-    }
+  if (service.container === 'traefik') {
+    return checkTraefik(service);
   }
 
   // Special case: TCP check for services without an HTTP health endpoint (e.g. Redis)
@@ -404,8 +460,11 @@ async function checkServiceHealth(service: ServiceConfig): Promise<ServiceStatus
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), service.timeout);
 
+    // A redirect is the service answering; following it could chase a
+    // public URL the app cannot reach and report a running service as down.
     const response = await fetch(service.healthUrl, {
       method: 'GET',
+      redirect: 'manual',
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -446,27 +505,19 @@ import type { HonoVariables } from '../../types';
 
 const servicesStatusRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Helper to check if user is a super admin
-function requireSuperAdmin(c: {
-  get: (key: string) => unknown;
-}): { error: string; status: 401 | 403 } | null {
-  const user = c.get('user') as { app_metadata?: { role?: string } } | null;
-  if (!user) return { error: 'Unauthorized', status: 401 };
-  if (user.app_metadata?.role !== 'super_admin') return { error: 'Forbidden', status: 403 };
-  return null;
-}
-
 servicesStatusRoutes.get('/', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   logger.debug('Checking services status');
 
   // Get enabled services (auto-detects running containers)
-  const services = await getEnabledServices();
+  const { services, running } = await getEnabledServices();
 
   // Check all services in parallel
-  const results = await Promise.all(services.map(checkServiceHealth));
+  const results = (
+    await Promise.all(services.map((service) => checkServiceHealth(service, running)))
+  ).map((row) => ({ ...row, restartable: isRestartable(row.container) }));
 
   // Sort by name for consistent ordering
   results.sort((a, b) => a.name.localeCompare(b.name));
@@ -487,18 +538,44 @@ servicesStatusRoutes.get('/', async (c) => {
   });
 });
 
-// All known container names (core + all optional)
+// Every container this page knows by name: the log viewer's allowlist.
 const ALL_KNOWN_CONTAINERS = [
   ...CORE_SERVICES.map((s) => s.container),
+  'docker-socket-proxy',
+  ...DISCOVERED_SERVICES.map((s) => s.container),
   ...Object.values(OPTIONAL_SERVICES).flatMap((configs) => configs.map((c) => c.container)),
 ];
+
+/**
+ * The restart allowlist: known containers minus docker-socket-proxy, which is
+ * the read-only path this page sees Docker through and no dashboard action
+ * should cycle.
+ */
+const RESTARTABLE_CONTAINERS = new Set(
+  ALL_KNOWN_CONTAINERS.filter((name) => name !== 'docker-socket-proxy')
+);
+
+/**
+ * Restarts run `docker compose restart` and so need the docker CLI and the
+ * compose files next to this process: local dev, the API on the host. The
+ * production app container has neither (and its socket proxy refuses POST),
+ * and k8s has no compose, so the dashboard offers no restart there.
+ */
+const canRestart = !isKubernetes && !isDocker;
+
+const RESTART_UNAVAILABLE =
+  'Restart is not available from the dashboard in this deployment. Run `docker compose restart <service>` on the server.';
+
+function isRestartable(container: string): boolean {
+  return canRestart && RESTARTABLE_CONTAINERS.has(container);
+}
 
 /**
  * Restart a Docker container using docker compose
  */
 async function restartContainer(container: string): Promise<{ success: boolean; error?: string }> {
-  // Only allow restarting known containers
-  if (!ALL_KNOWN_CONTAINERS.includes(container)) {
+  // Only allow restarting known, restartable containers
+  if (!RESTARTABLE_CONTAINERS.has(container)) {
     return { success: false, error: `Invalid container: ${container}` };
   }
 
@@ -516,11 +593,7 @@ async function restartContainer(container: string): Promise<{ success: boolean; 
     // is read-only by design) — restarts must run on the host. Say so
     // instead of surfacing a bare "Command failed".
     if (/not found|ENOENT/i.test(errorMessage)) {
-      return {
-        success: false,
-        error:
-          'Restart is not available from the dashboard in this deployment. Run `docker compose restart <service>` on the server.',
-      };
+      return { success: false, error: RESTART_UNAVAILABLE };
     }
     return { success: false, error: errorMessage };
   }
@@ -528,17 +601,22 @@ async function restartContainer(container: string): Promise<{ success: boolean; 
 
 // POST /restart - Restart all running services
 servicesStatusRoutes.post('/restart', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   if (isKubernetes) {
     return c.json({ success: false, error: 'Not supported in Kubernetes' }, 501);
   }
+  if (!canRestart) return c.json({ success: false, error: RESTART_UNAVAILABLE }, 501);
 
   logger.info('Restarting all services');
 
-  const services = await getEnabledServices();
-  const containers = services.map((s) => s.container);
+  const { services } = await getEnabledServices();
+  // Not the app itself: restarting the process answering this request would
+  // drop the reply. Restart it on its own (POST /restart/app).
+  const containers = services
+    .map((s) => s.container)
+    .filter((name) => name !== 'app' && RESTARTABLE_CONTAINERS.has(name));
 
   const results = await Promise.all(
     containers.map(async (container) => {
@@ -565,8 +643,8 @@ servicesStatusRoutes.post('/restart', async (c) => {
 
 // POST /restart/:container - Restart a specific service
 servicesStatusRoutes.post('/restart/:container', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   if (isKubernetes) {
     return c.json({ success: false, error: 'Not supported in Kubernetes' }, 501);
@@ -574,9 +652,10 @@ servicesStatusRoutes.post('/restart/:container', async (c) => {
 
   const container = c.req.param('container');
 
-  if (!ALL_KNOWN_CONTAINERS.includes(container)) {
+  if (!RESTARTABLE_CONTAINERS.has(container)) {
     return c.json({ success: false, error: `Invalid container: ${container}` }, 400);
   }
+  if (!canRestart) return c.json({ success: false, error: RESTART_UNAVAILABLE }, 501);
 
   const result = await restartContainer(container);
 
@@ -680,14 +759,10 @@ async function getK8sApiEndpoint(): Promise<{ host: string; port: number } | nul
 /** Human-readable names for k8s app labels */
 const K8S_LABEL_NAMES: Record<string, string> = {
   'vibecarbon-app': 'App',
-  'vibecarbon-kong': 'API Gateway',
-  'vibecarbon-auth': 'Authentication',
-  'vibecarbon-rest': 'REST API',
-  'vibecarbon-realtime': 'Realtime',
-  'vibecarbon-storage': 'File Storage',
-  'vibecarbon-studio': 'Studio',
-  'vibecarbon-meta': 'DB Management',
-  'vibecarbon-postgres': 'PostgreSQL',
+  // The db StatefulSet that replaces the Helm chart labels its pod
+  // `app: vibecarbon-db` (PR B); until then the chart's pod has no `app` label.
+  'vibecarbon-db': 'PostgreSQL',
+  'vibecarbon-traefik': 'Traefik',
   n8n: 'n8n',
   metabase: 'Metabase',
   prometheus: 'Prometheus',
@@ -798,8 +873,8 @@ async function getK8sPodLogs(
  *   - container: specific container (optional, defaults to all)
  */
 servicesStatusRoutes.get('/logs', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const tail = Math.min(Math.max(Number(c.req.query('tail')) || 200, 1), 1000); // 1..1000 lines
   const since = c.req.query('since') || '10m';
@@ -965,8 +1040,8 @@ servicesStatusRoutes.get('/logs', async (c) => {
 
 // GET /logs/containers - List available containers for log filtering
 servicesStatusRoutes.get('/logs/containers', async (c) => {
-  const authError = requireSuperAdmin(c);
-  if (authError) return c.json({ error: authError.error }, authError.status);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   if (isKubernetes) {
     try {
@@ -993,7 +1068,7 @@ servicesStatusRoutes.get('/logs/containers', async (c) => {
     }
   }
 
-  const services = await getEnabledServices();
+  const { services } = await getEnabledServices();
   return c.json({
     containers: services.map((s) => ({
       name: s.name,

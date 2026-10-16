@@ -1,5 +1,7 @@
-import { type ExecSyncOptions, execSync } from 'node:child_process';
-import { createServer } from 'node:net';
+import { type ExecSyncOptions, execFileSync, execSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { connect, createServer } from 'node:net';
+import { delimiter } from 'node:path';
 import { testConfig } from '../config.js';
 
 /**
@@ -10,6 +12,30 @@ import { testConfig } from '../config.js';
  * - Robust cleanup with fallback to force kill
  * - Structured logging for debugging
  */
+
+/**
+ * The compose file set `vibecarbon up` runs in dev for the project at
+ * `projectDir`, as a COMPOSE_FILE value. It asks the project's own
+ * scripts/lib/manifest.js getComposeFiles (what dev:start's docker-up.js
+ * uses: the base file, each enabled service file and its dev override, the
+ * main docker-compose.override.yml last), so a smoke test can never drive a
+ * stack no user runs. Joined with the platform's path delimiter, the
+ * separator compose reads COMPOSE_FILE with.
+ */
+export function devComposeFileEnv(projectDir: string): string {
+  const files = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        "const m = await import('./scripts/lib/manifest.js'); process.stdout.write(JSON.stringify(m.getComposeFiles(m.loadManifest())));",
+      ],
+      { cwd: projectDir, encoding: 'utf-8' },
+    ),
+  ) as string[];
+  return files.join(delimiter);
+}
 
 // =============================================================================
 // TYPES
@@ -58,17 +84,44 @@ export interface ExecResult {
 // =============================================================================
 
 /**
- * Check if a port is available for binding
+ * Check if a port is free for a compose service to publish.
+ *
+ * Binds it ourselves first. A non-root user cannot bind a port below
+ * net.ipv4.ip_unprivileged_port_start (1024 by default), so EACCES on :80
+ * says nothing about whether the port is free: Docker publishes it as root
+ * either way. Treating EACCES as "busy" skipped the Traefik smoke on every
+ * non-root host. On EACCES this asks the port instead: a refused connection
+ * means nothing listens there, so compose can publish it.
  */
 export function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
-    server.once('error', () => resolve(false));
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EACCES') {
+        nothingListensOn(port).then(resolve);
+        return;
+      }
+      resolve(false);
+    });
     server.once('listening', () => {
       server.close();
       resolve(true);
     });
     server.listen(port, '0.0.0.0');
+  });
+}
+
+/** True when a TCP connect to 127.0.0.1:<port> is refused (no listener). */
+export function nothingListensOn(port: number, timeoutMs = 2000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ port, host: '127.0.0.1' });
+    const done = (free: boolean) => {
+      socket.destroy();
+      resolve(free);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(false));
+    socket.once('error', (err: NodeJS.ErrnoException) => done(err.code === 'ECONNREFUSED'));
   });
 }
 
@@ -98,25 +151,40 @@ export async function arePortsAvailable(
 // =============================================================================
 
 /**
- * HTTP fetch with timeout and error handling
+ * HTTP GET (or `options.method`) with a timeout; never throws (status 0 on
+ * any transport error).
+ *
+ * Built on node:http, not fetch: fetch treats `Host` as a forbidden header
+ * and silently sends the URL's own host instead, so every Traefik case that
+ * routed by Host (`traefik.localhost`) actually reached the `localhost`
+ * router, and only the cases whose Host matched the URL could pass.
  */
-export async function fetchWithTimeout(
+export function fetchWithTimeout(
   url: string,
   timeoutMs: number,
-  options?: RequestInit,
+  options?: { method?: string; headers?: Record<string, string> },
 ): Promise<FetchResult> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    const body = await response.text();
-    return { ok: response.ok, status: response.status, body };
-  } catch {
-    return { ok: false, status: 0, body: '' };
-  } finally {
-    clearTimeout(timeout);
-  }
+  return new Promise((resolve) => {
+    const req = httpRequest(
+      url,
+      { method: options?.method ?? 'GET', headers: options?.headers, timeout: timeoutMs },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          resolve({ ok: status >= 200 && status < 300, status, body });
+        });
+        res.on('error', () => resolve({ ok: false, status: 0, body: '' }));
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', () => resolve({ ok: false, status: 0, body: '' }));
+    req.end();
+  });
 }
 
 // =============================================================================
@@ -223,7 +291,12 @@ export async function waitForDockerCommand(
 }
 
 /**
- * Wait for PostgreSQL to be ready
+ * Wait for PostgreSQL to be ready.
+ *
+ * Probes over TCP (`-h localhost`), like the compose healthcheck. The default
+ * unix-socket probe passes against the temporary socket-only server the image
+ * runs during first-boot init, then the real server restarts and the next
+ * query fails with "the database system is shutting down".
  */
 export async function waitForPostgres(
   cwd: string,
@@ -231,24 +304,9 @@ export async function waitForPostgres(
   options: WaitOptions = {},
 ): Promise<boolean> {
   return waitForDockerCommand(
-    'docker compose exec -T db pg_isready -U postgres',
+    'docker compose exec -T db pg_isready -h localhost -U postgres',
     { cwd, env, encoding: 'utf-8' },
     { label: 'PostgreSQL ready', timeout: testConfig.smoke.timeouts.serviceReady, ...options },
-  );
-}
-
-/**
- * Wait for Kong to be healthy
- */
-export async function waitForKong(
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  options: WaitOptions = {},
-): Promise<boolean> {
-  return waitForDockerCommand(
-    'docker compose exec -T kong kong health',
-    { cwd, env, encoding: 'utf-8' },
-    { label: 'Kong healthy', timeout: testConfig.smoke.timeouts.serviceReady, ...options },
   );
 }
 

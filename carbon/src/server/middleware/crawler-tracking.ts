@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import type { Context, Next } from 'hono';
+import { adminDb } from '../db/client';
+import { dbErrorForLog } from '../db/errors';
+import { crawlerHits } from '../db/schema';
 import { classifyCrawler } from '../lib/crawlers';
 import { logger } from '../lib/logger';
-import { supabaseAdmin } from '../lib/supabase';
 import type { HonoVariables } from '../types';
 
 /**
@@ -30,7 +32,7 @@ import type { HonoVariables } from '../types';
  * SECURITY: no IP address and no other request header is stored — only the
  * crawler name, a bucketed path, and a truncated User-Agent. There is
  * deliberately no personal data here, so the table needs no retention story
- * beyond the prune in migration 00008.
+ * beyond the prune scheduled in db/migrations/0002_baseline_post.sql.
  */
 
 /** User-Agent values are attacker-controlled; cap what we persist. */
@@ -160,7 +162,7 @@ function logInsertFailure(error: unknown): void {
   const now = Date.now();
   if (now - lastErrorLoggedAt < ERROR_LOG_INTERVAL_MS) return;
   lastErrorLoggedAt = now;
-  logger.warn({ error }, 'Crawler hit insert failed (tracking is best-effort)');
+  logger.warn({ err: dbErrorForLog(error) }, 'Crawler hit insert failed (tracking is best-effort)');
 }
 
 /** False once this crawler has exhausted its budget for the current window. */
@@ -196,18 +198,17 @@ function recordHit(
   if (!admitHit(crawler)) return;
 
   // NOT awaited: the response must not wait on (or fail because of) this write.
-  // PostgREST reports failures in the resolved value, so both paths are handled.
-  supabaseAdmin
-    .from('crawler_hits')
-    .insert({
+  // A rejected insert is handled by the second `.then` argument; a synchronous
+  // throw while building the query is caught by the caller's try/catch.
+  adminDb
+    .insert(crawlerHits)
+    .values({
       crawler,
       path: normalizeTrackedPath(path),
-      user_agent: userAgent ? userAgent.slice(0, MAX_USER_AGENT_LENGTH) : null,
+      userAgent: userAgent ? userAgent.slice(0, MAX_USER_AGENT_LENGTH) : null,
       status,
     })
-    .then((result) => {
-      if (result.error) logInsertFailure(result.error);
-    }, logInsertFailure);
+    .then(undefined, logInsertFailure);
 }
 
 export async function crawlerTracking(

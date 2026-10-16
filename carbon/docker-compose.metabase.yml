@@ -10,11 +10,14 @@
 services:
   # Extend db service to add metabase database initialization
   db:
+    environment:
+      # The metabase role's own password, for metabase-init.sh.
+      METABASE_DB_PASSWORD: ${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
     volumes:
       - ./volumes/db/metabase-init.sh:/docker-entrypoint-initdb.d/zz-metabase-init.sh:Z
 
   metabase:
-    image: metabase/metabase:latest
+    image: metabase/metabase:v0.64.2.7@sha256:f69044cd03f1a9968cdd427f23e3f50b893666f0092e6cac1ef7e2e30e100a96
     container_name: ${PROJECT_NAME:-vibecarbon}-metabase
     restart: unless-stopped
     environment:
@@ -23,7 +26,7 @@ services:
       - MB_DB_DBNAME=metabase
       - MB_DB_PORT=5432
       - MB_DB_USER=metabase
-      - MB_DB_PASS=${POSTGRES_PASSWORD}
+      - MB_DB_PASS=${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
       - MB_DB_HOST=db
       # Site configuration
       - MB_SITE_URL=${METABASE_SITE_URL:-http://metabase.localhost}
@@ -63,7 +66,7 @@ services:
       start_period: 120s
 
   metabase-setup:
-    image: alpine:latest
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     container_name: ${PROJECT_NAME:-vibecarbon}-metabase-setup
     volumes:
       - ./volumes/metabase/scripts:/scripts:ro
@@ -71,7 +74,11 @@ services:
       - METABASE_URL=http://metabase:3000
       - METABASE_ADMIN_EMAIL=${METABASE_ADMIN_EMAIL:-${ADMIN_EMAIL}}
       - METABASE_ADMIN_PASSWORD=${METABASE_ADMIN_PASSWORD:-${ADMIN_PASSWORD}}
-      - DB_PASSWORD=${DB_PASSWORD}
+      # "Application Data" connects as the metabase role with its own password
+      # (never the superuser's): metabase-init.sh makes it NOSUPERUSER
+      # BYPASSRLS, read-only, with the server-only tables revoked.
+      - APP_DB_USER=metabase
+      - APP_DB_PASSWORD=${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
     entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq && sh /scripts/setup.sh"]
     depends_on:
       metabase:

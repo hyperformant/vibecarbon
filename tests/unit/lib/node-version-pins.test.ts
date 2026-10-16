@@ -41,6 +41,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 const ROOT = process.cwd();
 const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), 'utf-8');
@@ -52,9 +53,12 @@ const NODE_MAJOR = read('.nvmrc').trim();
 // ships into generated projects, so its pins are customer-facing.
 const WORKFLOWS = [
   // CodeQL runs prebuilt analysis actions only — no setup-node, no Node pin.
+  join('.github', 'workflows', 'cleanup-db-image-dev.yml'),
   join('.github', 'workflows', 'codeql.yml'),
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
   join('.github', 'workflows', 'e2e-us-perf.yml'),
+  join('.github', 'workflows', 'native-multiarch-image.yml'),
+  join('.github', 'workflows', 'publish-db-image-dev.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),
   join('.github', 'workflows', 'publish-images.yml'),
   join('.github', 'workflows', 'release.yml'),
@@ -122,8 +126,9 @@ function jobRunCommands(relPath: string, jobId: string): string[] {
 }
 
 // Dockerfiles that pin a `node:` base image, and those that deliberately
-// don't (both DB images are FROM supabase/postgres; docker/wal-g is a Go
-// build). Listing the second group is what makes the inventory meaningful:
+// don't (the db image is FROM the official postgres Alpine image; docker/wal-g
+// is a Go build; .github/image-pins is never built, it only shows Dependabot
+// the image pins held in JS constants). Listing the second group is what makes the inventory meaningful:
 // adding Node to one of them, or adding a new Dockerfile entirely, has to be
 // triaged here.
 const NODE_DOCKERFILES = [
@@ -131,9 +136,9 @@ const NODE_DOCKERFILES = [
   join('docker', 'carbon-autoscaler', 'Dockerfile'),
 ];
 const NON_NODE_DOCKERFILES = [
-  join('carbon', 'db', 'Dockerfile'),
   join('docker', 'postgres-walg', 'Dockerfile'),
   join('docker', 'wal-g', 'Dockerfile'),
+  join('.github', 'image-pins', 'Dockerfile'),
 ];
 
 // Only genuinely irrelevant trees are skipped. Dot-directories are NOT
@@ -620,7 +625,7 @@ describe('the engines.node floor is EXECUTED in CI, not merely declared', () => 
     expect(check, 'that step must read the floor from package.json, not a second literal').toMatch(
       /engines/,
     );
-    expect(check).not.toMatch(new RegExp(ENGINES_FLOOR.replace(/\./g, '\\.')));
+    expect(check).not.toMatch(new RegExp(escapeRegExp(ENGINES_FLOOR)));
   });
 
   it('carbon declares the same floor, so this one leg covers both projects', () => {

@@ -62,7 +62,7 @@ describe('mutateConfigMapManifest (against the real template)', () => {
 
   it('preserves the keys the deploy and the backup CronJob depend on', () => {
     const out = mutateConfigMapManifest(template, 'e2e-warm-abc');
-    for (const key of ['SITE_URL', 'DB_HOST', 'KONG_URL', 'BACKUP_RETENTION_DAYS']) {
+    for (const key of ['SITE_URL', 'DB_HOST', 'DB_PORT', 'BACKUP_RETENTION_DAYS']) {
       expect(out).toContain(`${key}:`);
     }
   });

@@ -20,7 +20,7 @@ vi.mock('@/components/auth/AuthProvider', () => ({ useAuth: () => ({ user: null 
 vi.mock('@/hooks/api', async () => ({
   // Keep the REAL useGitHubStars/getGitHubRepoUrl — the contract under test.
   // Imported from the specific module, NOT the barrel: the barrel drags in
-  // supabase-backed hooks whose module-load env check throws under jsdom.
+  // every other api hook, which this test does not want loaded.
   ...(await import('@/hooks/api/useGitHubStars')),
   useAuthSettings: () => ({ data: undefined }),
   useDocsVisibility: () => ({ userDocsEnabled: true, apiDocsEnabled: true, isLoading: false }),
@@ -53,9 +53,12 @@ describe('Nav', () => {
 
     renderNav();
 
-    const calledGitHub = fetchSpy.mock.calls.some((args) =>
-      String(args[0]).includes('api.github.com'),
-    );
+    // Parsed, so the assertion is "no request went to the GitHub API host",
+    // whatever form fetch was handed (string, URL or Request).
+    const calledGitHub = fetchSpy.mock.calls.some(([input]) => {
+      const href = input instanceof Request ? input.url : String(input);
+      return new URL(href, 'http://localhost').hostname === 'api.github.com';
+    });
     expect(calledGitHub).toBe(false);
     expect(screen.queryByLabelText('GitHub repository')).toBeNull();
   });

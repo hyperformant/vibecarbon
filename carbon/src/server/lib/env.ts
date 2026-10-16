@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolveDbPort } from '../db/port';
 
 /**
  * Parse a boolean env var strictly: only the literal string "true" is true.
@@ -10,15 +11,35 @@ const envBool = (def: boolean) =>
   z.preprocess((v) => (v === undefined ? def : v === 'true'), z.boolean());
 
 const envSchema = z.object({
-  // Supabase (required)
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_ANON_KEY: z.string().min(1),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  // Session signing and encryption key for the in-process auth (cookies,
+  // verification tokens). At least 32 characters; `vibecarbon create`
+  // generates 64.
+  BETTER_AUTH_SECRET: z.string().min(32),
 
-  // Public site URL — used in CSP connectSrc so the client can reach Supabase
-  // via the public domain (Traefik → Kong). Defaults to empty string in dev
-  // (CSP is disabled in development).
-  SITE_URL: z.string().url().optional(),
+  // Postgres. Discrete vars, never a URL, so a password needs no URL-encoding.
+  // DB_USER must be able to bypass RLS (checked at startup, see db/startup.ts)
+  // and be a member of app_user (withUserDb switches to it per transaction).
+  DB_HOST: z.string().min(1),
+  DB_PORT: z.coerce.number().int().positive().default(5432),
+  DB_USER: z.string().min(1).default('postgres'),
+  DB_PASSWORD: z.string().min(1),
+  DB_NAME: z.string().min(1).default('postgres'),
+
+  // The app's one public origin (http://localhost:5173 in dev). Required:
+  // auth builds every emailed link (verification, password reset, magic
+  // link) and OAuth callback from it, never from the request's Host header,
+  // and it anchors the trusted origins for CORS, CSRF and auth. Also used in
+  // the CSP connectSrc.
+  SITE_URL: z.string().url(),
+
+  // App storage bucket (provider-native S3, provisioned by `vibecarbon deploy`).
+  // All optional: when any is missing, uploads are disabled (503) and the app
+  // still boots.
+  S3_ENDPOINT: z.string().url().optional(),
+  S3_REGION: z.string().optional(),
+  S3_BUCKET: z.string().optional(),
+  S3_ACCESS_KEY: z.string().optional(),
+  S3_SECRET_KEY: z.string().optional(),
 
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -29,21 +50,30 @@ const envSchema = z.object({
   DEV_VITE_PORT: z.coerce.number().optional(),
   DEV_API_PORT: z.coerce.number().optional(),
   DEV_DB_PORT: z.coerce.number().optional(),
-  DEV_KONG_PORT: z.coerce.number().optional(),
   DEV_TRAEFIK_PORT: z.coerce.number().optional(),
   DEV_GRAFANA_PORT: z.coerce.number().optional(),
   DEV_PROMETHEUS_PORT: z.coerce.number().optional(),
   DEV_LOKI_PORT: z.coerce.number().optional(),
 
-  // OAuth (optional - configure in Supabase dashboard)
+  // OAuth (optional, set by `vibecarbon configure`). A provider is offered
+  // only when it is enabled AND its client id and secret are set. Redirect
+  // URI: <SITE_URL>/api/auth/callback/<google|microsoft>.
   GOOGLE_ENABLED: envBool(false),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
   MICROSOFT_ENABLED: envBool(false),
-  GITHUB_ENABLED: envBool(false),
-  APPLE_ENABLED: envBool(false),
-  DISCORD_ENABLED: envBool(false),
+  MICROSOFT_CLIENT_ID: z.string().optional(),
+  MICROSOFT_CLIENT_SECRET: z.string().optional(),
+  MICROSOFT_TENANT_ID: z.string().optional(),
   MAGIC_LINK_ENABLED: envBool(true),
 
-  // SMTP (shared with Supabase Auth)
+  // Super admin ensured at startup (see auth/bootstrap-admin.ts). Both unset:
+  // no bootstrap. An existing account is promoted, never re-passworded.
+  ADMIN_EMAIL: z.string().email().optional(),
+  ADMIN_PASSWORD: z.string().min(8).optional(),
+
+  // SMTP (auth emails and transactional emails). Without it, email
+  // verification is not required and auth emails are logged, not sent.
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().optional(),
   SMTP_USER: z.string().optional(),
@@ -88,11 +118,11 @@ const envSchema = z.object({
 });
 
 // Apply port offset to localhost URLs in development
-// SUPABASE_URL and SITE_URL are hardcoded to default ports in .env but
-// DEV_PORT_OFFSET shifts Docker ports (Kong on 8000+offset, Vite on 5173+offset).
+// SITE_URL is hardcoded to the default port in .env but DEV_PORT_OFFSET shifts
+// the dev ports (Vite on 5173+offset).
 const portOffset = Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
 if (process.env.NODE_ENV !== 'production' && portOffset !== 0) {
-  for (const key of ['SUPABASE_URL', 'SITE_URL'] as const) {
+  for (const key of ['SITE_URL'] as const) {
     const raw = process.env[key];
     if (!raw) continue;
     try {
@@ -105,6 +135,14 @@ if (process.env.NODE_ENV !== 'production' && portOffset !== 0) {
       // Leave invalid URLs for Zod to catch
     }
   }
+}
+
+// Same idea for the local database (one rule, shared with drizzle.config.ts):
+// a localhost DB_HOST outside production dials DEV_DB_PORT, else the base
+// DB_PORT + DEV_PORT_OFFSET, the way docker-up.js publishes the dev db.
+{
+  const dbPort = resolveDbPort(process.env);
+  if (dbPort !== undefined) process.env.DB_PORT = dbPort;
 }
 
 // Treat empty-string env vars as unset before validating. Docker Compose

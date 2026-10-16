@@ -8,15 +8,13 @@
 # =============================================================================
 
 ---
-# Default deny all INGRESS for the namespace. We don't deny egress by
-# default — that broke the Supabase community chart whose subcharts
-# (auth, rest, realtime, storage, analytics) init-container against the
-# `supabase-supabase-db` service and don't have vibecarbon-app labels
-# our specific allow-policies matched.
+# Default deny all INGRESS for the namespace. Egress is not denied by a
+# namespace-wide policy: every pod is selected by allow-dns and
+# allow-intra-namespace-egress below (which makes egress default-deny for it),
+# and the per-workload policies add what each one needs on top.
 #
-# The chart-internal east/west traffic is fine inside the namespace;
-# external egress restrictions are enforced by the Hetzner firewall
-# (no outbound from cluster-public nets to arbitrary ports anyway).
+# East/west traffic inside the namespace is fine; external egress
+# restrictions are enforced by the provider firewall too.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -28,9 +26,9 @@ spec:
     - Ingress
 
 ---
-# Allow ALL ingress from other pods in the same namespace. Chart
-# subcharts need to reach the db / kong / each other without us
-# having to enumerate every label combination the chart might use.
+# Allow ALL ingress from other pods in the same namespace. The app and the
+# add-ons need to reach the db and each other without us having to enumerate
+# every label combination.
 # External ingress still gates through traefik-policy + app-policy etc.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -52,9 +50,9 @@ spec:
 # allow-intra-namespace ingress policy above. Required because
 # `allow-dns` below selects all pods with Egress policyType, which
 # implicitly switches the namespace to default-deny-egress for those
-# pods. Without this, the Supabase subchart init containers can resolve
-# `supabase-supabase-db` via DNS but the TCP connect to :5432 is
-# dropped, causing a 25-minute wait-for-db loop on every cold install.
+# pods. Without this, a pod could resolve the `db` Service via DNS but
+# its TCP connect to :5432 would be dropped (the old wait-for-db init
+# containers looped for 25 minutes on every cold install exactly this way).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -95,78 +93,8 @@ spec:
           port: 53
 
 ---
-# Allow the supabase-db pod to egress to S3 (HTTPS) for wal-g: continuous WAL
-# archiving (archive_command → wal-g wal-push) and the nightly base backup
-# (kubectl exec → wal-g backup-push) both run INSIDE the db container and push
-# to Hetzner Object Storage. Without this, the implicit default-deny-egress
-# (allow-dns/allow-intra-namespace-egress select all pods with Egress type)
-# drops the db pod's outbound 443 and wal-g hangs/fails.
-# Selector matches the chart-generated db pod labels; base kustomize `labels:`
-# does not include selectors, so these are not mutated.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: supabase-db-s3-egress
-  namespace: vibecarbon
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: supabase-db
-      app.kubernetes.io/instance: supabase
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-      ports:
-        - protocol: TCP
-          port: 443
-
----
-# The storage service pushes and fetches user objects in S3 (STORAGE_BACKEND=s3
-# in k8s/values/supabase.values.yaml). Like the db's wal-g egress above, the
-# implicit default-deny (allow-dns / allow-intra-namespace-egress select every
-# pod with an Egress type) drops its outbound 443 without this.
-#
-# This was MISSING entirely, on every provider, for as long as the k8s tier has
-# existed. It went unnoticed because storage was ALSO shipped without S3
-# credentials or an endpoint (fixed 5b2e8dfa), so it never attempted a
-# connection that could be dropped — and because the e2e storage checks skipped
-# on a bucket nothing created, nothing ever tried an upload. Two independent
-# faults, both invisible behind the same skip: the first live upload attempt
-# failed on credentials, and the very next one failed here.
-#
-# Same shape as supabase-db-s3-egress: public S3 only, private ranges excluded.
-# The DO-specific VPC-gateway allowance lives in
-# k8s/base/s3-egress-vpc/s3-egress-vpc.yaml, which grants the sibling arm.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: supabase-storage-s3-egress
-  namespace: vibecarbon
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: supabase-storage
-      app.kubernetes.io/instance: supabase
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-      ports:
-        - protocol: TCP
-          port: 443
+# The db pod's S3 egress (wal-g) lives with the StatefulSet:
+# db-s3-egress in k8s/base/db/network-policy.yaml.
 
 ---
 # H-9: allow the app pod to reach the (optional) vibecarbon-observability

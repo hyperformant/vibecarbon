@@ -22,8 +22,8 @@
   - Admin manual unlock capability
   - Automatic cleanup of old attempts (every 6 hours, 24-hour retention)
 - Password reset via email with anti-enumeration (always shows success)
-- JWT-based sessions with 1-hour access tokens and automatic refresh
-- Cookie-based token storage (`SameSite=Lax`, 7-day max-age, cross-subdomain support)
+- Database-backed sessions (Better Auth, in the API server): every API request reads the session from the database, so sign-out, revocation and bans take effect at once
+- HttpOnly session cookie (`SameSite=Lax`) on the app's own origin; page JS never holds a token
 - Session validated server-side on mount (detects stale tokens after DB reset)
 - OAuth callback route (`/auth/callback`) with session handoff
 - Anonymous users explicitly disabled
@@ -91,7 +91,7 @@
 ## Email (Transactional)
 
 - Nodemailer SMTP transport (bring-your-own SMTP server)
-- Shares SMTP credentials with Supabase Auth (single mail config)
+- Shares SMTP credentials with the auth emails (verification, password reset, magic links): one mail config
 - Gracefully no-ops when SMTP is not configured (emails logged as skipped)
 - HTML injection protection via `escapeHtml()` on all user-supplied fields
 - Three email templates:
@@ -103,23 +103,25 @@
 
 ## File Uploads & Storage
 
-- Supabase Storage backend (self-hosted, no third-party CDN required)
-- Direct client-to-Supabase upload (not proxied through API server)
+- Signed-URL uploads straight from the browser to your provider's S3 bucket (never through the API server, never on the server's disk)
+- `POST /api/v1/files/presign` signs a 5-minute PUT; `GET /api/files/<key>` answers with a 302 to a 5-minute signed read
+- Server-owned object keys (`avatars/<userId>/<uuid>.<ext>`, `private/<userId>/<uuid>.<ext>`); callers never choose a path
+- Two kinds with size caps and content-type allowlists
+  - `avatar`: JPEG, PNG, GIF, WebP, max 2 MB, readable by anyone through the app
+  - `private`: JPEG, PNG, GIF, WebP, PDF, TXT, CSV, max 10 MB, owner-only and served as a download
+- Bucket stays private; CORS allows only your domain, set on every deploy
+- Optional: without the `S3_*` variables, presign returns 503 and the app still boots
+- Local Garage S3 service for development, with the bucket and CORS set up on `npm run dev:start`
 - Generic `<FileUpload>` component
-  - Configurable bucket, path prefix, accepted file types, and max size
+  - `kind` prop (`avatar` or `private`) and an optional `prepare` transform before upload
   - Drag-and-drop zone with visual feedback
   - Click-to-browse fallback
   - Loading spinner during upload
   - Client-side file size validation (default 10 MB)
-  - Upsert mode (re-upload overwrites)
 - `<AvatarUpload>` specialization
-  - Hardcoded to `avatars` bucket
-  - Accepts JPEG, PNG, GIF, WebP (max 2 MB)
+  - Resizes to a 256px WebP in the browser before upload
   - Circular preview with placeholder
   - Persists URL to user metadata on upload
-- Storage RLS: user-scoped paths (`auth.uid()` as first path segment)
-- Avatars bucket: public read, private write
-- Uploads bucket: fully private
 
 ## Contact Form
 
@@ -201,9 +203,12 @@
 
 - Scheduled background jobs via PostgreSQL's built-in `pg_cron` extension
 - Zero additional infrastructure: no Redis, no worker process, no external queue
-- Three default jobs:
+- Six default jobs:
   - `cleanup-login-attempts`: every 6 hours, removes attempts older than 24 hours
+  - `rollup-crawler-hits`: daily at 2:15 AM, rolls yesterday's crawler hits into the daily table
   - `cleanup-expired-notifications`: daily at 3 AM, deletes past-expiry notifications
+  - `cleanup-expired-sessions`: daily at 3:30 AM, deletes sessions a day past expiry and expired verification tokens
+  - `cleanup-crawler-hits`: daily at 3:45 AM, prunes raw hits after 90 days and rollups after 400
   - `cleanup-job-history`: weekly (Sunday 4 AM), prunes history older than 30 days
 - `cron_job_history` table for execution tracking (job name, status, result, error, timestamps)
 - `log_cron_job()` helper function for logging results from custom jobs
@@ -230,7 +235,7 @@
 
 ## Admin Panel
 
-- Super admin role (`app_metadata.role = 'super_admin'`)
+- Super admin role (the server-controlled `user.role = 'super_admin'`)
 - Route guard redirects non-admins to dashboard
 - Admin Dashboard
   - Service health overview
@@ -245,11 +250,11 @@
   - Paginated, searchable, sortable org list
   - Name, slug, plan tier (color-coded badge), member count, created date
 - Infrastructure Dashboard
-  - Visual service topology map (Edge, Gateway, Application, Data, Observability, Tooling layers)
+  - Visual service topology map (Edge, Application, Data, Observability, Tooling layers)
   - Per-service health status and latency
   - Summary badges (healthy/unhealthy/total counts)
   - Auto-refresh every 30 seconds
-  - Deployment info: environment, version, Supabase URL, HA mode
+  - Deployment info: environment, version, site URL, HA mode
 - Docker Log Viewer
   - Filter by container, time range (5m to 24h), line count (100 to 1000)
   - Color-coded log severity (error/warning/debug)
@@ -297,15 +302,14 @@
   - Pagination search input validated against safe character regex
 - Error sanitization in production (generic messages to client, full details logged server-side)
 - Row Level Security (RLS) enabled on all tables
-  - All policies use `(SELECT auth.uid())` subquery form to prevent per-row re-evaluation
+  - All policies use `(SELECT app.user_id())` subquery form to prevent per-row re-evaluation
   - `SECURITY DEFINER` + `SET search_path = ''` on all helper functions
-- Privilege separation: user-context Supabase client for user queries, admin client only where required
-- Disposable auth client for `signInWithPassword` (prevents session state contamination)
+- Privilege separation: `withUserDb` (RLS as `app_user`) for user queries, `adminDb` only in census-listed files
 - Billing webhook signature verification before processing (Stripe HMAC, Paddle HMAC-SHA256, Polar HMAC-SHA256 with timing-safe comparison)
-- Traefik ForwardAuth for infrastructure services (Studio, Grafana)
+- Traefik ForwardAuth for infrastructure services (Traefik dashboard, Grafana)
   - Role-based access: `super-admin-auth` middleware requires `super_admin` role to access all admin services
   - Validated redirect URLs (protocol allowlist prevents open redirects)
-- Kong API gateway with key-auth plugin on all Supabase services
+- One public origin: Traefik routes every public path to the app, and the database has no public port
 - Super admin deletion protection (must remove role first)
 - Environment variable validation at startup (exits on failure, hides specifics in production)
 - Service role key never exposed to client
@@ -316,8 +320,8 @@
 ## API
 
 - Hono 4 framework on `@hono/node-server`
-- Type-safe context injection (user, Supabase client per request)
-- Middleware stack: secure headers, timeout, logging, rate limiting, CORS, body size limit, auth JWT extraction
+- Type-safe context injection (user and session per request)
+- Middleware stack: secure headers, timeout, logging, rate limiting, CORS, CSRF origin check, body size limit, session lookup
 - Structured logging via Pino (info in production, debug in development with pretty-printing)
 - OpenAPI 3.0 spec at `/api/openapi.json`
 - Scalar API Reference at `/api/docs` (dev only)
@@ -327,7 +331,7 @@
 - Versioned routes (`/api/v1/*`) with 301 redirects from legacy paths
 - Plan gating middleware for paid-tier features
 - Graceful shutdown on SIGINT/SIGTERM (10-second drain timeout)
-- Periodic maintenance via pg_cron (login attempt cleanup, notification cleanup, job history pruning)
+- Periodic maintenance via pg_cron (login attempt, notification, expired session and crawler cleanup, job history pruning)
 
 ## UI Components (59)
 
@@ -363,20 +367,20 @@
   1. **Profile**, collecting the display name (pre-filled from OAuth or sign-up)
   2. **Organization**, creating the first org (skippable)
   3. **Plan**, selecting Free/Startup/Pro (paid plans redirect to Stripe checkout)
-- Completion flag stored in Supabase Auth user metadata
+- Completion flag stored on the user row (`onboarding_completed`)
 - Redirects to dashboard on finish (replaces history entry)
 - Invite step translations pre-defined for future use
 - Fully internationalized via i18next
 
 ## Infrastructure & Deployment
 
-- Docker Compose for local development (full Supabase stack + Traefik + Kong)
+- Docker Compose for local development (Postgres + Traefik + local S3)
 - Production overlay (`docker-compose.prod.yml`) for SSL, registry images, production env vars
 - Per-project container naming and port offset system (run multiple projects simultaneously)
 - Compose-based HA: multi-region Docker Compose with PostgreSQL streaming replication and one-command failover
 - Kubernetes manifests for production (Kustomize-based with overlays per region)
   - App: Deployment, Service, HPA (2-10 replicas, CPU 70%, memory 80%), PodDisruptionBudget
-  - Full self-hosted Supabase stack: auth, db, imgproxy, kong, meta, realtime, rest, storage, studio
+  - Postgres 17 StatefulSet (pg_cron, WAL-G archiving to S3); file uploads go to the provider's S3 bucket
   - Traefik with IngressRoute, middlewares, cert-manager integration
   - Network policies, RBAC, service accounts
   - Local OCI registry (`local-registry.yaml`) for k3s image distribution without external registry
@@ -443,11 +447,11 @@
 - Interactive prompts via `@clack/prompts` with non-interactive CI mode (`-y` flag)
 - Package manager support: npm (default), pnpm, bun
 - Package manager version validation with upgrade hints
-- Secure secret generation at project creation (JWT, DB password, API keys)
+- Secure secret generation at project creation (auth secret, database and replication passwords)
 - Placeholder validation after generation (warns on remaining `{{PLACEHOLDER}}` patterns)
 - TypeScript across client, server, and shared code with strict type checking
 - Path aliases: `@/*` for client, `@shared/*` for shared code
-- Type-safe Supabase client via generated `Database` type
+- Type-safe data access via Drizzle schema types
 - Biome for linting and formatting
 - Vitest test suite (unit, E2E, smoke, infrastructure tests)
 - Vite dev server with HMR for React client
@@ -455,7 +459,7 @@
 - `concurrently` runs both dev servers via `npm run dev`
 - Multi-stage Docker build (build + minimal runtime)
 - `vibecarbon status` command
-  - Local health: API server, Vite, Docker containers (PostgreSQL, Kong, Auth, REST, Realtime, Storage, Studio)
+  - Local health: API server, Vite, Docker containers (PostgreSQL, Traefik, local S3, any add-ons)
   - Remote health: HTTPS check with latency
   - Hetzner server status (optional, via API token)
   - Git sync tracking (deployed commit SHA, commits ahead)

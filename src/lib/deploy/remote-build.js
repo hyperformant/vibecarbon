@@ -117,7 +117,7 @@ export const TRANSPORT_DROP_RETRY_DELAYS_MS = [3000, 6000];
  * different commands (a native `docker build` here vs. an arbitrary SSH'd
  * remote command there). This file is the natural home: compose/index.js
  * already imports several other `../*.js` siblings under src/lib/deploy/
- * (admin-user.js, rls-audit.js, walg-staleness.js), and remote-build.js has
+ * (admin-ready.js, rls-audit.js, walg-staleness.js), and remote-build.js has
  * no existing dependency in the other direction.
  */
 export const DNS_NOT_SETTLED_RETRY_DELAYS_MS = [10000, 15000, 20000];

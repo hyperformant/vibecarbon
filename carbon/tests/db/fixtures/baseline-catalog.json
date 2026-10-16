@@ -1,0 +1,3515 @@
+{
+  "schemas": [
+    {
+      "name": "app",
+      "owner": "postgres",
+      "acl": [
+        "app_user=U/postgres",
+        "postgres=UC/postgres"
+      ]
+    },
+    {
+      "name": "cron",
+      "owner": "postgres",
+      "acl": [
+        "postgres=UC/postgres"
+      ]
+    },
+    {
+      "name": "public",
+      "owner": "pg_database_owner",
+      "acl": [
+        "=U/pg_database_owner",
+        "app_user=U/pg_database_owner",
+        "pg_database_owner=UC/pg_database_owner"
+      ]
+    }
+  ],
+  "extensions": [
+    {
+      "name": "pg_cron",
+      "version": "1.6",
+      "schema": "pg_catalog"
+    },
+    {
+      "name": "pg_stat_statements",
+      "version": "1.11",
+      "schema": "monitoring"
+    },
+    {
+      "name": "plpgsql",
+      "version": "1.0",
+      "schema": "pg_catalog"
+    }
+  ],
+  "roles": [
+    {
+      "name": "app_user",
+      "super": false,
+      "inherit": true,
+      "createrole": false,
+      "createdb": false,
+      "login": false,
+      "bypassrls": false,
+      "members": "{postgres}"
+    }
+  ],
+  "relations": [
+    {
+      "schema": "cron",
+      "name": "job",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "=r/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "cron",
+      "name": "job_run_details",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "=rd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "cron",
+      "name": "jobid_seq",
+      "kind": "S",
+      "owner": "postgres",
+      "rls": false,
+      "force_rls": false,
+      "acl": [
+        "=r/postgres",
+        "postgres=rwU/postgres"
+      ]
+    },
+    {
+      "schema": "cron",
+      "name": "runid_seq",
+      "kind": "S",
+      "owner": "postgres",
+      "rls": false,
+      "force_rls": false,
+      "acl": [
+        "=r/postgres",
+        "postgres=rwU/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "account",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "app_settings",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "contact_submissions",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "crawler_hits",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "crawler_hits_daily",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "crawler_hits_id_seq",
+      "kind": "S",
+      "owner": "postgres",
+      "rls": false,
+      "force_rls": false,
+      "acl": []
+    },
+    {
+      "schema": "public",
+      "name": "cron_job_history",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "customers",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "failed_login_attempts",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "memberships",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "newsletter_subscribers",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "notification_dismissals",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "notifications",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "organizations",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "session",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "subscriptions",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "app_user=arwd/postgres",
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "two_factor",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "user",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "postgres=arwdDxtm/postgres"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "verification",
+      "kind": "r",
+      "owner": "postgres",
+      "rls": true,
+      "force_rls": false,
+      "acl": [
+        "postgres=arwdDxtm/postgres"
+      ]
+    }
+  ],
+  "columns": [
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 1,
+      "name": "jobid",
+      "type": "bigint",
+      "not_null": true,
+      "default": "nextval('cron.jobid_seq'::regclass)",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 2,
+      "name": "schedule",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 3,
+      "name": "command",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 4,
+      "name": "nodename",
+      "type": "text",
+      "not_null": true,
+      "default": "'localhost'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 5,
+      "name": "nodeport",
+      "type": "integer",
+      "not_null": true,
+      "default": "inet_server_port()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 6,
+      "name": "database",
+      "type": "text",
+      "not_null": true,
+      "default": "current_database()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 7,
+      "name": "username",
+      "type": "text",
+      "not_null": true,
+      "default": "CURRENT_USER",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 8,
+      "name": "active",
+      "type": "boolean",
+      "not_null": true,
+      "default": "true",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "position": 9,
+      "name": "jobname",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 1,
+      "name": "jobid",
+      "type": "bigint",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 2,
+      "name": "runid",
+      "type": "bigint",
+      "not_null": true,
+      "default": "nextval('cron.runid_seq'::regclass)",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 3,
+      "name": "job_pid",
+      "type": "integer",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 4,
+      "name": "database",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 5,
+      "name": "username",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 6,
+      "name": "command",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 7,
+      "name": "status",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 8,
+      "name": "return_message",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 9,
+      "name": "start_time",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "position": 10,
+      "name": "end_time",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 2,
+      "name": "account_id",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 3,
+      "name": "provider_id",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 4,
+      "name": "user_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 5,
+      "name": "access_token",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 6,
+      "name": "refresh_token",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 7,
+      "name": "id_token",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 8,
+      "name": "access_token_expires_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 9,
+      "name": "refresh_token_expires_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 10,
+      "name": "scope",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 11,
+      "name": "password",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 12,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "position": 13,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "position": 1,
+      "name": "key",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "position": 2,
+      "name": "value",
+      "type": "jsonb",
+      "not_null": true,
+      "default": "'{}'::jsonb",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "position": 3,
+      "name": "updated_by",
+      "type": "uuid",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "position": 4,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 2,
+      "name": "name",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 3,
+      "name": "email",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 4,
+      "name": "subject",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 5,
+      "name": "message",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 6,
+      "name": "status",
+      "type": "text",
+      "not_null": true,
+      "default": "'unread'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 7,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "position": 8,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "position": 1,
+      "name": "id",
+      "type": "bigint",
+      "not_null": true,
+      "default": null,
+      "identity": "a",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "position": 2,
+      "name": "crawler",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "position": 3,
+      "name": "path",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "position": 4,
+      "name": "user_agent",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "position": 5,
+      "name": "hit_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "position": 6,
+      "name": "status",
+      "type": "smallint",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "position": 1,
+      "name": "day",
+      "type": "date",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "position": 2,
+      "name": "crawler",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "position": 3,
+      "name": "path",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "position": 4,
+      "name": "hits",
+      "type": "integer",
+      "not_null": true,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "position": 5,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "position": 6,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "position": 7,
+      "name": "errors",
+      "type": "integer",
+      "not_null": true,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 2,
+      "name": "job_name",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 3,
+      "name": "status",
+      "type": "text",
+      "not_null": true,
+      "default": "'running'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 4,
+      "name": "started_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 5,
+      "name": "finished_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 6,
+      "name": "duration_ms",
+      "type": "integer",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 7,
+      "name": "result",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 8,
+      "name": "error",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "position": 9,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "position": 2,
+      "name": "user_id",
+      "type": "uuid",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "position": 3,
+      "name": "organization_id",
+      "type": "uuid",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "position": 4,
+      "name": "stripe_customer_id",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "position": 5,
+      "name": "email",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "position": 6,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "position": 7,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "position": 2,
+      "name": "email",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "position": 3,
+      "name": "ip_address",
+      "type": "inet",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "position": 4,
+      "name": "attempted_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "position": 2,
+      "name": "role",
+      "type": "text",
+      "not_null": false,
+      "default": "'MEMBER'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "position": 3,
+      "name": "user_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "position": 4,
+      "name": "organization_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "position": 5,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "position": 6,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 2,
+      "name": "email",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 3,
+      "name": "name",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 4,
+      "name": "status",
+      "type": "text",
+      "not_null": true,
+      "default": "'pending'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 5,
+      "name": "confirmation_token",
+      "type": "uuid",
+      "not_null": false,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 6,
+      "name": "subscribed_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 7,
+      "name": "unsubscribed_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 8,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "position": 9,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "position": 2,
+      "name": "notification_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "position": 3,
+      "name": "user_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "position": 4,
+      "name": "dismissed_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 2,
+      "name": "title",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 3,
+      "name": "message",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 4,
+      "name": "type",
+      "type": "text",
+      "not_null": false,
+      "default": "'info'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 5,
+      "name": "visibility",
+      "type": "text",
+      "not_null": false,
+      "default": "'all'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 6,
+      "name": "dismissible",
+      "type": "boolean",
+      "not_null": false,
+      "default": "true",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 7,
+      "name": "organization_id",
+      "type": "uuid",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 8,
+      "name": "starts_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 9,
+      "name": "ends_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 10,
+      "name": "action_label",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 11,
+      "name": "action_url",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 12,
+      "name": "is_active",
+      "type": "boolean",
+      "not_null": false,
+      "default": "true",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 13,
+      "name": "created_by",
+      "type": "uuid",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 14,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "position": 15,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "position": 2,
+      "name": "name",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "position": 3,
+      "name": "slug",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "position": 4,
+      "name": "plan",
+      "type": "text",
+      "not_null": false,
+      "default": "'FREE'::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "position": 5,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "position": 6,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 2,
+      "name": "expires_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 3,
+      "name": "token",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 4,
+      "name": "ip_address",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 5,
+      "name": "user_agent",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 6,
+      "name": "user_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 7,
+      "name": "impersonated_by",
+      "type": "uuid",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 8,
+      "name": "two_factor_verified",
+      "type": "boolean",
+      "not_null": true,
+      "default": "false",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 9,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "position": 10,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 2,
+      "name": "customer_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 3,
+      "name": "stripe_subscription_id",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 4,
+      "name": "stripe_price_id",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 5,
+      "name": "status",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 6,
+      "name": "current_period_start",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 7,
+      "name": "current_period_end",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 8,
+      "name": "cancel_at_period_end",
+      "type": "boolean",
+      "not_null": true,
+      "default": "false",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 9,
+      "name": "canceled_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 10,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "position": 11,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "position": 2,
+      "name": "secret",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "position": 3,
+      "name": "backup_codes",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "position": 4,
+      "name": "user_id",
+      "type": "uuid",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "position": 5,
+      "name": "verified",
+      "type": "boolean",
+      "not_null": false,
+      "default": "true",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "position": 6,
+      "name": "failed_verification_count",
+      "type": "integer",
+      "not_null": false,
+      "default": "0",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "position": 7,
+      "name": "locked_until",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 1,
+      "name": "id",
+      "type": "uuid",
+      "not_null": true,
+      "default": "gen_random_uuid()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 2,
+      "name": "name",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 3,
+      "name": "email",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 4,
+      "name": "email_verified",
+      "type": "boolean",
+      "not_null": true,
+      "default": "false",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 5,
+      "name": "image",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 6,
+      "name": "role",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 7,
+      "name": "banned",
+      "type": "boolean",
+      "not_null": false,
+      "default": "false",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 8,
+      "name": "ban_reason",
+      "type": "text",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 9,
+      "name": "ban_expires",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 10,
+      "name": "two_factor_enabled",
+      "type": "boolean",
+      "not_null": false,
+      "default": "false",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 11,
+      "name": "onboarding_completed",
+      "type": "boolean",
+      "not_null": true,
+      "default": "false",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 12,
+      "name": "last_sign_in_at",
+      "type": "timestamp with time zone",
+      "not_null": false,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 13,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "position": 14,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "position": 1,
+      "name": "id",
+      "type": "text",
+      "not_null": true,
+      "default": "(gen_random_uuid())::text",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "position": 2,
+      "name": "identifier",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "position": 3,
+      "name": "value",
+      "type": "text",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "position": 4,
+      "name": "expires_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": null,
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "position": 5,
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "position": 6,
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default": "now()",
+      "identity": "",
+      "generated": ""
+    }
+  ],
+  "constraints": [
+    {
+      "schema": "cron",
+      "table": "job",
+      "name": "job_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (jobid)"
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "name": "jobname_username_uniq",
+      "type": "u",
+      "definition": "UNIQUE (jobname, username)"
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "name": "job_run_details_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (runid)"
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "name": "account_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "name": "account_user_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (user_id) REFERENCES \"user\"(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "app_settings_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (key)"
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "app_settings_updated_by_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (updated_by) REFERENCES \"user\"(id) ON DELETE SET NULL"
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "name": "contact_submissions_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "name": "crawler_hits_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "name": "crawler_hits_daily_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (day, crawler, path)"
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "name": "cron_job_history_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "customer_type",
+      "type": "c",
+      "definition": "CHECK ((((user_id IS NOT NULL) AND (organization_id IS NULL)) OR ((user_id IS NULL) AND (organization_id IS NOT NULL))))"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "customers_organization_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "customers_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "customers_stripe_customer_id_key",
+      "type": "u",
+      "definition": "UNIQUE (stripe_customer_id)"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "customers_user_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (user_id) REFERENCES \"user\"(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "name": "failed_login_attempts_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_organization_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_role_check",
+      "type": "c",
+      "definition": "CHECK ((role = ANY (ARRAY['OWNER'::text, 'ADMIN'::text, 'MEMBER'::text])))"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_user_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (user_id) REFERENCES \"user\"(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_user_id_organization_id_key",
+      "type": "u",
+      "definition": "UNIQUE (user_id, organization_id)"
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "name": "newsletter_subscribers_email_key",
+      "type": "u",
+      "definition": "UNIQUE (email)"
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "name": "newsletter_subscribers_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "notification_dismissals_notification_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "notification_dismissals_notification_id_user_id_key",
+      "type": "u",
+      "definition": "UNIQUE (notification_id, user_id)"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "notification_dismissals_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "notification_dismissals_user_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (user_id) REFERENCES \"user\"(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "notifications_created_by_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (created_by) REFERENCES \"user\"(id) ON DELETE SET NULL"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "notifications_organization_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "notifications_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "notifications_type_check",
+      "type": "c",
+      "definition": "CHECK ((type = ANY (ARRAY['info'::text, 'warning'::text, 'error'::text, 'success'::text])))"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "notifications_visibility_check",
+      "type": "c",
+      "definition": "CHECK ((visibility = ANY (ARRAY['all'::text, 'authenticated'::text, 'public'::text])))"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "organizations_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "organizations_plan_check",
+      "type": "c",
+      "definition": "CHECK ((plan = ANY (ARRAY['FREE'::text, 'STARTER'::text, 'PRO'::text, 'ENTERPRISE'::text])))"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "organizations_slug_key",
+      "type": "u",
+      "definition": "UNIQUE (slug)"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "session_impersonated_by_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (impersonated_by) REFERENCES \"user\"(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "session_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "session_token_key",
+      "type": "u",
+      "definition": "UNIQUE (token)"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "session_user_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (user_id) REFERENCES \"user\"(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "subscriptions_customer_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "subscriptions_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "subscriptions_status_check",
+      "type": "c",
+      "definition": "CHECK ((status = ANY (ARRAY['active'::text, 'canceled'::text, 'incomplete'::text, 'incomplete_expired'::text, 'past_due'::text, 'trialing'::text, 'unpaid'::text, 'paused'::text])))"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "subscriptions_stripe_subscription_id_key",
+      "type": "u",
+      "definition": "UNIQUE (stripe_subscription_id)"
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "name": "two_factor_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "name": "two_factor_user_id_fkey",
+      "type": "f",
+      "definition": "FOREIGN KEY (user_id) REFERENCES \"user\"(id) ON DELETE CASCADE"
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "name": "user_email_key",
+      "type": "u",
+      "definition": "UNIQUE (email)"
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "name": "user_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "name": "verification_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    }
+  ],
+  "indexes": [
+    {
+      "schema": "cron",
+      "table": "job",
+      "name": "job_pkey",
+      "definition": "CREATE UNIQUE INDEX job_pkey ON cron.job USING btree (jobid)"
+    },
+    {
+      "schema": "cron",
+      "table": "job",
+      "name": "jobname_username_uniq",
+      "definition": "CREATE UNIQUE INDEX jobname_username_uniq ON cron.job USING btree (jobname, username)"
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "name": "job_run_details_pkey",
+      "definition": "CREATE UNIQUE INDEX job_run_details_pkey ON cron.job_run_details USING btree (runid)"
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "name": "account_pkey",
+      "definition": "CREATE UNIQUE INDEX account_pkey ON public.account USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "account",
+      "name": "idx_account_user_id",
+      "definition": "CREATE INDEX idx_account_user_id ON public.account USING btree (user_id)"
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "app_settings_pkey",
+      "definition": "CREATE UNIQUE INDEX app_settings_pkey ON public.app_settings USING btree (key)"
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "idx_app_settings_updated_by",
+      "definition": "CREATE INDEX idx_app_settings_updated_by ON public.app_settings USING btree (updated_by) WHERE (updated_by IS NOT NULL)"
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "name": "contact_submissions_pkey",
+      "definition": "CREATE UNIQUE INDEX contact_submissions_pkey ON public.contact_submissions USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "name": "idx_contact_submissions_created_at",
+      "definition": "CREATE INDEX idx_contact_submissions_created_at ON public.contact_submissions USING btree (created_at DESC)"
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "name": "idx_contact_submissions_status",
+      "definition": "CREATE INDEX idx_contact_submissions_status ON public.contact_submissions USING btree (status)"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "name": "crawler_hits_pkey",
+      "definition": "CREATE UNIQUE INDEX crawler_hits_pkey ON public.crawler_hits USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "name": "idx_crawler_hits_crawler_hit_at",
+      "definition": "CREATE INDEX idx_crawler_hits_crawler_hit_at ON public.crawler_hits USING btree (crawler, hit_at DESC)"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "name": "idx_crawler_hits_hit_at",
+      "definition": "CREATE INDEX idx_crawler_hits_hit_at ON public.crawler_hits USING btree (hit_at DESC)"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "name": "crawler_hits_daily_pkey",
+      "definition": "CREATE UNIQUE INDEX crawler_hits_daily_pkey ON public.crawler_hits_daily USING btree (day, crawler, path)"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "name": "idx_crawler_hits_daily_crawler_day",
+      "definition": "CREATE INDEX idx_crawler_hits_daily_crawler_day ON public.crawler_hits_daily USING btree (crawler, day DESC)"
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "name": "cron_job_history_pkey",
+      "definition": "CREATE UNIQUE INDEX cron_job_history_pkey ON public.cron_job_history USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "name": "idx_cron_job_history_job_name",
+      "definition": "CREATE INDEX idx_cron_job_history_job_name ON public.cron_job_history USING btree (job_name)"
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "name": "idx_cron_job_history_started_at",
+      "definition": "CREATE INDEX idx_cron_job_history_started_at ON public.cron_job_history USING btree (started_at DESC)"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "customers_pkey",
+      "definition": "CREATE UNIQUE INDEX customers_pkey ON public.customers USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "customers_stripe_customer_id_key",
+      "definition": "CREATE UNIQUE INDEX customers_stripe_customer_id_key ON public.customers USING btree (stripe_customer_id)"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "idx_customers_organization_id",
+      "definition": "CREATE UNIQUE INDEX idx_customers_organization_id ON public.customers USING btree (organization_id) WHERE (organization_id IS NOT NULL)"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "idx_customers_user_id",
+      "definition": "CREATE UNIQUE INDEX idx_customers_user_id ON public.customers USING btree (user_id) WHERE (user_id IS NOT NULL)"
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "name": "failed_login_attempts_pkey",
+      "definition": "CREATE UNIQUE INDEX failed_login_attempts_pkey ON public.failed_login_attempts USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "name": "idx_failed_login_attempts_lookup",
+      "definition": "CREATE INDEX idx_failed_login_attempts_lookup ON public.failed_login_attempts USING btree (email, ip_address, attempted_at DESC)"
+    },
+    {
+      "schema": "public",
+      "table": "failed_login_attempts",
+      "name": "idx_failed_login_attempts_time",
+      "definition": "CREATE INDEX idx_failed_login_attempts_time ON public.failed_login_attempts USING btree (attempted_at)"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "idx_memberships_organization_id",
+      "definition": "CREATE INDEX idx_memberships_organization_id ON public.memberships USING btree (organization_id)"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "idx_memberships_user_id",
+      "definition": "CREATE INDEX idx_memberships_user_id ON public.memberships USING btree (user_id)"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_pkey",
+      "definition": "CREATE UNIQUE INDEX memberships_pkey ON public.memberships USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_user_id_organization_id_key",
+      "definition": "CREATE UNIQUE INDEX memberships_user_id_organization_id_key ON public.memberships USING btree (user_id, organization_id)"
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "name": "idx_newsletter_subscribers_status",
+      "definition": "CREATE INDEX idx_newsletter_subscribers_status ON public.newsletter_subscribers USING btree (status)"
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "name": "newsletter_subscribers_email_key",
+      "definition": "CREATE UNIQUE INDEX newsletter_subscribers_email_key ON public.newsletter_subscribers USING btree (email)"
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "name": "newsletter_subscribers_pkey",
+      "definition": "CREATE UNIQUE INDEX newsletter_subscribers_pkey ON public.newsletter_subscribers USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "idx_notification_dismissals_user",
+      "definition": "CREATE INDEX idx_notification_dismissals_user ON public.notification_dismissals USING btree (user_id, notification_id)"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "notification_dismissals_notification_id_user_id_key",
+      "definition": "CREATE UNIQUE INDEX notification_dismissals_notification_id_user_id_key ON public.notification_dismissals USING btree (notification_id, user_id)"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "notification_dismissals_pkey",
+      "definition": "CREATE UNIQUE INDEX notification_dismissals_pkey ON public.notification_dismissals USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "idx_notifications_active",
+      "definition": "CREATE INDEX idx_notifications_active ON public.notifications USING btree (is_active, starts_at, ends_at) WHERE (is_active = true)"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "idx_notifications_created_by",
+      "definition": "CREATE INDEX idx_notifications_created_by ON public.notifications USING btree (created_by) WHERE (created_by IS NOT NULL)"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "idx_notifications_org",
+      "definition": "CREATE INDEX idx_notifications_org ON public.notifications USING btree (organization_id) WHERE (organization_id IS NOT NULL)"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "notifications_pkey",
+      "definition": "CREATE UNIQUE INDEX notifications_pkey ON public.notifications USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "organizations_pkey",
+      "definition": "CREATE UNIQUE INDEX organizations_pkey ON public.organizations USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "organizations_slug_key",
+      "definition": "CREATE UNIQUE INDEX organizations_slug_key ON public.organizations USING btree (slug)"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "idx_session_impersonated_by",
+      "definition": "CREATE INDEX idx_session_impersonated_by ON public.session USING btree (impersonated_by) WHERE (impersonated_by IS NOT NULL)"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "idx_session_user_id",
+      "definition": "CREATE INDEX idx_session_user_id ON public.session USING btree (user_id)"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "session_pkey",
+      "definition": "CREATE UNIQUE INDEX session_pkey ON public.session USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "session",
+      "name": "session_token_key",
+      "definition": "CREATE UNIQUE INDEX session_token_key ON public.session USING btree (token)"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "idx_subscriptions_customer_id",
+      "definition": "CREATE INDEX idx_subscriptions_customer_id ON public.subscriptions USING btree (customer_id)"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "idx_subscriptions_status",
+      "definition": "CREATE INDEX idx_subscriptions_status ON public.subscriptions USING btree (status)"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "subscriptions_pkey",
+      "definition": "CREATE UNIQUE INDEX subscriptions_pkey ON public.subscriptions USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "subscriptions_stripe_subscription_id_key",
+      "definition": "CREATE UNIQUE INDEX subscriptions_stripe_subscription_id_key ON public.subscriptions USING btree (stripe_subscription_id)"
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "name": "idx_two_factor_secret",
+      "definition": "CREATE INDEX idx_two_factor_secret ON public.two_factor USING btree (secret)"
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "name": "idx_two_factor_user_id",
+      "definition": "CREATE INDEX idx_two_factor_user_id ON public.two_factor USING btree (user_id)"
+    },
+    {
+      "schema": "public",
+      "table": "two_factor",
+      "name": "two_factor_pkey",
+      "definition": "CREATE UNIQUE INDEX two_factor_pkey ON public.two_factor USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "name": "user_email_key",
+      "definition": "CREATE UNIQUE INDEX user_email_key ON public.\"user\" USING btree (email)"
+    },
+    {
+      "schema": "public",
+      "table": "user",
+      "name": "user_pkey",
+      "definition": "CREATE UNIQUE INDEX user_pkey ON public.\"user\" USING btree (id)"
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "name": "idx_verification_identifier",
+      "definition": "CREATE INDEX idx_verification_identifier ON public.verification USING btree (identifier)"
+    },
+    {
+      "schema": "public",
+      "table": "verification",
+      "name": "verification_pkey",
+      "definition": "CREATE UNIQUE INDEX verification_pkey ON public.verification USING btree (id)"
+    }
+  ],
+  "policies": [
+    {
+      "schema": "cron",
+      "table": "job",
+      "name": "cron_job_policy",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "ALL",
+      "using": "(username = CURRENT_USER)",
+      "with_check": null
+    },
+    {
+      "schema": "cron",
+      "table": "job_run_details",
+      "name": "cron_job_run_details_policy",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "ALL",
+      "using": "(username = CURRENT_USER)",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "Public can read whitelisted settings",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "(key = ANY (ARRAY['mfa_enabled'::text, 'app_theme'::text, 'user_docs_enabled'::text, 'api_docs_enabled'::text]))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "Super admins can insert app settings",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "INSERT",
+      "using": null,
+      "with_check": "is_super_admin()"
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "Super admins can read all settings",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "is_super_admin()",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "Super admins can update app settings",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "UPDATE",
+      "using": "is_super_admin()",
+      "with_check": "is_super_admin()"
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "name": "Super admins can manage contact submissions",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "ALL",
+      "using": "is_super_admin()",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits",
+      "name": "Super admins can read crawler hits",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "is_super_admin()",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "name": "Super admins can read crawler hit rollups",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "is_super_admin()",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "cron_job_history",
+      "name": "Super admins can read job history",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "is_super_admin()",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "Users can view their own customer records",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "((user_id = ( SELECT app.user_id() AS user_id)) OR (organization_id IN ( SELECT get_user_org_ids() AS get_user_org_ids)))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "Admins can add non-owner members",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "INSERT",
+      "using": null,
+      "with_check": "((organization_id IN ( SELECT get_user_admin_org_ids() AS get_user_admin_org_ids)) AND (role = ANY (ARRAY['ADMIN'::text, 'MEMBER'::text])))"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "Admins can update non-owner memberships",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "UPDATE",
+      "using": "((organization_id IN ( SELECT get_user_admin_org_ids() AS get_user_admin_org_ids)) AND (role <> 'OWNER'::text))",
+      "with_check": "((organization_id IN ( SELECT get_user_admin_org_ids() AS get_user_admin_org_ids)) AND (role <> 'OWNER'::text))"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "Owners can add any member",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "INSERT",
+      "using": null,
+      "with_check": "(organization_id IN ( SELECT get_user_owner_org_ids() AS get_user_owner_org_ids))"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "Owners can update any membership",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "UPDATE",
+      "using": "(organization_id IN ( SELECT get_user_owner_org_ids() AS get_user_owner_org_ids))",
+      "with_check": "(organization_id IN ( SELECT get_user_owner_org_ids() AS get_user_owner_org_ids))"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "Users can leave or be removed by owners/admins",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "DELETE",
+      "using": "((user_id = ( SELECT app.user_id() AS user_id)) OR (organization_id IN ( SELECT get_user_admin_org_ids() AS get_user_admin_org_ids)))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "Users can view memberships in their organizations",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "(organization_id IN ( SELECT get_user_org_ids() AS get_user_org_ids))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "name": "Super admins can manage newsletter subscribers",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "ALL",
+      "using": "is_super_admin()",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "Users can dismiss notifications",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "INSERT",
+      "using": null,
+      "with_check": "(user_id = ( SELECT app.user_id() AS user_id))"
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "Users can remove their dismissals",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "DELETE",
+      "using": "(user_id = ( SELECT app.user_id() AS user_id))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "notification_dismissals",
+      "name": "Users can view their dismissals",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "(user_id = ( SELECT app.user_id() AS user_id))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "Anonymous users can view public notifications",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "app_user"
+      ],
+      "cmd": "SELECT",
+      "using": "((( SELECT app.user_id() AS user_id) IS NULL) AND (is_active = true) AND ((starts_at IS NULL) OR (starts_at <= now())) AND ((ends_at IS NULL) OR (ends_at > now())) AND (visibility = ANY (ARRAY['all'::text, 'public'::text])) AND (organization_id IS NULL))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "Authenticated users can view relevant notifications",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "app_user"
+      ],
+      "cmd": "SELECT",
+      "using": "((( SELECT app.user_id() AS user_id) IS NOT NULL) AND (is_active = true) AND ((starts_at IS NULL) OR (starts_at <= now())) AND ((ends_at IS NULL) OR (ends_at > now())) AND (visibility = ANY (ARRAY['all'::text, 'authenticated'::text])) AND ((organization_id IS NULL) OR (organization_id IN ( SELECT get_user_org_ids() AS get_user_org_ids))))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "Super admins can create notifications",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "INSERT",
+      "using": null,
+      "with_check": "is_super_admin()"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "Super admins can delete notifications",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "DELETE",
+      "using": "is_super_admin()",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "Super admins can update notifications",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "UPDATE",
+      "using": "is_super_admin()",
+      "with_check": "is_super_admin()"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "Authenticated users can create organizations",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "INSERT",
+      "using": null,
+      "with_check": "(( SELECT app.user_id() AS user_id) IS NOT NULL)"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "Owners and admins can update organizations",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "UPDATE",
+      "using": "(id IN ( SELECT get_user_admin_org_ids() AS get_user_admin_org_ids))",
+      "with_check": "(id IN ( SELECT get_user_admin_org_ids() AS get_user_admin_org_ids))"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "Owners can delete organizations",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "DELETE",
+      "using": "(id IN ( SELECT get_user_owner_org_ids() AS get_user_owner_org_ids))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "Users can view their organizations",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "(id IN ( SELECT get_user_org_ids() AS get_user_org_ids))",
+      "with_check": null
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "Users can view their own subscriptions",
+      "permissive": "PERMISSIVE",
+      "roles": [
+        "public"
+      ],
+      "cmd": "SELECT",
+      "using": "(customer_id IN ( SELECT get_user_customer_ids() AS get_user_customer_ids))",
+      "with_check": null
+    }
+  ],
+  "functions": [
+    {
+      "schema": "app",
+      "signature": "app.revoke_server_only_tables()",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION app.revoke_server_only_tables()\n RETURNS integer\n LANGUAGE plpgsql\n SET search_path TO ''\nAS $function$\nDECLARE\n  t RECORD;\n  r TEXT;\n  n INTEGER := 0;\nBEGIN\n  FOR t IN\n    SELECT c.oid::regclass AS tbl, c.relowner\n    FROM pg_catalog.pg_class c\n    JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace\n    WHERE ns.nspname = 'public'\n      AND c.relkind IN ('r', 'p')\n      AND (\n        (c.relrowsecurity\n          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid))\n        OR c.relname IN ('user', 'session', 'account', 'verification', 'two_factor')\n      )\n  LOOP\n    EXECUTE format('REVOKE ALL ON TABLE %s FROM PUBLIC', t.tbl);\n    FOR r IN\n      SELECT rolname FROM pg_catalog.pg_roles\n      WHERE NOT rolsuper AND rolname NOT LIKE 'pg\\_%'\n        AND rolname <> current_user\n        AND oid <> t.relowner\n    LOOP\n      EXECUTE format('REVOKE ALL ON TABLE %s FROM %I', t.tbl, r);\n    END LOOP;\n    n := n + 1;\n  END LOOP;\n  RETURN n;\nEND;\n$function$\n"
+    },
+    {
+      "schema": "app",
+      "signature": "app.user_id()",
+      "owner": "postgres",
+      "acl": [
+        "=X/postgres",
+        "app_user=X/postgres",
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION app.user_id()\n RETURNS uuid\n LANGUAGE sql\n STABLE\n SET search_path TO ''\nAS $function$\n  SELECT nullif(current_setting('app.user_id', true), '')::uuid;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "admin_unlock_account(text)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.admin_unlock_account(p_email text)\n RETURNS void\n LANGUAGE sql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  DELETE FROM public.failed_login_attempts WHERE email = LOWER(p_email);\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "check_account_lockout(text,inet,integer,integer)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.check_account_lockout(p_email text, p_ip_address inet, p_max_attempts integer DEFAULT 5, p_lockout_minutes integer DEFAULT 15)\n RETURNS jsonb\n LANGUAGE plpgsql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  attempt_count INTEGER;\n  oldest_relevant TIMESTAMPTZ;\n  minutes_remaining INTEGER;\nBEGIN\n  SELECT COUNT(*), MIN(attempted_at)\n  INTO attempt_count, oldest_relevant\n  FROM public.failed_login_attempts\n  WHERE email = LOWER(p_email)\n    AND ip_address = p_ip_address\n    AND attempted_at > NOW() - (p_lockout_minutes || ' minutes')::INTERVAL;\n\n  IF attempt_count >= p_max_attempts THEN\n    minutes_remaining := GREATEST(\n      0,\n      p_lockout_minutes - EXTRACT(EPOCH FROM (NOW() - oldest_relevant))::INTEGER / 60\n    );\n    RETURN jsonb_build_object('locked', true, 'remaining_minutes', minutes_remaining);\n  END IF;\n\n  RETURN jsonb_build_object('locked', false, 'remaining_minutes', 0);\nEND;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "cleanup_old_login_attempts(integer)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.cleanup_old_login_attempts(p_retention_hours integer DEFAULT 24)\n RETURNS integer\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  deleted_count INTEGER;\nBEGIN\n  DELETE FROM public.failed_login_attempts\n  WHERE attempted_at < NOW() - (p_retention_hours || ' hours')::INTERVAL;\n\n  GET DIAGNOSTICS deleted_count = ROW_COUNT;\n  RETURN deleted_count;\nEND;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "clear_failed_logins(text,inet)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.clear_failed_logins(p_email text, p_ip_address inet)\n RETURNS void\n LANGUAGE sql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  DELETE FROM public.failed_login_attempts\n  WHERE email = LOWER(p_email) AND ip_address = p_ip_address;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "get_cron_jobs()",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.get_cron_jobs()\n RETURNS TABLE(jobname text, schedule text, active boolean)\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  SELECT j.jobname::text, j.schedule::text, j.active\n  FROM cron.job j\n  ORDER BY j.jobname;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "get_locked_accounts(integer,integer)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.get_locked_accounts(p_max_attempts integer DEFAULT 5, p_lockout_minutes integer DEFAULT 15)\n RETURNS TABLE(email text, attempt_count bigint, first_attempt timestamp with time zone, last_attempt timestamp with time zone)\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  SELECT\n    email,\n    COUNT(*) as attempt_count,\n    MIN(attempted_at) as first_attempt,\n    MAX(attempted_at) as last_attempt\n  FROM public.failed_login_attempts\n  WHERE attempted_at > NOW() - (p_lockout_minutes || ' minutes')::INTERVAL\n  GROUP BY email\n  HAVING COUNT(*) >= p_max_attempts\n  ORDER BY last_attempt DESC;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "get_user_admin_org_ids()",
+      "owner": "postgres",
+      "acl": [
+        "=X/postgres",
+        "app_user=X/postgres",
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.get_user_admin_org_ids()\n RETURNS SETOF uuid\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  SELECT organization_id FROM public.memberships\n  WHERE user_id = app.user_id() AND role IN ('OWNER', 'ADMIN');\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "get_user_customer_ids()",
+      "owner": "postgres",
+      "acl": [
+        "=X/postgres",
+        "app_user=X/postgres",
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.get_user_customer_ids()\n RETURNS SETOF uuid\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  SELECT c.id FROM public.customers c\n  WHERE c.user_id = (SELECT app.user_id())\n  UNION\n  SELECT c.id FROM public.customers c\n  WHERE c.organization_id IN (SELECT public.get_user_org_ids());\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "get_user_org_ids()",
+      "owner": "postgres",
+      "acl": [
+        "=X/postgres",
+        "app_user=X/postgres",
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.get_user_org_ids()\n RETURNS SETOF uuid\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  SELECT organization_id FROM public.memberships WHERE user_id = app.user_id();\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "get_user_owner_org_ids()",
+      "owner": "postgres",
+      "acl": [
+        "=X/postgres",
+        "app_user=X/postgres",
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.get_user_owner_org_ids()\n RETURNS SETOF uuid\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  SELECT organization_id FROM public.memberships\n  WHERE user_id = app.user_id() AND role = 'OWNER';\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "is_super_admin()",
+      "owner": "postgres",
+      "acl": [
+        "=X/postgres",
+        "app_user=X/postgres",
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.is_super_admin()\n RETURNS boolean\n LANGUAGE sql\n STABLE SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  SELECT COALESCE(\n    (\n      SELECT u.role = 'super_admin'\n      FROM public.\"user\" u\n      WHERE u.id = (SELECT app.user_id())\n    ),\n    false\n  );\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "log_cron_job(text,text,text,text)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.log_cron_job(p_job_name text, p_status text DEFAULT 'succeeded'::text, p_result text DEFAULT NULL::text, p_error text DEFAULT NULL::text)\n RETURNS void\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nBEGIN\n  INSERT INTO public.cron_job_history (job_name, status, finished_at, result, error)\n  VALUES (p_job_name, p_status, now(), p_result, p_error);\nEND;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "record_failed_login(text,inet)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.record_failed_login(p_email text, p_ip_address inet)\n RETURNS void\n LANGUAGE sql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\n  INSERT INTO public.failed_login_attempts (email, ip_address)\n  VALUES (LOWER(p_email), p_ip_address);\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "rollup_crawler_hits(date)",
+      "owner": "postgres",
+      "acl": [
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.rollup_crawler_hits(p_day date DEFAULT NULL::date)\n RETURNS integer\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  v_day DATE := COALESCE(p_day, ((now() AT TIME ZONE 'UTC')::date - 1));\n  v_start TIMESTAMPTZ;\n  v_end TIMESTAMPTZ;\n  v_rows INTEGER;\nBEGIN\n  v_start := (v_day::timestamp) AT TIME ZONE 'UTC';\n  v_end := ((v_day + 1)::timestamp) AT TIME ZONE 'UTC';\n\n  INSERT INTO public.crawler_hits_daily (day, crawler, path, hits, errors)\n  SELECT v_day, h.crawler, h.path, count(*)::int,\n         (count(*) FILTER (WHERE h.status >= 500))::int\n  FROM public.crawler_hits h\n  WHERE h.hit_at >= v_start AND h.hit_at < v_end\n  GROUP BY h.crawler, h.path\n  ON CONFLICT (day, crawler, path) DO UPDATE\n    SET hits = EXCLUDED.hits,\n        errors = EXCLUDED.errors;\n\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  RETURN v_rows;\nEND;\n$function$\n"
+    },
+    {
+      "schema": "public",
+      "signature": "update_updated_at()",
+      "owner": "postgres",
+      "acl": [
+        "=X/postgres",
+        "app_user=X/postgres",
+        "postgres=X/postgres"
+      ],
+      "definition": "CREATE OR REPLACE FUNCTION public.update_updated_at()\n RETURNS trigger\n LANGUAGE plpgsql\n SET search_path TO ''\nAS $function$\nBEGIN\n  NEW.updated_at = NOW();\n  RETURN NEW;\nEND;\n$function$\n"
+    }
+  ],
+  "triggers": [
+    {
+      "schema": "cron",
+      "table": "job",
+      "name": "cron_job_cache_invalidate",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER cron_job_cache_invalidate AFTER INSERT OR DELETE OR UPDATE OR TRUNCATE ON cron.job FOR EACH STATEMENT EXECUTE FUNCTION cron.job_cache_invalidate()"
+    },
+    {
+      "schema": "public",
+      "table": "app_settings",
+      "name": "app_settings_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER app_settings_updated_at BEFORE UPDATE ON public.app_settings FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "contact_submissions",
+      "name": "update_contact_submissions_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER update_contact_submissions_updated_at BEFORE UPDATE ON public.contact_submissions FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "crawler_hits_daily",
+      "name": "update_crawler_hits_daily_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER update_crawler_hits_daily_updated_at BEFORE UPDATE ON public.crawler_hits_daily FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "customers",
+      "name": "update_customers_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER update_customers_updated_at BEFORE UPDATE ON public.customers FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "memberships",
+      "name": "memberships_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER memberships_updated_at BEFORE UPDATE ON public.memberships FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "newsletter_subscribers",
+      "name": "update_newsletter_subscribers_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER update_newsletter_subscribers_updated_at BEFORE UPDATE ON public.newsletter_subscribers FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "notifications",
+      "name": "notifications_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER notifications_updated_at BEFORE UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "organizations",
+      "name": "organizations_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER organizations_updated_at BEFORE UPDATE ON public.organizations FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    },
+    {
+      "schema": "public",
+      "table": "subscriptions",
+      "name": "update_subscriptions_updated_at",
+      "enabled": "O",
+      "definition": "CREATE TRIGGER update_subscriptions_updated_at BEFORE UPDATE ON public.subscriptions FOR EACH ROW EXECUTE FUNCTION update_updated_at()"
+    }
+  ],
+  "defaultPrivileges": [
+    {
+      "role": "postgres",
+      "schema": "public",
+      "type": "f",
+      "acl": [
+        "app_user=X/postgres"
+      ]
+    },
+    {
+      "role": "postgres",
+      "schema": "public",
+      "type": "r",
+      "acl": [
+        "app_user=arwd/postgres"
+      ]
+    }
+  ],
+  "cronJobs": [
+    {
+      "name": "cleanup-crawler-hits",
+      "schedule": "45 3 * * *",
+      "command": "\n  DO $body$\n  DECLARE\n    deleted_count INTEGER;\n    deleted_daily INTEGER;\n  BEGIN\n    DELETE FROM public.crawler_hits\n    WHERE hit_at < now() - interval '90 days';\n    GET DIAGNOSTICS deleted_count = ROW_COUNT;\n\n    DELETE FROM public.crawler_hits_daily\n    WHERE day < ((now() AT TIME ZONE 'UTC')::date - 400);\n    GET DIAGNOSTICS deleted_daily = ROW_COUNT;\n\n    PERFORM public.log_cron_job('cleanup-crawler-hits', 'succeeded',\n      'Deleted ' || deleted_count || ' crawler hits older than 90 days and '\n      || deleted_daily || ' rollup rows older than 400 days');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('cleanup-crawler-hits', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",
+      "database": "postgres",
+      "username": "postgres",
+      "active": true
+    },
+    {
+      "name": "cleanup-expired-notifications",
+      "schedule": "0 3 * * *",
+      "command": "\n  DO $body$\n  DECLARE\n    deleted_count INTEGER;\n  BEGIN\n    DELETE FROM public.notifications\n    WHERE ends_at IS NOT NULL AND ends_at < now();\n    GET DIAGNOSTICS deleted_count = ROW_COUNT;\n    PERFORM public.log_cron_job('cleanup-expired-notifications', 'succeeded',\n      'Deleted ' || deleted_count || ' expired notifications');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('cleanup-expired-notifications', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",
+      "database": "postgres",
+      "username": "postgres",
+      "active": true
+    },
+    {
+      "name": "cleanup-expired-sessions",
+      "schedule": "30 3 * * *",
+      "command": "\n  DO $body$\n  DECLARE\n    deleted_sessions INTEGER;\n    deleted_verifications INTEGER;\n  BEGIN\n    DELETE FROM public.session\n    WHERE expires_at < now() - interval '1 day';\n    GET DIAGNOSTICS deleted_sessions = ROW_COUNT;\n\n    DELETE FROM public.verification\n    WHERE expires_at < now();\n    GET DIAGNOSTICS deleted_verifications = ROW_COUNT;\n\n    PERFORM public.log_cron_job('cleanup-expired-sessions', 'succeeded',\n      'Deleted ' || deleted_sessions || ' expired sessions and '\n      || deleted_verifications || ' expired verifications');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('cleanup-expired-sessions', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",
+      "database": "postgres",
+      "username": "postgres",
+      "active": true
+    },
+    {
+      "name": "cleanup-job-history",
+      "schedule": "0 4 * * 0",
+      "command": "\n  DO $body$\n  DECLARE\n    deleted_count INTEGER;\n  BEGIN\n    DELETE FROM public.cron_job_history\n    WHERE created_at < now() - interval '30 days';\n    GET DIAGNOSTICS deleted_count = ROW_COUNT;\n    PERFORM public.log_cron_job('cleanup-job-history', 'succeeded',\n      'Deleted ' || deleted_count || ' old history entries');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('cleanup-job-history', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",
+      "database": "postgres",
+      "username": "postgres",
+      "active": true
+    },
+    {
+      "name": "cleanup-login-attempts",
+      "schedule": "0 */6 * * *",
+      "command": "\n  DO $body$\n  DECLARE\n    deleted_count INTEGER;\n  BEGIN\n    DELETE FROM public.failed_login_attempts\n    WHERE attempted_at < now() - interval '24 hours';\n    GET DIAGNOSTICS deleted_count = ROW_COUNT;\n    PERFORM public.log_cron_job('cleanup-login-attempts', 'succeeded',\n      'Deleted ' || deleted_count || ' old login attempts');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('cleanup-login-attempts', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",
+      "database": "postgres",
+      "username": "postgres",
+      "active": true
+    },
+    {
+      "name": "rollup-crawler-hits",
+      "schedule": "15 2 * * *",
+      "command": "\n  DO $body$\n  DECLARE\n    rolled_count INTEGER;\n  BEGIN\n    rolled_count := public.rollup_crawler_hits();\n    PERFORM public.log_cron_job('rollup-crawler-hits', 'succeeded',\n      'Rolled up ' || rolled_count || ' crawler/path rows');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('rollup-crawler-hits', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",
+      "database": "postgres",
+      "username": "postgres",
+      "active": true
+    }
+  ],
+  "seededSettings": [
+    "api_docs_enabled",
+    "app_theme",
+    "mfa_enabled",
+    "user_docs_enabled"
+  ]
+}

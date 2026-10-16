@@ -259,7 +259,7 @@ describe('HetznerProvider.fetchServerTypes', () => {
     // from a live per-region set that doesn't exist.
     expect(HetznerProvider.getRegionDefaults('fsn1')).toEqual({
       masterType: 'cpx22',
-      supabaseType: 'cpx32',
+      dbType: 'cpx32',
       workerType: 'cpx22',
     });
   });

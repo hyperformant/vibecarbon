@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CARBON_AUTOSCALER_IMAGE,
   CARBON_AUTOSCALER_TAG,
+  CLUSTER_AUTOSCALER_DIGEST,
   CLUSTER_AUTOSCALER_IMAGE,
   CLUSTER_AUTOSCALER_TAG,
   CLUSTER_AUTOSCALER_UPSTREAM_IMAGE,
@@ -148,7 +149,7 @@ describe('publish workflow tag-resolution grep matches images.js', () => {
     // every cluster. Both refs derive from CLUSTER_AUTOSCALER_TAG, so they
     // cannot diverge.
     expect(clusterAutoscalerUpstreamRef().split(':').pop()).toBe(CLUSTER_AUTOSCALER_TAG);
-    expect(clusterAutoscalerImageRef().split(':').pop()).toBe(CLUSTER_AUTOSCALER_TAG);
+    expect(clusterAutoscalerImageRef().split('@')[0].split(':').pop()).toBe(CLUSTER_AUTOSCALER_TAG);
   });
 });
 
@@ -160,7 +161,7 @@ describe('cluster-autoscaler image ref (ghcr mirror of the upstream image)', () 
     );
     expect(CLUSTER_AUTOSCALER_TAG).toBe('v1.32.7');
     expect(clusterAutoscalerImageRef()).toBe(
-      `${CLUSTER_AUTOSCALER_IMAGE}:${CLUSTER_AUTOSCALER_TAG}`,
+      `${CLUSTER_AUTOSCALER_IMAGE}:${CLUSTER_AUTOSCALER_TAG}@${CLUSTER_AUTOSCALER_DIGEST}`,
     );
     expect(clusterAutoscalerUpstreamRef()).toBe(
       `${CLUSTER_AUTOSCALER_UPSTREAM_IMAGE}:${CLUSTER_AUTOSCALER_TAG}`,
@@ -174,8 +175,12 @@ describe('cluster-autoscaler image ref (ghcr mirror of the upstream image)', () 
     expect(clusterAutoscalerImageRef()).toMatch(/^ghcr\.io\//);
   });
 
-  it('is a version tag, never a digest pin (house rule) and never per-deploy unique', () => {
-    expect(clusterAutoscalerImageRef()).not.toContain('@sha256:');
+  it('is upstream’s version tag plus upstream’s amd64 digest, never per-deploy unique', () => {
+    // Every shipped ref is digest-pinned (tests/unit/deploy/image-digest-census.test.ts).
+    // The mirror copies upstream's linux/amd64 manifest verbatim, so the
+    // digest is the same on both hosts; the fixture below is that manifest.
+    expect(CLUSTER_AUTOSCALER_DIGEST).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(clusterAutoscalerImageRef()).toMatch(/:v1\.32\.7@sha256:[a-f0-9]{64}$/);
     expect(clusterAutoscalerImageRef()).toBe(clusterAutoscalerImageRef());
     expect(clusterAutoscalerImageRef()).not.toMatch(/dirty|\d{14}/);
   });
@@ -330,13 +335,18 @@ describe('mirror job copies the manifest — never rebuilds, never multi-arch', 
     },
   );
 
-  it('is re-runnable: it pins the source by digest resolved at run time', () => {
-    // Resolving the amd64 digest from the tag and re-pushing the same index
-    // makes a re-run a no-op rather than a new image. (A digest resolved
-    // inside the job is NOT a digest pin in a template — the house rule is
-    // about refs that ship in manifests, and the mirrored ref is a tag.)
+  it('copies the PINNED digest, and fails when upstream’s tag no longer resolves to it', () => {
+    // The digest every deployed ref carries comes from src/lib/images.js via
+    // the matrix. The job resolves upstream's tag only to prove it still
+    // points there; a moved tag fails the leg instead of shipping new bits.
     expect(code).toMatch(/imagetools inspect/);
-    expect(code).toMatch(/\$\{?DIGEST/);
+    expect(code).toMatch(/PINNED: \$\{\{ matrix\.digest \}\}/);
+    expect(code).toMatch(/if \[ "\$DIGEST" != "\$PINNED" \]/);
+    expect(code).toMatch(/imagetools create --tag "\$DST" "\$\{SRC%:\*\}@\$PINNED"/);
+  });
+
+  it('the pinned CA digest is the amd64 child of upstream’s captured index', () => {
+    expect(CLUSTER_AUTOSCALER_DIGEST).toBe(UPSTREAM_INDEX.manifests[0].digest);
   });
 });
 

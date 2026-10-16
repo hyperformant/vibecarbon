@@ -28,7 +28,7 @@ describe('wal-g S3 prefix is a single canonical path (NO role segment)', () => {
     expect(compose).not.toMatch(/walg\/\$\{WALG_ROLE/);
   });
 
-  it('k8s installSupabase builds …/walg with no /<role> segment', () => {
+  it('k8s buildDbManifestValues builds …/walg with no /<role> segment', () => {
     const k3s = read('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toMatch(/backups\/\$\{projectName \|\| 'vibecarbon'\}\/walg`/);
     expect(k3s).not.toMatch(/\/walg\/\$\{walgRole\}/);
@@ -41,17 +41,16 @@ describe('WALG_ROLE is exposed to the db container as the write-guard signal', (
     expect(compose).toMatch(/WALG_ROLE:\s*\$\{WALG_ROLE:-primary\}/);
   });
 
-  it('k8s supabase.values.yaml renders WALG_ROLE into the db env', () => {
-    const values = read('carbon/k8s/values/supabase.values.yaml');
-    // Chart >= 0.7.1 env schema: list of {name, value} entries.
-    expect(values).toMatch(/- name: WALG_ROLE\s+value: "\{\{WALG_ROLE\}\}"/);
+  it('the k8s db StatefulSet renders WALG_ROLE into the db env', () => {
+    const sts = read('carbon/k8s/base/db/statefulset.yaml');
+    expect(sts).toMatch(/- name: WALG_ROLE\s+value: "\{\{WALG_ROLE\}\}"/);
   });
 
   it('k3s.js renders {{WALG_ROLE}} and derives the role from the explicit `role` option', () => {
     const k3s = read('src/lib/deploy/k8s/k3s.js');
-    expect(k3s).toContain('.replace(/\\{\\{WALG_ROLE\\}\\}/g, walgRole)');
+    expect(k3s).toContain('WALG_ROLE: walgRole,');
     // Pilot-light (Task 4): walgRole comes from the `role` option threaded
-    // through deployK3s/applyK3sManifests/installSupabase, NOT an
+    // through deployK3s/applyK3sManifests/buildDbManifestValues, NOT an
     // `environment` suffix sniff — Task 6 fans out role: 'primary'/'standby'.
     expect(k3s).toMatch(/walgRole\s*=\s*role\s*===\s*'standby'\s*\?\s*'standby'\s*:\s*'primary'/);
     expect(k3s).not.toMatch(/environment\?\.endsWith\('-standby'\)/);
@@ -61,9 +60,9 @@ describe('WALG_ROLE is exposed to the db container as the write-guard signal', (
     // The .env merge moved out of the deployComposeHA orchestration into the
     // compose-ha deploy effect (haMergeWalgRole) when the tier was converted to
     // the step-plan; the write-guard behavior is unchanged. The literal key is
-    // now spelled ONLY in composeRoleEnv (walg-role.js), which pairs it with
-    // REALTIME_REPLICAS — compose-role-env-census.test.ts bans the literal
-    // shape here, so assert the helper call and what it emits instead.
+    // now spelled ONLY in composeRoleEnv (walg-role.js), which validates the
+    // role — compose-role-env-census.test.ts bans the literal shape here, so
+    // assert the helper call and what it emits instead.
     const eff = read('src/lib/deploy/effects/compose-ha.js');
     expect(eff).toMatch(/composeRoleEnv\('primary'\)/);
     expect(eff).toMatch(/composeRoleEnv\('standby'\)/);

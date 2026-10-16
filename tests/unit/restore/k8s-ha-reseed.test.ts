@@ -17,8 +17,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The db pod name (DB_POD in src/lib/deploy/db-workload.js), spelled out:
+// vi.mock factories are hoisted above every import.
 vi.mock('../../../src/lib/ssh.js', () => ({
-  getPostgresPod: vi.fn().mockResolvedValue('supabase-supabase-db-0'),
+  getPostgresPod: vi.fn().mockResolvedValue('db-0'),
   sshKubectl: vi.fn().mockResolvedValue(''),
   sshRun: vi.fn().mockResolvedValue(''),
   getSSHKeyPath: vi.fn(),
@@ -31,22 +33,22 @@ function makeSpinner() {
   return { start: vi.fn(), stop: vi.fn(), message: vi.fn() };
 }
 
-// k8s-HA env: identifyServers reads ha.primary/ha.standby (masterIp + supabaseIp
-// + the persisted supabasePrivateIp — the local WireGuard-relay endpoint).
+// k8s-HA env: identifyServers reads ha.primary/ha.standby (masterIp + dbIp
+// + the persisted dbPrivateIp — the local WireGuard-relay endpoint).
 const haEnvConfig = {
   deployMode: 'kubernetes',
   ha: {
     enabled: true,
     primary: {
       masterIp: '10.0.1.1',
-      supabaseIp: '10.0.1.9',
-      supabasePrivateIp: '10.0.1.2',
+      dbIp: '10.0.1.9',
+      dbPrivateIp: '10.0.1.2',
       region: 'hel1',
     },
     standby: {
       masterIp: '10.0.2.1',
-      supabaseIp: '10.0.2.9',
-      supabasePrivateIp: '10.0.1.2',
+      dbIp: '10.0.2.9',
+      dbPrivateIp: '10.0.1.2',
       region: 'nbg1',
     },
   },
@@ -120,8 +122,8 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
     // WireGuard relay the basebackup + conninfo dial (deploy-time transport —
     // no direct primary dial).
     expect(reseedStandbyFromPrimary).toHaveBeenCalledWith('10.0.2.1', '/tmp/key', {
-      standbySupabaseIp: '10.0.2.9',
-      standbySupabasePrivateIp: '10.0.1.2',
+      standbyDbIp: '10.0.2.9',
+      standbyDbPrivateIp: '10.0.1.2',
     });
     // Verify reads pg_stat_replication on the PRIMARY master.
     expect(readReplicationState).toHaveBeenCalledWith('10.0.1.1', '/tmp/key');
@@ -198,26 +200,26 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
     ).rejects.toThrow(/streaming replication is NOT confirmed/i);
   });
 
-  it('fails loudly (no masterIp fallback) when the standby supabase node IP is missing', async () => {
+  it('fails loudly (no masterIp fallback) when the standby database node IP is missing', async () => {
     const reseedStandbyFromPrimary = vi.fn();
     const readReplicationState = vi.fn();
     const s = makeSpinner();
 
-    const noStandbySupabase = {
+    const noStandbyDb = {
       ...haEnvConfig,
       ha: {
         ...haEnvConfig.ha,
-        standby: { masterIp: '10.0.2.1', region: 'nbg1' }, // supabaseIp missing
+        standby: { masterIp: '10.0.2.1', region: 'nbg1' }, // dbIp missing
       },
     };
 
-    // The node-side PGDATA swap targets the standby SUPABASE node; falling back
+    // The node-side PGDATA swap targets the standby DATABASE node; falling back
     // to the master would swap on the wrong filesystem — must refuse instead.
     await expect(
       runK8sRestore({
         ...baseArgs,
         s,
-        envConfig: noStandbySupabase,
+        envConfig: noStandbyDb,
         reseedStandbyFromPrimary,
         readReplicationState,
       }),

@@ -1,8 +1,8 @@
 /**
  * Human-facing project display name, derived from (or recorded alongside) the
- * machine slug. The slug (PROJECT_NAME) stays DNS-safe for container names,
- * pooler tenant IDs, and k8s resources; the display name is what users see in
- * browser titles, the PWA manifest, legal copy, and email sender names.
+ * machine slug. The slug (PROJECT_NAME) stays DNS-safe for container names
+ * and k8s resources; the display name is what users see in browser titles,
+ * the PWA manifest, legal copy, and email sender names.
  */
 
 import { validateDisplayName } from './validators.js';

@@ -65,16 +65,16 @@ function carbonMajor(pkgName: string): number {
 }
 
 /**
- * PostgreSQL major, from the image the database is actually built on.
- * carbon/db/Dockerfile is the real binding — docker-compose.yml only builds
- * `./db` and tags the result, so the version lives one level down.
+ * PostgreSQL major, from the image the database actually runs on.
+ * docker/postgres-walg/Dockerfile is the real binding — every compose file and
+ * the k8s values only name the published tag, so the version lives there.
  */
 function postgresMajor(): number {
-  const dockerfile = read(join('carbon', 'db', 'Dockerfile'));
-  const match = dockerfile.match(/^FROM\s+supabase\/postgres:(\d+)\./m);
+  const dockerfile = read(join('docker', 'postgres-walg', 'Dockerfile'));
+  const match = dockerfile.match(/^FROM\s+postgres:(\d+)\./m);
   if (!match) {
     throw new Error(
-      'carbon/db/Dockerfile: no `FROM supabase/postgres:<major>.…` line. ' +
+      'docker/postgres-walg/Dockerfile: no `FROM postgres:<major>.…` line. ' +
         'If the base image changed, update this guard with it.',
     );
   }
@@ -159,7 +159,7 @@ describe('doc fact census: framework version claims', () => {
       for (const m of text.matchAll(/\bPostgreSQL (\d+)\b/g)) {
         if (Number(m[1]) !== realPostgresMajor) {
           offenders.push(
-            `${rel}: claims "${m[0]}" but carbon/db/Dockerfile builds on supabase/postgres:${realPostgresMajor}.x`,
+            `${rel}: claims "${m[0]}" but docker/postgres-walg/Dockerfile builds on postgres:${realPostgresMajor}.x`,
           );
         }
       }

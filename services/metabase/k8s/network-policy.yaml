@@ -34,7 +34,7 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-              app: vibecarbon-postgres
+              app: vibecarbon-db
       ports:
         - protocol: TCP
           port: 5432
@@ -61,7 +61,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: vibecarbon-postgres
+      app: vibecarbon-db
   policyTypes:
     - Ingress
   ingress:

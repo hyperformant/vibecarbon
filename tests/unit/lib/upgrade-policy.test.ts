@@ -16,6 +16,8 @@ describe('getFilePolicy', () => {
     expect(getFilePolicy('Dockerfile')).toBe('safe');
     expect(getFilePolicy('docker-compose.prod.yml')).toBe('safe');
     expect(getFilePolicy('k8s/base/kustomization.yaml')).toBe('safe');
+    // The Garage config the dev override mounts: missing, Docker mounts a directory.
+    expect(getFilePolicy('volumes/s3/garage.toml')).toBe('safe');
     expect(getFilePolicy('k8s/base/deep/nested/file.yaml')).toBe('safe');
     expect(getFilePolicy('.github/workflows/deploy.yml')).toBe('safe');
     expect(getFilePolicy('cloud-init/docker-ce-setup.yaml')).toBe('safe');
@@ -35,6 +37,26 @@ describe('getFilePolicy', () => {
     expect(getFilePolicy('pnpm-lock.yaml')).toBe('never');
     expect(getFilePolicy('volumes/db/data.sql')).toBe('never');
     expect(getFilePolicy('README.md')).toBe('never');
+  });
+
+  // After create, db/migrations is the project's own history (the app
+  // applies it at startup, ledger in drizzle.__drizzle_migrations). An
+  // upgrade that rewrote or added a migration would change what an applied
+  // ledger means, or replay the template's baseline over a live schema.
+  it('never touches db/migrations, the SQL or drizzle meta', () => {
+    for (const f of [
+      'db/migrations/0000_baseline_pre.sql',
+      'db/migrations/0001_baseline_schema.sql',
+      'db/migrations/0007_add_projects.sql',
+      'db/migrations/meta/_journal.json',
+      'db/migrations/meta/0001_snapshot.json',
+    ]) {
+      expect(getFilePolicy(f), f).toBe('never');
+    }
+  });
+
+  it('never ships the template-only migrations census or tests at all', () => {
+    expect(getFilePolicy('tests/structural/template-migrations-census.test.ts')).toBe('never');
   });
 
   it('defaults unclassified paths to never', () => {

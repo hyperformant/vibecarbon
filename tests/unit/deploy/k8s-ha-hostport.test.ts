@@ -6,7 +6,7 @@ describe('buildDbHostPortPatch', () => {
   it('adds hostPort 5433 (REPL_PORT) to the postgres containerPort 5432', () => {
     const patch = buildDbHostPortPatch();
     const container = patch.spec.template.spec.containers[0];
-    expect(container.name).toBe('supabase-db');
+    expect(container.name).toBe('db');
     const port = container.ports.find((p: { containerPort: number }) => p.containerPort === 5432);
     expect(port).toBeDefined();
     expect(port.hostPort).toBe(5433);

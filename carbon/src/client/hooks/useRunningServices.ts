@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { adminServices } from '@/lib/admin-services';
-import { getAuthHeaders } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 
 interface ServiceStatus {
   name: string;
@@ -26,8 +26,7 @@ interface ServicesStatusResponse {
  */
 async function fetchRunningServices(): Promise<Set<string>> {
   try {
-    const headers = await getAuthHeaders();
-    const response = await fetch('/api/_internal/services/status', { headers });
+    const response = await apiFetch('/api/_internal/services/status');
     if (!response.ok) {
       return new Set();
     }
@@ -48,7 +47,6 @@ async function fetchRunningServices(): Promise<Set<string>> {
 
 // Map container names to admin service IDs
 const containerToServiceId: Record<string, string> = {
-  studio: 'database',
   traefik: 'gateway',
   grafana: 'monitoring',
   n8n: 'automation',

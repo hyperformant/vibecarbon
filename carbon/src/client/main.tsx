@@ -9,6 +9,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { ImpersonationBanner } from './components/ImpersonationBanner';
 import { NotificationBar } from './components/NotificationDrawer';
 import { SmoothScroll } from './components/SmoothScroll';
+import { Toaster } from './components/ui/sonner';
 import { NotificationProvider } from './hooks/useNotifications';
 import { OrganizationsProvider } from './hooks/useOrganizations';
 import './lib/i18n';
@@ -44,6 +45,7 @@ createRoot(rootElement).render(
                         <App />
                       </div>
                     </div>
+                    <Toaster />
                   </SmoothScroll>
                 </NotificationProvider>
               </OrganizationsProvider>

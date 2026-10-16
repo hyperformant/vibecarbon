@@ -6,14 +6,14 @@ order: 4
 
 ## Overview
 
-Authentication is handled by self-hosted Supabase Auth. It supports:
+Authentication runs inside the API server (`/api/auth`, Better Auth). It supports:
 
 - **Email/password** sign-up and sign-in
-- **OAuth** providers (Google, Microsoft, GitHub, Apple, Discord)
+- **OAuth** providers (Google, Microsoft)
 - **Magic links**: passwordless email authentication
 - **Multi-factor authentication** (TOTP)
 
-All auth state is managed through the `useAuth()` hook on the client and JWT middleware on the server.
+All auth state is managed through the `useAuth()` hook on the client and the session middleware on the server, which reads the HttpOnly session cookie.
 
 ## useAuth() Hook
 
@@ -21,10 +21,10 @@ The `useAuth()` hook (from `AuthProvider`) exposes everything you need for auth 
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `user` | `User \| null` | Current Supabase user object |
-| `session` | `Session \| null` | Current session with tokens |
+| `user` | `User \| null` | Signed-in user (`id`, `email`, `name`, `image`, `role`) |
+| `session` | `Session \| null` | Current session (no tokens: it lives in an HttpOnly cookie) |
 | `isLoading` | `boolean` | `true` while session is being validated |
-| `isSuperAdmin` | `boolean` | User has `super_admin` role in `app_metadata` |
+| `isSuperAdmin` | `boolean` | User's `role` is `super_admin` |
 | `mfaRequired` | `boolean` | MFA is enforced app-wide (set by admin) |
 | `hasMfaEnabled` | `boolean` | Current user has enrolled a TOTP factor |
 | `signIn` | `object` | Sign-in methods (see below) |
@@ -70,7 +70,7 @@ The `signIn.email()` method returns `{ requiresMfa: boolean }`. When `true`, the
 
 ### Magic Links
 
-Users receive a sign-in link via email; no password required. Requires SMTP to be configured.
+Users receive a sign-in link via email; no password required. It needs SMTP and `MAGIC_LINK_ENABLED` (on by default). Without SMTP the sign-in page hides the option, and the send endpoint answers 400 `MAGIC_LINK_UNAVAILABLE`, so nobody waits for an email that never comes.
 
 ```typescript
 const { signIn } = useAuth();
@@ -81,22 +81,19 @@ await signIn.magicLink('user@example.com');
 
 ### OAuth Providers
 
-Enable social login by configuring providers. Each provider has a dedicated method:
+Google and Microsoft sign-in are built in. Each has a dedicated method:
 
 ```typescript
 const { signIn } = useAuth();
 
 await signIn.google();
-await signIn.github();
 await signIn.microsoft();
-await signIn.apple();
-await signIn.discord();
 ```
 
-To enable an OAuth provider (self-hosted auth reads these from environment variables, and there is no Supabase Studio step):
+To enable one (the app's auth reads its credentials from environment variables):
 
-1. Set the provider's credentials as environment variables. `vibecarbon configure` → **OAuth** does this for Google and Microsoft, writing `GOOGLE_ENABLED` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (and the Microsoft equivalents) to `.env` / `.env.local`. For other providers, set them by hand. `vibecarbon deploy` ships them to the server, where GoTrue reads them as `GOTRUE_EXTERNAL_*`.
-2. In the provider's developer console, set the **authorized redirect URI** to `<SUPABASE_URL>/auth/v1/callback` (the `configure` wizard prints the exact URL to paste).
+1. Set the provider's credentials. `vibecarbon configure` → **OAuth** writes `GOOGLE_ENABLED` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (and the Microsoft equivalents, plus `MICROSOFT_TENANT_ID`) to `.env` / `.env.local`, and `vibecarbon deploy` ships them to the server.
+2. In the provider's developer console, set the **authorized redirect URI** to `<SITE_URL>/api/auth/callback/google` (or `/microsoft`).
 3. The provider button automatically appears on the sign-in page.
 
 ## Sign-Up
@@ -110,7 +107,7 @@ await signUp('user@example.com', 'password', 'Jane Smith');
 // User is signed in and redirected to onboarding
 ```
 
-The `name` parameter is stored in `user_metadata.full_name`.
+The `name` parameter is stored in `user.name`.
 
 ## Route Protection
 
@@ -197,6 +194,8 @@ if (pendingMfaChallenge) {
 
 Super admins can require MFA for all users from the admin dashboard. This sets the `mfa_enabled` key in the `app_settings` table. When enforced, `ProtectedRoute` redirects users without MFA to the enrollment page.
 
+Your users can still turn their own two-factor off from **Settings → Security** while it is required. They confirm a code from their authenticator first (step-up), and then the requirement sends them back to enrollment.
+
 ## Account Lockout
 
 Brute force protection is built in. After **5 failed login attempts** from the same email and IP address within a **15-minute window**, the account is locked.
@@ -208,7 +207,7 @@ Brute force protection is built in. After **5 failed login attempts** from the s
 
 ## Server-Side Auth
 
-API requests include the user's JWT in the `Authorization` header. The server middleware validates it and makes the user available in route handlers:
+API requests carry the session cookie the browser holds (HttpOnly, so page JavaScript never sees it). The server middleware checks it and makes the user available in route handlers:
 
 ```typescript
 const user = c.get('user');
@@ -217,14 +216,19 @@ if (!user) return c.json({ error: 'Unauthorized' }, 401);
 
 The middleware chain runs on every request:
 
-1. **Extract token** from `Authorization: Bearer <token>` header
-2. **Validate** with `supabase.auth.getUser()` (server-side verification)
-3. **Set context**: `c.set('user', user)` and `c.set('supabase', client)` where `supabase` is a user-scoped client that respects RLS
+1. **Read the session cookie** the auth API set at sign-in
+2. **Look up the session and its user** in the database, so a revoked session, a banned user or a changed role takes effect on the next request
+3. **Set context**: `c.set('user', user)` and `c.set('session', session)`, which routes read with `c.get('user')`
 
-For operations that need to bypass RLS (admin tasks, webhooks), use the service role client:
+Mutating requests that carry the cookie also pass a CSRF origin check, so a script that calls your API must send a matching `Origin` header.
+
+Routes then query the database as that user with `withUserDb(user.id, ...)`, so row-level security applies. For operations that need to bypass RLS (admin tasks, webhooks), the server uses `adminDb`, after checking the caller may do it:
 
 ```typescript
-import { supabaseAdmin } from '@/server/lib/supabase';
+import { adminDb } from '../../db/client';
+import { organizations } from '../../db/schema';
 
-const { data } = await supabaseAdmin.from('organizations').select('*');
+const all = await adminDb.select().from(organizations);
 ```
+
+See [Database](/docs/database) for both.

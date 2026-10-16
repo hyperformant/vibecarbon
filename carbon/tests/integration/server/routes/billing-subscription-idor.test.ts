@@ -1,21 +1,55 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryChain } from '../../../_helpers/drizzle-mock';
 import type { HonoVariables } from '@server/types';
 
-// adminDb (service role) is used by the handler AFTER the org membership gate.
-// A customer lookup that returns null yields {status:'none'} — enough to prove
-// the request reached the handler (i.e. the gate passed).
-// `adminFrom` records every service-role table access so tests can assert the
-// customers/subscriptions tables were never touched on a rejected request.
-const { adminFrom } = vi.hoisted(() => {
-  const adminChain: Record<string, unknown> = {};
-  adminChain.select = () => adminChain;
-  adminChain.eq = () => adminChain;
-  adminChain.is = () => adminChain;
-  adminChain.maybeSingle = async () => ({ data: null, error: null });
-  return { adminFrom: vi.fn((_table: string) => adminChain) };
+const { state, withUserDbMock, adminTables } = vi.hoisted(() => ({
+  state: { membershipRole: null as string | null },
+  withUserDbMock: vi.fn(),
+  // Every table the service-role adminDb touched, by name, so tests can assert
+  // the customers/subscriptions tables were never reached on a rejected request.
+  adminTables: [] as string[],
+}));
+
+// requireOrgRole reads the caller's membership through withUserDb (RLS as the
+// caller). The handler then reads billing rows through adminDb AFTER the gate;
+// a customer lookup that finds nothing yields {status:'none'} — enough to
+// prove the request reached the handler (i.e. the gate passed).
+vi.mock('@server/db/client', async () => {
+  const { getTableName } = await import('drizzle-orm');
+  // A Drizzle builder double that records the table of every from()/insert()
+  // and resolves every query to no rows.
+  // biome-ignore lint/suspicious/noExplicitAny: the chain stands in for every builder type
+  const recordingChain = (): any => {
+    // biome-ignore lint/suspicious/noExplicitAny: Proxy over a callable target
+    const chain: any = new Proxy(() => undefined, {
+      get(_target, prop) {
+        if (prop === 'then') {
+          return (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
+            Promise.resolve([]).then(resolve, reject);
+        }
+        if (prop === 'from') {
+          return (table: never) => {
+            adminTables.push(getTableName(table));
+            return chain;
+          };
+        }
+        return () => chain;
+      },
+    });
+    return chain;
+  };
+  return {
+    adminDb: {
+      select: () => recordingChain(),
+      insert: (table: never) => {
+        adminTables.push(getTableName(table));
+        return recordingChain();
+      },
+    },
+    withUserDb: withUserDbMock,
+  };
 });
-vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { from: adminFrom } }));
 vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }));
@@ -27,29 +61,27 @@ vi.mock('@server/billing', () => ({
 
 const { billingRoutes } = await import('@server/routes/v1/billing');
 
-// Build an app that injects an authenticated user + a fake RLS-enforced
-// per-user Supabase client whose memberships lookup returns `membershipRole`.
+beforeEach(() => {
+  state.membershipRole = null;
+  withUserDbMock.mockReset();
+  withUserDbMock.mockImplementation((_userId: string | null, fn: (tx: unknown) => unknown) =>
+    fn({
+      select: () =>
+        queryChain(() => (state.membershipRole ? [{ role: state.membershipRole }] : [])),
+    })
+  );
+});
+
+// Build an app that injects an authenticated user whose membership in the
+// target org (as RLS shows it to them) has role `membershipRole`.
 function appWith(membershipRole: string | null) {
+  state.membershipRole = membershipRole;
   const app = new Hono<{ Variables: HonoVariables }>();
   app.use('*', async (c, next) => {
     // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
     c.set('user', { id: 'u1', email: 'u@test.com' } as any);
-    c.set('aal', 'aal2');
-    // biome-ignore lint/suspicious/noExplicitAny: minimal supabase double
-    c.set('supabase', {
-      from: () => ({
-        select: () => ({
-          eq: () => ({
-            eq: () => ({
-              single: async () => ({
-                data: membershipRole ? { role: membershipRole } : null,
-                error: membershipRole ? null : { message: 'no rows' },
-              }),
-            }),
-          }),
-        }),
-      }),
-    } as any);
+    // biome-ignore lint/suspicious/noExplicitAny: minimal injected session (aal2)
+    c.set('session', { id: 's1', twoFactorVerified: true } as any);
     await next();
   });
   app.route('/api/v1/billing', billingRoutes);
@@ -59,13 +91,11 @@ function appWith(membershipRole: string | null) {
 const ORG = '00000000-0000-0000-0000-0000000000aa';
 
 beforeEach(() => {
-  adminFrom.mockClear();
+  adminTables.length = 0;
 });
 
 function touchedBillingTables(): string[] {
-  return adminFrom.mock.calls
-    .map(([table]) => table)
-    .filter((t) => t === 'customers' || t === 'subscriptions');
+  return adminTables.filter((t) => t === 'customers' || t === 'subscriptions');
 }
 
 describe('GET /billing/subscription org access control (IDOR fix)', () => {
@@ -74,6 +104,8 @@ describe('GET /billing/subscription org access control (IDOR fix)', () => {
       `/api/v1/billing/subscription?type=organization&organizationId=${ORG}`
     );
     expect(res.status).toBe(403);
+    // The lookup ran as the caller, under RLS — never as the server.
+    expect(withUserDbMock).toHaveBeenCalledWith('u1', expect.any(Function));
   });
 
   it('allows an OWNER of the target org through the gate', async () => {
@@ -129,7 +161,7 @@ describe('GET /billing/subscription org access control (IDOR fix)', () => {
 
   it('treats a missing or empty type as user-scoped', async () => {
     for (const qs of ['', '?type=']) {
-      adminFrom.mockClear();
+      adminTables.length = 0;
       const res = await appWith(null).request(
         `/api/v1/billing/subscription${qs}${qs ? '&' : '?'}organizationId=${ORG}`
       );
@@ -137,6 +169,23 @@ describe('GET /billing/subscription org access control (IDOR fix)', () => {
       expect((await res.json()).status).toBe('none');
       expect(touchedBillingTables()).toEqual(['customers']);
     }
+  });
+
+  it('denies a malformed organizationId without querying', async () => {
+    const res = await appWith('OWNER').request(
+      '/api/v1/billing/subscription?type=organization&organizationId=not-a-uuid'
+    );
+    expect(res.status).toBe(403);
+    expect(withUserDbMock).not.toHaveBeenCalled();
+  });
+
+  it('SECURITY: rejects any other type instead of reading the org ungated', async () => {
+    // requireOrgRole only gates type=organization; another type must not reach
+    // the organization lookup with an arbitrary organizationId.
+    const res = await appWith(null).request(
+      `/api/v1/billing/subscription?type=org&organizationId=${ORG}`
+    );
+    expect(res.status).toBe(400);
   });
 });
 

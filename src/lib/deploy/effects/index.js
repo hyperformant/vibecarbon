@@ -251,7 +251,7 @@ async function transferImage(ctx) {
 
 /**
  * Log the server into Docker Hub so reconcile.sh's `docker compose pull` of the
- * Supabase service images isn't subject to the per-IP unauthenticated pull
+ * stack's service images isn't subject to the per-IP unauthenticated pull
  * quota. State-gated on the creds fingerprint; `when` gates on creds present.
  */
 /**
@@ -438,6 +438,20 @@ async function updateDns(ctx) {
   }
 }
 
+/**
+ * Refuse a server whose database the retired stack made (tables, no
+ * migration ledger): the app's baseline would fail on it after the old
+ * services are gone. Runs before the bundle upload and the image transfer,
+ * so a refusal leaves the server exactly as it was. One read per server.
+ */
+async function checkDbLedger(ctx) {
+  const { serverIp, sshKeyPath, projectConfig } = ctx;
+  const { assertDbMadeByThisStack } = await import('../compose/db-ledger-preflight.js');
+  await perfAsync('deploy.compose.checkDbLedger', () =>
+    assertDbMadeByThisStack([serverIp], sshKeyPath, projectConfig.projectName),
+  );
+}
+
 /** Reconcile the Compose stack (`docker compose pull` + `up -d`) on the VPS. */
 async function startComposeStack(ctx) {
   const { serverIp, sshKeyPath, projectConfig, services } = ctx;
@@ -470,38 +484,36 @@ async function startComposeStack(ctx) {
 }
 
 /**
- * Apply app migrations + reload PostgREST. Shipped-bug guard: the inlined
- * single-compose path once skipped this and shipped an EMPTY app schema.
- * runMigrations waits for supabase_admin, applies each supabase/migrations/*
- * with ON_ERROR_STOP=1 (a real failure aborts the deploy), runs the two
- * ground-truth audits against the live system — RLS (rls-audit.js) and wal-g
- * backups (walg-audit.js), each of which FAILS the deploy — then reloads the
- * PostgREST schema cache.
+ * Wait for the app to report its migrations applied and its super admin
+ * ready (one /api/health probe). The app applies db/migrations at startup,
+ * then creates the admin from ADMIN_EMAIL / ADMIN_PASSWORD in the bundled
+ * .env. Shipped-bug
+ * guard: a deploy once reported success with no admin, shipping a prod app
+ * the operator couldn't log into. FATAL on failure (waitForAdminReady throws
+ * with the app's log tail; mirrors k3s.js's awaitAppAdminReady).
  */
-async function runMigrations(ctx) {
+async function waitAdminReady(ctx) {
   const { serverIp, sshKeyPath, projectConfig } = ctx;
-  const { runMigrations: runMigrationsRemote } = await import('../compose/index.js');
-  await perfAsync('deploy.compose.migrations', () =>
-    runMigrationsRemote(serverIp, sshKeyPath, projectConfig.projectName),
+  const { waitForAdminReady } = await import('../compose/index.js');
+  const result = await perfAsync('deploy.compose.waitAdminReady', () =>
+    waitForAdminReady(serverIp, sshKeyPath, projectConfig.projectName),
   );
+  p.log.success(result.message);
 }
 
 /**
- * Create the production app super-admin via GoTrue's admin API. Shipped-bug
- * guard: the inlined path once skipped it, shipping a prod app the operator
- * couldn't log into. Idempotent (422 = exists). FATAL on failure (fast-follow
- * to M3 Task 9h, mirrors k3s.js#provisionAdminUser): createAdminUserRemote
- * now retries the whole auth-readiness + SSH-tunnel + POST flow under its own
- * budget and throws once exhausted, or throws immediately on missing admin
- * credentials — no soft `{success: false}` return remains to branch on here.
+ * The two ground-truth audits against the live database once the app has
+ * migrated it: RLS (rls-audit.js) and wal-g backups (walg-audit.js), each of
+ * which FAILS the deploy. Shipped-bug guard: they used to ride inside the
+ * deploy's own migration runner, which the app's startup migrations
+ * replaced; they must not be lost with it.
  */
-async function createAdminUser(ctx) {
+async function auditDatabase(ctx) {
   const { serverIp, sshKeyPath, projectConfig } = ctx;
-  const { createAdminUser: createAdminUserRemote } = await import('../compose/index.js');
-  const adminResult = await perfAsync('deploy.compose.createAdminUser', () =>
-    createAdminUserRemote(serverIp, sshKeyPath, projectConfig.projectName),
+  const { runDatabaseAudits } = await import('../compose/index.js');
+  await perfAsync('deploy.compose.databaseAudits', () =>
+    runDatabaseAudits(serverIp, sshKeyPath, projectConfig.projectName),
   );
-  p.log.success(adminResult.message);
 }
 
 /**
@@ -626,9 +638,10 @@ export const EFFECTS = {
   ghcrLogin,
   setupServerFiles,
   updateDns,
+  checkDbLedger,
   startComposeStack,
-  runMigrations,
-  createAdminUser,
+  waitAdminReady,
+  auditDatabase,
   verifyHealth,
   verifyTlsReady,
   setupBackupCron,

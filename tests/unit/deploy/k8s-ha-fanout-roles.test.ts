@@ -7,7 +7,7 @@
  *   - primary: role 'primary', full sizing (minWorkers/maxWorkers as
  *     configured).
  *   - standby: role 'standby', minWorkers 0 (no Pulumi-provisioned worker
- *     nodes — just master + supabase), maxWorkers carried through unchanged,
+ *     nodes — just master + database), maxWorkers carried through unchanged,
  *     and caBoundsMin set to the PRIMARY's minWorkers (dormant CA bounds —
  *     the standby's cluster-autoscaler is rendered pre-sized for promotion
  *     day so a failover only has to flip its replica count 0→1, never
@@ -25,9 +25,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const deployK3s = vi.fn(async (opts: Record<string, unknown>) => ({
   masterIp: '1.1.1.1',
-  supabaseIp: '2.2.2.2',
+  dbIp: '2.2.2.2',
   floatingIp: '3.3.3.3',
-  supabasePrivateIp: '10.0.1.2',
+  dbPrivateIp: '10.0.1.2',
   kubeconfig: `/tmp/kubeconfig-${opts.environment}`,
 }));
 
@@ -76,7 +76,7 @@ describe('haK8sProvisionClusters pilot-light asymmetry', () => {
       minWorkers: 2,
       maxWorkers: 5,
       masterServerType: 'cx23',
-      supabaseServerType: 'cx23',
+      dbServerType: 'cx23',
       workerServerType: 'cpx21',
     });
 
@@ -99,16 +99,16 @@ describe('haK8sProvisionClusters pilot-light asymmetry', () => {
     // Task 7 persists these off ctx.primaryResult/standbyResult — both sides
     // must carry their stack identity + the region + server types actually
     // deployed (C2/I5: the orchestrator persists ha.{primary,standby}.region and
-    // .{master,supabase}ServerType from these, not the options-level flags).
+    // .{master,db}ServerType from these, not the options-level flags).
     expect((ctx.primaryResult as Record<string, unknown>).stack).toBe('e4-primary');
     expect((ctx.standbyResult as Record<string, unknown>).stack).toBe('e4-standby');
     expect((ctx.primaryResult as Record<string, unknown>).workerServerType).toBe('cpx21');
     expect((ctx.primaryResult as Record<string, unknown>).region).toBe('nbg1');
     expect((ctx.standbyResult as Record<string, unknown>).region).toBe('hel1');
     expect((ctx.primaryResult as Record<string, unknown>).masterServerType).toBe('cx23');
-    expect((ctx.primaryResult as Record<string, unknown>).supabaseServerType).toBe('cx23');
+    expect((ctx.primaryResult as Record<string, unknown>).dbServerType).toBe('cx23');
     expect((ctx.standbyResult as Record<string, unknown>).masterServerType).toBe('cx23');
-    expect((ctx.standbyResult as Record<string, unknown>).supabaseServerType).toBe('cx23');
+    expect((ctx.standbyResult as Record<string, unknown>).dbServerType).toBe('cx23');
   });
 
   it('follows a persisted post-failover role mapping (stacks swapped)', async () => {

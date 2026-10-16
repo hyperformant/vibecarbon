@@ -100,14 +100,10 @@ jobs:
           # Vite inlines import.meta.env.VITE_* at build time, so the browser
           # bundle bakes whatever these resolve to. They come from repo-level
           # Actions variables seeded by `vibecarbon deploy` (push mode) via
-          # seedBuildVars. Without them the bundle ships empty VITE_SUPABASE_*
-          # and the SPA throws "Missing Supabase environment variables" on
-          # load. Empty/unset vars resolve to "" — same as a fresh project
-          # before its first push-mode deploy.
+          # seedBuildVars. Empty/unset vars resolve to "" — same as a fresh
+          # project before its first push-mode deploy.
           build-args: |
             VITE_PROJECT_NAME=${{ vars.VITE_PROJECT_NAME }}
-            VITE_SUPABASE_URL=${{ vars.VITE_SUPABASE_URL }}
-            VITE_SUPABASE_ANON_KEY=${{ vars.VITE_SUPABASE_ANON_KEY }}
             VITE_PUBLIC_URL=${{ vars.VITE_PUBLIC_URL }}
             VITE_PLAUSIBLE_DOMAIN=${{ vars.VITE_PLAUSIBLE_DOMAIN }}
             VITE_PLAUSIBLE_SCRIPT_URL=${{ vars.VITE_PLAUSIBLE_SCRIPT_URL }}

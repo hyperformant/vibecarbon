@@ -391,19 +391,11 @@ describe('HetznerS3Provider', () => {
       });
     });
 
-    describe('configureCORS', () => {
-      it('configures CORS with default origins', async () => {
-        mockSend.mockResolvedValue({});
-
-        await provider.configureCORS('my-bucket');
-
-        expect(mockSend).toHaveBeenCalled();
-      });
-
+    describe('setBucketCors', () => {
       it('configures CORS with custom origins', async () => {
         mockSend.mockResolvedValue({});
 
-        await provider.configureCORS('my-bucket', ['https://example.com']);
+        await provider.setBucketCors('my-bucket', ['https://example.com']);
 
         expect(mockSend).toHaveBeenCalled();
       });
@@ -596,14 +588,14 @@ describe('HetznerS3Provider', () => {
         vi.useRealTimers();
       });
 
-      it('configureCORS retries transient 502 then succeeds', async () => {
+      it('setBucketCors retries transient 502 then succeeds', async () => {
         vi.useFakeTimers();
         mockSend.mockRejectedValueOnce(
           makeErr({ name: 'BadGateway', $metadata: { httpStatusCode: 502 } }),
         );
         mockSend.mockResolvedValueOnce({});
 
-        const promise = provider.configureCORS('b');
+        const promise = provider.setBucketCors('b', ['https://example.com']);
         await vi.runAllTimersAsync();
         await promise;
 

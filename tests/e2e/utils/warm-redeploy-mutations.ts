@@ -8,8 +8,8 @@
  *   - #202 — `k3s-apply`'s skip gate digested only `projectDir/k8s`, never the
  *     CLI's own bundled `carbon/k8s` tree, so a manifest change left every gate
  *     input identical and a state-resumed redeploy SKIPPED the apply.
- *   - #234 — the Supabase chart's PVCs were never pinned to a StorageClass, so
- *     a state-resumed deploy that re-ran `installSupabase` could put PGDATA on
+ *   - #234 — the database PVCs (then a Helm chart's) were never pinned to a
+ *     StorageClass, so a state-resumed deploy that re-ran the db install could put PGDATA on
  *     node-local `local-path` instead of the provider CSI. Silent durability
  *     loss: replication, failover and wal-g restore all break with no error.
  *

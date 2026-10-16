@@ -33,7 +33,7 @@ SLEEP_BASE="${WAL_ARCHIVE_SLEEP:-2}"
 
 # WRITE-GUARD (finding #3): a standby node must NEVER push WAL into the single
 # canonical WALG_S3_PREFIX. WALG_ROLE=standby is set on the standby's db env
-# (compose .env / k8s supabase.values.yaml). This closes the bring-up window
+# (compose .env / k8s db/statefulset.yaml). This closes the bring-up window
 # that the pg_is_in_recovery() gate below can't: a freshly-provisioned standby
 # db can briefly be an INDEPENDENT primary (not yet in recovery) before it is
 # reseeded — WALG_ROLE=standby stops it archiving into the primary's stream even
@@ -42,6 +42,19 @@ if [ "${WALG_ROLE:-primary}" = "standby" ]; then
     echo "wal-archive: WALG_ROLE=standby — skipping archive of '${WAL_PATH}' (only the primary writes to the canonical prefix)." >&2
     exit 0
 fi
+
+# No backup target: nothing to push to. Local dev sets WALG_S3_PREFIX to ""
+# (docker-compose.override.yml), and a deploy with no bucket name renders a
+# bucketless "s3:///..." prefix. Without this, every segment waits out the
+# wal-g attempts below and logs WAL_ARCHIVE_FAILED. Same guard as
+# backup/compose-backup.sh; a real deploy without archiving is still failed
+# by the deploy's wal-g audit (src/lib/deploy/walg-audit.js).
+case "${WALG_S3_PREFIX:-}" in
+    ""|s3:///*)
+        echo "wal-archive: no backup target (WALG_S3_PREFIX='${WALG_S3_PREFIX:-}'), not archiving '${WAL_PATH}'." >&2
+        exit 0
+        ;;
+esac
 
 # Recovery gate: a node in recovery (a streaming standby) must NEVER archive
 # WAL. Doing so would let a standby write into the shared/canonical WAL stream
@@ -54,7 +67,7 @@ fi
 PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
 in_recovery=""
 if command -v psql >/dev/null 2>&1; then
-    in_recovery="$(psql -U "${PGUSER:-supabase_admin}" -d postgres -tAXc 'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '[:space:]')"
+    in_recovery="$(psql -U "${PGUSER:-postgres}" -d postgres -tAXc 'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '[:space:]')"
 fi
 # Fall back to the standby.signal marker if psql couldn't answer (e.g. socket
 # not reachable from the archive_command context). Postgres removes this file

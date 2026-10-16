@@ -33,6 +33,9 @@ coverage/
 carbon/docker-compose.dev-init.yml
 carbon/volumes/db/super-admin.generated.sql
 
+# `npx drizzle-kit pull` scratch output (see carbon/drizzle.config.ts)
+carbon/drizzle/
+
 # Operator e2e credential tokens (A6) — see tests/.env.e2e.example
 tests/.env.e2e
 

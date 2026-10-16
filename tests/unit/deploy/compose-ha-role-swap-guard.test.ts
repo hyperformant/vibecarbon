@@ -110,7 +110,7 @@ const HEALTHY_BY_TIER: Record<string, Record<string, unknown>> = {
     deployMode: 'kubernetes',
     servers: [
       { name: 'master', ip: '10.0.1.1', region: 'nbg1', role: 'master' },
-      { name: 'supabase', ip: '10.0.1.2', region: 'nbg1', role: 'supabase' },
+      { name: 'db', ip: '10.0.1.2', region: 'nbg1', role: 'db' },
       { name: 'worker-1', ip: '10.0.1.3', region: 'nbg1', role: 'worker' },
     ],
   },
@@ -122,8 +122,8 @@ const HEALTHY_BY_TIER: Record<string, Record<string, unknown>> = {
       standby: { stack: `${ENV}-standby`, region: 'fsn1' },
     },
     servers: [
-      { name: 'primary', ip: '10.0.2.1', supabaseIp: '10.0.2.2', region: 'nbg1' },
-      { name: 'standby', ip: '10.0.2.3', supabaseIp: '10.0.2.4', region: 'fsn1' },
+      { name: 'primary', ip: '10.0.2.1', dbIp: '10.0.2.2', region: 'nbg1' },
+      { name: 'standby', ip: '10.0.2.3', dbIp: '10.0.2.4', region: 'fsn1' },
     ],
   },
 };

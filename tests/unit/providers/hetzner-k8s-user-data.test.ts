@@ -8,7 +8,7 @@
  * untouched this task (see Task 3 dossier). The wrap must therefore produce
  * BYTE-IDENTICAL output to what those call sites already render.
  *
- * `tests/fixtures/k3s-hetzner-{master,worker,supabase}-init-rendered.txt`
+ * `tests/fixtures/k3s-hetzner-{master,worker,db}-init-rendered.txt`
  * were captured by calling loadCloudInit/renderScript directly (the
  * pre-existing render path) with the vars below — see task-3-report.md for
  * the original capture command.
@@ -50,7 +50,7 @@ const workerVars = {
   cluster_name: 'acme-prod',
 };
 
-const supabaseVars = {
+const dbVars = {
   k3s_version: 'v1.31.5+k3s1',
   k3s_token: 'deadbeefcafe1234567890abcdef',
   master_ip: '10.0.1.1',
@@ -94,23 +94,23 @@ describe('M3 Task 3 — HetznerProvider k8s user-data statics (byte-identical wr
     expect(worker).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
   });
 
-  it('getK8sSupabaseUserData matches the stored fixture (pre-existing render, byte-for-byte)', async () => {
+  it('getK8sDbUserData matches the stored fixture (pre-existing render, byte-for-byte)', async () => {
     const fixture = readFileSync(
-      join(__dirname, '../../fixtures/k3s-hetzner-supabase-init-rendered.txt'),
+      join(__dirname, '../../fixtures/k3s-hetzner-db-init-rendered.txt'),
       'utf-8',
     );
-    const rendered = await HetznerProvider.getK8sSupabaseUserData(supabaseVars);
+    const rendered = await HetznerProvider.getK8sDbUserData(dbVars);
     expect(rendered).toBe(fixture);
   });
 
-  it('getK8sSupabaseUserData is algebraically identical to calling loadCloudInit/renderScript directly (proves the wrap adds nothing)', async () => {
-    const direct = renderScript(loadCloudInit('supabase-init.sh'), supabaseVars);
-    const wrapped = await HetznerProvider.getK8sSupabaseUserData(supabaseVars);
+  it('getK8sDbUserData is algebraically identical to calling loadCloudInit/renderScript directly (proves the wrap adds nothing)', async () => {
+    const direct = renderScript(loadCloudInit('db-init.sh'), dbVars);
+    const wrapped = await HetznerProvider.getK8sDbUserData(dbVars);
     expect(wrapped).toBe(direct);
   });
 
-  it('getK8sSupabaseUserData leaves no unrendered template placeholders with a full vars object', async () => {
-    const supabase = await HetznerProvider.getK8sSupabaseUserData(supabaseVars);
-    expect(supabase).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
+  it('getK8sDbUserData leaves no unrendered template placeholders with a full vars object', async () => {
+    const dbRendered = await HetznerProvider.getK8sDbUserData(dbVars);
+    expect(dbRendered).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
   });
 });

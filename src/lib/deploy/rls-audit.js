@@ -1,19 +1,19 @@
 /**
  * Deploy-time RLS audit — the ground-truth backstop.
  *
- * The browser queries PostgREST directly through Kong (`/rest/v1`), so any
- * table in the `public` schema without row-level security is world-readable
- * and -writable over the internet. Static tests (shipped in the generated
- * project) catch this at dev time, but they parse migration files — they can't
- * see a table added by hand in Studio, by a raw `psql`, or by a dependency's
- * migration. This audit queries the LIVE catalog after migrations apply and
+ * Row-level security is what scopes every query the app runs on a user's
+ * behalf: `withUserDb` switches to the `app_user` role per transaction, and
+ * the policies decide which rows that user may read or write. A `public`
+ * table without RLS gives every signed-in user every row. Static tests
+ * (shipped in the generated project) catch this at dev time, but they parse
+ * migration files — they can't see a table added by hand with a raw `psql`
+ * or by a dependency's migration. This audit queries the LIVE catalog after migrations apply and
  * FAILS the deploy if any public table has RLS disabled, so a missing policy
  * can never reach users regardless of how the table got there.
  *
  * Zero false positives by construction: extension-owned tables (tracked via
- * pg_depend deptype 'e', e.g. postgis `spatial_ref_sys`) are excluded, and
- * Supabase's own tables live in the `storage`/`auth`/`realtime` schemas, not
- * `public`. A healthy deploy returns an empty list.
+ * pg_depend deptype 'e', e.g. postgis `spatial_ref_sys`) are excluded. A
+ * healthy deploy returns an empty list.
  */
 
 /**
@@ -38,8 +38,9 @@ export const RLS_AUDIT_SQL =
 export function rlsAuditFailureMessage(tableList) {
   return (
     `SECURITY: ${tableList.split(',').length} table(s) in the public schema have ` +
-    `row-level security DISABLED: ${tableList}. The browser reaches these directly ` +
-    `through PostgREST (/rest/v1), so they are readable/writable by anyone. Add ` +
+    `row-level security DISABLED: ${tableList}. Queries the app runs for a user ` +
+    `(withUserDb) are scoped only by RLS, so every signed-in user could read and ` +
+    `write every row. Add ` +
     `\`ALTER TABLE <t> ENABLE ROW LEVEL SECURITY;\` plus policies (in the same ` +
     `migration) before deploying. Refusing to deploy an exposed schema.`
   );
@@ -54,7 +55,7 @@ export function rlsAuditFailureMessage(tableList) {
 export function composeRlsAuditShell() {
   // -tAc: tuples-only, unaligned, single command → stdout is the list or empty.
   return (
-    `UNPROTECTED=$(docker compose exec -T db psql -U supabase_admin -d postgres -tAc ` +
+    `UNPROTECTED=$(docker compose exec -T db psql -U postgres -d postgres -tAc ` +
     `"${RLS_AUDIT_SQL}" 2>/dev/null | tr -d '[:space:]'); ` +
     `if [ -n "$UNPROTECTED" ]; then ` +
     `echo "[migrate] SECURITY: public tables without RLS: $UNPROTECTED, refusing to deploy an exposed schema" >&2; ` +

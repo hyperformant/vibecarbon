@@ -6,7 +6,7 @@ metadata:
     app: vibecarbon-backup
     component: backup
 ---
-# The backup CronJob runs `kubectl exec` into the supabase-db pod to invoke
+# The backup CronJob runs `kubectl exec` into the db pod to invoke
 # wal-g backup-push (wal-g needs local PGDATA access). That requires
 # pods/exec in the vibecarbon namespace. `pods` get/list is needed so
 # `kubectl exec statefulset/...` can resolve the pod.

@@ -23,7 +23,12 @@
  * volume so the layer diff pays off across deploys.
  */
 
-export const REGISTRY_IMAGE = 'registry:2';
+// Pinned by the multi-arch index digest (tests/unit/deploy/image-digest-census.test.ts).
+// Stays on the 2.x line: registry 3 changed the config format. Dependabot
+// proposes digest moves through .github/image-pins/Dockerfile, which the
+// census keeps byte-identical to this constant.
+export const REGISTRY_IMAGE =
+  'registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373';
 export const REGISTRY_CONTAINER = 'vibecarbon-registry';
 export const REGISTRY_PORT = 5000;
 
@@ -126,7 +131,7 @@ export const REGISTRY_PREFIX = `127.0.0.1:${REGISTRY_PORT}/`;
  *   5s  — a `--restart unless-stopped` registry bounce, or a brief SSH blip
  *         on the operator's uplink.
  *  15s  — a slower restart, or dockerd busy competing with reconcile's own
- *         `docker compose pull` of the Supabase images for disk I/O.
+ *         `docker compose pull` of the stack images for disk I/O.
  * Beyond that, retrying is worse than sideloading. Tunnel-bind races need no
  * ladder entry at all — `pushImageOverSshTunnel` walks 20 ports WITHIN one
  * attempt, so reaching a second attempt for that reason means something

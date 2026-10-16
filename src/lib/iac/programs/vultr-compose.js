@@ -126,10 +126,6 @@ export function buildVultrComposeProgram(config) {
     ...allowedSshIps.map((cidr) => ({ port: '22', cidr, notes: 'operator-22' })),
     ...WORLD.map((cidr) => ({ port: '80', cidr, notes: 'http' })),
     ...WORLD.map((cidr) => ({ port: '443', cidr, notes: 'https' })),
-    // Supavisor pooler ports — operator-scoped like SSH, NEVER world-open;
-    // kept in lockstep by applyOperatorCidrs (OPERATOR_LOCKED_PORTS).
-    ...allowedSshIps.map((cidr) => ({ port: '5432', cidr, notes: 'operator-5432' })),
-    ...allowedSshIps.map((cidr) => ({ port: '6543', cidr, notes: 'operator-6543' })),
   ];
 
   return async () => {

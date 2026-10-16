@@ -27,12 +27,12 @@ describe('formatServerLines', () => {
         'prod-primary': {
           kind: 'compose',
           ip: '1.1.1.1',
-          rows: [row('db', 'healthy'), row('kong', 'healthy')],
+          rows: [row('db', 'healthy'), row('app', 'healthy')],
         },
         'prod-standby': {
           kind: 'compose',
           ip: '2.2.2.2',
-          rows: [row('db', 'healthy'), row('kong', 'healthy')],
+          rows: [row('db', 'healthy'), row('app', 'healthy')],
         },
       },
     }).map(strip);
@@ -52,9 +52,9 @@ describe('formatServerLines', () => {
           ip: '1.1.1.1',
           rows: [
             row('db', 'healthy'),
-            row('kong', 'unhealthy', 'exited', 'Exited (128) 3 hours ago'),
+            row('app', 'unhealthy', 'exited', 'Exited (128) 3 hours ago'),
             row('x-setup', 'done'),
-            row('rest', 'starting'),
+            row('traefik', 'starting'),
           ],
         },
       },
@@ -62,8 +62,8 @@ describe('formatServerLines', () => {
     expect(lines).toEqual([
       '  prod-primary     1.1.1.1         cpx31',
       '    containers ● 1/3 healthy',
-      '      kong                        ● exited  Exited (128) 3 hours ago',
-      '      rest                        ● starting  ',
+      '      app                         ● exited  Exited (128) 3 hours ago',
+      '      traefik                     ● starting  ',
     ]);
   });
 
@@ -73,7 +73,7 @@ describe('formatServerLines', () => {
         'prod-primary': {
           kind: 'k8s',
           ip: '1.1.1.1',
-          rows: [row('app', 'healthy'), row('supabase-db-0', 'healthy')],
+          rows: [row('app', 'healthy'), row('db-0', 'healthy')],
           platform: {
             'flux-system': { healthy: 4, total: 4 },
             'cert-manager': { healthy: 2, total: 3 },
@@ -140,7 +140,7 @@ describe('formatServerLines', () => {
 });
 
 describe('formatHealthLines', () => {
-  it('renders the db/supabase detail from the real /ready shape', () => {
+  it('renders the db detail from the real /ready shape', () => {
     const lines = formatHealthLines({
       url: 'https://x/api/health/ready',
       ok: true,
@@ -149,13 +149,13 @@ describe('formatHealthLines', () => {
       data: {
         status: 'ready',
         timestamp: 't',
-        services: { database: 'connected', supabase: 'connected' },
+        services: { database: 'connected' },
       },
     }).map(strip);
     expect(lines).toEqual([
       'Health',
       '  https://x/api/health/ready',
-      '  ● healthy  42ms  (db: connected, supabase: connected, ready)',
+      '  ● healthy  42ms  (db: connected, ready)',
     ]);
   });
   it('renders a failed probe with its error or status', () => {

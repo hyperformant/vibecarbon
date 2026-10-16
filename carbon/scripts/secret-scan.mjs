@@ -68,8 +68,8 @@ const SECRET_RULES = [
     predicate: (m) => !/^[a-f0-9]+$/i.test(m),
   },
   {
-    id: 'supabase-service-role-jwt',
-    description: 'Supabase service-role JWT',
+    id: 'privileged-role-jwt',
+    description: 'JWT with a privileged role claim (service_role or admin)',
     pattern: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
     predicate: (m) => {
       const parts = m.split('.');

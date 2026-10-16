@@ -255,11 +255,11 @@ export function extractRegistryMirrorAddress(registriesYaml: string): string | n
  * Only the fields relevant to server IP extraction are typed here.
  *
  * For k8s deployments the orchestrator now persists ONE entry per role
- * (master + supabase + worker-N), so iterating `servers[].ip` already
- * fans out to every node. The `supabaseIp` field on the master entry is
+ * (master + database + worker-N), so iterating `servers[].ip` already
+ * fans out to every node. The `dbIp` field on the master entry is
  * kept for back-compat with failover.js's existing lookup; we read it
  * here too so older `.vibecarbon.json` files that pre-date the multi-
- * entry persistence still get supabase covered.
+ * entry persistence still get the db node covered.
  */
 interface EnvConfig {
   deployMode?: string;
@@ -267,12 +267,12 @@ interface EnvConfig {
     ip: string;
     name?: string;
     role?: string;
-    supabaseIp?: string;
+    dbIp?: string;
   }>;
   ha?: {
     enabled?: boolean;
-    primary?: { masterIp: string; supabaseIp?: string; region?: string };
-    standby?: { masterIp: string; supabaseIp?: string; region?: string };
+    primary?: { masterIp: string; dbIp?: string; region?: string };
+    standby?: { masterIp: string; dbIp?: string; region?: string };
   };
 }
 
@@ -284,7 +284,7 @@ interface ProjectConfig {
  * Get the server IP(s) for an environment from the .vibecarbon.json config.
  *
  * Returns every node's public IP that the test could meaningfully resize
- * or probe — for k8s/k8s-HA that means master + supabase + each worker
+ * or probe — for k8s/k8s-HA that means master + database + each worker
  * (and on HA, the same triplet for the standby cluster). For
  * compose/compose-HA it's the one VPS (or two for HA primary/standby).
  *
@@ -309,26 +309,26 @@ export function getServerIps(projectDir: string, env: string): string[] {
     };
 
     // HA deployments still persist a top-level `ha.primary` / `ha.standby`
-    // block alongside the servers array. Pull master + supabase from each
+    // block alongside the servers array. Pull master + database from each
     // — verify-scale needs every Hetzner-managed node, and the standby
-    // cluster's supabase is otherwise invisible to the test.
+    // cluster's db node is otherwise invisible to the test.
     if (envConfig.ha?.enabled && envConfig.ha.primary && envConfig.ha.standby) {
       push(envConfig.ha.primary.masterIp);
-      push(envConfig.ha.primary.supabaseIp);
+      push(envConfig.ha.primary.dbIp);
       push(envConfig.ha.standby.masterIp);
-      push(envConfig.ha.standby.supabaseIp);
+      push(envConfig.ha.standby.dbIp);
     }
 
     // Non-HA deployments (and HA's per-cluster role entries): one entry per
-    // node role on k8s (master + supabase + worker-N), one VPS on compose.
-    // We also surface any `supabaseIp` carried on the master entry for
+    // node role on k8s (master + database + worker-N), one VPS on compose.
+    // We also surface any `dbIp` carried on the master entry for
     // back-compat with older `.vibecarbon.json` files persisted before the
     // multi-entry shape landed.
     // Role-primary first. Callers treat serverIps[0] as "the master" (the node
     // to SSH for exec-based checks), and a compose-HA failover flips the `role`
     // field in place without reordering the array — so array order names the
     // OLD primary once a failover has happened. Only HA compose configs carry
-    // primary/standby roles; k8s configs use master/supabase/worker and are
+    // primary/standby roles; k8s configs use master/database/worker and are
     // left in their existing, meaningful order.
     const servers = envConfig.servers ?? [];
     const rolePrimary = servers.find((s) => s.role === 'primary');
@@ -336,7 +336,7 @@ export function getServerIps(projectDir: string, env: string): string[] {
       ? [rolePrimary, ...servers.filter((s) => s !== rolePrimary)]
       : servers) {
       push(srv.ip);
-      push(srv.supabaseIp);
+      push(srv.dbIp);
     }
 
     return out;

@@ -173,8 +173,9 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
  *
  * Two pieces:
  *   1. `db` publishes the raw replication port (REPL_PORT=5433 → container 5432)
- *      so the local socat relay has a plaintext postgres to forward to
- *      (supavisor owns 5432 and can't speak the replication protocol).
+ *      so the local socat relay has a plaintext postgres to forward to. It is
+ *      the one replication port both HA modes share (replication.js); the host
+ *      firewall never opens it, so the relay below is its only way in.
  *   2. `repl-gateway` — a socat relay on the HOST network namespace (so it sees
  *      the host's `wg0`, brought up by exchangeAndBringUpTunnel) that binds this
  *      node's OWN tunnel IP (`selfWgIp:REPL_GATEWAY_PORT`) and forwards to the
@@ -199,11 +200,17 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
  * untagged `alpine/socat` meant each node cached whatever `:latest` resolved to
  * on ITS first pull, so two nodes in one HA pair could run different builds.
  *
- * LOCKSTEP: must match the tag in
- * carbon/k8s/base/repl-gateway/repl-gateway.yaml (the k8s-tier gateway).
- * tests/unit/deploy/socat-pin.test.ts fails the build if they drift.
+ * Pinned by tag AND multi-arch index digest, so even a retagged 1.8.1.3
+ * cannot reach a node.
+ *
+ * LOCKSTEP: must match the ref in
+ * carbon/k8s/base/repl-gateway/repl-gateway.yaml (the k8s-tier gateway) and
+ * .github/image-pins/Dockerfile (Dependabot's view of this pin).
+ * tests/unit/deploy/socat-pin.test.ts and image-digest-census.test.ts fail
+ * the build if they drift.
  */
-export const SOCAT_IMAGE_TAG = '1.8.1.3';
+export const SOCAT_IMAGE =
+  'alpine/socat:1.8.1.3@sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361';
 
 export function buildReplicationOverlay(selfWgIp) {
   return `version: "3.8"
@@ -212,7 +219,7 @@ services:
     ports:
       - "${REPL_PORT}:5432"
   repl-gateway:
-    image: alpine/socat:${SOCAT_IMAGE_TAG}
+    image: ${SOCAT_IMAGE}
     network_mode: host
     restart: unless-stopped
     command:
@@ -226,26 +233,6 @@ services:
 // deploy effects (write-replication-overlay) build the identical file set.
 export const REPL_COMPOSE_FLAGS =
   '-f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.replication.yml';
-
-/**
- * Reconcile the `realtime` service to whatever `REALTIME_REPLICAS` the node's
- * `.env` now says (composeRoleEnv, walg-role.js): at 1 it creates and starts
- * the container, at 0 it removes it. Compose reads `deploy.replicas` at `up`
- * time, so this is the step that makes a role swap reach Realtime — the
- * standby is deployed with the container absent and promotion has to create it
- * before the app-tier `docker restart` names `${project}-realtime`.
- *
- * REPL_COMPOSE_FLAGS, never bare `docker compose`: base + prod are the two
- * files that define realtime (prod adds the fail-closed env and the resource
- * limits), and the compose-invocation census bans the bare shape. `--no-deps`
- * so a recreate of realtime never touches db or the rest of the tier.
- *
- * @param {string} remoteDir e.g. `/opt/<project>`
- * @returns {string} a shell command, run over SSH
- */
-export function composeRealtimeReconcileCmd(remoteDir) {
-  return `cd ${remoteDir} && docker compose ${REPL_COMPOSE_FLAGS} up -d --no-deps realtime 2>&1`;
-}
 
 /**
  * Configure the primary PostgreSQL server for streaming replication.
@@ -328,7 +315,7 @@ END $$;
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres`,
+    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres`,
     { timeout: 30_000, input: createRoleSql, what: 'replicator role + replication slot creation' },
   );
 
@@ -350,15 +337,13 @@ END $$;
   // scoped firewall), and auth remains scram-sha-256 with the per-deploy
   // random REPL_PASSWORD.
   //
-  // The supabase/postgres image overrides hba_file to
-  // /etc/postgresql/pg_hba.conf (NOT the default
-  // /var/lib/postgresql/data/pg_hba.conf). RCA: compose-ha 2026-05-01 fanout12
-  // — appended to the wrong file, postgres never saw the rule, every
-  // replication connection was rejected with "no pg_hba.conf entry" while
-  // pg_hba_file_rules reflected the actual /etc loaded contents (no replicator
-  // entry). Resolve the path at runtime via SHOW hba_file so we don't break
-  // again if the image moves the file. Appends are idempotent (grep -qxF) so
-  // re-deploys / failover re-seeds don't grow the file.
+  // Resolve the hba path at runtime via SHOW hba_file rather than assuming
+  // one. Our postgres:17 image keeps it at $PGDATA/pg_hba.conf, but the
+  // previous image overrode it to /etc/postgresql/pg_hba.conf, and appending to
+  // a file postgres never reads rejects every replication connection with "no
+  // pg_hba.conf entry" (RCA: compose-ha 2026-05-01 fanout12). Appends are
+  // idempotent (grep -qxF) so re-deploys / failover re-seeds don't grow the
+  // file.
   const netOut = await sshRun(
     primaryIp,
     sshKeyPath,
@@ -383,9 +368,9 @@ END $$;
   const hbaOut = await sshRun(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && HBA_FILE=$(docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]') && ` +
+    `cd ${remoteDir} && HBA_FILE=$(docker compose exec -T db psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]') && ` +
       `docker compose exec -T db sh -c "${hbaAppendCmds}; ` +
-      `psql -U supabase_admin -d postgres -tAc 'SELECT pg_reload_conf();'"`,
+      `psql -U postgres -d postgres -tAc 'SELECT pg_reload_conf();'"`,
     { timeout: 15_000 },
   );
   if (hbaOut === false) {
@@ -402,7 +387,7 @@ END $$;
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET wal_level = 'replica';" && docker compose exec -T db psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET max_wal_senders = 5;" && docker compose exec -T db psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET wal_keep_size = '512MB';"`,
+    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_level = 'replica';" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET max_wal_senders = 5;" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_keep_size = '512MB';"`,
     { timeout: 30_000, what: 'WAL replication settings (ALTER SYSTEM)' },
   );
 
@@ -487,7 +472,7 @@ END $$;`;
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && echo ${ensureSlotB64} | base64 -d | docker compose exec -T db psql -U supabase_admin -d postgres`,
+    `cd ${remoteDir} && echo ${ensureSlotB64} | base64 -d | docker compose exec -T db psql -U postgres -d postgres`,
     { timeout: 30_000, what: 'replication-slot re-create on the primary' },
   );
 
@@ -557,9 +542,9 @@ END $$;`;
   })}
 echo COMPOSE_RESEED_STAGED
 `;
-  // Stage into the RUNNING db container. Use bash, not sh: the supabase/postgres
-  // image symlinks /bin/sh → dash, which rejects `set -o pipefail` and silently
-  // neuters every failure check (RCA: compose-ha 2026-05-01 fanout10 failover).
+  // Stage into the RUNNING db container. Use bash, not sh: an image whose
+  // /bin/sh is dash rejects `set -o pipefail` and silently neuters every
+  // failure check (RCA: compose-ha 2026-05-01 fanout10 failover, previous image).
   // The script (which embeds the replication password in PGPASSWORD +
   // primary_conninfo) is piped to bash via STDIN (`input:`), so it never appears
   // in argv / the ssh command string. `-T` forwards stdin. `|| true` keeps the
@@ -672,7 +657,7 @@ echo COMPOSE_RESEED_STAGED
   // Two independent signals — either is sufficient:
   //   1. standby's pg_is_in_recovery() returns 't' (requires hot_standby on
   //      AND consistent recovery state — can take 60-180s after fresh
-  //      basebackup of a Supabase cluster, especially under fanout-3 load)
+  //      basebackup of the primary, especially under fanout-3 load)
   //   2. primary's pg_stat_replication has a row with client_addr matching
   //      this standby AND state in ('streaming','catchup','startup')
   //
@@ -697,7 +682,7 @@ echo COMPOSE_RESEED_STAGED
       const result = await sshRun(
         standbyIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
         { timeout: 10_000 },
       );
       lastProbeResult = typeof result === 'string' ? result.trim() : '';
@@ -709,7 +694,7 @@ echo COMPOSE_RESEED_STAGED
       const primaryResult = await sshRun(
         primaryIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "SELECT state FROM pg_stat_replication WHERE client_addr = '${standbyIp}'::inet"`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication WHERE client_addr = '${standbyIp}'::inet"`,
         { timeout: 10_000 },
       );
       lastPrimarySignal = typeof primaryResult === 'string' ? primaryResult.trim() : '';
@@ -731,7 +716,7 @@ echo COMPOSE_RESEED_STAGED
       `within ${PROBE_BUDGET_S}s after pg_basebackup. Last standby pg_is_in_recovery() = ` +
       `${JSON.stringify(lastProbeResult)}, last primary pg_stat_replication.state for this ` +
       `standby = ${JSON.stringify(lastPrimarySignal)}. SSH in and check: docker compose exec ` +
-      `db psql -U supabase_admin -d postgres -tAc 'SELECT pg_is_in_recovery()' and ` +
+      `db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()' and ` +
       `ls /var/lib/postgresql/data/standby.signal`,
   );
 }
@@ -839,7 +824,7 @@ export async function isComposeStandbyStreaming(standbyIp, sshKeyPath, remoteDir
     const result = await sshRun(
       standbyIp,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SELECT status FROM pg_stat_wal_receiver'`,
+      `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT status FROM pg_stat_wal_receiver'`,
       { silent: true, timeout: 10_000 },
     );
     return (typeof result === 'string' ? result : '').trim() === 'streaming';
@@ -1117,56 +1102,40 @@ export async function destroyComposeHA(options) {
 // ============================================================================
 
 /**
- * The app-tier services failover Step 1b restarts on the new primary (container
- * names are `${projectName}-<svc>`). Exported so the serve-gate coverage census
- * can assert every member is either probed by newPrimaryApiProbeCmd or carries
- * an explicit exemption — the invariant that made the 2026-08-19 storage gap
- * (gate proved rest only; storage still booting; verify 502'd) unrepresentable.
+ * The app-tier services failover Step 1b restarts on the new primary, and Step
+ * 2 stops on the old one (container names are `${projectName}-<svc>`). The
+ * app is the only service in the tier that holds database connections: db and
+ * traefik are not app-tier, and docker-socket-proxy never touches the
+ * database. Exported so the serve-gate coverage census can assert every
+ * member is either probed by newPrimaryApiProbeCmd or carries an explicit
+ * exemption — the invariant that made the 2026-08-19 gap (the gate proved one
+ * service while a since-removed one was still booting; verify 502'd)
+ * unrepresentable.
  */
-export const APP_TIER_RESTART_SERVICES = [
-  'supavisor',
-  'auth',
-  'rest',
-  'realtime',
-  'storage',
-  'app',
-];
+export const APP_TIER_RESTART_SERVICES = ['app'];
 
 /**
  * Restarted services the serve gate deliberately does NOT probe, with the
- * reason. The census requires every non-probed member to appear here.
+ * reason. The census requires every non-probed member to appear here. Empty
+ * today: the one restarted service, the app, is probed.
+ *
+ * @type {Record<string, string>}
  */
-export const NEW_PRIMARY_PROBE_EXEMPT = {
-  supavisor:
-    'not Kong-routed: supavisor serves EXTERNAL database clients on its own ports; ' +
-    'the app tier and verify-failover never traverse it',
-  realtime:
-    'no crisp keyless 200: every /realtime/v1 route is key-auth’d and the service ' +
-    'answers non-200 on bare paths (its own healthcheck accepts any HTTP code); ' +
-    'verify-failover’s realtime check carries a WS→HTTP fallback of its own',
-};
+export const NEW_PRIMARY_PROBE_EXEMPT = {};
 
 /**
- * Build the compound curl used to probe the new primary's app tier locally —
- * one labeled status code per Kong-routed service the failover restarted.
+ * Build the curl used to probe the new primary's app tier locally — one
+ * labeled status code per service the failover restarted.
  *
  * `--resolve <domain>:443:127.0.0.1` pins the hostname to loopback, so the
  * probe hits Traefik on the new-primary host itself and is independent of DNS
  * propagation (the DNS flip happens later in failover, and the operator host's
  * resolver may still be cached). `-k` skips the LE-staging cert.
  *
- * The three probes, and why these paths:
- *  - rest/app: /api/v1/notifications — the exact endpoint verify-failover
- *    checks; 200 means app → Kong → PostgREST → DB is serving, including
- *    PostgREST's schema cache (cold for ~10-30s after the restart).
- *  - auth: /auth/v1/health — Kong's OPEN health route (no key-auth), 200 from
- *    GoTrue itself.
- *  - storage: /storage/v1/object/public/<nonexistent> — the OPEN route the
- *    2026-08-19 verify upload actually 502'd through. storage-api answering
- *    AT ALL (200/400/404 for a bucket that doesn't exist) proves the upstream
- *    is up; only Kong can say 502/503/504 here. The key-auth'd
- *    /storage/v1/status is useless for this: Kong 401s it before storage-api
- *    is ever consulted (the k8s auth-probe trap of 2026-07-08).
+ * The probe, and why this path:
+ *  - app: /api/v1/notifications — the exact endpoint verify-failover
+ *    checks; 200 means the app is serving against the promoted database.
+ *    Sign-in needs nothing more: auth runs inside the app, on that database.
  *
  * @param {string} domain
  * @returns {string}
@@ -1174,20 +1143,8 @@ export const NEW_PRIMARY_PROBE_EXEMPT = {
 export function newPrimaryApiProbeCmd(domain) {
   const curlTo = (path) =>
     `curl -sk -o /dev/null -w '%{http_code}' --max-time 5 --resolve ${domain}:443:127.0.0.1 https://${domain}${path}`;
-  return (
-    `r=$(${curlTo('/api/v1/notifications')}); ` +
-    `a=$(${curlTo('/auth/v1/health')}); ` +
-    `s=$(${curlTo('/storage/v1/object/public/vc-serve-gate-probe/probe')}); ` +
-    'echo "rest=$r auth=$a storage=$s"'
-  );
+  return `r=$(${curlTo('/api/v1/notifications')}); echo "app=$r"`;
 }
-
-/**
- * Storage readiness codes: anything storage-api itself would say to a GET of a
- * nonexistent public object. 502/503/504 are Kong speaking FOR a dead upstream;
- * 000 is curl reaching nothing.
- */
-const STORAGE_UPSTREAM_ANSWERED = new Set(['200', '400', '404']);
 
 /**
  * Parse one probe output line into a verdict. Exported-shape deliberate: the
@@ -1199,26 +1156,20 @@ const STORAGE_UPSTREAM_ANSWERED = new Set(['200', '400', '404']);
  */
 function parseNewPrimaryProbe(out) {
   const detail = out.trim();
-  const m = /rest=(\S+) auth=(\S+) storage=(\S+)/.exec(detail);
+  const m = /app=(\S+)/.exec(detail);
   if (!m) return { ready: false, detail: detail || 'none' };
-  const [, rest, auth, storage] = m;
-  return {
-    ready: rest === '200' && auth === '200' && STORAGE_UPSTREAM_ANSWERED.has(storage),
-    detail,
-  };
+  return { ready: m[1] === '200', detail };
 }
 
 /**
  * Poll the new primary until its restarted app tier actually SERVES.
  *
- * Root-cause fix for the compose-ha failover-readiness race, twice over: Step
- * 1b runs `docker restart … rest storage app …` to force a clean reconnect
- * against the now-read-write DB, but restart returns when containers *start*,
- * not when they're *ready*. PostgREST spends ~10-30s rebuilding its schema
- * cache (RCA 2026-05-30); storage-api replays its DB migrations and rises even
- * later (RCA 2026-08-19, DO run 32309395314 — the gate proved rest only, and
- * verify-failover's single-shot upload met Kong's 502). Gating on every
- * Kong-routed restarted service closes the race for the e2e *and* real
+ * Root-cause fix for the compose-ha failover-readiness race: Step 1b runs
+ * `docker restart <project>-app` to force a clean reconnect against the
+ * now-read-write DB, but restart returns when the container *starts*, not when
+ * it is *ready* (RCA 2026-05-30; RCA 2026-08-19, DO run 32309395314, where the
+ * gate proved one service while a since-removed one was still booting).
+ * Gating on every restarted service closes the race for the e2e *and* real
  * operators (a failover that reports success before the app serves is itself
  * a bug).
  *
@@ -1300,9 +1251,7 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
   const remoteDir = `/opt/${projectName}`;
 
   try {
-    // composeRoleEnv: WALG_ROLE=primary AND REALTIME_REPLICAS=1 in one write.
-    // The Realtime half is consumed by the `up -d --no-deps realtime` the
-    // failover flow runs right after this (before the app-tier restart).
+    // composeRoleEnv: the only sanctioned compose-side role write.
     await mergeEnv(
       promotedIp,
       pinnedSshOptsString(sshKeyPath),
@@ -1371,9 +1320,7 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
   } = deps;
   const remoteDir = `/opt/${projectName}`;
   try {
-    // composeRoleEnv: WALG_ROLE=standby AND REALTIME_REPLICAS=0 in one write.
-    // The Realtime half is consumed by the `up -d --no-deps realtime` the
-    // failover flow runs once this demote has landed.
+    // composeRoleEnv: the only sanctioned compose-side role write.
     await mergeEnv(
       oldPrimaryIp,
       pinnedSshOptsString(sshKeyPath),
@@ -1550,7 +1497,7 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
       const r = await sshRun(
         standbyServer.ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
         { silent: true, timeout: 10_000 },
       );
       return typeof r === 'string' ? r.trim() : '';
@@ -1574,7 +1521,7 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
       const result = await sshRun(
         standbyServer.ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "SELECT pg_promote(wait => true, wait_seconds => 120)"`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => true, wait_seconds => 120)"`,
         { silent: true, timeout: 150_000 },
       );
       const trimmed = typeof result === 'string' ? result.trim() : '';
@@ -1676,55 +1623,22 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     );
   }
 
-  // Step 1a4: Bring Realtime up on the promoted node. It was deployed as the
-  // standby with REALTIME_REPLICAS=0 (its boot migration cannot run against a
-  // hot-standby Postgres, so the container was never created — see
-  // composeRoleEnv). restoreComposeWalgRole just wrote REALTIME_REPLICAS=1
-  // into .env; this `up` is what reads it. MUST precede Step 1b: the app-tier
-  // `docker restart` names `${project}-realtime` by container name, and a
-  // name that does not exist fails the whole restart. Best-effort like its
-  // neighbours — sshRun answers `false`, it never throws.
-  s.start('Starting Realtime on the new primary');
-  const realtimeUp = await sshRun(
-    standbyServer.ip,
-    sshKeyPath,
-    composeRealtimeReconcileCmd(remoteDir),
-    { timeout: 180_000 },
-  );
-  if (realtimeUp === false) {
-    p.log.warn(
-      `Could not start Realtime on the new primary (${standbyServer.ip}); /realtime/v1 will be ` +
-        `down until \`vibecarbon deploy ${envName}\` reconciles the node (it re-renders ` +
-        `REALTIME_REPLICAS from the now-swapped roles).`,
-    );
-  } else {
-    p.log.info(`[realtime] started on new primary ${standbyServer.ip}`);
-  }
-  s.stop(
-    realtimeUp === false
-      ? 'Realtime NOT started on the new primary (continuing: see warning)'
-      : 'Realtime started on the new primary',
-  );
-
-  // Step 1b: Restart app-tier services on the new primary so they re-pool
-  // against the now-read-write DB. These services were started during deploy
-  // while the local DB was in recovery — supavisor's tenant pools and the
-  // app/auth/rest/realtime/storage DB handles can hold stale connections that
-  // surface as 500 "Database error" / 544 DatabaseTimeout right after
-  // promotion. Restart is cheap (~10s) and forces a clean reconnect.
+  // Step 1b: Restart the app tier on the new primary so it re-pools against
+  // the now-read-write DB. The app was started during deploy while the local
+  // DB was in recovery, and its DB handles can hold stale connections that
+  // surface as 500s right after promotion. Restart is cheap (~10s) and
+  // forces a clean reconnect.
   s.start('Restarting new-primary app-tier');
   // sshRun answers `false`; it never throws, so the try/catch this replaces
   // could not fire and the spinner asserted success unconditionally.
   //
   // CONTAINER names, not compose service names: this used to run bare
-  // `docker compose restart supavisor auth ...`, but supavisor is defined
-  // only in docker-compose.prod.yml — bare compose (no -f chain in this
-  // remote invocation) failed service-name resolution and exited in ~2s
-  // having restarted NOTHING, on every failover (2026-08-09 round-A d2
-  // verify-failover RCA; two earlier runs passed only because the step-1c
-  // API wait let PostgREST self-recover). Every app-tier service stamps
-  // `container_name: ${PROJECT_NAME}-<svc>`, so `docker restart` by
-  // container name needs no compose file resolution at all.
+  // `docker compose restart <svc> ...`, and a service defined only in
+  // docker-compose.prod.yml failed service-name resolution (no -f chain in
+  // this remote invocation), so it exited in ~2s having restarted NOTHING, on
+  // every failover (2026-08-09 round-A d2 verify-failover RCA). Every
+  // app-tier service stamps `container_name: ${PROJECT_NAME}-<svc>`, so
+  // `docker restart` by container name needs no compose file resolution.
   const appTierContainers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(
     ' ',
   );
@@ -1745,9 +1659,9 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
 
   // Step 1c: Gate on the new primary actually SERVING a DB-backed request
   // before we stop the old primary and flip DNS. The Step 1b restart only
-  // *starts* the app tier; PostgREST's schema cache is cold for ~10-30s after,
-  // during which /api/v1/notifications 500s. Without this wait, failover
-  // returned into that window and verify-failover (no retry on 500) failed.
+  // *starts* the app tier; until it has reconnected to the promoted database,
+  // /api/v1/notifications 500s. Without this wait, failover returned into
+  // that window and verify-failover (no retry on 500) failed.
   // Probed locally via curl --resolve so readiness is independent of the DNS
   // flip below. Best-effort — see waitForNewPrimaryApi.
   if (envConfig.domain) {
@@ -1772,14 +1686,16 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
   // still accepting writes.
   s.start('Stopping old primary services');
   // CONTAINER names, not compose service names — same RCA as the app-tier
-  // restart above (2026-08-09): bare `docker compose stop … supavisor`
-  // could not resolve the overlay-only supavisor service and exited in ~2s
-  // having stopped NOTHING, so the old primary kept serving writes behind
-  // the SPLIT-BRAIN warning on every failover. The compose-invocation
-  // census (compose-invocation-service-names.test.ts) bans the old shape.
-  const oldPrimaryContainers = ['app', 'auth', 'rest', 'realtime', 'storage', 'supavisor']
-    .map((svc) => `${projectName}-${svc}`)
-    .join(' ');
+  // restart above (2026-08-09): bare `docker compose stop …` could not
+  // resolve an overlay-only service and exited in ~2s having stopped
+  // NOTHING, so the old primary kept serving writes behind the SPLIT-BRAIN
+  // warning on every failover. The compose-invocation census
+  // (compose-invocation-service-names.test.ts) bans the old shape. The same
+  // list as the restart: the e2e health check reads APP_TIER_RESTART_SERVICES
+  // as what the retired node is allowed to show exited.
+  const oldPrimaryContainers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(
+    ' ',
+  );
   const stopped = await sshRun(
     primaryServer.ip,
     sshKeyPath,
@@ -1811,29 +1727,6 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     sshKeyPath,
     projectName,
   });
-  // Step 2b2: Remove Realtime from the demoted node. Step 2 already stopped
-  // the container; demoteComposeWalgRole just wrote REALTIME_REPLICAS=0, and
-  // at 0 this `up` removes it, so the retired node cannot crash-loop Realtime
-  // against a replica-backed database when it is later reseeded as the
-  // standby. GATED on the demote having landed: if the .env write did not
-  // reach the node its REALTIME_REPLICAS is still 1, and this same command
-  // would START the container Step 2 stopped for split-brain protection.
-  if (demoted) {
-    const realtimeDown = await sshRun(
-      primaryServer.ip,
-      sshKeyPath,
-      composeRealtimeReconcileCmd(remoteDir),
-      { timeout: 180_000 },
-    );
-    if (realtimeDown === false) {
-      p.log.warn(
-        `Could not remove Realtime from the demoted node (${primaryServer.ip}); it stays stopped ` +
-          `(Step 2) and \`vibecarbon deploy ${envName}\` converges it when the node is reseeded.`,
-      );
-    } else {
-      p.log.info(`[realtime] removed from demoted ${primaryServer.ip}`);
-    }
-  }
   // Step 2c: Disarm the retired node's ACME issuer — the swapped pair must
   // never run two armed solvers against one `_acme-challenge` TXT name (the
   // dual-solver clobbering class, acme-role.js). Best-effort for the same

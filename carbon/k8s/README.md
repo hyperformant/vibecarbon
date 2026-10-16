@@ -16,10 +16,8 @@ This directory contains Kubernetes manifests for deploying Vibecarbon with enter
            |                               |
     k3s Cluster                     k3s Cluster
     +--------------+               +--------------+
-    | app: 2-10    |               | app: 0 (standby)
-    | kong: 2      |   WAL repl    | kong: 0
-    | rest: 2-5    | <-----------> | rest: 0
-    | PostgreSQL   |               | PostgreSQL (replica)
+    | app: 2-10    |   WAL repl    | app: 0 (standby)
+    | PostgreSQL   | <-----------> | PostgreSQL (replica)
     | PRIMARY      |               | HOT STANDBY
     +--------------+               +--------------+
 ```
@@ -32,20 +30,11 @@ k8s/
 │   ├── namespace.yaml
 │   ├── network-policy.yaml        # Default-deny NetworkPolicy
 │   ├── secrets/                   # Secrets and ConfigMaps
+│   ├── db/                       # PostgreSQL StatefulSet (deploy-time placeholders)
 │   ├── app/                      # Vibecarbon application
 │   │   ├── deployment.yaml
 │   │   ├── local-registry.yaml   # Local OCI registry for k3s image distribution
 │   │   └── rbac.yaml             # ServiceAccount for pod listing
-│   ├── supabase/                 # Supabase services
-│   │   ├── postgres/
-│   │   ├── kong/
-│   │   ├── auth/
-│   │   ├── rest/
-│   │   ├── realtime/
-│   │   ├── storage/
-│   │   ├── imgproxy/
-│   │   ├── meta/
-│   │   └── studio/
 │   └── traefik/                  # Ingress controller
 ├── infra/                         # Infrastructure-level resources (applied once)
 │   └── cert-manager-resources/   # ClusterIssuers for TLS certificates
@@ -99,14 +88,7 @@ Before deploying, update the secrets with real values:
 # Create secrets manually (recommended for initial setup)
 kubectl create secret generic vibecarbon-secrets \
   --namespace=vibecarbon \
-  --from-literal=DB_PASSWORD=<your-password> \
-  --from-literal=JWT_SECRET=<your-jwt-secret> \
-  --from-literal=ANON_KEY=<your-anon-key> \
-  --from-literal=SERVICE_ROLE_KEY=<your-service-key> \
-  --from-literal=REALTIME_SECRET=<your-realtime-secret> \
-  --from-literal=VAULT_ENC_KEY=<your-vault-key> \
-  --from-literal=PG_META_CRYPTO_KEY=<your-meta-key> \
-  --from-literal=LOGFLARE_API_KEY=<your-logflare-key>
+  --from-literal=DB_PASSWORD=<your-password>
 
 kubectl create secret generic hcloud-token \
   --namespace=vibecarbon \
@@ -157,7 +139,6 @@ The following services have HPA configured:
 | Service | Min Replicas | Max Replicas | CPU Target |
 |---------|--------------|--------------|------------|
 | app     | 2            | 10           | 70%        |
-| rest    | 2            | 5            | 70%        |
 
 Worker VMs are provisioned at deploy time; the interactive deploy prompt asks for the worker bounds (default `min=1, max=3`) and persists them in the environment's config (`.vibecarbon.json`). The static floor is Pulumi-managed; cluster-autoscaler spawns and reaps additional workers (up to `max - min`) based on pending-pod pressure. See the Cluster Autoscaler section below.
 
@@ -199,7 +180,7 @@ In `--ha` mode both clusters use the same `--min-workers/--max-workers` bounds �
 
 **Hetzner project quota**
 
-Trial Hetzner Cloud projects cap at ~50 servers across all resource types; verified accounts get higher limits. If you set `--max-workers` aggressively, make sure your project quota covers the worst case across all clusters in the project (master + supabase + workers + CA-spawned, x2 in HA).
+Trial Hetzner Cloud projects cap at ~50 servers across all resource types; verified accounts get higher limits. If you set `--max-workers` aggressively, make sure your project quota covers the worst case across all clusters in the project (master + database + workers + CA-spawned, x2 in HA).
 
 **Token requirement: Read+Write**
 
@@ -227,10 +208,6 @@ To failover manually with kubectl:
 # Scale up standby
 export KUBECONFIG=kubeconfig-hel1.yaml
 kubectl scale deployment app --replicas=2 -n vibecarbon
-kubectl scale deployment kong --replicas=2 -n vibecarbon
-kubectl scale deployment auth --replicas=2 -n vibecarbon
-kubectl scale deployment rest --replicas=2 -n vibecarbon
-kubectl scale deployment realtime --replicas=2 -n vibecarbon
 ```
 
 ## Monitoring (Optional)

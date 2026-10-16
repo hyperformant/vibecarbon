@@ -29,11 +29,12 @@ describe('k8s local — applyVibecarbonSecrets allowlist', () => {
 });
 
 describe('k8s GitOps — buildPerEnvSecrets', () => {
-  // Fixture covers one key of each feature secret + non-secret + infra alias.
+  // Fixture covers one key of each feature secret + non-secret + infra key,
+  // plus secrets of the removed services an older .env.local still carries.
   const envLocal: Record<string, string> = {
     DB_PASSWORD: 'pw',
-    ANON_KEY: 'anon',
-    SERVICE_ROLE_KEY: 'svc',
+    JWT_SECRET: 'jwt',
+    VAULT_ENC_KEY: 'vault',
     STRIPE_SECRET_KEY: 'sk_test_x',
     BILLING_PROVIDER: 'stripe',
     SMTP_PASS: 'smtp-secret',
@@ -50,9 +51,10 @@ describe('k8s GitOps — buildPerEnvSecrets', () => {
     }
   });
 
-  it('maps Supabase infra aliases', () => {
-    expect(out.SUPABASE_ANON_KEY).toBe('anon');
-    expect(out.SUPABASE_SERVICE_ROLE_KEY).toBe('svc');
+  it("never uploads the removed services' secrets", () => {
+    for (const key of ['JWT_SECRET', 'VAULT_ENC_KEY']) {
+      expect(out, key).not.toHaveProperty(key);
+    }
   });
 
   it('uses canonical SMTP_PASS, never SMTP_PASSWORD', () => {

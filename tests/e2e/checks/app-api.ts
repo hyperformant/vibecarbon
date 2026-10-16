@@ -2,10 +2,9 @@
  * Application API-layer verification checks.
  *
  * These exercise the app's OWN Hono routes under `/api/v1/*` on the main
- * domain — the layer the rest of the e2e suite never touched. Everything else
- * hits Supabase services directly (Kong: /auth/v1, /rest/v1, /storage/v1,
- * /realtime/v1), so a broken app backend (missing schema, dead route, bad DB
- * wiring) could 500 while every platform check stayed green.
+ * domain. The other checks hit the auth API (/api/auth) or the database
+ * directly over SSH, so a broken app backend (missing schema, dead route, bad
+ * DB wiring) could 500 while every platform check stayed green.
  *
  * RCA prod-1 2026-05-26: /api/v1/notifications 500'd (PGRST205, empty schema)
  * and nothing in e2e noticed because nothing called the app's API layer.
@@ -108,8 +107,7 @@ async function checkRoute(
 
 /**
  * Run app API-layer checks against the main domain (where the app's Hono
- * server serves /api/v1/*, distinct from the /auth/v1|/rest/v1|... paths
- * Traefik routes to Kong on the same apex).
+ * server serves /api/v1/*).
  */
 export async function runAppApiChecks(domain: string): Promise<VerificationResult[]> {
   const base = `https://${domain}/api/v1`;

@@ -1,7 +1,7 @@
 /**
  * Symmetric replication firewall (RCA 2026-07-05 follow-on, superseded 2026-07-06
  * by the WireGuard transport): deploy opens the WireGuard tunnel port on the
- * Hetzner firewall so the two supabase nodes' repl-gateway pods can reach each
+ * Hetzner firewall so the two database nodes' repl-gateway pods can reach each
  * other cross-cluster. buildReplicationFirewallRules is the pure rule
  * computation; deployK8sHA applies it to BOTH clusters' firewalls with the
  * peer IP swapped.
@@ -61,12 +61,9 @@ describe('HetznerProvider.buildReplicationFirewallRules', () => {
   });
 
   it('drops the stale tcp 5433/30432 replication-era rules but PRESERVES tcp/5432', () => {
-    // 5432 left the stale set when compose deploys gained a legitimate
-    // operator-scoped Supavisor pooler rule on that port: the HA
-    // replication-firewall reconcile runs on compose-ha too (compose/ha.js)
-    // and must not eat the pooler rule. The replication-era direct-5432
-    // rule this scrub once targeted never worked and predates every
-    // pre-release rig still alive.
+    // 5432 is not in the stale set: the replication-era direct-5432 rule
+    // this scrub once targeted never worked and predates every pre-release
+    // rig still alive, and the reconcile only owns replication rules.
     const stale = [
       ...BASE_RULES,
       { direction: 'in', protocol: 'tcp', port: '5432', source_ips: ['198.51.100.1/32'] },
@@ -79,13 +76,16 @@ describe('HetznerProvider.buildReplicationFirewallRules', () => {
     expect(updated?.some((r) => r.port === '30432')).toBe(false);
   });
 
-  it('preserves the operator-scoped pooler rules (5432/6543) untouched', () => {
-    const withPooler = [
+  it('leaves tcp rules it does not own (5432/6543) untouched', () => {
+    const withOtherRules = [
       ...BASE_RULES,
       { direction: 'in', protocol: 'tcp', port: '5432', source_ips: ['192.0.2.1/32'] },
       { direction: 'in', protocol: 'tcp', port: '6543', source_ips: ['192.0.2.1/32'] },
     ];
-    const updated = provider.buildReplicationFirewallRules({ rules: withPooler }, '203.0.113.7');
+    const updated = provider.buildReplicationFirewallRules(
+      { rules: withOtherRules },
+      '203.0.113.7',
+    );
     expect(updated?.filter((r) => r.port === '5432' || r.port === '6543')).toHaveLength(2);
   });
 

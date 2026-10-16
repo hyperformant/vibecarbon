@@ -34,6 +34,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
+import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   buildReplicationOverlay,
   configurePrimaryReplication,
@@ -42,16 +43,16 @@ import {
   openWireguardPortUfw,
 } from '../compose/ha.js';
 import {
-  createAdminUser,
   dockerLoginOnServer,
   pullComposeImages,
-  runMigrations,
+  runDatabaseAudits,
   setupComposeBackupCron,
   setupServer,
   setupServerFiles,
   sshRun,
   sshRunAsync,
   startComposeStack,
+  waitForAdminReady,
   waitForDockerReady,
   waitForSSH,
 } from '../compose/index.js';
@@ -506,11 +507,6 @@ async function haSetupServerFiles(ctx) {
  * prefix on both nodes (so the standby can READ the primary's base backups);
  * WALG_ROLE=standby makes wal-archive.sh + compose-backup.sh no-op on the
  * standby so it never WRITES into the shared prefix (split-brain guard).
- *
- * REALTIME_REPLICAS rides the same write (composeRoleEnv): the standby holds
- * Realtime at 0 because its boot migration cannot run against a hot-standby
- * Postgres and would crash-loop for the life of the node. Failover's role swap
- * is what brings it to 1 on the promoted node (compose/ha.js).
  */
 async function haMergeWalgRole(ctx) {
   const projectName = ctx.projectConfig.projectName;
@@ -607,6 +603,19 @@ async function haUpdateDns(ctx) {
   }
 }
 
+/**
+ * Refuse, on either server, a database the retired stack made (tables, no
+ * migration ledger), before either server gets a file, a build or a swap.
+ * One read per server (compose/db-ledger-preflight.js).
+ */
+async function haCheckDbLedger(ctx) {
+  const { primary, standby, sshKeyPath } = ctx;
+  ctx.onProgress('Checking both databases were made by this stack...');
+  await perfAsync('deploy.ha.compose.checkDbLedger', () =>
+    assertDbMadeByThisStack([primary.ip, standby.ip], sshKeyPath, ctx.projectConfig.projectName),
+  );
+}
+
 /** Start compose stacks on both servers in parallel. */
 async function haStartComposeStack(ctx) {
   const projectName = ctx.projectConfig.projectName;
@@ -630,38 +639,39 @@ async function haStartComposeStack(ctx) {
 }
 
 /**
- * Run migrations on the PRIMARY only. Let failures propagate — shipping an
- * empty/partial schema is worse than a visibly-failed deploy.
+ * Wait for the PRIMARY's app to report its super admin ready (it creates the
+ * admin at startup from ADMIN_EMAIL / ADMIN_PASSWORD in the bundled .env).
+ * FATAL on failure — shares waitForAdminReady (compose/index.js) with the
+ * single-compose effect. The standby's app needs no separate wait: its
+ * database is a replica, so the admin row arrives with replication.
  */
-async function haRunMigrations(ctx) {
+async function haWaitAdminReady(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { primary, sshKeyPath } = ctx;
-  ctx.onProgress('Running database migrations on primary...');
-  await perfAsync('deploy.ha.compose.migrations', () =>
-    runMigrations(primary.ip, sshKeyPath, projectName),
+  ctx.onProgress('Waiting for the app to report its super admin ready...');
+  const result = await perfAsync('deploy.ha.compose.waitAdminReady', () =>
+    waitForAdminReady(primary.ip, sshKeyPath, projectName),
   );
+  p.log.success(result.message);
 }
 
 /**
- * Create the production super-admin on the PRIMARY. Idempotent (422 =
- * exists); FATAL on failure — shares createAdminUser (compose/index.js) with
- * the single-compose effect, so the same fast-follow to M3 Task 9h applies
- * here: a retry-exhaustion or missing-credentials failure throws instead of
- * degrading to a soft warning.
+ * The RLS + wal-g backup audits on the PRIMARY, once its app has migrated
+ * the database (haWaitAdminReady waits for that). The standby is a replica
+ * of the same catalog and its wal-g probe skips itself.
  */
-async function haCreateAdminUser(ctx) {
+async function haAuditDatabase(ctx) {
   const projectName = ctx.projectConfig.projectName;
   const { primary, sshKeyPath } = ctx;
-  ctx.onProgress('Creating admin user...');
-  const adminResult = await perfAsync('deploy.ha.compose.createAdminUser', () =>
-    createAdminUser(primary.ip, sshKeyPath, projectName),
+  ctx.onProgress('Auditing the primary database (RLS, backups)...');
+  await perfAsync('deploy.ha.compose.databaseAudits', () =>
+    runDatabaseAudits(primary.ip, sshKeyPath, projectName),
   );
-  p.log.success(adminResult.message);
 }
 
 /**
  * Wait for primary Postgres to accept connections before configuring
- * replication (pg_basebackup needs the socket; not GoTrue/Storage migrations).
+ * replication (pg_basebackup needs the socket).
  * ~6min budget; proceeds optimistically on timeout with a breadcrumb.
  */
 async function haWaitPrimaryPostgres(ctx) {
@@ -674,7 +684,7 @@ async function haWaitPrimaryPostgres(ctx) {
         const health = await sshRun(
           primary.ip,
           sshKeyPath,
-          `cd /opt/${projectName} && docker compose exec -T db pg_isready -h localhost -p 5432 2>/dev/null`,
+          `cd /opt/${projectName} && docker compose exec -T db pg_isready -h localhost -p 5432 -U postgres 2>/dev/null`,
           { timeout: 10_000 },
         );
         if (health?.includes('accepting connections')) return true;
@@ -703,8 +713,9 @@ async function haWaitPrimaryPostgres(ctx) {
  * THE `up -d db` MUST RUN WITH RECONCILE'S OWN FLAG SET (extracted from
  * reconcile.sh on the node), not REPL_COMPOSE_FLAGS. The 3-file subset
  * recreated db with a config-hash no full-set reconcile ever computes, so
- * EVERY subsequent warm deploy recreated db again — and auth 502'd through
- * createAdminUser's whole retry budget while db cycled (e2 warm-deploy,
+ * EVERY subsequent warm deploy recreated db again — and the then-separate
+ * auth service 502'd through the admin-user step's whole retry budget while
+ * db cycled (e2 warm-deploy,
  * 3× on 2026-08-06/07; the .vc-render-first/last diff on the kept rig named
  * the replication overlay as the drifting content). Extracting the baked
  * flags keeps this invocation byte-identical to future reconciles by
@@ -728,21 +739,19 @@ async function haWriteReplicationOverlay(ctx) {
       // Materialize the db image EXPLICITLY before recreating the service.
       //
       // On the standby this can be the FIRST time the db image exists: the
-      // deploy's compose-up does not necessarily start db there, and db is
-      // `pull_policy: build` (never pulled). Before 2026-08-23 the `up -d db`
-      // below did this implicitly — a full build including the base-image
-      // pull, racing the step's 60s ssh timeout. Hetzner's bandwidth won that
-      // race; vultr's lost it (runs 32614839037/32620567017), dying as an
-      // opaque timeout with the build half-done. Explicit build = its own
-      // command, a pull-scale 600s budget, and the builder's stderr naming
-      // any real failure. Warm nodes no-op in seconds (cache hit).
+      // deploy's compose-up does not necessarily start db there. Left to the
+      // `up -d db` below, the pull would race that step's 60s ssh timeout
+      // (the 2026-08-23 vultr runs 32614839037/32620567017 lost exactly that
+      // race when this was still an on-server build). An explicit pull is its
+      // own command with a pull-scale 600s budget, and its stderr names any
+      // real failure. Warm nodes no-op in seconds (image already present).
       await sshRunAsync(
         ip,
         sshKeyPath,
         `cd /opt/${projectName} || exit 1; ` +
           `FLAGS=$(sed -n 's/^docker compose \\(.*\\) \\$(\\[ -f docker-compose.replication.yml.*up -d --remove-orphans$/\\1/p' reconcile.sh | tail -1); ` +
           `[ -n "$FLAGS" ] || FLAGS='${REPL_COMPOSE_FLAGS_BASE}'; ` +
-          `docker compose $FLAGS -f docker-compose.replication.yml build db 2>&1`,
+          `docker compose $FLAGS -f docker-compose.replication.yml pull db 2>&1`,
         { timeout: 600_000 },
       );
       // Pull reconcile.sh's own ${composeFlags} (the text before the runtime
@@ -815,7 +824,7 @@ async function haVerifyStreaming(ctx) {
       const state = await sshRun(
         primary.ip,
         sshKeyPath,
-        `cd /opt/${projectName} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+        `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
         { timeout: 10_000 },
       );
       return typeof state === 'string' ? state.trim() : '';
@@ -941,14 +950,15 @@ export const COMPOSE_HA_EFFECTS = {
   haSeedKnownHosts,
   haSetupServers,
   haWaitDockerReady,
+  haCheckDbLedger,
   haRemoteBuild,
   haSetupServerFiles,
   haMergeWalgRole,
   haPullImages,
   haUpdateDns,
   haStartComposeStack,
-  haRunMigrations,
-  haCreateAdminUser,
+  haWaitAdminReady,
+  haAuditDatabase,
   haWaitPrimaryPostgres,
   haWriteReplicationOverlay,
   haConfigureReplication,

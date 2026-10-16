@@ -1,23 +1,82 @@
+import { and, count, gte, lt, type SQL, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { isSuperAdmin } from '../../lib/auth';
+import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
+import { organizations, user as userTable } from '../../db/schema';
 import { logger } from '../../lib/logger';
-import { supabaseAdmin } from '../../lib/supabase';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
 const statsRoutes = new Hono<{ Variables: HonoVariables }>();
 
+type UserStats = {
+  total: number;
+  newThisMonth: number;
+  newLastMonth: number;
+  activeThisMonth: number;
+  activeLastMonth: number;
+  /** Sign-up times of the last six weeks, for the weekly buckets. */
+  recentSignups: Date[];
+};
+
 /**
- * Count organizations with an optional filter applied to the query builder.
+ * User counts in one aggregate query (plus the last six weeks of sign-up
+ * times). "Active" reads user.last_sign_in_at: signed in within the last
+ * 30 days (this month) or between 60 and 30 days ago (last month).
+ * Zeros on any error, like countOrgs.
+ */
+async function userStats(at: {
+  startOfThisMonth: Date;
+  startOfLastMonth: Date;
+  thirtyDaysAgo: Date;
+  sixtyDaysAgo: Date;
+  fortyTwoDaysAgo: Date;
+}): Promise<UserStats> {
+  const created = userTable.createdAt;
+  const lastSignIn = userTable.lastSignInAt;
+  const n = (cond: SQL) => sql<number>`(count(*) filter (where ${cond}))::int`;
+  try {
+    const [[counts], recent] = await Promise.all([
+      adminDb
+        .select({
+          total: count(),
+          newThisMonth: n(sql`${created} >= ${at.startOfThisMonth}`),
+          newLastMonth: n(
+            sql`${created} >= ${at.startOfLastMonth} and ${created} < ${at.startOfThisMonth}`
+          ),
+          activeThisMonth: n(sql`${lastSignIn} >= ${at.thirtyDaysAgo}`),
+          activeLastMonth: n(
+            sql`${lastSignIn} >= ${at.sixtyDaysAgo} and ${lastSignIn} < ${at.thirtyDaysAgo}`
+          ),
+        })
+        .from(userTable),
+      adminDb
+        .select({ createdAt: created })
+        .from(userTable)
+        .where(gte(created, at.fortyTwoDaysAgo)),
+    ]);
+    return { ...counts, recentSignups: recent.map((r) => r.createdAt) };
+  } catch (err) {
+    logger.warn({ err: dbErrorForLog(err) }, 'Admin stats: user counts failed');
+    return {
+      total: 0,
+      newThisMonth: 0,
+      newLastMonth: 0,
+      activeThisMonth: 0,
+      activeLastMonth: 0,
+      recentSignups: [],
+    };
+  }
+}
+
+/**
+ * Count organizations matching an optional condition.
  * Returns 0 on any error for resilience.
  */
-async function countOrgs(
-  // biome-ignore lint/suspicious/noExplicitAny: Supabase query builder generics are too complex to type the filter callback
-  filter?: (q: any) => PromiseLike<{ count: number | null; error: unknown }>
-): Promise<number> {
+async function countOrgs(where?: SQL): Promise<number> {
   try {
-    const base = supabaseAdmin.from('organizations').select('*', { count: 'exact', head: true });
-    const result = filter ? await filter(base) : await base;
-    return result.error ? 0 : (result.count ?? 0);
+    const [row] = await adminDb.select({ total: count() }).from(organizations).where(where);
+    return row?.total ?? 0;
   } catch {
     return 0;
   }
@@ -34,9 +93,8 @@ statsRoutes.get('/', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const now = new Date();
 
@@ -52,80 +110,41 @@ statsRoutes.get('/', async (c) => {
   // 42 days ago for weekly signups (6 weeks)
   const fortyTwoDaysAgo = new Date(now.getTime() - 42 * 24 * 60 * 60 * 1000);
 
-  // Fetch all user data with a single listUsers call, then derive all counts in-memory.
-  // Previously this made 5 separate listUsers calls with perPage: 1000 each.
-  // Now we make one call to get the total count (perPage: 1) and one call to fetch
-  // all users for segmentation. For apps with many users, pagination fetches all pages.
   const [usersResult, totalOrgsResult, orgsNewThisMonthResult, orgsNewLastMonthResult] =
     await Promise.all([
-      // Single listUsers call — fetch all users for date-based segmentation
-      (async () => {
-        try {
-          // First get the total count with a lightweight call
-          const countResult = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
-          if (countResult.error) return { total: 0, users: [] };
-          const total = countResult.data.total;
-
-          // Fetch all users (paginated if needed) for segmentation
-          const allUsers: typeof countResult.data.users = [];
-          const pageSize = 1000;
-          const totalPages = Math.ceil(total / pageSize);
-          for (let page = 1; page <= totalPages; page++) {
-            const pageResult = await supabaseAdmin.auth.admin.listUsers({
-              page,
-              perPage: pageSize,
-            });
-            if (pageResult.error) break;
-            allUsers.push(...pageResult.data.users);
-          }
-          return { total, users: allUsers };
-        } catch {
-          return { total: 0, users: [] };
-        }
-      })(),
+      userStats({
+        startOfThisMonth,
+        startOfLastMonth,
+        thirtyDaysAgo,
+        sixtyDaysAgo,
+        fortyTwoDaysAgo,
+      }),
 
       // Total organizations
       countOrgs(),
 
       // Organizations created this month
-      countOrgs((q) => q.gte('created_at', startOfThisMonth.toISOString())),
+      countOrgs(gte(organizations.createdAt, startOfThisMonth.toISOString())),
 
       // Organizations created last month
-      countOrgs((q) =>
-        q
-          .gte('created_at', startOfLastMonth.toISOString())
-          .lt('created_at', startOfThisMonth.toISOString())
+      countOrgs(
+        and(
+          gte(organizations.createdAt, startOfLastMonth.toISOString()),
+          lt(organizations.createdAt, startOfThisMonth.toISOString())
+        )
       ),
     ]);
 
-  // Derive all user stats from the single fetched dataset
-  const { total: totalUsersResult, users: allUsers } = usersResult;
+  const {
+    total: totalUsersResult,
+    newThisMonth: newThisMonthResult,
+    newLastMonth: newLastMonthResult,
+    activeThisMonth: activeThisMonthResult,
+    activeLastMonth: activeLastMonthResult,
+    recentSignups,
+  } = usersResult;
 
-  const newThisMonthResult = allUsers.filter(
-    (u) => new Date(u.created_at) >= startOfThisMonth
-  ).length;
-
-  const newLastMonthResult = allUsers.filter(
-    (u) => new Date(u.created_at) >= startOfLastMonth && new Date(u.created_at) < startOfThisMonth
-  ).length;
-
-  const activeThisMonthResult = allUsers.filter(
-    (u) => u.last_sign_in_at && new Date(u.last_sign_in_at) >= thirtyDaysAgo
-  ).length;
-
-  const activeLastMonthResult = allUsers.filter(
-    (u) =>
-      u.last_sign_in_at &&
-      new Date(u.last_sign_in_at) >= sixtyDaysAgo &&
-      new Date(u.last_sign_in_at) < thirtyDaysAgo
-  ).length;
-
-  const weeklySignupsResult = bucketIntoWeeks(
-    allUsers
-      .filter((u) => new Date(u.created_at) >= fortyTwoDaysAgo)
-      .map((u) => new Date(u.created_at)),
-    fortyTwoDaysAgo
-  );
+  const weeklySignupsResult = bucketIntoWeeks(recentSignups, fortyTwoDaysAgo);
 
   logger.debug({ userId: user.id }, 'Admin stats fetched');
 

@@ -125,12 +125,12 @@ describe('post-failover role resolution (compose-HA)', () => {
       expect(getServerIps(dir, 'd2')[0]).toBe(OLD_PRIMARY);
     });
 
-    it('leaves k8s node ordering (master/supabase/worker) untouched — no primary role there', () => {
+    it('leaves k8s node ordering (master/database/worker) untouched — no primary role there', () => {
       write({
         region: 'nbg1',
         servers: [
           { name: 'master', ip: '10.0.0.1', role: 'master' },
-          { name: 'supabase', ip: '10.0.0.2', role: 'supabase' },
+          { name: 'db', ip: '10.0.0.2', role: 'db' },
           { name: 'worker-1', ip: '10.0.0.3', role: 'worker' },
         ],
       });

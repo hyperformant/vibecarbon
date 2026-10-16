@@ -66,6 +66,15 @@ classes:
         detectable: false
         notes: wal-g reads of the BACKUP bucket riding documented Hetzner OS staleness
       - site: "src/lib/deploy/walg-staleness.js :: WALG_STALE_RETRY_DELAYS_MS"
+      - site: "carbon/k8s/base/db/statefulset.yaml :: walg-restore WALG_FETCH_ATTEMPTS"
+        detectable: false
+        notes: >-
+          The k8s restore init container's backup-fetch runs in the kubelet,
+          with no JS seam, so it carries a shell mirror of walg-staleness.js:
+          the same storage-404 signatures and the same 5-attempt 2/4/8/16 s
+          budget, against the same documented Hetzner OS staleness. Ported
+          from the deleted chart values. Anything that is not a storage 404
+          fails on attempt 1.
       - site: "src/lib/providers/s3-base.js :: createBucket-consistency-ladder"
         detectable: false
         notes: bucket create/exists propagation on genuinely-first deploys
@@ -128,6 +137,9 @@ classes:
       - site: "src/lib/ssh.js :: SCP_RETRY_DELAY_MS"
       - site: "src/lib/deploy/remote-build.js :: SSH_PROBE_DELAYS_MS"
       - site: "tests/e2e/checks/replication.ts :: SSH_RETRY_DELAY_MS"
+        notes: >-
+          shared via runPsql: app-functional's db_schema and
+          db_write_roundtrip checks are callers too (same ladder, no new site)
       - site: "tests/e2e/checks/pilot-light.ts :: SSH_RETRY_DELAY_MS"
 
   - class: fresh-server-dns-settle
@@ -160,14 +172,13 @@ classes:
       flake, 2026-05-01); the resolver-warmup member is partly ours (our
       0.0.0.0 placeholder record is what the pinned upstreams serve stale).
     proofDebtSpec: docs/attribution-ledger.md
-    frozenSites: 6
+    frozenSites: 5
     sites:
       - site: "tests/e2e/checks/health.ts :: HEALTH_RETRY_DELAYS_MS"
       - site: "tests/e2e/checks/health.ts :: SSL_RETRY_DELAY_MS"
       - site: "tests/e2e/checks/feature-redis.ts :: RETRY_DELAY_MS"
       - site: "tests/e2e/checks/app-functional.ts :: RETRY_DELAY_MS"
       - site: "tests/e2e/checks/app-api.ts :: RETRY_DELAY_MS"
-      - site: "tests/e2e/checks/feature-functions.ts :: RETRY_DELAY_MS"
 
   - class: operator-resolver-staleness
     attribution: external-proven
@@ -205,11 +216,6 @@ classes:
           Chromium owns its resolver stack; without a failover pin it now
           maps the domain to the public-DNS-resolved IP (Host/SNI stay the
           domain) instead of sitting on the OS resolver
-      - site: "tests/e2e/checks/supavisor-pooler.ts :: external dial resolveCheckIp"
-        detectable: false
-        notes: >-
-          raw TCP dial has no Host/SNI to preserve; dials the
-          public-DNS-resolved address with fallback to the name
       - site: "tests/e2e/runner.ts :: resolvectl flush-caches at scenario start"
         detectable: false
         notes: >-
@@ -329,15 +335,16 @@ classes:
     evidence: >-
       A provisioned host going dark mid-deploy while the provider API still
       reports it running. 2026-09-01, e2e run 07ffb0d6-11ae-4db0-bbdc-d9cf73f91906
-      (PG17 cert, hetzner k8s-ha standby worker
-      testapp-k8s-ha-1788223963488-r9p4ie-e4-standby-supabase, hel1): node
+      (PG17 cert, hetzner k8s-ha, the standby db node of
+      testapp-k8s-ha-1788223963488-r9p4ie-e4, hel1): node
       NotReady in k3s, kubelet unreachable from the
       master (proxy 502 dialing :10250), SSH to the public IP timed out
       during banner exchange, Hetzner Cloud API status "running"
       throughout — a kernel/host wedge, not anything the workload did. The
-      db pod froze in Init and helm's --wait expired. Detection is
+      db pod froze in Init and the db install's wait expired (then a Helm
+      chart's --wait, now the db StatefulSet's rollout wait). Detection is
       evidence-gated: summarizeNotReadyNodes (k3s.js) appends the NotReady
-      node clause to the helm-failure error, and the classifier requires
+      node clause to the db rollout failure error, and the classifier requires
       BOTH the stuck-pod and NotReady-node clauses before attributing here
       — a stuck pod on healthy nodes stays [unknown] (ours until proven
       otherwise). Retry is the only remedy: the rebuilt deploy lands on a
@@ -411,34 +418,6 @@ classes:
       VULTR_PROPAGATION_TIMEOUT=300 for cache-expiry stragglers on churned
       names. Residual misses retried by E2E_RETRY_FLAKES via this mapping.
     sites: []
-
-  - class: supabase-boot-ddl-deadlock
-    attribution: external-asserted
-    evidence: >-
-      Run 33287840597 (hetzner k8s-ha restore's re-deploy, 2026-08-30
-      03:5xZ): applyMigrations' --single-transaction psql died with
-      "ERROR: deadlock detected / Process 71 waits for AccessExclusiveLock
-      on relation 16524 ... blocked by process 55" while applying policies
-      on storage.objects — the relations supabase-storage's own first-boot
-      DDL migrates concurrently. The storage-schema readiness probe
-      (buckets.public queryable) proves schema EXISTENCE, not lock
-      quiescence, and full serialization is circular: our migrations
-      REQUIRE the services' boot DDL to have run. Deadlock retry is
-      Postgres's documented contract for 40P01 (the file's transaction
-      rolled back completely, so the re-run is byte-identical to attempt
-      1); a failure surviving the ladder stays loudly fatal.
-    proofDebtSpec: docs/attribution-ledger.md
-    frozenSites: 3
-    sites:
-      - site: "src/lib/deploy/migration-deadlock.js :: MIGRATION_DEADLOCK_DELAYS_MS"
-      - site: "src/lib/deploy/migration-deadlock.js :: MIGRATION_DEADLOCK_PATTERN"
-        detectable: false
-        notes: the 40P01 spelling gate — nothing but "deadlock detected" retries
-      - site: "src/lib/deploy/migration-deadlock.js :: composeMigrationsRetryShell"
-        detectable: false
-        notes: >-
-          the same ladder rendered as the compose transports' remote shell
-          loop (attempt bound derived from MIGRATION_DEADLOCK_DELAYS_MS)
 
 flakeRetry:
   - { reason: "k3s install timeout", class: provider-provisioning-slowness }

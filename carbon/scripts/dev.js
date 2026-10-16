@@ -111,7 +111,6 @@ function printBanner() {
 
   ${cyan('→')}  ${bold('Frontend:')}  ${cyan(`http://localhost:${ports.vite}`)}
   ${cyan('→')}  ${bold('API:')}       ${cyan(`http://localhost:${ports.api}`)}
-  ${cyan('→')}  ${bold('Studio:')}    ${cyan('http://studio.localhost')} (no auth in dev)
   ${cyan('→')}  ${bold('Traefik:')}   ${cyan('http://traefik.localhost')} (no auth in dev)
 `);
 }

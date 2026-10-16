@@ -7,20 +7,21 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 // removed) inlined `deployComposeSingle` block — one step per state-gated /
 // conditional operation, in the exact order the orchestrator ran them. The
 // 5 shared compose effect functions (setupServerFiles, startComposeStack,
-// runMigrations, createAdminUser, setupComposeBackupCron) plus provisioning
+// waitForAdminReady, runDatabaseAudits, setupComposeBackupCron) plus provisioning
 // and the health gate are the headline steps; the intermediate
 // server-prep / login / DNS operations are their own gated steps.
 const EXPECTED_COMPOSE_SEQUENCE = [
   'provision-server',
   'setup-server',
+  'check-db-ledger',
   'transfer-image',
   'dockerhub-login',
   'ghcr-login',
   'setup-server-files',
   'update-dns',
   'start-compose-stack',
-  'run-migrations',
-  'create-admin-user',
+  'wait-admin-ready',
+  'audit-database',
   'verify-health',
   'verify-tls',
   'setup-backup-cron',
@@ -32,13 +33,15 @@ describe('planDeploy(compose)', () => {
     expect(planStepNames(steps)).toEqual(EXPECTED_COMPOSE_SEQUENCE);
   });
 
-  it('includes the shipped-bug guard steps (run-migrations, create-admin-user, setup-backup-cron)', () => {
+  it('includes the shipped-bug guard steps (wait-admin-ready, audit-database, setup-backup-cron)', () => {
     // Regression guard, NOT optional: the inlined compose-single path once
-    // shipped an empty schema (no runMigrations), an app the operator could
-    // not log into (no createAdminUser), and no scheduled backups (no
-    // setupComposeBackupCron). These MUST remain in the compose plan.
+    // shipped an empty schema, an app the operator could not log into (no
+    // wait-admin-ready, which now also waits for the app's own startup
+    // migrations), and no scheduled backups (no setupComposeBackupCron). The
+    // RLS + wal-g audits (audit-database) rode along with the old migration
+    // step and must survive it. These MUST remain in the compose plan.
     const steps = planDeploy('compose', {});
-    for (const guard of ['run-migrations', 'create-admin-user', 'setup-backup-cron']) {
+    for (const guard of ['wait-admin-ready', 'audit-database', 'setup-backup-cron']) {
       expect(steps.find((s) => s.name === guard)).toBeTruthy();
     }
   });
@@ -89,10 +92,11 @@ describe('planDeploy(compose)', () => {
     // unconditional steps have no when-gate
     for (const always of [
       'setup-server',
+      'check-db-ledger',
       'setup-server-files',
       'start-compose-stack',
-      'run-migrations',
-      'create-admin-user',
+      'wait-admin-ready',
+      'audit-database',
       'verify-health',
       'setup-backup-cron',
     ]) {
@@ -293,7 +297,7 @@ describe('planDeploy(k8s-ha)', () => {
 // two-node config persistence (persist-pending-config / finalize-config that
 // deployComposeHA owned inline). Step NAMES mirror the single-compose plan
 // where the operation is conceptually shared (setup-server-files,
-// start-compose-stack, run-migrations, create-admin-user, setup-backup-cron,
+// start-compose-stack, wait-admin-ready, audit-database, setup-backup-cron,
 // update-dns) so the read symmetry is visible; the EFFECTS differ (multi-node
 // fan-out + `deploy.ha.compose.*` perf labels), so they are distinct registry
 // entries — reusing the single-server effects verbatim would change the perf
@@ -305,14 +309,15 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'seed-known-hosts',
   'setup-servers',
   'wait-docker-ready',
+  'check-db-ledger',
   'remote-build',
   'setup-server-files',
   'merge-walg-role',
   'pull-images',
   'update-dns',
   'start-compose-stack',
-  'run-migrations',
-  'create-admin-user',
+  'wait-admin-ready',
+  'audit-database',
   'wait-primary-postgres',
   'write-replication-overlay',
   'configure-replication',
@@ -332,9 +337,10 @@ describe('planDeploy(compose-ha)', () => {
     const names = planStepNames(planDeploy('compose-ha', {}));
     const idx = (n: string) => names.indexOf(n);
     // The app must be serving (migrations + admin + primary PG ready) before
-    // the standby is seeded.
-    expect(idx('run-migrations')).toBeGreaterThan(idx('start-compose-stack'));
-    expect(idx('wait-primary-postgres')).toBeGreaterThan(idx('create-admin-user'));
+    // the standby is seeded; the audits read the migrated catalog.
+    expect(idx('wait-admin-ready')).toBeGreaterThan(idx('start-compose-stack'));
+    expect(idx('audit-database')).toBeGreaterThan(idx('wait-admin-ready'));
+    expect(idx('wait-primary-postgres')).toBeGreaterThan(idx('wait-admin-ready'));
     // Overlay is written before replication is configured; streaming is
     // verified only after the standby is configured.
     expect(idx('write-replication-overlay')).toBeGreaterThan(idx('wait-primary-postgres'));
@@ -347,7 +353,7 @@ describe('planDeploy(compose-ha)', () => {
 
   it('includes the shipped-bug guard steps shared with single compose', () => {
     const steps = planDeploy('compose-ha', {});
-    for (const guard of ['run-migrations', 'create-admin-user', 'setup-backup-cron']) {
+    for (const guard of ['wait-admin-ready', 'audit-database', 'setup-backup-cron']) {
       expect(steps.find((s) => s.name === guard)).toBeTruthy();
     }
   });

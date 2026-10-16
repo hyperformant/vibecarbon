@@ -9,6 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
+import { localComposeEnv } from './images.js';
 import { deriveComposeProjectName } from './subnet.js';
 
 /**
@@ -73,7 +74,10 @@ export function resolveComposeProjectName({
  */
 export function releaseMovedStack(
   name,
-  { cwd, run = (args) => execFileSync('docker', args, { cwd, stdio: 'pipe' }) } = {},
+  {
+    cwd,
+    run = (args) => execFileSync('docker', args, { cwd, env: localComposeEnv(), stdio: 'pipe' }),
+  } = {},
 ) {
   try {
     run(['compose', '-p', name, 'down', '--remove-orphans']);

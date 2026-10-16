@@ -58,13 +58,13 @@ const composeScaleSteps = () => [
 
 const k8sScaleSteps = () => [
   defineStep({ name: 'apply-scale-changes', effect: 'scaleApplyK8sChanges' }),
-  // HA-only belt (item I-1): after the resize rebooted the supabase node(s),
+  // HA-only belt (item I-1): after the resize rebooted the database node(s),
   // recreate wg0 + bounce the crash-looped repl-gateway BEFORE the pods-Ready
   // wait — a crash-looping gateway (couldn't bind its tunnel IP without wg0)
   // otherwise wedges the primary's `kubectl wait --for=Ready pods --all` for
   // 10 min and fails scale. Shared step (k8s + k8s-ha keep one plan shape, per
   // the scale-plan design); `when: ctx.isHA` gates it to HA at run time, and
-  // the effect further no-ops unless the supabase node was actually resized.
+  // the effect further no-ops unless the database node was actually resized.
   defineStep({
     name: 're-establish-ha-tunnel',
     effect: 'scaleReestablishHaTunnel',

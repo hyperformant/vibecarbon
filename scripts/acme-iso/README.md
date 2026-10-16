@@ -30,7 +30,7 @@ ENV_FILE=../../tests/.env.e2e \
     name.
   - `combined` — one order, apex main + wildcard SAN (two TXT values at one
     name, presented together).
-  - `disjoint` — no wildcard: apex + `studio.<domain>` each get their own
+  - `disjoint` — no wildcard: apex + `dashboard.<domain>` each get their own
     order at their own challenge name.
 - Use a UNIQUE subdomain per trial (fresh `_acme-challenge` name — no
   contention with CI's cid* names or a concurrent trial).

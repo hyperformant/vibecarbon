@@ -12,9 +12,9 @@ Complete technical reference for developing with Vibecarbon.
 |-------|--------------|-------------|
 | **Frontend** | React 19 + Vite + Shadcn UI | Ultra-fast development with modern styling |
 | **Backend** | Hono 4 + Node.js | Lightweight API framework (~13KB) with full type safety |
-| **Auth & API** | Supabase (GoTrue, PostgREST, Realtime, Storage) | Authentication, auto-generated REST API, WebSocket subscriptions |
-| **Database** | PostgreSQL 17 | Database with Row Level Security |
-| **Gateway** | Kong | API Gateway with rate limiting and routing |
+| **Auth** | Better Auth (in the Hono app) | Email + password, magic links, Google/Microsoft OAuth, MFA; sessions are HttpOnly cookies |
+| **Database** | PostgreSQL 17 (pg_cron, WAL-G) + Drizzle ORM | Your own Postgres; the API server queries it directly; Row Level Security on every table |
+| **Storage** | Any S3-compatible bucket | Uploads go straight to the bucket through presigned URLs (Garage locally) |
 | **Orchestration** | Docker Compose + Kubernetes | Container orchestration with auto-scaling |
 | **Proxy** | Traefik | Reverse proxy with automatic HTTPS |
 | **Tooling** | Biome + TypeScript | Fast linting/formatting with full type safety |
@@ -24,7 +24,8 @@ Complete technical reference for developing with Vibecarbon.
 | Layer | Technologies | Description |
 |-------|--------------|-------------|
 | **HA/Failover** | Postgres streaming replication | Manual failover, two regions. k8s-ha: pilot-light standby (2-node idle floor, cold app tier, IaC worker provisioning at failover, convergent role reconciliation via deploy). compose-ha: always-warm two-VPS standby, its own failover path |
-| **Observability** | Prometheus + Grafana + Loki | Metrics, dashboards, and log aggregation |
+| **Observability** | Prometheus + Grafana + Loki | Metrics, dashboards, and log aggregation (`vibecarbon add observability`) |
+| **Cache** | Redis | Shared rate-limit counters across app replicas, plus a cache or queue you build on it (`vibecarbon add redis`) |
 
 ---
 
@@ -37,21 +38,24 @@ my-app/
 ├── src/
 │   ├── client/                  # React 19 SPA (Vite)
 │   │   ├── components/ui/       # 52+ Shadcn UI components
-│   │   ├── components/auth/     # AuthProvider with Supabase
+│   │   ├── components/auth/     # AuthProvider (session, sign-in, MFA)
 │   │   ├── pages/               # Route pages (Home, Login, Dashboard)
 │   │   ├── hooks/               # Custom React hooks
-│   │   └── lib/                 # supabase.ts, utils.ts
+│   │   └── lib/                 # api.ts, auth-client.ts, utils.ts
 │   ├── server/                  # Hono API (Node.js)
+│   │   ├── auth/                # Better Auth instance, mounted at /api/auth
+│   │   ├── db/                  # client.ts (withUserDb, adminDb), schema.ts, migrate.ts
 │   │   ├── routes/              # API routes (health, v1/, api/)
-│   │   └── lib/                 # env.ts, logger.ts, rate-limiter.ts, supabase.ts
+│   │   └── lib/                 # env.ts, logger.ts, rate-limiter.ts, storage.ts
 │   └── shared/                  # Shared TypeScript types
-├── supabase/
-│   └── migrations/              # SQL migrations with RLS
+├── db/
+│   └── migrations/              # Drizzle migrations with RLS, applied by the app at startup
 ├── k8s/                         # Kubernetes manifests with Kustomize overlays
 ├── volumes/                     # Docker volume mounts
-│   ├── kong/                    # Kong configuration
-│   └── db/                      # Database initialization
-├── docker-compose.yml           # Local dev with full Supabase stack
+│   ├── traefik/                 # Traefik routing and ForwardAuth middlewares
+│   ├── s3/                      # Local S3 (Garage) config
+│   └── db/                      # Database initialization and WAL archiving
+├── docker-compose.yml           # Postgres, the app and Traefik
 ├── docker-compose.prod.yml      # Production overlay
 ├── Dockerfile                   # Production-optimized container
 └── .github/workflows/           # CI/CD pipelines
@@ -62,10 +66,10 @@ my-app/
 `src/create.js` uses `@clack/prompts` for interactive CLI. It:
 1. Parses CLI arguments (`-pm`, `-y`, `-admin-email`, etc.)
 2. Prompts for admin email and password (required for dashboard access)
-3. Generates secure secrets (JWT, passwords, Supabase keys)
+3. Generates secure secrets (`BETTER_AUTH_SECRET`, the database and replication passwords)
 4. Copies template files from `carbon/` directory
-5. Replaces placeholders (e.g., `{{PROJECT_NAME}}`, `{{JWT_SECRET}}`)
-6. Creates admin user in Supabase auth
+5. Replaces placeholders (e.g., `{{PROJECT_NAME}}`, `{{ADMIN_EMAIL}}`)
+6. Writes `ADMIN_EMAIL`/`ADMIN_PASSWORD` to `.env.local`; the app creates the super admin from them at startup
 7. Installs dependencies and initializes git
 
 ---
@@ -79,11 +83,10 @@ The bootstrap process creates a `.env.local` file with secure, randomly generate
 ```bash
 # .env.local
 
-# Supabase (auto-generated)
-SUPABASE_URL="http://localhost:8000"
-SUPABASE_ANON_KEY="eyJ..."
-SUPABASE_SERVICE_ROLE_KEY="eyJ..."
-JWT_SECRET="..."
+# Generated at create time
+BETTER_AUTH_SECRET="..."
+DB_HOST=localhost
+DB_PASSWORD="..."
 
 # Add your OAuth credentials
 GOOGLE_ENABLED=true
@@ -103,20 +106,14 @@ npm run dev:start
 ```
 
 This single command:
-1. Starts all Docker containers (Supabase stack)
+1. Starts the Docker containers
 2. Runs database migrations
 3. Launches development servers
 
 **Services started:**
-- PostgreSQL database
-- Kong API Gateway
-- GoTrue (Auth)
-- PostgREST (REST API)
-- Realtime server
-- Storage API
-- imgproxy (image transformations)
-- Supabase Studio (database GUI)
+- PostgreSQL 17 database (pg_cron, WAL-G)
 - Traefik reverse proxy
+- Local S3 (Garage) for uploads
 
 **Development servers:**
 - **API server**: http://localhost:3000
@@ -173,15 +170,16 @@ app.get('/api/protected', (c) => {
   return c.json({ user });
 });
 
-// Or use supabase admin client for server operations
-import { supabaseAdmin } from '../lib/supabase';
+// Query as the signed-in user: RLS scopes every statement to their rows
+import { withUserDb } from '../db/client';
+import { organizations } from '../db/schema';
 
-app.get('/api/users', async (c) => {
-  const { data, error } = await supabaseAdmin
-    .from('users')
-    .select('*');
+app.get('/api/v1/organizations', async (c) => {
+  const user = c.get('user');
+  if (!user) return c.json({ error: 'Unauthorized' }, 401);
 
-  return c.json(data);
+  const orgs = await withUserDb(user.id, (tx) => tx.select().from(organizations));
+  return c.json({ organizations: orgs });
 });
 ```
 
@@ -189,32 +187,36 @@ app.get('/api/users', async (c) => {
 
 ```typescript
 import { useAuth } from './components/auth/AuthProvider';
-import { supabase } from './lib/supabase';
 
 function MyComponent() {
-  const { user, isLoading } = useAuth();
-
-  const signInWithGoogle = () => {
-    supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: window.location.origin + '/auth/callback' }
-    });
-  };
+  const { user, isLoading, signIn, signOut } = useAuth();
 
   if (isLoading) return <div>Loading...</div>;
 
   if (!user) {
-    return <button onClick={signInWithGoogle}>Sign in with Google</button>;
+    return <button onClick={() => signIn.google()}>Sign in with Google</button>;
   }
 
-  return <button onClick={() => supabase.auth.signOut()}>Sign out</button>;
+  return <button onClick={() => signOut()}>Sign out</button>;
 }
 ```
 
+The session is an HttpOnly cookie Better Auth sets on the app's own origin. Page code never sees a token: calls through `apiJson` / `apiFetch` (`src/client/lib/api.ts`) ride the cookie.
+
 ### Database & Row Level Security
 
+The browser never queries Postgres. It calls the Hono API (`/api/v1/...`), and the API server queries Postgres directly with Drizzle through `src/server/db/client.ts`, which exports two handles:
+
+- **`withUserDb(userId, fn)`** opens a transaction, switches to the `app_user` role, and sets `app.user_id` for that transaction in one parameterized statement (`select set_config('role', 'app_user', true), set_config('app.user_id', $1, true)`). Every statement `fn` runs is filtered by RLS. `userId = null` is an anonymous request: `app.user_id()` reads `NULL`, so user-scoped policies match nothing. This is the default for anything done on behalf of a user.
+- **`adminDb`** runs as the connection role (`DB_USER`, default `postgres`), which bypasses RLS. It is reserved for the server acting for itself (webhooks, admin tools, background jobs); `tests/structural/db-access-census.test.ts` lists the files allowed to import it.
+
+At startup the server applies any pending migrations from `db/migrations/` itself (drizzle-orm's migrator under a Postgres advisory lock, ledger in `drizzle.__drizzle_migrations`; no deploy step applies SQL, and every route but `/api/health` answers 503 until they are applied), then checks that the connection role bypasses RLS and is a member of `app_user`, and exits if not, so `adminDb` can never silently become RLS-scoped. The connection comes from discrete env vars (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`), never a URL, so passwords need no URL-encoding.
+
+Policies target `app_user` and read the caller from `app.user_id()`:
+
 ```sql
--- supabase/migrations/00001_init.sql
+-- The shape of what db/migrations/0001_baseline_schema.sql (generated by
+-- drizzle-kit from src/server/db/schema.ts) creates
 
 -- Organizations table
 CREATE TABLE organizations (
@@ -227,91 +229,49 @@ CREATE TABLE organizations (
 -- Enable RLS
 ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
 
--- Policy: Users can only see orgs they belong to
+-- Policy: Users can only see orgs they belong to.
+-- get_user_org_ids() is a SECURITY DEFINER helper that reads
+-- memberships for (SELECT app.user_id()).
 CREATE POLICY "Users can view their organizations"
   ON organizations FOR SELECT
-  USING (id IN (
-    SELECT organization_id FROM memberships
-    WHERE user_id = auth.uid()
-  ));
+  TO app_user
+  USING (id IN (SELECT get_user_org_ids()));
 ```
 
-### Querying with supabase-js
+### Querying with Drizzle
 
 ```typescript
-// Client-side - RLS automatically filters results
-const { data: orgs } = await supabase
-  .from('organizations')
-  .select('*');
+import { adminDb, withUserDb } from '../db/client';
+import { organizations } from '../db/schema';
 
-// Server-side with service role - bypasses RLS
-const { data: allOrgs } = await supabaseAdmin
-  .from('organizations')
-  .select('*');
+// On behalf of a user: RLS returns only their organizations
+const orgs = await withUserDb(user.id, (tx) => tx.select().from(organizations));
+
+// As the server itself (webhook, admin tool, job): bypasses RLS, so check
+// the caller's authorization yourself before passing in any user-supplied id
+const allOrgs = await adminDb.select().from(organizations);
 ```
 
-### Realtime Subscriptions
-
-```typescript
-import { supabase } from './lib/supabase';
-import { useEffect, useState } from 'react';
-
-function LiveMessages() {
-  const [messages, setMessages] = useState([]);
-
-  useEffect(() => {
-    const channel = supabase
-      .channel('messages')
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'messages'
-      }, (payload) => {
-        setMessages(prev => [...prev, payload.new]);
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, []);
-
-  return (
-    <ul>
-      {messages.map(msg => <li key={msg.id}>{msg.content}</li>)}
-    </ul>
-  );
-}
-```
+The client reads through TanStack Query and `apiJson('/api/v1/organizations')` from `src/client/lib/api.ts`. Drizzle binds every value as a query parameter; never build SQL text from input. The real-Postgres `db` test tier (`carbon/tests/db/`, `npm run test:db`) proves the policies against the engine that enforces them.
 
 ### File Storage
 
-```typescript
-// Upload a file
-const { data, error } = await supabase.storage
-  .from('avatars')
-  .upload(`${userId}/avatar.png`, file);
+Uploads go from the browser straight to your S3 bucket. The API signs the request, so the file never passes through the app server:
 
-// Get public URL
-const { data: { publicUrl } } = supabase.storage
-  .from('avatars')
-  .getPublicUrl(`${userId}/avatar.png`);
+1. The client asks `POST /api/v1/files/presign` for an upload URL (`presignUpload` in `src/server/lib/storage.ts` checks the user, the kind and the content type, and builds a per-user object key).
+2. The browser `PUT`s the file to the presigned URL.
+3. Reads go through the app (`/api/files/<key>`), which checks access and redirects to a short-lived presigned read URL.
 
-// Get transformed image URL
-const { data: { publicUrl: thumbnailUrl } } = supabase.storage
-  .from('avatars')
-  .getPublicUrl(`${userId}/avatar.png`, {
-    transform: { width: 100, height: 100 }
-  });
-```
+Locally the bucket is Garage on `localhost`; deployed, it is the S3-compatible object storage of your provider.
 
 ---
 
 ## API Routes & Patterns
 
-### Supabase Client Usage
-- **Client-side**: `src/client/lib/supabase.ts` - uses anon key, RLS enforced
-- **Server-side**: `src/server/lib/supabase.ts` - uses service role key, bypasses RLS
+### Data and Auth Clients
+- **Data (server only)**: `src/server/db/client.ts` - `withUserDb` (RLS as `app_user`, the default) and `adminDb` (bypasses RLS, census-listed files only)
+- **Auth, client-side**: `src/client/lib/auth-client.ts` and `useAuth()` - sign-in, sign-up, MFA, sign-out; the session is a cookie, never a token in page JS
+- **Auth, server-side**: `src/server/auth/` - the Better Auth instance (mounted at `/api/auth`) and its plugins: lockout, MFA assurance, impersonation, the super-admin bootstrap
 
 ### Route Conventions
 | Route | Purpose |
@@ -331,17 +291,16 @@ When modifying template files in `carbon/`, these placeholders are replaced at g
 
 | Placeholder | Description |
 |-------------|-------------|
-| `{{PROJECT_NAME}}` | User's project name |
+| `{{PROJECT_NAME}}` | User's project name (machine slug) |
+| `{{PROJECT_DISPLAY_NAME}}` | Human-facing name (titles, emails, legal copy) |
+| `{{GITHUB_OWNER}}` | GitHub owner for GitOps and image names |
+| `{{SITE_URL}}` | The app's public origin |
 | `{{ADMIN_EMAIL}}` | Admin user email (entered during creation) |
-| `{{ADMIN_PASSWORD}}` | Admin user password (entered during creation) |
-| `{{JWT_SECRET}}` | Generated JWT signing secret |
-| `{{DB_PASSWORD}}` | PostgreSQL password |
-| `{{ANON_KEY}}` | Supabase anonymous key |
-| `{{SERVICE_ROLE_KEY}}` | Supabase service role key |
-| `{{REALTIME_SECRET}}` | Realtime service secret |
-| `{{VAULT_ENC_KEY}}` | Vault encryption key |
-| `{{N8N_PASSWORD}}` | n8n password (if enabled) |
-| `{{GRAFANA_PASSWORD}}` | Grafana password (if observability enabled) |
+| `{{ADMIN_PASSWORD}}` | Admin user password (entered during creation; never substituted into a checked-in file) |
+| `{{DB_PASSWORD}}` | PostgreSQL password (never substituted into a checked-in file) |
+| `{{REPL_PASSWORD}}` | Replication password for the HA modes (never substituted into a checked-in file) |
+
+Secret placeholders go to `.env.local` and are patched in at deploy time. Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX}}`, ...) stay in the scaffold until `vibecarbon deploy` fills them.
 
 ---
 
@@ -352,9 +311,9 @@ All admin dashboards are protected by a unified Single Sign-On (SSO) system usin
 ### How It Works
 
 1. **Login via main app** - Sign in at `http://localhost:5173/login` with your admin email/password
-2. **JWT cookie set** - Supabase Auth sets an HTTP-only session cookie
-3. **Access dashboards** - Navigate to any admin dashboard
-4. **ForwardAuth validates** - Traefik forwards requests to `/api/_internal/verify-role?role=super_admin`
+2. **Session cookie set** - Better Auth sets an HttpOnly session cookie on the app's origin
+3. **Open a dashboard** - The admin panel mints a short-lived, parent-domain `vc-admin-token` cookie (a dedicated ForwardAuth token, never the session) for super admins
+4. **ForwardAuth validates** - Traefik forwards requests to `/api/_internal/verify-role?role=super_admin`, which accepts only that token
 5. **Access granted** - If valid super admin session, request passes through
 
 ### Admin Dashboards
@@ -363,7 +322,6 @@ All admin dashboards are protected by a unified Single Sign-On (SSO) system usin
 
 | Dashboard | Local URL | Production URL |
 |-----------|-----------|----------------|
-| Supabase Studio | http://studio.localhost | https://studio.yourdomain.com |
 | Traefik Dashboard | http://traefik.localhost | https://traefik.yourdomain.com |
 | Grafana | http://grafana.localhost | https://grafana.yourdomain.com |
 
@@ -404,9 +362,8 @@ Additional super admin users can be added via:
 1. Sign up through the app
 2. Update their role in the database:
    ```sql
-   UPDATE auth.users
-   SET raw_app_meta_data = raw_app_meta_data || '{"role": "super_admin"}'::jsonb
-   WHERE email = 'newadmin@example.com';
+   -- over `vibecarbon shell`, or psql against the local dev db
+   UPDATE "user" SET role = 'super_admin' WHERE email = 'newadmin@example.com';
    ```
 
 ### Unauthenticated Access
@@ -426,31 +383,26 @@ When accessing an admin dashboard without a valid session:
 - **CORS** - Configured for SPA origin with credentials
 
 ### Database Security
-- **Row Level Security** - Policies enforced at database level
-- **Role separation** - anon (SELECT), authenticated (CRUD), service_role (ALL)
-- **JWT validation** - Kong validates tokens before reaching PostgREST
+- **Row Level Security** - Policies enforced at database level; user requests run as `app_user` with `app.user_id` set per transaction
+- **Role separation** - `app_user` (user requests, RLS enforced), `postgres` (the API server's connection role, bypasses RLS, used by `adminDb`)
+- **No public database port** - Postgres listens on the private network only; operators reach it through `vibecarbon shell` (SSH)
 
 ### Database Roles
 
 | Role | Used By | Purpose |
 |------|---------|---------|
-| `postgres` | Admin operations | Superuser for migrations |
-| `authenticator` | PostgREST | API gateway connection, switches roles based on JWT |
-| `supabase_admin` | Realtime, Meta, Studio | Admin operations on database |
-| `supabase_auth_admin` | GoTrue | Manages auth schema and user records |
-| `supabase_storage_admin` | Storage | Manages storage schema and file metadata |
-| `anon` | Anonymous API | SELECT only, RLS enforced |
-| `authenticated` | Logged-in users | CRUD operations, RLS enforced |
-| `service_role` | Server-side code | Bypasses RLS for admin operations |
+| `postgres` | API server (`adminDb`), migrations | Connection role; bypasses RLS and is a member of `app_user` |
+| `app_user` | API server (`withUserDb`) | NOLOGIN; every user request switches to it, RLS enforced |
 
 ### Authentication Security
-- **Supabase Auth** - Battle-tested GoTrue authentication
-- **Secure tokens** - JWTs signed with your secret
+- **Better Auth, in-process** - Sign-in runs inside the app against your own database; no separate auth service
+- **HttpOnly session cookies** - Signed with `BETTER_AUTH_SECRET`; page JS never holds a session or refresh token
 - **OAuth providers** - Google, Microsoft with PKCE flow
+- **Account lockout and MFA** - Failed-login lockout, TOTP with backup codes, step-up for sensitive actions
 
 ### Infrastructure Security
-- **Kong API Gateway** - Central API authentication and routing
-- **Traefik ForwardAuth** - Admin dashboards protected by JWT-based SSO
+- **One public origin** - Traefik routes every public path to the app; nothing else is reachable from the internet
+- **Traefik ForwardAuth** - Admin dashboards protected by a super-admin SSO token
 - **Non-root containers** - All services run unprivileged
 - **Automatic HTTPS** - Traefik handles TLS certificates
 - **Operator Access Lock** - SSH (port 22) and Kubernetes API (port 6443) firewall-locked to authenticated CIDRs
@@ -493,14 +445,14 @@ vibecarbon deploy prod -y
 
 | Service | Port | Access | Purpose |
 |---------|------|--------|---------|
-| Traefik | 80 | Direct | Reverse proxy (routes to all services) |
-| Kong | 8000 | Direct | API Gateway (Supabase APIs) |
+| Traefik | 80 | Direct | Reverse proxy (routes to the app and admin tools) |
 | App | 3000 | Direct or via Traefik | Your Hono API server |
 | Vite | 5173 | Direct | Frontend dev server |
-| Studio | - | via Traefik (`studio.localhost`) | Database management GUI |
 | Traefik Dashboard | - | via Traefik (`traefik.localhost`) | Proxy dashboard |
-| PostgreSQL | 5432 | Internal | Database |
-| Realtime | 4000 | Internal | WebSocket subscriptions |
+| PostgreSQL | 5432 | localhost only (dev), private network (deployed) | Database |
+| Local S3 (Garage) | 8333 | localhost only (dev) | Upload bucket |
+
+`vibecarbon up` shifts every dev port by `DEV_PORT_OFFSET` when you run more than one project at once.
 
 ---
 
@@ -509,18 +461,12 @@ vibecarbon deploy prod -y
 | Component | CPU (max) | RAM (max) |
 |-----------|-----------|-----------|
 | PostgreSQL | 2.0 | 4 GB |
-| Kong | 1.0 | 512 MB |
-| PostgREST | 1.0 | 512 MB |
-| Realtime | 1.0 | 512 MB |
-| App | 1.0 | 512 MB |
-| Auth | 0.5 | 256 MB |
-| Storage | 0.5 | 512 MB |
+| App (Hono + Better Auth) | not capped | not capped |
 | Traefik | 0.5 | 256 MB |
-| Other (imgproxy, meta, studio) | ~0.5 | ~512 MB |
-| **Subtotal (Production)** | **~8.0** | **~7.5 GB** |
-| N8N (optional) | ~0.5 | ~512 MB |
+| Docker socket proxy | 0.25 | 128 MB |
 | Observability Stack (optional) | ~1.0 | ~1.5 GB |
-| **Total (Full Stack)** | **~9.5** | **~9.5 GB** |
+
+The caps are the `deploy.resources.limits` in `docker-compose.prod.yml`. The app has none, so it can use what the database leaves free.
 
 ### VPS Recommendations
 
@@ -616,9 +562,9 @@ specifically.
 The standby cluster is deployed as a cost-optimized, non-serving replica designed to minimize idle cost while remaining ready for rapid failover:
 
 **Idle State:**
-- **2 nodes only:** master (control plane, ingress, cert-manager, replication gateway, in-cluster registry) + dedicated supabase node (the streaming replica database)
-- Same server types as the primary's master and supabase nodes: cost savings come from eliminating workers and the warm app tier, not from downsizing
-- **Cold app tier, declaratively:** All app-tier workloads (the app Deployment, `auth`, `rest`, `realtime`, `storage`, `meta`, `kong`, `studio`, `imgproxy`, cluster-autoscaler) are set to `replicas: 0`; the only active workloads are the db StatefulSet and replication gateway
+- **2 nodes only:** master (control plane, ingress, cert-manager, replication gateway, in-cluster registry) + dedicated database node (the streaming replica database)
+- Same server types as the primary's master and database nodes: cost savings come from eliminating workers and the warm app tier, not from downsizing
+- **Cold app tier, declaratively:** All app-tier workloads (the app Deployment and cluster-autoscaler) are set to `replicas: 0`; the only active workloads are the db StatefulSet and replication gateway
 - **Seeded on first boot:** The standby database is initialized by a seed container running `pg_basebackup` at deploy time, booting as a live streaming replica. The 200s stage/swap/reboot reseed cycle is eliminated
 
 **Deploy as role reconciler:**
@@ -729,8 +675,10 @@ never reported as a clean success.
 
 ## External Resources
 
-- [Supabase Documentation](https://supabase.com/docs)
-- [Supabase Self-Hosting Guide](https://supabase.com/docs/guides/self-hosting)
+- [PostgreSQL Documentation](https://www.postgresql.org/docs/17/)
+- [Better Auth Documentation](https://www.better-auth.com/docs)
+- [Drizzle ORM Documentation](https://orm.drizzle.team/docs/overview)
+- [Traefik Documentation](https://doc.traefik.io/traefik/)
 - [Hono Documentation](https://hono.dev)
 - [Vite Documentation](https://vitejs.dev)
 - [React Documentation](https://react.dev)

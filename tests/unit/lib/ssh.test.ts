@@ -358,20 +358,19 @@ describe('getPostgresPod', () => {
     mockRun.mockReset();
   });
 
-  it('uses the Supabase Helm chart db pod label selector', async () => {
-    mockRun.mockResolvedValue('supabase-supabase-db-0');
+  it('uses the db StatefulSet pod label selector', async () => {
+    mockRun.mockResolvedValue('db-0');
     await getPostgresPod('1.2.3.4', '/path/to/key');
     const [cmd] = mockRun.mock.calls[0] as [string[]];
     const joined = cmd.join(' ');
     // Each remote argv token is POSIX-quoted; the label value survives intact.
-    // Supabase community Helm chart labels the db StatefulSet with
-    // app.kubernetes.io/name=supabase-db (release=supabase + subchart=db).
-    expect(joined).toContain("'-l' 'app.kubernetes.io/name=supabase-db'");
+    // carbon/k8s/base/db/statefulset.yaml labels its pod app=vibecarbon-db.
+    expect(joined).toContain("'-l' 'app=vibecarbon-db'");
   });
 
   it('returns the trimmed pod name', async () => {
-    mockRun.mockResolvedValue('  supabase-supabase-db-0  \n');
-    expect(await getPostgresPod('1.2.3.4', '/path/to/key')).toBe('supabase-supabase-db-0');
+    mockRun.mockResolvedValue('  db-0  \n');
+    expect(await getPostgresPod('1.2.3.4', '/path/to/key')).toBe('db-0');
   });
 });
 
@@ -458,12 +457,12 @@ describe('sshKubectl', () => {
       '--',
       'sh',
       '-c',
-      'gunzip -c /tmp/f.gz | psql -U supabase_admin postgres',
+      'gunzip -c /tmp/f.gz | psql -U postgres postgres',
     ]);
     const [cmd] = mockRun.mock.calls[0] as [string[]];
     const dashIdx = cmd.indexOf('--');
     expect(cmd.slice(dashIdx + 2)).toEqual([
-      "'env' 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' 'kubectl' 'exec' '-n' 'vibecarbon' 'postgres-0' '--' 'sh' '-c' 'gunzip -c /tmp/f.gz | psql -U supabase_admin postgres'",
+      "'env' 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' 'kubectl' 'exec' '-n' 'vibecarbon' 'postgres-0' '--' 'sh' '-c' 'gunzip -c /tmp/f.gz | psql -U postgres postgres'",
     ]);
   });
 });
@@ -505,7 +504,9 @@ describe('SSH_TUNNEL_NO_MUX_OPTS — port-forward tunnels bypass multiplexing', 
         }
       }
     }
-    expect(tunnels).toBeGreaterThanOrEqual(2); // compose admin tunnel + registry push tunnel
+    // The registry push tunnel (the compose admin tunnel went with the
+    // external auth service). Floor of 1 keeps the census from passing empty.
+    expect(tunnels).toBeGreaterThanOrEqual(1);
   });
 
   it('the opt-out really overrides: OpenSSH takes the FIRST -o value, so it must PRECEDE the shared opts', async () => {
@@ -561,6 +562,8 @@ describe('SSH_TUNNEL_NO_MUX_OPTS — port-forward tunnels bypass multiplexing', 
         }
       }
     }
-    expect(tunnels).toBeGreaterThanOrEqual(2); // compose admin tunnel + registry push tunnel
+    // The registry push tunnel (the compose admin tunnel went with the
+    // external auth service). Floor of 1 keeps the census from passing empty.
+    expect(tunnels).toBeGreaterThanOrEqual(1);
   });
 });

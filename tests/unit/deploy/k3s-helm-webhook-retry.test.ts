@@ -76,24 +76,16 @@ const CHART_REGISTRY: ChartRow[] = [
       "cert-manager's ValidatingWebhookConfiguration. The admission probe upstream is what makes " +
       'a bare install safe.',
   },
-  {
-    probe: 'SUPABASE_HELM_CHART',
-    chart: 'supabase community chart',
-    certManagerAdmitted: false,
-    notes:
-      'carbon/k8s/values/supabase.values.yaml (+ .standby) declare ZERO cert-manager / Certificate / ' +
-      'Issuer / tls / acme resources — the chart creates nothing that traverses cert-manager’s ' +
-      'validating webhook; TLS is handled by the separately-applied cert-manager-resources kustomization + traefik.',
-  },
 ];
 
 const sites = collectHelmInstallSites();
 
 describe('helm-install cert-manager admission census', () => {
   it('detects the imperative helm upgrade --install population (not vacuously green)', () => {
-    // Two sites exist today (supabase + DNS-01 webhook). If a refactor drops
-    // this to zero the sweep has gone blind — fix the detector, not the floor.
-    expect(sites.length).toBeGreaterThanOrEqual(2);
+    // One site exists today (the DNS-01 webhook; the database is our own
+    // StatefulSet, no chart). If a refactor drops this to zero the sweep has
+    // gone blind — fix the detector, not the floor.
+    expect(sites.length).toBeGreaterThanOrEqual(1);
   });
 
   it('every detected helm install matches exactly one registry row (new installs must be classified)', () => {

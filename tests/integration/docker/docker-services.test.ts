@@ -1,15 +1,14 @@
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import {
   arePortsAvailable,
   cleanupDocker,
+  devComposeFileEnv,
   fetchWithTimeout,
-  waitForDockerCommand,
   waitForHttpHealth,
-  waitForKong,
   waitForPostgres,
 } from '../../_shared/docker-utils.js';
 import { cleanupTempDir, createTempDir } from '../../_shared/temp-dir.js';
@@ -25,8 +24,7 @@ describeDocker('Docker Services Smoke Test', () => {
   let tempDir: string;
   let projectEnv: Record<string, string>;
   let portsAvailable = false;
-  let fullStackAvailable = false;
-  let realtimeAvailable = false;
+  let s3Available = false;
   let traefikAvailable = false;
   const projectName = 'test-smoke-docker';
   const projectDir = () => join(tempDir, projectName);
@@ -45,12 +43,12 @@ describeDocker('Docker Services Smoke Test', () => {
     }
     portsAvailable = true;
 
-    // Check if full stack ports are available (Kong on 8000)
-    const fullStackCheck = await arePortsAvailable(testConfig.smoke.fullStackPorts);
-    fullStackAvailable = fullStackCheck.available;
-    if (!fullStackAvailable) {
+    // Check if the local S3 port is available (Garage on 8333, dev-only)
+    const s3Check = await arePortsAvailable(testConfig.smoke.s3Ports);
+    s3Available = s3Check.available;
+    if (!s3Available) {
       console.log(
-        `Full stack tests will be skipped: ports not available (${fullStackCheck.unavailablePorts.join(', ')})`,
+        `Local S3 tests will be skipped: ports not available (${s3Check.unavailablePorts.join(', ')})`,
       );
     }
 
@@ -67,8 +65,10 @@ describeDocker('Docker Services Smoke Test', () => {
 
     // Create project
     execSync(
-      `node ${join(process.cwd(), 'src/cli.js')} create ${projectName} -y -admin-email test@smoke.local -admin-password smoketest123`,
+      `node ${join(process.cwd(), 'src/cli.js')} create ${projectName} -y -install -admin-email test@smoke.local -admin-password smoketest123`,
       {
+        // -install: the Migrations cases run the project's own
+        // `npm run db:migrate`, which needs its dependencies.
         cwd: tempDir,
         encoding: 'utf-8',
         timeout: 300000,
@@ -80,30 +80,18 @@ describeDocker('Docker Services Smoke Test', () => {
     // docker-compose.yml uses PROJECT_NAME and POSTGRES_PASSWORD
     projectEnv.PROJECT_NAME = projectName;
     projectEnv.POSTGRES_PASSWORD = projectEnv.DB_PASSWORD || 'postgres';
+    // The file set `vibecarbon up` runs in dev, dev override included, so
+    // the smoke boots the stack users boot. It also reaches cleanupDocker.
+    projectEnv.COMPOSE_FILE = devComposeFileEnv(projectDir());
+    expect(projectEnv.COMPOSE_FILE.split(delimiter)).toContain('docker-compose.override.yml');
 
-    // Determine which services to start based on available ports
-    let services: string[];
-    if (traefikAvailable && fullStackAvailable) {
-      // Full stack with Traefik and app
-      services = [
-        'db',
-        'kong',
-        'auth',
-        'rest',
-        'realtime',
-        'storage',
-        'imgproxy',
-        'meta',
-        'traefik',
-        'app',
-      ];
-    } else if (fullStackAvailable) {
-      // Full Supabase stack without Traefik
-      services = ['db', 'kong', 'auth', 'rest', 'realtime', 'storage', 'imgproxy', 'meta'];
-    } else {
-      // Database only
-      services = ['db'];
-    }
+    // The local stack is db, app and traefik, plus the dev-only s3 (Garage)
+    // from docker-compose.override.yml. Garage sets up its own layout, key
+    // and bucket at start, so there is no init service. Start what the free
+    // ports allow; the database is the minimum.
+    const services = ['db'];
+    if (s3Available) services.push('s3');
+    if (traefikAvailable) services.push('traefik', 'app');
 
     execSync(`docker compose up -d ${services.join(' ')}`, {
       cwd: projectDir(),
@@ -116,44 +104,6 @@ describeDocker('Docker Services Smoke Test', () => {
     const dbReady = await waitForPostgres(projectDir(), getExecEnv());
     if (!dbReady) {
       throw new Error('PostgreSQL failed to become ready');
-    }
-
-    // If full stack, wait for Kong and Realtime to be healthy
-    if (fullStackAvailable) {
-      const kongReady = await waitForKong(projectDir(), getExecEnv());
-      if (!kongReady) {
-        throw new Error('Kong failed to become healthy');
-      }
-
-      // Wait for Realtime (Erlang/Elixir runtime is slow to cold-start in CI)
-      // Non-fatal: if Realtime isn't available, only its tests are skipped
-      realtimeAvailable = await waitForDockerCommand(
-        'docker compose exec -T realtime curl -sf http://localhost:4000/',
-        { cwd: projectDir(), env: getExecEnv(), encoding: 'utf-8' },
-        { timeout: testConfig.smoke.timeouts.serviceReady, label: 'Realtime ready' },
-      );
-      if (!realtimeAvailable) {
-        // Dump container state for CI debugging
-        try {
-          const ps = execSync('docker compose ps --format json', {
-            cwd: projectDir(),
-            encoding: 'utf-8',
-            timeout: 10000,
-            env: getExecEnv(),
-          });
-          const containers = ps
-            .trim()
-            .split('\n')
-            .filter(Boolean)
-            .map((l) => JSON.parse(l));
-          const rt = containers.find((c: { Service: string }) => c.Service === 'realtime');
-          console.warn(
-            `[Smoke] Realtime not healthy. State: ${rt?.State ?? 'not found'}, Health: ${rt?.Health ?? 'N/A'}`,
-          );
-        } catch {
-          /* ignore */
-        }
-      }
     }
 
     // If Traefik available, wait for it to be ready
@@ -169,8 +119,9 @@ describeDocker('Docker Services Smoke Test', () => {
         throw new Error('Traefik failed to become ready');
       }
 
-      // Wait for app to be healthy (it needs to build first)
-      const appReady = await waitForHttpHealth('http://localhost/health', {
+      // Wait for app to be healthy (it needs to build first). The app's
+      // health route is /api/health; /health is a 404.
+      const appReady = await waitForHttpHealth('http://localhost/api/health', {
         timeout: testConfig.smoke.timeouts.appBuild,
         headers: { Host: 'localhost' },
         label: 'App health',
@@ -259,21 +210,6 @@ describeDocker('Docker Services Smoke Test', () => {
       });
       expect(result).toContain('1');
     });
-
-    it('has required extensions installed', ({ skip }) => {
-      if (!portsAvailable) skip();
-      const result = execSync(
-        `docker compose exec -T db psql -U postgres -c "SELECT extname FROM pg_extension WHERE extname IN ('uuid-ossp', 'pgcrypto')"`,
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
-      expect(result).toContain('uuid-ossp');
-      expect(result).toContain('pgcrypto');
-    });
   });
 
   // =========================================================================
@@ -281,239 +217,172 @@ describeDocker('Docker Services Smoke Test', () => {
   // =========================================================================
 
   describe('Migrations', () => {
-    it('can run database migrations', async ({ skip }) => {
+    // The generated project applies its migrations with drizzle-orm's
+    // migrator (carbon/src/server/db/migrate.ts): `npm run db:migrate` runs
+    // the same runMigrations() the app runs at startup. The first run applies
+    // the baseline, the second finds the ledger complete.
+    it('db:migrate applies the baseline once, then nothing', async ({ skip }) => {
       if (!portsAvailable) skip();
-      // Wait for database to be fully ready before running migrations
-      // (may be in a transient state from previous tests)
       const dbReady = await waitForPostgres(projectDir(), getExecEnv());
-      if (!dbReady) {
-        skip(); // Skip if db not ready (transient infrastructure issue)
-        return;
-      }
-
-      // Run migration directly (just 00001_init.sql) - may have partial failures
-      // when auth.* functions aren't available (db-only mode, no full Supabase)
-      let result = '';
-      try {
-        // Test file uses execSync for controlled test environment with known safe inputs
-        // This is a test environment with hardcoded commands - no user input
-        result = execSync(
-          'docker compose exec -T db psql -U postgres -d postgres -f /migrations/00001_init.sql',
-          {
-            cwd: projectDir(),
-            encoding: 'utf-8',
-            timeout: 30000,
-            env: getExecEnv(),
-          },
-        );
-      } catch (e) {
-        // Migration may fail on RLS policies that depend on auth.* functions
-        // This is expected when running with just db container (no full Supabase stack)
-        const error = e as { stderr?: string; stdout?: string; message?: string };
-        const output = (error.stderr || '') + (error.stdout || '') + (error.message || '');
-
-        // Skip if connection failed (db container not ready - infrastructure issue)
-        if (
-          output.includes('No such file or directory') ||
-          output.includes('connection refused') ||
-          output.includes('shutting down')
-        ) {
-          skip();
-          return;
-        }
-
-        // If the errors are only about auth functions, that's expected in db-only mode
-        if (
-          output.includes('auth.jwt()') ||
-          output.includes('auth.uid()') ||
-          output.includes('is_super_admin()')
-        ) {
-          // Expected failures in db-only mode - tables should still be created
-          result = output;
-        } else {
-          throw e;
-        }
-      }
-      // Migration ran (tables created via CREATE TABLE IF NOT EXISTS)
-      expect(result).toBeDefined();
+      if (!dbReady) throw new Error('Database not ready');
+      const migrate = () =>
+        execSync('npm run --silent db:migrate', {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          timeout: 120000,
+          env: getExecEnv(),
+        });
+      // A previous run against this volume may have applied it already.
+      const first = migrate();
+      expect(first).toMatch(/Applied \d+ database migration|Database migrations are up to date/);
+      expect(migrate()).toContain('Database migrations are up to date');
     });
 
-    it('migrations create expected tables', async ({ skip }) => {
+    it('migrations create the schema and the ledger', async ({ skip }) => {
       if (!portsAvailable) skip();
-      // Wait for database to be ready (may still be processing migrations)
-      const dbReady = await waitForPostgres(projectDir(), getExecEnv());
-      if (!dbReady) {
-        throw new Error('Database not ready');
-      }
+      const result = execSync(
+        `docker compose exec -T db psql -U postgres -tA -c "select (select count(*) from pg_tables where schemaname = 'public'), (select count(*) from drizzle.__drizzle_migrations)"`,
+        { cwd: projectDir(), encoding: 'utf-8', timeout: 10000, env: getExecEnv() },
+      );
+      const [tables, applied] = result.trim().split('|').map(Number);
+      expect(tables).toBeGreaterThan(10);
+      expect(applied).toBeGreaterThanOrEqual(3);
+    });
 
-      // Check that the public schema has tables (after migration) with retries
-      let result = '';
-      let lastError: Error | null = null;
-      for (let i = 0; i < 3; i++) {
-        try {
-          // Test file uses execSync for controlled test environment with known safe inputs
-          result = execSync(
-            'docker compose exec -T db psql -U postgres -c "SELECT tablename FROM pg_tables WHERE schemaname = \'public\'"',
-            {
-              cwd: projectDir(),
-              encoding: 'utf-8',
-              timeout: 10000,
-              env: getExecEnv(),
-            },
-          );
-          break;
-        } catch (e) {
-          lastError = e as Error;
-          // Wait before retry
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-      }
-      if (!result && lastError) throw lastError;
-      // The initial migration should create at least some tables or the query should succeed
-      expect(result).toBeDefined();
+    // The baseline (db/migrations/0000) creates the one extension the lean
+    // stack uses, pg_cron, so this runs after db:migrate: with port 80 taken
+    // no app container starts, and its startup migration never ran. (UUIDs
+    // come from core gen_random_uuid(); uuid-ossp and pgcrypto came with the
+    // old database image and nothing uses them.)
+    it('the baseline installs pg_cron', ({ skip }) => {
+      if (!portsAvailable) skip();
+      const result = execSync(
+        `docker compose exec -T db psql -U postgres -tA -c "SELECT extname FROM pg_extension WHERE extname = 'pg_cron'"`,
+        {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          timeout: 10000,
+          env: getExecEnv(),
+        },
+      );
+      expect(result.trim()).toBe('pg_cron');
     });
   });
 
   // =========================================================================
-  // Full Stack Tests (Kong, Auth, PostgREST)
+  // Local S3 (dev-only Garage for uploads)
   // =========================================================================
 
-  describe('API Gateway (Kong)', () => {
-    it('is healthy', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose exec -T kong kong health', {
+  describe('Local S3', () => {
+    const runningServices = () =>
+      execSync('docker compose ps --format json', {
         cwd: projectDir(),
         encoding: 'utf-8',
         timeout: 10000,
         env: getExecEnv(),
+      })
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((c: { State: string }) => c.State === 'running')
+        .map((c: { Service: string }) => c.Service as string);
+
+    // What `vibecarbon up` runs after compose: CORS on the bucket Garage made.
+    const ensureDevBucket = () =>
+      execSync('node scripts/ensure-dev-bucket.js', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 30000,
+        env: getExecEnv(),
       });
-      expect(result).toContain('healthy');
-    });
+
+    // Presigned PUT and GET with the project's own SDK and the .env.local
+    // key, plus browser preflights from the Vite origin and a foreign one:
+    // the round trip an avatar upload makes. With readKey, also reads back an
+    // object an earlier call wrote. Prints one JSON line.
+    const roundTrip = (readKey?: string) =>
+      JSON.parse(
+        execSync('node --input-type=module -', {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          timeout: 30000,
+          env: { ...getExecEnv(), READ_KEY: readKey ?? '' },
+          input: `
+            import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+            import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+            const e = process.env;
+            const client = new S3Client({
+              endpoint: e.S3_ENDPOINT, region: e.S3_REGION, forcePathStyle: true,
+              requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
+              credentials: { accessKeyId: e.S3_ACCESS_KEY, secretAccessKey: e.S3_SECRET_KEY },
+            });
+            const read = async (Key) => {
+              const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: e.S3_BUCKET, Key }), { expiresIn: 60 });
+              const res = await fetch(url);
+              return { status: res.status, body: await res.text() };
+            };
+            const preflight = (url, Origin) => fetch(url, { method: 'OPTIONS', headers: {
+              Origin, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'content-type' } });
+            const key = 'smoke/' + Date.now() + '.txt';
+            const put = await getSignedUrl(client, new PutObjectCommand({ Bucket: e.S3_BUCKET, Key: key, ContentType: 'text/plain' }), { expiresIn: 60 });
+            const dev = await preflight(put, 'http://localhost:5173');
+            const foreign = await preflight(put, 'http://evil.example');
+            const putRes = await fetch(put, { method: 'PUT', body: 'hello ' + key, headers: { 'content-type': 'text/plain' } });
+            const got = await read(key);
+            console.log(JSON.stringify({
+              key,
+              allowOrigin: dev.headers.get('access-control-allow-origin'),
+              foreign: { status: foreign.status, allowOrigin: foreign.headers.get('access-control-allow-origin') },
+              put: putRes.status, get: got.status, body: got.body,
+              earlier: e.READ_KEY ? await read(e.READ_KEY) : null,
+            }));
+          `,
+        }),
+      );
+
+    // Written before the recreate, read back after it.
+    let firstKey = '';
 
     it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
+      if (!s3Available) skip();
+      expect(runningServices()).toContain('s3');
+    });
+
+    it('takes a presigned upload and serves it back, CORS scoped to the dev origin', ({ skip }) => {
+      if (!s3Available) skip();
+      ensureDevBucket();
+      const result = roundTrip();
+      firstKey = result.key;
+      expect(result).toMatchObject({
+        allowOrigin: 'http://localhost:5173',
+        put: 200,
+        get: 200,
+        body: `hello ${result.key}`,
+      });
+      // A foreign origin's preflight is refused. Browsers need a 2xx
+      // preflight, so the 403 blocks the upload; Garage's error responses
+      // carry a wildcard ACAO header, which a non-2xx preflight never uses.
+      // (A bucket held under a key-local alias would answer 200 here.)
+      expect(result.foreign.status).toBe(403);
+      expect(result.foreign.allowOrigin).not.toBe('http://evil.example');
+    });
+
+    it('sets itself up again idempotently when recreated on the same volume', ({ skip }) => {
+      if (!s3Available) skip();
+      expect(firstKey, 'the upload case runs first and writes an object').not.toBe('');
+      execSync('docker compose up -d --force-recreate s3', {
         cwd: projectDir(),
         encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('kong');
-    });
-
-    it('responds on port 8000', async ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      // Kong should respond (even if with an error, it means the gateway is up)
-      const response = await fetchWithTimeout('http://localhost:8000/', 5000);
-      expect(response.status).toBeGreaterThan(0);
-    });
-  });
-
-  describe('PostgREST API', () => {
-    it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('rest');
-    });
-
-    it('responds via Kong gateway', async ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      // PostgREST is available at /rest/v1/ through Kong
-      const response = await fetchWithTimeout('http://localhost:8000/rest/v1/', 5000);
-      // Should get a response (401 without auth is expected)
-      expect(response.status).toBeGreaterThan(0);
-    });
-  });
-
-  describe('GoTrue Auth', () => {
-    it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('auth');
-    });
-
-    it('health endpoint responds via Kong', async ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      // Auth health is available at /auth/v1/health through Kong
-      // Requires apikey header for Kong authentication
-      const headers = { apikey: projectEnv.SUPABASE_ANON_KEY || projectEnv.VITE_SUPABASE_ANON_KEY };
-      const healthy = await waitForHttpHealth('http://localhost:8000/auth/v1/health', {
         timeout: 60000,
-        headers,
-        label: 'GoTrue health',
-      });
-      expect(healthy).toBe(true);
-    }, 60000);
-  });
-
-  describe('Realtime', () => {
-    it('container is running', ({ skip }) => {
-      if (!realtimeAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
         env: getExecEnv(),
       });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('realtime');
-    });
-  });
-
-  describe('Storage', () => {
-    it('container is running', ({ skip }) => {
-      if (!fullStackAvailable) skip();
-      const result = execSync('docker compose ps --format json', {
-        cwd: projectDir(),
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: getExecEnv(),
-      });
-
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
-
-      expect(runningServices).toContain('storage');
+      expect(runningServices()).toContain('s3');
+      ensureDevBucket();
+      const result = roundTrip(firstKey);
+      expect(result).toMatchObject({ put: 200, get: 200, body: `hello ${result.key}` });
+      // The object written before the recreate survived it.
+      expect(result.earlier).toEqual({ status: 200, body: `hello ${firstKey}` });
     });
   });
 
@@ -540,14 +409,18 @@ describeDocker('Docker Services Smoke Test', () => {
       expect(runningServices).toContain('traefik');
     });
 
-    it('dashboard responds via traefik.localhost (requires auth)', async ({ skip }) => {
+    it('dashboard responds via traefik.localhost', async ({ skip }) => {
       if (!traefikAvailable) skip();
-      // Dashboard is protected by admin-auth middleware
+      // The dev file set puts no middleware on the dashboard router; only the
+      // prod overlay adds super-admin-auth (pinned without docker by
+      // tests/unit/template/admin-surface-auth.test.ts). This smoke never ran
+      // for a non-root user until the port probe stopped reading EACCES on :80
+      // as busy, which is how its old 401/302 expectation went unnoticed.
       const response = await fetchWithTimeout('http://localhost/api/overview', 5000, {
         headers: { Host: 'traefik.localhost' },
       });
-      // Expect 401 or 302 redirect to login (auth required)
-      expect([401, 302]).toContain(response.status);
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body).providers).toContain('Docker');
     });
 
     it('routes traffic on port 80', async ({ skip }) => {
@@ -585,12 +458,35 @@ describeDocker('Docker Services Smoke Test', () => {
 
     it('health endpoint responds via Traefik', async ({ skip }) => {
       if (!traefikAvailable) skip();
-      // App health is available at /health through Traefik
-      const response = await fetchWithTimeout('http://localhost/health', 5000, {
+      const response = await fetchWithTimeout('http://localhost/api/health', 5000, {
         headers: { Host: 'localhost' },
       });
       expect(response.ok).toBe(true);
+      expect(JSON.parse(response.body).migrationStatus).toBe('applied');
     });
+
+    // Auth runs inside the app: there is no auth container. The app creates
+    // the super admin from ADMIN_EMAIL / ADMIN_PASSWORD once the schema exists
+    // (the Migrations block above applied it) and reports it on /api/health,
+    // the same flag every `vibecarbon deploy` waits for.
+    it('creates the super admin from ADMIN_EMAIL/ADMIN_PASSWORD (adminReady)', async ({ skip }) => {
+      if (!traefikAvailable) skip();
+      const deadline = Date.now() + 90_000;
+      let last = '';
+      while (Date.now() < deadline) {
+        try {
+          const response = await fetchWithTimeout('http://localhost/api/health', 5000, {
+            headers: { Host: 'localhost' },
+          });
+          last = response.body;
+          if (response.ok && JSON.parse(response.body).adminReady === true) break;
+        } catch {
+          // app still starting
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      expect(JSON.parse(last || '{}').adminReady, `last /api/health: ${last}`).toBe(true);
+    }, 120_000);
 
     it('serves the frontend via Traefik', async ({ skip }) => {
       if (!traefikAvailable) skip();

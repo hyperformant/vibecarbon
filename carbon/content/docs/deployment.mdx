@@ -107,11 +107,12 @@ The `k8s/` directory structure:
 ```
 k8s/
 ├── base/                # Shared manifests
-│   ├── app/             # App deployment, service, ingress
-│   ├── supabase/        # Supabase services
+│   ├── app/             # App deployment, service, autoscaling
+│   ├── db/              # Postgres StatefulSet and services
+│   ├── backup/          # WAL-G base backups and archiving config
+│   ├── traefik/         # Ingress routes and middlewares
 │   └── kustomization.yaml
 └── overlays/
-    ├── staging/         # Staging-specific config
     └── production/      # Production-specific config
 ```
 
@@ -146,9 +147,10 @@ Production requires these environment variables in your project's `.env` file �
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `SUPABASE_URL` | Yes | Your Supabase API URL |
-| `SUPABASE_ANON_KEY` | Yes | Public anonymous key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-side service role key |
+| `BETTER_AUTH_SECRET` | Yes | Signs session cookies and auth tokens, at least 32 characters (`vibecarbon create` generates one). Changing it signs everyone out |
+| `ADMIN_EMAIL` | Yes | Email of the super admin the app creates on first start |
+| `ADMIN_PASSWORD` | Yes | That super admin's first password, at least 8 characters (`vibecarbon create` generates one). Change it after you sign in |
+| `DB_PASSWORD` | Yes | Postgres password for the API server (same value as `POSTGRES_PASSWORD`; `vibecarbon create` sets both). The deploy points `DB_HOST` at the database service for you |
 | `SITE_URL` | Yes | Your production URL (e.g., `https://app.example.com`) |
 | `DOMAIN` | Yes | Your root domain (e.g., `example.com`) |
 | `SMTP_HOST` | Yes | SMTP server hostname |
@@ -178,7 +180,7 @@ Production requires these environment variables in your project's `.env` file �
 
 ## SMTP Configuration
 
-SMTP credentials are shared between Supabase Auth (for email confirmation, password reset, magic links) and the application's email service (for welcome emails, team invitations, billing notifications).
+The app uses the SMTP credentials for auth emails (email confirmation, password reset, magic links) and for its other emails (welcome emails, team invitations, billing notifications).
 
 **Required variables**: `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`
 
@@ -198,7 +200,7 @@ Point your domain to the server's IP address:
 |--------|------|-------|
 | A | `app.example.com` | `<server-ip>` |
 
-The app is served from a single origin. Auth, REST, realtime, and storage APIs are path-routed under it (`/auth/v1`, `/rest/v1`, `/realtime/v1`, `/storage/v1`), so no separate `api.` record exists.
+The app is served from a single origin. Auth lives in the app (`/api/auth`) next to the rest of the API (`/api`), so no separate `api.` record exists.
 
 If you have optional services enabled, add records for their subdomains too (e.g., `grafana.example.com`).
 

@@ -60,7 +60,7 @@ describe('deploy wizard credential order', () => {
     });
     vi.spyOn(HetznerProvider, 'fetchServerTypes').mockResolvedValue(undefined as never);
     vi.spyOn(HetznerProvider, 'getRegionDefaults').mockReturnValue({
-      supabaseType: 'cpx31',
+      dbType: 'cpx31',
       masterType: 'cpx31',
       workerType: 'cpx31',
     } as never);

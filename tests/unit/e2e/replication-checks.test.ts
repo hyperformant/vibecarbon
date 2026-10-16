@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import {
   buildCreateMarkerSql,
   buildDropProbeTableSql,
@@ -56,15 +57,15 @@ describe('buildPsqlCommand', () => {
   it('uses docker compose exec for compose-ha and cds into the project dir', () => {
     const cmd = buildPsqlCommand('compose-ha', 'acme', 'SELECT 1');
     expect(cmd).toContain('cd /opt/acme');
-    expect(cmd).toContain('docker compose exec -T db psql -U supabase_admin -d postgres -tAc');
+    expect(cmd).toContain('docker compose exec -T db psql -U postgres -d postgres -tAc');
     expect(cmd).toContain('"SELECT 1"');
   });
 
-  it('uses kubectl exec into the supabase-db pod for k8s-ha', () => {
+  it('uses kubectl exec into the db pod for k8s-ha', () => {
     const cmd = buildPsqlCommand('k8s-ha', 'acme', 'SELECT 1');
     expect(cmd).toContain('KUBECONFIG=/etc/rancher/k3s/k3s.yaml');
-    expect(cmd).toContain('kubectl exec -n vibecarbon supabase-supabase-db-0');
-    expect(cmd).toContain('psql -U supabase_admin -d postgres -tAc');
+    expect(cmd).toContain(`kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER}`);
+    expect(cmd).toContain('psql -U postgres -d postgres -tAc');
     expect(cmd).not.toContain('docker compose');
   });
 
@@ -85,7 +86,7 @@ describe('buildLogDiagCommand', () => {
 
   it('greps k8s pod logs for replication/pg_hba', () => {
     const cmd = buildLogDiagCommand('k8s-ha', 'acme');
-    expect(cmd).toContain('kubectl logs -n vibecarbon supabase-supabase-db-0');
+    expect(cmd).toContain(`kubectl logs -n vibecarbon ${DB_POD} -c ${DB_CONTAINER}`);
     expect(cmd).toContain('tail -20');
   });
 });

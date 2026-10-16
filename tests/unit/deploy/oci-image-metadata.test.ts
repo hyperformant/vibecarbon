@@ -50,8 +50,8 @@ const packageName = (imageRef: string) => imageRef.split('/').pop() as string;
  * test failed, a new publishable image appeared — give it a description rather
  * than widening the exclusion.
  *
- * DELIBERATELY ABSENT: carbon/Dockerfile and carbon/db/Dockerfile. Those build
- * the GENERATED project's images, which are published to the customer's own
+ * DELIBERATELY ABSENT: carbon/Dockerfile. It builds the GENERATED project's
+ * app image, which is published to the customer's own
  * ghcr namespace by carbon/.github/workflows/vibecarbon-build.yml. Stamping our
  * repo URL and our license onto a customer's image would be wrong on both
  * counts, and their package page is theirs to describe.
@@ -66,8 +66,8 @@ const OWNED_IMAGES = [
   {
     dockerfile: join('docker', 'postgres-walg', 'Dockerfile'),
     packageName: packageName(DB_IMAGE),
-    // Overwhelmingly upstream bits (PostgreSQL, the supabase extension set,
-    // wal-g) under a mix of licenses; our contribution is one RUN layer. Any
+    // Overwhelmingly upstream bits (PostgreSQL, pg_cron, wal-g, Alpine) under
+    // a mix of licenses; our contribution is a config file and an entrypoint. Any
     // single SPDX expression would be a compliance claim we cannot back, and an
     // absent label reads as "unknown" — which is the truth. See the Dockerfile.
     declaresLicense: false,

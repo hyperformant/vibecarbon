@@ -27,7 +27,7 @@
  *    placeholders in carbon/k8s/overlays/local/secrets.yaml tripped
  *    GitHub's scanner because they had `service_role` in the payload —
  *    we now ship plain non-JWT placeholders, so this rule fires only on
- *    real Supabase keys.
+ *    real privileged tokens.
  *  - Allowlist support: a `.vibecarbonignore` file at the repo root can
  *    contain literal substrings or `regex:<pattern>` lines that suppress
  *    matches. Same syntax as our docs.
@@ -201,8 +201,8 @@ export const SECRET_RULES = [
     },
   },
   {
-    id: 'supabase-service-role-jwt',
-    description: 'Supabase service-role JWT (privileged)',
+    id: 'privileged-role-jwt',
+    description: 'JWT with a privileged role claim (service_role or admin)',
     pattern: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
     predicate: (m) => {
       const payload = decodeJwtPayload(m);

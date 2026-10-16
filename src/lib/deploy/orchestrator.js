@@ -214,25 +214,48 @@ async function probePublicHealth(
 }
 
 /**
- * Where the SERVING cluster's kubeconfig lives. Exported for unit tests.
+ * Apply the browser-upload CORS rule to the app bucket. Runs on EVERY deploy,
+ * outside the skippable s3-setup step, so deployments that predate the rule
+ * (or whose rule was edited out-of-band) converge on re-run; the PUT is
+ * idempotent. A failure only costs browser uploads, so it warns and returns.
  *
- * HA deploys split into kubeconfig-<env>-primary / -standby; standalone uses
- * just kubeconfig-<env>. The cluster that decides whether the domain serves
- * is the one holding the PRIMARY ROLE — and stacks keep their birth names
- * while roles flip at failover (envConfig.ha.primary.stack is the role
- * pointer), so "prefer the -primary FILE" is only right until the first
- * failover. d4 run 7 RCA (2026-08-28): during the post-failover reconverge,
- * the health probe's ACME watchdog keyed off the -primary file and inspected
- * the DEMOTED cluster — all certs Ready, nothing to repair — while the
- * SERVING (`-standby`-named) cluster's invalid Order sat unrepairable for
- * the probe's whole 20-minute budget. Follow the role first; fall back to
- * the old file preference for configs that never recorded one. Returns the
- * standalone path when nothing exists so the caller surfaces a
- * file-not-found rather than a silent skip.
+ * SECURITY: never a `*` wildcard (setBucketCors refuses it). With a domain
+ * the rule allows exactly `https://<domain>`, the single public origin the
+ * app serves from. A domainless deploy has no browser origin to trust yet,
+ * so it gets localhost dev origins and a warning; re-run deploy once a
+ * domain is set.
  *
- * @param {string} environment
- * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
+ * @param {object} opts
+ * @param {() => Promise<object>} opts.createProvider - builds a provider at the
+ *   APP bucket's region (the shared one may point at the state bucket's)
+ * @param {string} opts.bucket - app bucket name
+ * @param {string} [opts.domain]
+ * @param {{ start: Function, stop: Function }} opts.spin
+ * @param {{ warn: Function }} opts.log
  */
+export async function applyAppBucketCors({ createProvider, bucket, domain, spin, log }) {
+  try {
+    spin.start('Configuring bucket CORS');
+    let corsOrigins;
+    if (domain) {
+      corsOrigins = [`https://${domain}`];
+    } else {
+      corsOrigins = ['http://localhost:3000', 'http://localhost:5173'];
+      log.warn(
+        'No domain configured, so bucket CORS only allows localhost dev origins. Re-run deploy with a domain to allow your production origin.',
+      );
+    }
+    const provider = await createProvider();
+    await provider.setBucketCors(bucket, corsOrigins);
+    spin.stop('Bucket CORS configured');
+  } catch (corsErr) {
+    spin.stop('Bucket CORS not set');
+    log.warn(
+      `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to apply it again, or set CORS on ${bucket} in your provider console.`,
+    );
+  }
+}
+
 /**
  * Refuse to provision against a bucket the provider has not made readable.
  * createBucket's visibility probe (HEAD+LIST+write, 120s) can exhaust its
@@ -258,6 +281,26 @@ export function assertBucketReady(result, role) {
   );
 }
 
+/**
+ * Where the SERVING cluster's kubeconfig lives. Exported for unit tests.
+ *
+ * HA deploys split into kubeconfig-<env>-primary / -standby; standalone uses
+ * just kubeconfig-<env>. The cluster that decides whether the domain serves
+ * is the one holding the PRIMARY ROLE — and stacks keep their birth names
+ * while roles flip at failover (envConfig.ha.primary.stack is the role
+ * pointer), so "prefer the -primary FILE" is only right until the first
+ * failover. d4 run 7 RCA (2026-08-28): during the post-failover reconverge,
+ * the health probe's ACME watchdog keyed off the -primary file and inspected
+ * the DEMOTED cluster — all certs Ready, nothing to repair — while the
+ * SERVING (`-standby`-named) cluster's invalid Order sat unrepairable for
+ * the probe's whole 20-minute budget. Follow the role first; fall back to
+ * the old file preference for configs that never recorded one. Returns the
+ * standalone path when nothing exists so the caller surfaces a
+ * file-not-found rather than a silent skip.
+ *
+ * @param {string} environment
+ * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
+ */
 export function resolveKubeconfigPath(environment, envConfig) {
   const roleStack = envConfig?.ha?.primary?.stack;
   const candidates = [
@@ -291,7 +334,7 @@ export async function executeDeployment(args, gatheredConfig) {
     secondaryRegion,
     serverType,
     masterServerType,
-    supabaseServerType,
+    dbServerType,
     workerServerType,
     minWorkers,
     maxWorkers,
@@ -538,31 +581,6 @@ export async function executeDeployment(args, gatheredConfig) {
           : `S3 bucket exists: ${s3Config.bucket}`,
       );
 
-      try {
-        s3Spinner.start('Configuring bucket CORS');
-        // SECURITY: never fall back to a `*` wildcard — that would let any
-        // origin issue credentialed browser requests against the storage
-        // bucket. When a domain is configured we scope to its https origins
-        // (apex + api/app subdomains the app actually serves from); a
-        // domainless deploy has no browser origin to trust yet, so we scope
-        // to localhost dev origins and warn. The operator re-runs deploy once
-        // a domain is set to widen CORS to the real origin.
-        let corsOrigins;
-        if (domain) {
-          // Single public origin — Supabase/storage is served on the apex.
-          corsOrigins = [`https://${domain}`];
-        } else {
-          corsOrigins = ['http://localhost:3000', 'http://localhost:5173'];
-          p.log.warn(
-            'No domain configured — scoping bucket CORS to localhost dev origins instead of `*`. Re-run deploy with a domain to allow your production origin.',
-          );
-        }
-        await s3Provider.configureCORS(s3Config.bucket, corsOrigins);
-        s3Spinner.stop('CORS configured');
-      } catch {
-        s3Spinner.stop('CORS configuration skipped (not supported by provider)');
-      }
-
       // No try/catch here: a backup bucket that failed to create used to be
       // logged and skipped, and the deploy then died at wal-g's audit after
       // the VPS existed. The step's catch below reports and exits before
@@ -746,6 +764,23 @@ export async function executeDeployment(args, gatheredConfig) {
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
 
+  // Browser uploads need CORS on the app bucket. Outside the s3-setup step on
+  // purpose: that step is skipped on re-run, and existing deployments must
+  // still pick the rule up.
+  await applyAppBucketCors({
+    createProvider: () =>
+      getObjectStorageProvider(
+        providerIdFor(envConfig),
+        s3Config.accessKey,
+        s3Config.secretKey,
+        s3Config.region,
+      ),
+    bucket: s3Config.bucket,
+    domain,
+    spin: s3Spinner,
+    log: p.log,
+  });
+
   // SKELETON SAVE: persist the minimum env entry that `vibecarbon destroy`
   // needs to recover, BEFORE any `pulumi up` runs. Without this, a crash
   // during k3s install / cloud-init / health probe leaves Pulumi state in
@@ -817,10 +852,9 @@ export async function executeDeployment(args, gatheredConfig) {
     // failure runCommandAsync includes captured stdout/stderr in the
     // thrown error — operator still sees what went wrong.
     // Plumb VITE_* build args through to docker build so the browser bundle
-    // ships with real values for VITE_SUPABASE_URL etc. Without these the
+    // ships with real client config (VITE_PUBLIC_URL etc.). Without these the
     // Dockerfile's ARG VITE_* defaults to empty strings and Vite inlines
-    // empty values, causing the client-side supabase init to throw at
-    // page load. Mirrors what docker-compose.yml's build.args block does
+    // empty values into the bundle. Mirrors what docker-compose.yml's build.args block does
     // for local-dev `docker compose up --build`. See
     // src/lib/deploy/compose/build-args.js for the rationale.
     const { collectComposeBuildArgs, buildArgFlags } = await import('./compose/build-args.js');
@@ -884,8 +918,8 @@ export async function executeDeployment(args, gatheredConfig) {
     // wait. On a cold push deploy this is the dominant cost (~10 min).
     // Pass the VITE_* build args so ensureCIImageReady can seed them as repo
     // variables — the CI image bakes them at build time (Vite inlines them).
-    // Without this the GHCR image ships empty VITE_SUPABASE_* and the SPA
-    // crashes at page load. Mirrors the compose-local build-args path above.
+    // Without this the GHCR image ships empty client config (VITE_PUBLIC_URL,
+    // feature flags). Mirrors the compose-local build-args path above.
     const { collectComposeBuildArgs } = await import('./compose/build-args.js');
     const ciBuildArgs = collectComposeBuildArgs(process.cwd(), {
       projectName: projectConfig.projectName,
@@ -1012,7 +1046,7 @@ export async function executeDeployment(args, gatheredConfig) {
     region,
     secondaryRegion,
     masterServerType,
-    supabaseServerType,
+    dbServerType,
     workerServerType,
     serverType,
     minWorkers,
@@ -1030,8 +1064,9 @@ export async function executeDeployment(args, gatheredConfig) {
     backupConfig,
     backupBucketName: backupS3Config?.bucket || null,
     // DR: when set (`deploy -restore latest|<ts>`), the db pod's init
-    // container seeds PGDATA from S3 via wal-g and applyMigrations is
-    // skipped (the restored DB is authoritative).
+    // container seeds PGDATA from S3 via wal-g. The restored DB carries its
+    // migration ledger, so the app's startup migrations apply only what the
+    // backup lacks.
     restore: args.restore || null,
     // Finding #1: hard-gate k8s-HA replication unless the operator opts into a
     // warm/degraded standby via `deploy -allow-degraded`.
@@ -1217,7 +1252,7 @@ export async function executeDeployment(args, gatheredConfig) {
         'Cluster + app ready',
       );
       // Fall through to Step 6 so .vibecarbon.json persists the serverlist —
-      // without it, `vibecarbon destroy` can't find the master/supabase IPs
+      // without it, `vibecarbon destroy` can't find the master/database IPs
       // and the cluster leaks.
     }
 
@@ -1390,7 +1425,7 @@ export async function executeDeployment(args, gatheredConfig) {
           const recentEvents = events.split('\n').slice(-30).join('\n');
           // Direct curl probes — surface the actual TLS/HTTP error from the
           // public side (cert-manager not yet issued, traefik not routing,
-          // kong 503, etc.). curl exits non-zero on connect/TLS errors so we
+          // app 503, etc.). curl exits non-zero on connect/TLS errors so we
           // route through safeRun. -k skips cert validation — we want the
           // body even if origin's cert is staging or self-signed.
           const curlVerbose = await safeRun('curl', [
@@ -1496,38 +1531,38 @@ export async function executeDeployment(args, gatheredConfig) {
   }
 
   // --- STEP 6: Finalize Config (Consolidated) ---
-  // Persist supabaseIp alongside masterIp for k8s deploys. The failover flow
-  // in src/failover.js needs the supabase node IP (where the postgres pod
+  // Persist dbIp alongside masterIp for k8s deploys. The failover flow
+  // in src/failover.js needs the database node IP (where the postgres pod
   // runs) to pg_basebackup-reseed standby from primary — without it, the
   // failover uses whatever (potentially stale) state standby has. Compose
-  // deploys only have a single masterIp so supabaseIp is omitted there.
+  // deploys only have a single masterIp so dbIp is omitted there.
   const servers = [];
   if (deployResult.primary) {
-    // k8s-HA shape: { primary: { masterIp, supabaseIp }, standby: {...} }
+    // k8s-HA shape: { primary: { masterIp, dbIp }, standby: {...} }
     servers.push(
       {
         name: 'primary',
         ip: deployResult.primary.masterIp,
-        supabaseIp: deployResult.primary.supabaseIp,
+        dbIp: deployResult.primary.dbIp,
         region,
       },
       {
         name: 'standby',
         ip: deployResult.standby.masterIp,
-        supabaseIp: deployResult.standby.supabaseIp,
+        dbIp: deployResult.standby.dbIp,
         region: secondaryRegion,
       },
     );
   } else if (deployResult.primaryIp && deployResult.standbyIp) {
-    // compose-HA shape: { primaryIp, standbyIp } — no supabaseIp because
-    // compose-HA runs Supabase on the same VM as the app.
+    // compose-HA shape: { primaryIp, standbyIp } — no dbIp because
+    // compose-HA runs the database on the same VM as the app.
     servers.push(
       { name: 'primary', ip: deployResult.primaryIp, region, serverType },
       { name: 'standby', ip: deployResult.standbyIp, region: secondaryRegion, serverType },
     );
   } else if (deployResult.masterIp) {
     // Single-server fall-through: hit by compose (one VPS) and k8s
-    // (master + supabase + worker[s]) deploys.
+    // (master + database + worker[s]) deploys.
     //
     // Compose: persist the Hetzner-assigned `id` + literal name (e.g.
     // `${projectName}-${environment}`) so `vibecarbon destroy` can locate
@@ -1543,14 +1578,14 @@ export async function executeDeployment(args, gatheredConfig) {
     // works end-to-end across both fields.
     //
     // K8s: in addition to the master entry, persist one entry per node
-    // role (supabase + worker-N) so post-deploy commands (scale, destroy,
+    // role (db + worker-N) so post-deploy commands (scale, destroy,
     // e2e verify-scale) can enumerate every IP without having to
     // re-derive worker IPs from Pulumi outputs. Master stays at index 0 —
     // a handful of compose-only paths read `envConfig.servers?.[0]`, and
-    // preserving that contract is cheap. `supabaseIp` is also kept on the
-    // master entry so failover.js can read `servers[0].supabaseIp` without
-    // first iterating to find the supabase entry — redundant with the
-    // dedicated supabase entry below, but keeps the existing failover
+    // preserving that contract is cheap. `dbIp` is also kept on the
+    // master entry so failover.js can read `servers[0].dbIp` without
+    // first iterating to find the db entry — redundant with the
+    // dedicated db entry below, but keeps the existing failover
     // path working.
     servers.push({
       name: 'master',
@@ -1562,21 +1597,21 @@ export async function executeDeployment(args, gatheredConfig) {
       // firewall (Hetzner: applied by the Pulumi program; DO: attached by tag).
       ...(deployResult.firewallId && { firewallId: deployResult.firewallId }),
       ip: deployResult.masterIp,
-      supabaseIp: deployResult.supabaseIp,
+      dbIp: deployResult.dbIp,
       region,
       serverType,
       ...(isComposeTier(tier) ? {} : { role: 'master' }),
     });
-    // K8s only — compose has neither a separate supabase node nor worker
+    // K8s only — compose has neither a separate database node nor worker
     // pool. Compose deploys leave servers as a single-element array.
     if (isK8sTier(tier)) {
-      if (deployResult.supabaseIp) {
+      if (deployResult.dbIp) {
         servers.push({
-          name: 'supabase',
-          ip: deployResult.supabaseIp,
+          name: 'db',
+          ip: deployResult.dbIp,
           region,
           serverType,
-          role: 'supabase',
+          role: 'db',
         });
       }
       const workerIps = Array.isArray(deployResult.workerIps) ? deployResult.workerIps : [];
@@ -1668,7 +1703,7 @@ export async function executeDeployment(args, gatheredConfig) {
           // warm/degraded standby, which the inner deploy flags on deployResult.
           replication: deployResult?.degraded ? 'degraded' : 'streaming',
           degraded: !!deployResult?.degraded,
-          // Persist per-cluster floatingIp + supabaseIp under ha.primary /
+          // Persist per-cluster floatingIp + dbIp under ha.primary /
           // ha.standby so failover.identifyServers takes the structured
           // path that surfaces floatingIp. Without these, identifyServers
           // falls through to the flat `servers[]` lookup which has only
@@ -1682,12 +1717,12 @@ export async function executeDeployment(args, gatheredConfig) {
               primary: {
                 masterIp: deployResult.primary.masterIp,
                 floatingIp: deployResult.primary.floatingIp,
-                supabaseIp: deployResult.primary.supabaseIp,
-                // The supabase node's PRIVATE IP — the local WireGuard-relay
+                dbIp: deployResult.primary.dbIp,
+                // The database node's PRIVATE IP — the local WireGuard-relay
                 // endpoint the failover/restore re-seed dials (deterministic
                 // 10.0.1.2 in the IaC program; persisted so identifyServers
                 // can surface it without hardcoding).
-                supabasePrivateIp: deployResult.primary.supabasePrivateIp,
+                dbPrivateIp: deployResult.primary.dbPrivateIp,
                 // The region + server types this side ACTUALLY deployed to,
                 // from the fan-out result (fall back to the options value only
                 // if absent). A failover/scale converge reads these back for the
@@ -1696,7 +1731,7 @@ export async function executeDeployment(args, gatheredConfig) {
                 // options-level flags or the shared primary types.
                 region: deployResult.primary.region ?? region,
                 masterServerType: deployResult.primary.masterServerType,
-                supabaseServerType: deployResult.primary.supabaseServerType,
+                dbServerType: deployResult.primary.dbServerType,
                 // Task 6/7: cluster identity (Pulumi stack name). A redeploy
                 // reads THIS back as `envConfig.ha.primary.stack` (see the
                 // haStacks derivation above, ~line 702) so a post-failover
@@ -1707,14 +1742,14 @@ export async function executeDeployment(args, gatheredConfig) {
               standby: {
                 masterIp: deployResult.standby.masterIp,
                 floatingIp: deployResult.standby.floatingIp,
-                supabaseIp: deployResult.standby.supabaseIp,
-                supabasePrivateIp: deployResult.standby.supabasePrivateIp,
+                dbIp: deployResult.standby.dbIp,
+                dbPrivateIp: deployResult.standby.dbPrivateIp,
                 region: deployResult.standby.region ?? secondaryRegion,
                 // The standby's region-resolved types (may differ from the
                 // primary's) — provisionStandbyCapacity pins them so a failover
                 // converge never resizes the standby's master/db node.
                 masterServerType: deployResult.standby.masterServerType,
-                supabaseServerType: deployResult.standby.supabaseServerType,
+                dbServerType: deployResult.standby.dbServerType,
                 stack: deployResult.standby.stack,
               },
               // Pilot-light failover config: what `vibecarbon failover` will
@@ -1725,14 +1760,6 @@ export async function executeDeployment(args, gatheredConfig) {
                 serverType: deployResult.standby.workerServerType,
               },
               scaleUpList: deriveScaleUpList({
-                overlayText: readFileSync(
-                  join(process.cwd(), 'k8s/values/supabase.standby.values.yaml'),
-                  'utf-8',
-                ),
-                sharedValuesText: readFileSync(
-                  join(process.cwd(), 'k8s/values/supabase.values.yaml'),
-                  'utf-8',
-                ),
                 appManifestText: readFileSync(
                   join(process.cwd(), 'k8s/base/app/deployment.yaml'),
                   'utf-8',
@@ -1774,12 +1801,12 @@ export async function executeDeployment(args, gatheredConfig) {
         // Without `minWorkers/maxWorkers` here, scale.js would read
         // `envConfig.minWorkers/maxWorkers` as `undefined` and fall back to
         // built-in defaults — which on a clean type-bump made Pulumi plan a
-        // delete of `worker-1`, replacing master+supabase along the way
-        // (etcd loss). Master/supabase/worker types are also persisted so
+        // delete of `worker-1`, replacing master+database along the way
+        // (etcd loss). Master/database/worker types are also persisted so
         // the per-role split survives across deploy → scale.
         ...(deployMode === 'kubernetes' && {
           masterServerType,
-          supabaseServerType,
+          dbServerType,
           workerServerType,
           // Single (non-HA) k8s's floating/reserved ingress IP (M3 Task 9f).
           // `status.js` has read `envConfig.floatingIp` for a long time, but

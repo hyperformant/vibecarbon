@@ -4,67 +4,98 @@
  * vibecarbon standardizes on x86-64 (amd64) servers — decision 2026-07-30.
  * DigitalOcean offers no ARM instances at all (and its CCM/CSI ship amd64-only
  * images regardless); Hetzner ARM is 4 SKUs in 3 of 6 locations behind a
- * "Cost-Optimized / Limited availability" tier. Every image below is consumed
- * ONLY on a server the CLI provisions, so arm64 has no consumer and building
- * it is pure QEMU tax.
+ * "Cost-Optimized / Limited availability" tier. An image consumed ONLY on a
+ * server the CLI provisions therefore publishes amd64 alone.
  *
  * This is a two-way guard, and that is the point:
  *
- *   - Re-adding `linux/arm64` fails here, so nobody silently pays for an
- *     emulated build leg nothing pulls.
- *   - Removing `linux/amd64`, or re-adding docker/setup-qemu-action, also
- *     fails here.
+ *   - Adding `linux/arm64` to a server-only image fails here, so nobody
+ *     silently pays for a build leg nothing pulls.
+ *   - Removing `linux/amd64`, dropping arm64 from an image a developer machine
+ *     pulls, or adding docker/setup-qemu-action to a workflow that has no
+ *     reason to emulate, also fails here.
  *
- * THE ONE arm64 IMAGE: ghcr.io/hyperformant/wal-g. A developer running the
- * generated project's compose stack (including on an Apple Silicon Mac) never
- * pulls ghcr.io/hyperformant/postgres — carbon/docker-compose.yml's `db`
- * service is `build: {context: ./db}` with `pull_policy: build`, so it builds
- * from carbon/db/Dockerfile for the host arch. Since the PG17/Alpine move,
- * that build's FIRST step is pulling ghcr.io/hyperformant/wal-g, which
- * therefore MUST publish linux/arm64 — the one image with an arm64 consumer.
- * Its Dockerfile cross-compiles (GOARCH from TARGETARCH on $BUILDPLATFORM),
- * so even that multi-arch publish needs no QEMU, and the no-QEMU guard below
- * stays absolute. The in-consumer `wal-g --version` exec is what catches a
- * wrong-arch binary at build time. See the `arm64 build support` block at the
- * bottom.
+ * THE arm64 IMAGES: ghcr.io/hyperformant/postgres, and the wal-g image it is
+ * built from. Servers stay amd64; the db image's arm64 child exists solely so
+ * local `vibecarbon up` on Apple Silicon runs Postgres natively (every mode,
+ * local dev included, pulls that image). Both build natively per arch on
+ * GitHub's ubuntu-24.04 / ubuntu-24.04-arm runners through one reusable
+ * workflow (native-multiarch-image.yml), each arch smoke-tested on its own
+ * hardware before its digest is pushed, and a merge job joins the two digests
+ * under one tag. No workflow sets up QEMU, and no build step leans on the
+ * runner's preinstalled binfmt to execute a foreign-arch binary.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 
+type Step = {
+  id?: string;
+  uses?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+  env?: Record<string, string>;
+};
+type Job = {
+  'runs-on'?: string;
+  needs?: string | string[];
+  permissions?: Record<string, string>;
+  strategy?: { 'fail-fast'?: boolean; matrix?: { include?: Array<Record<string, string>> } };
+  steps?: Step[];
+};
+const jobsOf = (workflow: string) =>
+  (loadYaml(read(workflow)) as { jobs: Record<string, Job> }).jobs;
+/** A literal GitHub expression, without tripping the template-string lint. */
+const expr = (inner: string) => `$${'{{'} ${inner} }}`;
+const isBuildPush = (step: Step) => /docker\/build-push-action@/.test(step.uses ?? '');
+
 /**
- * Every workflow that runs docker/build-push-action, with the platform list it
- * is intended to publish and WHO pulls the result. If you are here because
- * this test failed, change the reasoning first — not just the string.
+ * The platforms a job builds, with `${{ matrix.platform }}` expanded over the
+ * job's matrix legs. Sorted and de-duplicated: the db legs build twice (once
+ * to load for the smoke test, once to push), which is still one platform.
+ */
+function builtPlatforms(job: Job): string[] {
+  const legs = job.strategy?.matrix?.include ?? [{}];
+  const out = new Set<string>();
+  for (const step of (job.steps ?? []).filter(isBuildPush)) {
+    const raw = String(step.with?.platforms ?? '');
+    for (const leg of legs) {
+      const value = raw.replace(/\$\{\{\s*matrix\.(\w+)\s*\}\}/g, (_, k) => leg[k] ?? '');
+      for (const p of value.split(',')) if (p) out.add(p.trim());
+    }
+  }
+  return [...out].sort();
+}
+
+/**
+ * Every job that runs docker/build-push-action, with the platforms it is
+ * intended to publish and WHO pulls the result. If you are here because this
+ * test failed, change the reasoning first — not just the string.
  */
 const PUBLISHED_IMAGES = [
   {
-    workflow: '.github/workflows/publish-db-image.yml',
-    image: 'ghcr.io/hyperformant/wal-g (static wal-g binary)',
-    platforms: 'linux/amd64,linux/arm64',
+    workflow: '.github/workflows/native-multiarch-image.yml',
+    job: 'build',
+    image:
+      'ghcr.io/hyperformant/postgres and ghcr.io/hyperformant/wal-g (release, via ' +
+      'publish-db-image.yml), and both into ghcr.io/hyperformant/postgres-dev (branches, via ' +
+      'publish-db-image-dev.yml)',
+    platforms: ['linux/amd64', 'linux/arm64'],
     consumers:
-      'BOTH consumer Dockerfiles COPY --from this image: docker/postgres-walg (built amd64 in ' +
-      'CI) AND carbon/db, which builds on target servers (x86-64) and on developer machines — ' +
-      'Apple Silicon included. That local-dev pull is the arm64 consumer. The Dockerfile ' +
-      'cross-compiles on $BUILDPLATFORM, so no QEMU even for this multi-arch publish.',
-  },
-  {
-    workflow: '.github/workflows/publish-db-image.yml',
-    image: 'ghcr.io/hyperformant/postgres (supabase/postgres + wal-g)',
-    platforms: 'linux/amd64',
-    consumers:
-      "k8s only — carbon/k8s/values/supabase.values.yaml's {{DB_IMAGE}}/{{DB_IMAGE_TAG}} " +
-      'placeholders, substituted by installSupabase in src/lib/deploy/k8s/k3s.js and pulled by ' +
-      'k3s nodes. The compose path (local dev AND compose deploys) BUILDS carbon/db instead of ' +
-      'pulling this, so no developer machine ever pulls it.',
+      'servers (amd64 only, src/lib/deploy/platform.js) pull the db amd64 child; the arm64 child ' +
+      'exists solely for local `vibecarbon up` on Apple Silicon, which pulls this image too. ' +
+      'wal-g is consumed only by the db build (COPY --from, both arches). The dev channel is the ' +
+      'same build, selected only by VIBECARBON_DB_IMAGE.',
   },
   {
     workflow: '.github/workflows/publish-images.yml',
+    job: 'publish',
     image: 'ghcr.io/hyperformant/carbon-autoscaler',
-    platforms: 'linux/amd64',
+    platforms: ['linux/amd64'],
     consumers:
       'k8s only — the `carbon-autoscaler` sidecar in ' +
       'carbon/k8s/base/cluster-autoscaler/deployment.yaml, nodeSelector-pinned to ' +
@@ -73,132 +104,558 @@ const PUBLISHED_IMAGES = [
   },
   {
     workflow: 'carbon/.github/workflows/vibecarbon-build.yml',
+    job: 'build',
     image: "the generated project's app image (ghcr.io/<owner>/<repo>)",
-    platforms: 'linux/amd64',
+    platforms: ['linux/amd64'],
     consumers:
       'servers only — pulled by `vibecarbon deploy` (compose push mode via APP_IMAGE, and the ' +
       'k8s app Deployment) onto provisioned x86-64 servers.',
   },
 ] as const;
 
-// A workflow may publish more than one image (publish-db-image.yml builds the
-// wal-g binary image, then the db image that COPY --froms it — `needs:` inside
-// ONE workflow is what serializes that dependency), so assertions run per
-// workflow over the multiset of its images' intended platform lists.
 const WORKFLOWS = [...new Set(PUBLISHED_IMAGES.map((p) => p.workflow))].map((workflow) => ({
   workflow,
   images: PUBLISHED_IMAGES.filter((p) => p.workflow === workflow),
 }));
 
 describe.each(WORKFLOWS)('$workflow publishes its intended platforms', ({ workflow, images }) => {
-  const wf = read(workflow);
-  // Comments are ALLOWED to name arm64 and setup-qemu-action — that is where
-  // the reasoning for their absence lives. Only executable YAML is checked.
-  const code = wf
+  const jobs = jobsOf(workflow);
+  // Comments are ALLOWED to name setup-qemu-action — that is where the
+  // reasoning for its absence lives. Only executable YAML is checked.
+  const code = read(workflow)
     .split('\n')
     .filter((line) => !/^\s*#/.test(line))
     .join('\n');
   const why = `\n\n${images
-    .map((i) => `Image: ${i.image}\nConsumers: ${i.consumers}\nIntended platforms: ${i.platforms}`)
+    .map(
+      (i) =>
+        `Image: ${i.image} (job ${i.job})\nConsumers: ${i.consumers}\n` +
+        `Intended platforms: ${i.platforms.join(',')}`,
+    )
     .join('\n\n')}`;
 
-  it('pins exactly the intended platform list per published image', () => {
-    const found = [...code.matchAll(/^\s*platforms:\s*(\S.*?)\s*$/gm)].map((m) => m[1]);
-    const intended = images.map((i) => i.platforms);
-    expect(
-      found.sort(),
-      `${workflow} must declare exactly one \`platforms:\` line per published image.${why}`,
-    ).toEqual(intended.sort());
+  it('every image-building job is registered here', () => {
+    const building = Object.entries(jobs)
+      .filter(([, job]) => (job.steps ?? []).some(isBuildPush))
+      .map(([id]) => id)
+      .sort();
+    expect(building, `${workflow}: unregistered build-push job.${why}`).toEqual(
+      images.map((i) => i.job).sort(),
+    );
   });
 
-  it('does not set up QEMU (nothing is ever emulated — multi-arch cross-compiles)', () => {
-    // setup-qemu-action only exists to register binfmt handlers for foreign
-    // architectures. Even the multi-arch wal-g image needs none: its
-    // Dockerfile builds on $BUILDPLATFORM and targets GOARCH directly.
+  it.each(images.map((i) => [i.job, i] as const))(
+    'job %s builds exactly its intended platforms',
+    (_, image) => {
+      expect(builtPlatforms(jobs[image.job]), `${workflow}#${image.job}.${why}`).toEqual(
+        [...image.platforms].sort(),
+      );
+    },
+  );
+
+  it('never sets up QEMU (multi-arch is cross-compiled or built natively per arch)', () => {
     expect(
       code,
-      `${workflow} re-added docker/setup-qemu-action. QEMU is only needed to EMULATE a ` +
-        `foreign architecture — every multi-arch image this repo publishes cross-compiles ` +
-        `instead.${why}`,
+      `${workflow} added docker/setup-qemu-action. QEMU is only needed to EMULATE a foreign ` +
+        `architecture: Go images cross-compile, and the db image builds on a native runner ` +
+        `per arch.${why}`,
     ).not.toMatch(/setup-qemu-action/);
-  });
-
-  it('references arm64 nowhere but intended platforms lines', () => {
-    const withoutPlatformLines = code
-      .split('\n')
-      .filter((line) => !/^\s*platforms:/.test(line))
-      .join('\n');
-    const anyArmIntended = images.some((i) => i.platforms.includes('arm64'));
-    expect(
-      withoutPlatformLines,
-      `${workflow} references arm64 outside a \`platforms:\` line${
-        anyArmIntended ? '' : ' (and none of its images intend arm64 at all)'
-      }.${why}`,
-    ).not.toMatch(/arm64|aarch64/);
   });
 });
 
-describe('arm64 build support survives in the wal-g delivery chain', () => {
-  // arm64 local dev works because carbon/db/Dockerfile pulls the multi-arch
-  // ghcr.io/hyperformant/wal-g image (carbon/docker-compose.yml's db service
-  // uses `build: {context: ./db}` with `pull_policy: build`, so an Apple
-  // Silicon developer builds it natively). A future "consistency" cleanup
-  // that drops linux/arm64 from that image's publish — or the TARGETARCH
-  // cross-compile that makes it QEMU-free — breaks ARM laptops silently.
-  // The publish-platform half is pinned by the PUBLISHED_IMAGES entry above;
-  // these pin the Dockerfile half. (Deeper build-shape guards live in
-  // tests/unit/deploy/walg-dockerfile-arch.test.ts.)
+type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
+type CallerJob = Job & { uses?: string; with?: Record<string, string>; if?: string };
+const workflowOf = (file: string) => loadYaml(read(file)) as Workflow;
+const REUSABLE = './.github/workflows/native-multiarch-image.yml';
+const SMOKE = '.github/scripts/smoke-db-image.sh';
+/** A job's run: scripts, joined, for regex checks. */
+const runsOf = (job: Job | undefined) => (job?.steps ?? []).map((s) => s.run ?? '').join('\n');
+
+describe('the db image builds natively per arch and merges into one tag', () => {
+  const jobs = jobsOf('.github/workflows/native-multiarch-image.yml');
+  const build = jobs.build;
+  const merge = jobs.merge;
+
+  it('one matrix leg per arch, each on its own native runner', () => {
+    expect(build['runs-on']).toBe(expr('matrix.runner'));
+    expect(build.strategy?.matrix?.include).toEqual([
+      { platform: 'linux/amd64', runner: 'ubuntu-24.04' },
+      { platform: 'linux/arm64', runner: 'ubuntu-24.04-arm' },
+    ]);
+  });
+
+  it('each leg builds ONE platform, smoke-tests it, then pushes by digest only', () => {
+    const steps = build.steps ?? [];
+    const pushes = steps.filter(isBuildPush);
+    for (const step of pushes) expect(step.with?.platforms).toBe(expr('matrix.platform'));
+    const smokeAt = steps.findIndex((s) => /bash "\$SMOKE" smoke:local/.test(s.run ?? ''));
+    const pushAt = steps.findIndex(
+      (s) => isBuildPush(s) && /push-by-digest=true/.test(String(s.with?.outputs ?? '')),
+    );
+    expect(smokeAt, 'no smoke step before the push').toBeGreaterThan(-1);
+    expect(pushAt, 'no push-by-digest step').toBeGreaterThan(smokeAt);
+    // The leg never tags: only the merge job names the image.
+    for (const step of pushes) expect(step.with?.tags ?? 'smoke:local').toBe('smoke:local');
+  });
+
+  it('a failed leg stops the other: fail-fast, so no lone digest waits for a merge', () => {
+    expect(build.strategy?.['fail-fast']).toBe(true);
+  });
+
+  it('the pushed image is proven to be the smoke-tested one (same config digest)', () => {
+    const steps = build.steps ?? [];
+    const loadAt = steps.findIndex(
+      (s) => isBuildPush(s) && s.id === 'load' && s.with?.load === true,
+    );
+    const pushAt = steps.findIndex((s) => isBuildPush(s) && s.id === 'push');
+    const checkAt = steps.findIndex((s) => /"\$SMOKED" != "\$PUSHED"/.test(s.run ?? ''));
+    expect(loadAt).toBeGreaterThan(-1);
+    expect(pushAt).toBeGreaterThan(loadAt);
+    expect(checkAt, 'no config-digest check after the push').toBeGreaterThan(pushAt);
+    const recordAt = steps.findIndex((s) => /digests\/\$ARCH/.test(s.run ?? ''));
+    expect(recordAt, 'the digest is recorded only once it is proven').toBeGreaterThan(checkAt);
+    // One emptiness guard per digest, each its own exit: `test -n a && test
+    // -n b` does not stop `set -e`, and two empty digests compare equal.
+    const check = steps[checkAt].run ?? '';
+    expect(check).toMatch(/if \[ -z "\$SMOKED" \]; then[\s\S]*?exit 1/);
+    expect(check).toMatch(/if \[ -z "\$DIGEST" \]; then[\s\S]*?exit 1/);
+    expect(check).toMatch(/if \[ -z "\$PUSHED" \]; then[\s\S]*?exit 1/);
+    expect(check).not.toMatch(/test -n "\$\w+" &&/);
+    // The smoke side comes from the load build's metadata (docker exporter:
+    // one manifest, no attestations). The push side can NOT: the push build
+    // carries the default provenance attestation, so its result is an index
+    // and buildx reports no `containerimage.config.digest` for it (the first
+    // real run failed exactly so). It is read from the registry instead, by
+    // the digest the push reported.
+    expect(steps[checkAt].env).toEqual({
+      SMOKED: expr("fromJSON(steps.load.outputs.metadata)['containerimage.config.digest']"),
+      DIGEST: expr('steps.push.outputs.digest'),
+      NAME: expr('inputs.image'),
+      PLATFORM: expr('matrix.platform'),
+    });
+    expect(JSON.stringify(steps[checkAt].env)).not.toMatch(/steps\.push\.outputs\.metadata/);
+    expect(check).toMatch(/docker buildx imagetools inspect --raw "\$NAME@\$DIGEST"/);
+    expect(check).toContain('"attestation-manifest"');
+    expect(check).toMatch(/PUSHED=\$\(jq -r '\.config\.digest/);
+  });
+
+  it('the push keeps its provenance attestation: the guard reads through it, never around it', () => {
+    const push = (build.steps ?? []).find((s) => isBuildPush(s) && s.id === 'push');
+    expect(push?.with?.provenance).toBeUndefined();
+    expect(push?.with?.attests).toBeUndefined();
+    expect(JSON.stringify(build.steps)).not.toMatch(/BUILDX_NO_DEFAULT_ATTESTATIONS/);
+  });
+
+  it('digest artifacts are named per run attempt, so a partial re-run never clashes', () => {
+    const upload = (build.steps ?? []).find((s) => /actions\/upload-artifact@/.test(s.uses ?? ''));
+    expect(upload?.with?.name).toBe(
+      `${expr('inputs.name')}-digest-${expr('steps.ref.outputs.arch')}-${expr('github.run_attempt')}`,
+    );
+    const download = (merge.steps ?? []).find((s) =>
+      /actions\/download-artifact@/.test(s.uses ?? ''),
+    );
+    expect(download?.with?.pattern).toBe(`${expr('inputs.name')}-digest-*`);
+    // Per-artifact directories: the merge picks each arch's newest attempt.
+    expect(download?.with?.['merge-multiple']).toBeUndefined();
+    expect(runsOf(merge)).toMatch(/sort -V \| tail -n 1/);
+  });
+
+  it("each digest's platform is verified BEFORE the tag is created", () => {
+    const run = runsOf(merge);
+    const check = run.indexOf('if [ "$got" != "linux/$arch" ]');
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(run.indexOf('docker buildx imagetools create'));
+  });
+
+  it('the smoke script really starts postgres and loads pg_cron', () => {
+    const smoke = read(SMOKE);
+    expect(smoke).toMatch(/--entrypoint postgres "\$IMAGE" --version/);
+    expect(smoke).toMatch(/--entrypoint wal-g "\$IMAGE" --version/);
+    expect(smoke).toMatch(/initdb -D \/tmp\//);
+    expect(smoke).toMatch(/CREATE EXTENSION pg_cron/);
+  });
+
+  it('the environment is an input with an empty default, used by both jobs', () => {
+    const wf = workflowOf('.github/workflows/native-multiarch-image.yml');
+    const call = (wf.on as { workflow_call: { inputs: Record<string, { default?: unknown }> } })
+      .workflow_call;
+    expect(call.inputs.environment.default).toBe('');
+    expect(call.inputs.immutable.default).toBe(false);
+    for (const job of [build, merge]) {
+      expect((job as Job & { environment?: string }).environment).toBe(expr('inputs.environment'));
+    }
+  });
+
+  it('an immutable tag is re-checked right before create and never moved', () => {
+    const run = runsOf(merge);
+    expect(run.indexOf('if [ "$IMMUTABLE" = true ]')).toBeGreaterThan(-1);
+    expect(run.indexOf('if [ "$IMMUTABLE" = true ]')).toBeLessThan(
+      run.indexOf('docker buildx imagetools create'),
+    );
+    expect(run).toMatch(/grep -q 'not found'/);
+  });
+
+  it('the merge job creates the tag from both digests, then verifies and smokes it', () => {
+    expect(merge.needs).toBe('build');
+    const run = runsOf(merge);
+    expect(run).toMatch(/docker buildx imagetools create -t "\$IMAGE"/);
+    expect(run).toMatch(/-eq 2/);
+    expect(run).toMatch(/for arch in amd64 arm64/);
+    expect(run).toMatch(/bash "\$SMOKE" "\$IMAGE"/);
+    expect((merge.steps ?? []).some(isBuildPush)).toBe(false);
+  });
+});
+
+const WALG_SMOKE = '.github/scripts/smoke-walg-image.sh';
+const DB_WORKFLOWS = [
+  '.github/workflows/publish-db-image.yml',
+  '.github/workflows/publish-db-image-dev.yml',
+] as const;
+
+describe('wal-g builds natively per arch in both channels (arch audit F6)', () => {
+  // wal-g's Dockerfile executes the binary in a TARGETPLATFORM smoke stage.
+  // Built for both arches on one amd64 runner, that RUN only worked through the
+  // runner image's preinstalled binfmt. Each arch now builds on its own runner
+  // via the shared workflow, so nothing depends on emulation.
+  it.each(DB_WORKFLOWS)(
+    '%s builds no image itself: every build goes through the shared workflow',
+    (file) => {
+      for (const [id, job] of Object.entries(workflowOf(file).jobs)) {
+        expect((job.steps ?? []).some(isBuildPush), `${file}#${id} runs build-push itself`).toBe(
+          false,
+        );
+      }
+      const code = read(file)
+        .split('\n')
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n');
+      expect(code).not.toMatch(/setup-qemu-action/);
+      expect(code, `${file}: pin runners (ubuntu-24.04), never ubuntu-latest`).not.toMatch(
+        /ubuntu-latest/,
+      );
+    },
+  );
+
+  it('the smoke script executes wal-g', () => {
+    expect(read(WALG_SMOKE)).toMatch(/--entrypoint \/usr\/local\/bin\/wal-g "\$IMAGE" --version/);
+  });
+
+  it('release: publish-walg is the shared workflow, gated on a wal-g change, never feeding the db build', () => {
+    const wf = workflowOf('.github/workflows/publish-db-image.yml');
+    const walg = wf.jobs['publish-walg'] as CallerJob;
+    expect(walg.uses).toBe(REUSABLE);
+    expect(walg.needs).toBe('walg-ref');
+    expect(walg.with).toMatchObject({
+      context: 'docker/wal-g',
+      image: 'ghcr.io/hyperformant/wal-g',
+      tag: expr('needs.walg-ref.outputs.tag'),
+      smoke: WALG_SMOKE,
+      environment: 'e2e-infra',
+    });
+    expect(wf.jobs['walg-ref']['runs-on']).toBe('ubuntu-24.04');
+    expect(runsOf(wf.jobs['walg-ref'])).toMatch(/ARG WALG_VERSION=v/);
+    // Republished only when docker/wal-g changed in the push (or the tag is
+    // missing, or by hand): an unchanged rebuild would move the tag's digest
+    // for nothing, since the build is not byte-reproducible.
+    expect(runsOf(wf.jobs['walg-ref'])).toMatch(
+      /git diff --quiet "\$BEFORE" HEAD -- docker\/wal-g/,
+    );
+    expect((walg as CallerJob & { if?: string }).if).toBe(
+      "needs.walg-ref.outputs.publish == 'true'",
+    );
+    // The db image COPY --froms the wal-g digest its Dockerfile pins, so it
+    // must not wait on (or consume) this run's wal-g publish.
+    expect((wf.jobs['build-db'] as CallerJob).needs).not.toContain('publish-walg');
+  });
+
+  it('dev: build-walg is the shared workflow, consumed by digest by the db build', () => {
+    const wf = workflowOf('.github/workflows/publish-db-image-dev.yml');
+    const walg = wf.jobs['build-walg'] as CallerJob;
+    const db = wf.jobs['build-db'] as CallerJob;
+    expect(walg.uses).toBe(REUSABLE);
+    expect(walg.with).toMatchObject({
+      context: 'docker/wal-g',
+      image: expr('needs.plan.outputs.image'),
+      tag: expr('needs.plan.outputs.walg-tag'),
+      smoke: WALG_SMOKE,
+      immutable: true,
+    });
+    // Like build-db, dev needs no e2e-infra secrets: no environment.
+    expect(walg.with?.environment).toBeUndefined();
+    expect(runsOf(wf.jobs.plan)).toMatch(/echo "walg-tag=walg-\$\{SHA:0:\$LEN\}"/);
+    expect(db.needs).toEqual(['plan', 'build-walg']);
+    // The db legs resolve FROM <walg-from> to the reusable workflow's
+    // digest-pinned `ref` output, never to the walg-<sha> tag.
+    const ctx = String(db.with?.['build-contexts']);
+    expect(ctx).toMatch(/needs\.build-walg\.result == 'success'/);
+    expect(ctx).toContain(
+      "format('{0}=docker-image://{1}', needs.plan.outputs.walg-from, needs.build-walg.outputs.ref)",
+    );
+    expect(ctx).not.toMatch(/walg-tag/);
+  });
+
+  it('the shared workflow exposes the digest-pinned ref the dev db build consumes', () => {
+    const wf = workflowOf('.github/workflows/native-multiarch-image.yml');
+    const call = (wf.on as { workflow_call: { outputs: Record<string, { value: string }> } })
+      .workflow_call;
+    expect(call.outputs.ref.value).toBe(expr('jobs.merge.outputs.ref'));
+    expect(runsOf(jobsOf('.github/workflows/native-multiarch-image.yml').merge)).toMatch(
+      /echo "ref=\$NAME@\$\(jq -r \.digest manifest\.json\)"/,
+    );
+  });
+});
+
+describe('packages: write only on the jobs that publish', () => {
+  // OpenSSF Token-Permissions: the workflow default is read-only, and only a
+  // job that pushes to ghcr (or calls the shared workflow that does) gets
+  // packages: write. A planning job never does.
+  const PUBLISHING: Record<string, string[]> = {
+    '.github/workflows/native-multiarch-image.yml': ['build', 'merge'],
+    '.github/workflows/publish-db-image.yml': ['build-db', 'publish-walg'],
+    '.github/workflows/publish-db-image-dev.yml': ['build-db', 'build-walg'],
+  };
+
+  it.each(Object.entries(PUBLISHING))('%s', (file, publishing) => {
+    const wf = workflowOf(file) as Workflow & { permissions?: unknown };
+    expect(wf.permissions, `${file}: workflow default must be read-only`).toEqual({
+      contents: 'read',
+    });
+    const writers = Object.entries(wf.jobs)
+      .filter(([, job]) => job.permissions?.packages === 'write')
+      .map(([id]) => id)
+      .sort();
+    expect(writers).toEqual(publishing);
+    for (const [id, job] of Object.entries(wf.jobs)) {
+      expect(job.permissions, `${file}#${id} declares no permissions`).toBeDefined();
+      const extra = Object.keys(job.permissions ?? {}).filter(
+        (k) => !['contents', 'packages'].includes(k),
+      );
+      expect(extra, `${file}#${id} asks for more than contents/packages`).toEqual([]);
+    }
+  });
+});
+
+describe('the release db publish is unchanged by the dev channel', () => {
+  const wf = workflowOf('.github/workflows/publish-db-image.yml');
+  const build = wf.jobs['build-db'] as CallerJob;
+
+  it('runs only on pushes to main (and by hand), never on pull requests', () => {
+    expect(Object.keys(wf.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect((wf.on.push as { branches: string[] }).branches).toEqual(['main']);
+  });
+
+  it('builds the release ref through the shared workflow, from the pinned wal-g digest', () => {
+    expect(build.uses).toBe(REUSABLE);
+    expect(build.needs).toBe('db-ref');
+    expect(build.with).toMatchObject({
+      context: 'docker/postgres-walg',
+      image: expr('needs.db-ref.outputs.image'),
+      tag: expr('needs.db-ref.outputs.tag'),
+      smoke: SMOKE,
+      environment: 'e2e-infra',
+    });
+    expect(build.with?.['build-contexts']).toBeUndefined();
+    // Anchored on DB_IMAGE itself: DEV_DB_IMAGE must never satisfy the grep.
+    const ref = runsOf(wf.jobs['db-ref']);
+    expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE\\s\*=/);
+    expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE_TAG\\s\*=/);
+    expect(read('.github/workflows/publish-db-image.yml')).not.toMatch(/postgres-dev|DEV_DB_IMAGE/);
+  });
+
+  it('never re-mints an existing release tag (a wal-g-only push builds no db image)', () => {
+    // The tag's -r<N> revision moves with every input change, so a tag that
+    // already exists IS this build. db-ref looks it up and build-db is
+    // skipped when it is there: a push touching only docker/wal-g (which still
+    // triggers this workflow) leaves the release image alone. `immutable`
+    // re-checks after the builds so a racing run cannot move it either.
+    const ref = runsOf(wf.jobs['db-ref']);
+    expect(ref).toMatch(/docker buildx imagetools inspect "\$IMG:\$TAG"/);
+    expect(ref).toMatch(/grep -q 'not found'/);
+    expect((build as CallerJob & { if?: string }).if).toBe("needs.db-ref.outputs.exists != 'true'");
+    expect(build.with?.immutable).toBe(true);
+    expect((wf.on.push as { paths: string[] }).paths).toContain('docker/wal-g/**');
+  });
+});
+
+describe('release.yml refuses a release whose pinned db image users cannot pull', () => {
+  // Every mode pulls DB_IMAGE:DB_IMAGE_TAG, local `up` included. A release
+  // cut before publish-db-image finished (or with a private package, or a
+  // missing arch) breaks create/up/deploy for every user at once.
+  const jobs = jobsOf('.github/workflows/release.yml') as Record<string, Job & { needs?: string }>;
+  const gate = jobs['db-image'];
+  const run = runsOf(gate);
+
+  it('the release job needs the db-image gate', () => {
+    expect(gate).toBeDefined();
+    expect(jobs.release.needs).toBe('db-image');
+  });
+
+  it('reads the pair from src/lib/images.js, the CLI authority', () => {
+    expect(run).toContain("import('./src/lib/images.js')");
+    expect(run).toContain('$GITHUB_ENV');
+  });
+
+  it('inspects anonymously: an empty DOCKER_CONFIG and no login anywhere in the job', () => {
+    expect(run).toMatch(/DOCKER_CONFIG="\$RUNNER_TEMP\/[^"]+"/);
+    expect(run).toMatch(/docker buildx imagetools inspect "\$ref"/);
+    expect(run.indexOf('export DOCKER_CONFIG')).toBeLessThan(run.indexOf('imagetools inspect'));
+    expect(JSON.stringify(gate)).not.toMatch(/docker\/login-action|docker login|secrets\./);
+  });
+
+  it('requires both linux/amd64 and linux/arm64 children and refuses otherwise', () => {
+    expect(run).toMatch(/for want in linux\/amd64 linux\/arm64; do/);
+    expect(run).toMatch(/grep -qx "\$want"/);
+    expect(run.match(/::error::refusing to release/g)?.length).toBe(2);
+    expect(run.match(/exit 1/g)?.length).toBe(2);
+  });
+});
+
+describe('the db image dev channel (publish-db-image-dev.yml)', () => {
+  const FILE = '.github/workflows/publish-db-image-dev.yml';
+  const wf = workflowOf(FILE);
+  const plan = runsOf(wf.jobs.plan);
+  const build = wf.jobs['build-db'] as CallerJob;
+
+  it('runs on branch pushes and by hand, NEVER on pull_request*', () => {
+    expect(Object.keys(wf.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    const push = wf.on.push as { 'branches-ignore': string[]; paths: string[] };
+    // dependabot/**: those pushes get a read-only token and no secrets, so
+    // every db-image bump ran red here (final review M6).
+    expect(push['branches-ignore']).toEqual(['main', 'dependabot/**']);
+    expect(push.paths).toEqual(
+      expect.arrayContaining(['docker/postgres-walg/**', 'docker/wal-g/**']),
+    );
+    expect(read(FILE)).not.toMatch(/^\s*pull_request/m);
+  });
+
+  it('publishes only to postgres-dev, refusing any other name', () => {
+    expect(plan).toMatch(/grep -oP "\^export const DEV_DB_IMAGE\\s\*=/);
+    expect(plan).toMatch(/case "\$IMG" in \*\/postgres-dev\) ;;/);
+    expect(build.uses).toBe(REUSABLE);
+    expect(build.with?.image).toBe(expr('needs.plan.outputs.image'));
+    expect((wf.jobs['build-walg'] as CallerJob).with?.image).toBe(expr('needs.plan.outputs.image'));
+    // Nothing names the release package as a push target.
+    const code = read(FILE)
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+    expect(code).not.toMatch(/hyperformant\/postgres(?!-dev)\b/);
+  });
+
+  it('tags are <DB_IMAGE_TAG>-<sha> of the last image-input commit, never rebuilt', () => {
+    expect(build.with?.tag).toBe(expr('needs.plan.outputs.tag'));
+    expect(plan).toMatch(/DEV_TAG="\$TAG-\$\{SHA:0:\$LEN\}"/);
+    expect(plan).toMatch(/SHA=\$\(git log -1 --format=%H HEAD -- /);
+    expect(build.if).toMatch(/needs\.plan\.outputs\.exists != 'true'/);
+    expect(build.with?.immutable).toBe(true);
+    // Two runs for one tag queue rather than race imagetools create.
+    expect((build as CallerJob & { concurrency?: unknown }).concurrency).toEqual({
+      group: `publish-db-image-dev-${expr('needs.plan.outputs.tag')}`,
+      'cancel-in-progress': false,
+    });
+    // Dev needs no e2e-infra secrets: the shared jobs run with no environment.
+    expect(build.with?.environment).toBeUndefined();
+    expect(wf.jobs['build-walg'] as CallerJob).toMatchObject({
+      if: expect.stringMatching(/needs\.plan\.outputs\.walg-changed == 'true'/),
+    });
+  });
+
+  it('the plan pathspec and the push trigger paths are the e2e harness pathspec', async () => {
+    const { DB_IMAGE_INPUT_PATHSPEC } = await import('../../e2e/utils/db-image-select.js');
+    expect(DB_IMAGE_INPUT_PATHSPEC).toContain('src/lib/images.js');
+    const asTrigger = DB_IMAGE_INPUT_PATHSPEC.map((p: string) =>
+      p.startsWith(':(exclude)')
+        ? `!${p.slice(':(exclude)'.length)}`
+        : p.endsWith('.js')
+          ? p
+          : `${p}/**`,
+    );
+    expect((wf.on.push as { paths: string[] }).paths).toEqual(asTrigger);
+    const quoted = DB_IMAGE_INPUT_PATHSPEC.map((p: string) =>
+      p.startsWith(':') ? `'${p}'` : p,
+    ).join(' ');
+    expect(plan).toContain(`git log -1 --format=%H HEAD -- ${quoted}`);
+  });
+});
+
+describe('the dev channel cleanup (cleanup-db-image-dev.yml)', () => {
+  const FILE = '.github/workflows/cleanup-db-image-dev.yml';
+  const wf = workflowOf(FILE);
+  const jobs = Object.entries(wf.jobs);
+
+  it('runs daily, one job, scoped to postgres-dev with packages: write only there', () => {
+    expect(Object.keys(wf.on).sort()).toEqual(['schedule', 'workflow_dispatch']);
+    expect(jobs.map(([id]) => id)).toEqual(['prune']);
+    const prune = wf.jobs.prune as Job & {
+      permissions?: Record<string, string>;
+      env?: Record<string, string>;
+    };
+    expect(prune.permissions).toEqual({ packages: 'write' });
+    expect((wf as unknown as { permissions: unknown }).permissions).toEqual({ contents: 'read' });
+    expect(prune.env).toMatchObject({ PACKAGE: 'postgres-dev', MAX_AGE_DAYS: '14' });
+    const del = (prune.steps ?? []).filter((s) =>
+      /actions\/delete-package-versions@/.test(s.uses ?? ''),
+    );
+    expect(del).toHaveLength(1);
+    expect(del[0].with).toMatchObject({
+      'package-name': 'postgres-dev',
+      'package-type': 'container',
+    });
+    // With no ids the action deletes the oldest version regardless of age.
+    expect((del[0] as Step & { if?: string }).if).toBe("steps.old.outputs.ids != ''");
+    expect(read(FILE)).not.toMatch(/package-name:\s*postgres\s*$/m);
+  });
+});
+
+describe('arm64 build support survives in the db image delivery chain', () => {
+  // arm64 local dev works because the db image (and the wal-g image it copies
+  // from) publish linux/arm64. The publish-platform half is pinned by the
+  // PUBLISHED_IMAGES entries above; these pin the Dockerfile half. (Deeper
+  // build-shape guards live in tests/unit/deploy/walg-dockerfile-arch.test.ts.)
   it('docker/wal-g/Dockerfile cross-compiles from TARGETARCH', () => {
     const dockerfile = read('docker/wal-g/Dockerfile');
     expect(dockerfile).toMatch(/ARG TARGETARCH/);
     expect(dockerfile).toMatch(/GOARCH=\$\{?TARGETARCH\}?/);
   });
 
-  it.each(['carbon/db/Dockerfile', 'docker/postgres-walg/Dockerfile'])(
-    '%s executes wal-g --version at build time',
-    (path) => {
-      // Executing the binary during the build is the only place a wrong-arch
-      // wal-g fails loudly instead of shipping a database with silently dead
-      // backups behind green health checks.
-      expect(read(path)).toMatch(/wal-g --version/);
-    },
-  );
+  it('docker/postgres-walg/Dockerfile executes wal-g --version at build time', () => {
+    // Executing the binary during the build (natively on each arch) is the only
+    // place a wrong-arch wal-g fails loudly instead of shipping a database
+    // with silently dead backups behind green health checks.
+    expect(read('docker/postgres-walg/Dockerfile')).toMatch(/wal-g --version/);
+  });
 });
 
-describe('compose keeps BUILDING the db image rather than pulling the published one', () => {
-  // This is the fact that makes amd64-only publishing safe for the db image.
-  // If the `db` service ever switches to `image: ghcr.io/hyperformant/postgres`,
-  // local dev on Apple Silicon starts PULLING it and arm64 must go back into
-  // .github/workflows/publish-db-image.yml.
-  const compose = read('carbon/docker-compose.yml');
-  // Slice the `db:` service body: from its key to the next top-level service.
-  const dbStart = compose.indexOf('\n  db:');
-  const nextService = compose.slice(dbStart + 1).search(/\n {2}[a-z_-]+:/);
-  const dbService = compose.slice(dbStart, dbStart + 1 + nextService);
+describe('compose pulls the published db image rather than building one', () => {
+  // This is the fact that makes arm64 publishing necessary for the db image:
+  // local dev on Apple Silicon pulls it.
+  // Slice the `db:` service body: from its key to the next top-level key.
+  const dbServiceOf = (file: string) => {
+    const compose = read(file);
+    const start = compose.indexOf('\n  db:');
+    if (start === -1) return '';
+    const next = compose.slice(start + 1).search(/\n {2}[a-z_-]+:|\n[a-z]/);
+    return compose.slice(start, next === -1 ? undefined : start + 1 + next);
+  };
+  const dbService = dbServiceOf('carbon/docker-compose.yml');
 
   it('the slice actually isolated the db service', () => {
-    expect(dbStart).toBeGreaterThan(-1);
-    expect(nextService).toBeGreaterThan(-1);
     expect(dbService).toMatch(/^\n {2}db:/);
-    expect(dbService).not.toMatch(/\n {2}kong:/);
+    expect(dbService).not.toMatch(/\n {2}app:/);
+    expect(dbService).toMatch(/healthcheck:/);
   });
 
-  it('db builds from ./db with pull_policy: build', () => {
-    expect(dbService).toMatch(/build:\s*\n\s*context:\s*\.\/db/);
-    expect(dbService).toMatch(/pull_policy:\s*build/);
+  it('db is image DB_IMAGE:DB_IMAGE_TAG from .env, with no build and no pull_policy', () => {
+    expect(dbService).toMatch(/^\s+image: \$\{DB_IMAGE:\?[^}]*\}:\$\{DB_IMAGE_TAG:\?[^}]*\}\s*$/m);
+    expect(dbService).not.toMatch(/^\s+build:/m);
+    expect(dbService).not.toMatch(/pull_policy/);
   });
 
-  it('no compose file points the db service at the published ghcr image', () => {
-    for (const file of [
-      'carbon/docker-compose.yml',
-      'carbon/docker-compose.override.yml',
-      'carbon/docker-compose.prod.yml',
-    ]) {
-      expect(
-        read(file),
-        `${file} references the published db image. If any compose path PULLS it, local dev on ` +
-          `an arm64 Mac breaks unless linux/arm64 is restored in publish-db-image.yml.`,
-      ).not.toMatch(/ghcr\.io\/hyperformant\/postgres/);
+  it('no compose overlay reintroduces a db build or another db image', () => {
+    for (const file of ['carbon/docker-compose.override.yml', 'carbon/docker-compose.prod.yml']) {
+      const overlay = dbServiceOf(file);
+      expect(overlay, `${file} has no db service to check`).toMatch(/^\n {2}db:/);
+      expect(overlay, `${file} builds the db`).not.toMatch(/^\s+(build|image|pull_policy):/m);
     }
   });
 });

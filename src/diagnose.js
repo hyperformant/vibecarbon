@@ -39,6 +39,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig } from './lib/config.js';
 import { isComposeTier, resolveTier } from './lib/deploy/tier-registry.js';
+import { DIAG_BUSYBOX_IMAGE, DIAG_NETSHOOT_IMAGE } from './lib/images.js';
 import { ensureOperatorIpAccessWarn } from './lib/operator-ip.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
@@ -407,7 +408,7 @@ function diagnoseNetwork(report, env, kubeconfig, Provider) {
       'kube-system',
       'run',
       probeName,
-      '--image=busybox:1.36',
+      `--image=${DIAG_BUSYBOX_IMAGE}`,
       '--restart=Never',
       '--rm',
       '--attach',
@@ -557,7 +558,7 @@ function diagnoseEgress(report, env, kubeconfig, sshKey, controlplaneIp, Provide
       'default',
       'run',
       podName,
-      '--image=nicolaka/netshoot',
+      `--image=${DIAG_NETSHOOT_IMAGE}`,
       '--restart=Never',
       '--command',
       '--',

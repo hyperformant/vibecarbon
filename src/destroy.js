@@ -263,9 +263,9 @@ async function findOrphanPulumiStacks(projectConfig) {
  *   - `kubectl delete pvc --all --wait=true`. Failed — PVCs have a
  *     kubernetes.io/pvc-protection finalizer that blocks delete while
  *     a Pod is bound, so the wait burned the full 180s while
- *     supabase-db-0 still held its PVC. 4 orphans.
+ *     the db pod still held its PVC. 4 orphans.
  *   - Delete Pods first (--wait=false), then PVCs. Failed for the
- *     same end result — supabase-db is a StatefulSet, so its
+ *     same end result — the db is a StatefulSet, so its
  *     controller recreated the deleted Pod within seconds and
  *     re-bound the PVC. Same 4 orphans on the 2026-04-28 rerun.
  *   - Current: delete the entire vibecarbon namespace. The namespace
@@ -496,7 +496,7 @@ async function cleanupAutoscalerWorkers(provider, clusterName) {
 
   // Match strategy: label-primary, in-network-without-role-label fallback.
   // Pulumi-managed roles for compatibility with pre-Phase-3 deploys.
-  const PULUMI_ROLES = new Set(['master', 'supabase', 'worker']);
+  const PULUMI_ROLES = new Set(['master', 'db', 'worker']);
   const caServers = servers.filter((server) => {
     const inClusterNetwork = provider.serverNetworkIds(server).includes(clusterNetwork.id);
     if (!inClusterNetwork) return false;
@@ -2107,7 +2107,7 @@ async function destroyK8sTier({
   const Provider = providerFor(envConfig);
   const provider = new Provider(providerToken);
 
-  // Volume IDs collected from ALL cluster servers (master, supabase, workers)
+  // Volume IDs collected from ALL cluster servers (master, database, workers)
   // AND from each cluster's own PersistentVolumes. Both providers' CSI drivers
   // name volumes pvc-<uuid> — not the cluster name — and the labels the bumped
   // Hetzner driver stamps are project-scoped, not environment-scoped (DO stamps

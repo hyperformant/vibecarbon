@@ -14,13 +14,16 @@ See the in-app deployment guide (`content/docs/deployment.mdx`, rendered at `/do
 
 ## Architecture Differences
 
+The same four services run in both places: your Postgres 17 (`db`, with pg_cron and WAL-G), your app (`app`, the Hono API with Better Auth, serving the SPA), Traefik, and in production the Docker socket proxy Traefik reads through. What changes is how they are tuned and exposed.
+
 ### Local Development
 **Goal**: Fast startup, minimal resources, easy debugging
 
 Services included:
-- ✓ Core Supabase stack (Auth, Database, Storage, Realtime, REST API)
-- ✓ Development tools (Studio, Meta)
-- ✓ Basic networking
+- ✓ Postgres 17, published on `localhost` only
+- ✓ Traefik, with the admin tools open (no ForwardAuth) on `*.localhost`
+- ✓ Your app, either in Docker or as `npm run dev` (API on :3000, Vite on :5173)
+- ✓ A local S3 bucket (Garage) for uploads
 
 **Start command:**
 ```bash
@@ -32,11 +35,12 @@ docker compose up -d
 ### Production
 **Goal**: Performance, reliability, scalability
 
-Additional services:
-- ✓ **Supavisor** - Connection pooling (handles 1000+ concurrent connections)
-- ✓ **Edge Functions** - Serverless function runtime
-- ✓ **Resource limits** - Prevents resource exhaustion
-- ✓ **Optimized settings** - Production-tuned configurations
+What the production overlay adds:
+- ✓ **TLS and one public origin** - Traefik terminates HTTPS and sends every public path to the app
+- ✓ **ForwardAuth** - The Traefik dashboard and any admin add-on require a `super_admin`
+- ✓ **Resource limits** - Prevents one service from starving the others
+- ✓ **Backups** - WAL-G archives every WAL segment and takes base backups to your S3 bucket
+- ✓ **No public database port** - Postgres listens on the private network only
 
 **Start command:**
 ```bash
@@ -45,73 +49,30 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 ## Key Differences
 
-### 1. Connection Pooling (Supavisor)
+### 1. Database Access
 
-**Local**: Direct database connections
-- Simpler debugging
-- Lower latency
-- No connection limits needed
+**Local**: Postgres on `localhost:5432` (shifted by `DEV_PORT_OFFSET` when you run several projects), so `psql`, Drizzle Studio or any GUI connects directly.
 
-**Production**: Supavisor pooler for EXTERNAL clients only
-- Handles 1000+ concurrent external connections efficiently (`POOLER_MAX_CLIENT_CONN`)
-- Connection pooling (default: 15 per pool)
-- Session mode on port 5432, transaction mode on port 6543 (Supavisor's defaults, pinned explicitly via `PROXY_PORT_SESSION` / `PROXY_PORT_TRANSACTION` in `docker-compose.prod.yml`)
-- The internal Supabase stack (auth, rest, realtime, storage, meta) always connects **directly** to `db:5432` — a transaction pooler breaks realtime's replication slot, PostgREST's NOTIFY-based schema reload, and migration advisory locks
+**Production**: Postgres is reachable only on the private network. The app connects to `db:5432` with its own pool (`max: 10` per replica, `src/server/db/client.ts`) against `max_connections=200`. No firewall rule opens 5432 to the internet or to your IP. To run SQL by hand:
 
 ```bash
-# Internal services (fixed — do not route these through the pooler)
-DATABASE_URL=postgres://postgres:password@db:5432/postgres
-
-# External clients via Supavisor (BI tools, Metabase, Prisma, one-off scripts,
-# serverless). The username carries the tenant id: postgres.<PROJECT_NAME>
-
-# Session mode (port 5432) — prepared statements, LISTEN/NOTIFY, session state:
-DATABASE_URL=postgres://postgres.my-app:password@yourdomain.com:5432/postgres
-
-# Transaction mode (port 6543) — short stateless queries, serverless workers:
-DATABASE_URL=postgres://postgres.my-app:password@yourdomain.com:6543/postgres
+vibecarbon shell            # SSH to the server
+docker compose exec db psql -U postgres
 ```
 
-> **Firewall:** the pooler ports are locked to your operator CIDR allowlist —
-> the same list that guards SSH — never opened to the internet (this is
-> password auth straight into Postgres). Connecting from a new machine or a
-> BI server? Allowlist it first: `vibecarbon access add <ip>/32`.
+A BI tool or script that needs the database runs next to it (an add-on such as Metabase, or a job inside the app), never across the internet.
 
-> The pooler is exercised end-to-end on every compose e2e run (tenant routing
-> through both modes + external reachability through the operator firewall).
-
-### 2. Edge Functions
-
-**Local**: Not included (use your Hono API for custom logic)
-- Faster startup
-- Simpler stack
-
-**Production**: Edge Functions runtime available
-- Run Deno/TypeScript functions
-- Webhook handlers
-- Scheduled tasks
-- Custom API endpoints
-
-```typescript
-// Example edge function: functions/hello-world/index.ts
-Deno.serve((req) => {
-  return new Response(JSON.stringify({ message: "Hello World!" }), {
-    headers: { "Content-Type": "application/json" },
-  });
-});
-```
-
-### 3. Resource Limits
+### 2. Resource Limits
 
 **Local**: No limits
 - Use whatever resources you have
 - Services compete for resources
 
-**Production**: Hard limits enforced
-- Database: 4GB RAM, 2 CPUs
-- API services: 512MB RAM, 1 CPU
-- Prevents one service from consuming all resources
-- Predictable performance
+**Production**: Hard limits enforced (`docker-compose.prod.yml`)
+- Database: 4 GB RAM, 2 CPUs
+- Traefik: 256 MB RAM, 0.5 CPU
+- Docker socket proxy: 128 MB RAM, 0.25 CPU
+- The app is not capped, so it can use what the database leaves free
 
 ## Configuration Files
 
@@ -174,7 +135,7 @@ Most environment variables are the same between local and production. Key differ
 ```bash
 # Development URLs
 SITE_URL=http://localhost:5173
-SUPABASE_URL=http://localhost:8000
+DB_HOST=localhost
 
 # No SMTP (emails logged to console)
 SMTP_HOST=
@@ -183,12 +144,9 @@ SMTP_PORT=
 
 ### Production (.env.production)
 ```bash
-# Production URLs — ONE public origin: the apex serves the app, the Hono API,
-# and the Supabase gateway (Traefik path-routes /auth/v1, /rest/v1,
-# /realtime/v1, /storage/v1 to Kong). SUPABASE_URL is the server-side
-# (in-network) Kong address, never a public host.
+# Production URLs: ONE public origin. The apex serves the app and the Hono
+# API (auth included, at /api/auth); nothing else is public.
 SITE_URL=https://yourdomain.com
-SUPABASE_URL=http://kong:8000
 
 # Real SMTP
 SMTP_HOST=smtp.sendgrid.net
@@ -196,12 +154,13 @@ SMTP_PORT=587
 SMTP_USER=apikey
 SMTP_PASS=your_api_key
 
-# S3 storage (required for production)
-STORAGE_BACKEND=s3
-S3_BUCKET=your-bucket
+# S3 storage for uploads (`vibecarbon deploy` provisions the bucket and
+# writes these; when any is missing, uploads are disabled and the app still boots)
+S3_ENDPOINT=https://your-provider-endpoint
 S3_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
+S3_BUCKET=your-bucket
+S3_ACCESS_KEY=your_key
+S3_SECRET_KEY=your_secret
 ```
 
 ## Package.json Scripts
@@ -244,8 +203,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 # Verify services start correctly
 docker compose ps
 
-# Test connection pooling
-psql postgres://postgres:password@localhost:5432/postgres
+# Check the database answers
+docker compose exec db psql -U postgres -c 'select 1'
 ```
 
 Once the production stack checks out locally, deploy it with `vibecarbon deploy` (see [Deploying to production](#deploying-to-production) above). For what that command does under the hood, see [Under the hood / manual operation](#under-the-hood--manual-operation).
@@ -266,19 +225,13 @@ docker stats
 
 Monitor CPU, memory, and network usage.
 
-### Connection Pooler Stats
-```bash
-# Supavisor metrics
-curl http://localhost:9999/metrics
-```
-
 ### View Logs
 ```bash
 # All services
 docker compose logs -f
 
 # Specific service
-docker compose logs -f supavisor
+docker compose logs -f app
 ```
 
 ## Troubleshooting
@@ -287,26 +240,29 @@ docker compose logs -f supavisor
 
 **Problem**: "remaining connection slots are reserved"
 
-**Solution**: Use Supavisor in production
+**Solution**: Count who holds connections, then fix the holder
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose exec db psql -U postgres -c \
+  "select usename, application_name, state, count(*) from pg_stat_activity group by 1,2,3 order by 4 desc"
 ```
+Each app replica holds at most 10. Many idle connections from one client usually means a script or add-on that never closes them.
 
 ### Out of Memory
 
 **Problem**: Services crash with OOM errors
 
 **Solution**: Resource limits in `docker-compose.prod.yml` prevent this
-- Database limited to 4GB
-- Services limited to 512MB each
+- Database limited to 4 GB
+- Traefik and the socket proxy limited to 256 MB and 128 MB
 
 ### Slow Performance
 
 **Problem**: Queries are slow under load
 
-**Solution**: Connection pooling + resource limits
-- Supavisor handles connection overhead
-- Resource limits prevent resource starvation
+**Solution**: Find the slow query, then index or scale
+- `EXPLAIN ANALYZE` the query over `vibecarbon shell`; add an index for the filter
+- Resource limits keep the database's share of the box predictable
+- Scale the app tier (`vibecarbon scale`) when the app, not the database, is the bottleneck
 
 ## Rate Limiting Considerations
 
@@ -356,9 +312,9 @@ Before deploying, test the full production stack locally.
 Use `docker stats` to ensure limits are appropriate.
 
 ### 4. Scale Horizontally
-For even more performance, run multiple instances behind a load balancer:
+For more capacity, resize the server (Compose, blue-green with no downtime) or add workers (Kubernetes, the autoscaler's floor and ceiling):
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --scale rest=3
+vibecarbon scale <env>
 ```
 
 ### 5. Use External Database for Large Deployments
@@ -388,7 +344,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.
 
 ## Learn More
 
-- [Supavisor Documentation](https://github.com/supabase/supavisor)
-- [Edge Functions Guide](https://supabase.com/docs/guides/functions)
 - [Docker Compose Production Guide](https://docs.docker.com/compose/production/)
-- [Self-Hosting Supabase](https://supabase.com/docs/guides/self-hosting)
+- [PostgreSQL 17 Documentation](https://www.postgresql.org/docs/17/)
+- [WAL-G for PostgreSQL](https://wal-g.readthedocs.io/PostgreSQL/)
+- [Traefik Documentation](https://doc.traefik.io/traefik/)

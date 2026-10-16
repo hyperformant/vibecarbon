@@ -92,7 +92,7 @@ describe('buildK8sProfileOptions', () => {
     }));
 
   it('offers the x86 trio for every profile', () => {
-    const names = K8S_PROFILES.flatMap((p) => [p.types.master, p.types.supabase, p.types.worker]);
+    const names = K8S_PROFILES.flatMap((p) => [p.types.master, p.types.db, p.types.worker]);
     const options = buildK8sProfileOptions(namesToTypes([...new Set(names)]));
     const starter = options.find((o) => o.value === 'starter');
     expect(starter._variant).toEqual(K8S_PROFILES[0].types);
@@ -204,7 +204,7 @@ describe('amd64-only presentation guarantee', () => {
   });
 
   it('buildSimpleTypeOptions offers no cax type — including with filterSharedCpu:false', () => {
-    // scale.js:1042 calls it exactly this way for the master/supabase/worker
+    // scale.js:1042 calls it exactly this way for the master/database/worker
     // pickers; that call is how ARM reached the scale picker.
     for (const opts of [
       buildSimpleTypeOptions(MIXED_REGION_TYPES),

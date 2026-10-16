@@ -3,8 +3,9 @@
 Your Vibecarbon app sends transactional email in two ways, and **neither works
 until you configure SMTP**:
 
-1. **Auth email via GoTrue**: signup confirmation, magic links, password reset,
-   and email-change confirmation. Sent by the Supabase auth service.
+1. **Auth email**: signup confirmation, magic links, password reset, and
+   email-change confirmation. Sent by the app's own auth (it runs inside the
+   app's API server) through the same SMTP settings.
 2. **App email via the server mailer**: organization invites, subscription
    receipts, contact-form notifications, newsletters (`src/server/lib/email.ts`).
 
@@ -14,12 +15,11 @@ until you configure SMTP**:
   host configured:
   - The **app mailer silently no-ops**: invites and notifications simply never
     arrive, with no error surfaced to the user.
-  - **GoTrue password-reset and magic-link email fail**: users who forget their
-    password cannot recover their account.
-- Local development sets `GOTRUE_MAILER_AUTOCONFIRM=true`, so signups are
-  auto-confirmed and you never notice email is unconfigured. **In production you
-  should turn autoconfirm off** (`vibecarbon configure`), which then *requires*
-  working SMTP. Otherwise no one can complete signup.
+  - **Password-reset, verification and magic-link emails are logged, not
+    sent**: users who forget their password cannot recover their account.
+  - **Signups need no email verification**, so you never notice email is
+    unconfigured. Once SMTP is set (`vibecarbon configure`), new signups must
+    confirm their address before they can sign in, so that SMTP has to work.
 
 ## Configure SMTP
 
@@ -32,7 +32,7 @@ SMTP_HOST=smtp.your-provider.com
 SMTP_PORT=587
 SMTP_USER=...
 SMTP_PASS=...
-SMTP_ADMIN_EMAIL=admin@yourdomain.com     # GoTrue sender
+SMTP_ADMIN_EMAIL=admin@yourdomain.com     # the From address
 SMTP_SENDER_NAME="Your App"
 ```
 

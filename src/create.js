@@ -1,6 +1,6 @@
 /**
  * Vibecarbon Create Command
- * Scaffolds a complete Hono + Vite + React 19 + Supabase self-hosted stack
+ * Scaffolds a complete Hono + Vite + React 19 + PostgreSQL stack
  *
  * Usage:
  *   vibecarbon create my-app            # Create new project
@@ -32,8 +32,10 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommand } from './lib/command.js';
 import { registerProject } from './lib/config.js';
+import { devS3Endpoint } from './lib/dev-s3.js';
 import { titleizeSlug } from './lib/display-name.js';
 import { dotenvValueProblem, formatDotenvLine } from './lib/dotenv.js';
+import { resolveDbImage } from './lib/images.js';
 import { writeLogoSvgs } from './lib/logo-generator.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
 import {
@@ -44,13 +46,7 @@ import {
   writeTemplateLockfile,
 } from './lib/package-manager.js';
 import { saveManifest, validateGitignore } from './lib/project.js';
-import {
-  generateBucketSalt,
-  generateJWT,
-  generatePassword,
-  generateReplPassword,
-  hashPassword,
-} from './lib/secrets.js';
+import { generateBucketSalt, generatePassword, generateReplPassword } from './lib/secrets.js';
 import { projectPathFor, templatePathFor } from './lib/template-paths.js';
 import { createTracker } from './lib/tracker.js';
 import { getUpgradeableFiles } from './lib/upgrade-policy.js';
@@ -82,19 +78,10 @@ const PLACEHOLDERS = {
   PROJECT_DISPLAY_NAME: '{{PROJECT_DISPLAY_NAME}}',
   GITHUB_OWNER: '{{GITHUB_OWNER}}',
   DB_PASSWORD: '{{DB_PASSWORD}}',
-  JWT_SECRET: '{{JWT_SECRET}}',
-  ANON_KEY: '{{ANON_KEY}}',
-  SERVICE_ROLE_KEY: '{{SERVICE_ROLE_KEY}}',
-  REALTIME_SECRET: '{{REALTIME_SECRET}}',
-  LOGFLARE_API_KEY: '{{LOGFLARE_API_KEY}}',
-  VAULT_ENC_KEY: '{{VAULT_ENC_KEY}}',
-  PG_META_CRYPTO_KEY: '{{PG_META_CRYPTO_KEY}}',
-  DB_ENC_KEY: '{{DB_ENC_KEY}}',
   REPL_PASSWORD: '{{REPL_PASSWORD}}',
   SITE_URL: '{{SITE_URL}}',
   ADMIN_EMAIL: '{{ADMIN_EMAIL}}',
   ADMIN_PASSWORD: '{{ADMIN_PASSWORD}}',
-  ADMIN_PASSWORD_HASH: '{{ADMIN_PASSWORD_HASH}}',
 };
 
 // Placeholders that are NEVER substituted into checked-in template files at
@@ -103,28 +90,8 @@ const PLACEHOLDERS = {
 // manifests at deploy time. Substituting them here would bake a high-entropy
 // secret into a file that lands in `git ls-files` and trips the preflight
 // secret-scan during the next `vibecarbon deploy` — the exact regression
-// fixed by this set (k8s/values/supabase.values.yaml ADMIN_PASSWORD).
-//
-// ADMIN_PASSWORD_HASH is intentionally NOT in this set: volumes/db/super-admin.sql
-// is a Postgres init script with no deploy-time substitution layer, so its
-// bcrypt hash must be substituted at create time for first-boot admin user
-// creation to work. The scanner does not match `password_hash :=` (its regex
-// requires `password\s*[:=]`, not `password_hash\s*:=`), so a hash leak there
-// is benign for the scanner. If a future template adds a hash to another
-// file, treat it as a separate fix.
-const SECRET_PLACEHOLDERS = new Set([
-  'DB_PASSWORD',
-  'JWT_SECRET',
-  'ANON_KEY',
-  'SERVICE_ROLE_KEY',
-  'REALTIME_SECRET',
-  'LOGFLARE_API_KEY',
-  'VAULT_ENC_KEY',
-  'PG_META_CRYPTO_KEY',
-  'DB_ENC_KEY',
-  'REPL_PASSWORD',
-  'ADMIN_PASSWORD',
-]);
+// fixed by this set (an ADMIN_PASSWORD once baked into a k8s values file).
+const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'REPL_PASSWORD', 'ADMIN_PASSWORD']);
 
 // ============================================================================
 // CLI ARGUMENT PARSING
@@ -142,9 +109,9 @@ const SPEC = {
     "What's included:",
     '  • Hono API server with TypeScript',
     '  • Vite + React 19 SPA',
-    '  • Supabase self-hosted (Auth, Database, Storage, Realtime)',
+    '  • Built-in auth, sessions and admin dashboard',
     '  • PostgreSQL with Row Level Security',
-    '  • Kong API Gateway + Supabase Studio',
+    '  • S3 file storage with presigned uploads',
     '  • Docker Compose for local development',
     '  • Kubernetes for production with autoscaling',
     '  • Traefik reverse proxy with automatic HTTPS',
@@ -402,6 +369,14 @@ function makeBiomeConfigRoot(biomeJsonPath) {
   const updated = content.replace(/"root"\s*:\s*false/, '"root": true');
   if (updated !== content) writeFileSync(biomeJsonPath, updated);
 }
+
+/**
+ * Template tests that must not reach a generated project. The migrations
+ * census pins carbon/db/migrations to its one baseline set; a project's
+ * history grows normally, so the census would fail on its first
+ * `drizzle-kit generate`. Pinned by tests/unit/create/template-only-tests.test.ts.
+ */
+export const TEMPLATE_ONLY_TESTS = ['template-migrations-census.test.ts'];
 
 function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCopy = []) {
   const fullTemplatePath = join(TEMPLATE_DIR, templateSubdir);
@@ -738,47 +713,20 @@ async function bootstrap(cliArgs) {
 
   // Generate secure secrets
   const dbPassword = generatePassword();
-  const jwtSecret = generatePassword(64);
-  const realtimeSecret = generatePassword(64); // SECRET_KEY_BASE (min 64 chars)
-  const logflareApiKey = generatePassword(32);
-  // VAULT_ENC_KEY must be exactly 32 BYTES: Supavisor's tenant seed encrypts
-  // the manager password with Cloak AES-256-GCM, and :crypto rejects any
-  // other key size ("Unknown cipher or invalid key size" crash-loop — RCA
-  // kept compose rig e1, 2026-08-06; latent until the tenant seed existed).
-  const vaultEncKey = generatePassword(32);
-  const pgMetaCryptoKey = generatePassword(32); // PG_META_CRYPTO_KEY (min 32 chars)
-  const dbEncKey = generatePassword(16); // DB_ENC_KEY for Realtime aes_128_ecb (must be exactly 16 bytes)
+  // Session signing key for the app's in-process auth (env.ts requires >= 32).
+  const betterAuthSecret = generatePassword(64);
   const replPassword = generateReplPassword();
-  const anonKey = generateJWT(jwtSecret, {
-    role: 'anon',
-    iss: 'supabase',
-    ref: projectName,
-  });
-
-  const serviceRoleKey = generateJWT(jwtSecret, {
-    role: 'service_role',
-    iss: 'supabase',
-    ref: projectName,
-  });
 
   const variables = {
     PROJECT_NAME: projectName,
     PROJECT_DISPLAY_NAME: displayName,
     GITHUB_OWNER: projectName, // Default to project name; rewritten by `vibecarbon configure` → CI/CD (or by deploy's rewriteOwnerAndRepo fallback)
     DB_PASSWORD: dbPassword,
-    JWT_SECRET: jwtSecret,
-    ANON_KEY: anonKey,
-    SERVICE_ROLE_KEY: serviceRoleKey,
-    REALTIME_SECRET: realtimeSecret,
-    LOGFLARE_API_KEY: logflareApiKey,
-    VAULT_ENC_KEY: vaultEncKey,
-    PG_META_CRYPTO_KEY: pgMetaCryptoKey,
-    DB_ENC_KEY: dbEncKey,
+    BETTER_AUTH_SECRET: betterAuthSecret,
     REPL_PASSWORD: replPassword,
     SITE_URL: 'http://localhost:5173',
     ADMIN_EMAIL: adminEmail,
     ADMIN_PASSWORD: adminPassword || '',
-    ADMIN_PASSWORD_HASH: adminPassword ? hashPassword(adminPassword) : '',
   };
 
   // Create project
@@ -798,27 +746,24 @@ async function bootstrap(cliArgs) {
     'src/client/pages',
     'src/client/lib',
     'src/shared',
-    'supabase/migrations',
-    'db',
+    'db/migrations',
     'public',
     'backup',
-    'volumes/kong',
     'volumes/db',
     'volumes/traefik',
+    'volumes/s3',
     '.github/workflows',
     'k8s/base/app',
+    'k8s/base/db',
     'k8s/base/backup',
     'k8s/base/config',
     'k8s/base/traefik',
     'k8s/infra/cert-manager-resources',
     'k8s/infra/traefik-crds',
     'k8s/overlays/production',
-    'k8s/overlays/local',
     'k8s/flux/clusters/primary',
     'k8s/flux/clusters/standby',
-    'k8s/gitops/supabase',
     'k8s/gitops/cert-manager-webhook-hetzner',
-    'k8s/values',
   ];
   for (const dir of dirs) {
     mkdirSync(join(projectDir, dir), { recursive: true });
@@ -857,7 +802,10 @@ async function bootstrap(cliArgs) {
   copyTemplate('vitest.config.ts', join(projectDir, 'vitest.config.ts'), variables);
   copyTemplate('tsconfig.test.json', join(projectDir, 'tsconfig.test.json'), variables);
   copyTemplate('TESTING.md', join(projectDir, 'TESTING.md'), variables);
-  copyTemplateDir('tests', join(projectDir, 'tests'), variables);
+  // Minus the template's own migrations census: it pins the template to its
+  // single baseline set, and a project's db/migrations grows with every
+  // `drizzle-kit generate` (TEMPLATE_ONLY_TESTS).
+  copyTemplateDir('tests', join(projectDir, 'tests'), variables, TEMPLATE_ONLY_TESTS);
   // Copy .env.example WITHOUT replacing placeholders (it's committed to git as documentation)
   const envExampleContent = readFileSync(join(TEMPLATE_DIR, '.env.example'), 'utf-8');
   writeFileSync(join(projectDir, '.env.example'), envExampleContent);
@@ -902,18 +850,6 @@ async function bootstrap(cliArgs) {
   await tick();
 
   s.message('Generating backend files');
-  copyTemplate('volumes/kong/kong.yml', join(projectDir, 'volumes/kong/kong.yml'), variables);
-  copyTemplate(
-    'volumes/kong/docker-entrypoint.sh',
-    join(projectDir, 'volumes/kong/docker-entrypoint.sh'),
-    variables,
-  );
-  copyTemplate('volumes/db/roles.sql', join(projectDir, 'volumes/db/roles.sql'), variables);
-  copyTemplate(
-    'volumes/db/set-passwords.sh',
-    join(projectDir, 'volumes/db/set-passwords.sh'),
-    variables,
-  );
   // wal-archive.sh is postgres's archive_command. It was missing from this copy
   // list, so scaffolds shipped no source file — Docker then bind-mounted an
   // empty DIRECTORY at /etc/postgresql/wal-archive.sh and postgres failed
@@ -924,31 +860,7 @@ async function bootstrap(cliArgs) {
     join(projectDir, 'volumes/db/wal-archive.sh'),
     variables,
   );
-  copyTemplate('volumes/db/jwt.sql', join(projectDir, 'volumes/db/jwt.sql'), variables);
-  // pooler.sql + pooler.exs are bind-mount SOURCES (db init + supavisor
-  // tenant seed). Same escape class as wal-archive.sh above: omit them here
-  // and Docker mounts an auto-created empty DIRECTORY on the server —
-  // "could not read from input file: Is a directory" aborts db init before
-  // set-passwords, and every db-connected service crash-loops on SASL auth
-  // (RCA: kept compose rig e1, 2026-08-06). Guarded by
-  // tests/unit/create/volume-mount-sources.test.ts.
-  copyTemplate('volumes/db/pooler.sql', join(projectDir, 'volumes/db/pooler.sql'), variables);
-  copyTemplate(
-    'volumes/pooler/pooler.exs',
-    join(projectDir, 'volumes/pooler/pooler.exs'),
-    variables,
-  );
-  copyTemplate('volumes/db/realtime.sql', join(projectDir, 'volumes/db/realtime.sql'), variables);
-  copyTemplate(
-    'volumes/db/super-admin.sql',
-    join(projectDir, 'volumes/db/super-admin.sql'),
-    variables,
-  );
-  copyTemplate(
-    'volumes/db/super-admin.dev.sql',
-    join(projectDir, 'volumes/db/super-admin.dev.sql'),
-    variables,
-  );
+  copyTemplate('volumes/s3/garage.toml', join(projectDir, 'volumes/s3/garage.toml'), variables);
   copyTemplate(
     'volumes/traefik/middlewares.yml',
     join(projectDir, 'volumes/traefik/middlewares.yml'),
@@ -975,12 +887,6 @@ async function bootstrap(cliArgs) {
   // explicitly opts in. Direct deploy is the default; shipping the workflow
   // files in fresh projects would silently flip ciAvailable() and force
   // every deploy through GitHub Actions.
-  copyTemplate(
-    'supabase/migrations/00001_init.sql',
-    join(projectDir, 'supabase/migrations/00001_init.sql'),
-    variables,
-  );
-  copyTemplate('supabase/seed.sql', join(projectDir, 'supabase/seed.sql'), variables);
   // Copy entire src directory (server, client, shared)
   copyTemplateDir('src', join(projectDir, 'src'), variables);
 
@@ -997,7 +903,9 @@ async function bootstrap(cliArgs) {
   // Blog content
   copyTemplateDir('content', join(projectDir, 'content'), variables);
 
-  // Custom database files (WAL-G Dockerfile)
+  // Database files: the migration baseline (db/migrations/, with drizzle's
+  // meta/) and seed.sql. From here on db/migrations is the project's own
+  // history: the app applies it at startup, and upgrade never writes to it.
   copyTemplateDir('db', join(projectDir, 'db'), variables);
 
   // Kubernetes manifests (exclude optional features like n8n - they're added via `vibecarbon add`)
@@ -1016,10 +924,7 @@ async function bootstrap(cliArgs) {
 
   // Make shell scripts executable
   const shellScripts = [
-    'k8s/test-local.sh',
     'docker-entrypoint.sh',
-    'volumes/kong/docker-entrypoint.sh',
-    'volumes/db/set-passwords.sh',
     // Postgres execs this directly as its archive_command, so it MUST be +x.
     // copyTemplate (copyFileSync) drops the source's exec bit, and omitting it
     // here shipped a 0644 script → archive_command failed with exit 126 ("not
@@ -1552,18 +1457,28 @@ ${runCmd} test:prepush
 // GENERATOR FUNCTIONS
 // ============================================================================
 
+// Dev-only placeholders: the key the local Garage imports at start
+// (GARAGE_DEFAULT_* in carbon/docker-compose.override.yml; dev-init.js writes
+// the same). Garage requires GK + 24 hex for the id and 64 hex for the secret.
+const DEV_S3_ACCESS_KEY = 'GK6c6f63616c2d6465762d7333';
+const DEV_S3_SECRET_KEY = '6c6f63616c2d6465762d73332d7365637265742d6e6f742d666f722d70726f64';
+// A new project starts on the base ports; `vibecarbon up` picks an offset
+// (and rewrites S3_ENDPOINT with it) only when those are taken.
+const DEV_PORT_OFFSET_AT_CREATE = '0';
+
 function generateEnvLocal(projectName, variables) {
   // Every value-bearing line goes through formatDotenvLine (src/lib/dotenv.js):
   // the one grammar Node, Docker Compose and Vite all read identically. It
   // picks bare / "double" / 'single' per value and THROWS DotenvValueError for
   // a value no portable form can hold (the admin-password prompt refuses the
   // same values first; this is the backstop for --admin-password).
+  const dbImage = resolveDbImage();
   return `# =============================================================================
-# SUPABASE CONFIGURATION
+# PROJECT CONFIGURATION
 # Generated by create-vibecarbon - DO NOT COMMIT THIS FILE
 # =============================================================================
 
-# Project name (machine slug: container naming, pooler tenant, k8s resources)
+# Project name (machine slug: container naming, k8s resources)
 ${formatDotenvLine('PROJECT_NAME', projectName)}
 ${formatDotenvLine('VITE_PROJECT_NAME', projectName)}
 
@@ -1572,38 +1487,34 @@ ${formatDotenvLine('VITE_PROJECT_NAME', projectName)}
 # can re-substitute it into updated template files.
 ${formatDotenvLine('PROJECT_DISPLAY_NAME', variables.PROJECT_DISPLAY_NAME)}
 
-# Supabase URLs
-${formatDotenvLine('SUPABASE_URL', 'http://localhost:8000')}
-${formatDotenvLine('VITE_SUPABASE_URL', 'http://localhost:8000')}
+# Signs the app's session cookies and auth tokens. Changing it signs everyone out.
+${formatDotenvLine('BETTER_AUTH_SECRET', variables.BETTER_AUTH_SECRET)}
 
-# Supabase Keys
-${formatDotenvLine('SUPABASE_ANON_KEY', variables.ANON_KEY)}
-${formatDotenvLine('VITE_SUPABASE_ANON_KEY', variables.ANON_KEY)}
-${formatDotenvLine('SUPABASE_SERVICE_ROLE_KEY', variables.SERVICE_ROLE_KEY)}
-
-# JWT Secret (for token generation)
-${formatDotenvLine('JWT_SECRET', variables.JWT_SECRET)}
-
-# Database
+# Database. The API server connects with the DB_* vars. Local values: the dev
+# db container on localhost (DB_PORT is the base port; DEV_DB_PORT or
+# DEV_PORT_OFFSET is applied at runtime). Deploys override DB_HOST.
+${formatDotenvLine('DB_HOST', 'localhost')}
+${formatDotenvLine('DB_PORT', '5432')}
+${formatDotenvLine('DB_USER', 'postgres')}
 ${formatDotenvLine('DB_PASSWORD', variables.DB_PASSWORD)}
+${formatDotenvLine('DB_NAME', 'postgres')}
 ${formatDotenvLine('POSTGRES_PASSWORD', variables.DB_PASSWORD)}
-
-# Encryption Keys
-${formatDotenvLine('REALTIME_SECRET', variables.REALTIME_SECRET)}
-${formatDotenvLine('VAULT_ENC_KEY', variables.VAULT_ENC_KEY)}
-${formatDotenvLine('PG_META_CRYPTO_KEY', variables.PG_META_CRYPTO_KEY)}
-${formatDotenvLine('DB_ENC_KEY', variables.DB_ENC_KEY)}
-${formatDotenvLine('LOGFLARE_API_KEY', variables.LOGFLARE_API_KEY)}
 
 # HA PostgreSQL replication (used by HA deploy modes: -mode compose-ha / k8s-ha)
 ${formatDotenvLine('REPL_PASSWORD', variables.REPL_PASSWORD)}
+
+# The database image docker-compose.yml pulls. Set by the vibecarbon CLI:
+# \`vibecarbon upgrade\` and every deploy rewrite it to the CLI's own version.
+${formatDotenvLine('DB_IMAGE', dbImage.image)}
+${formatDotenvLine('DB_IMAGE_TAG', dbImage.tag)}
 
 # =============================================================================
 # ADMIN CREDENTIALS
 # =============================================================================
 
-# Admin user with dashboard access (created during project setup)
-# Note: Password stored here for your reference only. Database stores bcrypt hash.
+# The app creates this super admin the first time it starts (locally and on
+# every deploy) if the account doesn't exist yet. Changing the password here
+# later does not reset it: change it in the app instead.
 ${formatDotenvLine('ADMIN_EMAIL', variables.ADMIN_EMAIL)}
 ${formatDotenvLine('ADMIN_PASSWORD', variables.ADMIN_PASSWORD)}
 
@@ -1616,11 +1527,10 @@ ${formatDotenvLine('VITE_PUBLIC_URL', 'http://localhost:5173')}
 # =============================================================================
 # OAUTH PROVIDERS (optional)
 # =============================================================================
-# Self-hosted GoTrue reads these from the environment — docker-compose maps them
-# to GOTRUE_EXTERNAL_GOOGLE_* / GOTRUE_EXTERNAL_AZURE_*. They are NOT set in
-# Supabase Studio. Run \`vibecarbon configure\` (OAuth) to fill them in; deploy
-# ships them automatically. In the provider console (Google Cloud / Microsoft
-# Entra) set the authorized redirect URI to <SITE_URL>/auth/v1/callback.
+# The app reads these from its environment. Run \`vibecarbon configure\` (OAuth)
+# to fill them in; deploy ships them automatically. In the provider console
+# (Google Cloud / Microsoft Entra) set the authorized redirect URI to
+# <SITE_URL>/api/auth/callback/google or <SITE_URL>/api/auth/callback/microsoft.
 
 ${formatDotenvLine('GOOGLE_ENABLED', 'false')}
 ${formatDotenvLine('GOOGLE_CLIENT_ID', '')}
@@ -1639,19 +1549,15 @@ ${formatDotenvLine('MICROSOFT_TENANT_ID', '')}
 ${formatDotenvLine('STRIPE_SECRET_KEY', '')}
 ${formatDotenvLine('STRIPE_WEBHOOK_SECRET', '')}
 
-# SMTP Email (shared by Supabase Auth and app transactional emails)
+# SMTP Email (auth emails and transactional emails). While SMTP_HOST is empty,
+# signups need no email verification and auth emails are logged, not sent.
+# Once SMTP is set, new signups confirm their address before signing in.
 ${formatDotenvLine('SMTP_HOST', '')}
 ${formatDotenvLine('SMTP_PORT', '587')}
 ${formatDotenvLine('SMTP_USER', '')}
 ${formatDotenvLine('SMTP_PASS', '')}
 ${formatDotenvLine('SMTP_ADMIN_EMAIL', '')}
 ${formatDotenvLine('SMTP_SENDER_NAME', variables.PROJECT_DISPLAY_NAME)}
-# "true" auto-confirms signups WITHOUT a verification email (required while
-# SMTP is unset, or every signup errors on the unsendable message).
-# If you fill in SMTP_* by hand above, ALSO set GOTRUE_MAILER_AUTOCONFIRM=false
-# so signups get real confirmation emails. \`vibecarbon configure\` -> SMTP
-# sets both together automatically.
-${formatDotenvLine('GOTRUE_MAILER_AUTOCONFIRM', 'true')}
 
 # =============================================================================
 # ANALYTICS (optional - Plausible)
@@ -1674,19 +1580,32 @@ ${formatDotenvLine('VITE_N8N_ENABLED', 'false')}
 ${formatDotenvLine('VITE_OBSERVABILITY_ENABLED', 'false')}
 
 # =============================================================================
+# LOCAL S3 (dev uploads)
+# =============================================================================
+# Garage from docker-compose.override.yml (dev-only, never deployed). The key
+# is the one it imports at start. vibecarbon deploy overwrites every S3_* value
+# with the real bucket's. The port is 8333 + DEV_PORT_OFFSET unless DEV_S3_PORT
+# is set; vibecarbon up keeps S3_ENDPOINT in step when it changes the offset.
+
+${formatDotenvLine('S3_ENDPOINT', devS3Endpoint({ DEV_PORT_OFFSET: DEV_PORT_OFFSET_AT_CREATE }))}
+${formatDotenvLine('S3_REGION', 'us-east-1')}
+${formatDotenvLine('S3_BUCKET', `${projectName}-local`)}
+${formatDotenvLine('S3_ACCESS_KEY', DEV_S3_ACCESS_KEY)}
+${formatDotenvLine('S3_SECRET_KEY', DEV_S3_SECRET_KEY)}
+
+# =============================================================================
 # PORT CONFIGURATION (for running multiple projects)
 # =============================================================================
 # Use DEV_PORT_OFFSET to shift all ports when running multiple projects.
 # Example: DEV_PORT_OFFSET=100 shifts Vite to 5273, API to 3100, etc.
 
-${formatDotenvLine('DEV_PORT_OFFSET', '0')}
+${formatDotenvLine('DEV_PORT_OFFSET', DEV_PORT_OFFSET_AT_CREATE)}
 
 # Override individual ports (takes precedence over offset):
 # DEV_VITE_PORT="5173"
 # DEV_API_PORT="3000"
-# DEV_KONG_PORT="8000"
-# DEV_KONG_SSL_PORT="8443"
 # DEV_TRAEFIK_PORT="80"
+# DEV_S3_PORT="8333"
 
 # =============================================================================
 # ENVIRONMENT
@@ -1708,8 +1627,8 @@ A modern web app built with Vibecarbon.
 - **Hono** - Fast, lightweight web framework
 - **Vite** - Next-generation frontend tooling
 - **React 19** - UI library (SPA mode)
-- **Supabase** - Self-hosted backend (Auth, Database, Storage, Realtime)
-- **PostgreSQL** - Database (via Supabase)
+- **PostgreSQL** - Database with Row Level Security
+- **Better Auth** - Sign-in and sessions, built into the API server
 - **Tailwind CSS** - Utility-first styling
 - **Shadcn UI** - Component library
 - **Kubernetes** - Container orchestration & autoscaling
@@ -1731,8 +1650,6 @@ This starts Docker containers, runs database migrations, and launches the dev se
 |---------|-----|-------------|
 | Vite Dev | http://localhost:5173 | Frontend development server |
 | Hono API | http://localhost:3000 | Application API |
-| Supabase API | http://localhost:8000 | Supabase API Gateway (Kong) |
-| Supabase Studio | http://studio.localhost | Database management UI (requires admin login) |
 | Traefik Dashboard | http://traefik.localhost | Reverse proxy dashboard (requires admin login) |
 
 ## Available Scripts
@@ -1773,11 +1690,11 @@ ${run} docker:logs
 
 ### Port conflicts
 
-If ports 5173, 3000, 3001, or 8000 are in use, stop conflicting services or modify \`docker-compose.yml\`.
+If ports 5173, 3000, 3001, or 80 are in use, stop conflicting services or modify \`docker-compose.yml\`.
 
 ## Learn More
 
-- [Supabase Documentation](https://supabase.com/docs)
+- [PostgreSQL Documentation](https://www.postgresql.org/docs/)
 - [Hono Documentation](https://hono.dev)
 - [Vite Documentation](https://vitejs.dev)
 `;
@@ -1803,7 +1720,6 @@ export {
   copyTemplate,
   detectPackageManager,
   generateEnvLocal,
-  generateJWT,
   generatePassword,
   generateReadme,
   getInstallCommand,

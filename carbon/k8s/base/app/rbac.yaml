@@ -3,7 +3,7 @@ kind: ServiceAccount
 metadata:
   name: vibecarbon-app
 # Pull secrets are attached to the `default` SA by deploy.js at runtime
-# (dockerhub-pull-secret for Supabase images, ghcr-pull-secret for the app
+# (dockerhub-pull-secret for Docker Hub images, ghcr-pull-secret for the app
 # image). This app SA inherits the same set so the app Deployment — which
 # uses serviceAccountName: vibecarbon-app — can pull the private ghcr image.
 imagePullSecrets:

@@ -79,6 +79,8 @@ export default defineConfig({
             'tests/loadtest/**',
             'tests/e2e/**',
             'tests/_shared/**',
+            // Its own project below, so it runs one file at a time.
+            'tests/integration/docker/**',
           ],
           // testTimeout AND hookTimeout BOTH 240s — first call to
           // realProject() in each worker runs real `vibecarbon create`
@@ -102,6 +104,25 @@ export default defineConfig({
           // All three timeouts (test, hook, exec) now align at 240s
           // so a slow-but-completing realProject() finishes before
           // any of the three layers aborts.
+          testTimeout: 240_000,
+          hookTimeout: 240_000,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          // The integration tier's docker-compose smokes (gated on
+          // DOCKER_INTEGRATION=true; `pnpm test:docker`). One file at a
+          // time, declared here rather than as a CLI flag so no invocation
+          // can run them in parallel: each file brings up its own compose
+          // stack, and two at once clash on the compose network subnet.
+          // `pnpm test:integration` selects both projects (`integration*`).
+          name: 'integration-docker',
+          include: ['tests/integration/docker/**/*.test.ts'],
+          // The root `include` (tests/**) merges into every project's, so
+          // everything outside the docker dir is excluded explicitly.
+          exclude: ['tests/!(integration)/**', 'tests/integration/!(docker)/**'],
+          fileParallelism: false,
           testTimeout: 240_000,
           hookTimeout: 240_000,
         },

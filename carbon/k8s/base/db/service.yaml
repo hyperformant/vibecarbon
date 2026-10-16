@@ -1,0 +1,39 @@
+# `db` is the address the app (DB_HOST in k8s/base/config/configmap.yaml) and
+# every add-on connect to. `db-headless` is the StatefulSet's governing
+# Service (spec.serviceName), which gives the pod its stable
+# db-0.db-headless DNS name; it publishes the pod before it is Ready so that
+# name resolves during a long recovery too.
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  labels:
+    app: vibecarbon-db
+    component: database
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    app: vibecarbon-db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-headless
+  labels:
+    app: vibecarbon-db
+    component: database
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    app: vibecarbon-db

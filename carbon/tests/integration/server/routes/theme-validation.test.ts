@@ -1,11 +1,13 @@
-import type { User } from '@supabase/supabase-js';
+import type { AuthUser as User } from '@server/auth';
 import { Hono } from 'hono';
 import { describe, expect, it, vi } from 'vitest';
 import { jsonPost } from '../../../_helpers/app';
+import { queryChain } from '../../../_helpers/drizzle-mock';
 import type { HonoVariables } from '@server/types';
 
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: { from: () => ({ upsert: async () => ({ error: null }) }) },
+// adminDb.insert(appSettings).values(...).onConflictDoUpdate(...)
+vi.mock('@server/db/client', () => ({
+  adminDb: { insert: () => queryChain(async () => undefined) },
 }));
 vi.mock('@server/lib/logger', () => ({
   logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
@@ -17,7 +19,7 @@ function adminApp() {
   const app = new Hono<{ Variables: HonoVariables }>();
   app.use('*', async (c, next) => {
     // biome-ignore lint/suspicious/noExplicitAny: minimal injected super admin
-    c.set('user', { id: 'admin1', app_metadata: { role: 'super_admin' } } as Partial<User> as any);
+    c.set('user', { id: 'admin1', role: 'super_admin' } as Partial<User> as any);
     await next();
   });
   app.route('/api/v1/admin/theme', themeRoutes);

@@ -10,7 +10,7 @@
 
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     container_name: ${PROJECT_NAME:-vibecarbon}-prometheus
     restart: unless-stopped
     command:
@@ -37,7 +37,7 @@ services:
         condition: service_healthy
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     container_name: ${PROJECT_NAME:-vibecarbon}-grafana
     restart: unless-stopped
     environment:
@@ -98,7 +98,7 @@ services:
       - loki
 
   loki:
-    image: grafana/loki:3.3.0
+    image: grafana/loki:3.3.0@sha256:58b60b901255c209d3455d8a1979a3f73d1d09686a0a858c2c93025a969eb550
     container_name: ${PROJECT_NAME:-vibecarbon}-loki
     restart: unless-stopped
     command: -config.file=/etc/loki/loki-config.yml
@@ -117,7 +117,7 @@ services:
       start_period: 30s
 
   promtail:
-    image: grafana/promtail:3.3.0
+    image: grafana/promtail:3.3.0@sha256:5aa128328d6b0b47a41e1fedd3e5e599c02203c0368d2a2ffc736785ba5a22a3
     container_name: ${PROJECT_NAME:-vibecarbon}-promtail
     restart: unless-stopped
     command: -config.file=/etc/promtail/promtail-config.yml
@@ -131,11 +131,11 @@ services:
       - loki
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.19.1
+    image: prometheuscommunity/postgres-exporter:v0.19.1@sha256:e96064f876226d94bb6ce48a4c4b3dd76edba91168ec1ab024e5c4b959310b0f
     container_name: ${PROJECT_NAME:-vibecarbon}-postgres-exporter
     restart: unless-stopped
     environment:
-      # Least-privilege metrics role (pg_monitor), not the supabase_admin
+      # Least-privilege metrics role (pg_monitor), not the postgres
       # superuser. Provisioned by volumes/db/observability-init.sh.
       DATA_SOURCE_NAME: "postgresql://observability_ro:${OBSERVABILITY_DB_PASSWORD}@db:5432/postgres?sslmode=disable"
     networks:

@@ -1,107 +1,35 @@
 import { statfsSync } from 'node:fs';
 import { Hono } from 'hono';
-import { isSuperAdmin } from '../../lib/auth';
+import { pingDb } from '../../db/client';
 import { logger } from '../../lib/logger';
+import { probeTraefik } from '../../lib/traefik-probe';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
 const performanceRoutes = new Hono<{ Variables: HonoVariables }>();
 
-// Detect runtime environment (same logic as services-status.ts)
-const isKubernetes = !!process.env.KUBERNETES_SERVICE_HOST;
-const isDocker =
-  !isKubernetes && (process.env.NODE_ENV === 'production' || process.env.DOCKER === 'true');
-
-interface ServiceHealthCheck {
-  name: string;
-  url: string;
-  acceptCodes?: number[];
-}
-
-// Core services to check latency against (subset of services-status.ts)
-const HEALTH_CHECK_SERVICES: ServiceHealthCheck[] = [
-  {
-    name: 'API Gateway',
-    url: isKubernetes
-      ? 'http://kong:8000/'
-      : isDocker
-        ? 'http://kong:8000/'
-        : 'http://localhost:8000/',
-    acceptCodes: [404],
-  },
-  {
-    name: 'Authentication',
-    url: isKubernetes
-      ? 'http://kong:8000/auth/v1/health'
-      : isDocker
-        ? 'http://auth:9999/health'
-        : 'http://localhost:8000/auth/v1/health',
-    acceptCodes: isDocker ? undefined : [200, 401],
-  },
-  {
-    name: 'REST API',
-    url: isKubernetes
-      ? 'http://kong:8000/rest/v1/'
-      : isDocker
-        ? 'http://rest:3000/'
-        : 'http://localhost:8000/rest/v1/',
-    acceptCodes: [200, 401],
-  },
-  {
-    name: 'Realtime',
-    url: isKubernetes
-      ? 'http://kong:8000/realtime/v1/'
-      : isDocker
-        ? 'http://realtime:4000/api/tenants'
-        : 'http://localhost:8000/realtime/v1/',
-    acceptCodes: [200, 401, 403, 426],
-  },
-  {
-    name: 'File Storage',
-    url: isKubernetes
-      ? 'http://kong:8000/storage/v1/status'
-      : isDocker
-        ? 'http://storage:5000/status'
-        : 'http://localhost:8000/storage/v1/status',
-    acceptCodes: isDocker ? undefined : [200, 401],
-  },
-  {
-    name: 'DB Management',
-    url: isKubernetes
-      ? 'http://kong:8000/pg/'
-      : isDocker
-        ? 'http://meta:8080/health'
-        : 'http://localhost:8000/pg/',
-    acceptCodes: [200, 401],
-  },
-];
+type Latency = { name: string; latencyMs: number; status: 'healthy' | 'unhealthy' | 'unknown' };
 
 const SERVICE_TIMEOUT_MS = 2000;
 
-async function checkServiceLatency(
-  service: ServiceHealthCheck
-): Promise<{ name: string; latencyMs: number; status: 'healthy' | 'unhealthy' | 'unknown' }> {
-  const start = performance.now();
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), SERVICE_TIMEOUT_MS);
+/** Round trip from the app to Postgres over its own connection. */
+async function checkDatabaseLatency(): Promise<Latency> {
+  const ping = await pingDb(undefined, { timeoutMs: SERVICE_TIMEOUT_MS });
+  return {
+    name: 'PostgreSQL',
+    latencyMs: ping.latencyMs,
+    status: ping.ok ? 'healthy' : 'unhealthy',
+  };
+}
 
-    const response = await fetch(service.url, {
-      method: 'GET',
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    const latencyMs = Math.round(performance.now() - start);
-
-    const isHealthy = service.acceptCodes
-      ? service.acceptCodes.includes(response.status)
-      : response.status >= 200 && response.status < 400;
-
-    return { name: service.name, latencyMs, status: isHealthy ? 'healthy' : 'unhealthy' };
-  } catch {
-    const latencyMs = Math.round(performance.now() - start);
-    return { name: service.name, latencyMs, status: 'unhealthy' };
-  }
+/** Round trip from the app to Traefik (lib/traefik-probe.ts). */
+async function checkTraefikLatency(): Promise<Latency> {
+  const probe = await probeTraefik(SERVICE_TIMEOUT_MS);
+  return {
+    name: 'Traefik',
+    latencyMs: probe.latencyMs,
+    status: probe.ok ? 'healthy' : 'unhealthy',
+  };
 }
 
 // ============================================================================
@@ -115,9 +43,8 @@ performanceRoutes.get('/', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   // Gather server metrics
   const mem = process.memoryUsage();
@@ -153,8 +80,10 @@ performanceRoutes.get('/', async (c) => {
     platform: `${process.platform} ${process.arch}`,
   };
 
-  // Check all service latencies in parallel
-  const items = await Promise.all(HEALTH_CHECK_SERVICES.map(checkServiceLatency));
+  // The services one network hop from the app, each with a measured round
+  // trip. Authentication runs inside this process, so it has no hop of its
+  // own to time and is not an item (the Services panel folds it into App).
+  const items = await Promise.all([checkDatabaseLatency(), checkTraefikLatency()]);
 
   const healthy = items.filter((s) => s.status === 'healthy').length;
   const healthyItems = items.filter((s) => s.status === 'healthy');

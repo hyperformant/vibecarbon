@@ -190,12 +190,12 @@ describe('DigitalOceanProvider.fetchServerTypes', () => {
 });
 
 describe('DigitalOceanProvider.getRegionDefaults', () => {
-  it('returns a valid {masterType, supabaseType, workerType} shape for every known region', () => {
+  it('returns a valid {masterType, dbType, workerType} shape for every known region', () => {
     for (const region of Object.keys(DigitalOceanProvider.REGIONS)) {
       const defaults = DigitalOceanProvider.getRegionDefaults(region);
       expect(defaults).toEqual({
         masterType: 's-2vcpu-2gb',
-        supabaseType: 's-2vcpu-4gb',
+        dbType: 's-2vcpu-4gb',
         workerType: 's-2vcpu-2gb',
       });
     }

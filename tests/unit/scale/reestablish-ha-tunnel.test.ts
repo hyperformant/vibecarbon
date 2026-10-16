@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// The k8s-ha scale belt (item I-1): after a supabase-node resize reboots the
+// The k8s-ha scale belt (item I-1): after a database-node resize reboots the
 // node that owns the host `wg0`, the repl-gateway crash-loops and the primary's
 // pods-Ready wait would time out. `scaleReestablishHaTunnel` recreates the
-// transport BEFORE that wait — but ONLY when the env is HA AND the supabase node
+// transport BEFORE that wait — but ONLY when the env is HA AND the database node
 // was actually resized (a master/worker-only resize leaves wg0 intact, so we
 // must not needlessly tear down a healthy tunnel).
 
@@ -22,13 +22,13 @@ vi.mock('../../../src/failover.js', () => ({
   identifyServers: vi.fn(() => ({
     primary: {
       ip: '1.1.1.1',
-      supabaseIp: '167.233.150.173',
-      supabasePrivateIp: '10.0.1.2',
+      dbIp: '167.233.150.173',
+      dbPrivateIp: '10.0.1.2',
     },
     standby: {
       ip: '2.2.2.2',
-      supabaseIp: '157.180.115.19',
-      supabasePrivateIp: '10.0.1.2',
+      dbIp: '157.180.115.19',
+      dbPrivateIp: '10.0.1.2',
     },
   })),
 }));
@@ -63,13 +63,13 @@ describe('scaleReestablishHaTunnel gating', () => {
     await SCALE_EFFECTS.scaleReestablishHaTunnel({
       ...baseCtx,
       isHA: false,
-      infraChanges: ['supabaseType'],
+      infraChanges: ['dbType'],
     });
     expect(reestablishReplicationTransport).not.toHaveBeenCalled();
     expect(identifyServers).not.toHaveBeenCalled();
   });
 
-  it('no-ops when the supabase node was not resized (wg0 not disrupted)', async () => {
+  it('no-ops when the database node was not resized (wg0 not disrupted)', async () => {
     await SCALE_EFFECTS.scaleReestablishHaTunnel({
       ...baseCtx,
       isHA: true,
@@ -78,21 +78,21 @@ describe('scaleReestablishHaTunnel gating', () => {
     expect(reestablishReplicationTransport).not.toHaveBeenCalled();
   });
 
-  it('re-establishes the transport when HA + supabase node resized', async () => {
+  it('re-establishes the transport when HA + database node resized', async () => {
     await SCALE_EFFECTS.scaleReestablishHaTunnel({
       ...baseCtx,
       isHA: true,
-      infraChanges: ['supabaseType', 'workerType'],
+      infraChanges: ['dbType', 'workerType'],
     });
     expect(reestablishReplicationTransport).toHaveBeenCalledTimes(1);
     expect(reestablishReplicationTransport).toHaveBeenCalledWith(
       expect.objectContaining({
         primaryIp: '1.1.1.1',
         standbyIp: '2.2.2.2',
-        primarySupabaseIp: '167.233.150.173',
-        standbySupabaseIp: '157.180.115.19',
-        primarySupabasePrivateIp: '10.0.1.2',
-        standbySupabasePrivateIp: '10.0.1.2',
+        primaryDbIp: '167.233.150.173',
+        standbyDbIp: '157.180.115.19',
+        primaryDbPrivateIp: '10.0.1.2',
+        standbyDbPrivateIp: '10.0.1.2',
         sshKeyPath: expect.stringContaining('deploy_key_prod'),
       }),
     );
@@ -104,7 +104,7 @@ describe('scaleReestablishHaTunnel gating', () => {
       SCALE_EFFECTS.scaleReestablishHaTunnel({
         ...baseCtx,
         isHA: true,
-        infraChanges: ['supabaseType'],
+        infraChanges: ['dbType'],
       }),
     ).resolves.toBeUndefined();
   });

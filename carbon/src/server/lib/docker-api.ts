@@ -69,12 +69,24 @@ export interface DockerContainer {
   id: string;
   name: string;
   service: string;
+  /**
+   * The container's own healthcheck verdict, parsed from the list's Status
+   * text ("Up 3 minutes (healthy)"). Undefined when it defines no healthcheck.
+   */
+  health?: 'healthy' | 'unhealthy' | 'starting';
 }
 
 interface ContainerListEntry {
   Id: string;
   Names?: string[];
   Labels?: Record<string, string>;
+  Status?: string;
+}
+
+function parseHealth(status: string | undefined): DockerContainer['health'] {
+  const match = status?.match(/\((healthy|unhealthy|health: starting)\)/);
+  if (!match) return undefined;
+  return match[1] === 'health: starting' ? 'starting' : (match[1] as 'healthy' | 'unhealthy');
 }
 
 /**
@@ -94,7 +106,8 @@ export function mapContainerList(
       const name = (entry.Names?.[0] ?? '').replace(/^\//, '');
       const service =
         entry.Labels?.['com.docker.compose.service'] ?? name.slice(project.length + 1);
-      return { id: entry.Id, name, service };
+      const health = parseHealth(entry.Status);
+      return { id: entry.Id, name, service, ...(health && { health }) };
     })
     .filter((container) => container.name.startsWith(`${project}-`));
 }

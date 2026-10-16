@@ -1,0 +1,51 @@
+name: cleanup-db-image-dev
+# Daily prune of the db image dev channel: deletes every version of
+# ghcr.io/hyperformant/postgres-dev (tagged db builds, the walg-<sha> wal-g
+# builds, and their per-arch children, all pushed by publish-db-image-dev.yml) created more
+# than 14 days ago. Scoped to that ONE package: the release package
+# ghcr.io/hyperformant/postgres is never listed or touched here.
+#
+# delete-package-versions has no age filter, so the list step selects the
+# version ids by created_at and the action deletes exactly those ids. An
+# empty list skips the action: given no ids it would fall back to deleting
+# the oldest version regardless of age.
+#
+# Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write   # delete postgres-dev versions; nothing else
+    env:
+      PACKAGE: postgres-dev
+      MAX_AGE_DAYS: '14'
+    steps:
+      - id: old
+        name: List postgres-dev versions older than 14 days
+        run: |
+          set -euo pipefail
+          cutoff=$(( $(date +%s) - MAX_AGE_DAYS * 86400 ))
+          if ! versions=$(gh api --paginate "/orgs/$OWNER/packages/container/$PACKAGE/versions" 2>err.txt); then
+            # The package appears with the first dev publish; before that there is nothing to prune.
+            if grep -q 'Not Found' err.txt; then echo "ids=" >> "$GITHUB_OUTPUT"; exit 0; fi
+            cat err.txt >&2; exit 1
+          fi
+          ids=$(jq -rs --argjson cutoff "$cutoff" \
+            '[.[][] | select((.created_at | fromdateiso8601) < $cutoff) | .id] | map(tostring) | join(",")' <<<"$versions")
+          echo "ids=$ids" >> "$GITHUB_OUTPUT"
+          echo "deleting: ${ids:-nothing}" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+      - if: steps.old.outputs.ids != ''
+        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        with:
+          package-name: postgres-dev
+          package-type: container
+          package-version-ids: ${{ steps.old.outputs.ids }}

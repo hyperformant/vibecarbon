@@ -8,7 +8,7 @@ const baseK8sConfig = {
   sshPublicKey: 'ssh-ed25519 AAAA',
   location: 'fsn1',
   masterServerType: 'cx23',
-  supabaseServerType: 'cx23',
+  dbServerType: 'cx23',
   workerServerType: 'cx23',
   minWorkers: 0,
   maxWorkers: 0,

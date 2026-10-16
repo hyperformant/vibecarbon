@@ -63,7 +63,7 @@ the stack up alongside the app.
 - **Least-privilege datasource role.** The postgres-exporter and Grafana's
   PostgreSQL datasource authenticate as `observability_ro` (granted `pg_monitor`
   only — read access to `pg_stat_*`/settings, **no** SELECT on application
-  tables), not the `supabase_admin` superuser. The role is created by
+  tables), not the `postgres` superuser. The role is created by
   `volumes/db/observability-init.sh` on first DB init and its password is the
   generated `OBSERVABILITY_DB_PASSWORD`. **Caveat:** like every
   `docker-entrypoint-initdb.d` script, it runs only when the database is first

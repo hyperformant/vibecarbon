@@ -24,7 +24,7 @@ describe('renderTraefikDefaultCert', () => {
         features: { observability: true, n8n: true, metabase: true },
       });
       expect(yaml).not.toContain(`api.${domain}`);
-      expect(yaml).not.toContain(`studio.${domain}`);
+      expect(yaml).not.toContain(`dashboard.${domain}`);
       expect(yaml).not.toContain(`grafana.${domain}`);
       expect(yaml).not.toContain(`n8n.${domain}`);
     });
@@ -49,11 +49,12 @@ describe('renderTraefikDefaultCert', () => {
       expect(yaml).not.toContain('*.');
     });
 
-    it('contains the core subdomain sans (studio, dashboard) without any add-ons', () => {
+    it('covers only dashboard.<domain> without any add-ons (no sans, no studio host)', () => {
       const yaml = renderTraefikDefaultCert({ domain, dnsChallenge: false, features: {} });
-      expect(yaml).toContain(`studio.${domain}`);
-      expect(yaml).toContain(`dashboard.${domain}`);
-      // Single-origin: Kong is path-routed on the apex — no api. host exists.
+      expect(yaml).toContain(`main: "dashboard.${domain}"`);
+      expect(yaml).not.toContain('sans:');
+      expect(yaml).not.toContain(`studio.${domain}`);
+      // Single-origin: the API lives on the apex — no api. host exists.
       expect(yaml).not.toContain(`api.${domain}`);
     });
 
@@ -107,7 +108,7 @@ describe('renderTraefikDefaultCert', () => {
         dnsChallenge: false,
         features: { observability: true, n8n: true, metabase: true },
       });
-      expect(yaml).toContain(`studio.${domain}`);
+      expect(yaml).toContain(`main: "dashboard.${domain}"`);
       expect(yaml).toContain(`grafana.${domain}`);
       expect(yaml).toContain(`prometheus.${domain}`);
       expect(yaml).toContain(`n8n.${domain}`);
@@ -120,9 +121,9 @@ describe('renderTraefikDefaultCert', () => {
       expect(yaml).toContain('resolver: letsencrypt');
     });
 
-    it('uses studio.<domain> as main (apex app + Kong share the router cert)', () => {
+    it('uses dashboard.<domain> as main (the apex app has its own router cert)', () => {
       const yaml = renderTraefikDefaultCert({ domain, dnsChallenge: false });
-      expect(yaml).toContain(`main: "studio.${domain}"`);
+      expect(yaml).toContain(`main: "dashboard.${domain}"`);
       // the bare apex must not be in the default cert
       expect(yaml).not.toContain(`main: "${domain}"`);
     });

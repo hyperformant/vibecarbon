@@ -50,6 +50,14 @@ Consequences worth knowing:
 | `modules/` | Module-level integration that doesn't fit a single CLI command | `pnpm test:modules` |
 | `_harness/` | Shared CLI test harness (fixtures, stubs, runCli, assertions); also has self-tests | n/a |
 
+The docker smoke starts only what the free host ports allow: the database
+(5432) always, local S3 (8333) and Traefik plus the app (80) when free, and
+it logs which parts it skipped. It is not in CI, so run it after changing
+compose files or the db image. Running as a normal user is fine: binding :80
+from Node fails with EACCES for a non-root user whatever the port's state,
+so the probe then checks whether anything listens there
+(`tests/_shared/docker-utils.ts`), and Docker publishes the port as root.
+
 ## Writing a CLI test (the harness)
 
 ```ts

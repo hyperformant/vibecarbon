@@ -1,16 +1,14 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
+import { contactSubmissions } from '../../db/schema';
 import { sendEmail } from '../../lib/email';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
-import { supabaseAdmin } from '../../lib/supabase';
 import type { HonoVariables } from '../../types';
-
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
 
 const contactRoutes = new Hono<{ Variables: HonoVariables }>();
 
@@ -50,15 +48,15 @@ contactRoutes.post('/submit', async (c) => {
   }
 
   try {
-    const { error: insertError } = await adminDb.from('contact_submissions').insert({
-      name: body.name,
-      email: body.email,
-      subject: body.subject,
-      message: body.message,
-    });
-
-    if (insertError) {
-      logger.error({ error: insertError }, 'Failed to save contact submission');
+    try {
+      await adminDb.insert(contactSubmissions).values({
+        name: body.name,
+        email: body.email,
+        subject: body.subject,
+        message: body.message,
+      });
+    } catch (insertError) {
+      logger.error({ err: dbErrorForLog(insertError) }, 'Failed to save contact submission');
       return c.json({ error: sanitizeError(insertError, 'Failed to submit') }, 500);
     }
 

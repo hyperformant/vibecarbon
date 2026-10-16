@@ -81,6 +81,9 @@ const PNPM_WORKFLOWS: Record<string, string[]> = {
 /** Root-owned workflows that deliberately never set pnpm up. */
 const NON_PNPM_WORKFLOWS = [
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
+  join('.github', 'workflows', 'cleanup-db-image-dev.yml'),
+  join('.github', 'workflows', 'native-multiarch-image.yml'),
+  join('.github', 'workflows', 'publish-db-image-dev.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),
   join('.github', 'workflows', 'publish-images.yml'),
   // CodeQL runs prebuilt analysis actions only — no Node, no pnpm.

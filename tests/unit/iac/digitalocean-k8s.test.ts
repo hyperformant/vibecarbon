@@ -8,7 +8,7 @@
  * unit-test harness (no prior precedent in this repo). Mocks return
  * synthetic ids/computed fields (ipv4Address, ipv4AddressPrivate, vpc id,
  * reserved-ip address) so the program's actual resource graph — including
- * the master-private-IP-dependent supabase/worker user-data `.apply()`
+ * the master-private-IP-dependent database/worker user-data `.apply()`
  * chains — executes end to end, letting these tests assert on REAL
  * resolved resource inputs rather than re-deriving them by hand.
  */
@@ -74,7 +74,7 @@ const baseConfig = {
   sshPublicKey: 'ssh-ed25519 AAAAtest test@example.com',
   location: 'nyc3',
   masterServerType: 's-2vcpu-4gb',
-  supabaseServerType: 's-2vcpu-4gb',
+  dbServerType: 's-2vcpu-4gb',
   workerServerType: 's-2vcpu-4gb',
   minWorkers: 2,
   maxWorkers: 3,
@@ -93,7 +93,7 @@ const CLUSTER_NAME = 'acme-prod';
  * settle before returning) means `program()`'s own returned promise
  * resolves as soon as the top-level async function body returns — NOT once
  * every constructed resource has finished registering against the mock
- * monitor. Supabase/worker droplets in particular depend on an async
+ * monitor. Database/worker droplets in particular depend on an async
  * `.apply()` chain (dynamic-imports the cloud-init renderer), so their
  * `newResource` calls can still be in flight after `program()` resolves.
  * Poll `capturedResources` until the expected count lands rather than
@@ -145,7 +145,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     const program = buildDigitalOceanK8sProgram(baseConfig);
     const rawOutputs = await program();
     // sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment,
-    // supabase, worker-1, worker-2 = 10 resources for this config (M3 Task
+    // db, worker-1, worker-2 = 10 resources for this config (M3 Task
     // 9b added the pre-created cluster Tag the firewall dependsOn).
     await waitForResourceCount(10);
     // pulumi.output(...).promise() deeply resolves every nested Output
@@ -175,7 +175,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     expect(dropletNames).toEqual(
       [
         `${CLUSTER_NAME}-master`,
-        `${CLUSTER_NAME}-supabase`,
+        `${CLUSTER_NAME}-db`,
         `${CLUSTER_NAME}-worker-1`,
         `${CLUSTER_NAME}-worker-2`,
       ].sort(),
@@ -187,8 +187,8 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
       [
         'masterIp',
         'masterPrivateIp',
-        'supabaseIp',
-        'supabasePrivateIp',
+        'dbIp',
+        'dbPrivateIp',
         'workerIps',
         'floatingIp',
         'networkId',
@@ -218,12 +218,12 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     expect(outputs.vpcCidr).not.toBe('10.10.0.0/20');
   });
 
-  it('masterPrivateIp/supabasePrivateIp are the REAL Pulumi-resolved addresses, not Hetzner-style hardcoded literals', () => {
+  it('masterPrivateIp/dbPrivateIp are the REAL Pulumi-resolved addresses, not Hetzner-style hardcoded literals', () => {
     expect(outputs.masterPrivateIp).toBe('10.10.0.11');
     expect(outputs.masterIp).toBe('203.0.113.1');
     expect(outputs.masterPrivateIp).not.toBe('10.0.1.1');
-    expect(outputs.supabasePrivateIp).not.toBe('10.0.1.2');
-    expect(outputs.supabasePrivateIp).not.toBe(outputs.masterPrivateIp);
+    expect(outputs.dbPrivateIp).not.toBe('10.0.1.2');
+    expect(outputs.dbPrivateIp).not.toBe(outputs.masterPrivateIp);
   });
 
   it('floatingIp output is the Reserved IP address; networkId is the Vpc id; sshKeyId the SshKey id', () => {
@@ -232,7 +232,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     expect(outputs.sshKeyId).toBe('999888');
   });
 
-  it('threads the SAME vpcUuid (the Vpc id) to master, supabase, and every worker droplet', () => {
+  it('threads the SAME vpcUuid (the Vpc id) to master, database, and every worker droplet', () => {
     const droplets = byType('digitalocean:index/droplet:Droplet');
     expect(droplets.length).toBe(4);
     for (const d of droplets) {
@@ -253,7 +253,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     );
     const assignment = byType('digitalocean:index/reservedIpAssignment:ReservedIpAssignment')[0];
     expect(assignment.inputs.ipAddress).toBe('203.0.113.250');
-    // master is always the first Droplet-type resource registered (supabase
+    // master is always the first Droplet-type resource registered (db
     // and every worker's inputs depend on master.ipv4AddressPrivate, so
     // Pulumi cannot resolve them before master resolves) — id 9000001.
     expect(assignment.inputs.dropletId).toBe(9_000_001);
@@ -263,18 +263,14 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
   it('tags every droplet with the canonical role/node-pool/cluster tags (Task 1 encodeLabel contract)', () => {
     const droplets = byType('digitalocean:index/droplet:Droplet');
     const master = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-master`);
-    const supabase = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-supabase`);
+    const dbDroplet = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-db`);
     const workers = droplets.filter((d) => (d.inputs.name as string).includes('-worker-'));
 
     expect(master?.inputs.tags).toEqual(
       expect.arrayContaining(['role:master', `cluster:${CLUSTER_NAME}`, 'managed-by:vibecarbon']),
     );
-    expect(supabase?.inputs.tags).toEqual(
-      expect.arrayContaining([
-        'role:supabase',
-        'node-pool:supabase-pool',
-        `cluster:${CLUSTER_NAME}`,
-      ]),
+    expect(dbDroplet?.inputs.tags).toEqual(
+      expect.arrayContaining(['role:db', 'node-pool:db-pool', `cluster:${CLUSTER_NAME}`]),
     );
     for (const w of workers) {
       // '/' -> '-' encoding (Task 1 canonical contract): distinguishes
@@ -349,7 +345,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
   // ReservedIpAssignment, or accidentally doubles up a Droplet) that none
   // of the by-type/by-name assertions above would notice on their own.
   // M3 Task 9b bumped 9 -> 10 (added the pre-created cluster Tag).
-  it('registers EXACTLY 10 resources for minWorkers:2 (sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment, supabase, 2x worker)', () => {
+  it('registers EXACTLY 10 resources for minWorkers:2 (sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment, db, 2x worker)', () => {
     expect(capturedResources.length).toBe(10);
   });
 
@@ -379,19 +375,19 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     expect([...userData].every((ch) => (ch.codePointAt(0) ?? 0) <= 0x7f)).toBe(true);
   });
 
-  it('renders supabase/worker user-data with the REAL master private IP (not a placeholder or the master literal)', () => {
+  it('renders database/worker user-data with the REAL master private IP (not a placeholder or the master literal)', () => {
     const droplets = byType('digitalocean:index/droplet:Droplet');
-    const supabase = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-supabase`);
+    const dbDroplet = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-db`);
     const worker1 = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-worker-1`);
 
-    const supabaseUserData = supabase?.inputs.userData as string;
+    const dbUserData = dbDroplet?.inputs.userData as string;
     const workerUserData = worker1?.inputs.userData as string;
 
-    expect(supabaseUserData).toContain('K3S_URL="https://10.10.0.11:6443"');
-    expect(supabaseUserData).toContain('--node-taint="dedicated=supabase:NoSchedule"');
+    expect(dbUserData).toContain('K3S_URL="https://10.10.0.11:6443"');
+    expect(dbUserData).toContain('--node-taint="dedicated=db:NoSchedule"');
     expect(workerUserData).toContain('K3S_URL="https://10.10.0.11:6443"');
-    expect(workerUserData).not.toContain('--node-taint="dedicated=supabase:NoSchedule"');
-    expect(supabaseUserData).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
+    expect(workerUserData).not.toContain('--node-taint="dedicated=db:NoSchedule"');
+    expect(dbUserData).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
     expect(workerUserData).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
   });
 });
@@ -411,7 +407,7 @@ describe('buildDigitalOceanK8sProgram — existingSshKeyId reuse (HA shared key)
       existingSshKeyId: '424242',
     });
     const rawOutputs = await program();
-    // vpc, tag, firewall, master, reservedIp, reservedIpAssignment, supabase,
+    // vpc, tag, firewall, master, reservedIp, reservedIpAssignment, db,
     // worker-1, worker-2 = 9 resources (no SshKey — existingSshKeyId reused;
     // M3 Task 9b bumped 8 -> 9 for the pre-created cluster Tag).
     await waitForResourceCount(runStart + 9);

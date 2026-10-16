@@ -650,7 +650,64 @@ export async function gatherDeploymentConfig(args) {
     process.exit(1);
   }
 
-  // Object-storage keys come right after the API token: on every provider
+  // Server types resolve (and the ARM guard runs) straight after the API
+  // token, which the live catalog needs, and BEFORE the object-storage keys.
+  // The guard needs nothing from S3, and a persisted ARM type in
+  // .vibecarbon.json is a dead end: refuse it before asking the operator for
+  // (and live-verifying) secrets the run can never use. Nothing here prompts,
+  // so the API token and the S3 keys are still asked back to back.
+  await Provider.fetchServerTypes(apiToken);
+  const regionDefaults = Provider.getRegionDefaults(region);
+
+  // Server Type Selection (Streamlined)
+  let serverType, masterServerType, workerServerType, dbServerType;
+
+  if (isComposeDeploy) {
+    // Compose = the whole stack on one host, so use the medium-tier default
+    // (2+ vCPU, 4+ GB) for the whole box. regionDefaults.dbType is
+    // live-catalog-derived so it avoids retired SKUs like cpx21 in EU.
+    serverType = args.serverType || envConfig.serverType || regionDefaults.dbType;
+    masterServerType = workerServerType = dbServerType = serverType;
+  } else {
+    // `args.serverType` acts as a blanket fallback for all three node roles
+    // when a role-specific value isn't set. Matches the compose case's simpler
+    // mental model and lets e2e pin the whole cluster to a single known-good
+    // SKU. (`args.serverType` comes from `deploy -server-type <id>` or a
+    // programmatic caller; the per-role values from `.vibecarbon.json` / the
+    // interactive prompt. `scale` is the command that takes `-type`.)
+    const blanket = args.serverType || envConfig.serverType;
+    masterServerType =
+      args.masterServerType || envConfig.masterServerType || blanket || regionDefaults.masterType;
+    dbServerType = args.dbServerType || envConfig.dbServerType || blanket || regionDefaults.dbType;
+    workerServerType =
+      args.workerServerType || envConfig.workerServerType || blanket || regionDefaults.workerType;
+    serverType = workerServerType;
+  }
+
+  // Guard every resolved type. The region defaults and any option list are
+  // amd64 by construction (the provider catalogs drop ARM and
+  // lib/server-types.js filters the builders), so what this actually catches is
+  // an operator-authored `.vibecarbon.json` — the one path that reaches Pulumi
+  // without passing a prompt. vibecarbon is x86-64 only; see
+  // src/lib/deploy/platform.js. Failing here is deliberate: a deploy is
+  // attended and the config is one edit away, so it's better than silently
+  // provisioning ARM hardware the app image cannot exec on.
+  for (const [label, value] of [
+    ['serverType', serverType],
+    ['masterServerType', masterServerType],
+    ['dbServerType', dbServerType],
+    ['workerServerType', workerServerType],
+  ]) {
+    try {
+      Provider.assertAmd64ServerType(value, `.vibecarbon.json ${label}`);
+    } catch (err) {
+      p.log.error(err.message);
+      process.exit(1);
+    }
+  }
+
+  // Object-storage keys come right after the API token (only the prompt-free
+  // server-type resolution above sits between them): on every provider
   // both are generated in the same console visit (Hetzner: project, then
   // Security, then API tokens / S3 credentials), so asking for them back to
   // back saves the operator a second trip before the DNS questions.
@@ -731,60 +788,6 @@ export async function gatherDeploymentConfig(args) {
     saveS3Credentials = again.save ?? null;
     s3Region = await resolveStorageRegion();
     s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
-  }
-
-  await Provider.fetchServerTypes(apiToken);
-  const regionDefaults = Provider.getRegionDefaults(region);
-
-  // Server Type Selection (Streamlined)
-  let serverType, masterServerType, workerServerType, supabaseServerType;
-
-  if (isComposeDeploy) {
-    // Compose = single-host Supabase stack, so use the medium-tier default
-    // (2+ vCPU, 4+ GB) for the whole box. regionDefaults.supabaseType is
-    // live-catalog-derived so it avoids retired SKUs like cpx21 in EU.
-    serverType = args.serverType || envConfig.serverType || regionDefaults.supabaseType;
-    masterServerType = workerServerType = supabaseServerType = serverType;
-  } else {
-    // `args.serverType` acts as a blanket fallback for all three node roles
-    // when a role-specific value isn't set. Matches the compose case's simpler
-    // mental model and lets e2e pin the whole cluster to a single known-good
-    // SKU. (`args.serverType` comes from `deploy -server-type <id>` or a
-    // programmatic caller; the per-role values from `.vibecarbon.json` / the
-    // interactive prompt. `scale` is the command that takes `-type`.)
-    const blanket = args.serverType || envConfig.serverType;
-    masterServerType =
-      args.masterServerType || envConfig.masterServerType || blanket || regionDefaults.masterType;
-    supabaseServerType =
-      args.supabaseServerType ||
-      envConfig.supabaseServerType ||
-      blanket ||
-      regionDefaults.supabaseType;
-    workerServerType =
-      args.workerServerType || envConfig.workerServerType || blanket || regionDefaults.workerType;
-    serverType = workerServerType;
-  }
-
-  // Guard every resolved type. The region defaults and any option list are
-  // amd64 by construction (the provider catalogs drop ARM and
-  // lib/server-types.js filters the builders), so what this actually catches is
-  // an operator-authored `.vibecarbon.json` — the one path that reaches Pulumi
-  // without passing a prompt. vibecarbon is x86-64 only; see
-  // src/lib/deploy/platform.js. Failing here is deliberate: a deploy is
-  // attended and the config is one edit away, so it's better than silently
-  // provisioning ARM hardware the app image cannot exec on.
-  for (const [label, value] of [
-    ['serverType', serverType],
-    ['masterServerType', masterServerType],
-    ['supabaseServerType', supabaseServerType],
-    ['workerServerType', workerServerType],
-  ]) {
-    try {
-      Provider.assertAmd64ServerType(value, `.vibecarbon.json ${label}`);
-    } catch (err) {
-      p.log.error(err.message);
-      process.exit(1);
-    }
   }
 
   // DNS provider selection — registry-derived from DNS_PROVIDERS.
@@ -1017,7 +1020,7 @@ export async function gatherDeploymentConfig(args) {
     secondaryRegion,
     serverType,
     masterServerType,
-    supabaseServerType,
+    dbServerType,
     workerServerType,
     minWorkers: args.minWorkers ?? DEFAULT_WORKER_MIN,
     maxWorkers: args.maxWorkers ?? DEFAULT_WORKER_MAX,

@@ -2,7 +2,7 @@
  * vibecarbon down
  *
  * Wrapper around `<pm> dev:stop` that auto-detects the project's package manager.
- * Stops Docker services (Supabase, Traefik, etc.) for the current project.
+ * Stops Docker services (Postgres, Traefik, etc.) for the current project.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -13,6 +13,7 @@ import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { runCommandThroughTaskLog } from './lib/command.js';
+import { localComposeEnv } from './lib/images.js';
 import { findOrphanStacks, formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -94,7 +95,12 @@ export async function removeOrphanStacks({
   for (const { project } of orphans) {
     try {
       // Works without the compose files. Never -v: volumes are handled below.
-      exec('docker', ['compose', '-p', project, 'down', '--remove-orphans'], { stdio: 'ignore' });
+      // Run from inside a project, compose still reads that folder's compose
+      // file, which needs the db image pair.
+      exec('docker', ['compose', '-p', project, 'down', '--remove-orphans'], {
+        stdio: 'ignore',
+        env: localComposeEnv(),
+      });
     } catch (e) {
       log.warn(`couldn't remove ${project}: ${errMsg(e)}`);
       failed.push(project);
@@ -182,6 +188,9 @@ export async function run(args = []) {
       cwd,
       title: `Stopping dev environment with ${pm}`,
       successMessage: 'Dev environment stopped',
+      // dev:stop runs `docker compose down`, which interpolates the compose
+      // file: it needs the db image pair just as `up` does.
+      env: localComposeEnv(),
       // See PM_RUN_CONTEXT_RE in lib/command.js.
       cleanEnv: true,
     });

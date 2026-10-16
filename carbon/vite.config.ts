@@ -29,15 +29,13 @@ export default defineConfig(({ mode }) => {
   const portOffset = Number.parseInt(env.DEV_PORT_OFFSET || '0', 10);
   const vitePort = getPort('DEV_VITE_PORT', 5173, portOffset);
   const apiPort = getPort('DEV_API_PORT', 3000, portOffset);
-  const kongPort = getPort('DEV_KONG_PORT', 8000, portOffset);
 
   // Override client-side env vars with offset-adjusted ports in development.
-  // VITE_SUPABASE_URL and SITE_URL are hardcoded to default ports in .env,
-  // but DEV_PORT_OFFSET shifts Docker ports (Kong on 8000+offset).
+  // SITE_URL is hardcoded to the default port in .env, but DEV_PORT_OFFSET
+  // shifts the dev ports (Vite on 5173+offset).
   const devDefines: Record<string, string> =
     mode === 'development' && portOffset !== 0
       ? {
-          'import.meta.env.VITE_SUPABASE_URL': JSON.stringify(`http://localhost:${kongPort}`),
           'import.meta.env.SITE_URL': JSON.stringify(`http://localhost:${vitePort}`),
         }
       : {};
@@ -84,7 +82,6 @@ export default defineConfig(({ mode }) => {
               id.includes('node_modules/react-router')
             )
               return 'vendor-react';
-            if (id.includes('node_modules/@supabase/')) return 'vendor-supabase';
             if (id.includes('node_modules/@tanstack/react-query')) return 'vendor-query';
             // DO NOT split recharts into its own chunk. With rolldown-vite (Vite 8 +
             // rolldown 1.x), splitting a CJS-React consumer causes rolldown to bundle

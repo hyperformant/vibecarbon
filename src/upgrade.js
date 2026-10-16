@@ -31,6 +31,8 @@ import { spinner } from './lib/cli/progress.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { resolveDisplayName } from './lib/display-name.js';
+import { parseDotenv } from './lib/dotenv.js';
+import { localComposeEnv, resolveDbImage } from './lib/images.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
 import {
   adaptDockerfileForPackageManager,
@@ -63,35 +65,15 @@ const PLACEHOLDERS = {
   PROJECT_DISPLAY_NAME: '{{PROJECT_DISPLAY_NAME}}',
   GITHUB_OWNER: '{{GITHUB_OWNER}}',
   DB_PASSWORD: '{{DB_PASSWORD}}',
-  JWT_SECRET: '{{JWT_SECRET}}',
-  ANON_KEY: '{{ANON_KEY}}',
-  SERVICE_ROLE_KEY: '{{SERVICE_ROLE_KEY}}',
-  REALTIME_SECRET: '{{REALTIME_SECRET}}',
-  LOGFLARE_API_KEY: '{{LOGFLARE_API_KEY}}',
-  VAULT_ENC_KEY: '{{VAULT_ENC_KEY}}',
-  PG_META_CRYPTO_KEY: '{{PG_META_CRYPTO_KEY}}',
-  DB_ENC_KEY: '{{DB_ENC_KEY}}',
   SITE_URL: '{{SITE_URL}}',
   ADMIN_EMAIL: '{{ADMIN_EMAIL}}',
   ADMIN_PASSWORD: '{{ADMIN_PASSWORD}}',
-  ADMIN_PASSWORD_HASH: '{{ADMIN_PASSWORD_HASH}}',
 };
 
 // Mirrors SECRET_PLACEHOLDERS in src/create.js — placeholders that must never
 // be substituted into checked-in files (deploy code patches them at runtime
 // from .env.local). Keep in sync with create.js.
-const SECRET_PLACEHOLDERS = new Set([
-  'DB_PASSWORD',
-  'JWT_SECRET',
-  'ANON_KEY',
-  'SERVICE_ROLE_KEY',
-  'REALTIME_SECRET',
-  'LOGFLARE_API_KEY',
-  'VAULT_ENC_KEY',
-  'PG_META_CRYPTO_KEY',
-  'DB_ENC_KEY',
-  'ADMIN_PASSWORD',
-]);
+const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'ADMIN_PASSWORD']);
 
 // Files that contain {{PLACEHOLDER}} strings as their own substitution keys
 // (not vibecarbon template variables). Must be copied raw without replacement.
@@ -117,7 +99,7 @@ const SPEC = {
     'Files are classified into three categories:',
     "  Safe    Auto-replaced if you haven't modified them",
     '  Merge   Always shown for review (docker-compose.yml, package.json, etc.)',
-    '  Never   Your code, never touched (src/**, supabase/**, .env, etc.)',
+    '  Never   Your code, never touched (src/**, db/migrations/**, .env, etc.)',
   ].join('\n'),
   flags: [
     { name: 'h', boolean: true, description: 'Show this help' },
@@ -145,50 +127,173 @@ const SPEC = {
 // ============================================================================
 
 /**
+ * Give a project created before auth moved into the app the session signing
+ * key it now needs. The app refuses to start in production without
+ * BETTER_AUTH_SECRET (docker-compose.prod.yml `:?`, env.ts min 32), so an
+ * upgraded project that lacks one could not deploy. Checks BOTH .env.local
+ * (local dev) and .env (the file a deploy ships): a valid key in either is
+ * copied to the other, never rotated (that would sign everyone out);
+ * otherwise a new one is generated. Generating is safe: no session exists
+ * that was signed with anything else.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {'generated' | 'copied' | null} what was (or, under -dry, would
+ *   be) written: a new key ('generated', the sign the project predates
+ *   in-app auth), a valid key copied to the file that lacked it ('copied'),
+ *   or nothing (null)
+ */
+export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
+  const valid = (v) => typeof v === 'string' && v.length >= 32;
+  const local = loadEnvVariables(cwd).BETTER_AUTH_SECRET;
+  const basePath = join(cwd, '.env');
+  const hasBase = existsSync(basePath);
+  const base = hasBase
+    ? parseDotenv(readFileSync(basePath, 'utf-8')).BETTER_AUTH_SECRET
+    : undefined;
+  if (valid(local) && (!hasBase || valid(base))) return null;
+  const existing = valid(local) ? local : valid(base) ? base : null;
+  if (!dryRun) setEnvVar('BETTER_AUTH_SECRET', existing ?? generatePassword(64), cwd);
+  return existing ? 'copied' : 'generated';
+}
+
+/**
+ * Give every installed add-on the generated secrets its manifest declares
+ * (`envVars` with `generate: 'password'`, services/<name>/manifest.json),
+ * when the project lacks them. `vibecarbon add` generates them once; a
+ * project that added the add-on before the secret existed (Metabase's and
+ * n8n's own database passwords, METABASE_DB_PASSWORD / N8N_DB_PASSWORD)
+ * would otherwise fail compose's `:?` check and could not start it. Checks
+ * BOTH .env.local and .env, like ensureBetterAuthSecret: a value in either is
+ * copied to the other, never rotated; otherwise a new one is generated.
+ * Values are never printed. Only add-ons listed in .vibecarbon.json count,
+ * read from the CLI's bundled services/.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean, servicesDir?: string}} [opts]
+ * @returns {{key: string, status: 'generated' | 'copied'}[]} what was (or,
+ *   under -dry, would be) written
+ */
+export function ensureAddonSecrets(
+  cwd,
+  { dryRun = false, servicesDir = join(__dirname, '..', 'services') } = {},
+) {
+  const services = Object.keys(loadManifest(cwd).services ?? {});
+  if (services.length === 0) return [];
+  const local = loadEnvVariables(cwd);
+  const basePath = join(cwd, '.env');
+  const base = existsSync(basePath) ? parseDotenv(readFileSync(basePath, 'utf-8')) : null;
+  const written = [];
+  for (const name of services.sort()) {
+    const svcManifest = join(servicesDir, name, 'manifest.json');
+    if (!existsSync(svcManifest)) continue;
+    const envVars = JSON.parse(readFileSync(svcManifest, 'utf-8')).envVars ?? {};
+    for (const [key, config] of Object.entries(envVars)) {
+      if (config?.generate !== 'password') continue;
+      const inLocal = local[key] || '';
+      const inBase = base ? base[key] || '' : inLocal;
+      if (inLocal && inBase) continue;
+      const existing = inLocal || inBase;
+      if (!dryRun) setEnvVar(key, existing || generatePassword(config.length || 24), cwd);
+      written.push({ key, status: existing ? 'copied' : 'generated' });
+    }
+  }
+  return written;
+}
+
+/**
+ * Point the project's .env files at this CLI's database image.
+ * docker-compose.yml pulls `${DB_IMAGE}:${DB_IMAGE_TAG}`, so the upgraded
+ * template files and the image they run on move together. A project created
+ * before the image was pulled has neither key and could not start its db.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {boolean} whether either file was (or, under -dry, would be) changed
+ */
+export function ensureDbImageEnv(cwd, { dryRun = false } = {}) {
+  const { image, tag } = resolveDbImage();
+  const want = { DB_IMAGE: image, DB_IMAGE_TAG: tag };
+  let changed = false;
+  for (const file of ['.env.local', '.env']) {
+    const path = join(cwd, file);
+    if (!existsSync(path)) continue;
+    const env = parseDotenv(readFileSync(path, 'utf-8'));
+    if (Object.entries(want).some(([k, v]) => env[k] !== v)) changed = true;
+  }
+  if (changed && !dryRun) {
+    for (const [k, v] of Object.entries(want)) setEnvVar(k, v, cwd);
+  }
+  return changed;
+}
+
+/**
+ * What `upgrade` tells the user about BETTER_AUTH_SECRET. A generated key
+ * means the project predates in-app auth, and a database a server already
+ * runs for it can't carry over: sign-in accounts lived in the old auth
+ * service and are not migrated, and the old tables' user foreign keys still
+ * point at its schema. So that case also warns, with the commands that get
+ * a fresh database.
+ *
+ * @param {'generated' | 'copied' | null} status from ensureBetterAuthSecret
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {{info?: string, warn?: string}}
+ */
+export function betterAuthUpgradeNotes(status, { dryRun = false } = {}) {
+  if (!status) return {};
+  if (status === 'copied') {
+    return {
+      info: dryRun
+        ? 'Would copy BETTER_AUTH_SECRET into the .env file that lacks it'
+        : 'Copied BETTER_AUTH_SECRET into the .env file that lacked it, so local dev and deploys sign sessions with the same key',
+    };
+  }
+  return {
+    info: dryRun
+      ? 'Would add BETTER_AUTH_SECRET (the app now signs its own sessions)'
+      : 'Added BETTER_AUTH_SECRET to .env.local and .env (the app now signs its own sessions)',
+    warn:
+      'Sign-in now runs inside your app, so a server you already deployed needs a fresh database. ' +
+      'Accounts are not carried over, and the old tables still point at the previous auth service. ' +
+      'To keep a copy of the old data, run `vibecarbon backup` first. ' +
+      'Then `vibecarbon destroy` and `vibecarbon deploy` give you a fresh one. ' +
+      'Locally, `vibecarbon down` and say yes to deleting the data volumes, then start again.',
+  };
+}
+
+/**
  * Reconstruct template variables from the project's .env.local
  * Maps environment variable names back to template placeholder names
  *
  * @param {string} cwd - Project directory
  * @returns {object} - Variables keyed by placeholder name (without braces)
  */
-/**
- * Regenerate a too-short VAULT_ENC_KEY and WRITE IT BACK to .env.local.
- *
- * Supavisor's Cloak layer uses AES-256-GCM, which rejects any key that is not
- * exactly 32 bytes. `create` before 2026-08 generated 16 chars under a comment
- * claiming "32 hex chars = 16 bytes" — wrong on both counts — so the pooler
- * crash-looped in its tenant seed with "Unknown cipher or invalid key size".
- *
- * #251 fixed `create` and added a heal here, but the heal was INERT: it
- * computed a fresh key inside reconstructVariables, whose only consumer is
- * resolveTemplate — and resolveTemplate skips every key in SECRET_PLACEHOLDERS,
- * VAULT_ENC_KEY among them. Nothing in this file wrote .env.local at all, so
- * the new key was generated, never substituted, never persisted, discarded.
- * Every pre-2026-08 project kept its 16-char key and kept crash-looping;
- * only fresh `create`s were ever fixed. The guard that was supposed to cover
- * it asserted SOURCE TEXT via regex, so it passed against the dead code.
- *
- * Safe to rotate: nothing durable is encrypted under the old key. The pooler
- * tenant is re-seeded at container boot, and it never successfully seeded under
- * a short key in the first place.
- *
- * @param {string} cwd
- * @returns {boolean} true when a key was regenerated
- */
-export function healShortVaultEncKey(cwd) {
-  const current = loadEnvVariables(cwd).VAULT_ENC_KEY || '';
-  if (current.length >= 32) return false;
-  setEnvVar('VAULT_ENC_KEY', generatePassword(32), cwd, { localOnly: true });
-  return true;
-}
-
 function reconstructVariables(cwd, { dryRun = false } = {}) {
   // Runs BEFORE the env is read below, so the reconstructed variables (and any
-  // template rendered from them) see the healed value rather than the short
-  // one. Same hook configure/deploy/scale run at entry (project.js); under
-  // `-dry` it reports what it would re-encode and writes nothing.
+  // template rendered from them) see the repaired values. Same hook
+  // configure/deploy/scale run at entry (project.js); under `-dry` it reports
+  // what it would re-encode and writes nothing.
   repairLegacyEnvQuoting(cwd, { dryRun });
-  healShortVaultEncKey(cwd);
+  const authNotes = betterAuthUpgradeNotes(ensureBetterAuthSecret(cwd, { dryRun }), { dryRun });
+  if (authNotes.info) p.log.info(authNotes.info);
+  if (authNotes.warn) p.log.warn(authNotes.warn);
+  for (const { key, status } of ensureAddonSecrets(cwd, { dryRun })) {
+    const verb = status === 'generated' ? 'Generated' : 'Copied';
+    p.log.info(
+      `${dryRun ? `Would set` : verb} ${key} in .env and .env.local` +
+        (status === 'generated'
+          ? ': restart the stack so the add-on role gets it (`vibecarbon up`; on a server, set it with \\password, see docs/security.md)'
+          : ''),
+    );
+  }
+  if (ensureDbImageEnv(cwd, { dryRun })) {
+    const { ref } = resolveDbImage();
+    p.log.info(
+      dryRun
+        ? `Would set the database image to ${ref} in .env and .env.local`
+        : `Set the database image to ${ref} in .env and .env.local`,
+    );
+  }
   const env = loadEnvVariables(cwd);
   const manifest = loadManifest(cwd);
 
@@ -199,22 +304,9 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
     PROJECT_DISPLAY_NAME: resolveDisplayName(env),
     GITHUB_OWNER: manifest.services?.cicd?.owner || env.PROJECT_NAME || '',
     DB_PASSWORD: env.DB_PASSWORD || env.POSTGRES_PASSWORD || '',
-    JWT_SECRET: env.JWT_SECRET || '',
-    ANON_KEY: env.SUPABASE_ANON_KEY || '',
-    SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY || '',
-    REALTIME_SECRET: env.REALTIME_SECRET || env.SECRET_KEY_BASE || '',
-    LOGFLARE_API_KEY: env.LOGFLARE_API_KEY || '',
-    // Must be exactly 32 bytes (Supavisor's Cloak AES-256-GCM rejects other
-    // sizes). See healShortVaultEncKey — the heal PERSISTS to .env.local before
-    // this runs, so by here env.VAULT_ENC_KEY is already the healed value.
-    VAULT_ENC_KEY: env.VAULT_ENC_KEY || '',
-    PG_META_CRYPTO_KEY: env.PG_META_CRYPTO_KEY || '',
-    DB_ENC_KEY: (env.DB_ENC_KEY || '').slice(0, 16), // Realtime aes_128_ecb requires exactly 16 bytes
     SITE_URL: env.SITE_URL || 'http://localhost:5173',
     ADMIN_EMAIL: env.ADMIN_EMAIL || '',
     ADMIN_PASSWORD: env.ADMIN_PASSWORD || '',
-    // ADMIN_PASSWORD_HASH can't be reconstructed, but only appears in NEVER files
-    ADMIN_PASSWORD_HASH: '',
   };
 
   return variables;
@@ -346,6 +438,7 @@ async function main(cliArgs) {
     const { execFileSync } = await import('node:child_process');
     const ps = execFileSync('docker', ['compose', 'ps', '--format', 'json'], {
       cwd,
+      env: localComposeEnv(),
       encoding: 'utf-8',
       timeout: 10000,
     }).trim();

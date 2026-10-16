@@ -16,10 +16,12 @@ import dns from 'node:dns';
 import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { loadAllSpecs } from './lib/cli/command-registry.js';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
 import { formatExamples, renderCommandList } from './lib/cli/help.js';
 import { c } from './lib/colors.js';
+import { dbImageOverrideProblem, setDbImageWarningSink } from './lib/images.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
@@ -61,6 +63,42 @@ export function checkPlatform(platform = process.platform) {
     console.error('See: https://learn.microsoft.com/en-us/windows/wsl/install');
     process.exit(1);
   }
+}
+
+/**
+ * A malformed VIBECARBON_DB_IMAGE stops the CLI before any command runs, with
+ * one line saying what is wrong and how to fix it, instead of a throw from
+ * deep inside create/upgrade/deploy. A good one routes the resolver's
+ * "using dev db image" warning through the clack logger. All of it goes to
+ * stderr: it is a diagnostic, and stdout belongs to the command (a `status`
+ * or `-dry` run piped into a file must not carry it). main() calls this
+ * after top-level `-h`/`-v` and skips it for a command's own `-h`/`-v`, so
+ * help and version always print.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function checkDbImageOverride(env = process.env) {
+  const toStderr = { output: process.stderr };
+  setDbImageWarningSink((msg) => p.log.warn(msg, toStderr));
+  const problem = dbImageOverrideProblem(env);
+  if (!problem) return;
+  p.log.error(problem, toStderr);
+  p.log.info('fix the ref, or unset VIBECARBON_DB_IMAGE to use the release db image', toStderr);
+  process.exit(1);
+}
+
+/**
+ * Whether a command's own flags ask for its help or version (`-h` / `-v`).
+ * Only the command's flags count: everything after `--` belongs to whatever
+ * the command passes it to (`vibecarbon shell -- psql -v ON_ERROR_STOP=1`).
+ *
+ * @param {string[]} args - the command's arguments (after the command name)
+ * @returns {boolean}
+ */
+export function asksHelpOrVersion(args) {
+  const end = args.indexOf('--');
+  const own = end === -1 ? args : args.slice(0, end);
+  return own.includes('-h') || own.includes('-v');
 }
 
 /**
@@ -222,11 +260,15 @@ async function main() {
     process.exit(0);
   }
 
+  // After help/version: a bad VIBECARBON_DB_IMAGE must never hide them, at
+  // the top level or for one command (`vibecarbon up -h`).
+  const subcommandArgs = args.slice(1);
+  if (!asksHelpOrVersion(subcommandArgs)) checkDbImageOverride();
+
   // Route to subcommands. Every command's total wall-clock is logged as
   // `[perf] cli.<command>.total <ms>ms` when VIBECARBON_PERF=1 is set — the
   // e2e runner forces it on so we always have total + sub-step
   // breakdowns per CLI invocation.
-  const subcommandArgs = args.slice(1);
 
   // Central license gate chokepoint: any command classified 'paid' in
   // COMMAND_GATES is gated HERE, pre-dispatch, so it can never ship

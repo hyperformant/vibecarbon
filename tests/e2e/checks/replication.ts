@@ -20,10 +20,10 @@
  *
  * Mode anatomy (how we reach postgres per mode):
  *   compose-ha: postgres is the `db` compose service on each VPS. We SSH to the
- *     VPS and `docker compose exec -T db psql -U supabase_admin`.
- *   k8s-ha:     postgres is pod supabase-supabase-db-0 (ns vibecarbon) on each
+ *     VPS and `docker compose exec -T db psql -U postgres`.
+ *   k8s-ha:     postgres is pod db-0 (ns vibecarbon) on each
  *     cluster. We SSH to that cluster's MASTER node (k3s API server) and
- *     `kubectl exec ... -- psql -U supabase_admin`. The standby postgres is a
+ *     `kubectl exec ... -- psql -U postgres`. The standby postgres is a
  *     streaming replica, so read-only queries against it are safe.
  *
  * All SSH command strings are built from trusted test config + a sanitized
@@ -35,6 +35,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
 import {
@@ -69,11 +70,11 @@ const QUALIFIED_PROBE_TABLE = `public.${REPL_PROBE_TABLE}`;
  * security on it, and inserts the marker row — in that order, in ONE
  * statement batch. Belt #1 against the deploy-time RLS audit
  * (src/lib/deploy/rls-audit.js), which fails any warm-deploy/restore/
- * reconverge that finds a public table with RLS disabled. supabase_admin is
- * a postgres SUPERUSER (carbon/volumes/db/roles.sql), and superusers always
+ * reconverge that finds a public table with RLS disabled. postgres is
+ * the SUPERUSER (the db image's initdb creates it), and superusers always
  * bypass RLS regardless of table ownership or FORCE ROW LEVEL SECURITY — so
  * enabling RLS here never blocks the probe's own reads/writes, which all run
- * as supabase_admin.
+ * as postgres.
  */
 export function buildCreateMarkerSql(markerId: string): string {
   return (
@@ -122,12 +123,12 @@ export function buildMarkerId(runId: string, step: string, ts: number): string {
  */
 export function buildPsqlCommand(mode: DeployMode, projectName: string, sql: string): string {
   if (mode.startsWith('compose')) {
-    return `cd /opt/${projectName} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "${sql}"`;
+    return `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${sql}"`;
   }
-  // k8s / k8s-ha: exec into the supabase-db pod from the master node.
+  // k8s / k8s-ha: exec into the db pod from the master node.
   return (
-    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl exec -n vibecarbon supabase-supabase-db-0 ` +
-    `-- psql -U supabase_admin -d postgres -tAc "${sql}"`
+    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} ` +
+    `-- psql -U postgres -d postgres -tAc "${sql}"`
   );
 }
 
@@ -142,7 +143,7 @@ export function buildLogDiagCommand(mode: DeployMode, projectName: string): stri
     return `cd /opt/${projectName} && docker compose logs --no-color --tail=400 db 2>&1 | ${filter}`;
   }
   return (
-    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl logs -n vibecarbon supabase-supabase-db-0 ` +
+    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl logs -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} ` +
     `--tail=400 2>&1 | ${filter}`
   );
 }
@@ -201,7 +202,7 @@ export function extractPgHbaRejectIps(logText: string | null | undefined): strin
 interface RawEnvConfig {
   region?: string;
   secondaryRegion?: string;
-  servers?: Array<{ ip: string; name?: string; role?: string; supabaseIp?: string }>;
+  servers?: Array<{ ip: string; name?: string; role?: string; dbIp?: string }>;
   ha?: {
     failoverRegion?: string;
     primary?: { masterIp?: string };
@@ -351,7 +352,7 @@ export function classifySshExecFailure(
   return { kind, transient };
 }
 
-interface PsqlResult {
+export interface PsqlResult {
   ok: boolean;
   output: string;
   error?: string;
@@ -455,8 +456,12 @@ async function sshExecWithRetry(
   };
 }
 
-/** Run a psql statement on `target` over SSH (retried). Never throws. */
-async function runPsql(target: ReplTarget, sql: string): Promise<PsqlResult> {
+/**
+ * Run a psql statement on `target` over SSH (retried). Never throws. Shared
+ * with the app-functional db checks so every direct-SQL e2e probe reaches the
+ * database the same way (one place to change the role or the pod name).
+ */
+export async function runPsql(target: ReplTarget, sql: string): Promise<PsqlResult> {
   const remote = buildPsqlCommand(target.mode, target.projectName, sql);
   const res = await sshExecWithRetry(target, remote);
   if (res.ok) return { ok: true, output: res.stdout };

@@ -5,15 +5,11 @@
  * select every pod with an Egress type), so a pod without an explicit S3
  * allowance simply cannot reach object storage.
  *
- * The storage service had NO allowance at all, on any provider, for as long as
- * the k8s tier has existed. It went unnoticed because storage was ALSO shipped
- * with no S3 credentials and no endpoint (5b2e8dfa), so it never attempted a
- * connection that could be dropped — and the e2e storage checks skipped on a
- * bucket nothing created, so nothing ever tried an upload. Two independent
- * faults stacked behind one skip. Live DO k8s, 2026-08-21: the first upload
- * attempt failed on credentials, the very next failed here with
- * `connect ECONNREFUSED 10.10.15.254:443` — the VPC gateway address
- * s3-egress-vpc.yaml's own header documents.
+ * History: the (since removed) storage service shipped with NO
+ * allowance at all, on any provider. Live DO k8s, 2026-08-21: its first upload
+ * failed with `connect ECONNREFUSED 10.10.15.254:443`, the VPC gateway address
+ * s3-egress-vpc.yaml's own header documents. Pods that talk to S3 today: the
+ * app and the db (wal-g).
  *
  * TWO paths, and a pod needs both:
  *   - network-policies.yaml — public S3, private ranges excluded. All providers.
@@ -48,26 +44,17 @@ const s3EgressTargets = (rel: string) =>
         (e.ports ?? []).some((port) => port.port === 443),
       ),
     )
-    .map((p) => p.spec?.podSelector?.matchLabels?.['app.kubernetes.io/name'])
+    .map((p) => p.spec?.podSelector?.matchLabels?.app)
     .filter(Boolean);
 
 describe('k8s S3 egress coverage', () => {
-  it('the storage pod has a public-S3 egress allowance', () => {
-    expect(s3EgressTargets('base/network-policies.yaml')).toContain('supabase-storage');
-  });
-
-  it('the storage pod has the DO VPC-gateway allowance too', () => {
-    // Without this arm, DO storage fails with ECONNREFUSED against the VPC
-    // gateway even once credentials are correct — exactly what happened live.
-    expect(s3EgressTargets('base/s3-egress-vpc/s3-egress-vpc.yaml')).toContain('supabase-storage');
-  });
-
   it('every VPC arm has a public-S3 sibling — the file says each mirrors one', () => {
     // A VPC arm without its sibling would allow the gateway but still deny
     // public S3 on providers that resolve publicly (Hetzner et al).
     const vpc = s3EgressTargets('base/s3-egress-vpc/s3-egress-vpc.yaml');
     const pub = [
       ...s3EgressTargets('base/network-policies.yaml'),
+      ...s3EgressTargets('base/db/network-policy.yaml'),
       ...s3EgressTargets('base/app/network-policy.yaml'),
       ...s3EgressTargets('base/registry/local-registry.yaml'),
     ];
@@ -77,10 +64,9 @@ describe('k8s S3 egress coverage', () => {
   });
 
   it('the db keeps its own allowance — wal-g depends on it', () => {
-    // Regression floor: this pre-dated the storage work and must not be
-    // disturbed by it.
-    expect(s3EgressTargets('base/network-policies.yaml')).toContain('supabase-db');
-    expect(s3EgressTargets('base/s3-egress-vpc/s3-egress-vpc.yaml')).toContain('supabase-db');
+    // Regression floor: wal-g backups and restores need both arms.
+    expect(s3EgressTargets('base/db/network-policy.yaml')).toContain('vibecarbon-db');
+    expect(s3EgressTargets('base/s3-egress-vpc/s3-egress-vpc.yaml')).toContain('vibecarbon-db');
   });
 
   it('the VPC file still renders its placeholder, never a literal CIDR', () => {
@@ -91,10 +77,10 @@ describe('k8s S3 egress coverage', () => {
       'utf8',
     );
     const cidrs = [...raw.matchAll(/cidr: (\S+)/g)].map((m) => m[1]);
-    // 3 arms since 2026-08-30: the registry left the S3-egress family when
-    // its backend moved to the master's filesystem (see
-    // registry-no-object-storage.test.ts) — app, storage, and db remain.
-    expect(cidrs.length).toBeGreaterThanOrEqual(3);
+    // 2 arms: the registry left the S3-egress family when its backend moved
+    // to the master's filesystem (registry-no-object-storage.test.ts, 2026-08-30)
+    // and the storage service left with the service itself — app and db remain.
+    expect(cidrs.length).toBeGreaterThanOrEqual(2);
     for (const c of cidrs) expect(c).toBe('__VPC_CIDR__');
   });
 });

@@ -36,8 +36,8 @@ describe('mapContainerList', () => {
     },
     {
       Id: 'bbb',
-      Names: ['/my-app-kong'],
-      Labels: { 'com.docker.compose.service': 'kong' },
+      Names: ['/my-app-traefik'],
+      Labels: { 'com.docker.compose.service': 'traefik' },
     },
     // The docker `name` filter matches substrings, so a sibling project with
     // a shared prefix leaks through the API query — the exact-prefix filter
@@ -48,14 +48,14 @@ describe('mapContainerList', () => {
       Labels: { 'com.docker.compose.service': 'db' },
     },
     // No compose labels: service falls back to name minus the project prefix.
-    { Id: 'ddd', Names: ['/my-app-imgproxy'], Labels: {} },
+    { Id: 'ddd', Names: ['/my-app-app'], Labels: {} },
   ];
 
   it('keeps only exact-prefix matches and resolves service names', () => {
     expect(mapContainerList(entries, 'my-app')).toEqual([
       { id: 'aaa', name: 'my-app-db', service: 'db' },
-      { id: 'bbb', name: 'my-app-kong', service: 'kong' },
-      { id: 'ddd', name: 'my-app-imgproxy', service: 'imgproxy' },
+      { id: 'bbb', name: 'my-app-traefik', service: 'traefik' },
+      { id: 'ddd', name: 'my-app-app', service: 'app' },
     ]);
   });
 
@@ -64,6 +64,21 @@ describe('mapContainerList', () => {
       { Id: 'eee', Names: ['/my-app-db'], Labels: { 'com.docker.compose.service': 'db' } },
     ];
     expect(mapContainerList(dashed, 'my-app')[0].service).toBe('db');
+  });
+
+  it("reads each container's healthcheck verdict from its Status text", () => {
+    const withStatus = [
+      { Id: 'h1', Names: ['/p-db'], Status: 'Up 3 minutes (healthy)' },
+      { Id: 'h2', Names: ['/p-s3'], Status: 'Up 10 seconds (health: starting)' },
+      { Id: 'h3', Names: ['/p-app'], Status: 'Up 2 hours (unhealthy)' },
+      { Id: 'h4', Names: ['/p-traefik'], Status: 'Up 2 hours' },
+    ];
+    expect(mapContainerList(withStatus, 'p').map((c) => c.health)).toEqual([
+      'healthy',
+      'starting',
+      'unhealthy',
+      undefined,
+    ]);
   });
 });
 

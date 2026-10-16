@@ -24,7 +24,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { apiJson } from '@/lib/api';
-import { supabase } from '@/lib/supabase';
+import { authErrorKey } from '@/lib/auth-errors';
 
 async function deleteAccount(): Promise<void> {
   await apiJson<void>('/api/v1/me', { method: 'DELETE' }, 'Failed to delete account');
@@ -32,22 +32,19 @@ async function deleteAccount(): Promise<void> {
 
 export default function Profile() {
   const { t } = useTranslation();
-  const { user, isSuperAdmin, signOut } = useAuth();
+  const { user, isSuperAdmin, signOut, updateUser } = useAuth();
   const navigate = useNavigate();
-  const displayName = user?.user_metadata?.full_name || '';
+  const displayName = user?.name || '';
   const [name, setName] = useState(displayName);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      const { error } = await supabase.auth.updateUser({ data: { full_name: name } });
-      if (error) throw error;
-    },
+    mutationFn: () => updateUser({ name: name.trim() }),
     onSuccess: () => {
       toast.success(t('profile.saved'));
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toast.error(t(authErrorKey(error, 'profile.saveFailed')));
     },
   });
 
@@ -62,8 +59,9 @@ export default function Profile() {
     },
   });
 
+  // `url` is the app's own /api/files/avatars/... address, readable by anyone.
   async function handleAvatarUpload(url: string) {
-    await supabase.auth.updateUser({ data: { avatar_url: url } });
+    await updateUser({ image: url });
   }
 
   return (
@@ -78,11 +76,7 @@ export default function Profile() {
           </CardHeader>
           <CardContent className="space-y-6">
             {user && (
-              <AvatarUpload
-                userId={user.id}
-                currentUrl={user.user_metadata?.avatar_url}
-                onUpload={handleAvatarUpload}
-              />
+              <AvatarUpload currentUrl={user.image ?? undefined} onUpload={handleAvatarUpload} />
             )}
 
             <div className="grid gap-4">

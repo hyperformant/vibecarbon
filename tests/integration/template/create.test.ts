@@ -1,5 +1,13 @@
 import { execSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
@@ -85,8 +93,7 @@ describe('create-vibecarbon E2E', () => {
         'src/client/pages',
         'src/client/lib',
         'src/shared',
-        'supabase/migrations',
-        'volumes/kong',
+        'db/migrations',
         'volumes/db',
       ];
 
@@ -126,10 +133,23 @@ describe('create-vibecarbon E2E', () => {
 
     it('generates .env.local with secrets', () => {
       const envContent = readFileSync(join(projectDir(), '.env.local'), 'utf-8');
-      expect(envContent).toContain('SUPABASE_ANON_KEY=');
-      expect(envContent).toContain('SUPABASE_SERVICE_ROLE_KEY=');
-      expect(envContent).toContain('JWT_SECRET=');
+      expect(envContent).toContain('BETTER_AUTH_SECRET=');
+      expect(envContent).not.toContain('JWT_SECRET');
       expect(envContent).toContain('DB_PASSWORD=');
+    });
+
+    it('writes the local-S3 dev vars, agreeing with the Garage service', () => {
+      const env = parseDotenv(readFileSync(join(projectDir(), '.env.local'), 'utf-8'));
+      expect(env.S3_ENDPOINT).toBe('http://localhost:8333');
+      expect(env.S3_REGION).toBe('us-east-1');
+      expect(env.S3_BUCKET).toMatch(/-local$/);
+      const override = readFileSync(join(projectDir(), 'docker-compose.override.yml'), 'utf-8');
+      expect(override).toContain(`GARAGE_DEFAULT_ACCESS_KEY: ${env.S3_ACCESS_KEY}\n`);
+      expect(override).toContain(`GARAGE_DEFAULT_SECRET_KEY: ${env.S3_SECRET_KEY}\n`);
+      // The Garage config the s3 service mounts is scaffolded.
+      expect(readFileSync(join(projectDir(), 'volumes/s3/garage.toml'), 'utf-8')).toContain(
+        'replication_factor = 1',
+      );
     });
 
     it('replaces all template placeholders', () => {
@@ -142,20 +162,20 @@ describe('create-vibecarbon E2E', () => {
       expect(dockerCompose.length).toBeGreaterThan(100);
     });
 
-    it('keeps {{ADMIN_PASSWORD}} as a placeholder in k8s/values/supabase.values.yaml', () => {
-      // installSupabase() in src/lib/deploy/k8s/k3s.js patches {{ADMIN_PASSWORD}}
-      // at deploy time from .env.local. Substituting it at create-time bakes a
-      // high-entropy password into a checked-in file and trips the preflight
-      // secret-scan during `vibecarbon deploy` (regression from a brand-new
-      // project). Non-secret placeholders like {{ADMIN_EMAIL}} and {{PROJECT_NAME}}
-      // are still substituted normally.
-      const valuesYaml = readFileSync(
-        join(projectDir(), 'k8s/values/supabase.values.yaml'),
-        'utf-8',
-      );
-      expect(valuesYaml).toContain('{{ADMIN_PASSWORD}}');
-      expect(valuesYaml).not.toContain('{{ADMIN_EMAIL}}');
-      expect(valuesYaml).not.toContain('{{PROJECT_NAME}}');
+    it('k8s/base/db/statefulset.yaml carries no credentials, only deploy-time placeholders', () => {
+      // A password substituted at create time would be a high-entropy secret
+      // in a checked-in file, tripping the preflight secret-scan during
+      // `vibecarbon deploy`. The db reads its password from vibecarbon-secrets,
+      // and the deploy-time placeholders renderK8sBase resolves
+      // (src/lib/deploy/k8s/k3s.js) stay unsubstituted.
+      const sts = readFileSync(join(projectDir(), 'k8s/base/db/statefulset.yaml'), 'utf-8');
+      expect(sts).not.toMatch(/ADMIN_(EMAIL|PASSWORD)|username:|password:/);
+      expect(sts).toContain('key: DB_PASSWORD');
+      expect(sts).toContain('{{DB_IMAGE}}');
+      expect(sts).toContain('{{WALG_S3_PREFIX}}');
+      expect(sts).toContain('{{K8S_STORAGE_CLASS}}');
+      // The chart era's files are not scaffolded any more.
+      expect(existsSync(join(projectDir(), 'k8s/values'))).toBe(false);
     });
 
     it('copies binary icon assets byte-identical to the template (no UTF-8 corruption)', () => {
@@ -224,11 +244,11 @@ describe('create-vibecarbon E2E', () => {
       const sourceFiles = [
         'src/server/index.ts',
         'src/server/lib/env.ts',
-        'src/server/lib/supabase.ts',
+        'src/server/auth/index.ts',
         'src/server/routes/health.ts',
         'src/client/App.tsx',
         'src/client/main.tsx',
-        'src/client/lib/supabase.ts',
+        'src/client/lib/auth-client.ts',
         'src/shared/types.ts',
       ];
 
@@ -237,8 +257,28 @@ describe('create-vibecarbon E2E', () => {
       }
     });
 
-    it('generates migration files', () => {
-      expect(existsSync(join(projectDir(), 'supabase/migrations/00001_init.sql'))).toBe(true);
+    it('scaffolds the whole migration baseline (SQL + drizzle meta) and the seed file', () => {
+      // All of carbon/db/migrations, meta/ included: the app's migrator reads
+      // meta/_journal.json, and a scaffold missing a baseline file ships
+      // code whose schema never gets created
+      // (docs/rca/2026-08-25-migration-drift.md).
+      const dir = (root: string) => join(root, 'db/migrations');
+      const template = join(process.cwd(), 'carbon');
+      for (const sub of ['', 'meta']) {
+        const want = readdirSync(join(dir(template), sub)).sort();
+        expect(want.length).toBeGreaterThan(1);
+        expect(readdirSync(join(dir(projectDir()), sub)).sort()).toEqual(want);
+      }
+      expect(existsSync(join(projectDir(), 'db/seed.sql'))).toBe(true);
+    });
+
+    it('leaves the template-only migrations census out of the project', () => {
+      expect(
+        existsSync(join(projectDir(), 'tests/structural/template-migrations-census.test.ts')),
+      ).toBe(false);
+      expect(existsSync(join(projectDir(), 'tests/structural/migrations-drift.test.ts'))).toBe(
+        true,
+      );
     });
 
     it('ships the test-seed scaffolding (tiered vitest setup + helpers)', () => {
@@ -620,17 +660,16 @@ describe('create-vibecarbon E2E', () => {
       // are base64/base64url/JWT and the test password is alphanumeric, all in
       // the bare alphabet, so each is written unquoted.
       const BARE = '[A-Za-z0-9_./:@+=,%-]+';
-      expect(envLocal).toMatch(new RegExp(`^SUPABASE_ANON_KEY=${BARE}$`, 'm'));
-      expect(envLocal).toMatch(new RegExp(`^SUPABASE_SERVICE_ROLE_KEY=${BARE}$`, 'm'));
-      expect(envLocal).toMatch(new RegExp(`^JWT_SECRET=${BARE}$`, 'm'));
+      expect(envLocal).toMatch(new RegExp(`^BETTER_AUTH_SECRET=${BARE}$`, 'm'));
+      expect(envLocal).not.toMatch(/^JWT_SECRET=/m);
       expect(envLocal).toMatch(new RegExp(`^DB_PASSWORD=${BARE}$`, 'm'));
       expect(envLocal).toMatch(/^ADMIN_PASSWORD=testpass123$/m);
 
       // Secrets should be unique (not placeholders). Values are read back
       // through parseDotenv, the codebase's one dotenv reader.
       const env = parseDotenv(envLocal);
-      expect(env.SUPABASE_ANON_KEY).toBeTruthy();
-      expect(env.SUPABASE_ANON_KEY).not.toBe(env.SUPABASE_SERVICE_ROLE_KEY);
+      expect(env.BETTER_AUTH_SECRET).toBeTruthy();
+      expect(env.BETTER_AUTH_SECRET).not.toBe(env.DB_PASSWORD);
     }, 60000);
 
     it('-display-name overrides the derived display name', () => {

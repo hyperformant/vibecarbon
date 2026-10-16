@@ -421,27 +421,15 @@ describe('config-registry', () => {
  * their webhook secrets) skippable mid-section — too loose. This
  * one-directional rule is the version that actually holds.
  *
- * A handful of oauth keys (GOOGLE_CLIENT_ID/SECRET, MICROSOFT_CLIENT_ID/
- * SECRET/TENANT_ID) and one smtp key (GOTRUE_MAILER_AUTOCONFIRM) never
- * appear in env.ts at all — they're read by the GoTrue auth service
- * container's own env, not the app's zod schema — so there is no boot-time
- * contract to compare against. They're listed explicitly below rather than
- * silently skipped, so a key that starts appearing in env.ts is noticed.
+ * Every key here is read by the app's own env.ts now (auth runs in-process),
+ * so NOT_IN_ENV_SCHEMA is empty. A key a separate container reads instead
+ * goes there with the reason, rather than being silently skipped.
  */
 describe('config-registry ↔ carbon env.ts — registry is never looser than env.ts', () => {
   const ENV_TS_PATH = join(process.cwd(), 'carbon/src/server/lib/env.ts');
   const CONFIGURE_FEATURES = new Set(['billing', 'oauth', 'smtp']);
 
-  const NOT_IN_ENV_SCHEMA: Record<string, string> = {
-    GOOGLE_CLIENT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
-    GOOGLE_CLIENT_SECRET: 'read by the GoTrue auth service container env, not the app zod schema',
-    MICROSOFT_CLIENT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
-    MICROSOFT_CLIENT_SECRET:
-      'read by the GoTrue auth service container env, not the app zod schema',
-    MICROSOFT_TENANT_ID: 'read by the GoTrue auth service container env, not the app zod schema',
-    GOTRUE_MAILER_AUTOCONFIRM:
-      'read by the GoTrue auth service container env, not the app zod schema',
-  };
+  const NOT_IN_ENV_SCHEMA: Record<string, string> = {};
 
   /** Maps each envSchema field name to whether its zod chain is `.optional()`. */
   function parseEnvSchemaOptionality(): Record<string, boolean> {
@@ -494,7 +482,7 @@ describe('config-registry ↔ carbon env.ts — registry is never looser than en
     // Guards the parser itself: env.ts must have real optional/required keys
     // to compare against, or this test would pass vacuously.
     expect(Object.keys(envOptionality).length).toBeGreaterThan(20);
-    expect(envOptionality.SUPABASE_URL).toBe(false);
+    expect(envOptionality.BETTER_AUTH_SECRET).toBe(false);
     expect(envOptionality.STRIPE_WEBHOOK_SECRET).toBe(true);
 
     const relevant = CONFIG_KEYS.filter((k) => CONFIGURE_FEATURES.has(k.feature));

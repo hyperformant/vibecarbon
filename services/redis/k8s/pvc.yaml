@@ -14,7 +14,7 @@ spec:
   # redis' data landed on node-local disk on the unlucky flip, the PV's node
   # affinity pinned redis to that node, and the data died with it — silently,
   # since redis comes up Ready either way. Same defect #234 fixed for the
-  # Supabase PVCs.
+  # database PVC.
   # Resolved to a real class BEFORE apply by renderK8sStorageClassPlaceholder
   # (storageClassName is immutable once the PVC exists, so it cannot be patched
   # afterwards).

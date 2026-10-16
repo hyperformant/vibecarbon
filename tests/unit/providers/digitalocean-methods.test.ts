@@ -103,9 +103,9 @@ describe('encodeLabel / encodeLabels', () => {
       encodeLabel('cluster', 'demo-cluster'),
       encodeLabel('managed-by', 'vibecarbon'),
       encodeLabel('role', 'worker'),
-      encodeLabel('role', 'supabase'),
+      encodeLabel('role', 'db'),
       encodeLabel('node-pool', 'worker-pool'),
-      encodeLabel('node-pool', 'supabase-pool'),
+      encodeLabel('node-pool', 'db-pool'),
       encodeLabel('os-flavor', 'k3s'),
     ]);
     expect(encoded.size).toBe(9);
@@ -1233,14 +1233,17 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       expect(putBody.tags).toEqual(['cluster:proj-prod']);
     });
 
-    it('also rewrites the operator-scoped Supavisor pooler rules (5432/6543)', async () => {
-      // Compose deploys firewall the pooler ports to operator CIDRs, same
-      // as SSH — access add/remove/prune must keep them in lockstep.
+    it('deletes leftover inbound tcp/5432 and tcp/6543 rules, touching nothing else', async () => {
+      // The database has no public port (operators use `vibecarbon shell` /
+      // SSH). A firewall from before the external pooler was retired still
+      // carries 5432/6543 operator rules; the next reconcile removes them,
+      // leaving SSH (rewritten), HTTPS and the WireGuard rule as they were.
       const existingRules = [
         { protocol: 'tcp', ports: '22', sources: { addresses: ['9.9.9.9/32'] } },
         { protocol: 'tcp', ports: '5432', sources: { addresses: ['9.9.9.9/32'] } },
         { protocol: 'tcp', ports: '6543', sources: { addresses: ['9.9.9.9/32'] } },
         { protocol: 'tcp', ports: '443', sources: { addresses: ['0.0.0.0/0', '::/0'] } },
+        { protocol: 'udp', ports: '51821', sources: { addresses: ['5.5.5.5/32'] } },
       ];
       fetchWithRetryMock
         .mockResolvedValueOnce(
@@ -1270,9 +1273,8 @@ describe('DigitalOceanProvider instance methods — exact wire shapes (B3)', () 
       );
       expect(putBody.inbound_rules).toEqual([
         { protocol: 'tcp', ports: '22', sources: { addresses: cidrs } },
-        { protocol: 'tcp', ports: '5432', sources: { addresses: cidrs } },
-        { protocol: 'tcp', ports: '6543', sources: { addresses: cidrs } },
         { protocol: 'tcp', ports: '443', sources: { addresses: ['0.0.0.0/0', '::/0'] } },
+        { protocol: 'udp', ports: '51821', sources: { addresses: ['5.5.5.5/32'] } },
       ]);
     });
   });

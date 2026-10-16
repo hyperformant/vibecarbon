@@ -42,7 +42,7 @@ import * as p from '@clack/prompts';
 import { spinner } from '../cli/progress.js';
 import { perfAsync } from '../perf.js';
 import { providerIdFor } from '../providers/index.js';
-import { buildProgramConfig } from '../scale-plan.js';
+import { assertPersistedRoleTypes, buildProgramConfig } from '../scale-plan.js';
 
 /**
  * Build an abort Error whose `logLines` are the exact `p.log.error(...)` lines
@@ -73,8 +73,8 @@ function abort(lines) {
  * @param {boolean|string} args.isHA             HA topology (truthy → shared-key path).
  * @param {Record<string, unknown>} [args.overrides]  buildProgramConfig `newValues` slot.
  *   Accepts BOTH the short type keys buildProgramConfig reads
- *   (`masterType`/`supabaseType`/`workerType`) and the long-form persisted spec
- *   keys (`masterServerType`/`supabaseServerType`/`workerServerType`, matching
+ *   (`masterType`/`dbType`/`workerType`) and the long-form persisted spec
+ *   keys (`masterServerType`/`dbServerType`/`workerServerType`, matching
  *   envConfig.ha.standby.*). Long-form keys are mapped to short when the short
  *   key is absent, so a caller using either vocabulary reaches Pulumi — `scale`
  *   passes short keys, the pilot-light `failover` provisioning passes long keys.
@@ -101,6 +101,37 @@ export async function convergeClusterInfra({
   label = clusterEnv,
   action = 'scale',
 }) {
+  // `current*Type` (below) come from currentRoleTypes, the SAME formula
+  // scaleK8s uses, so buildProgramConfig's fallback slot is byte-identical to
+  // the scale path; `overrides` (the newValues slot) wins via `??` when set.
+  // `Provider` is the resolved class passed in by the caller
+  // (providerFor(envConfig) at the call site) — see the @param doc above.
+  // Normalize long-form server-type override keys to the short keys
+  // buildProgramConfig reads. `scale` passes the short keys verbatim; the
+  // pilot-light `failover` provisioning passes the persisted long-form spec
+  // keys (workerServerType/masterServerType/dbServerType, matching
+  // envConfig.ha.standby.*). Without this, a `-server-type` override and the
+  // persisted standby types are silently dropped and Pulumi plans an in-place
+  // resize of the standby's master/db node mid-failover. Map long→short only
+  // when the short key is absent (short wins if a caller sets both).
+  const normalizedOverrides = { ...overrides };
+  if (normalizedOverrides.workerType == null && overrides.workerServerType != null)
+    normalizedOverrides.workerType = overrides.workerServerType;
+  if (normalizedOverrides.masterType == null && overrides.masterServerType != null)
+    normalizedOverrides.masterType = overrides.masterServerType;
+  if (normalizedOverrides.dbType == null && overrides.dbServerType != null)
+    normalizedOverrides.dbType = overrides.dbServerType;
+
+  // The persisted per-role types are reused verbatim for every role this call
+  // does not override (scale with no `-type`, the CA worker-pool re-patch, a
+  // failover that only overrides some roles): refuse an ARM one before any
+  // stack is touched (assertPersistedRoleTypes).
+  const {
+    masterType: currentMasterType,
+    dbType: currentDbType,
+    workerType: currentWorkerType,
+  } = assertPersistedRoleTypes(Provider, envConfig, normalizedOverrides);
+
   // Apply server type changes via Pulumi. Hetzner server_type is an in-place
   // resize via the provider's update path (~2 min reboot), so a legitimate
   // type-bump shows up as `update`, not `replace`. Any planned `replace` of
@@ -132,7 +163,7 @@ export async function convergeClusterInfra({
   // would either replace the managed SshKey (single-cluster) or — for
   // HA — try to *create* a brand-new SshKey resource that the original
   // deploy never managed. The new resource has a different id,
-  // master/supabase/worker `sshKeys: [sshKeyId]` diffs against state,
+  // master/database/worker `sshKeys: [sshKeyId]` diffs against state,
   // and Pulumi plans a destructive replace of every node (etcd loss).
   // The k3sToken probe (further down) is necessary but insufficient
   // for HA — we ALSO need to mirror the deploy's `existingSshKeyId`
@@ -219,32 +250,7 @@ export async function convergeClusterInfra({
   // newValues/persisted/default `??` resolution. k3sVersion and labels MUST
   // match deployK3s (both are interpolated into userData / resource labels).
   //
-  // `current*Type` are re-derived here from envConfig with the SAME formula
-  // scaleK8s uses (envConfig.<role>ServerType || (envConfig.serverType ||
-  // Provider.DEFAULT_COMPOSE_TYPE)) so buildProgramConfig's fallback slot is
-  // byte-identical to the scale path; `overrides` (the newValues slot) wins
-  // via `??` when set. `Provider` is the resolved class passed in by the
-  // caller (providerFor(envConfig) at the call site) — see the @param doc above.
-  const fallbackType = envConfig.serverType || Provider.DEFAULT_COMPOSE_TYPE;
-  const currentMasterType = envConfig.masterServerType || fallbackType;
-  const currentSupabaseType = envConfig.supabaseServerType || fallbackType;
-  const currentWorkerType = envConfig.workerServerType || fallbackType;
   const allowedCidrs = (projectConfig.operatorCidrs ?? []).map((e) => e.cidr);
-  // Normalize long-form server-type override keys to the short keys
-  // buildProgramConfig reads. `scale` passes the short keys verbatim; the
-  // pilot-light `failover` provisioning passes the persisted long-form spec
-  // keys (workerServerType/masterServerType/supabaseServerType, matching
-  // envConfig.ha.standby.*). Without this, a `-server-type` override and the
-  // persisted standby types are silently dropped and Pulumi plans an in-place
-  // resize of the standby's master/db node mid-failover. Map long→short only
-  // when the short key is absent (short wins if a caller sets both).
-  const normalizedOverrides = { ...overrides };
-  if (normalizedOverrides.workerType == null && overrides.workerServerType != null)
-    normalizedOverrides.workerType = overrides.workerServerType;
-  if (normalizedOverrides.masterType == null && overrides.masterServerType != null)
-    normalizedOverrides.masterType = overrides.masterServerType;
-  if (normalizedOverrides.supabaseType == null && overrides.supabaseServerType != null)
-    normalizedOverrides.supabaseType = overrides.supabaseServerType;
   const programConfig = buildProgramConfig({
     projectName: projectConfig.projectName,
     environment: clusterEnv,
@@ -254,7 +260,7 @@ export async function convergeClusterInfra({
     location: clusterRegion,
     newValues: normalizedOverrides,
     currentMasterType,
-    currentSupabaseType,
+    currentDbType,
     currentWorkerType,
     persistedMinWorkers: envConfig.minWorkers,
     persistedMaxWorkers: envConfig.maxWorkers,

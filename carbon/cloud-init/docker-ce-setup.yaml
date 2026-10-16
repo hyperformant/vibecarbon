@@ -80,7 +80,7 @@ runcmd:
   - [systemctl, restart, docker]
 
   # Note: an earlier iteration (iter-perfwave4b 2026-05-06) added parallel
-  # `docker pull` of supabase service images here to overlap pulls with
+  # `docker pull` of the stack's service images here to overlap pulls with
   # iac.upStack. Net result was -25s: the unauthenticated pulls from
   # Hetzner DC IPs hit Docker Hub's per-IP rate limit, serializing/
   # throttling them, which extended cloudInitReady by ~61s while only

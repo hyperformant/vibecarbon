@@ -114,3 +114,68 @@ export function paymentFailedEmail(params: {
     `),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Auth emails (sent by auth/email.ts). The link carries a one-time token and
+// is the whole point of the message: one button, plus the raw link for mail
+// clients that strip buttons.
+// ---------------------------------------------------------------------------
+
+function actionEmail(params: {
+  heading: string;
+  intro: string;
+  button: string;
+  url: string;
+  footnote: string;
+}): string {
+  const url = escapeHtml(params.url);
+  return layout(`
+      <h1>${escapeHtml(params.heading)}</h1>
+      <p>${escapeHtml(params.intro)}</p>
+      <p style="text-align: center; margin: 24px 0;">
+        <a href="${url}" class="btn">${escapeHtml(params.button)}</a>
+      </p>
+      <p style="font-size: 12px; color: #71717a; word-break: break-all;">Or paste this link into your browser: ${url}</p>
+      <p style="font-size: 12px; color: #71717a;">${escapeHtml(params.footnote)}</p>
+    `);
+}
+
+export function verifyEmailEmail(params: { url: string }): { subject: string; html: string } {
+  return {
+    subject: `Confirm your email for ${PROJECT_DISPLAY_NAME}`,
+    html: actionEmail({
+      heading: 'Confirm your email',
+      intro: `Confirm this address to finish setting up your ${PROJECT_DISPLAY_NAME} account.`,
+      button: 'Confirm email',
+      url: params.url,
+      footnote: "If you didn't create an account, you can ignore this email.",
+    }),
+  };
+}
+
+export function resetPasswordEmail(params: { url: string }): { subject: string; html: string } {
+  return {
+    subject: `Reset your ${PROJECT_DISPLAY_NAME} password`,
+    html: actionEmail({
+      heading: 'Reset your password',
+      intro:
+        'Someone asked to reset the password for this account. The link works once and expires in an hour.',
+      button: 'Choose a new password',
+      url: params.url,
+      footnote: "If it wasn't you, ignore this email. Your password stays the same.",
+    }),
+  };
+}
+
+export function magicLinkEmail(params: { url: string }): { subject: string; html: string } {
+  return {
+    subject: `Your ${PROJECT_DISPLAY_NAME} sign-in link`,
+    html: actionEmail({
+      heading: 'Sign in',
+      intro: 'Use this link to sign in. It works once and expires in 5 minutes.',
+      button: 'Sign in',
+      url: params.url,
+      footnote: "If you didn't ask for this link, you can ignore this email.",
+    }),
+  };
+}

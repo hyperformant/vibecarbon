@@ -43,12 +43,14 @@ LICENSE
 # Backup
 backup
 
-# Supabase volumes
+# Service volumes
 volumes
 
 # Infrastructure & tooling (not needed in app image)
 k8s
-supabase
+# db/ except the migrations, which the app applies at startup
+db/*
+!db/migrations
 .claude
 .cursor
 .github

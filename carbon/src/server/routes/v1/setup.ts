@@ -1,11 +1,14 @@
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { isBillingConfigured } from '../../billing';
-import { isSuperAdmin } from '../../lib/auth';
+import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
+import { appSettings } from '../../db/schema';
 import { isEmailConfigured } from '../../lib/email';
 import { env } from '../../lib/env';
 import { logger } from '../../lib/logger';
-import { supabaseAdmin } from '../../lib/supabase';
+import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../types';
 
 /**
@@ -21,12 +24,12 @@ const setupRoutes = new Hono<{ Variables: HonoVariables }>();
 const BILLING_OPT_OUT_KEY = 'billing_opt_out';
 
 async function readBillingOptOut(): Promise<boolean> {
-  const { data } = await supabaseAdmin
-    .from('app_settings')
-    .select('value')
-    .eq('key', BILLING_OPT_OUT_KEY)
-    .single();
-  return (data?.value as { optedOut?: boolean } | null)?.optedOut === true;
+  const [row] = await adminDb
+    .select({ value: appSettings.value })
+    .from(appSettings)
+    .where(eq(appSettings.key, BILLING_OPT_OUT_KEY))
+    .limit(1);
+  return (row?.value as { optedOut?: boolean } | null)?.optedOut === true;
 }
 
 function analyticsConfigured(): boolean {
@@ -38,7 +41,8 @@ function analyticsConfigured(): boolean {
 setupRoutes.get('/', async (c) => {
   const user = c.get('user');
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
-  if (!isSuperAdmin(user)) return c.json({ error: 'Super admin access required' }, 403);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const billingOptOut = await readBillingOptOut().catch(() => false);
 
@@ -57,22 +61,20 @@ const patchSchema = z.object({ billingOptOut: z.boolean() });
 setupRoutes.patch('/', async (c) => {
   const user = c.get('user');
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
-  if (!isSuperAdmin(user)) return c.json({ error: 'Super admin access required' }, 403);
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const parsed = patchSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: 'Invalid request' }, 400);
 
-  const { error } = await supabaseAdmin.from('app_settings').upsert(
-    {
-      key: BILLING_OPT_OUT_KEY,
-      value: { optedOut: parsed.data.billingOptOut },
-      updated_by: user.id,
-    },
-    { onConflict: 'key' }
-  );
-
-  if (error) {
-    logger.error({ error, userId: user.id }, 'Failed to save billing opt-out');
+  try {
+    const value = { optedOut: parsed.data.billingOptOut };
+    await adminDb
+      .insert(appSettings)
+      .values({ key: BILLING_OPT_OUT_KEY, value, updatedBy: user.id })
+      .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedBy: user.id } });
+  } catch (error) {
+    logger.error({ err: dbErrorForLog(error), userId: user.id }, 'Failed to save billing opt-out');
     return c.json({ error: 'Failed to save setting' }, 500);
   }
 

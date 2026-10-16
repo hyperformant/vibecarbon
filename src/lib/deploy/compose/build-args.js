@@ -6,9 +6,9 @@
  * The Dockerfile declares matching `ARG VITE_*` directives. Without
  * `docker build --build-arg KEY=VALUE` flags, the ARGs default to empty
  * strings, `ENV VITE_*=$VITE_*` propagates "" to the Vite build, and the
- * shipped bundle has e.g. `VITE_SUPABASE_URL=""`. The runtime guard at
- * carbon/src/client/lib/supabase.ts throws "Missing Supabase environment
- * variables" the moment the page loads.
+ * shipped bundle carries empty client config (customer RCA: vibecarbon.com
+ * 2026-05-19, the browser bundle shipped with empty client config and the
+ * SPA failed at page load).
  *
  * Local dev sidesteps this via `docker compose up --build` reading
  * docker-compose.yml's `build.args:` block (which sources from .env.local).
@@ -18,25 +18,19 @@
  * code (orchestrator.js / compose/ha.js calling buildRemote or a plain
  * `docker build`), and THAT path was passing no build args at all.
  *
- * Customer RCA: vibecarbon.com 2026-05-19, post-cert-fix the browser
- * threw "Missing Supabase environment variables" because the bundle had
- * empty VITE_SUPABASE_URL.
- *
  * Selection rule: every key starting with `VITE_` is pulled through —
  * seeded from .env.local, then overridden by any non-empty value in `.env`
- * (the deploy's server-runtime baseline; client and server must agree on
- * keys like VITE_SUPABASE_ANON_KEY). We further rewrite a couple of values
- * that must differ between local dev and production (mirrors bundle.js's
- * runtime .env rewrites at src/lib/deploy/bundle.js:147-152):
+ * (the deploy's server-runtime baseline, so the client is built from the
+ * same config the server runs with). We further rewrite the values that
+ * must differ between local dev and production (mirrors bundle.js's
+ * runtime .env rewrites):
  *   - VITE_PROJECT_NAME: forced to the deploy's projectName (the operator
  *     might have changed it in .env.local during local dev iteration)
- *   - VITE_SUPABASE_URL: rewritten to https://${domain} — production serves
- *     ONE origin; Traefik path-routes /auth/v1|/rest/v1|/realtime/v1|
- *     /storage/v1 on the apex to Kong, so the browser's Supabase calls are
- *     same-origin (dev keeps hitting Kong's localhost port directly)
+ *   - VITE_PUBLIC_URL: https://${domain}, the one public origin
  *
  * All other VITE_* values (feature flags, plausible config, etc.) flow
- * through unchanged.
+ * through unchanged. The browser talks only to the app's own origin (auth
+ * included, at /api/auth), so no gateway URL or key is baked in.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -53,10 +47,9 @@ export function collectComposeBuildArgs(cwd, opts = {}) {
   const args = {};
   // .env.local seeds the args, but `.env` overrides it for any key it holds
   // non-empty: `.env` is the SAME baseline bundle.js ships as the server's
-  // runtime env, and client-baked values like VITE_SUPABASE_ANON_KEY must
-  // agree with the server's JWT secret from that file. (vibecarbon.com
-  // 2026-08-22: an .env.local migrated from another project baked a foreign
-  // anon key while the server ran this project's .env — browser auth 401'd.)
+  // runtime env, and client-baked values must agree with the server's.
+  // (vibecarbon.com 2026-08-22: an .env.local migrated from another project
+  // baked a foreign client key while the server ran this project's .env.)
   // .env.local still fills keys .env lacks, preserving the 2026-05-19 fix.
   const localPath = join(cwd, '.env.local');
   if (existsSync(localPath)) {
@@ -75,9 +68,6 @@ export function collectComposeBuildArgs(cwd, opts = {}) {
   // Prod rewrites — these must match what bundle.js writes into the
   // server's runtime .env so the client + server agree on the URL.
   if (projectName) args.VITE_PROJECT_NAME = projectName;
-  // Single public origin: Supabase is reached on the apex via Traefik's
-  // versioned-path routing to Kong, so this equals VITE_PUBLIC_URL.
-  if (domain) args.VITE_SUPABASE_URL = `https://${domain}`;
   // Public canonical URL (apex domain) baked into the client at build time —
   // drives og:url / og:image / twitter:image and the generated sitemap.
   // Without this the client falls back to the create-time SITE_URL

@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { progressLog } from './cli/progress.js';
 import { runCommandAsync } from './command.js';
+import { DB_POD_SELECTOR } from './deploy/db-workload.js';
 import { buildHostKeyOpts, knownHostsPath, SSH_CONNECTION_OPTS } from './host-keys.js';
 import { runWithRetry } from './retry.js';
 import { shEscape } from './shell.js';
@@ -516,7 +517,7 @@ export async function getPostgresPod(ip, sshKeyPath) {
     '-n',
     'vibecarbon',
     '-l',
-    'app.kubernetes.io/name=supabase-db',
+    DB_POD_SELECTOR,
     '-o',
     'jsonpath={.items[0].metadata.name}',
   ]);

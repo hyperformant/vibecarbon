@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { verifyPostgres } from '../../../src/restore.js';
 
 const noSleep = () => Promise.resolve();
-const getPod = () => 'supabase-supabase-db-0';
+const getPod = () => DB_POD;
 
 describe('verifyPostgres', () => {
   it('returns once pg_isready succeeds (no wait when already up)', async () => {

@@ -1,16 +1,15 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type Stripe from 'stripe';
+import { findCustomerByProviderId, upsertSubscriptionRow } from '../../billing/records';
+import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
+import { subscriptions } from '../../db/schema';
 import { paymentFailedEmail, subscriptionConfirmEmail } from '../../emails/templates';
 import { sendEmail } from '../../lib/email';
 import { logger } from '../../lib/logger';
 import { getStripe, verifyWebhookSignature } from '../../lib/stripe';
-import { supabaseAdmin } from '../../lib/supabase';
 import type { HonoVariables } from '../../types';
-
-// Helper to access tables not yet in generated types
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
 
 const stripeWebhookRoutes = new Hono<{ Variables: HonoVariables }>();
 
@@ -67,8 +66,10 @@ stripeWebhookRoutes.post('/', async (c) => {
 
     return c.json({ received: true });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    logger.error({ error: message, eventType: event.type }, 'Failed to process webhook event');
+    logger.error(
+      { err: dbErrorForLog(error), eventType: event.type },
+      'Failed to process webhook event'
+    );
     return c.json({ error: 'Webhook handler failed' }, 500);
   }
 });
@@ -93,14 +94,10 @@ async function handleCheckoutSessionCompleted(session: Stripe.Checkout.Session) 
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
 
   // Find customer in our database
-  const { data: customer, error: customerError } = await adminDb
-    .from('customers')
-    .select('id')
-    .eq('stripe_customer_id', customerId)
-    .single();
+  const customer = await findCustomerByProviderId(customerId);
 
-  if (customerError || !customer) {
-    logger.error({ customerId, error: customerError }, 'Customer not found for subscription');
+  if (!customer) {
+    logger.error({ customerId }, 'Customer not found for subscription');
     throw new Error(`Customer not found: ${customerId}`);
   }
 
@@ -127,7 +124,10 @@ async function handleCheckoutSessionCompleted(session: Stripe.Checkout.Session) 
       });
     }
   } catch (emailErr) {
-    logger.error({ error: emailErr }, 'Failed to prepare subscription confirmation email');
+    logger.error(
+      { err: dbErrorForLog(emailErr) },
+      'Failed to prepare subscription confirmation email'
+    );
   }
 }
 
@@ -140,17 +140,10 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
   );
 
   // Find customer in our database
-  const { data: customer, error: customerError } = await adminDb
-    .from('customers')
-    .select('id')
-    .eq('stripe_customer_id', customerId)
-    .single();
+  const customer = await findCustomerByProviderId(customerId);
 
-  if (customerError || !customer) {
-    logger.error(
-      { customerId, error: customerError },
-      'Customer not found for subscription update'
-    );
+  if (!customer) {
+    logger.error({ customerId }, 'Customer not found for subscription update');
     throw new Error(`Customer not found: ${customerId}`);
   }
 
@@ -160,17 +153,14 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
 async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
   logger.info({ subscriptionId: subscription.id }, 'Subscription deleted');
 
-  const { error } = await adminDb
-    .from('subscriptions')
-    .update({
-      status: 'canceled',
-      canceled_at: new Date().toISOString(),
-    })
-    .eq('stripe_subscription_id', subscription.id);
-
-  if (error) {
+  try {
+    await adminDb
+      .update(subscriptions)
+      .set({ status: 'canceled', canceledAt: new Date().toISOString() })
+      .where(eq(subscriptions.stripeSubscriptionId, subscription.id));
+  } catch (error) {
     logger.error(
-      { error, subscriptionId: subscription.id },
+      { err: dbErrorForLog(error), subscriptionId: subscription.id },
       'Failed to update canceled subscription'
     );
     throw error;
@@ -194,13 +184,16 @@ async function handlePaymentFailed(invoice: Stripe.Invoice) {
 
   logger.warn({ subscriptionId, invoiceId: invoice.id }, 'Payment failed for subscription');
 
-  const { error } = await adminDb
-    .from('subscriptions')
-    .update({ status: 'past_due' })
-    .eq('stripe_subscription_id', subscriptionId);
-
-  if (error) {
-    logger.error({ error, subscriptionId }, 'Failed to update subscription status to past_due');
+  try {
+    await adminDb
+      .update(subscriptions)
+      .set({ status: 'past_due' })
+      .where(eq(subscriptions.stripeSubscriptionId, subscriptionId));
+  } catch (error) {
+    logger.error(
+      { err: dbErrorForLog(error), subscriptionId },
+      'Failed to update subscription status to past_due'
+    );
     throw error;
   }
 
@@ -223,7 +216,7 @@ async function handlePaymentFailed(invoice: Stripe.Invoice) {
       });
     }
   } catch (emailErr) {
-    logger.error({ error: emailErr }, 'Failed to prepare payment failed email');
+    logger.error({ err: dbErrorForLog(emailErr) }, 'Failed to prepare payment failed email');
   }
 }
 
@@ -243,27 +236,26 @@ async function upsertSubscription(customerId: string, subscription: Stripe.Subsc
   const currentPeriodEnd = (subscription as unknown as { current_period_end?: number })
     .current_period_end;
 
-  const subscriptionData = {
-    customer_id: customerId,
-    stripe_subscription_id: subscription.id,
-    stripe_price_id: priceId,
-    status: subscription.status,
-    current_period_start: currentPeriodStart
-      ? new Date(currentPeriodStart * 1000).toISOString()
-      : null,
-    current_period_end: currentPeriodEnd ? new Date(currentPeriodEnd * 1000).toISOString() : null,
-    cancel_at_period_end: subscription.cancel_at_period_end,
-    canceled_at: subscription.canceled_at
-      ? new Date(subscription.canceled_at * 1000).toISOString()
-      : null,
-  };
-
-  const { error } = await adminDb.from('subscriptions').upsert(subscriptionData, {
-    onConflict: 'stripe_subscription_id',
-  });
-
-  if (error) {
-    logger.error({ error, subscriptionId: subscription.id }, 'Failed to upsert subscription');
+  try {
+    await upsertSubscriptionRow({
+      customerId,
+      stripeSubscriptionId: subscription.id,
+      stripePriceId: priceId,
+      status: subscription.status,
+      currentPeriodStart: currentPeriodStart
+        ? new Date(currentPeriodStart * 1000).toISOString()
+        : null,
+      currentPeriodEnd: currentPeriodEnd ? new Date(currentPeriodEnd * 1000).toISOString() : null,
+      cancelAtPeriodEnd: subscription.cancel_at_period_end,
+      canceledAt: subscription.canceled_at
+        ? new Date(subscription.canceled_at * 1000).toISOString()
+        : null,
+    });
+  } catch (error) {
+    logger.error(
+      { err: dbErrorForLog(error), subscriptionId: subscription.id },
+      'Failed to upsert subscription'
+    );
     throw error;
   }
 

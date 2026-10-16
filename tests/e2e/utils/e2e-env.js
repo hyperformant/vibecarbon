@@ -118,7 +118,7 @@ export function readStagingRootPems(bundlePath = STAGING_CA_BUNDLE) {
  *      `vibecarbon` CLI the harness spawns inherits it and starts with the
  *      staging roots already in its trust store.
  *   2. `tls.setDefaultCACertificates()` — for THIS process. Covers the
- *      runner's own in-process TLS (the `realtime_connect` WebSocket check,
+ *      runner's own in-process TLS (any in-process HTTPS or WebSocket client,
  *      any bare `fetch`) when the env var wasn't already set at startup,
  *      e.g. `tsx tests/e2e/runner.ts` invoked directly rather than through
  *      the `pnpm test:e2e*` scripts (which do set it).

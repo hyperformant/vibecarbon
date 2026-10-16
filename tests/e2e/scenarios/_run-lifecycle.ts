@@ -16,14 +16,18 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
-import { runAppFunctionalChecks } from '../checks/app-functional.js';
+import {
+  missingDbHandle,
+  runAppFunctionalChecks,
+  smtpConfiguredFromEnv,
+} from '../checks/app-functional.js';
 import { runBackupEvidenceChecks } from '../checks/backup-evidence.js';
-import { runClientKeyAgreementCheck } from '../checks/client-key-agreement.js';
 import { resolveComposeFirewallServers, runCloudFirewallChecks } from '../checks/cloud-firewall.js';
 import {
   CONFIG_CANARY_SECRET,
@@ -31,7 +35,6 @@ import {
   runConfigCanaryChecks,
 } from '../checks/config-canary.js';
 import { runDnsFailoverFlipCheck } from '../checks/dns-flip.js';
-import { runEdgeFunctionChecks } from '../checks/feature-functions.js';
 import { runObservabilityChecks } from '../checks/feature-observability.js';
 import { runRedisChecks } from '../checks/feature-redis.js';
 import { runFrontendSmokeChecks } from '../checks/frontend-smoke.js';
@@ -54,7 +57,6 @@ import {
   writeReplicationMarker,
 } from '../checks/replication.js';
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
-import { runSupavisorPoolerChecks } from '../checks/supavisor-pooler.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
 import {
@@ -144,7 +146,7 @@ export interface MetricsCollector {
 // Timeouts are sized against the single slowest scenario for each step.
 // Cold-path k8s-ha (2026-04-26 batch run #2) breakdown — observed end-to-end:
 //   sideload ~25 min (HA = 6 nodes × ~600MB image each, parallel SSH)
-//   helm install supabase --wait ~6 min
+//   helm install of the (since retired) database chart --wait ~6 min
 //   migrations ~1 min
 //   app rollout-status ~3 min
 //   DNS update + cert-manager + public probe ~20 min budget
@@ -249,64 +251,34 @@ const TIMEOUTS: Record<string, number> = {
 const EXPECTED_VERIFY_FAILURES: Record<string, Partial<Record<StepName, string[]>>> = {};
 
 // ---------------------------------------------------------------------------
-// .env.local key parser
+// .env.local admin credentials
 // ---------------------------------------------------------------------------
 
-interface SupabaseKeys {
-  anonKey: string;
-  serviceRoleKey: string;
+interface AdminCredentials {
   /** Admin credentials for the auth_admin_login check; absent on older bundles. */
   adminEmail?: string;
   adminPassword?: string;
+  /** The app requires email verification exactly when SMTP is configured. */
+  smtpConfigured: boolean;
 }
 
 /**
- * Read Supabase keys from the project's .env.local file — deliberately
+ * Read the admin credentials from the project's .env.local file — deliberately
  * `.env.local` ONLY (never `.env`): that is where `create.js` writes every
- * Supabase/admin secret for a scaffolded project, so there is no second file
- * to layer against `readEnvFiles`.
- * Looks for VITE_SUPABASE_ANON_KEY and SERVICE_ROLE_KEY (or
- * SUPABASE_SERVICE_ROLE_KEY — the current generator only ever writes the
- * latter; the former is read for older bundles), plus ADMIN_EMAIL/
- * ADMIN_PASSWORD so the functional checks can verify the operator can
- * actually log into their deployed app as the super-admin.
+ * admin secret for a scaffolded project, so there is no second file to layer
+ * against `readEnvFiles`. ADMIN_EMAIL/ADMIN_PASSWORD let the functional checks
+ * verify the operator can actually log into their deployed app as the
+ * super-admin. Null only when the file cannot be read.
  */
-function readSupabaseKeys(projectDir: string): SupabaseKeys | null {
+function readAdminCredentials(projectDir: string): AdminCredentials | null {
   try {
     const envPath = join(projectDir, '.env.local');
     const vars = parseDotenv(readFileSync(envPath, 'utf-8'));
-
-    const anonKey = vars.VITE_SUPABASE_ANON_KEY ?? '';
-    const serviceRoleKey = vars.SERVICE_ROLE_KEY ?? vars.SUPABASE_SERVICE_ROLE_KEY ?? '';
-    const adminEmail = vars.ADMIN_EMAIL ?? '';
-    const adminPassword = vars.ADMIN_PASSWORD ?? '';
-
-    if (!anonKey || !serviceRoleKey) return null;
     return {
-      anonKey,
-      serviceRoleKey,
-      adminEmail: adminEmail || undefined,
-      adminPassword: adminPassword || undefined,
+      adminEmail: vars.ADMIN_EMAIL || undefined,
+      adminPassword: vars.ADMIN_PASSWORD || undefined,
+      smtpConfigured: smtpConfiguredFromEnv(vars),
     };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Read POSTGRES_PASSWORD from the scaffolded project's `.env.local` — the
- * supavisor-pooler check needs it to authenticate as the tenant user
- * (postgres.<PROJECT_NAME>) through the pooler. `.env.local`-only, same
- * reason as readSupabaseKeys above; like it, a duplicated key now resolves
- * last-wins (parseDotenv) where the old line scan took the first — create
- * never writes the key twice.
- */
-function readPostgresPassword(projectDir: string): string | null {
-  try {
-    const value = parseDotenv(
-      readFileSync(join(projectDir, '.env.local'), 'utf-8'),
-    ).POSTGRES_PASSWORD;
-    return value || null;
   } catch {
     return null;
   }
@@ -532,10 +504,10 @@ async function captureFailureDiagnostics(
       // (their --previous is "not found" and their current logs can be huge) —
       // RCA 2026-06-23: an earlier version filtered on not-ready, so a noisy app
       // pod's logs blew safeRun's 10s budget BEFORE the loop reached the
-      // crash-looping supabase-db, and its FATAL went uncaptured. Each logs call
+      // crash-looping db pod, and its FATAL went uncaptured. Each logs call
       // is `timeout`-bounded so one slow pod can't starve the rest, and the
       // section gets a larger budget. --all-containers includes init containers
-      // (walg-restore / init-db / init-pgsodium).
+      // (walg-restore / seed-standby).
       sections.push([
         `${label}: logs from crash-looping pods (--previous, all containers)`,
         safeRun(
@@ -568,10 +540,10 @@ async function captureFailureDiagnostics(
       // replica (t) from an independent writable primary (f) — decisive for
       // any standby-seeding or replication RCA, and cheap.
       sections.push([
-        `${label}: supabase-db pg_is_in_recovery`,
+        `${label}: db pg_is_in_recovery`,
         safeRun('bash', [
           '-c',
-          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec supabase-supabase-db-0 -c supabase-db -- psql -U supabase_admin -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ]),
       ]);
       // 100 events for k8s-ha (applyManifests on standby can emit 50+ in
@@ -1290,7 +1262,7 @@ export async function runLifecycle(
   // one scenario live without interleaving with the others in a parallel run.
 
   // Cache for values resolved after deploy
-  let supabaseKeys: SupabaseKeys | null = null;
+  let adminCreds: AdminCredentials | null = null;
   let serverIps: string[] = [];
   let sshKeyPath: string | null = null;
 
@@ -1322,7 +1294,7 @@ export async function runLifecycle(
   // drive the cluster-autoscaler ceiling. Without these flags, deploy
   // defaults to (1, 3) and the test can only spawn 2 extra workers before
   // hitting MAX — not a meaningful end-to-end CA test. The (1, 5) shape
-  // means baseline = 3 nodes (master + supabase + 1 worker) and a 6-pod
+  // means baseline = 3 nodes (master + database + 1 worker) and a 6-pod
   // loadgen Deployment forces CA to spawn 4 extra workers + leave the 6th
   // replica Pending.
   const isK8sMode = config.mode === 'k8s' || config.mode === 'k8s-ha';
@@ -1500,7 +1472,7 @@ export async function runLifecycle(
     // while spa_auth_callback, auth_signin, auth_admin_login, db_schema and
     // storage_upload hit the DEMOTED node (app tier deliberately stopped) and
     // failed. None of the failing request ids appeared in the promoted node's
-    // Kong access log; everything healed at TTL expiry.
+    // proxy access log; everything healed at TTL expiry.
     //
     // Inside this pin every HTTP check dials the promoted node directly while
     // keeping the domain as Host + TLS SNI, so serving correctness (name-based
@@ -1581,10 +1553,10 @@ export async function runLifecycle(
               // modes can be asymmetric (one cluster healthy, the other not).
               //
               // getServerIps returns
-              //   [primary_master, primary_supabase, standby_master, standby_supabase]
+              //   [primary_master, primary_db, standby_master, standby_db]
               // for k8s-ha (see tests/e2e/utils/ssh.ts). We want the two
               // master IPs (k3s API server runs there); slice(0,2) was picking
-              // [primary_master, primary_supabase] and the standby kubectl was
+              // [primary_master, primary_db] and the standby kubectl was
               // hitting a node with no API server → "connection refused: dial
               // tcp [::1]:8080" floods (k8s-ha matrix #7 verify-failover, PR 1BF).
               const clusterIps =
@@ -1619,7 +1591,7 @@ export async function runLifecycle(
                   `kubectl get deployment/app -n vibecarbon -o jsonpath='{.spec.template.spec.containers[0].image}' 2>&1 || echo "(no app deployment)"`,
                 );
                 console.log(`${tag} [diag][${label}] deployment/app.image=${appImage}`);
-                // Full deployment+statefulset image table for kong/postgres/etc.
+                // Full deployment+statefulset image table for app/postgres/etc.
                 const deployments = ssh(
                   `kubectl get deployments,statefulsets -n vibecarbon -o wide 2>&1 | head -25 || echo "(no deployments)"`,
                 );
@@ -1715,20 +1687,19 @@ export async function runLifecycle(
           throw new Error(`Domain ${config.domain} did not become healthy within timeout`);
         }
 
-        // Resolve keys if not already cached
-        if (!supabaseKeys) {
-          supabaseKeys = readSupabaseKeys(config.projectDir);
+        // Resolve admin credentials if not already cached
+        if (!adminCreds) {
+          adminCreds = readAdminCredentials(config.projectDir);
         }
-        if (!supabaseKeys) {
-          throw new Error('Could not read Supabase keys from .env.local');
+        if (!adminCreds) {
+          throw new Error('Could not read admin credentials from .env.local');
         }
 
         // Run all check groups
         const allResults: VerificationResult[] = [];
 
-        // Single public origin in every mode: Traefik path-routes the versioned
-        // Supabase prefixes (/auth/v1, /rest/v1, /realtime/v1, /storage/v1) on
-        // the apex to Kong — there is no api. subdomain. Optional add-ons
+        // Single public origin in every mode: Traefik routes the whole apex to
+        // the app — there is no api. subdomain. Optional add-ons
         // (grafana/n8n/...) still use subdomains on compose, hence isCompose.
         const isCompose = config.mode.startsWith('compose');
         const apiDomain = config.domain;
@@ -1753,7 +1724,7 @@ export async function runLifecycle(
         // Why it is needed: on the k8s tiers `serverIps` is not populated until
         // a later step, so at verify-deploy EVERY ssh-based check silently
         // self-skipped with "no serverIp/sshKeyPath" — config_secret_propagation,
-        // config_oauth_gotrue_propagation and the wal-g backup evidence pair.
+        // config_oauth_app_propagation and the wal-g backup evidence pair.
         // The k8s runs showed 18 passed / 8 skipped against compose's 27 / 4,
         // and the two config canaries never ran on k8s AT ALL, at any phase, on
         // any provider. They exist specifically to cover a k8s gap
@@ -1777,7 +1748,7 @@ export async function runLifecycle(
         // DNS-propagation gate for verify-failover: a fast failover (71.6s
         // post apikey-fix, run 2 2026-07-09) can finish before the A-record
         // flip reaches the pinned resolvers — the checks then hit the OLD
-        // scaled-down primary (Kong 502 upstream, "missing" tables) and fail
+        // scaled-down primary (502 upstream, "missing" tables) and fail
         // spuriously. Wait (bounded) until the domain resolves to the promoted
         // IP; both modes rewrite .vibecarbon.json on failover (compose-ha in
         // failoverComposeHA, k8s-ha via swapHaRoles' terminal write), so a
@@ -1857,23 +1828,24 @@ export async function runLifecycle(
           );
         }
 
-        // Wait for the Supabase gateway (apex /auth/v1 path → Kong) before the
-        // functional checks — the app router can come up before Kong does.
-        console.log(`${tag} Waiting for ${apiDomain}/auth/v1/health to become ready...`);
+        // Wait for the in-process auth API before the functional checks: the
+        // app answers /api/health before its auth routes are mounted behind
+        // the router on a cold start.
+        console.log(`${tag} Waiting for ${apiDomain}/api/auth/ok to become ready...`);
         const apiHealthy = await waitForHealthy(
           apiDomain,
           Math.min(TIMEOUTS[stepName], 120_000),
           5_000,
-          '/auth/v1/health',
+          '/api/auth/ok',
         );
         if (!apiHealthy) {
           console.warn(
-            `${tag} Supabase gateway on ${apiDomain} did not become healthy within 120s — functional checks may fail`,
+            `${tag} Auth API on ${apiDomain} did not become healthy within 120s — functional checks may fail`,
           );
         }
 
         // Infrastructure health checks (app endpoint, always on main domain)
-        const healthResults = await runHealthChecks(config.domain, supabaseKeys.anonKey);
+        const healthResults = await runHealthChecks(config.domain);
         allResults.push(...healthResults);
 
         // Evidence for any SSH-unreachability diagnosis raised later in this
@@ -1885,20 +1857,29 @@ export async function runLifecycle(
           healthResults.length > 0 && healthResults.every((r) => r.status === 'pass'),
         );
 
-        // App functional checks (auth, real-schema assertion, DB write
-        // round-trip, storage, realtime via Kong path-routed on the apex)
-        const appResults = await runAppFunctionalChecks(
-          apiDomain,
-          supabaseKeys.anonKey,
-          supabaseKeys.serviceRoleKey,
-          supabaseKeys.adminEmail,
-          supabaseKeys.adminPassword,
-          config.domain,
-        );
+        // App functional checks (auth, real-schema assertion and DB write
+        // round-trip as direct SQL over SSH, file upload round-trip)
+        const appResults = await runAppFunctionalChecks({
+          domain: config.domain,
+          db:
+            sshCheckMasterIp && sshKeyPath
+              ? {
+                  ip: sshCheckMasterIp,
+                  sshKeyPath,
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  label: 'primary',
+                }
+              : // Non-null here: the condition above is exactly its null case.
+                (missingDbHandle(sshCheckMasterIp, sshKeyPath) as string),
+          adminEmail: adminCreds.adminEmail,
+          adminPassword: adminCreds.adminPassword,
+          smtpConfigured: adminCreds.smtpConfigured,
+        });
         allResults.push(...appResults);
 
         // App API-layer checks — the app's own /api/v1/* Hono routes on the MAIN
-        // domain (distinct from the Kong/api-subdomain surface above). Catches a
+        // domain. Catches a
         // broken app backend that 500s while the platform stays green.
         const appApiResults = await runAppApiChecks(config.domain);
         allResults.push(...appApiResults);
@@ -1945,13 +1926,6 @@ export async function runLifecycle(
         const frontendResults = await runFrontendSmokeChecks(config.domain);
         allResults.push(...frontendResults);
 
-        // Client/server key agreement — the anon key baked into the served
-        // bundle must be the SAME key the auth checks above just passed.
-        // Closes the vibecarbon.com 2026-08-22 blindspot where every auth
-        // check was green (they use the harness's server-side key) while
-        // every real browser 401'd on a stale baked key.
-        allResults.push(await runClientKeyAgreementCheck(config.domain, supabaseKeys.anonKey));
-
         // Cloud-firewall presence — compose/compose-ha only, verify-deploy only
         // (RCA in checks/cloud-firewall.ts: an empirical experiment proved DO
         // firewalls DO get created/attached; this is the standing guard that
@@ -1967,48 +1941,6 @@ export async function runLifecycle(
           const firewallResults = await runCloudFirewallChecks(fwProvider, fwServers);
           allResults.push(...firewallResults);
         }
-
-        // Supavisor pooler — compose/compose-ha only (k8s ships no pooler),
-        // verify-deploy only. Proves tenant routing through both pooler modes
-        // from inside the rig AND external reachability through the
-        // operator-scoped firewall rules (see checks/supavisor-pooler.ts).
-        // Closes docs/security.md's "not yet covered by an automated
-        // end-to-end test" caveat.
-        if (isCompose && stepName === 'verify-deploy') {
-          const postgresPassword = readPostgresPassword(config.projectDir);
-          if (!postgresPassword) {
-            allResults.push({
-              checkName: 'supavisor_session_tenant_routing',
-              status: 'fail',
-              errorMessage: 'POSTGRES_PASSWORD not found in .env.local — cannot probe the pooler',
-            });
-          } else {
-            const poolerResults = await runSupavisorPoolerChecks({
-              domain: config.domain,
-              masterIp: sshCheckMasterIp,
-              sshKeyPath: sshKeyPath ?? undefined,
-              projectName: config.projectName,
-              postgresPassword,
-              phase: stepName,
-            });
-            allResults.push(...poolerResults);
-          }
-        }
-
-        // Edge-functions runtime health (compose only; SSH-based since :9000
-        // isn't publicly routed). Catches a crash-looping edge-runtime container.
-        // Edge functions are opt-in (off by default in both compose and k8s since
-        // 2026-05-26). Only assert runtime health when a scenario actually enables
-        // them via `--features=functions`; otherwise the container is intentionally
-        // absent and the check self-skips.
-        const edgeResults = await runEdgeFunctionChecks(
-          sshCheckMasterIp,
-          sshKeyPath ?? undefined,
-          config.projectName,
-          isCompose,
-          config.features.includes('functions'),
-        );
-        allResults.push(...edgeResults);
 
         // Feature-specific checks (only if the feature is enabled)
         if (config.features.includes('observability')) {
@@ -2281,7 +2213,7 @@ export async function runLifecycle(
   //
   // Pre-condition: cluster was deployed with --min-workers=1 / --max-workers=5
   // (the lifecycle's deploy step does this when options.expanded === true on
-  // a k8s/k8s-ha scenario). Baseline node count is 3 — master + supabase + 1
+  // a k8s/k8s-ha scenario). Baseline node count is 3 — master + database + 1
   // worker. CA's MAX is therefore (5 - 1) = 4 extra workers; ceiling node
   // count is 7.
   //
@@ -2330,7 +2262,7 @@ export async function runLifecycle(
       }
 
       // For k8s-ha, getServerIps returns
-      //   [primary_master, primary_supabase, standby_master, standby_supabase]
+      //   [primary_master, primary_db, standby_master, standby_db]
       // Primary master = serverIps[0]. For k8s, serverIps[0] is also the
       // master. Either way we kubectl from there.
       const primaryMasterIp = serverIps[0];
@@ -2378,7 +2310,7 @@ export async function runLifecycle(
         }
       };
 
-      // 1. Capture baseline. Expect 3 (master + supabase + 1 worker) on a
+      // 1. Capture baseline. Expect 3 (master + database + 1 worker) on a
       //    k8s/k8s-ha primary cluster deployed with --min-workers=1.
       const baseline = countReadyNodes();
       if (baseline == null) {
@@ -2457,13 +2389,13 @@ EOF`;
         throw new Error(`verify-autoscale: scale-up failed: ${scaleUp.stdout.slice(0, 500)}`);
       }
 
-      // 4. Poll for scale-up. Expected ceiling = 7 nodes (master + supabase +
+      // 4. Poll for scale-up. Expected ceiling = 7 nodes (master + database +
       //    5 workers). Hetzner server-create + cloud-init + k3s-join is
       //    typically 2-4 min/node; 4 nodes serially is well within 12 min.
       const SCALE_UP_BUDGET_MS = 12 * 60_000;
       const POLL_INTERVAL_MS = 30_000;
       // Derive ceiling from the operator-supplied bound, not from `baseline`.
-      // At ceiling: total nodes = master (1, Pulumi-fixed) + supabase (1,
+      // At ceiling: total nodes = master (1, Pulumi-fixed) + db (1,
       // Pulumi-fixed) + maxWorkers (CA at full pool size — `maxWorkers` is
       // the total worker count when CA tops out, not the number of CA-spawned
       // additions on top of the static floor). Coupling to `baseline` would
@@ -2756,12 +2688,10 @@ EOF`;
           // seeding). Done here — before setup-repo commits — so the CI path
           // picks it up too.
           setEnvVar('STRIPE_SECRET_KEY', CONFIG_CANARY_SECRET, config.projectDir);
-          // OAuth canary: client id ONLY, never GOOGLE_ENABLED — a
-          // half-configured enabled provider could fail GoTrue's boot
-          // validation, while an unused client id on a disabled provider is
-          // inert. Asserted inside the auth container by
-          // config_oauth_gotrue_propagation (compose env interpolation /
-          // k8s valueFrom secretKeyRef).
+          // OAuth canary: client id ONLY, never the secret — a half-configured
+          // provider stays off in the auth instance, while an unused client id
+          // is inert. Asserted inside the app container by
+          // config_oauth_app_propagation (compose env_file / k8s envFrom).
           setEnvVar('GOOGLE_CLIENT_ID', OAUTH_CANARY_CLIENT_ID, config.projectDir);
         }),
     },
@@ -3061,7 +2991,7 @@ EOF`;
             // Cache deployment info for subsequent steps
             serverIps = getServerIps(config.projectDir, config.envPrefix);
             sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
-            supabaseKeys = readSupabaseKeys(config.projectDir);
+            adminCreds = readAdminCredentials(config.projectDir);
 
             console.log(`${tag} Deploy complete. Server IPs: [${serverIps.join(', ')}]`);
 
@@ -3291,7 +3221,7 @@ EOF`;
     // 4.25 Verify load — concurrent-burst probe. Catches "deploy succeeded
     // and the single-request /api/health returned 200, but the app is
     // dead under any concurrency" (single-threaded misconfig, connection
-    // pool too small, downstream Supabase timeouts under fan-out, etc.).
+    // pool too small, downstream database timeouts under fan-out, etc.).
     // Stays well under the app's 100 req/min/IP rate limit (one burst,
     // immediately complete). Sustained load testing belongs in
     // `tests/loadtest/`, run by an operator against a dedicated env;
@@ -3478,9 +3408,9 @@ EOF`;
           //    under -y).
           //
           //    K8s / k8s-HA: scale.js's `--type X` widens to all roles
-          //    (master + supabase + worker) — Hetzner server_type changes
+          //    (master + database + worker) — Hetzner server_type changes
           //    are in-place resizes, so the master-replace guard does not
-          //    trip. Every persisted IP (master + supabase + each worker,
+          //    trip. Every persisted IP (master + database + each worker,
           //    plus standby for HA) MUST be on the target.
           //
           //    The previous "sorted-type-lists differ" heuristic passed
@@ -3565,8 +3495,7 @@ EOF`;
 
           // 4. Frontend render smoke AFTER scale. Scale blue-green-replaces the
           //    server and REBUILDS the app image; a rebuild that drops the
-          //    VITE_* build args ships an empty VITE_SUPABASE_URL and the SPA
-          //    white-screens with "Missing Supabase environment variables".
+          //    VITE_* build args ships a bundle that white-screens.
           //    verify-deploy catches this at deploy time, but without a check
           //    here a scale that breaks the bundle passes green (RCA 2026-06-22:
           //    scale.js called buildRemote with no build args). Self-skips
@@ -3776,7 +3705,7 @@ EOF`;
           }
 
           // Refresh server info after restore
-          supabaseKeys = readSupabaseKeys(config.projectDir);
+          adminCreds = readAdminCredentials(config.projectDir);
         }),
     },
 
@@ -4008,7 +3937,7 @@ EOF`;
               }
 
               // Refresh cached server info — the reconverged ex-primary's
-              // supabase/worker topology changed shape (scaled to
+              // database/worker topology changed shape (scaled to
               // pilot-light).
               serverIps = getServerIps(config.projectDir, config.envPrefix);
               sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);

@@ -44,9 +44,8 @@ async function renderWithCatalog(catalogTiers: CatalogTier[]) {
     ...(await importOriginal<typeof import('@shared/pricing')>()),
     catalogTiers,
   }));
-  // PricingSection imports @/lib/api (checkout CTA), whose real module pulls
-  // in @/lib/supabase — which throws at load without VITE_SUPABASE_* env
-  // (hermetic CI has none). Mock the api seam so the chain never loads.
+  // PricingSection imports @/lib/api (checkout CTA). Mock the api seam so the
+  // checkout call never leaves the test.
   vi.doMock('@/lib/api', () => ({
     ApiError: class ApiError extends Error {},
     apiJson: vi.fn(async () => ({ url: 'https://checkout.test/session' })),

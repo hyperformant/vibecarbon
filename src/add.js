@@ -65,8 +65,6 @@ const LOCAL_SERVICES_DIR = join(__dirname, '..', SERVICES_PATH);
 const PLACEHOLDERS = {
   PROJECT_NAME: '{{PROJECT_NAME}}',
   DB_PASSWORD: '{{DB_PASSWORD}}',
-  ANON_KEY: '{{ANON_KEY}}',
-  SERVICE_ROLE_KEY: '{{SERVICE_ROLE_KEY}}',
   N8N_PASSWORD: '{{N8N_PASSWORD}}',
   DOMAIN: '{{DOMAIN}}',
 };
@@ -410,8 +408,6 @@ async function addService(serviceName, options) {
   const variables = {
     PROJECT_NAME: project.projectName,
     DB_PASSWORD: envVars.POSTGRES_PASSWORD || envVars.DB_PASSWORD || '',
-    ANON_KEY: envVars.SUPABASE_ANON_KEY || '',
-    SERVICE_ROLE_KEY: envVars.SUPABASE_SERVICE_ROLE_KEY || '',
     DOMAIN: envVars.DOMAIN || 'localhost',
   };
 
@@ -530,7 +526,7 @@ const LOCAL_FEATURES = [
   { name: 'observability', description: 'Prometheus, Grafana, Loki monitoring stack' },
   { name: 'n8n', description: 'Workflow automation platform', status: 'parked' },
   { name: 'metabase', description: 'Business intelligence and analytics', status: 'parked' },
-  { name: 'redis', description: 'In-memory cache and session store' },
+  { name: 'redis', description: 'Shared rate limiting, caching and queues' },
 ];
 
 // External services were previously listed here (CI/CD via GitHub Actions);

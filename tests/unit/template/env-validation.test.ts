@@ -26,10 +26,18 @@ const envBool = (def: boolean) =>
   z.preprocess((v) => (v === undefined ? def : v === 'true'), z.boolean());
 
 const envSchema = z.object({
-  // Supabase (required)
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_ANON_KEY: z.string().min(1),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  // Auth session signing key (required, at least 32 characters)
+  BETTER_AUTH_SECRET: z.string().min(32),
+
+  // Postgres (the API server connects directly; discrete vars, no URL)
+  DB_HOST: z.string().min(1),
+  DB_PORT: z.coerce.number().int().positive().default(5432),
+  DB_USER: z.string().min(1).default('postgres'),
+  DB_PASSWORD: z.string().min(1),
+  DB_NAME: z.string().min(1).default('postgres'),
+
+  // The app's one public origin (required)
+  SITE_URL: z.string().url(),
 
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -39,7 +47,7 @@ const envSchema = z.object({
   DEV_PORT_OFFSET: z.coerce.number().default(0),
   DEV_VITE_PORT: z.coerce.number().optional(),
   DEV_API_PORT: z.coerce.number().optional(),
-  DEV_KONG_PORT: z.coerce.number().optional(),
+  DEV_DB_PORT: z.coerce.number().optional(),
   DEV_TRAEFIK_PORT: z.coerce.number().optional(),
   DEV_GRAFANA_PORT: z.coerce.number().optional(),
   DEV_PROMETHEUS_PORT: z.coerce.number().optional(),
@@ -48,12 +56,9 @@ const envSchema = z.object({
   // OAuth (optional) — strict "true"-only booleans.
   GOOGLE_ENABLED: envBool(false),
   MICROSOFT_ENABLED: envBool(false),
-  GITHUB_ENABLED: envBool(false),
-  APPLE_ENABLED: envBool(false),
-  DISCORD_ENABLED: envBool(false),
   MAGIC_LINK_ENABLED: envBool(true),
 
-  // SMTP (shared with Supabase Auth)
+  // SMTP (auth and app emails)
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().optional(),
   SMTP_USER: z.string().optional(),
@@ -79,9 +84,10 @@ const envSchema = z.object({
 // ============================================================================
 
 const validEnv = {
-  SUPABASE_URL: 'http://localhost:8000',
-  SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiJ9.test-anon-key',
-  SUPABASE_SERVICE_ROLE_KEY: 'eyJhbGciOiJIUzI1NiJ9.test-service-role',
+  BETTER_AUTH_SECRET: 'a'.repeat(64),
+  SITE_URL: 'http://localhost:5173',
+  DB_HOST: 'localhost',
+  DB_PASSWORD: 'local-postgres-password',
 };
 
 describe('Environment variable validation', () => {
@@ -91,32 +97,60 @@ describe('Environment variable validation', () => {
       expect(result.success).toBe(true);
     });
 
-    it('fails when SUPABASE_URL is missing', () => {
-      const { SUPABASE_URL, ...env } = validEnv;
+    it('fails when BETTER_AUTH_SECRET is missing', () => {
+      const { BETTER_AUTH_SECRET, ...env } = validEnv;
       const result = envSchema.safeParse(env);
       expect(result.success).toBe(false);
     });
 
-    it('fails when SUPABASE_URL is not a valid URL', () => {
-      const result = envSchema.safeParse({ ...validEnv, SUPABASE_URL: 'not-a-url' });
+    it('fails when BETTER_AUTH_SECRET is shorter than 32 characters', () => {
+      const result = envSchema.safeParse({ ...validEnv, BETTER_AUTH_SECRET: 'a'.repeat(31) });
       expect(result.success).toBe(false);
     });
 
-    it('fails when SUPABASE_ANON_KEY is missing', () => {
-      const { SUPABASE_ANON_KEY, ...env } = validEnv;
+    it('fails when SITE_URL is missing', () => {
+      const { SITE_URL, ...env } = validEnv;
       const result = envSchema.safeParse(env);
       expect(result.success).toBe(false);
     });
 
-    it('fails when SUPABASE_ANON_KEY is empty', () => {
-      const result = envSchema.safeParse({ ...validEnv, SUPABASE_ANON_KEY: '' });
+    it('fails when SITE_URL is not a valid URL', () => {
+      const result = envSchema.safeParse({ ...validEnv, SITE_URL: 'not-a-url' });
       expect(result.success).toBe(false);
     });
+  });
 
-    it('fails when SUPABASE_SERVICE_ROLE_KEY is missing', () => {
-      const { SUPABASE_SERVICE_ROLE_KEY, ...env } = validEnv;
-      const result = envSchema.safeParse(env);
-      expect(result.success).toBe(false);
+  describe('database variables', () => {
+    it('fails when DB_HOST is missing', () => {
+      const { DB_HOST, ...env } = validEnv;
+      expect(envSchema.safeParse(env).success).toBe(false);
+    });
+
+    it('fails when DB_PASSWORD is missing or empty', () => {
+      const { DB_PASSWORD, ...env } = validEnv;
+      expect(envSchema.safeParse(env).success).toBe(false);
+      expect(envSchema.safeParse({ ...validEnv, DB_PASSWORD: '' }).success).toBe(false);
+    });
+
+    it('defaults DB_PORT to 5432, DB_USER and DB_NAME to postgres', () => {
+      const result = envSchema.safeParse(validEnv);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.DB_PORT).toBe(5432);
+        expect(result.data.DB_USER).toBe('postgres');
+        expect(result.data.DB_NAME).toBe('postgres');
+      }
+    });
+
+    it('coerces DB_PORT and rejects a non-positive one', () => {
+      const ok = envSchema.safeParse({ ...validEnv, DB_PORT: '6543' });
+      expect(ok.success && ok.data.DB_PORT).toBe(6543);
+      expect(envSchema.safeParse({ ...validEnv, DB_PORT: '0' }).success).toBe(false);
+    });
+
+    it('keeps a password with URL-special characters verbatim (no URL to encode)', () => {
+      const result = envSchema.safeParse({ ...validEnv, DB_PASSWORD: 'p@ss:w/rd#?' });
+      expect(result.success && result.data.DB_PASSWORD).toBe('p@ss:w/rd#?');
     });
   });
 
@@ -150,9 +184,6 @@ describe('Environment variable validation', () => {
       const result = envSchema.parse(validEnv);
       expect(result.GOOGLE_ENABLED).toBe(false);
       expect(result.MICROSOFT_ENABLED).toBe(false);
-      expect(result.GITHUB_ENABLED).toBe(false);
-      expect(result.APPLE_ENABLED).toBe(false);
-      expect(result.DISCORD_ENABLED).toBe(false);
     });
   });
 
@@ -205,9 +236,13 @@ describe('Environment variable validation', () => {
     });
 
     it('parses any other non-"true" string as false', () => {
-      const result = envSchema.parse({ ...validEnv, GITHUB_ENABLED: '1', DISCORD_ENABLED: 'yes' });
-      expect(result.GITHUB_ENABLED).toBe(false);
-      expect(result.DISCORD_ENABLED).toBe(false);
+      const result = envSchema.parse({
+        ...validEnv,
+        GOOGLE_ENABLED: '1',
+        MICROSOFT_ENABLED: 'yes',
+      });
+      expect(result.GOOGLE_ENABLED).toBe(false);
+      expect(result.MICROSOFT_ENABLED).toBe(false);
     });
 
     it('falls back to the declared default when unset', () => {
@@ -286,11 +321,11 @@ describe('Environment variable validation', () => {
         ...validEnv,
         DEV_VITE_PORT: '5273',
         DEV_API_PORT: '3100',
-        DEV_KONG_PORT: '8100',
+        DEV_DB_PORT: '5532',
       });
       expect(result.DEV_VITE_PORT).toBe(5273);
       expect(result.DEV_API_PORT).toBe(3100);
-      expect(result.DEV_KONG_PORT).toBe(8100);
+      expect(result.DEV_DB_PORT).toBe(5532);
     });
   });
 
@@ -343,6 +378,21 @@ describe('Environment variable validation', () => {
       // (A bare z.coerce.boolean() reference survives only in the explanatory
       // comment, so match the field-assignment form specifically.)
       expect(src).not.toMatch(/_ENABLED: z\.coerce\.boolean/);
+    });
+
+    it('declares the DB_* vars exactly as this mirror does', () => {
+      expect(src).toContain('DB_HOST: z.string().min(1),');
+      expect(src).toContain('DB_PORT: z.coerce.number().int().positive().default(5432),');
+      expect(src).toContain("DB_USER: z.string().min(1).default('postgres'),");
+      expect(src).toContain('DB_PASSWORD: z.string().min(1),');
+      expect(src).toContain("DB_NAME: z.string().min(1).default('postgres'),");
+      // Never a connection URL: a password would need URL-encoding.
+      expect(src).not.toMatch(/DATABASE_URL/);
+    });
+
+    it('declares the required auth and origin vars exactly as this mirror does', () => {
+      expect(src).toContain('BETTER_AUTH_SECRET: z.string().min(32),');
+      expect(src).toContain('SITE_URL: z.string().url(),');
     });
 
     it('has no yearly Stripe price env vars', () => {

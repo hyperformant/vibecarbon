@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
 import { formatDotenvLine } from '../dotenv.js';
+import { resolveDbImage } from '../images.js';
 import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
 import { registryEnsureShell } from './compose/registry-config.js';
 
@@ -204,8 +205,8 @@ function composeFileFlags(options = {}) {
  *     One wildcard cert covers all subdomains, no per-subdomain ACME orders.
  *   - HTTP-01 (manual DNS): wildcards require DNS-01 (LE policy), so we list
  *     the explicit subdomains that are active for this deploy instead.
- *     `main` stays `${domain}` (the app root); `sans` lists api/studio/dashboard
- *     plus any enabled feature subdomains (grafana/prometheus, n8n, metabase).
+ *     `main` is `dashboard.${domain}` (always present); `sans` lists the
+ *     enabled feature subdomains (grafana/prometheus, n8n, metabase).
  *
  * The file is written into `volumes/traefik/` which is already bind-mounted
  * as `/etc/traefik/dynamic:ro`. Traefik hot-reloads files from that dir.
@@ -238,14 +239,13 @@ export function renderTraefikDefaultCert({ domain, dnsChallenge, features = {} }
     sans = [];
   } else {
     // HTTP-01: wildcards require DNS-01 (LE policy), so enumerate the active
-    // subdomains. `studio` and `dashboard` always exist; the rest are
-    // feature-gated. The apex (app + Hono API + Kong path-routes) is covered
-    // by its own router cert, not here.
-    const subs = ['dashboard'];
+    // subdomains. `dashboard` always exists; the rest are feature-gated. The
+    // apex (app + Hono API) is covered by its own router cert, not here.
+    const subs = [];
     if (features.observability) subs.push('grafana', 'prometheus');
     if (features.n8n) subs.push('n8n');
     if (features.metabase) subs.push('metabase');
-    main = `studio.${domain}`;
+    main = `dashboard.${domain}`;
     sans = subs.map((s) => `${s}.${domain}`);
   }
 
@@ -332,15 +332,21 @@ export function renderBundle(projectName, options = {}) {
     .join('\n');
 
   const envOverrides = { ...(options.envOverrides || {}) };
+  // The db image is the CLI's, never the project's: docker-compose.yml pulls
+  // ${DB_IMAGE}:${DB_IMAGE_TAG}, and every server runs the tag of the CLI that
+  // deployed it. Set after the caller's overrides so a replayed older .env
+  // (scale) cannot pin a stale tag.
+  // (VIBECARBON_DB_IMAGE swaps in a dev build for testing; resolveDbImage warns.)
+  const dbImage = resolveDbImage();
+  envOverrides.DB_IMAGE = dbImage.image;
+  envOverrides.DB_IMAGE_TAG = dbImage.tag;
   if (options.domain) {
     envOverrides.DOMAIN = options.domain;
     envOverrides.ACME_EMAIL = `admin@${options.domain}`;
-    // Single public origin: the apex serves the SPA, the Hono /api, AND the
-    // Supabase gateway (Traefik path-routes /auth/v1|/rest/v1|/realtime/v1|
-    // /storage/v1 to Kong). SITE_URL is that one origin — GoTrue redirect
-    // config, billing return URLs, and CSP/CORS all derive from it.
+    // Single public origin: the apex serves the SPA and the Hono /api (auth
+    // included, at /api/auth). SITE_URL is that one origin — auth redirects
+    // and cookies, billing return URLs, and CSP/CORS all derive from it.
     envOverrides.SITE_URL = `https://${options.domain}`;
-    envOverrides.SUPABASE_URL = 'http://kong:8000';
   }
   if (options.image) {
     envOverrides.APP_IMAGE = options.image;
@@ -406,21 +412,10 @@ export function renderBundle(projectName, options = {}) {
     }
   };
 
-  copyDirIfExist('db', 'db');
+  // No db/: the migrations ship inside the app image (the Dockerfile copies
+  // db/migrations) and the app applies them at startup, so nothing on the
+  // server reads them.
   copyDirIfExist('volumes/db', 'volumes/db');
-  // Supavisor tenant seed — bind-mounted by docker-compose.prod.yml. Missing
-  // from the bundle = Docker auto-creates a directory over it on the server
-  // and the pooler crash-loops on `cat: /etc/pooler/pooler.exs: Is a
-  // directory` (same class as the functions/ note below).
-  copyDirIfExist('volumes/pooler', 'volumes/pooler');
-  copyDirIfExist('supabase/migrations', 'supabase/migrations');
-  copyDirIfExist('volumes/kong', 'volumes/kong');
-  // Edge functions: docker-compose.prod.yml bind-mounts ./functions and starts
-  // the edge-runtime with `--main-service /home/deno/functions/main`. If this
-  // isn't bundled, the mount auto-creates an empty dir on the server and the
-  // runtime crash-loops with "could not find an appropriate entrypoint". The
-  // template ships a stub at functions/main/index.ts. RCA: prod-1 2026-05-26.
-  copyDirIfExist('functions', 'functions');
 
   // volumes/traefik/ — dynamic-config directory mounted into Traefik.
   // Always ensure the dir exists in the bundle so Traefik's file provider

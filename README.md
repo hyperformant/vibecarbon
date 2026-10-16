@@ -27,7 +27,7 @@
 
 ---
 
-Vibecarbon is a full-stack SaaS starter that combines React 19, Vite, Tailwind v4, Hono, and self-hosted Supabase, with automated DevOps built in.
+Vibecarbon is a full-stack SaaS starter that combines React 19, Vite, Tailwind v4, Hono, Better Auth, and your own Postgres, with automated DevOps built in.
 
 Skip the choice between vendor lock-in and DIY infrastructure. Ship an application with authentication, billing, teams, email, blog, docs, and i18n already wired up, then put it in production without a dedicated DevOps engineer.
 

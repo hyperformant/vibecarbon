@@ -23,7 +23,7 @@ describe('envIdentityOf', () => {
     secondaryRegion: 'hil',
     serverType: 'cpx21',
     masterServerType: 'cpx22',
-    supabaseServerType: 'cpx32',
+    dbServerType: 'cpx32',
     workerServerType: 'cpx22',
     // runtime — must NOT carry over
     status: 'deployed',
@@ -52,7 +52,7 @@ describe('envIdentityOf', () => {
       secondaryRegion: 'hil',
       serverType: 'cpx21',
       masterServerType: 'cpx22',
-      supabaseServerType: 'cpx32',
+      dbServerType: 'cpx32',
       workerServerType: 'cpx22',
     });
   });

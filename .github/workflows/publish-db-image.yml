@@ -14,113 +14,151 @@ on:
 permissions:
   contents: read
 jobs:
-  # The static wal-g binary image publishes FIRST: the db image below (and
-  # carbon/db/Dockerfile on every target server) COPY --froms it, so `needs:`
-  # in this one workflow is what serializes a same-push bump of both — two
-  # workflows racing the same push was the alternative, and the db leg would
-  # lose it.
+  # The static wal-g binary image. The db image below COPY --froms it BY
+  # DIGEST (docker/postgres-walg/Dockerfile pins
+  # ghcr.io/hyperformant/wal-g:<version>@sha256:...), so that Dockerfile line
+  # is the single record of which wal-g build the db image carries, and the
+  # db build never consumes a digest this run just minted. wal-g republishes
+  # only when its own inputs changed in this push (or its tag is missing, or
+  # on a manual dispatch): every other run would otherwise move the tag's
+  # digest for nothing (the build is not byte-reproducible) and leave the
+  # pin looking stale. Adopting a republished wal-g is a re-pin of that FROM
+  # line plus a DB_IMAGE_TAG revision bump; Dependabot's docker ecosystem
+  # watches docker/postgres-walg and proposes the re-pin.
   #
-  # multi-arch (amd64 + arm64) with NO QEMU: docker/wal-g/Dockerfile builds
-  # on $BUILDPLATFORM and cross-compiles per TARGETARCH, so both platforms
-  # are native-speed `go build`s. arm64's consumer is local dev — an Apple
-  # Silicon machine building carbon/db pulls this image. Guarded by
+  # amd64 + arm64, each built on its OWN native runner through the same
+  # native-multiarch-image.yml the db image uses (ubuntu-24.04 /
+  # ubuntu-24.04-arm), never QEMU. docker/wal-g/Dockerfile's smoke stage
+  # (`RUN wal-g --version` on TARGETPLATFORM) therefore executes natively on
+  # both arches instead of leaning on whatever binfmt the runner image ships,
+  # and .github/scripts/smoke-walg-image.sh runs each arch before its digest
+  # is pushed, then again on the merged tag. Its one consumer is the db
+  # image's two native per-arch builds below. Guarded by
   # tests/unit/deploy/workflow-platforms.test.ts.
   #
-  # The ghcr package must be PUBLIC: target servers pull it anonymously
-  # during compose builds (same rule as ghcr.io/hyperformant/postgres).
-  publish-walg:
-    runs-on: ubuntu-latest
-    environment: e2e-infra
+  # The ghcr package must be PUBLIC (same rule as ghcr.io/hyperformant/postgres).
+  walg-ref:
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-      packages: write   # push to ghcr
+      packages: read   # see whether the wal-g tag already exists
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      publish: ${{ steps.ref.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0   # diff this push's range for docker/wal-g changes
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - id: ref
-        name: Resolve wal-g version from docker/wal-g/Dockerfile
+        name: Resolve the wal-g version and whether to publish it
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
+          set -euo pipefail
           V=$(grep -oP 'ARG WALG_VERSION=v\K[0-9.]+' docker/wal-g/Dockerfile)
-          echo "image=ghcr.io/hyperformant/wal-g:$V" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: docker/wal-g
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.ref.outputs.image }}
-      # The Dockerfile's own smoke stage already executed the amd64 binary
-      # in-build; this proves the PUBLISHED manifest resolves and runs.
-      - name: Smoke-test the published amd64 binary
-        run: docker run --rm --entrypoint /usr/local/bin/wal-g ${{ steps.ref.outputs.image }} --version
-  publish:
-    needs: publish-walg
-    runs-on: ubuntu-latest
-    environment: e2e-infra
+          test -n "$V"
+          # Only a definite "not found" counts as missing; any other lookup
+          # error fails the run rather than guess.
+          if out=$(docker buildx imagetools inspect "ghcr.io/hyperformant/wal-g:$V" 2>&1 >/dev/null); then MISSING=false
+          elif grep -q 'not found' <<<"$out"; then MISSING=true
+          else echo "$out" >&2; exit 1; fi
+          if [ "$EVENT" != push ] || [ "$MISSING" = true ]; then PUBLISH=true
+          elif ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then PUBLISH=true
+          elif git diff --quiet "$BEFORE" HEAD -- docker/wal-g ':(exclude)docker/wal-g/README.md'; then PUBLISH=false
+          else PUBLISH=true; fi
+          {
+            echo "tag=$V"
+            echo "publish=$PUBLISH"
+          } >> "$GITHUB_OUTPUT"
+          echo "wal-g $V: missing=$MISSING publish=$PUBLISH" >> "$GITHUB_STEP_SUMMARY"
+  publish-walg:
+    needs: walg-ref
+    if: needs.walg-ref.outputs.publish == 'true'
     permissions:
       contents: read
-      packages: write   # push to ghcr
+      packages: write   # push the per-arch digests and the multi-arch tag to ghcr
+    uses: ./.github/workflows/native-multiarch-image.yml
+    with:
+      name: walg
+      context: docker/wal-g
+      image: ghcr.io/hyperformant/wal-g
+      tag: ${{ needs.walg-ref.outputs.tag }}
+      smoke: .github/scripts/smoke-walg-image.sh
+      environment: e2e-infra
+  # The db image: one NATIVE build per arch, then one multi-arch tag.
+  #
+  # amd64 + arm64. Servers are amd64 only (src/lib/deploy/platform.js); the
+  # arm64 child exists solely so local `vibecarbon up` on Apple Silicon runs
+  # Postgres natively, since every mode (local dev included) pulls this image.
+  #
+  # The build itself is native-multiarch-image.yml, shared with the branch dev
+  # channel (publish-db-image-dev.yml): per-arch native runners, the smoke
+  # script (.github/scripts/smoke-db-image.sh) on each arch before anything is
+  # pushed, push by digest, then one merge job that names both digests under
+  # the tag and smoke-tests the published result.
+  #
+  # Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+  # The release tag is immutable: DB_IMAGE_TAG's -r<N> revision moves with
+  # every input change (tests/unit/deploy/db-image-fingerprint.test.ts), so a
+  # tag names exactly one build and is published exactly once. db-ref skips
+  # the build when the tag already exists, which is what keeps a push that
+  # touches only docker/wal-g (or only this workflow) from re-minting the
+  # release image under a tag servers already hold; `immutable` re-checks after
+  # the builds so a racing run never moves it either.
+  db-ref:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read   # see whether the release tag already exists
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      tag: ${{ steps.ref.outputs.tag }}
+      exists: ${{ steps.ref.outputs.exists }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - id: ref
-        name: Resolve ref from src/lib/images.js
-        run: |
-          IMG=$(grep -oP "DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
-          TAG=$(grep -oP "DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
-          echo "image=$IMG:$TAG" >> "$GITHUB_OUTPUT"
-      # amd64-only, deliberately — and note this is NOT the same question as
-      # "does anything arm64 build this Dockerfile?".
-      #
-      # WHO PULLS THIS IMAGE: k8s deploys, and only k8s deploys. The ref is
-      # substituted into carbon/k8s/values/supabase.values.yaml's {{DB_IMAGE}}/
-      # {{DB_IMAGE_TAG}} placeholders by installSupabase (src/lib/deploy/k8s/
-      # k3s.js) and materialized by containerd on the k3s nodes. It is never
-      # sideloaded, and `helm` running locally does not pull it — the remote
-      # cluster does.
-      #
-      # WHO DOES NOT: local development. The generated project's compose stack
-      # BUILDS the db from carbon/db/Dockerfile (`build: {context: ./db}` +
-      # `pull_policy: build` in carbon/docker-compose.yml) — including for
-      # compose *deploys*, where reconcile.sh runs `docker compose up` on the
-      # server itself. So no developer machine, Apple Silicon or otherwise,
-      # ever pulls this image, and dropping arm64 here cannot break local dev.
-      #
-      # That is why carbon/db/Dockerfile and docker/postgres-walg/Dockerfile
-      # KEEP their arm64 TARGETARCH branches: those are build-time paths that
-      # still run on arm64 hosts, and the `wal-g --version` exec in them is the
-      # only place a wrong-arch or glibc-mismatched binary fails loudly. Single
-      # published platform + arch-correct Dockerfiles is intentional.
-      #
-      # vibecarbon standardizes on x86-64 servers (decision 2026-07-30):
-      # DigitalOcean has no ARM instances at all, and Hetzner ARM is 4 SKUs in
-      # 3 of 6 locations behind a "limited availability" tier.
-      #
-      # No foreign architecture is built, so docker/setup-qemu-action is gone.
-      # Measured on run 30456193724 (the last multi-arch publish): setup-qemu
-      # 9s + a 2m20s two-arch build-push out of a 4m07s job — the emulated
-      # arm64 leg (apt-get + wal-g download + `wal-g --version` under QEMU) is
-      # roughly half of that build, so expect ~1m15s back per run.
-      #
-      # Bonus: the smoke-test step below only ever exercised the amd64 image
-      # even while arm64 was published. Now that amd64 is all we publish, the
-      # smoke test covers 100% of the artifact instead of half of it.
-      #
-      # Guarded by tests/unit/deploy/workflow-platforms.test.ts.
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: docker/postgres-walg
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.ref.outputs.image }}
-      - name: Smoke-test wal-g on the published amd64 image
-        run: docker run --rm --entrypoint wal-g ${{ steps.ref.outputs.image }} --version
+      - id: ref
+        name: Resolve the release ref from src/lib/images.js and whether it exists
+        run: |
+          set -euo pipefail
+          IMG=$(grep -oP "^export const DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
+          TAG=$(grep -oP "^export const DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
+          test -n "$IMG" && test -n "$TAG"
+          # Only a definite "not found" means build; any other lookup error
+          # fails the run rather than risk re-minting an existing tag.
+          if out=$(docker buildx imagetools inspect "$IMG:$TAG" 2>&1 >/dev/null); then EXISTS=true
+          elif grep -q 'not found' <<<"$out"; then EXISTS=false
+          else echo "$out" >&2; exit 1; fi
+          {
+            echo "image=$IMG"
+            echo "tag=$TAG"
+            echo "exists=$EXISTS"
+          } >> "$GITHUB_OUTPUT"
+          echo "db $IMG:$TAG exists=$EXISTS" >> "$GITHUB_STEP_SUMMARY"
+  # No `needs: publish-walg`: the db image takes wal-g from the digest its
+  # Dockerfile pins, which is already published, never from this run.
+  build-db:
+    needs: db-ref
+    if: needs.db-ref.outputs.exists != 'true'
+    permissions:
+      contents: read
+      packages: write   # push the per-arch digests and the multi-arch tag to ghcr
+    uses: ./.github/workflows/native-multiarch-image.yml
+    with:
+      name: db
+      context: docker/postgres-walg
+      image: ${{ needs.db-ref.outputs.image }}
+      tag: ${{ needs.db-ref.outputs.tag }}
+      smoke: .github/scripts/smoke-db-image.sh
+      environment: e2e-infra
+      immutable: true

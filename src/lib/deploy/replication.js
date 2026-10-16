@@ -19,12 +19,8 @@
 
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
+import { DB_PVC, DB_STATEFULSET } from './db-workload.js';
 import { REPL_GATEWAY_PORT } from './wireguard.js';
-
-// The supabase-db StatefulSet name (helm release `supabase`, chart `supabase`,
-// component `db` → `supabase-supabase-db`). Used by the k8s re-seed's
-// scale-to-zero quiesce.
-const DB_STATEFULSET = 'supabase-supabase-db';
 
 /**
  * Shared budget for every db-StatefulSet boot/rollout wait (the deploy-side
@@ -51,7 +47,7 @@ const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';
 const REPLICATION_SLOT = 'vibecarbon_standby_slot';
 
 // The single replication port for BOTH HA modes. compose publishes db:5432 →
-// host:5433 (supavisor owns host 5432); k8s uses a hostPort 5433 → container
+// host:5433 (over WireGuard only); k8s uses a hostPort 5433 → container
 // 5432. One port keeps primary_conninfo / pg_basebackup byte-identical.
 export const REPL_PORT = 5433;
 
@@ -129,7 +125,7 @@ export function buildReplicationHbaLines(cidrs) {
  * (k8s/ha/index.js setupReplication) AND at failover/restore time (failover.js,
  * restore.js). Hardenings preserved from the previous inline copies:
  *   1. `set -e -o pipefail` — a partial pg_basebackup leaves PGDATA non-empty
- *      without PG_VERSION; the supabase-db entrypoint then runs initdb on next
+ *      without PG_VERSION; the db entrypoint then runs initdb on next
  *      restart, aborts on "directory exists but is not empty", and CrashLoops.
  *   2. Stage into a tmp dir + atomic swap — a failed backup never leaves PGDATA
  *      half-formed; the original survives at data.prev until the swap succeeds.
@@ -152,7 +148,7 @@ export function buildReplicationHbaLines(cidrs) {
  * OPTIONAL (`swap`, default true). The k8s-HA deploy seed sets `swap:false` and
  * stages the basebackup into a subdir of PGDATA (`stagingDir`), then performs
  * the atomic swap NODE-SIDE after scaling the pod to zero — because in the
- * supabase-db pod the postmaster is PID 1, so an in-pod `pg_ctl stop` (which
+ * db pod the postmaster is PID 1, so an in-pod `pg_ctl stop` (which
  * every swap-in-place path implicitly relied on the caller running first)
  * terminates the container and kubelet restarts it as a fresh independent
  * primary. compose + failover/restore keep the combined `swap:true` behavior
@@ -207,7 +203,7 @@ export function buildReplicationHbaLines(cidrs) {
  * @param {number} [opts.basebackupDelayS=15] - seconds between basebackup
  *   attempts (only relevant when basebackupAttempts > 1).
  * @param {boolean} [opts.exhaustExitZero=false] - when the attempt budget is
- *   exhausted, exit 0 instead of 1 — the chart's own initdb boots the db
+ *   exhausted, exit 0 instead of 1 — the image's own initdb boots the db
  *   independently and the serial reseed path still covers replication later,
  *   so a bounded-wait init container should not be treated as a hard failure.
  * @param {boolean} [opts.passwordFromEnv=false] - source PGPASSWORD from the
@@ -379,7 +375,7 @@ if [ ! -f ${stagingDir}/PG_VERSION ]; then
 fi`
       : (() => {
           const exhaustBlock = exhaustExitZero
-            ? `echo "[${label}] pg_basebackup budget exhausted (${basebackupAttempts} attempts) — exiting UNSEEDED; the chart's initdb boots the db independent and the serial reseed path covers replication." >&2; exit 0`
+            ? `echo "[${label}] pg_basebackup budget exhausted (${basebackupAttempts} attempts) — exiting UNSEEDED; the image's initdb boots the db independent and the serial reseed path covers replication." >&2; exit 0`
             : `echo "[${label}] pg_basebackup failed after ${basebackupAttempts} attempt(s)" >&2
   exit 1`;
           return `
@@ -412,15 +408,13 @@ ${connectTimeoutBlock}${probeBlock}${basebackupBlock}
 # -R should already have created standby.signal; touch belt-and-suspenders.
 touch ${stagingDir}/standby.signal
 echo "primary_slot_name = '${slotName}'" >> ${stagingDir}/postgresql.auto.conf
-# hot_standby MUST be forced on: the supabase/postgres image ships
-# /etc/postgresql-custom/wal-g.conf with 'hot_standby = off' (postgresql.conf
-# leaves it commented, so the included wal-g.conf wins) — the reseeded standby
-# then streams fine but REFUSES read-only connections ("FATAL: the database
-# system is not accepting connections / DETAIL: Hot standby mode is disabled"),
-# failing every pg_is_in_recovery() check. postgresql.auto.conf is read LAST,
-# so this wins over the include. Harmless after promotion (ignored outside
-# recovery). Live RCA 2026-07-06 e4 rig; k8s + compose ship the same image
-# family, so this applies to BOTH staging paths.
+# hot_standby MUST be on: with it off, the reseeded standby streams fine but
+# REFUSES read-only connections ("FATAL: the database system is not accepting
+# connections / DETAIL: Hot standby mode is disabled"), failing every
+# pg_is_in_recovery() check. The previous image shipped a config include with
+# 'hot_standby = off' (live RCA 2026-07-06 e4 rig); postgresql.auto.conf is read
+# LAST, so pinning it here wins over any image config on both staging paths
+# (k8s + compose). Harmless after promotion (ignored outside recovery).
 echo "hot_standby = on" >> ${stagingDir}/postgresql.auto.conf
 ${conninfoBlock}chown -R postgres:postgres ${stagingDir}
 ${swapBlock}`.trim();
@@ -446,12 +440,12 @@ ${swapBlock}`.trim();
  * probe; pg_isready cannot see pg_hba/wal_level state), staging into a
  * sibling dir on the raw volume mount and swapping in-script (no running
  * postmaster exists yet, so the in-place swap is safe here, unlike the
- * failover/restore paths). On exhaustion it exits 0 UNSEEDED — the chart's
+ * failover/restore paths). On exhaustion it exits 0 UNSEEDED — the image's
  * initdb then boots the db independent and setupReplication's serial swap
  * path covers replication (bounded wait + fallback, decision #2).
  *
  * Env contract (injected by the seed-standby init container in
- * carbon/k8s/values/supabase.values.yaml): WALG_ROLE, RESTORE_TARGET
+ * carbon/k8s/base/db/statefulset.yaml): WALG_ROLE, RESTORE_TARGET
  * (optional), REPL_PASSWORD (secretKeyRef), SEED_PRIMARY_HOST,
  * SEED_PRIMARY_PORT. Mount contract: db PVC mounted RAW (no subPath) at
  * /seed-volume; PGDATA lives at /seed-volume/postgres-data.
@@ -592,9 +586,9 @@ export const PGDATA_SWAP_POD = 'vibecarbon-pgdata-swap';
 const PGDATA_SWAP_MOUNT_ROOT = '/pgdata-vol';
 
 /**
- * Parse the supabase-db pod JSON into everything the helper-pod swap needs:
+ * Parse the db pod JSON into everything the helper-pod swap needs:
  *   - claimName: the PVC to mount into the swap pod (same volume the db uses),
- *   - subPath:   the db's volumeMount subPath (the chart mounts the PVC at
+ *   - subPath:   the db's volumeMount subPath (the StatefulSet mounts the PVC at
  *     /var/lib/postgresql/data via subPath `postgres-data`), so PGDATA on the
  *     raw volume is `<volume-root>/<subPath>`,
  *   - image:     the db container's image — reused for the swap pod so it is
@@ -629,7 +623,7 @@ export function parsePgdataClaimFromPodJson(podJson) {
     throw new Error('no persistentVolumeClaim mounted at /var/lib/postgresql/data');
   }
   if (!image) {
-    throw new Error('could not resolve the supabase-db container image for the swap pod');
+    throw new Error('could not resolve the db container image for the swap pod');
   }
   return { claimName, subPath, image };
 }
@@ -640,7 +634,7 @@ export function parsePgdataClaimFromPodJson(podJson) {
  *
  * @param {string} ip - the cluster's master IP (kubectl target)
  * @param {string} sshKeyPath
- * @param {string} pod - the supabase-db pod name
+ * @param {string} pod - the db pod name
  * @returns {Promise<{claimName:string, subPath:string, image:string}>}
  */
 async function resolvePgdataClaim(ip, sshKeyPath, pod) {
@@ -665,7 +659,7 @@ async function resolvePgdataClaim(ip, sshKeyPath, pod) {
  * root so the same-filesystem renames succeed regardless of the volume root's
  * ownership; buildNodePgdataSwapScript preserves the staged tree's numeric
  * ownership (no chown), so the reseeded PGDATA keeps the in-container postgres
- * uid. restartPolicy Never — a one-shot job. Pinned to the dedicated supabase
+ * uid. restartPolicy Never — a one-shot job. Pinned to the dedicated database
  * node (same nodeSelector as the db StatefulSet): a detached csi.hetzner.cloud
  * volume carries only ZONAL topology, so without the pin the scheduler is free
  * to place the pod on a worker that never ran the db — which then pulls the
@@ -697,15 +691,13 @@ export function buildPgdataSwapPodManifest({
     spec: {
       restartPolicy: 'Never',
       securityContext: { runAsUser: 0, runAsGroup: 0, fsGroup: 0 },
-      // Same placement contract as the db StatefulSet (supabase.values.yaml):
-      // the selector ATTRACTS the pod to the dedicated supabase node (see the
+      // Same placement contract as the db StatefulSet (k8s/base/db/statefulset.yaml):
+      // the selector ATTRACTS the pod to the dedicated database node (see the
       // doc comment — CSI zonal topology does not), and the toleration lets it
-      // pass the node's dedicated=supabase:NoSchedule taint (live-hit
+      // pass the node's dedicated=db:NoSchedule taint (live-hit
       // 2026-07-07: without it the pod sat Unschedulable forever).
-      nodeSelector: { dedicated: 'supabase' },
-      tolerations: [
-        { key: 'dedicated', operator: 'Equal', value: 'supabase', effect: 'NoSchedule' },
-      ],
+      nodeSelector: { dedicated: 'db' },
+      tolerations: [{ key: 'dedicated', operator: 'Equal', value: 'db', effect: 'NoSchedule' }],
       containers: [
         {
           name: 'swap',
@@ -886,9 +878,11 @@ export const STALE_ATTACH_EVENT_PATTERN =
   /MountVolume\.MountDevice failed[\s\S]*?(does not exist and no size was specified|formatting disk failed)/;
 
 /**
- * PersistentVolume names bound to the db StatefulSet's claims
- * (`<template>-<sts>-0` naming). Fail-open: unreadable/unparseable output →
- * empty list, so every caller degrades to "nothing to wait for / repair"
+ * PersistentVolume names bound to the db StatefulSet's claim (DB_PVC,
+ * `data-db-0`: the StatefulSet's only volumeClaimTemplate). Matched exactly,
+ * not by suffix, so an add-on StatefulSet whose name happens to end in `db`
+ * is never mistaken for the database. Fail-open: unreadable/unparseable output
+ * → empty list, so every caller degrades to "nothing to wait for / repair"
  * rather than failing a reseed over a diagnostic read.
  *
  * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
@@ -899,7 +893,7 @@ export async function listDbPvNames(kubectl) {
     const raw = await kubectl(['get', 'pvc', '-n', 'vibecarbon', '-o', 'json']);
     const items = JSON.parse(String(raw))?.items ?? [];
     return items
-      .filter((c) => String(c?.metadata?.name ?? '').endsWith(`-${DB_STATEFULSET}-0`))
+      .filter((c) => c?.metadata?.name === DB_PVC)
       .map((c) => c?.spec?.volumeName)
       .filter(Boolean);
   } catch {
@@ -1211,7 +1205,7 @@ $$;
       '--',
       'psql',
       '-U',
-      'supabase_admin',
+      'postgres',
       '-d',
       'postgres',
       '-v',
@@ -1261,11 +1255,11 @@ $$;
  *     (best-effort) so the standby is never left down; its original PGDATA is
  *     untouched until the atomic swap succeeds.
  *
- * Transport: the standby dials its OWN supabase node's private IP on the
+ * Transport: the standby dials its OWN database node's private IP on the
  * repl-gateway relay port (REPL_GATEWAY_PORT) — the standby gateway relays
  * through the WireGuard tunnel to the primary gateway, which forwards to the
  * primary postgres hostPort. This is the EXACT path the deploy-time seed uses;
- * the old direct `primarySupabaseIp:5432` dial is dead post-WireGuard (the
+ * the old direct `primaryDbIp:5432` dial is dead post-WireGuard (the
  * firewall admits only UDP 51821, and the primary db's hostPort 5433 is
  * localhost-relayed). The gateway relay directions were configured at deploy
  * for the CURRENT roles, and this re-seed always runs while those roles still
@@ -1277,15 +1271,15 @@ $$;
  * @param {string} standbyIp - standby cluster master IP (kubectl target)
  * @param {string} sshKeyPath
  * @param {object} opts
- * @param {string} opts.standbySupabaseIp - standby SUPABASE node public IP.
+ * @param {string} opts.standbyDbIp - standby DATABASE node public IP.
  *   No longer a swap target (the swap runs in a cluster-side helper pod), but
  *   still REQUIRED as a precondition that the standby HA cluster is fully
  *   identified — a re-seed must not run against a half-identified env.
- * @param {string} opts.standbySupabasePrivateIp - the standby supabase
+ * @param {string} opts.standbyDbPrivateIp - the standby database
  *   node's PRIVATE IP: the local repl-gateway relay endpoint the basebackup +
  *   primary_conninfo dial. REQUIRED — a real IaC output on every provider
  *   (Hetzner pins it statically; DO exports the Pulumi-assigned VPC address),
- *   persisted under envConfig.ha.*.supabasePrivateIp at deploy time. A
+ *   persisted under envConfig.ha.*.dbPrivateIp at deploy time. A
  *   Hetzner-shaped fallback here would make the re-seed's reachability probe
  *   fail closed into 'skipped' on other providers — promotion without
  *   re-seed.
@@ -1296,27 +1290,27 @@ $$;
 export async function reseedStandbyFromPrimary(
   standbyIp,
   sshKeyPath,
-  { standbySupabaseIp, standbySupabasePrivateIp, detachSettleMs = 25_000 } = {},
+  { standbyDbIp, standbyDbPrivateIp, detachSettleMs = 25_000 } = {},
 ) {
-  if (!standbySupabasePrivateIp) {
-    // Same precondition class as the standbySupabaseIp check below: a
+  if (!standbyDbPrivateIp) {
+    // Same precondition class as the standbyDbIp check below: a
     // missing private IP signals a half-identified HA env (or a pre-M3
     // persisted config). Never assume an address — redeploy to persist it.
     throw new Error(
-      're-seed aborted: standbySupabasePrivateIp is required — the standby supabase ' +
+      're-seed aborted: standbyDbPrivateIp is required — the standby database ' +
         "node's private IP is a deploy output persisted in the environment config; " +
         'redeploy to persist it before re-seeding',
     );
   }
-  if (!standbySupabaseIp) {
+  if (!standbyDbIp) {
     // Precondition: a fully-identified HA standby cluster. The PGDATA swap runs
     // in a cluster-side helper pod now (not a node-side ssh), so this IP is no
-    // longer a swap target — but a missing supabase node still signals a
+    // longer a swap target — but a missing database node still signals a
     // half-identified env we must NOT run a destructive re-seed against.
     throw new Error(
-      're-seed aborted: standby supabase node IP is unknown; the standby HA ' +
+      're-seed aborted: standby database node IP is unknown; the standby HA ' +
         'cluster is not fully identified. Cannot safely re-seed; redeploy to ' +
-        'persist the standby supabase IP.',
+        'persist the standby database IP.',
     );
   }
 
@@ -1347,7 +1341,7 @@ export async function reseedStandbyFromPrimary(
       '--',
       'pg_isready',
       '-h',
-      standbySupabasePrivateIp,
+      standbyDbPrivateIp,
       '-p',
       String(REPL_GATEWAY_PORT),
       '-t',
@@ -1395,13 +1389,13 @@ export async function reseedStandbyFromPrimary(
   // (sslmode=disable) — WireGuard encrypts the wire.
   const script = buildStagedBasebackupScript({
     replPassword,
-    primaryHost: standbySupabasePrivateIp,
+    primaryHost: standbyDbPrivateIp,
     primaryPort: String(REPL_GATEWAY_PORT),
     probeFirst: false,
     swap: false,
     stagingDir: RESEED_STAGING_DIR,
     primaryConninfo: buildPrimaryConninfo({
-      primaryHost: standbySupabasePrivateIp,
+      primaryHost: standbyDbPrivateIp,
       replPassword,
       port: REPL_GATEWAY_PORT,
     }),
@@ -1450,7 +1444,7 @@ export async function reseedStandbyFromPrimary(
     }
     if (!podGone) {
       throw new Error(
-        'standby supabase-db pod did not terminate within budget after scale-to-zero, ' +
+        'standby db pod did not terminate within budget after scale-to-zero, ' +
           'refusing the helper-pod PGDATA swap while the pod may still hold the PVC.',
       );
     }
@@ -1618,7 +1612,7 @@ export async function reseedStandbyFromPrimary(
         '--',
         'psql',
         '-U',
-        'supabase_admin',
+        'postgres',
         '-tAc',
         'SELECT pg_is_in_recovery()',
       ]);
@@ -1635,21 +1629,21 @@ export async function reseedStandbyFromPrimary(
     await new Promise((r) => setTimeout(r, i < 5 ? 500 : 4000));
   }
   if (!inRecovery) {
-    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won —
-    // the image's wal-g.conf ships it off and the staged auto.conf override
-    // did not take), NOT a timing issue: waiting longer can never fix it.
+    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won
+    // because the staged auto.conf override did not take), NOT a timing issue:
+    // waiting longer can never fix it.
     if (lastRecoveryErr.includes('Hot standby mode is disabled')) {
       throw new Error(
         'standby re-seed: the standby is streaming but refusing read-only connections ' +
           '("Hot standby mode is disabled") — hot_standby is OFF in its effective config ' +
-          "(the image's wal-g.conf ships hot_standby=off; the staged postgresql.auto.conf " +
-          'must override it with hot_standby = on). Config error, not a timing issue.',
+          '(the staged postgresql.auto.conf must pin hot_standby = on, and it did not take). ' +
+          'Config error, not a timing issue.',
       );
     }
     throw new Error(
       'standby re-seed swapped in a fresh basebackup but the standby never entered ' +
         'recovery mode within the budget; the reseeded PGDATA is not replaying from ' +
-        'the primary (check the standby supabase-db logs).',
+        'the primary (check the standby db logs).',
     );
   }
   return 'reseeded';
@@ -1695,7 +1689,7 @@ export async function promoteStandby(standbyIp, sshKeyPath) {
         '--',
         'psql',
         '-U',
-        'supabase_admin',
+        'postgres',
         '-tAc',
         'SELECT pg_is_in_recovery()',
       ]);
@@ -1735,7 +1729,7 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
       '--',
       'psql',
       '-U',
-      'supabase_admin',
+      'postgres',
       '-tAc',
       'SELECT status FROM pg_stat_wal_receiver',
     ]);
@@ -1773,7 +1767,7 @@ export async function isStandbyPromoted(standbyIp, sshKeyPath) {
       '--',
       'psql',
       '-U',
-      'supabase_admin',
+      'postgres',
       '-tAc',
       'SELECT pg_is_in_recovery()',
     ]);
@@ -1802,7 +1796,7 @@ export async function readK8sReplicationState(primaryIp, sshKeyPath) {
     '--',
     'psql',
     '-U',
-    'supabase_admin',
+    'postgres',
     '-tAc',
     "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1",
   ]);

@@ -135,16 +135,16 @@ export function identifyServers(envName, envConfig, _projectConfig) {
     return {
       primary: {
         ip: envConfig.ha.primary.masterIp,
-        supabaseIp: envConfig.ha.primary.supabaseIp,
-        supabasePrivateIp: envConfig.ha.primary.supabasePrivateIp,
+        dbIp: envConfig.ha.primary.dbIp,
+        dbPrivateIp: envConfig.ha.primary.dbPrivateIp,
         floatingIp: envConfig.ha.primary.floatingIp || envConfig.ha.primary.masterIp,
         region: envConfig.ha.primary.region,
         envKey: envName,
       },
       standby: {
         ip: envConfig.ha.standby.masterIp,
-        supabaseIp: envConfig.ha.standby.supabaseIp,
-        supabasePrivateIp: envConfig.ha.standby.supabasePrivateIp,
+        dbIp: envConfig.ha.standby.dbIp,
+        dbPrivateIp: envConfig.ha.standby.dbPrivateIp,
         floatingIp: envConfig.ha.standby.floatingIp || envConfig.ha.standby.masterIp,
         region: envConfig.ha.standby.region,
         envKey: envName,
@@ -174,15 +174,15 @@ export function identifyServers(envName, envConfig, _projectConfig) {
     return {
       primary: {
         ip: primary.ip,
-        supabaseIp: primary.supabaseIp,
-        supabasePrivateIp: primary.supabasePrivateIp,
+        dbIp: primary.dbIp,
+        dbPrivateIp: primary.dbPrivateIp,
         region: primaryRegion,
         envKey: envName,
       },
       standby: {
         ip: standby.ip,
-        supabaseIp: standby.supabaseIp,
-        supabasePrivateIp: standby.supabasePrivateIp,
+        dbIp: standby.dbIp,
+        dbPrivateIp: standby.dbPrivateIp,
         region: standbyRegion,
         envKey: envName,
       },
@@ -272,14 +272,14 @@ async function reseedAndPromoteOrAbort(servers, sshKeyPath, s) {
     s.start('Re-seeding standby from primary (pg_basebackup)');
     let result;
     try {
-      // standby.supabaseIp: the node the standby db pod is pinned to — the
+      // standby.dbIp: the node the standby db pod is pinned to — the
       // re-seed's node-side PGDATA swap ssh's there (roles are not yet swapped;
       // the re-seed runs BEFORE promotion, so the deploy-time gateway relay
       // directions still hold and the re-seed dials the standby's LOCAL
       // WireGuard relay — no primary IP needed, no gateway re-render).
       result = await reseedStandbyFromPrimary(servers.standby.ip, sshKeyPath, {
-        standbySupabaseIp: servers.standby.supabaseIp,
-        standbySupabasePrivateIp: servers.standby.supabasePrivateIp,
+        standbyDbIp: servers.standby.dbIp,
+        standbyDbPrivateIp: servers.standby.dbPrivateIp,
       });
     } catch (err) {
       s.stop('Re-seed failed, aborting failover');
@@ -372,7 +372,7 @@ export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
     '--',
     'psql',
     '-U',
-    'supabase_admin',
+    'postgres',
     '-tAc',
     'SELECT pg_current_wal_lsn()',
   ]);
@@ -397,7 +397,7 @@ export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
         '--',
         'psql',
         '-U',
-        'supabase_admin',
+        'postgres',
         '-tAc',
         `SELECT pg_wal_lsn_diff(pg_last_wal_replay_lsn(), '${target}') >= 0`,
       ]);
@@ -535,17 +535,11 @@ async function scaleDeployments(ip, sshKeyPath, deployments, replicas, label) {
 /**
  * Build the argv for a public-ingress probe against the promoted master. Uses
  * `--resolve <domain>:443:127.0.0.1` so the probe traverses the REAL public path
- * (traefik hostPort → kong/app) on the promoted node without waiting on DNS
+ * (traefik hostPort → app) on the promoted node without waiting on DNS
  * propagation — the DNS A record was flipped moments ago and the test runner's
  * resolver may still be cached. Mirrors compose/ha.js newPrimaryApiProbeCmd.
- *
- * `anonKey` (when known) is sent as the `apikey` header: kong's declarative
- * config runs a key-auth plugin on `/auth/v1/*`, so a keyless probe gets 401
- * from kong before GoTrue is reached and the auth half of the gate can never
- * confirm (2026-07-08 matrix: every k8s failover burned the full 300s budget
- * on "last auth=401"). Harmless on the un-gated app routes.
  */
-export function promotedProbeArgv(domain, path, anonKey) {
+export function promotedProbeArgv(domain, path) {
   return [
     'curl',
     '-sk',
@@ -557,66 +551,21 @@ export function promotedProbeArgv(domain, path, anonKey) {
     '5',
     '--resolve',
     `${domain}:443:127.0.0.1`,
-    ...(anonKey ? ['-H', `apikey: ${anonKey}`] : []),
     `https://${domain}${path}`,
   ];
 }
 
 /**
- * Read the anon key from the promoted cluster's own `vibecarbon-secrets`
- * Secret (the same key the app pods consume). Sourced from the cluster rather
- * than the local .env so failover works from any operator machine with SSH
- * access, even if the local project files drifted. Best-effort: returns ''
- * on any failure — the probe then runs keyless and the gate soft-fails
- * exactly as before, it just can't confirm the auth path.
- */
-export async function getPromotedAnonKey(ip, sshKeyPath, opts = {}) {
-  const { kubectl = sshKubectl } = opts;
-  try {
-    const b64 = await kubectl(
-      ip,
-      sshKeyPath,
-      [
-        'get',
-        'secret',
-        'vibecarbon-secrets',
-        '-n',
-        'vibecarbon',
-        '-o',
-        'jsonpath={.data.ANON_KEY}',
-      ],
-      // 15s cap (not sshRun's 120s default): this runs mid-failover against a
-      // possibly-sick apiserver, and a slow secret read must not stall the
-      // gate — '' falls back to a keyless probe.
-      { silent: true, timeout: 15_000 },
-    );
-    const raw = typeof b64 === 'string' ? b64.trim() : '';
-    if (!raw) return '';
-    return Buffer.from(raw, 'base64').toString('utf8').trim();
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Poll the promoted cluster's public API until it actually SERVES — the app
- * health endpoint (/api/health), an auth-path endpoint (/auth/v1/health), AND
- * the storage health endpoint (/storage/v1/status) all return 200 within a
- * budget (k8s path-based routing → kong → gotrue/storage-api).
+ * Poll the promoted cluster's public API until it actually SERVES — the app's
+ * liveness (/api/health) AND its readiness (/api/health/ready: the app answers
+ * against the promoted database) both return 200 within a budget. Auth runs
+ * inside the app on that database, so readiness is also "sign-in works".
  *
  * This is the k8s mirror of compose/ha.js waitForNewPrimaryApi: `vibecarbon
  * failover` returns via the skip-if-streaming fast path in ~44s (promotion ~9s),
- * but the promoted cluster's supabase services then spend a window
- * restarting/reconnecting — auth 502s and PostgREST serves schema-cache misses
- * against the (present!) tables. failover used to report "complete" straight
- * into that window and verify-failover (which does not retry) caught it.
- *
- * Storage is part of the gate since 2026-08-19 (DO run 32309395314): the
- * compose sibling proved rest only and verify's single-shot upload met Kong's
- * 502 while storage-api was still replaying its boot-time DB migrations — the
- * slowest riser of the restarted tier. This gate had the same
- * one-service-short premise. /storage/v1/status is key-auth'd at kong, so the
- * probe rides the same anonKey the auth probe already needs.
+ * but the promoted cluster's pods then spend a window starting/reconnecting.
+ * failover used to report "complete" straight into that window and
+ * verify-failover (which does not retry) caught it.
  *
  * Best-effort, matching compose: returns false + a LOUD warning on timeout
  * rather than throwing — a not-yet-confirmed promoted API is still better than
@@ -628,15 +577,13 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
     runner = sshRun,
     poll = pollUntil,
     healthPath = '/api/health',
-    authPath = '/auth/v1/health',
-    storagePath = '/storage/v1/status',
-    anonKey = '',
+    readyPath = '/api/health/ready',
     initialDelayMs = 3000,
     maxDelayMs = 15_000,
   } = opts;
   let last = '';
   const codeOf = async (path) => {
-    const out = await runner(ip, sshKeyPath, promotedProbeArgv(domain, path, anonKey), {
+    const out = await runner(ip, sshKeyPath, promotedProbeArgv(domain, path), {
       silent: true,
       timeout: 12_000,
     });
@@ -648,14 +595,9 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
       last = `health=${health || 'none'}`;
       return false;
     }
-    const auth = await codeOf(authPath);
-    if (auth !== '200') {
-      last = `auth=${auth || 'none'}`;
-      return false;
-    }
-    const storage = await codeOf(storagePath);
-    if (storage !== '200') {
-      last = `storage=${storage || 'none'}`;
+    const ready = await codeOf(readyPath);
+    if (ready !== '200') {
+      last = `ready=${ready || 'none'}`;
       return false;
     }
     return true;
@@ -665,7 +607,7 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
       budgetMs,
       initialDelayMs,
       maxDelayMs,
-      description: `promoted API to serve ${domain} (health + auth + storage)`,
+      description: `promoted API to serve ${domain} (health + ready)`,
     });
     return true;
   } catch {
@@ -737,20 +679,11 @@ export async function gatePromotedApiReadiness(domain, promotedIp, sshKeyPath, s
     p.log.warn('No domain configured, skipping public API readiness probe');
     return;
   }
-  // The auth probe is kong-key-gated (see promotedProbeArgv); without the
-  // anon key the gate can never confirm and always times out.
-  const anonKey = await getPromotedAnonKey(promotedIp, sshKeyPath, { kubectl });
-  if (!anonKey) {
-    p.log.warn('Could not read ANON_KEY from the promoted cluster, auth probe will run keyless');
-  }
-  s.start('Waiting for promoted API to serve (health + auth)');
-  const ready = await waitForPromotedApiServing(domain, promotedIp, sshKeyPath, {
-    anonKey,
-    runner,
-  });
+  s.start('Waiting for promoted API to serve (health + ready)');
+  const ready = await waitForPromotedApiServing(domain, promotedIp, sshKeyPath, { runner });
   s.stop(
     ready
-      ? 'Promoted API serving (health + auth 200)'
+      ? 'Promoted API serving (health + ready 200)'
       : 'Promoted API not confirmed, proceeding (see warning)',
   );
 }
@@ -865,18 +798,16 @@ async function summarizeStandbyStack({ envConfig, standbyStack, creds, projectNa
 }
 
 /**
- * Fire-and-forget supabase-image pre-pull on the standby nodes right after the
- * new workers register Ready. Overlaps the app-tier scale-up (Task 10) so
+ * Fire-and-forget image pre-pull (the cluster-autoscaler pod's pair) on the
+ * standby nodes right after the new workers register Ready. Overlaps the app-tier scale-up (Task 10) so
  * kubelet finds images already present. Best-effort by contract — every failure
  * degrades to on-demand pulls. Only the standby cluster's nodes are targeted.
  */
 async function prePullStandbyImages({ servers, envName, workerIps }) {
-  const { prePullChartImages } = await import('./lib/deploy/k8s/k3s.js');
+  const { prePullImages } = await import('./lib/deploy/k8s/k3s.js');
   const { knownHostsPath } = await import('./lib/host-keys.js');
-  const nodeIps = [servers.standby.ip, servers.standby.supabaseIp, ...(workerIps ?? [])].filter(
-    Boolean,
-  );
-  return prePullChartImages({
+  const nodeIps = [servers.standby.ip, servers.standby.dbIp, ...(workerIps ?? [])].filter(Boolean);
+  return prePullImages({
     nodeIps,
     sshKeyPath: getSSHKeyPath(envName),
     khPath: knownHostsPath(envName),
@@ -969,7 +900,7 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
  * @param {string} args.envName
  * @param {object} args.envConfig
  * @param {object} args.projectConfig
- * @param {{ standby: { ip: string, supabaseIp?: string } }} args.servers
+ * @param {{ standby: { ip: string, dbIp?: string } }} args.servers
  * @param {{ count: number, serverType: string }} args.workerSpec  Persisted spec.
  * @param {string|null} [args.serverTypeOverride]  `-server-type` — wins over spec.
  * @param {{ converge?: Function, kubectl?: Function, sleep?: Function, creds?: any }} [args.deps]
@@ -1001,7 +932,7 @@ async function _provisionStandbyCapacityImpl({
   const count = workerSpec.count;
   const serverType = serverTypeOverride || workerSpec.serverType;
 
-  // The standby's region-resolved master/supabase types persisted at deploy
+  // The standby's region-resolved master/database types persisted at deploy
   // (may differ from the primary's when the standby region doesn't stock the
   // same SKU). Pinning them on EVERY converge (the up AND the
   // 0-worker revert) keeps buildProgramConfig's current-type slots matched to
@@ -1009,7 +940,7 @@ async function _provisionStandbyCapacityImpl({
   // (reboot) of the standby's master/db node mid-failover. Undefined on envs
   // that predate this persist → falls back to envConfig, matching prior behavior.
   const standbyMasterType = envConfig.ha?.standby?.masterServerType;
-  const standbySupabaseType = envConfig.ha?.standby?.supabaseServerType;
+  const standbyDbType = envConfig.ha?.standby?.dbServerType;
 
   // Architecture gate on every type that will actually reach Pulumi.
   // `-server-type` was already checked in run(); what this adds is the three
@@ -1058,9 +989,9 @@ async function _provisionStandbyCapacityImpl({
       flagFixable: false,
     },
     {
-      type: standbySupabaseType,
+      type: standbyDbType,
       role: 'standby database',
-      source: '.vibecarbon.json ha.standby.supabaseServerType',
+      source: '.vibecarbon.json ha.standby.dbServerType',
       flagFixable: false,
     },
   ];
@@ -1115,12 +1046,12 @@ async function _provisionStandbyCapacityImpl({
     isHA: true,
     // DR-flavored abort wording (the converge module defaults to 'scale').
     action: 'failover',
-    // Pin the standby's resolved master/supabase types on both the up and the
-    // revert (see standbyMasterType/standbySupabaseType above). The per-call
+    // Pin the standby's resolved master/database types on both the up and the
+    // revert (see standbyMasterType/standbyDbType above). The per-call
     // overrides (minWorkers/workerServerType) win when spread last.
     overrides: {
       ...(standbyMasterType ? { masterServerType: standbyMasterType } : {}),
-      ...(standbySupabaseType ? { supabaseServerType: standbySupabaseType } : {}),
+      ...(standbyDbType ? { dbServerType: standbyDbType } : {}),
       ...overrides,
     },
     label: standbyStack,
@@ -1341,8 +1272,8 @@ export function swapHaRoles(envName) {
  * Move the wal-g WRITE-GUARD onto the cluster this failover just promoted, and
  * PROVE it took — see src/lib/deploy/walg-role.js for why nothing else does.
  *
- * On k8s, `WALG_ROLE` is rendered into the supabase-db container env at helm
- * install time and the backup CronJob has none of its own: it `kubectl exec`s
+ * On k8s, `WALG_ROLE` is rendered into the db container env at deploy
+ * time and the backup CronJob has none of its own: it `kubectl exec`s
  * into the db pod and INHERITS it. So a promoted cluster that still reads
  * `standby` skips every base backup, and — once the k8s copy of wal-archive.sh
  * carries the same write-guard as the compose copy — every WAL segment too.
@@ -1531,23 +1462,20 @@ export async function failoverHA(
   const { workerSpec, scaleUpList, creds, standbyOutputs } = await preflight(envName, envConfig);
 
   // Freshness refresh: prefer the LIVE stack output over the persisted
-  // deploy-time snapshot for the standby supabase node's private IP — the
+  // deploy-time snapshot for the standby database node's private IP — the
   // re-seed dials it, and on DO it is DHCP-assigned (a droplet replacement
   // hands out a new one, silently rotting the persisted value). Hetzner pins
   // it statically, so fresh === persisted there and this is a no-op.
-  const freshSupabasePrivateIp = standbyOutputs?.supabasePrivateIp;
-  if (freshSupabasePrivateIp) {
-    if (
-      servers.standby.supabasePrivateIp &&
-      servers.standby.supabasePrivateIp !== freshSupabasePrivateIp
-    ) {
+  const freshDbPrivateIp = standbyOutputs?.dbPrivateIp;
+  if (freshDbPrivateIp) {
+    if (servers.standby.dbPrivateIp && servers.standby.dbPrivateIp !== freshDbPrivateIp) {
       p.log.warn(
-        `Standby supabase private IP moved since deploy ` +
-          `(${servers.standby.supabasePrivateIp} → ${freshSupabasePrivateIp}); ` +
+        `Standby database private IP moved since deploy ` +
+          `(${servers.standby.dbPrivateIp} → ${freshDbPrivateIp}); ` +
           `using the live stack output.`,
       );
     }
-    servers.standby.supabasePrivateIp = freshSupabasePrivateIp;
+    servers.standby.dbPrivateIp = freshDbPrivateIp;
   }
 
   // STEP 2 — Provision standby worker capacity (0→N). The ONLY step that adds
@@ -1973,7 +1901,7 @@ export async function run(args) {
 }
 
 // Exported for tests. (failoverHA, swapHaRoles, gatePromotedApiReadiness,
-// waitForPromotedApiServing, promotedProbeArgv, getPromotedAnonKey,
+// waitForPromotedApiServing, promotedProbeArgv,
 // preflightPilotFailover, provisionStandbyCapacity, and AbortProvisioningError
 // are exported inline at their definitions above.)
 export { getReplPasswordFromSecret, reseedAndPromoteOrAbort, reseedStandbyFromPrimary, SPEC };

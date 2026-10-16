@@ -6,8 +6,8 @@
  * `WALG_ROLE` is the wal-g write-guard: `primary` archives, `standby` no-ops.
  * It is rendered ONCE, at DEPLOY time, from the deploy's notion of which node is
  * which — compose writes it into each node's `.env` (haMergeWalgRoleStep, before
- * the stack starts) and k8s renders it into the supabase-db container env
- * (`{{WALG_ROLE}}` in k8s/values/supabase.values.yaml).
+ * the stack starts) and k8s renders it into the db container env
+ * (`{{WALG_ROLE}}` in k8s/base/db/statefulset.yaml).
  *
  * Failover moves the role WITHOUT redeploying. It promotes the standby, flips
  * DNS, and persists the swap in the project config — but nothing re-rendered
@@ -49,41 +49,19 @@
  */
 
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
-
-/** The supabase-db StatefulSet (helm release `supabase`, chart component `db`). */
-export const WALG_DB_STATEFULSET = 'supabase-supabase-db';
+import { DB_POD, DB_STATEFULSET } from './db-workload.js';
 
 /** The env var both tiers read as the wal-g write-guard. */
 export const WALG_ROLE_ENV = 'WALG_ROLE';
 
 /**
- * The compose knob that holds Realtime off a replica-backed standby
- * (`deploy.replicas: ${REALTIME_REPLICAS:-1}` on the realtime service in
- * carbon/docker-compose.yml). Compose-side only: the k8s standby scales its
- * app tier to zero through a different mechanism (k8s/standby-config.js).
- */
-export const REALTIME_REPLICAS_ENV = 'REALTIME_REPLICAS';
-
-/**
- * The compose node-role env pair, written wherever a compose node's role is.
+ * The compose node-role env, written wherever a compose node's role is.
  *
- * `WALG_ROLE` is the wal-g write-guard (see the module docblock).
- * `REALTIME_REPLICAS` keeps Supabase Realtime off a replica-backed standby:
- * Realtime runs Ecto migrations on every boot, and Ecto's migrator
- * unconditionally issues `CREATE TABLE IF NOT EXISTS schema_migrations`, which
- * a hot-standby Postgres rejects (SQLSTATE 25006, read_only_sql_transaction).
- * It exits 1, `restart: unless-stopped` brings it back, and the standby
- * crash-loops it at ~50s cadence for its whole life — 63 restarts in 51
- * minutes on the 2026-09-19 kept compose-ha rig. Auth and Storage also migrate
- * on boot but only WRITE when something is pending, so they are fine; PostgREST
- * retries its `LISTEN` every ~32s and serves reads, which is the warm-failover
- * point of the standby, so it is left alone.
- *
- * Every compose-side role write (deploy's haMergeWalgRole, failover's
- * restoreComposeWalgRole / demoteComposeWalgRole) goes through here so the two
- * halves cannot drift: a promoted node with Realtime still held at 0, or a
- * standby crash-looping it, are both single-key mistakes this makes
- * unrepresentable. compose-role-env-census.test.ts enforces it.
+ * `WALG_ROLE` is the wal-g write-guard (see the module docblock). Every
+ * compose-side role write (deploy's haMergeWalgRole, failover's
+ * restoreComposeWalgRole / demoteComposeWalgRole) goes through here, so the
+ * role is validated in one place: an unknown role throws instead of silently
+ * arming (or disarming) archiving. compose-role-env-census.test.ts enforces it.
  *
  * Values are strings because the destination is a dotenv file.
  *
@@ -94,10 +72,7 @@ export function composeRoleEnv(role) {
   if (role !== 'primary' && role !== 'standby') {
     throw new Error(`composeRoleEnv: unknown role ${role}`);
   }
-  return {
-    [WALG_ROLE_ENV]: role,
-    [REALTIME_REPLICAS_ENV]: role === 'primary' ? '1' : '0',
-  };
+  return { [WALG_ROLE_ENV]: role };
 }
 
 /**
@@ -241,7 +216,7 @@ export function composeDbRecreateShell(remoteDir) {
     // The recreate returns as soon as the container is CREATED. Everything after
     // this (the audit, the app-tier restart) needs a database that answers.
     'for i in $(seq 1 45); do',
-    '  if docker compose exec -T db pg_isready -h 127.0.0.1 -U supabase_admin >/dev/null 2>&1; then',
+    '  if docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then',
     `    echo "[walg-role] db accepting connections; ${WALG_ROLE_ENV}=$(docker compose exec -T db printenv ${WALG_ROLE_ENV} 2>/dev/null | tr -d "[:space:]"); published:$PORTS_AFTER"`,
     '    exit 0',
     '  fi',
@@ -253,7 +228,7 @@ export function composeDbRecreateShell(remoteDir) {
 }
 
 /**
- * `kubectl` argv (no leading `kubectl`) that sets `WALG_ROLE` on the supabase-db
+ * `kubectl` argv (no leading `kubectl`) that sets `WALG_ROLE` on the db
  * StatefulSet. The template change is what rolls the pod, which is what makes
  * the new value visible to postgres' `archive_command` and to the backup
  * CronJob's `kubectl exec` (it inherits the db container's env — the CronJob has
@@ -274,7 +249,7 @@ export function k8sSetWalgRoleArgv(role) {
     'vibecarbon',
     'set',
     'env',
-    `statefulset/${WALG_DB_STATEFULSET}`,
+    `statefulset/${DB_STATEFULSET}`,
     `${WALG_ROLE_ENV}=${role}`,
   ];
 }
@@ -294,7 +269,7 @@ export function k8sDbRolloutStatusArgv(timeoutSeconds = 300) {
     'vibecarbon',
     'rollout',
     'status',
-    `statefulset/${WALG_DB_STATEFULSET}`,
+    `statefulset/${DB_STATEFULSET}`,
     `--timeout=${timeoutSeconds}s`,
   ];
 }
@@ -316,7 +291,7 @@ export function walgRoleDegradedMessage({ path, envName, promotedIp, detail }) {
   const verify =
     path === 'compose'
       ? `ssh root@${promotedIp} 'cd /opt/<project> && docker compose exec -T db printenv WALG_ROLE'`
-      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${WALG_DB_STATEFULSET}-0 -- printenv WALG_ROLE'`;
+      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${DB_POD} -- printenv WALG_ROLE'`;
   return (
     `FAILOVER COMPLETED, BACKUPS DID NOT. The promoted node (${promotedIp}) is serving, DNS ` +
     `is flipped and the role swap is persisted; but this failover could not prove that ` +

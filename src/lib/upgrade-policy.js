@@ -23,18 +23,11 @@ const SAFE_PATTERNS = [
   'k8s/base/**',
   'k8s/infra/**',
   'k8s/flux/**',
-  // k8s/values/** and k8s/gitops/** were in NO bucket, and getFilePolicy
-  // defaults an unmatched path to 'never' — so both were silently stranded on
-  // every existing project. They are the WORST files to strand: each carries a
-  // chart-version pin that must move in lockstep with the CLI.
-  // k8s/values/supabase.values.yaml is read from the PROJECT copy by
-  // installSupabase and its env-list schema is coupled to
-  // SUPABASE_HELM_CHART_VERSION (the 0.7.1 bump replaced those lists
-  // wholesale), and k8s/gitops/supabase/helm-release.yaml carries the second
-  // pin site for the Flux path. Stranded, a chart bump would install the NEW
-  // chart against OLD values on every upgraded project — the exact map-vs-list
-  // break — with no CLI command able to repair it.
-  'k8s/values/**',
+  // k8s/gitops/** was in NO bucket, and getFilePolicy defaults an unmatched
+  // path to 'never' — so it was silently stranded on every existing project.
+  // It is among the WORST files to strand: the cert-manager webhook
+  // HelmRelease carries a chart-version pin that must move in lockstep with
+  // the CLI (DNS01_PROVIDERS.hetzner.webhook.version).
   'k8s/gitops/**',
   // Live on every managed-DNS compose deploy (acme.js exports it as
   // DNS01_OVERRIDE_FILE; scale.js adds it to the -f set) but absent from this
@@ -57,13 +50,15 @@ const SAFE_PATTERNS = [
   'components.json',
   'backup/**',
   'scripts/**',
-  'volumes/kong/**',
   'volumes/grafana/**',
   'volumes/prometheus/**',
   'volumes/loki/**',
   'volumes/promtail/**',
   'volumes/traefik/**',
-  'volumes/pooler/**',
+  // The dev-only Garage config docker-compose.override.yml mounts. Missing,
+  // Docker would mount an empty directory there and the local S3 would not
+  // start.
+  'volumes/s3/**',
   'AGENTS.md',
   'CLAUDE.md',
   'PRODUCTION.md',
@@ -90,7 +85,8 @@ const MERGE_PATTERNS = [
 const NEVER_PATTERNS = [
   'src/**',
   'content/**',
-  'supabase/**',
+  'db/migrations/**',
+  'db/seed.sql',
   '.env',
   '.env.local',
   '.env.example',

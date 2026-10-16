@@ -32,6 +32,7 @@ import { c } from './lib/colors.js';
 import { configureStandbyReplication as realConfigureStandbyReplication } from './lib/deploy/compose/ha.js';
 import { composeHaStandbyResyncHint } from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
+import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import {
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
@@ -591,14 +592,14 @@ export async function runComposeRestore({
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
 }
 
-// k8s restore is wal-g-native: postgres + wal-g live in the supabase-db pod,
+// k8s restore is wal-g-native: postgres + wal-g live in the db pod,
 // which continuously archives WAL + base backups to S3. Restore = set a
 // RESTORE_TARGET marker on vibecarbon-secrets → bounce the db StatefulSet so
 // its walg-restore init container runs `wal-g backup-fetch` into PGDATA before
 // postgres starts → clear the marker. No bytes flow through the operator and
 // no pg_dump/kubectl-cp; wal-g pulls from S3 inside the cluster. Mirrors the
 // compose wal-g restore, adapted to the StatefulSet/init-container shape.
-const DB_STATEFULSET = 'supabase-supabase-db';
+// The workload name is DB_STATEFULSET (src/lib/deploy/db-workload.js).
 
 /** Set or clear the RESTORE_TARGET marker the init container reads. */
 async function setRestoreMarker(ip, sshKeyPath, value) {
@@ -725,16 +726,16 @@ export async function runK8sRestore({
   if (isK8sHA) {
     const servers = identifyServers(envName, envConfig, {});
     const standbyIp = servers?.standby?.ip;
-    // The standby SUPABASE node hosts the db pod's local-path PVC — the re-seed's
+    // The standby DATABASE node hosts the db pod's local-path PVC — the re-seed's
     // node-side PGDATA swap ssh's there. No masterIp fallback: swapping on the
     // wrong node would be destructive-in-the-wrong-place, so fail loudly instead.
-    const standbySupabaseIp = servers?.standby?.supabaseIp;
-    if (!standbyIp || !standbySupabaseIp) {
+    const standbyDbIp = servers?.standby?.dbIp;
+    if (!standbyIp || !standbyDbIp) {
       // We can't locate the standby — fail loudly rather than report a clean
       // restore while the standby silently diverges.
       throw new Error(
         'HA restore: the primary was restored, but the standby cluster or its ' +
-          'supabase node could not be resolved from config, ' +
+          'database node could not be resolved from config, ' +
           'so the standby could NOT be ' +
           `re-seeded and now has a DIVERGED timeline. DR is not guaranteed. Resync with ` +
           `\`vibecarbon deploy ${envName}\` (re-runs the verified replication setup).`,
@@ -765,10 +766,10 @@ export async function runK8sRestore({
     let reseedResult;
     try {
       reseedResult = await reseedStandbyFromPrimary(standbyIp, sshKeyPath, {
-        standbySupabaseIp,
+        standbyDbIp,
         // The re-seed dials the standby's LOCAL WireGuard relay (private IP :
         // gateway port) — the deploy-time transport, unchanged by a restore.
-        standbySupabasePrivateIp: servers?.standby?.supabasePrivateIp,
+        standbyDbPrivateIp: servers?.standby?.dbPrivateIp,
       });
     } catch (err) {
       s.stop('Standby re-seed failed');

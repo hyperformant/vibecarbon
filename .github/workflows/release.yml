@@ -34,8 +34,52 @@ permissions:
   contents: read
 
 jobs:
+  # Every mode pulls DB_IMAGE:DB_IMAGE_TAG (src/lib/images.js), local `up`
+  # included, so a release whose db tag is missing, private, or lacks an arch
+  # breaks create/up/deploy for every user at the first pull. This proves the
+  # tag is pullable the way users pull it: anonymously (an empty
+  # DOCKER_CONFIG, no login, so a private package fails here), with both
+  # children present (amd64 for servers, arm64 for Apple Silicon `up`).
+  # It is one read, not a wait: if publish-db-image has not finished, let it
+  # finish and dispatch again.
+  db-image:
+    name: Verify the pinned db image is public and multi-arch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+
+      - name: Read the db image ref the CLI pins
+        run: node --input-type=module -e "const m = await import('./src/lib/images.js'); console.log('DB_IMAGE=' + m.DB_IMAGE); console.log('DB_IMAGE_TAG=' + m.DB_IMAGE_TAG);" >> "$GITHUB_ENV"
+
+      - name: Inspect it anonymously and require linux/amd64 + linux/arm64
+        run: |
+          ref="$DB_IMAGE:$DB_IMAGE_TAG"
+          DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
+          export DOCKER_CONFIG
+          mkdir -p "$DOCKER_CONFIG"
+          if ! manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'); then
+            echo "::error::refusing to release: $ref is not pullable anonymously. Wait for publish-db-image to finish on main, or make the ghcr package public, then dispatch again."
+            exit 1
+          fi
+          platforms=$(printf '%s' "$manifest" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' | sort -u)
+          echo "Platforms in $ref:"
+          echo "$platforms"
+          for want in linux/amd64 linux/arm64; do
+            if ! printf '%s\n' "$platforms" | grep -qx "$want"; then
+              echo "::error::refusing to release: $ref has no $want child. Re-run publish-db-image for this tag, then dispatch again."
+              exit 1
+            fi
+          done
+
   release:
     name: Semantic Release
+    needs: db-image
     runs-on: ubuntu-latest
     permissions:
       contents: write

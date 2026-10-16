@@ -18,8 +18,6 @@ import { generateEnvLocal, TEMPLATE_DIR } from '../../../src/create.js';
 const baseVariables = {
   PROJECT_DISPLAY_NAME: 'Token App',
   PROJECT_NAME: 'token-app',
-  ANON_KEY: 'anon-key',
-  SERVICE_ROLE_KEY: 'service-role-key',
   JWT_SECRET: 'jwt-secret',
   DB_PASSWORD: 'db-password',
   ADMIN_EMAIL: 'admin@example.com',

@@ -1,4 +1,8 @@
+import { and, eq } from 'drizzle-orm';
 import type { Context, Next } from 'hono';
+import { withUserDb } from '../db/client';
+import { memberships } from '../db/schema';
+import { isUuid } from '../db/values';
 import type { HonoVariables } from '../types';
 
 /**
@@ -10,10 +14,10 @@ import type { HonoVariables } from '../types';
  * these in the query string; writes are POSTs that carry them in the JSON body
  * (Hono caches the parsed body, so the handler can re-parse it safely).
  *
- * SECURITY: the membership lookup uses the RLS-enforced per-user Supabase client
- * (`c.get('supabase')`), never the service-role `adminDb`. A caller can only see
- * memberships they belong to, so this can neither be bypassed nor used to probe
- * arbitrary organizations.
+ * SECURITY: the membership lookup runs under RLS as the caller (`withUserDb`),
+ * never through `adminDb`. A caller can only see memberships in organizations
+ * they belong to, so this can neither be bypassed nor used to probe arbitrary
+ * organizations.
  *
  * Fails closed: `type` must be exactly 'user' or 'organization'. Any other
  * value is rejected with 400 here, because handlers that branch on
@@ -75,15 +79,21 @@ export function requireOrgRole(roles: string[]) {
       return c.json({ error: 'Organization ID is required for organization billing' }, 400);
     }
 
-    const supabase = c.get('supabase');
-    const { data: membership } = await supabase
-      .from('memberships')
-      .select('role')
-      .eq('user_id', user.id)
-      .eq('organization_id', organizationId)
-      .single();
+    // A malformed id can match no membership: deny without asking the db.
+    const membership = isUuid(organizationId)
+      ? await withUserDb(user.id, async (tx) => {
+          const [row] = await tx
+            .select({ role: memberships.role })
+            .from(memberships)
+            .where(
+              and(eq(memberships.userId, user.id), eq(memberships.organizationId, organizationId))
+            )
+            .limit(1);
+          return row ?? null;
+        })
+      : null;
 
-    if (!membership || !roles.includes(membership.role)) {
+    if (!membership?.role || !roles.includes(membership.role)) {
       return c.json({ error: 'You must be an admin to manage organization billing' }, 403);
     }
 

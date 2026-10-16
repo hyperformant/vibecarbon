@@ -31,7 +31,8 @@ When invoked, follow this systematic process:
 - Three Vitest projects, one directory each (`vitest.config.ts`, documented in `TESTING.md`):
   - `tests/unit/` — pure functions, validators, pricing math, shared types (node env). `tests/structural/` runs in this project too and holds the security invariants.
   - `tests/component/` — React components and custom hooks via React Testing Library (jsdom env)
-  - `tests/integration/` — Hono route handlers end-to-end via `app.request()`, with Supabase/Stripe/SMTP mocked at the module boundary (node env)
+  - `tests/integration/` — Hono route handlers end-to-end via `app.request()`, with the database, the auth API, Stripe and SMTP mocked at the module boundary (node env)
+  - `tests/db/` — RLS policies and SQL against a real Postgres; skipped unless `TEST_DB_HOST` is set (see `TESTING.md`)
 - Shared helpers live in `tests/_helpers/`: `app.ts` (`mountRoute`, `jsonPost`), `factories.ts` (`makeUser`, `makeOrg`), `jwt.ts` (`mockJwt`), `env.ts` (`mockEnv`)
 - Use Vitest (`describe`, `it`, `expect`, `vi` for mocking)
 - Put a new test in the tier that matches what it exercises; do not co-locate tests next to `src/`
@@ -62,7 +63,7 @@ Follow these principles:
 - Test loading, error, and empty states
 - Test accessibility basics (roles, labels)
 - Use `@testing-library/react` with user-event for interactions
-- Mock Supabase client and TanStack Query when needed
+- Mock `fetch` (the `apiJson` seam) and TanStack Query when needed
 
 **For Utilities and Shared Code:**
 - Test all exported functions
@@ -96,12 +97,13 @@ Follow these principles:
 - Do NOT use `@/shared/*` — it won't resolve
 
 ### Mocking Conventions
-- Supabase: `vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { from: () => ({ insert: vi.fn() }) } }))`
+- Database: `vi.mock('@server/db/client', () => ({ adminDb: { select: () => queryChain(() => rows) }, withUserDb: ... }))`, with `queryChain` from `tests/_helpers/drizzle-mock.ts` standing in for any Drizzle chain
+- Server auth: `vi.mock('@server/auth', () => ({ auth: { api: { getSession: vi.fn() } } }))` when a route calls the auth API itself; otherwise seed `c.get('user')` / `c.get('session')` in a pre-route middleware
 - Stripe: `vi.mock('@server/lib/stripe', () => ({ stripe: { ... } }))`
 - Client-side fetch: `vi.stubGlobal('fetch', vi.fn(...))` plus `vi.unstubAllGlobals()` in `afterEach`
 - TanStack Query: wrap each render in a fresh `QueryClient` with `retry: false`
 - Rate limiter: `vi.mock('@server/lib/rate-limiter', ...)` — the real module starts a 60s `setInterval` at module load, which keeps the run alive
-- Never use real Supabase credentials in tests. `c.get('supabase')` is RLS-enforced and `supabaseAdmin` is not, so mock whichever the route under test actually uses.
+- Never use real credentials in tests. `withUserDb` is RLS-enforced and `adminDb` is not, so mock whichever the route under test actually uses, and prove RLS itself in the `db` tier (a mock cannot).
 
 ### Pre-existing TypeScript Issues
 - `asChild` prop causes TS errors on Button component — these are known and pre-existing
@@ -137,7 +139,7 @@ You may be spawned as a **teammate** in a Claude Code agent team, with your own 
 
 Examples of what to record:
 - Testing patterns and conventions used in each test directory
-- Common mock setups (Supabase client, file system, CLI prompts)
+- Common mock setups (db client, auth session, file system)
 - Tests that are known to be flaky or slow
 - Coverage gaps you've identified but couldn't address in the current session
 - Relationships between source files and their test files

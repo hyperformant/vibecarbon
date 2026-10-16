@@ -1,16 +1,16 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryChain } from '../../../_helpers/drizzle-mock';
 import type { HonoVariables } from '@server/types';
 
-const { maybeSingleMock, warnMock } = vi.hoisted(() => ({
-  maybeSingleMock: vi.fn(),
+const { selectMock, warnMock } = vi.hoisted(() => ({
+  selectMock: vi.fn(),
   warnMock: vi.fn(),
 }));
 
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: maybeSingleMock }) }) }),
-  },
+// The app_settings.mfa_enabled read: adminDb.select().from().where().limit(1)
+vi.mock('@server/db/client', () => ({
+  adminDb: { select: () => queryChain(selectMock) },
 }));
 vi.mock('@server/lib/logger', () => ({
   logger: { error: vi.fn(), info: vi.fn(), warn: warnMock, debug: vi.fn() },
@@ -21,14 +21,19 @@ const { __resetMfaSettingsCache } = await import('@server/lib/mfa-settings');
 
 type Aal = 'aal1' | 'aal2' | null;
 
-// Build a fresh app whose injector middleware seeds user + aal BEFORE the
+/** What the session middleware sets for a session at this level. */
+function seed(c: { set: (k: never, v: never) => void }, user: unknown, aal: Aal) {
+  const set = c.set as (k: string, v: unknown) => void;
+  set('user', user);
+  set('session', user ? { id: 'session-1', twoFactorVerified: aal === 'aal2' } : null);
+}
+
+// Build a fresh app whose injector middleware seeds user + session BEFORE the
 // gated route (mountRoute can't be used here — it adds no pre-route middleware).
 function gatedApp(opts: { user: unknown; aal: Aal }) {
   const app = new Hono<{ Variables: HonoVariables }>();
   app.use('*', async (c, next) => {
-    // biome-ignore lint/suspicious/noExplicitAny: test injects a minimal user
-    c.set('user', opts.user as any);
-    c.set('aal', opts.aal);
+    seed(c, opts.user, opts.aal);
     await next();
   });
   app.delete('/gated', requireAal2, (c) => c.json({ ok: true }));
@@ -38,15 +43,15 @@ function gatedApp(opts: { user: unknown; aal: Aal }) {
 const aUser = { id: 'user-1', email: 'u@test.com' };
 
 function enableMfa() {
-  maybeSingleMock.mockResolvedValue({ data: { value: { enabled: true } }, error: null });
+  selectMock.mockResolvedValue([{ value: { enabled: true } }]);
 }
 function disableMfa() {
-  maybeSingleMock.mockResolvedValue({ data: { value: { enabled: false } }, error: null });
+  selectMock.mockResolvedValue([{ value: { enabled: false } }]);
 }
 
 beforeEach(() => {
   __resetMfaSettingsCache();
-  maybeSingleMock.mockReset();
+  selectMock.mockReset();
   warnMock.mockReset();
 });
 
@@ -54,7 +59,7 @@ describe('requireAal2', () => {
   it('passes an aal2 session through (no settings read needed)', async () => {
     const res = await gatedApp({ user: aUser, aal: 'aal2' }).request('/gated', { method: 'DELETE' });
     expect(res.status).toBe(200);
-    expect(maybeSingleMock).not.toHaveBeenCalled();
+    expect(selectMock).not.toHaveBeenCalled();
   });
 
   it('blocks an aal1 session with 403 mfa_required when MFA is globally enabled', async () => {
@@ -65,6 +70,8 @@ describe('requireAal2', () => {
       error: 'mfa_required',
       current_aal: 'aal1',
       aal_required: 'aal2',
+      mfa_enrolled: false,
+      message: 'Set up two-factor authentication to continue.',
     });
   });
 
@@ -76,6 +83,22 @@ describe('requireAal2', () => {
       error: 'mfa_required',
       current_aal: 'aal1',
       aal_required: 'aal2',
+      mfa_enrolled: false,
+      message: 'Set up two-factor authentication to continue.',
+    });
+  });
+
+  it('tells an enrolled user to verify a code from this session (step-up)', async () => {
+    enableMfa();
+    const res = await gatedApp({ user: { ...aUser, twoFactorEnabled: true }, aal: 'aal1' }).request(
+      '/gated',
+      { method: 'DELETE' },
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({
+      error: 'mfa_required',
+      mfa_enrolled: true,
+      message: 'Confirm a code from your authenticator app to continue.',
     });
   });
 
@@ -86,6 +109,21 @@ describe('requireAal2', () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
+  it('refuses an impersonation session, even aal2 and with MFA off', async () => {
+    disableMfa();
+    const app = new Hono<{ Variables: HonoVariables }>();
+    app.use('*', async (c, next) => {
+      const set = c.set as (k: string, v: unknown) => void;
+      set('user', aUser);
+      set('session', { id: 's-imp', twoFactorVerified: true, impersonatedBy: 'admin-1' });
+      await next();
+    });
+    app.delete('/gated', requireAal2, (c) => c.json({ ok: true }));
+    const res = await app.request('/gated', { method: 'DELETE' });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe('impersonation_not_allowed');
+  });
+
   it('returns 401 when there is no authenticated user', async () => {
     const res = await gatedApp({ user: null, aal: null }).request('/gated', { method: 'DELETE' });
     expect(res.status).toBe(401);
@@ -93,7 +131,7 @@ describe('requireAal2', () => {
   });
 
   it('fails open (allows) and warns when the settings read throws', async () => {
-    maybeSingleMock.mockRejectedValueOnce(new Error('db down'));
+    selectMock.mockRejectedValueOnce(new Error('db down'));
     const res = await gatedApp({ user: aUser, aal: 'aal1' }).request('/gated', { method: 'DELETE' });
     expect(res.status).toBe(200);
     expect(warnMock).toHaveBeenCalledWith(
@@ -106,9 +144,7 @@ describe('requireAal2', () => {
     enableMfa();
     const app = new Hono<{ Variables: HonoVariables }>();
     app.use('*', async (c, next) => {
-      // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-      c.set('user', aUser as any);
-      c.set('aal', 'aal1');
+      seed(c, aUser, 'aal1');
       await next();
     });
     app.post('/inline', async (c) => {

@@ -2,7 +2,7 @@
  * k3s-on-Hetzner deploy backend.
  *
  * The Pulumi program is `hetzner-k8s.js`; cloud-init scripts are
- * `carbon/cloud-init/k3s/{master,supabase,worker}-init.sh`.
+ * `carbon/cloud-init/k3s/{master,db,worker}-init.sh`.
  *
  * End-to-end flow on a cold deploy:
  *   1. Preflight: docker, ssh, kubectl, helm on PATH; server-type architecture.
@@ -12,14 +12,15 @@
  *   5. scp `/etc/rancher/k3s/k3s.yaml` from master, patch server URL to public IP.
  *   6. Build app image locally (10.0.1.1:5000/<project>:<sha>[-dirty]-<ts>).
  *   7. Sideload via `docker save TAG | ssh node 'k3s ctr images import -'` per node.
- *   8. `kubectl apply -k k8s/base/` (cert-manager via infra/, traefik, app).
- *   9. (helm-render supabase values + helm install supabase.)
+ *   8. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
+ *      traefik, app; cert-manager via infra/).
+ *   9. `kubectl rollout status statefulset/db`.
  *   10. `kubectl set image deploy/app app=<tag>` + rollout-status.
  *
  * Warm path: skip 1-5; rebuild image (6); sideload (7) skipping unchanged tag;
  * apply changed manifests (8); rollout (10).
  *
- * Target cold-deploy time: ≤ 3 min for single-master + supabase + 0 workers.
+ * Target cold-deploy time: ≤ 3 min for single-master + database + 0 workers.
  * Spike on 2026-04-25 measured 82s for cluster bring-up alone.
  */
 
@@ -33,14 +34,13 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { progressLog, spinner } from '../../cli/progress.js';
-import { checkDependency, runCommandAsync, writeSecretFile } from '../../command.js';
+import { checkDependency, runCommandAsync } from '../../command.js';
 import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
 import { DNS01_PROVIDERS } from '../../dns-provider.js';
 import { parseDotenv } from '../../dotenv.js';
@@ -49,7 +49,7 @@ import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
   csiSidecarSetImagePlan,
-  dbImageRef,
+  resolveDbImage,
 } from '../../images.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
@@ -57,10 +57,9 @@ import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
-import { postAdminUser, waitForGotrueHealth } from '../admin-user.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
+import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
-import { withMigrationDeadlockRetry } from '../migration-deadlock.js';
 import { pushImageOverSshTunnel } from '../registry-push.js';
 import { buildStandbySeedInitScript } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
@@ -72,9 +71,11 @@ import {
 import { REPL_GATEWAY_PORT } from '../wireguard.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
 import {
+  awaitAppAdminReady,
   awaitCertManagerAdmission,
   awaitControlPlaneServing,
   awaitPostgresAccepting,
+  watchAppMigrationFailure,
 } from './readiness.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -91,7 +92,7 @@ export const K3S_VERSION = 'v1.31.5+k3s1';
 export const BUNDLED_K8S_DIR = join(__dirname, '../../../../carbon/k8s');
 
 // The S3-egress-VPC-allowance manifest (M3 Task 9c) — three additive
-// NetworkPolicies (app/registry/supabase-db S3-purposed sibling policies).
+// NetworkPolicies (the app and db S3-purposed sibling policies).
 // DO-only + conditional, so it lives OUTSIDE the base kustomization (mirrors
 // carbon/k8s/base/repl-gateway/repl-gateway.yaml: read from the vibecarbon
 // CLI's OWN bundled template — not projectDir — so a re-deploy with an
@@ -127,6 +128,9 @@ export const APP_BUILD_CONTEXT_PATHS = Object.freeze([
   'biome.json',
   'components.json',
   'content',
+  // The app applies its migrations at startup, so they ship in the image: a
+  // new migration must rebuild it.
+  'db/migrations',
   'docker-entrypoint.sh',
   'package-lock.json',
   'package.json',
@@ -206,7 +210,7 @@ export function digestAppSource(projectDir) {
  *
  * The coarse inputs alone were blind to the app's SOURCE, and that is a
  * customer-visible bug, not a theoretical one: on a warm redeploy
- * projectName/domain/supabaseUrl/masterPrivateIp are all unchanged, so
+ * projectName/domain/siteUrl/masterPrivateIp are all unchanged, so
  * `k3s-build` skipped, `imageTag` came back from the PRIOR step result,
  * `k3s-sideload` skipped on that same tag and `k3s-apply` saw an unchanged
  * image — an app-only edit NEVER reached the cluster and k8s push-to-deploy
@@ -223,14 +227,14 @@ export function digestAppSource(projectDir) {
  *   - `buildArgsDigest` — the `VITE_*` `--build-arg` values, which Vite INLINES
  *     into the browser bundle. They come from `.env.local`, which
  *     `.dockerignore` keeps out of the context entirely, so no source digest
- *     can see them: rotating the anon key or flipping a feature flag changes
+ *     can see them: rotating a public key or flipping a feature flag changes
  *     the shipped bundle with the whole tree byte-identical. Digested rather
  *     than carried as values so a public-but-sensitive key never lands in
  *     `.vibecarbon/deploy-state-<env>.json` if the state format ever starts
  *     persisting inputs.
  *
  * The coarse inputs stay because neither digest can see them: `domain` /
- * `supabaseUrl` are baked into the bundle (a change to the URL DERIVATION
+ * `siteUrl` are baked into the bundle (a change to the URL DERIVATION
  * itself — e.g. the api.<domain> → apex single-origin migration — must bust the
  * gate on upgrade), and `masterPrivateIp` prefixes the built tag's registry ref
  * (M3 Task 2), so a resumed deploy against a different private IP must not
@@ -242,14 +246,14 @@ export function digestAppSource(projectDir) {
  * busted digest cascades through the whole chain exactly as a cold deploy does.
  *
  * @param {{ projectName: string, domain?: string, masterPrivateIp: string, projectDir: string }} args
- * @returns {{ projectName: string, domain: string|undefined, supabaseUrl: string|undefined, masterPrivateIp: string, sourceDigest: string, buildArgsDigest: string }}
+ * @returns {{ projectName: string, domain: string|undefined, siteUrl: string|undefined, masterPrivateIp: string, sourceDigest: string, buildArgsDigest: string }}
  */
 export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, projectDir }) {
   const buildArgs = domain ? collectComposeBuildArgs(projectDir, { projectName, domain }) : {};
   return {
     projectName,
     domain,
-    supabaseUrl: domain ? `https://${domain}` : undefined,
+    siteUrl: domain ? `https://${domain}` : undefined,
     masterPrivateIp,
     sourceDigest: digestAppSource(projectDir),
     buildArgsDigest: createHash('sha256')
@@ -283,8 +287,8 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * digest change only ever forces a (correct) re-apply.
  *
  * `storageClass` (`ProviderClass.K8S_STORAGE_CLASS`) is an input in its own
- * right because the step's most durability-critical render — the Supabase
- * chart's PVC classes — comes from a provider STATIC, not from either manifest
+ * right because the step's most durability-critical render — the db
+ * StatefulSet's PVC class — comes from a provider STATIC, not from either manifest
  * tree. Neither digest can see it, so without this key a warm/state-resumed
  * redeploy would happily skip `k3s-apply` and leave a cluster's database on
  * whatever class it originally bound (RCA: kept k8s-ha rig e4, 2026-08-05 —
@@ -316,9 +320,7 @@ export function buildK3sApplyInputs({ imageTag, dbImageTag, restore, projectDir,
  *
  * `k3s-apply` loads `.env.local` and feeds it to applyVibecarbonSecrets (the
  * whole vibecarbon-secrets Secret — every configure-managed OAuth/SMTP/billing
- * key plus REDIS_*), to the Supabase values render (ADMIN_EMAIL,
- * ADMIN_PASSWORD, MICROSOFT_TENANT_ID, GOTRUE_MAILER_AUTOCONFIRM), and to
- * ACME_CA_SERVER. None of that was in the gate. `.env.local` sits in neither
+ * key plus REDIS_*) and to ACME_CA_SERVER. None of that was in the gate. `.env.local` sits in neither
  * digested manifest tree, and .dockerignore keeps it out of the build context
  * so no source digest sees it either.
  *
@@ -348,17 +350,9 @@ export function digestEnvLocalSecrets(projectDir) {
   const envLocal = loadEnvLocal(envPath);
   if (!envLocal) return 'no-env-local';
   const hash = createHash('sha256');
-  // Sorted so key ORDER in the file is not a change; ADMIN_*/ACME_CA_SERVER/
-  // GOTRUE_MAILER_AUTOCONFIRM/MICROSOFT_TENANT_ID join SECRET_KEYS because the
-  // values render reads them directly.
-  const watched = [
-    ...SECRET_KEYS,
-    'ADMIN_EMAIL',
-    'ADMIN_PASSWORD',
-    'MICROSOFT_TENANT_ID',
-    'GOTRUE_MAILER_AUTOCONFIRM',
-    'ACME_CA_SERVER',
-  ].sort();
+  // Sorted so key ORDER in the file is not a change. ACME_CA_SERVER joins
+  // SECRET_KEYS because the issuer pick reads it directly.
+  const watched = [...new Set([...SECRET_KEYS, 'ACME_CA_SERVER'])].sort();
   for (const key of watched) {
     const value = envLocal[key];
     if (value === undefined) continue;
@@ -369,7 +363,7 @@ export function digestEnvLocalSecrets(projectDir) {
 
 /** The db image is pre-published + multi-arch — pulled, never built/sideloaded. */
 export function resolveDbImageTag() {
-  return dbImageRef();
+  return resolveDbImage().ref;
 }
 
 /**
@@ -811,7 +805,7 @@ export async function captureClusterAutoscalerDiagnostics({ env } = {}) {
  *
  * `nodeGroups['worker-pool'].image` is `ProviderClass.K8S_IMAGE` (M3 Task
  * 2) — MUST match the base image slug that provider's k8s Pulumi program
- * boots master/supabase/worker nodes with, or a CA-spawned worker would
+ * boots master/database/worker nodes with, or a CA-spawned worker would
  * come up on a different image than the rest of the cluster.
  *
  * `cloudInit` is rendered through `ProviderClass.getK8sWorkerUserData(vars)`
@@ -933,7 +927,7 @@ export function pickIssuerName({ dnsProvider, acmeServer }) {
  *
  * DNS-01 issuers (cloudflare, hetzner) support wildcard SANs — cert-manager
  * can obtain `*.${domain}` in a single ACME order, covering every subdomain
- * (api, studio, dashboard, grafana, n8n …) without separate per-subdomain
+ * (api, dashboard, grafana, n8n …) without separate per-subdomain
  * certificates. One wildcard cert = no per-router cert-resolver needed =
  * no per-domain ACME rate-limit risk.
  *
@@ -1065,7 +1059,7 @@ export function buildDnsProviderSecret({ dnsProvider, dnsToken }) {
  * @property {string} region
  * @property {string} [secondaryRegion]
  * @property {string} masterServerType
- * @property {string} supabaseServerType
+ * @property {string} dbServerType
  * @property {string} workerServerType
  * @property {string} serverType
  * @property {number} minWorkers   Static floor (Pulumi-provisioned). Default 1.
@@ -1248,143 +1242,9 @@ export async function fetchKubeconfig(masterIp, sshKeyPath, khPath, projectDir, 
 
 const CERT_MANAGER_VERSION = 'v1.20.2';
 const CERT_MANAGER_URL = `https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml`;
-const SUPABASE_HELM_REPO_URL = 'https://supabase-community.github.io/supabase-kubernetes';
-const SUPABASE_HELM_REPO_NAME = 'supabase-community';
-const SUPABASE_HELM_CHART = `${SUPABASE_HELM_REPO_NAME}/supabase`;
-// PINNED: supabase.values.yaml is schema-coupled to the chart's values
-// contract, so the chart version must move in lockstep with the template —
-// never float it. Chart 0.7.1 (published 2026-07-14) switched environment.*
-// from MAPS to LISTS of {name, value} and instantly broke every unpinned
-// deploy ("supabase.env.render at <.name>: can't evaluate field name" —
-// helm coalesce kept our then-map values over the new list defaults). Under
-// the list schema helm REPLACES lists wholesale, so our values carry each
-// overridden component's FULL default list — bumping this pin requires
-// re-diffing those lists against the new chart's defaults (see the
-// environment section header in carbon/k8s/values/supabase.values.yaml),
-// bumping the scaffolded k8s/gitops/supabase/helm-release.yaml pin, and
-// running the k8s e2e scenario.
-// PIN BUMP CHECKLIST (4 lockstep artifacts): this constant, the gitops
-// helm-release.yaml, the values env-list re-diff, AND regenerate
-// tests/fixtures/supabase-chart-workloads.json via
-// `node scripts/gen-chart-workloads-snapshot.mjs` (drives the standby
-// zero-overlay drift guard + failover scale-up derivation).
-//
-// BUMP TRAP for 0.7.2 (verified 2026-07-30 by diffing both chart tarballs):
-// 0.7.1's realtime Deployment HARDCODES the startup command --
-//   command: ["/bin/sh"]
-//   args: ["-c", "/app/bin/migrate && /app/bin/realtime eval
-//          'Realtime.Release.seeds(Realtime.Repo)' && /app/bin/server"]
-// 0.7.2 makes both values-driven, guarded by `{{- with
-// .Values.deployment.realtime.command }}`, and defaults them to EMPTY LISTS
-// (values.yaml:460-461). `with` skips an empty list, so the container silently
-// falls back to the image entrypoint. Our values set environment.realtime but
-// nothing under deployment.realtime, so a naive bump DROPS realtime's migrate
-// + seed step with no error. Bumping to 0.7.2+ means adding
-// deployment.realtime.command/args to supabase.values.yaml carrying the 0.7.1
-// literals. No image tags changed between 0.7.1 and 0.7.2, so there is no
-// security pressure to take this bump.
-const SUPABASE_HELM_CHART_VERSION = '0.7.1';
-
-/**
- * StatefulSet annotation recording the sha of the wal-archive.sh ConfigMap the
- * running db pod was started with. Exists because that script is mounted with
- * `subPath`, and subPath ConfigMap mounts are never updated in place — see the
- * freshness step in applyK3sManifests for the full reasoning.
- */
-export const WAL_ARCHIVE_SHA_ANNOTATION = 'vibecarbon.dev/wal-archive-sha';
-const SUPABASE_HELM_RELEASE_NAME = 'supabase';
-const SUPABASE_HELM_TIMEOUT = '15m';
-
-/**
- * Components whose images the pre-pull skips: `db` is vibecarbon's own
- * wal-g image (built + sideloaded, never pulled from a registry), and the
- * rest are disabled in carbon/k8s/values/supabase.values.yaml
- * (deployment.<comp>.enabled: false) so their pods never exist. A unit
- * drift-guard (k3s-prepull-images.test.ts) keeps this list in lockstep with
- * the values file.
- */
-export const PREPULL_EXCLUDED_COMPONENTS = [
-  'db',
-  'functions',
-  'analytics',
-  'vector',
-  'minio',
-  // minioClient's init-bucket container is template-gated on
-  // deployment.minio.enabled — off in our values, so it never runs.
-  'minioClient',
-];
-
-/**
- * Parse the `image:` section of `helm show values` output into fully
- * qualified image refs for `ctr images pull`. Line-based on purpose (the CLI
- * carries no YAML dependency) — the chart's values shape is stable:
- *
- *   image:
- *     <component>:
- *       repository: supabase/gotrue
- *       tag: v2.177.0
- *
- * Bare Docker Hub repos are qualified to `docker.io/...` (single-segment
- * official images get `library/`); refs that fail a strict character
- * allowlist are dropped — they end up inside a remote shell script, so
- * nothing outside [A-Za-z0-9._/:-] may pass.
- *
- * @param {string} valuesYaml - raw `helm show values` output
- * @param {{exclude?: string[]}} [opts]
- * @returns {string[]} deterministic, duplicate-free image refs
- */
-export function parseChartImages(valuesYaml, { exclude = [] } = {}) {
-  const images = [];
-  const lines = valuesYaml.split('\n');
-  const start = lines.findIndex((l) => /^image:\s*$/.test(l));
-  if (start === -1) return images;
-
-  let comp = null;
-  let repo = null;
-  let tag = null;
-  const flush = () => {
-    if (!comp || !repo || tag == null || exclude.includes(comp)) return;
-    if (!/^[A-Za-z0-9._/-]+$/.test(repo) || !/^[A-Za-z0-9._-]+$/.test(tag)) return;
-    const firstSegment = repo.split('/')[0];
-    let qualified;
-    if (firstSegment.includes('.') || firstSegment.includes(':')) {
-      qualified = repo; // already carries a registry host
-    } else if (repo.includes('/')) {
-      qualified = `docker.io/${repo}`;
-    } else {
-      qualified = `docker.io/library/${repo}`;
-    }
-    images.push(`${qualified}:${tag}`);
-  };
-
-  for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\S/.test(line)) break; // next top-level key — image section over
-    const compMatch = line.match(/^ {2}([\w-]+):/);
-    if (compMatch) {
-      flush();
-      comp = compMatch[1];
-      repo = null;
-      tag = null;
-      continue;
-    }
-    const repoMatch = line.match(/^ {4}repository:\s*"?([^"\n]+?)"?\s*$/);
-    if (repoMatch) {
-      repo = repoMatch[1];
-      continue;
-    }
-    const tagMatch = line.match(/^ {4}tag:\s*"?([^"\n]+?)"?\s*$/);
-    if (tagMatch) {
-      tag = tagMatch[1];
-    }
-  }
-  flush();
-  return [...new Set(images)];
-}
-
 /**
  * The two images of the `cluster-autoscaler` pod (upstream CA + our
- * carbon-autoscaler sidecar), pre-pulled AHEAD of the supabase chart images.
+ * carbon-autoscaler sidecar), pre-pulled FIRST on every node.
  *
  * Incident 2026-07-31 (e3 k8s e2e): the CA rollout wait spent its whole 300s
  * budget on image pulls that 403'd — three attempts, BackOff x20 over 5m11s.
@@ -1407,87 +1267,56 @@ export function clusterAutoscalerPodImages() {
 }
 
 /**
- * Assemble the pre-pull list: cluster-autoscaler pod first, chart images
- * after, duplicate-free and order-stable.
+ * Assemble the pre-pull list: cluster-autoscaler pod first, then any extra
+ * images (the db image on a deploy), duplicate-free and order-stable. Refs
+ * end up inside a remote shell script, so anything outside a strict
+ * character allowlist is dropped rather than quoted.
  *
- * @param {string[]} chartImages
+ * @param {string[]} [extraImages]
  * @returns {string[]}
  */
-export function buildPrePullImages(chartImages) {
-  return [...new Set([...clusterAutoscalerPodImages(), ...(chartImages ?? [])])];
+export function buildPrePullImages(extraImages = []) {
+  const safe = (ref) => typeof ref === 'string' && /^[A-Za-z0-9._/:@-]+$/.test(ref);
+  return [...new Set([...clusterAutoscalerPodImages(), ...(extraImages ?? []).filter(safe)])];
 }
 
 /**
  * One-line pre-pull summary for the deploy log. Lives here rather than inline
  * at the call site so the fire-and-forget shape
- * (`prePullChartImages(...).then(...).catch(...)`) stays compact enough to
- * read — and to keep its structural guard in k3s-prepull-images.test.ts
- * meaningful.
+ * (`prePullImages(...).then(...).catch(...)`) stays compact enough to read.
  *
- * A chart-enumeration failure is reported WITHOUT swallowing the fact that
- * the cluster-autoscaler images still pulled — otherwise the line reads as
- * "the pre-pull did nothing", which is the opposite of what happened.
- *
- * @param {{images: number, nodes: number, chartError: Error|null}} result
+ * @param {{images: number, nodes: number}} result
  * @param {number} elapsedMs
  * @returns {string}
  */
 export function formatPrePullSummary(result, elapsedMs) {
-  const base = `[prepull] ${result.images} images on ${result.nodes} node(s) in ${Math.round(elapsedMs / 1000)}s`;
-  if (!result.chartError) return base;
-  const why = (result.chartError.message || String(result.chartError)).slice(0, 120);
-  return `${base}, chart list unavailable (${why}); cluster-autoscaler images only`;
+  return `[prepull] ${result.images} images on ${result.nodes} node(s) in ${Math.round(elapsedMs / 1000)}s`;
 }
 
 /**
- * Opportunistic image pre-pull. The supabase pods' images pull from Docker
- * Hub when helm installs — on slow-pull regions that is the dominant cost of
- * the helm wait (hil measured ~135s to all-pods-Ready vs ash's 55-59s on
- * identical images). Firing `ctr images pull` on every node right after k3s
- * is Ready moves those pulls 2-3 minutes earlier, overlapping the sideload /
- * manifest work, so kubelet finds the images already present. The
- * cluster-autoscaler pod's images ride along at the front of the list — see
- * clusterAutoscalerPodImages().
+ * Opportunistic image pre-pull. Firing `ctr images pull` on every node right
+ * after k3s is Ready moves the pulls 2-3 minutes earlier, overlapping the
+ * build / sideload / manifest work, so kubelet finds the images already
+ * present: the cluster-autoscaler pod's pair (see clusterAutoscalerPodImages)
+ * and, on a deploy, the db image the db StatefulSet's inits and container all
+ * run (pulled from ghcr; slow-pull regions measured over two minutes of a
+ * cold db boot in image pulls alone).
  *
  * Fully fire-and-forget by contract: the caller must NOT await this into the
- * deploy's critical path, and every failure mode (repo fetch, SSH, a single
- * pull) degrades to today's behavior — kubelet pulls on demand. One SSH per
- * node (parallel across nodes); pulls run sequentially inside a node to
- * bound NIC + containerd churn. `|| true` per image keeps one bad ref from
- * aborting the rest.
+ * deploy's critical path, and every failure mode (SSH, a single pull)
+ * degrades to the default behavior — kubelet pulls on demand. One SSH per
+ * node (parallel across nodes); pulls run sequentially inside a node to bound
+ * NIC + containerd churn. `|| true` per image keeps one bad ref from aborting
+ * the rest.
  *
- * Chart enumeration failing does NOT cancel the CA pulls: those two are the
- * incident-critical pair, and `helm show values` reaching out to a chart repo
- * is exactly the kind of network step that has no business taking them down
- * with it. The error is surfaced on the result for the caller to log.
- *
- * @returns {Promise<{images: number, nodes: number, chartImages: number, chartError: Error|null}>}
+ * @param {{nodeIps: string[], sshKeyPath: string, khPath: string, extraImages?: string[]}} args
+ * @returns {Promise<{images: number, nodes: number}>}
  */
-export async function prePullChartImages({ nodeIps, sshKeyPath, khPath }) {
-  let chartImages = [];
-  let chartError = null;
-  try {
-    // Enumerate from the PINNED chart's default values so the pull list can
-    // never drift from what helm installs. repo add is idempotent.
-    await runCommandAsync(
-      ['helm', 'repo', 'add', SUPABASE_HELM_REPO_NAME, SUPABASE_HELM_REPO_URL],
-      { silent: true, ignoreError: true },
-    );
-    const valuesYaml = await runCommandAsync(
-      ['helm', 'show', 'values', SUPABASE_HELM_CHART, '--version', SUPABASE_HELM_CHART_VERSION],
-      { silent: true },
-    );
-    if (typeof valuesYaml !== 'string' || !valuesYaml.trim()) {
-      throw new Error('helm show values returned nothing');
-    }
-    chartImages = parseChartImages(valuesYaml, { exclude: PREPULL_EXCLUDED_COMPONENTS });
-  } catch (err) {
-    chartError = err instanceof Error ? err : new Error(String(err));
-  }
-  const images = buildPrePullImages(chartImages);
+export async function prePullImages({ nodeIps, sshKeyPath, khPath, extraImages = [] }) {
+  const images = buildPrePullImages(extraImages);
   const targets = (nodeIps ?? []).filter(Boolean);
   if (images.length === 0 || targets.length === 0) {
-    return { images: images.length, nodes: 0, chartImages: chartImages.length, chartError };
+    return { images: images.length, nodes: 0 };
   }
   const script = images
     .map((img) => `k3s ctr -n k8s.io images pull ${img} >/dev/null 2>&1 || true`)
@@ -1504,12 +1333,7 @@ export async function prePullChartImages({ nodeIps, sshKeyPath, khPath }) {
       }),
     ),
   );
-  return {
-    images: images.length,
-    nodes: targets.length,
-    chartImages: chartImages.length,
-    chartError,
-  };
+  return { images: images.length, nodes: targets.length };
 }
 
 // cert-manager-webhook-hetzner (third-party chart for the Hetzner DNS-01
@@ -1570,11 +1394,10 @@ export async function buildAppImage(
   masterPrivateIp = '10.0.1.1',
 ) {
   const { buildLocalImage } = await import('../image.js');
-  // App image: collect VITE_* build args (incl. VITE_SUPABASE_URL rewritten to
+  // App image: collect VITE_* build args (incl. VITE_PUBLIC_URL rewritten to
   // https://<domain> — single public origin) so the browser bundle ships with
-  // real config instead of empty strings. buildLocalImage previously passed NO build args, so the
-  // k8s SPA crashed on load with "Missing Supabase environment variables" —
-  // compose plumbs these via collectComposeBuildArgs, k8s did not. The backup
+  // real config instead of empty strings. buildLocalImage previously passed NO
+  // build args, so the k8s SPA shipped empty client config — compose plumbs these via collectComposeBuildArgs, k8s did not. The backup
   // image build (no frontend) calls this without a domain → no VITE args.
   let buildArgs = {};
   if (domain) {
@@ -1593,8 +1416,8 @@ export async function buildAppImage(
  * Wait until the `k3s` binary is installed and on PATH on a given node.
  *
  * waitForK3sReady only polls the master's /tmp/k3s-ready marker. Workers
- * and the supabase node run their own k3s install asynchronously
- * (worker-init.sh / supabase-init.sh) which can take 1-3 min after the
+ * and the database node run their own k3s install asynchronously
+ * (worker-init.sh / db-init.sh) which can take 1-3 min after the
  * master is ready (apt update, dpkg locks, k3s install script). If
  * sideload runs in that window, the remote `k3s ctr images import -`
  * exits 127 ("command not found") and one node's import fails,
@@ -1808,7 +1631,7 @@ async function captureK3sInstallDiag(host, sshKeyPath, khPath) {
  * Parallel via Promise.all + spawn — wall-clock dominated by the slowest node.
  *
  * Before each `docker save | ssh` we wait for `command -v k3s` on the target
- * (workers/supabase finish their k3s install asynchronously after the master
+ * (workers and the database node finish their k3s install asynchronously after the master
  * marker — see waitForK3sBinary). 5-min cap per node; total budget bounded
  * by the deploy step's lifecycle timeout.
  *
@@ -1955,27 +1778,27 @@ export async function pushImageToLocalRegistry({
 
 /**
  * Generated infra secrets that must land in the in-cluster vibecarbon-secrets
- * Secret. The Supabase Helm chart reads JWT_SECRET + ANON_KEY +
- * SERVICE_ROLE_KEY via secretRef from this Secret; the app Deployment reads
- * DB_PASSWORD + the rest via envFrom.
+ * Secret. The app Deployment reads DB_PASSWORD, BETTER_AUTH_SECRET and
+ * ADMIN_EMAIL/ADMIN_PASSWORD via envFrom; the db StatefulSet reads
+ * DB_PASSWORD (its superuser password) and REPL_PASSWORD (the standby's seed
+ * init).
  *
  * These are generated at deploy time (not user-configured), so they stay
  * local here rather than in the config-registry.
  */
 const INFRA_SECRET_KEYS = [
   'DB_PASSWORD',
-  'JWT_SECRET',
-  'ANON_KEY',
-  'SERVICE_ROLE_KEY',
-  'REALTIME_SECRET',
-  'LOGFLARE_API_KEY',
-  'VAULT_ENC_KEY',
-  'PG_META_CRYPTO_KEY',
-  'DB_ENC_KEY',
   'REPL_PASSWORD',
+  // The app's session signing key (carbon/src/server/auth/).
+  'BETTER_AUTH_SECRET',
+  // The app creates its super admin from these at startup.
   'ADMIN_EMAIL',
   'ADMIN_PASSWORD',
-  'ADMIN_PASSWORD_HASH',
+  // The add-on roles' own database passwords (generated by `vibecarbon add`,
+  // healed by `upgrade`), never the superuser's. Present only when the add-on
+  // is installed; the metabase and n8n Deployments read them by key.
+  'METABASE_DB_PASSWORD',
+  'N8N_DB_PASSWORD',
 ];
 
 /**
@@ -2013,22 +1836,6 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
   for (const key of SECRET_KEYS) {
     if (envLocal[key]) stringData[key] = envLocal[key];
   }
-  // .env.local stores Supabase keys with the SUPABASE_ prefix (matches the
-  // app's runtime env vars), but the supabase Helm chart's secretRefKey
-  // mapping reads them under their bare names from this Secret. Translate.
-  // Without this, kubelet fails kong/storage/studio/app pods with
-  // "couldn't find key ANON_KEY in Secret vibecarbon/vibecarbon-secrets".
-  if (!stringData.ANON_KEY && envLocal.SUPABASE_ANON_KEY) {
-    stringData.ANON_KEY = envLocal.SUPABASE_ANON_KEY;
-  }
-  if (!stringData.SERVICE_ROLE_KEY && envLocal.SUPABASE_SERVICE_ROLE_KEY) {
-    stringData.SERVICE_ROLE_KEY = envLocal.SUPABASE_SERVICE_ROLE_KEY;
-  }
-  // Supabase chart's db.secretRefKey.database maps to DB_NAME in this Secret.
-  // Neither .env.local nor SECRET_KEYS supplies it, so the chart-canonical
-  // default "postgres" is hardcoded — kubelet otherwise fails the supabase-db
-  // pod with "couldn't find key DB_NAME in Secret vibecarbon/vibecarbon-secrets".
-  if (!stringData.DB_NAME) stringData.DB_NAME = envLocal.POSTGRES_DB || 'postgres';
   // Redis addon: the redis Deployment reads REDIS_PASSWORD from this Secret
   // (required secretKeyRef — without it the pod can never start), and the
   // app's distributed rate-limit store connects via REDIS_URL, delivered by
@@ -2045,13 +1852,10 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
     stringData.S3_BUCKET = s3Config.bucket;
     stringData.S3_ENDPOINT = s3Config.endpoint;
     stringData.S3_REGION = s3Config.region;
-    // AWS-SDK-format credentials file for wal-g in the supabase-db pod. The
-    // supabase Helm chart can't inject secret env on the db container
-    // (environment.db is string-only), so instead of a post-helm env patch
-    // (which helm would strip every upgrade → a db restart every deploy) we
-    // mount THIS key as a file and point AWS_SHARED_CREDENTIALS_FILE at it
-    // (volume is helm-owned → never stripped → no per-deploy restart). See
-    // k8s/values/supabase.values.yaml deployment.db.volumes.
+    // AWS-SDK-format credentials file for wal-g in the db pod, mounted as a
+    // file (AWS_SHARED_CREDENTIALS_FILE) rather than env so a rotated key
+    // reaches wal-g without a pod-template change. See the walg-s3-creds
+    // volume in k8s/base/db/statefulset.yaml.
     stringData.S3_CREDENTIALS_INI = `[default]\naws_access_key_id=${s3Config.accessKey}\naws_secret_access_key=${s3Config.secretKey}\n`;
   }
   if (backupBucketName) {
@@ -2156,92 +1960,49 @@ export async function applyObservabilitySecrets({ kubeconfig, envLocal, domain }
 }
 
 /**
- * The pinned chart's `persistence.<key>` entries that OUR values file actually
- * renders a PersistentVolumeClaim for (PVC object name is `supabase-<key>`).
+ * Pre-flight the two ways the database can end up on node-local storage, and
+ * fail LOUD instead of proceeding. Runs before `k8s/base` (and with it the db
+ * StatefulSet) is applied.
  *
- * Kept in lockstep with `tests/fixtures/supabase-chart-workloads.json` (`pvcs`)
- * — the same 4th lockstep artifact the standby zero-overlay is pinned against.
- * A chart bump that adds or renames a PVC fails
- * tests/unit/deploy/k3s-supabase-storage-class.test.ts's drift guard; regenerate
- * with `node scripts/gen-chart-workloads-snapshot.mjs` and update this list.
- */
-export const SUPABASE_PVC_KEYS = ['db', 'imgproxy', 'pgsodium', 'snippets', 'storage'];
-
-/**
- * The PVC objects whose StorageClass decides the DATABASE's durability model:
- * `supabase-db` (PGDATA) and `supabase-pgsodium` (the encryption key root).
- * Everything else the chart provisions is a cache that a redeploy rebuilds, so
- * the wrong-class guard below is bounded to these two.
- */
-export const SUPABASE_DB_CRITICAL_PVCS = ['supabase-db', 'supabase-pgsodium'];
-
-/**
- * Build the `helm --set` expression that pins the provider's StorageClass on
- * every chart PVC.
- *
- * RCA (kept k8s-ha rig e4, 2026-08-05): nothing pinned it. The chart's
- * `_pvc.tpl` emits `storageClassName` only `{{- if $persistence.storageClassName }}`
- * and our values file left it unset, so every Supabase PVC was created with NO
- * class and the kube-apiserver's DefaultStorageClass admission plugin stamped
- * whichever class was default at that instant. That is a race, not a choice:
- * k3s ships `local-path` annotated `is-default-class: "true"` and
- * hetznercloud/csi-driver's `hcloud-volumes` is annotated the same way (its
- * StorageClass is byte-identical at v2.9.0 and at the v2.18.1 pinned now),
- * and with two defaults the plugin picks the NEWEST by creationTimestamp. The
- * rig's standby won that race (CSI volumes); a state-resumed deploy of the
- * primary lost it and put PGDATA on node-local disk — no detachable volume, so
- * replication, failover and wal-g restore all silently lose their footing.
- *
- * `--set` rather than a values-template placeholder on purpose: helm applies
- * `--set` AFTER every `-f`, and the values file installSupabase renders is the
- * PROJECT'S copy (laid down once by `create`, never re-synced), so a template
- * placeholder would be silently absent on every project older than this fix —
- * the exact failure mode being fixed.
- *
- * @param {string} storageClass - `ProviderClass.K8S_STORAGE_CLASS`
- * @returns {string} comma-joined `persistence.<key>.storageClassName=<class>`
- */
-export function buildSupabaseStorageClassSetArg(storageClass) {
-  if (!storageClass) {
-    throw new Error(
-      'installSupabase: no storageClass, ProviderClass.K8S_STORAGE_CLASS is empty. ' +
-        'Refusing to install Supabase without a pinned StorageClass: the chart would ' +
-        "fall back to the cluster's default class, which can be k3s' node-local " +
-        'local-path and silently breaks replication/failover/restore.',
-    );
-  }
-  return SUPABASE_PVC_KEYS.map((k) => `persistence.${k}.storageClassName=${storageClass}`).join(
-    ',',
-  );
-}
-
-/**
- * Pre-flight the two ways a Supabase install can end up on node-local storage,
- * and fail LOUD instead of proceeding.
+ * WHY (kept k8s-ha rig e4, 2026-08-05): a PVC created with NO class gets
+ * whichever class the DefaultStorageClass admission plugin picks at that
+ * instant, and that is a race: k3s ships `local-path` annotated default and
+ * hetznercloud/csi-driver's `hcloud-volumes` is annotated the same way, and
+ * with two defaults the plugin picks the NEWEST. A state-resumed deploy lost
+ * the race and put PGDATA on node-local disk — no detachable volume, so
+ * replication, failover and wal-g restore all silently lost their footing.
+ * The StatefulSet's volumeClaimTemplate therefore pins
+ * `ProviderClass.K8S_STORAGE_CLASS` (rendered by renderK8sBase), and this
+ * checks the two cases the pin alone cannot fix:
  *
  * 1. The provider's StorageClass is absent from the cluster. cloud-init installs
  *    the CSI driver on a best-effort 3-try loop whose failure is never checked
  *    (`carbon/cloud-init/k3s/master-init.sh`), and `/tmp/k3s-ready` is touched
  *    regardless — so a cluster genuinely can come up with only `local-path`.
- *    With the class now pinned the PVCs would sit Pending and `helm --wait`
- *    would burn its full 15m timeout; this turns that into an instant, named
- *    failure.
- * 2. A db-critical PVC already exists on a DIFFERENT class. `spec.storageClassName`
- *    is immutable, so helm's next upgrade would be rejected by the API server
- *    with an opaque "spec is immutable" error — and, worse, a deploy that
- *    predates this fix may already have bound PGDATA to local-path.
+ *    The db PVC would then sit Pending and the db rollout wait would burn its
+ *    whole budget; this turns that into an instant, named failure.
+ * 2. The PGDATA claim (DB_PVC) already exists on a DIFFERENT class.
+ *    `spec.storageClassName` is immutable, so it cannot be repaired in place.
  *
  * Probe failures are NOT fatal: a transient apiserver blip must not fail a
- * deploy, and the `--set` pin still prevents a silent wrong-class bind (the PVC
- * would stay Pending and helm would fail loudly). An EMPTY StorageClass listing
- * is treated as "could not verify" rather than "none exist" — every real k3s
- * cluster has at least `local-path`, so an empty list means the probe, not the
- * cluster, came up short.
+ * deploy, and the pinned class still prevents a silent wrong-class bind (the
+ * PVC would stay Pending and the rollout wait would fail loudly). An EMPTY
+ * StorageClass listing is treated as "could not verify" rather than "none
+ * exist" — every real k3s cluster has at least `local-path`, so an empty list
+ * means the probe, not the cluster, came up short.
  *
  * @param {{storageClass: string, namespace?: string, env: NodeJS.ProcessEnv}} args
- *   `env` must already carry KUBECONFIG (installSupabase builds it that way).
+ *   `env` must already carry KUBECONFIG.
  */
-export async function assertSupabaseStorageClass({ storageClass, namespace = 'vibecarbon', env }) {
+export async function assertDbStorageClass({ storageClass, namespace = 'vibecarbon', env }) {
+  if (!storageClass) {
+    throw new Error(
+      'assertDbStorageClass: no storageClass, ProviderClass.K8S_STORAGE_CLASS is empty. ' +
+        'Refusing to create the database without a pinned StorageClass: the PVC would ' +
+        "fall back to the cluster's default class, which can be k3s' node-local " +
+        'local-path and silently breaks replication/failover/restore.',
+    );
+  }
   /** @param {string[]} args */
   const probe = async (args, description) => {
     try {
@@ -2249,7 +2010,7 @@ export async function assertSupabaseStorageClass({ storageClass, namespace = 'vi
     } catch (err) {
       console.error(
         `[storage-class] probe skipped (${(err?.message || String(err)).slice(0, 160)}), ` +
-          'the --set pin still prevents a silent wrong-class bind',
+          'the pinned class still prevents a silent wrong-class bind',
       );
       return null;
     }
@@ -2264,31 +2025,23 @@ export async function assertSupabaseStorageClass({ storageClass, namespace = 'vi
       '-o',
       'jsonpath={range .items[*]}{.metadata.name}{"="}{.spec.storageClassName}{"\\n"}{end}',
     ],
-    'assertSupabaseStorageClass: kubectl get pvc',
+    'assertDbStorageClass: kubectl get pvc',
   );
-  /** @type {[string, string][]} */
-  const mismatched = [];
   for (const line of (pvcOut ?? '').split('\n')) {
     const idx = line.indexOf('=');
     if (idx === -1) continue;
     const name = line.slice(0, idx).trim();
     const observed = line.slice(idx + 1).trim();
-    if (!SUPABASE_DB_CRITICAL_PVCS.includes(name)) continue;
-    if (observed !== storageClass) mismatched.push([name, observed]);
-  }
-  if (mismatched.length > 0) {
-    const detail = mismatched
-      .map(([name, observed]) => `  - ${name}: ${observed || '(no class)'}`)
-      .join('\n');
+    if (name !== DB_PVC || observed === storageClass) continue;
     throw new Error(
-      `installSupabase: database PVC(s) are on the WRONG StorageClass; expected ${storageClass}:\n` +
-        `${detail}\n` +
+      `assertDbStorageClass: the database PVC is on the WRONG StorageClass; expected ${storageClass}:\n` +
+        `  - ${name}: ${observed || '(no class)'}\n` +
         "A PVC's spec.storageClassName is immutable, so this cannot be repaired in place. " +
-        'These volumes are node-local, not detachable: replication, failover and wal-g ' +
-        'restore do not work against them.\n' +
+        'A node-local volume is not detachable: replication, failover and wal-g ' +
+        'restore do not work against it.\n' +
         'Remediation (DESTRUCTIVE; the local copy of this data is deleted):\n' +
-        `  kubectl -n ${namespace} scale statefulset supabase-supabase-db --replicas=0\n` +
-        `  kubectl -n ${namespace} delete pvc ${mismatched.map(([n]) => n).join(' ')}\n` +
+        `  kubectl -n ${namespace} scale statefulset ${DB_STATEFULSET} --replicas=0\n` +
+        `  kubectl -n ${namespace} delete pvc ${name}\n` +
         '  then re-run deploy. If this cluster holds the only copy of the data, take a ' +
         'wal-g backup first and bring it back with `vibecarbon restore` afterwards.',
     );
@@ -2296,7 +2049,7 @@ export async function assertSupabaseStorageClass({ storageClass, namespace = 'vi
 
   const scOut = await probe(
     ['get', 'storageclass', '-o', 'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}'],
-    'assertSupabaseStorageClass: kubectl get storageclass',
+    'assertDbStorageClass: kubectl get storageclass',
   );
   const classes = (scOut ?? '')
     .split('\n')
@@ -2304,10 +2057,10 @@ export async function assertSupabaseStorageClass({ storageClass, namespace = 'vi
     .filter(Boolean);
   if (classes.length > 0 && !classes.includes(storageClass)) {
     throw new Error(
-      `installSupabase: StorageClass '${storageClass}' does not exist in this cluster ` +
+      `assertDbStorageClass: StorageClass '${storageClass}' does not exist in this cluster ` +
         `(found: ${classes.join(', ')}). The provider's CSI driver did not install — ` +
         'cloud-init applies it on a best-effort retry loop whose failure is not checked. ' +
-        'Refusing to install Supabase: without it the database PVCs would fall back to ' +
+        'Refusing to create the database: without it the PVC would fall back to ' +
         "the cluster's default class (k3s' node-local local-path). Check the master's " +
         '/var/log/cloud-init-output.log, re-apply the CSI driver, then re-run deploy.',
     );
@@ -2315,26 +2068,15 @@ export async function assertSupabaseStorageClass({ storageClass, namespace = 'vi
 }
 
 /**
- * How many not-ready pods the helm-failure message names before summarizing
- * the rest as a count. A deploy error must stay one readable line, and past
- * the first handful the names stop adding signal.
- */
-const SUPABASE_POD_NAME_CAP = 8;
-
-/**
- * The `kubectl get pods` argv behind the helm-failure explanation.
- *
- * Scoped to the release's own label selector: the `vibecarbon` namespace also
- * carries our app and any addons, and helm's `--wait` was not waiting on
- * those.
- *
- * PHASE and the READY condition are both read because `--wait` gates on
- * READY, not on phase — a Running-but-not-Ready pod times helm out exactly
- * like a Pending one, and reporting phase alone would call it healthy.
+ * The `kubectl get pods` argv behind the db-rollout failure explanation,
+ * scoped to the db pod's own label (the namespace also carries the app and
+ * any add-ons, and the wait was not on those). PHASE and the READY condition
+ * are both read because `rollout status` gates on READY, not on phase — a
+ * Running-but-not-Ready pod times the wait out exactly like a Pending one.
  *
  * @returns {string[]}
  */
-export function supabasePodListArgs() {
+export function dbPodListArgs() {
   return [
     'kubectl',
     '-n',
@@ -2342,7 +2084,7 @@ export function supabasePodListArgs() {
     'get',
     'pods',
     '-l',
-    'app.kubernetes.io/instance=supabase',
+    DB_POD_SELECTOR,
     '-o',
     'custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].status',
     '--no-headers',
@@ -2350,13 +2092,15 @@ export function supabasePodListArgs() {
 }
 
 /**
- * Turn `supabasePodListArgs`' output into the one-line truth about what helm's
- * `--wait` actually left behind.
+ * Turn `dbPodListArgs`' output into the one-line truth about what the db
+ * rollout wait left behind. The "never became Ready" wording is load-bearing:
+ * tests/e2e/utils/classify-failure.ts pairs it with summarizeNotReadyNodes'
+ * clause to tell a dead host from our own bug.
  *
  * @param {string} raw - `kubectl get pods … --no-headers` stdout
  * @returns {string}
  */
-export function summarizeSupabasePods(raw) {
+export function summarizeDbPods(raw) {
   const pods = String(raw ?? '')
     .split('\n')
     .map((line) => line.trim())
@@ -2369,30 +2113,25 @@ export function summarizeSupabasePods(raw) {
     });
 
   if (pods.length === 0) {
-    return 'No Supabase pods exist in the namespace; the release never created any.';
+    return `No db pod exists in the namespace; the ${DB_STATEFULSET} StatefulSet never created one.`;
   }
 
   const notReady = pods.filter((p) => !p.ready);
   if (notReady.length === 0) {
     return (
-      `All ${pods.length} Supabase pods are Ready, helm failed for a reason other than pod ` +
-      `readiness (a hook, a release lock, or its own timeout racing the last pod to Ready); ` +
+      `The db pod is Ready, the rollout wait failed for a reason other than pod ` +
+      `readiness (its own timeout racing the pod to Ready, or the apiserver); ` +
       `see its output above.`
     );
   }
 
-  const named = notReady.slice(0, SUPABASE_POD_NAME_CAP).map((p) => `${p.name} (${p.phase})`);
-  const overflow = notReady.length - named.length;
-  return (
-    `${pods.length - notReady.length}/${pods.length} Supabase pods are Ready; ` +
-    `${notReady.length} never became Ready: ${named.join(', ')}` +
-    `${overflow > 0 ? `, +${overflow} more` : ''}.`
-  );
+  const named = notReady.map((p) => `${p.name} (${p.phase})`);
+  return `The db pod never became Ready: ${named.join(', ')}.`;
 }
 
 /**
- * `kubectl get nodes` shaped like `supabasePodListArgs` — name + the Ready
- * condition. Read alongside the pods when helm's `--wait` fails: a pod
+ * `kubectl get nodes` shaped like `dbPodListArgs` — name + the Ready
+ * condition. Read alongside the pod when the db rollout wait fails: a pod
  * stuck Pending/Init means one thing on a healthy cluster and something
  * entirely different when its HOST is gone.
  *
@@ -2412,13 +2151,13 @@ export function clusterNodeListArgs() {
 /**
  * One clause naming any NotReady nodes, or '' when every node is Ready.
  *
- * WHY (RCA 2026-09-01, k8s-ha standby, PG17 cert run): the supabase worker
- * node went dark mid-deploy — kubelet stopped answering, SSH timed out,
- * Hetzner's API still said "running". The db pod froze in Init, helm's
- * wait expired, and the step classified [unknown] because the error only
- * described the POD. Naming the dead node makes the failure classifiable
- * as infrastructure (see classify-failure.ts) so the flake retry can
- * re-roll the deploy instead of hard-failing the run.
+ * WHY (RCA 2026-09-01, k8s-ha standby, PG17 cert run): the database node went
+ * dark mid-deploy — kubelet stopped answering, SSH timed out, Hetzner's API
+ * still said "running". The db pod froze in Init, the wait expired, and the
+ * step classified [unknown] because the error only described the POD. Naming
+ * the dead node makes the failure classifiable as infrastructure (see
+ * classify-failure.ts) so the flake retry can re-roll the deploy instead of
+ * hard-failing the run.
  *
  * @param {string} raw - `kubectl get nodes … --no-headers` stdout
  * @returns {string}
@@ -2442,21 +2181,21 @@ export function summarizeNotReadyNodes(raw) {
 }
 
 /**
- * Read the release's pods so the helm-failure error can say what actually
+ * Read the db pod so the rollout-failure error can say what actually
  * happened instead of asserting a state it never checked.
  *
  * Never throws: this runs INSIDE the construction of another error, and a
- * failure to list pods must not replace the helm failure it was trying to
+ * failure to list pods must not replace the failure it was trying to
  * explain. It also must not fall back to the zero-pod wording — claiming
- * "no pods" because kubectl was unreachable is the same lie in a new place.
+ * "no pod" because kubectl was unreachable is the same lie in a new place.
  *
  * @param {NodeJS.ProcessEnv} env - carries KUBECONFIG
  * @returns {Promise<string>}
  */
-async function describeSupabasePods(env) {
+async function describeDbPods(env) {
   try {
-    const raw = await runCommandAsync(supabasePodListArgs(), { env, silent: true });
-    const podSummary = summarizeSupabasePods(raw);
+    const raw = await runCommandAsync(dbPodListArgs(), { env, silent: true });
+    const podSummary = summarizeDbPods(raw);
     // Node readiness rides along, best-effort: a stuck pod on a dead node
     // is an infrastructure event, and only the node line makes it read as
     // one (see summarizeNotReadyNodes). A failure to list nodes never
@@ -2474,534 +2213,312 @@ async function describeSupabasePods(env) {
       .trim()
       .slice(0, 160);
     return (
-      `Could not list the release's pods to report what state they are in (${detail}) — ` +
-      `check them by hand with \`kubectl -n vibecarbon get pods\`.`
+      `Could not list the db pod to report what state it is in (${detail}) — ` +
+      `check it by hand with \`kubectl -n vibecarbon get pods -l ${DB_POD_SELECTOR}\`.`
     );
   }
 }
 
 /**
- * Render the project's k8s/values/supabase.values.yaml template and
- * `helm upgrade --install` the supabase community chart. Waits for the
- * release to converge before returning.
+ * Budget for the db StatefulSet to become Ready after `k8s/base` is applied.
+ * A cold first boot pays the CSI volume provision + attach, the db image pull
+ * (when the pre-pull has not finished) and initdb; a standby's first boot adds
+ * the seed-standby init's pg_basebackup (up to ~6 minutes of retries before it
+ * gives up and lets the serial reseed take over). 15 minutes is the budget the
+ * chart install had for the same work.
  *
- * Direct `helm upgrade --install` keeps Flux off the deploy path; Flux
- * is opt-in via `vibecarbon configure cicd`.
- *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, domain: string, storageClass: string, envLocal?: Record<string,string>, role?: 'primary'|'standby'}} args
+ * Deliberately longer than DB_STS_BOOT_TIMEOUT_S (600s, src/lib/deploy/
+ * replication.js), the shared budget for re-booting an EXISTING db pod (the
+ * HA hostPort recreate, the reseed standby boot): those waits pay a CSI
+ * re-attach, this one also pays the first provision, the image pull and
+ * initdb. Must never drop below that floor:
+ * tests/unit/deploy/db-sts-boot-timeout-census.test.ts pins it.
  */
-export async function installSupabase({
-  kubeconfig,
-  projectDir,
-  projectName,
-  domain,
-  s3Config,
-  envLocal,
+export const DB_ROLLOUT_TIMEOUT_S = 900;
+
+/**
+ * The workloads the retired Postgres Helm chart left in a cluster: its db
+ * StatefulSet (`<release>-<chart>-db`; the release and the chart shared one
+ * name) and Helm's release record (a `sh.helm.release.v1.<release>.v<n>`
+ * Secret labelled owner=helm,name=<release>), plus the GitOps Kustomization
+ * `vibecarbon-<release>` that installed it. Named here, and only here, so
+ * the deploy can recognize a chart-era cluster and refuse to build a second
+ * database beside it. The release name is the one line the terminology
+ * census exempts (tests/unit/lib/terminology-census.test.ts).
+ */
+export const RETIRED_CHART_RELEASE = 'supabase'; // terminology-census: retired chart name
+export const RETIRED_CHART_DB_STATEFULSET = `${RETIRED_CHART_RELEASE}-${RETIRED_CHART_RELEASE}-db`;
+export const RETIRED_CHART_KUSTOMIZATION = `vibecarbon-${RETIRED_CHART_RELEASE}`;
+
+/**
+ * Refuse to deploy onto a cluster that still runs the retired chart's
+ * database.
+ *
+ * WHY: the db now lives on a new StatefulSet and a new volume (`data-db-0`).
+ * Applied beside a running chart release it would start an EMPTY database
+ * and the app (DB_HOST=db) would switch to it, so every row would look gone;
+ * on k8s-ha the new pod could not even schedule, because the chart pod
+ * already holds the node's replication hostPort (5433), and the rollout
+ * would burn its whole budget. Nothing moves the data across automatically,
+ * so the operator has to choose how, and this says how.
+ *
+ * A single read of the live cluster, not a retry: it runs after
+ * awaitControlPlaneServing proved the apiserver answers, so a failing read
+ * is a real failure and is reported as one rather than guessed at.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace?: string, exec?: typeof runCommandAsync}} args
+ */
+export async function assertNoRetiredChartDb({
+  env,
+  namespace = 'vibecarbon',
+  exec = runCommandAsync,
+}) {
+  let sts;
+  let release;
+  try {
+    sts = await exec(
+      [
+        'kubectl',
+        '-n',
+        namespace,
+        'get',
+        'statefulset',
+        RETIRED_CHART_DB_STATEFULSET,
+        '--ignore-not-found',
+        '-o',
+        'name',
+      ],
+      { env, silent: true },
+    );
+    release = await exec(
+      [
+        'kubectl',
+        '-n',
+        namespace,
+        'get',
+        'secret',
+        '-l',
+        `owner=helm,name=${RETIRED_CHART_RELEASE}`,
+        '-o',
+        'name',
+      ],
+      { env, silent: true },
+    );
+  } catch (err) {
+    throw new Error(
+      'assertNoRetiredChartDb: could not read the cluster to check for the retired database ' +
+        `chart (${String(err?.message ?? err).slice(0, 200)}). Refusing to create the db ` +
+        'StatefulSet without knowing whether an older database is still running here.',
+    );
+  }
+  const found = [String(sts ?? '').trim(), String(release ?? '').trim()].filter(Boolean);
+  if (found.length === 0) return;
+  throw new Error(
+    `This cluster still runs the database from the retired Helm chart (${found.join(', ')} in ` +
+      `namespace ${namespace}). This version runs Postgres as its own StatefulSet on a NEW ` +
+      'volume, and existing data does not carry over automatically: deploying now would point ' +
+      'the app at an empty database.\n' +
+      'Pick one:\n' +
+      '  - Start clean: `vibecarbon destroy <env>`, then `vibecarbon deploy <env>`.\n' +
+      `  - Keep the data: \`helm uninstall ${RETIRED_CHART_RELEASE} -n ${namespace}\`, then ` +
+      '`vibecarbon deploy <env> -restore latest`. The restore reads the same wal-g prefix ' +
+      'the chart database archived to (unchanged), so it replays every segment archived ' +
+      'before the uninstall. On k8s-ha do this on both clusters.\n' +
+      'GitOps clusters (`vibecarbon configure cicd`): first set `prune: false` on the ' +
+      `\`${RETIRED_CHART_KUSTOMIZATION}\` Flux Kustomization in flux-system and then delete it; deleting it ` +
+      'with prune on garbage-collects the HelmRelease, which uninstalls the chart and deletes ' +
+      'its database volume before you chose to.',
+  );
+}
+
+/**
+ * Wait for `statefulset/db` to roll out (its pod Ready: the real server
+ * accepting TCP, see the readinessProbe in k8s/base/db/statefulset.yaml).
+ * Throws with the db pod's state, and any NotReady node, when it does not.
+ *
+ * Rides runKubectlWithRetry like every deploy-gating rollout wait: a
+ * transient failure on kubectl's initial connect (a TLS handshake timeout
+ * seconds into the budget) would otherwise fail the deploy outright, and its
+ * output goes through the deploy-log tee. Async (spawn-based): the wait can
+ * last many minutes, and in HA the standby cluster's deploy runs in parallel
+ * with the primary's.
+ *
+ * @param {{env: NodeJS.ProcessEnv, timeoutS?: number}} args
+ */
+export async function awaitDbRollout({ env, timeoutS = DB_ROLLOUT_TIMEOUT_S }) {
+  const started = Date.now();
+  try {
+    await runKubectlWithRetry(
+      [
+        '-n',
+        'vibecarbon',
+        'rollout',
+        'status',
+        `statefulset/${DB_STATEFULSET}`,
+        `--timeout=${timeoutS}s`,
+      ],
+      { env, description: `awaitDbRollout: rollout status statefulset/${DB_STATEFULSET}` },
+    );
+  } catch (err) {
+    throw new Error(
+      `awaitDbRollout: statefulset/${DB_STATEFULSET} did not become Ready within ${timeoutS}s ` +
+        `(${(err?.message || String(err)).slice(0, 300)}). ${await describeDbPods(env)}`,
+    );
+  }
+  console.error(
+    `[db] statefulset/${DB_STATEFULSET} Ready after ${Math.round((Date.now() - started) / 1000)}s`,
+  );
+}
+
+/**
+ * Apply the `vibecarbon-seed-standby` ConfigMap the db pod's seed-standby
+ * init mounts. Rendered fresh every deploy from the shared builder (one
+ * source of truth with the failover/restore reseeds) and applied BEFORE
+ * `k8s/base`, so the init can mount it on the pod's first boot. Secret-free by
+ * contract: REPL_PASSWORD reaches the script via env only.
+ *
+ * Best-effort: the ConfigMap's ABSENCE is already fully handled — the init's
+ * volume is optional and its command guards on the mounted file being present
+ * — so losing this apply just means a standby's first-boot seed self-skips and
+ * the serial reseed path covers replication later. Logged loudly, not thrown.
+ *
+ * @param {{env: NodeJS.ProcessEnv}} args
+ */
+export async function applyDbSeedConfigMap({ env }) {
+  const seedScript = buildStandbySeedInitScript();
+  const seedConfigMap = [
+    'apiVersion: v1',
+    'kind: ConfigMap',
+    'metadata:',
+    '  name: vibecarbon-seed-standby',
+    '  namespace: vibecarbon',
+    'data:',
+    '  seed-standby.sh: |',
+    ...seedScript.split('\n').map((l) => `    ${l}`),
+    '',
+  ].join('\n');
+  await runCommandAsync(['kubectl', 'apply', '-f', '-'], {
+    silent: true,
+    env,
+    input: seedConfigMap,
+  }).catch((err) => {
+    console.error(
+      `[seed-standby] ConfigMap apply failed (${err?.message || err}), seed init will self-skip; serial reseed covers replication`,
+    );
+  });
+}
+
+/**
+ * The deploy-time values for the db StatefulSet's `{{PLACEHOLDER}}` tokens
+ * (k8s/base/db/statefulset.yaml), one per token. Pure.
+ *
+ * @param {object} o
+ * @param {string} o.dbImageTag - full db image ref, `<repo>:<tag>`
+ * @param {string} [o.projectName]
+ * @param {{bucket?: string, endpoint?: string, region?: string}} [o.s3Config]
+ * @param {string|null} [o.backupBucketName]
+ * @param {'primary'|'standby'} [o.walgRole]
+ * @param {string} o.dbPrivateIp - this cluster's database node private IP
+ * @param {string} o.storageClass - `ProviderClass.K8S_STORAGE_CLASS`
+ * @param {string} o.walArchiveSha - sha of k8s/base/backup/configmap-walg.yaml
+ * @returns {Record<string, string>}
+ */
+export function buildDbManifestValues({
   dbImageTag,
+  projectName,
+  s3Config,
   backupBucketName,
   walgRole = 'primary',
-  supabasePrivateIp,
-  role,
+  dbPrivateIp,
   storageClass,
+  walArchiveSha,
 }) {
-  if (!supabasePrivateIp) {
-    // Rendered into {{REPL_RELAY_HOST}} below. A real IaC output on every
-    // provider (Hetzner pins 10.0.1.2 statically; DO exports the
-    // Pulumi-assigned VPC address) — never assume a Hetzner-shaped address:
-    // a standby's seed init would dial a relay that exists on no node.
+  if (!dbImageTag) {
     throw new Error(
-      'installSupabase: supabasePrivateIp is required — the IaC program outputs it; ' +
+      'buildDbManifestValues: dbImageTag is required (the pre-published wal-g db image, pulled from ghcr).',
+    );
+  }
+  if (!dbPrivateIp) {
+    // Rendered into {{REPL_RELAY_HOST}}. A real IaC output on every provider
+    // (Hetzner pins 10.0.1.2 statically; DO exports the Pulumi-assigned VPC
+    // address) — never assume a Hetzner-shaped address: a standby's seed init
+    // would dial a relay that exists on no node.
+    throw new Error(
+      'buildDbManifestValues: dbPrivateIp is required — the IaC program outputs it; ' +
         'a missing value means the infra step result is incomplete',
     );
   }
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
-  // Pin the provider's StorageClass on every chart PVC. Throws when it is
-  // missing rather than letting the chart inherit the cluster default — see
-  // buildSupabaseStorageClassSetArg for the RCA. Computed FIRST so an
-  // unthreaded storageClass fails before any cluster mutation.
-  const storageClassSetArg = buildSupabaseStorageClassSetArg(storageClass);
-  await assertSupabaseStorageClass({ storageClass, env });
-  // Render the values template — substitute every {{TOKEN}} the template
-  // uses so the rendered yaml is fully valid before helm sees it.
-  const valuesTemplatePath = join(projectDir, 'k8s/values/supabase.values.yaml');
-  if (!existsSync(valuesTemplatePath)) {
+  if (!storageClass) {
     throw new Error(
-      `installSupabase: ${valuesTemplatePath} not found. Project must include the supabase values template.`,
+      'buildDbManifestValues: no storageClass, ProviderClass.K8S_STORAGE_CLASS is empty.',
     );
   }
-  if (!dbImageTag) {
-    throw new Error(
-      'installSupabase: dbImageTag is required (the pre-published wal-g db image, pulled from ghcr).',
-    );
-  }
-  // Split the full image ref into repository + tag for the chart's
-  // image.db.{repository,tag} (and the walg-restore init's `{{DB_IMAGE}}:{{DB_IMAGE_TAG}}`).
-  // dbImageTag is now the pre-published `ghcr.io/<org>/postgres:<pg>-walg<ver>`
-  // ref — split on the LAST colon so the registry host (and any future port
-  // colon) stays in the repository.
+  // Split on the LAST colon so the registry host (and any port colon) stays
+  // in the repository.
   const lastColon = dbImageTag.lastIndexOf(':');
-  const dbImageRepo = dbImageTag.slice(0, lastColon);
-  const dbImageVer = dbImageTag.slice(lastColon + 1);
   // WAL-G S3 prefix — dedicated backup bucket if provided, else the storage
   // bucket (mirrors compose's S3_BACKUP_BUCKET:-S3_BUCKET fallback). Never
-  // leave it as s3:/// (wal-g would error).
+  // s3:/// (wal-g would error): empty when there is no bucket at all.
   //
   // SINGLE canonical prefix (NO role segment). Reads (backup-fetch/restore/
   // reseed) and writes (backup-push/wal-push) must all agree on ONE prefix — a
   // role-segmented prefix made the standby read an empty `…/walg/standby` and
   // fail restore/reseed with "No backups found" (caught by compose-ha scale
-  // e2e). Anti-collision (finding #3: a standby / bring-up-phase independent
-  // primary must never WRITE here) is enforced by the WALG_ROLE WRITE-GUARD:
-  // wal-archive.sh and the backup CronJob both no-op when WALG_ROLE=standby.
-  // walgRole is rendered into the db env below so those write guards can read it.
+  // e2e). Anti-collision (a standby / bring-up-phase independent primary must
+  // never WRITE here) is enforced by the WALG_ROLE WRITE-GUARD: wal-archive.sh
+  // and the backup CronJob both no-op when WALG_ROLE=standby.
   const walgBucket = backupBucketName || s3Config?.bucket || '';
-  const walgS3Prefix = walgBucket
-    ? `s3://${walgBucket}/backups/${projectName || 'vibecarbon'}/walg`
-    : '';
-  const rendered = readFileSync(valuesTemplatePath, 'utf-8')
-    .replace(/\{\{DOMAIN\}\}/g, domain || 'localhost')
-    .replace(/\{\{PROJECT_NAME\}\}/g, projectName || 'vibecarbon')
-    .replace(/\{\{S3_BACKUP_BUCKET\}\}/g, walgBucket)
-    .replace(/\{\{WALG_S3_PREFIX\}\}/g, walgS3Prefix)
-    .replace(/\{\{WALG_ROLE\}\}/g, walgRole)
-    .replace(/\{\{S3_ENDPOINT\}\}/g, s3Config?.endpoint ?? '')
-    .replace(/\{\{S3_REGION\}\}/g, s3Config?.region ?? '')
-    // Storage-service S3 wiring. DISTINCT from S3_BACKUP_BUCKET above: user
-    // objects live in the storage bucket (s3Config.bucket), wal-g backups in
-    // the dedicated backup bucket. Rendering the same name into both would
-    // put customer uploads and WAL segments in one bucket.
-    //
-    // These exist because the storage block shipped with literal `stub`
-    // region/bucket, no endpoint and no credentials while STORAGE_BACKEND was
-    // already `s3` — every upload 500'd with
-    // `CredentialsProviderError: Could not load credentials from any
-    // providers` (live DO k8s, 2026-08-21). Invisible for months because the
-    // e2e storage checks skipped on a bucket nothing created.
-    .replace(/\{\{S3_STORAGE_BUCKET\}\}/g, s3Config?.bucket ?? '')
-    .replace(/\{\{S3_ACCESS_KEY\}\}/g, s3Config?.accessKey ?? '')
-    .replace(/\{\{S3_SECRET_KEY\}\}/g, s3Config?.secretKey ?? '')
-    .replace(/\{\{DB_IMAGE\}\}/g, dbImageRepo)
-    .replace(/\{\{DB_IMAGE_TAG\}\}/g, dbImageVer)
-    // Studio dashboard creds — sourced from .env.local at deploy time. Empty
-    // string fallback keeps yaml valid; chart inlines them into the
-    // chart-generated supabase-dashboard secret.
-    .replace(/\{\{ADMIN_EMAIL\}\}/g, envLocal?.ADMIN_EMAIL ?? '')
-    .replace(/\{\{ADMIN_PASSWORD\}\}/g, envLocal?.ADMIN_PASSWORD ?? '')
-    // Microsoft OAuth tenant URL for GoTrue's AZURE provider — mirrors
-    // compose's `https://login.microsoftonline.com/${MICROSOFT_TENANT_ID:-common}`
-    // interpolation, which a k8s env valueFrom cannot express. Rendered even
-    // when Microsoft OAuth is unconfigured (harmless — the provider stays
-    // disabled without MICROSOFT_ENABLED in vibecarbon-secrets).
-    .replace(
-      /\{\{AZURE_TENANT_URL\}\}/g,
-      `https://login.microsoftonline.com/${envLocal?.MICROSOFT_TENANT_ID || 'common'}`,
-    )
-    // Signup-confirmation opt-in (configure → SMTP). Fail-safe: only the
-    // literal 'false' (require confirmation emails) is honored — anything
-    // else renders 'true' (auto-confirm), because without working SMTP a
-    // false here 500s every signup.
-    .replace(
-      /\{\{GOTRUE_MAILER_AUTOCONFIRM\}\}/g,
-      envLocal?.GOTRUE_MAILER_AUTOCONFIRM === 'false' ? 'false' : 'true',
-    )
-    // Repl-gateway relay endpoint for the standby seed init: the standby's
-    // OWN supabase-node private IP + the relay port (see the seed-standby
-    // init in the values file). Rendered on every tier; only a standby's
-    // first boot ever dials it.
-    .replace(/\{\{REPL_RELAY_HOST\}\}/g, supabasePrivateIp)
-    .replace(/\{\{REPL_RELAY_PORT\}\}/g, String(REPL_GATEWAY_PORT));
-  const tmpValues = join(tmpdir(), `vibecarbon-supabase-values-${process.pid}-${Date.now()}.yaml`);
-  // SECURITY: the rendered values contain ADMIN_EMAIL/ADMIN_PASSWORD and live
-  // for the whole `helm upgrade --wait` window — write 0o600, never 0o644.
-  writeSecretFile(tmpValues, rendered);
-  // Declared here (not inside the `if`) so the `finally` below can always
-  // reach it for cleanup, whether or not role === 'standby' set it.
-  let overlayPath = null;
-  try {
-    // Pilot-light: the standby's app tier renders at 0 replicas. Scalars merge
-    // across -f files (unlike env LISTS, replaced wholesale) so this overlay
-    // must only ever carry replicaCount keys — drift guard:
-    // tests/unit/deploy/standby-overlay-drift.test.ts
-    if (role === 'standby') {
-      const overlaySrc = join(projectDir, 'k8s/values/supabase.standby.values.yaml');
-      if (!existsSync(overlaySrc)) {
-        throw new Error(`installSupabase: standby overlay missing at ${overlaySrc}`);
-      }
-      const overlayText = readFileSync(overlaySrc, 'utf-8');
-      if (/\{\{[A-Z0-9_]+\}\}/.test(overlayText)) {
-        throw new Error('installSupabase: standby overlay must not contain placeholders');
-      }
-      overlayPath = join(tmpdir(), `supabase.standby.values.${Date.now()}.yaml`);
-      writeFileSync(overlayPath, overlayText, { mode: 0o600 });
-    }
-    // Seed-script ConfigMap: rendered fresh every deploy from the shared
-    // builder (one source of truth with the failover/restore reseeds) and
-    // applied BEFORE helm so the db pod's seed-standby init can mount it on
-    // first boot. Secret-free by contract — REPL_PASSWORD reaches the script
-    // via env only.
-    const seedScript = buildStandbySeedInitScript();
-    const seedConfigMap = [
-      'apiVersion: v1',
-      'kind: ConfigMap',
-      'metadata:',
-      '  name: vibecarbon-seed-standby',
-      '  namespace: vibecarbon',
-      'data:',
-      '  seed-standby.sh: |',
-      ...seedScript.split('\n').map((l) => `    ${l}`),
-      '',
-    ].join('\n');
-    // Best-effort: a transient apiserver blip here must not hard-fail the
-    // whole deploy. The ConfigMap's ABSENCE is already fully handled — the
-    // init container's volume mount is optional and its command guards on
-    // the mounted file being present (`[ -f /etc/vibecarbon/seed-standby.sh
-    // ] && exec bash … ; … exit 0`) — so losing this apply just means the
-    // standby's first-boot seed self-skips and the serial reseed path covers
-    // replication later. Caught (not ignoreError) so the failure is still
-    // logged loudly instead of silently swallowed.
-    await runCommandAsync(['kubectl', 'apply', '-f', '-'], {
-      silent: true,
-      env,
-      input: seedConfigMap,
-    }).catch((err) => {
-      console.error(
-        `[seed-standby] ConfigMap apply failed (${err?.message || err}), seed init will self-skip; serial reseed covers replication`,
-      );
-    });
-    // Add the supabase-community helm repo (idempotent — non-zero if exists).
-    // helm repo add fails if the repo already exists; `helm repo update`
-    // below refreshes either way, hence ignoreError.
-    await runCommandAsync(
-      ['helm', 'repo', 'add', SUPABASE_HELM_REPO_NAME, SUPABASE_HELM_REPO_URL],
-      {
-        silent: true,
-        ignoreError: true,
-        env,
-      },
-    );
-    await runCommandAsync(['helm', 'repo', 'update', SUPABASE_HELM_REPO_NAME], {
-      silent: true,
-      env,
-    });
-    // --wait blocks until all pods are Ready. --create-namespace is a no-op
-    // if vibecarbon namespace already exists.
-    //
-    // Async (spawn-based via runCommandAsync) — `helm --wait --timeout 15m`
-    // can block for 1-15 minutes. A sync execFileSync would block Node's
-    // event loop the whole time, inflating every concurrent perfAsync's
-    // `Date.now()` measurement on parallel branches. In HA the standby
-    // cluster's installSupabase runs in parallel with primary's; without
-    // this, primary's blocking helm-wait makes standby's perf substep
-    // numbers unreadable (RCA from iter-validate6, where standby's
-    // certManager.wait reported 21 minutes despite kubectl wait finishing
-    // in seconds — the wall-clock was inflated by primary's blocking).
-    const helmStart = Date.now();
-    const helmOk = await runCommandAsync(
-      [
-        'helm',
-        'upgrade',
-        '--install',
-        SUPABASE_HELM_RELEASE_NAME,
-        SUPABASE_HELM_CHART,
-        '--version',
-        SUPABASE_HELM_CHART_VERSION,
-        '--namespace',
-        'vibecarbon',
-        '--create-namespace',
-        '-f',
-        tmpValues,
-        ...(overlayPath ? ['-f', overlayPath] : []),
-        // AFTER every -f on purpose: helm applies --set last, so the pin holds
-        // even against a project values file that predates this fix (the
-        // project copy is laid down once by `create` and never re-synced).
-        '--set',
-        storageClassSetArg,
-        '--wait',
-        '--timeout',
-        SUPABASE_HELM_TIMEOUT,
-      ],
-      { silent: false, env },
-    );
-    // runCommandAsync resolves `false` (does NOT reject) for non-silent
-    // callers on non-zero exit. Without this check a failed helm install
-    // let the deploy march on and die 3 steps later with a misleading
-    // "pods supabase-supabase-db-0 not found" at WAL-archiving setup
-    // (CI run 29348429215 — unpinned chart 0.7.1 schema break).
-    if (helmOk !== true) {
-      throw new Error(
-        `installSupabase: helm upgrade --install failed for ${SUPABASE_HELM_CHART} ` +
-          `--version ${SUPABASE_HELM_CHART_VERSION} (release ${SUPABASE_HELM_RELEASE_NAME}). ` +
-          `helm's output is streamed above. ${await describeSupabasePods(env)}`,
-      );
-    }
-    const helmDur = Math.round((Date.now() - helmStart) / 1000);
-    // Snapshot pod state immediately after `--wait` returns. Each pod's
-    // age tells us how long IT took to become Ready (kubectl AGE = now -
-    // pod.creationTimestamp; for newly-created pods the age ≈ helm wait).
-    // Without this, the only signal for a slow installSupabase is the
-    // umbrella perfAsync number — which collapses 14+ pods into one
-    // duration. iter-perfwave2 showed primary 3m47s vs standby 1m43s
-    // with no way to localize which pod was the long pole.
-    try {
-      const podSnapshot = (
-        await runCommandAsync(
-          [
-            'kubectl',
-            '-n',
-            'vibecarbon',
-            'get',
-            'pods',
-            '-l',
-            'app.kubernetes.io/instance=supabase',
-            '-o',
-            'custom-columns=NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount,AGE:.metadata.creationTimestamp,NODE:.spec.nodeName',
-            '--no-headers',
-          ],
-          { env, silent: true },
-        )
-      ).trim();
-      console.error(`[supabase] helm-wait ${helmDur}s; post-wait pods:\n${podSnapshot}`);
-    } catch (e) {
-      console.error(
-        `[supabase] helm-wait ${helmDur}s; pod snapshot failed: ${e.message?.slice(0, 80)}`,
-      );
-    }
-  } finally {
-    try {
-      unlinkSync(tmpValues);
-    } catch {
-      // non-fatal: leave tmp file, OS will clean /tmp eventually
-    }
-    if (overlayPath) {
-      try {
-        unlinkSync(overlayPath);
-      } catch {
-        // non-fatal: leave tmp file, OS will clean /tmp eventually
-      }
-    }
-  }
+  return {
+    DB_IMAGE: dbImageTag.slice(0, lastColon),
+    DB_IMAGE_TAG: dbImageTag.slice(lastColon + 1),
+    WALG_S3_PREFIX: walgBucket
+      ? `s3://${walgBucket}/backups/${projectName || 'vibecarbon'}/walg`
+      : '',
+    WALG_ROLE: walgRole,
+    S3_ENDPOINT: s3Config?.endpoint ?? '',
+    S3_REGION: s3Config?.region ?? '',
+    // Repl-gateway relay endpoint for the standby seed init: the cluster's
+    // OWN database-node private IP + the relay port. Rendered on every tier;
+    // only a standby's first boot ever dials it.
+    REPL_RELAY_HOST: dbPrivateIp,
+    REPL_RELAY_PORT: String(REPL_GATEWAY_PORT),
+    K8S_STORAGE_CLASS: storageClass,
+    WAL_ARCHIVE_SHA: walArchiveSha || 'none',
+  };
 }
 
 /**
- * Wait until the supabase storage schema has fully initialized — specifically
- * until `storage.buckets` has ALL the columns our app migration inserts:
- * `public`, `file_size_limit`, and `allowed_mime_types`. The supabase chart's
- * storage-api container runs its own schema migrations on startup which lag
- * helm's `--wait`-Ready signal by 30-90s on cold clusters, and it adds these
- * columns in SEPARATE migrations (`public` earlier, `file_size_limit` +
- * `allowed_mime_types` in a later one). Running our own migrations against an
- * in-progress storage schema fails with errors like "column 'file_size_limit'
- * of relation 'buckets' does not exist" when an INSERT INTO storage.buckets
- * references a column the storage container hasn't added yet. Waiting only for
- * `public` was insufficient: it let the app migration race the later
- * file_size_limit migration (observed 2026-04-26 e2e #4 for `public`, and again
- * 2026-07-11 k8s-ha standby for `file_size_limit` after deploy timing tightened).
+ * The sha the db pod template records for the wal-archive ConfigMap
+ * (`vibecarbon.dev/wal-archive-sha`). The hash covers the WHOLE ConfigMap
+ * file rather than just the script body: it needs no YAML parsing, cannot
+ * drift from how the file is applied, and the only cost of the extra breadth
+ * is one db roll if someone edits a comment in that file.
  *
- * Polls every 5s for up to maxWaitSec. Idempotent: if the column already
- * exists (warm path), returns immediately on first probe.
- *
- * Each kubectl exec is bounded to ~15s wall via `--request-timeout=15s` plus
- * a Node-side kill backstop. A bare `spawnSync(kubectl exec)` with no
- * timeout can hang for arbitrary time when the apiserver streaming
- * connection wedges, which silently bypasses maxWaitSec — observed
- * 2026-05-08 e2e run #3 where standby's poll ran ~1005s against a
- * nominal maxWaitSec=300 and rolled into the parallel primary's 16.7-min
- * rolloutApp window. Bounding each call also lets first-failure stderr
- * surface so a real storage-api crashloop is distinguishable from an exec
- * connectivity issue. Uses async spawn so the parent's event loop stays
- * free for the parallel HA branch.
- *
- * @param {{kubeconfig: string, maxWaitSec?: number}} args
+ * @param {string} projectDir
+ * @returns {string} 16 hex chars, or '' when the file is absent
  */
-export async function waitForSupabaseStorageSchema({ kubeconfig, maxWaitSec = 600 }) {
+export function walArchiveConfigSha(projectDir) {
+  const cmPath = join(projectDir, 'k8s/base/backup/configmap-walg.yaml');
+  if (!existsSync(cmPath)) return '';
+  return createHash('sha256').update(readFileSync(cmPath)).digest('hex').slice(0, 16);
+}
+
+/**
+ * Ground-truth RLS audit for the k8s path (see src/lib/deploy/rls-audit.js),
+ * against the live catalog once the app has migrated it: the app applies
+ * db/migrations itself at startup (carbon/src/server/db/migrate.ts), and
+ * awaitAppAdminReady waits for `migrationStatus: 'applied'` before this
+ * runs. THROWS (failing the deploy) when any public table lacks RLS.
+ *
+ * @param {{kubeconfig: string}} args
+ */
+export async function auditRls({ kubeconfig }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
-  // Require all three columns 00001_init inserts — a later storage-api
-  // migration adds file_size_limit + allowed_mime_types, so waiting only for
-  // `public` races that migration. count(*) must reach 3.
-  const probeSql = `SELECT count(*) FROM information_schema.columns WHERE table_schema='storage' AND table_name='buckets' AND column_name IN ('public','file_size_limit','allowed_mime_types');`;
-  const perCallSec = 15;
-  let attempt = 0;
-  let firstErrLogged = false;
-  try {
-    // Fixed 5s spacing (initialDelayMs === maxDelayMs, no backoff growth) —
-    // matches the old hand-rolled `while` loop's constant waitMs exactly.
-    await pollUntil(
-      async () => {
-        attempt += 1;
-        const { status, stdout, stderr } = await execKubectlOnce(
-          [
-            '-n',
-            'vibecarbon',
-            'exec',
-            '-i',
-            `--request-timeout=${perCallSec}s`,
-            'supabase-supabase-db-0',
-            '--',
-            'psql',
-            '-U',
-            'supabase_admin',
-            '-d',
-            'postgres',
-            '-tA',
-          ],
-          { env, input: probeSql, killAfterMs: (perCallSec + 5) * 1000 },
-        );
-        if (status === 0 && stdout.trim() === '3') return true;
-        if (!firstErrLogged && (status !== 0 || stderr)) {
-          // Surface the first failure so a real crashloop / connectivity
-          // issue is visible instead of silently looping. Subsequent polls
-          // stay quiet to keep the deploy log readable.
-          const msg = (stderr || stdout || '(no output)').trim().slice(-500);
-          console.log(
-            `[waitForSupabaseStorageSchema] attempt ${attempt} status=${status ?? '?'} — ${msg}`,
-          );
-          firstErrLogged = true;
-        }
-        return false;
-      },
-      {
-        budgetMs: maxWaitSec * 1000,
-        initialDelayMs: 5000,
-        maxDelayMs: 5000,
-        description: 'storage.buckets public + file_size_limit + allowed_mime_types columns',
-      },
-    );
-  } catch {
-    throw new Error(
-      `Supabase storage schema didn't add storage.buckets.{public,file_size_limit,allowed_mime_types} ` +
-        `columns within ${maxWaitSec}s. Storage-api container may have crashlooped: check ` +
-        `kubectl logs supabase-supabase-storage-0`,
-    );
-  }
-}
-
-/**
- * Single bounded kubectl exec: spawn-based (non-blocking), per-call kill
- * backstop on top of kubectl's own `--request-timeout`. Caller passes argv
- * starting after `kubectl`. Returns { status, stdout, stderr } with status
- * `null` if killed by the backstop.
- *
- * @param {string[]} argv
- * @param {{env: NodeJS.ProcessEnv, input?: string, killAfterMs: number}} opts
- */
-function execKubectlOnce(argv, { env, input, killAfterMs }) {
-  return new Promise((resolveFn) => {
-    const child = spawn('kubectl', argv, {
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (b) => {
-      stdout += b.toString();
-    });
-    child.stderr.on('data', (b) => {
-      stderr += b.toString();
-    });
-    const killTimer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* ignore */
-      }
-    }, killAfterMs);
-    child.on('error', () => {
-      clearTimeout(killTimer);
-      resolveFn({ status: null, stdout, stderr });
-    });
-    child.on('close', (code) => {
-      clearTimeout(killTimer);
-      resolveFn({ status: code, stdout, stderr });
-    });
-    if (input != null) {
-      child.stdin.write(input);
-      child.stdin.end();
-    } else {
-      child.stdin.end();
-    }
-  });
-}
-
-/**
- * Apply the project's `supabase/migrations/*.sql` against the chart-installed
- * supabase-postgres pod. Runs each file in lexicographic order via
- * `kubectl exec -i ... psql -U supabase_admin -d postgres`. Errors per file
- * are surfaced — unlike compose's `|| true` swallow — so a broken migration
- * stops the deploy with a useful error instead of a 503 readiness probe
- * loop downstream.
- *
- * The supabase-db StatefulSet pod must be Ready (helm `--wait` ensures this).
- *
- * @param {{kubeconfig: string, projectDir: string}} args
- */
-export async function applyMigrations({ kubeconfig, projectDir }) {
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const migrationsDir = join(projectDir, 'supabase', 'migrations');
-  if (!existsSync(migrationsDir)) {
-    // Project has no migrations directory — skip silently. Matches compose
-    // behaviour (which `|| true`'s past a missing dir).
-    return;
-  }
-  const files = readdirSync(migrationsDir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-  if (files.length === 0) return;
-  // Wait for supabase's own storage-api schema to finish initializing —
-  // some project migrations (e.g. INSERT INTO storage.buckets with a
-  // `public` column) reference columns added by storage-api's startup
-  // migrations, which can lag helm's --wait Ready signal.
-  await waitForSupabaseStorageSchema({ kubeconfig });
-  for (const file of files) {
-    const sql = readFileSync(join(migrationsDir, file), 'utf-8');
-    try {
-      // Deadlock-only retry: our boot-window DDL can deadlock against a
-      // Supabase service's own first-boot DDL on the same relations
-      // (2026-08-30 RCA — see migration-deadlock.js). --single-transaction
-      // makes the re-run safe; every other failure stays one-shot fatal.
-      await withMigrationDeadlockRetry(
-        () =>
-          runCommandAsync(
-            [
-              'kubectl',
-              '-n',
-              'vibecarbon',
-              'exec',
-              '-i',
-              'supabase-supabase-db-0',
-              '--',
-              'psql',
-              '-U',
-              'supabase_admin',
-              '-d',
-              'postgres',
-              '-v',
-              'ON_ERROR_STOP=1',
-              // Each migration file is atomic — a mid-file failure must not leave
-              // partial schema behind (see docs/rca/2026-08-25-migration-drift.md).
-              '--single-transaction',
-            ],
-            { env, input: sql, silent: true },
-          ),
-        file,
-      );
-    } catch (err) {
-      // silent:true buffers stdout/stderr instead of streaming them
-      // (unlike the old stdio: [...,'inherit','inherit']) — print them here
-      // on failure so the operator still sees the psql error output.
-      if (err.stdout) process.stdout.write(err.stdout);
-      if (err.stderr) process.stderr.write(err.stderr);
-      throw new Error(
-        `applyMigrations: ${file} failed with exit ${err.status}. ` +
-          `Fix the migration or set ON_ERROR_STOP=0 manually.`,
-      );
-    }
-  }
-
   // Ground-truth RLS audit (see src/lib/deploy/rls-audit.js): query the live
   // catalog and refuse to proceed if any public table reached the schema
-  // without row-level security — the browser reaches public tables directly
-  // through PostgREST, so an un-RLS'd table is a live data breach regardless
-  // of how it was created (migration, hand edit, dependency).
+  // without row-level security — RLS is what scopes every query the app runs
+  // on a user's behalf, so an un-RLS'd table hands every signed-in user every
+  // row regardless of how it was created (migration, hand edit, dependency).
   const auditOut = await runCommandAsync(
     [
       'kubectl',
@@ -3009,11 +2526,13 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
       'vibecarbon',
       'exec',
       '-i',
-      'supabase-supabase-db-0',
+      DB_POD,
+      '-c',
+      DB_CONTAINER,
       '--',
       'psql',
       '-U',
-      'supabase_admin',
+      'postgres',
       '-d',
       'postgres',
       '-tAc',
@@ -3024,13 +2543,13 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
   // runCommandAsync(silent) resolves the stdout string directly.
   const unprotected = String(auditOut ?? '').trim();
   if (unprotected) {
-    throw new Error(`applyMigrations: ${rlsAuditFailureMessage(unprotected)}`);
+    throw new Error(`auditRls: ${rlsAuditFailureMessage(unprotected)}`);
   }
 }
 
 /**
  * Ground-truth BACKUP audit for the k8s path — the kubectl-exec twin of the
- * `docker compose exec` probe compose/index.js runs inside runMigrations.
+ * `docker compose exec` probe compose/index.js runs inside runDatabaseAudits.
  * Same probe string, same pure evaluator, same failure message; only the exec
  * seam differs. See src/lib/deploy/walg-audit.js for why `wal-g backup-list`
  * is the load-bearing signal and why a standby / unconfigured node skips.
@@ -3042,7 +2561,7 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
  *
  * @param {{kubeconfig: string, dbPod?: string}} args
  */
-export async function verifyWalgBackups({ kubeconfig, dbPod = 'supabase-supabase-db-0' }) {
+export async function verifyWalgBackups({ kubeconfig, dbPod = DB_POD }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   await assertWalgBackupsWorking({
     path: 'k8s',
@@ -3063,464 +2582,6 @@ export async function verifyWalgBackups({ kubeconfig, dbPod = 'supabase-supabase
 }
 
 /**
- * Reload PostgREST's schema cache after applyMigrations.
- *
- * The chart's `rest` (supabase-supabase-rest) pod comes up during helm
- * `--wait`, BEFORE applyMigrations runs — so its in-memory schema cache
- * predates the app tables. Reads of /rest/v1/<table> then 404 with PGRST205
- * ("Could not find the table ... in the schema cache") until PostgREST
- * reloads. No DDL-watch event trigger exists in the app migrations or db init
- * to auto-NOTIFY (verified), so issue the canonical reload explicitly.
- *
- * This is the k8s mirror of the compose fix (compose/index.js): same intent —
- * `NOTIFY pgrst, 'reload schema'` on the db — via `kubectl exec` instead of
- * `docker compose exec`. Best-effort: a missed reload self-heals whenever the
- * rest pod next restarts (e.g. the k8s-ha replication path rollout-restarts it
- * anyway), so a failure here is logged, not fatal.
- *
- * @param {{kubeconfig: string}} args
- */
-export async function reloadPostgrest({ kubeconfig }) {
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const { status, stderr } = await execKubectlOnce(
-    [
-      '-n',
-      'vibecarbon',
-      'exec',
-      '-i',
-      '--request-timeout=15s',
-      'supabase-supabase-db-0',
-      '--',
-      'psql',
-      '-U',
-      'supabase_admin',
-      '-d',
-      'postgres',
-      '-c',
-      "NOTIFY pgrst, 'reload schema'",
-    ],
-    { env, killAfterMs: 20_000 },
-  );
-  if (status !== 0) {
-    progressLog(
-      `[migrate] PostgREST schema reload NOTIFY failed (non-fatal, self-heals on rest restart): ${(stderr || '').trim().slice(-200)}`,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// provisionAdminUser's `kubectl port-forward` child. Constants + helpers live
-// at module scope so the forward's diagnostics are greppable from a deploy log
-// and unit-testable through provisionAdminUser's injected `spawnImpl` seam.
-//
-// Twin of compose/index.js's `openAdminTunnel` (#226), which fixed this
-// evidence hole on the `ssh -L` side first. Deliberately duplicated rather
-// than shared: the two children differ in binary, in stderr vocabulary, and —
-// most importantly — in whether the local port may be WALKED. Keep them in
-// sync by hand when either grows a new evidence channel.
-// ---------------------------------------------------------------------------
-
-/** Bounded stderr tail kept per port-forward child. */
-const ADMIN_PF_STDERR_TAIL_LINES = 10;
-const ADMIN_PF_STDERR_TAIL_CHARS = 2000;
-/** Grace for a dying child's stderr to flush when 'close' never arrives. */
-const ADMIN_PF_EXIT_FLUSH_MS = 500;
-/**
- * `kubectl port-forward`'s own wording for a local bind collision. It reports
- * the OS error verbatim ("bind: address already in use") and then its own
- * summary ("unable to listen on any of the requested ports"); either alone is
- * enough to classify.
- */
-const ADMIN_PF_BIND_CONFLICT = /address already in use|unable to listen on any of the requested/i;
-
-/**
- * Last-N-lines tail of a child's stderr, bounded by chars first and then lines
- * so neither a chatty session nor one runaway line can paste a whole log into
- * a deploy error.
- *
- * @param {string} text
- * @returns {string}
- */
-function tailPortForwardStderr(text) {
-  return text
-    .slice(-ADMIN_PF_STDERR_TAIL_CHARS)
-    .split('\n')
-    .slice(-ADMIN_PF_STDERR_TAIL_LINES)
-    .join('\n');
-}
-
-/**
- * Flatten a fetch rejection into one log-safe line.
- *
- * Node's fetch throws a bland `TypeError: fetch failed` and hides the part
- * that actually discriminates the failure (ECONNREFUSED = nothing listening on
- * the forwarded port, vs ETIMEDOUT / socket hang up = the forward is up but
- * GoTrue isn't answering) in `.cause`.
- *
- * @param {unknown} err
- * @returns {string}
- */
-function describeAdminFetchError(err) {
-  if (!err) return 'no fetch error recorded';
-  if (!(err instanceof Error)) return String(err);
-  const cause = err.cause;
-  const detail = cause instanceof Error ? cause.message : cause ? String(cause) : '';
-  const code = (cause instanceof Error ? /** @type {any} */ (cause).code : undefined) ?? err.code;
-  let text = detail && detail !== err.message ? `${err.message} (${detail})` : err.message;
-  if (code && !text.includes(code)) text += ` [${code}]`;
-  return text;
-}
-
-/**
- * Open provisionAdminUser's `kubectl port-forward` child, wrapped with the
- * evidence its failure paths need: a bounded stderr tail, the exit code/signal
- * (or spawn error), and a `settled` promise that resolves the moment the child
- * dies.
- *
- * stderr is PIPED for the reason #226 established on the compose side: it is
- * the only channel carrying the child's own diagnosis, and the previous
- * `stdio: 'ignore'` discarded it. A forward that cannot bind its local port,
- * names a service that does not exist, or loses its apiserver connection
- * prints exactly that and exits — under 'ignore' the deploy only ever saw the
- * wrapper's "Could not reach GoTrue via kubectl port-forward", which is
- * un-RCA-able without a re-run.
- *
- * @param {object} args
- * @param {number} args.localPort
- * @param {NodeJS.ProcessEnv} args.env - carries KUBECONFIG
- * @param {typeof spawn} args.spawnImpl
- */
-function openAdminPortForward({ localPort, env, spawnImpl }) {
-  const child = spawnImpl(
-    'kubectl',
-    ['-n', 'vibecarbon', 'port-forward', 'svc/supabase-supabase-auth', `${localPort}:9999`],
-    { env, stdio: ['ignore', 'ignore', 'pipe'] },
-  );
-
-  let stderr = '';
-  /** @type {{code: number|null, signal: string|null}|null} */
-  let exitInfo = null;
-  /** @type {Error|null} */
-  let spawnError = null;
-  /** @type {ReturnType<typeof setTimeout>|null} */
-  let flushTimer = null;
-  let resolveSettled = () => {};
-  const settled = new Promise((resolve) => {
-    resolveSettled = resolve;
-  });
-  const finish = () => {
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = null;
-    resolveSettled();
-  };
-
-  child.stderr?.on?.('data', (chunk) => {
-    stderr = tailPortForwardStderr(stderr + String(chunk));
-  });
-  // A spawn-level failure ('error', e.g. ENOENT) must not crash the deploy as
-  // an unhandled ChildProcess event — it stays folded into the same retry
-  // budget as any other reach failure, but now carries its message.
-  child.on('error', (err) => {
-    spawnError = err;
-    finish();
-  });
-  // Settle on 'close' where possible (stderr is flushed by then); 'exit' can
-  // fire with data still queued on the pipe. If 'close' never arrives, the
-  // grace timer settles anyway so an attempt can't hang waiting for it.
-  child.on('close', finish);
-  child.on('exit', (code, signal) => {
-    exitInfo = { code, signal };
-    if (!flushTimer) flushTimer = setTimeout(finish, ADMIN_PF_EXIT_FLUSH_MS);
-  });
-
-  return {
-    localPort,
-    /** Resolves once the child has died (never, for a healthy forward). */
-    settled,
-    get dead() {
-      return exitInfo !== null || spawnError !== null;
-    },
-    /** True when kubectl's stderr names a local bind collision. */
-    get bindConflict() {
-      return ADMIN_PF_BIND_CONFLICT.test(stderr);
-    },
-    /** One-line `kubectl: …` clause for a deploy error / retry log line. */
-    describe() {
-      if (spawnError) return `kubectl: spawn failed: ${spawnError.message}`;
-      const tail = stderr.trim().replace(/\s*\n\s*/g, ' / ');
-      let state;
-      if (exitInfo === null) state = 'still running';
-      else if (exitInfo.code === null || exitInfo.code === undefined)
-        state = `killed by ${exitInfo.signal ?? 'an unknown signal'}`;
-      else state = `exited ${exitInfo.code}${exitInfo.signal ? ` (${exitInfo.signal})` : ''}`;
-      return tail ? `kubectl: ${state}; ${tail}` : `kubectl: ${state}, no stderr`;
-    },
-    /** Idempotent teardown — safe to call on every exit path. */
-    close() {
-      try {
-        child.kill();
-      } catch {
-        // already gone
-      }
-      child.stderr?.destroy?.();
-      if (flushTimer) clearTimeout(flushTimer);
-      flushTimer = null;
-    },
-  };
-}
-
-/**
- * Create the production app super-admin in `auth.users` via GoTrue's admin API.
- *
- * The k8s mirror of compose/index.js `createAdminUser`: identical GoTrue
- * admin-API contract (POST the super_admin payload with the service-role
- * bearer, idempotent on 422 via the shared admin-user helper), reached via
- * `kubectl port-forward svc/supabase-supabase-auth` instead of an `ssh -L`
- * tunnel. Goes direct to GoTrue (auth :9999, path `/admin/users`) — no Kong
- * `/auth/v1` prefix to strip.
- *
- * Without this, a k8s deploy shipped a prod app the operator couldn't log
- * into: ADMIN_EMAIL/ADMIN_PASSWORD only seeded the Supabase Studio dashboard
- * basic-auth secret, never an app `auth.users` row.
- *
- * M3 Task 9h: the port-forward + HTTP reach gets a budgeted retry (same
- * tunnel-then-operation shape as the registry push's retries, which live in
- * registry-push.js — a backgrounded local forward that needs re-opening on
- * failure, not a plain probe). `helm upgrade --install --wait` (installSupabase) already
- * gates on every chart pod, including auth/GoTrue, reaching Available BEFORE
- * this step ever runs (see applyK3sManifests step 8c below) — so there is no
- * missing ordering wait to add; a failure here is a transient port-forward /
- * apiserver hiccup against an already-Ready pod, the same class of blip the
- * cert-manager readiness poll above absorbs, not a readiness race. A battery
- * run (d3 run 6) hit exactly that: the single old attempt failed, logged a
- * warning, and the deploy "succeeded" with no admin.users row — customer CI
- * would ship the same half-configured stack. Exhausting the retry budget now
- * fails the deploy loudly instead: pre-release, no half-configured success.
- *
- * Credentials-missing (no ADMIN_EMAIL/ADMIN_PASSWORD/SUPABASE_SERVICE_ROLE_KEY
- * resolvable from `envLocal`) is NOT retryable (there's nothing to poll for)
- * but is NOT a soft return either (M3 Task 9h fix round 1): `create` always
- * writes these into the project's `.env.local`, and they're also
- * GH-Environment-managed CI secrets (see github-environments.js) — a real
- * customer CI run with a missing/misnamed secret hits this exact branch, and
- * a soft `{success: false}` here reproduces the identical bug this task
- * exists to kill (deploy "succeeds", no admin.users row). It throws.
- *
- * Diagnosability (twin of #226, which fixed the same hole on compose's `ssh
- * -L` tunnel): every failure path now carries WHY. The forward child is
- * spawned with a PIPED stderr and its tail / exit code / signal / spawn error
- * are captured (openAdminPortForward above), the health poll's LAST fetch
- * error is recorded through `waitForGotrueHealth`'s `fetchImpl` seam, and both
- * land in the thrown message AND in every per-attempt retry log line. Before
- * this, a failing attempt produced the bare wrapper string "Could not reach
- * GoTrue via kubectl port-forward" — indistinguishable between a missing
- * service, a squatted local port, a dead apiserver connection and a GoTrue
- * that answers 503, and un-RCA-able without re-running the deploy.
- *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, localPort?: number, spawnImpl?: typeof spawn, fetchImpl?: typeof fetch}} args
- *   (The former `retryDelaysMs` ladder is removed — band-aid removal
- *   2026-08-16; one attempt, loud failure.)
- *
- *   `spawnImpl` / `fetchImpl` — injection seams for the `kubectl port-forward`
- *   child and the health-poll fetch (same DI convention as admin-user.js's
- *   `fetchImpl`, and as compose's `createAdminUser`). Production callers omit
- *   both; tests inject fakes so the forward's diagnostics can be asserted
- *   without mocking `node:child_process` (builtin-module mocks are not
- *   reliably scoped per file under the parallel unit run — see
- *   k3s-admin-port-forward-diagnostics.test.ts's header).
- * @returns {Promise<{success: boolean, message: string}>} resolves only on
- *   success (admin created, or already exists — idempotent).
- * @throws {Error} if required admin credentials are missing from `envLocal`,
- *   or if GoTrue stays unreachable (or the admin-user POST keeps failing)
- *   through the whole retry budget.
- */
-export async function provisionAdminUser({
-  kubeconfig,
-  envLocal,
-  localPort = 15000,
-  spawnImpl = spawn,
-  fetchImpl = fetch,
-}) {
-  const adminEmail = envLocal?.ADMIN_EMAIL;
-  const adminPassword = envLocal?.ADMIN_PASSWORD;
-  const serviceRoleKey = envLocal?.SERVICE_ROLE_KEY ?? envLocal?.SUPABASE_SERVICE_ROLE_KEY;
-  if (!adminEmail || !adminPassword || !serviceRoleKey) {
-    const missing = [
-      !adminEmail && 'ADMIN_EMAIL',
-      !adminPassword && 'ADMIN_PASSWORD',
-      !serviceRoleKey && 'SUPABASE_SERVICE_ROLE_KEY',
-    ].filter(Boolean);
-    throw new Error(
-      `Admin credentials missing (${missing.join(', ')}) — admin login will not work. Expected ` +
-        `as keys in the project's .env.local for a local deploy, or as the matching ` +
-        `per-environment GitHub Environment secret(s) for a CI deploy.`,
-    );
-  }
-
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
-
-  // 4 attempts total (3 retries): [3s, 6s, 12s] backoff. Each attempt also
-  // pays waitForGotrueHealth's own ~10s internal poll (20 x 500ms) before
-  // declaring that attempt's port-forward unreachable, so the worst case is
-  // ~61s — generous for a transient blip against a pod helm --wait already
-  // confirmed Ready, well short of the cert-manager budget above (that one
-  // covers pods that may not even be scheduled yet).
-  // The retry ladder that lived here is REMOVED (band-aid removal,
-  // 2026-08-16): its enumerated triggers were GoTrue answering 500 while its
-  // DB session pool was refused (closed at the source by
-  // awaitPostgresAccepting) and forward wedges (owned per-attempt by the
-  // open→use→teardown lifecycle below). One attempt; a failure is loud and
-  // carries the full per-phase cause.
-  const attemptErrors = [];
-
-  // One attempt: open a fresh port-forward, wait for GoTrue to answer
-  // through it, POST the admin user, then always tear the forward down.
-  // Mirrors the registry push's per-attempt tunnel lifecycle (open →
-  // use → teardown in `finally`, registry-push.js) so a wedged forward from a failed attempt
-  // can't block the next attempt from re-opening the same localPort — kept
-  // fixed (not walked, unlike the push tunnel) because HA runs primary and
-  // standby's provisionAdminUser in parallel on adjacent bases (15000 /
-  // 15001, mirroring the 5000/5001 registry-tunnel split); a per-attempt
-  // port offset could walk one cluster's retry straight into the other's.
-  // The retry backoff (min 3s) is ample for kubectl port-forward to release
-  // the port after `pf.kill()`.
-  const attemptOnce = async () => {
-    // A spawn-level failure ('error', e.g. ENOENT) is captured by the helper
-    // rather than crashing the deploy as an unhandled ChildProcess event —
-    // folded into the same retry budget as any other reach failure, but now
-    // carrying its message instead of masquerading as a reach timeout.
-    const pf = openAdminPortForward({ localPort, env, spawnImpl });
-    try {
-      // Record the last health-poll fetch error through waitForGotrueHealth's
-      // existing `fetchImpl` seam. That helper returns a bare boolean by
-      // design (compose reads it the same way), so wrapping the fetch here
-      // keeps the cause without changing a contract shared with the compose
-      // path.
-      let lastFetchError = null;
-      const probeFetch = async (url, init) => {
-        // The forward is already gone; fail fast instead of spending the rest
-        // of the poll's budget fetching a closed port.
-        if (pf.dead) throw new Error('kubectl port-forward exited');
-        try {
-          const res = await fetchImpl(url, init);
-          if (!res.ok) lastFetchError = new Error(`HTTP ${res.status} from ${url}`);
-          return res;
-        } catch (err) {
-          lastFetchError = err;
-          throw err;
-        }
-      };
-
-      // Race the reach poll against the forward's own death so a bind
-      // collision (or a missing service) is classified immediately instead of
-      // after the poll burns its full ~10s budget.
-      const outcome = await Promise.race([
-        waitForGotrueHealth(`http://localhost:${localPort}/health`, {
-          attempts: 20,
-          intervalMs: 500,
-          fetchImpl: probeFetch,
-        }).then((ok) => (ok ? 'healthy' : 'unreachable')),
-        pf.settled.then(() => 'forward-died'),
-      ]);
-
-      if (outcome !== 'healthy') {
-        // Everything the next RCA needs, on one line: which port, what the
-        // last HTTP attempt actually said, and what kubectl itself reported.
-        //
-        // A bind collision gets an explicit remedy because this path CANNOT
-        // route around it: unlike compose's tunnel (which walks 19876 →
-        // 19885), the port here is fixed, since HA provisions primary and
-        // standby in parallel on adjacent bases (15000/15001) and a walk could
-        // step one cluster's retry straight onto the other's.
-        throw new Error(
-          `Could not reach GoTrue via kubectl port-forward on localhost:${localPort} ` +
-            `(last error: ${describeAdminFetchError(lastFetchError)}; ${pf.describe()})` +
-            (pf.bindConflict
-              ? `, local port ${localPort} is already bound (a leaked port-forward from an ` +
-                `earlier run, or another process on this machine). This port is fixed, not ` +
-                `walked: the HA pair provisions primary and standby in parallel on 15000/15001, ` +
-                `so walking could collide the two. Kill the stale forward and re-run.`
-              : ''),
-        );
-      }
-
-      const result = await postAdminUser({
-        adminUsersUrl: `http://localhost:${localPort}/admin/users`,
-        serviceRoleKey,
-        adminEmail,
-        adminPassword,
-      });
-      if (!result.success) {
-        throw new Error(result.message);
-      }
-      return result;
-    } finally {
-      // Every exit path — success, unreachable, POST failure and throw — reaps
-      // this attempt's forward.
-      pf.close();
-    }
-  };
-
-  try {
-    return await attemptOnce();
-  } catch (err) {
-    attemptErrors.push(err instanceof Error ? err.message : String(err));
-    // Loud failure (M3 Task 9h): no warning-and-continue crutch. States what
-    // failed, the consequence, and what was attempted so the operator/CI log
-    // is actionable without re-running to discover it. Framed as "admin-user
-    // provisioning failed" rather than "GoTrue unreachable" — attemptErrors
-    // can mix unreachable-port-forward failures with reachable-but-erroring
-    // postAdminUser calls (e.g. a transient 500), and the message must cover
-    // both. Numbered per-attempt, same shape as the registry push's
-    // exhausted-attempts error (registry-push.js).
-    throw new Error(
-      `GoTrue admin-user provisioning failed after ${attemptErrors.length} attempt${attemptErrors.length === 1 ? '' : 's'} — ` +
-        `admin login will not work. Errors: ${attemptErrors.map((m, i) => `[#${i + 1}] ${m}`).join(' | ')}`,
-    );
-  }
-}
-
-/**
- * The four `ALTER SYSTEM` settings that turn on continuous WAL archiving for
- * wal-g on the chart-installed supabase-db.
- */
-export const WAL_ARCHIVING_SETTINGS = [
-  "ALTER SYSTEM SET archive_mode='on'",
-  "ALTER SYSTEM SET archive_command='bash /etc/postgresql/wal-archive.sh %p'",
-  "ALTER SYSTEM SET archive_timeout='900'",
-  "ALTER SYSTEM SET wal_level='replica'",
-];
-
-/**
- * Build the `kubectl exec … psql …` argument list that enables WAL archiving.
- *
- * Each `ALTER SYSTEM` MUST be its own `-c` option. psql sends a single `-c`
- * string as one simple-query request, and Postgres runs a multi-statement
- * simple query inside ONE implicit transaction — where `ALTER SYSTEM` is
- * rejected with "ALTER SYSTEM cannot run inside a transaction block". The
- * documented remedy (and the compose/ha.js pattern) is to pass each statement
- * as a separate `-c`, so every ALTER SYSTEM is its own implicit transaction.
- *
- * @param {string} dbPod - e.g. `supabase-supabase-db-0`
- * @returns {string[]}
- */
-export function enableWalArchivingPsqlArgs(dbPod) {
-  return [
-    '-n',
-    'vibecarbon',
-    'exec',
-    dbPod,
-    '--',
-    'psql',
-    '-U',
-    'supabase_admin',
-    '-d',
-    'postgres',
-    ...WAL_ARCHIVING_SETTINGS.flatMap((stmt) => ['-c', stmt]),
-  ];
-}
-
-/**
  * Resolve every `{{K8S_STORAGE_CLASS}}` placeholder a kustomize directory's
  * manifests ship (observability's loki/grafana/prometheus PVCs today; any
  * future PVC-bearing addon that adopts the same placeholder) into a FRESH
@@ -3533,12 +2594,9 @@ export function enableWalArchivingPsqlArgs(dbPod) {
  * BEFORE `kubectl apply` ever creates the object, unlike the mutable-field
  * placeholders below (cert-manager domain, carbon-autoscaler image) that
  * get `kubectl patch`ed AFTER apply. And it must not overwrite the
- * project's own tracked files: mirrors `installSupabase`'s
- * supabase.values.yaml rendering, which reads the project's checked-in
- * template and writes the substituted result to a temp file for `helm -f`
- * rather than mutating the template in place — the same reasoning applies
- * here (a redeploy would otherwise leave the operator's git working tree
- * permanently dirty).
+ * project's own tracked files (a redeploy would otherwise leave the
+ * operator's git working tree permanently dirty). renderK8sBase applies the
+ * same rule to `k8s/base` and the db StatefulSet.
  *
  * RECURSIVE since 2026-08-06. It was flat, and its own note said "a future
  * addon that needs one would need this extended" — which had already happened
@@ -3556,10 +2614,6 @@ export function enableWalArchivingPsqlArgs(dbPod) {
  *   `kubectl apply -k` instead of `dir`.
  */
 export function renderK8sStorageClassPlaceholder(dir, storageClass) {
-  // Prefix carries the source dir's basename (e.g. `observability`) so the
-  // rendered path stays recognizable in `kubectl` error output/logs, and so
-  // any argv/log matching on the addon name (e.g. tests asserting the
-  // observability apply ran) still finds it after the path swap.
   // Fail loudly up front: k8s gives NO natural error for a bad value here.
   // A leftover `{{K8S_STORAGE_CLASS}}` is accepted by kubectl (free-form
   // reference, never DNS-1123-validated) and the PVC sits Pending forever;
@@ -3571,7 +2625,26 @@ export function renderK8sStorageClassPlaceholder(dir, storageClass) {
       'renderK8sStorageClassPlaceholder: unresolved placeholder target; ProviderClass.K8S_STORAGE_CLASS is empty',
     );
   }
-  const tmpDir = mkdtempSync(join(tmpdir(), `vibecarbon-k8s-storageclass-${basename(dir)}-`));
+  return renderK8sPlaceholders(dir, { K8S_STORAGE_CLASS: storageClass }, 'storageclass');
+}
+
+/**
+ * Copy a kustomize directory tree into a fresh temp dir, replacing every
+ * `{{KEY}}` for each KEY in `values` (recursively, every file). The source
+ * tree is never modified. Keys not in `values` are left as they are.
+ *
+ * @param {string} dir
+ * @param {Record<string, string>} values
+ * @param {string} label - lands in the temp dir's name, for logs
+ * @returns {string} the rendered temp copy
+ */
+function renderK8sPlaceholders(dir, values, label) {
+  // Prefix carries the source dir's basename (e.g. `observability`) so the
+  // rendered path stays recognizable in `kubectl` error output/logs, and so
+  // any argv/log matching on the addon name (e.g. tests asserting the
+  // observability apply ran) still finds it after the path swap.
+  const tmpDir = mkdtempSync(join(tmpdir(), `vibecarbon-k8s-${label}-${basename(dir)}-`));
+  const entries = Object.entries(values);
   const copyInto = (srcDir, destDir) => {
     for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
       const srcPath = join(srcDir, entry.name);
@@ -3581,13 +2654,12 @@ export function renderK8sStorageClassPlaceholder(dir, storageClass) {
         copyInto(srcPath, destPath);
         continue;
       }
-      const content = readFileSync(srcPath, 'utf-8');
-      writeFileSync(
-        destPath,
-        content.includes('{{K8S_STORAGE_CLASS}}')
-          ? content.replaceAll('{{K8S_STORAGE_CLASS}}', storageClass)
-          : content,
-      );
+      let content = readFileSync(srcPath, 'utf-8');
+      for (const [key, value] of entries) {
+        const token = `{{${key}}}`;
+        if (content.includes(token)) content = content.replaceAll(token, value);
+      }
+      writeFileSync(destPath, content);
     }
   };
   copyInto(dir, tmpDir);
@@ -3595,28 +2667,50 @@ export function renderK8sStorageClassPlaceholder(dir, storageClass) {
 }
 
 /**
- * `renderK8sStorageClassPlaceholder`, but a NO-OP when the tree has no
- * placeholder to resolve.
+ * Render `k8s/base` for apply: every db StatefulSet placeholder
+ * (buildDbManifestValues) plus `{{K8S_STORAGE_CLASS}}`, which the db's
+ * volumeClaimTemplate and the add-on PVCs `add redis` / `add n8n` copy into
+ * `k8s/base/<addon>/` share, into a temp copy of the tree.
  *
- * Applied to `k8s/base`, whose contents vary per project: only the addon
- * subdirectories `add` copies in (redis, n8n) carry the placeholder. Returning
- * the original path when there is nothing to substitute keeps the argv, the
- * kustomize root and every log line byte-identical for the overwhelmingly
- * common case, so the temp-copy path is entered only when it is load-bearing.
+ * Always a temp copy, never an in-place rewrite: the placeholders must be
+ * resolved BEFORE `kubectl apply` creates the objects (a StatefulSet's
+ * volumeClaimTemplates and a PVC's storageClassName are immutable), and a
+ * redeploy must not leave the operator's git working tree dirty.
  *
- * @param {string} dir
- * @param {string} storageClass
- * @returns {string} `dir` itself, or a rendered temp copy
+ * Refuses the result when `db/statefulset.yaml` still carries ANY
+ * `{{PLACEHOLDER}}`: the API server accepts a literal image or StorageClass
+ * name and fails much later and much less clearly (InvalidImageName, a PVC
+ * Pending forever) — and the volumeClaimTemplate cannot be fixed afterwards.
+ * A project whose base predates the db StatefulSet (no `db/` at all) is
+ * refused too: without it nothing would ever create the database.
+ *
+ * @param {string} dir - the project's `k8s/base`
+ * @param {Record<string, string>} values - buildDbManifestValues' output
+ * @returns {string} the rendered temp copy to pass to `kubectl apply -k`
  */
-export function renderK8sStorageClassPlaceholderIfPresent(dir, storageClass) {
-  const hasPlaceholder = (d) =>
-    readdirSync(d, { withFileTypes: true }).some((entry) => {
-      const full = join(d, entry.name);
-      if (entry.isDirectory()) return hasPlaceholder(full);
-      return readFileSync(full, 'utf-8').includes('{{K8S_STORAGE_CLASS}}');
-    });
-  if (!existsSync(dir) || !hasPlaceholder(dir)) return dir;
-  return renderK8sStorageClassPlaceholder(dir, storageClass);
+export function renderK8sBase(dir, values) {
+  if (!values?.K8S_STORAGE_CLASS) {
+    throw new Error('renderK8sBase: K8S_STORAGE_CLASS is empty, refusing to render the db PVC');
+  }
+  const sourceSts = join(dir, 'db', 'statefulset.yaml');
+  if (!existsSync(sourceSts)) {
+    throw new Error(
+      `renderK8sBase: ${sourceSts} is missing. This project's k8s/base predates the db ` +
+        'StatefulSet; run `vibecarbon upgrade` to bring the k8s manifests up to date.',
+    );
+  }
+  const rendered = renderK8sPlaceholders(dir, values, 'base');
+  const leftover = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8').match(
+    /\{\{[A-Z0-9_]+\}\}/g,
+  );
+  if (leftover) {
+    rmSync(rendered, { recursive: true, force: true });
+    throw new Error(
+      `renderK8sBase: db/statefulset.yaml still carries ${[...new Set(leftover)].join(', ')} after rendering; ` +
+        'refusing to apply a database with an unresolved image, prefix or StorageClass.',
+    );
+  }
+  return rendered;
 }
 
 /**
@@ -3654,15 +2748,17 @@ export function renderS3EgressVpcManifest(template, vpcCidrs) {
 
 /**
  * Apply cert-manager + vibecarbon-secrets + the project's k8s/infra +
- * k8s/base kustomizations, install supabase via helm, patch the app
- * deployment to use the locally-sideloaded image, and wait for rollout.
+ * k8s/base kustomizations (the db StatefulSet included, rendered), wait for
+ * the db, patch the app deployment to use the locally-sideloaded image, and
+ * wait for rollout.
  *
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: string|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, supabasePrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
- *   `restore` (when set, e.g. 'latest' or an ISO timestamp) skips applyMigrations
- *   — the wal-g-restored DB already carries schema_migrations.
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: string|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ *   `restore` is accepted for the caller's input hash and ignored here: the
+ *   wal-g-restored DB carries its migration ledger, so the app's startup
+ *   migrations apply only what the backup lacks (no restore special case).
  */
 export async function applyK3sManifests({
   kubeconfig,
@@ -3674,7 +2770,6 @@ export async function applyK3sManifests({
   domain,
   s3Config,
   backupBucketName,
-  restore,
   dnsProvider,
   // The ONE DNS-01 credential, already resolved for whichever `dnsProvider`
   // is selected (see DNS01_PROVIDERS). Never five per-provider token args:
@@ -3723,11 +2818,11 @@ export async function applyK3sManifests({
   localTunnelPort = 5000,
   // perfPrefix tags internal sub-stage perf timings — see deployK3s.
   perfPrefix = 'k3s',
-  // The supabase node's Hetzner private-network IP (deterministic in the IaC
+  // The database node's Hetzner private-network IP (deterministic in the IaC
   // program; deployK3s threads it through from infraOutputs). Rendered into
-  // the seed-standby init's SEED_PRIMARY_HOST via installSupabase — see
-  // installSupabase's {{REPL_RELAY_HOST}} replace.
-  supabasePrivateIp,
+  // the db StatefulSet's seed-standby init as SEED_PRIMARY_HOST
+  // ({{REPL_RELAY_HOST}}, see buildDbManifestValues).
+  dbPrivateIp,
   // The master's private-network IP (deterministic on Hetzner — static
   // 10.0.1.1 — but a real Pulumi output on DO, which can't pin VPC IPs).
   // deployK3s threads it through from infraOutputs. Passed to
@@ -3745,8 +2840,8 @@ export async function applyK3sManifests({
   // HetznerProvider.getS3EgressExtraCidrs ignores its argument entirely.
   vpcCidr,
   // Pilot-light: 'primary' | 'standby' | undefined (single-cluster ==
-  // primary behavior). Drives walgRole below and is forwarded to
-  // installSupabase so it can append the standby zero overlay `-f`.
+  // primary behavior). Drives walgRole below (rendered into the db
+  // StatefulSet) and zeroes the app tier on a standby.
   role,
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
@@ -3782,8 +2877,8 @@ export async function applyK3sManifests({
   //     `sig-storage/livenessprobe:v2.13.1`. That node's hcloud-csi-node pod
   //     never came up, so it never registered the driver, so its CSINode had no
   //     topology key — and the db PVC failed to provision with "no topology key
-  //     found on CSINode". installSupabase's `helm upgrade --wait` then sat
-  //     until its 15m timeout and the deploy died. The other two nodes pulled
+  //     found on CSINode". The db install's 15m wait then sat until its
+  //     timeout and the deploy died. The other two nodes pulled
   //     the identical images without trouble: registry.k8s.io routes by client
   //     IP, so the 403 is per-node roulette (full write-up: src/lib/images.js).
   //     (Those two tags are the INCIDENT's — csi-driver v2.9.0's. The Hetzner
@@ -4025,7 +3120,7 @@ export async function applyK3sManifests({
   //     cert-manager calls into for dns01.webhook(groupName=...). It must be
   //     Available BEFORE any Certificate referencing the issuer is
   //     reconciled, otherwise Orders fail with "no provider for solver".
-  //     Mirrors the Supabase pattern at step 7. `row.webhook` is null for
+  //     `row.webhook` is null for
   //     providers whose solver ships in cert-manager core (e.g. cloudflare)
   //     and DNS01_PROVIDERS has no entry at all for manual/unknown
   //     providers, so both skip this block exactly as the old
@@ -4053,8 +3148,8 @@ export async function applyK3sManifests({
       // ClusterIssuer's groupName, so we don't override it either.
       // Async helm + kubectl wait — both can block for minutes; sync would
       // block Node's event loop and inflate parallel-branch perf timings.
-      // See installSupabase above for the full RCA (iter-validate6 standby
-      // certManager.wait reporting 21min when actual was seconds).
+      // (RCA iter-validate6: a blocking wait on the primary made the standby's
+      // certManager.wait report 21min when the actual was seconds).
       //
       // The webhook warm-up retry that used to wrap this install is GONE
       // (band-aid removal, 2026-08-16): the third-party chart's own Issuer +
@@ -4213,26 +3308,55 @@ export async function applyK3sManifests({
       description: 'applyK3sManifests: kubectl apply Secret/carbon-autoscaler-config',
     });
   }
-  // 5. Apply base (namespace, network-policies, app, backup, traefik, config).
+  // 4c. The db pod's seed-standby init mounts this ConfigMap on its FIRST
+  //     boot, so it lands before base creates the StatefulSet.
+  await applyDbSeedConfigMap({ env });
+  // 5. Apply base (namespace, network-policies, db, app, backup, traefik,
+  //    config), always from a rendered temp copy (renderK8sBase): the db
+  //    StatefulSet carries deploy-time placeholders (image, wal-g prefix and
+  //    role, S3 endpoint, relay address, StorageClass), and so do the PVCs
+  //    `add redis` / `add n8n` copy into k8s/base/<addon>/. kubectl accepts a
+  //    literal storageClassName and the PVC sits Pending forever, and neither
+  //    a PVC's class nor a StatefulSet's volumeClaimTemplates can be changed
+  //    once the object exists, so the substitution has to happen before this
+  //    apply.
   //
-  // Rendered first when — and ONLY when — the tree carries an unresolved
-  // {{K8S_STORAGE_CLASS}}. `add redis` / `add n8n` copy their PVCs into
-  // k8s/base/<addon>/, and nothing ever substituted the placeholder on this
-  // path: kubectl accepts the literal (storageClassName is a free-form
-  // reference) and the PVC sits Pending forever. It cannot be patched after
-  // the fact — storageClassName is immutable once the object exists — so the
-  // substitution has to happen before this apply. A project with no such addon
-  // gets the original path, byte-identical argv included.
-  const baseDir = renderK8sStorageClassPlaceholderIfPresent(
+  // Derive the wal-g WRITE-GUARD role (NOT a path segment) from the explicit
+  // `role` option — the k8s-ha fan-out passes role: 'primary' / 'standby';
+  // single-cluster deploys leave role undefined → 'primary'. Rendered into the
+  // db container env as WALG_ROLE so wal-archive.sh + the backup CronJob
+  // no-op on the standby. The S3 prefix itself stays canonical.
+  const walgRole = role === 'standby' ? 'standby' : 'primary';
+  const storageClass = ProviderClass?.K8S_STORAGE_CLASS;
+  // A chart-era cluster keeps its database on the chart's StatefulSet; a new
+  // one beside it would be empty. Refuse before anything is created.
+  await assertNoRetiredChartDb({ env });
+  await assertDbStorageClass({ storageClass, env });
+  const baseDir = renderK8sBase(
     join(projectDir, 'k8s/base'),
-    ProviderClass.K8S_STORAGE_CLASS,
-  );
-  await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
-    runKubectlWithRetry(['apply', '-k', baseDir], {
-      env,
-      description: 'applyK3sManifests: kubectl apply -k k8s/base',
+    buildDbManifestValues({
+      dbImageTag,
+      projectName,
+      s3Config,
+      backupBucketName,
+      walgRole,
+      dbPrivateIp,
+      storageClass,
+      walArchiveSha: walArchiveConfigSha(projectDir),
     }),
   );
+  try {
+    await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
+      runKubectlWithRetry(['apply', '-k', baseDir], {
+        env,
+        description: 'applyK3sManifests: kubectl apply -k k8s/base',
+      }),
+    );
+  } finally {
+    // The rendered copy carries the bucket + endpoint wiring; it served its
+    // one apply.
+    rmSync(baseDir, { recursive: true, force: true });
+  }
   if (pilotStandby) {
     // Pilot-light: nothing app-tier runs on the 2-node standby. Declarative
     // zero via the same patch-at-deploy pattern as the placeholder patches
@@ -4338,16 +3462,16 @@ export async function applyK3sManifests({
   }
   // Push the app image to the in-cluster registry so CA-spawned workers
   // (which don't exist at sideload time) can pull it on first schedule.
-  // The db image is NOT pushed here: it's pinned to the static supabase
-  // node, reaches it via sideload, and the chart references it with
-  // imagePullPolicy: IfNotPresent — CA workers never run postgres.
+  // The db image is NOT pushed here: it's pulled from ghcr by the database
+  // node (pinned there, see k8s/base/db/statefulset.yaml) — CA workers never
+  // run postgres.
   const appPushPort = localTunnelPort;
   // Kick off the registry push CONCURRENTLY — do NOT await it here. It exists
   // only so future cluster-autoscaler-spawned workers can pull the app image;
   // the app pods themselves run the SIDELOADED image (step 6 sets
   // deployment/app to imageTag with imagePullPolicy: IfNotPresent), and NOTHING
   // between here and the end of this function reads the in-cluster registry. So
-  // this ~90-140s S3-blob upload overlaps the CA rollout + Supabase install +
+  // this ~90-140s S3-blob upload overlaps the CA rollout + db rollout +
   // migrations + app rollout instead of serializing onto the critical path. It
   // is still AWAITED at the end of applyK3sManifests (see the await below the
   // traefik restart) so a failed push — which would leave CA-scaled workers
@@ -4375,7 +3499,7 @@ export async function applyK3sManifests({
     }),
   );
   // Attach a no-op rejection guard so a push failure that lands WHILE the CA /
-  // Supabase work below is still running doesn't surface as an
+  // db work below is still running doesn't surface as an
   // unhandledRejection — the real `await registryPushPromise` at the end
   // re-throws it and fails the deploy.
   registryPushPromise.catch(() => {});
@@ -4547,8 +3671,8 @@ export async function applyK3sManifests({
         }),
       );
     } finally {
-      // Same cleanup contract as installSupabase's temp values files —
-      // deploys must not leak a temp dir per run (T4 review).
+      // Same cleanup contract as the rendered k8s/base copy — deploys must
+      // not leak a temp dir per run (T4 review).
       rmSync(renderedObservabilityDir, { recursive: true, force: true });
     }
     // Patch the LOCAL grafana-tls Certificate (issuer + dnsNames) in the
@@ -4666,282 +3790,40 @@ export async function applyK3sManifests({
       }
     });
   }
-  // 6. Patch the app deployment to use the sideloaded image BEFORE installSupabase.
-  //    base/ ships image=ghcr.io/<owner>/<repo>:main — no pull secret in
-  //    local-first mode, so leaving it pointed at GHCR triggers
-  //    ImagePullBackOff that races against installSupabase's `--wait`.
-  //    Switching now means the app pods come up on the sideloaded image
-  //    immediately; we still wait for rollout after Supabase converges.
+  // 6. Patch the app deployment to use the sideloaded image BEFORE waiting on
+  //    the db. base/ ships image=ghcr.io/<owner>/<repo>:main — no pull secret
+  //    in local-first mode, so leaving it pointed at GHCR triggers an
+  //    ImagePullBackOff for the whole db wait. Switching now means the app
+  //    pods come up on the sideloaded image immediately (their readiness stays
+  //    503 until the db answers); we still wait for their rollout below.
   await runKubectlWithRetry(
     ['-n', 'vibecarbon', 'set', 'image', 'deployment/app', `app=${imageTag}`],
     { env, description: 'applyK3sManifests: kubectl set image deployment/app' },
   );
-  // 7. Install Supabase via helm. Blocks until release converges (15m
-  //    timeout in chart). image.db points at the wal-g-equipped db image
-  //    (sideloaded in step 7b), and the chart mounts wal-archive.sh + the
-  //    non-secret WALG_* env from supabase.values.yaml.
-  // Derive the wal-g WRITE-GUARD role (NOT a path segment) from the explicit
-  // `role` option — Task 6 fans out deployK3s with role: 'primary' /
-  // 'standby'; single-cluster deploys leave role undefined → 'primary'.
-  // Rendered into the db container env as WALG_ROLE so wal-archive.sh + the
-  // backup CronJob no-op on the standby. The S3 prefix itself stays
-  // canonical (no role segment).
-  const walgRole = role === 'standby' ? 'standby' : 'primary';
-  await perfAsync(`deploy.${perfPrefix}.installSupabase`, async () =>
-    installSupabase({
-      kubeconfig,
-      projectDir,
-      projectName,
-      domain,
-      s3Config,
-      envLocal,
-      dbImageTag,
-      backupBucketName,
-      walgRole,
-      supabasePrivateIp,
-      role,
-      // The chart's PVCs must NOT inherit the cluster's default StorageClass —
-      // on k3s that can be node-local `local-path`, which silently breaks
-      // replication/failover/restore (RCA: kept k8s-ha rig e4, 2026-08-05).
-      // Same provider static the add-on manifests resolve
-      // `{{K8S_STORAGE_CLASS}}` from.
-      storageClass: ProviderClass?.K8S_STORAGE_CLASS,
-    }),
-  );
-  // 7b. Enable continuous WAL archiving on the supabase-db. The chart can't
-  //     inject secret env (environment.db is string-only) or postgres archive
-  //     flags, so we (a) ALTER SYSTEM the archive params (persisted to
-  //     postgresql.auto.conf on the PVC), and (b) inject the SECRET S3 creds
-  //     via a strategic-merge env patch (merged by env name → idempotent;
-  //     re-applied every deploy because helm upgrade strips non-chart env).
-  //     The cred patch rolls the pod when it changes the template; on first
-  //     enable that rollout is what makes postgres pick up archive_mode.
-  //     Skipped without S3 (dev / no backups configured).
-  if (s3Config?.accessKey) {
-    // Set when the block below rolls the db pod, so the wal-archive.sh
-    // freshness check that follows does not roll it a SECOND time.
-    let dbPodJustRolled = false;
-    await perfAsync(`deploy.${perfPrefix}.enableWalArchiving`, async () => {
-      const dbSts = 'supabase-supabase-db';
-      const dbPod = `${dbSts}-0`;
-      // Gate on ACCEPTING, not Running, before the psql calls below — the
-      // 0fbb296f RCA's root cause, closed at the source (mitigation-audit
-      // cluster 5). The per-call PSQL_LIFECYCLE ladder is REMOVED: a
-      // lifecycle FATAL past a proven-accepting gate is a regression and
-      // fails the deploy loudly.
-      await awaitPostgresAccepting({ env, dbPod });
-      // S3 creds reach the db container as a mounted file (helm-owned, see
-      // supabase.values.yaml walg-s3-creds volume) — no env patch, so no
-      // db restart on warm deploys. Only the archive params need ALTER
-      // SYSTEM, and archive_mode flips only with a RESTART. So: check the
-      // RUNNING archive_mode; if already 'on' (persisted in
-      // postgresql.auto.conf from a prior enable), this is a warm deploy —
-      // nothing to do. If 'off', set the params and restart ONCE.
-      let archiveMode = '';
-      try {
-        archiveMode = (
-          await runKubectlWithRetry(
-            [
-              '-n',
-              'vibecarbon',
-              'exec',
-              dbPod,
-              '--',
-              'psql',
-              '-U',
-              'supabase_admin',
-              '-d',
-              'postgres',
-              '-tAc',
-              'SHOW archive_mode',
-            ],
-            {
-              env,
-              captureStdout: true,
-              description: 'applyK3sManifests: read archive_mode',
-            },
-          )
-        )
-          ?.toString()
-          .trim();
-      } catch {
-        // Treat an unreadable value as "not yet enabled" — the worst case is
-        // one extra ALTER SYSTEM + restart, which is idempotent.
-      }
-      if (archiveMode === 'on') {
-        progressLog('[k3s] WAL archiving already enabled, skipping ALTER SYSTEM + restart.');
-        return;
-      }
-      await runKubectlWithRetry(enableWalArchivingPsqlArgs(dbPod), {
-        env,
-        description: 'applyK3sManifests: enable WAL archiving (ALTER SYSTEM)',
-      });
-      // archive_mode requires a restart (reload is insufficient). Restart the
-      // StatefulSet ONCE; persisted to postgresql.auto.conf on the PVC, so
-      // subsequent deploys hit the archiveMode==='on' fast path above.
-      await runKubectlWithRetry(
-        ['-n', 'vibecarbon', 'rollout', 'restart', `statefulset/${dbSts}`],
-        { env, description: 'applyK3sManifests: restart supabase-db to enable WAL archiving' },
-      );
-      await runKubectlWithRetry(
-        ['-n', 'vibecarbon', 'rollout', 'status', `statefulset/${dbSts}`, '--timeout=300s'],
-        { env, description: 'applyK3sManifests: wait supabase-db rollout (WAL archiving)' },
-      );
-      dbPodJustRolled = true;
-    });
-    // 7c. Make a CHANGED wal-archive.sh actually reach the running database.
-    //
-    // The script is mounted with `subPath: wal-archive.sh`
-    // (carbon/k8s/values/supabase.values.yaml), and a subPath ConfigMap mount is
-    // NEVER updated in place by the kubelet — unlike a whole-directory mount, it
-    // is materialised once at container start. So `kubectl apply` of a new
-    // ConfigMap changes the object and changes nothing the database executes:
-    // the old script keeps running until the pod is recreated for some unrelated
-    // reason. That is not a theoretical staleness window — it is how a fix to
-    // this script reaches ZERO existing clusters on a routine `vibecarbon
-    // deploy` (the failover path self-heals only because `set env` rolls the
-    // pod, which routine deploys never do).
-    //
-    // So: hash what we shipped, keep it in an annotation on the StatefulSet, and
-    // roll the pod when the two disagree. The hash covers the WHOLE ConfigMap
-    // file rather than just the script body — a superset, deliberately: it needs
-    // no YAML parsing (this module carries no YAML dependency), it cannot drift
-    // from how the file is applied, and the only cost of the extra breadth is
-    // one db roll if someone edits a comment in that file.
-    await perfAsync(`deploy.${perfPrefix}.walArchiveScriptFreshness`, async () => {
-      const dbSts = 'supabase-supabase-db';
-      const cmPath = join(projectDir, 'k8s/base/backup/configmap-walg.yaml');
-      if (!existsSync(cmPath)) return;
-      const want = createHash('sha256').update(readFileSync(cmPath)).digest('hex').slice(0, 16);
-      let have = '';
-      try {
-        have = (
-          await runKubectlWithRetry(
-            [
-              '-n',
-              'vibecarbon',
-              'get',
-              `statefulset/${dbSts}`,
-              '-o',
-              `jsonpath={.metadata.annotations.${WAL_ARCHIVE_SHA_ANNOTATION.replace(/\./g, '\\.')}}`,
-            ],
-            { env, captureStdout: true, description: 'applyK3sManifests: read wal-archive sha' },
-          )
-        )
-          ?.toString()
-          .trim();
-      } catch {
-        // Unreadable annotation == unknown == treat as stale. One extra roll is
-        // the safe direction; silently running a stale archive_command is not.
-      }
-      if (have === want) {
-        progressLog('[k3s] wal-archive.sh is current in the db pod; no restart needed.');
-        return;
-      }
-      // A pod that this deploy ALREADY recreated is running the current
-      // ConfigMap by construction — record the hash, skip the second roll.
-      if (dbPodJustRolled) {
-        progressLog('[k3s] db pod was just rolled, wal-archive.sh is current.');
-      } else {
-        progressLog('[k3s] wal-archive.sh changed, restarting supabase-db so it takes effect.');
-        await runKubectlWithRetry(
-          ['-n', 'vibecarbon', 'rollout', 'restart', `statefulset/${dbSts}`],
-          { env, description: 'applyK3sManifests: restart supabase-db (wal-archive.sh changed)' },
-        );
-        await runKubectlWithRetry(
-          ['-n', 'vibecarbon', 'rollout', 'status', `statefulset/${dbSts}`, '--timeout=300s'],
-          { env, description: 'applyK3sManifests: wait supabase-db rollout (wal-archive.sh)' },
-        );
-      }
-      await runKubectlWithRetry(
-        [
-          '-n',
-          'vibecarbon',
-          'annotate',
-          `statefulset/${dbSts}`,
-          `${WAL_ARCHIVE_SHA_ANNOTATION}=${want}`,
-          '--overwrite',
-        ],
-        { env, description: 'applyK3sManifests: record wal-archive.sh sha' },
-      );
-    });
-  }
+  // 7. Wait for the db StatefulSet (applied with base in step 5) to be Ready:
+  //    WAL archiving is on from its first boot (startup flags, see
+  //    k8s/base/db/statefulset.yaml), so there is no archiving setup or
+  //    restart after it. A changed wal-archive.sh rolls the pod through its
+  //    template's sha annotation, inside this same wait.
+  await perfAsync(`deploy.${perfPrefix}.awaitDb`, () => awaitDbRollout({ env }));
+  // Gate the psql-bearing steps after this (the RLS audit, the wal-g audit,
+  // the HA primary configuration) on the condition, not the proxy: the pod
+  // being Ready is its readiness probe's verdict at one instant, and this
+  // re-proves the REAL server accepts TCP right now (mitigation-audit
+  // cluster 5 root fix; the d4 run-2 RCA in awaitPostgresAccepting).
+  await awaitPostgresAccepting({ env, dbPod: DB_POD });
   // NOTE: the wal-g backup audit deliberately does NOT live here. It is the one
   // check whose subject can rot with ZERO in-cluster change (keys revoked at the
   // provider, bucket deleted), so it must not sit behind the persisted
   // `k3s-apply` skip gate — see deployK3s, which runs it unconditionally.
-  // 8. Apply project SQL migrations against the chart-installed postgres.
-  //    SKIPPED when restoring: a wal-g restore brings the full DB including
-  //    supabase_migrations.schema_migrations, so re-running migrations would
-  //    hit duplicate-key errors (applyMigrations deliberately does not
-  //    swallow them). On a normal deploy, helm's `--wait` guarantees the db
-  //    pod is up; without migrations the app's /api/health/ready 503s.
-  if (pilotStandby) {
-    // Pilot-light: no app tier is reading the schema on a standby yet, and
-    // applyMigrations execs against a pod whose migrations wouldn't matter —
-    // skip both it and its nested waitForSupabaseStorageSchema poll.
-    console.error('[pilot-standby] skipping applyMigrations, app tier is zeroed until failover');
-    console.error(
-      '[pilot-standby] skipping waitForSupabaseStorageSchema, app tier is zeroed until failover',
-    );
-  } else if (restore) {
-    progressLog(
-      `[k3s] restore=${restore} requested, skipping applyMigrations (restored DB carries schema_migrations).`,
-    );
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.applyMigrations`, async () =>
-      applyMigrations({ kubeconfig, projectDir }),
-    );
-  }
-  // 8b. Reload PostgREST's schema cache so it sees the tables applyMigrations
-  //     just created. rest came up during helm --wait (before migrations) and
-  //     no DDL-watch trigger exists to auto-NOTIFY — without this, /rest/v1/*
-  //     404s with PGRST205 until rest restarts. Mirrors the compose fix.
-  if (pilotStandby) {
-    console.error('[pilot-standby] skipping reloadPostgrest, app tier is zeroed until failover');
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.reloadPostgrest`, async () =>
-      reloadPostgrest({ kubeconfig }),
-    );
-  }
-  // 8c. Create the production app super-admin via GoTrue's admin API. Mirrors
-  //     the compose path — without it the operator can't log into their own
-  //     deployed app (ADMIN_* only seeds the Studio dashboard secret, never an
-  //     auth.users row). Runs unconditionally (incl. restore: idempotent on
-  //     422, and a backup predating admin-creation still gets seeded). In HA
-  //     both clusters run this against their independently-writable DB at
-  //     deploy time (same as applyMigrations); the localPort is derived from
-  //     localTunnelPort so the parallel primary/standby port-forwards don't
-  //     race for the same bind. FATAL on ANY failure (M3 Task 9h, fix round
-  //     1): provisionAdminUser retries the whole port-forward + HTTP flow
-  //     under its own budget and throws once it's exhausted, AND throws
-  //     immediately on missing admin credentials — no soft return remains.
-  //     A transient blip here used to warn-and-continue, shipping a deploy
-  //     with no admin.users row behind a false "success" (battery d3 run 6);
-  //     a missing/misnamed CI secret hit the exact same failure mode via the
-  //     credentials-missing branch.
-  //     SKIPPED on a pilot standby: GoTrue isn't running yet (auth Deployment
-  //     is part of the zeroed app tier), so the port-forward would just spin
-  //     until provisionAdminUser's retry budget is exhausted.
-  if (pilotStandby) {
-    console.error('[pilot-standby] skipping createAdminUser, app tier is zeroed until failover');
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.createAdminUser`, async () => {
-      // provisionAdminUser now always either succeeds or throws (see its
-      // doc comment) — no soft-fail return remains to branch on here.
-      const adminResult = await provisionAdminUser({
-        kubeconfig,
-        envLocal,
-        localPort: 15000 + (localTunnelPort - 5000),
-      });
-      progressLog(`[k3s] ${adminResult.message}`);
-    });
-  }
+  // 8. No migration step: the app applies db/migrations itself at startup
+  //    (under an advisory lock, so replicas take turns) and the readiness
+  //    probe stays 503 until it has. A restored database carries its ledger,
+  //    so there is no restore special case either.
   // 9. Wait for app rollout. The deployment template already has
   //    imagePullPolicy: IfNotPresent, so kubelet uses the sideloaded image
   //    without pulling. 300s wasn't enough on a cold deploy where the app
-  //    pods stay Pending behind kong/auth converge — bump to 10m to match
-  //    the helm `--wait` budget.
+  //    pods stay unready until the database converges, hence 10m.
   //
   //    Retry on apiserver-warm-up transients. iter-postpush + iter-validate2
   //    both saw `kubectl rollout status` fast-fail in ~10s on the k8s-ha
@@ -4960,7 +3842,14 @@ export async function applyK3sManifests({
     // rollout to wait on.
     console.error('[pilot-standby] skipping rolloutApp, app tier is zeroed until failover');
   } else {
-    await perfAsync(`deploy.${perfPrefix}.rolloutApp`, async () => {
+    // The rollout waits on readiness, which stays 503 until the app's
+    // startup migrations are applied. A FAILED migration never becomes ready,
+    // so a watcher polls the app's own health probe alongside the rollout and
+    // fails the deploy at once on MIGRATIONS_FAILED (with the app log tail)
+    // instead of at the rollout's 600 s timeout. Whichever settles first wins;
+    // the other is stopped (the rollout child is killed through the signal).
+    const rolloutAbort = new AbortController();
+    const rollout = perfAsync(`deploy.${perfPrefix}.rolloutApp`, async () => {
       const rolloutArgs = [
         '-n',
         'vibecarbon',
@@ -4982,6 +3871,7 @@ export async function applyK3sManifests({
           const child = spawn('kubectl', rolloutArgs, {
             env,
             stdio: ['ignore', 'inherit', 'pipe'],
+            signal: rolloutAbort.signal,
           });
           let stderrBuf = '';
           child.stderr?.on('data', (chunk) => {
@@ -5015,6 +3905,31 @@ export async function applyK3sManifests({
         },
       );
     });
+    const migrationWatch = watchAppMigrationFailure({ env, signal: rolloutAbort.signal });
+    try {
+      await Promise.race([rollout, migrationWatch]);
+    } finally {
+      rolloutAbort.abort();
+      // The loser settles after the abort; its outcome no longer matters.
+      rollout.catch(() => {});
+      migrationWatch.catch(() => {});
+    }
+  }
+  // 9b. Wait for the app to report its migrations applied and its super
+  //     admin ready (one probe). The app migrates, then creates the admin
+  //     at startup from ADMIN_EMAIL / ADMIN_PASSWORD (delivered through the
+  //     vibecarbon-secrets envFrom, see SECRET_KEYS) once the database
+  //     answers; the deploy is not done until the operator can sign in.
+  //     Runs on restore too (a backup predating the admin still gets one).
+  //     SKIPPED on a pilot standby: its app tier is zeroed until failover,
+  //     and the admin row arrives with the replicated database.
+  if (pilotStandby) {
+    console.error('[pilot-standby] skipping awaitAppAdminReady, app tier is zeroed until failover');
+  } else {
+    await perfAsync(`deploy.${perfPrefix}.awaitAdminReady`, () => awaitAppAdminReady({ env }));
+    // 9c. The app has migrated the database (awaitAppAdminReady waits for
+    //     migrationStatus 'applied'): audit the live catalog for RLS.
+    await perfAsync(`deploy.${perfPrefix}.auditRls`, () => auditRls({ kubeconfig }));
   }
   // 10. Force-restart traefik so it starts AFTER kube-router has installed
   //     iptables rules for the NetworkPolicies. RCA from k8s-hetzner
@@ -5077,7 +3992,7 @@ export async function applyK3sManifests({
   }
   // Block on the backgrounded in-cluster registry push (kicked off right after
   // localRegistry.wait, above). It ran concurrently with the CA rollout +
-  // Supabase install + migrations + app rollout — nothing above reads the
+  // db rollout + migrations + app rollout — nothing above reads the
   // registry — so awaiting it here keeps a failed push FATAL to the deploy
   // (CA-scaled workers must be able to pull the app image) without having
   // serialized its ~90-140s S3 upload onto the critical path.
@@ -5091,7 +4006,7 @@ export async function applyK3sManifests({
  * App install + sideload land in a follow-up commit (Task 7).
  *
  * @param {K3sDeployOptions} options
- * @returns {Promise<{masterIp: string, floatingIp: string, supabaseIp: string, supabasePrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string}>}
+ * @returns {Promise<{masterIp: string, floatingIp: string, dbIp: string, dbPrivateIp: string, workerIps: string[], networkId: string|number, kubeconfig: string, sshKeyPath: string}>}
  */
 /**
  * Probe an existing Pulumi stack for its k3s token so a re-deploy replays it.
@@ -5180,7 +4095,7 @@ export async function deployK3s(options) {
   // when Hetzner recycles a public IP).
   const khPath = knownHostsPath(options.environment, projectDir);
 
-  // 3. Pulumi up — provisions network, firewall, master, supabase, workers,
+  // 3. Pulumi up — provisions network, firewall, master, database, workers,
   //    floating IP. Cloud-init runs k3s install + hcloud-ccm/csi on each node.
   // Phase 5: Pulumi sees `minWorkers` (static floor) only; `maxWorkers`
   // is consumed by the cluster-autoscaler patch in applyK3sManifests
@@ -5192,7 +4107,7 @@ export async function deployK3s(options) {
   const infraInputs = {
     region: options.region,
     masterType: options.masterServerType,
-    supabaseType: options.supabaseServerType,
+    dbType: options.dbServerType,
     workerType: options.workerServerType,
     minWorkers,
     maxWorkers,
@@ -5214,8 +4129,7 @@ export async function deployK3s(options) {
       location: options.region,
       masterServerType:
         options.masterServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
-      supabaseServerType:
-        options.supabaseServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
+      dbServerType: options.dbServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
       workerServerType:
         options.workerServerType || options.serverType || Provider.DEFAULT_K8S_NODE_TYPE,
       minWorkers,
@@ -5282,22 +4196,22 @@ export async function deployK3s(options) {
     // (redeploy) to refresh the persisted outputs.
     masterPrivateIp,
     floatingIp,
-    supabaseIp,
-    supabasePrivateIp,
+    dbIp,
+    dbPrivateIp,
     workerIps,
     networkId,
     // DO-only real Pulumi output (the Vpc's actual ipRange). Fallback
     // default (Provider.DEFAULT_VPC_CIDR — empty string on Hetzner,
     // '10.10.0.0/20' on DO) covers state.json step results persisted
     // before this field existed, same reasoning as
-    // masterPrivateIp/supabasePrivateIp above. HetznerProvider.
+    // masterPrivateIp/dbPrivateIp above. HetznerProvider.
     // getS3EgressExtraCidrs ignores this value entirely, so an unused ''
     // fallback there is harmless.
     vpcCidr = Provider.DEFAULT_VPC_CIDR,
   } = infraOutputs;
-  if (!masterPrivateIp || !supabasePrivateIp) {
+  if (!masterPrivateIp || !dbPrivateIp) {
     throw new Error(
-      'k3s-infra step result is missing masterPrivateIp/supabasePrivateIp — the IaC ' +
+      'k3s-infra step result is missing masterPrivateIp/dbPrivateIp — the IaC ' +
         'program outputs both; a stale persisted step result predates them. ' +
         'Re-run the infra step (redeploy) to refresh the outputs.',
     );
@@ -5329,7 +4243,7 @@ export async function deployK3s(options) {
   // per-IP line). Best-effort: if ssh-keyscan can't reach a node we fall back
   // to accept-new TOFU. See host-keys.js seedKnownHosts for the full security
   // rationale (why only provisioning re-seeds).
-  for (const seedIp of [masterIp, supabaseIp, ...(workerIps ?? [])].filter(Boolean)) {
+  for (const seedIp of [masterIp, dbIp, ...(workerIps ?? [])].filter(Boolean)) {
     await seedKnownHosts(khPath, seedIp);
   }
 
@@ -5340,24 +4254,29 @@ export async function deployK3s(options) {
   // callback is not awaited and must never fail this deploy.
   if (typeof options.onInfraReady === 'function') {
     try {
-      options.onInfraReady({ masterIp, floatingIp, supabaseIp, supabasePrivateIp });
+      options.onInfraReady({ masterIp, floatingIp, dbIp, dbPrivateIp });
     } catch {
       // opportunistic hook — a listener bug must not break the deploy
     }
   }
 
+  // The wal-g-equipped db image is a pre-published image pulled from ghcr —
+  // no per-deploy build or sideload. The db StatefulSet's container and both
+  // its inits reference it (see buildDbManifestValues).
+  const dbImageTag = resolveDbImageTag();
+
   // Opportunistic image pre-pull on every node — deliberately NOT awaited: it
   // overlaps the build/sideload/manifest work below so kubelet finds the
-  // images already present when helm installs (slow-pull regions measured
-  // ~135s of the helm wait in image pulls alone) and when the
-  // cluster-autoscaler rollout wait starts (a 403'd CA pull ate the full 300s
-  // budget on 2026-07-31). Any failure just means kubelet pulls on demand,
-  // exactly as before.
+  // images already present when the db StatefulSet starts (its image pull
+  // is a cold boot's first cost) and when the cluster-autoscaler rollout wait
+  // starts (a 403'd CA pull ate the full 300s budget on 2026-07-31). Any
+  // failure just means kubelet pulls on demand.
   const prePullStart = Date.now();
-  prePullChartImages({
-    nodeIps: [masterIp, supabaseIp, ...(workerIps ?? [])],
+  prePullImages({
+    nodeIps: [masterIp, dbIp, ...(workerIps ?? [])],
     sshKeyPath: privateKeyPath,
     khPath,
+    extraImages: [dbImageTag],
   })
     .then((r) => console.error(formatPrePullSummary(r, Date.now() - prePullStart)))
     .catch((err) =>
@@ -5414,21 +4333,15 @@ export async function deployK3s(options) {
   }
   const { tag: imageTag } = state.getStepResult('k3s-build');
 
-  // 7. The wal-g-equipped db image (supabase/postgres + wal-g) is now a
-  //    pre-published, multi-arch image pulled from ghcr — no per-deploy build
-  //    or sideload. The supabase Helm chart's image.db + the walg-restore init
-  //    container both reference it (see installSupabase + supabase.values.yaml).
-  const dbImageTag = resolveDbImageTag();
-
   // 7b. Sideload to every node (parallel SSH within sideloadK3s) AND fan out
   //     the app+db sideloads against each other. Both writes go through
   //     `docker save | ssh ... gunzip | k3s ctr import` against disjoint
   //     image refs on the same target nodes — kernel disk buffer + sshd
   //     multiplex two parallel streams. Critical path = max(app, db).
-  //     The db image only NEEDS the supabase node (db is pinned there), but
+  //     The db image only NEEDS the database node (db is pinned there), but
   //     sideloading to all nodes is harmless and keeps the target list shared.
   const sshTargets = [`root@${masterIp}`];
-  if (supabaseIp) sshTargets.push(`root@${supabaseIp}`);
+  if (dbIp) sshTargets.push(`root@${dbIp}`);
   for (const wIp of workerIps ?? []) sshTargets.push(`root@${wIp}`);
   const sideloadInputs = { imageTag, targets: sshTargets.join(',') };
   const sideloadTasks = [];
@@ -5446,7 +4359,7 @@ export async function deployK3s(options) {
     s.stop('Sideload complete (app)');
   }
 
-  // 8. Apply manifests + supabase Helm release + roll out the app.
+  // 8. Apply manifests (the db StatefulSet included) + roll out the app.
   // The gate folds the CONTENT of BOTH applied manifest trees (the project
   // copy and the CLI's own bundled `carbon/k8s`) into its inputs — see
   // buildK3sApplyInputs for why each one is load-bearing.
@@ -5455,13 +4368,13 @@ export async function deployK3s(options) {
     dbImageTag,
     restore: options.restore,
     projectDir,
-    // The Supabase chart's PVC classes are rendered from this provider static,
+    // The db StatefulSet's PVC class is rendered from this provider static,
     // and no manifest digest can see it — see buildK3sApplyInputs.
     storageClass: Provider.K8S_STORAGE_CLASS,
   });
   if (!state.shouldSkip('k3s-apply', applyInputs)) {
     state.startStep('k3s-apply', applyInputs);
-    s.start('Applying k8s manifests + installing Supabase + rolling out app');
+    s.start('Applying k8s manifests + starting the database + rolling out app');
     const envLocal = loadEnvLocal(join(projectDir, '.env.local'));
     await perfAsync(`deploy.${perfPrefix}.applyManifests`, () =>
       applyK3sManifests({
@@ -5497,7 +4410,7 @@ export async function deployK3s(options) {
         region: options.region,
         environment: options.environment,
         // Pilot-light: 'primary' | 'standby' | undefined — drives walgRole
-        // and installSupabase's standby zero-overlay. The k8s-ha fan-out
+        // and the zeroed standby app tier. The k8s-ha fan-out
         // (Task 6) passes this; single-cluster deploys leave it undefined
         // (== primary behavior).
         role: options.role,
@@ -5519,10 +4432,10 @@ export async function deployK3s(options) {
         // for `localhost:5000` on the operator host. Single-cluster
         // deploys leave it undefined → applyK3sManifests defaults to 5000.
         localTunnelPort: options.localTunnelPort,
-        // The supabase node's own private IP — installSupabase renders it
+        // The database node's own private IP — rendered (buildDbManifestValues)
         // into the seed-standby init's SEED_PRIMARY_HOST (repl-gateway relay
         // endpoint). Already in scope from infraOutputs (returned below).
-        supabasePrivateIp,
+        dbPrivateIp,
         // M3 Task 2: the master's own private IP — renderCarbonAutoscalerConfig
         // (CA-spawned worker join target) and pushImageToLocalRegistry
         // (registry-ref host, must match buildAppImage's masterPrivateIp
@@ -5565,12 +4478,12 @@ export async function deployK3s(options) {
   return {
     masterIp,
     floatingIp,
-    supabaseIp,
-    // The supabase node's Hetzner private-network IP (deterministic in the IaC
+    dbIp,
+    // The database node's Hetzner private-network IP (deterministic in the IaC
     // program, but threaded through the output rather than hardcoded at the use
     // site). setupReplication renders it into the repl-gateway egress
     // NetworkPolicy + socat bind for this cluster.
-    supabasePrivateIp,
+    dbPrivateIp,
     workerIps,
     networkId,
     kubeconfig,

@@ -5,7 +5,7 @@
  * Skips automatically if PERF_BASE_URL is unset or the target is unreachable.
  *
  * Usage:
- *   PERF_BASE_URL=http://localhost:8000 pnpm test:loadtest
+ *   PERF_BASE_URL=http://localhost:3000 pnpm test:loadtest
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

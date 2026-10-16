@@ -904,21 +904,27 @@ export class S3CompatibleProvider {
   }
 
   /**
-   * Configure CORS policy for browser uploads
+   * Set the CORS policy browsers need for presigned uploads (PUT) and reads
+   * (GET/HEAD) straight against the bucket. Scoped to explicit origins; a
+   * wildcard is refused so a private bucket never answers credentialed
+   * requests from arbitrary sites.
    * @param {string} bucketName - Bucket name
-   * @param {string[]} [allowedOrigins=['*']] - Allowed origins
+   * @param {string[]} allowedOrigins - Exact origins, e.g. ['https://example.com']
    * @returns {Promise<void>}
    */
-  async configureCORS(bucketName, allowedOrigins = ['*']) {
+  async setBucketCors(bucketName, allowedOrigins) {
+    if (!allowedOrigins?.length || allowedOrigins.includes('*')) {
+      throw new Error('Bucket CORS needs explicit origins; a wildcard origin is not allowed.');
+    }
     const command = new PutBucketCorsCommand({
       Bucket: bucketName,
       CORSConfiguration: {
         CORSRules: [
           {
-            AllowedHeaders: ['*'],
-            AllowedMethods: ['GET', 'PUT', 'POST', 'DELETE', 'HEAD'],
             AllowedOrigins: allowedOrigins,
-            ExposeHeaders: ['ETag', 'Content-Length', 'Content-Type'],
+            AllowedMethods: ['GET', 'PUT', 'HEAD'],
+            AllowedHeaders: ['content-type', 'content-length'],
+            ExposeHeaders: ['ETag'],
             MaxAgeSeconds: 3600,
           },
         ],

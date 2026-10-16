@@ -31,7 +31,7 @@ Behind the scenes, `create` generates secure secrets, copies the template, insta
 
 | Category | Features |
 |----------|----------|
-| Auth | Email/password, magic links, OAuth (Google, GitHub, Microsoft, Apple, Discord), MFA |
+| Auth | Email/password, magic links, OAuth (Google, Microsoft), MFA |
 | Billing | Multi-provider (Stripe, Paddle, Polar) subscriptions, checkout, portal, plan gating |
 | Admin | Super admin panel, user/org management, impersonation, notifications, jobs, contact, newsletter |
 | Content | MDX blog, changelog, docs (with search), legal pages (privacy, terms) |
@@ -48,7 +48,7 @@ vibecarbon up
 
 This single command boots your entire development environment:
 
-1. **Starts Docker services**: PostgreSQL, Supabase (Auth, REST, Realtime, Storage, Studio), and Traefik reverse proxy
+1. **Starts Docker services**: your PostgreSQL database, a local S3 service for file uploads, and the Traefik reverse proxy
 2. **Runs database migrations**: creates tables, security policies, and your admin user
 3. **Launches dev servers**: Hono API on port 3000 and Vite on port 5173 with hot reloading
 
@@ -59,7 +59,6 @@ Open [http://app.localhost](http://app.localhost) and sign in with the credentia
 | Service | URL |
 |---------|-----|
 | App | http://app.localhost |
-| Supabase Studio | http://studio.localhost |
 | Traefik Dashboard | http://traefik.localhost |
 
 ### Documentation visibility
@@ -106,15 +105,15 @@ src/
 ├── server/              # Hono API (Node.js)
 └── shared/              # Shared TypeScript types
 
-supabase/
-└── migrations/          # SQL migrations
+db/
+└── migrations/          # Database migrations (Drizzle), applied at startup
 
 content/
 ├── blog/                # Blog posts (MDX)
 ├── changelog/           # Release notes (MDX)
 └── docs/                # Documentation (MDX)
 
-docker-compose.yml       # Local dev environment (Supabase, Traefik)
+docker-compose.yml       # Local dev environment (Postgres, Traefik)
 docker-compose.prod.yml  # Production overlay
 k8s/                     # Kubernetes manifests (Kustomize)
 .env.local               # Local environment variables (git-ignored)
@@ -125,7 +124,7 @@ k8s/                     # Kubernetes manifests (Kustomize)
 - [CLI Reference](/docs/cli): all commands, options, and flags
 - [Development](/docs/development): commands, adding pages, routes, and content
 - [Authentication](/docs/authentication): sign-in methods and security
-- [Database](/docs/database): Supabase, migrations, and RLS
+- [Database](/docs/database): Postgres, migrations, and RLS
 - [Deployment](/docs/deployment): deploy to production
 - [Background Jobs](/docs/background-jobs): scheduled tasks with pg_cron
 - [Analytics](/docs/analytics): privacy-friendly analytics with Plausible

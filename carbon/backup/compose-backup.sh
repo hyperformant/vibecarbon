@@ -29,7 +29,7 @@ echo "=== Vibecarbon Compose Backup (wal-g) ==="
 echo "Started at $(date)"
 echo "Retain: ${RETAIN} full base backups"
 
-# wal-g connects to PG via libpq; PGUSER=supabase_admin is REQUIRED (only the
+# wal-g connects to PG via libpq; PGUSER=postgres is REQUIRED (only the
 # superuser may call pg_backup_start; unset, libpq defaults to OS user root →
 # "role root does not exist"). The pg_is_in_recovery()='f' guard makes the
 # backup a no-op on a standby (exit 0), so only the primary pushes to S3.
@@ -43,7 +43,7 @@ echo "Retain: ${RETAIN} full base backups"
 # the container is robust: it tests the actual env wal-g sees (source of truth),
 # covers both the cron and on-demand paths, and needs no deploy-time S3 plumbing.
 docker compose exec -T db bash -c '
-  export PGUSER=supabase_admin PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
+  export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
   case "${WALG_S3_PREFIX:-}" in
     ""|s3:///*)
       echo "scheduled backup skipped: no S3 backup target configured (empty WALG_S3_PREFIX)."
@@ -62,8 +62,8 @@ docker compose exec -T db bash -c '
     echo "WALG_ROLE=standby — skipping base backup (only the primary writes to the canonical prefix)."
     exit 0
   fi
-  if [ "$(psql -U supabase_admin -d postgres -tAc "SELECT pg_is_in_recovery()")" != "f" ]; then
-    echo "supabase-db is in recovery (standby) — skipping base backup."
+  if [ "$(psql -U postgres -d postgres -tAc "SELECT pg_is_in_recovery()")" != "f" ]; then
+    echo "db is in recovery (standby) — skipping base backup."
     exit 0
   fi
   # `delete garbage BACKUPS` sweeps sentinel-less orphans (an interrupted

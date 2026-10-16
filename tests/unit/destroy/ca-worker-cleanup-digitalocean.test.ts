@@ -159,16 +159,16 @@ describe('cleanupAutoscalerWorkers — DigitalOcean fixtures (Task 7)', () => {
     expect(result).toEqual({ deleted: [], failed: [], volumeIds: [] });
   });
 
-  it('excludes Pulumi-managed droplets tagged role=master/supabase/worker', async () => {
+  it('excludes Pulumi-managed droplets tagged role=master/database/worker', async () => {
     installFetchRouter({
       vpcs: [{ id: VPC_ID, name: `${CLUSTER_NAME}-network` }],
       droplets: [
         { id: 401, name: 'master-1', vpc_uuid: VPC_ID, tags: encodeLabels({ role: 'master' }) },
         {
           id: 402,
-          name: 'supabase-1',
+          name: 'db-1',
           vpc_uuid: VPC_ID,
-          tags: encodeLabels({ role: 'supabase' }),
+          tags: encodeLabels({ role: 'db' }),
         },
         { id: 403, name: 'worker-1', vpc_uuid: VPC_ID, tags: encodeLabels({ role: 'worker' }) },
       ],

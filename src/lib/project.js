@@ -220,12 +220,10 @@ export function findEnvDrift(cwd = process.cwd()) {
  * present (see findMissingRequiredEnv).
  */
 export const COMPOSE_REQUIRED_ENV_FALLBACK = Object.freeze([
-  'DB_ENC_KEY',
-  'JWT_SECRET',
-  'PG_META_CRYPTO_KEY',
+  'ADMIN_EMAIL',
+  'ADMIN_PASSWORD',
+  'BETTER_AUTH_SECRET',
   'POSTGRES_PASSWORD',
-  'REALTIME_SECRET',
-  'VAULT_ENC_KEY',
 ]);
 
 /**
@@ -234,8 +232,8 @@ export const COMPOSE_REQUIRED_ENV_FALLBACK = Object.freeze([
  * baseline.
  *
  * Compose marks a hard-required variable as `${KEY:?message}`; the shipped
- * stack uses that for the secrets `vibecarbon create` writes (JWT_SECRET,
- * POSTGRES_PASSWORD, …). This reads exactly those markers out of the
+ * stack uses that for the secrets `vibecarbon create` writes
+ * (BETTER_AUTH_SECRET, POSTGRES_PASSWORD, …). This reads exactly those markers out of the
  * project's `docker-compose.prod.yml`, so the preflight and the runtime agree
  * by construction. `${KEY:-default}` and bare `${KEY}` are not required and
  * are ignored.
@@ -528,7 +526,7 @@ const PROJECT_GIT_ADD_ALLOWLIST = [
   'backup/',
   'ha/',
   'k8s/',
-  'supabase/',
+  'db/',
   'cloud-init/',
   'volumes/',
   // Docs and metadata

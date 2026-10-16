@@ -1,13 +1,13 @@
-import type { User } from '@supabase/supabase-js';
+import type { AuthUser as User } from '@server/auth';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HonoVariables } from '@server/types';
 
 const { orderMock } = vi.hoisted(() => ({ orderMock: vi.fn() }));
 
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({ select: () => ({ eq: () => ({ order: orderMock }) }) }),
+vi.mock('@server/db/client', () => ({
+  adminDb: {
+    select: () => ({ from: () => ({ where: () => ({ orderBy: orderMock }) }) }),
   },
 }));
 vi.mock('@server/lib/email', () => ({ sendEmail: vi.fn().mockResolvedValue(undefined) }));
@@ -38,15 +38,15 @@ describe('admin newsletter super-admin guard (requireSuperAdmin)', () => {
   });
 
   it('returns 403 for a non-super-admin (guard no longer fails closed for admins)', async () => {
-    const res = await appWithUser({ id: 'u1', app_metadata: { role: 'authenticated' } }).request(
+    const res = await appWithUser({ id: 'u1', role: 'authenticated' }).request(
       '/api/v1/admin/newsletter/export'
     );
     expect(res.status).toBe(403);
   });
 
   it('allows a super_admin through', async () => {
-    orderMock.mockResolvedValue({ data: [], error: null });
-    const res = await appWithUser({ id: 'u1', app_metadata: { role: 'super_admin' } }).request(
+    orderMock.mockResolvedValue([]);
+    const res = await appWithUser({ id: 'u1', role: 'super_admin' }).request(
       '/api/v1/admin/newsletter/export'
     );
     expect(res.status).toBe(200);
@@ -55,27 +55,24 @@ describe('admin newsletter super-admin guard (requireSuperAdmin)', () => {
 
 describe('newsletter CSV export escaping (formula/CSV injection)', () => {
   it('SECURITY: neutralizes a formula-triggering name and quotes fields', async () => {
-    orderMock.mockResolvedValue({
-      data: [
-        {
-          email: 'a@b.com',
-          name: '=SUM(1+1)',
-          status: 'active',
-          subscribed_at: null,
-          created_at: '2026-01-01',
-        },
-        {
-          email: 'c@d.com',
-          name: 'Ada, "The First"',
-          status: 'active',
-          subscribed_at: '2026-01-02',
-          created_at: '2026-01-03',
-        },
-      ],
-      error: null,
-    });
+    orderMock.mockResolvedValue([
+      {
+        email: 'a@b.com',
+        name: '=SUM(1+1)',
+        status: 'active',
+        subscribedAt: null,
+        createdAt: '2026-01-01 00:00:00+00',
+      },
+      {
+        email: 'c@d.com',
+        name: 'Ada, "The First"',
+        status: 'active',
+        subscribedAt: '2026-01-02 00:00:00+00',
+        createdAt: '2026-01-03 00:00:00+00',
+      },
+    ]);
 
-    const res = await appWithUser({ id: 'u1', app_metadata: { role: 'super_admin' } }).request(
+    const res = await appWithUser({ id: 'u1', role: 'super_admin' }).request(
       '/api/v1/admin/newsletter/export'
     );
     expect(res.status).toBe(200);

@@ -3,13 +3,14 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 /**
- * Regression guard for "Missing Supabase environment variables" after a scale.
+ * Regression guard for a frontend bundle built without its VITE_* values after
+ * a scale.
  *
  * Vite inlines import.meta.env.VITE_* at build time. The deploy (orchestrator.js)
  * and HA (compose/ha.js) paths pass collectComposeBuildArgs() to buildRemote so
- * the new server's frontend bundle gets the real VITE_SUPABASE_URL/ANON_KEY.
- * scale.js originally rebuilt the app image with NO build args, shipping an empty
- * VITE_SUPABASE_URL and breaking the site post-scale. This is a source-level
+ * the new server's frontend bundle gets the real VITE_* values (VITE_PUBLIC_URL
+ * and the feature flags). scale.js originally rebuilt the app image with NO
+ * build args, shipping empty values and breaking the site post-scale. This is a source-level
  * guard (scale's build step has no unit harness — it's exercised in e2e, which
  * did not verify the frontend after scaling).
  */

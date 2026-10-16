@@ -58,18 +58,15 @@ import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
-// sibling providers (SSH, k8s API for future parity, Supavisor poolers).
+// sibling providers (SSH, k8s API for future parity).
 // Numeric: Scaleway rules carry dest_port_from/dest_port_to as numbers.
 const SSH_PORT = 22;
 const K8S_API_PORT = 6443;
-const POOLER_SESSION_PORT = 5432;
-const POOLER_TRANSACTION_PORT = 6543;
-const OPERATOR_LOCKED_PORTS = new Set([
-  SSH_PORT,
-  K8S_API_PORT,
-  POOLER_SESSION_PORT,
-  POOLER_TRANSACTION_PORT,
-]);
+const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs; applyOperatorCidrs deletes any such rule (the database has no
+// public port).
+const RETIRED_DB_PORTS = new Set([5432, 6543]);
 
 // WireGuard replication port (wireguard.js WG_PORT) — only reachable via
 // compose-ha (declared since tier-parity wave 1). Numeric (see above).
@@ -409,32 +406,54 @@ export class ScalewayProvider extends BaseProvider {
   static K8S_IMAGE = '';
 
   // ── ARM guard ───────────────────────────────────────────────────────────
-  // Scaleway sells real ARM lines: BASIC2-A* ('A' = arm64 vs BASIC3-X*'s
-  // 'X' = x86_64; live catalog arch field) and the COPARM1 line. The
-  // fallback catalog is all-x86 and fetchServerTypes() filters arm64 out,
-  // but the predicate must still recognize the SKUs so `-type BASIC2-A2C-4G`
-  // is rejected with a reason.
+  // Scaleway sells real arm64 lines. The catalog names them with an 'A'
+  // core letter where the x86 twin has 'X' (BASIC2-A2C-4G vs BASIC3-X2C-4G,
+  // STANDARD2-A2C-8G vs STANDARD3-X2C-8G), and the older COPARM1 line.
+  // The authoritative answer is the `arch` field the products/servers
+  // catalog reports for each commercial type: fetchServerTypes() records it
+  // for EVERY type (arm64 included) in _typeArch, and isArmServerType reads
+  // that first. The name rule below is the fallback for when the catalog
+  // was not (or could not be) fetched, or does not list the type. It covers
+  // every arm64 family seen in the live catalog (2026-10-16: BASIC2-A*,
+  // STANDARD2-A*; COPARM1 historically) and any future `<FAMILY><n>-A<n>C-`
+  // line, and matches no x86 type in that catalog.
+
+  /** @type {RegExp} */
+  static ARM_NAME_RULE = /^(?:[A-Z]+\d*-A\d+C-|COPARM)/i;
+
+  /**
+   * Commercial type → `arch` as reported by the live catalog (`x86_64`,
+   * `arm64`), across every REGIONS zone. null until fetchServerTypes()
+   * completes a full walk.
+   * @type {Record<string, string>|null}
+   */
+  static _typeArch = null;
 
   /**
    * @param {string} serverType
    * @returns {boolean}
    */
   static isArmServerType(serverType) {
-    return /^(?:BASIC\d+-A|COPARM)/i.test(serverType || '');
+    if (!serverType) return false;
+    const arch = ScalewayProvider._typeArch?.[serverType.toUpperCase()];
+    if (arch) return arch !== 'x86_64';
+    return ScalewayProvider.ARM_NAME_RULE.test(serverType);
   }
 
   /**
-   * Size-preserving ARM→x86 map: BASIC2-A<N>C-<M>G shares its core/RAM
-   * shape with BASIC3-X<N>C-<M>G (live catalog: BASIC2-A2C-4G is 2c/4G,
-   * BASIC3-X2C-4G is 2c/4G) — swap the family. Anything else (COPARM,
-   * unknown ARM spellings) falls back to DEFAULT_TYPE.
+   * Size-preserving ARM→x86 map: the arm64 BASIC2/STANDARD2 types share
+   * their core/RAM shape with the x86 BASIC3/STANDARD3 types (live
+   * catalog: BASIC2-A2C-4G and BASIC3-X2C-4G are both 2c/4G,
+   * STANDARD2-A2C-8G and STANDARD3-X2C-8G are both 2c/8G), so swap the
+   * family and keep the shape when that type is in the catalog. Anything
+   * else (COPARM, unknown ARM spellings) falls back to DEFAULT_TYPE.
    * @param {string} serverType
    * @returns {string}
    */
   static armToAmd64Equivalent(serverType) {
-    const m = /^BASIC\d+-A(\d+C-\d+G)$/i.exec(serverType || '');
+    const m = /^(BASIC|STANDARD)\d+-A(\d+C-\d+G)$/i.exec(serverType || '');
     if (m) {
-      const candidate = `BASIC3-X${m[1].toUpperCase()}`;
+      const candidate = `${m[1].toUpperCase()}3-X${m[2].toUpperCase()}`;
       if (candidate in ScalewayProvider.SERVER_TYPES) return candidate;
     }
     return ScalewayProvider.DEFAULT_TYPE;
@@ -453,7 +472,7 @@ export class ScalewayProvider extends BaseProvider {
   }
 
   /** @returns {Promise<never>} */
-  static async getK8sSupabaseUserData() {
+  static async getK8sDbUserData() {
     throw new Error("Scaleway's k8s tier is not built — SUPPORTED_TIERS is compose-only");
   }
 
@@ -507,6 +526,7 @@ export class ScalewayProvider extends BaseProvider {
     try {
       const types = {};
       const locationTypes = {};
+      const typeArch = {};
       for (const zone of Object.keys(ScalewayProvider.REGIONS)) {
         const servers = {};
         for (let page = 1; page <= 20; page++) {
@@ -521,6 +541,9 @@ export class ScalewayProvider extends BaseProvider {
           if (Object.keys(pageServers).length < 100) break;
         }
         for (const [name, spec] of Object.entries(servers)) {
+          // Record every type's arch (arm64 too) so isArmServerType can
+          // classify a typed-in SKU by what Scaleway says it is.
+          if (spec.arch) typeArch[name.toUpperCase()] = spec.arch;
           if (spec.arch !== 'x86_64') continue; // amd64-only catalog
           if (spec.end_of_service) continue;
           types[name] = {
@@ -540,6 +563,7 @@ export class ScalewayProvider extends BaseProvider {
 
       ScalewayProvider.SERVER_TYPES = types;
       ScalewayProvider._locationTypes = locationTypes;
+      ScalewayProvider._typeArch = typeArch;
       return true;
     } catch {
       return false;
@@ -578,15 +602,15 @@ export class ScalewayProvider extends BaseProvider {
   /**
    * Region-appropriate default server types — fixed roles. DEV1-M is the
    * audited fallback family (present wherever BASIC3 is, in our REGIONS
-   * set) and carries the master/worker roles for cost; supabase gets the
+   * set) and carries the master/worker roles for cost; db gets the
    * baseline type.
    * @param {string} _region - interface parity; unused
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     return {
       masterType: 'DEV1-M',
-      supabaseType: ScalewayProvider.DEFAULT_TYPE,
+      dbType: ScalewayProvider.DEFAULT_TYPE,
       workerType: 'DEV1-M',
     };
   }
@@ -630,7 +654,7 @@ export class ScalewayProvider extends BaseProvider {
     if (available) {
       if (available.has(serverType)) return serverType;
       const defaults = ScalewayProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.supabaseType) return defaults.supabaseType;
+      if (serverType === defaults.dbType) return defaults.dbType;
       return defaults.masterType;
     }
 
@@ -1395,7 +1419,8 @@ export class ScalewayProvider extends BaseProvider {
 
   /**
    * Rewrite the operator-locked ports' inbound rules to the given CIDR
-   * list, leaving every other rule unchanged. Scaleway rules carry ONE
+   * list, deleting any inbound TCP/5432 or TCP/6543 rule (RETIRED_DB_PORTS),
+   * and leaving every other rule unchanged. Scaleway rules carry ONE
    * ip_range each, so each locked port gets one rule PER CIDR (the same
    * expansion the compose program applies at create time); the whole set
    * lands in one atomic PUT (closest in shape to Hetzner's
@@ -1412,7 +1437,13 @@ export class ScalewayProvider extends BaseProvider {
       r.direction === 'inbound' &&
       r.protocol === 'TCP' &&
       OPERATOR_LOCKED_PORTS.has(Number(r.dest_port_from));
-    const kept = (fw.rules || []).filter((r) => !isLocked(r)).map(({ id: _id, ...rest }) => rest);
+    const isRetiredDbPort = (r) =>
+      r.direction === 'inbound' &&
+      r.protocol === 'TCP' &&
+      RETIRED_DB_PORTS.has(Number(r.dest_port_from));
+    const kept = (fw.rules || [])
+      .filter((r) => !isLocked(r) && !isRetiredDbPort(r))
+      .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
       ...new Set((fw.rules || []).filter(isLocked).map((r) => Number(r.dest_port_from))),
     ];

@@ -190,8 +190,7 @@ export default function Dashboard() {
 
   const greeting = t(getGreetingKey());
   const initials = getUserInitials(user);
-  const firstName =
-    user?.user_metadata?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there';
+  const firstName = user?.name?.split(' ')[0] || user?.email?.split('@')[0] || 'there';
   const formattedDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
     month: 'long',

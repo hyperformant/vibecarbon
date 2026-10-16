@@ -8,11 +8,11 @@ import { describe, expect, it } from 'vitest';
 // Compose merges the `ports` sequence across `-f` files by CONCATENATION, so an
 // empty list contributes nothing and every entry from the base file survives.
 // Seven overlay sites relied on the opposite, each with a comment claiming it
-// dropped the host port. The most consequential was kong: `docker compose -f
-// docker-compose.yml -f docker-compose.prod.yml` (the exact pair
-// deployCompose uses — src/lib/deploy/compose/index.js) still published the
-// unauthenticated Supabase gateway on host 8000/8443, bypassing Traefik and
-// TLS entirely. Only the cloud firewall's 22/80/443 allowlist stopped external
+// dropped the host port. The most consequential was the (since removed) API
+// gateway: `docker compose -f docker-compose.yml -f docker-compose.prod.yml`
+// (the exact pair deployCompose uses — src/lib/deploy/compose/index.js) still
+// published it unauthenticated on host 8000/8443, bypassing Traefik and TLS
+// entirely. Only the cloud firewall's 22/80/443 allowlist stopped external
 // reach — and `vibecarbon scale` creates its replacement server with no
 // firewall at all, so on a scaled host it was reachable.
 //
@@ -76,11 +76,6 @@ const RESET_SITES = [
  */
 const LOAD_BEARING_BASE_PUBLICATIONS = [
   {
-    file: 'carbon/docker-compose.yml',
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal compose ${VAR:-default} placeholders
-    published: ['${DEV_KONG_PORT:-8000}:8000/tcp', '${DEV_KONG_SSL_PORT:-8443}:8443/tcp'],
-  },
-  {
     file: 'services/observability/compose/docker-compose.yml',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: literal compose ${VAR:-default} placeholders
     published: ['${DEV_PROMETHEUS_PORT:-9190}:9090', '${DEV_LOKI_PORT:-3100}:3100'],
@@ -135,40 +130,5 @@ describe('compose overlays clear inherited port publications with !reset, never 
         ).toContain(mapping);
       }
     }
-  });
-
-  it('kong is bound to LOOPBACK in prod — never removed, never on 0.0.0.0', () => {
-    // Kong is a special case among the seven. It cannot simply lose its
-    // publication: createAdminUser reaches the gateway over
-    // `ssh -L <port>:localhost:8000` (compose/index.js), and an -L forward
-    // target resolves ON THE SERVER, so with nothing bound to the host's 8000
-    // the tunnel fails hard (ExitOnForwardFailure=yes) and admin-user
-    // provisioning breaks on every compose deploy.
-    //
-    // 127.0.0.1 satisfies both halves: the tunnel still works, and the
-    // gateway is unreachable from off-box no matter what the firewall says.
-    // `!override` (replace the list) rather than `!reset` (remove the key).
-    const prod = readFileSync(join(repoRoot, 'carbon/docker-compose.prod.yml'), 'utf-8');
-    const rawBlock = prod.split(/^ {2}kong:\s*$/m)[1]?.split(/\n {2}\w[\w-]*:\s*$/m)[0] ?? '';
-    // Judge CODE, not prose — the block's comment explains the old 8443 bug.
-    const kongBlock = rawBlock
-      .split('\n')
-      .filter((line) => !/^\s*#/.test(line))
-      .join('\n');
-
-    expect(kongBlock, 'kong must replace the inherited list, not append to it').toMatch(
-      /ports:\s*!override/,
-    );
-    expect(kongBlock, 'the ssh -L admin tunnel needs 8000 on the loopback').toMatch(
-      /- ["']127\.0\.0\.1:8000:8000["']/,
-    );
-    // Every publication kong declares must carry an explicit loopback host_ip.
-    const publications = kongBlock.match(/^\s+- ["']?[\d.:]+["']?\s*$/gm) ?? [];
-    expect(publications.length, 'expected at least one kong publication').toBeGreaterThan(0);
-    for (const pub of publications) {
-      expect(pub, `kong publication ${pub.trim()} must be loopback-bound`).toMatch(/127\.0\.0\.1:/);
-    }
-    // 8443 is gone entirely — nothing tunnels to it and TLS ends at Traefik.
-    expect(kongBlock).not.toMatch(/8443/);
   });
 });

@@ -224,12 +224,16 @@ jobs:
           # event payload), but the shape stays uniform with every other job.
           SRC: ${{ matrix.src }}
           DST: ${{ matrix.dst }}
+          PINNED: ${{ matrix.digest }}
         # Upstream publishes a multi-platform index. vibecarbon runs x86-64
         # only (see tests/unit/deploy/workflow-platforms.test.ts), so resolve
         # the linux/amd64 child manifest and copy just that — hauling the other
         # platforms' blobs into our org would be pure storage tax. The digest is
-        # RESOLVED AT RUN TIME from upstream's tag; it is not a digest pin in a
-        # template (the house rule) — what ships in the manifest is a tag.
+        # PINNED in src/lib/images.js (MirroredImage.digest) and every deployed
+        # ref carries it (`name:tag@digest`). The job resolves upstream's tag at
+        # run time only to prove it still points at that pin: if upstream
+        # retagged, the leg fails and asks for a re-pin rather than shipping
+        # bits nobody reviewed.
         #
         # `imagetools create` is a registry-side manifest copy: it re-pushes
         # the same layer blobs and the same config, so the mirrored image is
@@ -253,12 +257,20 @@ jobs:
             exit 1
           fi
           echo "resolved amd64 manifest: $DIGEST"
-          docker buildx imagetools create --tag "$DST" "${SRC%:*}@$DIGEST"
-      - name: Verify the mirrored tag resolves
+          if [ "$DIGEST" != "$PINNED" ]; then
+            echo "::error::$SRC linux/amd64 is $DIGEST, but src/lib/images.js pins $PINNED; re-pin after reviewing upstream's change" >&2
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$DST" "${SRC%:*}@$PINNED"
+      - name: Verify the mirrored tag and the pinned digest resolve
         env:
           DST: ${{ matrix.dst }}
+          PINNED: ${{ matrix.digest }}
         # Authenticated inspect only — this cannot prove the package is public.
         # That flip is a manual, one-time operator step (see the job header),
         # and it is per PACKAGE, not per tag: flipping csi-provisioner once
         # covers every tag this matrix pushes under that name.
-        run: docker buildx imagetools inspect "$DST"
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$DST"
+          docker buildx imagetools inspect "$DST@$PINNED"

@@ -5,8 +5,8 @@
  * Class (named per the family-sweep discipline): "db StatefulSet
  * boot/rollout budget too tight for CSI volume settle". Instance that
  * bought this: run 33252884427's k8s-ha reconverge — the reseed's
- * standbyBoot `kubectl rollout status statefulset/supabase-supabase-db
- * --timeout=300s` timed out on DigitalOcean while the standby was still
+ * standbyBoot `kubectl rollout status statefulset/<db> --timeout=300s` (the
+ * database then ran from a Helm chart; it is now statefulset/db) timed out on DigitalOcean while the standby was still
  * settling CSI detach/attach; the failure diagnostics captured ~1 minute
  * later showed the pod 1/1 Running and every pod Ready. A healthy boot,
  * failed by its own budget. Hetzner CSI was already documented as
@@ -29,6 +29,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { DB_ROLLOUT_TIMEOUT_S } from '../../../src/lib/deploy/k8s/k3s.js';
 import { DB_STS_BOOT_TIMEOUT_S } from '../../../src/lib/deploy/replication.js';
 
 const FILES = ['src/lib/deploy/k8s/ha/index.js', 'src/lib/deploy/replication.js'];
@@ -49,6 +50,12 @@ function dbStsTimeoutLiterals(source: string): Array<{ line: number; seconds: nu
 describe('db StatefulSet boot/rollout budgets (the CSI-settle class)', () => {
   it('pins the shared budget to 600s — DO CSI settle exceeded 300s on a healthy boot', () => {
     expect(DB_STS_BOOT_TIMEOUT_S).toBe(600);
+  });
+
+  it('the deploy-time db rollout wait (k3s.js awaitDbRollout) never drops below the shared floor', () => {
+    // A first boot pays everything a re-boot does (CSI attach) plus the first
+    // provision, the image pull and initdb, so it gets its own larger budget.
+    expect(DB_ROLLOUT_TIMEOUT_S).toBeGreaterThanOrEqual(DB_STS_BOOT_TIMEOUT_S);
   });
 
   for (const file of FILES) {

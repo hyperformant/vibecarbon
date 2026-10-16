@@ -340,7 +340,7 @@ describe('cluster-autoscaler rbac.yaml — untouched', () => {
     const clusterRole = docs.find((d) => d.kind === 'ClusterRole');
 
     const storageRules = (clusterRole?.rules ?? []).filter((r) =>
-      r.apiGroups.includes('storage.k8s.io'),
+      r.apiGroups.some((group) => group === 'storage.k8s.io'),
     );
     const volumeAttachmentRule = storageRules.find((r) =>
       r.resources.includes('volumeattachments'),

@@ -43,6 +43,7 @@ vi.mock('../../../src/lib/deploy/k8s/index.js', () => ({
 }));
 
 const { convergeClusterInfra } = await import('../../../src/lib/iac/converge-cluster.js');
+const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
 
 /** Fake Provider that records the config passed to each getK8sProgram call. */
 function makeProvider() {
@@ -54,6 +55,9 @@ function makeProvider() {
       return async () => ({});
     }),
     promptObjectStorageCredentials: promptSpy,
+    // The real (polymorphic) guard with Hetzner's ARM predicate and wording.
+    assertAmd64ServerType: (type: string, source: string) =>
+      HetznerProvider.assertAmd64ServerType(type, source),
   };
   return { Provider, programCalls, promptSpy };
 }
@@ -200,20 +204,20 @@ describe('convergeClusterInfra', () => {
     expect(long.programCalls[0].workerServerType).toBe('cpx41');
   });
 
-  // I5: the long-form master/supabase server-type overrides (what
+  // I5: the long-form master/database server-type overrides (what
   // provisionStandbyCapacity pins from envConfig.ha.standby.*ServerType) must
   // also reach the program config, or the failover converge re-derives them
   // from the primary's types and plans an in-place resize of the standby's
   // master/db node.
-  it('(e2) maps long-form master/supabase server-type overrides into the program config', async () => {
+  it('(e2) maps long-form master/database server-type overrides into the program config', async () => {
     const { Provider, programCalls } = makeProvider();
     await convergeClusterInfra({
       ...baseArgs(),
       Provider,
-      overrides: { masterServerType: 'cpx31', supabaseServerType: 'cpx41' },
+      overrides: { masterServerType: 'cpx31', dbServerType: 'cpx41' },
     });
     expect(programCalls[0].masterServerType).toBe('cpx31');
-    expect(programCalls[0].supabaseServerType).toBe('cpx41');
+    expect(programCalls[0].dbServerType).toBe('cpx41');
   });
 
   // Minor: the master-replace abort weaves the caller's action word so a DR
@@ -247,5 +251,41 @@ describe('convergeClusterInfra', () => {
         action: 'failover',
       }),
     ).rejects.toThrow(/Refusing to failover/);
+  });
+
+  // F4 (arch audit 2026-10-15): the persisted per-role types are reused
+  // verbatim for every role a run does not override (scale with no `-type`,
+  // the CA worker-pool re-patch). An ARM type hand-edited into
+  // .vibecarbon.json after deploy must be refused before any stack work,
+  // with the same message a flag gets.
+  it('(g) refuses an ARM type persisted in .vibecarbon.json before touching the stack', async () => {
+    const { Provider, programCalls } = makeProvider();
+    const args = baseArgs({
+      envConfig: { minWorkers: 2, maxWorkers: 5, serverType: 'cpx22', workerServerType: 'cax21' },
+    });
+    await expect(convergeClusterInfra({ ...args, Provider })).rejects.toThrow(
+      ".vibecarbon.json workerServerType: 'cax21' is an ARM (aarch64) Hetzner Cloud server type.",
+    );
+    expect(programCalls).toHaveLength(0);
+    expect(getOrCreateStackMock).not.toHaveBeenCalled();
+    expect(upStackMock).not.toHaveBeenCalled();
+  });
+
+  it('(g2) names serverType when the ARM type comes from the unified default', async () => {
+    const { Provider } = makeProvider();
+    const args = baseArgs({ envConfig: { minWorkers: 2, maxWorkers: 5, serverType: 'cax11' } });
+    await expect(convergeClusterInfra({ ...args, Provider })).rejects.toThrow(
+      ".vibecarbon.json serverType: 'cax11' is an ARM",
+    );
+  });
+
+  it('(g3) does not refuse a persisted ARM role the run overrides with an x86 type', async () => {
+    const { Provider, programCalls } = makeProvider();
+    const args = baseArgs({
+      envConfig: { minWorkers: 2, maxWorkers: 5, serverType: 'cpx22', workerServerType: 'cax21' },
+      overrides: { workerType: 'cpx32' },
+    });
+    await convergeClusterInfra({ ...args, Provider });
+    expect(programCalls[0].workerServerType).toBe('cpx32');
   });
 });

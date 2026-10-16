@@ -38,7 +38,7 @@ describe('renderBundle envOverrides', () => {
 
     const stage = renderBundle('myproj', {
       envOverrides: {
-        SUPABASE_SERVICE_ROLE_KEY: 'srk-from-old-server',
+        SMTP_PASS: 'smtp-from-old-server',
         S3_ACCESS_KEY: 'AKIA-from-old-server',
       },
     });
@@ -48,7 +48,7 @@ describe('renderBundle envOverrides', () => {
       // Local key preserved
       expect(env.FOO).toBe('local');
       // Override keys appended
-      expect(env.SUPABASE_SERVICE_ROLE_KEY).toBe('srk-from-old-server');
+      expect(env.SMTP_PASS).toBe('smtp-from-old-server');
       expect(env.S3_ACCESS_KEY).toBe('AKIA-from-old-server');
       // PROJECT_NAME is set by renderBundle when projectName is given
       expect(env.PROJECT_NAME).toBe('myproj');
@@ -100,7 +100,7 @@ describe('renderBundle envOverrides', () => {
   });
 
   it('lets options.domain-derived overrides win over envOverrides', () => {
-    // domain → DOMAIN/SITE_URL/SUPABASE_URL/ACME_EMAIL is set after
+    // domain → DOMAIN/SITE_URL/ACME_EMAIL is set after
     // envOverrides spread, so the deploy-time domain wins. This guards
     // against scale silently re-pinning a stale domain from the old env.
     projectDir = makeProjectDir('');
@@ -319,9 +319,9 @@ describe('renderBundle tls-default.yml', () => {
 
     try {
       const tls = readFileSync(join(stage, 'volumes', 'traefik', 'tls-default.yml'), 'utf-8');
-      // HTTP-01: studio.<domain> is main; apex app owns its own cert; no
+      // HTTP-01: dashboard.<domain> is main; apex app owns its own cert; no
       // wildcard; no api. host exists under single-origin routing
-      expect(tls).toContain('main: "studio.e1.carbonstack.dev"');
+      expect(tls).toContain('main: "dashboard.e1.carbonstack.dev"');
       expect(tls).not.toContain('main: "e1.carbonstack.dev"');
       expect(tls).not.toContain('api.e1.carbonstack.dev');
       expect(tls).toContain('grafana.e1.carbonstack.dev');

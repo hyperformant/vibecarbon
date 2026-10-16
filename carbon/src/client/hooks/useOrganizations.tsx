@@ -9,6 +9,7 @@ import {
   useState,
 } from 'react';
 import { useAuth } from '@/components/auth/AuthProvider';
+import { apiFetch } from '@/lib/api';
 
 export type OrganizationRole = 'OWNER' | 'ADMIN' | 'MEMBER';
 
@@ -77,7 +78,7 @@ function transformMemberships(data: Record<string, unknown>[]): Membership[] {
 }
 
 export function OrganizationsProvider({ children }: { children: ReactNode }) {
-  const { user, session } = useAuth();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [selectedOrganization, setSelectedOrganization] = useState<Organization | null>(null);
 
@@ -89,9 +90,7 @@ export function OrganizationsProvider({ children }: { children: ReactNode }) {
   } = useQuery({
     queryKey: ['organizations', user?.id],
     queryFn: async () => {
-      const response = await fetch('/api/v1/me', {
-        headers: { Authorization: `Bearer ${session?.access_token}` },
-      });
+      const response = await apiFetch('/api/v1/me');
 
       if (!response.ok) {
         throw new Error('Failed to fetch organizations');
@@ -100,7 +99,7 @@ export function OrganizationsProvider({ children }: { children: ReactNode }) {
       const { memberships: data } = await response.json();
       return transformMemberships(data);
     },
-    enabled: !!user && !!session,
+    enabled: !!user,
     staleTime: 1000 * 60 * 5, // 5 minutes
   });
 
@@ -136,18 +135,10 @@ export function OrganizationsProvider({ children }: { children: ReactNode }) {
   // Create organization mutation
   const createMutation = useMutation({
     mutationFn: async (name: string) => {
-      if (!session) {
-        throw new Error('Not authenticated');
-      }
-
       const slug = generateSlug(name);
 
-      const response = await fetch('/api/v1/organizations', {
+      const response = await apiFetch('/api/v1/organizations', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
-        },
         body: JSON.stringify({ name, slug }),
       });
 

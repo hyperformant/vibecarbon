@@ -73,7 +73,7 @@ Grafana is protected by the unified admin SSO system using Traefik ForwardAuth.
 
 ### First-Time Setup
 
-When you create a project with `vibecarbon create`, you provide an admin email and password. This creates a user in Supabase with `role=super_admin` in their app metadata.
+When you create a project with `vibecarbon create`, you provide an admin email and password. The app creates that account at startup with `role = 'super_admin'`.
 
 If you try to access Grafana without being logged in, you'll be redirected to the login page.
 
@@ -81,9 +81,8 @@ If you try to access Grafana without being logged in, you'll be redirected to th
 
 Grafana (and other admin services) require the `super_admin` role. To grant another user access:
 ```sql
-UPDATE auth.users
-SET raw_app_meta_data = raw_app_meta_data || '{"role": "super_admin"}'::jsonb
-WHERE email = 'newadmin@example.com';
+-- over `vibecarbon shell`, or psql against the local dev db
+UPDATE "user" SET role = 'super_admin' WHERE email = 'newadmin@example.com';
 ```
 
 ## Pre-configured Dashboards
@@ -121,7 +120,7 @@ Grafana's Explore feature supports LogQL for querying Loki logs.
 {service="app"} |= "error"
 
 # Regex match
-{service=~"app|kong"} |~ "(?i)error"
+{service=~"app|traefik"} |~ "(?i)error"
 
 # Exclude lines
 {service="db"} != "STATEMENT:"

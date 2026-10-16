@@ -17,7 +17,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { getAuthHeaders } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || '0.1.0';
@@ -31,6 +31,8 @@ interface ServiceStatus {
   status: 'healthy' | 'unhealthy' | 'unknown';
   latencyMs?: number;
   error?: string;
+  /** The dashboard can restart this container in this deployment. */
+  restartable?: boolean;
 }
 
 interface ServicesStatusResponse {
@@ -44,8 +46,7 @@ interface ServicesStatusResponse {
 }
 
 async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
-  const headers = await getAuthHeaders();
-  const response = await fetch('/api/_internal/services/status', { headers });
+  const response = await apiFetch('/api/_internal/services/status');
   if (!response.ok) {
     throw new Error('Failed to fetch services status');
   }
@@ -53,19 +54,15 @@ async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
 }
 
 async function restartService(container: string): Promise<{ success: boolean; error?: string }> {
-  const headers = await getAuthHeaders();
-  const response = await fetch(`/api/_internal/services/status/restart/${container}`, {
+  const response = await apiFetch(`/api/_internal/services/status/restart/${container}`, {
     method: 'POST',
-    headers,
   });
   return response.json();
 }
 
 async function restartAllServices(): Promise<{ success: boolean }> {
-  const headers = await getAuthHeaders();
-  const response = await fetch('/api/_internal/services/status/restart', {
+  const response = await apiFetch('/api/_internal/services/status/restart', {
     method: 'POST',
-    headers,
   });
   return response.json();
 }
@@ -144,7 +141,9 @@ export function ServicesStatus() {
     mutationFn: restartAllServices,
     onMutate: () => {
       if (data?.services) {
-        setRestartingContainers(new Set(data.services.map((s) => s.container)));
+        setRestartingContainers(
+          new Set(data.services.filter((s) => s.restartable).map((s) => s.container))
+        );
       }
     },
     onSettled: () => {
@@ -210,6 +209,8 @@ export function ServicesStatus() {
   }
 
   const { summary, services } = data;
+  // Restarts only work where the API can run docker compose (local dev).
+  const anyRestartable = services.some((s) => s.restartable);
 
   return (
     <Card>
@@ -266,38 +267,46 @@ export function ServicesStatus() {
                     <span className="text-xs text-destructive">{service.error}</span>
                   ) : null}
                   {isRestarting ? null : <StatusBadge status={service.status} />}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    onClick={() => handleRestart(service.container)}
-                    disabled={isAnyRestarting}
-                    title={`Restart ${service.name}`}
-                  >
-                    <Power className="size-3.5" />
-                  </Button>
+                  {service.restartable ? (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      onClick={() => handleRestart(service.container)}
+                      disabled={isAnyRestarting}
+                      title={`Restart ${service.name}`}
+                      aria-label={`Restart ${service.name}`}
+                    >
+                      <Power className="size-3.5" />
+                    </Button>
+                  ) : anyRestartable ? (
+                    // Keeps the column aligned with the rows that have a button.
+                    <span className="size-7" />
+                  ) : null}
                 </div>
               </div>
             );
           })}
         </div>
       </CardContent>
-      <CardFooter className="border-t pt-4">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleRestartAll}
-          disabled={isAnyRestarting}
-          className="w-full"
-        >
-          {restartAllMutation.isPending ? (
-            <Loader2 className="mr-2 size-4 animate-spin" />
-          ) : (
-            <Power className="mr-2 size-4" />
-          )}
-          {restartAllMutation.isPending ? 'Restarting All Services...' : 'Restart All Services'}
-        </Button>
-      </CardFooter>
+      {anyRestartable && (
+        <CardFooter className="border-t pt-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRestartAll}
+            disabled={isAnyRestarting}
+            className="w-full"
+          >
+            {restartAllMutation.isPending ? (
+              <Loader2 className="mr-2 size-4 animate-spin" />
+            ) : (
+              <Power className="mr-2 size-4" />
+            )}
+            {restartAllMutation.isPending ? 'Restarting All Services...' : 'Restart All Services'}
+          </Button>
+        </CardFooter>
+      )}
     </Card>
   );
 }

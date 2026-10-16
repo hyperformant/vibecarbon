@@ -2,19 +2,26 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { cors } from 'hono/cors';
 import { createMiddleware } from 'hono/factory';
 import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
+import { auth } from './auth';
+import { pool } from './db/client';
+import { startDatabase } from './db/startup';
+import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
-import { decodeAalFromJwt } from './lib/jwt';
+import { handleAppError } from './lib/errors';
 import { logger } from './lib/logger';
 import { createRateLimiter } from './lib/rate-limiter';
 import { createSeoShell } from './lib/seo';
-import { getSupabaseClient } from './lib/supabase';
+import { applyAuthRateLimits } from './middleware/auth-rate-limits';
+import { apiCors } from './middleware/cors';
 import { crawlerTracking } from './middleware/crawler-tracking';
+import { csrfProtection } from './middleware/csrf';
+import { migrationsGate } from './middleware/migrations-gate';
+import { sessionMiddleware } from './middleware/session';
 import { servicesStatusRoutes } from './routes/_internal/services-status';
 import { verifyRoleRoutes } from './routes/_internal/verify-role';
 import { healthRoutes } from './routes/health';
@@ -26,6 +33,7 @@ import { adminNewsletterRoutes } from './routes/v1/admin/newsletter';
 import { authRoutes } from './routes/v1/auth';
 import { billingRoutes } from './routes/v1/billing';
 import { contactRoutes } from './routes/v1/contact';
+import { fileReadRoutes, filesRoutes } from './routes/v1/files';
 import { newsletterRoutes } from './routes/v1/newsletter';
 import { performanceRoutes } from './routes/v1/performance';
 import { statsRoutes } from './routes/v1/stats';
@@ -35,6 +43,12 @@ import { stripeWebhookRoutes } from './routes/webhooks/stripe';
 import type { HonoVariables } from './types';
 
 const app = new Hono<{ Variables: HonoVariables }>();
+
+// Anything a route throws without catching: generic 500 for the client, the
+// error (database params stripped) for the log. Hono's default handler would
+// console.error the raw error, and a Drizzle error's message carries every
+// bound value of the failed query.
+app.onError(handleAppError);
 
 // ============================================================================
 // SECURITY MIDDLEWARE
@@ -74,17 +88,13 @@ app.use(
             ],
             styleSrc: ["'self'", "'unsafe-inline'"],
             imgSrc: ["'self'", 'data:', 'https:'],
-            connectSrc: [
-              "'self'",
-              // Production serves ONE origin: the SPA, the Hono API, and the
-              // Supabase gateway (path-routed to Kong) all live on SITE_URL,
-              // so 'self' + SITE_URL covers every first-party call. Fall back
-              // to SUPABASE_URL for prod-like environments without SITE_URL.
-              env.SITE_URL ?? env.SUPABASE_URL,
-              'https://cloudflareinsights.com',
-              'https://api.github.com',
+            // 'self' + SITE_URL, analytics, and the S3 endpoint origin (the
+            // browser PUTs uploads straight to the presigned URL).
+            connectSrc: buildConnectSrc({
+              siteUrl: env.SITE_URL,
+              s3Endpoint: env.S3_ENDPOINT,
               plausibleOrigin,
-            ].filter(Boolean) as string[],
+            }),
             fontSrc: ["'self'", 'data:'],
             objectSrc: ["'none'"],
             frameAncestors: ["'none'"],
@@ -107,6 +117,11 @@ app.use('*', timeout(30000));
 // Request logging
 app.use('*', honoLogger());
 
+// Nothing but /api/health is served until the database migrations are
+// applied (db/startup.ts migrateAtStartup). Before every middleware that
+// touches the database (crawler tracking, sessions).
+app.use('*', migrationsGate());
+
 // AI Visibility: record AI/search-crawler document fetches (fire-and-forget,
 // never awaited). Deliberately registered here — on '*' and BEFORE the /api/*
 // limiters — because crawlers fetch '/', '/docs/*', '/llms.txt' and the .md
@@ -122,6 +137,11 @@ app.use('/api/v1/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 app.use('/api/health', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 app.use('/api/health/*', createRateLimiter({ windowMs: 60 * 1000, max: 100 }));
 
+// Auth endpoints: a general budget plus strict per-IP caps on sign-in,
+// sign-up, password reset, verification email and second factor (see
+// middleware/auth-rate-limits.ts for each cap and why).
+applyAuthRateLimits(app);
+
 // Rate limiting for internal endpoints (higher threshold for infrastructure)
 // These are called by Traefik for auth verification on each request
 app.use('/api/_internal/*', createRateLimiter({ windowMs: 60 * 1000, max: 1000 }));
@@ -131,39 +151,7 @@ app.use('/api/_internal/*', createRateLimiter({ windowMs: 60 * 1000, max: 1000 }
 app.use('/api/webhooks/*', createRateLimiter({ windowMs: 60 * 1000, max: 500 }));
 
 // CORS for SPA - restrict to allowed origins
-app.use(
-  '/api/*',
-  cors({
-    origin: (origin) => {
-      // Build allowed origins list
-      const allowedOrigins: string[] = [];
-
-      // Always allow the configured site URL
-      if (process.env.SITE_URL) {
-        allowedOrigins.push(process.env.SITE_URL);
-      }
-
-      // Allow custom CORS origins from environment
-      if (process.env.CORS_ORIGINS) {
-        allowedOrigins.push(...process.env.CORS_ORIGINS.split(',').map((o) => o.trim()));
-      }
-
-      // Only allow localhost in development (with configurable ports)
-      if (process.env.NODE_ENV !== 'production') {
-        const portOffset = Number.parseInt(process.env.DEV_PORT_OFFSET || '0', 10);
-        const vitePort = process.env.DEV_VITE_PORT || String(5173 + portOffset);
-        const apiPort = process.env.DEV_API_PORT || String(3000 + portOffset);
-        allowedOrigins.push(`http://localhost:${vitePort}`, `http://localhost:${apiPort}`);
-      }
-
-      return allowedOrigins.includes(origin) ? origin : null;
-    },
-    allowHeaders: ['Content-Type', 'Authorization', 'apikey'],
-    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    credentials: true,
-    maxAge: 3600, // 1 hour
-  })
-);
+app.use('/api/*', apiCors());
 
 // Request body size limit. bodyLimit enforces the cap while READING the stream,
 // not just by trusting the Content-Length header (which a client can under-state
@@ -177,48 +165,21 @@ app.use(
   })
 );
 
-// Supabase session middleware - inject user and client into context
-// Skip for health endpoint (no auth needed, avoids unnecessary getUser() call)
-app.use('/api/*', async (c, next) => {
-  if (c.req.path === '/api/health' || c.req.path === '/api/health/ready') {
-    c.set('user', null);
-    c.set('aal', null);
-    await next();
-    return;
-  }
+// CSRF origin check on cookie-authenticated mutating requests, every content
+// type (see middleware/csrf.ts; skips /api/auth, /api/webhooks, /api/_internal/verify-role).
+app.use('/api/*', csrfProtection());
 
-  const authHeader = c.req.header('Authorization');
-  const supabase = getSupabaseClient(authHeader);
-  c.set('supabase', supabase);
+// Auth endpoints (sign-up, sign-in, sign-out, sessions, OAuth callbacks,
+// email verification, password reset, magic link, admin plugin). Mounted
+// before the session middleware: Better Auth reads its own cookies.
+app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(c.req.raw));
 
-  // Verify the JWT and get user info
-  if (authHeader?.startsWith('Bearer ')) {
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser();
-    if (!error && user) {
-      c.set('user', user);
-      // Token signature already verified by getUser() above — safe to read claims.
-      c.set('aal', decodeAalFromJwt(authHeader));
-    } else {
-      c.set('user', null);
-      c.set('aal', null);
-    }
-  } else {
-    c.set('user', null);
-    c.set('aal', null);
-  }
-
-  await next();
-});
+// Session middleware: put the signed-in user (or null) on the context.
+app.use('/api/*', sessionMiddleware);
 
 // ============================================================================
 // ROUTES
 // ============================================================================
-
-// Note: Auth is handled by Supabase (Kong routes to Auth service)
-// Your Hono app only needs to handle application-specific APIs
 
 // Health check (public, used by load balancers)
 app.route('/api/health', healthRoutes);
@@ -242,6 +203,8 @@ app.route('/api/v1/admin/contact', adminContactRoutes);
 app.route('/api/v1/admin/newsletter', adminNewsletterRoutes);
 app.route('/api/v1/contact', contactRoutes);
 app.route('/api/v1/newsletter', newsletterRoutes);
+app.route('/api/v1/files', filesRoutes);
+app.route('/api/files', fileReadRoutes);
 
 // Webhooks (no auth required, signature verified internally)
 // Note: Must receive raw body for signature verification
@@ -283,14 +246,24 @@ const openApiSpec = {
                 schema: {
                   type: 'object',
                   properties: {
-                    status: { type: 'string', example: 'healthy' },
+                    status: { type: 'string', example: 'ok' },
                     timestamp: { type: 'string', format: 'date-time' },
-                    services: {
-                      type: 'object',
-                      properties: {
-                        database: { type: 'string' },
-                        supabase: { type: 'string' },
-                      },
+                    adminReady: {
+                      type: 'boolean',
+                      description: 'Whether the ADMIN_EMAIL super admin exists and can sign in',
+                    },
+                    adminStatus: {
+                      type: 'string',
+                      enum: ['pending', 'ready', 'skipped', 'refused', 'failed'],
+                    },
+                    migrationStatus: {
+                      type: 'string',
+                      enum: ['pending', 'applied', 'failed'],
+                      description: 'Whether the database migrations are applied',
+                    },
+                    migrationError: {
+                      type: 'string',
+                      description: 'SQLSTATE of a failed migration (the app log has the error)',
                     },
                   },
                 },
@@ -304,7 +277,7 @@ const openApiSpec = {
       get: {
         summary: 'Get current user',
         tags: ['User'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'User info with memberships and role' },
           '401': { description: 'Unauthorized' },
@@ -315,7 +288,7 @@ const openApiSpec = {
       get: {
         summary: 'List organizations',
         tags: ['Organizations'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'List of organizations' },
           '401': { description: 'Unauthorized' },
@@ -324,7 +297,7 @@ const openApiSpec = {
       post: {
         summary: 'Create organization',
         tags: ['Organizations'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         requestBody: {
           required: true,
           content: {
@@ -351,7 +324,7 @@ const openApiSpec = {
       post: {
         summary: 'Create checkout session',
         tags: ['Billing'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         requestBody: {
           required: true,
           content: {
@@ -434,7 +407,7 @@ const openApiSpec = {
       get: {
         summary: 'List background jobs',
         tags: ['Admin'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'Job summaries and execution history' },
           '403': { description: 'Forbidden: requires super admin' },
@@ -445,7 +418,7 @@ const openApiSpec = {
       get: {
         summary: 'List contact submissions',
         tags: ['Admin'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'Paginated contact submissions' },
           '403': { description: 'Forbidden: requires super admin' },
@@ -456,7 +429,7 @@ const openApiSpec = {
       get: {
         summary: 'List newsletter subscribers',
         tags: ['Admin'],
-        security: [{ bearerAuth: [] }],
+        security: [{ sessionCookie: [] }],
         responses: {
           '200': { description: 'Paginated subscriber list' },
           '403': { description: 'Forbidden: requires super admin' },
@@ -479,7 +452,7 @@ const openApiSpec = {
       get: {
         summary: 'Verify user role (ForwardAuth)',
         description:
-          'Internal endpoint for Traefik ForwardAuth. Verifies JWT and checks user role.',
+          'Internal endpoint for Traefik ForwardAuth. Verifies the vc-admin-token cookie and checks the user role.',
         tags: ['Internal'],
         parameters: [
           {
@@ -505,10 +478,14 @@ const openApiSpec = {
   },
   components: {
     securitySchemes: {
-      bearerAuth: {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
+      // The session cookie the auth API sets on sign-in (auth/index.ts). Better
+      // Auth prefixes it with __Secure- when SITE_URL is https. There is no
+      // Bearer token: a script must sign in and send the cookie, plus a
+      // matching Origin on writes (AGENTS.md "CSRF").
+      sessionCookie: {
+        type: 'apiKey',
+        in: 'cookie',
+        name: `${env.SITE_URL.startsWith('https://') ? '__Secure-' : ''}better-auth.session_token`,
       },
     },
   },
@@ -611,7 +588,7 @@ if (process.env.NODE_ENV === 'production') {
 
 const port = env.DEV_API_PORT ?? env.PORT + env.DEV_PORT_OFFSET;
 
-// Login attempt cleanup is now handled by pg_cron (see migration 00003_pg_cron.sql)
+// Login attempt cleanup is handled by pg_cron (db/migrations/0002_baseline_post.sql)
 
 logger.info({ port }, 'Starting server');
 
@@ -619,6 +596,14 @@ const server = serve({
   fetch: app.fetch,
   port,
 });
+
+// Not awaited: the server must come up even while Postgres is still starting
+// (readiness reports it down meanwhile, and the migrations gate answers 503).
+// Once the database answers: apply pending migrations, confirm the
+// connection role (the process exits if it does not bypass RLS), then ensure
+// the ADMIN_EMAIL super admin exists (db/startup.ts startDatabase). A failed
+// migration is terminal for this boot: /api/health reports it.
+void startDatabase();
 
 // Graceful shutdown handler - drain in-flight requests before exiting
 let isShuttingDown = false;
@@ -633,7 +618,7 @@ const shutdown = (signal: string) => {
   // Stop accepting new connections and wait for in-flight requests to finish
   server.close(() => {
     logger.info('All connections closed');
-    process.exit(0);
+    pool.end().finally(() => process.exit(0));
   });
 
   // Force exit if draining takes too long

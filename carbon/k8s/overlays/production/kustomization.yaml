@@ -16,19 +16,29 @@ configMapGenerator:
     literals:
       - SITE_URL={{DOMAIN}}
       - PROJECT_NAME=vibecarbon
-      # Service names follow the Supabase community Helm chart convention
-      # (release name `supabase` + chart name `supabase` → `supabase-supabase-*`).
-      - DB_HOST=supabase-supabase-db
+      # The `db` Service in front of the db StatefulSet (base/db/service.yaml).
+      - DB_HOST=db
       - DB_PORT=5432
       - DB_NAME=postgres
-      - KONG_URL=http://supabase-supabase-kong:8000
-      - AUTH_URL=http://supabase-supabase-auth:9999
-      - REST_URL=http://supabase-supabase-rest:3000
-      - REALTIME_URL=http://supabase-supabase-realtime:4000
-      - STORAGE_URL=http://supabase-supabase-storage:5000
-      - META_URL=http://supabase-supabase-meta:8080
-      - IMGPROXY_URL=http://supabase-supabase-imgproxy:5001
 
 images:
   - name: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}
     newTag: main
+
+# The db StatefulSet stays with the vibecarbon CLI's deploy, which renders its
+# per-cluster values (image, StorageClass, S3 endpoint, wal-g role; see
+# base/db/statefulset.yaml). A Flux Kustomization pointed at an overlay built
+# on this one would otherwise apply the unrendered placeholders, and the
+# apply is rejected outright (volumeClaimTemplates are immutable). Same
+# delete patch as vibecarbon-base in flux/clusters/*/vibecarbon.yaml; the
+# db Services and NetworkPolicy carry no placeholders and stay.
+patches:
+  - patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: db
+    target:
+      kind: StatefulSet
+      name: db

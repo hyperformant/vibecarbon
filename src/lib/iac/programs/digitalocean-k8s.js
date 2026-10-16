@@ -11,7 +11,7 @@
  *
  *   - A `digitalocean.Vpc` has no separate subnet/zone concept (one flat
  *     region-scoped network) and no static per-server IP assignment — the
- *     master/supabase/worker droplets' private IPs are only known AFTER
+ *     master/database/worker droplets' private IPs are only known AFTER
  *     Pulumi creates them, not pinned at declare time like Hetzner's
  *     `10.0.1.1`/`10.0.1.2`/`10.0.1.10+`.
  *   - `digitalocean.Firewall` attaches by TAG (not by droplet id list),
@@ -34,7 +34,7 @@
  *     anti-affinity primitive (M3 dossier §8-repo). Workers are NOT spread
  *     across failure domains the way Hetzner's workers are.
  *   - User-data is rendered via the provider's own
- *     `DigitalOceanProvider.getK8s{Master,Supabase,Worker}UserData`
+ *     `DigitalOceanProvider.getK8s{Master,Db,Worker}UserData`
  *     statics (M3 Tasks 3 + 5) rather than this program calling
  *     loadCloudInit/renderScript directly — unlike hetzner-k8s.js, which
  *     predates those statics and was deliberately left on its own direct
@@ -59,14 +59,14 @@
  *   - Firewall (tag-attached)
  *   - ReservedIp + ReservedIpAssignment (to master)
  *   - Master droplet (cloud-init: do-master-init.sh via the provider static)
- *   - Supabase droplet (cloud-init: do-supabase-init.sh via the provider static)
+ *   - database droplet (cloud-init: do-db-init.sh via the provider static)
  *   - Worker droplets × N (cloud-init: do-worker-init.sh via the provider static)
  *
- * Outputs: masterIp, masterPrivateIp, supabaseIp, supabasePrivateIp,
+ * Outputs: masterIp, masterPrivateIp, dbIp, dbPrivateIp,
  * workerIps, floatingIp, networkId, sshKeyId, k3sToken, clusterName — the
  * SAME key set hetzner-k8s.js exports (wire contract; renderCarbonAutoscaler-
  * Config and deployK3s read these generically through `infraOutputs`
- * regardless of provider). masterPrivateIp/supabasePrivateIp are REAL
+ * regardless of provider). masterPrivateIp/dbPrivateIp are REAL
  * Pulumi-assigned addresses here (not hardcoded literals — DO has no
  * static-IP assignment to pin them to, unlike Hetzner's byte-identical
  * `10.0.1.1`/`10.0.1.2`). PLUS one DO-only additive key (M3 Task 9c):
@@ -98,7 +98,7 @@ import { transliterateToAscii } from './digitalocean-compose.js';
  *                                      region — there is no separate
  *                                      network-zone concept to derive.
  * @property {string} masterServerType
- * @property {string} supabaseServerType
+ * @property {string} dbServerType
  * @property {string} workerServerType
  * @property {number} minWorkers   Static floor of worker droplets (provisioned by Pulumi). Default 1.
  * @property {number} maxWorkers   Upper bound for cluster-autoscaler. Not consumed by Pulumi; flows to the CA Deployment in applyK3sManifests. Default 3.
@@ -234,7 +234,7 @@ export function buildDigitalOceanK8sProgram(config) {
     // Private network. DO VPCs are region-scoped with no separate
     // subnet/zone object (contrast hetzner-k8s.js's Network+NetworkSubnet
     // pair) and assign member droplets' private IPs dynamically — there is
-    // no static-IP `networks: [{ip}]` equivalent to pin master/supabase/
+    // no static-IP `networks: [{ip}]` equivalent to pin master/database/
     // worker addresses at declare time.
     const network = new digitalocean.Vpc('network', {
       name: `${clusterName}-network`,
@@ -317,7 +317,7 @@ export function buildDigitalOceanK8sProgram(config) {
       // dependsOn firewall (M3 Task 5b): DO firewalls attach by tag, not by
       // droplet-id list — a droplet created before the firewall resource
       // exists sits default-OPEN until Pulumi later reconciles it. Ordering
-      // closes that window. Supabase/workers below also depend on firewall
+      // closes that window. The database node/workers below also depend on firewall
       // explicitly, rather than relying on their (also-present) dependsOn
       // master to carry it transitively.
       { dependsOn: [firewall] },
@@ -380,35 +380,35 @@ export function buildDigitalOceanK8sProgram(config) {
       dropletId: master.id.apply((id) => Number.parseInt(id, 10)),
     });
 
-    // Supabase droplet — joins master via k3s agent, pinned to the
-    // dedicated Supabase node-pool (label + NoSchedule taint baked into
-    // do-supabase-init.sh's k3s agent argv). master_ip MUST be the
+    // Database droplet — joins master via k3s agent, pinned to the
+    // dedicated database node-pool (label + NoSchedule taint baked into
+    // do-db-init.sh's k3s agent argv). master_ip MUST be the
     // master's REAL private IP, only known once Pulumi has created it —
     // unlike Hetzner's hardcoded '10.0.1.1', DO has no static-IP
     // assignment to pin this to ahead of time (M3 dossier §4-repo).
-    const supabaseUserData = pulumi.all([master.ipv4AddressPrivate]).apply(([masterPrivateIp]) =>
-      DigitalOceanProvider.getK8sSupabaseUserData({
+    const dbUserData = pulumi.all([master.ipv4AddressPrivate]).apply(([masterPrivateIp]) =>
+      DigitalOceanProvider.getK8sDbUserData({
         k3s_version: config.k3sVersion,
         k3s_token: k3sToken,
         master_ip: masterPrivateIp,
       }).then(transliterateToAscii),
     );
-    const supabase = new digitalocean.Droplet(
-      'supabase',
+    const dbServer = new digitalocean.Droplet(
+      'db',
       {
-        name: `${clusterName}-supabase`,
+        name: `${clusterName}-db`,
         region: config.location,
-        size: config.supabaseServerType,
+        size: config.dbServerType,
         image,
         vpcUuid: network.id,
         sshKeys: [sshKeyIdForDroplet],
         tags: encodeLabels({
           ...labels,
-          role: 'supabase',
-          'node-pool': 'supabase-pool',
+          role: 'db',
+          'node-pool': 'db-pool',
           cluster: clusterName,
         }),
-        userData: supabaseUserData,
+        userData: dbUserData,
       },
       // dependsOn firewall explicitly (M3 Task 5b), not just transitively
       // through master — see master's own dependsOn comment.
@@ -466,8 +466,8 @@ export function buildDigitalOceanK8sProgram(config) {
       // REAL output (not hardcoded) — see module doc + Task 2's Hetzner
       // byte-identical contrast.
       masterPrivateIp: master.ipv4AddressPrivate,
-      supabaseIp: supabase.ipv4Address,
-      supabasePrivateIp: supabase.ipv4AddressPrivate,
+      dbIp: dbServer.ipv4Address,
+      dbPrivateIp: dbServer.ipv4AddressPrivate,
       workerIps: workers.map((w) => w.ipv4Address),
       floatingIp: reservedIp.ipAddress,
       networkId: network.id,

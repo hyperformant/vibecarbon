@@ -6,27 +6,27 @@
  * `isTrackablePath` decides what counts as a *document* fetch, and
  * `classifyCrawler` decides whether a row is written at all. Everything below
  * the guards is fire-and-forget, which is exactly why it needs pinning: a
- * rejected — or PostgREST-style resolved-with-error — insert must be logged,
- * never thrown, and never allowed to fail the page render.
+ * rejected insert must be logged, never thrown, and never allowed to fail the page render.
  *
  * Module state (burst-cap counter, error-log throttle) lives at module scope
  * with no reset hook, so tests that touch it re-import the module through
  * `loadMiddleware()` for a clean slate.
  */
 
+import { getTableName } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HonoVariables } from '@server/types';
 
-const { fromMock, insertMock, warnMock, readFileSyncMock } = vi.hoisted(() => ({
-  fromMock: vi.fn(),
+const { insertIntoMock, insertMock, warnMock, readFileSyncMock } = vi.hoisted(() => ({
+  insertIntoMock: vi.fn(),
   insertMock: vi.fn(),
   warnMock: vi.fn(),
   readFileSyncMock: vi.fn(),
 }));
 
-// supabaseAdmin.from('crawler_hits').insert({...}).then(onResult, onError)
-vi.mock('@server/lib/supabase', () => ({ supabaseAdmin: { from: fromMock } }));
+// adminDb.insert(crawlerHits).values({...}).then(undefined, onError)
+vi.mock('@server/db/client', () => ({ adminDb: { insert: insertIntoMock } }));
 
 vi.mock('@server/lib/logger', () => ({
   logger: { warn: warnMock, error: vi.fn(), info: vi.fn(), debug: vi.fn() },
@@ -92,21 +92,21 @@ function ctx(method: string, path: string, userAgent?: string, status = 200) {
 function insertedRow(call = 0): {
   crawler: string;
   path: string;
-  user_agent: string | null;
+  userAgent: string | null;
   status: number | null;
 } {
   return insertMock.mock.calls[call][0];
 }
 
 beforeEach(() => {
-  fromMock.mockReset();
+  insertIntoMock.mockReset();
   insertMock.mockReset();
   warnMock.mockReset();
   readFileSyncMock.mockReset();
   readFileSyncMock.mockReturnValue(MANIFEST);
-  // Default: PostgREST resolves with `{ error: null }` on success.
-  insertMock.mockReturnValue(Promise.resolve({ error: null }));
-  fromMock.mockReturnValue({ insert: insertMock });
+  // Default: the insert resolves.
+  insertMock.mockReturnValue(Promise.resolve([]));
+  insertIntoMock.mockReturnValue({ values: insertMock });
 });
 
 afterEach(() => {
@@ -166,12 +166,13 @@ describe('crawlerTracking — when a row is written', () => {
 
     await crawlerTracking(ctx('GET', '/docs/seo', GPTBOT_UA), next);
 
-    expect(fromMock).toHaveBeenCalledWith('crawler_hits');
+    // Module reset gives the middleware a fresh table object, so compare by name.
+    expect(getTableName(insertIntoMock.mock.calls[0][0])).toBe('crawler_hits');
     expect(insertMock).toHaveBeenCalledTimes(1);
     expect(insertedRow()).toEqual({
       crawler: 'GPTBot',
       path: '/docs/seo',
-      user_agent: GPTBOT_UA,
+      userAgent: GPTBOT_UA,
       status: 200,
     });
     expect(next).toHaveBeenCalledTimes(1);
@@ -235,15 +236,15 @@ describe('crawlerTracking — when a row is written', () => {
 
     await crawlerTracking(ctx('GET', '/', longUa), vi.fn(async () => {}));
 
-    expect(insertedRow().user_agent).toHaveLength(256);
+    expect(insertedRow().userAgent).toHaveLength(256);
   });
 
   it('never throws out of the middleware, even if tracking blows up', async () => {
     // MEDIUM-4: this middleware fronts the whole site. A throw anywhere in the
     // tracking block must not turn a page render into a 500.
     const crawlerTracking = await loadMiddleware();
-    fromMock.mockImplementation(() => {
-      throw new Error('supabase client exploded');
+    insertIntoMock.mockImplementation(() => {
+      throw new Error('db client exploded');
     });
     const next = vi.fn(async () => {});
 
@@ -332,9 +333,10 @@ describe('crawlerTracking — path bucketing (SECURITY: bounded cardinality)', (
 });
 
 describe('crawlerTracking — insert failures are swallowed', () => {
-  it('logs (does not throw) a PostgREST-style resolved error', async () => {
+  it('logs (does not throw) a permission error from the database', async () => {
     const crawlerTracking = await loadMiddleware();
-    insertMock.mockReturnValue(Promise.resolve({ error: { message: 'permission denied' } }));
+    const denied = new Error('permission denied');
+    insertMock.mockImplementation(() => Promise.reject(denied));
     const next = vi.fn(async () => {});
 
     // The middleware must resolve normally — the page render does not wait on,
@@ -343,12 +345,12 @@ describe('crawlerTracking — insert failures are swallowed', () => {
     expect(next).toHaveBeenCalledTimes(1);
 
     await vi.waitFor(() => expect(warnMock).toHaveBeenCalledTimes(1));
-    expect(warnMock.mock.calls[0][0]).toEqual({ error: { message: 'permission denied' } });
+    expect(warnMock.mock.calls[0][0]).toEqual({ err: denied });
   });
 
   it('logs (does not throw) a rejected insert promise', async () => {
     const crawlerTracking = await loadMiddleware();
-    insertMock.mockReturnValue(Promise.reject(new Error('connection refused')));
+    insertMock.mockImplementation(() => Promise.reject(new Error('connection refused')));
 
     await expect(
       crawlerTracking(ctx('GET', '/', GPTBOT_UA), vi.fn(async () => {}))
@@ -359,7 +361,7 @@ describe('crawlerTracking — insert failures are swallowed', () => {
 
   it('throttles the failure log to one line per minute', async () => {
     const crawlerTracking = await loadMiddleware();
-    insertMock.mockReturnValue(Promise.resolve({ error: { message: 'db down' } }));
+    insertMock.mockImplementation(() => Promise.reject(new Error('db down')));
     const next = vi.fn(async () => {});
 
     for (let i = 0; i < 5; i++) {

@@ -20,19 +20,16 @@ spec:
         - protocol: TCP
           port: 3000
   egress:
-    # Allow connection to Kong (Supabase API gateway)
+    # Allow connection to the database: the API server queries Postgres
+    # directly (src/server/db/client.ts) through the `db` Service. Selects the
+    # db StatefulSet's pod (k8s/base/db/statefulset.yaml); base `labels:` never
+    # rewrites selectors. (allow-intra-namespace-egress also admits this; the
+    # explicit rule keeps the app's db path visible here and survives a
+    # tighter namespace policy.)
     - to:
         - podSelector:
             matchLabels:
-              app: vibecarbon-kong
-      ports:
-        - protocol: TCP
-          port: 8000
-    # Allow connection to database (direct queries)
-    - to:
-        - podSelector:
-            matchLabels:
-              app: vibecarbon-postgres
+              app: vibecarbon-db
       ports:
         - protocol: TCP
           port: 5432
@@ -58,7 +55,7 @@ spec:
       ports:
         - protocol: TCP
           port: 6443
-    # Allow outbound HTTPS (Stripe, SMTP provider, external APIs)
+    # Allow outbound HTTPS (Stripe, OAuth providers, email APIs, external APIs)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -69,6 +66,28 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # Allow outbound SMTP: the app sends its own auth emails (verification,
+    # password reset, magic link) and transactional email through SMTP_HOST
+    # on SMTP_PORT. 587 (submission/STARTTLS) is the configure default; 465
+    # (implicit TLS), 25 and 2525 (the alternate port Resend, Postmark,
+    # SendGrid and Mailgun offer where 25/587 are blocked) cover the rest.
+    # Public destinations only, like HTTPS above.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 25
+        - protocol: TCP
+          port: 465
+        - protocol: TCP
+          port: 587
+        - protocol: TCP
+          port: 2525
     # Allow connection to Redis (if configured)
     - to:
         - podSelector:
@@ -114,11 +133,3 @@ spec:
       ports:
         - protocol: TCP
           port: 3100
-    # Allow health checks to Studio (for admin services-status API)
-    - to:
-        - podSelector:
-            matchLabels:
-              app: vibecarbon-studio
-      ports:
-        - protocol: TCP
-          port: 3000

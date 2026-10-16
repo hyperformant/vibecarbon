@@ -10,6 +10,7 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { DEV_S3_BASE_PORT } from './lib/dev-s3.js';
 import { readEnvFiles } from './lib/dotenv.js';
 import {
   buildComposeCommand,
@@ -45,8 +46,9 @@ function getPortEnvVars() {
 
   return {
     DEV_DB_PORT: getPort('DEV_DB_PORT', 5432, portOffset),
-    DEV_KONG_PORT: getPort('DEV_KONG_PORT', 8000, portOffset),
-    DEV_KONG_SSL_PORT: getPort('DEV_KONG_SSL_PORT', 8443, portOffset),
+    // Local S3 (Garage). dev-init.js writes S3_ENDPOINT from the same base
+    // and rule (scripts/lib/dev-s3.js).
+    DEV_S3_PORT: getPort('DEV_S3_PORT', DEV_S3_BASE_PORT, portOffset),
     DEV_TRAEFIK_PORT: getPort('DEV_TRAEFIK_PORT', 80, portOffset),
     DEV_PROMETHEUS_PORT: getPort('DEV_PROMETHEUS_PORT', 9190, portOffset),
     DEV_GRAFANA_PORT: getPort('DEV_GRAFANA_PORT', 3002, portOffset),
@@ -134,7 +136,7 @@ const execOpts = { stdio: 'inherit', env: { ...process.env, ...portEnv, ...build
 
 // Check if any optional services (metabase, n8n, observability, etc.) are enabled.
 // These can have slow health checks (e.g. Metabase JVM takes 2-4 min), so we start
-// core Supabase services first with --wait, then launch optional services in the
+// the core services first with --wait, then launch optional services in the
 // background without blocking.
 const hasOptionalServices = args.all || getEnabledServices(manifest).length > 0;
 
@@ -194,12 +196,24 @@ if (hasOptionalServices) {
   }
 }
 
+// Dev only: the local S3 container (docker-compose.override.yml) creates its
+// key and bucket itself; put the browser-upload CORS on that bucket.
+// Idempotent; non-fatal (the script warns and exits 0 on failure, and skips
+// when S3_* is unset).
+if (!args.prod) {
+  try {
+    execSync('node scripts/ensure-dev-bucket.js', { stdio: 'inherit' });
+  } catch {
+    // Never block dev startup on storage.
+  }
+}
+
 /**
  * Check unhealthy containers for common issues and print helpful messages.
  */
 function diagnoseFailure() {
   try {
-    const logs = execSync('docker compose logs --tail 20 auth rest storage 2>&1', {
+    const logs = execSync('docker compose logs --tail 20 app db 2>&1', {
       encoding: 'utf-8',
       env: { ...process.env, ...getPortEnvVars() },
     });

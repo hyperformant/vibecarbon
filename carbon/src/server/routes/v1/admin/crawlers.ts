@@ -1,9 +1,11 @@
+import { and, desc, gte, lt } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { isSuperAdmin } from '../../../lib/auth';
+import { adminDb } from '../../../db/client';
+import { crawlerHits, crawlerHitsDaily } from '../../../db/schema';
 import { type CrawlerCategory, findCrawlerByName } from '../../../lib/crawlers';
 import { sanitizeError } from '../../../lib/errors';
 import { logger } from '../../../lib/logger';
-import { supabaseAdmin } from '../../../lib/supabase';
+import { checkSuperAdmin } from '../../../middleware/requireSuperAdmin';
 import type { HonoVariables } from '../../../types';
 
 /**
@@ -68,9 +70,8 @@ crawlerRoutes.get('/', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  if (!isSuperAdmin(user)) {
-    return c.json({ error: 'Super admin access required' }, 403);
-  }
+  const blocked = await checkSuperAdmin(c);
+  if (blocked) return blocked;
 
   const windowDays = parseWindowDays(c.req.query('days'));
 
@@ -131,53 +132,55 @@ crawlerRoutes.get('/', async (c) => {
 
   try {
     // --- Recent window: raw per-hit rows ----------------------------------
-    const { data: rawHits, error: rawError } = await supabaseAdmin
-      .from('crawler_hits')
-      .select('crawler, path, status, hit_at')
-      .gte('hit_at', new Date(rawFromMs).toISOString())
-      .order('hit_at', { ascending: false })
+    const rawHits = await adminDb
+      .select({
+        crawler: crawlerHits.crawler,
+        path: crawlerHits.path,
+        status: crawlerHits.status,
+        hitAt: crawlerHits.hitAt,
+      })
+      .from(crawlerHits)
+      .where(gte(crawlerHits.hitAt, new Date(rawFromMs).toISOString()))
+      .orderBy(desc(crawlerHits.hitAt))
       .limit(MAX_RAW_ROWS);
 
-    if (rawError) {
-      return c.json({ error: sanitizeError(rawError, 'Failed to fetch crawler hits') }, 500);
-    }
-
-    if (rawHits && rawHits.length >= MAX_RAW_ROWS) {
+    if (rawHits.length >= MAX_RAW_ROWS) {
       logger.warn(
         { limit: MAX_RAW_ROWS, windowDays },
         'Crawler hit window truncated at the raw-row cap; recent totals are a lower bound'
       );
     }
 
-    for (const hit of rawHits ?? []) {
+    for (const hit of rawHits) {
       // status is null for rows recorded before the column existed.
       const isError = (hit.status ?? 0) >= 500 ? 1 : 0;
-      addRecord(toDayKey(Date.parse(hit.hit_at)), hit.crawler, hit.path, 1, isError);
+      addRecord(toDayKey(Date.parse(hit.hitAt)), hit.crawler, hit.path, 1, isError);
     }
 
     // --- Older days: daily rollup ----------------------------------------
     if (windowDays > RAW_WINDOW_DAYS) {
-      const { data: dailyRows, error: dailyError } = await supabaseAdmin
-        .from('crawler_hits_daily')
-        .select('day, crawler, path, hits, errors')
-        .gte('day', dayKeys[0])
-        .lt('day', rawFromKey)
-        .order('hits', { ascending: false })
+      const dailyRows = await adminDb
+        .select({
+          day: crawlerHitsDaily.day,
+          crawler: crawlerHitsDaily.crawler,
+          path: crawlerHitsDaily.path,
+          hits: crawlerHitsDaily.hits,
+          errors: crawlerHitsDaily.errors,
+        })
+        .from(crawlerHitsDaily)
+        .where(and(gte(crawlerHitsDaily.day, dayKeys[0]), lt(crawlerHitsDaily.day, rawFromKey)))
+        .orderBy(desc(crawlerHitsDaily.hits))
         .limit(MAX_ROLLUP_ROWS);
 
-      if (dailyError) {
-        return c.json({ error: sanitizeError(dailyError, 'Failed to fetch crawler hits') }, 500);
-      }
-
-      if (dailyRows && dailyRows.length >= MAX_ROLLUP_ROWS) {
+      if (dailyRows.length >= MAX_ROLLUP_ROWS) {
         logger.warn(
           { limit: MAX_ROLLUP_ROWS, windowDays },
           'Crawler rollup window truncated at the row cap; older totals are a lower bound'
         );
       }
 
-      for (const row of dailyRows ?? []) {
-        // `day` is a DATE; PostgREST already renders it as YYYY-MM-DD.
+      for (const row of dailyRows) {
+        // `day` is a DATE; the driver hands it back as YYYY-MM-DD.
         addRecord(row.day, row.crawler, row.path, row.hits, row.errors ?? 0);
       }
     }

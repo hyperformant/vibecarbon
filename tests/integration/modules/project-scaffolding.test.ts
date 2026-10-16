@@ -24,9 +24,6 @@ describe('Project Scaffolding Integration', () => {
       const variables = {
         PROJECT_NAME: 'test-project',
         DB_PASSWORD: 'test-password',
-        JWT_SECRET: 'test-jwt-secret',
-        ANON_KEY: 'test-anon-key',
-        SERVICE_ROLE_KEY: 'test-service-role-key',
       };
 
       const result = copyTemplate('package.json', destPath, variables);
@@ -57,9 +54,8 @@ describe('Project Scaffolding Integration', () => {
   describe('generateEnvLocal', () => {
     it('generates .env.local content', () => {
       const variables = {
-        ANON_KEY: 'test-anon-key',
-        SERVICE_ROLE_KEY: 'test-service-role-key',
         JWT_SECRET: 'test-jwt-secret',
+        BETTER_AUTH_SECRET: 'test-better-auth-secret',
         DB_PASSWORD: 'test-db-password',
         ADMIN_EMAIL: 'test@example.com',
         ADMIN_PASSWORD: 'test-admin-password',
@@ -69,18 +65,25 @@ describe('Project Scaffolding Integration', () => {
 
       // Every value line is emitted by formatDotenvLine: these all fit the
       // bare alphabet, so no quotes at all.
-      expect(content).toContain('\nSUPABASE_URL=http://localhost:8000\n');
-      expect(content).toContain('\nSUPABASE_ANON_KEY=test-anon-key\n');
-      expect(content).toContain('\nSUPABASE_SERVICE_ROLE_KEY=test-service-role-key\n');
-      expect(content).toContain('\nJWT_SECRET=test-jwt-secret\n');
+      expect(content).toContain('\nBETTER_AUTH_SECRET=test-better-auth-secret\n');
       expect(content).toContain('\nDB_PASSWORD=test-db-password\n');
       expect(content).toContain('\nADMIN_EMAIL=test@example.com\n');
       expect(content).toContain('\nADMIN_PASSWORD=test-admin-password\n');
       expect(parseDotenv(content)).toMatchObject({
-        SUPABASE_URL: 'http://localhost:8000',
-        SUPABASE_ANON_KEY: 'test-anon-key',
+        BETTER_AUTH_SECRET: 'test-better-auth-secret',
         ADMIN_PASSWORD: 'test-admin-password',
       });
+      // The removed services' URL, keys and secrets are never written.
+      const keys = Object.keys(parseDotenv(content));
+      for (const gone of [
+        'JWT_SECRET',
+        'LOGFLARE_API_KEY',
+        'VAULT_ENC_KEY',
+        'PG_META_CRYPTO_KEY',
+        'DB_ENC_KEY',
+      ]) {
+        expect(keys, gone).not.toContain(gone);
+      }
     });
   });
 
@@ -91,34 +94,25 @@ describe('Project Scaffolding Integration', () => {
       expect(readme).toContain('# test-project');
       expect(readme).toContain('Hono');
       expect(readme).toContain('React 19');
-      expect(readme).toContain('Supabase');
+      expect(readme).toContain('PostgreSQL');
+      expect(readme).not.toMatch(/Studio/);
       expect(readme).toContain('npm run dev:start');
     });
   });
 
   describe('Template Super Admin Role Patterns', () => {
-    it('super-admin.sql uses super_admin role', () => {
-      const sqlPath = join(TEMPLATE_DIR, 'volumes/db/super-admin.sql');
-      const content = readFileSync(sqlPath, 'utf-8');
-
-      // Verify the INSERT statement sets super_admin role
-      expect(content).toContain("'role', 'super_admin'");
-      // Verify the UPDATE statement sets super_admin role
-      expect(content).toContain('{"role": "super_admin"}');
-      // Should NOT contain old 'admin' role
-      expect(content).not.toMatch(/'role',\s*'admin'[^_]/);
-    });
-
-    it('super-admin.dev.sql uses super_admin role', () => {
-      const sqlPath = join(TEMPLATE_DIR, 'volumes/db/super-admin.dev.sql');
-      const content = readFileSync(sqlPath, 'utf-8');
-
-      // Verify the INSERT statement sets super_admin role
-      expect(content).toContain("'role', 'super_admin'");
-      // Verify the UPDATE statement sets super_admin role
-      expect(content).toContain('{"role": "super_admin"}');
-      // Should NOT contain old 'admin' role
-      expect(content).not.toMatch(/'role',\s*'admin'[^_]/);
+    it('the app bootstraps the admin as super_admin (no SQL seed ships)', () => {
+      // The super admin is created by the app at startup, not by a mounted
+      // SQL file: neither seed exists any more.
+      expect(existsSync(join(TEMPLATE_DIR, 'volumes/db/super-admin.sql'))).toBe(false);
+      expect(existsSync(join(TEMPLATE_DIR, 'volumes/db/super-admin.dev.sql'))).toBe(false);
+      const content = readFileSync(
+        join(TEMPLATE_DIR, 'src/server/auth/bootstrap-admin.ts'),
+        'utf-8',
+      );
+      expect(content).toContain("role: 'super_admin'");
+      // Should NOT grant the old 'admin' role
+      expect(content).not.toMatch(/role: 'admin'/);
     });
 
     it('AuthProvider checks for super_admin role', () => {
@@ -126,9 +120,9 @@ describe('Project Scaffolding Integration', () => {
       const content = readFileSync(authProviderPath, 'utf-8');
 
       // Verify isSuperAdmin check uses super_admin
-      expect(content).toContain("user?.app_metadata?.role === 'super_admin'");
+      expect(content).toContain("user?.role === 'super_admin'");
       // Should NOT check for old 'admin' role
-      expect(content).not.toMatch(/app_metadata\?\.role\s*===\s*['"]admin['"]/);
+      expect(content).not.toMatch(/role\s*===\s*['"]admin['"]/);
     });
 
     it('API routes check for super_admin role', () => {
@@ -137,7 +131,7 @@ describe('Project Scaffolding Integration', () => {
       const authContent = readFileSync(authPath, 'utf-8');
 
       // Verify isSuperAdmin function checks for super_admin
-      expect(authContent).toContain("app_metadata?.role === 'super_admin'");
+      expect(authContent).toContain("user.role === 'super_admin'");
       // Should NOT check for old 'admin' role in isSuperAdmin
       expect(authContent).not.toMatch(/isSuperAdmin.*role\s*===\s*['"]admin['"]/);
 
@@ -147,8 +141,8 @@ describe('Project Scaffolding Integration', () => {
       expect(routesContent).toContain("import { isSuperAdmin } from '../../lib/auth'");
     });
 
-    it('init migration uses super_admin in RLS', () => {
-      const migrationPath = join(TEMPLATE_DIR, 'supabase/migrations/00001_init.sql');
+    it('the baseline migration uses super_admin in RLS', () => {
+      const migrationPath = join(TEMPLATE_DIR, 'db/migrations/0000_baseline_pre.sql');
       const content = readFileSync(migrationPath, 'utf-8');
 
       // Verify is_super_admin function checks for super_admin

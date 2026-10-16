@@ -1,11 +1,11 @@
 /**
  * Shared helpers for loading + rendering the k3s cloud-init scripts in
- * `carbon/cloud-init/k3s/` (master-init.sh / supabase-init.sh /
+ * `carbon/cloud-init/k3s/` (master-init.sh / db-init.sh /
  * worker-init.sh).
  *
  * Used by:
  *   - `src/lib/iac/programs/hetzner-k8s.js` to render user_data baked
- *     into the master/supabase/static-worker servers at Pulumi up.
+ *     into the master/database/static-worker servers at Pulumi up.
  *   - `src/lib/deploy/k8s/k3s.js` (`renderCarbonAutoscalerConfig`) to
  *     render the worker-init.sh body that the carbon-autoscaler sidecar
  *     reads from its `carbon-autoscaler-config` Secret's `config.json`
@@ -35,7 +35,7 @@ const INCLUDE_DIRECTIVE = /^#[ \t]*@include[ \t]+(\S+)[ \t]*$/gm;
  * replacing each directive line with the named file's contents.
  *
  * WHY this lives in the loader rather than being a `renderScript` var: the
- * three Hetzner role scripts (master/supabase/worker) each need a
+ * three Hetzner role scripts (master/database/worker) each need a
  * byte-identical copy of the private-NIC guard, and the registry-mirror
  * block above it already documents that hand-copied three-way duplication
  * is the status quo only because "extracting a shared snippet would
@@ -101,7 +101,7 @@ export function loadCloudInit(name) {
 
 /**
  * Substitute ${var} placeholders in a cloud-init script template with
- * values from a JS object. Used to render the master/supabase/worker
+ * values from a JS object. Used to render the master/database/worker
  * cloud-init scripts at deploy time.
  *
  * @param {string} tmpl

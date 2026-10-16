@@ -1,20 +1,20 @@
 /**
  * Application-level functional verification checks.
  *
- * Tests that actual application features (auth, database CRUD, storage,
- * realtime) work against a deployed environment. Every check is
- * fault-tolerant — errors are captured, never thrown.
+ * Tests that actual application features (auth, database CRUD, file uploads)
+ * work against a deployed environment. Every check is fault-tolerant — errors
+ * are captured, never thrown.
  */
 
 import crypto from 'node:crypto';
 import type { VerificationResult } from '../scenarios/types.js';
-import { dnsSafeFetch, resolveCheckIp } from './health.js';
+import { createPresignedTransfer, type PresignedTransfer } from '../utils/presigned-transfer.js';
+import { dnsSafeFetch } from './health.js';
+import { type PsqlResult, type ReplTarget, runPsql } from './replication.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-const TIMEOUT_MS = 10_000;
 
 /** fetch() wrapper that bypasses system DNS cache. */
 async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -50,28 +50,96 @@ function skip(checkName: string, reason: string): VerificationResult {
 }
 
 /**
- * Decode a GoTrue access-token JWT and return `app_metadata.role`, or null if
- * the token is malformed or carries no role. Pure (no network) so the role
- * assertion in checkAdminLogin is unit-testable without a live cluster.
- *
- * GoTrue mirrors the user's `raw_app_meta_data` into the JWT's `app_metadata`
- * claim, so a token minted for the configured admin carries
- * `app_metadata.role === 'super_admin'` — set identically by both provisioning
- * paths (compose createAdminUser + k8s provisionAdminUser, and the
- * super-admin.sql seed).
+ * A minimal cookie jar. Better Auth carries the session in an HttpOnly cookie
+ * and strips the token from JSON bodies, so a check that wants to be "signed
+ * in" has to keep the Set-Cookie values and replay them as a Cookie header.
+ * Pure (no network), so it is unit-testable.
  */
-export function extractAppMetadataRole(accessToken: string): string | null {
-  try {
-    const parts = accessToken.split('.');
-    if (parts.length !== 3) return null;
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as {
-      app_metadata?: { role?: unknown };
-    };
-    const role = payload.app_metadata?.role;
-    return typeof role === 'string' ? role : null;
-  } catch {
-    return null;
+export class CookieJar {
+  private readonly cookies = new Map<string, string>();
+
+  /** Absorb every Set-Cookie of a response; an empty value or Max-Age=0 deletes. */
+  absorb(res: Response): void {
+    for (const line of res.headers.getSetCookie()) {
+      const [pair, ...attrs] = line.split(';');
+      const eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      const expired = attrs.some((a) => /^\s*max-age\s*=\s*0\s*$/i.test(a));
+      if (value === '' || expired) this.cookies.delete(name);
+      else this.cookies.set(name, value);
+    }
   }
+
+  get size(): number {
+    return this.cookies.size;
+  }
+
+  /** The Cookie request header value ('' when empty). */
+  header(): string {
+    return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+}
+
+/** A signed-in session: the jar plus the user get-session reported. */
+export interface AuthSession {
+  jar: CookieJar;
+  user: { id?: string; email?: string; role?: string };
+}
+
+/**
+ * Headers for a call to the app's JSON API. Mutating requests carry an Origin
+ * matching SITE_URL (https://<domain>): the auth API and the CSRF middleware
+ * on /api/* both refuse a cookie-authenticated write without it.
+ */
+function apiHeaders(domain: string, jar?: CookieJar): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Origin: `https://${domain}`,
+  };
+  const cookie = jar?.header();
+  if (cookie) headers.Cookie = cookie;
+  return headers;
+}
+
+/**
+ * Read the signed-in user from `GET /api/auth/get-session`. The user is null
+ * when there is no session (the endpoint answers 200 with a null body then).
+ * Pure given a fetcher, so the admin-role assertion is unit-testable.
+ */
+export async function fetchSessionUser(
+  domain: string,
+  jar: CookieJar,
+  fetcher: typeof safeFetch = safeFetch,
+): Promise<{ status: number; user: AuthSession['user'] | null }> {
+  const res = await fetcher(`https://${domain}/api/auth/get-session`, {
+    method: 'GET',
+    headers: apiHeaders(domain, jar),
+  });
+  if (res.status !== 200) return { status: res.status, user: null };
+  const body = (await res.json().catch(() => null)) as { user?: AuthSession['user'] } | null;
+  return { status: 200, user: body?.user ?? null };
+}
+
+/**
+ * Whether the deployed app requires email verification. The server requires it
+ * exactly when SMTP is configured (carbon/src/server/lib/email.ts
+ * isEmailConfigured: a transporter from SMTP_HOST and SMTP_USER, plus SMTP_ADMIN_EMAIL), so
+ * the harness derives it from the same keys in the project's env.
+ */
+export function smtpConfiguredFromEnv(vars: Record<string, string | undefined>): boolean {
+  return Boolean(vars.SMTP_HOST?.trim() && vars.SMTP_USER?.trim() && vars.SMTP_ADMIN_EMAIL?.trim());
+}
+
+/**
+ * Sign-in failed because the address is unverified. Only a precondition gap
+ * (skip) when the harness KNOWS the app has SMTP configured, since a
+ * throwaway address can never verify then. Without SMTP the server does not
+ * require verification, so the same 403 is a regression and must fail.
+ */
+function isUnverifiedEmail(status: number, body: string, smtpConfigured: boolean): boolean {
+  return smtpConfigured && status === 403 && /EMAIL_NOT_VERIFIED/i.test(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +148,6 @@ export function extractAppMetadataRole(accessToken: string): string | null {
 
 async function checkAuthSignup(
   domain: string,
-  anonKey: string,
   email: string,
   password: string,
 ): Promise<VerificationResult> {
@@ -90,13 +157,10 @@ async function checkAuthSignup(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await safeFetch(`https://${domain}/auth/v1/signup`, {
+      const res = await safeFetch(`https://${domain}/api/auth/sign-up/email`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: anonKey,
-        },
-        body: JSON.stringify({ email, password }),
+        headers: apiHeaders(domain),
+        body: JSON.stringify({ email, password, name: 'E2E Test' }),
       });
 
       if (res.ok) {
@@ -105,14 +169,16 @@ async function checkAuthSignup(
 
       const body = await res.text();
 
-      // Retry on 404 — Kong may still be loading declarative routes after health check passes
-      if (res.status === 404 && attempt < MAX_RETRIES) {
+      // Retry only while the app is still coming up (gateway 502/503/504, or a
+      // 404 before the route table is live). A 4xx from the auth API is a real
+      // answer, and the sign-up cap (3 per 10s per IP) punishes blind retries.
+      if ([404, 502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
         continue;
       }
 
       return result('auth_signup', 'fail', start, {
-        errorMessage: `Signup returned ${res.status}: ${body}`,
+        errorMessage: `Signup returned ${res.status}: ${body.slice(0, 300)}`,
         details: { attempts: attempt + 1 },
       });
     } catch (err) {
@@ -131,45 +197,67 @@ async function checkAuthSignup(
   return result('auth_signup', 'fail', start, { errorMessage: 'Exhausted retries' });
 }
 
-async function checkAuthSignin(
+/** Sign in with email + password; the session cookie lands in the returned jar. */
+async function signInWithPassword(
   domain: string,
-  anonKey: string,
   email: string,
   password: string,
-): Promise<{ result: VerificationResult; accessToken?: string }> {
+  fetcher: typeof safeFetch = safeFetch,
+): Promise<{ jar: CookieJar; status: number; body: string }> {
+  const jar = new CookieJar();
+  const res = await fetcher(`https://${domain}/api/auth/sign-in/email`, {
+    method: 'POST',
+    headers: apiHeaders(domain),
+    body: JSON.stringify({ email, password }),
+  });
+  jar.absorb(res);
+  return { jar, status: res.status, body: await res.text() };
+}
+
+export async function checkAuthSignin(
+  domain: string,
+  email: string,
+  password: string,
+  smtpConfigured = false,
+  fetcher: typeof safeFetch = safeFetch,
+): Promise<{ result: VerificationResult; jar?: CookieJar; unverified?: boolean }> {
   const start = Date.now();
   try {
-    const res = await safeFetch(`https://${domain}/auth/v1/token?grant_type=password`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: anonKey,
-      },
-      body: JSON.stringify({ email, password }),
-    });
+    const { jar, status, body } = await signInWithPassword(domain, email, password, fetcher);
 
-    if (!res.ok) {
-      const body = await res.text();
+    if (status < 200 || status >= 300) {
+      if (status === 429) {
+        return {
+          result: result('auth_signin', 'fail', start, {
+            errorMessage: `Signin returned 429: hit the per-IP sign-in cap (10 per 15 min), not an auth regression; wait out the window. ${body.slice(0, 200)}`,
+          }),
+        };
+      }
+      if (isUnverifiedEmail(status, body, smtpConfigured)) {
+        return {
+          result: skip(
+            'auth_signin',
+            'The app requires email verification (SMTP is configured); a throwaway address cannot verify',
+          ),
+          unverified: true,
+        };
+      }
       return {
         result: result('auth_signin', 'fail', start, {
-          errorMessage: `Signin returned ${res.status}: ${body}`,
+          errorMessage: `Signin returned ${status}: ${body.slice(0, 300)}`,
         }),
       };
     }
 
-    const json = (await res.json()) as { access_token?: string };
-    if (!json.access_token) {
+    if (jar.size === 0) {
       return {
         result: result('auth_signin', 'fail', start, {
-          errorMessage: 'Response did not contain access_token',
+          errorMessage: 'Signin succeeded but set no session cookie',
         }),
       };
     }
 
-    return {
-      result: result('auth_signin', 'pass', start),
-      accessToken: json.access_token,
-    };
+    return { result: result('auth_signin', 'pass', start), jar };
   } catch (err) {
     return {
       result: result('auth_signin', 'fail', start, {
@@ -181,27 +269,24 @@ async function checkAuthSignin(
 
 async function checkAuthProtected(
   domain: string,
-  anonKey: string,
-  accessToken: string,
+  jar: CookieJar,
+  expectedEmail: string,
 ): Promise<VerificationResult> {
   const start = Date.now();
   try {
-    // Verify the access token is valid by calling GoTrue's /auth/v1/user endpoint.
-    // This tests the full auth pipeline: token issued by signup → validated by GoTrue.
-    // The user-context DB path (anon consumer + user JWT through Kong to
-    // PostgREST) is covered separately by app_api_me_authenticated.
-    const res = await safeFetch(`https://${domain}/auth/v1/user`, {
-      method: 'GET',
-      headers: {
-        apikey: anonKey,
-        Authorization: `Bearer ${accessToken}`,
-      },
-    });
+    // The session cookie from sign-in must resolve to the same user through
+    // get-session. The user-context DB path is covered separately by
+    // app_api_me_authenticated.
+    const { status, user } = await fetchSessionUser(domain, jar);
 
-    if (res.status !== 200) {
-      const body = await res.text();
+    if (status !== 200) {
       return result('auth_protected', 'fail', start, {
-        errorMessage: `Auth user endpoint returned ${res.status}: ${body}`,
+        errorMessage: `get-session returned ${status}`,
+      });
+    }
+    if (!user || user.email?.toLowerCase() !== expectedEmail.toLowerCase()) {
+      return result('auth_protected', 'fail', start, {
+        errorMessage: `get-session did not return the signed-in user (got ${user?.email ?? 'no session'})`,
       });
     }
 
@@ -228,28 +313,24 @@ export function validateMeResponse(body: unknown): string | null {
 }
 
 /**
- * Authenticated app-API check: GET /api/v1/me with the throwaway user's JWT.
+ * Authenticated app-API check: GET /api/v1/me with the throwaway user's
+ * session cookie.
  *
- * This is the only check that exercises the app's USER-CONTEXT DB path:
- * Hono route → Supabase client (ANON key as Kong apikey + user JWT in
- * Authorization) → Kong rest-v1 ACL → PostgREST under RLS. Every other check
- * reaches PostgREST as service_role (Kong `admin` group) or stops at GoTrue.
- *
- * RCA 2026-07-08: the audit remediation (b8dc024) moved user-context clients
- * onto the anon apikey while Kong's rest-v1 ACL still allowed only `admin` —
- * every authenticated data query 403'd at Kong (surfaced as app 500s) and the
- * matrix stayed green because nothing tested this path.
+ * This is the check that exercises the app's USER-CONTEXT DB path: the Hono
+ * session middleware resolves the cookie to a user, then the route reads
+ * memberships under RLS (`withUserDb` sets app.user_id). A broken session
+ * lookup or a broken RLS context shows up here and nowhere else.
  */
 export async function checkAppApiMeAuthenticated(
   appDomain: string,
-  accessToken: string,
+  jar: CookieJar,
   fetcher: typeof safeFetch = safeFetch,
 ): Promise<VerificationResult> {
   const start = Date.now();
   try {
     const res = await fetcher(`https://${appDomain}/api/v1/me`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: apiHeaders(appDomain, jar),
     });
 
     if (res.status !== 200) {
@@ -278,7 +359,8 @@ export async function checkAppApiMeAuthenticated(
  * Verify the OPERATOR can log into their own deployed app as the configured
  * super-admin. This is distinct from the throwaway signup/signin checks below
  * — those prove the auth *pipeline* works for a brand-new user; this proves the
- * admin user from `vibecarbon create` was actually provisioned in PRODUCTION.
+ * admin user from `vibecarbon create` was actually provisioned in PRODUCTION
+ * (the app's startup bootstrap creates it; see auth/bootstrap-admin.ts).
  *
  * RCA 2026-05-30: createAdminUser ran on compose-ha only — compose-single, k8s,
  * and k8s-ha shipped a prod app the operator couldn't log into (the admin user
@@ -287,43 +369,40 @@ export async function checkAppApiMeAuthenticated(
  * closes that blind spot: it FAILS (not skips) when the admin can't sign in, or
  * signs in without the super_admin role.
  */
-async function checkAdminLogin(
+export async function checkAdminLogin(
   domain: string,
-  anonKey: string,
   adminEmail: string,
   adminPassword: string,
+  fetcher: typeof safeFetch = safeFetch,
 ): Promise<VerificationResult> {
   const start = Date.now();
   try {
-    const res = await safeFetch(`https://${domain}/auth/v1/token?grant_type=password`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: anonKey,
-      },
-      body: JSON.stringify({ email: adminEmail, password: adminPassword }),
-    });
+    const { jar, status, body } = await signInWithPassword(
+      domain,
+      adminEmail,
+      adminPassword,
+      fetcher,
+    );
 
-    if (!res.ok) {
-      const body = await res.text();
+    if (status < 200 || status >= 300) {
       return result('auth_admin_login', 'fail', start, {
         errorMessage:
-          `Admin sign-in returned ${res.status}: ${body.slice(0, 200)} — the configured admin ` +
-          `(${adminEmail}) was not provisioned on this deploy mode (createAdminUser/provisionAdminUser gap)`,
+          `Admin sign-in returned ${status}: ${body.slice(0, 200)} — the configured admin ` +
+          `(${adminEmail}) was not provisioned on this deploy mode (startup bootstrap gap)`,
       });
     }
 
-    const json = (await res.json()) as { access_token?: string };
-    if (!json.access_token) {
+    const session = await fetchSessionUser(domain, jar, fetcher);
+    if (session.status !== 200 || !session.user) {
       return result('auth_admin_login', 'fail', start, {
-        errorMessage: 'Admin sign-in succeeded but the response carried no access_token',
+        errorMessage: `Admin signed in but get-session returned ${session.status} with ${session.user ? 'a user' : 'no session'}`,
       });
     }
 
-    const role = extractAppMetadataRole(json.access_token);
+    const role = session.user.role ?? null;
     if (role !== 'super_admin') {
       return result('auth_admin_login', 'fail', start, {
-        errorMessage: `Admin logged in but app_metadata.role is "${role ?? 'absent'}" (expected "super_admin")`,
+        errorMessage: `Admin logged in but user.role is "${role ?? 'absent'}" (expected "super_admin")`,
         details: { role },
       });
     }
@@ -336,16 +415,16 @@ async function checkAdminLogin(
   }
 }
 
+// Request budget per verify pass against the per-IP caps
+// (carbon/src/server/middleware/auth-rate-limits.ts): 2 password sign-ins (cap
+// 10 per 15 min), 1 sign-up (cap 3 per 10 s), 2 get-session (shared 100 per
+// min). Several verify passes inside 15 minutes still fit.
 async function runAuthChecks(
   domain: string,
-  anonKey: string,
   adminEmail?: string,
   adminPassword?: string,
-  // /api/v1/me is an APP route: on compose it lives on the main domain while
-  // `domain` here is the Kong api-subdomain (k8s: same domain, so it masked
-  // the difference — overnight 2026-07-08 compose verify-deploy 404).
-  appDomain: string = domain,
-): Promise<VerificationResult[]> {
+  smtpConfigured = false,
+): Promise<{ results: VerificationResult[]; jar?: CookieJar }> {
   const results: VerificationResult[] = [];
 
   // Admin login first — independent of the throwaway-signup pipeline below, so
@@ -353,7 +432,7 @@ async function runAuthChecks(
   // real deploy always has ADMIN_EMAIL/ADMIN_PASSWORD in .env.local; only skip
   // when they genuinely couldn't be parsed.
   if (adminEmail && adminPassword) {
-    results.push(await checkAdminLogin(domain, anonKey, adminEmail, adminPassword));
+    results.push(await checkAdminLogin(domain, adminEmail, adminPassword));
   } else {
     results.push(skip('auth_admin_login', 'ADMIN_EMAIL/ADMIN_PASSWORD not found in .env.local'));
   }
@@ -363,44 +442,47 @@ async function runAuthChecks(
   const password = 'TestPass123!';
 
   // Sign up
-  const signupResult = await checkAuthSignup(domain, anonKey, email, password);
+  const signupResult = await checkAuthSignup(domain, email, password);
   results.push(signupResult);
   if (signupResult.status === 'fail') {
     results.push(skip('auth_signin', 'Skipped because signup failed'));
     results.push(skip('auth_protected', 'Skipped because signup failed'));
     results.push(skip('app_api_me_authenticated', 'Skipped because signup failed'));
-    return results;
+    return { results };
   }
 
   // Sign in
-  const signinOutcome = await checkAuthSignin(domain, anonKey, email, password);
+  const signinOutcome = await checkAuthSignin(domain, email, password, smtpConfigured);
   results.push(signinOutcome.result);
-  if (signinOutcome.result.status === 'fail' || !signinOutcome.accessToken) {
-    results.push(skip('auth_protected', 'Skipped because signin failed'));
-    results.push(skip('app_api_me_authenticated', 'Skipped because signin failed'));
-    return results;
+  if (!signinOutcome.jar) {
+    const why = signinOutcome.unverified
+      ? 'Skipped because the app requires email verification'
+      : 'Skipped because signin failed';
+    results.push(skip('auth_protected', why));
+    results.push(skip('app_api_me_authenticated', why));
+    return { results };
   }
 
-  // Protected endpoint
-  results.push(await checkAuthProtected(domain, anonKey, signinOutcome.accessToken));
+  // Protected endpoint: the cookie resolves to the signed-in user
+  results.push(await checkAuthProtected(domain, signinOutcome.jar, email));
 
   // User-context DB path through the app's own API (see check docstring)
-  results.push(await checkAppApiMeAuthenticated(appDomain, signinOutcome.accessToken));
+  results.push(await checkAppApiMeAuthenticated(domain, signinOutcome.jar));
 
-  return results;
+  return { results, jar: signinOutcome.jar };
 }
 
 // ---------------------------------------------------------------------------
 // Database CRUD checks
 // ---------------------------------------------------------------------------
 
-// Core application tables created by supabase/migrations/00001_init.sql. If
-// any of these is missing from PostgREST's schema cache, the migration didn't
-// run (or PostgREST never reloaded) and every DB-backed feature is broken.
+// Core application tables from the app's Drizzle schema
+// (carbon/src/server/db/schema.ts). If any of these is missing, the migration
+// didn't run and every DB-backed feature is broken.
 // RCA prod-1 2026-05-26: the old check tested a synthetic `e2e_test_table`
 // that no migration creates, so it 404'd and skip()'d to PASS every run —
 // a deploy with 0 application tables sailed through e2e green.
-const CORE_TABLES = [
+export const CORE_TABLES = [
   'notifications',
   'organizations',
   'memberships',
@@ -408,44 +490,65 @@ const CORE_TABLES = [
   'app_settings',
 ] as const;
 
-async function runDbChecks(domain: string, serviceRoleKey: string): Promise<VerificationResult[]> {
-  const results: VerificationResult[] = [];
-  const headers: Record<string, string> = {
-    apikey: serviceRoleKey,
-    Authorization: `Bearer ${serviceRoleKey}`,
-    'Content-Type': 'application/json',
-    Prefer: 'return=representation',
-  };
+/** Runs one single-line SQL statement against the deployed database. */
+export type SqlRunner = (sql: string) => Promise<PsqlResult>;
 
-  // --- db_schema: assert the real app tables exist & are queryable ---------
-  // A `limit=1` read via PostgREST (service role bypasses RLS). 200 proves the
-  // table exists AND PostgREST sees it in its schema cache. 404 (PGRST205) is
-  // the exact prod-1 failure mode. This FAILS — it does not skip.
-  const schemaStart = Date.now();
-  const missing: string[] = [];
-  const tableErrors: Record<string, string> = {};
-  for (const table of CORE_TABLES) {
-    try {
-      const res = await safeFetch(`https://${domain}/rest/v1/${table}?limit=1`, {
-        method: 'GET',
-        headers,
-      });
-      if (res.status === 200) continue;
-      const body = await res.text();
-      // 404 + PGRST205 => table not in schema cache (missing migration or
-      // unreloaded PostgREST). Any other non-200 is also a real problem.
-      missing.push(table);
-      tableErrors[table] = `HTTP ${res.status}: ${body.slice(0, 160)}`;
-    } catch (err) {
-      missing.push(table);
-      tableErrors[table] = err instanceof Error ? err.message : String(err);
-    }
+/** psql -tA output → one trimmed value per non-empty line. */
+function psqlLines(output: string): string[] {
+  return output
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Real-schema assertion + write round-trip, as direct SQL inside the deployed
+ * database (the same SSH + `docker compose exec` / `kubectl exec` path the
+ * replication checks use — see runPsql in ./replication.ts). The app has no
+ * public table API to probe from outside, so the database is asked directly.
+ * `sql` is a string instead of a runner when the run has no SSH handle to the
+ * database host; it names the missing handle (see missingDbHandle). Both
+ * checks then FAIL, never skip: every scenario that reaches a verify step has
+ * deployed servers and a deploy key, so a missing handle is a broken harness,
+ * and a skip would let the prod-1 regression guard below go quietly unrun.
+ */
+export async function runDbChecks(sql: SqlRunner | string): Promise<VerificationResult[]> {
+  if (typeof sql === 'string') {
+    const errorMessage = `Cannot reach the database: ${sql}`;
+    return ['db_schema', 'db_write_roundtrip'].map((checkName) => ({
+      checkName,
+      status: 'fail' as const,
+      errorMessage,
+      details: { missing: sql },
+    }));
   }
+  const results: VerificationResult[] = [];
+
+  // --- db_schema: assert the real app tables exist -------------------------
+  // One catalog query for all of them. A missing table is the exact prod-1
+  // failure mode. This FAILS — it does not skip.
+  const schemaStart = Date.now();
+  const tableList = CORE_TABLES.map((t) => `'${t}'`).join(',');
+  const schema = await sql(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN (${tableList})`,
+  );
+  if (!schema.ok) {
+    results.push(
+      result('db_schema', 'fail', schemaStart, {
+        errorMessage: `Schema query failed: ${schema.error ?? 'unknown error'}`,
+        details: { checked: CORE_TABLES },
+      }),
+    );
+    results.push(skip('db_write_roundtrip', 'Skipped: schema query failed (see db_schema)'));
+    return results;
+  }
+  const present = new Set(psqlLines(schema.output));
+  const missing = CORE_TABLES.filter((t) => !present.has(t));
   if (missing.length > 0) {
     results.push(
       result('db_schema', 'fail', schemaStart, {
-        errorMessage: `Missing/unqueryable core tables: ${missing.join(', ')} (migrations likely didn't run or PostgREST didn't reload)`,
-        details: { missing, tableErrors, checked: CORE_TABLES },
+        errorMessage: `Missing core tables: ${missing.join(', ')} (migrations likely didn't run)`,
+        details: { missing, checked: CORE_TABLES },
       }),
     );
     // Schema is broken — a CRUD round-trip can't work, so don't muddy the
@@ -458,550 +561,202 @@ async function runDbChecks(domain: string, serviceRoleKey: string): Promise<Veri
   );
 
   // --- db_write_roundtrip: prove insert/query/delete on a REAL table -------
-  // Use notifications with is_active:false so the row is never surfaced to the
-  // public/authenticated notification feed even if cleanup somehow fails.
-  const uid = crypto.randomUUID();
-  const marker = `e2e-probe-${uid}`;
-  const notifUrl = `https://${domain}/rest/v1/notifications`;
+  // notifications with is_active=false so the row is never surfaced to any
+  // notification feed even if cleanup somehow fails. The marker is a UUID, so
+  // the single-quoted literal can never break out of the statement.
+  const marker = `e2e-probe-${crypto.randomUUID()}`;
+  const deleteSql = `DELETE FROM public.notifications WHERE title = '${marker}' RETURNING title`;
   const roundtripStart = Date.now();
-  try {
-    // Insert
-    const insertRes = await safeFetch(notifUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ title: marker, is_active: false, visibility: 'authenticated' }),
-    });
-    if (!insertRes.ok) {
-      const body = await insertRes.text();
-      results.push(
-        result('db_write_roundtrip', 'fail', roundtripStart, {
-          errorMessage: `Insert returned ${insertRes.status}: ${body.slice(0, 200)}`,
-          details: { step: 'insert' },
-        }),
-      );
-      return results;
-    }
+  const fail = (step: string, errorMessage: string): VerificationResult =>
+    result('db_write_roundtrip', 'fail', roundtripStart, { errorMessage, details: { step } });
 
-    // Query
-    const queryRes = await safeFetch(`${notifUrl}?title=eq.${marker}&select=id,title`, {
-      method: 'GET',
-      headers,
-    });
-    const rows = queryRes.ok
-      ? ((await queryRes.json()) as Array<{ id: string; title: string }>)
-      : [];
-    const found = rows.some((r) => r.title === marker);
+  const insert = await sql(
+    `INSERT INTO public.notifications (title, is_active, visibility) VALUES ('${marker}', false, 'authenticated') RETURNING title`,
+  );
+  if (!insert.ok || !psqlLines(insert.output).includes(marker)) {
+    results.push(fail('insert', `Insert failed: ${insert.error ?? insert.output.slice(0, 200)}`));
+    // The INSERT may have committed even if its output was lost in transit.
+    await sql(deleteSql);
+    return results;
+  }
 
-    // Delete (best-effort cleanup, always attempt)
-    await safeFetch(`${notifUrl}?title=eq.${marker}`, { method: 'DELETE', headers }).catch(
-      () => undefined,
+  const query = await sql(`SELECT title FROM public.notifications WHERE title = '${marker}'`);
+  const found = query.ok && psqlLines(query.output).includes(marker);
+  const cleanup = await sql(deleteSql);
+  const deleted = cleanup.ok && psqlLines(cleanup.output).includes(marker);
+
+  if (!found) {
+    results.push(
+      fail('query', `Inserted row not found on read-back${query.error ? `: ${query.error}` : ''}`),
     );
-
-    if (!found) {
-      results.push(
-        result('db_write_roundtrip', 'fail', roundtripStart, {
-          errorMessage: 'Inserted row not found on read-back',
-          details: { step: 'query', rowsReturned: rows.length },
-        }),
-      );
-      return results;
-    }
-
+  } else if (!deleted) {
+    results.push(
+      fail(
+        'delete',
+        `Delete did not remove the probe row${cleanup.error ? `: ${cleanup.error}` : ''}`,
+      ),
+    );
+  } else {
     results.push(
       result('db_write_roundtrip', 'pass', roundtripStart, {
         details: { table: 'notifications', insert: true, query: true, cleanup: true },
       }),
     );
-  } catch (err) {
-    // Best-effort cleanup on unexpected error
-    await safeFetch(`${notifUrl}?title=eq.${marker}`, { method: 'DELETE', headers }).catch(
-      () => undefined,
-    );
-    results.push(
-      result('db_write_roundtrip', 'fail', roundtripStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
-    );
   }
-
   return results;
 }
 
 // ---------------------------------------------------------------------------
-// Storage checks
+// File upload round-trip
 // ---------------------------------------------------------------------------
+
+/** A valid 1x1 PNG: the smallest real image the avatar allowlist accepts. */
+export const ONE_PIXEL_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+/** Source list of one CSP directive, or null when the header or directive is absent. */
+function cspDirective(header: string | null, name: string): string[] | null {
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const [directive, ...sources] = part.trim().split(/\s+/);
+    if (directive?.toLowerCase() === name) return sources;
+  }
+  return null;
+}
+
+interface PresignBody {
+  key?: unknown;
+  url?: unknown;
+  headers?: unknown;
+  fileUrl?: unknown;
+}
 
 /**
- * Every spelling of "object not found" the storage download path produces —
- * the trigger for storage_download's DIAGNOSTIC retry (which fails either
- * way; it exists to name the failure mode, not absorb it).
+ * The upload path end to end, the way the browser walks it: the signed-in user
+ * asks the app for a presigned PUT (`POST /api/v1/files/presign`), confirms the
+ * page CSP and the bucket CORS would let a browser make that PUT, PUTs the
+ * bytes straight to object storage, then reads them back through the app
+ * (`GET /api/files/<key>`, a 302 to a presigned GET). Passes only when the
+ * bytes that come back equal the bytes that went up.
  *
- * Two observed spellings, one per occurrence of the post-restore
- * read-after-write race:
- *  - outer HTTP 404 (2026-08-23, run 32614839037) — Kong/storage passthrough.
- *  - outer HTTP 400 with storage-api's JSON envelope
- *    `{"statusCode":"404","error":"Not found",…}` (2026-08-30, run
- *    33324819789) — the trigger keyed on outer 404 alone MISSED this one,
- *    so that run produced zero discriminating evidence. Body match is pinned
- *    to the envelope shape, not prose mentioning 404.
+ * App requests ride `appFetch` (dnsSafeFetch: pinned, Host + SNI kept on the
+ * domain). The two object-storage legs ride `transfer`, see
+ * tests/e2e/utils/presigned-transfer.ts for why they sit off the pinned seam.
+ * `appFetch` does not follow redirects, which is what lets this check assert
+ * the 302 itself before following it.
  */
-export function isStorageNotFoundResponse(status: number, body: string): boolean {
-  if (status === 404) return true;
-  return status === 400 && /"statusCode"\s*:\s*"?404"?/.test(body);
-}
+export async function checkFileUploadRoundtrip(
+  appDomain: string,
+  jar: CookieJar,
+  deps: { appFetch?: typeof safeFetch; transfer?: PresignedTransfer } = {},
+): Promise<VerificationResult> {
+  const appFetch = deps.appFetch ?? safeFetch;
+  const transfer = deps.transfer ?? createPresignedTransfer(appDomain);
+  const start = Date.now();
+  const fail = (step: string, message: string, details?: Record<string, unknown>) =>
+    result('file_upload_roundtrip', 'fail', start, {
+      errorMessage: `${step}: ${message}`,
+      details: { step, ...details },
+    });
 
-/**
- * Create `test-bucket` if it is not already there, so the storage checks
- * below have the precondition they need.
- *
- * WHY THIS EXISTS. Nothing in the product or the harness ever created this
- * bucket, so `storage_upload`/`storage_download`/`storage_delete` skipped as
- * "precondition missing" in verify-deploy, verify-restore AND verify-failover
- * — on every provider, in every run, since the checks were written. Every
- * green lifecycle record we have was green with the Storage path entirely
- * unexercised (confirmed on the 2026-08-20 vultr and scaleway compose-HA
- * passes: "30 passed, 0 failed, 4 skipped" three times over).
- *
- * The bucket is the TEST's fixture, not the product's — the template must not
- * ship a `test-bucket` — so the harness creates it. Doing it here rather than
- * as a separate lifecycle step means every caller of runStorageChecks gets it,
- * including the post-restore and post-failover ones where a re-created stack
- * has an empty storage schema again.
- *
- * Creating it through the Storage API is a bonus assertion: the admin path
- * (POST /storage/v1/bucket) has never been covered either.
- *
- * @returns null on success, or an operator-facing reason on failure
- */
-export async function ensureTestBucket(
-  domain: string,
-  serviceRoleKey: string,
-): Promise<string | null> {
   try {
-    const res = await safeFetch(`https://${domain}/storage/v1/bucket`, {
+    const presignRes = await appFetch(`https://${appDomain}/api/v1/files/presign`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${serviceRoleKey}`,
-        apikey: serviceRoleKey,
-        'Content-Type': 'application/json',
+        ...apiHeaders(appDomain, jar),
       },
-      body: JSON.stringify({ id: 'test-bucket', name: 'test-bucket', public: true }),
-    });
-    if (res.ok) return null;
-    const body = await res.text();
-    // Idempotent: a bucket that already exists is exactly what we wanted.
-    // Supabase answers 409 for this, but the wording has moved across
-    // versions, so match the status OR either spelling.
-    if (res.status === 409 || /already exists|Duplicate/i.test(body)) return null;
-    return `POST /storage/v1/bucket returned ${res.status}: ${body.slice(0, 300)}`;
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-}
-
-async function runStorageChecks(
-  domain: string,
-  serviceRoleKey: string,
-): Promise<VerificationResult[]> {
-  const results: VerificationResult[] = [];
-  const uid = crypto.randomUUID();
-  const objectPath = `e2e-test-${uid}.txt`;
-  const content = 'e2e test content';
-  // TWO distinct paths, per the Storage REST contract:
-  //   upload / delete -> /object/<bucket>/<key>          (authenticated)
-  //   public download -> /object/public/<bucket>/<key>   (public read URL)
-  // Supabase's own troubleshooting note is explicit: a public bucket only
-  // means a public URL exists for DOWNLOAD; "use the normal path for all
-  // other operations and not the public URL path with 'public' in it".
-  //
-  // This check used the public path for ALL THREE, so upload and delete were
-  // always addressed wrong. It never showed up because the bucket did not
-  // exist either, and the missing-bucket branch short-circuited before the
-  // path could be wrong in a visible way. Creating the bucket
-  // (ensureTestBucket) exposed it immediately: the very next CI run failed
-  // storage_upload with `Bucket not found` against /object/public/... while
-  // storage_bucket_ensure passed. Two bugs, one hiding the other.
-  const objectUrl = `https://${domain}/storage/v1/object/test-bucket/${objectPath}`;
-  const publicUrl = `https://${domain}/storage/v1/object/public/test-bucket/${objectPath}`;
-  const authHeaders: Record<string, string> = {
-    Authorization: `Bearer ${serviceRoleKey}`,
-    apikey: serviceRoleKey,
-  };
-
-  // Precondition, created rather than assumed — see ensureTestBucket. A
-  // failure here FAILS the check rather than skipping it: "we could not set
-  // up storage" is a storage result, and silently skipping is what hid this
-  // whole surface for months.
-  const bucketStart = Date.now();
-  const bucketError = await ensureTestBucket(domain, serviceRoleKey);
-  if (bucketError) {
-    results.push(
-      result('storage_bucket_ensure', 'fail', bucketStart, {
-        errorMessage: `Could not create or find test-bucket: ${bucketError}`,
+      body: JSON.stringify({
+        kind: 'avatar',
+        contentType: 'image/png',
+        size: ONE_PIXEL_PNG.length,
       }),
-    );
-    results.push(skip('storage_upload', 'Skipped because test-bucket could not be created'));
-    results.push(skip('storage_download', 'Skipped because test-bucket could not be created'));
-    results.push(skip('storage_delete', 'Skipped because test-bucket could not be created'));
-    return results;
-  }
-  results.push(result('storage_bucket_ensure', 'pass', bucketStart));
-
-  // Upload
-  const uploadStart = Date.now();
-  try {
-    const res = await safeFetch(objectUrl, {
-      method: 'POST',
-      headers: {
-        ...authHeaders,
-        'Content-Type': 'text/plain',
-      },
-      body: content,
     });
-
-    if (!res.ok) {
-      const body = await res.text();
-      // "Bucket not found" USED to skip all three checks here. It cannot be a
-      // skip any more: ensureTestBucket has just reported the bucket present,
-      // so storage losing it between those two calls is a real defect and must
-      // read as one. That old skip is precisely how this surface stayed
-      // unexercised on every provider for months.
-      const missing = body.includes('Bucket not found') || res.status === 404;
-      // DIAGNOSTIC retry, sibling of storage_download's (#29) and
-      // storage_delete's: on the not-found envelope (covers the S3
-      // stale-frontend NoSuchBucket rendered as 400 + statusCode "404" —
-      // run 33435737752, post-restore verify) probe the IDENTICAL upload
-      // once after 2s. It fails either way; it exists to name the failure
-      // mode — and the attestation carries the classifiable spelling into
-      // the thrown step error.
-      let retryNote = '';
-      if (missing || isStorageNotFoundResponse(res.status, body)) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const again = await safeFetch(objectUrl, {
-            method: 'POST',
-            headers: { ...authHeaders, 'Content-Type': 'text/plain' },
-            body: content,
-          });
-          retryNote = again.ok
-            ? ' S3-BACKEND BLIP: the identical upload succeeded on a 2s-later retry — stale storage frontend (ensureTestBucket had just seen the bucket), not a broken upload path.'
-            : ` Retry after 2s also failed (${again.status}) — the upload path itself is failing.`;
-        } catch (retryErr) {
-          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
-        }
-      }
-      results.push(
-        result('storage_upload', 'fail', uploadStart, {
-          errorMessage: missing
-            ? `test-bucket vanished between creation and upload (${res.status}): ${body}${retryNote}`
-            : `Upload returned ${res.status}: ${body}${retryNote}`,
-        }),
+    if (presignRes.status !== 200) {
+      const body = await presignRes.text();
+      return fail(
+        'presign',
+        `POST /api/v1/files/presign returned ${presignRes.status}: ${body.slice(0, 300)}`,
       );
-      results.push(skip('storage_download', 'Skipped because upload failed'));
-      results.push(skip('storage_delete', 'Skipped because upload failed'));
-      return results;
+    }
+    const presign = (await presignRes.json()) as PresignBody;
+    if (
+      typeof presign.url !== 'string' ||
+      typeof presign.key !== 'string' ||
+      typeof presign.fileUrl !== 'string' ||
+      !presign.headers ||
+      typeof presign.headers !== 'object'
+    ) {
+      return fail('presign', `200 but unexpected shape: ${JSON.stringify(presign).slice(0, 300)}`);
+    }
+    const key = presign.key;
+
+    // The browser PUTs straight to object storage, so two things outside the
+    // byte transfer must hold or the real upload button fails while this
+    // server-side PUT succeeds: the page's CSP connect-src must allow the
+    // storage origin, and the bucket's CORS must answer the preflight for the
+    // app's origin.
+    const storageOrigin = new URL(presign.url).origin;
+    const homeRes = await appFetch(`https://${appDomain}/`, { method: 'GET' });
+    const csp = homeRes.headers.get('content-security-policy');
+    const connectSrc = cspDirective(csp, 'connect-src');
+    if (!connectSrc?.includes(storageOrigin)) {
+      return fail(
+        'csp',
+        `connect-src does not allow ${storageOrigin} (got: ${connectSrc ? connectSrc.join(' ') : `no connect-src in ${JSON.stringify(csp)}`})`,
+        { key },
+      );
     }
 
-    results.push(result('storage_upload', 'pass', uploadStart));
-  } catch (err) {
-    results.push(
-      result('storage_upload', 'fail', uploadStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
+    const appOrigin = `https://${appDomain}`;
+    const preflight = await transfer.preflight(presign.url, appOrigin);
+    if (preflight.status < 200 || preflight.status >= 300 || preflight.allowOrigin !== appOrigin) {
+      return fail(
+        'cors',
+        `preflight from ${appOrigin} returned ${preflight.status} with Access-Control-Allow-Origin ${JSON.stringify(preflight.allowOrigin)}`,
+        { key },
+      );
+    }
+
+    const put = await transfer.put(
+      presign.url,
+      presign.headers as Record<string, string>,
+      new Uint8Array(ONE_PIXEL_PNG),
     );
-    results.push(skip('storage_download', 'Skipped because upload failed'));
-    results.push(skip('storage_delete', 'Skipped because upload failed'));
-    return results;
-  }
-
-  // Download
-  const downloadStart = Date.now();
-  try {
-    // Deliberately the PUBLIC url: reading back through the public path is
-    // what proves the bucket is actually public and Kong routes it.
-    const res = await safeFetch(publicUrl, {
-      method: 'GET',
-      headers: authHeaders,
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      // DIAGNOSTIC RETRY — NOT AN ABSORBER. 2026-08-23 (matrix 32614839037,
-      // hetzner compose verify-restore): the public download 404'd 137ms
-      // after a successful upload, then the identical sequence passed on the
-      // rerun. One data point cannot distinguish "object never readable"
-      // from "read-after-write race on a restored stack". So on failure,
-      // probe once more after 2s and FAIL EITHER WAY — the check stays red,
-      // but its message now names which failure mode occurred, which is the
-      // evidence the next occurrence needs. An absorbing retry here would be
-      // an unregistered mitigation hiding an `ours` bug (mitigation policy).
-      // Occurrence #2 (2026-08-30, run 33324819789, same step): storage-api
-      // rendered the miss as outer 400 + body statusCode "404", the old
-      // `status === 404` trigger missed it, and we got no evidence — hence
-      // isStorageNotFoundResponse, which pins BOTH spellings.
-      let retryNote = '';
-      if (isStorageNotFoundResponse(res.status, body)) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const again = await safeFetch(publicUrl, { method: 'GET', headers: authHeaders });
-          retryNote = again.ok
-            ? ` READ-AFTER-WRITE RACE: same URL succeeded on a 2s-later retry — the object became publicly readable late, it was not missing.`
-            : ` Retry after 2s also failed (${again.status}) — not a settle race at this horizon.`;
-        } catch (retryErr) {
-          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
-        }
-      }
-      results.push(
-        result('storage_download', 'fail', downloadStart, {
-          errorMessage: `Download returned ${res.status}: ${body}${retryNote}`,
-        }),
-      );
-    } else {
-      const body = await res.text();
-      if (body !== content) {
-        results.push(
-          result('storage_download', 'fail', downloadStart, {
-            errorMessage: 'Downloaded content does not match uploaded content',
-            details: { expected: content, received: body.slice(0, 200) },
-          }),
-        );
-      } else {
-        results.push(result('storage_download', 'pass', downloadStart));
-      }
-    }
-  } catch (err) {
-    results.push(
-      result('storage_download', 'fail', downloadStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
-    );
-  }
-
-  // Delete (best-effort cleanup)
-  const deleteStart = Date.now();
-  try {
-    const res = await safeFetch(objectUrl, {
-      method: 'DELETE',
-      headers: authHeaders,
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      // DIAGNOSTIC RETRY — NOT AN ABSORBER (same contract as the download
-      // leg above). 2026-08-23 run 32646830369: upload and download passed,
-      // then this DELETE got a bare storage-api 500 — the same hetzner
-      // object-storage degradation family the registry-500 RCA documented.
-      // One 5xx tells us nothing about blip-vs-broken, so probe once after
-      // 2s and FAIL EITHER WAY with the mode named.
-      let retryNote = '';
-      if (res.status >= 500) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const again = await safeFetch(objectUrl, { method: 'DELETE', headers: authHeaders });
-          retryNote = again.ok
-            ? ' S3-BACKEND BLIP: the identical delete succeeded on a 2s-later retry — transient backend error, not a broken delete path.'
-            : ` Retry after 2s also failed (${again.status}) — the delete path itself is failing.`;
-        } catch (retryErr) {
-          retryNote = ` Retry probe itself errored: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`;
-        }
-      }
-      results.push(
-        result('storage_delete', 'fail', deleteStart, {
-          errorMessage: `Delete returned ${res.status}: ${body}${retryNote}`,
-        }),
-      );
-    } else {
-      results.push(result('storage_delete', 'pass', deleteStart));
-    }
-  } catch (err) {
-    results.push(
-      result('storage_delete', 'fail', deleteStart, {
-        errorMessage: err instanceof Error ? err.message : String(err),
-      }),
-    );
-  }
-
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// Realtime check
-// ---------------------------------------------------------------------------
-
-async function runRealtimeCheck(domain: string, anonKey: string): Promise<VerificationResult[]> {
-  // Primary: Try WebSocket connection (requires Node 21+ for global WebSocket).
-  // Fallback: HTTP request to the realtime endpoint via dnsSafeFetch.
-  //
-  // The WebSocket constructor uses dns.lookup() (system resolver), which may
-  // have stale cache entries for newly created domains. Our HTTP checks use
-  // dnsSafeFetch which resolves via Cloudflare/Google DNS, bypassing the cache.
-  // When WebSocket fails, we fall back to HTTP to verify the service is running.
-  //
-  // The WebSocket handshake is therefore the ONE probe here that a
-  // verify-failover resolution pin cannot cover (no lookup hook on the global
-  // WebSocket constructor). It is not a hole: the pin exists so a stale record
-  // can't produce a spurious FAILURE, and a WebSocket that lands on the retired
-  // node simply fails and drops into the PINNED HTTP fallback below, which
-  // decides the check. It can never turn a broken deployment green — a pass
-  // still requires a real response from the node the pin dialed.
-  //
-  // TLS: the WebSocket handshake is the one check with no per-call TLS opt-out
-  // — it uses the process default. That default used to be "verify nothing"
-  // (the runner's NODE_TLS_REJECT_UNAUTHORIZED=0); it is now "system roots plus
-  // the Let's Encrypt staging roots" (tests/e2e/utils/e2e-env.js), so a staging
-  // rig still connects while a bogus certificate no longer does. A cert
-  // rejection here is not fatal — it drops through to the HTTP fallback below,
-  // which reports a pass with a note.
-
-  // Resolve the domain through the shared check seam (pin-aware: under a
-  // verify-failover resolution pin this is the promoted node's IP, so the
-  // precondition can't be satisfied by a stale record pointing at the retired
-  // one). Used only as an existence precondition + a diagnostic detail.
-  const resolvedIp = await resolveCheckIp(domain);
-  if (!resolvedIp) {
-    return [skip('realtime_connect', `DNS not yet resolving for ${domain} — skipped`)];
-  }
-
-  // Try WebSocket first (best proof of realtime working)
-  if (typeof globalThis.WebSocket !== 'undefined') {
-    const wsResult = await tryWebSocket(domain, anonKey);
-    if (wsResult.status === 'pass') {
-      return [wsResult];
-    }
-    // WebSocket failed — fall through to HTTP fallback
-    console.log(`[realtime] WebSocket failed (${wsResult.errorMessage}), trying HTTP fallback...`);
-  }
-
-  // Fallback: verify realtime service is reachable via HTTP (uses dnsSafeFetch
-  // which resolves DNS through Cloudflare/Google, bypassing stale system cache).
-  // Retry on timeout — realtime may take longer to come up after server restarts
-  // (e.g. post-scale reboots).
-  const start = Date.now();
-  // This HTTP fallback only runs when the WebSocket handshake (tried first) fails,
-  // so its whole budget is failure-path. 3×10s=30s rides out a slow post-scale
-  // realtime cold start without doubling the previous 4×15s=60s tail.
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_MS = 10_000;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await safeFetch(
-        `https://${domain}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`,
-        { method: 'GET' },
-      );
-      // The realtime endpoint returns an HTTP upgrade error or a response —
-      // any non-timeout response proves the service is reachable.
-      return [
-        result('realtime_connect', 'pass', start, {
-          details: {
-            method: 'http_fallback',
-            statusCode: res.status,
-            resolvedIp,
-            attempt,
-            note: 'WebSocket DNS failed; HTTP fallback confirmed service reachable',
-          },
-        }),
-      ];
-    } catch (err) {
-      if (attempt < MAX_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-        continue;
-      }
-      return [
-        result('realtime_connect', 'fail', start, {
-          errorMessage: `Both WebSocket and HTTP fallback failed: ${err instanceof Error ? err.message : String(err)}`,
-          details: { attempts: attempt + 1 },
-        }),
-      ];
-    }
-  }
-
-  // Unreachable
-  return [result('realtime_connect', 'fail', start, { errorMessage: 'Exhausted retries' })];
-}
-
-/** Attempt a WebSocket connection to the realtime service. */
-function tryWebSocket(domain: string, anonKey: string): Promise<VerificationResult> {
-  const start = Date.now();
-
-  return new Promise<VerificationResult>((resolve) => {
-    const timer = setTimeout(() => {
-      try {
-        ws.close();
-      } catch {
-        /* best effort */
-      }
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: 'Timed out waiting for Phoenix join reply (10 s)',
-        }),
-      );
-    }, TIMEOUT_MS);
-
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(`wss://${domain}/realtime/v1/websocket?apikey=${anonKey}&vsn=1.0.0`);
-    } catch (err) {
-      clearTimeout(timer);
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: err instanceof Error ? err.message : String(err),
-        }),
-      );
-      return;
-    }
-
-    ws.addEventListener('error', (event) => {
-      clearTimeout(timer);
-      try {
-        ws.close();
-      } catch {
-        /* best effort */
-      }
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: 'message' in event ? (event as ErrorEvent).message : 'WebSocket error',
-        }),
-      );
-    });
-
-    ws.addEventListener('open', () => {
-      // Send Phoenix join message
-      const joinMsg = JSON.stringify({
-        topic: 'phoenix',
-        event: 'heartbeat',
-        payload: {},
-        ref: '1',
+    if (put.status < 200 || put.status >= 300) {
+      return fail('upload', `PUT to the presigned URL returned ${put.status}: ${put.body}`, {
+        key,
       });
-      ws.send(joinMsg);
-    });
+    }
 
-    ws.addEventListener('message', (event) => {
-      try {
-        const msg = JSON.parse(typeof event.data === 'string' ? event.data : '') as {
-          ref?: string;
-        };
-        // Any reply to our ref means the realtime server is responsive
-        if (msg.ref === '1') {
-          clearTimeout(timer);
-          ws.close();
-          resolve(result('realtime_connect', 'pass', start));
-        }
-      } catch {
-        // Ignore malformed frames; keep waiting for our reply
-      }
-    });
-
-    ws.addEventListener('close', () => {
-      // If we haven't resolved yet, the connection was closed unexpectedly
-      clearTimeout(timer);
-      resolve(
-        result('realtime_connect', 'fail', start, {
-          errorMessage: 'WebSocket closed before receiving a join reply',
-        }),
+    const readRes = await appFetch(`https://${appDomain}${presign.fileUrl}`, { method: 'GET' });
+    const location = readRes.headers.get('location');
+    if (readRes.status !== 302 || !location) {
+      const body = await readRes.text();
+      return fail(
+        'read',
+        `GET ${presign.fileUrl} returned ${readRes.status} (expected a 302 to a presigned URL): ${body.slice(0, 200)}`,
+        { key },
       );
-    });
-  });
+    }
+
+    const got = await transfer.get(location);
+    if (got.status !== 200) {
+      return fail('download', `following the read redirect returned ${got.status}`, { key });
+    }
+    if (!Buffer.from(got.bytes).equals(ONE_PIXEL_PNG)) {
+      return fail(
+        'compare',
+        `downloaded ${got.bytes.length} bytes that differ from the ${ONE_PIXEL_PNG.length} uploaded`,
+        { key },
+      );
+    }
+
+    return result('file_upload_roundtrip', 'pass', start, { details: { key } });
+  } catch (err) {
+    return fail('request', err instanceof Error ? err.message : String(err));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,33 +764,45 @@ function tryWebSocket(domain: string, anonKey: string): Promise<VerificationResu
 // ---------------------------------------------------------------------------
 
 /**
- * Run all application functional checks against a deployed environment.
- * Returns array of individual check results.
+ * Which SSH handle to the database host is missing, in the same words as the
+ * config-canary checks, or null when both are present.
  */
-export async function runAppFunctionalChecks(
-  domain: string,
-  anonKey: string,
-  serviceRoleKey: string,
-  adminEmail?: string,
-  adminPassword?: string,
-  appDomain: string = domain,
-): Promise<VerificationResult[]> {
+export function missingDbHandle(ip?: string | null, sshKeyPath?: string | null): string | null {
+  if (ip && sshKeyPath) return null;
+  if (!ip) return sshKeyPath ? 'no serverIp (sshKeyPath present)' : 'no serverIp and no sshKeyPath';
+  return 'no sshKeyPath (serverIp present)';
+}
+
+/**
+ * Run all application functional checks against a deployed environment.
+ * Returns array of individual check results. `db` is the SSH target that
+ * fronts the database, or the missingDbHandle() reason when there is none.
+ */
+export async function runAppFunctionalChecks(opts: {
+  domain: string;
+  db: ReplTarget | string;
+  adminEmail?: string;
+  adminPassword?: string;
+  smtpConfigured?: boolean;
+}): Promise<VerificationResult[]> {
+  const { domain, db, adminEmail, adminPassword, smtpConfigured = false } = opts;
   const results: VerificationResult[] = [];
 
   // Run check groups sequentially — auth creates state the others do not
   // depend on, but sequential execution keeps resource usage predictable
   // and makes logs easier to follow during long e2e runs.
-  const authResults = await runAuthChecks(domain, anonKey, adminEmail, adminPassword, appDomain);
-  results.push(...authResults);
+  const auth = await runAuthChecks(domain, adminEmail, adminPassword, smtpConfigured);
+  results.push(...auth.results);
 
-  const dbResults = await runDbChecks(domain, serviceRoleKey);
-  results.push(...dbResults);
+  results.push(...(await runDbChecks(typeof db === 'string' ? db : (sql) => runPsql(db, sql))));
 
-  const storageResults = await runStorageChecks(domain, serviceRoleKey);
-  results.push(...storageResults);
-
-  const realtimeResults = await runRealtimeCheck(domain, anonKey);
-  results.push(...realtimeResults);
+  // Uploads are an app feature (presign + read routes on the app domain), so
+  // they run as the signed-in throwaway user from the auth checks above.
+  results.push(
+    auth.jar
+      ? await checkFileUploadRoundtrip(domain, auth.jar)
+      : skip('file_upload_roundtrip', 'Skipped because no signed-in user (auth checks failed)'),
+  );
 
   return results;
 }

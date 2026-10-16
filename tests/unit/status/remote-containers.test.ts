@@ -18,7 +18,7 @@ describe('planContainerTargets', () => {
   // Shapes below are what the product writes, not invented ones:
   //   compose-ha (effects/compose-ha.js)   { name: '<proj>-<env>-primary', ip, role: 'primary' }
   //   compose-ha (orchestrator.js ~1452)   { name: 'primary', ip, region, serverType }   (no role)
-  //   kubernetes-ha (orchestrator.js ~1440) { name: 'primary', ip, supabaseIp, region }  (no role)
+  //   kubernetes-ha (orchestrator.js ~1440) { name: 'primary', ip, dbIp, region }  (no role)
   //                                        + ha.primary.masterIp / ha.standby.masterIp
   it('compose-ha (effects shape): role-tagged primary and standby, both compose', () => {
     expect(
@@ -67,13 +67,13 @@ describe('planContainerTargets', () => {
     ]);
   });
 
-  it('kubernetes: only the master, kind k8s; workers and supabase omitted', () => {
+  it('kubernetes: only the master, kind k8s; workers and the db node omitted', () => {
     expect(
       planContainerTargets({
         deployMode: 'kubernetes',
         servers: [
-          { name: 'master', ip: '1.1.1.1', supabaseIp: '3.3.3.3', role: 'master' },
-          { name: 'supabase', ip: '3.3.3.3', role: 'supabase' },
+          { name: 'master', ip: '1.1.1.1', dbIp: '3.3.3.3', role: 'master' },
+          { name: 'db', ip: '3.3.3.3', role: 'db' },
           { name: 'worker-1', ip: '4.4.4.4', role: 'worker' },
         ],
       }),
@@ -94,8 +94,8 @@ describe('planContainerTargets', () => {
       planContainerTargets({
         deployMode: 'kubernetes-ha',
         servers: [
-          { name: 'primary', ip: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
-          { name: 'standby', ip: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
+          { name: 'primary', ip: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
+          { name: 'standby', ip: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
         ],
       }),
     ).toEqual([
@@ -111,12 +111,12 @@ describe('planContainerTargets', () => {
         deployMode: 'kubernetes-ha',
         ha: {
           enabled: true,
-          primary: { masterIp: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
-          standby: { masterIp: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
+          primary: { masterIp: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
+          standby: { masterIp: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
         },
         servers: [
-          { name: 'primary', ip: '1.1.1.1', supabaseIp: '3.3.3.3', region: 'fsn1' },
-          { name: 'standby', ip: '2.2.2.2', supabaseIp: '4.4.4.4', region: 'hel1' },
+          { name: 'primary', ip: '1.1.1.1', dbIp: '3.3.3.3', region: 'fsn1' },
+          { name: 'standby', ip: '2.2.2.2', dbIp: '4.4.4.4', region: 'hel1' },
         ],
       }),
     ).toEqual([
@@ -293,13 +293,13 @@ describe('podDisplayName', () => {
       podDisplayName(
         pod({
           metadata: {
-            name: 'supabase-kong-5f6d7c8b9-xyz12',
+            name: 'metabase-5f6d7c8b9-xyz12',
             namespace: 'vibecarbon',
-            ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-kong-5f6d7c8b9' }],
+            ownerReferences: [{ kind: 'ReplicaSet', name: 'metabase-5f6d7c8b9' }],
           },
         }),
       ),
-    ).toBe('supabase-kong');
+    ).toBe('metabase');
   });
 
   it('keeps the ordinal for StatefulSet pods', () => {
@@ -307,13 +307,13 @@ describe('podDisplayName', () => {
       podDisplayName(
         pod({
           metadata: {
-            name: 'supabase-db-0',
+            name: 'db-0',
             namespace: 'vibecarbon',
-            ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-db' }],
+            ownerReferences: [{ kind: 'StatefulSet', name: 'db' }],
           },
         }),
       ),
-    ).toBe('supabase-db-0');
+    ).toBe('db-0');
   });
 
   it('falls back to the pod name with no owner', () => {
@@ -356,38 +356,15 @@ describe('podDisplayName', () => {
     expect(podDisplayName(p)).toBe('web-abc');
   });
 
-  it('collapses the Helm release/chart double prefix for ReplicaSet-owned pods', () => {
+  it('leaves a StatefulSet pod name exactly as it is', () => {
     const p = pod({
       metadata: {
-        name: 'supabase-supabase-kong-5b8f9c7dxz-q2w4r',
+        name: 'db-0',
         namespace: 'vibecarbon',
-        labels: { 'pod-template-hash': '5b8f9c7dxz' },
-        ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-supabase-kong-5b8f9c7dxz' }],
+        ownerReferences: [{ kind: 'StatefulSet', name: 'db' }],
       },
     });
-    expect(podDisplayName(p)).toBe('supabase-kong');
-  });
-
-  it('collapses the Helm release/chart double prefix for StatefulSet-owned pods', () => {
-    const p = pod({
-      metadata: {
-        name: 'supabase-supabase-db-0',
-        namespace: 'vibecarbon',
-        ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-supabase-db' }],
-      },
-    });
-    expect(podDisplayName(p)).toBe('supabase-db-0');
-  });
-
-  it('leaves a single supabase- prefix unchanged', () => {
-    const p = pod({
-      metadata: {
-        name: 'supabase-db-0',
-        namespace: 'vibecarbon',
-        ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-db' }],
-      },
-    });
-    expect(podDisplayName(p)).toBe('supabase-db-0');
+    expect(podDisplayName(p)).toBe('db-0');
   });
 });
 
@@ -397,16 +374,16 @@ describe('rowsFromPods', () => {
       pod({}),
       pod({
         metadata: {
-          name: 'supabase-db-0',
+          name: 'db-0',
           namespace: 'vibecarbon',
-          ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-db' }],
+          ownerReferences: [{ kind: 'StatefulSet', name: 'db' }],
         },
       }),
       pod({
         metadata: {
-          name: 'supabase-realtime-9b7c2z-q',
+          name: 'redis-9b7c2z-q',
           namespace: 'vibecarbon',
-          ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-realtime-9b7c2z' }],
+          ownerReferences: [{ kind: 'ReplicaSet', name: 'redis-9b7c2z' }],
         },
         status: {
           phase: 'Running',
@@ -451,16 +428,16 @@ describe('rowsFromPods', () => {
         latencyMs: 0,
       },
       {
-        name: 'supabase-db-0',
-        container: 'supabase-db-0',
+        name: 'db-0',
+        container: 'db-0',
         health: 'healthy',
         label: 'healthy',
         detail: '',
         latencyMs: 0,
       },
       {
-        name: 'supabase-realtime',
-        container: 'supabase-realtime',
+        name: 'redis',
+        container: 'redis',
         health: 'unhealthy',
         label: 'CrashLoopBackOff',
         detail: 'restarts 12',
@@ -535,8 +512,8 @@ describe('checkRemoteContainers', () => {
   it('compose: runs docker ps -a per server and classifies rows', async () => {
     const sshRun = vi.fn(async (ip: string) =>
       ip === '1.1.1.1'
-        ? 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-kong\trunning\tUp 1h (healthy)\n'
-        : 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-kong\texited\tExited (128) 3 hours ago\n',
+        ? 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-app\trunning\tUp 1h (healthy)\n'
+        : 'letsgo-db\trunning\tUp 1h (healthy)\nletsgo-app\texited\tExited (128) 3 hours ago\n',
     );
     const out = await checkRemoteContainers('prod', composeHa, 'letsgo', { ...base(), sshRun });
     expect(sshRun).toHaveBeenCalledTimes(2);
@@ -568,8 +545,8 @@ describe('checkRemoteContainers', () => {
           latencyMs: 0,
         },
         {
-          name: 'Kong Gateway',
-          container: 'kong',
+          name: 'App',
+          container: 'app',
           health: 'healthy',
           label: 'healthy',
           detail: '',
@@ -578,7 +555,7 @@ describe('checkRemoteContainers', () => {
       ],
     });
     expect(out?.s.rows[1]).toMatchObject({
-      container: 'kong',
+      container: 'app',
       health: 'unhealthy',
       label: 'exited',
       detail: 'Exited (128) 3 hours ago',

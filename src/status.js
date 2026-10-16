@@ -148,46 +148,21 @@ async function checkHttpEndpoint(url, timeout = 2000, fetchImpl = fetch) {
 // Note: execSync calls below use only hardcoded commands (no user input),
 // matching the pattern in deploy.js and destroy.js throughout this codebase.
 
-// Core services whose container may carry no healthcheck. Probed through Kong only when
-// Docker offers no verdict, on whichever host port THIS project's kong container bound.
-const GATEWAY_PROBES = {
-  rest: { path: '/rest/v1/', acceptCodes: [200, 401] },
-  meta: { path: '/pg/', acceptCodes: [200, 401] },
-};
-
-/**
- * Parse `docker port <container> 8000/tcp` output ("0.0.0.0:8000\n[::]:8000")
- * into the host port. Null when the container isn't running or the output
- * isn't a binding.
- *
- * @param {string|null|undefined} output
- * @returns {number|null}
- */
-function parseKongHostPort(output) {
-  const first = (output || '').split('\n').find((line) => line.trim());
-  if (!first) return null;
-  const match = first.trim().match(/:(\d+)$/);
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-
 /**
  * Health of this project's local Docker stack, from Docker's point of view.
  *
  * Enumerates `docker ps -a` for containers prefixed `${projectName}-` so the
  * table shows the whole stack — core services, `vibecarbon add` add-ons, and
- * containers that have exited (which the old running-only listing hid, e.g.
- * a kong that lost its port bind). Health comes from the compose healthcheck
- * verdict in Docker's status string; the two core services without one
- * (rest, meta) are probed through Kong on the host port THIS project's kong
- * container bound, never a fixed :8000 that another project's gateway may
- * own.
+ * containers that have exited (which the old running-only listing hid).
+ * Health comes from the compose healthcheck verdict in Docker's status
+ * string.
  *
  * @param {string|undefined} projectName
- * @param {{runCommand?: typeof runCommandAsync, fetch?: typeof fetch, timeoutMs?: number}} [deps]
+ * @param {{runCommand?: typeof runCommandAsync}} [deps]
  * @returns {Promise<Array<{name: string, container: string, health: string, label: string, detail: string, latencyMs: number}>>}
  */
 async function checkDockerContainers(projectName, deps = {}) {
-  const { runCommand: _run = runCommandAsync, fetch: _fetch = fetch, timeoutMs = 2000 } = deps;
+  const { runCommand: _run = runCommandAsync } = deps;
   // No project name means no `${name}-*` prefix to enumerate; the old fallback (strip the
   // first dash-segment of every container on the host) is exactly the cross-project
   // confusion this function exists to avoid.
@@ -221,83 +196,12 @@ async function checkDockerContainers(projectName, deps = {}) {
 
   if (containers.length === 0) return [];
 
-  const kongRunning = containers.some((ct) => ct.container === 'kong' && ct.state === 'running');
-  let kongPort = null;
-  if (kongRunning) {
-    try {
-      kongPort = parseKongHostPort(
-        await _run(['docker', 'port', `${prefix}kong`, '8000/tcp'], {
-          silent: true,
-          timeout: 5000,
-          ignoreError: true,
-        }),
-      );
-    } catch {
-      kongPort = null;
-    }
-  }
-  const gatewayDetail = kongRunning ? 'gateway port not published' : 'gateway down';
-
-  const rows = await Promise.all(
-    containers.map(async ({ container, state, status }) => {
-      const name = SERVICE_DISPLAY_NAMES[container] || container;
-      const base = classifyContainer(container, state, status);
-      const probe = GATEWAY_PROBES[container];
-      // Kong probe is a fallback for containers Docker has no verdict on
-      // (label 'running' = up, no healthcheck). A real healthcheck verdict
-      // — from compose or baked into the image — always wins.
-      if (!probe || state !== 'running' || base.label !== 'running') {
-        return { name, container, ...base, latencyMs: 0 };
-      }
-      if (kongPort === null) {
-        return {
-          name,
-          container,
-          health: 'unknown',
-          label: 'unknown',
-          detail: gatewayDetail,
-          latencyMs: 0,
-        };
-      }
-      const start = Date.now();
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await _fetch(`http://localhost:${kongPort}${probe.path}`, {
-          method: 'GET',
-          signal: controller.signal,
-        });
-        const latencyMs = Date.now() - start;
-        if (probe.acceptCodes.includes(response.status)) {
-          return { name, container, health: 'healthy', label: 'healthy', detail: '', latencyMs };
-        }
-        return {
-          name,
-          container,
-          health: 'unhealthy',
-          label: 'unhealthy',
-          detail: `HTTP ${response.status}`,
-          latencyMs,
-        };
-      } catch (err) {
-        const detail = controller.signal.aborted
-          ? `timeout after ${timeoutMs}ms`
-          : err instanceof Error
-            ? err.message
-            : String(err);
-        return {
-          name,
-          container,
-          health: 'unhealthy',
-          label: 'unhealthy',
-          detail,
-          latencyMs: Date.now() - start,
-        };
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    }),
-  );
+  const rows = containers.map(({ container, state, status }) => ({
+    name: SERVICE_DISPLAY_NAMES[container] || container,
+    container,
+    ...classifyContainer(container, state, status),
+    latencyMs: 0,
+  }));
 
   const rank = (ct) => {
     const i = CORE_SERVICE_ORDER.indexOf(ct);
@@ -493,7 +397,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
             [
               'bash',
               '-lc',
-              `cd /opt/${projectName} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "${targetSql}"`,
+              `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${targetSql}"`,
             ],
             { timeout: timeoutMs },
           )
@@ -508,7 +412,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
               '--',
               'psql',
               '-U',
-              'supabase_admin',
+              'postgres',
               '-d',
               'postgres',
               '-tAc',
@@ -566,7 +470,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
             '--',
             'psql',
             '-U',
-            'supabase_admin',
+            'postgres',
             '-d',
             'postgres',
             '-tAc',
@@ -1062,9 +966,8 @@ function formatServerLines(servers, checks) {
 
 /**
  * Lines for the "Health" block: header, probe URL, and a verdict line built
- * from the real `/api/health/ready` shape (db/supabase nest under
- * `services`, with a top-level `services`/`database`/`supabase` fallback for
- * older payload shapes).
+ * from the real `/api/health/ready` shape (the db state nests under
+ * `services`, with a top-level `database` fallback).
  *
  * @param {{url: string, ok: boolean, status?: number|null, latencyMs: number, data?: object|null, error?: string}} remoteHealth
  * @returns {string[]}
@@ -1079,9 +982,7 @@ function formatHealthLines(remoteHealth) {
     if (data && typeof data === 'object') {
       const parts = [];
       const db = data.services?.database ?? data.database;
-      const supabase = data.services?.supabase ?? data.supabase;
       if (db) parts.push(`db: ${db}`);
-      if (supabase) parts.push(`supabase: ${supabase}`);
       if (data.status) parts.push(data.status);
       if (parts.length > 0) details = c.dim(`  (${parts.join(', ')})`);
     }
@@ -1595,7 +1496,6 @@ export {
   getBranchName,
   isEnvironmentUnhealthy,
   main,
-  parseKongHostPort,
   providerDisplayName,
   resolveEnvProvider,
   SPEC,

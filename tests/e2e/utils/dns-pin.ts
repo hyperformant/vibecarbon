@@ -20,10 +20,10 @@
  * fresh answer and hit the promoted node (auth_health, auth_signup, rest_api —
  * all passed), while others got the stale answer and hit the DEMOTED node whose
  * app tier is deliberately stopped. That produced spa_auth_callback 404
- * ("swallowed by Kong"), auth_signin / auth_admin_login timeouts, an
+ * ("swallowed by the gateway"), auth_signin / auth_admin_login timeouts, an
  * unqueryable db_schema, and storage_upload 503 `{"message":"name resolution
- * failed"}` — the retired node's Kong failing to resolve its own stopped
- * upstreams. The promoted node's Kong access log contained none of those
+ * failed"}` — the retired node's gateway failing to resolve its own stopped
+ * upstreams. The promoted node's gateway access log contained none of those
  * request ids; everything healed at TTL expiry.
  *
  * WHAT THE PIN DOES

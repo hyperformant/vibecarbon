@@ -209,7 +209,9 @@ export function createRateLimiter(options: { windowMs: number; max: number }) {
     // before the auth middleware sets `user`, so those key by IP.
     const user = c.get('user');
     const identifier = user?.id ? `user:${user.id}` : `ip:${getClientIp(c)}`;
-    const key = `${identifier}:${c.req.path}`;
+    // The window and cap are part of the key: two limiters on one path (a
+    // general budget and a strict cap) must each keep their own count.
+    const key = `${identifier}:${c.req.path}:${options.windowMs}:${options.max}`;
     const now = Date.now();
 
     const result = await getStore().increment(key, options.windowMs, options.max);

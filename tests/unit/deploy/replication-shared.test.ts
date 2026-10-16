@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { DB_CONTAINER, DB_PVC } from '../../../src/lib/deploy/db-workload.js';
 import {
   assertReplicationStreamingOrDegraded,
   buildNodePgdataSwapScript,
@@ -186,12 +187,12 @@ describe('buildStagedBasebackupScript', () => {
     expect(script).toContain('-S vibecarbon_standby_slot');
   });
 
-  it('forces hot_standby=on in the staged auto.conf (image wal-g.conf ships it off)', () => {
-    // Live RCA 2026-07-06 e4 rig: the standby STREAMED fine but refused
-    // read-only connections ("FATAL: ... Hot standby mode is disabled") — the
-    // supabase image's /etc/postgresql-custom/wal-g.conf sets hot_standby=off
-    // and postgresql.conf leaves it commented, so the include wins unless
-    // postgresql.auto.conf (read last) overrides it.
+  it('pins hot_standby=on in the staged auto.conf, whatever the image config says', () => {
+    // With hot_standby off, a reseeded standby streams fine but refuses
+    // read-only connections ("FATAL: ... Hot standby mode is disabled"), so
+    // every pg_is_in_recovery() check fails (live RCA 2026-07-06 e4 rig, when
+    // an image config include shipped it off). postgresql.auto.conf is read
+    // last, so the staged line wins over any image or include setting.
     // BOTH staging modes must carry the override:
     const combined = buildStagedBasebackupScript({ replPassword: 'pw', primaryHost: 'h' });
     expect(combined).toContain(
@@ -302,8 +303,8 @@ const POD_JSON_FIXTURE = JSON.stringify({
   spec: {
     containers: [
       {
-        name: 'supabase-db',
-        image: 'supabase/postgres:15.8.1.060',
+        name: DB_CONTAINER,
+        image: 'postgres:17',
         volumeMounts: [
           {
             name: 'postgres-volume',
@@ -316,7 +317,7 @@ const POD_JSON_FIXTURE = JSON.stringify({
     volumes: [
       {
         name: 'postgres-volume',
-        persistentVolumeClaim: { claimName: 'data-supabase-supabase-db-0' },
+        persistentVolumeClaim: { claimName: DB_PVC },
       },
     ],
   },
@@ -325,20 +326,20 @@ const POD_JSON_FIXTURE = JSON.stringify({
 describe('parsePgdataClaimFromPodJson', () => {
   it('extracts claimName, subPath, and the db image (works for local-path AND CSI)', () => {
     expect(parsePgdataClaimFromPodJson(POD_JSON_FIXTURE)).toEqual({
-      claimName: 'data-supabase-supabase-db-0',
+      claimName: DB_PVC,
       subPath: 'postgres-data',
-      image: 'supabase/postgres:15.8.1.060',
+      image: 'postgres:17',
     });
   });
 
   it('accepts a pre-parsed object too', () => {
     const obj = JSON.parse(POD_JSON_FIXTURE);
-    expect(parsePgdataClaimFromPodJson(obj).claimName).toBe('data-supabase-supabase-db-0');
+    expect(parsePgdataClaimFromPodJson(obj).claimName).toBe(DB_PVC);
   });
 
   it('throws when no PVC is mounted at /var/lib/postgresql/data', () => {
     const noPvc = JSON.stringify({
-      spec: { containers: [{ name: 'supabase-db', image: 'x', volumeMounts: [] }], volumes: [] },
+      spec: { containers: [{ name: DB_CONTAINER, image: 'x', volumeMounts: [] }], volumes: [] },
     });
     expect(() => parsePgdataClaimFromPodJson(noPvc)).toThrow(/no persistentVolumeClaim/);
   });
@@ -348,7 +349,7 @@ describe('parsePgdataClaimFromPodJson', () => {
       spec: {
         containers: [
           {
-            name: 'supabase-db',
+            name: DB_CONTAINER,
             volumeMounts: [{ name: 'v', mountPath: '/var/lib/postgresql/data' }],
           },
         ],
@@ -362,17 +363,15 @@ describe('parsePgdataClaimFromPodJson', () => {
 describe('buildPgdataSwapPodManifest', () => {
   const manifest = JSON.parse(
     buildPgdataSwapPodManifest({
-      claimName: 'data-supabase-supabase-db-0',
-      image: 'supabase/postgres:15.8.1.060',
+      claimName: DB_PVC,
+      image: 'postgres:17',
       swapScript: buildNodePgdataSwapScript({ pgdataDir: '/pgdata-vol/postgres-data' }),
     }),
   );
 
   it('mounts the SAME PVC (no subPath) so the swap can rename PGDATA aside', () => {
     const c = manifest.spec.containers[0];
-    expect(manifest.spec.volumes[0].persistentVolumeClaim.claimName).toBe(
-      'data-supabase-supabase-db-0',
-    );
+    expect(manifest.spec.volumes[0].persistentVolumeClaim.claimName).toBe(DB_PVC);
     // Whole volume mounted at the root; NO subPath (PGDATA is a subdir under it).
     expect(c.volumeMounts[0].mountPath).toBe('/pgdata-vol');
     expect(c.volumeMounts[0].subPath).toBeUndefined();
@@ -380,7 +379,7 @@ describe('buildPgdataSwapPodManifest', () => {
 
   it('reuses the db image (already pulled on the node) and runs the swap script via bash', () => {
     const c = manifest.spec.containers[0];
-    expect(c.image).toBe('supabase/postgres:15.8.1.060');
+    expect(c.image).toBe('postgres:17');
     expect(c.command[0]).toBe('bash');
     expect(c.command[1]).toBe('-c');
     expect(c.command[2]).toContain("PGDATA='/pgdata-vol/postgres-data'");
@@ -392,23 +391,23 @@ describe('buildPgdataSwapPodManifest', () => {
     expect(manifest.spec.securityContext.runAsUser).toBe(0);
   });
 
-  it('tolerates dedicated=supabase:NoSchedule (local-path PV pins the pod to the tainted node)', () => {
+  it('tolerates dedicated=db:NoSchedule (local-path PV pins the pod to the tainted node)', () => {
     // Live-hit 2026-07-07: without this the swap pod sat Unschedulable —
-    // "1 node(s) had untolerated taint {dedicated: supabase}, 2 node(s) had
+    // "1 node(s) had untolerated taint {dedicated: db}, 2 node(s) had
     // volume node affinity conflict". Harmless on CSI rigs (tolerations only
     // widen schedulability).
     expect(manifest.spec.tolerations).toEqual([
-      { key: 'dedicated', operator: 'Equal', value: 'supabase', effect: 'NoSchedule' },
+      { key: 'dedicated', operator: 'Equal', value: 'db', effect: 'NoSchedule' },
     ]);
   });
 
-  it('pins to the dedicated supabase node like the db StatefulSet (CSI topology is only zonal)', () => {
+  it('pins to the dedicated database node like the db StatefulSet (CSI topology is only zonal)', () => {
     // RCA 2026-07-16 (gate run 29504041478): a detached csi.hetzner.cloud
     // volume does not attract the pod to the node it detached from, so the
     // scheduler placed the swap pod on a worker that never ran the db — the
     // cold multi-GB wal-g image pull blew the 180s swap budget. The selector
     // makes placement deterministic: cached image + node-local re-attach.
-    expect(manifest.spec.nodeSelector).toEqual({ dedicated: 'supabase' });
+    expect(manifest.spec.nodeSelector).toEqual({ dedicated: 'db' });
   });
 });
 
@@ -444,9 +443,9 @@ describe('swapPgdataViaHelperPod', () => {
   }
 
   const inputs = {
-    claimName: 'data-supabase-supabase-db-0',
+    claimName: DB_PVC,
     subPath: 'postgres-data',
-    image: 'supabase/postgres:15.8.1.060',
+    image: 'postgres:17',
   };
 
   it('applies the swap pod, waits for Succeeded, returns its logs, and deletes it', async () => {
@@ -457,8 +456,8 @@ describe('swapPgdataViaHelperPod', () => {
     const cmds = calls.map((c) => c.argv.join(' '));
     // Manifest carries the PVC, the reused image, and PGDATA=<root>/<subPath>.
     const apply = calls.find((c) => c.argv.join(' ').includes('apply -f -'));
-    expect(apply?.input).toContain('data-supabase-supabase-db-0');
-    expect(apply?.input).toContain('supabase/postgres:15.8.1.060');
+    expect(apply?.input).toContain(DB_PVC);
+    expect(apply?.input).toContain('postgres:17');
     expect(apply?.input).toContain("PGDATA='/pgdata-vol/postgres-data'");
     // Waited on the pod status via shell-safe `-o json` (no jsonpath metachars
     // that the joined-argv ssh transport would hand to bash), then always
@@ -506,7 +505,7 @@ describe('swapPgdataViaHelperPod', () => {
 
   it('fails FAST on Unschedulable (terminal — waiting cannot fix a taint/affinity conflict)', async () => {
     const schedMsg =
-      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: supabase}, ' +
+      '0/3 nodes are available: 1 node(s) had untolerated taint {dedicated: db}, ' +
       '2 node(s) had volume node affinity conflict.';
     const { kubectl, calls } = mkKubectl({
       phase: 'Pending',
@@ -515,7 +514,7 @@ describe('swapPgdataViaHelperPod', () => {
     // The error names the exact scheduler conflict (not a generic timeout) and
     // surfaces on the FIRST poll — no budget wait.
     await expect(swapPgdataViaHelperPod(kubectl, inputs)).rejects.toThrow(
-      /could not be scheduled[\s\S]*untolerated taint \{dedicated: supabase\}/,
+      /could not be scheduled[\s\S]*untolerated taint \{dedicated: db\}/,
     );
     // The pod is still cleaned up (finally).
     expect(calls.map((c) => c.argv.join(' ')).some((c) => c.includes('delete pod'))).toBe(true);

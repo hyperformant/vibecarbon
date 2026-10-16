@@ -19,18 +19,14 @@ import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
-// HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity, and
-// the Supavisor pooler ports, which compose deploys scope to operator CIDRs).
+// HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
-const POOLER_SESSION_PORT = '5432';
-const POOLER_TRANSACTION_PORT = '6543';
-const OPERATOR_LOCKED_PORTS = new Set([
-  SSH_PORT,
-  K8S_API_PORT,
-  POOLER_SESSION_PORT,
-  POOLER_TRANSACTION_PORT,
-]);
+const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs; applyOperatorCidrs deletes any such rule (the database has no
+// public port).
+const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
 // The single replication port for the WireGuard tunnel (see wireguard.js —
 // WG_PORT=51821). Only reachable via compose-ha, which Linode does not
@@ -390,7 +386,7 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /** @returns {Promise<never>} */
-  static async getK8sSupabaseUserData() {
+  static async getK8sDbUserData() {
     throw new Error("Linode's k8s tier is not built — SUPPORTED_TIERS is compose-only");
   }
 
@@ -524,12 +520,12 @@ export class LinodeProvider extends BaseProvider {
    * Region-appropriate default server types. Fixed roles — Linode's Standard
    * line is uniform across regions, so no per-region preference walk.
    * @param {string} _region - Accepted for interface parity; unused
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     return {
       masterType: 'g6-standard-1',
-      supabaseType: LinodeProvider.DEFAULT_TYPE,
+      dbType: LinodeProvider.DEFAULT_TYPE,
       workerType: 'g6-standard-1',
     };
   }
@@ -584,7 +580,7 @@ export class LinodeProvider extends BaseProvider {
       if (available.has(serverType)) return serverType;
 
       const defaults = LinodeProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.supabaseType) return defaults.supabaseType;
+      if (serverType === defaults.dbType) return defaults.dbType;
       return defaults.masterType;
     }
 
@@ -1183,9 +1179,10 @@ export class LinodeProvider extends BaseProvider {
   }
 
   /**
-   * Rewrite the operator-locked ports' inbound rules (SSH 22, k8s API 6443,
-   * pooler 5432/6543) on a named firewall to the given CIDR list, leaving
-   * every other rule unchanged. CIDRs are split into Linode's per-family
+   * Rewrite the operator-locked ports' inbound rules (SSH 22, k8s API 6443)
+   * on a named firewall to the given CIDR list, deleting any inbound
+   * TCP/5432 or TCP/6543 rule (RETIRED_DB_PORTS), and leaving every other
+   * rule unchanged. CIDRs are split into Linode's per-family
    * `{ipv4, ipv6}` arrays (splitCidrsByFamily).
    * @param {{firewallName: string, cidrs: string[]}} args
    * @returns {Promise<boolean>} true if found and updated; false if the
@@ -1195,12 +1192,14 @@ export class LinodeProvider extends BaseProvider {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
     const addresses = splitCidrsByFamily(cidrs);
-    const newRules = (fw.rules?.inbound || []).map((rule) => {
-      if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
-        return { ...rule, addresses };
-      }
-      return rule;
-    });
+    const newRules = (fw.rules?.inbound || [])
+      .filter((rule) => !(rule.protocol === 'TCP' && RETIRED_DB_PORTS.has(String(rule.ports))))
+      .map((rule) => {
+        if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
+          return { ...rule, addresses };
+        }
+        return rule;
+      });
     await this.setFirewallRules(fw.id, newRules);
     return true;
   }

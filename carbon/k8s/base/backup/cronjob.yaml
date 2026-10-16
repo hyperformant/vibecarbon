@@ -1,12 +1,11 @@
 # Nightly wal-g base backup.
 #
 # wal-g backup-push needs direct PGDATA filesystem access, which only the
-# supabase-db pod has. So instead of a separate backup container that talks to
+# db pod has. So instead of a separate backup container that talks to
 # postgres over the network (the old pg_dump design), this CronJob runs a tiny
 # kubectl image and `kubectl exec`s wal-g INSIDE the db pod — where wal-g, the
-# WALG_*/AWS_* env, and PGDATA already live (see k8s/values/supabase.values.yaml
-# + the WAL-archiving setup in applyK3sManifests). No bespoke backup image, no
-# sideload, no registry push.
+# WALG_*/AWS_* env, and PGDATA already live (see k8s/base/db/statefulset.yaml).
+# No bespoke backup image, no sideload, no registry push.
 #
 # HA-safe: the command guards on pg_is_in_recovery()=f, so it only takes a base
 # backup on the PRIMARY. On the standby (in recovery) it no-ops, and after a
@@ -46,7 +45,7 @@ spec:
               # until Bitnami sunset their public Docker Hub catalog (2025) and
               # the tag vanished (`not found` → ImagePullBackOff); alpine/k8s
               # is the maintained drop-in (alpine base, bash + kubectl).
-              image: alpine/k8s:1.31.12
+              image: alpine/k8s:1.31.12@sha256:5aab84f0ca8ee3ae12dbe2c9fef9502a0c1e2bb0fac913bb3e71e422b642986e
               imagePullPolicy: IfNotPresent
               env:
                 - name: BACKUP_RETENTION_DAYS
@@ -63,20 +62,20 @@ spec:
                   RETAIN="${BACKUP_RETENTION_DAYS:-7}"
                   # Exec wal-g inside the db pod. The guard makes this a no-op on
                   # a standby (in recovery) so only the primary takes base backups.
-                  kubectl exec -n vibecarbon statefulset/supabase-supabase-db -- bash -c '
+                  kubectl exec -n vibecarbon statefulset/db -c db -- bash -c '
                     set -euo pipefail
                     # wal-g backup-push connects to Postgres (pg_backup_start) using
                     # libpq env. Unset, PGUSER defaults to the container OS user
                     # "root" → "role \"root\" does not exist". And only the cluster
-                    # superuser may call pg_backup_start — supabase_admin is the sole
-                    # superuser ("postgres" gets "permission denied for function
-                    # pg_backup_start"). So pin the libpq connection explicitly.
+                    # superuser may call pg_backup_start, and on our postgres:17
+                    # image that is the postgres role. So pin the libpq
+                    # connection explicitly.
                     # (wal-push/archiving and backup-fetch/restore do not connect to
                     # PG, which is why this only bit backup-push. RCA 2026-05-30.)
-                    export PGUSER=supabase_admin PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
+                    export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
                     # WRITE-GUARD (finding #3): never base-backup on a standby into
                     # the single canonical WALG_S3_PREFIX. WALG_ROLE is rendered
-                    # into the db container env (supabase.values.yaml) and inherited
+                    # into the db container env (db/statefulset.yaml) and inherited
                     # by this kubectl-exec. Closes the bring-up window the recovery
                     # check below cannot (independent primary, not yet in recovery).
                     if [ "${WALG_ROLE:-primary}" = "standby" ]; then
@@ -90,13 +89,13 @@ spec:
                     # the job exited 0 having backed up NOTHING (latent
                     # false-green found in the 2026-08-16 backup RCA). Only a
                     # literal t skips; only a literal f proceeds.
-                    REC="$(psql -U supabase_admin -d postgres -tAc "SELECT pg_is_in_recovery()")" || {
+                    REC="$(psql -U postgres -d postgres -tAc "SELECT pg_is_in_recovery()")" || {
                       echo "recovery probe failed (psql exit $?) — refusing to guess primary/standby."
                       exit 1
                     }
                     case "$REC" in
                       t)
-                        echo "supabase-db is in recovery (standby) — skipping base backup."
+                        echo "db is in recovery (standby) — skipping base backup."
                         exit 0
                         ;;
                       f) ;;

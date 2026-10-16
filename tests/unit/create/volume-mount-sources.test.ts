@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 /**
  * Escape-class guard: every FILE the core compose files bind-mount from
@@ -9,11 +10,11 @@ import { describe, expect, it } from 'vitest';
  * Docker auto-create an empty DIRECTORY at the mount source — the service
  * then dies with "Is a directory".
  *
- * This class has now bitten THREE times: wal-archive.sh (postgres archive
- * exit 126, see create.js's comment), then pooler.sql AND pooler.exs
- * together (db init aborted before set-passwords → every db-connected
- * service crash-looped on SASL auth; supavisor cat-crash-looped — RCA: kept
- * compose rig e1, 2026-08-06). Grep-level, so it runs in the unit tier.
+ * This class has bitten THREE times: wal-archive.sh (postgres archive exit
+ * 126, see create.js's comment), then two db init mount sources together
+ * (db init aborted, every db-connected service crash-looped on SASL auth —
+ * RCA: kept compose rig e1, 2026-08-06). Grep-level, so it runs in the unit
+ * tier.
  */
 
 const ROOT = join(__dirname, '..', '..', '..');
@@ -31,17 +32,24 @@ const fileMounts = [...new Set(composeSources)].filter((p) =>
 );
 
 describe('compose file bind-mount sources', () => {
-  it('found the known mounts (sanity — regex still matches the compose files)', () => {
-    expect(fileMounts.length).toBeGreaterThanOrEqual(9);
-    expect(fileMounts).toContain('volumes/db/pooler.sql');
-    expect(fileMounts).toContain('volumes/pooler/pooler.exs');
+  it('found exactly the known mounts (sanity — regex still matches the compose files)', () => {
+    // The real set, pinned exactly: the lean stack bind-mounts one file
+    // (the WAL archive script) and one directory (Traefik's). A regex that
+    // stops matching fails here instead of silently testing nothing, and a
+    // new mount must be added here, which is the moment to check it is
+    // scaffolded and shipped (the cases below).
+    expect([...new Set(composeSources)].sort()).toEqual([
+      'volumes/db/wal-archive.sh',
+      'volumes/traefik',
+    ]);
+    expect(fileMounts).toEqual(['volumes/db/wal-archive.sh']);
   });
 
   it.each(fileMounts)('%s is scaffolded by create.js', (rel) => {
     const createSrc = read('src/create.js');
     // Must match the SOURCE argument position — `join(projectDir, '<rel>')`
     // destination args also contain the literal and must not satisfy this.
-    const asCopySource = new RegExp(`copyTemplate\\(\\s*'${rel.replace(/[.]/g, '\\.')}'`);
+    const asCopySource = new RegExp(`copyTemplate\\(\\s*'${escapeRegExp(rel)}'`);
     expect(
       asCopySource.test(createSrc),
       `${rel} is bind-mounted by a core compose file but create.js never copies it — ` +

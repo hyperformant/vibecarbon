@@ -59,7 +59,7 @@ function pickHaPair(envConfig) {
  * Which servers to query, and how, for one environment.
  *
  * compose → its single server; compose-ha → primary + standby; kubernetes →
- * the master (workers and a dedicated supabase VM are nodes, not stacks —
+ * the master (workers and the dedicated database node are nodes, not stacks —
  * their pods show up in the cluster table); kubernetes-ha → the primary and
  * standby cluster masters.
  *
@@ -141,7 +141,7 @@ const POD_TEMPLATE_HASH_RE = /-[bcdfghjklmnpqrstvwxz0-9]{5,10}$/;
 /**
  * Name a pod by its controller: Deployment pods drop the ReplicaSet hash
  * (`app-7d9f8b5c6-abcde` → `app`), StatefulSet pods keep their ordinal
- * (`supabase-db-0`), everything else is the pod name.
+ * (`db-0`), everything else is the pod name.
  *
  * @param {object} pod
  * @returns {string}
@@ -149,22 +149,12 @@ const POD_TEMPLATE_HASH_RE = /-[bcdfghjklmnpqrstvwxz0-9]{5,10}$/;
 export function podDisplayName(pod) {
   const name = pod?.metadata?.name || '';
   const owner = pod?.metadata?.ownerReferences?.[0];
-  let result;
-  if (owner?.kind !== 'ReplicaSet') {
-    result = name;
-  } else {
-    const hash = pod?.metadata?.labels?.['pod-template-hash'];
-    if (hash && owner.name.endsWith(`-${hash}`)) {
-      result = owner.name.slice(0, -(hash.length + 1));
-    } else {
-      result = owner.name.replace(POD_TEMPLATE_HASH_RE, '');
-    }
+  if (owner?.kind !== 'ReplicaSet') return name;
+  const hash = pod?.metadata?.labels?.['pod-template-hash'];
+  if (hash && owner.name.endsWith(`-${hash}`)) {
+    return owner.name.slice(0, -(hash.length + 1));
   }
-  // The Supabase Helm chart is installed with release name `supabase` and
-  // chart name `supabase`, so every workload doubles the prefix
-  // (`supabase-supabase-kong`). Collapse exactly one leading duplication so
-  // display names match the spec's `supabase-kong` / `supabase-db-0`.
-  return result.replace(/^supabase-supabase-/, 'supabase-');
+  return owner.name.replace(POD_TEMPLATE_HASH_RE, '');
 }
 
 /**

@@ -21,9 +21,6 @@ export interface AuthSettings {
     providers?: {
       google: boolean;
       microsoft: boolean;
-      github: boolean;
-      apple: boolean;
-      discord: boolean;
     };
     magicLinkEnabled?: boolean;
   } | null;

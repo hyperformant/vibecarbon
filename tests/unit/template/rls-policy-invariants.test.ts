@@ -3,14 +3,17 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * RLS boundary invariants (2026-07-23 security audit). The browser queries
- * PostgREST directly through Kong (`/rest/v1`), so RLS is the ONLY data-layer
- * defense — a single under-scoped policy is a cross-tenant hole for every
- * tenant on the stack. These static guards pin the audit's fixes so the bug
+ * RLS boundary invariants (2026-07-23 security audit; app_user contract
+ * 2026-10-13). User requests run as role app_user with app.user_id() set per
+ * transaction, and RLS is the data-layer boundary: a single under-scoped
+ * policy is a cross-tenant hole for every tenant on the stack. These static guards pin the audit's fixes so the bug
  * class cannot silently return in a future migration edit.
  */
 
-const MIGRATIONS_DIR = join(process.cwd(), 'carbon/supabase/migrations');
+// The template's baseline: two custom SQL files around the one drizzle-kit
+// generates from carbon/src/server/db/schema.ts (policies are pgPolicy
+// entries there), so the guards below read what actually reaches Postgres.
+const MIGRATIONS_DIR = join(process.cwd(), 'carbon/db/migrations');
 
 function allMigrationsSql(): string {
   return readdirSync(MIGRATIONS_DIR)
@@ -61,24 +64,166 @@ describe('RLS: UPDATE WITH CHECK mirrors the org scope of USING', () => {
   });
 });
 
-describe('RLS: role checks read the server-controlled claim', () => {
-  it('is_super_admin reads app_metadata, never the user-writable user_metadata', () => {
+describe('RLS: role checks read the server-controlled role column', () => {
+  it('is_super_admin reads "user".role for app.user_id(), SECURITY DEFINER with an empty search_path', () => {
     const fn = sql.match(/FUNCTION\s+(?:public\.)?is_super_admin[\s\S]*?\$\$;/i);
     expect(fn, 'is_super_admin not found').not.toBeNull();
     const body = fn?.[0] ?? '';
-    expect(body).toMatch(/app_metadata/);
-    expect(body).not.toMatch(/user_metadata/);
+    expect(body).toMatch(/\brole\s*=\s*'super_admin'/);
+    expect(body).toMatch(/FROM\s+public\."user"/i);
+    expect(body).toMatch(/app\.user_id\(\)/);
+    expect(body).toMatch(/SECURITY DEFINER/i);
+    expect(body).toMatch(/SET search_path = ''/i);
+    expect(body).not.toMatch(/auth\.users|meta_?data/i);
+  });
+});
+
+describe('Auth tables are server-only', () => {
+  // Password hashes, session tokens, OAuth tokens and TOTP secrets: only the
+  // server (adminDb, BYPASSRLS) may touch them. RLS on with no policies, and
+  // the request role's grants revoked, so neither a stray policy nor a
+  // blanket GRANT alone can expose them.
+  const AUTH_TABLES = ['"user"', 'session', 'account', 'verification', 'two_factor'];
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  it('no migration references the old auth.users table', () => {
+    expect(sql.replace(/--.*$/gm, '')).not.toMatch(/auth\.users/i);
+  });
+
+  it('enables RLS on every auth table and defines no policy on any', () => {
+    for (const t of AUTH_TABLES) {
+      // drizzle-kit quotes every identifier; hand-written SQL may not.
+      const name = `"?${esc(t.replaceAll('"', ''))}"?`;
+      expect(sql, `${t}: RLS not enabled`).toMatch(
+        new RegExp(`ALTER TABLE\\s+(?:"?public"?\\.)?${name}\\s+ENABLE ROW LEVEL SECURITY`, 'i'),
+      );
+      expect(sql, `${t}: has a policy`).not.toMatch(
+        new RegExp(`CREATE POLICY[^;]*\\bON\\s+(?:"?public"?\\.)?${name}[\\s;]`, 'i'),
+      );
+    }
+  });
+
+  it('revokes every server-only table from PUBLIC and, per role, from every non-superuser role', () => {
+    // app.revoke_server_only_tables() derives the set from the catalog (RLS
+    // on, no policy) plus the Better Auth tables by name, and the baseline
+    // calls it once its tables exist; migrate.ts calls it after every run.
+    const fn = sql.match(
+      /CREATE OR REPLACE FUNCTION app\.revoke_server_only_tables\(\)[\s\S]*?\n\$\$;/,
+    )?.[0];
+    expect(fn, 'app.revoke_server_only_tables() not found').toBeDefined();
+    expect(fn).toMatch(/c\.relrowsecurity\s+AND NOT EXISTS \(SELECT 1 FROM pg_catalog\.pg_policy/);
+    expect(fn).toContain(
+      "c.relname IN ('user', 'session', 'account', 'verification', 'two_factor')",
+    );
+    expect(fn).toContain("EXECUTE format('REVOKE ALL ON TABLE %s FROM PUBLIC', t.tbl)");
+    expect(fn).toContain("EXECUTE format('REVOKE ALL ON TABLE %s FROM %I', t.tbl, r)");
+    expect(fn).toMatch(/SET search_path = ''/);
+    expect(sql).toContain(
+      'REVOKE EXECUTE ON FUNCTION app.revoke_server_only_tables() FROM PUBLIC, app_user;',
+    );
+    expect(sql).toMatch(/^SELECT app\.revoke_server_only_tables\(\);$/m);
+    // Every role that is not a superuser, so app_user, the RLS-bypass add-on
+    // roles (metabase and n8n, whose default privileges cover public tables)
+    // and any role the image or an optional service creates. A fixed list
+    // would miss a role it never named and re-expose password hashes and
+    // session tokens to it.
+    const loop = sql.match(
+      /FOR r IN\s+SELECT rolname FROM pg_catalog\.pg_roles\s+WHERE ([^\n]*)/,
+    )?.[1];
+    expect(loop, 'auth-table revoke loop not found').toBeDefined();
+    expect(loop).toMatch(/NOT rolsuper AND rolname NOT LIKE/);
+    expect(loop).not.toMatch(/rolbypassrls/);
+  });
+
+  it('the migration runner enforces it after every run', () => {
+    const migrate = readFileSync(join(process.cwd(), 'carbon/src/server/db/migrate.ts'), 'utf8');
+    expect(migrate).toMatch(
+      /await migrate\(drizzle\(\{ client \}\), \{ migrationsFolder: folder \}\);\s+await revokeServerOnlyTables\(client\);/,
+    );
+    expect(migrate).toContain("'select app.revoke_server_only_tables()'");
+  });
+
+  it('every former auth.users foreign key points at "user"(id)', () => {
+    for (const [table, column, onDelete] of [
+      ['memberships', 'user_id', 'CASCADE'],
+      ['customers', 'user_id', 'CASCADE'],
+      ['notifications', 'created_by', 'SET NULL'],
+      ['notification_dismissals', 'user_id', 'CASCADE'],
+      ['app_settings', 'updated_by', 'SET NULL'],
+    ]) {
+      // drizzle-kit adds every foreign key as its own ALTER TABLE.
+      expect(sql, `${table}.${column}`).toMatch(
+        new RegExp(
+          `ALTER TABLE "${table}" ADD CONSTRAINT "\\w+" FOREIGN KEY \\("${column}"\\) ` +
+            `REFERENCES "public"\\."user"\\("id"\\) ON DELETE ${onDelete}`,
+          'i',
+        ),
+      );
+    }
+  });
+});
+
+describe('RLS: policies read the request identity from app.user_id()', () => {
+  // User requests run as role app_user with app.user_id set per transaction.
+  // auth.uid()/auth.jwt() are never set on that path: a policy or helper that
+  // still reads them silently matches nothing (or, worse, something else if a
+  // JWT claim setting ever leaked in).
+  it('no migration calls auth.uid() or auth.jwt()', () => {
+    const code = sql.replace(/--.*$/gm, '');
+    expect(code).not.toMatch(/auth\.uid\(\)/i);
+    expect(code).not.toMatch(/auth\.jwt\(\)/i);
+  });
+
+  it('no grant, revoke or policy names a role that plain Postgres lacks', () => {
+    // The migrations must apply on a stock postgres image, where only
+    // postgres, app_user and the optional service roles exist. Comments,
+    // quoted identifiers and string literals ('authenticated' is a
+    // notification visibility value) are stripped before the check.
+    const code = sql.replace(/--.*$/gm, '');
+    const statements = [
+      ...code.matchAll(/\b(?:GRANT|REVOKE|CREATE POLICY|ALTER DEFAULT PRIVILEGES)\b[^;]*;/gi),
+    ].map((m) => m[0].replace(/'[^']*'|"[^"]*"/g, ''));
+    const foreign = /\b(anon|authenticated|service_role|authenticator)\b/i;
+    const bad = statements.filter((st) => foreign.test(st));
+    expect(bad, `statements naming a missing role: ${bad.join(' | ')}`).toEqual([]);
+  });
+
+  it('defines app_user (NOLOGIN), app.user_id(), and grants app_user to the connection role', () => {
+    expect(sql).toMatch(/CREATE ROLE app_user NOLOGIN/i);
+    expect(sql).toMatch(/GRANT app_user TO postgres/i);
+    const fn = sql.match(/FUNCTION\s+app\.user_id\(\)[\s\S]*?\$\$;/i);
+    expect(fn, 'app.user_id() not found').not.toBeNull();
+    expect(fn?.[0]).toMatch(/nullif\(current_setting\('app\.user_id', true\), ''\)::uuid/i);
+    expect(fn?.[0]).toMatch(/\bSTABLE\b/i);
+  });
+
+  it('the notification read policies split on whether app.user_id() is set', () => {
+    const authed = sql.match(
+      /CREATE POLICY "Authenticated users can view relevant notifications"[\s\S]*?;/i,
+    );
+    const anon = sql.match(
+      /CREATE POLICY "Anonymous users can view public notifications"[\s\S]*?;/i,
+    );
+    expect(authed?.[0]).toMatch(/app\.user_id\(\)\)\s+IS NOT NULL/i);
+    expect(anon?.[0]).toMatch(/app\.user_id\(\)\)\s+IS NULL/i);
   });
 });
 
 describe('RLS: SECURITY DEFINER RPC surface is locked down', () => {
-  it('log_cron_job is revoked from public/anon/authenticated', () => {
+  it('log_cron_job is revoked from PUBLIC', () => {
     expect(sql).toMatch(
-      /REVOKE EXECUTE ON FUNCTION\s+(?:public\.)?log_cron_job[^;]*FROM[^;]*\b(anon|PUBLIC)\b/i,
+      /REVOKE EXECUTE ON FUNCTION\s+(?:public\.)?log_cron_job[^;]*FROM[^;]*\bPUBLIC\b/i,
     );
   });
 
+  it('every REVOKE EXECUTE also revokes from app_user (functions default to app_user EXECUTE)', () => {
+    const revokes = [...sql.matchAll(/REVOKE EXECUTE ON FUNCTION[^;]*;/gi)].map((m) => m[0]);
+    expect(revokes.length).toBeGreaterThan(0);
+    const missing = revokes.filter((r) => !/\bapp_user\b/.test(r));
+    expect(missing, `REVOKEs missing app_user: ${missing.join(' | ')}`).toEqual([]);
+  });
+
   it('the billing customers table has no client INSERT policy', () => {
-    expect(sql).not.toMatch(/CREATE POLICY[^;]*ON\s+customers\s+FOR INSERT/i);
+    expect(sql).not.toMatch(/CREATE POLICY[^;]*ON\s+"?customers"?\s+(?:AS \w+\s+)?FOR INSERT/i);
   });
 });

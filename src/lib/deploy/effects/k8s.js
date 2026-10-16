@@ -17,14 +17,14 @@
  * ── ctx contract ──
  *   Inputs (set by the orchestrator before runPlan):
  *     options = the deploymentConfig object deployK3s consumes (projectName,
- *               environment, region, master/supabase/worker server types,
+ *               environment, region, master/database/worker server types,
  *               min/maxWorkers, apiToken, s3Config, state, tracker, domain,
  *               restore, dnsProvider, dnsToken, backupBucketName, …)
  *               — passed through UNCHANGED so deployK3s receives byte-for-byte
  *               the same options object it got from the former dispatch table.
  *   Filled in by the effect:
- *     clusterResult = deployK3s's return { masterIp, floatingIp, supabaseIp,
- *                     supabasePrivateIp, workerIps, networkId, kubeconfig,
+ *     clusterResult = deployK3s's return { masterIp, floatingIp, dbIp,
+ *                     dbPrivateIp, workerIps, networkId, kubeconfig,
  *                     sshKeyPath, imageTag } — read back into deployResult.
  */
 import { perfAsync } from '../../perf.js';

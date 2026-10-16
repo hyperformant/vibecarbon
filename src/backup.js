@@ -22,6 +22,7 @@ import { selectAction } from './lib/cli/select-action.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadBackupS3Config, loadS3Config } from './lib/config.js';
+import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import { awaitPostgresAccepting } from './lib/deploy/k8s/index.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
@@ -202,10 +203,9 @@ fi
 exit 1`;
 }
 
-// The db StatefulSet the backup Job execs into — same workload name the
-// CronJob template (carbon/k8s/base/backup/cronjob.yaml) and restore.js
-// address.
-const DB_STATEFULSET = 'supabase-supabase-db';
+// The db StatefulSet the backup Job execs into (DB_STATEFULSET, imported) is
+// the same workload the CronJob template (carbon/k8s/base/backup/cronjob.yaml)
+// and restore.js address.
 
 /**
  * Trigger a one-off backup Job from the CronJob template and poll it to

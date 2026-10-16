@@ -186,23 +186,6 @@ export function buildLinodeComposeProgram(config) {
           ipv4s: worldAddresses.ipv4,
           ipv6s: worldAddresses.ipv6,
         },
-        // Supavisor pooler ports — operator-CIDR-scoped like SSH, NEVER
-        // world-open (password auth straight into Postgres). Kept in
-        // lockstep with SSH by applyOperatorCidrs (OPERATOR_LOCKED_PORTS).
-        {
-          label: 'pooler-session',
-          action: 'ACCEPT',
-          protocol: 'TCP',
-          ports: '5432',
-          ...operatorAddresses,
-        },
-        {
-          label: 'pooler-transaction',
-          action: 'ACCEPT',
-          protocol: 'TCP',
-          ports: '6543',
-          ...operatorAddresses,
-        },
       ],
       tags: encodeLabels(labels),
     });

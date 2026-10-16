@@ -5,7 +5,7 @@
  * docs/tests.md ("success must cite evidence"). Everything upstream of it
  * proves *capability*, never *effect*:
  *
- *   - `carbon/db/Dockerfile` proves the wal-g BINARY runs (executed in the
+ *   - `docker/postgres-walg/Dockerfile` proves the wal-g BINARY runs (executed in the
  *     same build layer, pinned by walg-dockerfile-arch.test.ts).
  *   - `src/lib/deploy/walg-audit.js` proves wal-g can REACH the bucket — but
  *     its own docblock is explicit that an EMPTY `backup-list` is a PASS, so
@@ -65,6 +65,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { getObjectStorageProvider, getProviderClass } from '../../../src/lib/providers/index.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
@@ -202,7 +203,7 @@ export function buildWalSwitchProbe(): string {
     'if [ "${WALG_ROLE:-primary}" = "standby" ]; then',
     '  echo "WAL_SWITCH=fail:standby-role"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
     'fi',
-    'REC="$(psql -U supabase_admin -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"',
+    'REC="$(psql -U postgres -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"',
     'if [ "$REC" = "t" ]; then',
     '  echo "WAL_SWITCH=fail:in-recovery"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
     'fi',
@@ -210,7 +211,7 @@ export function buildWalSwitchProbe(): string {
     // session, in order; `tr -d "[:blank:]"` strips padding but KEEPS newlines
     // (a [:space:] class would fold both answers onto one line), and the last
     // non-empty line is the walfile name.
-    'SEG="$(psql -U supabase_admin -d postgres -tAX -c "SELECT txid_current()" -c "SELECT pg_walfile_name(pg_switch_wal())" 2>/dev/null | tr -d "[:blank:]" | grep -v "^$" | tail -1)"',
+    'SEG="$(psql -U postgres -d postgres -tAX -c "SELECT txid_current()" -c "SELECT pg_walfile_name(pg_switch_wal())" 2>/dev/null | tr -d "[:blank:]" | grep -v "^$" | tail -1)"',
     'if [ -z "$SEG" ]; then',
     '  echo "WAL_SWITCH=fail:switch-returned-nothing"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
     'fi',
@@ -270,7 +271,7 @@ export function parseWalSwitchOutput(raw: string): WalSwitchResult {
 
 /**
  * Remote command that runs the probe in the db container (compose) or the
- * supabase-db pod (k8s). Same probe, same evaluator — only the exec seam
+ * db pod (k8s). Same probe, same evaluator — only the exec seam
  * differs, mirroring walg-audit's composeWalgAuditShell / k8sWalgAuditArgv
  * split. Exported for the unit test that pins the single-quote invariant.
  *
@@ -284,7 +285,7 @@ export function buildWalSwitchRemoteCommand(projectName: string, isCompose: bool
   }
   return (
     'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n vibecarbon exec ' +
-    `supabase-supabase-db-0 -- bash -c '${probe}'`
+    `${DB_POD} -c ${DB_CONTAINER} -- bash -c '${probe}'`
   );
 }
 

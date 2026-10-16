@@ -23,9 +23,9 @@ These are wrappers around the `npm` scripts listed below; use whichever you pref
 | `npm run dev:start` | Full cold start: Docker, migrations, and dev servers |
 | `npm run dev` | Start API + Vite (assumes Docker is already running) |
 | `npm run dev:reset` | Remove containers, volumes, and built images (run `npm run dev:start` to restart) |
-| `npm run docker:up` | Start Supabase and infrastructure services |
+| `npm run docker:up` | Start Postgres, Traefik and local S3 |
 | `npm run docker:down` | Stop all Docker services |
-| `npm run db:migrate` | Run SQL migrations from `supabase/migrations/` |
+| `npm run db:migrate` | Run SQL migrations from `db/migrations/` |
 | `npm run build` | Build client (Vite) and server (esbuild) for production |
 | `npm run lint` | Biome linting and formatting check |
 | `npm run lint:fix` | Auto-fix lint and formatting issues |
@@ -39,8 +39,8 @@ These are wrappers around the `npm` scripts listed below; use whichever you pref
 
 `npm run dev:start` runs three phases in sequence:
 
-1. **Docker startup**: starts PostgreSQL, Kong, GoTrue, PostgREST, Realtime, Storage, Studio, and Traefik. Blocks until all services are healthy.
-2. **Migrations**: executes all SQL files in `supabase/migrations/` to set up the schema, RLS policies, and initial admin user.
+1. **Docker startup**: starts PostgreSQL, Traefik, and a local S3 service (Garage) for file uploads. Blocks until all services are healthy.
+2. **Migrations**: executes all SQL files in `db/migrations/` to set up the schema and RLS policies. The API server creates the admin user (`ADMIN_EMAIL` / `ADMIN_PASSWORD`) when it starts.
 3. **Dev servers**: spawns two processes in parallel:
    - **Hono API** on port 3000 via `tsx watch` (auto-restarts on file changes)
    - **Vite** on port 5173 with full HMR (instant browser updates)
@@ -59,7 +59,6 @@ Traefik routes `*.localhost` subdomains to each service:
 | Service | URL |
 |---------|-----|
 | App | http://app.localhost |
-| Supabase Studio | http://studio.localhost |
 | Traefik Dashboard | http://traefik.localhost |
 
 Optional services like observability (Grafana) get their own subdomains when enabled; see the [CLI reference](/docs/cli#add).
@@ -74,9 +73,9 @@ Optional services like observability (Grafana) get their own subdomains when ena
 
 ## Debugging
 
-**Container logs**: run `npm run docker:logs` to tail logs from all Docker services. Useful for debugging Supabase Auth errors, PostgREST issues, or Kong routing problems.
+**Container logs**: run `npm run docker:logs` to tail logs from all Docker services. Useful for debugging database or Traefik routing problems (auth errors show up in the API server's own output).
 
-**Supabase Studio**: open [http://studio.localhost](http://studio.localhost) to browse your database, inspect tables, view RLS policies, and manage auth users directly.
+**Database**: connect any Postgres client to `localhost:5432` (or your shifted `DEV_DB_PORT`; user `postgres`, password `POSTGRES_PASSWORD` from `.env.local`) to browse tables and RLS policies, or run `npx drizzle-kit studio` for a browser view of your schema.
 
 **React DevTools**: Vite's dev server supports React DevTools out of the box. Install the browser extension for component inspection and state debugging.
 
@@ -112,6 +111,8 @@ Wrap with `<ProtectedRoute>` to require authentication, or omit it for public pa
 ```typescript
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { withUserDb } from '../../db/client';
+import { items as itemsTable } from '../../db/schema';
 import type { HonoVariables } from '../../types';
 
 const items = new Hono<{ Variables: HonoVariables }>();
@@ -124,10 +125,13 @@ items.get('/', async (c) => {
   const user = c.get('user');
   if (!user) return c.json({ error: 'Unauthorized' }, 401);
 
-  const supabase = c.get('supabase');
-  const { data, error } = await supabase.from('items').select('*');
-  if (error) return c.json({ error: 'Failed to fetch items' }, 500);
-  return c.json(data);
+  // Runs as the signed-in user: row-level security decides which rows come back.
+  try {
+    const rows = await withUserDb(user.id, (tx) => tx.select().from(itemsTable));
+    return c.json(rows);
+  } catch {
+    return c.json({ error: 'Failed to fetch items' }, 500);
+  }
 });
 
 items.post('/', async (c) => {
@@ -140,14 +144,14 @@ items.post('/', async (c) => {
     return c.json({ error: result.error.issues.map((e) => e.message).join(', ') }, 400);
   }
 
-  const supabase = c.get('supabase');
-  const { data, error } = await supabase
-    .from('items')
-    .insert(result.data)
-    .select()
-    .single();
-  if (error) return c.json({ error: 'Failed to create item' }, 500);
-  return c.json({ item: data }, 201);
+  try {
+    const [item] = await withUserDb(user.id, (tx) =>
+      tx.insert(itemsTable).values({ ...result.data, userId: user.id }).returning()
+    );
+    return c.json({ item }, 201);
+  } catch {
+    return c.json({ error: 'Failed to create item' }, 500);
+  }
 });
 
 export { items };
@@ -215,12 +219,12 @@ To run two Vibecarbon projects simultaneously, set a port offset in `.env.local`
 DEV_PORT_OFFSET=100
 ```
 
-This shifts all ports by 100 (Vite → 5273, API → 3100, Kong → 8100, etc.). You can also override individual ports:
+This shifts all ports by 100 (Vite → 5273, API → 3100, Postgres → 5532, etc.). You can also override individual ports:
 
 ```bash
 DEV_VITE_PORT=5273
 DEV_API_PORT=3100
-DEV_KONG_PORT=8100
+DEV_DB_PORT=5532
 ```
 
 ## Resetting the Environment

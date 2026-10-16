@@ -208,14 +208,20 @@ describe('every operator-supplied server type is guarded', () => {
   // *presents*. These are the paths where a type arrives as raw text instead —
   // a flag, or a hand-edited .vibecarbon.json — so they must call the guard.
   const GUARDED_ENTRY_POINTS = [
-    ['scale.js', '-type'],
-    ['failover.js', '-server-type'],
-    ['lib/deploy/prompts.js', '.vibecarbon.json'],
+    ['scale.js', 'assertAmd64ServerType', '-type'],
+    ['failover.js', 'assertAmd64ServerType', '-server-type'],
+    ['lib/deploy/prompts.js', 'assertAmd64ServerType', '.vibecarbon.json'],
+    // Persisted per-role types reused with no flag (scale's converge re-feed
+    // and CA re-patch; failover's partially overridden converge) go through
+    // the one shared helper, which itself calls the guard.
+    ['lib/scale-plan.js', 'assertAmd64ServerType', '.vibecarbon.json'],
+    ['scale.js', 'assertPersistedRoleTypes(', 'plan?.newValues'],
+    ['lib/iac/converge-cluster.js', 'assertPersistedRoleTypes(', 'normalizedOverrides'],
   ] as const;
 
-  it.each(GUARDED_ENTRY_POINTS)('%s calls assertAmd64ServerType (%s)', (rel, label) => {
+  it.each(GUARDED_ENTRY_POINTS)('%s calls %s (%s)', (rel, guard, label) => {
     const src = sourceOf(rel);
-    expect(src).toContain('assertAmd64ServerType');
+    expect(src).toContain(guard);
     expect(src).toContain(label);
   });
 });

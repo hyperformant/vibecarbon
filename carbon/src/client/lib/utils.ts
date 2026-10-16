@@ -5,11 +5,9 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function getUserInitials(
-  user: { email?: string; user_metadata?: { full_name?: string } } | null
-): string {
+export function getUserInitials(user: { email?: string; name?: string | null } | null): string {
   if (!user) return '?';
-  const name = user.user_metadata?.full_name;
+  const name = user.name?.trim();
   if (name) {
     return name
       .split(' ')

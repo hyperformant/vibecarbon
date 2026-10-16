@@ -8,13 +8,14 @@ metadata:
 spec:
   replicas: 2
   # 900s (15m) — cold k8s deploys race the rollout window: `kubectl set image`
-  # triggers the rollout BEFORE `helm install supabase --wait` returns, and the
-  # app's readiness probe (/api/health/ready) stays 503 until kong is up. On
-  # the slow HA path the sideload + helm install consumed >29m before kong was
-  # reachable; the old 120s deadline tripped before kong existed and the
-  # subsequent `kubectl rollout status` failed even though pods were healthy
-  # by then. 900s covers worst-observed cold path; warm rollouts still finish
-  # in <60s so this only matters on the cold cycle.
+  # triggers the rollout BEFORE the db StatefulSet is Ready (a cold CSI attach
+  # plus the image pull), and the app's readiness probe (/api/health/ready)
+  # stays 503 until the db answers and its migrations are applied. On the slow
+  # HA path the sideload + db install once consumed >29m; the old
+  # 120s deadline tripped before the db existed and the subsequent
+  # `kubectl rollout status` failed even though pods were healthy by then.
+  # 900s covers worst-observed cold path; warm rollouts still finish in <60s
+  # so this only matters on the cold cycle.
   progressDeadlineSeconds: 900
   strategy:
     type: RollingUpdate
@@ -59,26 +60,43 @@ spec:
         env:
         - name: NODE_ENV
           value: production
-        - name: SUPABASE_URL
-          valueFrom:
-            configMapKeyRef:
-              name: vibecarbon-config
-              key: KONG_URL
         - name: SITE_URL
           valueFrom:
             configMapKeyRef:
               name: vibecarbon-config
               key: SITE_URL
-        - name: SUPABASE_ANON_KEY
+        # Auth runs in-process (src/server/auth/): its public URL is SITE_URL,
+        # and BETTER_AUTH_SECRET (session signing key) arrives through the
+        # vibecarbon-secrets envFrom above.
+        - name: BETTER_AUTH_URL
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: SITE_URL
+        # The API server talks to Postgres directly (src/server/db/client.ts).
+        # Named explicitly, not left to envFrom, so a stray DB_HOST in the
+        # Secret (e.g. the local-dev localhost) can never win. The host is the
+        # `db` Service (k8s/base/db/service.yaml); DB_USER defaults to postgres.
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_NAME
+        - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:
               name: vibecarbon-secrets
-              key: ANON_KEY
-        - name: SUPABASE_SERVICE_ROLE_KEY
-          valueFrom:
-            secretKeyRef:
-              name: vibecarbon-secrets
-              key: SERVICE_ROLE_KEY
+              key: DB_PASSWORD
         resources:
           requests:
             cpu: 100m

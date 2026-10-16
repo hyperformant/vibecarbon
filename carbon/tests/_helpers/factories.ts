@@ -4,8 +4,7 @@ import { randomBytes } from 'node:crypto';
  * Lightweight factories that produce plausible domain objects for tests.
  *
  * These don't touch the DB — they return plain TS objects you can hand to
- * a mocked Supabase client's resolved value (e.g. `mockResolvedValue({
- * data: makeUser(), error: null })`).
+ * a mocked module's resolved value (e.g. `mockResolvedValue(makeUser())`).
  *
  * Add new factories here as you write tests; the test-maintainer agent
  * follows this pattern when extending coverage.

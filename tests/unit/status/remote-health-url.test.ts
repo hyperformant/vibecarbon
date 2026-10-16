@@ -2,14 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { checkRemoteHealth } from '../../../src/status.js';
 
 describe('checkRemoteHealth', () => {
-  it('probes the readiness endpoint so the db/supabase detail can render', async () => {
+  it('probes the readiness endpoint so the db detail can render', async () => {
     const fetchSpy = vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => ({
         status: 'ready',
         timestamp: '2026-09-18T00:00:00.000Z',
-        services: { database: 'connected', supabase: 'connected' },
+        services: { database: 'connected' },
       }),
     }));
     const out = await checkRemoteHealth('example.test', {

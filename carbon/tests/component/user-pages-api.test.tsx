@@ -1,22 +1,12 @@
 /**
  * Covers the user-facing pages migrated onto the shared client API layer
- * (src/client/lib/api.ts). Verifies one read path carries the Supabase auth
- * header end-to-end, and one write path surfaces the server error via
- * ApiError. Mirrors api-client.test.ts (supabase mock) and
+ * (src/client/lib/api.ts). Verifies one read path rides the session cookie
+ * (no Authorization header) end-to-end, and one write path surfaces the server error via
+ * ApiError. Mirrors api-client.test.ts and
  * use-auth-settings.test.tsx (vi.stubGlobal fetch).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-vi.mock('@/lib/supabase', () => ({
-  supabase: {
-    auth: {
-      getSession: vi.fn(async () => ({
-        data: { session: { access_token: 'tok-123' } },
-      })),
-    },
-  },
-}));
 
 import { ApiError } from '@/lib/api';
 import { submitContactForm } from '@/pages/Contact';
@@ -34,7 +24,7 @@ afterEach(() => {
 });
 
 describe('fetchBillingStatus (migrated read path)', () => {
-  it('hits the billing status endpoint with the bearer token and returns parsed JSON', async () => {
+  it('hits the billing status endpoint with the session cookie and returns parsed JSON', async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ configured: true }), { status: 200 })
     );
@@ -43,7 +33,8 @@ describe('fetchBillingStatus (migrated read path)', () => {
 
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe('/api/v1/billing/status');
-    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok-123');
+    expect(init.credentials).toBe('same-origin');
+    expect(new Headers(init.headers as HeadersInit).has('Authorization')).toBe(false);
   });
 });
 

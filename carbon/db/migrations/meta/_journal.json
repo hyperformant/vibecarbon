@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1792151194766,
+      "tag": "0000_baseline_pre",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792151195265,
+      "tag": "0001_baseline_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792151195543,
+      "tag": "0002_baseline_post",
+      "breakpoints": true
+    }
+  ]
+}

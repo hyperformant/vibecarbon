@@ -1,0 +1,285 @@
+name: native-multiarch-image
+# Reusable: build one image NATIVELY per arch, smoke-test each arch on its own
+# hardware before anything is pushed, push each leg by digest only, then name
+# both digests under one tag. Callers:
+#   - publish-db-image.yml      (release: ghcr.io/hyperformant/wal-g, then
+#                                ghcr.io/hyperformant/postgres)
+#   - publish-db-image-dev.yml  (branches: wal-g and the db image, both into
+#                                ghcr.io/hyperformant/postgres-dev)
+# One definition, so the dev channel is the release build with a different
+# name and tag, never a lookalike that drifts.
+#
+# Native runners, never QEMU: the db image compiles pg_cron (C, PGXS) inside
+# the target platform's postgres image, and both images execute their
+# binaries in-build (wal-g's smoke stage, the db image's `wal-g --version`),
+# so each arch builds on its own hardware (ubuntu-24.04 / ubuntu-24.04-arm)
+# at full speed, and the smoke script EXECUTES that arch's binaries for real. Each leg pushes by digest
+# only (no tag), and proves the pushed image is the one it smoke-tested (same
+# image config digest); the merge job checks each digest's platform, then
+# names both under the one tag, so the tag never points at a half-built or
+# untested image.
+#
+# Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Short id, unique per caller run (names the digest artifacts)
+        type: string
+        required: true
+      context:
+        description: Docker build context directory
+        type: string
+        required: true
+      image:
+        description: Repository to push to, e.g. ghcr.io/hyperformant/postgres
+        type: string
+        required: true
+      tag:
+        description: The one tag the merge job creates
+        type: string
+        required: true
+      smoke:
+        description: Script run as `bash <smoke> <image ref>` per arch before push, and on the published tag
+        type: string
+        required: true
+      build-contexts:
+        description: Optional named build contexts (build-push-action build-contexts)
+        type: string
+        required: false
+        default: ''
+      environment:
+        description: GitHub Environment for the build and merge jobs; empty runs with none
+        type: string
+        required: false
+        default: ''
+      immutable:
+        description: Skip the merge (exit green) when the tag already exists, never overwriting it
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      ref:
+        description: The published tag, pinned by digest (image@sha256:...)
+        value: ${{ jobs.merge.outputs.ref }}
+# Job-scoped writes only (OpenSSF Scorecard Token-Permissions).
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: write   # push the per-arch digest to ghcr
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: ref
+        name: Resolve the arch
+        run: echo "arch=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Build once into the local daemon for the smoke test. The push step
+      # below rebuilds from the same builder's cache; the step after it proves
+      # that produced the very image smoked here.
+      - id: load
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ inputs.context }}
+          build-contexts: ${{ inputs.build-contexts }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: smoke:local
+      - name: Smoke-test the built image on this arch
+        run: bash "$SMOKE" smoke:local
+        env:
+          SMOKE: ${{ inputs.smoke }}
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ inputs.context }}
+          build-contexts: ${{ inputs.build-contexts }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true,push=true
+      # The image config digest names the image's content (layers, env,
+      # entrypoint). Equal digests mean the pushed image IS the smoked one; a
+      # cache miss that built anything different stops the leg here, before
+      # its digest can reach the merge.
+      #
+      # The two builds report it differently. The load build (docker exporter)
+      # gets no attestations, so it reports a single manifest and its
+      # `containerimage.config.digest`. The push build gets build-push-action's
+      # default provenance attestation (mode=max on a public repo), so its
+      # result is an index of [image manifest, attestation manifest] and
+      # buildx reports no config digest at all. Provenance stays on: it is
+      # what ties a published digest to this run. So the pushed side is read
+      # from the registry: the index's one image manifest (it must be this
+      # leg's platform), then that manifest's config digest.
+      - name: Check the pushed image is the smoke-tested one
+        run: |
+          set -euo pipefail
+          # One guard each: `test a && test b` would not stop `set -e` on the
+          # first, and two empty digests would then compare equal.
+          if [ -z "$SMOKED" ]; then
+            echo "::error::the smoke build reported no image config digest; nothing is tagged" >&2
+            exit 1
+          fi
+          if [ -z "$DIGEST" ]; then
+            echo "::error::the push build reported no digest; nothing is tagged" >&2
+            exit 1
+          fi
+          raw=$(docker buildx imagetools inspect --raw "$NAME@$DIGEST")
+          media=$(jq -r '.mediaType // ""' <<<"$raw")
+          case "$media" in
+            application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
+              # Every entry that is not an attestation is an image; a leg
+              # builds one platform, so exactly one, and it is this leg's.
+              images=$(jq -c '[.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")]' <<<"$raw")
+              if [ "$(jq length <<<"$images")" != 1 ]; then
+                echo "::error::$NAME@$DIGEST holds $(jq length <<<"$images") images, not one; nothing is tagged" >&2
+                exit 1
+              fi
+              got=$(jq -r '.[0].platform | "\(.os)/\(.architecture)"' <<<"$images")
+              if [ "$got" != "$PLATFORM" ]; then
+                echo "::error::$NAME@$DIGEST is $got, not $PLATFORM; nothing is tagged" >&2
+                exit 1
+              fi
+              manifest=$(docker buildx imagetools inspect --raw "$NAME@$(jq -r '.[0].digest' <<<"$images")")
+              ;;
+            application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json)
+              manifest=$raw
+              ;;
+            *)
+              echo "::error::$NAME@$DIGEST has media type '$media', not an image or index; nothing is tagged" >&2
+              exit 1
+              ;;
+          esac
+          PUSHED=$(jq -r '.config.digest // ""' <<<"$manifest")
+          if [ -z "$PUSHED" ]; then
+            echo "::error::the pushed image $NAME@$DIGEST has no config digest; nothing is tagged" >&2
+            exit 1
+          fi
+          if [ "$SMOKED" != "$PUSHED" ]; then
+            echo "::error::pushed config $PUSHED is not the smoke-tested $SMOKED; nothing is tagged" >&2
+            exit 1
+          fi
+          echo "pushed $NAME@$DIGEST carries config $PUSHED, the smoke-tested image"
+        env:
+          SMOKED: ${{ fromJSON(steps.load.outputs.metadata)['containerimage.config.digest'] }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          NAME: ${{ inputs.image }}
+          PLATFORM: ${{ matrix.platform }}
+      - name: Record the pushed digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          echo "$DIGEST" > "$RUNNER_TEMP/digests/$ARCH"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          ARCH: ${{ steps.ref.outputs.arch }}
+      # The run attempt in the name: re-running one failed leg uploads beside
+      # the first attempt's artifacts instead of clashing with them.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.name }}-digest-${{ steps.ref.outputs.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/digests/${{ steps.ref.outputs.arch }}
+          if-no-files-found: error
+          retention-days: 1
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: write   # push the multi-arch tag to ghcr
+    outputs:
+      ref: ${{ steps.verify.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # One directory per artifact (<name>-digest-<arch>-<attempt>/<arch>),
+      # every attempt's; the create step takes each arch's newest.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: ${{ inputs.name }}-digest-*
+          path: ${{ runner.temp }}/digests
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Exactly two digests, one per arch, each verified to be that arch's
+      # image BEFORE the tag exists, or the tag is not created.
+      - name: Create the multi-arch tag from the per-arch digests
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          if [ "$IMMUTABLE" = true ]; then
+            # Re-checked here, after the builds, so a run that raced another
+            # for the same tag never moves it. Only "not found" means create.
+            if out=$(docker buildx imagetools inspect "$IMAGE" 2>&1 >/dev/null); then
+              echo "::notice::$IMAGE already exists; immutable tag left as is"
+              exit 0
+            elif ! grep -q 'not found' <<<"$out"; then
+              echo "$out" >&2; exit 1
+            fi
+          fi
+          # The os/arch of each image in a pushed ref: the platform entries of
+          # an index (attestations, platform unknown/unknown, skipped) or the
+          # config of a single manifest.
+          platforms_of() {
+            local raw
+            raw=$(docker buildx imagetools inspect "$1" --raw)
+            if jq -e '.manifests' <<<"$raw" >/dev/null; then
+              jq -r '.manifests[] | select(.platform.architecture != "unknown") | "\(.platform.os)/\(.platform.architecture)"' <<<"$raw"
+            else
+              docker buildx imagetools inspect "$1" --format '{{json .Image}}' | jq -r '"\(.os)/\(.architecture)"'
+            fi
+          }
+          refs=()
+          for arch in amd64 arm64; do
+            file=$(find . -path "./$ID-digest-$arch-*/$arch" | sort -V | tail -n 1)
+            test -n "$file" || { echo "::error::no $arch digest" >&2; exit 1; }
+            ref="$NAME@$(cat "$file")"
+            got=$(platforms_of "$ref")
+            if [ "$got" != "linux/$arch" ]; then
+              echo "::error::$ref is $got, not linux/$arch; tag not created" >&2
+              exit 1
+            fi
+            refs+=("$ref")
+          done
+          test "${#refs[@]}" -eq 2
+          docker buildx imagetools create -t "$IMAGE" "${refs[@]}"
+        env:
+          IMAGE: ${{ inputs.image }}:${{ inputs.tag }}
+          NAME: ${{ inputs.image }}
+          ID: ${{ inputs.name }}
+          IMMUTABLE: ${{ inputs.immutable }}
+      - id: verify
+        name: Verify the published tag carries amd64 and arm64, then smoke it
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' > manifest.json
+          for arch in amd64 arm64; do
+            jq -e --arg a "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a)' manifest.json >/dev/null
+          done
+          echo "ref=$NAME@$(jq -r .digest manifest.json)" >> "$GITHUB_OUTPUT"
+          docker pull --platform linux/amd64 "$IMAGE"
+          bash "$SMOKE" "$IMAGE"
+        env:
+          IMAGE: ${{ inputs.image }}:${{ inputs.tag }}
+          NAME: ${{ inputs.image }}
+          SMOKE: ${{ inputs.smoke }}

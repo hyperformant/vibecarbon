@@ -11,7 +11,9 @@ import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
+import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { runCommandThroughTaskLog } from './lib/command.js';
+import { localComposeEnv } from './lib/images.js';
 import { detectPackageManager } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 
@@ -54,6 +56,14 @@ export async function run(args = []) {
     process.exit(1);
   }
 
+  // Off a TTY without -y there is nobody to confirm: exit 1 with the
+  // canonical message instead of the prompt library crashing (exit 70).
+  requireTTYOrFlags({
+    requirements: [
+      { flag: 'y', description: 'confirm deleting all local database data', satisfied: yes },
+    ],
+  });
+
   if (!yes) {
     const confirmed = await p.confirm({
       message: 'All local database data will be lost. Continue?',
@@ -76,6 +86,9 @@ export async function run(args = []) {
       cwd,
       title: `Resetting dev environment with ${pm}`,
       successMessage: 'Dev environment reset',
+      // dev:reset runs `docker compose down -v`, which interpolates the
+      // compose file: it needs the db image pair just as `up` does.
+      env: localComposeEnv(),
       // See PM_RUN_CONTEXT_RE in lib/command.js.
       cleanEnv: true,
     });

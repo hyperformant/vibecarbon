@@ -27,7 +27,7 @@ datasources:
       maxLines: 1000
 
   # PostgreSQL - monitoring views only (pg_monitor).
-  # Uses the least-privilege observability_ro role, NOT the supabase_admin
+  # Uses the least-privilege observability_ro role, NOT the postgres
   # superuser. This role can read pg_stat_* / pg_settings but has no SELECT on
   # application tables — the shipped dashboards query Prometheus/Loki, not app
   # data. Password comes from OBSERVABILITY_DB_PASSWORD (set in the grafana env).

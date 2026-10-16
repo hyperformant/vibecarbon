@@ -1,5 +1,5 @@
-// Database types for Supabase
-// These types are used by @supabase/supabase-js for type-safe queries
+// Row shapes of the public tables, shared by the API and the client.
+// The server's source of truth is the Drizzle schema (src/server/db/schema.ts).
 
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
@@ -305,8 +305,8 @@ export type Database = {
         };
         Relationships: [];
       };
-      // AI Visibility: raw crawler hits (migration 00008). Written only by the
-      // server's service_role client; pruned after 90 days by pg_cron.
+      // AI Visibility: raw crawler hits (schema.ts crawlerHits). Written only by the
+      // server (adminDb); pruned after 90 days by pg_cron.
       crawler_hits: {
         Row: {
           id: number;

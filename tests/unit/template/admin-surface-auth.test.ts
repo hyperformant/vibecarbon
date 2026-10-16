@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 /**
  * Admin-surface auth contract (2026-07-23 security audit). The platform has
- * exactly ONE elevated role: super_admin (app_metadata.role). There is NO
+ * exactly ONE elevated role: super_admin (`user.role`). There is NO
  * platform `admin` role — `admin` belongs to the org-membership axis
  * (OWNER/ADMIN/MEMBER), enforced by RLS, never by ForwardAuth. So EVERY
  * privileged dashboard is super_admin-gated, and the `admin-auth` ForwardAuth
@@ -17,10 +17,6 @@ const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
 
 describe('compose prod: admin surfaces are super_admin-gated', () => {
   const compose = read('carbon/docker-compose.prod.yml');
-
-  it('studio uses super-admin-auth (full DB access — highest privilege)', () => {
-    expect(compose).toContain('traefik.http.routers.studio.middlewares=super-admin-auth@file');
-  });
 
   it('the traefik dashboard uses super-admin-auth', () => {
     expect(compose).toContain('traefik.http.routers.dashboard.middlewares=super-admin-auth@file');

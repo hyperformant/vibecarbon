@@ -60,7 +60,7 @@ describe('triggerBackupJob exec+pg condition gate', () => {
     // apiserver.
     const probeArgv = calls[0];
     expect(probeArgv).toContain('exec');
-    expect(probeArgv.join(' ')).toContain('statefulset/supabase-supabase-db');
+    expect(probeArgv.join(' ')).toContain('statefulset/db');
 
     // Job creation happens strictly AFTER the condition held.
     const createIdx = calls.findIndex((a) => a[0] === 'create' && a[1] === 'job');

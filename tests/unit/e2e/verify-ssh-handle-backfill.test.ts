@@ -13,9 +13,9 @@
  *
  * The extra four were the wal-g backup evidence pair (which did run later, at
  * verify-scale) and BOTH config canaries — `config_secret_propagation` and
- * `config_oauth_gotrue_propagation`, which never ran on k8s at any phase on
- * any provider. Those two exist specifically to cover a k8s-only gap (GoTrue
- * `valueFrom secretKeyRef`, silently missing until 2026-07-15), so the check
+ * `config_oauth_app_propagation`, which never ran on k8s at any phase on
+ * any provider. Those two exist specifically to cover a k8s-only gap (a config
+ * key silently missing from the pod env, found 2026-07-15), so the check
  * written for k8s was precisely the one k8s never got.
  */
 import { readFileSync } from 'node:fs';

@@ -27,17 +27,14 @@ import { pollUntil } from '../retry.js';
 import { BaseProvider } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
-// sibling providers (SSH, k8s API for future parity, Supavisor poolers).
+// sibling providers (SSH, k8s API for future parity).
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
-const POOLER_SESSION_PORT = '5432';
-const POOLER_TRANSACTION_PORT = '6543';
-const OPERATOR_LOCKED_PORTS = new Set([
-  SSH_PORT,
-  K8S_API_PORT,
-  POOLER_SESSION_PORT,
-  POOLER_TRANSACTION_PORT,
-]);
+const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs; applyOperatorCidrs deletes any such rule (the database has no
+// public port).
+const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
 // WireGuard replication port (wireguard.js WG_PORT) — only reachable via
 // compose-ha (declared since tier-parity wave 1); the member is
@@ -262,7 +259,7 @@ export class VultrProvider extends BaseProvider {
   }
 
   /** @returns {Promise<never>} */
-  static async getK8sSupabaseUserData() {
+  static async getK8sDbUserData() {
     throw new Error("Vultr's k8s tier is not built — SUPPORTED_TIERS is compose-only");
   }
 
@@ -384,12 +381,12 @@ export class VultrProvider extends BaseProvider {
    * Region-appropriate default server types — fixed roles (the vc2 line is
    * near-uniform; per-region gaps are handled by resolveServerTypeForRegion).
    * @param {string} _region - interface parity; unused
-   * @returns {{masterType: string, supabaseType: string, workerType: string}}
+   * @returns {{masterType: string, dbType: string, workerType: string}}
    */
   static getRegionDefaults(_region) {
     return {
       masterType: 'vc2-1c-2gb',
-      supabaseType: VultrProvider.DEFAULT_TYPE,
+      dbType: VultrProvider.DEFAULT_TYPE,
       workerType: 'vc2-1c-2gb',
     };
   }
@@ -435,7 +432,7 @@ export class VultrProvider extends BaseProvider {
     if (available) {
       if (available.has(serverType)) return serverType;
       const defaults = VultrProvider.getRegionDefaults(targetRegion);
-      if (serverType === defaults.supabaseType) return defaults.supabaseType;
+      if (serverType === defaults.dbType) return defaults.dbType;
       return defaults.masterType;
     }
 
@@ -981,7 +978,8 @@ export class VultrProvider extends BaseProvider {
 
   /**
    * Rewrite the operator-locked ports' inbound rules to the given CIDR
-   * list, leaving every other rule unchanged. Vultr keeps one subnet per
+   * list, deleting any tcp/5432 or tcp/6543 rule (RETIRED_DB_PORTS), and
+   * leaving every other rule unchanged. Vultr keeps one subnet per
    * rule, so each locked port gets one rule PER CIDR (the same expansion
    * the compose program applies at create time).
    * @param {{firewallName: string, cidrs: string[]}} args
@@ -993,6 +991,7 @@ export class VultrProvider extends BaseProvider {
 
     const kept = (fw.rules || [])
       .filter((r) => !(r.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(String(r.port))))
+      .filter((r) => !(r.protocol === 'tcp' && RETIRED_DB_PORTS.has(String(r.port))))
       .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
       ...new Set(

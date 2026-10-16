@@ -10,9 +10,10 @@ import {
   IconLoader2 as Loader2,
   IconNetwork as Network,
   IconServer as Server,
-  IconShield as Shield,
 } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 import { ServicesStatus } from '@/components/admin/ServicesStatus';
 import { ContentPanel } from '@/components/ContentPanel';
 import { PageHeader } from '@/components/PageHeader';
@@ -40,44 +41,48 @@ export async function fetchServicesStatus(): Promise<ServicesStatusResponse> {
 }
 
 // Service topology: layers from top (user-facing) to bottom (data)
-const TOPOLOGY_LAYERS = [
-  {
-    name: 'Edge',
-    icon: Globe,
-    services: ['traefik'],
-    description: 'Load balancer & reverse proxy',
-  },
-  {
-    name: 'API Gateway',
-    icon: Shield,
-    services: ['kong'],
-    description: 'Authentication & rate limiting',
-  },
-  {
-    name: 'Application',
-    icon: Server,
-    services: ['auth', 'rest', 'realtime', 'storage', 'meta', 'studio'],
-    description: 'Core Supabase services',
-  },
-  {
-    name: 'Data',
-    icon: Database,
-    services: ['db', 'redis'],
-    description: 'PostgreSQL & caching',
-  },
-  {
-    name: 'Observability',
-    icon: Activity,
-    services: ['prometheus', 'grafana', 'loki'],
-    description: 'Monitoring & logging',
-  },
-  {
-    name: 'Tooling',
-    icon: Container,
-    services: ['n8n', 'metabase', 'imgproxy'],
-    description: 'Automation, analytics & media',
-  },
-] as const;
+function topologyLayers(t: TFunction) {
+  return [
+    {
+      key: 'edge',
+      name: t('admin.infrastructure.layers.edge.name'),
+      icon: Globe,
+      services: ['traefik', 'docker-socket-proxy'],
+      description: t('admin.infrastructure.layers.edge.description'),
+    },
+    {
+      key: 'application',
+      name: t('admin.infrastructure.layers.application.name'),
+      icon: Server,
+      // Better Auth runs inside the app, so it has no tile of its own.
+      services: ['app'],
+      description: t('admin.infrastructure.layers.application.description'),
+    },
+    {
+      key: 'data',
+      name: t('admin.infrastructure.layers.data.name'),
+      icon: Database,
+      // s3 is Garage, the local dev object store; production uses the
+      // provider's S3 and runs no container for it.
+      services: ['db', 's3', 'redis'],
+      description: t('admin.infrastructure.layers.data.description'),
+    },
+    {
+      key: 'observability',
+      name: t('admin.infrastructure.layers.observability.name'),
+      icon: Activity,
+      services: ['prometheus', 'grafana', 'loki'],
+      description: t('admin.infrastructure.layers.observability.description'),
+    },
+    {
+      key: 'tooling',
+      name: t('admin.infrastructure.layers.tooling.name'),
+      icon: Container,
+      services: ['n8n', 'metabase'],
+      description: t('admin.infrastructure.layers.tooling.description'),
+    },
+  ] as const;
+}
 
 function StatusDot({ status }: { status: 'healthy' | 'unhealthy' | 'unknown' | 'not_running' }) {
   return (
@@ -94,6 +99,8 @@ function StatusDot({ status }: { status: 'healthy' | 'unhealthy' | 'unknown' | '
 }
 
 export default function Infrastructure() {
+  const { t } = useTranslation();
+  const layers = topologyLayers(t);
   const { data, isLoading } = useQuery({
     queryKey: ['services-status'],
     queryFn: fetchServicesStatus,
@@ -144,18 +151,19 @@ export default function Infrastructure() {
               </div>
             ) : (
               <div className="space-y-3">
-                {TOPOLOGY_LAYERS.map((layer, i) => {
+                {layers.map((layer, i) => {
                   const layerServices = layer.services
                     .map((name) => ({
                       name,
                       status: serviceMap.get(name),
                     }))
-                    .filter((s) => s.status || layer.services.length <= 3);
+                    // Only containers this environment runs.
+                    .filter((s) => s.status);
 
                   if (layerServices.length === 0) return null;
 
                   return (
-                    <div key={layer.name}>
+                    <div key={layer.key}>
                       {/* Layer */}
                       <div className="rounded-lg border p-4">
                         <div className="mb-3 flex items-center gap-2 text-sm text-muted-foreground">
@@ -192,7 +200,7 @@ export default function Infrastructure() {
                       </div>
 
                       {/* Connector */}
-                      {i < TOPOLOGY_LAYERS.length - 1 && layerServices.length > 0 && (
+                      {i < layers.length - 1 && layerServices.length > 0 && (
                         <div className="flex justify-center py-1">
                           <div className="h-3 w-px bg-border" />
                         </div>
@@ -221,10 +229,7 @@ export default function Infrastructure() {
                 value={import.meta.env.VITE_ENVIRONMENT || import.meta.env.MODE || 'development'}
               />
               <InfoRow label="Version" value={import.meta.env.VITE_APP_VERSION || '0.1.0'} />
-              <InfoRow
-                label="Supabase URL"
-                value={import.meta.env.VITE_SUPABASE_URL || 'Not configured'}
-              />
+              <InfoRow label="Site URL" value={window.location.origin} />
               <InfoRow
                 label="HA Mode"
                 value={

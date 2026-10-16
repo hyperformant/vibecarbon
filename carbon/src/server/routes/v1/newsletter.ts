@@ -1,16 +1,16 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { adminDb } from '../../db/client';
+import { dbErrorForLog } from '../../db/errors';
+import { newsletterSubscribers } from '../../db/schema';
+import { isUuid } from '../../db/values';
 import { sendEmail } from '../../lib/email';
 import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
 import { createRateLimiter } from '../../lib/rate-limiter';
-import { supabaseAdmin } from '../../lib/supabase';
 import type { HonoVariables } from '../../types';
-
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
 
 const newsletterRoutes = new Hono<{ Variables: HonoVariables }>();
 
@@ -41,11 +41,11 @@ newsletterRoutes.post('/subscribe', async (c) => {
 
   try {
     // Check if already subscribed
-    const { data: existing } = await adminDb
-      .from('newsletter_subscribers')
-      .select('id, status')
-      .eq('email', body.email)
-      .maybeSingle();
+    const [existing] = await adminDb
+      .select({ id: newsletterSubscribers.id, status: newsletterSubscribers.status })
+      .from(newsletterSubscribers)
+      .where(eq(newsletterSubscribers.email, body.email))
+      .limit(1);
 
     if (existing?.status === 'active') {
       // Already subscribed — don't reveal this to prevent email enumeration
@@ -58,29 +58,28 @@ newsletterRoutes.post('/subscribe', async (c) => {
     }
 
     // Insert or update (if previously unsubscribed)
-    const { data: subscriber, error: insertError } = await adminDb
-      .from('newsletter_subscribers')
-      .upsert(
-        {
-          email: body.email,
-          name: body.name || null,
-          status: 'pending',
-          confirmation_token: crypto.randomUUID(),
-          unsubscribed_at: null,
-        },
-        { onConflict: 'email' }
-      )
-      .select('confirmation_token')
-      .single();
-
-    if (insertError) {
-      logger.error({ error: insertError }, 'Failed to create newsletter subscriber');
+    let confirmationToken: string | null;
+    try {
+      const changes = {
+        name: body.name || null,
+        status: 'pending',
+        confirmationToken: crypto.randomUUID(),
+        unsubscribedAt: null,
+      };
+      const [subscriber] = await adminDb
+        .insert(newsletterSubscribers)
+        .values({ email: body.email, ...changes })
+        .onConflictDoUpdate({ target: newsletterSubscribers.email, set: changes })
+        .returning({ confirmationToken: newsletterSubscribers.confirmationToken });
+      confirmationToken = subscriber?.confirmationToken ?? null;
+    } catch (insertError) {
+      logger.error({ err: dbErrorForLog(insertError) }, 'Failed to create newsletter subscriber');
       return c.json({ error: sanitizeError(insertError, 'Failed to subscribe') }, 500);
     }
 
     // Send confirmation email (double opt-in)
     const baseUrl = env.SITE_URL || 'http://localhost:5173';
-    const confirmUrl = `${baseUrl}/api/v1/newsletter/confirm?token=${subscriber.confirmation_token}`;
+    const confirmUrl = `${baseUrl}/api/v1/newsletter/confirm?token=${confirmationToken}`;
 
     sendEmail({
       to: body.email,
@@ -111,24 +110,25 @@ newsletterRoutes.get('/confirm', async (c) => {
     return c.json({ error: 'Missing confirmation token' }, 400);
   }
 
+  // The token column is a uuid; anything else cannot match a row.
+  if (!isUuid(token)) {
+    return c.json({ error: 'Invalid or expired confirmation link' }, 400);
+  }
+
   try {
     // NOTE: confirmation_token is intentionally NOT cleared here — it doubles as
     // the per-subscriber unsubscribe secret (see the unsubscribe route below).
     // Re-confirmation is already prevented by the `status = 'pending'` filter.
-    const { data, error } = await adminDb
-      .from('newsletter_subscribers')
-      .update({
-        status: 'active',
-        subscribed_at: new Date().toISOString(),
-      })
-      .eq('confirmation_token', token)
-      .eq('status', 'pending')
-      .select('email')
-      .maybeSingle();
-
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to confirm') }, 500);
-    }
+    const [data] = await adminDb
+      .update(newsletterSubscribers)
+      .set({ status: 'active', subscribedAt: new Date().toISOString() })
+      .where(
+        and(
+          eq(newsletterSubscribers.confirmationToken, token),
+          eq(newsletterSubscribers.status, 'pending')
+        )
+      )
+      .returning({ email: newsletterSubscribers.email });
 
     if (!data) {
       return c.json({ error: 'Invalid or expired confirmation link' }, 400);
@@ -157,21 +157,22 @@ newsletterRoutes.get('/unsubscribe', async (c) => {
     return c.json({ error: 'Missing email or unsubscribe token' }, 400);
   }
 
-  try {
-    const { data, error } = await adminDb
-      .from('newsletter_subscribers')
-      .update({
-        status: 'unsubscribed',
-        unsubscribed_at: new Date().toISOString(),
-      })
-      .eq('email', email)
-      .eq('confirmation_token', token)
-      .select('id')
-      .maybeSingle();
+  // The token column is a uuid; anything else cannot match a row.
+  if (!isUuid(token)) {
+    return c.json({ error: 'Invalid unsubscribe link' }, 400);
+  }
 
-    if (error) {
-      return c.json({ error: sanitizeError(error, 'Failed to unsubscribe') }, 500);
-    }
+  try {
+    const [data] = await adminDb
+      .update(newsletterSubscribers)
+      .set({ status: 'unsubscribed', unsubscribedAt: new Date().toISOString() })
+      .where(
+        and(
+          eq(newsletterSubscribers.email, email),
+          eq(newsletterSubscribers.confirmationToken, token)
+        )
+      )
+      .returning({ id: newsletterSubscribers.id });
 
     if (!data) {
       return c.json({ error: 'Invalid unsubscribe link' }, 400);

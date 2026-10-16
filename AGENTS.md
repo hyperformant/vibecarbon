@@ -6,7 +6,7 @@ Guidance for AI coding agents working on this repository.
 
 ## Project Overview
 
-Vibecarbon is a CLI tool that generates production-ready software applications with Hono + Vite + React 19 + self-hosted Supabase. The repository contains:
+Vibecarbon is a CLI tool that generates production-ready software applications with Hono + Vite + React 19 on its own Postgres 17 (Better Auth for sign-in, Drizzle for data, Traefik at the edge; extras such as observability and Redis arrive through `vibecarbon add`). The repository contains:
 
 1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`, `activate.js`)
 2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `vibecarbon create`
@@ -186,10 +186,10 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 `src/create.js` uses `@clack/prompts` for interactive CLI. It:
 1. Parses CLI arguments via the shared spec-driven parser (`-y`, `-pm <npm|pnpm|bun>`, `-admin-email <email>`, `-admin-password <pw>`, `-install`, `-skip-lockfile`)
 2. Prompts for admin email and password (required for dashboard access)
-3. Generates secure secrets (JWT, passwords, Supabase keys)
+3. Generates secure secrets (BETTER_AUTH_SECRET for the app's sessions, the database and replication passwords)
 4. Copies template files from `carbon/` directory
-5. Replaces placeholders (e.g., `{{PROJECT_NAME}}`, `{{JWT_SECRET}}`, `{{ADMIN_EMAIL}}`)
-6. Creates admin user in Supabase auth
+5. Replaces placeholders (e.g., `{{PROJECT_NAME}}`, `{{ADMIN_EMAIL}}`)
+6. Writes ADMIN_EMAIL/ADMIN_PASSWORD to `.env`/`.env.local`; the app creates the super admin from them at startup, and every deploy waits for `/api/health` to report `adminReady` (`src/lib/deploy/admin-ready.js`)
 7. Installs dependencies and initializes git
 
 ### CLI conventions
@@ -205,12 +205,12 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 ## Template Placeholders
 
 When modifying template files in `carbon/`, these placeholders are replaced at generation time:
-- `{{PROJECT_NAME}}` - User's project name (machine slug: containers, pooler tenant, k8s resources)
+- `{{PROJECT_NAME}}` - User's project name (machine slug: containers, k8s resources)
 - `{{PROJECT_DISPLAY_NAME}}` - Human-facing name (browser titles, PWA manifest, emails, legal copy); defaults to the titleized slug, overridable via `-display-name`
-- `{{ADMIN_EMAIL}}`, `{{ADMIN_PASSWORD}}` - Admin user credentials (entered during creation)
-- `{{JWT_SECRET}}`, `{{DB_PASSWORD}}`, `{{ANON_KEY}}`, `{{SERVICE_ROLE_KEY}}`
-- `{{REALTIME_SECRET}}`, `{{VAULT_ENC_KEY}}`
-- `{{N8N_PASSWORD}}`, `{{GRAFANA_PASSWORD}}`
+- `{{ADMIN_EMAIL}}` - Admin user email (entered during creation)
+- `{{GITHUB_OWNER}}`, `{{SITE_URL}}` - GitOps owner and the app's public origin
+- `{{DB_PASSWORD}}`, `{{REPL_PASSWORD}}`, `{{ADMIN_PASSWORD}}` - Secret placeholders (the admin password is entered during creation): never substituted into checked-in files; their values go to `.env.local` and deploy patches them in (`SECRET_PLACEHOLDERS` in `src/create.js`)
+- Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX}}`, `{{K8S_STORAGE_CLASS}}`, ...) stay in the scaffold and are filled by `vibecarbon deploy`
 
 ### Localization
 
@@ -233,6 +233,7 @@ Known deploy-time patches:
 - `ConfigMap vibecarbon-config.SITE_URL: https://app.example.com` → `https://${domain}` (PR 1AQ)
 - `Deployment app.image: ghcr.io/<owner>/<repo>:main` → sideloaded `vibecarbon-local/<project>:<tag>` (pre-existing, set in `applyK3sManifests` step 6)
 - `CronJob backup.image: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}-backup:latest` → sideloaded `vibecarbon-local/<project>-backup:<tag>` + `imagePullPolicy=IfNotPresent` (PR 1AS)
+- `StatefulSet db` (`carbon/k8s/base/db/statefulset.yaml`) → NOT patched: its double-brace placeholders (db image, wal-g prefix and role, S3 endpoint, repl relay address, `K8S_STORAGE_CLASS`, the wal-archive ConfigMap sha) are RENDERED into a temp copy of `k8s/base` by `renderK8sBase` before `kubectl apply -k`, which refuses a copy that still carries one, because a StatefulSet's volumeClaimTemplates are immutable. Flux's base Kustomization drops the object (`$patch: delete`) and only health-checks it
 - CSI sidecars (`daemonset/hcloud-csi-node`, `deployment/hcloud-csi-controller` on Hetzner; `daemonset/csi-do-node`, `statefulset/csi-do-controller` on DO) → ghcr mirrors, `set image` at step 0a from `csiSidecarSetImagePlan(providerId)`. Unlike the rows above these manifests are **upstream's**, applied verbatim from a URL by cloud-init, so there is no placeholder to render: `set image` is the only seam.
 
 **Why this category exists:** direct/local mode never pushes to GHCR, so any GHCR-pointed image causes ImagePullBackOff. ACME prod against `app.example.com` returns 403 (IANA-reserved).
@@ -241,11 +242,15 @@ Known deploy-time patches:
 
 It is a redirector, not a registry: it routes by client IP to a cloud backend whose GCP leg intermittently **403s datacenter ranges** (Hetzner included). Retries land on the same backend. It cost two deploys: cluster-autoscaler (2026-07-31) and the CSI sidecars (2026-08-05, one node of three lost storage cluster-wide).
 
-Every such image is mirrored into `ghcr.io/hyperformant/<name>` (flat, upstream's tag) by the `mirror-upstream-images` matrix in `.github/workflows/publish-images.yml`. The set lives in `MIRRORED_K8S_IMAGES` (`src/lib/images.js`); `scripts/mirror-matrix.mjs` imports it to build the matrix. `tests/unit/deploy/k8s-image-mirrors.test.ts` fails on any non-comment `registry.k8s.io` reference under `src/`, `carbon/`, `scripts/`, `tests/e2e/`, `.github/workflows/`.
+Every such image is mirrored into `ghcr.io/hyperformant/<name>` (flat, upstream's tag, deployed as `name:tag@<upstream's amd64 manifest digest>`) by the `mirror-upstream-images` matrix in `.github/workflows/publish-images.yml`. The set lives in `MIRRORED_K8S_IMAGES` (`src/lib/images.js`); `scripts/mirror-matrix.mjs` imports it to build the matrix. `tests/unit/deploy/k8s-image-mirrors.test.ts` fails on any non-comment `registry.k8s.io` reference under `src/`, `carbon/`, `scripts/`, `tests/e2e/`, `.github/workflows/`.
 
-**Adding one:** append to `MIRRORED_K8S_IMAGES` (or to `CSI_SIDECAR_MIRRORS`, which feeds it) → merge → dispatch the workflow → **flip the new package public by hand** in the org's package settings (no API exists for container visibility) → verify an anonymous `docker pull` → only then merge code that consumes it. A private package is an ImagePullBackOff on every node.
+**Adding one:** append to `MIRRORED_K8S_IMAGES` (or to `CSI_SIDECAR_MIRRORS`, which feeds it) with upstream's linux/amd64 `digest` (the `imagetools inspect` one-liner on the `MirroredImage` typedef; the mirror leg fails if upstream's tag stops resolving to it) → merge → dispatch the workflow → **flip the new package public by hand** in the org's package settings (no API exists for container visibility) → verify an anonymous `docker pull` → only then merge code that consumes it. A private package is an ImagePullBackOff on every node.
 
-**Bumping a CSI driver version in `carbon/cloud-init/k3s/*-init.sh`:** re-derive the sidecar tags in `CSI_SIDECAR_MIRRORS` from the new upstream manifest and update `HETZNER_CSI_VERSION` / `DO_CSI_VERSION`. The unit guard cross-checks the version in the cloud-init script against those constants and fails the build otherwise.
+**Bumping a CSI driver version in `carbon/cloud-init/k3s/*-init.sh`:** re-derive the sidecar tags and digests in `CSI_SIDECAR_MIRRORS` (and any floating container in `CSI_UPSTREAM_IMAGE_PINS`) from the new upstream manifest and update `HETZNER_CSI_VERSION` / `DO_CSI_VERSION`. The unit guard cross-checks the version in the cloud-init script against those constants and fails the build otherwise.
+
+### Every image ref is pinned by digest
+
+Every image this repo ships (compose, k8s manifests, Helm values, cloud-init, Dockerfiles, workflows, JS constants) is `name:tag@sha256:<multi-arch index digest>`; `tests/unit/deploy/image-digest-census.test.ts` fails on anything else. Its allowlist holds only images this repo or the project builds after merge (the app image, the db image, carbon-autoscaler), each with its reason. Dependabot (`.github/dependabot.yml`) moves the digests in three kinds of PR: one `images` multi-ecosystem PR (Dockerfiles, k8s manifests and compose together, so an image shared by compose and k8s moves in both), plus separate `js-pins` and `db-image` PRs for the bumps that need a hand edit and stay red until they get one. JS-held third-party pins are mirrored in `.github/image-pins/Dockerfile` (never built) so Dependabot sees them; its header lists the constant to update in the same PR. Verify a new tag exists and carries linux/amd64 with `docker buildx imagetools inspect <ref>` (registry metadata only, no pull) and pin the index digest it prints.
 
 **When you add a new resource under `carbon/k8s/base/`:** if it contains an image, hostname, ClusterIssuer name, or owner-scoped value that won't be reachable from a fresh cluster, add a corresponding `kubectl patch` step in `applyK3sManifests`. For images that aren't in containerd yet, also build + sideload to every node in `deployK3s` (mirror the app-image flow at step 7 / backup-image flow at step 7b). Deployment patches alone don't help if the image isn't reachable.
 

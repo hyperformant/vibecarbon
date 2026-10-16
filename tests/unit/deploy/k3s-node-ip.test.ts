@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
  * --node-ip.
  */
 const K3S_DIR = join(process.cwd(), 'carbon', 'cloud-init', 'k3s');
-const SCRIPTS = ['master-init.sh', 'worker-init.sh', 'supabase-init.sh'];
+const SCRIPTS = ['master-init.sh', 'worker-init.sh', 'db-init.sh'];
 
 describe.each(SCRIPTS)('k3s init script %s — node-ip robustness', (name) => {
   const src = readFileSync(join(K3S_DIR, name), 'utf8');

@@ -1,8 +1,9 @@
-import type { User } from '@supabase/supabase-js';
+import type { AuthUser as User } from '@server/auth';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HonoVariables } from '@server/types';
 import { jsonPost } from '../../../_helpers/app';
+import { queryChain } from '../../../_helpers/drizzle-mock';
 
 /**
  * The docs visibility toggles ride the existing app-settings endpoints:
@@ -19,21 +20,21 @@ const { selectRows, upserts } = vi.hoisted(() => ({
   upserts: [] as { key: string; value: unknown; updated_by?: string }[],
 }));
 
-// auth.ts aliases `supabaseAdmin` to a loosely-typed `adminDb` locally, so the
-// mock has to stand in for supabaseAdmin itself.
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({
-      select: () => ({
-        in: async () => selectRows,
+vi.mock('@server/db/client', () => ({
+  adminDb: {
+    select: () =>
+      queryChain(() => {
+        if (selectRows.error) throw selectRows.error;
+        return selectRows.data;
       }),
-      upsert: async (row: { key: string; value: unknown; updated_by?: string }) => {
-        upserts.push(row);
-        return { error: null };
-      },
+    insert: () => ({
+      values: (row: { key: string; value: unknown; updatedBy?: string }) => ({
+        onConflictDoUpdate: async () => {
+          upserts.push({ key: row.key, value: row.value, updated_by: row.updatedBy });
+        },
+      }),
     }),
   },
-  createAuthClient: () => ({}),
 }));
 
 vi.mock('@server/lib/logger', () => ({
@@ -48,7 +49,7 @@ function app(asSuperAdmin: boolean) {
     c.set(
       'user',
       // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
-      { id: 'admin1', app_metadata: { role: asSuperAdmin ? 'super_admin' : 'user' } } as any
+      { id: 'admin1', role: asSuperAdmin ? 'super_admin' : 'user' } as any
     );
     await next();
   });

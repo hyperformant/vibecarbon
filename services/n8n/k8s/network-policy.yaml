@@ -34,18 +34,10 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-              app: vibecarbon-postgres
+              app: vibecarbon-db
       ports:
         - protocol: TCP
           port: 5432
-    # Kong (Supabase API gateway)
-    - to:
-        - podSelector:
-            matchLabels:
-              app: vibecarbon-kong
-      ports:
-        - protocol: TCP
-          port: 8000
     # External HTTP/HTTPS (for webhook calls, npm packages, etc.)
     - to:
         - ipBlock:
@@ -69,7 +61,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: vibecarbon-postgres
+      app: vibecarbon-db
   policyTypes:
     - Ingress
   ingress:

@@ -31,7 +31,7 @@ Use this decision table when you've changed code and need to know what to run:
 | About to push and want the pre-push gate locally | `pnpm test:prepush` |
 | You changed a lot and aren't sure | `pnpm test` (unit + integration + loadtest) |
 
-The `integration` tier is one vitest project, but the directory is filterable. Running `pnpm test:cli` is just `vitest run --project integration tests/integration/cli` — the file path is the filter. The same shape works for any path under `tests/integration/`.
+The `integration` tier is two vitest projects: `integration`, and `integration-docker` for `tests/integration/docker/` (declared `fileParallelism: false`, so its compose stacks never run side by side). `pnpm test:integration` selects both (`--project 'integration*'`). The directory is filterable: `pnpm test:cli` is just `vitest run --project integration tests/integration/cli`, the file path being the filter. The same shape works for any path under `tests/integration/` outside `docker/`; for the docker files use `--project integration-docker`.
 
 ## Running a single file or a single test
 

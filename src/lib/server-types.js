@@ -5,10 +5,10 @@
  * both the deploy and scale commands.
  */
 
-// Minimum server specs for a full Compose stack (Supabase + app + Traefik + socket-proxy)
+// Minimum server specs for a full Compose stack (Postgres + app + Traefik + socket-proxy)
 export const COMPOSE_MIN_RAM_GB = 4;
 
-// Curated K8s deployment profiles — sensible combinations of master + supabase
+// Curated K8s deployment profiles — sensible combinations of master + database
 // + worker. x86 only: vibecarbon standardizes on amd64 (see
 // src/lib/deploy/platform.js), so the ARM variants these profiles used to carry
 // — and the per-region `hasArm ? profile.arm : profile.x86` switch that made an
@@ -35,22 +35,22 @@ export const K8S_PROFILES = [
     name: 'starter',
     label: 'Starter',
     hint: 'Good for MVPs and low-traffic apps',
-    types: { master: 'cpx22', supabase: 'cpx32', worker: 'cpx22' },
-    fallbackTypes: { master: 'cpx11', supabase: 'cpx21', worker: 'cpx11' },
+    types: { master: 'cpx22', db: 'cpx32', worker: 'cpx22' },
+    fallbackTypes: { master: 'cpx11', db: 'cpx21', worker: 'cpx11' },
   },
   {
     name: 'production',
     label: 'Production',
     hint: 'Recommended for production workloads',
-    types: { master: 'cpx32', supabase: 'cpx42', worker: 'cpx32' },
-    fallbackTypes: { master: 'cpx21', supabase: 'cpx31', worker: 'cpx21' },
+    types: { master: 'cpx32', db: 'cpx42', worker: 'cpx32' },
+    fallbackTypes: { master: 'cpx21', db: 'cpx31', worker: 'cpx21' },
   },
   {
     name: 'enterprise',
     label: 'Enterprise',
     hint: 'High-traffic apps with large databases',
-    types: { master: 'cpx42', supabase: 'cpx62', worker: 'cpx42' },
-    fallbackTypes: { master: 'cpx31', supabase: 'cpx41', worker: 'cpx31' },
+    types: { master: 'cpx42', db: 'cpx62', worker: 'cpx42' },
+    fallbackTypes: { master: 'cpx31', db: 'cpx41', worker: 'cpx31' },
   },
 ];
 
@@ -125,7 +125,7 @@ export function buildComposeTypeOptions(regionTypes, defaultType) {
 
     let hint = '';
     if (tooSmall) {
-      hint = `need ${COMPOSE_MIN_RAM_GB}GB+ RAM for Supabase`;
+      hint = `need ${COMPOSE_MIN_RAM_GB}GB+ RAM for the full stack`;
     } else if (isMinimum) {
       hint = 'minimum';
     } else if (isRecommended) {
@@ -157,14 +157,14 @@ export function buildK8sProfileOptions(regionTypes) {
     // generation in the EU, the legacy `cpx*1` line in ash/hil. A profile is
     // only dropped when NEITHER generation is fully available.
     const variant = profileVariants(profile).find((v) =>
-      [v.master, v.supabase, v.worker].every((t) => availableNames.has(t)),
+      [v.master, v.db, v.worker].every((t) => availableNames.has(t)),
     );
     if (!variant) return null;
 
     return {
       value: profile.name,
       label: profile.label,
-      hint: `${profile.hint} (${variant.master} + ${variant.supabase} + ${variant.worker})`,
+      hint: `${profile.hint} (${variant.master} + ${variant.db} + ${variant.worker})`,
       _variant: variant,
     };
   })
@@ -189,12 +189,12 @@ export function buildK8sProfileOptions(regionTypes) {
  * caller displays the raw current types alongside this label, so nothing goes
  * blank; the operator simply can't re-pick that shape from the profile list.
  */
-export function detectCurrentProfile(masterType, supabaseType, workerType) {
+export function detectCurrentProfile(masterType, dbType, workerType) {
   for (const profile of K8S_PROFILES) {
     // Either generation counts — a cluster provisioned in ash/hil runs the
     // legacy cpx*1 trio and should still classify as its named profile.
     for (const v of profileVariants(profile)) {
-      if (v.master === masterType && v.supabase === supabaseType && v.worker === workerType) {
+      if (v.master === masterType && v.db === dbType && v.worker === workerType) {
         return profile.name;
       }
     }
@@ -208,7 +208,7 @@ export function detectCurrentProfile(masterType, supabaseType, workerType) {
  *
  * `filterSharedCpu: false` (scale's per-role pickers) opts out of the
  * shared-vCPU filter ONLY. The amd64 filter is not optional — this builder fed
- * scale's master/supabase/worker `select()` prompts with the region catalog
+ * scale's master/database/worker `select()` prompts with the region catalog
  * verbatim, which is how ARM types appeared in the picker for any region that
  * had them.
  *

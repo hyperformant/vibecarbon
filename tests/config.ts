@@ -74,8 +74,8 @@ export const testConfig = {
     // Ports required for basic Docker smoke tests (database only)
     requiredPorts: [5432],
 
-    // Additional ports for full stack tests (Kong API gateway)
-    fullStackPorts: [8000],
+    // Local S3 (dev-only Garage from docker-compose.override.yml)
+    s3Ports: [8333],
 
     // Ports for Traefik reverse proxy (optional - tests skip if unavailable)
     // Note: Dashboard is now protected by admin-auth and accessed via traefik.localhost
@@ -223,7 +223,7 @@ export const testConfig = {
       // Hetzner's per-DC capacity flux, so a single pair is sufficient (no
       // fallback tiers). This ONE pair backs every DO reference scenario —
       // d1/d2 (compose/compose-ha), d3 (k8s) and d4 (k8s-ha) — the k8s
-      // tiers blanket-apply it to master/supabase/worker exactly like the
+      // tiers blanket-apply it to master/database/worker exactly like the
       // hetzner k8s entries (e3/e4) blanket-apply their single typePair
       // across those same roles.
       digitalocean: {

@@ -1,13 +1,11 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import type { Context, Next } from 'hono';
 import type { PlanId } from '../../shared/pricing';
 import { planIdFromPriceId } from '../../shared/pricing';
 import { getProviderPriceIds, isBillingConfigured } from '../billing';
-import { supabaseAdmin } from '../lib/supabase';
+import { adminDb } from '../db/client';
+import { customers, memberships, subscriptions } from '../db/schema';
 import type { HonoVariables } from '../types';
-
-// biome-ignore lint/suspicious/noExplicitAny: Tables not yet in generated Database types
-const adminDb = supabaseAdmin as SupabaseClient<any>;
 
 const planHierarchy: Record<PlanId, number> = {
   free: 0,
@@ -26,44 +24,47 @@ async function resolveHighestPlan(userId: string): Promise<PlanId> {
   const customerIds: string[] = [];
 
   // Personal customer (organization_id IS NULL).
-  const { data: personal } = await adminDb
-    .from('customers')
-    .select('id')
-    .eq('user_id', userId)
-    .is('organization_id', null)
-    .maybeSingle();
+  const [personal] = await adminDb
+    .select({ id: customers.id })
+    .from(customers)
+    .where(and(eq(customers.userId, userId), isNull(customers.organizationId)))
+    .limit(1);
   if (personal?.id) customerIds.push(personal.id);
 
   // Org customers for every organization the user is a member of.
-  const { data: memberships } = await adminDb
-    .from('memberships')
-    .select('organization_id')
-    .eq('user_id', userId);
-  const orgIds = (memberships ?? [])
-    .map((m: { organization_id: string | null }) => m.organization_id)
-    .filter((id: string | null): id is string => Boolean(id));
+  const userMemberships = await adminDb
+    .select({ organizationId: memberships.organizationId })
+    .from(memberships)
+    .where(eq(memberships.userId, userId));
+  const orgIds = userMemberships
+    .map((m) => m.organizationId)
+    .filter((id): id is string => Boolean(id));
 
   if (orgIds.length > 0) {
-    const { data: orgCustomers } = await adminDb
-      .from('customers')
-      .select('id')
-      .in('organization_id', orgIds);
-    for (const c of orgCustomers ?? []) {
+    const orgCustomers = await adminDb
+      .select({ id: customers.id })
+      .from(customers)
+      .where(inArray(customers.organizationId, orgIds));
+    for (const c of orgCustomers) {
       if (c.id) customerIds.push(c.id);
     }
   }
 
   if (customerIds.length === 0) return 'free';
 
-  const { data: subscriptions } = await adminDb
-    .from('subscriptions')
-    .select('stripe_price_id, status')
-    .in('customer_id', customerIds)
-    .in('status', ['active', 'trialing']);
+  const activeSubscriptions = await adminDb
+    .select({ stripePriceId: subscriptions.stripePriceId })
+    .from(subscriptions)
+    .where(
+      and(
+        inArray(subscriptions.customerId, customerIds),
+        inArray(subscriptions.status, ['active', 'trialing'])
+      )
+    );
 
   let highest: PlanId = 'free';
-  for (const sub of subscriptions ?? []) {
-    const plan = planIdFromPriceId(sub.stripe_price_id, priceIds);
+  for (const sub of activeSubscriptions) {
+    const plan = planIdFromPriceId(sub.stripePriceId, priceIds);
     if (planHierarchy[plan] > planHierarchy[highest]) {
       highest = plan;
     }

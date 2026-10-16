@@ -2,12 +2,13 @@ import {
   IconCloud as Cloud,
   IconContainer as Container,
   IconDatabase as Database,
+  IconFileCode as FileCode,
   IconWorld as Globe,
   IconDeviceSdCard as HardDrive,
   IconKey as Key,
   IconStack2 as Layers,
-  IconRadio as Radio,
   IconServer as Server,
+  IconTable as Table,
   IconBolt as Zap,
 } from '@tabler/icons-react';
 import { motion } from 'framer-motion';
@@ -37,7 +38,7 @@ interface LayerConfig {
   yOffset: number;
   accent: 'teal' | 'magenta';
   items: TechItem[];
-  /** Optional second row of items (Supabase uses a 2×2 + banner layout) */
+  /** Optional second row of items (the data layer uses a 2×2 + banner layout) */
   itemsRow2?: TechItem[];
   /** Full-width banner item (PostgreSQL) */
   banner?: TechItem;
@@ -79,8 +80,8 @@ const LAYERS: LayerConfig[] = [
     ],
   },
   {
-    id: 'supabase',
-    title: 'SUPABASE',
+    id: 'data',
+    title: 'DATA',
     maxWidth: 'max-w-xl',
     borderColor: 'border-primary/20',
     glowShadow: '0 8px 28px oklch(0.75 0.20 270 / 0.12)',
@@ -88,12 +89,12 @@ const LAYERS: LayerConfig[] = [
     yOffset: 30,
     accent: 'teal',
     items: [
-      { icon: Key, label: 'Auth', accent: 'teal' },
-      { icon: Globe, label: 'REST API', accent: 'teal' },
+      { icon: Key, label: 'Better Auth', accent: 'teal' },
+      { icon: Table, label: 'Drizzle ORM', accent: 'teal' },
     ],
     itemsRow2: [
-      { icon: Radio, label: 'Realtime', accent: 'teal' },
-      { icon: HardDrive, label: 'Storage', accent: 'teal' },
+      { icon: FileCode, label: 'SQL migrations', accent: 'teal' },
+      { icon: HardDrive, label: 'WAL-G backups', accent: 'teal' },
     ],
     banner: { icon: Database, label: 'PostgreSQL + RLS', accent: 'teal' },
   },
@@ -348,7 +349,7 @@ function LayerPlatform({ layer }: { layer: LayerConfig }) {
               </div>
             )}
 
-            {/* Supabase layout: 2×2 grid + banner */}
+            {/* Data layout: 2×2 grid + banner */}
             {layer.itemsRow2 && (
               <div className="flex flex-col gap-2">
                 <div className="grid grid-cols-2 gap-2">

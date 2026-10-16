@@ -28,6 +28,7 @@ import {
 } from '../../../host-keys.js';
 import { perfAsync } from '../../../perf.js';
 import { scpWithRetry } from '../../../ssh.js';
+import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../db-workload.js';
 import {
   buildPrimaryConninfo,
   buildReplicationHbaLines,
@@ -80,7 +81,7 @@ const REPL_GATEWAY_MANIFEST = join(
  *     standby db pod dials.
  *
  * @param {'primary'|'standby'} role
- * @param {string} nodePrivateIp - this cluster's supabase node private IP
+ * @param {string} nodePrivateIp - this cluster's database node private IP
  * @returns {{relayListen: string, relayTarget: string}}
  */
 export function buildReplGatewaySocatArgs(role, nodePrivateIp) {
@@ -108,7 +109,7 @@ export function buildReplGatewaySocatArgs(role, nodePrivateIp) {
  * @param {object} o
  * @param {string} o.template - the raw repl-gateway.yaml
  * @param {'primary'|'standby'} o.role
- * @param {string} o.nodePrivateIp - this cluster's supabase node private IP
+ * @param {string} o.nodePrivateIp - this cluster's database node private IP
  * @returns {string}
  */
 export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
@@ -116,7 +117,7 @@ export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
   return template
     .replaceAll('__RELAY_LISTEN__', relayListen)
     .replaceAll('__RELAY_TARGET__', relayTarget)
-    .replaceAll('__SUPABASE_PRIVATE_IP__', nodePrivateIp);
+    .replaceAll('__DB_PRIVATE_IP__', nodePrivateIp);
 }
 
 /**
@@ -131,10 +132,13 @@ export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
  * pattern. One db pod per node (StatefulSet), so the node's :REPL_PORT is
  * uncontended.
  *
- * The container name in the supabase chart's db StatefulSet is `supabase-db`.
- * A strategic-merge patch keyed by container `name` + port `containerPort`
- * updates the existing port entry in place (adds hostPort) rather than
- * appending a duplicate.
+ * Patched in here rather than written into k8s/base/db/statefulset.yaml: only
+ * an HA cluster needs the node port, and a single cluster's db stays
+ * cluster-internal. A strategic-merge patch keyed by container `name` + port
+ * `containerPort` updates the existing port entry in place (adds hostPort)
+ * rather than appending a duplicate, and a later `kubectl apply` of k8s/base
+ * leaves it alone (the three-way merge only removes fields the previous apply
+ * set).
  * @returns {object}
  */
 export function buildDbHostPortPatch() {
@@ -144,7 +148,7 @@ export function buildDbHostPortPatch() {
         spec: {
           containers: [
             {
-              name: 'supabase-db',
+              name: DB_CONTAINER,
               ports: [{ containerPort: 5432, hostPort: REPL_PORT }],
             },
           ],
@@ -156,7 +160,7 @@ export function buildDbHostPortPatch() {
 
 /**
  * Apply the repl-gateway manifest to both clusters and bring up the WireGuard
- * tunnel between the two supabase nodes. Shared by setupReplication (the
+ * tunnel between the two database nodes. Shared by setupReplication (the
  * serial path) and prepareReplicationTransport (the deploy fan-out overlap) so
  * the two paths cannot drift. Idempotent: kubectl apply reconciles the gateway
  * pod/netpol, and exchangeAndBringUpTunnel regenerates + re-exchanges keys on
@@ -165,10 +169,10 @@ export function buildDbHostPortPatch() {
 async function applyGatewaysAndBringUpTunnel({
   primaryIp,
   standbyIp,
-  primarySupabaseIp,
-  standbySupabaseIp,
-  primarySupabasePrivateIp,
-  standbySupabasePrivateIp,
+  primaryDbIp,
+  standbyDbIp,
+  primaryDbPrivateIp,
+  standbyDbPrivateIp,
   sshOpts,
   sshKeyPath,
 }) {
@@ -215,7 +219,7 @@ async function applyGatewaysAndBringUpTunnel({
     renderReplGatewayManifest({
       template: gatewayTemplate,
       role: 'primary',
-      nodePrivateIp: primarySupabasePrivateIp,
+      nodePrivateIp: primaryDbPrivateIp,
     }),
   );
   await applyGatewayPod(
@@ -223,17 +227,17 @@ async function applyGatewaysAndBringUpTunnel({
     renderReplGatewayManifest({
       template: gatewayTemplate,
       role: 'standby',
-      nodePrivateIp: standbySupabasePrivateIp,
+      nodePrivateIp: standbyDbPrivateIp,
     }),
   );
 
-  // Generate a keypair on each supabase node, cross-distribute PUBLIC keys, and
+  // Generate a keypair on each database node, cross-distribute PUBLIC keys, and
   // bring up wg0. Private keys are generated on-node and never leave it (see
-  // exchangeAndBringUpTunnel). The WG endpoints/SSH targets are the supabase
+  // exchangeAndBringUpTunnel). The WG endpoints/SSH targets are the database
   // nodes' PUBLIC IPs.
   await exchangeAndBringUpTunnel({
-    primaryIp: primarySupabaseIp,
-    standbyIp: standbySupabaseIp,
+    primaryIp: primaryDbIp,
+    standbyIp: standbyDbIp,
     sshKeyPath,
   });
 }
@@ -272,7 +276,7 @@ export async function waitForNamespace(
 /**
  * Deploy-fan-out transport prep: bring up the replication transport (gateway
  * pods + WireGuard tunnel) while the two clusters are still installing
- * manifests/helm — this work only needs the supabase NODES and each cluster's
+ * manifests/helm — this work only needs the database NODES and each cluster's
  * k3s apiserver, both available minutes before the cluster deploys finish.
  * The one k8s-level prerequisite is the vibecarbon namespace (applyBase
  * creates it early in each cluster's applyManifests), so wait for it on both
@@ -285,30 +289,30 @@ export async function waitForNamespace(
 export async function prepareReplicationTransport({
   primaryIp,
   standbyIp,
-  primarySupabaseIp,
-  standbySupabaseIp,
-  primarySupabasePrivateIp,
-  standbySupabasePrivateIp,
+  primaryDbIp,
+  standbyDbIp,
+  primaryDbPrivateIp,
+  standbyDbPrivateIp,
   sshKeyPath,
 }) {
   if (!primaryIp || !standbyIp || !sshKeyPath) {
     throw new Error('prepareReplicationTransport requires primaryIp, standbyIp, and sshKeyPath');
   }
-  // The supabase nodes' PRIVATE IPs are real IaC outputs on every provider
+  // The database nodes' PRIVATE IPs are real IaC outputs on every provider
   // (Hetzner pins 10.0.1.2 statically; DO exports the Pulumi-assigned VPC
   // address). A missing value means the infra step result is incomplete —
   // never assume a Hetzner-shaped address here: socat would bind a
   // nonexistent IP and the egress NetworkPolicy would scope to a /32 that
   // exists on no node.
-  if (!primarySupabasePrivateIp) {
+  if (!primaryDbPrivateIp) {
     throw new Error(
-      'prepareReplicationTransport: primarySupabasePrivateIp is required — the IaC program ' +
+      'prepareReplicationTransport: primaryDbPrivateIp is required — the IaC program ' +
         'outputs it; a missing value means the infra step result is incomplete',
     );
   }
-  if (!standbySupabasePrivateIp) {
+  if (!standbyDbPrivateIp) {
     throw new Error(
-      'prepareReplicationTransport: standbySupabasePrivateIp is required — the IaC program ' +
+      'prepareReplicationTransport: standbyDbPrivateIp is required — the IaC program ' +
         'outputs it; a missing value means the infra step result is incomplete',
     );
   }
@@ -336,10 +340,10 @@ export async function prepareReplicationTransport({
     await applyGatewaysAndBringUpTunnel({
       primaryIp,
       standbyIp,
-      primarySupabaseIp: primarySupabaseIp || primaryIp,
-      standbySupabaseIp: standbySupabaseIp || standbyIp,
-      primarySupabasePrivateIp,
-      standbySupabasePrivateIp,
+      primaryDbIp: primaryDbIp || primaryIp,
+      standbyDbIp: standbyDbIp || standbyIp,
+      primaryDbPrivateIp,
+      standbyDbPrivateIp,
       sshOpts,
       sshKeyPath,
     });
@@ -348,7 +352,7 @@ export async function prepareReplicationTransport({
 
 /**
  * Belt for the k8s-ha scale flow (item I-1): re-establish the replication
- * TRANSPORT after a node resize rebooted the supabase node(s). It does NOT
+ * TRANSPORT after a node resize rebooted the database node(s). It does NOT
  * re-seed — streaming replication resumes on its own once the tunnel + gateway
  * are back; this only restores the plumbing that the reboot dropped.
  *
@@ -356,7 +360,7 @@ export async function prepareReplicationTransport({
  * it), wg0 is already recreated at boot — but this belt makes recovery prompt
  * and self-healing regardless:
  *   1. Re-run exchangeAndBringUpTunnel (idempotent): recreates wg0 on both
- *      supabase nodes AND (re)installs the systemd unit, so an env deployed
+ *      database nodes AND (re)installs the systemd unit, so an env deployed
  *      before this fix gets persistence retrofitted during scale.
  *   2. Per cluster: delete the crash-looped `repl-gateway` Pod (it couldn't
  *      bind its tunnel IP while wg0 was gone) then re-apply the gateway
@@ -371,10 +375,10 @@ export async function prepareReplicationTransport({
  * @param {string} options.primaryIp - primary master node IP (SSH/kubectl target)
  * @param {string} options.standbyIp - standby master node IP (SSH/kubectl target)
  * @param {string} options.sshKeyPath - shared HA SSH key
- * @param {string} [options.primarySupabaseIp] - primary supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} [options.standbySupabaseIp] - standby supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} [options.primarySupabasePrivateIp] - primary supabase node private IP (gateway bind + netpol)
- * @param {string} [options.standbySupabasePrivateIp] - standby supabase node private IP (gateway bind + netpol)
+ * @param {string} [options.primaryDbIp] - primary database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} [options.standbyDbIp] - standby database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} [options.primaryDbPrivateIp] - primary database node private IP (gateway bind + netpol)
+ * @param {string} [options.standbyDbPrivateIp] - standby database node private IP (gateway bind + netpol)
  */
 export async function reestablishReplicationTransport(options) {
   const { primaryIp, standbyIp, sshKeyPath } = options;
@@ -383,13 +387,13 @@ export async function reestablishReplicationTransport(options) {
       'reestablishReplicationTransport requires primaryIp, standbyIp, and sshKeyPath',
     );
   }
-  const primarySupabaseIp = options.primarySupabaseIp || primaryIp;
-  const standbySupabaseIp = options.standbySupabaseIp || standbyIp;
+  const primaryDbIp = options.primaryDbIp || primaryIp;
+  const standbyDbIp = options.standbyDbIp || standbyIp;
   // Required, never defaulted — see prepareReplicationTransport's guard for why.
-  const { primarySupabasePrivateIp, standbySupabasePrivateIp } = options;
-  if (!primarySupabasePrivateIp || !standbySupabasePrivateIp) {
+  const { primaryDbPrivateIp, standbyDbPrivateIp } = options;
+  if (!primaryDbPrivateIp || !standbyDbPrivateIp) {
     throw new Error(
-      'reestablishReplicationTransport: primarySupabasePrivateIp and standbySupabasePrivateIp ' +
+      'reestablishReplicationTransport: primaryDbPrivateIp and standbyDbPrivateIp ' +
         'are required — the IaC program outputs them; redeploy to persist them if absent',
     );
   }
@@ -399,18 +403,18 @@ export async function reestablishReplicationTransport(options) {
   await seedKnownHosts(khPath, standbyIp);
   const sshOpts = ['-i', sshKeyPath, ...buildHostKeyOptsForPath(khPath)];
 
-  // 1. Recreate wg0 on both supabase nodes (+ retrofit the systemd unit).
+  // 1. Recreate wg0 on both database nodes (+ retrofit the systemd unit).
   await exchangeAndBringUpTunnel({
-    primaryIp: primarySupabaseIp,
-    standbyIp: standbySupabaseIp,
+    primaryIp: primaryDbIp,
+    standbyIp: standbyDbIp,
     sshKeyPath,
   });
 
   // 2. Bounce + re-apply the repl-gateway on each cluster.
   const gatewayTemplate = readFileSync(REPL_GATEWAY_MANIFEST, 'utf-8');
   for (const [masterIp, role, nodePrivateIp] of [
-    [primaryIp, 'primary', primarySupabasePrivateIp],
-    [standbyIp, 'standby', standbySupabasePrivateIp],
+    [primaryIp, 'primary', primaryDbPrivateIp],
+    [standbyIp, 'standby', standbyDbPrivateIp],
   ]) {
     await runCommandAsync(
       [
@@ -469,7 +473,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // would SCP an unrendered SQL file and replication auth would break.
   // Perf slices: this function was the largest un-instrumented block of the
   // k8s-ha deploy (~185s opaque tail in run 29354358889 — silent:true
-  // throughout, so the log showed nothing between reloadPostgrest and the
+  // throughout, so the log showed nothing between the app rollout and the
   // final reseed grep-line). Each phase below gets a deploy.ha.replication.*
   // marker so perf_substep can attribute the tail. Wrappers only — the
   // operations, their order, and their throw semantics are unchanged.
@@ -490,7 +494,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
           'ssh',
           ...sshOpts,
           `root@${primaryIp}`,
-          'cat /tmp/primary-init.sql | kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin',
+          `cat /tmp/primary-init.sql | kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres`,
         ],
         { silent: true },
       );
@@ -521,7 +525,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        'kubectl patch statefulset supabase-supabase-db -n vibecarbon --type strategic --patch-file /dev/stdin',
+        `kubectl patch statefulset ${DB_STATEFULSET} -n vibecarbon --type strategic --patch-file /dev/stdin`,
       ],
       { silent: true, input: JSON.stringify(buildDbHostPortPatch()) },
     );
@@ -530,7 +534,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        `kubectl rollout status statefulset/supabase-supabase-db -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
+        `kubectl rollout status statefulset/${DB_STATEFULSET} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
       ],
       { silent: true },
     );
@@ -553,7 +557,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   //
   // Both lines stay valid from BOTH sides after a failover: the tunnel /30
   // covers both peers, and both clusters run the same k3s pod CIDR — and
-  // pg_basebackup copies the (PGDATA-durable, see below) pg_hba byte-for-byte
+  // pg_basebackup copies the (PGDATA-resident, see below) pg_hba byte-for-byte
   // into the standby, so the reverse re-seed needs no per-peer bookkeeping.
   //
   // Security: both CIDRs are non-routable, cluster-internal sources. The only
@@ -561,30 +565,24 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // scoped firewall rule), and auth remains scram-sha-256 with the per-deploy
   // random REPL_PASSWORD.
   //
-  // DURABILITY (same-wave finding): the supabase/postgres image points
-  // hba_file at /etc/postgresql/pg_hba.conf — a container-EPHEMERAL path
-  // (compose RCA fanout12 2026-05-01 established the override; the k8s db
-  // image is the same family). Appending to the live file would be reverted by
-  // the very next pod restart — and step 3 deletes this pod moments from now —
-  // while appending only to PGDATA/pg_hba.conf targets a file postgres never
-  // reads. So: copy the LIVE hba file (resolved via SHOW hba_file) into PGDATA
-  // once, append our lines idempotently THERE, and repoint hba_file via ALTER
-  // SYSTEM (postgresql.auto.conf lives in PGDATA too). hba_file is a
-  // server-start parameter — no reload here; step 3's pod restart applies it.
-  // Net: the replication hba survives pod restarts, rides wal-g base backups,
-  // and is inherited by the standby via pg_basebackup.
+  // DURABILITY: the rules must land in the file postgres actually reads AND
+  // survive the pod restart in step 3. Our db image leaves hba_file at its
+  // default, PGDATA/pg_hba.conf (docker/postgres-walg/postgresql.conf), which
+  // lives on the PVC: it survives restarts, rides wal-g base backups, and is
+  // inherited by the standby via pg_basebackup. The script resolves the live
+  // path with SHOW hba_file and REFUSES (exit 1, failing this step) when it is
+  // not under PGDATA — appending to a container-ephemeral file would be
+  // reverted by the very next restart and fail replication much later and
+  // much less clearly. Step 3's restart then loads the new rules.
   const hbaLines = buildReplicationHbaLines([WG_SUBNET_CIDR, K3S_POD_CIDR]);
   const hbaSetupScript = [
     'set -e',
-    `HBA_LIVE=$(psql -U supabase_admin -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]')`,
-    'HBA_DURABLE=/var/lib/postgresql/data/pg_hba.conf',
-    'if [ "$HBA_LIVE" != "$HBA_DURABLE" ]; then',
-    '  cp "$HBA_LIVE" "$HBA_DURABLE"',
-    '  chown postgres:postgres "$HBA_DURABLE"',
-    '  chmod 600 "$HBA_DURABLE"',
-    `  psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET hba_file = '$HBA_DURABLE'"`,
-    'fi',
-    ...hbaLines.map((l) => `grep -qxF '${l}' "$HBA_DURABLE" || echo '${l}' >> "$HBA_DURABLE"`),
+    `HBA=$(psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]')`,
+    'case "$HBA" in',
+    '  /var/lib/postgresql/data/*) ;;',
+    '  *) echo "hba_file is $HBA, not under PGDATA; replication rules there would not survive a restart" >&2; exit 1 ;;',
+    'esac',
+    ...hbaLines.map((l) => `grep -qxF '${l}' "$HBA" || echo '${l}' >> "$HBA"`),
   ].join('\n');
   await perfAsync('deploy.ha.replication.hba', () =>
     runCommandAsync(
@@ -592,7 +590,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        'kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- bash',
+        `kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- bash`,
       ],
       { silent: true, input: hbaSetupScript },
     ),
@@ -605,7 +603,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        'kubectl delete pod supabase-supabase-db-0 -n vibecarbon --wait=true',
+        `kubectl delete pod ${DB_POD} -n vibecarbon --wait=true`,
       ],
       { silent: true },
     );
@@ -622,7 +620,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
             // awaitPostgresAccepting (readiness.js) for the d4 run-2 RCA.
             // This pod restarts with existing PGDATA (no init flow), so the
             // socket form was safe here, but TCP is the uniform condition.
-            'kubectl exec -n vibecarbon supabase-supabase-db-0 -- pg_isready -h 127.0.0.1 -U supabase_admin 2>/dev/null && echo IS_READY || echo NOT_READY',
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- pg_isready -h 127.0.0.1 -U postgres 2>/dev/null && echo IS_READY || echo NOT_READY`,
           ],
           { silent: true, ignoreError: true },
         );
@@ -636,102 +634,41 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
     }
   });
 
-  // 3b. Rollout-restart the postgres-dependent Deployments on primary
-  //     so they drop stale connection pools to the (now-restarted)
-  //     postgres.
+  // 3b. Rollout-restart the app on primary so it drops connections to the
+  //     (now-restarted) postgres.
   //
-  //     RCA from k8s-ha 2026-04-28 deploy runs: an earlier version
-  //     restarted only `app`, but the public probe still returned a
-  //     19-byte `404 page not found`. cert-manager state
-  //     was clean (vibecarbon-tls READY=True, Order=valid), but app
-  //     pods kept failing readiness 503. The app's
-  //     `/api/health/ready` queries `supabaseAdmin.from(...)`, which
-  //     hits SUPABASE_URL=http://supabase-supabase-kong:8000 → kong
-  //     → supabase-supabase-rest → postgres. When primary postgres
-  //     restarted, supabase-rest + auth + realtime + meta held onto
-  //     stale connections; restarting only `app` left the readiness
-  //     path broken. Service `app` then had zero Ready endpoints and
-  //     Traefik's IngressRoute fell through to its default 404
-  //     backend on the public probe.
+  //     RCA from k8s-ha 2026-04-28 deploy runs: after the primary postgres
+  //     restart, the db clients held stale connections, Service `app` had
+  //     zero Ready endpoints, and Traefik's IngressRoute fell through to its
+  //     default 404 backend on the public probe. The app's
+  //     `/api/health/ready` is now a direct db ping on its own pg pool, which
+  //     reconnects on its own, but the restart keeps the post-restart state
+  //     deterministic: the app is the only Deployment that holds postgres
+  //     connections now that the chart runs only the db.
   //
-  //     We restart specifically the deployments that hold direct
-  //     postgres connections. We do NOT restart:
-  //       - traefik          — hostPort 80/443; RollingUpdate races
-  //                            with itself (new pod can't bind ports
-  //                            while old pod still listens) and
-  //                            traefik doesn't talk to postgres.
-  //       - supabase-storage — single replica with RWO PVC; old pod
-  //                            holds the volume and new pod stays in
-  //                            Init forever waiting for attach.
-  //                            Storage will reconnect on next request.
-  //       - supabase-kong    — supabase community chart runs kong in
-  //                            DB-less mode (declarative config),
-  //                            no postgres connection.
-  //       - supabase-imgproxy — image proxy, no postgres connection.
-  //       - supabase-studio  — talks via meta/kong, no direct conn.
-  //
-  //     Verified on a live standby cluster on 2026-04-28: restarting
-  //     all 10 deployments hung on traefik (10 min progress deadline)
-  //     and storage (RWO PVC stuck attaching). The selective list
-  //     below completes in <2 min.
-  const postgresDependentDeployments = [
-    'app',
-    'supabase-supabase-auth',
-    'supabase-supabase-rest',
-    'supabase-supabase-realtime',
-    'supabase-supabase-meta',
-  ];
-  // Restart + status-wait the 5 postgres-dependent deployments in parallel.
-  // All 5 share the same apiserver but live in independent ReplicaSets — kubelet
-  // can roll them concurrently and rollout-status only blocks on its own
-  // deployment. Previously serial: total ≈ Σ(per-deploy rollout) = 5 × ~30-60s
-  // worst case = 2.5-5 min. Parallel: total ≈ max(per-deploy) = ~30-60s.
-  // perfAsync wraps the whole batch so the next run's perf_substep shows the
-  // critical-path cost in one place (uninstrumented before).
+  //     Traefik is deliberately NOT restarted: hostPort 80/443 makes a
+  //     RollingUpdate race itself (the new pod can't bind while the old one
+  //     still listens), and it doesn't talk to postgres. Verified on a live
+  //     standby cluster on 2026-04-28: restarting every deployment hung on
+  //     traefik (10 min progress deadline).
   await perfAsync('deploy.ha.replication.rolloutRestart', () =>
-    Promise.all(
-      postgresDependentDeployments.map((deploy) =>
-        runCommandAsync(
-          [
-            'ssh',
-            ...sshOpts,
-            `root@${primaryIp}`,
-            `kubectl rollout restart deployment/${deploy} -n vibecarbon`,
-          ],
-          { silent: true, ignoreError: true },
-        ),
-      ),
-    ),
-  );
-  await perfAsync('deploy.ha.replication.rolloutStatus', () =>
-    Promise.all(
-      postgresDependentDeployments.map((deploy) =>
-        runCommandAsync(
-          [
-            'ssh',
-            ...sshOpts,
-            `root@${primaryIp}`,
-            `kubectl rollout status deployment/${deploy} -n vibecarbon --timeout=300s`,
-          ],
-          { silent: true, ignoreError: true },
-        ),
-      ),
-    ),
-  );
-
-  // Mirror of reloadPostgrest() in the base k8s path. The rollout-restart of
-  // supabase-supabase-rest above already refreshes its schema cache, but issue
-  // the canonical NOTIFY explicitly so the app tables stay visible to PostgREST
-  // even if that restart list ever changes — same PGRST205 class the base
-  // deploy guards against. Best-effort (ignoreError): a missed reload
-  // self-heals on the next rest restart.
-  await perfAsync('deploy.ha.replication.reloadPostgrest', () =>
     runCommandAsync(
       [
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        `kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin -d postgres -c "NOTIFY pgrst, 'reload schema'"`,
+        'kubectl rollout restart deployment/app -n vibecarbon',
+      ],
+      { silent: true, ignoreError: true },
+    ),
+  );
+  await perfAsync('deploy.ha.replication.rolloutStatus', () =>
+    runCommandAsync(
+      [
+        'ssh',
+        ...sshOpts,
+        `root@${primaryIp}`,
+        'kubectl rollout status deployment/app -n vibecarbon --timeout=300s',
       ],
       { silent: true, ignoreError: true },
     ),
@@ -744,31 +681,31 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
  * @param {string} options.primaryIp - Primary master node IP (for SSH)
  * @param {string} options.standbyIp - Standby master node IP (for SSH)
  * @param {string} options.sshKeyPath - Path to shared SSH key
- * @param {string} options.primarySupabaseIp - Primary supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} options.standbySupabaseIp - Standby supabase node PUBLIC IP (WG endpoint + SSH)
- * @param {string} [options.primarySupabasePrivateIp] - Primary supabase node private IP (gateway bind + egress netpol)
- * @param {string} [options.standbySupabasePrivateIp] - Standby supabase node private IP (gateway bind + egress netpol)
+ * @param {string} options.primaryDbIp - Primary database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} options.standbyDbIp - Standby database node PUBLIC IP (WG endpoint + SSH)
+ * @param {string} [options.primaryDbPrivateIp] - Primary database node private IP (gateway bind + egress netpol)
+ * @param {string} [options.standbyDbPrivateIp] - Standby database node private IP (gateway bind + egress netpol)
  * @param {boolean} [options.transportPrepared] - Gateway pods + WG tunnel already brought up by prepareReplicationTransport during the deploy fan-out; skips the transport phase
  * @param {boolean} [options.primaryConfigured] - Primary-side replication config (primary-init.sql, hostPort patch, pg_hba, restart, dependent-deployment rollout) already applied via configurePrimaryForReplication during the cluster fan-out; skips those phases
  * @returns {Promise<{streaming: boolean}>} Replication status
  */
 export async function setupReplication(options) {
   const { primaryIp, standbyIp, sshKeyPath } = options;
-  // The supabase node PUBLIC IPs are BOTH the WireGuard tunnel endpoints and the
+  // The database node PUBLIC IPs are BOTH the WireGuard tunnel endpoints and the
   // SSH targets for the gateway bring-up. Fall back to master IP if not provided.
-  const _primarySupabaseIp = options.primarySupabaseIp || primaryIp;
-  const _standbySupabaseIp = options.standbySupabaseIp || standbyIp;
-  // The supabase nodes' PRIVATE IPs — real IaC outputs on every provider
+  const _primaryDbIp = options.primaryDbIp || primaryIp;
+  const _standbyDbIp = options.standbyDbIp || standbyIp;
+  // The database nodes' PRIVATE IPs — real IaC outputs on every provider
   // (Hetzner pins them statically; DO exports the Pulumi-assigned VPC
   // address), threaded through the deploy outputs. Used for the repl-gateway
   // socat bind + the egress NetworkPolicy scope on each cluster. Required,
   // never defaulted — a Hetzner-shaped assumption here silently breaks every
   // other provider.
-  const _primarySupabasePrivateIp = options.primarySupabasePrivateIp;
-  const _standbySupabasePrivateIp = options.standbySupabasePrivateIp;
-  if (!_primarySupabasePrivateIp || !_standbySupabasePrivateIp) {
+  const _primaryDbPrivateIp = options.primaryDbPrivateIp;
+  const _standbyDbPrivateIp = options.standbyDbPrivateIp;
+  if (!_primaryDbPrivateIp || !_standbyDbPrivateIp) {
     throw new Error(
-      'setupReplication: primarySupabasePrivateIp and standbySupabasePrivateIp are required — ' +
+      'setupReplication: primaryDbPrivateIp and standbyDbPrivateIp are required — ' +
         'the IaC program outputs them; a missing value means the infra step result is incomplete',
     );
   }
@@ -801,7 +738,7 @@ export async function setupReplication(options) {
   // 1a. Stand up the WireGuard replication transport.
   //
   // Replication runs over a point-to-point WireGuard tunnel (wg0, UDP
-  // WG_PORT=51821) between the two clusters' supabase nodes, relayed by a
+  // WG_PORT=51821) between the two clusters' database nodes, relayed by a
   // hostNetwork `repl-gateway` socat pod on each cluster:
   //
   //   standby db pod ─tcp <priv>:15433─► standby repl-gateway ─wg0→10.99.0.1:15433─►
@@ -828,10 +765,10 @@ export async function setupReplication(options) {
       applyGatewaysAndBringUpTunnel({
         primaryIp,
         standbyIp,
-        primarySupabaseIp: _primarySupabaseIp,
-        standbySupabaseIp: _standbySupabaseIp,
-        primarySupabasePrivateIp: _primarySupabasePrivateIp,
-        standbySupabasePrivateIp: _standbySupabasePrivateIp,
+        primaryDbIp: _primaryDbIp,
+        standbyDbIp: _standbyDbIp,
+        primaryDbPrivateIp: _primaryDbPrivateIp,
+        standbyDbPrivateIp: _standbyDbPrivateIp,
         sshOpts,
         sshKeyPath,
       }),
@@ -857,7 +794,7 @@ export async function setupReplication(options) {
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
           ],
           { silent: true, ignoreError: true },
         );
@@ -879,10 +816,10 @@ export async function setupReplication(options) {
   // netpol; the standby gateway relays it through the WireGuard tunnel to the
   // primary gateway, which forwards to the primary postgres hostPort. Plaintext
   // (no PGSSLMODE/PGSSLROOTCERT) — WireGuard is the encryption layer.
-  const primaryHost = _standbySupabasePrivateIp;
+  const primaryHost = _standbyDbPrivateIp;
   const primaryPort = String(REPL_GATEWAY_PORT);
-  const dbSts = 'supabase-supabase-db';
-  const dbPod = 'supabase-supabase-db-0';
+  const dbSts = DB_STATEFULSET;
+  const dbPod = DB_POD;
 
   // The standby streams through its LOCAL repl-gateway (own node private IP :
   // REPL_GATEWAY_PORT), NOT the primary's public IP. This explicit conninfo is
@@ -890,7 +827,7 @@ export async function setupReplication(options) {
   // reseeded PGDATA boots. Plaintext (sslmode=disable) — WireGuard encrypts the
   // wire. The password is delivered over stdin (never argv).
   const standbyConninfo = buildPrimaryConninfo({
-    primaryHost: _standbySupabasePrivateIp,
+    primaryHost: _standbyDbPrivateIp,
     replPassword,
     port: REPL_GATEWAY_PORT,
   });
@@ -902,10 +839,10 @@ export async function setupReplication(options) {
   // on scale-to-zero, which made the old node-side-ssh swap structurally
   // impossible on CSI clusters (RCA 2026-07-07 e4 rig). All kubectl runs on the
   // standby master (standbyIp); the scheduler places the helper pod wherever the
-  // RWO PVC attaches. We also carry the db subPath (the chart mounts the PVC at
-  // /var/lib/postgresql/data via subPath postgres-data → PGDATA on the raw
-  // volume is <mount-root>/<subPath>) and the db image (reused so it is already
-  // pulled on the node).
+  // RWO PVC attaches. We also carry the db subPath (the StatefulSet mounts the
+  // PVC at /var/lib/postgresql/data via subPath postgres-data → PGDATA on the
+  // raw volume is <mount-root>/<subPath>) and the db image (reused so it is
+  // already pulled on the node).
   // Self-heal a damaged rig first: a prior deploy that died mid-reseed (or
   // predates the finally-scale-up fix) can leave the sts at replicas=0 with
   // no db pod at all — and re-running deploy is exactly what our own failure
@@ -1028,7 +965,7 @@ export async function setupReplication(options) {
     }
     if (!podGone) {
       throw new Error(
-        `standby supabase-db pod did not terminate within budget after scale-to-zero, ` +
+        `standby db pod did not terminate within budget after scale-to-zero, ` +
           `refusing the helper-pod PGDATA swap while the pod may still hold the PVC.`,
       );
     }
@@ -1065,7 +1002,7 @@ export async function setupReplication(options) {
             `local relay ${primaryHost}:${primaryPort} after ${PROBE_ATTEMPTS} attempts ` +
             `(~${(PROBE_ATTEMPTS * PROBE_DELAY_S) / 60} min), so nothing was staged and the ` +
             `standby keeps its independent postgres. Check the repl-gateway pods and the ` +
-            `WireGuard tunnel (wg show) on both supabase nodes.`,
+            `WireGuard tunnel (wg show) on both database nodes.`,
         );
       }
       if (!swapText.includes('RESEED_SWAPPED')) {
@@ -1117,7 +1054,7 @@ export async function setupReplication(options) {
   // caught by the caller and folded into the shared hard-gate, so
   // -allow-degraded semantics are unchanged.
   // Budget: ~10 min. On csi.hetzner.cloud PVCs the scale-up alone costs
-  // minutes (volume reattach + the 4 init containers + backup recovery ran
+  // minutes (volume reattach + the init containers + backup recovery ran
   // ~5 min on a live cpx31 rig, 2026-07-07) and postgres only accepts the
   // read-only probe after reaching consistent state — the old ~2 min loop
   // declared failure while the standby was still coming up (and then
@@ -1135,13 +1072,13 @@ export async function setupReplication(options) {
           'ssh',
           ...sshOpts,
           `root@${standbyIp}`,
-          // -c supabase-db: without it kubectl prepends a 'Defaulted container
+          // -c db: without it kubectl prepends a 'Defaulted container
           // ...' stderr notice which the 2>&1 fold (needed to capture psql
           // FATAL details for config-error classification) would mix into the
           // output — the old strict === 't' match then never succeeded on this
           // multi-init-container pod and every reseed "timed out" while the
           // standby was recovering fine underneath.
-          `kubectl exec -n vibecarbon ${dbPod} -c supabase-db -- psql -U supabase_admin -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+          `kubectl exec -n vibecarbon ${dbPod} -c ${DB_CONTAINER} -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ],
         { silent: true, ignoreError: true },
       );
@@ -1165,21 +1102,21 @@ export async function setupReplication(options) {
     }
   });
   if (!inRecovery) {
-    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won —
-    // the image's wal-g.conf ships it off and the staged auto.conf override
-    // did not take), NOT a timing issue: waiting longer can never fix it.
+    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won
+    // because the staged auto.conf override did not take), NOT a timing issue:
+    // waiting longer can never fix it.
     if (lastRecoveryOut.includes('Hot standby mode is disabled')) {
       throw new Error(
         `standby reseed: the standby is streaming but refusing read-only connections ` +
           `("Hot standby mode is disabled") — hot_standby is OFF in its effective config ` +
-          `(the image's wal-g.conf ships hot_standby=off; the staged postgresql.auto.conf ` +
-          `must override it with hot_standby = on). Config error, not a timing issue.`,
+          `(the staged postgresql.auto.conf must pin hot_standby = on, and it did not take). ` +
+          `Config error, not a timing issue.`,
       );
     }
     throw new Error(
       `standby reseed swapped in a fresh basebackup but the standby never entered ` +
         `recovery mode within the budget; the reseeded PGDATA is not replaying from ` +
-        `the primary (check the standby supabase-db logs and the repl-gateway tunnel).`,
+        `the primary (check the standby db logs and the repl-gateway tunnel).`,
     );
   }
 
@@ -1212,7 +1149,7 @@ export async function setupReplication(options) {
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
           ],
           { silent: true },
         );

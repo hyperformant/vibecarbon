@@ -282,7 +282,7 @@ describe('secret-scan', () => {
     });
   });
 
-  describe('Supabase service-role JWT', () => {
+  describe('privileged-role JWT', () => {
     function makeJwt(payload: Record<string, unknown>): string {
       const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
         .toString('base64url')
@@ -293,27 +293,27 @@ describe('secret-scan', () => {
     }
 
     it('flags JWTs with role=service_role', () => {
-      const jwt = makeJwt({ role: 'service_role', iss: 'supabase' });
-      const f = scanContent(`SERVICE_ROLE_KEY: ${jwt}`);
-      expect(f.some((x) => x.ruleId === 'supabase-service-role-jwt')).toBe(true);
+      const jwt = makeJwt({ role: 'service_role', iss: 'example' });
+      const f = scanContent(`PRIVILEGED_TOKEN: ${jwt}`);
+      expect(f.some((x) => x.ruleId === 'privileged-role-jwt')).toBe(true);
     });
 
     it('flags JWTs with role=admin', () => {
       const jwt = makeJwt({ role: 'admin' });
       const f = scanContent(`KEY: ${jwt}`);
-      expect(f.some((x) => x.ruleId === 'supabase-service-role-jwt')).toBe(true);
+      expect(f.some((x) => x.ruleId === 'privileged-role-jwt')).toBe(true);
     });
 
     it('does NOT flag anon-role JWTs (intentionally public)', () => {
-      const jwt = makeJwt({ role: 'anon', iss: 'supabase' });
-      const f = scanContent(`ANON_KEY: ${jwt}`);
-      expect(f.some((x) => x.ruleId === 'supabase-service-role-jwt')).toBe(false);
+      const jwt = makeJwt({ role: 'anon', iss: 'example' });
+      const f = scanContent(`PUBLIC_TOKEN: ${jwt}`);
+      expect(f.some((x) => x.ruleId === 'privileged-role-jwt')).toBe(false);
     });
 
     it('does NOT flag the post-PR-1AJ placeholder shape', () => {
       // After PR 1AJ the local-overlay secrets.yaml uses these:
-      const placeholder = 'REPLACE-WITH-LOCAL-SERVICE-ROLE-JWT-FROM-supabase-status';
-      const f = scanContent(`SERVICE_ROLE_KEY: "${placeholder}"`);
+      const placeholder = 'REPLACE-WITH-LOCAL-SERVICE-ROLE-JWT';
+      const f = scanContent(`PRIVILEGED_TOKEN: "${placeholder}"`);
       // Generic-secret-assignment shouldn't fire (placeholder-prefix bail-out),
       // and JWT rule doesn't match because there's no eyJ shape.
       expect(f).toHaveLength(0);

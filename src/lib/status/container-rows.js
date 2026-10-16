@@ -12,16 +12,10 @@ import { c } from '../colors.js';
 // compose service name so nothing in the project's stack is ever hidden.
 export const SERVICE_DISPLAY_NAMES = {
   traefik: 'Traefik',
-  db: 'PostgreSQL',
-  kong: 'Kong Gateway',
-  auth: 'Auth (GoTrue)',
-  rest: 'REST (PostgREST)',
-  realtime: 'Realtime',
-  storage: 'Storage',
-  imgproxy: 'ImgProxy',
-  meta: 'Meta',
-  studio: 'Studio',
   app: 'App',
+  db: 'PostgreSQL',
+  'socket-proxy': 'Docker socket proxy',
+  s3: 'S3 (local)',
 };
 
 // Core services render first, in this order; everything else follows

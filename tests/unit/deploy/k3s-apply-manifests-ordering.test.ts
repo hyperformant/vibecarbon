@@ -1,15 +1,16 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-order-recovery.js';
+import { namesHost } from '../../_shared/hosts.js';
 
 /**
  * Integration-style unit tests for applyK3sManifests deploy-time behavior:
  *
  *   #1 — the in-cluster registry push runs CONCURRENTLY with the CA rollout +
- *        Supabase install + app rollout (nothing between reads the registry —
+ *        db rollout + app rollout (nothing between reads the registry —
  *        app pods use the sideloaded image via IfNotPresent), yet it is still
  *        AWAITED before the function returns so a failed push fails the deploy.
  *
@@ -27,18 +28,11 @@ import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-orde
  * function: the fake child succeeds everywhere and captures every stdin
  * write (so tests can inspect the Secret YAML piped via `apply -f -`).
  * retry.js / perf.js / command.js / fs stay real; the temp projectDir carries
- * the supabase values template installSupabase reads.
+ * the real db StatefulSet that renderK8sBase reads.
  *
- * Admin creds (M3 Task 9h fix round 1): baseArgs() carries real-looking
- * ADMIN_EMAIL/ADMIN_PASSWORD/SUPABASE_SERVICE_ROLE_KEY — provisionAdminUser
- * now THROWS on missing credentials (no more soft early-return, see
- * tests/unit/deploy/k3s-provision-admin-user.test.ts for its own retry/throw
- * contract), so a fixture that omits them would fail every test here that
- * reaches step 8c. waitForGotrueHealth/postAdminUser
- * (../../../src/lib/deploy/admin-user.js) are mocked to succeed on the first
- * call so admin provisioning is a cheap, deterministic no-op that doesn't
- * hit a real port or network — the retry/backoff behavior itself is unit
- * tested in k3s-provision-admin-user.test.ts, not here.
+ * Admin: applyK3sManifests no longer provisions an account. It waits for
+ * the app to report its super admin ready (`kubectl exec deploy/app … node
+ * -e`, see awaitAppAdminReady), which the spawn mock answers with exit 0.
  */
 
 vi.mock('node:child_process', async () => {
@@ -46,22 +40,8 @@ vi.mock('node:child_process', async () => {
   return { ...actual, spawn: vi.fn() };
 });
 
-const mockWaitForGotrueHealth = vi.fn();
-const mockPostAdminUser = vi.fn();
-vi.mock('../../../src/lib/deploy/admin-user.js', () => ({
-  waitForGotrueHealth: (...args: unknown[]) => mockWaitForGotrueHealth(...args),
-  postAdminUser: (...args: unknown[]) => mockPostAdminUser(...args),
-}));
-
-/** Reset the admin-user mocks to their default (first-attempt success) shape. */
-function resetAdminUserMock() {
-  mockWaitForGotrueHealth.mockReset().mockResolvedValue(true);
-  mockPostAdminUser
-    .mockReset()
-    .mockResolvedValue({ success: true, message: 'Admin user created: admin@example.test' });
-}
-
 const k3sPromise = import('../../../src/lib/deploy/k8s/k3s.js');
+const { RETIRED_CHART_DB_STATEFULSET, RETIRED_CHART_RELEASE } = await k3sPromise;
 
 // Ordered log of every spawn argv ([executable, ...args]).
 let cmdCalls: string[][] = [];
@@ -80,6 +60,12 @@ let pushExit = { code: 0, stderr: '' };
 // kubectl wait) — drives the fail-loud tests below.
 let webhookHelmExit = 0;
 let webhookWaitExit = 0;
+// Exit code of the in-container /api/health probe (`kubectl exec deploy/app
+// … node -e`), and whether `kubectl rollout status deployment/app` hangs
+// (never exits, as when readiness stays 503) — drive the migration-failure
+// short-circuit test.
+let appProbeExit = 0;
+let rolloutHangs = false;
 
 function makeGate() {
   let release!: () => void;
@@ -146,6 +132,26 @@ function fakeChild({
 // standby). Default: no nodes reported — every unrelated test sees an empty
 // cluster and the reap stays a no-op.
 let getNodesOut = '';
+// `kubectl get statefulset <retired chart db>` answer. Default: absent, so
+// every test deploys onto a cluster with no chart-era database.
+let retiredChartStsOut = '';
+// The chart's Helm release record (a Secret), which outlives a deleted StatefulSet.
+let retiredChartReleaseOut = '';
+
+const APP_POD = 'app-6f7d9c-abcde';
+const APP_RS_JSON = JSON.stringify({
+  items: [
+    {
+      metadata: {
+        annotations: { 'deployment.kubernetes.io/revision': '1' },
+        labels: { 'pod-template-hash': '6f7d9c' },
+      },
+    },
+  ],
+});
+const APP_PODS_JSON = JSON.stringify({
+  items: [{ metadata: { name: APP_POD, creationTimestamp: '2026-10-16T05:00:00Z' } }],
+});
 
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
@@ -161,6 +167,28 @@ function installSpawnMock() {
       return fakeChild({ exitCode: 0, stdout: getNodesOut, argv: full }) as unknown as ReturnType<
         typeof spawn
       >;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('statefulset') &&
+      argv.includes(RETIRED_CHART_DB_STATEFULSET)
+    ) {
+      return fakeChild({
+        exitCode: 0,
+        stdout: retiredChartStsOut,
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('secret') &&
+      argv.includes(`owner=helm,name=${RETIRED_CHART_RELEASE}`)
+    ) {
+      return fakeChild({
+        exitCode: 0,
+        stdout: retiredChartReleaseOut,
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'docker' && argv[0] === 'push') {
       return fakeChild({
@@ -184,22 +212,44 @@ function installSpawnMock() {
         typeof spawn
       >;
     }
-    // waitForSupabaseStorageSchema's probe (invoked from applyMigrations) reads
-    // the storage.buckets column count via a trailing bare `-tA` psql flag (SQL
-    // arrives over stdin, not argv) and polls every 5s for up to 600s until it
-    // sees '3' — answering '3' here on the FIRST attempt keeps any test that
-    // exercises applyMigrations (a real migrations/ dir) from blocking on that
-    // real-timer poll loop.
-    if (cmd === 'kubectl' && argv.includes('exec') && argv[argv.length - 1] === '-tA') {
-      return fakeChild({ stdout: '3\n', argv: full }) as unknown as ReturnType<typeof spawn>;
+    // The migration watch resolves the rollout's newest pod first
+    // (readiness.js newestAppPod): one current ReplicaSet, one pod.
+    if (cmd === 'kubectl' && argv.includes('get') && argv.includes('replicasets')) {
+      return fakeChild({ stdout: APP_RS_JSON, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
-    // Post-migration RLS audit (applyMigrations, -tAc). Empty stdout = clean
+    if (cmd === 'kubectl' && argv.includes('get') && argv.includes('pods')) {
+      return fakeChild({ stdout: APP_PODS_JSON, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('exec') &&
+      (argv.includes('deploy/app') || argv.includes(`pod/${APP_POD}`)) &&
+      argv.includes('node')
+    ) {
+      return fakeChild({ exitCode: appProbeExit, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (
+      rolloutHangs &&
+      cmd === 'kubectl' &&
+      argv.includes('rollout') &&
+      argv.includes('status') &&
+      argv.includes('deployment/app')
+    ) {
+      return fakeChild({ gate: new Promise<void>(() => {}), argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    // RLS audit after the app migrated (auditRls, -tAc). Empty stdout = clean
     // schema (no public tables without RLS) so the audit passes — a non-empty
     // result would be read as a list of unprotected tables and abort the deploy.
     if (cmd === 'kubectl' && argv.includes('exec') && argv.includes('-tAc')) {
       return fakeChild({ stdout: '', argv: full }) as unknown as ReturnType<typeof spawn>;
     }
-    // Other kubectl exec probes (storage schema / psql) read '1' as the ready signal.
+    // Other kubectl exec probes (psql) read '1' as the ready signal.
     const isExec = cmd === 'kubectl' && argv.includes('exec');
     return fakeChild({ stdout: isExec ? '1\n' : '', argv: full }) as unknown as ReturnType<
       typeof spawn
@@ -207,16 +257,15 @@ function installSpawnMock() {
   }) as unknown as typeof spawn);
 }
 
-function makeProjectDir({
-  withMigrations = false,
-  withStandbyOverlay = false,
-  withObservability = false,
-} = {}) {
+function makeProjectDir({ withObservability = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-k3s-apply-'));
-  mkdirSync(join(dir, 'k8s', 'values'), { recursive: true });
+  // renderK8sBase refuses a base without the db StatefulSet, so the project
+  // carries the real one, as `create` lays it down.
+  mkdirSync(join(dir, 'k8s', 'base', 'db'), { recursive: true });
+  writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
   writeFileSync(
-    join(dir, 'k8s', 'values', 'supabase.values.yaml'),
-    'image:\n  db:\n    repository: {{DB_IMAGE}}\n    tag: {{DB_IMAGE_TAG}}\ndomain: {{DOMAIN}}\n',
+    join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
+    readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
   if (withObservability) {
     // The isolated observability stack applies via `kubectl apply -k
@@ -228,24 +277,6 @@ function makeProjectDir({
     writeFileSync(
       join(dir, 'k8s', 'base', 'observability', 'kustomization.yaml'),
       'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: vibecarbon-observability\n',
-    );
-  }
-  if (withMigrations) {
-    // Gives applyMigrations something to actually exec, so the
-    // pilot-standby tests below can assert its absence/presence by argv
-    // (an empty migrations dir makes applyMigrations a silent no-op
-    // regardless of the standby gate, which would make the assertion
-    // vacuous).
-    mkdirSync(join(dir, 'supabase', 'migrations'), { recursive: true });
-    writeFileSync(join(dir, 'supabase', 'migrations', '0001_init.sql'), 'select 1;\n');
-  }
-  if (withStandbyOverlay) {
-    // installSupabase (Task 4) requires this overlay whenever role ===
-    // 'standby'. Mirrors carbon/k8s/values/supabase.standby.values.yaml's
-    // shape — see tests/unit/deploy/k3s-install-supabase.test.ts.
-    writeFileSync(
-      join(dir, 'k8s', 'values', 'supabase.standby.values.yaml'),
-      'deployment:\n  auth:\n    replicaCount: 0\n  kong:\n    replicaCount: 0\n',
     );
   }
   return dir;
@@ -276,18 +307,13 @@ function baseArgs(projectDir: string) {
     projectName: 'proj',
     imageTag: '10.0.1.1:5000/proj:abc-20260101000000',
     dbImageTag: 'ghcr.io/org/postgres:15-walg1',
-    // provisionAdminUser now throws on missing creds (M3 Task 9h fix round
-    // 1) — carry real-looking ones so step 8c reaches the (mocked-success)
-    // admin-user.js calls instead of failing every test here. The
-    // credentials-missing throw itself is pinned by its own test below,
-    // which overrides this with an empty envLocal.
     envLocal: {
       ADMIN_EMAIL: 'admin@example.test',
       ADMIN_PASSWORD: 'test-password',
-      SUPABASE_SERVICE_ROLE_KEY: 'svc-role-key',
+      BETTER_AUTH_SECRET: 'test-better-auth-secret-0123456789abcdef',
     },
     domain: 'app.example.test',
-    // s3Config omitted → WAL-archiving block skipped (fewer calls).
+    // s3Config omitted → no wal-g backup credentials (fewer calls).
     restore: null,
     // dnsProvider omitted → no DNS secret / hetzner webhook path.
     apiToken: 'hetzner-token',
@@ -298,9 +324,9 @@ function baseArgs(projectDir: string) {
     minWorkers: 1,
     maxWorkers: 3,
     workerServerType: 'cx23',
-    // Required since the d4 lift — installSupabase refuses to assume the
-    // Hetzner-static relay host. See supabase-private-ip-required.test.ts.
-    supabasePrivateIp: '10.0.1.2',
+    // Required since the d4 lift — buildDbManifestValues refuses to assume the
+    // Hetzner-static relay host. See db-private-ip-required.test.ts.
+    dbPrivateIp: '10.0.1.2',
     k3sToken: 'k3s-token',
     masterIp: '1.2.3.4',
     sshKeyPath: '/tmp/key',
@@ -320,7 +346,8 @@ async function waitFor(cond: () => boolean, timeoutMs: number) {
   return cond();
 }
 
-const isHelmUpgrade = (a: string[]) => a[0] === 'helm' && a.includes('upgrade');
+const isDbRolloutWait = (a: string[]) =>
+  a[0] === 'kubectl' && a.includes('rollout') && a.includes('statefulset/db');
 const isObservabilityApply = (a: string[]) =>
   a[0] === 'kubectl' &&
   a.includes('apply') &&
@@ -373,6 +400,75 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('applyK3sManifests refuses a chart-era cluster', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    installSpawnMock();
+  });
+  afterEach(() => {
+    retiredChartStsOut = '';
+    retiredChartReleaseOut = '';
+  });
+
+  it('refuses before applying k8s/base when the old chart database still runs', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    retiredChartStsOut = `statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}\n`;
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      /existing data does not carry over automatically/,
+    );
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.includes('-k') &&
+          a.some((x) => /k8s-base/.test(String(x))),
+      ),
+    ).toBe(false);
+  });
+
+  // Task 12 deferral: the StatefulSet can be gone while the Helm release
+  // record survives (a half-done uninstall, or a chart scaled away). The
+  // release alone still means the chart owns this namespace: refuse.
+  it('refuses before applying k8s/base when only the Helm release record remains', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    retiredChartReleaseOut = `secret/sh.helm.release.v1.${RETIRED_CHART_RELEASE}.v3\n`;
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      new RegExp(`sh\\.helm\\.release\\.v1\\.${RETIRED_CHART_RELEASE}\\.v3`),
+    );
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.includes('-k') &&
+          a.some((x) => /k8s-base/.test(String(x))),
+      ),
+    ).toBe(false);
+  });
+
+  it('proceeds to apply k8s/base when there is no trace of it', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(cmdCalls.some((a) => a.includes(RETIRED_CHART_DB_STATEFULSET))).toBe(true);
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.includes('-k') &&
+          a.some((x) => /k8s-base/.test(String(x))),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('applyK3sManifests deploy-time optimizations', () => {
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
@@ -383,27 +479,26 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
-  it('#1 registry push runs concurrently with installSupabase (helm), yet stays awaited', async () => {
+  it('#1 registry push runs concurrently with the db rollout wait, yet stays awaited', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
     // Hold the docker push open: a SERIAL (awaited-inline) push would block the
-    // whole function here and helm would never be reached; a BACKGROUNDED push
-    // lets the function proceed to installSupabase while the push is pending.
+    // whole function here and the db wait would never be reached; a
+    // BACKGROUNDED push lets the function proceed while the push is pending.
     pushGate = makeGate();
 
     const done = applyK3sManifests(baseArgs(projectDir));
     done.catch(() => {}); // avoid unhandled-rejection noise during the poll window
 
-    const helmRanWhilePushPending = await waitFor(() => cmdCalls.some(isHelmUpgrade), 2000);
+    const dbWaitRanWhilePushPending = await waitFor(() => cmdCalls.some(isDbRolloutWait), 2000);
 
     // Release the push so the function can complete its end-of-run await.
     pushGate.release();
     await done;
 
-    expect(helmRanWhilePushPending).toBe(true);
+    expect(dbWaitRanWhilePushPending).toBe(true);
   });
 
   it('#1 a failed registry push still fails the deploy (push stays awaited)', async () => {
@@ -478,7 +573,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
         s.startsWith('cluster-autoscaler=ghcr.io/hyperformant/cluster-autoscaler:'),
       ),
     ).toBe(true);
-    expect(cmdCalls[setImageIdx].some((s) => s.includes('registry.k8s.io'))).toBe(false);
+    expect(cmdCalls[setImageIdx].some((s) => namesHost(s, 'registry.k8s.io'))).toBe(false);
     // One `set image` invocation, not two. (`caCalls` matches the
     // `deploy/cluster-autoscaler` short form; `set image` addresses the same
     // Deployment as `deployment/cluster-autoscaler`, so count directly.)
@@ -530,7 +625,6 @@ describe('applyK3sManifests pilot-standby role', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   it('reaps stale -worker- Node objects on the pilot standby (run 32620564611)', async () => {
@@ -541,7 +635,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     // is stale by definition; reap declaratively, don't race the CCM.
     const { applyK3sManifests } = await k3sPromise;
     getNodesOut = 'node/citest-k8s-ha-x-primary-worker-1\nnode/citest-k8s-ha-x-standby-master\n';
-    const projectDir = makeProjectDir({ withStandbyOverlay: true });
+    const projectDir = makeProjectDir();
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
     const dels = cmdCalls.filter(
       (c) => c[0] === 'kubectl' && c.includes('delete') && c.includes('node'),
@@ -580,11 +674,7 @@ describe('applyK3sManifests pilot-standby role', () => {
 
   it('standby role zeroes app + CA and skips app-tier steps', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir({
-      withMigrations: true,
-      withStandbyOverlay: true,
-      withObservability: true,
-    });
+    const projectDir = makeProjectDir({ withObservability: true });
 
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
 
@@ -623,11 +713,10 @@ describe('applyK3sManifests pilot-standby role', () => {
         (a) => a.includes('rollout') && a.includes('status') && a.includes('deployment/app'),
       ),
     ).toBe(false);
-    // applyMigrations skipped — would exec against a pod that's fine, but
-    // there's nothing to migrate FOR (no app tier reading the schema yet).
-    expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(false);
-    // reloadPostgrest skipped.
-    expect(cmdCalls.some((a) => a.some((s) => s.includes('reload schema')))).toBe(false);
+    // No RLS audit either: no app tier has migrated anything on a standby.
+    expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);
+    // The db itself still comes up (a streaming replica) and is waited on.
+    expect(cmdCalls.some(isDbRolloutWait)).toBe(true);
 
     // Registry wait + push stay: failover pulls the app image from it.
     expect(
@@ -652,7 +741,7 @@ describe('applyK3sManifests pilot-standby role', () => {
 
   it('primary role call list is unchanged (patches/waits/app-tier steps all still run)', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir({ withMigrations: true, withObservability: true });
+    const projectDir = makeProjectDir({ withObservability: true });
 
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
 
@@ -665,8 +754,20 @@ describe('applyK3sManifests pilot-standby role', () => {
         (a) => a.includes('rollout') && a.includes('status') && a.includes('deployment/app'),
       ),
     ).toBe(true);
-    expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(true);
-    expect(cmdCalls.some((a) => a.some((s) => s.includes('reload schema')))).toBe(true);
+    // The deploy applies no SQL itself (the app migrates at startup), and
+    // audits RLS on the live catalog after the app reports migrations applied.
+    expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(false);
+    const adminProbe = cmdCalls.findIndex(
+      (a) =>
+        a.includes('exec') && a.some((s) => typeof s === 'string' && s.includes('/api/health')),
+    );
+    const rlsAudit = cmdCalls.findIndex((a) => a.includes('-tAc'));
+    expect(adminProbe).toBeGreaterThan(-1);
+    expect(rlsAudit).toBeGreaterThan(-1);
+    expect(rlsAudit).toBeGreaterThan(adminProbe);
+    // No schema-cache reload after migrations: nothing in the cluster caches
+    // the schema now that the chart runs only the db.
+    expect(cmdCalls.some((a) => a.some((s) => s.includes('reload schema')))).toBe(false);
     // Control for the standby skip above: with the same observability dir a
     // PRIMARY still applies the isolated stack.
     expect(cmdCalls.some(isObservabilityApply)).toBe(true);
@@ -711,7 +812,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     // must not be an active ACME issuer; the annotation is what the failover
     // promote (and every reconverge under the swapped role) re-points from.
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir({ withStandbyOverlay: true });
+    const projectDir = makeProjectDir();
 
     await applyK3sManifests({
       ...baseArgs(projectDir),
@@ -827,7 +928,7 @@ describe('cert-manager DNS-01 webhook install fails loud', () => {
   // their result — runCommandAsync resolves `false` (does NOT reject) for
   // non-silent callers, so a failed webhook chart install or readiness wait
   // let the deploy march on and ACME DNS-01 issuance died minutes later with
-  // no pointer back. Same class as the installSupabase helm check.
+  // no pointer back. Same class as the db rollout wait's check.
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
@@ -837,7 +938,6 @@ describe('cert-manager DNS-01 webhook install fails loud', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   async function runWithHetznerDns() {
@@ -891,7 +991,6 @@ describe('DNS-01 Secret precedes the ClusterIssuers that reference it (digitaloc
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   const issuerApplyIndex = () =>
@@ -959,7 +1058,6 @@ describe('readiness probes are wired in (mitigation-audit clusters 1+4 root fix)
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   // These pin the WIRING, not the probe mechanics (k8s-readiness.test.ts owns
@@ -1029,41 +1127,43 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
-  it('runs pg_isready against the db pod BEFORE the archive_mode psql', async () => {
+  it('waits for the db rollout, then runs pg_isready against db-0 BEFORE the first psql', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    // baseArgs omits s3Config, which skips the WAL-archiving block entirely —
-    // supply it so the psql the gate protects actually runs.
-    await applyK3sManifests({
-      ...baseArgs(makeProjectDir()),
-      s3Config: {
-        accessKey: 'AK',
-        secretKey: 'SK',
-        bucket: 'proj-backups',
-        endpoint: 'https://nbg1.example',
-        region: 'nbg1',
-      },
-    });
+    await applyK3sManifests(baseArgs(makeProjectDir()));
 
-    const isReadyIdx = cmdCalls.findIndex((a) => a[0] === 'kubectl' && a.includes('pg_isready'));
-    const archModeIdx = cmdCalls.findIndex(
-      (a) => a[0] === 'kubectl' && a.some((x) => String(x).includes('SHOW archive_mode')),
+    const rolloutIdx = cmdCalls.findIndex(isDbRolloutWait);
+    const isReadyIdx = cmdCalls.findIndex(
+      (a) => a[0] === 'kubectl' && a.includes('pg_isready') && a.includes('db-0'),
     );
-    expect(isReadyIdx, 'the accepting-gate must run').toBeGreaterThan(-1);
-    expect(archModeIdx, 'the psql the gate protects must still run').toBeGreaterThan(-1);
-    expect(archModeIdx).toBeGreaterThan(isReadyIdx);
+    const psqlIdx = cmdCalls.findIndex((a) => a[0] === 'kubectl' && a.includes('psql'));
+    expect(rolloutIdx, 'the db rollout wait must run').toBeGreaterThan(-1);
+    expect(isReadyIdx, 'the accepting-gate must run').toBeGreaterThan(rolloutIdx);
+    expect(psqlIdx, 'the psql the gate protects (the RLS audit) must still run').toBeGreaterThan(
+      -1,
+    );
+    expect(psqlIdx).toBeGreaterThan(isReadyIdx);
+    // WAL archiving is a startup flag on the StatefulSet: no ALTER SYSTEM, no
+    // db restart.
+    expect(
+      cmdCalls.some((a) => a.some((x) => String(x).includes('ALTER SYSTEM'))),
+      'no ALTER SYSTEM step',
+    ).toBe(false);
+    expect(
+      cmdCalls.some(
+        (a) => a.includes('restart') && a.some((x) => String(x).includes('statefulset')),
+      ),
+      'no db restart',
+    ).toBe(false);
   });
 });
 
-describe('createAdminUser: missing credentials fails the deploy loudly (M3 Task 9h fix round 1)', () => {
-  // Reviewer finding: `create` always writes ADMIN_EMAIL/ADMIN_PASSWORD into
-  // .env.local, and they're also GH-Environment-managed CI secrets — a real
-  // customer CI run with one missing/misnamed hits provisionAdminUser's
-  // credentials-missing branch exactly like this test does. It must no
-  // longer degrade to a soft `{success: false}` (the same bug class this
-  // whole task exists to kill); it must throw and fail the deploy.
+describe('applyK3sManifests — waits for the app to report its super admin', () => {
+  // The app creates the super admin itself at startup from ADMIN_EMAIL /
+  // ADMIN_PASSWORD (delivered via vibecarbon-secrets). The deploy's job is
+  // to ship those keys and then not report success until the app says the
+  // admin is ready, so the operator can always sign in to what was deployed.
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
@@ -1073,30 +1173,65 @@ describe('createAdminUser: missing credentials fails the deploy loudly (M3 Task 
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
-  it('throws naming every missing key when envLocal has no admin credentials at all', async () => {
-    const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
+  const isAdminProbe = (a: string[]) =>
+    a[0] === 'kubectl' &&
+    a.includes('exec') &&
+    a.includes('deploy/app') &&
+    a.some((x) => String(x).includes('adminReady'));
 
-    await expect(applyK3sManifests({ ...baseArgs(projectDir), envLocal: {} })).rejects.toThrow(
-      /Admin credentials missing \(ADMIN_EMAIL, ADMIN_PASSWORD, SUPABASE_SERVICE_ROLE_KEY\).*admin login will not work/is,
+  it('probes the app pod for adminReady after the app rollout, with no port-forward', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+
+    const probeIdx = cmdCalls.findIndex(isAdminProbe);
+    const rolloutIdx = cmdCalls.findIndex(
+      (a) => a[0] === 'kubectl' && a.includes('rollout') && a.includes('deployment/app'),
     );
-    // Never reached the port-forward — nothing to retry for a config problem.
-    expect(mockWaitForGotrueHealth).not.toHaveBeenCalled();
+    expect(probeIdx, 'admin-ready probe must run').toBeGreaterThan(-1);
+    expect(rolloutIdx).toBeGreaterThan(-1);
+    expect(probeIdx).toBeGreaterThan(rolloutIdx);
+    expect(cmdCalls.some((a) => a.includes('port-forward'))).toBe(false);
   });
 
-  it('throws naming only the ONE missing key when the rest are present', async () => {
+  // The app migrates at startup and readiness stays 503 until it has, so a
+  // FAILED migration never lets `rollout status` finish. The deploy must say
+  // so at once (probe exit 9, with the app log tail), not after the
+  // rollout's 600 s timeout.
+  it('fails at once on a failed migration while the rollout still waits', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir();
+    appProbeExit = 9; // ADMIN_PROBE_EXIT.MIGRATIONS_FAILED
+    rolloutHangs = true;
+    try {
+      const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/database migration failed/);
+      expect(err.message).toMatch(/app log tail/);
+      // The rollout's own pod, not whichever pod deploy/app picks.
+      expect(err.message).toContain(`kubectl -n vibecarbon logs pod/${APP_POD} -c app`);
+    } finally {
+      appProbeExit = 0;
+      rolloutHangs = false;
+    }
+    expect(
+      cmdCalls.some(
+        (a) => a[0] === 'kubectl' && a.includes('logs') && a.includes(`pod/${APP_POD}`),
+      ),
+    ).toBe(true);
+    // Nothing after the rollout ran: no RLS audit on a schema that failed.
+    expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);
+  }, 15_000);
 
-    await expect(
-      applyK3sManifests({
-        ...baseArgs(projectDir),
-        envLocal: { ADMIN_EMAIL: 'a@b.test', ADMIN_PASSWORD: 'pw' }, // SUPABASE_SERVICE_ROLE_KEY missing
-      }),
-    ).rejects.toThrow(/Admin credentials missing \(SUPABASE_SERVICE_ROLE_KEY\)/);
+  it('ships the session secret and the admin credentials in vibecarbon-secrets', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+
+    const secret = stdinCalls.find((c) => c.data.includes('name: vibecarbon-secrets'));
+    expect(secret, 'vibecarbon-secrets apply missing').toBeDefined();
+    for (const key of ['BETTER_AUTH_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']) {
+      expect(secret?.data, key).toMatch(new RegExp(`\\b${key}:`));
+    }
   });
 });
 
@@ -1124,7 +1259,6 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     webhookHelmExit = 0;
     webhookWaitExit = 0;
     installSpawnMock();
-    resetAdminUserMock();
   });
 
   const TEST_VPC_CIDR = '10.20.0.0/16';
@@ -1162,17 +1296,17 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     const yaml = hit.data;
 
     expect(yaml).toContain('name: app-s3-vpc-egress');
-    expect(yaml).toContain('name: supabase-db-s3-vpc-egress');
+    expect(yaml).toContain('name: db-s3-vpc-egress');
     expect(yaml).not.toContain('__VPC_CIDR__');
 
     // Pinned against the SAME variable the deploy call used (TEST_VPC_CIDR),
     // not a hand-copied literal — one occurrence per policy.
     const cidrMatches = yaml.match(/cidr: 10\.20\.0\.0\/16/g);
-    // 3 since 2026-08-30 — the registry's arm left with its S3 backend
-    // (filesystem now); storage joined 2026-08-21. app + storage + db.
-    expect(cidrMatches?.length).toBe(3);
+    // 2: the registry's arm left 2026-08-30 with its S3 backend (filesystem
+    // now) and the storage service's arm left with the service. app + db.
+    expect(cidrMatches?.length).toBe(2);
 
-    // Near-miss rejection — scoped to exactly the 3 S3-purposed policies;
+    // Near-miss rejection — scoped to exactly the 2 S3-purposed policies;
     // the audited-and-left-alone policies (Task 9c report) must gain no
     // NetworkPolicy object of their own here. Matches actual `name:` fields
     // (not a bare substring check) so the file's own header comment, which
@@ -1182,14 +1316,7 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     expect(yaml).not.toMatch(/name: traefik-policy\b/);
     expect(yaml).not.toMatch(/name: (allow-db-)?repl-gateway\S*/);
     const policyNames = [...yaml.matchAll(/^\s*name:\s*(\S+)/gm)].map((m) => m[1]);
-    expect(policyNames.sort()).toEqual(
-      [
-        'app-s3-vpc-egress',
-        'supabase-db-s3-vpc-egress',
-        // Added 2026-08-21 with the storage service's first working S3 wiring.
-        'supabase-storage-s3-vpc-egress',
-      ].sort(),
-    );
+    expect(policyNames.sort()).toEqual(['app-s3-vpc-egress', 'db-s3-vpc-egress'].sort());
   });
 
   it('Hetzner-shaped ProviderClass (no getS3EgressExtraCidrs, no vpcCidr): no S3-egress-VPC apply at all — real render path byte-identical', async () => {

@@ -10,12 +10,15 @@ Background jobs are powered by **pg_cron**, a PostgreSQL extension that runs sch
 
 ## Built-in Jobs
 
-Your app comes with three pre-configured jobs:
+Your app comes with six pre-configured jobs:
 
 | Job | Schedule | Description |
 |-----|----------|-------------|
 | `cleanup-login-attempts` | Every 6 hours | Removes failed login attempts older than 24 hours |
+| `rollup-crawler-hits` | Daily at 2:15 AM | Rolls yesterday's crawler hits into the daily table |
 | `cleanup-expired-notifications` | Daily at 3 AM | Deletes notifications past their expiry date |
+| `cleanup-expired-sessions` | Daily at 3:30 AM | Deletes sessions more than a day past expiry and expired verification tokens |
+| `cleanup-crawler-hits` | Daily at 3:45 AM | Prunes raw crawler hits after 90 days and daily rollups after 400 |
 | `cleanup-job-history` | Weekly (Sunday 4 AM) | Prunes job execution history older than 30 days |
 
 ## Admin Panel
@@ -31,13 +34,13 @@ Super admins can view and manage jobs from **Admin > Jobs**:
 To add a new scheduled job, create a new SQL migration:
 
 ```sql
--- supabase/migrations/XXXXXX_my_custom_job.sql
+-- db/migrations/XXXXXX_my_custom_job.sql
 
 SELECT cron.schedule(
   'my-job-name',           -- unique job name
   '*/30 * * * *',          -- cron expression (every 30 minutes)
   $$
-  DO $$
+  DO $body$
   DECLARE
     affected INTEGER;
   BEGIN
@@ -50,7 +53,7 @@ SELECT cron.schedule(
       'Processed ' || affected || ' rows');
   EXCEPTION WHEN OTHERS THEN
     PERFORM public.log_cron_job('my-job-name', 'failed', NULL, SQLERRM);
-  END $$;
+  END $body$;
   $$
 );
 ```

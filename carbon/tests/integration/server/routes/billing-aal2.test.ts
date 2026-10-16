@@ -1,14 +1,14 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { queryChain } from '../../../_helpers/drizzle-mock';
 import { jsonPost } from '../../../_helpers/app';
 import type { HonoVariables } from '@server/types';
 
-const { maybeSingleMock } = vi.hoisted(() => ({ maybeSingleMock: vi.fn() }));
+const { selectMock } = vi.hoisted(() => ({ selectMock: vi.fn() }));
 
-vi.mock('@server/lib/supabase', () => ({
-  supabaseAdmin: {
-    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: maybeSingleMock }) }) }),
-  },
+// The app_settings.mfa_enabled read: adminDb.select().from().where().limit(1)
+vi.mock('@server/db/client', () => ({
+  adminDb: { select: () => queryChain(selectMock) },
 }));
 vi.mock('@server/lib/logger', () => ({
   logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
@@ -29,7 +29,9 @@ function appWith(aal: 'aal1' | 'aal2') {
   app.use('*', async (c, next) => {
     // biome-ignore lint/suspicious/noExplicitAny: minimal injected user
     c.set('user', { id: 'u1', email: 'u@test.com' } as any);
-    c.set('aal', aal);
+    // What the session middleware sets: the gate reads the session row.
+    // biome-ignore lint/suspicious/noExplicitAny: minimal injected session
+    c.set('session', { id: 's1', twoFactorVerified: aal === 'aal2' } as any);
     await next();
   });
   app.route('/api/v1/billing', billingRoutes);
@@ -38,8 +40,8 @@ function appWith(aal: 'aal1' | 'aal2') {
 
 beforeEach(() => {
   __resetMfaSettingsCache();
-  maybeSingleMock.mockReset();
-  maybeSingleMock.mockResolvedValue({ data: { value: { enabled: true } }, error: null });
+  selectMock.mockReset();
+  selectMock.mockResolvedValue([{ value: { enabled: true } }]);
 });
 
 describe('billing endpoints are aal2-gated when MFA is globally enabled', () => {

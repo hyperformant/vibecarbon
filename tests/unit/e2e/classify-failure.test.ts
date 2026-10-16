@@ -181,15 +181,15 @@ describe('classifyFailure', () => {
     ).toBe('unknown');
   });
 
-  it('flags a helm-wait pod stuck on a NotReady NODE as infra — host died', () => {
+  it('flags a db-rollout pod stuck on a NotReady NODE as infra — host died', () => {
     // RCA 2026-09-01 (PG17 cert, k8s-ha standby): worker went dark
     // mid-deploy (kubelet 502, SSH timeout, provider API "running"), db
     // pod froze in Init, run hard-failed [unknown]. Both clauses required.
     const withNode = classifyFailure({
       errorMessage:
-        'HA deploy failed — standby: installSupabase: helm upgrade --install failed ... ' +
-        '0/1 Supabase pods are Ready; 1 never became Ready: supabase-supabase-db-0 (Pending). ' +
-        'Node(s) NotReady: testapp-e4-standby-supabase (Ready=Unknown) — the pod may be stuck ' +
+        'HA deploy failed — standby: awaitDbRollout: statefulset/db did not become Ready within 900s ... ' +
+        'The db pod never became Ready: db-0 (Pending). ' +
+        'Node(s) NotReady: testapp-e4-standby-db (Ready=Unknown) — the pod may be stuck ' +
         'because its HOST died or lost its kubelet, not because of the workload.',
     });
     expect(withNode.category).toBe('infra');
@@ -198,8 +198,7 @@ describe('classifyFailure', () => {
     // proven otherwise.
     expect(
       classifyFailure({
-        errorMessage:
-          '0/1 Supabase pods are Ready; 1 never became Ready: supabase-supabase-db-0 (Pending).',
+        errorMessage: 'The db pod never became Ready: db-0 (Pending).',
       }).category,
     ).toBe('unknown');
   });
@@ -210,8 +209,9 @@ describe('classifyFailure', () => {
     // NoSuchBucket spelling from this very classifier).
     const result = classifyFailure({
       errorMessage:
-        '1 verification(s) failed: storage_upload\n' +
-        '[fail] storage_upload: Upload returned 400: {"statusCode":"404","error":"UnknownError","message":"NoSuchBucket"}',
+        '1 verification(s) failed: file_upload_roundtrip\n' +
+        '[fail] file_upload_roundtrip: upload: PUT to the presigned URL returned 404: ' +
+        '<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchBucket</Code></Error>',
     });
     expect(result.category).toBe('infra');
     expect(result.reason).toBe('S3 transient');
