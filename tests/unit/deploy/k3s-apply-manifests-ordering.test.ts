@@ -40,7 +40,7 @@ vi.mock('node:child_process', async () => {
 });
 
 const k3sPromise = import('../../../src/lib/deploy/k8s/k3s.js');
-const { RETIRED_CHART_DB_STATEFULSET } = await k3sPromise;
+const { RETIRED_CHART_DB_STATEFULSET, RETIRED_CHART_RELEASE } = await k3sPromise;
 
 // Ordered log of every spawn argv ([executable, ...args]).
 let cmdCalls: string[][] = [];
@@ -134,6 +134,8 @@ let getNodesOut = '';
 // `kubectl get statefulset <retired chart db>` answer. Default: absent, so
 // every test deploys onto a cluster with no chart-era database.
 let retiredChartStsOut = '';
+// The chart's Helm release record (a Secret), which outlives a deleted StatefulSet.
+let retiredChartReleaseOut = '';
 
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
@@ -158,6 +160,17 @@ function installSpawnMock() {
       return fakeChild({
         exitCode: 0,
         stdout: retiredChartStsOut,
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('secret') &&
+      argv.includes(`owner=helm,name=${RETIRED_CHART_RELEASE}`)
+    ) {
+      return fakeChild({
+        exitCode: 0,
+        stdout: retiredChartReleaseOut,
         argv: full,
       }) as unknown as ReturnType<typeof spawn>;
     }
@@ -374,6 +387,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
   });
   afterEach(() => {
     retiredChartStsOut = '';
+    retiredChartReleaseOut = '';
   });
 
   it('refuses before applying k8s/base when the old chart database still runs', async () => {
@@ -381,6 +395,26 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
     retiredChartStsOut = `statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}\n`;
     await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
       /existing data does not carry over automatically/,
+    );
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.includes('-k') &&
+          a.some((x) => /k8s-base/.test(String(x))),
+      ),
+    ).toBe(false);
+  });
+
+  // Task 12 deferral: the StatefulSet can be gone while the Helm release
+  // record survives (a half-done uninstall, or a chart scaled away). The
+  // release alone still means the chart owns this namespace: refuse.
+  it('refuses before applying k8s/base when only the Helm release record remains', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    retiredChartReleaseOut = `secret/sh.helm.release.v1.${RETIRED_CHART_RELEASE}.v3\n`;
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      new RegExp(`sh\\.helm\\.release\\.v1\\.${RETIRED_CHART_RELEASE}\\.v3`),
     );
     expect(
       cmdCalls.some(
