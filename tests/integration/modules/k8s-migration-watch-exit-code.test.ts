@@ -46,18 +46,25 @@ describe('watchAppMigrationFailure with the real exec', () => {
     // A watch that misreads the code keeps polling: stop it so this fails
     // (resolves instead of rejecting) rather than hanging.
     const stop = setTimeout(() => controller.abort(), 5_000);
-    await expect(
-      watchAppMigrationFailure({ env, signal: controller.signal, intervalMs: 10 }),
-    ).rejects.toThrow(/migration 0003 failed: relation exists/);
-    clearTimeout(stop);
+    try {
+      await expect(
+        watchAppMigrationFailure({ env, signal: controller.signal, intervalMs: 10 }),
+      ).rejects.toThrow(/migration 0003 failed: relation exists/);
+    } finally {
+      clearTimeout(stop);
+    }
   });
 
   it('any other failing exit keeps watching until aborted', async () => {
     const env = fakeKubectl(1);
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 200);
-    await expect(
-      watchAppMigrationFailure({ env, signal: controller.signal, intervalMs: 10 }),
-    ).resolves.toBeUndefined();
+    const stop = setTimeout(() => controller.abort(), 200);
+    try {
+      await expect(
+        watchAppMigrationFailure({ env, signal: controller.signal, intervalMs: 10 }),
+      ).resolves.toBeUndefined();
+    } finally {
+      clearTimeout(stop);
+    }
   });
 });

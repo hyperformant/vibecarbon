@@ -39,6 +39,12 @@ describe('VIBECARBON_DB_IMAGE check ordering', () => {
     expect(`${r.stdout}${r.stderr}`).not.toMatch(/must be a full image ref/);
   });
 
+  it("a -v after -- is not the command's own: shell still refuses a malformed override", () => {
+    const r = runCli('shell', ['--', 'psql', '-v', 'ON_ERROR_STOP=1'], { env: BAD });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toMatch(/VIBECARBON_DB_IMAGE must be a full image ref/);
+  });
+
   it('a real command still refuses a malformed override, on stderr', () => {
     const r = runCli('down', [], { env: BAD });
     expect(r.exitCode).toBe(1);

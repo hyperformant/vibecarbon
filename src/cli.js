@@ -88,6 +88,20 @@ export function checkDbImageOverride(env = process.env) {
 }
 
 /**
+ * Whether a command's own flags ask for its help or version (`-h` / `-v`).
+ * Only the command's flags count: everything after `--` belongs to whatever
+ * the command passes it to (`vibecarbon shell -- psql -v ON_ERROR_STOP=1`).
+ *
+ * @param {string[]} args - the command's arguments (after the command name)
+ * @returns {boolean}
+ */
+export function asksHelpOrVersion(args) {
+  const end = args.indexOf('--');
+  const own = end === -1 ? args : args.slice(0, end);
+  return own.includes('-h') || own.includes('-v');
+}
+
+/**
  * The Node floor, read from package.json `engines.node` (computed by
  * scripts/sync-node-version.js from the lockfile). Reading it here means there
  * is no second copy to drift.
@@ -249,7 +263,7 @@ async function main() {
   // After help/version: a bad VIBECARBON_DB_IMAGE must never hide them, at
   // the top level or for one command (`vibecarbon up -h`).
   const subcommandArgs = args.slice(1);
-  if (!subcommandArgs.includes('-h') && !subcommandArgs.includes('-v')) checkDbImageOverride();
+  if (!asksHelpOrVersion(subcommandArgs)) checkDbImageOverride();
 
   // Route to subcommands. Every command's total wall-clock is logged as
   // `[perf] cli.<command>.total <ms>ms` when VIBECARBON_PERF=1 is set — the

@@ -4,6 +4,15 @@ import { delimiter } from 'node:path';
 import { testConfig } from '../config.js';
 
 /**
+ * Docker Testing Utilities
+ *
+ * Shared utilities for Docker-based smoke tests with:
+ * - Exponential backoff retry logic
+ * - Robust cleanup with fallback to force kill
+ * - Structured logging for debugging
+ */
+
+/**
  * The compose file set `vibecarbon up` runs in dev for the project at
  * `projectDir`, as a COMPOSE_FILE value. It asks the project's own
  * scripts/lib/manifest.js getComposeFiles (what dev:start's docker-up.js
@@ -26,15 +35,6 @@ export function devComposeFileEnv(projectDir: string): string {
   ) as string[];
   return files.join(delimiter);
 }
-
-/**
- * Docker Testing Utilities
- *
- * Shared utilities for Docker-based smoke tests with:
- * - Exponential backoff retry logic
- * - Robust cleanup with fallback to force kill
- * - Structured logging for debugging
- */
 
 // =============================================================================
 // TYPES

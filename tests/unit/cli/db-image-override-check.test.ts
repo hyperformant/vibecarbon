@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkDbImageOverride } from '../../../src/cli.js';
+import { asksHelpOrVersion, checkDbImageOverride } from '../../../src/cli.js';
 import { resolveDbImage, setDbImageWarningSink } from '../../../src/lib/images.js';
 
 describe('checkDbImageOverride (cli.js, before any command runs)', () => {
@@ -37,5 +37,19 @@ describe('checkDbImageOverride (cli.js, before any command runs)', () => {
       'using dev db image ghcr.io/x/pg:clack-check; not for production',
       { output: process.stderr },
     );
+  });
+});
+
+describe('asksHelpOrVersion (which runs skip the override check)', () => {
+  it("a command's own -h or -v", () => {
+    expect(asksHelpOrVersion(['-h'])).toBe(true);
+    expect(asksHelpOrVersion(['prod', '-v'])).toBe(true);
+    expect(asksHelpOrVersion(['prod', '-y'])).toBe(false);
+  });
+
+  it('flags after -- belong to the passed-through command, not this one', () => {
+    expect(asksHelpOrVersion(['--', 'psql', '-v', 'ON_ERROR_STOP=1'])).toBe(false);
+    expect(asksHelpOrVersion(['prod', '--', '-h'])).toBe(false);
+    expect(asksHelpOrVersion(['-h', '--', 'psql'])).toBe(true);
   });
 });

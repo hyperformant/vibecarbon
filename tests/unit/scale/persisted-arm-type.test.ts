@@ -167,9 +167,17 @@ describe('scale refuses ARM server types', () => {
       serverType: 'cpx22',
       workerServerType: 'cax21',
     });
-    // Past the guard the run asks for an API token (mocked away here as a
-    // refusal); what matters is that no ARM refusal was printed.
-    await run(['prod', '-y', '-type', 'cpx32']).catch(() => {});
-    expect(errors.join('\n')).not.toContain('is an ARM');
+    // Past the guard the scripted plan resizes every role and the run asks
+    // for an API token. A refused token is the next stop, so reaching it
+    // proves the guard let the run through.
+    const { HetznerProvider } = await import('../../../src/lib/providers/hetzner.js');
+    const token = vi.spyOn(HetznerProvider, 'promptApiToken').mockResolvedValue(null as never);
+    try {
+      await expect(run(['prod', '-y', '-type', 'cpx32'])).rejects.toThrow(ExitError);
+      expect(token).toHaveBeenCalledTimes(1);
+      expect(errors).toEqual(['API token required for server type changes']);
+    } finally {
+      token.mockRestore();
+    }
   });
 });

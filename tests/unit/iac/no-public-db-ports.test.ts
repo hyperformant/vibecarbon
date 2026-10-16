@@ -47,6 +47,11 @@ function expandPorts(value: unknown): Array<[number, number]> {
     .split(',')
     .map((part) => {
       const [lo, hi = lo] = part.trim().split(/[-:]/).map(Number);
+      // A word ('all', DO's every-port spelling), an empty value or anything
+      // else that is not a port number opens every port, as far as this guard
+      // is concerned.
+      const isPort = (n: number) => Number.isInteger(n) && n >= 1 && n <= 65535;
+      if (!isPort(lo) || !isPort(hi)) return [1, 65535] as [number, number];
       return [lo, hi] as [number, number];
     });
 }
@@ -113,6 +118,15 @@ describe('expandPorts', () => {
     expect(expandPorts('22, 80')).toEqual([
       [22, 22],
       [80, 80],
+    ]);
+  });
+
+  it('reads a non-numeric port value as every port', () => {
+    expect(expandPorts('all')).toEqual([[1, 65535]]);
+    expect(expandPorts('')).toEqual([[1, 65535]]);
+    expect(expandPorts('22, any')).toEqual([
+      [22, 22],
+      [1, 65535],
     ]);
   });
 });
