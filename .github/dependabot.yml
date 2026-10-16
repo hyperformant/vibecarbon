@@ -110,42 +110,46 @@ updates:
   # Docker image digests. Every image ref this repo ships is pinned as
   # `name:tag@sha256:<index digest>` (tests/unit/deploy/image-digest-census.test.ts
   # fails on one that is not); these entries keep the digests moving when
-  # upstream retags and propose new tags. Directories:
-  #   - Dockerfiles: the template app, our three published images (wal-g's
-  #     golang/alpine build stages included), and .github/image-pins, the
-  #     never-built Dockerfile that mirrors the pins held in JS constants
-  #     (socat, registry, diagnose probes, DO CSI init); its header says which
-  #     constant to update in the same PR.
-  #   - Kubernetes manifests (the docker ecosystem reads `image:` in
-  #     Deployment/StatefulSet/CronJob YAML): carbon/k8s/base/* and the
-  #     add-on services' k8s directories.
-  # Not reachable by any ecosystem, so not listed: the registry.k8s.io mirror
-  # digests in src/lib/images.js (re-derived with the CSI / cluster-autoscaler
-  # version, and verified by publish-images.yml on every run), and the
-  # project's own app image and our own db / carbon-autoscaler images
-  # (published by this repo's workflows; see the census allowlist).
+  # upstream retags and propose new tags. Three kinds of PR, so a bump that
+  # needs a hand edit (and is red until it gets one) never blocks the rest:
+  #
+  #   1. `images` (multi-ecosystem group, below): every bump that applies
+  #      cleanly. Dockerfiles, Kubernetes manifests (the docker ecosystem reads
+  #      `image:` in YAML that has apiVersion + kind) and compose files land in
+  #      ONE PR, so an image used in both compose and k8s (traefik, grafana,
+  #      loki, prometheus, n8n, metabase, redis) moves in both at once; the
+  #      census also fails when their tags differ.
+  #   2. `js-pins`: .github/image-pins/Dockerfile, the never-built mirror of
+  #      the pins held in JS constants (socat, registry, diagnose probes, DO CSI
+  #      init, binfmt). Red until the constant named in that file's header is
+  #      updated in the same PR. alpine/socat and registry are bumped ONLY
+  #      here (every other entry ignores them): their k8s copies must equal the
+  #      JS constant, so they move together by hand.
+  #   3. `db-image`: docker/postgres-walg (postgres base, wal-g stage). Red
+  #      until DB_IMAGE_TAG's -r revision and DB_IMAGE_INPUTS_SHA256 move
+  #      (tests/unit/deploy/db-image-fingerprint.test.ts).
+  #
+  # Not reachable by any ecosystem: the registry.k8s.io mirror digests in
+  # src/lib/images.js (re-derived with the CSI / cluster-autoscaler version,
+  # and verified by publish-images.yml on every run), and the project's own
+  # app image and our own db / carbon-autoscaler images (published by this
+  # repo's workflows; see the census allowlist). Compose overlays named
+  # docker-compose.<a>.<b>.yml (e.g. docker-compose.n8n.prod.yml) do not match
+  # Dependabot's compose filename pattern; they carry no images, and the
+  # census fails if one ever gains an `image:` line.
   - package-ecosystem: docker
     directories:
       - /carbon
       - /docker/carbon-autoscaler
-      - /docker/postgres-walg
       - /docker/wal-g
-      - /.github/image-pins
       - /carbon/k8s/base/*
       - /services/*/k8s
+    multi-ecosystem-group: images
+    patterns: ["*"]
     ignore:
-      # A PostgreSQL major is a data-format change (dump/restore or
-      # pg_upgrade), never a routine bump. Minors and digest moves still come
-      # through; each one also moves DB_IMAGE_TAG (src/lib/images.js), which
-      # the PR must do by hand (tests/unit/deploy/walg-dockerfile-arch.test.ts
-      # fails until then). The same holds for a wal-g re-pin in
-      # docker/postgres-walg (bump the DB_IMAGE_TAG -r revision).
-      - dependency-name: postgres
-        update-types: ["version-update:semver-major"]
-      # registry 3 changed its config format; the compose registry and the
-      # k8s local registry both run a 2.x config.
+      # Bumped only by the js-pins entry (see 2. above).
+      - dependency-name: alpine/socat
       - dependency-name: registry
-        update-types: ["version-update:semver-major"]
       # alpine/k8s tags track Kubernetes minors and the backup CronJob's
       # kubectl must stay within one minor of k3s (K3S_VERSION in
       # src/lib/deploy/k8s/k3s.js). Patches and digest moves still come.
@@ -156,30 +160,26 @@ updates:
       # tag's index digest, so a Dependabot "update" would only break the
       # parity guard. images.js owns this ref.
       - dependency-name: ghcr.io/hyperformant/cluster-autoscaler
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: America/Chicago
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: chore(docker-deps)
-      include: scope
+    # commit-message is group-only for multi-ecosystem entries (set below).
     labels:
       - dependencies
-    groups:
-      all-docker:
-        patterns: ["*"]
 
   # Compose files: the template's (shipped into every project), the add-on
-  # services', and the ACME isolation harness. Same pin form and the same
-  # census as above. A Traefik tag bump must also move the CRD URL in
-  # carbon/k8s/base/traefik (tests/unit/template/traefik-crd-version.test.ts).
+  # services', and the ACME isolation harness. Same `images` PR as the
+  # Dockerfiles and k8s manifests. A Traefik tag bump must also move the CRD
+  # URL in carbon/k8s/base/traefik (tests/unit/template/traefik-crd-version.test.ts).
   - package-ecosystem: docker-compose
     directories:
       - /carbon
       - /services/*/compose
       - /scripts/acme-iso
+    multi-ecosystem-group: images
+    patterns: ["*"]
+    labels:
+      - dependencies
+
+  - package-ecosystem: docker
+    directory: /.github/image-pins
     schedule:
       interval: weekly
       day: monday
@@ -192,5 +192,39 @@ updates:
     labels:
       - dependencies
     groups:
-      all-compose:
+      js-pins:
         patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /docker/postgres-walg
+    # A PostgreSQL major is a data-format change (dump/restore or
+    # pg_upgrade), never a routine bump. Minors, digest moves and wal-g
+    # re-pins still come through.
+    ignore:
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(docker-deps)
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      db-image:
+        patterns: ["*"]
+
+multi-ecosystem-groups:
+  images:
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    commit-message:
+      prefix: chore(docker-deps)
+      include: scope

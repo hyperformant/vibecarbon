@@ -63,9 +63,18 @@ export const PLATFORM_BUILD_FLAG = `--platform=${TARGET_PLATFORM}`;
  * format error`, or `no match for platform in manifest`), and an operator has
  * no way to connect that to a flag they never passed. This hint does.
  */
+/**
+ * The binfmt installer the hint below tells an operator to run, pinned by tag
+ * and multi-arch index digest like every other image ref
+ * (tests/unit/deploy/image-digest-census.test.ts); mirrored in
+ * .github/image-pins/Dockerfile so Dependabot proposes its bumps.
+ */
+export const BINFMT_IMAGE =
+  'tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0';
+
 export const AMD64_BUILD_HINT =
   `Builds are pinned to ${TARGET_PLATFORM}, vibecarbon is x86-64 only. ` +
   `If you are building on an arm64 machine (e.g. Apple Silicon) and the failure ` +
   `looks like "exec format error" or "no match for platform", Docker needs amd64 ` +
   `emulation: Docker Desktop ships it, and on Linux you can register it with ` +
-  `\`docker run --privileged --rm tonistiigi/binfmt --install amd64\`.`;
+  `\`docker run --privileged --rm ${BINFMT_IMAGE} --install amd64\`.`;

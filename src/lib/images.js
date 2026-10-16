@@ -589,7 +589,7 @@ export function csiSidecarSetImagePlan(providerId) {
  * the in-cluster DNS/HTTP probe, netshoot for the deep network battery.
  * Pinned by tag and multi-arch index digest (both carry amd64), so a
  * diagnosis never depends on what a floating tag resolved to that day.
- * Dependabot sees them through docker/image-pins/Dockerfile.
+ * Dependabot sees them through .github/image-pins/Dockerfile.
  */
 export const DIAG_BUSYBOX_IMAGE =
   'busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662';

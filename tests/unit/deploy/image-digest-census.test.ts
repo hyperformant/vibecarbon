@@ -26,12 +26,13 @@
  * propose their bumps too.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { SOCAT_IMAGE } from '../../../src/lib/deploy/compose/ha.js';
 import { REGISTRY_IMAGE } from '../../../src/lib/deploy/compose/registry-config.js';
+import { BINFMT_IMAGE } from '../../../src/lib/deploy/platform.js';
 import {
   CSI_SIDECAR_MIRRORS,
   CSI_UPSTREAM_IMAGE_PINS,
@@ -90,9 +91,13 @@ type Site = { where: string; ref: string };
 const isComment = (line: string) => /^\s*#/.test(line);
 const unquote = (v: string) => v.trim().replace(/^(['"])(.*)\1$/, '$2');
 
-/** `image:` values (and kustomize `newTag:`) from a YAML-ish file, line-based. */
+/**
+ * `image:` values, kustomize `newTag:` and Helm-style `repository:` + `tag:`
+ * pairs (joined as `repository:tag`) from a YAML-ish file, line-based.
+ */
 function yamlImageSites(rel: string): Site[] {
   const out: Site[] = [];
+  let repo: { value: string; indent: number; line: number } | null = null;
   read(rel)
     .split('\n')
     .forEach((line, i) => {
@@ -101,21 +106,46 @@ function yamlImageSites(rel: string): Site[] {
       if (img) out.push({ where: `${rel}:${i + 1}`, ref: unquote(img[1]) });
       const tag = line.match(/^\s*newTag:\s*(\S+)/);
       if (tag) out.push({ where: `${rel}:${i + 1}`, ref: `newTag: ${unquote(tag[1])}` });
+      const helmRepo = line.match(/^(\s*)repository:\s*(\S.*?)\s*(?:#.*)?$/);
+      if (helmRepo) {
+        repo = { value: unquote(helmRepo[2]), indent: helmRepo[1].length, line: i + 1 };
+        return;
+      }
+      const helmTag = line.match(/^(\s*)tag:\s*(\S.*?)\s*(?:#.*)?$/);
+      if (repo && helmTag && helmTag[1].length === repo.indent) {
+        out.push({ where: `${rel}:${repo.line}`, ref: `${repo.value}:${unquote(helmTag[2])}` });
+        repo = null;
+      }
     });
+  if (repo) {
+    const r = repo as { value: string; line: number };
+    out.push({ where: `${rel}:${r.line}`, ref: `${r.value} (repository with no tag)` });
+  }
   return out;
 }
 
-const COMPOSE_FILES = gitFiles(
-  'carbon/docker-compose*.yml',
-  'services/*/compose/*.yml',
-  'scripts/**/docker-compose*.yml',
+/** Every file in the checkout (tracked or new, never ignored or vendored). */
+const ALL_FILES = gitFiles().filter(
+  (f) => !f.split('/').includes('node_modules') && existsSync(join(ROOT, f)),
 );
-const K8S_FILES = gitFiles('carbon/k8s/**/*.yaml', 'carbon/k8s/**/*.yml', 'services/*/k8s/*.yaml');
-const CLOUD_INIT_FILES = gitFiles('carbon/cloud-init/**');
-const DOCKERFILES = gitFiles('**/Dockerfile', '**/Dockerfile.*').filter(
-  (f) => !f.includes('node_modules'),
+const isYaml = (f: string) => /\.ya?ml$/i.test(f);
+const base = (f: string) => f.slice(f.lastIndexOf('/') + 1);
+
+/** Compose files by name, anywhere: docker-compose*.y(a)ml and compose*.y(a)ml. */
+const COMPOSE_FILES = ALL_FILES.filter((f) =>
+  /^(docker-)?compose([.-][^/]*)?\.ya?ml$/i.test(base(f)),
 );
-const WORKFLOWS = gitFiles('.github/workflows/*.yml', 'carbon/.github/workflows/*.yml');
+const K8S_FILES = ALL_FILES.filter(
+  (f) => isYaml(f) && (f.startsWith('carbon/k8s/') || /^services\/[^/]+\/k8s\//.test(f)),
+);
+const CLOUD_INIT_FILES = ALL_FILES.filter((f) => f.startsWith('carbon/cloud-init/'));
+const DOCKERFILES = ALL_FILES.filter((f) => /^(Dockerfile|Containerfile)(\..+)?$/.test(base(f)));
+const WORKFLOWS = ALL_FILES.filter(
+  (f) => isYaml(f) && /^(carbon\/)?\.github\/workflows\/[^/]+$/.test(f),
+);
+const KNOWN_YAML = new Set([...COMPOSE_FILES, ...K8S_FILES, ...CLOUD_INIT_FILES, ...WORKFLOWS]);
+/** The backstop: every other YAML file in the repo. */
+const OTHER_YAML = ALL_FILES.filter((f) => isYaml(f) && !KNOWN_YAML.has(f));
 
 /** FROM refs and ARG *_IMAGE defaults; stage names, scratch and `${ARG}` are indirection. */
 function dockerfileSites(rel: string): Site[] {
@@ -189,6 +219,7 @@ const JS_REFS: Record<string, string[]> = {
   REGISTRY_IMAGE: [REGISTRY_IMAGE],
   DIAG_BUSYBOX_IMAGE: [DIAG_BUSYBOX_IMAGE],
   DIAG_NETSHOOT_IMAGE: [DIAG_NETSHOOT_IMAGE],
+  BINFMT_IMAGE: [BINFMT_IMAGE],
   'clusterAutoscalerImageRef()': [clusterAutoscalerImageRef()],
   'carbonAutoscalerImageRef()': [carbonAutoscalerImageRef()],
   'pauseImageRef()': [pauseImageRef()],
@@ -203,6 +234,69 @@ function jsSites(): Site[] {
   return Object.entries(JS_REFS).flatMap(([name, refs]) =>
     refs.map((ref) => ({ where: `js ${name}`, ref })),
   );
+}
+
+/** An image-ref-shaped literal token (not a path, flag, port map or `${}`). */
+const IMAGE_TOKEN =
+  /^(?:[a-z0-9][a-z0-9._-]*(?::\d+)?\/)*[a-z0-9][a-z0-9._-]*(?::[\w][\w.-]*)?(?:@sha256:[a-f0-9]{64})?$/;
+
+/**
+ * Literal image refs on `docker run|pull` / `nerdctl run|pull` and
+ * `ctr|crictl ... pull` lines in src/ and scripts/ (comments skipped). The
+ * image is the first argument that is not a flag, a flag's value, or an
+ * interpolation; a `${...}` image is a runtime value or a registered constant
+ * and is covered by the JS checks instead.
+ */
+function pullLiteralSites(): Site[] {
+  const out: Site[] = [];
+  const files = ALL_FILES.filter((f) => /^(src|scripts)\/.*\.(m?js|ts|sh)$/.test(f));
+  const FLAGS_WITH_VALUE = new Set([
+    '--name',
+    '-p',
+    '-v',
+    '-e',
+    '--env',
+    '--network',
+    '--platform',
+    '-n',
+    '--namespace',
+    '-w',
+    '--user',
+    '-u',
+    '--entrypoint',
+    '--restart',
+    '--mount',
+    '--label',
+    '-l',
+  ]);
+  for (const rel of files) {
+    read(rel)
+      .split('\n')
+      .forEach((line, i) => {
+        if (/^\s*(\*|\/\/|#)/.test(line)) return;
+        const m = line.match(
+          /\b(?:docker|nerdctl)\s+(?:run|pull)\s+(.*)$|\b(?:ctr|crictl)\b.*?\bpull\s+(.*)$/,
+        );
+        if (!m) return;
+        const tokens = (m[1] ?? m[2])
+          .split(/\s+/)
+          .map((t) => t.replace(/^[`'"]+|[`'".,;)]+$/g, ''));
+        for (let k = 0; k < tokens.length; k++) {
+          const t = tokens[k];
+          if (!t) continue;
+          if (t.startsWith('-')) {
+            if (FLAGS_WITH_VALUE.has(t)) k++;
+            continue;
+          }
+          if (t.includes('${') || t.includes('$')) break; // runtime / registered
+          if (IMAGE_TOKEN.test(t) && (t.includes('/') || t.includes(':'))) {
+            out.push({ where: `${rel}:${i + 1}`, ref: t });
+          }
+          break;
+        }
+      });
+  }
+  return out;
 }
 
 /** src/ lines that put an image into YAML or a CLI flag. */
@@ -285,6 +379,71 @@ describe('every shipped image ref is pinned by digest', () => {
     expect(unknown.map(({ where, ref }) => `${where}: ${ref}`)).toEqual([]);
   });
 
+  it('backstop: no YAML anywhere else in the repo carries an unpinned image', () => {
+    // Everything the globs above do not classify (tests, docs, scripts,
+    // tool config). A new compose/k8s location lands here until it is
+    // given a proper home in the census and in .github/dependabot.yml.
+    expect(OTHER_YAML.length).toBeGreaterThan(0);
+    expect(offenders(OTHER_YAML.flatMap(yamlImageSites))).toEqual([]);
+  });
+
+  it('src/ and scripts/ have no unpinned literal on a docker/ctr/crictl run or pull', () => {
+    expect(offenders(pullLiteralSites())).toEqual([]);
+  });
+
+  it('the run/pull sweep sees literals (it would catch an unpinned one)', () => {
+    // Self-check of the parser on the shapes the sweep exists for.
+    const probe = (line: string) => {
+      const m = line.match(/\b(?:docker|nerdctl)\s+(?:run|pull)\s+(.*)$/);
+      return m ? m[1].split(/\s+/).find((t) => !t.startsWith('-') && IMAGE_TOKEN.test(t)) : null;
+    };
+    expect(probe('docker run --privileged --rm tonistiigi/binfmt --install amd64')).toBe(
+      'tonistiigi/binfmt',
+    );
+    expect(probe('docker pull registry:2')).toBe('registry:2');
+  });
+
+  it('Helm-style repository/tag blocks are parsed (the db image is the only one)', () => {
+    const helm = K8S_FILES.flatMap(yamlImageSites).filter(({ ref }) =>
+      ref.startsWith('{{DB_IMAGE}}:'),
+    );
+    expect(
+      helm.some(({ where }) => where.startsWith('carbon/k8s/values/supabase.values.yaml:')),
+    ).toBe(true);
+    expect(
+      K8S_FILES.flatMap(yamlImageSites).filter(({ ref }) =>
+        ref.includes('(repository with no tag)'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('an image used in both compose and k8s runs the same tag in both', () => {
+    // Dependabot moves them in one `images` PR; this catches a hand edit
+    // that bumps one tier and forgets the other.
+    const tagsOf = (sites: Site[]) => {
+      const m = new Map<string, Set<string>>();
+      for (const { ref } of sites) {
+        if (!PINNED.test(ref)) continue;
+        const nameTag = ref.split('@')[0];
+        const colon = nameTag.lastIndexOf(':');
+        if (colon <= nameTag.lastIndexOf('/')) continue;
+        const name = nameTag.slice(0, colon);
+        m.set(name, (m.get(name) ?? new Set()).add(nameTag.slice(colon + 1)));
+      }
+      return m;
+    };
+    const compose = tagsOf(COMPOSE_FILES.flatMap(yamlImageSites));
+    const k8s = tagsOf(K8S_FILES.flatMap(yamlImageSites));
+    const shared = [...compose.keys()].filter((n) => k8s.has(n));
+    expect(shared.length).toBeGreaterThanOrEqual(5);
+    const drift = shared.filter(
+      (n) =>
+        [...(compose.get(n) as Set<string>)].sort().join() !==
+        [...(k8s.get(n) as Set<string>)].sort().join(),
+    );
+    expect(drift).toEqual([]);
+  });
+
   it('the allowlist holds only refs that still exist (no stale exemptions)', () => {
     const all = [
       ...COMPOSE_FILES.flatMap(yamlImageSites),
@@ -296,13 +455,15 @@ describe('every shipped image ref is pinned by digest', () => {
 
   it('every pinned third-party ref resolves to a single index digest per name:tag', () => {
     // Two sites naming the same tag with different digests means one of them
-    // was bumped and the other forgotten.
+    // was bumped and the other forgotten. Scope: the files Dependabot moves
+    // together in its `images` PR. The JS-held pins and their mirror
+    // (.github/image-pins) move in their own hand-sync PR, with explicit
+    // parity checks below, so they may briefly differ from a compose copy.
     const byTag = new Map<string, Set<string>>();
     const sites = [
       ...COMPOSE_FILES.flatMap(yamlImageSites),
       ...K8S_FILES.flatMap(yamlImageSites),
-      ...DOCKERFILES.flatMap(dockerfileSites),
-      ...jsSites(),
+      ...DOCKERFILES.filter((f) => f !== '.github/image-pins/Dockerfile').flatMap(dockerfileSites),
     ];
     for (const { ref } of sites) {
       if (!PINNED.test(ref)) continue;
@@ -354,6 +515,76 @@ describe('Dependabot can bump every pinned location', () => {
     expect(missing).toEqual([]);
   });
 
+  it('every compose file that holds an image matches Dependabot’s compose filename pattern', () => {
+    // dependabot-core docker/lib/dependabot/docker_compose/file_fetcher.rb
+    // FILENAME_REGEX (Ruby atomic group; `[\w-]` cannot eat the `.`, so the
+    // plain group below is equivalent). It allows ONE dotted segment, so
+    // `docker-compose.n8n.prod.yml` is invisible to Dependabot. Those
+    // overlays hold no images today; this fails the day one gains one.
+    const DEPENDABOT_COMPOSE = /(docker-)?compose(-[\w]+)?(?:\.[\w-]+)?\.ya?ml/i;
+    // Unanchored, like Ruby's `match?`, which is how the fetcher applies it.
+    expect(DEPENDABOT_COMPOSE.test('docker-compose.n8n.yml')).toBe(true);
+    expect(DEPENDABOT_COMPOSE.test('docker-compose.n8n.prod.yml')).toBe(false);
+    const unseen = COMPOSE_FILES.filter(
+      (f) => yamlImageSites(f).length > 0 && !DEPENDABOT_COMPOSE.test(base(f)),
+    );
+    expect(unseen).toEqual([]);
+  });
+
+  it('every k8s file that holds a pinned image is one Dependabot parses (apiVersion + kind)', () => {
+    // The docker ecosystem only reads YAML whose documents carry apiVersion
+    // and kind (shared_file_fetcher.rb); a values file or fragment would be
+    // silently skipped.
+    const skipped = K8S_FILES.filter((f) => {
+      if (!yamlImageSites(f).some(({ ref }) => PINNED.test(ref))) return false;
+      const text = read(f);
+      return !(/^apiVersion:/m.test(text) && /^kind:/m.test(text));
+    });
+    expect(skipped).toEqual([]);
+  });
+
+  it('hand-sync classes get their own Dependabot PRs; the rest share one `images` PR', () => {
+    const cfg = dependabot as unknown as {
+      updates: Array<{
+        'package-ecosystem': string;
+        directory?: string;
+        directories?: string[];
+        'multi-ecosystem-group'?: string;
+        groups?: Record<string, unknown>;
+        ignore?: Array<{ 'dependency-name': string; 'update-types'?: string[] }>;
+      }>;
+      'multi-ecosystem-groups'?: Record<string, unknown>;
+    };
+    const entryFor = (dir: string) =>
+      cfg.updates.filter(
+        (u) =>
+          u['package-ecosystem'] === 'docker' &&
+          (u.directory === dir || u.directories?.includes(dir)),
+      );
+    for (const dir of ['/.github/image-pins', '/docker/postgres-walg']) {
+      const entries = entryFor(dir);
+      expect(entries, dir).toHaveLength(1);
+      expect(entries[0].directories ?? [entries[0].directory]).toEqual([dir]);
+      expect(entries[0]['multi-ecosystem-group'], dir).toBeUndefined();
+      expect(Object.keys(entries[0].groups ?? {}), dir).toHaveLength(1);
+    }
+    expect(cfg['multi-ecosystem-groups']).toHaveProperty('images');
+    const inImages = cfg.updates.filter((u) => u['multi-ecosystem-group'] === 'images');
+    expect(inImages.map((u) => u['package-ecosystem']).sort()).toEqual([
+      'docker',
+      'docker-compose',
+    ]);
+    // socat and registry also live in k8s manifests that must equal a JS
+    // constant, so only the js-pins entry may bump them.
+    const dockerMain = inImages.find((u) => u['package-ecosystem'] === 'docker');
+    const ignored = new Set(
+      (dockerMain?.ignore ?? []).filter((i) => !i['update-types']).map((i) => i['dependency-name']),
+    );
+    expect(ignored).toEqual(
+      new Set(['alpine/socat', 'registry', 'ghcr.io/hyperformant/cluster-autoscaler']),
+    );
+  });
+
   it('github-actions is watched (workflow actions are SHA-pinned)', () => {
     expect(dirsFor('github-actions')).toContain('/');
   });
@@ -370,6 +601,7 @@ describe('Dependabot can bump every pinned location', () => {
       REGISTRY_IMAGE,
       DIAG_BUSYBOX_IMAGE,
       DIAG_NETSHOOT_IMAGE,
+      BINFMT_IMAGE,
       ...Object.values(CSI_UPSTREAM_IMAGE_PINS).flatMap((specs) =>
         specs.flatMap((s) => Object.values(s.containers)),
       ),

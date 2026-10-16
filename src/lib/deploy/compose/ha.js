@@ -205,7 +205,7 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
  *
  * LOCKSTEP: must match the ref in
  * carbon/k8s/base/repl-gateway/repl-gateway.yaml (the k8s-tier gateway) and
- * docker/image-pins/Dockerfile (Dependabot's view of this pin).
+ * .github/image-pins/Dockerfile (Dependabot's view of this pin).
  * tests/unit/deploy/socat-pin.test.ts and image-digest-census.test.ts fail
  * the build if they drift.
  */
