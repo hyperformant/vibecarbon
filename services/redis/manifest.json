@@ -1,6 +1,6 @@
 {
   "name": "redis",
-  "description": "In-memory data store for caching and sessions",
+  "description": "In-memory store for shared rate limiting, caching and queues",
   "version": "1.0.0",
   "port": 6379,
   "url": "redis://localhost:6379",

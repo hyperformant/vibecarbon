@@ -526,7 +526,7 @@ const LOCAL_FEATURES = [
   { name: 'observability', description: 'Prometheus, Grafana, Loki monitoring stack' },
   { name: 'n8n', description: 'Workflow automation platform', status: 'parked' },
   { name: 'metabase', description: 'Business intelligence and analytics', status: 'parked' },
-  { name: 'redis', description: 'In-memory cache and session store' },
+  { name: 'redis', description: 'Shared rate limiting, caching and queues' },
 ];
 
 // External services were previously listed here (CI/CD via GitHub Actions);

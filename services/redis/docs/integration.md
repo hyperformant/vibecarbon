@@ -10,9 +10,10 @@ Exactly one thing: **distributed rate limiting**. The app's rate-limit store
 request budgets hold across multiple app replicas — which matters on the
 Kubernetes tiers. On single-server Compose deploys the built-in in-memory
 limiter is functionally equivalent (counters reset on redeploy). There is no
-query/object/session cache in the shipped template — sessions are stateless
-JWTs. Everything beyond rate limiting is yours to build on the connection
-below.
+query or object cache in the shipped template, and sessions do not live
+here: Better Auth keeps them in Postgres, and the app reads each one from
+the database on every request. Everything beyond rate limiting is yours to
+build on the connection below.
 
 ## Connection Details
 
@@ -58,22 +59,13 @@ if (cached) {
 }
 ```
 
-### Session Storage
+### Sessions stay in Postgres
 
-```typescript
-import { redis } from './lib/redis';
-
-// Store session
-await redis.hset(`session:${sessionId}`, {
-  userId: user.id,
-  email: user.email,
-  createdAt: Date.now(),
-});
-await redis.expire(`session:${sessionId}`, 86400); // 24 hours
-
-// Retrieve session
-const session = await redis.hgetall(`session:${sessionId}`);
-```
+Don't move sign-in sessions here. Better Auth stores them in the `session`
+table, and the session middleware reads them from the database on every
+request, which is what makes sign-out, revocation and bans take effect at
+once. Use Redis for state you can afford to lose: caches, counters, job
+queues.
 
 ### Rate Limiting
 
