@@ -1,11 +1,12 @@
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import {
   arePortsAvailable,
   cleanupDocker,
+  devComposeFileEnv,
   waitForHttpHealth,
   waitForPostgres,
   waitWithBackoff,
@@ -63,19 +64,20 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
     projectEnv = parseDotenv(readFileSync(join(projectDir(), '.env.local'), 'utf-8'));
     projectEnv.PROJECT_NAME = projectName;
     projectEnv.POSTGRES_PASSWORD = projectEnv.DB_PASSWORD || 'postgres';
-    // Drive compose with the file set `vibecarbon up` uses in dev (the
-    // project's scripts/lib/manifest.js getComposeFiles: base, service, service
-    // override, main override last). Leaving out docker-compose.override.yml ran
-    // a db no user runs: WAL-G pointed at the dev S3 on localhost:8333, which in
-    // the container is the container itself, so pg_ctl could not stop the init
-    // server and the db crash-restarted on every first boot. COMPOSE_FILE also
-    // reaches cleanupDocker's `down -v`, so the observability volumes go too.
-    projectEnv.COMPOSE_FILE = [
+    // Drive compose with the file set `vibecarbon up` uses in dev
+    // (devComposeFileEnv: base, observability + its override, main override
+    // last). Leaving out docker-compose.override.yml ran a db no user runs:
+    // WAL-G pointed at the dev S3 on localhost:8333, which in the container
+    // is the container itself, so pg_ctl could not stop the init server and
+    // the db crash-restarted on every first boot. COMPOSE_FILE also reaches
+    // cleanupDocker's `down -v`, so the observability volumes go too.
+    projectEnv.COMPOSE_FILE = devComposeFileEnv(projectDir());
+    expect(projectEnv.COMPOSE_FILE.split(delimiter)).toEqual([
       'docker-compose.yml',
       'docker-compose.observability.yml',
       'docker-compose.observability.override.yml',
       'docker-compose.override.yml',
-    ].join(':');
+    ]);
 
     // Start db and observability services
     execSync('docker compose up -d db prometheus grafana loki promtail postgres-exporter', {
@@ -144,8 +146,9 @@ describeDocker('Optional Services Smoke Test - Observability', () => {
   afterAll(async () => {
     if (!portsAvailable || !tempDir) return;
 
-    // Use robust cleanup with fallback to force kill
-    // Note: We need to use the observability compose file for cleanup
+    // Robust cleanup with a force-kill fallback. getExecEnv() carries the
+    // COMPOSE_FILE set above, so `down -v` covers the observability services
+    // and their volumes too.
     const cleanupResult = await cleanupDocker({
       cwd: projectDir(),
       env: getExecEnv(),

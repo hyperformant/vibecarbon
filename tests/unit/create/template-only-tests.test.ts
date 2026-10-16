@@ -4,9 +4,11 @@
  * baseline set. A generated project's history grows with every
  * `drizzle-kit generate`, so the census must never reach a project:
  * `vibecarbon create` leaves it out of the tests copy, and `upgrade` never
- * writes tests/** (upgrade-policy.test.ts).
+ * writes tests/** (upgrade-policy.test.ts). That create really leaves it out
+ * is asserted on a created project (tests/integration/template/create.test.ts),
+ * not on create.js's source text.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TEMPLATE_ONLY_TESTS } from '../../../src/create.js';
@@ -19,13 +21,6 @@ describe('template-only tests', () => {
     for (const name of TEMPLATE_ONLY_TESTS) {
       expect(existsSync(join(ROOT, 'carbon', 'tests', 'structural', name)), name).toBe(true);
     }
-  });
-
-  it('create copies tests/ without them', () => {
-    const src = readFileSync(join(ROOT, 'src', 'create.js'), 'utf8');
-    expect(src).toMatch(
-      /copyTemplateDir\('tests', join\(projectDir, 'tests'\), variables, TEMPLATE_ONLY_TESTS\)/,
-    );
   });
 
   it('the drift check (valid for any history) does ship', () => {

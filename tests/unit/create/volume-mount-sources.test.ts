@@ -31,9 +31,17 @@ const fileMounts = [...new Set(composeSources)].filter((p) =>
 );
 
 describe('compose file bind-mount sources', () => {
-  it('found the known mounts (sanity — regex still matches the compose files)', () => {
-    expect(fileMounts.length).toBeGreaterThanOrEqual(1);
-    expect(fileMounts).toContain('volumes/db/wal-archive.sh');
+  it('found exactly the known mounts (sanity — regex still matches the compose files)', () => {
+    // The real set, pinned exactly: the lean stack bind-mounts one file
+    // (the WAL archive script) and one directory (Traefik's). A regex that
+    // stops matching fails here instead of silently testing nothing, and a
+    // new mount must be added here, which is the moment to check it is
+    // scaffolded and shipped (the cases below).
+    expect([...new Set(composeSources)].sort()).toEqual([
+      'volumes/db/wal-archive.sh',
+      'volumes/traefik',
+    ]);
+    expect(fileMounts).toEqual(['volumes/db/wal-archive.sh']);
   });
 
   it.each(fileMounts)('%s is scaffolded by create.js', (rel) => {

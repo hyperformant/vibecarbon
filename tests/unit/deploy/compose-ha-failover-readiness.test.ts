@@ -5,8 +5,9 @@
  * a clean reconnect against the freshly-promoted read-write DB, but restart
  * returns when the container STARTS, not when it is READY; until it is,
  * /api/v1/notifications 500s. failover returned straight into that window and
- * verify-failover caught it. Fix: waitForNewPrimaryApi polls the endpoint locally on the new primary
- * (curl --resolve, DNS-independent) until it serves 200.
+ * verify-failover caught it. Fix: waitForNewPrimaryApi polls the endpoint
+ * locally on the new primary (curl --resolve, DNS-independent) until it
+ * serves 200.
  *
  * RCA 2026-08-19 (DO compose-ha, run 32309395314): the gate proved ONE of the
  * restarted services and declared the whole app tier serving while a slower
@@ -139,10 +140,22 @@ describe('serve-gate coverage census', () => {
       ).toBe(true);
       if (probed) {
         expect(cmd).toContain(NEW_PRIMARY_PROBE_URLS_BY_SERVICE[svc]);
-      } else {
-        // An exemption must say WHY, not just exist.
-        expect(exempt.length).toBeGreaterThan(20);
       }
+    }
+  });
+
+  // Checked over the exemption map itself, not only through the restart
+  // loop above (which never reaches an exemption while every restarted
+  // service is probed): an entry is a restarted, unprobed service with a
+  // reason, or it is stale.
+  it('every exemption names a restarted, unprobed service and says why', () => {
+    for (const [svc, reason] of Object.entries(NEW_PRIMARY_PROBE_EXEMPT)) {
+      expect(APP_TIER_RESTART_SERVICES, `exempt "${svc}" is not restarted`).toContain(svc);
+      expect(
+        Object.keys(NEW_PRIMARY_PROBE_URLS_BY_SERVICE),
+        `"${svc}" is both probed and exempted`,
+      ).not.toContain(svc);
+      expect(reason.length, `exemption for "${svc}" must say why`).toBeGreaterThan(20);
     }
   });
 });

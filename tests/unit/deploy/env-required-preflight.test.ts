@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { formatDotenvLine } from '../../../src/lib/dotenv.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK, findMissingRequiredEnv } from '../../../src/lib/project.js';
 
 // vibecarbon-web prod move, 2026-09-15: the deploy ran from a fresh worktree
@@ -55,7 +56,7 @@ const DELETED_SECRETS = {
 };
 const dotenv = (vars: Record<string, string>) =>
   `${Object.entries(vars)
-    .map(([k, v]) => `${k}=${v}`)
+    .map(([k, v]) => formatDotenvLine(k, v))
     .join('\n')}\n`;
 const LEAN_ENV = Object.fromEntries(LEAN_REQUIRED.map((k) => [k, 'set']));
 

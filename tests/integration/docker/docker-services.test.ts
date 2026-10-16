@@ -1,11 +1,12 @@
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import {
   arePortsAvailable,
   cleanupDocker,
+  devComposeFileEnv,
   fetchWithTimeout,
   waitForHttpHealth,
   waitForPostgres,
@@ -77,6 +78,10 @@ describeDocker('Docker Services Smoke Test', () => {
     // docker-compose.yml uses PROJECT_NAME and POSTGRES_PASSWORD
     projectEnv.PROJECT_NAME = projectName;
     projectEnv.POSTGRES_PASSWORD = projectEnv.DB_PASSWORD || 'postgres';
+    // The file set `vibecarbon up` runs in dev, dev override included, so
+    // the smoke boots the stack users boot. It also reaches cleanupDocker.
+    projectEnv.COMPOSE_FILE = devComposeFileEnv(projectDir());
+    expect(projectEnv.COMPOSE_FILE.split(delimiter)).toContain('docker-compose.override.yml');
 
     // The local stack is db, app and traefik, plus the dev-only s3
     // (SeaweedFS) from docker-compose.override.yml. Start what the free ports

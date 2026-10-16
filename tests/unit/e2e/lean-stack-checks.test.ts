@@ -5,6 +5,8 @@
  * app's own HTML 404 rather than a gateway or a Traefik no-router 404.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CORE_TABLES,
@@ -12,7 +14,7 @@ import {
   runDbChecks,
   type SqlRunner,
 } from '../../e2e/checks/app-functional.js';
-import { checkUnknownPathNotFound } from '../../e2e/checks/health.js';
+import { APP_SHELL_MARKER, checkUnknownPathNotFound } from '../../e2e/checks/health.js';
 
 const ok = (output: string) => ({ ok: true, output });
 
@@ -123,7 +125,11 @@ describe('checkUnknownPathNotFound', () => {
     );
 
   it("passes on the app's HTML 404 for /rest/v1/", async () => {
-    const fetchFn = respond(404, 'text/html; charset=UTF-8', '<!DOCTYPE html>');
+    const fetchFn = respond(
+      404,
+      'text/html; charset=UTF-8',
+      '<!DOCTYPE html><html><body><div id="root"></div></body></html>',
+    );
     const r = await checkUnknownPathNotFound('x.example', fetchFn as never);
     expect(r).toMatchObject({ checkName: 'unknown_path_not_found', status: 'pass' });
     expect(fetchFn).toHaveBeenCalledWith('https://x.example/rest/v1/');
@@ -135,6 +141,20 @@ describe('checkUnknownPathNotFound', () => {
       respond(404, 'text/plain; charset=utf-8', '404 page not found') as never,
     );
     expect(r.status).toBe('fail');
+  });
+
+  it('fails on an HTML 404 that is not the app shell (a proxy or gateway error page)', async () => {
+    const r = await checkUnknownPathNotFound(
+      'x.example',
+      respond(404, 'text/html', '<html><body><h1>404 Not Found</h1>nginx</body></html>') as never,
+    );
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toContain('without the app shell');
+  });
+
+  it('the shell marker is the one in the template index.html', () => {
+    const html = readFileSync(join(process.cwd(), 'carbon/src/client/index.html'), 'utf-8');
+    expect(html).toContain(APP_SHELL_MARKER);
   });
 
   it('fails when something still answers the path (200 / 401)', async () => {

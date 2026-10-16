@@ -476,6 +476,14 @@ async function checkAuthHealth(domain: string): Promise<VerificationResult> {
 }
 
 /**
+ * The SPA shell's mount point (carbon/src/client/index.html). Every page the
+ * app serves, its NotFound page included, is that shell, so this marker is
+ * what tells the app's 404 apart from any other HTML 404 (an error page from
+ * a proxy or a leftover gateway).
+ */
+export const APP_SHELL_MARKER = '<div id="root">';
+
+/**
  * The app owns every path on the apex: Traefik routes `/` to it in every mode
  * and nothing else sits behind a path prefix. A path the app does not know is
  * a real 404 rendered by the app (an HTML NotFound page), never a Traefik
@@ -496,7 +504,11 @@ export async function checkUnknownPathNotFound(
     const responseTimeMs = elapsedMs(start);
     const contentType = res.headers.get('content-type') ?? '';
     const body = await res.text().catch(() => '');
-    if (res.status === 404 && contentType.includes('text/html')) {
+    if (
+      res.status === 404 &&
+      contentType.includes('text/html') &&
+      body.includes(APP_SHELL_MARKER)
+    ) {
       return {
         checkName: 'unknown_path_not_found',
         status: 'pass',
@@ -508,7 +520,10 @@ export async function checkUnknownPathNotFound(
       checkName: 'unknown_path_not_found',
       status: 'fail',
       responseTimeMs,
-      errorMessage: `Expected the app's HTML 404 for /rest/v1/, got ${res.status} ${contentType || 'without a content type'}`,
+      errorMessage:
+        res.status === 404 && contentType.includes('text/html')
+          ? `Got an HTML 404 for /rest/v1/ without the app shell (${APP_SHELL_MARKER}): something other than the app served it`
+          : `Expected the app's HTML 404 for /rest/v1/, got ${res.status} ${contentType || 'without a content type'}`,
       details: { httpStatus: res.status, contentType, body: body.slice(0, 256) },
     };
   } catch (err) {

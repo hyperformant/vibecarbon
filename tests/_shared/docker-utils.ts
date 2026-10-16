@@ -1,6 +1,31 @@
-import { type ExecSyncOptions, execSync } from 'node:child_process';
+import { type ExecSyncOptions, execFileSync, execSync } from 'node:child_process';
 import { createServer } from 'node:net';
+import { delimiter } from 'node:path';
 import { testConfig } from '../config.js';
+
+/**
+ * The compose file set `vibecarbon up` runs in dev for the project at
+ * `projectDir`, as a COMPOSE_FILE value. It asks the project's own
+ * scripts/lib/manifest.js getComposeFiles (what dev:start's docker-up.js
+ * uses: the base file, each enabled service file and its dev override, the
+ * main docker-compose.override.yml last), so a smoke test can never drive a
+ * stack no user runs. Joined with the platform's path delimiter, the
+ * separator compose reads COMPOSE_FILE with.
+ */
+export function devComposeFileEnv(projectDir: string): string {
+  const files = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        "const m = await import('./scripts/lib/manifest.js'); process.stdout.write(JSON.stringify(m.getComposeFiles(m.loadManifest())));",
+      ],
+      { cwd: projectDir, encoding: 'utf-8' },
+    ),
+  ) as string[];
+  return files.join(delimiter);
+}
 
 /**
  * Docker Testing Utilities

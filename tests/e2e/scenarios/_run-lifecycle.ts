@@ -1869,7 +1869,8 @@ export async function runLifecycle(
                   projectName: config.projectName,
                   label: 'primary',
                 }
-              : (missingDbHandle(sshCheckMasterIp, sshKeyPath) ?? 'no SSH handle'),
+              : // Non-null here: the condition above is exactly its null case.
+                (missingDbHandle(sshCheckMasterIp, sshKeyPath) as string),
           adminEmail: adminCreds.adminEmail,
           adminPassword: adminCreds.adminPassword,
           smtpConfigured: adminCreds.smtpConfigured,
