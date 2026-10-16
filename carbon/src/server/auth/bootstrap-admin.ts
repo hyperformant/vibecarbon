@@ -1,4 +1,4 @@
-import { and, eq, getTableColumns, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { adminDb, pool } from '../db/client';
 import { account, user } from '../db/schema';
 import { isSuperAdmin } from '../lib/auth';
@@ -165,25 +165,4 @@ async function passwordMatches(userId: string, password: string): Promise<boolea
   if (!hash) return false;
   const ctx = await auth.$context;
   return ctx.password.verify({ hash, password });
-}
-
-/**
- * Positive schema check for the bootstrap: every column of the tables it
- * writes (`user`, `account`, as declared in db/schema.ts, which is what
- * Better Auth inserts) exists. The startup loop waits on this instead of
- * retrying schema errors, so a database still being migrated is waited
- * for by its condition, not by guessing at error codes.
- */
-export async function adminSchemaReady(): Promise<{ ready: boolean; missing: string[] }> {
-  const wanted = [
-    ...Object.values(getTableColumns(user)).map((c) => `user.${c.name}`),
-    ...Object.values(getTableColumns(account)).map((c) => `account.${c.name}`),
-  ];
-  const { rows } = await adminDb.execute<{ col: string }>(
-    sql`select table_name || '.' || column_name as col from information_schema.columns
-      where table_schema = 'public' and table_name in ('user', 'account')`
-  );
-  const present = new Set(rows.map((r) => r.col));
-  const missing = wanted.filter((c) => !present.has(c));
-  return { ready: missing.length === 0, missing };
 }

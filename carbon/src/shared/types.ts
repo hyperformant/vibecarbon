@@ -305,7 +305,7 @@ export type Database = {
         };
         Relationships: [];
       };
-      // AI Visibility: raw crawler hits (migration 00008). Written only by the
+      // AI Visibility: raw crawler hits (schema.ts crawlerHits). Written only by the
       // server (adminDb); pruned after 90 days by pg_cron.
       crawler_hits: {
         Row: {

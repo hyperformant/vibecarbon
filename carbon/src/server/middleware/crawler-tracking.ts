@@ -32,7 +32,7 @@ import type { HonoVariables } from '../types';
  * SECURITY: no IP address and no other request header is stored — only the
  * crawler name, a bucketed path, and a truncated User-Agent. There is
  * deliberately no personal data here, so the table needs no retention story
- * beyond the prune in migration 00008.
+ * beyond the prune scheduled in db/migrations/0002_baseline_post.sql.
  */
 
 /** User-Agent values are attacker-controlled; cap what we persist. */

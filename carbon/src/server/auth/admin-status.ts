@@ -3,8 +3,10 @@
  * `adminReady` + `adminStatus` on `GET /api/health`, which is what
  * `vibecarbon deploy` waits for before calling a deploy done.
  *
- * - `pending`: waiting on a condition: the database unreachable, the auth
- *   tables not migrated yet, or a read-only standby without the admin row.
+ * - `pending`: waiting on a condition: the database unreachable, the
+ *   migrations not applied yet (or failed: then the bootstrap never runs,
+ *   and `migrationStatus` says why), or a read-only standby without the
+ *   admin row.
  *   The startup loop keeps checking (db/startup.ts).
  * - `ready`:   the admin exists with a password and can sign in.
  * - `skipped`: ADMIN_EMAIL / ADMIN_PASSWORD are not set. Terminal.

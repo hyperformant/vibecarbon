@@ -10,6 +10,9 @@ import { describe, expect, it } from 'vitest';
  * class cannot silently return in a future migration edit.
  */
 
+// The template's baseline: two custom SQL files around the one drizzle-kit
+// generates from carbon/src/server/db/schema.ts (policies are pgPolicy
+// entries there), so the guards below read what actually reaches Postgres.
 const MIGRATIONS_DIR = join(process.cwd(), 'carbon/db/migrations');
 
 function allMigrationsSql(): string {
@@ -89,11 +92,13 @@ describe('Auth tables are server-only', () => {
 
   it('enables RLS on every auth table and defines no policy on any', () => {
     for (const t of AUTH_TABLES) {
+      // drizzle-kit quotes every identifier; hand-written SQL may not.
+      const name = `"?${esc(t.replaceAll('"', ''))}"?`;
       expect(sql, `${t}: RLS not enabled`).toMatch(
-        new RegExp(`ALTER TABLE\\s+(?:public\\.)?${esc(t)}\\s+ENABLE ROW LEVEL SECURITY`, 'i'),
+        new RegExp(`ALTER TABLE\\s+(?:"?public"?\\.)?${name}\\s+ENABLE ROW LEVEL SECURITY`, 'i'),
       );
       expect(sql, `${t}: has a policy`).not.toMatch(
-        new RegExp(`CREATE POLICY[^;]*\\bON\\s+(?:public\\.)?${esc(t)}[\\s;]`, 'i'),
+        new RegExp(`CREATE POLICY[^;]*\\bON\\s+(?:"?public"?\\.)?${name}[\\s;]`, 'i'),
       );
     }
   });
@@ -124,12 +129,13 @@ describe('Auth tables are server-only', () => {
       ['notification_dismissals', 'user_id', 'CASCADE'],
       ['app_settings', 'updated_by', 'SET NULL'],
     ]) {
-      const body = sql.match(
-        new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n\\);`, 'i'),
-      )?.[1];
-      expect(body, `${table} not found`).toBeDefined();
-      expect(body, `${table}.${column}`).toMatch(
-        new RegExp(`\\b${column} UUID[^,\\n]*REFERENCES "user"\\(id\\) ON DELETE ${onDelete}`),
+      // drizzle-kit adds every foreign key as its own ALTER TABLE.
+      expect(sql, `${table}.${column}`).toMatch(
+        new RegExp(
+          `ALTER TABLE "${table}" ADD CONSTRAINT "\\w+" FOREIGN KEY \\("${column}"\\) ` +
+            `REFERENCES "public"\\."user"\\("id"\\) ON DELETE ${onDelete}`,
+          'i',
+        ),
       );
     }
   });
@@ -196,6 +202,6 @@ describe('RLS: SECURITY DEFINER RPC surface is locked down', () => {
   });
 
   it('the billing customers table has no client INSERT policy', () => {
-    expect(sql).not.toMatch(/CREATE POLICY[^;]*ON\s+customers\s+FOR INSERT/i);
+    expect(sql).not.toMatch(/CREATE POLICY[^;]*ON\s+"?customers"?\s+(?:AS \w+\s+)?FOR INSERT/i);
   });
 });

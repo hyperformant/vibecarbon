@@ -122,7 +122,7 @@ npm run test:prepush    # Lint + unit + component + integration
 # Docker
 npm run docker:up       # Start Supabase services
 npm run docker:down     # Stop services
-npm run db:migrate      # Run SQL migrations
+npm run db:migrate      # Apply pending migrations (the app also does at startup)
 ```
 
 ## Project Structure
@@ -164,8 +164,8 @@ content/
 ├── changelog/               # Changelog entries (MDX with version tags)
 └── docs/                    # Documentation pages (MDX with ordering)
 
-supabase/
-└── migrations/              # SQL migration files
+db/
+└── migrations/              # Drizzle migrations, applied by the app at startup
 ```
 
 </details>

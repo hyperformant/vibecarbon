@@ -2,19 +2,19 @@ import { existsSync } from 'node:fs';
 import { defineConfig } from 'drizzle-kit';
 import { resolveDbPort } from './src/server/db/port';
 
-// drizzle-kit is a schema tool here, not a migration runner. The SQL files in
-// db/migrations/ stay the source of truth (`npm run db:migrate` applies
-// them); src/server/db/schema.ts mirrors them for typed queries, and
-// tests/db/schema-drift.test.ts fails if the two disagree.
+// drizzle-kit writes the SQL migrations in db/migrations/ from
+// src/server/db/schema.ts; the app applies them at startup with drizzle-orm's
+// migrator (src/server/db/migrate.ts), ledger in drizzle.__drizzle_migrations.
+// AGENTS.md "Changing the database schema" has the workflow:
 //
-// Use it to introspect a migrated local database when writing a new table's
-// Drizzle definition:
+//   npx drizzle-kit generate --name <slug>            # tables, indexes, policies
+//   npx drizzle-kit generate --custom --name <slug>   # functions, triggers, cron
 //
-//   npx drizzle-kit pull     # writes ./drizzle/schema.ts, copy what you need
-//
-// Connection uses the same discrete DB_* vars as the server (no URL, so the
-// password never needs URL-encoding). Node's own loader reads .env.local, the
-// file `npm run dev:server` uses.
+// `generate` needs no database. The credentials below are only for commands
+// that connect (`drizzle-kit pull`, `studio`). Connection uses the same
+// discrete DB_* vars as the server (no URL, so the password never needs
+// URL-encoding). Node's own loader reads .env.local, the file
+// `npm run dev:server` uses.
 if (existsSync('.env.local')) process.loadEnvFile('.env.local');
 
 const host = process.env.DB_HOST ?? 'localhost';
@@ -22,7 +22,7 @@ const host = process.env.DB_HOST ?? 'localhost';
 export default defineConfig({
   dialect: 'postgresql',
   schema: './src/server/db/schema.ts',
-  out: './drizzle',
+  out: './db/migrations',
   schemaFilter: ['public'],
   dbCredentials: {
     host,

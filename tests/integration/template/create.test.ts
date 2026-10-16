@@ -256,14 +256,28 @@ describe('create-vibecarbon E2E', () => {
       }
     });
 
-    it('scaffolds every template migration and the seed file', () => {
-      // The whole of carbon/db/migrations, not just 00001: a scaffold missing
-      // later template migrations ships code whose schema never gets created
+    it('scaffolds the whole migration baseline (SQL + drizzle meta) and the seed file', () => {
+      // All of carbon/db/migrations, meta/ included: the app's migrator reads
+      // meta/_journal.json, and a scaffold missing a baseline file ships
+      // code whose schema never gets created
       // (docs/rca/2026-08-25-migration-drift.md).
-      const template = readdirSync(join(process.cwd(), 'carbon/db/migrations')).sort();
-      expect(template.length).toBeGreaterThan(1);
-      expect(readdirSync(join(projectDir(), 'db/migrations')).sort()).toEqual(template);
+      const dir = (root: string) => join(root, 'db/migrations');
+      const template = join(process.cwd(), 'carbon');
+      for (const sub of ['', 'meta']) {
+        const want = readdirSync(join(dir(template), sub)).sort();
+        expect(want.length).toBeGreaterThan(1);
+        expect(readdirSync(join(dir(projectDir()), sub)).sort()).toEqual(want);
+      }
       expect(existsSync(join(projectDir(), 'db/seed.sql'))).toBe(true);
+    });
+
+    it('leaves the template-only migrations census out of the project', () => {
+      expect(
+        existsSync(join(projectDir(), 'tests/structural/template-migrations-census.test.ts')),
+      ).toBe(false);
+      expect(existsSync(join(projectDir(), 'tests/structural/migrations-drift.test.ts'))).toBe(
+        true,
+      );
     });
 
     it('ships the test-seed scaffolding (tiered vitest setup + helpers)', () => {

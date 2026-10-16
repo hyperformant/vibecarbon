@@ -6,7 +6,7 @@ import type { HonoVariables } from '@server/types';
 import { asUser, connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
- * public.get_cron_jobs() (migration 00003): the admin Jobs page's schedule.
+ * public.get_cron_jobs() (db/migrations/0002_baseline_post.sql): the admin Jobs page's schedule.
  * Server-only, so no end-user role may call it.
  */
 describe.skipIf(!dbTestsEnabled)('get_cron_jobs()', () => {

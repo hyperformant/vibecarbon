@@ -262,10 +262,9 @@ describe('terminology census', () => {
     // It was a VITE_ prefixed build-time variable, so a revival lands in
     // carbon/src (the Vite app), not just the root CLI — the premise walk must
     // cover both or it proves nothing about the surface that would actually
-    // host it. Scoped to code directories on purpose: the name legitimately
-    // survives in a historical migration comment
-    // (carbon/db/migrations/00005_localization_languages.sql), which
-    // records the move away from the mechanism and must not trip this.
+    // host it. Scoped to code directories on purpose: docs and migration
+    // comments may still name it when they record the move away from the
+    // mechanism, and must not trip this.
     const codeFiles = [
       ...walkJsFiles(join(ROOT, 'src')),
       ...walkJsFiles(join(ROOT, 'carbon', 'src')),

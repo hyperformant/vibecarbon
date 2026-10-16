@@ -37,6 +37,26 @@ describe('getFilePolicy', () => {
     expect(getFilePolicy('README.md')).toBe('never');
   });
 
+  // After create, db/migrations is the project's own history (the app
+  // applies it at startup, ledger in drizzle.__drizzle_migrations). An
+  // upgrade that rewrote or added a migration would change what an applied
+  // ledger means, or replay the template's baseline over a live schema.
+  it('never touches db/migrations, the SQL or drizzle meta', () => {
+    for (const f of [
+      'db/migrations/0000_baseline_pre.sql',
+      'db/migrations/0001_baseline_schema.sql',
+      'db/migrations/0007_add_projects.sql',
+      'db/migrations/meta/_journal.json',
+      'db/migrations/meta/0001_snapshot.json',
+    ]) {
+      expect(getFilePolicy(f), f).toBe('never');
+    }
+  });
+
+  it('never ships the template-only migrations census or tests at all', () => {
+    expect(getFilePolicy('tests/structural/template-migrations-census.test.ts')).toBe('never');
+  });
+
   it('defaults unclassified paths to never', () => {
     expect(getFilePolicy('some-random-file.txt')).toBe('never');
     expect(getFilePolicy('docs/notes.md')).toBe('never');

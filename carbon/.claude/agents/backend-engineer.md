@@ -28,7 +28,8 @@ src/server/
 │   └── webhooks/        # Provider webhooks (Stripe)
 ├── db/
 │   ├── client.ts        # withUserDb (RLS as the caller) + adminDb (bypasses RLS)
-│   ├── schema.ts        # Drizzle table definitions (mirror the SQL migrations)
+│   ├── schema.ts        # The schema: tables, indexes, RLS policies (source of truth)
+│   ├── migrate.ts       # Applies db/migrations at app startup
 │   └── errors.ts        # dbErrorForLog — strip query params before logging
 ├── lib/
 │   ├── env.ts           # Environment configuration with Zod validation
@@ -44,7 +45,7 @@ src/shared/              # Shared TypeScript types between client and server
 - `docker-compose.yml` - Local dev with full Supabase stack
 - `docker-compose.prod.yml` - Production overlay
 - `k8s/` - Kubernetes manifests with Kustomize overlays (includes HA overlays for multi-region)
-- `db/migrations/` - SQL migration files
+- `db/migrations/` - Drizzle migrations (generated from schema.ts, plus `--custom` SQL), applied by the app at startup
 
 ### Database Access Rules (CRITICAL)
 - **`withUserDb(user.id, (tx) => ...)`** (`src/server/db/client.ts`): one transaction as role `app_user` with `app.user_id` set, so RLS scopes every statement. This is the default for anything done for a user; pass `null` for an anonymous visitor.
@@ -52,7 +53,7 @@ src/shared/              # Shared TypeScript types between client and server
 - **Never build SQL text from input.** Drizzle's query builder or the `sql` template only (values become bound parameters); never `sql.raw()` user input. RLS inside `withUserDb` catches logic mistakes, not injection.
 - **Log database errors as `{ err: dbErrorForLog(err) }`** and never log or return `err.message` of one: Drizzle puts the SQL and every bound value in it.
 - **No Supabase client on the server.** Auth is in-process (`src/server/auth/`, Better Auth); users live in `"user"`, reached through `adminDb` only in census-allowlisted files.
-- A new table needs its Drizzle definition in `src/server/db/schema.ts` (`tests/db/schema-drift.test.ts` checks it against the migrations).
+- Schema changes start in `src/server/db/schema.ts`; `npx drizzle-kit generate` writes the migration (`tests/structural/migrations-drift.test.ts` fails while one is missing). AGENTS.md "Changing the Database Schema" has the workflow.
 - NEVER expose the service role key to the client
 
 ### API Route Conventions
@@ -74,10 +75,10 @@ When your changes affect documented behavior, update the relevant `.md` files in
 ## Engineering Standards
 
 ### Database Migrations
-1. **Always create a new timestamped migration file**: `db/migrations/YYYYMMDDHHMMSS_descriptive_name.sql`
-2. **Every table MUST have RLS enabled in the SAME migration**: `ALTER TABLE table_name ENABLE ROW LEVEL SECURITY;` — user requests rely on it inside `withUserDb`, and PostgREST still serves `/rest/v1`, so an un-RLS'd `public` table is internet-readable/writable.
+1. **Edit `src/server/db/schema.ts`, then `npx drizzle-kit generate --name <slug>`**. Functions, triggers, grants, pg_cron schedules and seed rows go in `npx drizzle-kit generate --custom --name <slug>`. Never edit a migration that has been applied anywhere; the app applies new ones at startup.
+2. **Every table MUST have RLS enabled in the SAME migration**: `pgPolicy(...)` entries on the table in `schema.ts` (or `.enableRLS()` for a server-only table) — user requests rely on it inside `withUserDb`.
 3. **Every table MUST have appropriate RLS policies** restricting access via `(SELECT app.user_id())` (subquery form) and the org helpers. Every `UPDATE`/`INSERT` policy needs a `WITH CHECK` that mirrors the full scope of its `USING` (a narrower `WITH CHECK` on a tenant column = cross-tenant takeover). Role checks read the server-controlled `"user".role` column (`is_super_admin()` in SQL, `isSuperAdmin(user)` in TypeScript), never a field the user can write (`name`, `image`, `onboardingCompleted`).
-4. **Include both UP logic in the migration** - write migrations that are safe to re-run where possible
+4. **Migrations run once**, recorded in `drizzle.__drizzle_migrations`; all pending ones apply in one transaction
 5. **Add appropriate indexes** for columns used in WHERE clauses, JOINs, and ORDER BY
 6. **Use proper data types**: `uuid` for IDs (with `gen_random_uuid()` default), `timestamptz` for timestamps, `text` over `varchar` unless length constraint is meaningful
 7. **Add comments** explaining non-obvious design decisions

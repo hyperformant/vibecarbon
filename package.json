@@ -20,6 +20,7 @@
     "node:sync": "node scripts/sync-node-version.js",
     "node:check": "node scripts/sync-node-version.js --check",
     "db-image:build-local": "node scripts/db-image-build-local.mjs",
+    "template:db-baseline": "node scripts/template-db-baseline.mjs",
     "dev:stop": "node scripts/dev-stop.js",
     "lint": "node scripts/check-shell-safety.js && node scripts/check-stale-deploy-references.js && node scripts/check-paid-boundary.js && biome check src/ tests/ && tsc -p tsconfig.e2e.json",
     "docs:cli": "node scripts/gen-cli-docs.js",

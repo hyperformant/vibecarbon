@@ -15,8 +15,15 @@ vi.mock('@server/lib/logger', () => ({
 const { assertBypassRole, DbNotMigratedError, DbRoleError, pool } = await import(
   '@server/db/client'
 );
-const { checkDbRoleAtStartup, ensureAdminAtStartup, isConnectionLoss, isDbAuthFailure } =
-  await import('@server/db/startup');
+const {
+  checkDbRoleAtStartup,
+  ensureAdminAtStartup,
+  isConnectionLoss,
+  isDbAuthFailure,
+  migrateAtStartup,
+  startDatabase,
+} = await import('@server/db/startup');
+const { migrationFailureReason } = await import('@server/db/migration-status');
 
 function fakeLog() {
   return { fatal: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
@@ -169,6 +176,18 @@ describe('assertBypassRole', () => {
     expect(err.message).toMatch(/not a member of app_user/);
   });
 
+  // Before migrations: only the bypass half is checked, since the baseline
+  // is what creates app_user. A role RLS would scope is still refused.
+  it('with requireAppUser: false, accepts a bypass role before app_user exists', async () => {
+    const fresh = { ...ok, hasAppUser: false, member: false };
+    await expect(
+      assertBypassRole(executor(fresh), { requireAppUser: false })
+    ).resolves.toBeUndefined();
+    await expect(
+      assertBypassRole(executor({ ...fresh, bypass: false }), { requireAppUser: false })
+    ).rejects.toBeInstanceOf(DbRoleError);
+  });
+
   // Fresh deploy: the app can start before the migrations create app_user.
   // That is "not ready yet" (retry), never a fatal exit.
   it('reports a database without app_user as not migrated, which startup retries', async () => {
@@ -188,7 +207,6 @@ describe('assertBypassRole', () => {
 });
 
 describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only on conditions', () => {
-  const ready = async () => ({ ready: true, missing: [] });
   const run = (
     bootstrap: () => Promise<unknown>,
     extra: Partial<Parameters<typeof ensureAdminAtStartup>[0]> = {}
@@ -197,7 +215,6 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
     const log = fakeLog();
     const done = ensureAdminAtStartup({
       bootstrap: bootstrap as never,
-      schemaReady: ready,
       setStatus: (s) => statuses.push(s),
       log,
       retryMs: 0,
@@ -221,30 +238,6 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
     expect(bootstrap).toHaveBeenCalledTimes(4);
     expect(statuses).toEqual(['ready']);
     expect(log.warn).toHaveBeenCalledTimes(1); // once per outage, not per retry
-  });
-
-  it('waits for the schema by a positive check, re-logging the cause at error level', async () => {
-    let t = 0;
-    const schemaReady = vi
-      .fn()
-      .mockResolvedValueOnce({ ready: false, missing: ['account.password'] })
-      .mockResolvedValueOnce({ ready: false, missing: ['account.password'] })
-      .mockResolvedValueOnce({ ready: false, missing: ['account.password'] })
-      .mockResolvedValue({ ready: true, missing: [] });
-    const bootstrap = vi.fn().mockResolvedValue('unchanged');
-    const { done, log } = run(bootstrap, {
-      schemaReady,
-      relogMs: 60_000,
-      now: () => {
-        t += 40_000;
-        return t;
-      },
-    });
-    expect(await done).toBe('ready');
-    expect(bootstrap).toHaveBeenCalledTimes(1); // never tried against a half schema
-    expect(log.error.mock.calls.length).toBeGreaterThanOrEqual(1);
-    expect(log.error.mock.calls.length).toBeLessThan(3); // throttled, not per probe
-    expect(JSON.stringify(log.error.mock.calls[0])).toContain('account.password');
   });
 
   it('a refused bootstrap is terminal: reported, never retried', async () => {
@@ -273,21 +266,16 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
     expect(log.error).toHaveBeenCalledTimes(1); // the same cause re-logs only every relogMs
   });
 
-  // Fresh deploy: the loop waits on the schema (logged), then the first real
-  // failure arrives seconds later. It must reach the log tail at once, not
-  // wait out the schema line's 60 s throttle.
-  it('throttles per cause: a failure right after the schema wait is still logged', async () => {
+  // Two different causes in a row: the second must reach the log tail at
+  // once, not wait out the first one's throttle.
+  it('throttles per cause: a new failure right after another is still logged', async () => {
     let t = 0;
-    const schemaReady = vi
-      .fn()
-      .mockResolvedValueOnce({ ready: false, missing: ['user.role'] })
-      .mockResolvedValue({ ready: true, missing: [] });
     const bootstrap = vi
       .fn()
       .mockRejectedValueOnce(pgError('23502'))
+      .mockRejectedValueOnce(pgError('23505'))
       .mockResolvedValueOnce('created');
     const { done, log } = run(bootstrap, {
-      schemaReady,
       relogMs: 60_000,
       now: () => {
         t += 1000;
@@ -295,11 +283,7 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
       },
     });
     expect(await done).toBe('ready');
-    const messages = log.error.mock.calls.map((c) => String(c[1]));
-    expect(messages).toEqual([
-      expect.stringContaining('waiting for the auth tables'),
-      expect.stringContaining('bootstrap failed'),
-    ]);
+    expect(log.error).toHaveBeenCalledTimes(2);
   });
 
   it('a waiting state puts a stale failed back to pending', async () => {
@@ -340,5 +324,101 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
       expect(isConnectionLoss(pgError(code)), code).toBe(false);
     }
     expect(isConnectionLoss(new Error('nope'))).toBe(false);
+  });
+});
+
+describe('migrateAtStartup: migrations apply once, a failure is terminal', () => {
+  const pgError = (code: string) =>
+    new DrizzleQueryError('create table', [], Object.assign(new Error(`pg ${code}`), { code }));
+  const start = (run: () => Promise<unknown>) => {
+    const statuses: [string, string | undefined][] = [];
+    const log = fakeLog();
+    const done = migrateAtStartup({
+      run: run as never,
+      setStatus: (st, reason) => statuses.push([st, reason]),
+      log,
+      retryMs: 0,
+    });
+    return { done, statuses, log };
+  };
+
+  it('reports applied after a run', async () => {
+    const { done, statuses, log } = start(async () => ({ kind: 'applied', newlyApplied: 3 }));
+    expect(await done).toBe('applied');
+    expect(statuses).toEqual([['applied', undefined]]);
+    expect(log.info).toHaveBeenCalledWith({ applied: 3 }, 'Applied database migrations');
+  });
+
+  it('waits through connection loss (warning once), then applies', async () => {
+    const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(pgError('57P03'))
+      .mockResolvedValueOnce({ kind: 'applied', newlyApplied: 0 });
+    const { done, statuses, log } = start(run);
+    expect(await done).toBe('applied');
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(statuses).toEqual([['applied', undefined]]);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed migration is terminal: published with its SQLSTATE, logged once, never retried', async () => {
+    const run = vi.fn().mockRejectedValue(pgError('42P07'));
+    const { done, statuses, log } = start(run);
+    expect(await done).toBe('failed');
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual([['failed', 'SQLSTATE 42P07']]);
+    expect(log.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('a standby waits until its ledger has replicated', async () => {
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: 'standby', upToDate: false })
+      .mockResolvedValueOnce({ kind: 'standby', upToDate: false })
+      .mockResolvedValueOnce({ kind: 'standby', upToDate: true });
+    const { done, statuses } = start(run);
+    expect(await done).toBe('applied');
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(statuses).toEqual([['applied', undefined]]);
+  });
+
+  it('the public reason is the SQLSTATE only, never the message', () => {
+    const err = pgError('23505');
+    expect(migrationFailureReason(err)).toBe('SQLSTATE 23505');
+    expect(migrationFailureReason(new Error('duplicate key value (secret@example.com)'))).toBe(
+      'migration error (see the app log)'
+    );
+  });
+});
+
+describe('startDatabase: role check, then migrations, then the admin', () => {
+  it('runs the steps in order, the first role check without requiring app_user', async () => {
+    const order: string[] = [];
+    const checkRole = vi.fn(async (o?: { assert?: () => Promise<void> }) => {
+      order.push(o?.assert ? 'role(bypass)' : 'role(full)');
+    });
+    await startDatabase({
+      checkRole: checkRole as never,
+      migrate: async () => {
+        order.push('migrate');
+        return 'applied';
+      },
+      ensureAdmin: async () => {
+        order.push('admin');
+      },
+    });
+    expect(order).toEqual(['role(bypass)', 'migrate', 'role(full)', 'admin']);
+  });
+
+  it('stops after a failed migration: no admin bootstrap', async () => {
+    const ensureAdmin = vi.fn();
+    await startDatabase({
+      checkRole: vi.fn(async () => {}) as never,
+      migrate: async () => 'failed',
+      ensureAdmin,
+    });
+    expect(ensureAdmin).not.toHaveBeenCalled();
   });
 });

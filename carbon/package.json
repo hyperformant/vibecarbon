@@ -43,7 +43,7 @@
     "docker:reset:all": "node scripts/docker-down.js -v --rmi --all",
     "docker:prod:up": "node scripts/docker-up.js --prod",
     "docker:prod:down": "node scripts/docker-down.js --prod",
-    "db:migrate": "node scripts/db-migrate.js",
+    "db:migrate": "tsx scripts/db-migrate.ts",
     "db:reset": "node scripts/docker-down.js -v && node scripts/docker-up.js",
     "k8s:apply": "node scripts/k8s-apply.js",
     "k8s:delete": "node scripts/k8s-delete.js",

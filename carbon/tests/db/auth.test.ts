@@ -6,7 +6,6 @@ import { auth } from '@server/auth';
 import { adminStatusAfter } from '@server/auth/admin-status';
 import {
   ADMIN_BOOTSTRAP_LOCK_KEY,
-  adminSchemaReady,
   bootstrapAdmin,
   withAdminBootstrapLock,
 } from '@server/auth/bootstrap-admin';
@@ -542,7 +541,6 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       const replica = (i: number) =>
         ensureAdminAtStartup({
           bootstrap: () => bootstrapAdmin({ email, password: PASSWORD }),
-          schemaReady: adminSchemaReady,
           setStatus: (st) => statuses[i].push(st),
           log: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
           retryMs: 50,
@@ -556,10 +554,6 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
       );
       expect(rows[0].n).toBe(1);
       expect((await signIn(email, PASSWORD, '203.0.113.39')).status).toBe(200);
-    });
-
-    it('the schema check sees every column the bootstrap writes on a migrated database', async () => {
-      expect(await adminSchemaReady()).toEqual({ ready: true, missing: [] });
     });
 
     it("promotes the operator's own account when its password is ADMIN_PASSWORD", async () => {

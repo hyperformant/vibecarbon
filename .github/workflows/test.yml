@@ -330,6 +330,11 @@ jobs:
       - name: Write the dev .env
         run: node scripts/dev-init.js
 
+      # schema.ts and db/migrations agree (drizzle-kit generate writes
+      # nothing), and the template ships only its one baseline set.
+      - name: Check the migrations match schema.ts
+        run: npx vitest run --project unit tests/structural/migrations-drift.test.ts tests/structural/template-migrations-census.test.ts
+
       - name: Start db
         run: docker compose $COMPOSE_FILES up -d --wait db
         timeout-minutes: 10

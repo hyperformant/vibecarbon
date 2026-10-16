@@ -8,7 +8,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
 import { auth } from './auth';
 import { pool } from './db/client';
-import { checkDbRoleAtStartup, ensureAdminAtStartup } from './db/startup';
+import { startDatabase } from './db/startup';
 import { buildConnectSrc } from './lib/csp';
 import { isApiDocsEnabled } from './lib/docs-settings';
 import { env } from './lib/env';
@@ -20,6 +20,7 @@ import { applyAuthRateLimits } from './middleware/auth-rate-limits';
 import { apiCors } from './middleware/cors';
 import { crawlerTracking } from './middleware/crawler-tracking';
 import { csrfProtection } from './middleware/csrf';
+import { migrationsGate } from './middleware/migrations-gate';
 import { sessionMiddleware } from './middleware/session';
 import { servicesStatusRoutes } from './routes/_internal/services-status';
 import { verifyRoleRoutes } from './routes/_internal/verify-role';
@@ -115,6 +116,11 @@ app.use('*', timeout(30000));
 
 // Request logging
 app.use('*', honoLogger());
+
+// Nothing but /api/health is served until the database migrations are
+// applied (db/startup.ts migrateAtStartup). Before every middleware that
+// touches the database (crawler tracking, sessions).
+app.use('*', migrationsGate());
 
 // AI Visibility: record AI/search-crawler document fetches (fire-and-forget,
 // never awaited). Deliberately registered here — on '*' and BEFORE the /api/*
@@ -249,6 +255,15 @@ const openApiSpec = {
                     adminStatus: {
                       type: 'string',
                       enum: ['pending', 'ready', 'skipped', 'refused', 'failed'],
+                    },
+                    migrationStatus: {
+                      type: 'string',
+                      enum: ['pending', 'applied', 'failed'],
+                      description: 'Whether the database migrations are applied',
+                    },
+                    migrationError: {
+                      type: 'string',
+                      description: 'SQLSTATE of a failed migration (the app log has the error)',
                     },
                   },
                 },
@@ -573,7 +588,7 @@ if (process.env.NODE_ENV === 'production') {
 
 const port = env.DEV_API_PORT ?? env.PORT + env.DEV_PORT_OFFSET;
 
-// Login attempt cleanup is now handled by pg_cron (see migration 00003_pg_cron.sql)
+// Login attempt cleanup is handled by pg_cron (db/migrations/0002_baseline_post.sql)
 
 logger.info({ port }, 'Starting server');
 
@@ -583,11 +598,12 @@ const server = serve({
 });
 
 // Not awaited: the server must come up even while Postgres is still starting
-// (readiness reports it down meanwhile). It exits the process only if the
-// connection role turns out not to bypass RLS. Once the database answers,
-// ensure the ADMIN_EMAIL super admin exists, retrying transient errors
-// (db/startup.ts ensureAdminAtStartup, auth/bootstrap-admin.ts).
-void checkDbRoleAtStartup().then(() => ensureAdminAtStartup());
+// (readiness reports it down meanwhile, and the migrations gate answers 503).
+// Once the database answers: apply pending migrations, confirm the
+// connection role (the process exits if it does not bypass RLS), then ensure
+// the ADMIN_EMAIL super admin exists (db/startup.ts startDatabase). A failed
+// migration is terminal for this boot: /api/health reports it.
+void startDatabase();
 
 // Graceful shutdown handler - drain in-flight requests before exiting
 let isShuttingDown = false;

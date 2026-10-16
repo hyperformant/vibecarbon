@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { mountRoute } from '../../../_helpers/app';
 
 // The readiness check asks the DB module whether Postgres answers. pingDb
@@ -48,9 +48,44 @@ describe('GET /api/health', () => {
     expect(await read()).toMatchObject({ adminReady: false, adminStatus: 'refused' });
     setAdminStatus('pending');
   });
+
+  // `vibecarbon deploy` also waits for the migrations; a failure carries a
+  // SQLSTATE, never the error message.
+  it('reports the migrations: pending, applied, or failed with a SQLSTATE', async () => {
+    const { setMigrationStatus } = await import('@server/db/migration-status');
+    const read = async () =>
+      (await (await app.request('/api/health')).json()) as Record<string, unknown>;
+    expect(await read()).toMatchObject({ migrationStatus: 'pending' });
+    expect(await read()).not.toHaveProperty('migrationError');
+    setMigrationStatus('failed', 'SQLSTATE 42P07');
+    expect(await read()).toMatchObject({
+      migrationStatus: 'failed',
+      migrationError: 'SQLSTATE 42P07',
+    });
+    setMigrationStatus('applied');
+    const applied = await read();
+    expect(applied.migrationStatus).toBe('applied');
+    expect(applied).not.toHaveProperty('migrationError');
+    setMigrationStatus('pending');
+  });
+});
+
+describe('GET /api/health/ready before migrations', () => {
+  it('is 503 until the migrations are applied, without asking the database', async () => {
+    pingDb.mockClear();
+    const res = await app.request('/api/health/ready');
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ status: 'not_ready', migrationStatus: 'pending' });
+    expect(pingDb).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/health/ready', () => {
+  beforeAll(async () => {
+    const { setMigrationStatus } = await import('@server/db/migration-status');
+    setMigrationStatus('applied');
+  });
+
   it('returns 200 when the database answers', async () => {
     pingDb.mockResolvedValueOnce(UP);
     const res = await app.request('/api/health/ready');

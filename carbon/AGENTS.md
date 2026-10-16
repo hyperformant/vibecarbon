@@ -36,7 +36,7 @@ npm run test:prepush    # What the pre-push git hook runs
 npm run docker:up       # Start Supabase services
 npm run docker:down     # Stop services
 npm run docker:reset    # Remove containers, volumes, and built images
-npm run db:migrate      # Run SQL migrations
+npm run db:migrate      # Apply pending database migrations (the app also does at startup)
 ```
 
 ## Architecture
@@ -61,7 +61,7 @@ src/
 │   └── lib/                 # auth.ts (isSuperAdmin), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
 ├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
 content/                     # MDX content (blog/, changelog/, docs/)
-db/migrations/               # SQL migrations (run with npm run db:migrate)
+db/migrations/               # Drizzle migrations, applied by the app at startup (see Changing the Database Schema)
 ```
 
 ### API Routes
@@ -140,7 +140,7 @@ await adminDb.insert(items).values({ ... });
 - **Never build SQL text from input.** Use Drizzle's query builder or the `sql` template, which binds values as parameters. Never `sql.raw()` user input. RLS inside `withUserDb` catches logic mistakes (a missing `where`), not injection: injected SQL could `reset role`.
 - **Log database errors through `dbErrorForLog(err)`** (`src/server/db/errors.ts`), and never log or return `err.message` of one: Drizzle puts the SQL and every bound value (emails, tokens) in it. The logger strips them from `err`/`error` fields as a backstop.
 - **The server has no Supabase client.** Auth is the in-process auth API (`src/server/auth/`); users are rows in `"user"`, read and written through `adminDb` in the census-allowlisted files (the auth tables have no `app_user` privileges). The census fails on any `@supabase/supabase-js` import under `src/server`.
-- **New table**: add its Drizzle definition to `src/server/db/schema.ts`; `tests/db/schema-drift.test.ts` fails when it and the migrations disagree.
+- **Schema changes** start in `src/server/db/schema.ts` and become a migration with `npx drizzle-kit generate` (see Changing the Database Schema); `tests/structural/migrations-drift.test.ts` fails while a change has no migration.
 
 ## Key Patterns
 
@@ -166,15 +166,28 @@ Logo artwork lives in `src/client/assets/` and renders via `src/client/component
 
 Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt` text and the page/SEO titles.
 
-### Adding a Database Table
+### Changing the Database Schema
 
-1. Create migration in `db/migrations/` with:
-   - Table with `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`, `created_at`, `updated_at`
-   - Index on foreign key columns
-   - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` **in the same migration** (PostgREST still serves `/rest/v1`, so an un-RLS'd `public` table is public)
-   - RLS policies using `(SELECT app.user_id())` and the org helpers for user-scoped access, with `WITH CHECK` mirroring `USING` on every write policy (see `00001_init.sql` and Security Rules → Database Security)
-   - `update_updated_at()` trigger
-2. Run `npm run db:migrate`, add the table to `src/server/db/schema.ts` (Drizzle), and add API types to `src/shared/types.ts`
+`src/server/db/schema.ts` is the source of truth for tables, columns, constraints, indexes, foreign keys and RLS policies (`pgPolicy`, with `appUser` from the same file for `to: appUser`). `drizzle-kit` turns a change there into a SQL migration in `db/migrations/`, and **the app applies pending migrations itself at startup** (`src/server/db/migrate.ts`, under a Postgres advisory lock so replicas take turns, ledger in `drizzle.__drizzle_migrations`). Nothing else applies migrations: no deploy step, no psql. `npm run db:migrate` runs the same code locally. Until migrations are applied the server answers every route except `/api/health` with 503, and `/api/health` reports `migrationStatus` (`pending | applied | failed`); a failed migration is final for that boot, so fix it and restart.
+
+1. **Tables, columns, indexes, policies**: edit `schema.ts`, then
+   ```bash
+   npx drizzle-kit generate --name add_projects   # writes db/migrations/NNNN_add_projects.sql + meta/
+   ```
+   A new table needs: `id uuid().defaultRandom().primaryKey()`, `createdAt`/`updatedAt`, an index on every foreign key column, and RLS in the same migration: `pgPolicy` entries using `(SELECT app.user_id())` and the org helpers, with `withCheck` mirroring `using` on every write policy (see `organizations` and `memberships`, and Database Security below). Name constraints and indexes explicitly (`unique('projects_slug_key')`, `foreignKey({ name: 'projects_org_id_fkey', ... })`, `index('idx_projects_org_id')`).
+2. **Anything drizzle-kit cannot model** (functions, triggers such as `update_updated_at()`, grants and revokes, pg_cron schedules, seed rows, extensions):
+   ```bash
+   npx drizzle-kit generate --custom --name projects_triggers   # an empty migration to fill in
+   ```
+   Separate statements with `--> statement-breakpoint`. A `SECURITY DEFINER` function needs `SET search_path = ''` and, unless policies call it, `REVOKE EXECUTE ... FROM PUBLIC, app_user`.
+3. Start the app (or `npm run db:migrate`), add API types to `src/shared/types.ts`, and run `npm run test:prepush`.
+
+Rules:
+
+- **Never edit or delete a migration that has been applied anywhere** (deployed, or on a teammate's machine). The ledger records it as done, so an edit never runs; write a new migration instead.
+- **Renames**: `drizzle-kit generate` asks whether a column or table was renamed or dropped and re-created. Answer the prompt (a rename keeps the data), or write the `ALTER ... RENAME` in a `--custom` migration.
+- **Your `db/migrations/` is your project's own history.** It starts with the template's baseline (`0000_baseline_pre.sql`, `0001_baseline_schema.sql`, `0002_baseline_post.sql`) and grows with every `generate`. `vibecarbon upgrade` never writes to `db/migrations/**`, and a feature that brings tables (`vibecarbon add ...`) ships its schema as its own new migration appended to this history, never as an edit to an existing one.
+- `tests/structural/migrations-drift.test.ts` (in `test:prepush`) fails when `schema.ts` has a change with no migration: run `npx drizzle-kit generate`.
 
 ### Data Fetching (TanStack Query)
 
@@ -373,9 +386,9 @@ Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-spli
 
 ## Database Security (RLS)
 
-**Why this is load-bearing:** every user request's queries run through `withUserDb` as role `app_user`, and PostgREST still serves `public` tables at `/rest/v1` through Kong. RLS is what stands between one tenant's rows and another's (and the internet) — a missing or under-scoped policy is a live data breach, not a theoretical one. Enable RLS + write policies in the **same migration** that creates the table, before it ships.
+**Why this is load-bearing:** every user request's queries run through `withUserDb` as role `app_user`. RLS is what stands between one tenant's rows and another's — a missing or under-scoped policy is a live data breach, not a theoretical one. Enable RLS + write policies in the **same migration** that creates the table, before it ships.
 
-- **MUST** enable RLS on every new table: `ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;`
+- **MUST** enable RLS on every new table: give it `pgPolicy(...)` entries in `schema.ts` (which enables RLS), or `.enableRLS()` for a server-only table with no policies
 - **MUST** give every `UPDATE`/`INSERT` policy a `WITH CHECK` that mirrors the full scope of its `USING`. Postgres evaluates `USING` (which rows you may target) and `WITH CHECK` (what the row may become) **independently** — a `WITH CHECK` that drops the org/owner scope lets a user rewrite a row they can see into a tenant they cannot, a cross-tenant takeover. Never rely on the implicit `WITH CHECK = USING` default for a boundary column.
 - **MUST** use `(SELECT app.user_id())` in RLS policies, not bare `app.user_id()` — the subquery form prevents the query planner from re-evaluating per row. User requests run as role `app_user` with `app.user_id` set for the transaction (`NULL` when anonymous); `auth.uid()` is never set on that path, so a policy reading it silently matches nothing
 - **MUST** read roles in policies via `is_super_admin()`, which reads the caller's server-controlled `"user".role` (SECURITY DEFINER, since `app_user` cannot read the auth tables)

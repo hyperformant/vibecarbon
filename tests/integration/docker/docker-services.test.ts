@@ -223,96 +223,36 @@ describeDocker('Docker Services Smoke Test', () => {
   // =========================================================================
 
   describe('Migrations', () => {
-    it('can run database migrations', async ({ skip }) => {
+    // The generated project applies its migrations with drizzle-orm's
+    // migrator (carbon/src/server/db/migrate.ts): `npm run db:migrate` runs
+    // the same runMigrations() the app runs at startup. The first run applies
+    // the baseline, the second finds the ledger complete.
+    it('db:migrate applies the baseline once, then nothing', async ({ skip }) => {
       if (!portsAvailable) skip();
-      // Wait for database to be fully ready before running migrations
-      // (may be in a transient state from previous tests)
       const dbReady = await waitForPostgres(projectDir(), getExecEnv());
-      if (!dbReady) {
-        skip(); // Skip if db not ready (transient infrastructure issue)
-        return;
-      }
-
-      // Run migration directly (just 00001_init.sql) - may have partial failures
-      // when auth.* functions aren't available (db-only mode, no full Supabase)
-      let result = '';
-      try {
-        // Test file uses execSync for controlled test environment with known safe inputs
-        // This is a test environment with hardcoded commands - no user input
-        result = execSync(
-          'docker compose exec -T db psql -U postgres -d postgres -f /migrations/00001_init.sql',
-          {
-            cwd: projectDir(),
-            encoding: 'utf-8',
-            timeout: 30000,
-            env: getExecEnv(),
-          },
-        );
-      } catch (e) {
-        // Migration may fail on RLS policies that depend on auth.* functions
-        // This is expected when running with just db container (no full Supabase stack)
-        const error = e as { stderr?: string; stdout?: string; message?: string };
-        const output = (error.stderr || '') + (error.stdout || '') + (error.message || '');
-
-        // Skip if connection failed (db container not ready - infrastructure issue)
-        if (
-          output.includes('No such file or directory') ||
-          output.includes('connection refused') ||
-          output.includes('shutting down')
-        ) {
-          skip();
-          return;
-        }
-
-        // If the errors are only about auth functions, that's expected in db-only mode
-        if (
-          output.includes('auth.jwt()') ||
-          output.includes('auth.uid()') ||
-          output.includes('is_super_admin()')
-        ) {
-          // Expected failures in db-only mode - tables should still be created
-          result = output;
-        } else {
-          throw e;
-        }
-      }
-      // Migration ran (tables created via CREATE TABLE IF NOT EXISTS)
-      expect(result).toBeDefined();
+      if (!dbReady) throw new Error('Database not ready');
+      const migrate = () =>
+        execSync('npm run --silent db:migrate', {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          timeout: 120000,
+          env: getExecEnv(),
+        });
+      // A previous run against this volume may have applied it already.
+      const first = migrate();
+      expect(first).toMatch(/Applied \d+ database migration|Database migrations are up to date/);
+      expect(migrate()).toContain('Database migrations are up to date');
     });
 
-    it('migrations create expected tables', async ({ skip }) => {
+    it('migrations create the schema and the ledger', async ({ skip }) => {
       if (!portsAvailable) skip();
-      // Wait for database to be ready (may still be processing migrations)
-      const dbReady = await waitForPostgres(projectDir(), getExecEnv());
-      if (!dbReady) {
-        throw new Error('Database not ready');
-      }
-
-      // Check that the public schema has tables (after migration) with retries
-      let result = '';
-      let lastError: Error | null = null;
-      for (let i = 0; i < 3; i++) {
-        try {
-          // Test file uses execSync for controlled test environment with known safe inputs
-          result = execSync(
-            'docker compose exec -T db psql -U postgres -c "SELECT tablename FROM pg_tables WHERE schemaname = \'public\'"',
-            {
-              cwd: projectDir(),
-              encoding: 'utf-8',
-              timeout: 10000,
-              env: getExecEnv(),
-            },
-          );
-          break;
-        } catch (e) {
-          lastError = e as Error;
-          // Wait before retry
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-      }
-      if (!result && lastError) throw lastError;
-      // The initial migration should create at least some tables or the query should succeed
-      expect(result).toBeDefined();
+      const result = execSync(
+        `docker compose exec -T db psql -U postgres -tA -c "select (select count(*) from pg_tables where schemaname = 'public'), (select count(*) from drizzle.__drizzle_migrations)"`,
+        { cwd: projectDir(), encoding: 'utf-8', timeout: 10000, env: getExecEnv() },
+      );
+      const [tables, applied] = result.trim().split('|').map(Number);
+      expect(tables).toBeGreaterThan(10);
+      expect(applied).toBeGreaterThanOrEqual(3);
     });
   });
 

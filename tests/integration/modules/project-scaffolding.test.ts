@@ -146,8 +146,8 @@ describe('Project Scaffolding Integration', () => {
       expect(routesContent).toContain("import { isSuperAdmin } from '../../lib/auth'");
     });
 
-    it('init migration uses super_admin in RLS', () => {
-      const migrationPath = join(TEMPLATE_DIR, 'db/migrations/00001_init.sql');
+    it('the baseline migration uses super_admin in RLS', () => {
+      const migrationPath = join(TEMPLATE_DIR, 'db/migrations/0000_baseline_pre.sql');
       const content = readFileSync(migrationPath, 'utf-8');
 
       // Verify is_super_admin function checks for super_admin

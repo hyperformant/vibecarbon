@@ -375,6 +375,14 @@ function makeBiomeConfigRoot(biomeJsonPath) {
   if (updated !== content) writeFileSync(biomeJsonPath, updated);
 }
 
+/**
+ * Template tests that must not reach a generated project. The migrations
+ * census pins carbon/db/migrations to its one baseline set; a project's
+ * history grows normally, so the census would fail on its first
+ * `drizzle-kit generate`. Pinned by tests/unit/create/template-only-tests.test.ts.
+ */
+export const TEMPLATE_ONLY_TESTS = ['template-migrations-census.test.ts'];
+
 function copyTemplateDir(templateSubdir, destDir, variables, exclude = [], rawCopy = []) {
   const fullTemplatePath = join(TEMPLATE_DIR, templateSubdir);
 
@@ -805,7 +813,10 @@ async function bootstrap(cliArgs) {
   copyTemplate('vitest.config.ts', join(projectDir, 'vitest.config.ts'), variables);
   copyTemplate('tsconfig.test.json', join(projectDir, 'tsconfig.test.json'), variables);
   copyTemplate('TESTING.md', join(projectDir, 'TESTING.md'), variables);
-  copyTemplateDir('tests', join(projectDir, 'tests'), variables);
+  // Minus the template's own migrations census: it pins the template to its
+  // single baseline set, and a project's db/migrations grows with every
+  // `drizzle-kit generate` (TEMPLATE_ONLY_TESTS).
+  copyTemplateDir('tests', join(projectDir, 'tests'), variables, TEMPLATE_ONLY_TESTS);
   // Copy .env.example WITHOUT replacing placeholders (it's committed to git as documentation)
   const envExampleContent = readFileSync(join(TEMPLATE_DIR, '.env.example'), 'utf-8');
   writeFileSync(join(projectDir, '.env.example'), envExampleContent);
@@ -903,9 +914,9 @@ async function bootstrap(cliArgs) {
   // Blog content
   copyTemplateDir('content', join(projectDir, 'content'), variables);
 
-  // Database files: every migration (db/migrations/), seed.sql and the WAL-G
-  // Dockerfile. The whole directory, so a scaffold gets every template
-  // migration, not just 00001 (docs/rca/2026-08-25-migration-drift.md).
+  // Database files: the migration baseline (db/migrations/, with drizzle's
+  // meta/) and seed.sql. From here on db/migrations is the project's own
+  // history: the app applies it at startup, and upgrade never writes to it.
   copyTemplateDir('db', join(projectDir, 'db'), variables);
 
   // Kubernetes manifests (exclude optional features like n8n - they're added via `vibecarbon add`)

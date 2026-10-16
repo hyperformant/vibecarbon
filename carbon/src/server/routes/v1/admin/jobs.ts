@@ -39,9 +39,9 @@ jobsRoutes.use('*', requireSuperAdmin);
 /**
  * List the scheduled jobs with their latest outcome.
  *
- * The schedule comes from pg_cron through public.get_cron_jobs() (migration
- * 00003), so a job shows up before its first run. Run state comes from the
- * latest 100 history rows. If the schedule cannot be read, the error is
+ * The schedule comes from pg_cron through public.get_cron_jobs() (the
+ * baseline migration), so a job shows up before its first run. Run state
+ * comes from the latest 100 history rows. If the schedule cannot be read, the error is
  * logged and the list falls back to the jobs seen in history.
  */
 jobsRoutes.get('/', async (c) => {
@@ -163,10 +163,10 @@ jobsRoutes.post('/trigger', async (c) => {
         await adminDb.delete(cronJobHistory).where(lt(cronJobHistory.createdAt, thirtyDaysAgo));
       } else if (body.jobName === 'rollup-crawler-hits') {
         // The same idempotent SECURITY DEFINER function the nightly cron job
-        // runs (migration 00008). Null p_day = yesterday (UTC).
+        // runs (db/migrations/0002_baseline_post.sql). Null p_day = yesterday (UTC).
         await adminDb.execute(sql`select public.rollup_crawler_hits(${null}::date)`);
       } else if (body.jobName === 'cleanup-crawler-hits') {
-        // Mirrors the scheduled job in 00008: prune raw hits at 90 days AND the
+        // Mirrors the scheduled cleanup-crawler-hits job: prune raw hits at 90 days AND the
         // rollup at 400, so a manual run does the same work as the nightly one.
         const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
         const fourHundredDaysAgo = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)

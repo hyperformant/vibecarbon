@@ -47,7 +47,7 @@ When you are done, tear the stack down (`-v` drops the database volume):
 docker compose -f docker-compose.yml -f docker-compose.override.yml down -v
 ```
 
-The tier also runs the server's own DB module (`src/server/db/client.ts`) against that database: `tests/_helpers/setup-db.ts` copies the `TEST_DB_*` values into the `DB_*` vars the server reads, so a suite can import `adminDb` and `withUserDb` directly. `with-user-db.test.ts` proves the wrapper rolls back and releases its connection on error and leaks no role or user id to the next pooled query; `schema-drift.test.ts` fails when `src/server/db/schema.ts` and the migrated tables disagree.
+The tier also runs the server's own DB module (`src/server/db/client.ts`) against that database: `tests/_helpers/setup-db.ts` copies the `TEST_DB_*` values into the `DB_*` vars the server reads, so a suite can import `adminDb` and `withUserDb` directly. `with-user-db.test.ts` proves the wrapper rolls back and releases its connection on error and leaks no role or user id to the next pooled query; `migrations.test.ts` proves `runMigrations` is idempotent, serializes concurrent runs and leaves nothing behind when a migration fails. Whether `src/server/db/schema.ts` has a change with no migration is checked without a database, by `tests/structural/migrations-drift.test.ts` in the unit tier.
 
 `tests/db/_helpers.ts` has the pieces a new suite needs: `connectTestDb()`, `asUser(client, userId | null, fn)` (runs `fn` as `app_user` and always rolls back), `createTestUser`, `createOrgWithOwner`, `addMembership`, and `cleanupTestData`.
 

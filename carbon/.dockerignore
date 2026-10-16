@@ -48,7 +48,9 @@ volumes
 
 # Infrastructure & tooling (not needed in app image)
 k8s
-db
+# db/ except the migrations, which the app applies at startup
+db/*
+!db/migrations
 .claude
 .cursor
 .github

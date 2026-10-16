@@ -123,8 +123,15 @@ export class DbNotMigratedError extends Error {
  * deploy, migrations pending) throws `DbNotMigratedError` instead, and
  * connection failures propagate as they are: both mean "not ready yet",
  * which a caller retries, not "wrong role".
+ *
+ * `requireAppUser: false` checks the bypass half only: the startup check
+ * before migrations run, when `app_user` (created by the baseline) may not
+ * exist yet.
  */
-export async function assertBypassRole(db: Executor = adminDb): Promise<void> {
+export async function assertBypassRole(
+  db: Executor = adminDb,
+  opts: { requireAppUser?: boolean } = {}
+): Promise<void> {
   const { rows } = await db.execute<{
     role: string;
     bypass: boolean | null;
@@ -140,6 +147,7 @@ export async function assertBypassRole(db: Executor = adminDb): Promise<void> {
   const row = rows[0];
   const role = row?.role ?? env.DB_USER;
   if (!row?.bypass) throw new DbRoleError(role);
+  if (opts.requireAppUser === false) return;
   if (!row.hasAppUser) throw new DbNotMigratedError();
   if (!row.member) throw new DbRoleError(role, 'not-app-user-member');
 }

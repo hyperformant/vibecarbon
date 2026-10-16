@@ -5,8 +5,14 @@ import {
   setAdminStatus,
 } from '../auth/admin-status';
 import { logger } from '../lib/logger';
-import { assertBypassRole, DbRoleError } from './client';
+import { assertBypassRole, DbRoleError, pool } from './client';
 import { dbErrorForLog } from './errors';
+import { type MigrationOutcome, runMigrations, withDedicatedClient } from './migrate';
+import {
+  type MigrationStatus,
+  migrationFailureReason,
+  setMigrationStatus,
+} from './migration-status';
 
 interface StartupDeps {
   assert: () => Promise<void>;
@@ -53,7 +59,7 @@ export function isDbAuthFailure(err: unknown): boolean {
  * configuration error: log it as fatal and exit.
  *
  * A database that is not ready yet (the db container still starting, or
- * migrations not applied so `app_user` does not exist) is not: the server
+ * `app_user` missing because migrations have not run) is not: the server
  * keeps serving, `/api/health/ready` reports the db down, and this keeps
  * checking every `retryMs` until it gets an answer. Run it without
  * awaiting; it never rejects.
@@ -72,7 +78,7 @@ export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {})
   for (;;) {
     try {
       await assert();
-      log.info('Postgres connection role verified (bypasses RLS, member of app_user)');
+      log.info('Postgres connection role verified');
       return;
     } catch (err) {
       if (err instanceof DbRoleError) {
@@ -152,7 +158,6 @@ export function isReadOnlyDatabase(err: unknown): boolean {
 
 interface AdminStartupDeps {
   bootstrap: () => Promise<BootstrapResult>;
-  schemaReady: () => Promise<{ ready: boolean; missing: string[] }>;
   setStatus: (status: AdminStatus) => void;
   log: Pick<typeof logger, 'error' | 'info' | 'warn'>;
   retryMs: number;
@@ -165,7 +170,6 @@ const adminDefaults: AdminStartupDeps = {
   // Loaded lazily: the auth instance is heavy and this module is imported by
   // tests that never bootstrap.
   bootstrap: async () => (await import('../auth/bootstrap-admin')).bootstrapAdmin(),
-  schemaReady: async () => (await import('../auth/bootstrap-admin')).adminSchemaReady(),
   setStatus: setAdminStatus,
   log: logger,
   retryMs: defaults.retryMs,
@@ -174,14 +178,12 @@ const adminDefaults: AdminStartupDeps = {
 };
 
 /**
- * Ensure the ADMIN_EMAIL super admin exists, as the second half of startup:
- * call it once checkDbRoleAtStartup has confirmed the database answers and is
- * migrated. Never rejects; run it without awaiting. Every wait below runs on
- * the startup loop's cadence (`retryMs`).
+ * Ensure the ADMIN_EMAIL super admin exists, as the last step of startup:
+ * call it once migrations are applied (migrateAtStartup) and
+ * checkDbRoleAtStartup has confirmed the role, so every table the bootstrap
+ * writes exists. Never rejects; run it without awaiting. Every wait below
+ * runs on the startup loop's cadence (`retryMs`).
  *
- * - Waits for a positive schema check (adminSchemaReady: every column the
- *   bootstrap writes exists) before trying, so a migration still running is
- *   waited for by its condition, not by retrying schema errors.
  * - Waits through connection loss (isConnectionLoss), warning once.
  * - Waits while the database is a read-only replica (SQLSTATE 25006, a
  *   compose-ha standby that has no admin row yet): the status stays
@@ -190,22 +192,21 @@ const adminDefaults: AdminStartupDeps = {
  * - Any other error publishes `failed` (so a deploy stops with a reason) and
  *   keeps retrying, so fixing the cause recovers without a restart.
  *
- * While waiting on the schema or on a persistent error, the cause is logged
- * at error level again every `relogMs`, so it reaches a deploy's log tail.
+ * While a persistent error lasts, the cause is logged at error level again
+ * every `relogMs`, so it reaches a deploy's log tail.
  * Settled outcomes (ready, skipped, refused) end the loop.
  */
 export async function ensureAdminAtStartup(
   overrides: Partial<AdminStartupDeps> = {}
 ): Promise<AdminStatus> {
-  const { bootstrap, schemaReady, setStatus, log, retryMs, relogMs, now } = {
+  const { bootstrap, setStatus, log, retryMs, relogMs, now } = {
     ...adminDefaults,
     ...overrides,
   };
   let warnedConnection = false;
   let notedReadOnly = false;
   // Throttled per cause: the first occurrence of each distinct cause always
-  // logs at error level, repeats every relogMs. One shared timer would let a
-  // schema-wait line swallow the first real failure right after it.
+  // logs at error level, repeats every relogMs.
   const loggedAt = new Map<string, number>();
   const relog = (cause: string, fields: object, message: string) => {
     const last = loggedAt.get(cause);
@@ -230,17 +231,6 @@ export async function ensureAdminAtStartup(
 
   for (;;) {
     try {
-      const schema = await schemaReady();
-      if (!schema.ready) {
-        waiting();
-        relog(
-          'schema',
-          { missing: schema.missing },
-          'Super admin bootstrap is waiting for the auth tables; run the database migrations'
-        );
-        await pause();
-        continue;
-      }
       const result = await bootstrap();
       const status = adminStatusAfter(result);
       publish(status);
@@ -281,4 +271,107 @@ export async function ensureAdminAtStartup(
       await pause();
     }
   }
+}
+
+interface MigrateStartupDeps {
+  run: () => Promise<MigrationOutcome>;
+  setStatus: (status: MigrationStatus, reason?: string) => void;
+  log: Pick<typeof logger, 'error' | 'info' | 'warn'>;
+  retryMs: number;
+}
+
+const migrateDefaults: MigrateStartupDeps = {
+  run: () => withDedicatedClient(pool, (client) => runMigrations(client)),
+  setStatus: setMigrationStatus,
+  log: logger,
+  retryMs: defaults.retryMs,
+};
+
+/**
+ * Apply pending database migrations (db/migrate.ts runMigrations) and
+ * publish the outcome for /api/health and the migrations gate. Never
+ * rejects; resolves with the final status.
+ *
+ * - Waits through connection loss (isConnectionLoss, the same narrow
+ *   dependency wait as the admin bootstrap), warning once. The run is one
+ *   transaction, so a dropped connection leaves nothing half-applied.
+ * - On a standby, waits until replication has brought the ledger up to date
+ *   (the primary applies migrations), then reports `applied`.
+ * - Any other error is a failed migration: logged at error level, published
+ *   as `failed` with its SQLSTATE, and terminal for this boot. No retry: the
+ *   same SQL fails the same way until someone fixes it and restarts the app.
+ */
+export async function migrateAtStartup(
+  overrides: Partial<MigrateStartupDeps> = {}
+): Promise<MigrationStatus> {
+  const { run, setStatus, log, retryMs } = { ...migrateDefaults, ...overrides };
+  let warnedConnection = false;
+  let notedStandby = false;
+  const pause = () => new Promise((resolve) => setTimeout(resolve, retryMs));
+  for (;;) {
+    try {
+      const outcome = await run();
+      if (outcome.kind === 'standby' && !outcome.upToDate) {
+        if (!notedStandby) {
+          log.info("The database is a standby; waiting for the primary's migrations to replicate");
+          notedStandby = true;
+        }
+        await pause();
+        continue;
+      }
+      setStatus('applied');
+      if (outcome.kind === 'applied' && outcome.newlyApplied > 0) {
+        log.info({ applied: outcome.newlyApplied }, 'Applied database migrations');
+      } else {
+        log.info('Database migrations are up to date');
+      }
+      return 'applied';
+    } catch (err) {
+      if (isConnectionLoss(err)) {
+        if (!warnedConnection) {
+          log.warn(
+            { err: dbErrorForLog(err) },
+            'Database migrations are waiting for the database connection'
+          );
+          warnedConnection = true;
+        }
+        await pause();
+        continue;
+      }
+      const reason = migrationFailureReason(err);
+      setStatus('failed', reason);
+      log.error(
+        { err: dbErrorForLog(err) },
+        'Database migrations failed; the app serves only /api/health until the migration is ' +
+          'fixed and the app restarted'
+      );
+      return 'failed';
+    }
+  }
+}
+
+interface DatabaseStartupDeps {
+  checkRole: typeof checkDbRoleAtStartup;
+  migrate: () => Promise<MigrationStatus>;
+  ensureAdmin: () => Promise<unknown>;
+}
+
+/**
+ * The app's database startup, in order: wait until Postgres answers as a
+ * role that bypasses RLS, apply migrations, confirm the role is a member of
+ * the `app_user` the baseline creates, then bootstrap the super admin. A
+ * failed migration stops the sequence (the admin bootstrap never runs
+ * against a half-known schema). Never rejects; run it without awaiting.
+ */
+export async function startDatabase(overrides: Partial<DatabaseStartupDeps> = {}): Promise<void> {
+  const { checkRole, migrate, ensureAdmin } = {
+    checkRole: checkDbRoleAtStartup,
+    migrate: () => migrateAtStartup(),
+    ensureAdmin: () => ensureAdminAtStartup(),
+    ...overrides,
+  };
+  await checkRole({ assert: () => assertBypassRole(undefined, { requireAppUser: false }) });
+  if ((await migrate()) !== 'applied') return;
+  await checkRole();
+  await ensureAdmin();
 }

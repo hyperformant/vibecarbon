@@ -232,7 +232,6 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./volumes/db/wal-archive.sh:/etc/postgresql/wal-archive.sh:ro,Z
-      - ./db/migrations:/migrations:ro
     networks:
       - vibecarbon-network
 
