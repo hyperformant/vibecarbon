@@ -11,9 +11,31 @@
  * carbon/.windsurfrules, carbon/.cursor/**). File PATHS count too, so a
  * renamed directory cannot carry the old name.
  *
- * Match rule: case-insensitive, and the term may not sit inside a longer
- * alphanumeric word (`hongkong` is fine, `SUPABASE_URL` and `gotrue-1` are
- * not, because `_` and `-` count as boundaries).
+ * Match rule, built so camelCase and SCREAMING_CASE identifiers cannot hide
+ * a term (`createSupabaseClient`, `gotrueUrl`, `anonKey`, `serviceRoleKey`,
+ * `SUPABASE_URL` all hit):
+ *   - supabase, gotrue, postgrest, supavisor, pgbouncer: matched anywhere,
+ *     case-insensitive. They are distinctive enough that no English word or
+ *     unrelated identifier contains them.
+ *   - anon key, service role key, realtime secret: matched anywhere,
+ *     case-insensitive, with an optional `_`/`-` between the parts. `anonkey`
+ *     is not matched right after a `c` (`canonKey`).
+ *   - kong: a short word that real words contain (`Hongkong`, `kongsberg`),
+ *     so it needs a boundary that still understands camelCase. Three rules:
+ *     (a) case-insensitive `kong` with no letter or digit before it and no
+ *     letter after it (`kong`, `KONG_URL`, `kong-proxy`); (b) case-sensitive
+ *     `Kong` with no lowercase letter after it (`KongPlugin`, `getKong`,
+ *     `useKong()`); (c) case-sensitive `kong` with no letter or digit before
+ *     it and an uppercase letter after it (`kongPlugin`). `Hongkong` and
+ *     `kongsberg` pass every rule (a lowercase letter follows); `HongKong`
+ *     would hit rule (b), an accepted false positive.
+ *
+ * Not enforced, on purpose: `service_role` (the secret scanner's JWT claim
+ * check and the RLS foreign-role test name it legitimately), `studio`
+ * (Drizzle Studio is a real tool here, and a future add-on may be one),
+ * `pooler` and `realtime` (ordinary words; a future `vibecarbon add
+ * realtime` would use the second). Their stale product uses were swept by
+ * hand.
  *
  * Exemptions, kept minimal:
  *   - HISTORICAL: records of what happened, which must keep the names they
@@ -36,18 +58,14 @@ import { describe, expect, it } from 'vitest';
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 const SELF = 'tests/unit/lib/terminology-census.test.ts';
 
-const TERMS = [
-  'supabase',
-  'gotrue',
-  'postgrest',
-  'kong',
-  'supavisor',
-  'anon_key',
-  'service_role_key',
-  'pgbouncer',
-  'realtime_secret',
+const TERM_PATTERNS = [
+  /supabase|gotrue|postgrest|supavisor|pgbouncer/i,
+  /(?<!c)anon[_-]?key|service[_-]?role[_-]?key|realtime[_-]?secret/i,
+  /(?<![a-z0-9])kong(?![a-z])/i,
+  /Kong(?![a-z])/,
+  /(?<![A-Za-z0-9])kong(?=[A-Z])/,
 ];
-const TERM_RE = new RegExp(`(?<![a-z0-9])(?:${TERMS.join('|')})(?![a-z0-9])`, 'i');
+const hasTerm = (text: string) => TERM_PATTERNS.some((re) => re.test(text));
 
 const HISTORICAL_PREFIXES = [
   'CHANGELOG.md',
@@ -84,10 +102,10 @@ function offenders(sources: Source[]): string[] {
   const out: string[] = [];
   for (const { rel, text } of sources) {
     if (isExempt(rel)) continue;
-    if (TERM_RE.test(rel)) out.push(`${rel} (path)`);
+    if (hasTerm(rel)) out.push(`${rel} (path)`);
     const allowed = new Set(LINES.filter((l) => l.file === rel).map((l) => l.line));
     text.split('\n').forEach((line, i) => {
-      if (!TERM_RE.test(line)) return;
+      if (!hasTerm(line)) return;
       if (allowed.has(line.trim())) return;
       out.push(`${rel}:${i + 1}: ${line.trim().slice(0, 160)}`);
     });
@@ -145,7 +163,7 @@ describe('terminology census: the retired stack vocabulary', () => {
         lines.filter((l) => l === line),
         `${file}: the exempt line is gone or duplicated`,
       ).toHaveLength(1);
-      expect(TERM_RE.test(line), `${file}: the exempt line no longer needs exempting`).toBe(true);
+      expect(hasTerm(line), `${file}: the exempt line no longer needs exempting`).toBe(true);
     }
   });
 
@@ -158,13 +176,64 @@ describe('terminology census: the retired stack vocabulary', () => {
       { rel: 'src/other.js', text: LINES[0].line },
       { rel: 'docs/rca/2026-01-01-x.md', text: 'PostgREST served a stale schema cache' },
       { rel: 'CHANGELOG.md', text: 'Removed Supavisor' },
-      { rel: 'docs/places.md', text: 'hongkong, kongress, supabased are other words' },
+      {
+        rel: 'docs/places.md',
+        text: 'Hongkong, hongkong, kongress, kongsberg, canonKey are other words',
+      },
+      { rel: 'carbon/src/a.ts', text: 'const c = createSupabaseClient(url);' },
+      { rel: 'carbon/src/b.ts', text: 'type P = KongPlugin; const g = gotrueUrl;' },
+      { rel: 'carbon/src/c.ts', text: 'const k = { anonKey, serviceRoleKey };' },
+      { rel: 'carbon/src/d.ts', text: 'getK8sSupabaseUserData(); kongPlugin(); SupabaseProvider' },
+      { rel: 'carbon/src/e.ts', text: 'REALTIME_SECRET=x KONG_URL=y' },
     ]);
     expect(planted).toEqual([
       'docs/technical.md:2: The Kong gateway routes /rest',
       'carbon/src/server/x.ts:1: const url = env.SUPABASE_URL;',
       'carbon/k8s/gitops/gotrue/kustomization.yaml (path)',
       `src/other.js:1: ${LINES[0].line}`,
+      'carbon/src/a.ts:1: const c = createSupabaseClient(url);',
+      'carbon/src/b.ts:1: type P = KongPlugin; const g = gotrueUrl;',
+      'carbon/src/c.ts:1: const k = { anonKey, serviceRoleKey };',
+      'carbon/src/d.ts:1: getK8sSupabaseUserData(); kongPlugin(); SupabaseProvider',
+      'carbon/src/e.ts:1: REALTIME_SECRET=x KONG_URL=y',
     ]);
+  });
+
+  it('each match rule catches its own spellings and spares look-alike words', () => {
+    const hits = [
+      'createSupabaseClient',
+      'SupabaseProvider',
+      'getK8sSupabaseUserData',
+      'SUPABASE_URL',
+      'gotrueUrl',
+      'PostgRESTError',
+      'supavisorPool',
+      'PGBOUNCER_HOST',
+      'anonKey',
+      'ANON_KEY',
+      'anon-key',
+      'serviceRoleKey',
+      'SERVICE_ROLE_KEY',
+      'realtimeSecret',
+      'REALTIME_SECRET',
+      'kong',
+      'KONG_URL',
+      'kong-proxy',
+      'KongPlugin',
+      'getKong()',
+      'kongPlugin',
+      'the Kong gateway',
+    ];
+    const spared = [
+      'Hongkong',
+      'hongkong',
+      'kongsberg',
+      'Kongsberg',
+      'KONGSBERG',
+      'canonKey',
+      'service_role',
+    ];
+    expect(hits.filter((t) => !hasTerm(t))).toEqual([]);
+    expect(spared.filter((t) => hasTerm(t))).toEqual([]);
   });
 });

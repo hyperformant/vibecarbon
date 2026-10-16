@@ -383,7 +383,9 @@ describe('Session cookies: the split-cookie contract holds', () => {
   it('the SPA keeps no session of its own: no client code handles a session token', () => {
     for (const [rel, src] of clientSources) {
       expect(
-        /\b(?:access|refresh)_?token\b/i.test(src),
+        // Unbounded on purpose: catches access_token, ACCESS_TOKEN and
+        // camelCase getAccessToken / setRefreshToken alike.
+        /(?:access|refresh)[_-]?token/i.test(src),
         `${rel} handles an access or refresh token. Sessions are HttpOnly cookies ` +
           'the auth API sets; page JS must never hold a session or refresh token.'
       ).toBe(false);

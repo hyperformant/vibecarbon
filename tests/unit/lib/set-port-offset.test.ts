@@ -8,7 +8,7 @@ import { setComposeProjectName, setPortOffset } from '../../../src/up.js';
 /**
  * DEV_PORT_OFFSET and its client-visible twin VITE_DEV_PORT_OFFSET must be
  * written in lockstep: vite only exposes VITE_-prefixed vars, and the admin
- * panel's service links need the offset to build `studio.localhost:<80+n>`
+ * panel's service links need the offset to build `traefik.localhost:<80+n>`
  * (RCA 2026-07-17: port-less links sent swim2's admin panel into the OTHER
  * project's traefik on :80).
  *
