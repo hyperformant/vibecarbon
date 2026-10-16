@@ -66,6 +66,15 @@ Compose's default `pull_policy: missing` then uses the local image without
 contacting the registry, so a generated project's `vibecarbon up` (and
 `pnpm test:docker`) run against it. Nothing is pushed.
 
+The local image **shadows the registry image** under the same tag: once that
+tag is published, this machine still runs your local build and never pulls the
+published one, until you remove it. The build prints this reminder. When you
+are done testing:
+
+```bash
+pnpm db-image:remove-local  # removes the local DB_IMAGE:DB_IMAGE_TAG; the next start pulls
+```
+
 ### The dev channel
 
 Servers pull from ghcr, so real infrastructure needs a published image. A

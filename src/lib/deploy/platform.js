@@ -38,10 +38,12 @@
  *
  * ## The one arm64 image: the db image, for local development only
  *
- * ghcr.io/hyperformant/postgres (docker/postgres-walg) is ALSO published for
- * linux/arm64, built natively on GitHub's arm64 runner, solely so that local
+ * ghcr.io/hyperformant/postgres (docker/postgres-walg) is built for
+ * linux/arm64 as well, natively on GitHub's arm64 runner, solely so that local
  * `vibecarbon up` on an Apple Silicon machine runs Postgres natively (every
- * mode pulls that image, local dev included). Servers remain amd64: nothing
+ * mode pulls that image, local dev included). The arm64 child is published
+ * from the next release: no tag published before it carries one. (The wal-g
+ * image it copies from is built the same way.) Servers remain amd64: nothing
  * here or in the provider ARM rejection changes, and no server ever pulls the
  * arm64 child.
  */

@@ -11,6 +11,12 @@
  *
  * Local only: never pushes. For the native platform only, which is what the
  * local daemon runs.
+ *
+ * The local image SHADOWS the registry image: it carries the exact ref the
+ * published image will have, so once that tag is published this machine keeps
+ * running the local build instead of pulling it, until the local image is
+ * removed. `pnpm db-image:remove-local` (scripts/db-image-remove-local.mjs)
+ * removes it. The script says so after every successful build.
  */
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -26,5 +32,18 @@ const res = spawnSync('docker', ['build', '-t', ref, join(root, 'docker', 'postg
 if (res.error) {
   console.error(res.error.message);
   process.exit(1);
+}
+if (res.status === 0) {
+  console.log(
+    [
+      '',
+      `Built ${ref} locally.`,
+      `It shadows the registry image with the same tag: this machine's db containers`,
+      `run this local build, and never pull the published ${ref},`,
+      'until you remove it:',
+      '',
+      '  pnpm db-image:remove-local',
+    ].join('\n'),
+  );
 }
 process.exit(res.status ?? 1);

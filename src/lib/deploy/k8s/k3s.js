@@ -1290,7 +1290,8 @@ const SUPABASE_HELM_TIMEOUT = '15m';
 
 /**
  * Components whose images the pre-pull skips: `db` is vibecarbon's own
- * wal-g image (built + sideloaded, never pulled from a registry), and the
+ * published db image (resolveDbImageTag, pulled from ghcr by the kubelet when
+ * the db pod starts; never built or sideloaded), and the
  * rest are disabled in carbon/k8s/values/supabase.values.yaml
  * (deployment.<comp>.enabled: false) so their pods never exist. A unit
  * drift-guard (k3s-prepull-images.test.ts) keeps this list in lockstep with
