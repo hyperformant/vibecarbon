@@ -213,6 +213,26 @@ describe('the db image builds natively per arch and merges into one tag', () => 
     expect(smoke).toMatch(/CREATE EXTENSION pg_cron/);
   });
 
+  it('the environment is an input with an empty default, used by both jobs', () => {
+    const wf = workflowOf('.github/workflows/native-multiarch-image.yml');
+    const call = (wf.on as { workflow_call: { inputs: Record<string, { default?: unknown }> } })
+      .workflow_call;
+    expect(call.inputs.environment.default).toBe('');
+    expect(call.inputs.immutable.default).toBe(false);
+    for (const job of [build, merge]) {
+      expect((job as Job & { environment?: string }).environment).toBe(expr('inputs.environment'));
+    }
+  });
+
+  it('an immutable tag is re-checked right before create and never moved', () => {
+    const run = runsOf(merge);
+    expect(run.indexOf('if [ "$IMMUTABLE" = true ]')).toBeGreaterThan(-1);
+    expect(run.indexOf('if [ "$IMMUTABLE" = true ]')).toBeLessThan(
+      run.indexOf('docker buildx imagetools create'),
+    );
+    expect(run).toMatch(/grep -q 'not found'/);
+  });
+
   it('the merge job creates the tag from both digests, then verifies and smokes it', () => {
     expect(merge.needs).toBe('build');
     const run = runsOf(merge);
@@ -241,7 +261,9 @@ describe('the release db publish is unchanged by the dev channel', () => {
       image: expr('needs.db-ref.outputs.image'),
       tag: expr('needs.db-ref.outputs.tag'),
       smoke: SMOKE,
+      environment: 'e2e-infra',
     });
+    expect(build.with?.immutable).toBeUndefined();
     expect(build.with?.['build-contexts']).toBeUndefined();
     // Anchored on DB_IMAGE itself: DEV_DB_IMAGE must never satisfy the grep.
     const ref = runsOf(wf.jobs['db-ref']);
@@ -289,13 +311,30 @@ describe('the db image dev channel (publish-db-image-dev.yml)', () => {
     expect(plan).toMatch(/DEV_TAG="\$TAG-\$\{SHA:0:\$LEN\}"/);
     expect(plan).toMatch(/SHA=\$\(git log -1 --format=%H HEAD -- /);
     expect(build.if).toMatch(/needs\.plan\.outputs\.exists != 'true'/);
+    expect(build.with?.immutable).toBe(true);
+    // Two runs for one tag queue rather than race imagetools create.
+    expect((build as CallerJob & { concurrency?: unknown }).concurrency).toEqual({
+      group: `publish-db-image-dev-${expr('needs.plan.outputs.tag')}`,
+      'cancel-in-progress': false,
+    });
+    // Dev needs no e2e-infra secrets: the shared jobs run with no environment.
+    expect(build.with?.environment).toBeUndefined();
     expect(wf.jobs['build-walg'] as CallerJob).toMatchObject({
       if: expect.stringMatching(/needs\.plan\.outputs\.walg-changed == 'true'/),
     });
   });
 
-  it('the plan pathspec is the e2e harness pathspec', async () => {
+  it('the plan pathspec and the push trigger paths are the e2e harness pathspec', async () => {
     const { DB_IMAGE_INPUT_PATHSPEC } = await import('../../e2e/utils/db-image-select.js');
+    expect(DB_IMAGE_INPUT_PATHSPEC).toContain('src/lib/images.js');
+    const asTrigger = DB_IMAGE_INPUT_PATHSPEC.map((p: string) =>
+      p.startsWith(':(exclude)')
+        ? `!${p.slice(':(exclude)'.length)}`
+        : p.endsWith('.js')
+          ? p
+          : `${p}/**`,
+    );
+    expect((wf.on.push as { paths: string[] }).paths).toEqual(asTrigger);
     const quoted = DB_IMAGE_INPUT_PATHSPEC.map((p: string) =>
       p.startsWith(':') ? `'${p}'` : p,
     ).join(' ');

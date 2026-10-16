@@ -90,6 +90,10 @@ const ALLOWLIST = new Set([READER, REGISTRY]);
 const ALIAS_ALLOWLIST: Record<string, string> = {
   'backup.js':
     'passes the whole env to a child-process runner (env: process.env), a spawn bag not a read',
+  'cli.js':
+    'checkDbImageOverride({ env }) reads env.VIBECARBON_DB_IMAGE only, to validate it before dispatch',
+  'up.js':
+    'devStartEnv(base) is the dev:start child env bag (a spawn bag), plus the resolved db image',
   'telemetry.js':
     'injectable env for the telemetry status command; reads CI/DO_NOT_TRACK/VIBECARBON_TELEMETRY_DISABLED only',
   [join('lib', 'command.js')]:

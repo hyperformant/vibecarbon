@@ -38,6 +38,7 @@ describe('selectE2EDbImage', () => {
     expect(err.message).toMatch(
       /dev image for 0123456789ab not published yet .*push the branch and wait for publish-db-image-dev, or set VIBECARBON_DB_IMAGE/,
     );
+    expect(err.message).toMatch(/gh workflow run publish-db-image-dev\.yml --ref <branch>/);
     expect(d.env.VIBECARBON_DB_IMAGE).toBeUndefined();
   });
 

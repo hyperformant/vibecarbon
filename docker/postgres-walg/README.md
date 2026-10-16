@@ -71,8 +71,8 @@ contacting the registry, so a generated project's `vibecarbon up` (and
 Servers pull from ghcr, so real infrastructure needs a published image. A
 branch gets one without touching the release package:
 `.github/workflows/publish-db-image-dev.yml` runs on every push to a branch
-other than `main` that changes `docker/postgres-walg/**` or `docker/wal-g/**`
-(and by hand with `workflow_dispatch`), never on pull requests. It is the
+other than `main` that changes `docker/postgres-walg/**`, `docker/wal-g/**` or
+`src/lib/images.js` (and by hand with `workflow_dispatch`), never on pull requests. It is the
 release build (same native per-arch legs and smoke script) published to
 **`ghcr.io/hyperformant/postgres-dev`** under
 
@@ -81,8 +81,10 @@ release build (same native per-arch legs and smoke script) published to
 ```
 
 where `sha12` is the first 12 hex digits of the last commit that touched the
-image inputs (the READMEs excluded), so later commits that touch only other
-files keep pointing at the same build. A dev tag is never rebuilt or moved.
+image inputs or `src/lib/images.js` (the READMEs excluded), so later commits that touch only other
+files keep pointing at the same build. A dev tag is never rebuilt or moved. A push that does not trigger the
+workflow (history rewritten with the same inputs) needs it run by hand:
+`gh workflow run publish-db-image-dev.yml --ref <branch>`.
 If the branch changed `docker/wal-g`, the same run builds wal-g too and the db
 image consumes that build by digest; otherwise it uses the published wal-g.
 `cleanup-db-image-dev.yml` deletes `postgres-dev` versions older than 14 days.
@@ -91,7 +93,7 @@ Finding the tag: the workflow run's summary prints it (`dev tag ...`), or
 compute it from your checkout:
 
 ```bash
-git log -1 --format=%H HEAD -- docker/postgres-walg docker/wal-g \
+git log -1 --format=%H HEAD -- docker/postgres-walg docker/wal-g src/lib/images.js \
   ':(exclude)docker/postgres-walg/README.md' ':(exclude)docker/wal-g/README.md' | cut -c1-12
 ```
 

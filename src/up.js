@@ -433,11 +433,6 @@ export async function run(args = []) {
   p.log.info(`Starting dev environment with ${c.bold(pm)}...`);
 
   const spawnArgs = pm === 'npm' ? ['run', 'dev:start'] : ['dev:start'];
-  // VIBECARBON_DB_IMAGE (a dev channel db build) reaches compose as
-  // DB_IMAGE/DB_IMAGE_TAG in the environment, which compose's interpolation
-  // ranks above .env. Unset, .env's pinned release stands untouched.
-  const dbImage = resolveDbImage();
-  const dbImageEnv = dbImage.override ? { DB_IMAGE: dbImage.image, DB_IMAGE_TAG: dbImage.tag } : {};
   const child = spawn(pm, spawnArgs, {
     cwd,
     stdio: 'inherit',
@@ -445,10 +440,27 @@ export async function run(args = []) {
     // manager hands the wrapper's npm_config_* dialect to this npm, which npm
     // 12 flags with `npm warn Unknown env config` on every run. Raw spawn has
     // no cleanEnv option; gitSafeEnv() is the exported form of that scrub.
-    env: gitSafeEnv({ ...process.env, ...dbImageEnv }),
+    env: gitSafeEnv(devStartEnv()),
   });
 
   waitForDevTree(child);
+}
+
+/**
+ * The dev:start child's environment (before the gitSafeEnv scrub): the parent env plus the db
+ * image this CLI resolves, ALWAYS. Compose ranks the environment above .env
+ * for interpolation, so the CLI decides locally just as the deploy bundle
+ * does on a server: a project .env that lacks the pair (the carbon/ source
+ * tree's dev-init writes none) still starts, and a dev-channel ref a past
+ * `create` wrote while VIBECARBON_DB_IMAGE was set is never run silently once
+ * the variable is gone. While it is set, resolveDbImage warns.
+ *
+ * @param {Record<string, string | undefined>} [base]
+ * @returns {Record<string, string | undefined>}
+ */
+export function devStartEnv(base = process.env) {
+  const { image, tag } = resolveDbImage({ env: base });
+  return { ...base, DB_IMAGE: image, DB_IMAGE_TAG: tag };
 }
 
 /**

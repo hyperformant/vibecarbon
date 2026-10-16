@@ -97,3 +97,4 @@ jobs:
       image: ${{ needs.db-ref.outputs.image }}
       tag: ${{ needs.db-ref.outputs.tag }}
       smoke: .github/scripts/smoke-db-image.sh
+      environment: e2e-infra

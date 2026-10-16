@@ -46,7 +46,7 @@ import {
   setupE2EEnv,
   startE2ELicenseStub,
 } from '../tests/e2e/utils/e2e-env.js';
-import { selectE2EDbImage } from '../tests/e2e/utils/db-image-select.js';
+import { E2EDbImageError, selectE2EDbImage } from '../tests/e2e/utils/db-image-select.js';
 
 /** The kept project's id from its `.vibecarbon.json`, or null. */
 function readManifestProjectId(dir) {
@@ -230,7 +230,13 @@ const { envFileKeys, tls: tlsSetup } = setupE2EEnv();
 // branch's dev channel build when the release is not published yet (sets
 // VIBECARBON_DB_IMAGE, which e2eCliEnv hands to the child). Fails before the
 // step runs rather than deploying an image the tree does not match.
-await selectE2EDbImage();
+try {
+  await selectE2EDbImage();
+} catch (err) {
+  if (!(err instanceof E2EDbImageError)) throw err;
+  console.error(`[iter] e2e db image: ${err.message}`);
+  process.exit(1);
+}
 
 const licenseStub = await startE2ELicenseStub();
 const keptLicense = getLicense({ projectDir });

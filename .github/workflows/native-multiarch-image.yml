@@ -43,6 +43,16 @@ on:
         type: string
         required: false
         default: ''
+      environment:
+        description: GitHub Environment for the build and merge jobs; empty runs with none
+        type: string
+        required: false
+        default: ''
+      immutable:
+        description: Skip the merge (exit green) when the tag already exists, never overwriting it
+        type: boolean
+        required: false
+        default: false
     outputs:
       ref:
         description: The published tag, pinned by digest (image@sha256:...)
@@ -61,7 +71,7 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    environment: e2e-infra
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
       packages: write   # push the per-arch digest to ghcr
@@ -113,7 +123,7 @@ jobs:
   merge:
     needs: build
     runs-on: ubuntu-24.04
-    environment: e2e-infra
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
       packages: write   # push the multi-arch tag to ghcr
@@ -137,6 +147,16 @@ jobs:
         working-directory: ${{ runner.temp }}/digests
         run: |
           set -euo pipefail
+          if [ "$IMMUTABLE" = true ]; then
+            # Re-checked here, after the builds, so a run that raced another
+            # for the same tag never moves it. Only "not found" means create.
+            if out=$(docker buildx imagetools inspect "$IMAGE" 2>&1 >/dev/null); then
+              echo "::notice::$IMAGE already exists; immutable tag left as is"
+              exit 0
+            elif ! grep -q 'not found' <<<"$out"; then
+              echo "$out" >&2; exit 1
+            fi
+          fi
           refs=()
           for digest in *; do refs+=("$NAME@sha256:$digest"); done
           test "${#refs[@]}" -eq 2
@@ -144,6 +164,7 @@ jobs:
         env:
           IMAGE: ${{ inputs.image }}:${{ inputs.tag }}
           NAME: ${{ inputs.image }}
+          IMMUTABLE: ${{ inputs.immutable }}
       - id: verify
         name: Verify the published tag carries amd64 and arm64, then smoke it
         run: |

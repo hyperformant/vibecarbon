@@ -23,6 +23,7 @@ on:
     paths:
       - 'docker/postgres-walg/**'
       - 'docker/wal-g/**'
+      - 'src/lib/images.js'
       - '!docker/postgres-walg/README.md'
       - '!docker/wal-g/README.md'
   workflow_dispatch: {}
@@ -58,7 +59,7 @@ jobs:
           TAG=$(grep -oP "^export const DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
           LEN=$(grep -oP "^export const DEV_DB_IMAGE_SHA_LENGTH\s*=\s*\K[0-9]+" src/lib/images.js)
           # Same pathspec as tests/e2e/utils/db-image-select.js DB_IMAGE_INPUT_PATHSPEC.
-          SHA=$(git log -1 --format=%H HEAD -- docker/postgres-walg docker/wal-g ':(exclude)docker/postgres-walg/README.md' ':(exclude)docker/wal-g/README.md')
+          SHA=$(git log -1 --format=%H HEAD -- docker/postgres-walg docker/wal-g src/lib/images.js ':(exclude)docker/postgres-walg/README.md' ':(exclude)docker/wal-g/README.md')
           test -n "$SHA"
           DEV_TAG="$TAG-${SHA:0:$LEN}"
           case "$IMG" in */postgres-dev) ;; *) echo "refusing to publish to $IMG" >&2; exit 1 ;; esac
@@ -121,6 +122,11 @@ jobs:
           FROM: ${{ needs.plan.outputs.walg-from }}
   build-db:
     needs: [plan, build-walg]
+    # One run per dev tag at a time: a second run for the same tag queues
+    # here, and the reusable workflow's `immutable` re-check then skips it.
+    concurrency:
+      group: publish-db-image-dev-${{ needs.plan.outputs.tag }}
+      cancel-in-progress: false
     if: >-
       always() && needs.plan.result == 'success' && needs.plan.outputs.exists != 'true' &&
       (needs.build-walg.result == 'success' || needs.build-walg.result == 'skipped')
@@ -135,3 +141,4 @@ jobs:
       tag: ${{ needs.plan.outputs.tag }}
       smoke: .github/scripts/smoke-db-image.sh
       build-contexts: ${{ needs.build-walg.outputs.build-contexts }}
+      immutable: true

@@ -98,7 +98,7 @@ import type {
 } from './scenarios/types.js';
 import { resolveSelection, type SelectedScenario, SelectionError } from './selection.js';
 import { scenarioContext } from './utils/cli-runner.js';
-import { selectE2EDbImage } from './utils/db-image-select.js';
+import { E2EDbImageError, selectE2EDbImage } from './utils/db-image-select.js';
 import { applyDiffVsGreen, type DiffEntry } from './utils/diff-vs-green.js';
 import { setupE2EEnv, startE2ELicenseStub } from './utils/e2e-env.js';
 import { remapEnvPrefix, scratchNamePrefix } from './utils/namespace.js';
@@ -651,7 +651,15 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
   // VIBECARBON_DB_IMAGE for every CLI child). Fails here, in seconds, when
   // neither is published or the tree's image inputs are uncommitted. Not
   // behind E2E_PREFLIGHT=skip: a wrong db image is never a trusted re-run.
-  await selectE2EDbImage();
+  try {
+    await selectE2EDbImage();
+  } catch (err) {
+    if (err instanceof E2EDbImageError) {
+      console.error(`\nE2E db image: ${err.message}\n`);
+      process.exit(1);
+    }
+    throw err;
+  }
 
   // Pre-matrix infra preflight: 30-second sanity ping of every external
   // dependency. Surfaces "today is a bad day at Hetzner/Cloudflare" before

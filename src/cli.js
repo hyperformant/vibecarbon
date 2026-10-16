@@ -16,10 +16,12 @@ import dns from 'node:dns';
 import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import * as p from '@clack/prompts';
 import { loadAllSpecs } from './lib/cli/command-registry.js';
 import { installUnsettledExitGuard } from './lib/cli/exit-guard.js';
 import { formatExamples, renderCommandList } from './lib/cli/help.js';
 import { c } from './lib/colors.js';
+import { dbImageOverrideProblem, setDbImageWarningSink } from './lib/images.js';
 import { shouldGate } from './lib/licensing/gate.js';
 import { perfTimer } from './lib/perf.js';
 import { bootstrapOperatorEnv } from './lib/project.js';
@@ -61,6 +63,23 @@ export function checkPlatform(platform = process.platform) {
     console.error('See: https://learn.microsoft.com/en-us/windows/wsl/install');
     process.exit(1);
   }
+}
+
+/**
+ * A malformed VIBECARBON_DB_IMAGE stops the CLI before any command runs, with
+ * one line saying what is wrong and how to fix it, instead of a throw from
+ * deep inside create/upgrade/deploy. A good one routes the resolver's
+ * "using dev db image" warning through the clack logger.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function checkDbImageOverride(env = process.env) {
+  setDbImageWarningSink((msg) => p.log.warn(msg));
+  const problem = dbImageOverrideProblem(env);
+  if (!problem) return;
+  p.log.error(problem);
+  p.log.info('fix the ref, or unset VIBECARBON_DB_IMAGE to use the release db image');
+  process.exit(1);
 }
 
 /**
@@ -186,6 +205,7 @@ function showVersion() {
 async function main() {
   checkPlatform();
   checkNodeVersion();
+  checkDbImageOverride();
 
   // Fold operator-secret provider credentials (Hetzner/DO/Cloudflare tokens,
   // S3/Spaces keys) from this project's .env.local into process.env, so

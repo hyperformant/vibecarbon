@@ -40,11 +40,13 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
  * The db image's inputs, as a git pathspec. publish-db-image-dev.yml's plan
  * job uses this exact list (pinned by tests/unit/deploy/workflow-platforms
  * .test.ts), so the sha the workflow tags and the sha the harness looks up
- * are the same commit. READMEs are docs, not inputs.
+ * are the same commit. READMEs are docs, not inputs. src/lib/images.js holds
+ * DB_IMAGE_TAG, the dev tag's prefix, so editing it moves the dev tag too.
  */
 export const DB_IMAGE_INPUT_PATHSPEC = [
   'docker/postgres-walg',
   'docker/wal-g',
+  'src/lib/images.js',
   ':(exclude)docker/postgres-walg/README.md',
   ':(exclude)docker/wal-g/README.md',
 ];
@@ -158,6 +160,8 @@ export async function selectE2EDbImage({
     throw new E2EDbImageError(
       `${release} is not published and the dev image for ${sha} not published yet (${dev}): ` +
         `push the branch and wait for publish-db-image-dev, or set ${DB_IMAGE_OVERRIDE_ENV}. ` +
+        'If the push did not trigger it (rewritten history with the same inputs), run it by hand: ' +
+        '`gh workflow run publish-db-image-dev.yml --ref <branch>`. ' +
         `(If the workflow did publish it, the ${DEV_DB_IMAGE} package is still private: flip it public once.)`,
     );
   }
