@@ -859,7 +859,7 @@ async function bootstrap(cliArgs) {
     join(projectDir, 'volumes/db/wal-archive.sh'),
     variables,
   );
-  copyTemplate('volumes/s3/s3.json', join(projectDir, 'volumes/s3/s3.json'), variables);
+  copyTemplate('volumes/s3/garage.toml', join(projectDir, 'volumes/s3/garage.toml'), variables);
   copyTemplate(
     'volumes/traefik/middlewares.yml',
     join(projectDir, 'volumes/traefik/middlewares.yml'),
@@ -1456,9 +1456,11 @@ ${runCmd} test:prepush
 // GENERATOR FUNCTIONS
 // ============================================================================
 
-// Dev-only placeholders; must match carbon/volumes/s3/s3.json (and dev-init.js).
-const DEV_S3_ACCESS_KEY = 'local-dev-s3-access-key';
-const DEV_S3_SECRET_KEY = 'local-dev-s3-secret-key-not-for-production';
+// Dev-only placeholders: the key the local Garage imports at start
+// (GARAGE_DEFAULT_* in carbon/docker-compose.override.yml; dev-init.js writes
+// the same). Garage requires GK + 24 hex for the id and 64 hex for the secret.
+const DEV_S3_ACCESS_KEY = 'GK6c6f63616c2d6465762d7333';
+const DEV_S3_SECRET_KEY = '6c6f63616c2d6465762d73332d7365637265742d6e6f742d666f722d70726f64';
 
 function generateEnvLocal(projectName, variables) {
   // Every value-bearing line goes through formatDotenvLine (src/lib/dotenv.js):
@@ -1576,8 +1578,8 @@ ${formatDotenvLine('VITE_OBSERVABILITY_ENABLED', 'false')}
 # =============================================================================
 # LOCAL S3 (dev uploads)
 # =============================================================================
-# SeaweedFS from docker-compose.override.yml (dev-only, never deployed). The
-# keys match volumes/s3/s3.json. vibecarbon deploy overwrites every S3_* value
+# Garage from docker-compose.override.yml (dev-only, never deployed). The key
+# is the one it imports at start. vibecarbon deploy overwrites every S3_* value
 # with the real bucket's. If you change DEV_S3_PORT, change S3_ENDPOINT too.
 
 ${formatDotenvLine('S3_ENDPOINT', 'http://localhost:8333')}

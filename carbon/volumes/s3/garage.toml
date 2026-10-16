@@ -1,0 +1,16 @@
+# Garage config for the dev-only local S3 (docker-compose.override.yml).
+# Never deployed: production uses the cloud provider's object storage.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+
+# Node-to-node RPC. One node and the port is never published, so a fixed
+# placeholder secret is fine here (Garage requires one: 32 bytes as hex).
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "6c6f63616c2d6465762d7270632d7365637265742d6e6f742d666f722d70726f"
+
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"

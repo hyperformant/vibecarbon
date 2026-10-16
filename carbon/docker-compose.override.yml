@@ -45,20 +45,33 @@ services:
   app:
     restart: on-failure:5
 
-  # Local S3 for development uploads (SeaweedFS). Dev-only: this file is never
-  # deployed; production uses the cloud provider object storage. The browser PUTs
-  # to presigned URLs on this port, so it is published to the host. The bucket and
-  # its CORS rules are created by scripts/ensure-dev-bucket.js (run from docker-up).
+  # Local S3 for development uploads (Garage, single node). Dev-only: this file
+  # is never deployed; production uses the cloud provider object storage. The
+  # browser PUTs to presigned URLs on this port, so it is published to the host.
+  #
+  # Garage sets itself up on every start, so there is no init container:
+  # --single-node assigns the one-node layout when none is stored, and
+  # --default-bucket imports the fixed dev key below and creates the bucket
+  # with read/write/owner for it, skipping whatever already exists. The key
+  # and bucket must match the S3_* values dev-init.js and `vibecarbon create`
+  # write (tests/unit/template/dev-s3-credentials-agree.test.ts). The bucket
+  # gets a global alias this way, which Garage needs to apply the bucket's
+  # CORS to browser preflights; scripts/ensure-dev-bucket.js (run from
+  # docker-up) puts the same CORS rule deploy sets on real buckets.
   s3:
-    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
     container_name: ${PROJECT_NAME}-s3
     restart: on-failure:5
-    command: server -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data -master.volumeSizeLimitMB=256
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_DEFAULT_ACCESS_KEY: GK6c6f63616c2d6465762d7333
+      GARAGE_DEFAULT_SECRET_KEY: 6c6f63616c2d6465762d73332d7365637265742d6e6f742d666f722d70726f64
+      GARAGE_DEFAULT_BUCKET: ${PROJECT_NAME}-local
     ports:
-      - "127.0.0.1:${DEV_S3_PORT:-8333}:8333"
+      - "127.0.0.1:${DEV_S3_PORT:-8333}:3900"
     volumes:
-      - ./volumes/s3/s3.json:/etc/seaweedfs/s3.json:ro
-      - s3_data:/data
+      - ./volumes/s3/garage.toml:/etc/garage.toml:ro
+      - s3_data:/var/lib/garage
     networks:
       - vibecarbon-network
 

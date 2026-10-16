@@ -16,6 +16,8 @@ describe('getFilePolicy', () => {
     expect(getFilePolicy('Dockerfile')).toBe('safe');
     expect(getFilePolicy('docker-compose.prod.yml')).toBe('safe');
     expect(getFilePolicy('k8s/base/kustomization.yaml')).toBe('safe');
+    // The Garage config the dev override mounts: missing, Docker mounts a directory.
+    expect(getFilePolicy('volumes/s3/garage.toml')).toBe('safe');
     expect(getFilePolicy('k8s/base/deep/nested/file.yaml')).toBe('safe');
     expect(getFilePolicy('.github/workflows/deploy.yml')).toBe('safe');
     expect(getFilePolicy('cloud-init/docker-ce-setup.yaml')).toBe('safe');

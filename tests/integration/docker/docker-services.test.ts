@@ -43,7 +43,7 @@ describeDocker('Docker Services Smoke Test', () => {
     }
     portsAvailable = true;
 
-    // Check if the local S3 port is available (SeaweedFS on 8333, dev-only)
+    // Check if the local S3 port is available (Garage on 8333, dev-only)
     const s3Check = await arePortsAvailable(testConfig.smoke.s3Ports);
     s3Available = s3Check.available;
     if (!s3Available) {
@@ -85,9 +85,10 @@ describeDocker('Docker Services Smoke Test', () => {
     projectEnv.COMPOSE_FILE = devComposeFileEnv(projectDir());
     expect(projectEnv.COMPOSE_FILE.split(delimiter)).toContain('docker-compose.override.yml');
 
-    // The local stack is db, app and traefik, plus the dev-only s3
-    // (SeaweedFS) from docker-compose.override.yml. Start what the free ports
-    // allow; the database is the minimum.
+    // The local stack is db, app and traefik, plus the dev-only s3 (Garage)
+    // from docker-compose.override.yml. Garage sets up its own layout, key
+    // and bucket at start, so there is no init service. Start what the free
+    // ports allow; the database is the minimum.
     const services = ['db'];
     if (s3Available) services.push('s3');
     if (traefikAvailable) services.push('traefik', 'app');
@@ -268,26 +269,95 @@ describeDocker('Docker Services Smoke Test', () => {
   });
 
   // =========================================================================
-  // Local S3 (dev-only SeaweedFS for uploads)
+  // Local S3 (dev-only Garage for uploads)
   // =========================================================================
 
   describe('Local S3', () => {
-    it('container is running', ({ skip }) => {
-      if (!s3Available) skip();
-      const result = execSync('docker compose ps --format json', {
+    const runningServices = () =>
+      execSync('docker compose ps --format json', {
         cwd: projectDir(),
         encoding: 'utf-8',
         timeout: 10000,
         env: getExecEnv(),
+      })
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((c: { State: string }) => c.State === 'running')
+        .map((c: { Service: string }) => c.Service as string);
+
+    // What `vibecarbon up` runs after compose: CORS on the bucket Garage made.
+    const ensureDevBucket = () =>
+      execSync('node scripts/ensure-dev-bucket.js', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 30000,
+        env: getExecEnv(),
       });
 
-      const lines = result.trim().split('\n').filter(Boolean);
-      const containers = lines.map((line) => JSON.parse(line));
-      const runningServices = containers
-        .filter((c: { State: string }) => c.State === 'running')
-        .map((c: { Service: string }) => c.Service);
+    // Presigned PUT and GET with the project's own SDK and the .env.local
+    // key, plus a browser preflight from the Vite origin: the round trip an
+    // avatar upload makes. Prints one JSON line.
+    const roundTrip = () =>
+      JSON.parse(
+        execSync('node --input-type=module -', {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          timeout: 30000,
+          env: getExecEnv(),
+          input: `
+            import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+            import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+            const e = process.env;
+            const client = new S3Client({
+              endpoint: e.S3_ENDPOINT, region: e.S3_REGION, forcePathStyle: true,
+              requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
+              credentials: { accessKeyId: e.S3_ACCESS_KEY, secretAccessKey: e.S3_SECRET_KEY },
+            });
+            const Key = 'smoke/' + Date.now() + '.txt';
+            const put = await getSignedUrl(client, new PutObjectCommand({ Bucket: e.S3_BUCKET, Key, ContentType: 'text/plain' }), { expiresIn: 60 });
+            const preflight = await fetch(put, { method: 'OPTIONS', headers: {
+              Origin: 'http://localhost:5173', 'Access-Control-Request-Method': 'PUT',
+              'Access-Control-Request-Headers': 'content-type' } });
+            const putRes = await fetch(put, { method: 'PUT', body: 'hello garage', headers: { 'content-type': 'text/plain' } });
+            const get = await getSignedUrl(client, new GetObjectCommand({ Bucket: e.S3_BUCKET, Key }), { expiresIn: 60 });
+            const getRes = await fetch(get);
+            console.log(JSON.stringify({
+              allowOrigin: preflight.headers.get('access-control-allow-origin'),
+              put: putRes.status, get: getRes.status, body: await getRes.text(),
+            }));
+          `,
+        }),
+      );
 
-      expect(runningServices).toContain('s3');
+    it('container is running', ({ skip }) => {
+      if (!s3Available) skip();
+      expect(runningServices()).toContain('s3');
+    });
+
+    it('takes a presigned upload and serves it back, CORS scoped to the dev origin', ({ skip }) => {
+      if (!s3Available) skip();
+      ensureDevBucket();
+      expect(roundTrip()).toEqual({
+        allowOrigin: 'http://localhost:5173',
+        put: 200,
+        get: 200,
+        body: 'hello garage',
+      });
+    });
+
+    it('sets itself up again idempotently when recreated on the same volume', ({ skip }) => {
+      if (!s3Available) skip();
+      execSync('docker compose up -d --force-recreate s3', {
+        cwd: projectDir(),
+        encoding: 'utf-8',
+        timeout: 60000,
+        env: getExecEnv(),
+      });
+      expect(runningServices()).toContain('s3');
+      ensureDevBucket();
+      expect(roundTrip()).toMatchObject({ put: 200, get: 200, body: 'hello garage' });
     });
   });
 

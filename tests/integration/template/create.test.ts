@@ -139,15 +139,18 @@ describe('create-vibecarbon E2E', () => {
       expect(envContent).toContain('DB_PASSWORD=');
     });
 
-    it('writes the local-S3 dev vars, agreeing with volumes/s3/s3.json', () => {
+    it('writes the local-S3 dev vars, agreeing with the Garage service', () => {
       const env = parseDotenv(readFileSync(join(projectDir(), '.env.local'), 'utf-8'));
       expect(env.S3_ENDPOINT).toBe('http://localhost:8333');
       expect(env.S3_REGION).toBe('us-east-1');
       expect(env.S3_BUCKET).toMatch(/-local$/);
-      const cred = JSON.parse(readFileSync(join(projectDir(), 'volumes/s3/s3.json'), 'utf-8'))
-        .identities[0].credentials[0];
-      expect(env.S3_ACCESS_KEY).toBe(cred.accessKey);
-      expect(env.S3_SECRET_KEY).toBe(cred.secretKey);
+      const override = readFileSync(join(projectDir(), 'docker-compose.override.yml'), 'utf-8');
+      expect(override).toContain(`GARAGE_DEFAULT_ACCESS_KEY: ${env.S3_ACCESS_KEY}\n`);
+      expect(override).toContain(`GARAGE_DEFAULT_SECRET_KEY: ${env.S3_SECRET_KEY}\n`);
+      // The Garage config the s3 service mounts is scaffolded.
+      expect(readFileSync(join(projectDir(), 'volumes/s3/garage.toml'), 'utf-8')).toContain(
+        'replication_factor = 1',
+      );
     });
 
     it('replaces all template placeholders', () => {

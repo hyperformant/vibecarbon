@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { load as parseYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { generateEnvLocal } from '../../../src/create.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
@@ -7,20 +8,20 @@ import { parseDotenv } from '../../../src/lib/dotenv.js';
 /**
  * The local dev S3 credentials live in three places that must agree, or dev
  * uploads fail with InvalidAccessKeyId:
- * - carbon/volumes/s3/s3.json: the identity the SeaweedFS container accepts.
+ * - carbon/docker-compose.override.yml: the key the Garage container imports
+ *   at start (GARAGE_DEFAULT_ACCESS_KEY / GARAGE_DEFAULT_SECRET_KEY).
  * - carbon/scripts/dev-init.js: the .env written for the repo's own dev stack.
  * - src/create.js: the .env written into a freshly created project.
  */
 
 const ROOT = join(__dirname, '..', '..', '..');
 
-function seaweedCredentials() {
-  const config = JSON.parse(readFileSync(join(ROOT, 'carbon/volumes/s3/s3.json'), 'utf-8')) as {
-    identities: Array<{ credentials: Array<{ accessKey: string; secretKey: string }> }>;
-  };
-  const creds = config.identities.flatMap((i) => i.credentials);
-  expect(creds).toHaveLength(1);
-  return creds[0];
+function garageCredentials() {
+  const compose = parseYaml(
+    readFileSync(join(ROOT, 'carbon/docker-compose.override.yml'), 'utf-8'),
+  ) as { services: { s3: { environment: Record<string, string> } } };
+  const env = compose.services.s3.environment;
+  return { accessKey: env.GARAGE_DEFAULT_ACCESS_KEY, secretKey: env.GARAGE_DEFAULT_SECRET_KEY };
 }
 
 // dev-init.js runs on import (it writes .env files), so read its DEV constants
@@ -47,14 +48,14 @@ function createCredentials() {
   return { accessKey: env.S3_ACCESS_KEY, secretKey: env.S3_SECRET_KEY };
 }
 
-describe('dev S3 credentials agree across s3.json, dev-init.js and create.js', () => {
-  const expected = seaweedCredentials();
+describe('dev S3 credentials agree across the Garage service, dev-init.js and create.js', () => {
+  const expected = garageCredentials();
 
-  it('dev-init.js writes the identity s3.json accepts', () => {
+  it('dev-init.js writes the key Garage imports', () => {
     expect(devInitCredentials()).toEqual(expected);
   });
 
-  it('vibecarbon create writes the identity s3.json accepts', () => {
+  it('vibecarbon create writes the key Garage imports', () => {
     expect(createCredentials()).toEqual(expected);
   });
 });

@@ -74,7 +74,7 @@ export const testConfig = {
     // Ports required for basic Docker smoke tests (database only)
     requiredPorts: [5432],
 
-    // Local S3 (dev-only SeaweedFS from docker-compose.override.yml)
+    // Local S3 (dev-only Garage from docker-compose.override.yml)
     s3Ports: [8333],
 
     // Ports for Traefik reverse proxy (optional - tests skip if unavailable)

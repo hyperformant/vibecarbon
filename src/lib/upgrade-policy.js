@@ -55,6 +55,10 @@ const SAFE_PATTERNS = [
   'volumes/loki/**',
   'volumes/promtail/**',
   'volumes/traefik/**',
+  // The dev-only Garage config docker-compose.override.yml mounts. Missing,
+  // Docker would mount an empty directory there and the local S3 would not
+  // start.
+  'volumes/s3/**',
   'AGENTS.md',
   'CLAUDE.md',
   'PRODUCTION.md',

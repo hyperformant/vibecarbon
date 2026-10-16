@@ -111,7 +111,7 @@
   - `private`: JPEG, PNG, GIF, WebP, PDF, TXT, CSV, max 10 MB, owner-only and served as a download
 - Bucket stays private; CORS allows only your domain, set on every deploy
 - Optional: without the `S3_*` variables, presign returns 503 and the app still boots
-- Local SeaweedFS S3 service for development, with the bucket and CORS created on `npm run dev:start`
+- Local Garage S3 service for development, with the bucket and CORS set up on `npm run dev:start`
 - Generic `<FileUpload>` component
   - `kind` prop (`avatar` or `private`) and an optional `prepare` transform before upload
   - Drag-and-drop zone with visual feedback

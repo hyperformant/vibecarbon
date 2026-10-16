@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 /**
- * Ensure the local dev bucket exists and allows browser uploads.
+ * Apply browser-upload CORS to the local dev bucket.
  *
- * The dev S3 service (SeaweedFS) starts empty. Uploads go straight from the
- * browser to a presigned URL, so the bucket needs CORS for the Vite origin.
+ * The dev S3 service (Garage, docker-compose.override.yml) creates the bucket
+ * and its key itself at start. Uploads go straight from the browser to a
+ * presigned URL, so the bucket also needs CORS for the Vite origin, which
+ * depends on this checkout's port settings and so is set here, through the
+ * same S3 PutBucketCors call deploy makes on real buckets.
  * Idempotent: safe to run on every `npm run dev:start`.
+ *
+ * This never creates the bucket. One made through the S3 API gets a key-local
+ * alias in Garage, and Garage ignores CORS rules on those for preflights
+ * (it answers them with a wildcard origin), so a missing bucket is retried
+ * until Garage's own setup has made it.
  *
  * Skips quietly when the S3_* env vars are not set (storage is optional).
  *
@@ -13,12 +21,7 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import {
-  CreateBucketCommand,
-  HeadBucketCommand,
-  PutBucketCorsCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
+import { HeadBucketCommand, PutBucketCorsCommand, S3Client } from '@aws-sdk/client-s3';
 import { readEnvFiles } from './lib/dotenv.js';
 
 /**
@@ -32,32 +35,25 @@ export function devOrigins(env) {
   return [`http://localhost:${port}`];
 }
 
-/** Create the bucket if missing and always (re)apply CORS. */
+/** Wait-free check that the bucket exists, then always (re)apply CORS. */
 export async function ensureDevBucket({ client, bucket, origins }) {
-  let exists = true;
-  try {
-    await client.send(new HeadBucketCommand({ Bucket: bucket }));
-  } catch {
-    exists = false;
-  }
-  if (!exists) {
-    try {
-      await client.send(new CreateBucketCommand({ Bucket: bucket }));
-    } catch (error) {
-      if (error?.name !== 'BucketAlreadyOwnedByYou') throw error;
-    }
-  }
+  // Throws (NotFound) until the S3 service has created the bucket; main()
+  // retries.
+  await client.send(new HeadBucketCommand({ Bucket: bucket }));
   await client.send(
     new PutBucketCorsCommand({
       Bucket: bucket,
       CORSConfiguration: {
+        // The rule deploy puts on real buckets (setBucketCors in the CLI's
+        // src/lib/providers/s3-base.js), so a header the upload starts
+        // sending fails here first instead of in production.
         CORSRules: [
           {
             AllowedOrigins: origins,
             AllowedMethods: ['GET', 'PUT', 'HEAD'],
-            AllowedHeaders: ['*'],
+            AllowedHeaders: ['content-type', 'content-length'],
             ExposeHeaders: ['ETag'],
-            MaxAgeSeconds: 3000,
+            MaxAgeSeconds: 3600,
           },
         ],
       },
@@ -84,7 +80,8 @@ async function main() {
     responseChecksumValidation: 'WHEN_REQUIRED',
     credentials: { accessKeyId: S3_ACCESS_KEY, secretAccessKey: S3_SECRET_KEY },
   });
-  // The S3 container can accept connections a moment after compose reports it up.
+  // The S3 container accepts connections, and creates the bucket, a moment
+  // after compose reports it up.
   let lastError;
   for (let attempt = 1; attempt <= 10; attempt++) {
     try {

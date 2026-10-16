@@ -27,9 +27,12 @@ const DEV = {
   DB_PASSWORD: 'local-postgres-password-for-dev-only',
   ADMIN_EMAIL: 'admin@example.com',
   ADMIN_PASSWORD: 'local-admin-password',
-  // Must match volumes/s3/s3.json (dev-only placeholders, never used in deploys).
-  S3_ACCESS_KEY: 'local-dev-s3-access-key',
-  S3_SECRET_KEY: 'local-dev-s3-secret-key-not-for-production',
+  // The key the local Garage imports at start (GARAGE_DEFAULT_* in
+  // docker-compose.override.yml). Dev-only placeholders, never used in
+  // deploys. Garage requires GK + 24 hex for the id and 64 hex for the
+  // secret: these are "local-dev-s3" and "local-dev-s3-secret-not-for-prod".
+  S3_ACCESS_KEY: 'GK6c6f63616c2d6465762d7333',
+  S3_SECRET_KEY: '6c6f63616c2d6465762d73332d7365637265742d6e6f742d666f722d70726f64',
 };
 
 function existingAuthSecret() {
@@ -93,8 +96,8 @@ const envLines = [
   '# SMTP_ADMIN_EMAIL=""',
   formatDotenvLine('SMTP_SENDER_NAME', DEV.PROJECT_NAME),
   '',
-  '# Local S3 for uploads (SeaweedFS from docker-compose.override.yml, dev-only keys',
-  '# matching volumes/s3/s3.json). If you change DEV_S3_PORT, change S3_ENDPOINT to match.',
+  '# Local S3 for uploads (Garage from docker-compose.override.yml, dev-only key',
+  '# it imports at start). If you change DEV_S3_PORT, change S3_ENDPOINT to match.',
   formatDotenvLine('S3_ENDPOINT', 'http://localhost:8333'),
   formatDotenvLine('S3_REGION', 'us-east-1'),
   formatDotenvLine('S3_BUCKET', `${DEV.PROJECT_NAME}-local`),

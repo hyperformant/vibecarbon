@@ -1,8 +1,4 @@
-import {
-  CreateBucketCommand,
-  HeadBucketCommand,
-  PutBucketCorsCommand,
-} from '@aws-sdk/client-s3';
+import { HeadBucketCommand, PutBucketCorsCommand } from '@aws-sdk/client-s3';
 import { describe, expect, it, vi } from 'vitest';
 import { devOrigins, ensureDevBucket } from '../../../scripts/ensure-dev-bucket';
 
@@ -22,57 +18,37 @@ const notFound = () => {
 };
 
 describe('ensureDevBucket', () => {
-  it('creates the bucket when missing, then sets CORS', async () => {
-    const { client, sent } = fakeClient({ HeadBucketCommand: notFound });
-    await ensureDevBucket({ client, bucket: 'demo-local', origins: ['http://localhost:5173'] });
-    expect(names(sent)).toEqual([
-      HeadBucketCommand.name,
-      CreateBucketCommand.name,
-      PutBucketCorsCommand.name,
-    ]);
-  });
-
-  it('tolerates BucketAlreadyOwnedByYou from create', async () => {
-    const { client, sent } = fakeClient({
-      HeadBucketCommand: notFound,
-      CreateBucketCommand: () => {
-        throw Object.assign(new Error('mine'), { name: 'BucketAlreadyOwnedByYou' });
-      },
-    });
-    await expect(
-      ensureDevBucket({ client, bucket: 'demo-local', origins: ['http://localhost:5173'] })
-    ).resolves.toBeUndefined();
-    expect(names(sent).at(-1)).toBe(PutBucketCorsCommand.name);
-  });
-
-  it('skips create when the bucket exists but still puts CORS', async () => {
+  it('puts CORS on the bucket the S3 service created', async () => {
     const { client, sent } = fakeClient();
     await ensureDevBucket({ client, bucket: 'demo-local', origins: ['http://localhost:5173'] });
     expect(names(sent)).toEqual([HeadBucketCommand.name, PutBucketCorsCommand.name]);
   });
 
-  it('rethrows unexpected create errors', async () => {
-    const { client } = fakeClient({
-      HeadBucketCommand: notFound,
-      CreateBucketCommand: () => {
-        throw Object.assign(new Error('boom'), { name: 'AccessDenied' });
-      },
-    });
+  // Garage creates the bucket itself (--default-bucket). One made through the
+  // S3 API would get a key-local alias, whose CORS Garage ignores on
+  // preflights, so a missing bucket is an error main() retries, never a create.
+  it('never creates a missing bucket: it throws so main() retries', async () => {
+    const { client, sent } = fakeClient({ HeadBucketCommand: notFound });
     await expect(
-      ensureDevBucket({ client, bucket: 'b', origins: ['http://localhost:5173'] })
-    ).rejects.toThrow('boom');
+      ensureDevBucket({ client, bucket: 'demo-local', origins: ['http://localhost:5173'] }),
+    ).rejects.toThrow('nf');
+    expect(names(sent)).toEqual([HeadBucketCommand.name]);
   });
 
-  it('allows GET/PUT/HEAD from the dev origins', async () => {
+  it('puts the CORS rule deploy sets on real buckets, for the dev origins', async () => {
     const { client, sent } = fakeClient();
     const origins = ['http://localhost:5173', 'http://localhost:5183'];
     await ensureDevBucket({ client, bucket: 'b', origins });
     const cors = sent.find((c) => c instanceof PutBucketCorsCommand) as PutBucketCorsCommand;
     const rule = cors.input.CORSConfiguration?.CORSRules?.[0];
     expect(cors.input.Bucket).toBe('b');
-    expect(rule?.AllowedOrigins).toEqual(origins);
-    expect(rule?.AllowedMethods).toEqual(['GET', 'PUT', 'HEAD']);
-    expect(rule?.AllowedHeaders).toEqual(['*']);
+    expect(rule).toEqual({
+      AllowedOrigins: origins,
+      AllowedMethods: ['GET', 'PUT', 'HEAD'],
+      AllowedHeaders: ['content-type', 'content-length'],
+      ExposeHeaders: ['ETag'],
+      MaxAgeSeconds: 3600,
+    });
   });
 });
 
