@@ -85,17 +85,40 @@ function CopyCommand({ command, className }: { command: string; className?: stri
  */
 const CONNECTOR = 'top-9.5 -bottom-0.5 left-6.5 w-0.5 -translate-x-1/2';
 
-function StepNode({ step, selected }: { step: SetupStep; selected: boolean }) {
+interface StepNodeProps {
+  step: SetupStep;
+  selected: boolean;
+  hovered: boolean;
+}
+
+/**
+ * The step's circle carries every interaction state, so the row itself stays
+ * unhighlighted:
+ * - current: primary border plus a soft 4px glow (unchanged);
+ * - hovered: a faint primary ring set off from the circle by a 2px gap;
+ * - selected: the same ring at full strength, which wins over hover;
+ * - keyboard focus: an outline outside the ring (the step button is the
+ *   `group/step`).
+ * Ring, offset and glow are composed box-shadows; on a current step that is
+ * also hovered or selected the glow widens to 8px so it shows past the ring.
+ */
+function StepNode({ step, selected, hovered }: StepNodeProps) {
   return (
     <span
+      data-selected={selected || undefined}
+      data-hovered={(hovered && !selected) || undefined}
       className={cn(
         'relative z-10 -mt-2 flex size-9 shrink-0 items-center justify-center rounded-full border-2 bg-muted transition-shadow',
+        'ring-offset-card outline-ring group-focus-visible/step:outline-2 group-focus-visible/step:outline-offset-[6px]',
         // `text-background` is transparent in this theme (the canvas shows
         // through), which hid the check, so done nodes use primary-foreground.
         step.done && 'border-success bg-success text-primary-foreground',
         step.current && 'border-primary text-primary shadow-[0_0_0_4px_var(--glow-primary)]',
+        // A ring would cover the 4px glow, so push the glow out past it.
+        step.current && (selected || hovered) && 'shadow-[0_0_0_8px_var(--glow-primary)]',
         !step.done && !step.current && 'border-border text-muted-foreground',
-        selected && 'ring-ring ring-2 ring-offset-2 ring-offset-card'
+        hovered && !selected && 'ring-primary/45 ring-2 ring-offset-2',
+        selected && 'ring-primary ring-2 ring-offset-2'
       )}
     >
       {step.done ? (
@@ -115,21 +138,22 @@ interface TimelineStepProps {
   step: SetupStep;
   isLast: boolean;
   selected: boolean;
+  hovered: boolean;
   onPreview: (id: SetupStepId) => void;
   onSelect: (id: SetupStepId) => void;
 }
 
-function TimelineStep({ step, isLast, selected, onPreview, onSelect }: TimelineStepProps) {
+function TimelineStep({ step, isLast, selected, hovered, onPreview, onSelect }: TimelineStepProps) {
   const partner = step.integrations?.find((i) => i.isPartner);
   return (
+    // The step button is the row's only control. Its ::after overlay is
+    // stretched over the whole row (`relative` here, `after:inset-0` there),
+    // so the click area covers the title, description, command area and
+    // circle, padding included. Only the copy button is lifted above the
+    // overlay. The row has no background or pointer cursor of its own (the
+    // normal arrow throughout); hover, selection and focus show on the circle.
     // biome-ignore lint/a11y/noStaticElementInteractions: hover only previews; the step button below is the keyboard and click control
-    <div
-      className={cn(
-        'relative rounded-xl px-2 py-2.5 transition-colors hover:bg-accent/40',
-        selected && 'bg-accent/60 hover:bg-accent/60'
-      )}
-      onMouseEnter={() => onPreview(step.id)}
-    >
+    <div className="relative px-2 py-2.5" onMouseEnter={() => onPreview(step.id)}>
       {!isLast && (
         <span
           aria-hidden="true"
@@ -142,9 +166,9 @@ function TimelineStep({ step, isLast, selected, onPreview, onSelect }: TimelineS
         aria-current={step.current ? 'step' : undefined}
         aria-controls="setup-spotlight"
         onClick={() => onSelect(step.id)}
-        className="focus-visible:ring-ring grid w-full cursor-pointer grid-cols-[--spacing(9)_1fr] gap-3.5 rounded-lg text-left outline-none focus-visible:ring-2"
+        className="group/step grid w-full cursor-default grid-cols-[--spacing(9)_1fr] gap-3.5 text-left outline-none after:absolute after:inset-0 after:z-20 after:content-['']"
       >
-        <StepNode step={step} selected={selected} />
+        <StepNode step={step} selected={selected} hovered={hovered} />
         <span className="min-w-0">
           <span className="flex flex-wrap items-center gap-2">
             <span className="text-muted-foreground text-xs tabular-nums">
@@ -169,7 +193,8 @@ function TimelineStep({ step, isLast, selected, onPreview, onSelect }: TimelineS
         </span>
       </button>
       <div className="mt-2 flex flex-wrap items-center gap-2.5 pl-12.5">
-        <CopyCommand command={step.command} className="w-[320px] max-w-full" />
+        {/* Above the overlay: copying does not select the step. */}
+        <CopyCommand command={step.command} className="relative z-30 w-[320px] max-w-full" />
         {step.done ? (
           step.optedOut ? (
             <Badge variant="secondary" className="h-5 px-2 text-[10px]">
@@ -405,6 +430,7 @@ export function SetupProgress() {
                 step={step}
                 isLast={i === progress.steps.length - 1}
                 selected={step.id === activeId}
+                hovered={step.id === hoveredId}
                 onPreview={setHoveredId}
                 onSelect={setSelectedId}
               />

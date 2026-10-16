@@ -99,6 +99,63 @@ describe('SetupProgress stepper', () => {
     expect(eyebrow()).toHaveTextContent(/^Step 7 of 7$/);
   });
 
+  // jsdom has no layout or pseudo-element hit-testing, so the whole-row click
+  // target is pinned by its contract: the step button's ::after overlay is
+  // stretched over the positioned row, and only the copy button is lifted
+  // above it. (Verified in Chromium: hovering or clicking the command area,
+  // the description and the circle all land on the step button.)
+  it('stretches the step button over the whole row, below only the copy button', async () => {
+    const user = userEvent.setup();
+    renderStepper();
+    const button = stepButton(/Analytics/);
+    const row = rowOf(/Analytics/);
+    expect(row.className).toMatch(/\brelative\b/);
+    expect(button.className).toContain('after:absolute');
+    expect(button.className).toContain('after:inset-0');
+    // Normal arrow cursor, no row or button background.
+    expect(button.className).toContain('cursor-default');
+    expect(button.className).not.toContain('cursor-pointer');
+    expect(button.className).not.toMatch(/(^|\s)([a-z-]+:)*bg-/);
+    expect(button.className).not.toMatch(/(^|\s)relative(\s|$)/);
+    // No row highlight: state lives on the circle.
+    expect(row.className).not.toMatch(/bg-/);
+
+    const copy = within(row).getByRole('button', { name: /vibecarbon configure analytics/ });
+    expect(copy.className).toContain('relative');
+    expect(copy.className).toContain('z-30');
+
+    // Copy stays a copy: it does not select the step.
+    await user.click(copy);
+    expect(button).toHaveAttribute('aria-pressed', 'false');
+    // Clicking the row's text (inside the stretched control) selects it.
+    await user.click(within(row).getByText('Privacy-friendly usage insights'));
+    expect(button).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('shows hover and selection on the step circle', async () => {
+    const user = userEvent.setup();
+    renderStepper();
+    const circle = (label: RegExp) => stepButton(label).firstElementChild as HTMLElement;
+
+    // Default: the current step (Email) is selected; nothing is hovered.
+    expect(circle(/Email/)).toHaveAttribute('data-selected');
+    expect(circle(/Payments/)).not.toHaveAttribute('data-hovered');
+
+    fireEvent.mouseEnter(rowOf(/Payments/));
+    expect(circle(/Payments/)).toHaveAttribute('data-hovered');
+    expect(circle(/Payments/).className).toContain('ring-primary/45');
+    expect(circle(/Email/)).toHaveAttribute('data-selected');
+
+    await user.click(stepButton(/Payments/));
+    expect(circle(/Payments/)).toHaveAttribute('data-selected');
+    // Selected wins over hover, at full strength.
+    expect(circle(/Payments/)).not.toHaveAttribute('data-hovered');
+    expect(circle(/Payments/).className).toMatch(/(^|\s)ring-primary(\s|$)/);
+    expect(circle(/Email/)).not.toHaveAttribute('data-selected');
+    // The current step keeps its glow whether or not it is selected.
+    expect(circle(/Email/).className).toContain('shadow-[0_0_0_4px_var(--glow-primary)]');
+  });
+
   it('shows a done header with the command and integrations still browsable', async () => {
     const user = userEvent.setup();
     renderStepper({ ...NOTHING_DONE, email: true });
