@@ -108,7 +108,7 @@ curl -s http://n8n.localhost/rest/settings | python3 -m json.tool | grep showSet
 
 ### "password authentication failed for user n8n"
 
-The n8n compose DB password doesn't match what `n8n-init.sh` set. Ensure both use `${POSTGRES_PASSWORD}`.
+The n8n compose DB password doesn't match what `n8n-init.sh` set. Both read `N8N_DB_PASSWORD` from `.env.local`; if it changed after the first boot, set it on the role again (`vibecarbon up` locally reruns `n8n-init.sh`; on a server run `\password n8n` in `docker compose exec db psql -U postgres`).
 
 ### ForwardAuth returns 401 in production
 

@@ -20,7 +20,7 @@ APP_DB_HOST="${APP_DB_HOST:-db}"
 APP_DB_PORT="${APP_DB_PORT:-5432}"
 APP_DB_NAME="${APP_DB_NAME:-postgres}"
 APP_DB_USER="${APP_DB_USER:-metabase}"
-APP_DB_PASSWORD="${DB_PASSWORD}"
+APP_DB_PASSWORD="${APP_DB_PASSWORD}"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
@@ -123,8 +123,8 @@ main() {
     exit 1
   fi
 
-  if [ -z "$DB_PASSWORD" ]; then
-    log "ERROR: DB_PASSWORD is required"
+  if [ -z "$APP_DB_PASSWORD" ]; then
+    log "ERROR: APP_DB_PASSWORD (the metabase role's METABASE_DB_PASSWORD) is required"
     exit 1
   fi
 

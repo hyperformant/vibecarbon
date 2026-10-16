@@ -56,10 +56,10 @@ Host: db
 Port: 5432
 Database: postgres
 User: n8n
-Password: your POSTGRES_PASSWORD (from .env.local)
+Password: your N8N_DB_PASSWORD (from .env.local)
 ```
 
-Never use `postgres` here: it is the superuser, so a workflow on it could read the auth tables and run shell commands in the db container (`COPY ... TO PROGRAM`). The `n8n` role is what the add-on sets up for this (`volumes/db/n8n-init.sh`, on every start): not a superuser, bypasses row-level security, read and write on your business tables, and no access to the auth tables (`"user"`, `session`, `account`, ...). A workflow on it sees and can change every business row.
+Never use `postgres` here: it is the superuser, so a workflow on it could read the auth tables and run shell commands in the db container (`COPY ... TO PROGRAM`). The `n8n` role is what the add-on sets up for this (`volumes/db/n8n-init.sh`, at first boot and on every `vibecarbon up` in development), with its own password: not a superuser, bypasses row-level security, read and write on your business tables, and no access to the server-only tables (`"user"`, `session`, `account`, `failed_login_attempts`, ...). A workflow on it sees and can change every business row.
 
 A narrower role does not get you a "read-only view of everything" for free. Row-level security applies to every role without `BYPASSRLS`, and the policies decide by the app user a request runs as (`app.user_id()`). A report connection has no app user, so a plain role sees only what the policies allow it, which is no rows (or an error from a helper function it may not call). For a cross-tenant, read-only report, create a role that bypasses RLS but can only read the tables you grant (over `vibecarbon shell`, or psql against the local dev db):
 

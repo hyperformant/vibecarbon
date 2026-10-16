@@ -320,6 +320,10 @@ export function buildPerEnvSecrets(envLocal) {
     BETTER_AUTH_SECRET: envLocal.BETTER_AUTH_SECRET,
     ADMIN_EMAIL: envLocal.ADMIN_EMAIL,
     ADMIN_PASSWORD: envLocal.ADMIN_PASSWORD,
+    // The add-on roles' own database passwords; empty (and so not uploaded)
+    // when the add-on is not installed.
+    METABASE_DB_PASSWORD: envLocal.METABASE_DB_PASSWORD,
+    N8N_DB_PASSWORD: envLocal.N8N_DB_PASSWORD,
   };
   /** @type {Record<string,string|undefined>} */
   const features = {};

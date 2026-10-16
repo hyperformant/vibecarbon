@@ -158,6 +158,50 @@ export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
 }
 
 /**
+ * Give every installed add-on the generated secrets its manifest declares
+ * (`envVars` with `generate: 'password'`, services/<name>/manifest.json),
+ * when the project lacks them. `vibecarbon add` generates them once; a
+ * project that added the add-on before the secret existed (Metabase's and
+ * n8n's own database passwords, METABASE_DB_PASSWORD / N8N_DB_PASSWORD)
+ * would otherwise fail compose's `:?` check and could not start it. Checks
+ * BOTH .env.local and .env, like ensureBetterAuthSecret: a value in either is
+ * copied to the other, never rotated; otherwise a new one is generated.
+ * Values are never printed. Only add-ons listed in .vibecarbon.json count,
+ * read from the CLI's bundled services/.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean, servicesDir?: string}} [opts]
+ * @returns {{key: string, status: 'generated' | 'copied'}[]} what was (or,
+ *   under -dry, would be) written
+ */
+export function ensureAddonSecrets(
+  cwd,
+  { dryRun = false, servicesDir = join(__dirname, '..', 'services') } = {},
+) {
+  const services = Object.keys(loadManifest(cwd).services ?? {});
+  if (services.length === 0) return [];
+  const local = loadEnvVariables(cwd);
+  const basePath = join(cwd, '.env');
+  const base = existsSync(basePath) ? parseDotenv(readFileSync(basePath, 'utf-8')) : null;
+  const written = [];
+  for (const name of services.sort()) {
+    const svcManifest = join(servicesDir, name, 'manifest.json');
+    if (!existsSync(svcManifest)) continue;
+    const envVars = JSON.parse(readFileSync(svcManifest, 'utf-8')).envVars ?? {};
+    for (const [key, config] of Object.entries(envVars)) {
+      if (config?.generate !== 'password') continue;
+      const inLocal = local[key] || '';
+      const inBase = base ? base[key] || '' : inLocal;
+      if (inLocal && inBase) continue;
+      const existing = inLocal || inBase;
+      if (!dryRun) setEnvVar(key, existing || generatePassword(config.length || 24), cwd);
+      written.push({ key, status: existing ? 'copied' : 'generated' });
+    }
+  }
+  return written;
+}
+
+/**
  * Point the project's .env files at this CLI's database image.
  * docker-compose.yml pulls `${DB_IMAGE}:${DB_IMAGE_TAG}`, so the upgraded
  * template files and the image they run on move together. A project created
@@ -233,6 +277,15 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
   const authNotes = betterAuthUpgradeNotes(ensureBetterAuthSecret(cwd, { dryRun }), { dryRun });
   if (authNotes.info) p.log.info(authNotes.info);
   if (authNotes.warn) p.log.warn(authNotes.warn);
+  for (const { key, status } of ensureAddonSecrets(cwd, { dryRun })) {
+    const verb = status === 'generated' ? 'Generated' : 'Copied';
+    p.log.info(
+      `${dryRun ? `Would set` : verb} ${key} in .env and .env.local` +
+        (status === 'generated'
+          ? ': restart the stack so the add-on role gets it (`vibecarbon up`; on a server, set it with \\password, see docs/security.md)'
+          : ''),
+    );
+  }
   if (ensureDbImageEnv(cwd, { dryRun })) {
     const { ref } = resolveDbImage();
     p.log.info(

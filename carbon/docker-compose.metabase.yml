@@ -10,6 +10,9 @@
 services:
   # Extend db service to add metabase database initialization
   db:
+    environment:
+      # The metabase role's own password, for metabase-init.sh.
+      METABASE_DB_PASSWORD: ${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
     volumes:
       - ./volumes/db/metabase-init.sh:/docker-entrypoint-initdb.d/zz-metabase-init.sh:Z
 
@@ -23,7 +26,7 @@ services:
       - MB_DB_DBNAME=metabase
       - MB_DB_PORT=5432
       - MB_DB_USER=metabase
-      - MB_DB_PASS=${POSTGRES_PASSWORD}
+      - MB_DB_PASS=${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
       - MB_DB_HOST=db
       # Site configuration
       - MB_SITE_URL=${METABASE_SITE_URL:-http://metabase.localhost}
@@ -71,11 +74,11 @@ services:
       - METABASE_URL=http://metabase:3000
       - METABASE_ADMIN_EMAIL=${METABASE_ADMIN_EMAIL:-${ADMIN_EMAIL}}
       - METABASE_ADMIN_PASSWORD=${METABASE_ADMIN_PASSWORD:-${ADMIN_PASSWORD}}
-      # "Application Data" connects as the metabase role (never the superuser):
-      # metabase-init.sh makes it NOSUPERUSER BYPASSRLS, read-only, with the
-      # auth tables revoked. Its password is the shared POSTGRES_PASSWORD.
+      # "Application Data" connects as the metabase role with its own password
+      # (never the superuser's): metabase-init.sh makes it NOSUPERUSER
+      # BYPASSRLS, read-only, with the server-only tables revoked.
       - APP_DB_USER=metabase
-      - DB_PASSWORD=${DB_PASSWORD}
+      - APP_DB_PASSWORD=${METABASE_DB_PASSWORD:?METABASE_DB_PASSWORD missing, run vibecarbon upgrade}
     entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq && sh /scripts/setup.sh"]
     depends_on:
       metabase:

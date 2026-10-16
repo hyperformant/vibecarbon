@@ -59,11 +59,12 @@ spec:
           value: n8n
         - name: DB_POSTGRESDB_USER
           value: n8n
+        # The n8n role's own password, never the superuser's.
         - name: DB_POSTGRESDB_PASSWORD
           valueFrom:
             secretKeyRef:
               name: vibecarbon-secrets
-              key: DB_PASSWORD
+              key: N8N_DB_PASSWORD
         - name: N8N_SECURE_COOKIE
           value: 'true'
         volumeMounts:

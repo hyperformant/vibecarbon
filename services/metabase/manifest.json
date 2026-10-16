@@ -16,6 +16,7 @@
   },
 
   "envVars": {
+    "METABASE_DB_PASSWORD": { "generate": "password", "length": 32 },
     "METABASE_ADMIN_PASSWORD": { "from": "ADMIN_PASSWORD" },
     "METABASE_ADMIN_EMAIL": { "from": "ADMIN_EMAIL", "default": "admin@localhost" }
   },

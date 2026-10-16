@@ -28,11 +28,12 @@ spec:
           value: '5432'
         - name: MB_DB_USER
           value: metabase
+        # The metabase role's own password, never the superuser's.
         - name: MB_DB_PASS
           valueFrom:
             secretKeyRef:
               name: vibecarbon-secrets
-              key: DB_PASSWORD
+              key: METABASE_DB_PASSWORD
         # The `db` Service in front of the db StatefulSet
         # (k8s/base/db/service.yaml).
         - name: MB_DB_HOST
