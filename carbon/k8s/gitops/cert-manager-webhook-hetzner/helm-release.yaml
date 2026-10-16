@@ -23,7 +23,7 @@ spec:
     spec:
       chart: cert-manager-webhook-hetzner
       # PINNED: floating charts break overnight when upstream ships a values
-      # schema change (see the supabase 0.7.1 incident, 2026-07-14). Bump
+      # schema change (see the 2026-07-14 incident, when an upstream chart patch release switched its env values from maps to lists). Bump
       # deliberately, together with any values updates — and in lockstep
       # with DNS01_PROVIDERS.hetzner.webhook.version in src/lib/dns-provider.js
       # (the dev-push path installs the same chart imperatively).

@@ -1,0 +1,46 @@
+# Who may reach the database, and where it may reach.
+#
+# Ingress: the namespace baseline (k8s/base/network-policies.yaml) denies all
+# ingress and then admits every pod in this namespace, and NetworkPolicy
+# allows are additive, so a db-specific ingress rule could not narrow that.
+# The paths that actually reach postgres are:
+#   - the app on tcp 5432 (app-policy egress, k8s/base/app/network-policy.yaml)
+#     and any add-on that uses the database (same namespace);
+#   - the backup CronJob, which never opens a socket to postgres: it
+#     `kubectl exec`s wal-g into this pod through the apiserver
+#     (backup-policy, k8s/base/backup/network-policy.yaml);
+#   - on k8s-ha, the primary repl-gateway relaying the standby's replication
+#     connection to this pod's hostPort (patched in by the HA deploy,
+#     buildDbHostPortPatch in src/lib/deploy/k8s/ha/index.js), and this pod's
+#     own egress to the local gateway (allow-db-repl-gateway-egress, shipped
+#     inside k8s/base/repl-gateway/repl-gateway.yaml).
+#
+# Egress: the db pod pushes WAL and base backups to S3 over HTTPS (wal-g
+# runs INSIDE this container: archive_command → wal-g wal-push, and the
+# nightly `kubectl exec` → wal-g backup-push). The baseline's allow-dns and
+# allow-intra-namespace-egress select every pod with an Egress policy type,
+# which makes egress default-deny for them, so without this the db's
+# outbound 443 is dropped and wal-g hangs. Private ranges are excluded, as in
+# app-policy; DigitalOcean's VPC-internal Spaces gateway is admitted by the
+# provider-conditional db-s3-vpc-egress (k8s/base/s3-egress-vpc).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db-s3-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-db
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

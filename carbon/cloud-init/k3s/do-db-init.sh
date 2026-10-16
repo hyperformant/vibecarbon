@@ -126,7 +126,7 @@ fi
 # k3s-install comment for why this provider's --node-ip carries none of
 # db-init.sh's public-vs-firewall tension (that provider's CCM
 # matches nodes by public --node-ip; this provider's CCM matches by
-# providerID, pre-seeded below). --node-label/--node-taint pin Supabase
+# providerID, pre-seeded below). --node-label/--node-taint pin database
 # workloads to this node and repel everything else (dedicated=db),
 # mirroring db-init.sh's node-pool isolation exactly -- applied as
 # BOOT-TIME k3s agent flags here rather than a post-join `kubectl label`/
@@ -146,11 +146,11 @@ for attempt in 1 2 3 4 5; do
     K3S_INSTALL_OK=true
     break
   fi
-  echo "k3s supabase install attempt $attempt failed (likely transient GitHub/CDN issue), retrying in 20s..."
+  echo "k3s database-node install attempt $attempt failed (likely transient GitHub/CDN issue), retrying in 20s..."
   sleep 20
 done
 if [ "$K3S_INSTALL_OK" != "true" ]; then
-  echo "k3s supabase install failed after 5 attempts -- check GitHub CDN status" >&2
+  echo "k3s database-node install failed after 5 attempts -- check GitHub CDN status" >&2
   exit 1
 fi
 

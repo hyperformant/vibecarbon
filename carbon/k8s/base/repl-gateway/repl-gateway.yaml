@@ -73,7 +73,7 @@ spec:
 ---
 # The ONE additive egress NetworkPolicy that admits the db pod → local gateway
 # hop. The gateway presents as the node's private IP (inside the 10.0.0.0/8
-# range excluded by supabase-db-s3-egress) on tcp 15433, so the hop is blocked
+# range excluded by db-s3-egress) on tcp 15433, so the hop is blocked
 # by default. This policy is additive to default-deny-all and scoped to exactly
 # one destination IP + one port. NetworkPolicy is connection-stateful, so
 # allowing the egress SYN clears the return path too — no ingress rule needed
@@ -87,8 +87,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/instance: supabase
-      app.kubernetes.io/name: supabase-db
+      app: vibecarbon-db
   policyTypes:
     - Egress
   egress:

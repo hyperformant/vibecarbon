@@ -16,9 +16,8 @@ configMapGenerator:
     literals:
       - SITE_URL={{DOMAIN}}
       - PROJECT_NAME=vibecarbon
-      # Service names follow the Supabase community Helm chart convention
-      # (release name `supabase` + chart name `supabase` → `supabase-supabase-*`).
-      - DB_HOST=supabase-supabase-db
+      # The `db` Service in front of the db StatefulSet (base/db/service.yaml).
+      - DB_HOST=db
       - DB_PORT=5432
       - DB_NAME=postgres
 

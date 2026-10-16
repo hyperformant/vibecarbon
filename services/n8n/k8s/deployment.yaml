@@ -49,8 +49,10 @@ spec:
           value: UTC
         - name: DB_TYPE
           value: postgresdb
+        # The `db` Service in front of the db StatefulSet
+        # (k8s/base/db/service.yaml).
         - name: DB_POSTGRESDB_HOST
-          value: postgres
+          value: db
         - name: DB_POSTGRESDB_PORT
           value: '5432'
         - name: DB_POSTGRESDB_DATABASE

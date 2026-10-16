@@ -1,9 +1,9 @@
 # The backup CronJob pod no longer talks to postgres:5432 or S3 directly — it
-# runs `kubectl exec` into the supabase-db pod (wal-g runs there). So its only
+# runs `kubectl exec` into the db pod (wal-g runs there). So its only
 # egress need is the Kubernetes apiserver. DNS + intra-namespace egress come
 # from the cluster-baseline policies (network-policies.yaml, podSelector {}).
-# The wal-g → S3 egress now happens from the supabase-db pod, allowed by the
-# supabase-db-s3-egress policy in network-policies.yaml.
+# The wal-g → S3 egress happens from the db pod, allowed by the db-s3-egress
+# policy in db/network-policy.yaml.
 #
 # Also covers the manual `backup-manual-<ts>` Job created by
 # `kubectl create job --from=cronjob/backup` (src/backup.js triggerBackupJob):

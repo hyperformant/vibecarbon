@@ -1,0 +1,11 @@
+# PostgreSQL: the db StatefulSet, its two Services and its egress policy.
+# statefulset.yaml carries deploy-time placeholders, so this directory is
+# applied only as part of a rendered copy of k8s/base (see the header of
+# statefulset.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - statefulset.yaml
+  - service.yaml
+  - network-policy.yaml

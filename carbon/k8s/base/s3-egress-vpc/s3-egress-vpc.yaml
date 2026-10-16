@@ -17,8 +17,8 @@
 # Spaces endpoints resolve INSIDE pods to a VPC-internal gateway address
 # (observed: nyc3.digitaloceanspaces.com -> 10.10.15.254, the top of the
 # cluster VPC's 10.10.0.0/20). The S3-purposed egress rules in app-policy
-# and supabase-db-s3-egress (carbon/k8s/base/app/*.yaml,
-# carbon/k8s/base/network-policies.yaml) all allow TCP 443 to
+# and db-s3-egress (carbon/k8s/base/app/*.yaml,
+# carbon/k8s/base/db/network-policy.yaml) all allow TCP 443 to
 # `0.0.0.0/0 except [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]` — which cuts
 # that gateway address off, so every S3-dependent pod on DO (wal-g
 # backups/restores, the app's own storage calls) fails to reach it. (The
@@ -70,13 +70,12 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: supabase-db-s3-vpc-egress
+  name: db-s3-vpc-egress
   namespace: vibecarbon
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: supabase-db
-      app.kubernetes.io/instance: supabase
+      app: vibecarbon-db
   policyTypes:
     - Egress
   egress:

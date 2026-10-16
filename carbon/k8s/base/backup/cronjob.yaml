@@ -1,12 +1,11 @@
 # Nightly wal-g base backup.
 #
 # wal-g backup-push needs direct PGDATA filesystem access, which only the
-# supabase-db pod has. So instead of a separate backup container that talks to
+# db pod has. So instead of a separate backup container that talks to
 # postgres over the network (the old pg_dump design), this CronJob runs a tiny
 # kubectl image and `kubectl exec`s wal-g INSIDE the db pod — where wal-g, the
-# WALG_*/AWS_* env, and PGDATA already live (see k8s/values/supabase.values.yaml
-# + the WAL-archiving setup in applyK3sManifests). No bespoke backup image, no
-# sideload, no registry push.
+# WALG_*/AWS_* env, and PGDATA already live (see k8s/base/db/statefulset.yaml).
+# No bespoke backup image, no sideload, no registry push.
 #
 # HA-safe: the command guards on pg_is_in_recovery()=f, so it only takes a base
 # backup on the PRIMARY. On the standby (in recovery) it no-ops, and after a
@@ -63,7 +62,7 @@ spec:
                   RETAIN="${BACKUP_RETENTION_DAYS:-7}"
                   # Exec wal-g inside the db pod. The guard makes this a no-op on
                   # a standby (in recovery) so only the primary takes base backups.
-                  kubectl exec -n vibecarbon statefulset/supabase-supabase-db -- bash -c '
+                  kubectl exec -n vibecarbon statefulset/db -c db -- bash -c '
                     set -euo pipefail
                     # wal-g backup-push connects to Postgres (pg_backup_start) using
                     # libpq env. Unset, PGUSER defaults to the container OS user
@@ -76,7 +75,7 @@ spec:
                     export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
                     # WRITE-GUARD (finding #3): never base-backup on a standby into
                     # the single canonical WALG_S3_PREFIX. WALG_ROLE is rendered
-                    # into the db container env (supabase.values.yaml) and inherited
+                    # into the db container env (db/statefulset.yaml) and inherited
                     # by this kubectl-exec. Closes the bring-up window the recovery
                     # check below cannot (independent primary, not yet in recovery).
                     if [ "${WALG_ROLE:-primary}" = "standby" ]; then

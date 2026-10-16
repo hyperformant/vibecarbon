@@ -1,10 +1,10 @@
 ---
 # Flux GitRepository + Kustomizations for the standby cluster (HA setup).
 #
-# Mirror of clusters/primary/vibecarbon.yaml, minus the supabase
-# HelmRelease (the standby only runs replication-ready base resources;
-# Supabase runs on primary and replicates its DB to the standby's
-# postgres StatefulSet). The path layout + templating is identical.
+# Mirror of clusters/primary/vibecarbon.yaml. The standby runs the same base
+# resources; its db StatefulSet streams from the primary's, and its app tier
+# stays at zero replicas until a failover. The path layout + templating is
+# identical.
 #
 # Applied once by the deploy workflow at first standby-cluster bootstrap.
 apiVersion: source.toolkit.fluxcd.io/v1
@@ -35,10 +35,26 @@ spec:
   prune: true
   wait: true
   timeout: 10m
+  # The db StatefulSet stays with the vibecarbon CLI's deploy, which renders
+  # its per-cluster values (image, StorageClass, S3 endpoint, wal-g role,
+  # relay address; see k8s/base/db/statefulset.yaml). Flux would apply the
+  # unrendered placeholders, so it drops the object from its build here and
+  # only health-checks the live one. Its Services and NetworkPolicy carry no
+  # placeholders and stay in Flux's hands.
+  patches:
+    - patch: |
+        $patch: delete
+        apiVersion: apps/v1
+        kind: StatefulSet
+        metadata:
+          name: db
+      target:
+        kind: StatefulSet
+        name: db
   healthChecks:
     - apiVersion: apps/v1
       kind: StatefulSet
-      name: postgres
+      name: db
       namespace: vibecarbon
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1

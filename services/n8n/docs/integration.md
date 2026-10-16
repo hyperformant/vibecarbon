@@ -37,7 +37,7 @@ APP_DB_PASSWORD=your_password
 
 These give workflows admin access to your app's data. Row-level security does not apply to them, so treat any workflow that uses them as trusted code.
 
-On Kubernetes these variables are not set. Add a Postgres credential in n8n yourself (host `vibecarbon-postgres`, port `5432`), ideally with a role that has only the access your workflows need.
+On Kubernetes these variables are not set. Add a Postgres credential in n8n yourself (host `db`, port `5432`), ideally with a role that has only the access your workflows need.
 
 ## Example Workflows
 

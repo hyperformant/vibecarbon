@@ -8,9 +8,10 @@ metadata:
 spec:
   replicas: 2
   # 900s (15m) — cold k8s deploys race the rollout window: `kubectl set image`
-  # triggers the rollout BEFORE `helm install supabase --wait` returns, and the
-  # app's readiness probe (/api/health/ready) stays 503 until the db answers.
-  # On the slow HA path the sideload + helm install consumed >29m; the old
+  # triggers the rollout BEFORE the db StatefulSet is Ready (a cold CSI attach
+  # plus the image pull), and the app's readiness probe (/api/health/ready)
+  # stays 503 until the db answers and its migrations are applied. On the slow
+  # HA path the sideload + db install once consumed >29m; the old
   # 120s deadline tripped before the db existed and the subsequent
   # `kubectl rollout status` failed even though pods were healthy by then.
   # 900s covers worst-observed cold path; warm rollouts still finish in <60s
@@ -75,7 +76,7 @@ spec:
         # The API server talks to Postgres directly (src/server/db/client.ts).
         # Named explicitly, not left to envFrom, so a stray DB_HOST in the
         # Secret (e.g. the local-dev localhost) can never win. The host is the
-        # Supabase chart's db Service; DB_USER defaults to postgres.
+        # `db` Service (k8s/base/db/service.yaml); DB_USER defaults to postgres.
         - name: DB_HOST
           valueFrom:
             configMapKeyRef:

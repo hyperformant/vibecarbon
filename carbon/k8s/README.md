@@ -30,6 +30,7 @@ k8s/
 │   ├── namespace.yaml
 │   ├── network-policy.yaml        # Default-deny NetworkPolicy
 │   ├── secrets/                   # Secrets and ConfigMaps
+│   ├── db/                       # PostgreSQL StatefulSet (deploy-time placeholders)
 │   ├── app/                      # Vibecarbon application
 │   │   ├── deployment.yaml
 │   │   ├── local-registry.yaml   # Local OCI registry for k3s image distribution
@@ -87,8 +88,7 @@ Before deploying, update the secrets with real values:
 # Create secrets manually (recommended for initial setup)
 kubectl create secret generic vibecarbon-secrets \
   --namespace=vibecarbon \
-  --from-literal=DB_PASSWORD=<your-password> \
-  --from-literal=JWT_SECRET=<your-jwt-secret>
+  --from-literal=DB_PASSWORD=<your-password>
 
 kubectl create secret generic hcloud-token \
   --namespace=vibecarbon \

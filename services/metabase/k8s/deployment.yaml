@@ -33,8 +33,10 @@ spec:
             secretKeyRef:
               name: vibecarbon-secrets
               key: DB_PASSWORD
+        # The `db` Service in front of the db StatefulSet
+        # (k8s/base/db/service.yaml).
         - name: MB_DB_HOST
-          value: postgres
+          value: db
         - name: MB_PASSWORD_COMPLEXITY
           value: strong
         - name: MB_SESSION_COOKIES

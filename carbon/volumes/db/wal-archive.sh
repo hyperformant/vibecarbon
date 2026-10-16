@@ -33,7 +33,7 @@ SLEEP_BASE="${WAL_ARCHIVE_SLEEP:-2}"
 
 # WRITE-GUARD (finding #3): a standby node must NEVER push WAL into the single
 # canonical WALG_S3_PREFIX. WALG_ROLE=standby is set on the standby's db env
-# (compose .env / k8s supabase.values.yaml). This closes the bring-up window
+# (compose .env / k8s db/statefulset.yaml). This closes the bring-up window
 # that the pg_is_in_recovery() gate below can't: a freshly-provisioned standby
 # db can briefly be an INDEPENDENT primary (not yet in recovery) before it is
 # reseeded — WALG_ROLE=standby stops it archiving into the primary's stream even

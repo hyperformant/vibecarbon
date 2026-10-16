@@ -256,8 +256,8 @@ done
 # onto the tainted dedicated=db node (do-db-init.sh taints it
 # dedicated=db:NoSchedule). That node's CSINode object then never
 # gets the driver's `region` topologyKey, so the block-storage PV bound to
-# supabase-db's PVC (which carries nodeAffinity: region In [<region>]) can
-# never satisfy scheduling there, and supabase-db sits Pending forever
+# the db PVC (which carries nodeAffinity: region In [<region>]) can
+# never satisfy scheduling there, and the db pod sits Pending forever
 # ("volume node affinity conflict" -- RCA: DO d3 rig, battery kept-rig
 # deploy iteration 2, verified live: `kubectl get csinode` showed EMPTY
 # topologyKeys for the database node while master/worker-1 both showed
@@ -293,8 +293,8 @@ done
 # self-healing via kubectl's own reconciliation on a later apply), a
 # silently-exhausted patch here would still let the ready marker below
 # get written and let deployK3s's waiter proceed as if healthy,
-# reproducing the exact multi-hour supabase-db Pending wedge this patch
-# exists to fix, just with zero signal until the next 76-minute helm
+# reproducing the exact multi-hour db Pending wedge this patch
+# exists to fix, just with zero signal until the next database rollout
 # timeout.
 CSI_NODE_TOLERATION_OK=false
 for i in 1 2 3; do
@@ -307,7 +307,7 @@ for i in 1 2 3; do
   sleep 10
 done
 if [ "$CSI_NODE_TOLERATION_OK" != "true" ]; then
-  echo "FATAL: could not patch csi-do-node with a universal toleration after 3 attempts -- supabase-db (and any pod on a tainted dedicated node) will wedge Pending forever with a volume node affinity conflict" >&2
+  echo "FATAL: could not patch csi-do-node with a universal toleration after 3 attempts -- the db pod (and any pod on a tainted dedicated node) will wedge Pending forever with a volume node affinity conflict" >&2
   echo "csi-do-node DaemonSet status:"
   kubectl get daemonset csi-do-node -n kube-system -o wide 2>&1 || true
   kubectl describe daemonset csi-do-node -n kube-system 2>&1 || true

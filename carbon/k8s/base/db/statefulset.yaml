@@ -1,0 +1,420 @@
+# PostgreSQL, as one StatefulSet we own.
+#
+# The same published db image every compose mode pulls (official postgres
+# Alpine + pg_cron + wal-g + a baked /etc/postgresql/postgresql.conf, built
+# once from docker/postgres-walg in the vibecarbon repo), started with the
+# same flags as compose's db `command:` (carbon/docker-compose.yml). WAL
+# archiving is therefore on from the first boot: there is no ALTER SYSTEM step
+# and no restart to enable it.
+#
+# Placeholders. The double-brace tokens below are rendered at DEPLOY time by
+# applyK3sManifests (renderK8sBase in src/lib/deploy/k8s/k3s.js), which applies
+# a rendered temp copy of k8s/base and refuses to apply one that still carries
+# any of them. They are quoted so this file stays valid YAML and
+# `kubectl kustomize k8s/base` builds. Never apply k8s/base by hand: a literal
+# StorageClass token is accepted by the API server, and a StatefulSet's
+# volumeClaimTemplates cannot be changed afterwards.
+#
+#   DB_IMAGE / DB_IMAGE_TAG   the db image (resolveDbImage, src/lib/images.js)
+#   WALG_S3_PREFIX            s3://<backup bucket>/backups/<project>/walg, one
+#                             canonical prefix shared by primary and standby
+#   WALG_ROLE                 primary | standby: the wal-g WRITE-GUARD that
+#                             wal-archive.sh and the backup CronJob read
+#   S3_ENDPOINT / S3_REGION   the backup bucket's endpoint
+#   REPL_RELAY_HOST/PORT      the local repl-gateway relay the standby's
+#                             seed-standby init dials (k8s-ha only)
+#   K8S_STORAGE_CLASS         the provider's CSI class (never the cluster
+#                             default, which can be k3s' node-local local-path)
+#
+# Names other code relies on (src/lib/deploy/k8s/db-workload.js): StatefulSet
+# `db`, pod `db-0`, container `db`, PVC `data-db-0`, pod label
+# `app: vibecarbon-db` (also read by the admin Infrastructure page).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  labels:
+    app: vibecarbon-db
+    component: database
+spec:
+  serviceName: db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vibecarbon-db
+  template:
+    metadata:
+      labels:
+        app: vibecarbon-db
+        component: database
+      annotations:
+        # `kubectl exec statefulset/db` (the backup CronJob) and every
+        # `kubectl exec db-0` land in the postgres container, never an init.
+        kubectl.kubernetes.io/default-container: db
+        # sha of the wal-archive ConfigMap this pod template was rendered
+        # with. The script is mounted with subPath, and the kubelet never
+        # updates a subPath ConfigMap mount in place, so a changed script only
+        # reaches postgres when the pod is recreated. A changed sha changes the
+        # template, which rolls the pod on the next apply.
+        vibecarbon.dev/wal-archive-sha: "{{WAL_ARCHIVE_SHA}}"
+    spec:
+      # Nothing in this pod talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      # The image sets STOPSIGNAL SIGINT (fast shutdown). 60s covers a
+      # checkpoint on a busy database before the kubelet escalates to SIGKILL.
+      terminationGracePeriodSeconds: 60
+      # The entrypoint starts as root so it can chown PGDATA to the image's
+      # postgres user (uid/gid 70 on Alpine), then drops to it with gosu, the
+      # same way compose runs it. No fsGroup on purpose: the kubelet would
+      # re-group every file and set g+rwx on PGDATA, and postgres refuses a
+      # data directory that is not 0700 or 0750.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # Pin postgres to the dedicated database node: cloud-init labels it
+      # dedicated=db and taints it dedicated=db:NoSchedule
+      # (carbon/cloud-init/k3s/db-init.sh, do-db-init.sh), so the selector
+      # attracts this pod and the toleration lets it through the taint.
+      nodeSelector:
+        dedicated: db
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: db
+          effect: NoSchedule
+      initContainers:
+        # Restore bootstrap: ONLY when a restore is requested (RESTORE_TARGET
+        # set in vibecarbon-secrets), fetch the latest wal-g base backup into
+        # PGDATA before postgres starts. On a normal boot RESTORE_TARGET is
+        # empty and this is a logged no-op. Runs before postgres, so the app's
+        # startup migrations always see the restored database (its ledger
+        # included) and apply only what the backup lacks.
+        - name: walg-restore
+          image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              if [ -z "${RESTORE_TARGET:-}" ]; then
+                echo "walg-restore: RESTORE_TARGET empty — normal boot, skipping."
+                exit 0
+              fi
+              echo "walg-restore: RESTORE_TARGET=${RESTORE_TARGET} — restoring from S3."
+              if [ -f "${PGDATA}/PG_VERSION" ]; then
+                echo "walg-restore: existing PGDATA — clearing for backup-fetch."
+                rm -rf "${PGDATA:?}/"* "${PGDATA:?}/".* 2>/dev/null || true
+              fi
+              # Fetch the latest base backup into PGDATA. (For PITR the base that
+              # precedes the target is also the latest base — base backups are
+              # frequent, so LATEST is the right starting point either way.)
+              #
+              # Bounded retry over Hetzner Object Storage read-after-write
+              # staleness: a frontend that has not caught up 404s a bucket/object
+              # that provably exists (NoSuchBucket / NoSuchKey / status code:
+              # 404 / wal-g's own "object '…' not found in storage" wording),
+              # which is how a compose scale died on 2026-07-31 seconds
+              # after a successful base-backup push — and again on 2026-08-06,
+              # in the wal-g wording the pattern didn't cover. Bash mirror of the compose
+              # path's JS retry (src/lib/deploy/walg-staleness.js) — same
+              # signatures, same 5-attempt 2/4/8/16s budget. It exists separately
+              # because there is no JS seam here: the kubelet runs this, and its
+              # own init-container restart is not a substitute (each restart
+              # burns the `rollout status --timeout=120s` the restore waits on,
+              # and leaves no breadcrumb saying why). Anything that is not a
+              # storage 404 fails on attempt 1, and a bucket that really is gone
+              # still fails once the budget is spent.
+              WALG_FETCH_ATTEMPTS=5
+              WALG_FETCH_LOG=/tmp/walg-restore-fetch.log
+              walg_attempt=1
+              walg_delay=2
+              while :; do
+                if wal-g backup-fetch "${PGDATA}" LATEST 2>&1 | tee "${WALG_FETCH_LOG}"; then
+                  break
+                fi
+                if [ "${walg_attempt}" -ge "${WALG_FETCH_ATTEMPTS}" ] || \
+                   ! grep -qE "NoSuchBucket|NoSuchKey|status code: 404|object '[^']*' not found in storage" "${WALG_FETCH_LOG}"; then
+                  echo "walg-restore: backup-fetch FAILED on attempt ${walg_attempt}/${WALG_FETCH_ATTEMPTS} — see the output above."
+                  exit 1
+                fi
+                echo "[walg] backup-fetch hit a stale storage frontend (attempt ${walg_attempt}/${WALG_FETCH_ATTEMPTS}), retrying in ${walg_delay}s"
+                # backup-fetch requires an EMPTY target dir — clear whatever the
+                # failed attempt left so the retry starts from the state attempt
+                # 1 saw. (The staleness bites on the initial LIST, before any
+                # bytes land, but a mid-fetch 404 must not wedge the retry.)
+                rm -rf "${PGDATA:?}/"* "${PGDATA:?}/".* 2>/dev/null || true
+                sleep "${walg_delay}"
+                walg_attempt=$((walg_attempt + 1))
+                walg_delay=$((walg_delay * 2))
+              done
+              # Configure archive recovery. A fetched base backup is only
+              # consistent AFTER replaying the WAL from its redo point to its
+              # stop point — and that WAL lives in S3, not in the fetched PGDATA.
+              # Without restore_command + recovery.signal postgres aborts startup
+              # with "could not locate required checkpoint record".
+              # restore_command pulls each segment back from S3 via `wal-g
+              # wal-fetch`; recovery.signal puts postgres into archive recovery;
+              # on reaching the end of WAL (or the PITR target) it promotes to
+              # read-write. (RCA 2026-05-31: e2e k8s/k8s-ha restore — postgres
+              # crash-looped post-fetch.) postgresql.auto.conf lives in PGDATA,
+              # so it is read even though postgres starts with config_file
+              # pointing at the image's /etc/postgresql/postgresql.conf.
+              {
+                echo "restore_command = 'wal-g wal-fetch \"%f\" \"%p\"'"
+                echo "recovery_target_action = 'promote'"
+                # Pin recovery to the fetched base backup's OWN timeline. Default
+                # 'latest' makes postgres chase the newest timeline with a .history
+                # file; in HA, repeated restore→promote cycles leave DIVERGENT
+                # timelines in the shared wal-g S3 prefix, and 'latest' can pick one
+                # that forked before this base backup → crash-loop "requested
+                # timeline N is not a child of this server's history". 'current'
+                # recovers along the base backup's timeline, then promotes fresh.
+                echo "recovery_target_timeline = 'current'"
+                if [ "${RESTORE_TARGET}" != "latest" ]; then
+                  # PITR: RESTORE_TARGET is an ISO-8601 timestamp — replay only up
+                  # to that point instead of to the end of the WAL stream.
+                  echo "recovery_target_time = '${RESTORE_TARGET}'"
+                fi
+              } >> "${PGDATA}/postgresql.auto.conf"
+              touch "${PGDATA}/recovery.signal"
+              # This init runs as root. Hand the fetched tree to the image's
+              # postgres user (uid/gid 70) by name; the entrypoint would fix
+              # ownership too, but the restore should not depend on it.
+              chown -R postgres:postgres "${PGDATA}"
+              echo "walg-restore: backup-fetch complete; archive recovery configured."
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data
+            - name: RESTORE_TARGET
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-secrets
+                  key: RESTORE_TARGET
+                  optional: true
+            - name: WALG_S3_PREFIX
+              value: "{{WALG_S3_PREFIX}}"
+            - name: WALG_COMPRESSION_METHOD
+              value: lz4
+            - name: AWS_ENDPOINT
+              value: "{{S3_ENDPOINT}}"
+            - name: AWS_REGION
+              value: "{{S3_REGION}}"
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /etc/walg/credentials
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: postgres-data
+            - name: walg-s3-creds
+              mountPath: /etc/walg
+              readOnly: true
+        # Standby first-boot seeding (spec 2026-07-16-standby-init-seeding):
+        # on the k8s-ha STANDBY's first boot only, pg_basebackup the primary's
+        # data into empty PGDATA (via the local repl-gateway relay) so postgres
+        # boots directly into recovery as a streaming replica — no independent
+        # boot, no scale-to-zero swap. Self-gates (in-script) on
+        # WALG_ROLE=standby + empty PGDATA + no RESTORE_TARGET, so it is a
+        # logged no-op on the primary, on single-cluster k8s, on restores, and
+        # on every non-first boot. Bounded: ~6 min of retries, then exits 0
+        # UNSEEDED and the serial reseed path takes over. Script delivered via
+        # the vibecarbon-seed-standby ConfigMap (rendered at deploy time from
+        # the shared basebackup builder in src/lib/deploy/replication.js —
+        # secret-free; REPL_PASSWORD arrives via env below). Mounts the RAW
+        # volume (no subPath): PGDATA is <mount>/postgres-data, staging a
+        # sibling — the same layout the helper-pod swap uses.
+        - name: seed-standby
+          image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            # An optional ConfigMap that is MISSING mounts as an empty dir — a
+            # bare `bash <script>` would then fail the init and block the pod.
+            - '[ -f /etc/vibecarbon/seed-standby.sh ] && exec bash /etc/vibecarbon/seed-standby.sh; echo "[seed-standby] no script mounted — skipping"; exit 0'
+          env:
+            - name: WALG_ROLE
+              value: "{{WALG_ROLE}}"
+            - name: SEED_PRIMARY_HOST
+              value: "{{REPL_RELAY_HOST}}"
+            - name: SEED_PRIMARY_PORT
+              value: "{{REPL_RELAY_PORT}}"
+            - name: RESTORE_TARGET
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-secrets
+                  key: RESTORE_TARGET
+                  optional: true
+            - name: REPL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-secrets
+                  key: REPL_PASSWORD
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /seed-volume
+            - name: seed-standby-script
+              mountPath: /etc/vibecarbon
+              readOnly: true
+      containers:
+        - name: db
+          image: "{{DB_IMAGE}}:{{DB_IMAGE_TAG}}"
+          imagePullPolicy: IfNotPresent
+          # The same flags as compose's db `command:` (carbon/docker-compose.yml),
+          # where each one's reasoning lives. The image's entrypoint keeps
+          # archiving off on its init-time temporary server
+          # (docker/postgres-walg/db-entrypoint.sh), so a fresh volume never
+          # waits on S3 during initdb.
+          args:
+            - postgres
+            - -c
+            - config_file=/etc/postgresql/postgresql.conf
+            - -c
+            - log_min_messages=fatal
+            - -c
+            - wal_level=replica
+            - -c
+            - archive_mode=on
+            - -c
+            # Fault-tolerant wrapper around `wal-g wal-push` (vibecarbon-wal-archive
+            # ConfigMap, k8s/base/backup/configmap-walg.yaml): retries, then
+            # logs WAL_ARCHIVE_FAILED and exits 0 so a persistent S3 outage
+            # cannot pin pg_wal and fill the disk. Invoked through bash so the
+            # mounted file needs no exec bit.
+            - archive_command=bash /etc/postgresql/wal-archive.sh %p
+            - -c
+            - archive_timeout=900
+            - -c
+            # Lets the k8s-ha standby (in recovery) accept the read-only psql
+            # connection failover's pg_promote() needs.
+            - hot_standby=on
+            - -c
+            - max_connections=200
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            # The official image's superuser. The app connects as it too
+            # (DB_USER defaults to postgres): its startup migrations create the
+            # pg_cron extension and the app_user role, which takes a superuser.
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-secrets
+                  key: DB_PASSWORD
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-secrets
+                  key: DB_PASSWORD
+            - name: POSTGRES_DB
+              value: postgres
+            - name: PGDATABASE
+              value: postgres
+            - name: POSTGRES_HOST
+              value: /var/run/postgresql
+            - name: PGPORT
+              value: "5432"
+            - name: POSTGRES_PORT
+              value: "5432"
+            # Non-secret wal-g env: continuous WAL archiving (archive_command)
+            # and the backup CronJob's `kubectl exec` (which inherits this env)
+            # both read it. The S3 keys are a mounted file (walg-s3-creds), not
+            # env, so rotating them never needs a template change.
+            - name: WALG_S3_PREFIX
+              value: "{{WALG_S3_PREFIX}}"
+            - name: WALG_ROLE
+              value: "{{WALG_ROLE}}"
+            - name: WALG_COMPRESSION_METHOD
+              value: lz4
+            # The nightly base backup runs inside this container's cgroup, so
+            # it is kept at 2 (compose uses the wal-g default of 4) to bound
+            # the burst against the limits below.
+            - name: WALG_UPLOAD_CONCURRENCY
+              value: "2"
+            - name: AWS_ENDPOINT
+              value: "{{S3_ENDPOINT}}"
+            - name: AWS_REGION
+              value: "{{S3_REGION}}"
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /etc/walg/credentials
+          # Ready means the REAL server accepts TCP. The entrypoint's
+          # first-boot temporary server listens on the socket only, so a TCP
+          # pg_isready cannot mistake it for the real one (the d4 run-2 RCA in
+          # awaitPostgresAccepting, src/lib/deploy/k8s/readiness.js). A hot
+          # standby in recovery also answers, so the k8s-ha standby goes Ready
+          # too. No liveness probe: a long WAL replay after a restore must not
+          # be killed half way.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Headroom for the daily wal-g base backup, which runs INSIDE this
+          # container's cgroup (via `kubectl exec`, see k8s/base/backup/cronjob.yaml).
+          # backup-push streams PGDATA → lz4 → S3; the limit is sized for the
+          # backup window, not steady state, or it throttles postgres too.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            # subPath keeps PGDATA one level below the volume root: a freshly
+            # formatted ext4 volume carries lost+found, and initdb refuses a
+            # non-empty directory.
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: postgres-data
+            - name: wal-archive-script
+              mountPath: /etc/postgresql/wal-archive.sh
+              subPath: wal-archive.sh
+              readOnly: true
+            - name: walg-s3-creds
+              mountPath: /etc/walg
+              readOnly: true
+      volumes:
+        - name: wal-archive-script
+          configMap:
+            # Invoked as `bash /etc/postgresql/wal-archive.sh` (archive_command),
+            # so no exec bit is required on the mounted file.
+            name: vibecarbon-wal-archive
+        - name: walg-s3-creds
+          secret:
+            secretName: vibecarbon-secrets
+            # Optional so a no-S3 deploy still schedules the db pod; wal-g is
+            # simply unconfigured then. items maps the INI key → credentials.
+            optional: true
+            items:
+              - key: S3_CREDENTIALS_INI
+                path: credentials
+        # Optional: a deploy path that never created the map must not wedge
+        # the db pod in ContainerCreating (the init's command guards on the
+        # script being present).
+        - name: seed-standby-script
+          configMap:
+            name: vibecarbon-seed-standby
+            optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: vibecarbon-db
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        # The provider's CSI class, pinned at deploy time. Left to the
+        # cluster default this can bind k3s' node-local local-path, which
+        # silently breaks replication, failover and wal-g restore (RCA: kept
+        # k8s-ha rig e4, 2026-08-05). Immutable once the PVC exists.
+        storageClassName: "{{K8S_STORAGE_CLASS}}"
+        resources:
+          requests:
+            storage: 10Gi

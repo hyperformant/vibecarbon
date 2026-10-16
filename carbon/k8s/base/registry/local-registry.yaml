@@ -67,7 +67,7 @@ spec:
           ports:
             - containerPort: 5000
               # hostPort exposes the registry on the master's private IP (10.0.1.1:5000).
-              # Worker and supabase kubelets use 10.0.1.1:5000 to pull images — kubelet uses
+              # Worker and database-node kubelets use 10.0.1.1:5000 to pull images — kubelet uses
               # node DNS (not cluster DNS) so it can't resolve the "local-registry" service name.
               hostPort: 5000
               protocol: TCP
