@@ -202,12 +202,30 @@ describe('waitForAdminReady (compose, compose-ha)', () => {
     await expect(
       waitForAdminReady('1.2.3.4', '/key', 'proj', { sshRun, initialDelayMs: 0, budgetMs: 20 }),
     ).rejects.toThrow(
-      /did not report its super admin ready within 0s \(last: app is serving but[\s\S]*has not reported its super admin ready[\s\S]*ADMIN_EMAIL and ADMIN_PASSWORD[\s\S]*already exists/,
+      /did not report its migrations applied and its super admin ready within 0s \(last: app is serving but[\s\S]*has not reported its super admin ready[\s\S]*ADMIN_EMAIL and ADMIN_PASSWORD[\s\S]*already exists/,
     );
   });
 });
 
 describe('waitForAdminReady: a terminal status fails fast with its reason', () => {
+  it('names a failed migration as the cause, not the super admin', async () => {
+    const sshRun = vi.fn(async (_ip: string, _key: string, cmd: string) =>
+      cmd.includes('logs') ? 'Database migrations failed; ...' : 'exit=9',
+    );
+    const err = await waitForAdminReady('1.2.3.4', '/key', 'proj', {
+      sshRun,
+      initialDelayMs: 0,
+      budgetMs: 60_000,
+    }).catch((e) => e);
+    expect(err.message).toMatch(
+      /^The app's database migrations failed: a database migration failed/,
+    );
+    expect(err.message).not.toMatch(/super admin is not ready/);
+    expect(err.message).toContain('Database migrations failed; ...');
+    // One probe plus the log read: terminal, no waiting out the budget.
+    expect(sshRun).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps docker's own output when the exec never reached the probe", async () => {
     const sshRun = vi.fn(async (_ip: string, _key: string, cmd: string) =>
       cmd.includes('logs') ? '' : 'service "app" is not running\nexit=1',

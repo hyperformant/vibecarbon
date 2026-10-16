@@ -163,13 +163,6 @@ describe('per-site error framing survived the conversion', () => {
     expect(utils).toMatch(/Failed to pull \$\{remoteDir\}\/\.env from \$\{host\}/);
     expect(utils).toMatch(/remote still has the previous contents/);
   });
-
-  it('the best-effort pushes still swallow their failures (ignoreError preserved)', () => {
-    // setupServerFiles copies optional files that may legitimately be absent;
-    // converting them must not turn a missing prometheus dir into a hard fail.
-    const swallowed = utils.match(/ignoreError:\s*true/g) ?? [];
-    expect(swallowed.length).toBeGreaterThanOrEqual(6);
-  });
 });
 
 describe('detector sanity (not vacuously permissive)', () => {

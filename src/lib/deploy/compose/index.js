@@ -1032,8 +1032,10 @@ export async function waitForAdminReady(ip, sshKeyPath, projectName, options = {
   }
   const known = isAdminProbeExit(lastCode);
   const headline = isTerminalAdminProbeExit(lastCode)
-    ? `The app's super admin is not ready: ${describeAdminProbeExit(lastCode)}.`
-    : `The app did not report its super admin ready within ${Math.round(budgetMs / 1000)}s ` +
+    ? lastCode === ADMIN_PROBE_EXIT.MIGRATIONS_FAILED
+      ? `The app's database migrations failed: ${describeAdminProbeExit(lastCode)}.`
+      : `The app's super admin is not ready: ${describeAdminProbeExit(lastCode)}.`
+    : `The app did not report its migrations applied and its super admin ready within ${Math.round(budgetMs / 1000)}s ` +
       `(last: ${describeAdminProbeExit(lastCode)}).`;
   throw new Error(
     `${headline}\n` +

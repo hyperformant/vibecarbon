@@ -58,6 +58,12 @@ let pushExit = { code: 0, stderr: '' };
 // kubectl wait) — drives the fail-loud tests below.
 let webhookHelmExit = 0;
 let webhookWaitExit = 0;
+// Exit code of the in-container /api/health probe (`kubectl exec deploy/app
+// … node -e`), and whether `kubectl rollout status deployment/app` hangs
+// (never exits, as when readiness stays 503) — drive the migration-failure
+// short-circuit test.
+let appProbeExit = 0;
+let rolloutHangs = false;
 
 function makeGate() {
   let release!: () => void;
@@ -159,6 +165,27 @@ function installSpawnMock() {
       argv.includes('deploy/cert-manager-webhook-hetzner')
     ) {
       return fakeChild({ exitCode: webhookWaitExit, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('exec') &&
+      argv.includes('deploy/app') &&
+      argv.includes('node')
+    ) {
+      return fakeChild({ exitCode: appProbeExit, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
+    if (
+      rolloutHangs &&
+      cmd === 'kubectl' &&
+      argv.includes('rollout') &&
+      argv.includes('status') &&
+      argv.includes('deployment/app')
+    ) {
+      return fakeChild({ gate: new Promise<void>(() => {}), argv: full }) as unknown as ReturnType<
         typeof spawn
       >;
     }
@@ -1045,6 +1072,31 @@ describe('applyK3sManifests — waits for the app to report its super admin', ()
     expect(probeIdx).toBeGreaterThan(rolloutIdx);
     expect(cmdCalls.some((a) => a.includes('port-forward'))).toBe(false);
   });
+
+  // The app migrates at startup and readiness stays 503 until it has, so a
+  // FAILED migration never lets `rollout status` finish. The deploy must say
+  // so at once (probe exit 9, with the app log tail), not after the
+  // rollout's 600 s timeout.
+  it('fails at once on a failed migration while the rollout still waits', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    appProbeExit = 9; // ADMIN_PROBE_EXIT.MIGRATIONS_FAILED
+    rolloutHangs = true;
+    try {
+      const err = await applyK3sManifests(baseArgs(makeProjectDir())).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/database migration failed/);
+      expect(err.message).toMatch(/app log tail/);
+      expect(err.message).toMatch(/kubectl -n vibecarbon logs deploy\/app -c app/);
+    } finally {
+      appProbeExit = 0;
+      rolloutHangs = false;
+    }
+    expect(
+      cmdCalls.some((a) => a[0] === 'kubectl' && a.includes('logs') && a.includes('deploy/app')),
+    ).toBe(true);
+    // Nothing after the rollout ran: no RLS audit on a schema that failed.
+    expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);
+  }, 15_000);
 
   it('ships the session secret and the admin credentials in vibecarbon-secrets', async () => {
     const { applyK3sManifests } = await k3sPromise;

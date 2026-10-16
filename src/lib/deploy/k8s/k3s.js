@@ -74,6 +74,7 @@ import {
   awaitCertManagerAdmission,
   awaitControlPlaneServing,
   awaitPostgresAccepting,
+  watchAppMigrationFailure,
 } from './readiness.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -4228,7 +4229,14 @@ export async function applyK3sManifests({
     // rollout to wait on.
     console.error('[pilot-standby] skipping rolloutApp, app tier is zeroed until failover');
   } else {
-    await perfAsync(`deploy.${perfPrefix}.rolloutApp`, async () => {
+    // The rollout waits on readiness, which stays 503 until the app's
+    // startup migrations are applied. A FAILED migration never becomes ready,
+    // so a watcher polls the app's own health probe alongside the rollout and
+    // fails the deploy at once on MIGRATIONS_FAILED (with the app log tail)
+    // instead of at the rollout's 600 s timeout. Whichever settles first wins;
+    // the other is stopped (the rollout child is killed through the signal).
+    const rolloutAbort = new AbortController();
+    const rollout = perfAsync(`deploy.${perfPrefix}.rolloutApp`, async () => {
       const rolloutArgs = [
         '-n',
         'vibecarbon',
@@ -4250,6 +4258,7 @@ export async function applyK3sManifests({
           const child = spawn('kubectl', rolloutArgs, {
             env,
             stdio: ['ignore', 'inherit', 'pipe'],
+            signal: rolloutAbort.signal,
           });
           let stderrBuf = '';
           child.stderr?.on('data', (chunk) => {
@@ -4283,6 +4292,15 @@ export async function applyK3sManifests({
         },
       );
     });
+    const migrationWatch = watchAppMigrationFailure({ env, signal: rolloutAbort.signal });
+    try {
+      await Promise.race([rollout, migrationWatch]);
+    } finally {
+      rolloutAbort.abort();
+      // The loser settles after the abort; its outcome no longer matters.
+      rollout.catch(() => {});
+      migrationWatch.catch(() => {});
+    }
   }
   // 9b. Wait for the app to report its migrations applied and its super
   //     admin ready (one probe). The app migrates, then creates the admin

@@ -36,9 +36,11 @@
  * shows they no longer fire.
  */
 
+import { setTimeout as delay } from 'node:timers/promises';
 import { progressLog } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import {
+  ADMIN_PROBE_EXIT,
   adminNotReadyHint,
   adminReadyProbeScript,
   describeAdminProbeExit,
@@ -314,5 +316,86 @@ export async function awaitAppAdminReady({
     throw new Error(
       `${err.message}\n${adminNotReadyHint(`kubectl -n ${namespace} logs deploy/app -c app`)}`,
     );
+  }
+}
+
+/**
+ * Watch, alongside `kubectl rollout status deployment/app`, for the one
+ * outcome the rollout wait cannot see: a failed database migration. The app
+ * migrates at startup, and until migrations are applied its readiness probe
+ * answers 503, so a failed migration would otherwise surface only as the
+ * rollout's 600 s timeout. This polls the same in-container /api/health
+ * probe as awaitAppAdminReady (exec works on a running container whether or
+ * not it is Ready) and REJECTS at once on MIGRATIONS_FAILED, with the app's
+ * log tail and the probe's hint. Every other answer (no pod yet, pending,
+ * ready) just means keep watching. It is a condition watch for the rollout's
+ * lifetime, not a retry: it resolves when `signal` aborts, which the caller
+ * does as soon as the rollout settles.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
+ * @param {AbortSignal} params.signal - stops the watch
+ * @param {string} [params.namespace]
+ * @param {number} [params.intervalMs]
+ * @param {Function} [params.exec] - test seam, defaults to runCommandAsync
+ * @param {Function} [params.sleep] - test seam
+ */
+export async function watchAppMigrationFailure({
+  env,
+  signal,
+  namespace = 'vibecarbon',
+  intervalMs = 5_000,
+  exec = defaultExec,
+  sleep = defaultSleep,
+}) {
+  // The default pause ends early on abort, so a finished rollout leaves no
+  // timer holding the process open.
+  const pause =
+    sleep === defaultSleep ? (ms) => delay(ms, undefined, { signal }).catch(() => {}) : sleep;
+  while (!signal.aborted) {
+    let code = 0;
+    try {
+      await exec(
+        [
+          'kubectl',
+          '-n',
+          namespace,
+          'exec',
+          'deploy/app',
+          '-c',
+          'app',
+          '--',
+          'node',
+          '-e',
+          adminReadyProbeScript(),
+        ],
+        { env, silent: true },
+      );
+    } catch (err) {
+      code = err?.status ?? null;
+    }
+    if (signal.aborted) return;
+    if (code === ADMIN_PROBE_EXIT.MIGRATIONS_FAILED) {
+      let logs = '';
+      try {
+        logs = String(
+          (await exec(
+            ['kubectl', '-n', namespace, 'logs', 'deploy/app', '-c', 'app', '--tail=40'],
+            {
+              env,
+              silent: true,
+            },
+          )) ?? '',
+        );
+      } catch {
+        /* best effort */
+      }
+      throw new Error(
+        `The app is not ready: ${describeAdminProbeExit(code)}.\n` +
+          `${adminNotReadyHint(`kubectl -n ${namespace} logs deploy/app -c app`)}\n` +
+          `--- app log tail ---\n${logs.trim()}`,
+      );
+    }
+    await pause(intervalMs);
   }
 }
