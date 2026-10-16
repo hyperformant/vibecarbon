@@ -5,7 +5,7 @@
  * select every pod with an Egress type), so a pod without an explicit S3
  * allowance simply cannot reach object storage.
  *
- * History: the (since removed) Supabase storage service shipped with NO
+ * History: the (since removed) storage service shipped with NO
  * allowance at all, on any provider. Live DO k8s, 2026-08-21: its first upload
  * failed with `connect ECONNREFUSED 10.10.15.254:443`, the VPC gateway address
  * s3-egress-vpc.yaml's own header documents. Pods that talk to S3 today: the

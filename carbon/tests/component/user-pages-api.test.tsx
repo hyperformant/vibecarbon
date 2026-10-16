@@ -1,7 +1,7 @@
 /**
  * Covers the user-facing pages migrated onto the shared client API layer
- * (src/client/lib/api.ts). Verifies one read path carries the Supabase auth
- * header end-to-end, and one write path surfaces the server error via
+ * (src/client/lib/api.ts). Verifies one read path rides the session cookie
+ * (no Authorization header) end-to-end, and one write path surfaces the server error via
  * ApiError. Mirrors api-client.test.ts and
  * use-auth-settings.test.tsx (vi.stubGlobal fetch).
  */

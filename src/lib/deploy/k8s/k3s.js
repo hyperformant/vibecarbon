@@ -2233,13 +2233,17 @@ export const DB_ROLLOUT_TIMEOUT_S = 900;
 
 /**
  * The workloads the retired Postgres Helm chart left in a cluster: its db
- * StatefulSet (release `supabase`, chart `supabase`) and Helm's release
- * record (a `sh.helm.release.v1.<release>.v<n>` Secret labelled
- * owner=helm,name=<release>). Named here only so the deploy can recognize a
- * chart-era cluster and refuse to build a second database beside it.
+ * StatefulSet (`<release>-<chart>-db`; the release and the chart shared one
+ * name) and Helm's release record (a `sh.helm.release.v1.<release>.v<n>`
+ * Secret labelled owner=helm,name=<release>), plus the GitOps Kustomization
+ * `vibecarbon-<release>` that installed it. Named here, and only here, so
+ * the deploy can recognize a chart-era cluster and refuse to build a second
+ * database beside it. The release name is the one line the terminology
+ * census exempts (tests/unit/lib/terminology-census.test.ts).
  */
-export const RETIRED_CHART_DB_STATEFULSET = 'supabase-supabase-db';
-export const RETIRED_CHART_RELEASE = 'supabase';
+export const RETIRED_CHART_RELEASE = 'supabase'; // terminology-census: retired chart name
+export const RETIRED_CHART_DB_STATEFULSET = `${RETIRED_CHART_RELEASE}-${RETIRED_CHART_RELEASE}-db`;
+export const RETIRED_CHART_KUSTOMIZATION = `vibecarbon-${RETIRED_CHART_RELEASE}`;
 
 /**
  * Refuse to deploy onto a cluster that still runs the retired chart's
@@ -2316,7 +2320,7 @@ export async function assertNoRetiredChartDb({
       'the chart database archived to (unchanged), so it replays every segment archived ' +
       'before the uninstall. On k8s-ha do this on both clusters.\n' +
       'GitOps clusters (`vibecarbon configure cicd`): first set `prune: false` on the ' +
-      '`vibecarbon-supabase` Flux Kustomization in flux-system and then delete it; deleting it ' +
+      `\`${RETIRED_CHART_KUSTOMIZATION}\` Flux Kustomization in flux-system and then delete it; deleting it ` +
       'with prune on garbage-collects the HelmRelease, which uninstalls the chart and deletes ' +
       'its database volume before you chose to.',
   );

@@ -5,7 +5,7 @@
  * readiness-gate apikey fix, `vibecarbon failover` completed in 71.6s —
  * fast enough that verify-failover's checks resolved the domain BEFORE the
  * A-record flip propagated to the pinned resolvers (1.1.1.1/8.8.8.8). The
- * checks hit the OLD scaled-down primary (Kong 502 upstream, "missing"
+ * checks hit the OLD scaled-down primary (gateway 502 upstream, "missing"
  * tables) and failed; the failure diagnostics 30s later showed DNS already
  * on the promoted IP with a 200. Yesterday's buggy 4m48s gate stall had
  * been masking exactly this race. The gate: before running verify-failover

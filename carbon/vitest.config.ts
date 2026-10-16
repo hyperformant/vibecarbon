@@ -61,7 +61,7 @@ export default defineConfig({
         test: {
           name: 'integration',
           // Hono route handlers exercised end-to-end via app.request(),
-          // with external services (Supabase, Stripe, SMTP) mocked at the
+          // with external services (Stripe, SMTP, S3) mocked at the
           // module boundary. Tests the full request/response cycle —
           // schema validation, status codes, error mapping, rate-limit
           // wiring — without standing up real infra.

@@ -251,7 +251,7 @@ async function transferImage(ctx) {
 
 /**
  * Log the server into Docker Hub so reconcile.sh's `docker compose pull` of the
- * Supabase service images isn't subject to the per-IP unauthenticated pull
+ * stack's service images isn't subject to the per-IP unauthenticated pull
  * quota. State-gated on the creds fingerprint; `when` gates on creds present.
  */
 /**

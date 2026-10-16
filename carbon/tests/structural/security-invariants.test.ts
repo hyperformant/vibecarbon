@@ -131,7 +131,7 @@ describe('Routing: the app is the only public data path', () => {
   });
 
   it('no compose file defines a gateway, database API or admin console service', () => {
-    const forbidden = ['kong', 'rest', 'realtime', 'meta', 'studio', 'supavisor', 'edge-functions'];
+    const forbidden = ['gateway', 'rest', 'realtime', 'meta', 'studio', 'edge-functions'];
     for (const f of composeFiles) {
       const text = uncommented(read(f));
       for (const name of forbidden) {
@@ -380,12 +380,14 @@ describe('Session cookies: the split-cookie contract holds', () => {
     for (const u of uses) expect(u).toMatch(/sessionCookie/);
   });
 
-  it('the SPA keeps no session of its own: no client-side session module', () => {
-    expect(
-      exists('src/client/lib/supabase.ts'),
-      'A client session store is back. Sessions are HttpOnly cookies the auth ' +
-        'API sets; page JS must never hold a session or refresh token.'
-    ).toBe(false);
+  it('the SPA keeps no session of its own: no client code handles a session token', () => {
+    for (const [rel, src] of clientSources) {
+      expect(
+        /\b(?:access|refresh)_?token\b/i.test(src),
+        `${rel} handles an access or refresh token. Sessions are HttpOnly cookies ` +
+          'the auth API sets; page JS must never hold a session or refresh token.'
+      ).toBe(false);
+    }
   });
 
   it('client code never sends an Authorization header (the cookie is the credential)', () => {

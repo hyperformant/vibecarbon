@@ -33,8 +33,7 @@ describe('k8s GitOps — buildPerEnvSecrets', () => {
   // plus secrets of the removed services an older .env.local still carries.
   const envLocal: Record<string, string> = {
     DB_PASSWORD: 'pw',
-    ANON_KEY: 'anon',
-    SERVICE_ROLE_KEY: 'svc',
+    JWT_SECRET: 'jwt',
     VAULT_ENC_KEY: 'vault',
     STRIPE_SECRET_KEY: 'sk_test_x',
     BILLING_PROVIDER: 'stripe',
@@ -53,13 +52,7 @@ describe('k8s GitOps — buildPerEnvSecrets', () => {
   });
 
   it("never uploads the removed services' secrets", () => {
-    for (const key of [
-      'ANON_KEY',
-      'SERVICE_ROLE_KEY',
-      'SUPABASE_ANON_KEY',
-      'SUPABASE_SERVICE_ROLE_KEY',
-      'VAULT_ENC_KEY',
-    ]) {
+    for (const key of ['JWT_SECRET', 'VAULT_ENC_KEY']) {
       expect(out, key).not.toHaveProperty(key);
     }
   });

@@ -114,7 +114,7 @@ function codeWithoutComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
-describe('10.0.1.2 census — provider-generic files carry no supabase-IP literal', () => {
+describe('10.0.1.2 census — provider-generic files carry no db-IP literal', () => {
   for (const rel of GENERIC_FILES) {
     it(`${rel} has no quoted 10.0.1.2 literal in code`, () => {
       const code = codeWithoutComments(readFileSync(join(ROOT, rel), 'utf8'));

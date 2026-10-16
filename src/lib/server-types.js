@@ -5,7 +5,7 @@
  * both the deploy and scale commands.
  */
 
-// Minimum server specs for a full Compose stack (Supabase + app + Traefik + socket-proxy)
+// Minimum server specs for a full Compose stack (Postgres + app + Traefik + socket-proxy)
 export const COMPOSE_MIN_RAM_GB = 4;
 
 // Curated K8s deployment profiles — sensible combinations of master + database
@@ -125,7 +125,7 @@ export function buildComposeTypeOptions(regionTypes, defaultType) {
 
     let hint = '';
     if (tooSmall) {
-      hint = `need ${COMPOSE_MIN_RAM_GB}GB+ RAM for Supabase`;
+      hint = `need ${COMPOSE_MIN_RAM_GB}GB+ RAM for the full stack`;
     } else if (isMinimum) {
       hint = 'minimum';
     } else if (isRecommended) {

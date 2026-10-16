@@ -405,7 +405,7 @@ describe('HetznerProvider', () => {
   describe('getRegionDefaults', () => {
     // Tests cover the offline-fallback branch (no `_locationTypes` seeded).
     // The project standardized on x86 for all nodes — mixing architectures in a
-    // cluster complicates Helm charts (many Supabase images are amd64-only).
+    // cluster complicates Helm charts (many third-party images are amd64-only).
     //
     // EU and US resolve DIFFERENTLY because Hetzner's catalog forces it: the
     // 2025-10-16 changelog made cpx11/21/31/41/51 unorderable in FSN/NBG/HEL

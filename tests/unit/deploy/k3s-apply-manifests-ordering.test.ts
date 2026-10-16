@@ -40,6 +40,7 @@ vi.mock('node:child_process', async () => {
 });
 
 const k3sPromise = import('../../../src/lib/deploy/k8s/k3s.js');
+const { RETIRED_CHART_DB_STATEFULSET } = await k3sPromise;
 
 // Ordered log of every spawn argv ([executable, ...args]).
 let cmdCalls: string[][] = [];
@@ -152,7 +153,7 @@ function installSpawnMock() {
     if (
       cmd === 'kubectl' &&
       argv.includes('statefulset') &&
-      argv.includes('supabase-supabase-db')
+      argv.includes(RETIRED_CHART_DB_STATEFULSET)
     ) {
       return fakeChild({
         exitCode: 0,
@@ -377,7 +378,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
 
   it('refuses before applying k8s/base when the old chart database still runs', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    retiredChartStsOut = 'statefulset.apps/supabase-supabase-db\n';
+    retiredChartStsOut = `statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}\n`;
     await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
       /existing data does not carry over automatically/,
     );
@@ -395,7 +396,7 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
   it('proceeds to apply k8s/base when there is no trace of it', async () => {
     const { applyK3sManifests } = await k3sPromise;
     await applyK3sManifests(baseArgs(makeProjectDir()));
-    expect(cmdCalls.some((a) => a.includes('supabase-supabase-db'))).toBe(true);
+    expect(cmdCalls.some((a) => a.includes(RETIRED_CHART_DB_STATEFULSET))).toBe(true);
     expect(
       cmdCalls.some(
         (a) =>

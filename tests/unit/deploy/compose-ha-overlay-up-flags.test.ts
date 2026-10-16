@@ -5,7 +5,7 @@
  * THE INCIDENT (e2 warm-deploy, 3× on 2026-08-06/07): the overlay-write step
  * recreated db with REPL_COMPOSE_FLAGS (base + prod + replication) — a
  * rendering no full-set reconcile ever computes — so every warm deploy saw a
- * config-hash mismatch and recreated db again, and GoTrue 502'd through
+ * config-hash mismatch and recreated db again, and the auth service 502'd through
  * createAdminUser's whole retry budget while db cycled. The kept rig's
  * .vc-render-first/last diff named the replication overlay as the drifting
  * content.

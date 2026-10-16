@@ -166,7 +166,7 @@ describe('cleanupAutoscalerWorkers — DigitalOcean fixtures (Task 7)', () => {
         { id: 401, name: 'master-1', vpc_uuid: VPC_ID, tags: encodeLabels({ role: 'master' }) },
         {
           id: 402,
-          name: 'supabase-1',
+          name: 'db-1',
           vpc_uuid: VPC_ID,
           tags: encodeLabels({ role: 'db' }),
         },

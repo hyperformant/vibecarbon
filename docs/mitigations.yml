@@ -326,8 +326,8 @@ classes:
     evidence: >-
       A provisioned host going dark mid-deploy while the provider API still
       reports it running. 2026-09-01, e2e run 07ffb0d6-11ae-4db0-bbdc-d9cf73f91906
-      (PG17 cert, hetzner k8s-ha standby worker
-      testapp-k8s-ha-1788223963488-r9p4ie-e4-standby-supabase, hel1): node
+      (PG17 cert, hetzner k8s-ha, the standby db node of
+      testapp-k8s-ha-1788223963488-r9p4ie-e4, hel1): node
       NotReady in k3s, kubelet unreachable from the
       master (proxy 502 dialing :10250), SSH to the public IP timed out
       during banner exchange, Hetzner Cloud API status "running"

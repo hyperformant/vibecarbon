@@ -17,7 +17,7 @@
  *   2. `docker compose run` — the ground truth: the environment a container
  *      started from this file actually sees, printed NUL-delimited so the
  *      newline-bearing values survive. Needs the pinned busybox image (a
- *      few MB; this tier already pulls the whole Supabase stack).
+ *      few MB; this tier already pulls the whole stack).
  *
  * `network_mode: none` keeps `run` from creating a project network, so a host
  * whose address pools are exhausted (the smoke tests' failure mode) cannot

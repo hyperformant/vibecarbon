@@ -34,7 +34,7 @@ services:
       - ./volumes/grafana/dashboards.dev:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     labels:
-      # Dev: drop the ForwardAuth requirement (same as studio/traefik in local dev)
+      # Dev: drop the ForwardAuth requirement (same as the traefik dashboard in local dev)
       # so you don't need to be logged into the app as super_admin. H-9 keeps
       # anonymous auth OFF unconditionally, so local Grafana now shows its normal
       # login — sign in with GF_SECURITY_ADMIN_USER / _PASSWORD (ADMIN_EMAIL /

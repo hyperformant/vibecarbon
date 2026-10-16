@@ -104,7 +104,7 @@ describe('license checkout price-integrity guard', () => {
     holder.provider = provider;
 
     // Production serves ONE public origin; a buyer finishing payment must land
-    // on the site, not the retired api.<domain> host (Kong would 404 them).
+    // on the site, not a separate api.<domain> host (nothing serves it).
     const { env } = await import('@server/lib/env');
     const prevNodeEnv = env.NODE_ENV;
     const prevSiteUrl = process.env.SITE_URL;

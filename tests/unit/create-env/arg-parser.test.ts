@@ -82,7 +82,6 @@ describe('deploy SPEC + parseFlags integration', () => {
     for (const dropped of [
       '--master-type',
       '--worker-type',
-      '--supabase-type',
       '--type',
       '--domain',
       '--dns-provider',

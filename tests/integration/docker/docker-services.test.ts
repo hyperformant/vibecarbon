@@ -251,8 +251,8 @@ describeDocker('Docker Services Smoke Test', () => {
     // The baseline (db/migrations/0000) creates the one extension the lean
     // stack uses, pg_cron, so this runs after db:migrate: with port 80 taken
     // no app container starts, and its startup migration never ran. (UUIDs
-    // come from core gen_random_uuid(); uuid-ossp and pgcrypto were the
-    // Supabase image's and nothing uses them.)
+    // come from core gen_random_uuid(); uuid-ossp and pgcrypto came with the
+    // old database image and nothing uses them.)
     it('the baseline installs pg_cron', ({ skip }) => {
       if (!portsAvailable) skip();
       const result = execSync(

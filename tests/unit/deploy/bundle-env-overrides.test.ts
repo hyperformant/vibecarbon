@@ -118,8 +118,6 @@ describe('renderBundle envOverrides', () => {
       const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
       expect(env.DOMAIN).toBe('new-domain.example');
       expect(env.SITE_URL).toBe('https://new-domain.example');
-      // The API gateway is gone: no gateway URL is written into the bundle.
-      expect(env).not.toHaveProperty('SUPABASE_URL');
       // Single-origin guard: nothing in the rendered env may point at an
       // api. host (and never the doubled api.api. artifact).
       for (const v of Object.values(env)) {

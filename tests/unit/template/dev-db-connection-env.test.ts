@@ -12,7 +12,7 @@ import { parseDotenv } from '../../../src/lib/dotenv.js';
  * working local connection: the dev `db` container published on localhost,
  * logging in as `postgres` with POSTGRES_PASSWORD. DB_PORT is the base port;
  * env.ts shifts it by DEV_PORT_OFFSET (or takes DEV_DB_PORT) at runtime, the
- * same way it treats SUPABASE_URL, so a later `vibecarbon up` offset change
+ * same way it shifts the other dev ports, so a later `vibecarbon up` offset change
  * cannot leave it stale.
  */
 

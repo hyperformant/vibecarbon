@@ -56,7 +56,7 @@ function buildFixture(): string {
     join(dir, 'Dockerfile'),
     readFileSync(join(REPO_ROOT, 'carbon/Dockerfile'), 'utf-8'),
   );
-  writeFileSync(join(dir, '.env.local'), 'VITE_SUPABASE_URL=https://example.test\n');
+  writeFileSync(join(dir, '.env.local'), 'VITE_PUBLIC_URL=https://example.test\n');
   return dir;
 }
 

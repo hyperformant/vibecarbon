@@ -34,6 +34,9 @@ const {
   assertDbStorageClass,
   assertNoRetiredChartDb,
   awaitDbRollout,
+  RETIRED_CHART_DB_STATEFULSET,
+  RETIRED_CHART_KUSTOMIZATION,
+  RETIRED_CHART_RELEASE,
   buildDbManifestValues,
   dbPodListArgs,
   renderK8sBase,
@@ -470,12 +473,12 @@ describe('the chart is gone for good', () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const outside = k3s.slice(0, start) + k3s.slice(end);
-    expect(outside).not.toMatch(/supabase/i);
+    expect(outside.toLowerCase()).not.toContain(RETIRED_CHART_RELEASE);
     expect(k3s).not.toContain('ALTER SYSTEM');
   });
 
   it('the scaffold carries no values/ or chart GitOps bundle', () => {
-    for (const gone of ['carbon/k8s/values', 'carbon/k8s/gitops/supabase']) {
+    for (const gone of ['carbon/k8s/values', `carbon/k8s/gitops/${RETIRED_CHART_RELEASE}`]) {
       expect(existsSync(join(ROOT, gone)), gone).toBe(false);
     }
   });
@@ -502,36 +505,36 @@ describe('assertNoRetiredChartDb — a chart-era cluster is refused, not silentl
       'vibecarbon',
       'get',
       'statefulset',
-      'supabase-supabase-db',
+      RETIRED_CHART_DB_STATEFULSET,
       '--ignore-not-found',
       '-o',
       'name',
     ]);
-    expect(calls[1]).toContain('owner=helm,name=supabase');
+    expect(calls[1]).toContain(`owner=helm,name=${RETIRED_CHART_RELEASE}`);
   });
 
   it('refuses when the chart StatefulSet still runs, and says what to do', async () => {
     const { exec } = execWith(
-      'statefulset.apps/supabase-supabase-db\n',
-      'secret/sh.helm.release.v1.supabase.v3\n',
+      `statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}\n`,
+      `secret/sh.helm.release.v1.${RETIRED_CHART_RELEASE}.v3\n`,
     );
     const msg = String(
       ((await assertNoRetiredChartDb({ env, exec }).catch((e) => e)) as Error).message,
     );
-    expect(msg).toContain('statefulset.apps/supabase-supabase-db');
+    expect(msg).toContain(`statefulset.apps/${RETIRED_CHART_DB_STATEFULSET}`);
     expect(msg).toContain('existing data does not carry over automatically');
     expect(msg).toContain('`vibecarbon destroy <env>`');
-    expect(msg).toContain('`helm uninstall supabase -n vibecarbon`');
+    expect(msg).toContain(`\`helm uninstall ${RETIRED_CHART_RELEASE} -n vibecarbon\``);
     expect(msg).toContain('`vibecarbon deploy <env> -restore latest`');
     expect(msg).toMatch(/same wal-g prefix/);
     // GitOps: deleting the old Flux Kustomization with prune on would delete
     // the volume before the operator chose to.
     expect(msg).toContain('`prune: false`');
-    expect(msg).toContain('vibecarbon-supabase');
+    expect(msg).toContain(`\`${RETIRED_CHART_KUSTOMIZATION}\``);
   });
 
   it('refuses on the Helm release record alone (the StatefulSet already gone)', async () => {
-    const { exec } = execWith('', 'secret/sh.helm.release.v1.supabase.v1\n');
+    const { exec } = execWith('', `secret/sh.helm.release.v1.${RETIRED_CHART_RELEASE}.v1\n`);
     await expect(assertNoRetiredChartDb({ env, exec })).rejects.toThrow(/retired Helm chart/);
   });
 

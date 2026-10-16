@@ -4,8 +4,8 @@
  *
  * 2026-08-23, linode: THREE independent subsystems died in one leg with
  * `kex_exchange_identification: read: Connection reset by peer` — BuildKit's
- * dial-stdio (run 32640636398), the admin-user SSH tunnel, and the supavisor
- * check's own probe (run 32642715052). That error is sshd REFUSING connections
+ * dial-stdio (run 32640636398), the admin-user SSH tunnel, and the (since removed)
+ * pooler check's own probe (run 32642715052). That error is sshd REFUSING connections
  * at the door: Ubuntu's default `MaxStartups 10:30:100` starts probabilistically
  * dropping unauthenticated connects at 10 concurrent, and a deploy fans
  * builds, pulls, tunnels, and probes across nodes at exactly that scale. Slow

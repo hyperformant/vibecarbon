@@ -42,9 +42,6 @@ coverage
 # Docker volumes (data persisted here)
 volumes/db/data
 
-# Supabase
-.supabase
-
 # Secrets path retired 2026-04-20: vibecarbon-secrets is no longer
 # rendered into the repo at create-time. It's applied at deploy-time by
 # the vibecarbon CLI (imperative path) or

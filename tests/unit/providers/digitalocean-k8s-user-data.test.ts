@@ -1,9 +1,9 @@
 /**
- * M3 Task 3 (master/worker) + Task 5 (supabase) —
- * DigitalOceanProvider.getK8s{Master,Worker,Supabase}UserData.
+ * M3 Task 3 (master/worker) + Task 5 (db) —
+ * DigitalOceanProvider.getK8s{Master,Worker,Db}UserData.
  *
  * Covers the render-level contract for the
- * carbon/cloud-init/k3s/do-{master,worker,supabase}-init.sh templates: zero
+ * carbon/cloud-init/k3s/do-{master,worker,db}-init.sh templates: zero
  * `${...}` residue with the documented (complete) vars set, DO metadata
  * paths present, provider-id kubelet arg present, and zero cross-provider
  * token leakage. Template-shape assertions that don't depend on rendering
@@ -164,7 +164,7 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
     });
   });
 
-  it('do-{master,worker,supabase}-init.sh ship in carbon/cloud-init/k3s/', () => {
+  it('do-{master,worker,db}-init.sh ship in carbon/cloud-init/k3s/', () => {
     expect(() => loadCloudInit('do-master-init.sh')).not.toThrow();
     expect(() => loadCloudInit('do-worker-init.sh')).not.toThrow();
     expect(() => loadCloudInit('do-db-init.sh')).not.toThrow();
@@ -183,9 +183,9 @@ describe('M3 Task 3 — DigitalOceanProvider k8s user-data statics', () => {
   it('all three templates are pure ASCII (DO user-data wire contract — see digitalocean-compose.js ASCII_TRANSLITERATION_MAP RCA)', () => {
     const masterPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-master-init.sh');
     const workerPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-worker-init.sh');
-    const supabasePath = join(__dirname, '../../../carbon/cloud-init/k3s/do-db-init.sh');
+    const dbPath = join(__dirname, '../../../carbon/cloud-init/k3s/do-db-init.sh');
     expect(isPureAscii(readFileSync(masterPath, 'utf-8'))).toBe(true);
     expect(isPureAscii(readFileSync(workerPath, 'utf-8'))).toBe(true);
-    expect(isPureAscii(readFileSync(supabasePath, 'utf-8'))).toBe(true);
+    expect(isPureAscii(readFileSync(dbPath, 'utf-8'))).toBe(true);
   });
 });

@@ -9,7 +9,7 @@ services:
   n8n:
     restart: on-failure:5
     labels:
-      # Dev: No auth required (same as studio/traefik in local dev)
+      # Dev: No auth required (same as the traefik dashboard in local dev)
       # Production uses ForwardAuth via docker-compose.n8n.yml labels
       # Empty middlewares override removes ForwardAuth requirement
       - "traefik.enable=true"

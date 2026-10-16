@@ -161,7 +161,7 @@ describe('RLS: policies read the request identity from app.user_id()', () => {
     const statements = [
       ...code.matchAll(/\b(?:GRANT|REVOKE|CREATE POLICY|ALTER DEFAULT PRIVILEGES)\b[^;]*;/gi),
     ].map((m) => m[0].replace(/'[^']*'|"[^"]*"/g, ''));
-    const foreign = /\b(anon|authenticated|service_role|authenticator|pgbouncer|supabase_\w+)\b/i;
+    const foreign = /\b(anon|authenticated|service_role|authenticator)\b/i;
     const bad = statements.filter((st) => foreign.test(st));
     expect(bad, `statements naming a missing role: ${bad.join(' | ')}`).toEqual([]);
   });

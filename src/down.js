@@ -2,7 +2,7 @@
  * vibecarbon down
  *
  * Wrapper around `<pm> dev:stop` that auto-detects the project's package manager.
- * Stops Docker services (Supabase, Traefik, etc.) for the current project.
+ * Stops Docker services (Postgres, Traefik, etc.) for the current project.
  */
 
 import { execFileSync } from 'node:child_process';

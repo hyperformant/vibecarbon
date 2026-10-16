@@ -131,7 +131,7 @@ export const REGISTRY_PREFIX = `127.0.0.1:${REGISTRY_PORT}/`;
  *   5s  — a `--restart unless-stopped` registry bounce, or a brief SSH blip
  *         on the operator's uplink.
  *  15s  — a slower restart, or dockerd busy competing with reconcile's own
- *         `docker compose pull` of the Supabase images for disk I/O.
+ *         `docker compose pull` of the stack images for disk I/O.
  * Beyond that, retrying is worse than sideloading. Tunnel-bind races need no
  * ladder entry at all — `pushImageOverSshTunnel` walks 20 ports WITHIN one
  * attempt, so reaching a second attempt for that reason means something

@@ -328,7 +328,7 @@ describe('isCsiVolumeName', () => {
     // dangerous; the anchored UUID form is what makes it merely imprecise.
     expect(isCsiVolumeName('pvc-backups')).toBe(false);
     expect(isCsiVolumeName('pvc-')).toBe(false);
-    expect(isCsiVolumeName('supabase-db-data')).toBe(false);
+    expect(isCsiVolumeName('vibecarbon-db-data')).toBe(false);
     expect(isCsiVolumeName(undefined)).toBe(false);
   });
 });

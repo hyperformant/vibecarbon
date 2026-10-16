@@ -41,7 +41,7 @@ describe('collectComposeBuildArgs', () => {
         'VITE_PROJECT_NAME="my-app"',
         'VITE_PLAUSIBLE_DOMAIN="my-app.com"',
         'VITE_N8N_ENABLED="true"',
-        'SUPABASE_URL="http://localhost:8000"', // not VITE_, must be excluded
+        'SITE_URL="http://localhost:3000"', // not VITE_, must be excluded
         'DB_PASSWORD="secret"', // not VITE_, must be excluded
       ].join('\n'),
     );
@@ -51,7 +51,7 @@ describe('collectComposeBuildArgs', () => {
       VITE_PLAUSIBLE_DOMAIN: 'my-app.com',
       VITE_N8N_ENABLED: 'true',
     });
-    expect(args).not.toHaveProperty('SUPABASE_URL');
+    expect(args).not.toHaveProperty('SITE_URL');
     expect(args).not.toHaveProperty('DB_PASSWORD');
   });
 
@@ -60,7 +60,6 @@ describe('collectComposeBuildArgs', () => {
   it('bakes no gateway URL into the client, even with a domain', () => {
     writeEnvLocal('VITE_PROJECT_NAME="x"');
     const args = collectComposeBuildArgs(tmpDir, { domain: 'example.com' });
-    expect(args).not.toHaveProperty('VITE_SUPABASE_URL');
     expect(Object.keys(args).sort()).toEqual(['VITE_PROJECT_NAME', 'VITE_PUBLIC_URL']);
   });
 

@@ -43,8 +43,7 @@ export async function resolvePublicIp(domain: string): Promise<string | null> {
  * The address a VERIFICATION CHECK should dial for `domain`.
  *
  * This is the single resolution seam every HTTP check in the e2e harness goes
- * through (dnsSafeFetch, waitForHealthy, checkSslValid, and the realtime
- * pre-resolve in checks/app-functional.ts). Under an active resolution pin
+ * through (dnsSafeFetch, waitForHealthy, and checkSslValid). Under an active resolution pin
  * (tests/e2e/utils/dns-pin.ts — entered only for verify-failover on compose-ha)
  * it returns the pinned IP so the checks reach the PROMOTED node regardless of
  * where the operator's resolver chain is in the A-record's TTL. Callers keep

@@ -39,7 +39,7 @@ vi.mock('@server/lib/mfa-settings', () => ({
 }));
 vi.mock('@server/lib/email', () => ({ sendEmail: vi.fn(async () => undefined) }));
 
-/** The JSON form PostgREST used for timestamps, which the API keeps. */
+/** The ISO 8601 form (with offset) the API returns for timestamps. */
 const ISO_TIMESTAMP = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?[+-]\d\d:\d\d$/;
 
 /**

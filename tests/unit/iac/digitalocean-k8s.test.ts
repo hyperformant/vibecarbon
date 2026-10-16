@@ -145,7 +145,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     const program = buildDigitalOceanK8sProgram(baseConfig);
     const rawOutputs = await program();
     // sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment,
-    // supabase, worker-1, worker-2 = 10 resources for this config (M3 Task
+    // db, worker-1, worker-2 = 10 resources for this config (M3 Task
     // 9b added the pre-created cluster Tag the firewall dependsOn).
     await waitForResourceCount(10);
     // pulumi.output(...).promise() deeply resolves every nested Output
@@ -253,7 +253,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
     );
     const assignment = byType('digitalocean:index/reservedIpAssignment:ReservedIpAssignment')[0];
     expect(assignment.inputs.ipAddress).toBe('203.0.113.250');
-    // master is always the first Droplet-type resource registered (supabase
+    // master is always the first Droplet-type resource registered (db
     // and every worker's inputs depend on master.ipv4AddressPrivate, so
     // Pulumi cannot resolve them before master resolves) — id 9000001.
     expect(assignment.inputs.dropletId).toBe(9_000_001);
@@ -263,13 +263,13 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
   it('tags every droplet with the canonical role/node-pool/cluster tags (Task 1 encodeLabel contract)', () => {
     const droplets = byType('digitalocean:index/droplet:Droplet');
     const master = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-master`);
-    const supabase = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-db`);
+    const dbDroplet = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-db`);
     const workers = droplets.filter((d) => (d.inputs.name as string).includes('-worker-'));
 
     expect(master?.inputs.tags).toEqual(
       expect.arrayContaining(['role:master', `cluster:${CLUSTER_NAME}`, 'managed-by:vibecarbon']),
     );
-    expect(supabase?.inputs.tags).toEqual(
+    expect(dbDroplet?.inputs.tags).toEqual(
       expect.arrayContaining(['role:db', 'node-pool:db-pool', `cluster:${CLUSTER_NAME}`]),
     );
     for (const w of workers) {
@@ -345,7 +345,7 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
   // ReservedIpAssignment, or accidentally doubles up a Droplet) that none
   // of the by-type/by-name assertions above would notice on their own.
   // M3 Task 9b bumped 9 -> 10 (added the pre-created cluster Tag).
-  it('registers EXACTLY 10 resources for minWorkers:2 (sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment, supabase, 2x worker)', () => {
+  it('registers EXACTLY 10 resources for minWorkers:2 (sshKey, vpc, tag, firewall, master, reservedIp, reservedIpAssignment, db, 2x worker)', () => {
     expect(capturedResources.length).toBe(10);
   });
 
@@ -377,10 +377,10 @@ describe('buildDigitalOceanK8sProgram — resource graph (via Pulumi mocks)', ()
 
   it('renders database/worker user-data with the REAL master private IP (not a placeholder or the master literal)', () => {
     const droplets = byType('digitalocean:index/droplet:Droplet');
-    const supabase = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-db`);
+    const dbDroplet = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-db`);
     const worker1 = droplets.find((d) => d.inputs.name === `${CLUSTER_NAME}-worker-1`);
 
-    const dbUserData = supabase?.inputs.userData as string;
+    const dbUserData = dbDroplet?.inputs.userData as string;
     const workerUserData = worker1?.inputs.userData as string;
 
     expect(dbUserData).toContain('K3S_URL="https://10.10.0.11:6443"');
@@ -407,7 +407,7 @@ describe('buildDigitalOceanK8sProgram — existingSshKeyId reuse (HA shared key)
       existingSshKeyId: '424242',
     });
     const rawOutputs = await program();
-    // vpc, tag, firewall, master, reservedIp, reservedIpAssignment, supabase,
+    // vpc, tag, firewall, master, reservedIp, reservedIpAssignment, db,
     // worker-1, worker-2 = 9 resources (no SshKey — existingSshKeyId reused;
     // M3 Task 9b bumped 8 -> 9 for the pre-created cluster Tag).
     await waitForResourceCount(runStart + 9);

@@ -56,7 +56,7 @@
     "react",
     "hono",
     "vite",
-    "supabase",
+    "postgres",
     "saas",
     "starter",
     "boilerplate",

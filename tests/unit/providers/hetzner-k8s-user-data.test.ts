@@ -8,7 +8,7 @@
  * untouched this task (see Task 3 dossier). The wrap must therefore produce
  * BYTE-IDENTICAL output to what those call sites already render.
  *
- * `tests/fixtures/k3s-hetzner-{master,worker,supabase}-init-rendered.txt`
+ * `tests/fixtures/k3s-hetzner-{master,worker,db}-init-rendered.txt`
  * were captured by calling loadCloudInit/renderScript directly (the
  * pre-existing render path) with the vars below — see task-3-report.md for
  * the original capture command.
@@ -110,7 +110,7 @@ describe('M3 Task 3 — HetznerProvider k8s user-data statics (byte-identical wr
   });
 
   it('getK8sDbUserData leaves no unrendered template placeholders with a full vars object', async () => {
-    const supabase = await HetznerProvider.getK8sDbUserData(dbVars);
-    expect(supabase).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
+    const dbRendered = await HetznerProvider.getK8sDbUserData(dbVars);
+    expect(dbRendered).not.toMatch(/\$\{[a-zA-Z0-9_]+\}/);
   });
 });

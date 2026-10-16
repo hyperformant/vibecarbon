@@ -200,7 +200,7 @@ describe('cleanupAutoscalerWorkers', () => {
         },
         {
           id: 402,
-          name: 'supabase-1',
+          name: 'db-1',
           private_net: [{ network_id: NETWORK_ID }],
           labels: { role: 'db' },
         },

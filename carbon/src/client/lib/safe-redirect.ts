@@ -17,7 +17,7 @@ export function getSafeRedirect(redirectParam: string | null): string {
   // Absolute URLs: allow ONLY the current host or a subdomain of it. The login
   // page is served on the app's own origin, so anchoring on
   // window.location.hostname is exact — this preserves the admin-tool
-  // ForwardAuth flow (login on the apex, redirect back to studio./grafana.
+  // ForwardAuth flow (login on the apex, redirect back to the grafana./n8n.
   // subdomains) while rejecting look-alikes. The previous "last two DNS
   // labels" heuristic was an OPEN REDIRECT on multi-part public suffixes:
   // on app.example.co.uk it treated `co.uk` as the base domain, so

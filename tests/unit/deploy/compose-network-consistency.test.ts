@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 // compose-ha's `docker compose -f base -f prod -f replication up -d db` —
 // then saw vibecarbon-network with a DYNAMIC subnet, mismatching the live
 // pinned network. Docker recreated the network mid-op, which failed because
-// the sibling containers (app, supabase, grafana, …) still held endpoints.
+// the sibling containers (app, db, grafana, …) still held endpoints.
 //
 // Fix: the subnet pin lives in the BASE compose file, so every overlay subset
 // resolves the SAME vibecarbon-network definition and never recreates it.

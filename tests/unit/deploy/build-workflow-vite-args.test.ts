@@ -26,8 +26,4 @@ describe('vibecarbon-build.yml bakes VITE build args', () => {
       expect(wf).toContain(`${key}=\${{ vars.${key} }}`);
     }
   });
-
-  it('bakes no Supabase gateway values: the client has no Supabase client', () => {
-    expect(wf).not.toContain('VITE_SUPABASE_');
-  });
 });

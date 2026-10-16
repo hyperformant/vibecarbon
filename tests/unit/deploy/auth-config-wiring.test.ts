@@ -71,12 +71,6 @@ describe('compose: the app reads auth config from its own environment', () => {
       expect(COMPOSE_REQUIRED_ENV_FALLBACK).toContain(key);
     }
   });
-
-  it('no longer hands the app the gateway keys', () => {
-    for (const key of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY']) {
-      expect((base.app.environment ?? []).some((e) => e.startsWith(`${key}=`))).toBe(false);
-    }
-  });
 });
 
 describe('k8s: the app pod reads auth config from vibecarbon-secrets', () => {
@@ -111,9 +105,8 @@ describe('k8s: the app pod reads auth config from vibecarbon-secrets', () => {
     expect(perEnv.ADMIN_PASSWORD).toBe('test-password');
   });
 
-  it('no GoTrue-only keys are rendered or shipped', () => {
-    expect(SECRET_KEYS).not.toContain('GOTRUE_MAILER_AUTOCONFIRM');
+  it('no retired auth-provider keys are rendered', () => {
     const k3s = read('src/lib/deploy/k8s/k3s.js');
-    expect(k3s).not.toMatch(/AZURE_TENANT_URL|GOTRUE_MAILER_AUTOCONFIRM/);
+    expect(k3s).not.toMatch(/AZURE_TENANT_URL/);
   });
 });

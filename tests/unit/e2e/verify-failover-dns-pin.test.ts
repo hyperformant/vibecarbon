@@ -11,12 +11,12 @@
  * The verifier was grading the deployment on that tail. Its checks resolved
  * through the operator's resolver chain, which was caught MID-TTL: the battery
  * SPLIT. auth_health / auth_signup / rest_api got a fresh answer, reached the
- * promoted node and passed; spa_auth_callback (404 "swallowed by Kong"),
+ * promoted node and passed; spa_auth_callback (404 "swallowed by the gateway"),
  * auth_signin + auth_admin_login (10s timeouts), db_schema (unqueryable) and
  * storage_upload (503 `{"message":"name resolution failed"}` — the retired
- * node's Kong failing to resolve its own stopped upstreams) got the stale
+ * node's gateway failing to resolve its own stopped upstreams) got the stale
  * answer and hit the DEMOTED node. None of the failing request ids appeared in
- * the promoted node's Kong access log; everything healed at TTL expiry.
+ * the promoted node's gateway access log; everything healed at TTL expiry.
  *
  * The fix splits the verifier's job in two, and this file guards both halves:
  *   1. SERVING — pinned checks dial the promoted node directly while keeping

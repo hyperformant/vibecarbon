@@ -30,7 +30,7 @@ interface MockContext {
   get: (key: string) => unknown;
 }
 
-interface MockSupabaseResponse<T> {
+interface MockDataResponse<T> {
   data: T | null;
   error: { message: string } | null;
 }
@@ -224,7 +224,7 @@ describe('Admin Unlock-Account Endpoint', () => {
     user: MockUser | null,
     mockContext: MockContext,
     mockDb: {
-      unlockAccount: (email: string) => Promise<MockSupabaseResponse<null>>;
+      unlockAccount: (email: string) => Promise<MockDataResponse<null>>;
     },
   ): Promise<{ status: number; body: unknown }> {
     // Check authentication
@@ -424,7 +424,7 @@ describe('Admin Locked-Accounts Endpoint', () => {
     user: MockUser | null,
     mockDb: {
       getLockedAccounts: () => Promise<
-        MockSupabaseResponse<
+        MockDataResponse<
           Array<{
             email: string;
             attempt_count: number;
@@ -580,7 +580,7 @@ describe('Admin Locked-Accounts Endpoint', () => {
 
 describe('Auth Settings GET Endpoint', () => {
   async function getAuthSettingsEndpoint(mockDb: {
-    getSettings: () => Promise<MockSupabaseResponse<Array<{ key: string; value: unknown }>>>;
+    getSettings: () => Promise<MockDataResponse<Array<{ key: string; value: unknown }>>>;
     env: {
       GOOGLE_ENABLED: boolean;
       MICROSOFT_ENABLED: boolean;
@@ -771,7 +771,7 @@ describe('Admin Settings PATCH Endpoint', () => {
         key: string,
         value: unknown,
         userId: string,
-      ) => Promise<MockSupabaseResponse<null>>;
+      ) => Promise<MockDataResponse<null>>;
     },
   ): Promise<{ status: number; body: unknown }> {
     // Check authentication

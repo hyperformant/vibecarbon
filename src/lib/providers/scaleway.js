@@ -602,7 +602,7 @@ export class ScalewayProvider extends BaseProvider {
   /**
    * Region-appropriate default server types — fixed roles. DEV1-M is the
    * audited fallback family (present wherever BASIC3 is, in our REGIONS
-   * set) and carries the master/worker roles for cost; supabase gets the
+   * set) and carries the master/worker roles for cost; db gets the
    * baseline type.
    * @param {string} _region - interface parity; unused
    * @returns {{masterType: string, dbType: string, workerType: string}}

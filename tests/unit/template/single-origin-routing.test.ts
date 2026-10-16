@@ -52,7 +52,6 @@ describe('single-origin routing: k8s ingress', () => {
   });
 
   it('routes no admin console from the chart', () => {
-    expect(ingress).not.toMatch(/supabase-supabase-/);
     expect(ingress).not.toMatch(/PathPrefix\(`\/(_next|project|admin\/studio)`\)/);
   });
 

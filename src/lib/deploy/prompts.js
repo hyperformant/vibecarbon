@@ -574,7 +574,7 @@ export async function gatherDeploymentConfig(args) {
   let serverType, masterServerType, workerServerType, dbServerType;
 
   if (isComposeDeploy) {
-    // Compose = single-host Supabase stack, so use the medium-tier default
+    // Compose = the whole stack on one host, so use the medium-tier default
     // (2+ vCPU, 4+ GB) for the whole box. regionDefaults.dbType is
     // live-catalog-derived so it avoids retired SKUs like cpx21 in EU.
     serverType = args.serverType || envConfig.serverType || regionDefaults.dbType;

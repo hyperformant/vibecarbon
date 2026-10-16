@@ -259,7 +259,7 @@ export function extractRegistryMirrorAddress(registriesYaml: string): string | n
  * fans out to every node. The `dbIp` field on the master entry is
  * kept for back-compat with failover.js's existing lookup; we read it
  * here too so older `.vibecarbon.json` files that pre-date the multi-
- * entry persistence still get supabase covered.
+ * entry persistence still get the db node covered.
  */
 interface EnvConfig {
   deployMode?: string;
@@ -311,7 +311,7 @@ export function getServerIps(projectDir: string, env: string): string[] {
     // HA deployments still persist a top-level `ha.primary` / `ha.standby`
     // block alongside the servers array. Pull master + database from each
     // — verify-scale needs every Hetzner-managed node, and the standby
-    // cluster's supabase is otherwise invisible to the test.
+    // cluster's db node is otherwise invisible to the test.
     if (envConfig.ha?.enabled && envConfig.ha.primary && envConfig.ha.standby) {
       push(envConfig.ha.primary.masterIp);
       push(envConfig.ha.primary.dbIp);

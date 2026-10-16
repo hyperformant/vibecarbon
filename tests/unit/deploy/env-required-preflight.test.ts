@@ -43,11 +43,6 @@ const TEMPLATE_PROD_COMPOSE = readFileSync(
 // Secrets an older project's .env still carries after the services that read
 // them were removed.
 const DELETED_SECRETS = {
-  ANON_KEY: 'a',
-  SUPABASE_ANON_KEY: 'a',
-  SUPABASE_SERVICE_ROLE_KEY: 's',
-  SUPABASE_URL: 'http://kong:8000',
-  REALTIME_SECRET: 'r',
   LOGFLARE_API_KEY: 'l',
   VAULT_ENC_KEY: 'v',
   PG_META_CRYPTO_KEY: 'm',

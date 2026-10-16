@@ -89,8 +89,8 @@ const featureData = [
   { feature: 'API', usage: 88 },
   { feature: 'Auth', usage: 72 },
   { feature: 'Storage', usage: 54 },
-  { feature: 'Realtime', usage: 40 },
-  { feature: 'Edge Fn', usage: 65 },
+  { feature: 'Webhooks', usage: 40 },
+  { feature: 'Jobs', usage: 65 },
   { feature: 'Analytics', usage: 30 },
 ];
 

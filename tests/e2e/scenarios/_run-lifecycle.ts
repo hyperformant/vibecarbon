@@ -145,7 +145,7 @@ export interface MetricsCollector {
 // Timeouts are sized against the single slowest scenario for each step.
 // Cold-path k8s-ha (2026-04-26 batch run #2) breakdown — observed end-to-end:
 //   sideload ~25 min (HA = 6 nodes × ~600MB image each, parallel SSH)
-//   helm install supabase --wait ~6 min
+//   helm install of the (since retired) database chart --wait ~6 min
 //   migrations ~1 min
 //   app rollout-status ~3 min
 //   DNS update + cert-manager + public probe ~20 min budget
@@ -2394,7 +2394,7 @@ EOF`;
       const SCALE_UP_BUDGET_MS = 12 * 60_000;
       const POLL_INTERVAL_MS = 30_000;
       // Derive ceiling from the operator-supplied bound, not from `baseline`.
-      // At ceiling: total nodes = master (1, Pulumi-fixed) + supabase (1,
+      // At ceiling: total nodes = master (1, Pulumi-fixed) + db (1,
       // Pulumi-fixed) + maxWorkers (CA at full pool size — `maxWorkers` is
       // the total worker count when CA tops out, not the number of CA-spawned
       // additions on top of the static floor). Coupling to `baseline` would
@@ -3220,7 +3220,7 @@ EOF`;
     // 4.25 Verify load — concurrent-burst probe. Catches "deploy succeeded
     // and the single-request /api/health returned 200, but the app is
     // dead under any concurrency" (single-threaded misconfig, connection
-    // pool too small, downstream Supabase timeouts under fan-out, etc.).
+    // pool too small, downstream database timeouts under fan-out, etc.).
     // Stays well under the app's 100 req/min/IP rate limit (one burst,
     // immediately complete). Sustained load testing belongs in
     // `tests/loadtest/`, run by an operator against a dedicated env;

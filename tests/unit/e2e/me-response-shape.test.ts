@@ -1,7 +1,7 @@
 /**
  * Unit tests for validateMeResponse — the pure shape validator behind the e2e
- * `app_api_me_authenticated` check. That check exists because of the Kong
- * user-context DB regression class (RCA 2026-07-08): the app's authenticated
+ * `app_api_me_authenticated` check. That check exists because of the API gateway's
+ * user-context DB regression class (gateway since removed; RCA 2026-07-08): the app's authenticated
  * data path had zero e2e coverage, so a failure there sailed through a green
  * matrix. The check now rides the session cookie, not a bearer token.
  */
@@ -39,10 +39,10 @@ describe('validateMeResponse', () => {
 });
 
 describe('checkAppApiMeAuthenticated routing', () => {
-  it('requests /api/v1/me on the APP domain it is given (not hardcoded to the Kong surface)', async () => {
+  it('requests /api/v1/me on the APP domain it is given (not hardcoded to the gateway surface)', async () => {
     // RCA overnight 2026-07-08: the check ran inside runAuthChecks, which on
-    // compose receives the Kong api-subdomain — /api/v1/me is an app Hono
-    // route on the MAIN domain, so Kong 404'd ("no Route matched") and the
+    // compose receives the gateway api-subdomain — /api/v1/me is an app Hono
+    // route on the MAIN domain, so the gateway 404'd ("no Route matched") and the
     // first post-release matrix failed compose verify-deploy. k8s masked the
     // bug because both surfaces share one domain there.
     const jar = new CookieJar();

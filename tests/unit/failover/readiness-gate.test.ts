@@ -4,9 +4,9 @@
  * Live RCA (k8s-ha full-lifecycle 2026-07-07 — failover PASSED first-ever):
  * `vibecarbon failover` returned in ~44s (promotion ~9s via the skip-if-
  * streaming fast path) BEFORE the promoted cluster's API layer was ready.
- * Post-promotion the promoted supabase services restart/reconnect; during that
- * window auth 502s and PostgREST serves schema-cache misses against the
- * (present) tables. verify-failover ran inside that window → auth_admin_login /
+ * Post-promotion the promoted cluster's API services (since folded into the
+ * app) restart/reconnect; during that window auth 502s and the REST layer
+ * serves schema-cache misses against the (present) tables. verify-failover ran inside that window → auth_admin_login /
  * auth_signup / db_schema all failed while the db was healthy ~5 min later.
  *
  * The gate (Task 10): rollout-status EACH persisted scale-up entry on the

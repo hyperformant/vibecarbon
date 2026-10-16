@@ -20,7 +20,7 @@ vi.mock('@/components/auth/AuthProvider', () => ({ useAuth: () => ({ user: null 
 vi.mock('@/hooks/api', async () => ({
   // Keep the REAL useGitHubStars/getGitHubRepoUrl — the contract under test.
   // Imported from the specific module, NOT the barrel: the barrel drags in
-  // supabase-backed hooks whose module-load env check throws under jsdom.
+  // every other api hook, which this test does not want loaded.
   ...(await import('@/hooks/api/useGitHubStars')),
   useAuthSettings: () => ({ data: undefined }),
   useDocsVisibility: () => ({ userDocsEnabled: true, apiDocsEnabled: true, isLoading: false }),

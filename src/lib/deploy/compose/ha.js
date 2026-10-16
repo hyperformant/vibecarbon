@@ -657,7 +657,7 @@ echo COMPOSE_RESEED_STAGED
   // Two independent signals — either is sufficient:
   //   1. standby's pg_is_in_recovery() returns 't' (requires hot_standby on
   //      AND consistent recovery state — can take 60-180s after fresh
-  //      basebackup of a Supabase cluster, especially under fanout-3 load)
+  //      basebackup of the primary, especially under fanout-3 load)
   //   2. primary's pg_stat_replication has a row with client_addr matching
   //      this standby AND state in ('streaming','catchup','startup')
   //

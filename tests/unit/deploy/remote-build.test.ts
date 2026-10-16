@@ -239,7 +239,7 @@ describe('buildRemote target platform', () => {
     vi.mocked(runCommandAsync).mockResolvedValue(true);
 
     await buildRemote('1.2.3.4', '/tmp/key', 'proj-app:local', '/tmp/ctx', {
-      VITE_SUPABASE_URL: 'https://x.example',
+      VITE_PUBLIC_URL: 'https://x.example',
     });
 
     const argv = vi.mocked(runCommandAsync).mock.calls[0][0] as string[];

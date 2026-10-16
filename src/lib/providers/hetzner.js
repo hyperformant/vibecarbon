@@ -360,7 +360,7 @@ export class HetznerProvider extends BaseProvider {
 
   /**
    * Matches hetzner-k8s.js's `image: 'ubuntu-24.04'` literal (the master,
-   * supabase, and worker `hcloud.Server` resources all use the same slug —
+   * db, and worker `hcloud.Server` resources all use the same slug —
    * lib/iac/programs/hetzner-k8s.js:243,283,318) exactly.
    * `renderCarbonAutoscalerConfig` reads this for the CA-spawned worker
    * node group's `image` field instead of hardcoding it.
@@ -1348,7 +1348,7 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
-   * Compute the updated Hetzner firewall rule set admitting the peer supabase
+   * Compute the updated Hetzner firewall rule set admitting the peer db
    * node's WireGuard tunnel endpoint (udp/51821), or null when no update is
    * needed. Pure: deployK8sHA fetches the firewall, calls this, and PUTs the
    * result — for BOTH clusters with the peer swapped (the post-failover

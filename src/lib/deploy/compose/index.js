@@ -725,7 +725,7 @@ function composeFileFlags(options = {}) {
 export async function startComposeStack(ip, sshKeyPath, projectName, _options = {}) {
   const remoteDir = `/opt/${projectName}`;
   // Spinner over the long silent compose.up — typical 60-130s warm, longer
-  // cold while Supabase services pull. Replaces the previous
+  // cold while the images pull. Replaces the previous
   // `console.log('[reconcile] Running...')` + silence + `Reconcile
   // complete.` pair.
   const reconcileSpinner = spinner();
@@ -782,10 +782,10 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
  * Wait for all compose services with healthchecks to reach "healthy".
  *
  * `docker compose up -d` returns as soon as containers are *created*, not
- * when their healthchecks pass. For Supabase, auth/rest need 10-60s after
- * container-start to become healthy — verify-deploy's rest_api check 502s
- * when it runs against a starting service. Polls every 5s up to 3min; returns early once every service
- * with a declared healthcheck reports "healthy".
+ * when their healthchecks pass. A service probed while it is still starting
+ * (an add-on such as n8n or metabase, or traefik) can 502 the first
+ * post-deploy checks. Polls every 5s up to 3min; returns early once every
+ * service with a declared healthcheck reports "healthy".
  *
  * Non-critical — on timeout or error we log but don't fail, since the
  * caller's primary gate is the app-container probe which already passed.
@@ -903,10 +903,10 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       const out = (result || '').trim();
       lastStatus = out.slice(-8) || 'none';
       if (out.endsWith('2xx')) {
-        // App is serving, but Supabase services may still be warming up
-        // their healthchecks. The e2e harness's verify-deploy probes
-        // rest/realtime endpoints immediately after deploy returns — a 502
-        // from a service still 60s from healthy would fail otherwise-valid
+        // App is serving, but other services (traefik, add-ons) may still
+        // be warming up their healthchecks. The e2e harness's verify-deploy
+        // probes the public endpoints immediately after deploy returns, and a
+        // 502 from a service still 60s from healthy would fail otherwise-valid
         // deploys. Wait for all compose-managed services
         // with healthchecks to reach "healthy". Bounded: 3 min budget
         // (wasn't spent during the app probe since that succeeded quickly).
@@ -1107,7 +1107,7 @@ export async function runDatabaseAudits(ip, sshKeyPath, projectName) {
   // Ground-truth RLS audit: refuse to finish the deploy if any public table
   // reached the live schema without row-level security (see rls-audit.js).
   // Runs against the actual catalog, so it catches tables added by any path —
-  // a migration that forgot RLS, a hand edit in Studio, a dependency. sshRun
+  // a migration that forgot RLS, a hand edit over `vibecarbon shell`, a dependency. sshRun
   // throws on the non-zero exit, aborting the deploy.
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && ${composeRlsAuditShell()}`, {
     timeout: 60_000,

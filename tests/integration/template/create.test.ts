@@ -135,7 +135,6 @@ describe('create-vibecarbon E2E', () => {
       const envContent = readFileSync(join(projectDir(), '.env.local'), 'utf-8');
       expect(envContent).toContain('BETTER_AUTH_SECRET=');
       expect(envContent).not.toContain('JWT_SECRET');
-      expect(envContent).not.toContain('SUPABASE_');
       expect(envContent).toContain('DB_PASSWORD=');
     });
 
@@ -177,7 +176,6 @@ describe('create-vibecarbon E2E', () => {
       expect(sts).toContain('{{K8S_STORAGE_CLASS}}');
       // The chart era's files are not scaffolded any more.
       expect(existsSync(join(projectDir(), 'k8s/values'))).toBe(false);
-      expect(existsSync(join(projectDir(), 'k8s/gitops/supabase'))).toBe(false);
     });
 
     it('copies binary icon assets byte-identical to the template (no UTF-8 corruption)', () => {

@@ -7,7 +7,7 @@
  * doing is through Hetzner's out-of-band console.
  *
  * The node argument is a substring matched against server names — most
- * common is the project-name+role suffix, e.g. `master`, `supabase`,
+ * common is the project-name+role suffix, e.g. `master`, `db`,
  * `worker-1`, or the full server name.
  *
  * Tries `hcloud server request-console` (which prints the noVNC URL

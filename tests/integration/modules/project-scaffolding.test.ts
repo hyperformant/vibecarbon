@@ -77,10 +77,6 @@ describe('Project Scaffolding Integration', () => {
       const keys = Object.keys(parseDotenv(content));
       for (const gone of [
         'JWT_SECRET',
-        'SUPABASE_URL',
-        'SUPABASE_ANON_KEY',
-        'SUPABASE_SERVICE_ROLE_KEY',
-        'REALTIME_SECRET',
         'LOGFLARE_API_KEY',
         'VAULT_ENC_KEY',
         'PG_META_CRYPTO_KEY',
@@ -99,7 +95,7 @@ describe('Project Scaffolding Integration', () => {
       expect(readme).toContain('Hono');
       expect(readme).toContain('React 19');
       expect(readme).toContain('PostgreSQL');
-      expect(readme).not.toMatch(/Supabase|Kong|Studio/);
+      expect(readme).not.toMatch(/Studio/);
       expect(readme).toContain('npm run dev:start');
     });
   });

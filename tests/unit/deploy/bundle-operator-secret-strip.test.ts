@@ -117,7 +117,7 @@ describe('renderBundle strips operator-secret keys from the raw .env baseline', 
 
   it('an explicit S3 override wins over a stale S3_ACCESS_KEY in the raw .env baseline', () => {
     // options.s3 is the deliberate, feature-specific propagation path
-    // (Supabase storage/backup on the deployed server). S3_ACCESS_KEY here is
+    // (storage/backup on the deployed server). S3_ACCESS_KEY here is
     // the PROVIDER-AGNOSTIC server-side namespace (renderBundle writes it from
     // the resolved s3Config for every provider; carbon/docker-compose.yml maps
     // it to AWS_ACCESS_KEY_ID for wal-g) — NOT an operator-secret, so it is not

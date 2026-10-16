@@ -2,8 +2,8 @@
  * The app reaches Postgres directly, on every deploy path.
  *
  * The template's API server queries the database through its own pg pool
- * (carbon/src/server/db/client.ts) with discrete DB_* vars; PostgREST is no
- * longer on its data path. The server refuses to boot without DB_HOST and
+ * (carbon/src/server/db/client.ts) with discrete DB_* vars; nothing else sits
+ * on its data path. The server refuses to boot without DB_HOST and
  * DB_PASSWORD, and the generated .env carries DB_HOST=localhost for local dev,
  * so each deploy must override the host and supply the password:
  *

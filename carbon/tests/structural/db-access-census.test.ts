@@ -10,11 +10,12 @@ import { describe, expect, it } from 'vitest';
  *     anonymous visitor. RLS decides what `fn` sees.
  *   - `adminDb`, which bypasses RLS, only where the server acts for itself.
  *
- * The server uses no Supabase client at all (auth is in-process, data is
- * Drizzle). This census fails when:
- *   1. a file under src/server makes a data call through a Supabase client
- *      (`.from('table')`, `.rpc('fn')`, `.schema('x')`, storage), or imports
- *      @supabase/supabase-js at all;
+ * Auth is in-process (Better Auth) and data is Drizzle. This census fails
+ * when:
+ *   1. a file under src/server makes a data call through a query builder that
+ *      names its table by string (`.from('table')`, `.rpc('fn')`,
+ *      `.schema('x')`, `.storage.from(...)`), the shape of a hosted-database
+ *      SDK, which would reach Postgres around db/client.ts;
  *   2. a file other than db/client.ts imports or names `adminDb` (or the raw
  *      `pool`) without being on the allowlist below (db/ helpers included);
  *   3. a file reaches db/client any way but a plain named import (namespace
@@ -94,31 +95,20 @@ const files = serverFiles().map((path) => ({
   text: readFileSync(path, 'utf8'),
 }));
 
-describe('db access census: no data through Supabase clients', () => {
-  // `.from('table')` with a string is the supabase-js query builder; Drizzle's
-  // `.from()` takes a table object, never a string literal.
-  const SUPABASE_DATA_CALL =
+describe('db access census: no data through a string-table query builder', () => {
+  // `.from('table')` with a string is a hosted-database SDK's query builder;
+  // Drizzle's `.from()` takes a table object, never a string literal.
+  const STRING_TABLE_CALL =
     /(?<!\b(?:Array|Buffer|Object|Uint8Array))\.(from|rpc|schema)\(\s*['"`]|\.storage\s*\.\s*from\(/;
 
-  it('no file under src/server calls .from()/.rpc()/.schema()/storage on a Supabase client', () => {
+  it('no file under src/server calls .from()/.rpc()/.schema()/storage with a string table', () => {
     const offenders = files
-      .filter((f) => SUPABASE_DATA_CALL.test(f.text))
-      .map((f) => `${f.rel}: ${f.text.match(SUPABASE_DATA_CALL)?.[0]}`);
+      .filter((f) => STRING_TABLE_CALL.test(f.text))
+      .map((f) => `${f.rel}: ${f.text.match(STRING_TABLE_CALL)?.[0]}`);
     expect(
       offenders,
       'Data goes through db/client.ts: withUserDb for user requests, adminDb for ' +
-        'server-side work. Supabase clients are for Auth only.'
-    ).toEqual([]);
-  });
-
-  it('no file under src/server imports a Supabase client', () => {
-    const offenders = files
-      .filter((f) => /from\s*['"]@supabase\/supabase-js['"]/.test(f.text))
-      .map((f) => f.rel);
-    expect(
-      offenders,
-      'The server has no Supabase client: auth is the in-process auth API ' +
-        '(src/server/auth), data goes through db/client.ts.'
+        'server-side work. Auth is the in-process auth API (src/server/auth).'
     ).toEqual([]);
   });
 });

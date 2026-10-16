@@ -9,7 +9,7 @@ import { session as sessionTable, user as userTable, verification } from '../db/
  *
  * The cookie is scoped to the parent domain, so the browser sends it to
  * every admin subdomain, and Traefik passes it on to the tools behind them
- * (Grafana, n8n, Metabase, Studio). What those tools can see must be worth
+ * (Grafana, n8n, Metabase). What those tools can see must be worth
  * little: 32 random bytes that only verify-role accepts, live 1 hour, and
  * die with the session they were minted from (sign-out, revocation, ban).
  * It is useless against the app's own API.

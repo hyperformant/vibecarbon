@@ -32,7 +32,6 @@ describe('configurePrimaryForReplication', () => {
     // the schema-cache reload went with the chart's REST service.
     expect(body).toContain('kubectl rollout restart deployment/app -n vibecarbon');
     expect(body).not.toContain('reload schema');
-    expect(body).not.toMatch(/supabase-supabase-(rest|realtime|meta)/);
   });
 
   it('setupReplication delegates and honors primaryConfigured', () => {

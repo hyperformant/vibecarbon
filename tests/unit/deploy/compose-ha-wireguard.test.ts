@@ -374,7 +374,6 @@ describe('compose-ha replication + reseed connect as postgres', () => {
 
     expect(text).toContain('SHOW hba_file');
     expect(text).toContain('chown postgres:postgres');
-    expect(text).not.toMatch(/supabase/i);
 
     const users = [...text.matchAll(/(?:psql|pg_isready|pg_basebackup)\b[^\n]*?\s-U\s+(\S+)/g)].map(
       (m) => m[1],
