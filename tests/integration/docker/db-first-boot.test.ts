@@ -107,7 +107,7 @@ describeDocker('db image first boot with an unreachable backup bucket', () => {
     expect(psql('SHOW archive_command')).toBe('bash /etc/postgresql/wal-archive.sh %p');
     expect(psql('SHOW wal_level')).toBe('replica');
     expect(psql('SHOW config_file')).toBe('/etc/postgresql/postgresql.conf');
-    expect(psql('SHOW shared_preload_libraries')).toBe('pg_cron');
+    expect(psql('SHOW shared_preload_libraries')).toBe('pg_cron,pg_stat_statements');
   });
 
   it('a second boot (initialized volume, no temporary server) still archives', {

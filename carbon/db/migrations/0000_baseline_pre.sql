@@ -1,6 +1,7 @@
 -- Baseline, part 1 of 3: what the tables and policies in 0001 depend on.
 --
--- Custom SQL (drizzle-kit cannot model it): the pg_cron extension, the
+-- Custom SQL (drizzle-kit cannot model it): the pg_cron and
+-- pg_stat_statements extensions, the
 -- `app_user` request role, the `app` schema with app.user_id(), default
 -- privileges, and the RLS helper functions the policies call. Part 2
 -- (0001_baseline_schema.sql) is generated from src/server/db/schema.ts;
@@ -19,9 +20,18 @@ SET LOCAL check_function_bodies = off;
 
 -- ============================================================================
 -- pg_cron: background jobs inside the database (schedules in 0002)
+-- pg_stat_statements: per-query call counts and timings (the db image preloads
+-- both; docker/postgres-walg/postgresql.conf)
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS pg_cron;
+--> statement-breakpoint
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+--> statement-breakpoint
+-- The extension grants its views to PUBLIC. They are for the operator (as
+-- `postgres`, over `vibecarbon shell`), not for a user request: app_user
+-- would otherwise read the text of every query that ran as app_user.
+REVOKE ALL ON public.pg_stat_statements, public.pg_stat_statements_info FROM PUBLIC;
 --> statement-breakpoint
 -- The jobs and the admin Jobs page run as `postgres`.
 GRANT USAGE ON SCHEMA cron TO postgres;

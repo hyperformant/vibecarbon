@@ -104,9 +104,19 @@ describe('the baked postgresql.conf', () => {
   );
 
   it('preloads pg_cron for the postgres database and listens on all interfaces', () => {
-    expect(settings.shared_preload_libraries).toBe("'pg_cron'");
+    expect(settings.shared_preload_libraries).toBe("'pg_cron,pg_stat_statements'");
     expect(settings['cron.database_name']).toBe("'postgres'");
     expect(settings.listen_addresses).toBe("'*'");
+  });
+
+  it('records query statistics, slow statements and lock waits', () => {
+    // pg_stat_statements answers "why is my app slow": the top queries by
+    // total time. Utility statements stay out of it, so an ALTER ROLE ...
+    // PASSWORD is never kept in its query text.
+    expect(settings['pg_stat_statements.max']).toBe('1000');
+    expect(settings['pg_stat_statements.track_utility']).toBe('off');
+    expect(settings.log_min_duration_statement).toBe('1000');
+    expect(settings.log_lock_waits).toBe('on');
   });
 
   it('carries the small-box defaults', () => {

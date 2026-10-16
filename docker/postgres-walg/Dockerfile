@@ -68,10 +68,13 @@ COPY --chmod=0755 db-entrypoint.sh /usr/local/bin/db-entrypoint.sh
 # The load-bearing execs: deploy only asserts archive_mode=on, never that wal-g
 # runs, so this is the only place a broken binary fails loudly. The pg_cron
 # check proves the library the builder produced landed where the server loads
-# shared_preload_libraries from.
+# shared_preload_libraries from; the pg_stat_statements check proves the base
+# image still ships the contrib module postgresql.conf preloads.
 RUN wal-g --version \
  && test -f "$(pg_config --pkglibdir)/pg_cron.so" \
- && test -f "$(pg_config --sharedir)/extension/pg_cron.control"
+ && test -f "$(pg_config --sharedir)/extension/pg_cron.control" \
+ && test -f "$(pg_config --pkglibdir)/pg_stat_statements.so" \
+ && test -f "$(pg_config --sharedir)/extension/pg_stat_statements.control"
 
 # db-entrypoint.sh wraps the official docker-entrypoint.sh (it sources it and
 # keeps WAL archiving off the init-time temporary server; the script says why).

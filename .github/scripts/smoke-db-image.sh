@@ -5,7 +5,8 @@
 #
 # A real start on this arch: both binaries execute, then initdb into a tmp
 # dir, the server up with the baked config (so shared_preload_libraries loads
-# pg_cron.so), then CREATE EXTENSION. pg_ctl -w waits for readiness itself.
+# pg_cron.so and pg_stat_statements.so), then CREATE EXTENSION for both.
+# pg_ctl -w waits for readiness itself.
 #
 # Usage: smoke-db-image.sh <image ref>
 # Lives outside docker/postgres-walg on purpose: every file there is an image
@@ -17,7 +18,8 @@ docker run --rm --entrypoint wal-g "$IMAGE" --version
 docker run --rm -i --user postgres --entrypoint bash "$IMAGE" -euo pipefail <<'SH'
 initdb -D /tmp/pgdata -U postgres --auth=trust >/dev/null
 pg_ctl -D /tmp/pgdata -w -o "-c config_file=/etc/postgresql/postgresql.conf -c listen_addresses=" start
-psql -U postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_cron'
-test "$(psql -U postgres -tAc "SELECT count(*) FROM pg_extension WHERE extname = 'pg_cron'")" = 1
+psql -U postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_cron' -c 'CREATE EXTENSION pg_stat_statements'
+test "$(psql -U postgres -tAc "SELECT count(*) FROM pg_extension WHERE extname IN ('pg_cron', 'pg_stat_statements')")" = 2
+psql -U postgres -v ON_ERROR_STOP=1 -tAc 'SELECT count(*) FROM pg_stat_statements' >/dev/null
 pg_ctl -D /tmp/pgdata -w stop
 SH

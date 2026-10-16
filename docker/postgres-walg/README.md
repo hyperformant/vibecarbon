@@ -15,7 +15,10 @@ pinned by digest:
 - **`/etc/postgresql/postgresql.conf`**, the baked server config
   (`postgresql.conf` here). Deploys start postgres with
   `-c config_file=/etc/postgresql/postgresql.conf` and pass the WAL and
-  archiving settings as their own `-c` flags.
+  archiving settings as their own `-c` flags. It preloads pg_cron and
+  pg_stat_statements (the contrib module the official image ships; the
+  Dockerfile checks it is there), and logs statements slower than 1 s and
+  lock waits.
 - **`db-entrypoint.sh`**, a wrapper around the official entrypoint that keeps
   WAL archiving off the init-time temporary server, so a first boot with an
   unreachable backup bucket cannot crash (the script explains why).
@@ -48,8 +51,8 @@ the dev channel below) runs one leg on `ubuntu-24.04` (amd64) and one on
 image, and before anything is pushed each leg smoke-tests the image it just
 built on its own hardware with `.github/scripts/smoke-db-image.sh`:
 `postgres --version`, `wal-g --version`, then an initdb into a temp dir, a
-server start with the baked config (which preloads pg_cron.so), and
-`CREATE EXTENSION pg_cron`. Each leg pushes by digest only; the `merge` job
+server start with the baked config (which preloads pg_cron.so and
+pg_stat_statements.so), and `CREATE EXTENSION` for both. Each leg pushes by digest only; the `merge` job
 then joins the two digests under the one tag with
 `docker buildx imagetools create` and runs the same smoke script on the
 published tag, so the tag never names a half-built image.
@@ -159,6 +162,21 @@ ghcr package here, so servers and the harness pull it without credentials.
    `tests/unit/deploy/walg-dockerfile-arch.test.ts` if a version moved.
 3. `pnpm db-image:build-local`, then `pnpm test:docker` and a generated
    project's `npm run test:db` against it.
+   If `PG_CRON_VERSION` moved, or the base image's PostgreSQL minor moved
+   (it can bring a new pg_stat_statements version), existing databases keep
+   the old extension version in their catalog: `CREATE EXTENSION IF NOT
+   EXISTS` in the baseline never updates it. After the new image is running,
+   update each one, as `postgres` (`vibecarbon shell`, then
+   `psql -U postgres`):
+   ```sql
+   ALTER EXTENSION pg_cron UPDATE;
+   ALTER EXTENSION pg_stat_statements UPDATE;
+   SELECT extname, extversion FROM pg_extension;
+   ```
+   Within one pg_cron minor (1.6.x) the SQL version does not change and the
+   update is a no-op; from 1.6 to 1.7 it is required. Compare
+   `default_version` in `pg_available_extensions` with `extversion` to see
+   whether one is due.
 4. Push the branch and test on the dev channel (above), then merge.
    `.github/workflows/publish-db-image.yml` runs on any push to main
    touching `docker/postgres-walg/**`, `docker/wal-g/**` or `src/lib/images.js`,
