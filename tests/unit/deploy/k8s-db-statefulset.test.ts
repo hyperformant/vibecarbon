@@ -622,4 +622,27 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
       }
     }, 60_000);
   }
+
+  it('primary: also health-checks the CLI-applied cluster-autoscaler', () => {
+    const file = join(ROOT, 'carbon/k8s/flux/clusters/primary/vibecarbon.yaml');
+    const base = (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
+      (d) => d?.kind === 'Kustomization' && d.metadata.name === 'vibecarbon-base',
+    );
+    expect(base?.spec.healthChecks).toContainEqual({
+      apiVersion: 'apps/v1',
+      kind: 'Deployment',
+      name: 'cluster-autoscaler',
+      namespace: 'kube-system',
+    });
+  });
+
+  // Final review M1: overlays/production includes ../../base, so a Flux
+  // Kustomization pointed at an overlay built on it would apply the raw
+  // StatefulSet (and be rejected: volumeClaimTemplates are immutable).
+  it('overlays/production drops StatefulSet/db and keeps Service/db and the app', () => {
+    const docs = kustomize('carbon/k8s/overlays/production');
+    expect(docs.some((d) => d.kind === 'StatefulSet')).toBe(false);
+    expect(docs.some((d) => d.kind === 'Service' && d.metadata.name === 'db')).toBe(true);
+    expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'app')).toBe(true);
+  }, 60_000);
 });

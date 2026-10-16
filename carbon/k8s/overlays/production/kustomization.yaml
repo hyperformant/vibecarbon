@@ -24,3 +24,21 @@ configMapGenerator:
 images:
   - name: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}
     newTag: main
+
+# The db StatefulSet stays with the vibecarbon CLI's deploy, which renders its
+# per-cluster values (image, StorageClass, S3 endpoint, wal-g role; see
+# base/db/statefulset.yaml). A Flux Kustomization pointed at an overlay built
+# on this one would otherwise apply the unrendered placeholders, and the
+# apply is rejected outright (volumeClaimTemplates are immutable). Same
+# delete patch as vibecarbon-base in flux/clusters/*/vibecarbon.yaml; the
+# db Services and NetworkPolicy carry no placeholders and stay.
+patches:
+  - patch: |
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: db
+    target:
+      kind: StatefulSet
+      name: db

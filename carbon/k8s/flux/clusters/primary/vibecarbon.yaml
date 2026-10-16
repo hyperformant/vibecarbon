@@ -47,7 +47,8 @@ spec:
   # No `wait: true`: Flux ignores `healthChecks` when wait is on, and the
   # db StatefulSet below is not in this Kustomization's own inventory (see
   # `patches`), so `wait` alone would never look at the database. The
-  # explicit list covers every workload base runs on this cluster.
+  # explicit list covers every workload base runs on this cluster, plus the
+  # CLI-applied cluster-autoscaler.
   timeout: 10m
   # The db StatefulSet stays with the vibecarbon CLI's deploy, which renders
   # its per-cluster values (image, StorageClass, S3 endpoint, wal-g role,
@@ -82,6 +83,12 @@ spec:
       kind: Deployment
       name: local-registry
       namespace: vibecarbon
+    # Applied by the CLI (kube-system, outside this path), checked here like
+    # the db: the autoscaler is what adds workers under load.
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: cluster-autoscaler
+      namespace: kube-system
 ---
 # cert-manager-webhook-hetzner chart install (Phase 3 overlay).
 # Applied unconditionally; the ClusterIssuer DNS01 solver in
