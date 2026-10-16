@@ -298,8 +298,11 @@ jobs:
   # app_user and lets row-level security decide what they see, so the
   # boundary between tenants lives in SQL policies, and only the engine
   # that enforces them can prove them. `test:prepush` above mocks the
-  # database; this job runs carbon/tests/db against a real Postgres built
-  # from the same carbon/db image a deploy uses, after the real migrations.
+  # database; this job runs carbon/tests/db against a real Postgres, after
+  # the real migrations. The db image is BUILT here from docker/postgres-walg
+  # under the exact ref src/lib/images.js pins, so the job tests this
+  # commit's image (a bump's tag is unpublished until publish-db-image runs
+  # on main) and compose finds it locally instead of pulling.
   #
   # Same steps as carbon/TESTING.md "Database tier", so a red run reproduces
   # locally with the commands printed there. Only `db` comes up: auth runs
@@ -335,8 +338,17 @@ jobs:
       - name: Check the migrations match schema.ts
         run: npx vitest run --project unit tests/structural/migrations-drift.test.ts tests/structural/template-migrations-census.test.ts
 
+      # docker-compose.yml requires DB_IMAGE/DB_IMAGE_TAG (`:?`), and
+      # dev-init writes neither: the CLI is the authority for the pair.
+      - name: Read the db image ref the CLI pins
+        run: node --input-type=module -e "const m = await import('../src/lib/images.js'); console.log('DB_IMAGE=' + m.DB_IMAGE); console.log('DB_IMAGE_TAG=' + m.DB_IMAGE_TAG);" >> "$GITHUB_ENV"
+
+      - name: Build the db image from this commit
+        run: docker build -t "$DB_IMAGE:$DB_IMAGE_TAG" ../docker/postgres-walg
+        timeout-minutes: 10
+
       - name: Start db
-        run: docker compose $COMPOSE_FILES up -d --wait db
+        run: docker compose $COMPOSE_FILES up --pull never -d --wait db
         timeout-minutes: 10
 
       - name: Apply migrations

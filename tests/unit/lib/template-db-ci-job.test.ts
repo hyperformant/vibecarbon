@@ -34,15 +34,33 @@ describe('test.yml template-db job', () => {
   });
 
   it('starts db (nothing else), migrates, then runs the db tier, in that order', () => {
-    const up = indexOfRun('up -d --wait db');
+    const up = indexOfRun('-d --wait db');
     // Auth runs inside the app: the tier needs no separate auth container.
-    expect(runs[up]?.trimEnd().endsWith('up -d --wait db')).toBe(true);
+    expect(runs[up]?.trimEnd().endsWith('-d --wait db')).toBe(true);
     const migrate = indexOfRun('npm run db:migrate');
     const test = indexOfRun('npm run test:db');
     expect(indexOfRun('node scripts/dev-init.js')).toBeGreaterThanOrEqual(0);
     expect(up).toBeGreaterThanOrEqual(0);
     expect(migrate).toBeGreaterThan(up);
     expect(test).toBeGreaterThan(migrate);
+  });
+
+  it('builds the db image from this commit under the ref the CLI pins, before starting db', () => {
+    // docker-compose.yml requires DB_IMAGE/DB_IMAGE_TAG and dev-init writes
+    // neither; a bump's tag is unpublished until publish-db-image runs on
+    // main, so the job builds docker/postgres-walg and never pulls.
+    const readRef = indexOfRun('src/lib/images.js');
+    const build = indexOfRun('docker build');
+    const up = indexOfRun('-d --wait db');
+    expect(runs[readRef]).toContain('$GITHUB_ENV');
+    expect(runs[readRef]).toContain('DB_IMAGE=');
+    expect(runs[readRef]).toContain('DB_IMAGE_TAG=');
+    expect(runs[build]).toContain('-t "$DB_IMAGE:$DB_IMAGE_TAG"');
+    expect(runs[build]?.trimEnd().endsWith('../docker/postgres-walg')).toBe(true);
+    expect(readRef).toBeGreaterThanOrEqual(0);
+    expect(build).toBeGreaterThan(readRef);
+    expect(up).toBeGreaterThan(build);
+    expect(runs[up]).toContain('--pull never');
   });
 
   it('points the db tier at the database, with the password dev-init writes', () => {
