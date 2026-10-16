@@ -5,9 +5,9 @@ import {
   setAdminStatus,
 } from '../auth/admin-status';
 import { logger } from '../lib/logger';
-import { assertBypassRole, DbRoleError, pool } from './client';
+import { assertBypassRole, connectionConfig, DbRoleError } from './client';
 import { dbErrorForLog } from './errors';
-import { type MigrationOutcome, runMigrations, withDedicatedClient } from './migrate';
+import { type MigrationOutcome, runMigrationsOnOwnConnection } from './migrate';
 import {
   type MigrationStatus,
   migrationFailureReason,
@@ -281,7 +281,7 @@ interface MigrateStartupDeps {
 }
 
 const migrateDefaults: MigrateStartupDeps = {
-  run: () => withDedicatedClient(pool, (client) => runMigrations(client)),
+  run: () => runMigrationsOnOwnConnection(connectionConfig),
   setStatus: setMigrationStatus,
   log: logger,
   retryMs: defaults.retryMs,

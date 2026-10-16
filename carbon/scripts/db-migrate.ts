@@ -9,25 +9,23 @@
  * and ADMIN_PASSWORD (src/server/auth/bootstrap-admin.ts).
  */
 import { existsSync } from 'node:fs';
-import pg from 'pg';
-import { runMigrations } from '../src/server/db/migrate';
+import { runMigrationsOnOwnConnection } from '../src/server/db/migrate';
 import { resolveDbPort } from '../src/server/db/port';
 
 if (existsSync('.env.local')) process.loadEnvFile('.env.local');
 
 const env = process.env;
 const host = env.DB_HOST ?? 'localhost';
-const client = new pg.Client({
+const connection = {
   host,
   port: Number(resolveDbPort({ ...env, DB_HOST: host }) ?? 5432),
   user: env.DB_USER ?? 'postgres',
   password: env.DB_PASSWORD,
   database: env.DB_NAME ?? 'postgres',
-});
+};
 
 try {
-  await client.connect();
-  const outcome = await runMigrations(client);
+  const outcome = await runMigrationsOnOwnConnection(connection);
   if (outcome.kind === 'standby') {
     console.log(
       outcome.upToDate
@@ -42,6 +40,4 @@ try {
 } catch (err) {
   console.error('Database migrations failed:', err instanceof Error ? err.message : err);
   process.exitCode = 1;
-} finally {
-  await client.end().catch(() => undefined);
 }

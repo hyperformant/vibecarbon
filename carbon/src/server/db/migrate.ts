@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
-import type pg from 'pg';
+import pg from 'pg';
 
 /**
  * Apply db/migrations/ with drizzle-orm's migrator: the one way migrations
@@ -89,22 +89,50 @@ export async function runMigrations(
   return outcome;
 }
 
+/** Where to connect; any timeout fields in it are ignored (see below). */
+export type MigrationConnection = Pick<
+  pg.ClientConfig,
+  'host' | 'port' | 'user' | 'password' | 'database'
+>;
+
 /**
- * Check out a client from `source`, run `fn` on it and release it, discarding
- * the client if `fn` threw (so a session lock never outlives a broken run).
+ * Apply pending migrations on a connection of their own, opened from
+ * `connection` and closed afterwards. The one entry point the app's startup
+ * (db/startup.ts) and `npm run db:migrate` (scripts/db-migrate.ts) share.
+ *
+ * Deliberately NOT a pool client: the request pool's statement, query and
+ * idle-in-transaction timeouts (30-35 s, db/client.ts) are right for a web
+ * request and wrong here. A long migration (an index build, a backfill)
+ * would be cancelled the same way on every boot, and a replica waiting in
+ * pg_advisory_lock for another replica's run would be cancelled and report
+ * the migration failed. Waiting on that lock is waiting for a dependency,
+ * not a retry. So only the location and credentials are taken from
+ * `connection`, and the session's timeouts are set to 0 (off) explicitly, in
+ * case the role or database sets defaults.
  */
-export async function withDedicatedClient<T>(
-  source: pg.Pool,
-  fn: (client: pg.PoolClient) => Promise<T>
-): Promise<T> {
-  const client = await source.connect();
-  let broken: Error | undefined;
+export async function runMigrationsOnOwnConnection(
+  connection: MigrationConnection,
+  folder: string = migrationsFolder()
+): Promise<MigrationOutcome> {
+  const { host, port, user, password, database } = connection;
+  // Only the connect itself is bounded (as for the pool), so an unreachable
+  // database fails fast into startup's connection-loss wait.
+  const client = new pg.Client({
+    host,
+    port,
+    user,
+    password,
+    database,
+    connectionTimeoutMillis: 5_000,
+  });
+  await client.connect();
   try {
-    return await fn(client);
-  } catch (err) {
-    broken = err instanceof Error ? err : new Error(String(err));
-    throw err;
+    await client.query(
+      'set statement_timeout = 0; set lock_timeout = 0; set idle_in_transaction_session_timeout = 0'
+    );
+    return await runMigrations(client, folder);
   } finally {
-    client.release(broken);
+    // Ending the session also drops the advisory lock if the unlock failed.
+    await client.end().catch(() => undefined);
   }
 }

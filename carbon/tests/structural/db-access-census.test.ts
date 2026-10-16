@@ -74,8 +74,6 @@ const ADMIN_DB_ALLOWLIST: Record<string, string> = {
 /** Files that may import the raw pg `pool` (bypasses RLS like adminDb). */
 const POOL_ALLOWLIST: Record<string, string> = {
   'index.ts': 'drains the pool on graceful shutdown',
-  'db/startup.ts':
-    'runs the startup migrations on one dedicated client (the advisory lock is per session)',
   'auth/bootstrap-admin.ts':
     'holds one dedicated client for the session advisory lock that serializes the super admin ' +
     'bootstrap across replicas; runs no queries on it besides pg_advisory_lock/unlock',

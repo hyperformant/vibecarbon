@@ -184,6 +184,7 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
 
 Rules:
 
+- **Pending migrations run in ONE transaction**, all or nothing. So statements Postgres refuses inside a transaction block (`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `VACUUM`, `ALTER TYPE ... ADD VALUE` used in the same run, `CREATE DATABASE`) are not supported by this runner: use the plain form (`CREATE INDEX`, which locks writes to the table while it builds), or run the concurrent form by hand outside a migration.
 - **Never edit or delete a migration that has been applied anywhere** (deployed, or on a teammate's machine). The ledger records it as done, so an edit never runs; write a new migration instead.
 - **Renames**: `drizzle-kit generate` asks whether a column or table was renamed or dropped and re-created. Answer the prompt (a rename keeps the data), or write the `ALTER ... RENAME` in a `--custom` migration.
 - **Your `db/migrations/` is your project's own history.** It starts with the template's baseline (`0000_baseline_pre.sql`, `0001_baseline_schema.sql`, `0002_baseline_post.sql`) and grows with every `generate`. `vibecarbon upgrade` never writes to `db/migrations/**`, and a feature that brings tables (`vibecarbon add ...`) ships its schema as its own new migration appended to this history, never as an edit to an existing one.

@@ -39,7 +39,7 @@ import {
  *
  * Constraint and index names are spelled out, matching Postgres' own naming
  * (`<table>_<column>_key`, `_fkey`, `_check`, `_pkey`), so the catalog reads
- * the same whatever wrote it; tests/db/baseline-catalog.test.ts pins it.
+ * the same whatever wrote it; tests/db/migrations.test.ts pins it.
  *
  * Property names are camelCase, column names stay snake_case. Timestamps use
  * `mode: 'string'` so a value goes out exactly as Postgres returned it.

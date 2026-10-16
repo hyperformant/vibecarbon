@@ -18,12 +18,21 @@ import * as schema from './schema';
  * The pool connects lazily, so importing this module never dials the
  * database and the server boots while the db container is still starting.
  */
-export const pool = new pg.Pool({
+/**
+ * Where the database is and who to connect as: the pool below and the
+ * startup migrations (db/migrate.ts, on a connection of their own without
+ * the pool's request timeouts) share it.
+ */
+export const connectionConfig = {
   host: env.DB_HOST,
   port: env.DB_PORT,
   user: env.DB_USER,
   password: env.DB_PASSWORD,
   database: env.DB_NAME,
+} as const;
+
+export const pool = new pg.Pool({
+  ...connectionConfig,
   max: 10,
   idleTimeoutMillis: 30_000,
   // Fail a checkout instead of waiting forever when the db is unreachable,

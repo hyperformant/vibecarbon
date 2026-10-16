@@ -5,7 +5,12 @@ import { join } from 'node:path';
 import { Hono } from 'hono';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { migrationsFolder, runMigrations } from '@server/db/migrate';
+import {
+  MIGRATIONS_LOCK_KEY,
+  migrationsFolder,
+  runMigrations,
+  runMigrationsOnOwnConnection,
+} from '@server/db/migrate';
 import { getMigrationStatus, setMigrationStatus } from '@server/db/migration-status';
 import { migrateAtStartup } from '@server/db/startup';
 import { migrationsGate } from '@server/middleware/migrations-gate';
@@ -137,6 +142,48 @@ describe.skipIf(!dbTestsEnabled)('runMigrations', () => {
     expect(results.map((r) => (r.kind === 'applied' ? r.newlyApplied : -1)).sort()).toEqual([0, 1]);
     const { rows } = await a.query("select count(*)::int as n from pg_tables where tablename = 'locked_once'");
     expect(rows[0].n).toBe(1);
+  });
+
+  // Startup migrations must not inherit the request pool's 30 s timeouts: a
+  // replica waiting on the lock while another replica migrates is waiting
+  // for a dependency. Here the database itself defaults every session to a
+  // 200 ms statement_timeout, the connection settings carry pool-style
+  // timeouts too, and the lock is held for well over both: the run still
+  // waits and succeeds.
+  it('waits on the lock past any statement_timeout and still applies', async () => {
+    await admin.query(`alter database ${dbName} set statement_timeout = '200ms'`);
+    try {
+      const folder = writeFolder(root, [{ tag: '0000_waited', sql: 'create table waited (id int)' }]);
+      const holder = await connect();
+      await holder.query('set statement_timeout = 0');
+      await holder.query('select pg_advisory_lock($1::bigint)', [MIGRATIONS_LOCK_KEY]);
+
+      // Control: a session with the inherited timeout is cancelled waiting.
+      const timed = await connect();
+      await expect(
+        timed.query('select pg_advisory_lock($1::bigint)', [MIGRATIONS_LOCK_KEY])
+      ).rejects.toMatchObject({ code: '57014' });
+
+      const connection = {
+        host: process.env.TEST_DB_HOST,
+        port: Number(process.env.TEST_DB_PORT ?? 5432),
+        user: process.env.TEST_DB_USER ?? 'postgres',
+        password: process.env.TEST_DB_PASSWORD,
+        database: dbName,
+        // What the request pool carries; must be ignored.
+        statement_timeout: 200,
+        query_timeout: 300,
+        idle_in_transaction_session_timeout: 200,
+      };
+      const started = Date.now();
+      const run = runMigrationsOnOwnConnection(connection, folder);
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      await holder.query('select pg_advisory_unlock($1::bigint)', [MIGRATIONS_LOCK_KEY]);
+      expect(await run).toEqual({ kind: 'applied', newlyApplied: 1 });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_200);
+    } finally {
+      await admin.query(`alter database ${dbName} reset statement_timeout`);
+    }
   });
 
   it('a failing migration applies nothing and releases the lock', async () => {

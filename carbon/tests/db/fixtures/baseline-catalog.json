@@ -47,16 +47,6 @@
       "login": false,
       "bypassrls": false,
       "members": "{postgres}"
-    },
-    {
-      "name": "postgres",
-      "super": true,
-      "inherit": true,
-      "createrole": true,
-      "createdb": true,
-      "login": true,
-      "bypassrls": true,
-      "members": "{}"
     }
   ],
   "relations": [

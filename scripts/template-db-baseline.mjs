@@ -69,7 +69,12 @@ function main() {
     drizzleKit([...(custom ? ['--custom'] : []), `--name=${name}`]);
   }
   for (const [tag, sql] of kept) writeFileSync(join(dir, `${tag}.sql`), sql);
-  console.log('Baseline regenerated. Run the carbon db tier (tests/db/migrations.test.ts) next.');
+  console.log(
+    'Baseline regenerated. Every migration timestamp changed, so a dev database migrated with ' +
+      'the previous baseline will try to apply it again and fail: reset existing dev volumes ' +
+      '(npm run dev:reset in carbon/ or a project) before starting the app. Then run the ' +
+      'carbon db tier (tests/db/migrations.test.ts) against a fresh database.',
+  );
 }
 
 if (process.argv[1] && process.argv[1].endsWith('template-db-baseline.mjs')) main();

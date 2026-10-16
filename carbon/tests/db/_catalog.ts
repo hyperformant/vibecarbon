@@ -7,7 +7,7 @@ import type pg from 'pg';
  * definitions and ACLs), triggers, default privileges, pg_cron jobs and the
  * app_settings keys the baseline seeds.
  *
- * tests/db/baseline-catalog.test.ts compares it with
+ * tests/db/migrations.test.ts compares it with
  * tests/db/fixtures/baseline-catalog.json, which was first captured from a
  * database migrated by the old hand-written SQL files and is the contract the
  * drizzle-kit baseline has to reproduce.
@@ -16,7 +16,18 @@ import type pg from 'pg';
  * only the new runner creates), oids and job ids, and app_settings values
  * (other db suites write them). ACL entries are sorted, so only who holds
  * which privilege counts, not the order the grants ran in.
+ *
+ * Scoped to what the baseline owns, so rows other suites leave behind (a
+ * role, a setting) cannot make the comparison depend on test order: roles
+ * are the ones the baseline creates (BASELINE_ROLES), settings the keys it
+ * seeds (BASELINE_SETTINGS). A dropped seed or role still shows as missing.
  */
+
+/** Roles the baseline creates (the image owns `postgres`). */
+const BASELINE_ROLES = ['app_user'];
+
+/** app_settings keys the baseline seeds. */
+const BASELINE_SETTINGS = ['api_docs_enabled', 'app_theme', 'mfa_enabled', 'user_docs_enabled'];
 
 const OWNED_SCHEMAS = ['public', 'app', 'cron'];
 
@@ -51,7 +62,8 @@ export async function catalogSnapshot(client: pg.Client): Promise<Record<string,
             (select coalesce(array_agg(m.rolname order by m.rolname), '{}')
                from pg_auth_members am join pg_roles m on m.oid = am.member
               where am.roleid = r.oid) as members
-       from pg_roles r where r.rolname not like 'pg\\_%' order by 1`,
+       from pg_roles r where r.rolname = any($1) order by 1`,
+    [BASELINE_ROLES],
   );
   const relations = await rows(
     client,
@@ -138,7 +150,11 @@ export async function catalogSnapshot(client: pg.Client): Promise<Record<string,
        from cron.job order by 1`,
   );
   const seededSettings = (
-    await rows<{ key: string }>(client, 'select key from public.app_settings order by 1')
+    await rows<{ key: string }>(
+      client,
+      'select key from public.app_settings where key = any($1) order by 1',
+      [BASELINE_SETTINGS]
+    )
   ).map((r) => r.key);
 
   return {
