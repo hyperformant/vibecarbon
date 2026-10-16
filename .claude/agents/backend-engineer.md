@@ -73,7 +73,7 @@ When your changes affect documented behavior, update the relevant `.md` files in
 
 ### Database Migrations
 1. **Edit `carbon/src/server/db/schema.ts`, then `npx drizzle-kit generate --name <slug>`**. Functions, triggers, grants, pg_cron schedules and seed rows go in `npx drizzle-kit generate --custom --name <slug>`. Never edit a migration that has been applied anywhere; the app applies new ones at startup.
-2. **Every table MUST have RLS enabled in the SAME migration**: `pgPolicy(...)` entries on the table in `schema.ts` (or `.enableRLS()` for a server-only table) — user requests rely on it inside `withUserDb`.
+2. **Every table MUST have RLS enabled in the SAME migration**: `pgPolicy(...)` entries on the table in `schema.ts` (or `.enableRLS()` for a server-only table). User requests rely on it inside `withUserDb`.
 3. **Every table MUST have appropriate RLS policies** restricting access via `(SELECT app.user_id())` (subquery form) and the org helpers. Every `UPDATE`/`INSERT` policy needs a `WITH CHECK` that mirrors the full scope of its `USING` (a narrower `WITH CHECK` on a tenant column = cross-tenant takeover). Role checks read the server-controlled `"user".role` column (`is_super_admin()` in SQL, `isSuperAdmin(user)` in TypeScript), never a field the user can write (`name`, `image`, `onboardingCompleted`).
 4. **Migrations run once**, recorded in `drizzle.__drizzle_migrations`; all pending ones apply in one transaction
 5. **Add appropriate indexes** for columns used in WHERE clauses, JOINs, and ORDER BY

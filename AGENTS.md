@@ -207,9 +207,9 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 When modifying template files in `carbon/`, these placeholders are replaced at generation time:
 - `{{PROJECT_NAME}}` - User's project name (machine slug: containers, k8s resources)
 - `{{PROJECT_DISPLAY_NAME}}` - Human-facing name (browser titles, PWA manifest, emails, legal copy); defaults to the titleized slug, overridable via `-display-name`
-- `{{ADMIN_EMAIL}}`, `{{ADMIN_PASSWORD}}` - Admin user credentials (entered during creation)
+- `{{ADMIN_EMAIL}}` - Admin user email (entered during creation)
 - `{{GITHUB_OWNER}}`, `{{SITE_URL}}` - GitOps owner and the app's public origin
-- `{{DB_PASSWORD}}`, `{{REPL_PASSWORD}}` - Secret placeholders: never substituted into checked-in files; their values go to `.env.local` and deploy patches them in (`SECRET_PLACEHOLDERS` in `src/create.js`)
+- `{{DB_PASSWORD}}`, `{{REPL_PASSWORD}}`, `{{ADMIN_PASSWORD}}` - Secret placeholders (the admin password is entered during creation): never substituted into checked-in files; their values go to `.env.local` and deploy patches them in (`SECRET_PLACEHOLDERS` in `src/create.js`)
 - Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX}}`, `{{K8S_STORAGE_CLASS}}`, ...) stay in the scaffold and are filled by `vibecarbon deploy`
 
 ### Localization

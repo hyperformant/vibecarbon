@@ -84,9 +84,9 @@ Concise summary at the end:
 ## Common cost centers (so you know where to look first)
 
 - **`deploy.image.ciWait`** — only present when CI/CD opted in. Direct mode (default since `bc350e5`) skips this entirely.
-- **`deploy.iac.upStack`** — Pulumi up. Cold is ~30-90s for compose VPS, ~3-6 min for k8s/k8s-ha clusters (master + db + worker + network + firewall + floating IP).
+- **`deploy.iac.upStack`**: Pulumi up. Cold is ~30-90s for compose VPS, ~3-6 min for k8s/k8s-ha clusters (master + db + worker + network + firewall + floating IP).
 - **`deploy.bundle.upload`** — scp + ssh-tar-extract. ~10-15s for compose, ~1-2s per HA peer.
-- **`deploy.compose.imagesPull`** — `docker compose pull`. Multi-minute on cold (image layers). Worth caching.
+- **`deploy.compose.imagesPull`**: `docker compose pull`. Multi-minute on cold (image layers). Worth caching.
 - **`deploy.reconcile.run`** — server-side `docker compose up -d`. ~60-120s once images present.
 - **`deploy.k3s.full`** — sideload + helm + migrations + rollout-status. The dominant k8s cost.
 - **`deploy.ha.replication.setup`** — primary + standby pg_basebackup. Adds ~5-8 min on HA.

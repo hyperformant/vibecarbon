@@ -221,7 +221,7 @@ vibecarbon destroy <env> -y -confirm <project>-<env>   # scripted
 
 The backup bucket is preserved (only `-purge` deletes it). The app storage
 bucket *is* deleted and `storageBucketGeneration` is rotated, so the redeploy
-derives a fresh bucket name — anything in app storage (user uploads,
+derives a fresh bucket name, and anything in app storage (user uploads,
 avatars) does not come back with the database restore; copy it out first if
 you need it. The Pulumi state bucket is kept and recorded as
 `retainedStateBucket` in `.vibecarbon.json`, so the redeploy resumes the same

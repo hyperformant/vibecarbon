@@ -32,7 +32,7 @@ open http://n8n.localhost
 
 **Development login:** Use your admin email and the password `changeme` (set by the setup sidecar).
 
-In **production**, n8n is protected by Traefik ForwardAuth. Only users with the `super_admin` role can access it. They are signed in automatically via their existing app session.
+In **production**, n8n is protected by Traefik ForwardAuth. Only users with the `super_admin` role can access it: opening it from the app's admin panel mints a short-lived `vc-admin-token` cookie (a dedicated ForwardAuth token, never the app session), and n8n signs them in from that (see `services/n8n/docs/SSO.md`).
 
 ### 2. Reach your app from a workflow
 
@@ -59,13 +59,18 @@ User: postgres
 Password: your POSTGRES_PASSWORD (from .env.local)
 ```
 
-The `postgres` role bypasses row-level security, so a workflow on it sees every row. For a read-only report, create a narrower role first (over `vibecarbon shell`, or psql against the local dev db) and use that:
+The `postgres` role bypasses row-level security and can write anything, so a workflow on it sees and can change every row.
+
+A narrower role does not get you a "read-only view of everything" for free. Row-level security applies to every role without `BYPASSRLS`, and the policies decide by the app user a request runs as (`app.user_id()`). A report connection has no app user, so a plain role sees only what the policies allow it, which is no rows (or an error from a helper function it may not call). For a cross-tenant, read-only report, create a role that bypasses RLS but can only read the tables you grant (over `vibecarbon shell`, or psql against the local dev db):
 
 ```sql
-CREATE ROLE n8n_reports LOGIN PASSWORD '...';
+CREATE ROLE n8n_reports LOGIN BYPASSRLS PASSWORD '...';
+GRANT CONNECT ON DATABASE postgres TO n8n_reports;
 GRANT USAGE ON SCHEMA public TO n8n_reports;
 GRANT SELECT ON public.organizations, public.memberships TO n8n_reports;
 ```
+
+It still cannot read the auth tables (`"user"`, `session`, `account`, ...) or write anything, because it holds no grant for them.
 
 Then use the **Postgres** node:
 

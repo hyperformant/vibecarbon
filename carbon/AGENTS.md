@@ -506,7 +506,7 @@ myRoutes.post('/', async (c) => {
 
 The app has **one public origin** (the apex). Traefik sends every path there: the SPA, the Hono API under `/api`, and auth at `/api/auth`. Rules:
 
-- **NEVER** add a public path that reaches anything but the app, and **NEVER** use a `/rest`/`/storage`/`/realtime` prefix (versioned or bare), or any `/auth` prefix, in a Traefik rule — the SPA owns `/auth/callback` and `/reset-password`, and auth is the app's own `/api/auth`. **NEVER** run or route a separate auth service (`tests/structural/security-invariants.test.ts` fails on any `/auth/v1` route).
+- **NEVER** add a public path that reaches anything but the app, and **NEVER** use a `/rest`/`/storage`/`/realtime` prefix (versioned or bare), or any `/auth` prefix, in a Traefik rule. The SPA owns `/auth/callback` and `/reset-password`, and auth is the app's own `/api/auth`. **NEVER** run or route a separate auth service (`tests/structural/security-invariants.test.ts` fails on any `/auth/v1` route).
 - **NEVER** re-introduce a separate `api.<domain>` host. `SITE_URL` is the single origin; it feeds auth links and OAuth callbacks, billing return URLs, and CSP.
 
 ### Adding a New Admin Service

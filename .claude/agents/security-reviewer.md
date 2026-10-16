@@ -36,7 +36,7 @@ For every review, systematically evaluate changes against these security domains
   - Auth is in-process (Better Auth, `src/server/auth/`); the browser holds no session or token (HttpOnly cookie only).
 - **Session validation:** Ensure API routes that require auth read the user from `c.get('user')` (set by the session middleware from the session cookie, checked against the database) and refuse a missing one.
 - **Role checks:** The only elevated platform role is `super_admin` (the server-controlled `user.role` column); there is no platform `admin` role (`admin` is an org-membership tier, RLS-enforced). Platform-admin routes (`/api/v1/admin/*`, `/api/_internal/services/*`) must require `super_admin`. Flag any `role === 'admin'` exact check (excludes super admins) and any ForwardAuth gate at `?role=admin`.
-- **Never trust proxy headers as auth input:** `X-User-Id`/`X-User-Email`/`X-User-Role`/`X-Authenticated-User` are set by Traefik for downstream services. Flag any app code that reads them to determine identity or authorization — identity must come from the verified session (`c.get('user')`).
+- **Never trust proxy headers as auth input:** `X-User-Id`/`X-User-Email`/`X-User-Role`/`X-Authenticated-User` are set by Traefik for downstream services. Flag any app code that reads them to determine identity or authorization. Identity must come from the verified session (`c.get('user')`).
 - **Session handling:** Check for secure cookie flags (HttpOnly, Secure, SameSite), proper token refresh logic, and session invalidation.
 - **OAuth flows:** Verify state parameter usage, redirect URI validation, and PKCE where applicable.
 - **Magic links / OTP:** Ensure rate limiting on auth endpoints to prevent abuse.

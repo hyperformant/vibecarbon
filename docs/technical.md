@@ -25,7 +25,7 @@ Complete technical reference for developing with Vibecarbon.
 |-------|--------------|-------------|
 | **HA/Failover** | Postgres streaming replication | Manual failover, two regions. k8s-ha: pilot-light standby (2-node idle floor, cold app tier, IaC worker provisioning at failover, convergent role reconciliation via deploy). compose-ha: always-warm two-VPS standby, its own failover path |
 | **Observability** | Prometheus + Grafana + Loki | Metrics, dashboards, and log aggregation (`vibecarbon add observability`) |
-| **Cache** | Redis | In-memory cache and session store (`vibecarbon add redis`) |
+| **Cache** | Redis | Shared rate-limit counters across app replicas, plus a cache or queue you build on it (`vibecarbon add redis`) |
 
 ---
 
