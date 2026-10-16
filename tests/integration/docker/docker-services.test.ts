@@ -65,8 +65,10 @@ describeDocker('Docker Services Smoke Test', () => {
 
     // Create project
     execSync(
-      `node ${join(process.cwd(), 'src/cli.js')} create ${projectName} -y -admin-email test@smoke.local -admin-password smoketest123`,
+      `node ${join(process.cwd(), 'src/cli.js')} create ${projectName} -y -install -admin-email test@smoke.local -admin-password smoketest123`,
       {
+        // -install: the Migrations cases run the project's own
+        // `npm run db:migrate`, which needs its dependencies.
         cwd: tempDir,
         encoding: 'utf-8',
         timeout: 300000,
@@ -206,21 +208,6 @@ describeDocker('Docker Services Smoke Test', () => {
       });
       expect(result).toContain('1');
     });
-
-    it('has required extensions installed', ({ skip }) => {
-      if (!portsAvailable) skip();
-      const result = execSync(
-        `docker compose exec -T db psql -U postgres -c "SELECT extname FROM pg_extension WHERE extname IN ('uuid-ossp', 'pgcrypto')"`,
-        {
-          cwd: projectDir(),
-          encoding: 'utf-8',
-          timeout: 10000,
-          env: getExecEnv(),
-        },
-      );
-      expect(result).toContain('uuid-ossp');
-      expect(result).toContain('pgcrypto');
-    });
   });
 
   // =========================================================================
@@ -258,6 +245,25 @@ describeDocker('Docker Services Smoke Test', () => {
       const [tables, applied] = result.trim().split('|').map(Number);
       expect(tables).toBeGreaterThan(10);
       expect(applied).toBeGreaterThanOrEqual(3);
+    });
+
+    // The baseline (db/migrations/0000) creates the one extension the lean
+    // stack uses, pg_cron, so this runs after db:migrate: with port 80 taken
+    // no app container starts, and its startup migration never ran. (UUIDs
+    // come from core gen_random_uuid(); uuid-ossp and pgcrypto were the
+    // Supabase image's and nothing uses them.)
+    it('the baseline installs pg_cron', ({ skip }) => {
+      if (!portsAvailable) skip();
+      const result = execSync(
+        `docker compose exec -T db psql -U postgres -tA -c "SELECT extname FROM pg_extension WHERE extname = 'pg_cron'"`,
+        {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          timeout: 10000,
+          env: getExecEnv(),
+        },
+      );
+      expect(result.trim()).toBe('pg_cron');
     });
   });
 
