@@ -125,9 +125,14 @@ v1Routes.get('/me', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  // Fetch user's organizations/memberships
+  // Fetch the caller's own memberships. The user_id filter is load-bearing:
+  // RLS lets a member SELECT every membership row in their orgs, so without it
+  // this returned other members' rows (ids + roles), duplicating orgs in the
+  // client switcher and letting another member's role stand in for the caller's.
   const supabase = c.get('supabase');
-  const { data: memberships, error } = await supabase.from('memberships').select(`
+  const { data: memberships, error } = await supabase
+    .from('memberships')
+    .select(`
       id,
       role,
       organization:organizations (
@@ -138,7 +143,8 @@ v1Routes.get('/me', async (c) => {
         created_at,
         updated_at
       )
-    `);
+    `)
+    .eq('user_id', user.id);
 
   if (error) {
     return c.json({ error: sanitizeError(error, 'Failed to fetch memberships') }, 500);
