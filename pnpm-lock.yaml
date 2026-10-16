@@ -29,7 +29,7 @@ importers:
         version: 2.27.1(typescript@7.0.2)
       '@grpc/grpc-js':
         specifier: ^1.14.4
-        version: 1.14.5
+        version: 1.14.6
       '@grpc/proto-loader':
         specifier: ^0.8.1
         version: 0.8.1
@@ -41,7 +41,7 @@ importers:
         version: 1.42.0(typescript@7.0.2)
       '@pulumi/linode':
         specifier: ^6.4.0
-        version: 6.7.0(typescript@7.0.2)
+        version: 6.7.1(typescript@7.0.2)
       '@pulumi/pulumi':
         specifier: ^3.260.0
         version: 3.268.0(typescript@7.0.2)
@@ -466,8 +466,8 @@ packages:
     resolution: {integrity: sha512-GmzA9ckNokPypTg10pgpeHNQe7ph+iIKKmhKu3Ob9ANkswreCx7R3cKmY781K8QK3AqVL3xVh9A42JvIAbkkSA==}
     engines: {node: ^20.17.0 || >=22.9.0}
 
-  '@grpc/grpc-js@1.14.5':
-    resolution: {integrity: sha512-7VZM+SVdEcUUqSQeNI3zM8Qs/BhQKZndPo2h5VkYkAM8Iz0wJIa8mKV5ekQGqG8UUsnkQ0NMxIxwkIHYvj0qOw==}
+  '@grpc/grpc-js@1.14.6':
+    resolution: {integrity: sha512-SgC/B3/VZ8lTyOZ4Cwk6f1skWhmkNAaVfiX90qd5u1rRXGKk1//8FTUEN9GvOUq7rfWIqAYkA3CoyumYVpOS6g==}
     engines: {node: '>=12.10.0'}
 
   '@grpc/proto-loader@0.8.1':
@@ -782,8 +782,8 @@ packages:
   '@pulumi/hcloud@1.42.0':
     resolution: {integrity: sha512-vy/GJSVADB+q+rSLDeFM0dDM59r8wz6VeJr5Da1N7CRt4qYa2WeITQywkzqLbEZJfrJ8ghV7kYSSkeFSIKbKkA==}
 
-  '@pulumi/linode@6.7.0':
-    resolution: {integrity: sha512-iWPOLDyjsYunL+zY5eyd6CgY3/XViGsDTC2tcdhWqB5QlXuEQUsJg6ZXBclq1x4rldX/z9OYGhc0ErbGF3dd7A==}
+  '@pulumi/linode@6.7.1':
+    resolution: {integrity: sha512-wkSkToTrToMulEfzA+1+cLRz+RBaPPVjA6MkJno/Xen+Ay7Q19hoyhjsmiPMEQhHdOJfbPN9+Ked/+SguGM4OA==}
 
   '@pulumi/pulumi@3.268.0':
     resolution: {integrity: sha512-VtTIr44eC78BX4cAeh2MEqJqVFu5/UfrmsxjLdH73YIPr5igPEo9JB4g5yqncTHcXNxbkxJXndMOEm1CkpJA5Q==}
@@ -3436,7 +3436,7 @@ snapshots:
 
   '@gar/promise-retry@1.0.3': {}
 
-  '@grpc/grpc-js@1.14.5':
+  '@grpc/grpc-js@1.14.6':
     dependencies:
       '@grpc/proto-loader': 0.8.1
       '@js-sdsl/ordered-map': 4.4.2
@@ -3677,7 +3677,7 @@ snapshots:
 
   '@opentelemetry/exporter-trace-otlp-grpc@0.220.0(@opentelemetry/api@1.9.1)':
     dependencies:
-      '@grpc/grpc-js': 1.14.5
+      '@grpc/grpc-js': 1.14.6
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/otlp-exporter-base': 0.220.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/otlp-grpc-exporter-base': 0.220.0(@opentelemetry/api@1.9.1)
@@ -3717,7 +3717,7 @@ snapshots:
 
   '@opentelemetry/otlp-grpc-exporter-base@0.220.0(@opentelemetry/api@1.9.1)':
     dependencies:
-      '@grpc/grpc-js': 1.14.5
+      '@grpc/grpc-js': 1.14.6
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/core': 2.9.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/otlp-exporter-base': 0.220.0(@opentelemetry/api@1.9.1)
@@ -3840,7 +3840,7 @@ snapshots:
       - ts-node
       - typescript
 
-  '@pulumi/linode@6.7.0(typescript@7.0.2)':
+  '@pulumi/linode@6.7.1(typescript@7.0.2)':
     dependencies:
       '@pulumi/pulumi': 3.268.0(typescript@7.0.2)
     transitivePeerDependencies:
@@ -3850,7 +3850,7 @@ snapshots:
 
   '@pulumi/pulumi@3.268.0(typescript@7.0.2)':
     dependencies:
-      '@grpc/grpc-js': 1.14.5
+      '@grpc/grpc-js': 1.14.6
       '@logdna/tail-file': 2.2.0
       '@npmcli/arborist': 9.9.2
       '@opentelemetry/api': 1.9.1
