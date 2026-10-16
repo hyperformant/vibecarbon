@@ -451,6 +451,38 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * Strict twin of findBucketRegion for decisions that treat "missing" as
+   * proof: asks every region of this store whether it holds the bucket, and
+   * returns null ONLY when every region answered not-found. findBucketRegion
+   * swallows every per-region failure, so an unreachable store reads as
+   * "nowhere"; this throws instead, so a caller never mistakes silence for
+   * absence.
+   * @param {string} bucketName
+   * @returns {Promise<string|null>} the region holding the bucket, or null
+   */
+  async locateBucket(bucketName) {
+    for (const [region, endpoint] of Object.entries(this.constructor.ENDPOINTS)) {
+      const client = new S3Client({
+        region: this.constructor.S3_SIGNING_REGION ?? region,
+        endpoint,
+        forcePathStyle: true,
+        credentials: { accessKeyId: this.accessKeyId, secretAccessKey: this.secretAccessKey },
+        requestHandler: { ...S3_HTTP_TIMEOUTS },
+      });
+      try {
+        await client.send(new HeadBucketCommand({ Bucket: bucketName }));
+        return region;
+      } catch (error) {
+        const status = error?.$metadata?.httpStatusCode;
+        if (error?.name === 'NotFound' || error?.name === 'NoSuchBucket' || status === 404)
+          continue;
+        throw error;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Create a new bucket.
    *
    * Outer loop handles two operation-specific conditions that aren't

@@ -909,10 +909,51 @@ export async function removeStackState(stackName, options = {}) {
     if (err?.stackNotFound || /no stack named/i.test(err.message || '')) {
       return { removed: false };
     }
+    if (await stateBucketConfirmedMissing(err, options)) {
+      return { removed: false, stateBucketMissing: true };
+    }
     throw err;
   }
   await stack.workspace.removeStack(stackName, { force: true });
   return { removed: true };
+}
+
+/**
+ * True only when a stack-select failure says the state BUCKET does not exist
+ * AND an independent check finds that bucket in no region of the store.
+ *
+ * A deploy that fails before the state bucket is created (excitingai,
+ * 2026-10-16: wrong S3 keys, so no bucket was ever made) leaves an env whose
+ * backend URL names a bucket that never existed. `pulumi stack select` then
+ * fails with NoSuchBucket, and destroy recorded that as an UNVERIFIED
+ * pulumi-stack and exited 2, though there is no state to remove.
+ *
+ * The error text alone is not enough: region-scoped stores answer a bucket
+ * that lives in a different region with the same 404, so a wrong endpoint
+ * would read as "absent" and hide real state. locateBucket asks every
+ * region with the same keys and only returns null when each one answered
+ * "not found"; any other answer (or no answer) keeps the original error.
+ * @param {Error} err
+ * @param {{provider?: string, s3Config?: {stateBucket?: string, bucket?: string, accessKey?: string, secretKey?: string, stateBucketRegion?: string, region?: string}}} options
+ * @returns {Promise<boolean>}
+ */
+async function stateBucketConfirmedMissing(err, options) {
+  if (!/NoSuchBucket/.test(err?.message || '')) return false;
+  const s3 = options.s3Config;
+  const bucket = s3?.stateBucket ?? s3?.bucket;
+  if (!bucket || !s3?.accessKey || !s3?.secretKey || !options.provider) return false;
+  try {
+    const { getObjectStorageProvider } = await import('../providers/index.js');
+    const store = await getObjectStorageProvider(
+      options.provider,
+      s3.accessKey,
+      s3.secretKey,
+      s3.stateBucketRegion || s3.region,
+    );
+    return (await store.locateBucket(bucket)) === null;
+  } catch {
+    return false;
+  }
 }
 
 /**

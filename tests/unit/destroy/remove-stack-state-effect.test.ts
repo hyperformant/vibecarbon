@@ -99,6 +99,17 @@ describe('removePulumiStackState effect', () => {
     expect(ctx.results.leaks.isClean()).toBe(true);
   });
 
+  it('a state bucket that was never created is a clean outcome, not an UNVERIFIED leak', async () => {
+    // excitingai, 2026-10-16: the deploy failed before any bucket existed, and
+    // destroy exited 2 over a stack that could not exist.
+    removeStackStateMock.mockResolvedValue({ removed: false, stateBucketMissing: true });
+    const ctx = makeCtx();
+    await runEffect(ctx);
+
+    expect(ctx.results.leaks.isClean()).toBe(true);
+    expect(ctx.spinner.messages.join('\n')).toContain('state bucket was never created');
+  });
+
   it('removes BOTH compose-ha stacks (-primary and -standby)', async () => {
     const ctx = makeCtx({
       plan: { tier: 'compose-ha', stackEnvs: ['civ1-primary', 'civ1-standby'] },

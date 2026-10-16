@@ -2928,7 +2928,7 @@ async function removePulumiStackStateEffect(ctx) {
   for (const stackEnv of plan.stackEnvs) {
     s.start(`Removing Pulumi stack state: ${stackEnv}`);
     try {
-      const { removed } = await removeStackState(stackEnv, {
+      const { removed, stateBucketMissing } = await removeStackState(stackEnv, {
         projectName: projectConfig.projectName,
         provider: providerIdFor(envConfig),
         s3Config,
@@ -2936,7 +2936,9 @@ async function removePulumiStackStateEffect(ctx) {
       s.stop(
         removed
           ? `Pulumi stack state removed: ${stackEnv}`
-          : `Pulumi stack state already absent: ${stackEnv}`,
+          : stateBucketMissing
+            ? `Pulumi stack state already absent: ${stackEnv} (its state bucket was never created, so there was nothing to remove)`
+            : `Pulumi stack state already absent: ${stackEnv}`,
       );
     } catch (error) {
       s.stop(`Failed to remove Pulumi stack state: ${error.message}`);
