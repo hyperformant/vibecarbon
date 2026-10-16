@@ -33,11 +33,18 @@ import { describe, expect, it } from 'vitest';
 const ROOT = process.cwd();
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 
-type Step = { uses?: string; run?: string; with?: Record<string, unknown> };
+type Step = {
+  id?: string;
+  uses?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+  env?: Record<string, string>;
+};
 type Job = {
   'runs-on'?: string;
   needs?: string | string[];
-  strategy?: { matrix?: { include?: Array<Record<string, string>> } };
+  permissions?: Record<string, string>;
+  strategy?: { 'fail-fast'?: boolean; matrix?: { include?: Array<Record<string, string>> } };
   steps?: Step[];
 };
 const jobsOf = (workflow: string) =>
@@ -191,6 +198,49 @@ describe('the db image builds natively per arch and merges into one tag', () => 
     for (const step of pushes) expect(step.with?.tags ?? 'smoke:local').toBe('smoke:local');
   });
 
+  it('a failed leg stops the other: fail-fast, so no lone digest waits for a merge', () => {
+    expect(build.strategy?.['fail-fast']).toBe(true);
+  });
+
+  it('the pushed image is proven to be the smoke-tested one (same config digest)', () => {
+    const steps = build.steps ?? [];
+    const loadAt = steps.findIndex(
+      (s) => isBuildPush(s) && s.id === 'load' && s.with?.load === true,
+    );
+    const pushAt = steps.findIndex((s) => isBuildPush(s) && s.id === 'push');
+    const checkAt = steps.findIndex((s) => /"\$SMOKED" != "\$PUSHED"/.test(s.run ?? ''));
+    expect(loadAt).toBeGreaterThan(-1);
+    expect(pushAt).toBeGreaterThan(loadAt);
+    expect(checkAt, 'no config-digest check after the push').toBeGreaterThan(pushAt);
+    const recordAt = steps.findIndex((s) => /digests\/\$ARCH/.test(s.run ?? ''));
+    expect(recordAt, 'the digest is recorded only once it is proven').toBeGreaterThan(checkAt);
+    expect(steps[checkAt].env).toEqual({
+      SMOKED: expr("fromJSON(steps.load.outputs.metadata)['containerimage.config.digest']"),
+      PUSHED: expr("fromJSON(steps.push.outputs.metadata)['containerimage.config.digest']"),
+    });
+  });
+
+  it('digest artifacts are named per run attempt, so a partial re-run never clashes', () => {
+    const upload = (build.steps ?? []).find((s) => /actions\/upload-artifact@/.test(s.uses ?? ''));
+    expect(upload?.with?.name).toBe(
+      `${expr('inputs.name')}-digest-${expr('steps.ref.outputs.arch')}-${expr('github.run_attempt')}`,
+    );
+    const download = (merge.steps ?? []).find((s) =>
+      /actions\/download-artifact@/.test(s.uses ?? ''),
+    );
+    expect(download?.with?.pattern).toBe(`${expr('inputs.name')}-digest-*`);
+    // Per-artifact directories: the merge picks each arch's newest attempt.
+    expect(download?.with?.['merge-multiple']).toBeUndefined();
+    expect(runsOf(merge)).toMatch(/sort -V \| tail -n 1/);
+  });
+
+  it("each digest's platform is verified BEFORE the tag is created", () => {
+    const run = runsOf(merge);
+    const check = run.indexOf('if [ "$got" != "linux/$arch" ]');
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(run.indexOf('docker buildx imagetools create'));
+  });
+
   it('the smoke script really starts postgres and loads pg_cron', () => {
     const smoke = read(SMOKE);
     expect(smoke).toMatch(/--entrypoint postgres "\$IMAGE" --version/);
@@ -315,6 +365,36 @@ describe('wal-g builds natively per arch in both channels (arch audit F6)', () =
     expect(runsOf(jobsOf('.github/workflows/native-multiarch-image.yml').merge)).toMatch(
       /echo "ref=\$NAME@\$\(jq -r \.digest manifest\.json\)"/,
     );
+  });
+});
+
+describe('packages: write only on the jobs that publish', () => {
+  // OpenSSF Token-Permissions: the workflow default is read-only, and only a
+  // job that pushes to ghcr (or calls the shared workflow that does) gets
+  // packages: write. A planning job never does.
+  const PUBLISHING: Record<string, string[]> = {
+    '.github/workflows/native-multiarch-image.yml': ['build', 'merge'],
+    '.github/workflows/publish-db-image.yml': ['build-db', 'publish-walg'],
+    '.github/workflows/publish-db-image-dev.yml': ['build-db', 'build-walg'],
+  };
+
+  it.each(Object.entries(PUBLISHING))('%s', (file, publishing) => {
+    const wf = workflowOf(file) as Workflow & { permissions?: unknown };
+    expect(wf.permissions, `${file}: workflow default must be read-only`).toEqual({
+      contents: 'read',
+    });
+    const writers = Object.entries(wf.jobs)
+      .filter(([, job]) => job.permissions?.packages === 'write')
+      .map(([id]) => id)
+      .sort();
+    expect(writers).toEqual(publishing);
+    for (const [id, job] of Object.entries(wf.jobs)) {
+      expect(job.permissions, `${file}#${id} declares no permissions`).toBeDefined();
+      const extra = Object.keys(job.permissions ?? {}).filter(
+        (k) => !['contents', 'packages'].includes(k),
+      );
+      expect(extra, `${file}#${id} asks for more than contents/packages`).toEqual([]);
+    }
   });
 });
 

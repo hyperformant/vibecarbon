@@ -14,8 +14,10 @@ name: native-multiarch-image
 # binaries in-build (wal-g's smoke stage, the db image's `wal-g --version`),
 # so each arch builds on its own hardware (ubuntu-24.04 / ubuntu-24.04-arm)
 # at full speed, and the smoke script EXECUTES that arch's binaries for real. Each leg pushes by digest
-# only (no tag); the merge job then names both digests under the one tag, so
-# the tag never points at a half-built image.
+# only (no tag), and proves the pushed image is the one it smoke-tested (same
+# image config digest); the merge job checks each digest's platform, then
+# names both under the one tag, so the tag never points at a half-built or
+# untested image.
 #
 # Guarded by tests/unit/deploy/workflow-platforms.test.ts.
 on:
@@ -91,9 +93,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # Build once into the local daemon for the smoke test; the push step
-      # below reuses the same build cache, so it re-uploads these exact layers.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+      # Build once into the local daemon for the smoke test. The push step
+      # below rebuilds from the same builder's cache; the step after it proves
+      # that produced the very image smoked here.
+      - id: load
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: ${{ inputs.context }}
           build-contexts: ${{ inputs.build-contexts }}
@@ -111,16 +115,34 @@ jobs:
           build-contexts: ${{ inputs.build-contexts }}
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true,push=true
+      # The image config digest names the image's content (layers, env,
+      # entrypoint). Equal digests mean the pushed image IS the smoked one; a
+      # cache miss that built anything different stops the leg here, before
+      # its digest can reach the merge.
+      - name: Check the pushed image is the smoke-tested one
+        run: |
+          set -euo pipefail
+          test -n "$SMOKED" && test -n "$PUSHED"
+          if [ "$SMOKED" != "$PUSHED" ]; then
+            echo "::error::pushed config $PUSHED is not the smoke-tested $SMOKED; nothing is tagged" >&2
+            exit 1
+          fi
+        env:
+          SMOKED: ${{ fromJSON(steps.load.outputs.metadata)['containerimage.config.digest'] }}
+          PUSHED: ${{ fromJSON(steps.push.outputs.metadata)['containerimage.config.digest'] }}
       - name: Record the pushed digest
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
-          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+          echo "$DIGEST" > "$RUNNER_TEMP/digests/$ARCH"
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
+          ARCH: ${{ steps.ref.outputs.arch }}
+      # The run attempt in the name: re-running one failed leg uploads beside
+      # the first attempt's artifacts instead of clashing with them.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ inputs.name }}-digest-${{ steps.ref.outputs.arch }}
-          path: ${{ runner.temp }}/digests/*
+          name: ${{ inputs.name }}-digest-${{ steps.ref.outputs.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/digests/${{ steps.ref.outputs.arch }}
           if-no-files-found: error
           retention-days: 1
   merge:
@@ -134,10 +156,11 @@ jobs:
       ref: ${{ steps.verify.outputs.ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # One directory per artifact (<name>-digest-<arch>-<attempt>/<arch>),
+      # every attempt's; the create step takes each arch's newest.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: ${{ inputs.name }}-digest-*
-          merge-multiple: true
           path: ${{ runner.temp }}/digests
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
@@ -145,7 +168,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # Exactly two digests, one per arch, or the tag is not created.
+      # Exactly two digests, one per arch, each verified to be that arch's
+      # image BEFORE the tag exists, or the tag is not created.
       - name: Create the multi-arch tag from the per-arch digests
         working-directory: ${{ runner.temp }}/digests
         run: |
@@ -160,13 +184,36 @@ jobs:
               echo "$out" >&2; exit 1
             fi
           fi
+          # The os/arch of each image in a pushed ref: the platform entries of
+          # an index (attestations, platform unknown/unknown, skipped) or the
+          # config of a single manifest.
+          platforms_of() {
+            local raw
+            raw=$(docker buildx imagetools inspect "$1" --raw)
+            if jq -e '.manifests' <<<"$raw" >/dev/null; then
+              jq -r '.manifests[] | select(.platform.architecture != "unknown") | "\(.platform.os)/\(.platform.architecture)"' <<<"$raw"
+            else
+              docker buildx imagetools inspect "$1" --format '{{json .Image}}' | jq -r '"\(.os)/\(.architecture)"'
+            fi
+          }
           refs=()
-          for digest in *; do refs+=("$NAME@sha256:$digest"); done
+          for arch in amd64 arm64; do
+            file=$(find . -path "./$ID-digest-$arch-*/$arch" | sort -V | tail -n 1)
+            test -n "$file" || { echo "::error::no $arch digest" >&2; exit 1; }
+            ref="$NAME@$(cat "$file")"
+            got=$(platforms_of "$ref")
+            if [ "$got" != "linux/$arch" ]; then
+              echo "::error::$ref is $got, not linux/$arch; tag not created" >&2
+              exit 1
+            fi
+            refs+=("$ref")
+          done
           test "${#refs[@]}" -eq 2
           docker buildx imagetools create -t "$IMAGE" "${refs[@]}"
         env:
           IMAGE: ${{ inputs.image }}:${{ inputs.tag }}
           NAME: ${{ inputs.image }}
+          ID: ${{ inputs.name }}
           IMMUTABLE: ${{ inputs.immutable }}
       - id: verify
         name: Verify the published tag carries amd64 and arm64, then smoke it
