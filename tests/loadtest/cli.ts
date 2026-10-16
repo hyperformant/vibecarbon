@@ -103,7 +103,7 @@ async function fetchSessionCookie(
   baseUrl: string,
   email: string,
   password: string,
-): Promise<string | null> {
+): Promise<string | 'two-factor' | null> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6000);
@@ -115,6 +115,14 @@ async function fetchSessionCookie(
     });
     clearTimeout(timer);
     if (!res.ok) return null;
+    // A password sign-in on an account with a second factor answers
+    // { twoFactorRedirect: true } and no session: the load test cannot type
+    // a TOTP code, so the caller stops instead of testing as a guest.
+    const body = (await res
+      .clone()
+      .json()
+      .catch(() => null)) as { twoFactorRedirect?: boolean } | null;
+    if (body?.twoFactorRedirect) return 'two-factor';
     const cookie = res.headers
       .getSetCookie()
       .map((c) => c.split(';')[0])
@@ -126,6 +134,19 @@ async function fetchSessionCookie(
 }
 
 // ── URL resolution ────────────────────────────────────────────────────────────
+
+/** A dev port the way docker-up.js computes it: explicit var, else base + DEV_PORT_OFFSET. */
+function devPort(env: Record<string, string | undefined>, key: string, base: number): number {
+  const explicit = Number.parseInt(env[key] ?? '', 10);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const offset = Number.parseInt(env.DEV_PORT_OFFSET ?? '0', 10) || 0;
+  return base + offset;
+}
+
+function localTraefikUrl(env: Record<string, string | undefined>): string {
+  const port = devPort(env, 'DEV_TRAEFIK_PORT', 80);
+  return port === 80 ? 'http://localhost' : `http://localhost:${port}`;
+}
 
 function resolveBaseUrl(env: EnvConfig): string | null {
   if (env.domain) return `https://${env.domain}`;
@@ -236,13 +257,24 @@ async function main() {
     }
   }
 
-  // Local Docker option — if docker-compose.yml exists in project dir
-  const localUrl = 'http://localhost:3000';
+  // Local targets. Docker Compose publishes only Traefik (the app container
+  // is not on :3000, and its NODE_ENV=production drops localhost:3000 from
+  // the trusted origins), so the Docker target goes through Traefik on its
+  // dev port. `npm run dev` serves the API on its own port.
+  const localUrls: Record<string, string> = {
+    __local__: localTraefikUrl(projectEnv),
+    __local_dev__: `http://localhost:${devPort(projectEnv, 'DEV_API_PORT', 3000)}`,
+  };
   if (existsSync(join(projectDir, 'docker-compose.yml'))) {
     options.push({
       value: '__local__',
       label: 'Local Docker',
-      hint: `${localUrl}  (docker-compose)`,
+      hint: `${localUrls.__local__}  (docker compose, through Traefik)`,
+    });
+    options.push({
+      value: '__local_dev__',
+      label: 'Local dev server',
+      hint: `${localUrls.__local_dev__}  (npm run dev)`,
     });
   }
 
@@ -290,9 +322,9 @@ async function main() {
     // biome-ignore lint/style/noNonNullAssertion: selectedIds are filtered from options, always defined
     const opt = options.find((o) => o.value === id)!;
     // biome-ignore lint/style/noNonNullAssertion: opt.config exists for non-local envs; resolveBaseUrl returns non-null for valid configs
-    const baseUrl = id === '__local__' ? localUrl : resolveBaseUrl(opt.config!)!;
+    const baseUrl = localUrls[id] ?? resolveBaseUrl(opt.config!)!;
     // biome-ignore lint/style/noNonNullAssertion: opt.config exists for non-local envs
-    const label = id === '__local__' ? 'local' : envLabel(id, opt.config!);
+    const label = localUrls[id] ? 'local' : envLabel(id, opt.config!);
 
     console.log('');
     log.step(`▶  ${opt.label}  (${baseUrl})`);
@@ -307,6 +339,15 @@ async function main() {
     if (adminEmail && adminPassword) {
       // Admin user is valid for both user-scoped and admin endpoints
       const cookie = await fetchSessionCookie(baseUrl, adminEmail, adminPassword);
+      if (cookie === 'two-factor') {
+        s.stop('Sign-in needs a second factor');
+        cancel(
+          `${adminEmail} has two-factor sign-in on, and the load test cannot enter a code. ` +
+            'Run it with an account without a second factor (set ADMIN_EMAIL / ADMIN_PASSWORD ' +
+            'in .env.local to that account), or turn the factor off for this test user.',
+        );
+        process.exit(1);
+      }
       if (cookie) {
         authCookie = cookie;
         adminCookie = cookie;
