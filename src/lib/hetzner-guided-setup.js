@@ -19,8 +19,13 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import {
+  dotenvPromptProblem,
+  normalizeOperatorValue,
+  pastedKeyShapeProblem,
+  readOperatorVar,
+} from './operator-env.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 
 /**
  * Validate a Hetzner API token by making a lightweight API call.
@@ -246,8 +251,9 @@ export async function getS3Credentials(projectName, options = {}) {
     const envSecretKey = readOperatorVar('HETZNER_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
-      p.log.info('✓ Using S3 credentials from environment variables');
-      return { accessKey: envAccessKey, secretKey: envSecretKey };
+      const from = describeCredentialSource(['HETZNER_ACCESS_KEY', 'HETZNER_SECRET_KEY']);
+      p.log.info(`✓ Using S3 credentials from ${from.label}`);
+      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
     }
   }
 
@@ -267,7 +273,10 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your S3 Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return dotenvPromptProblem('HETZNER_ACCESS_KEY', v);
+      return (
+        pastedKeyShapeProblem('HETZNER_ACCESS_KEY', v) ??
+        dotenvPromptProblem('HETZNER_ACCESS_KEY', v)
+      );
     },
   });
 
@@ -279,7 +288,10 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your S3 Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return dotenvPromptProblem('HETZNER_SECRET_KEY', v);
+      return (
+        pastedKeyShapeProblem('HETZNER_SECRET_KEY', v) ??
+        dotenvPromptProblem('HETZNER_SECRET_KEY', v)
+      );
     },
   });
 
@@ -307,5 +319,5 @@ export async function getS3Credentials(projectName, options = {}) {
     await saveIfWanted({ HETZNER_ACCESS_KEY: accessKey, HETZNER_SECRET_KEY: secretKey });
   }
 
-  return { accessKey, secretKey };
+  return { accessKey, secretKey, source: 'what you pasted' };
 }

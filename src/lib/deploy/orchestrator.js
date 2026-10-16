@@ -11,6 +11,7 @@ import { progressLog, spinner } from '../cli/progress.js';
 import { c } from '../colors.js';
 import { runCommand, runCommandAsync } from '../command.js';
 import { loadProjectConfig, registerProject, saveProjectConfig } from '../config.js';
+import { writeLogDetail } from '../deploy-logger.js';
 import { getDnsProvider, hasAutomatedDns, operatorConfigForDns } from '../dns-provider.js';
 import { clearDestroyedRecord } from '../env-identity.js';
 import { readOperatorVar } from '../operator-env.js';
@@ -23,6 +24,7 @@ import {
   providerFor,
   providerIdFor,
 } from '../providers/index.js';
+import { formatS3SetupFailure } from '../providers/s3-base.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
 import { renderBundle } from './bundle.js';
@@ -709,12 +711,17 @@ export async function executeDeployment(args, gatheredConfig) {
       }
       state.completeStep('s3-setup', result);
     } catch (error) {
-      const errMsg =
-        error.message ||
-        error.Code ||
-        error.name ||
-        `HTTP ${error.$metadata?.httpStatusCode || 'unknown'}`;
-      s3Spinner.stop(`S3 setup failed: ${errMsg}`);
+      // One readable line on the terminal (cause, endpoint, key source); the
+      // full error goes to the deploy log only. The log is written
+      // synchronously, so the process.exit below cannot drop this line.
+      s3Spinner.stop(
+        formatS3SetupFailure(error, {
+          endpoint: s3Provider.getEndpoint(),
+          source: gatheredConfig.s3CredentialSource,
+        }),
+        1,
+      );
+      writeLogDetail(`# s3-setup error detail: ${error?.stack || error}`);
       process.exit(1);
     }
   }

@@ -84,6 +84,8 @@ describe('deploy wizard credential order', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     clackMock.select.mockReset();
+    clackMock.log.warn.mockClear();
+    clackMock.log.error.mockClear();
   });
 
   it('asks for the S3 keys right after the API token, before the DNS provider', async () => {
@@ -94,5 +96,90 @@ describe('deploy wizard credential order', () => {
       region: 'hil',
     });
     expect(events).toEqual(['api-token', 's3-credentials', 'dns-provider']);
+  });
+
+  it('verifies the S3 keys right away, naming where they came from, and asks again when S3 rejects them', async () => {
+    const prompt = vi.mocked(HetznerProvider.promptObjectStorageCredentials);
+    prompt.mockReset();
+    prompt
+      .mockResolvedValueOnce({
+        accessKey: 'STALEKEY000000000000',
+        secretKey: 'y'.repeat(40),
+        source: "your project's .env.local",
+      } as never)
+      .mockResolvedValueOnce({
+        accessKey: 'ABCDEFGHIJ0123456789',
+        secretKey: 'x'.repeat(40),
+        source: 'what you pasted',
+      } as never);
+    const validate = vi.mocked(S3CompatibleProvider.prototype.validateCredentials);
+    validate
+      .mockResolvedValueOnce({
+        valid: false,
+        rejected: true,
+        error: "the access key isn't recognized (InvalidAccessKeyId)",
+      } as never)
+      .mockResolvedValueOnce({ valid: true });
+
+    const tty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    let result: Awaited<ReturnType<typeof gatherDeploymentConfig>>;
+    try {
+      result = await gatherDeploymentConfig({
+        env: 'prod',
+        provider: 'hetzner',
+        compose: true,
+        region: 'hil',
+      });
+    } finally {
+      if (tty) Object.defineProperty(process.stdin, 'isTTY', tty);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
+
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(prompt.mock.calls[1][1]).toMatchObject({ force: true });
+    const warned = clackMock.log.warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(warned).toContain("your project's .env.local");
+    expect(warned).toContain('InvalidAccessKeyId');
+    expect(result.s3Config.accessKey).toBe('ABCDEFGHIJ0123456789');
+  });
+
+  it('stops with the reason under -y instead of deploying with rejected keys', async () => {
+    vi.mocked(S3CompatibleProvider.prototype.validateCredentials).mockResolvedValue({
+      valid: false,
+      rejected: true,
+      error: "the secret key doesn't match the access key (SignatureDoesNotMatch)",
+    } as never);
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    await expect(
+      gatherDeploymentConfig({
+        env: 'prod',
+        provider: 'hetzner',
+        compose: true,
+        region: 'hil',
+        yes: true,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+    expect(exit).toHaveBeenCalledWith(1);
+    const errors = clackMock.log.error.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(errors).toContain('SignatureDoesNotMatch');
+  });
+
+  it('carries on when the endpoint cannot be reached, since that is not a key problem', async () => {
+    vi.mocked(S3CompatibleProvider.prototype.validateCredentials).mockResolvedValue({
+      valid: false,
+      rejected: false,
+      error: 'no answer from https://fsn1.your-objectstorage.com (TimeoutError)',
+    } as never);
+    const result = await gatherDeploymentConfig({
+      env: 'prod',
+      provider: 'hetzner',
+      compose: true,
+      region: 'hil',
+    });
+    expect(result.s3Config.accessKey).toBe('ABCDEFGHIJ0123456789');
+    expect(vi.mocked(HetznerProvider.promptObjectStorageCredentials)).toHaveBeenCalledTimes(1);
   });
 });

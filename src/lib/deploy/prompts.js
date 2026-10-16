@@ -434,6 +434,40 @@ export async function promptEnvironmentName(args, { isTTY = Boolean(process.stdi
   return normalizeEnvName((answer || 'prod').trim());
 }
 
+/**
+ * One live, cheap, authenticated call (ListBuckets) against the storage
+ * endpoint the deploy will use, behind a spinner, with the result in one line.
+ *
+ * @param {import('../providers/s3-base.js').S3CompatibleProvider} s3Provider
+ * @param {string} source  Where the keys came from, as a phrase that reads
+ *   after "from" ("your project's .env.local", "what you pasted").
+ * @returns {Promise<{verdict: 'ok' | 'rejected' | 'unverified', reason?: string}>}
+ */
+async function verifyObjectStorageKeys(s3Provider, source) {
+  const s = spinner();
+  s.start('Verifying S3 credentials');
+  const check = await s3Provider.validateCredentials();
+  if (check.valid) {
+    s.stop('S3 credentials verified');
+    return { verdict: 'ok' };
+  }
+  if (check.rejected) {
+    s.stop('S3 credentials rejected', 1);
+    const pasted = source === 'what you pasted';
+    p.log.warn(
+      `S3 at ${s3Provider.getEndpoint()} rejected the keys from ${source}: ${check.error}.` +
+        (pasted
+          ? ' Paste them again below.'
+          : " Stale keys, or keys from another project, are the usual cause. Paste this project's keys below."),
+    );
+    return { verdict: 'rejected', reason: check.error };
+  }
+  s.stop(
+    `Could not check the S3 credentials (${check.error}), so we'll carry on and they'll be tried when the buckets are created`,
+  );
+  return { verdict: 'unverified', reason: check.error };
+}
+
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();
@@ -634,10 +668,12 @@ export async function gatherDeploymentConfig(args) {
   // on Pulumi backend ops (lock delete 503, history save 504, checkpoint
   // read conn-reset) — polymorphic over Provider since B6 so it applies to
   // every registered provider, not just Hetzner.
+  let s3CredentialSource = args.s3AccessKey ? 'the -s3-access-key flag' : '.vibecarbon.json';
   if (!s3AccessKey) {
     const credentials = await Provider.promptObjectStorageCredentials(projectConfig.projectName);
     s3AccessKey = credentials.accessKey;
     s3SecretKey = credentials.secretKey;
+    s3CredentialSource = credentials.source ?? 'what you pasted';
   }
 
   // ORDERING IS LOAD-BEARING: resolved AFTER promptObjectStorageCredentials,
@@ -650,13 +686,40 @@ export async function gatherDeploymentConfig(args) {
   // beforehand froze the compute-region default and produced an opaque
   // auth failure against the wrong cluster. Account-wide-key providers
   // (Hetzner/DO/Linode) are indifferent to this order.
-  const s3Region =
+  const resolveStorageRegion = async () =>
     args.s3Region ||
     readOperatorVar(Provider.S3_REGION_ENV).value ||
     envConfig.s3?.region ||
     (await resolveS3RegionFor(providerId, region));
+  let s3Region = await resolveStorageRegion();
+  let s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
 
-  const s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
+  // Verify the keys NOW, the way the API token was just verified. Wrong keys
+  // used to sail through here and fail at bucket creation with a message
+  // about the bucket name (excitingai, 2026-10-16). Only a rejection by S3
+  // itself re-asks; an endpoint we cannot reach is not proof the keys are
+  // wrong, so that case says so and carries on.
+  for (;;) {
+    const { verdict, reason } = await verifyObjectStorageKeys(s3Provider, s3CredentialSource);
+    if (verdict !== 'rejected') break;
+    if (args.yes || !process.stdin.isTTY) {
+      p.log.error(
+        `Deploy stopped before creating anything: S3 rejected the keys from ${s3CredentialSource} ` +
+          `(${reason}). ` +
+          `Put this project's keys in ${Provider.OBJECT_STORAGE_ENV.join(' and ') || 'the provider key variables'} ` +
+          '(in .env.local or your shell), then deploy again.',
+      );
+      process.exit(1);
+    }
+    const again = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
+      force: true,
+    });
+    s3AccessKey = again.accessKey;
+    s3SecretKey = again.secretKey;
+    s3CredentialSource = again.source ?? 'what you pasted';
+    s3Region = await resolveStorageRegion();
+    s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
+  }
 
   await Provider.fetchServerTypes(apiToken);
   const regionDefaults = Provider.getRegionDefaults(region);
@@ -950,6 +1013,7 @@ export async function gatherDeploymentConfig(args) {
     dnsProvider,
     dnsZoneId,
     dnsToken,
+    s3CredentialSource,
     s3Config: {
       accessKey: s3AccessKey,
       secretKey: s3SecretKey,

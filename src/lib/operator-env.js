@@ -225,6 +225,47 @@ export function dotenvPromptProblem(key, raw) {
   return problem ? `${key} ${problem}` : undefined;
 }
 
+// Shapes a PASTED object-storage key must have, checked at the prompt only.
+// Every provider here issues S3-style access key ids of 20 capital letters
+// and digits (AWS's format, which Ceph RGW-based stores copy), and Hetzner's
+// secret is 40 letters and digits. Only what is certainly wrong is refused:
+// secrets whose format a provider does not pin down keep the registry's
+// length check. Kept off the registry `shape` on purpose, so a deploy is never
+// refused over a stored key that S3 itself would still accept: the live check
+// after the prompt is the authority on whether a key works.
+const S3_ACCESS_KEY_SHAPE = { regex: /^[A-Z0-9]{20}$/, describe: '20 capital letters and digits' };
+const PASTED_KEY_SHAPES = {
+  HETZNER_ACCESS_KEY: S3_ACCESS_KEY_SHAPE,
+  HETZNER_SECRET_KEY: { regex: /^[A-Za-z0-9]{40}$/, describe: '40 letters and digits' },
+  DIGITALOCEAN_ACCESS_KEY: S3_ACCESS_KEY_SHAPE,
+  LINODE_ACCESS_KEY: S3_ACCESS_KEY_SHAPE,
+  VULTR_ACCESS_KEY: S3_ACCESS_KEY_SHAPE,
+};
+
+/**
+ * Prompt-time format check of a pasted object-storage key: the paste is
+ * normalized exactly as the caller will save it (whitespace, newlines and
+ * wrapping quotes dropped), then held to the provider's key format. Returns
+ * the message the prompt shows (naming the key and the reason, never the
+ * value) or `undefined`. Pair it with dotenvPromptProblem in the prompt's
+ * validate, which checks what a `.env` line can hold.
+ * @param {string} key
+ * @param {string | null | undefined} raw
+ * @returns {string | undefined}
+ */
+export function pastedKeyShapeProblem(key, raw) {
+  const entry = registryEntry(key);
+  const value = entry ? normalizeOperatorValue(raw, entry).value : String(raw ?? '').trim();
+  const shape = PASTED_KEY_SHAPES[key];
+  if (shape && value && !shape.regex.test(value)) {
+    return (
+      `${key} should be ${shape.describe}, and this paste has ${value.length} characters. ` +
+      'Copy it again from the console, all of it and nothing else.'
+    );
+  }
+  return undefined;
+}
+
 /**
  * Read `key` from `env`, normalize it against its registry entry (if any),
  * and validate the result. A key with no registry entry passes through

@@ -28,8 +28,13 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import {
+  dotenvPromptProblem,
+  normalizeOperatorValue,
+  pastedKeyShapeProblem,
+  readOperatorVar,
+} from './operator-env.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.vultr.com/v2';
 
@@ -291,7 +296,8 @@ export async function getS3Credentials(projectName, options = {}) {
     const envSecretKey = readOperatorVar('VULTR_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
-      p.log.info('✓ Using Object Storage credentials from environment variables');
+      const from = describeCredentialSource(['VULTR_ACCESS_KEY', 'VULTR_SECRET_KEY']);
+      p.log.info(`✓ Using Object Storage credentials from ${from.label}`);
       const envRegion = readOperatorVar('VULTR_STORAGE_REGION').value;
       if (!envRegion) {
         // Not fatal — resolveS3Region still returns the compute region's
@@ -302,7 +308,12 @@ export async function getS3Credentials(projectName, options = {}) {
           'VULTR_STORAGE_REGION is not set; set it to your subscription’s cluster (e.g. ewr1) if backups fail to authenticate.',
         );
       }
-      return { accessKey: envAccessKey, secretKey: envSecretKey, region: envRegion };
+      return {
+        accessKey: envAccessKey,
+        secretKey: envSecretKey,
+        region: envRegion,
+        source: from.label,
+      };
     }
   }
 
@@ -322,7 +333,9 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return dotenvPromptProblem('VULTR_ACCESS_KEY', v);
+      return (
+        pastedKeyShapeProblem('VULTR_ACCESS_KEY', v) ?? dotenvPromptProblem('VULTR_ACCESS_KEY', v)
+      );
     },
   });
 
@@ -334,7 +347,9 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return dotenvPromptProblem('VULTR_SECRET_KEY', v);
+      return (
+        pastedKeyShapeProblem('VULTR_SECRET_KEY', v) ?? dotenvPromptProblem('VULTR_SECRET_KEY', v)
+      );
     },
   });
 
@@ -382,5 +397,5 @@ export async function getS3Credentials(projectName, options = {}) {
     });
   }
 
-  return { accessKey, secretKey, region };
+  return { accessKey, secretKey, region, source: 'what you pasted' };
 }

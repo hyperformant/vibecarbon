@@ -25,7 +25,13 @@ vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/cli/tty-guard.js', () => ({ assertInteractiveStdin: vi.fn() }));
 
 const setEnvVarMock = vi.hoisted(() => vi.fn());
-vi.mock('../../../src/lib/project.js', () => ({ setEnvVar: setEnvVarMock }));
+vi.mock('../../../src/lib/project.js', () => ({
+  setEnvVar: setEnvVarMock,
+  describeCredentialSource: (keys: string[]) => ({
+    source: 'shell',
+    label: `your shell environment (${keys.join(', ')})`,
+  }),
+}));
 
 const fetchMock = vi.hoisted(() => vi.fn());
 vi.stubGlobal('fetch', fetchMock);
@@ -272,7 +278,7 @@ describe('getS3Credentials (Spaces) — env-only lookup (A3: credentials-file le
 
     const result = await getS3Credentials('my-project');
 
-    expect(result).toEqual({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
+    expect(result).toMatchObject({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
     expect(clackMock.text).not.toHaveBeenCalled();
   });
 
@@ -287,7 +293,7 @@ describe('getS3Credentials (Spaces) — env-only lookup (A3: credentials-file le
     const result = await getS3Credentials('my-project', { force: true, save: false });
 
     expect(clackMock.text).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ accessKey: 'AK-fresh-1234', secretKey: 'SK-fresh-1234' });
+    expect(result).toMatchObject({ accessKey: 'AK-fresh-1234', secretKey: 'SK-fresh-1234' });
   });
 
   it('save acceptance persists both keys via setEnvVar with localOnly:true (no nested digitalocean.spaces object)', async () => {
@@ -337,7 +343,7 @@ describe('getS3Credentials (Spaces) — env-only lookup (A3: credentials-file le
 
     const result = await getS3Credentials('my-project', { skipPrompts: true });
 
-    expect(result).toEqual({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
+    expect(result).toMatchObject({ accessKey: 'AK123456789', secretKey: 'SK987654321' });
     expect(clackMock.text).not.toHaveBeenCalled();
   });
 });

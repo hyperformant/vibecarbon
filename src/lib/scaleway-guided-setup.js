@@ -78,7 +78,7 @@ import { registryEntry } from './config-registry.js';
 import { resolveNameservers } from './dns-propagation.js';
 import { DNS_PROVIDERS, getDnsProvider, locateDomainBackend } from './dns-provider.js';
 import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 import {
   EXTERNAL_DOMAIN_CHALLENGE_NAME,
   getExternalDomainRegistration,
@@ -753,10 +753,11 @@ export async function getS3Credentials(projectName, options = {}) {
     const envSecretKey = readOperatorVar('SCALEWAY_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
+      const from = describeCredentialSource(['SCALEWAY_ACCESS_KEY', 'SCALEWAY_SECRET_KEY']);
       p.log.info(
-        '✓ Using Object Storage credentials from SCALEWAY_* environment variables (same IAM pair as compute)',
+        `✓ Using Object Storage credentials from ${from.label} (same IAM pair as compute)`,
       );
-      return { accessKey: envAccessKey, secretKey: envSecretKey };
+      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
     }
   }
 
@@ -771,5 +772,5 @@ export async function getS3Credentials(projectName, options = {}) {
   if (!secretKey || !accessKey) return null;
 
   p.log.success('Object Storage credentials received!');
-  return { accessKey, secretKey };
+  return { accessKey, secretKey, source: 'what you pasted' };
 }
