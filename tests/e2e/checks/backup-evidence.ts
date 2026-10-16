@@ -65,6 +65,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { getObjectStorageProvider, getProviderClass } from '../../../src/lib/providers/index.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
@@ -284,7 +285,7 @@ export function buildWalSwitchRemoteCommand(projectName: string, isCompose: bool
   }
   return (
     'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n vibecarbon exec ' +
-    `db-0 -- bash -c '${probe}'`
+    `${DB_POD} -c ${DB_CONTAINER} -- bash -c '${probe}'`
   );
 }
 

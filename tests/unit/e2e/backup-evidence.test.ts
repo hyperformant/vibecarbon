@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import {
   buildWalSwitchProbe,
   buildWalSwitchRemoteCommand,
@@ -100,7 +101,7 @@ describe('buildWalSwitchRemoteCommand', () => {
   it('uses the db pod with an explicit KUBECONFIG on k8s', () => {
     const cmd = buildWalSwitchRemoteCommand('myapp', false);
     expect(cmd).toContain('KUBECONFIG=/etc/rancher/k3s/k3s.yaml');
-    expect(cmd).toContain('kubectl -n vibecarbon exec db-0 -- bash -c ');
+    expect(cmd).toContain(`kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- bash -c `);
   });
 
   it('wraps the probe in exactly one single-quoted word on both seams', () => {

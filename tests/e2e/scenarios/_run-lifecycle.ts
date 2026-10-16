@@ -16,6 +16,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { APP_TIER_RESTART_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
 import { getProvider } from '../../../src/lib/providers/index.js';
@@ -542,7 +543,7 @@ async function captureFailureDiagnostics(
         `${label}: db pg_is_in_recovery`,
         safeRun('bash', [
           '-c',
-          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec db-0 -c db -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ]),
       ]);
       // 100 events for k8s-ha (applyManifests on standby can emit 50+ in

@@ -35,6 +35,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
 import {
@@ -126,7 +127,7 @@ export function buildPsqlCommand(mode: DeployMode, projectName: string, sql: str
   }
   // k8s / k8s-ha: exec into the db pod from the master node.
   return (
-    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl exec -n vibecarbon db-0 ` +
+    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} ` +
     `-- psql -U postgres -d postgres -tAc "${sql}"`
   );
 }
@@ -142,7 +143,7 @@ export function buildLogDiagCommand(mode: DeployMode, projectName: string): stri
     return `cd /opt/${projectName} && docker compose logs --no-color --tail=400 db 2>&1 | ${filter}`;
   }
   return (
-    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl logs -n vibecarbon db-0 ` +
+    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl logs -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} ` +
     `--tail=400 2>&1 | ${filter}`
   );
 }
