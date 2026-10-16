@@ -250,7 +250,7 @@ export function buildHetznerK8sProgram(config) {
     // id, and the Hetzner API token. The token + network id flow into
     // `hcloud` and `hcloud-csi` kube-system Secrets; hcloud-cloud-controller-
     // manager and hcloud-csi-driver fail to authenticate without them,
-    // which leaves PVCs Pending and the whole Supabase install hanging on
+    // which leaves PVCs Pending and the whole database install hanging on
     // wait-for-db.
     const masterUserData = pulumi.all([floatingIp.ipAddress, network.id]).apply(([ip, netId]) =>
       renderScript(masterInitTemplate, {
@@ -305,7 +305,7 @@ export function buildHetznerK8sProgram(config) {
     });
     // NOTE: previously `dependsOn: [master]` — we dropped that so Hetzner
     // provisions master + database in parallel, saving ~30-60s on the
-    // critical path. The supabase cloud-init (db-init.sh) already
+    // critical path. The database node's cloud-init (db-init.sh) already
     // polls the master k3s API with a 120-attempt retry loop, so it
     // tolerates master coming up slightly later.
     const dbServer = new hcloud.Server(

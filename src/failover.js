@@ -798,16 +798,16 @@ async function summarizeStandbyStack({ envConfig, standbyStack, creds, projectNa
 }
 
 /**
- * Fire-and-forget supabase-image pre-pull on the standby nodes right after the
- * new workers register Ready. Overlaps the app-tier scale-up (Task 10) so
+ * Fire-and-forget image pre-pull (the cluster-autoscaler pod's pair) on the
+ * standby nodes right after the new workers register Ready. Overlaps the app-tier scale-up (Task 10) so
  * kubelet finds images already present. Best-effort by contract — every failure
  * degrades to on-demand pulls. Only the standby cluster's nodes are targeted.
  */
 async function prePullStandbyImages({ servers, envName, workerIps }) {
-  const { prePullChartImages } = await import('./lib/deploy/k8s/k3s.js');
+  const { prePullImages } = await import('./lib/deploy/k8s/k3s.js');
   const { knownHostsPath } = await import('./lib/host-keys.js');
   const nodeIps = [servers.standby.ip, servers.standby.dbIp, ...(workerIps ?? [])].filter(Boolean);
-  return prePullChartImages({
+  return prePullImages({
     nodeIps,
     sshKeyPath: getSSHKeyPath(envName),
     khPath: knownHostsPath(envName),
@@ -1272,8 +1272,8 @@ export function swapHaRoles(envName) {
  * Move the wal-g WRITE-GUARD onto the cluster this failover just promoted, and
  * PROVE it took — see src/lib/deploy/walg-role.js for why nothing else does.
  *
- * On k8s, `WALG_ROLE` is rendered into the supabase-db container env at helm
- * install time and the backup CronJob has none of its own: it `kubectl exec`s
+ * On k8s, `WALG_ROLE` is rendered into the db container env at deploy
+ * time and the backup CronJob has none of its own: it `kubectl exec`s
  * into the db pod and INHERITS it. So a promoted cluster that still reads
  * `standby` skips every base backup, and — once the k8s copy of wal-archive.sh
  * carries the same write-guard as the compose copy — every WAL segment too.
@@ -1470,7 +1470,7 @@ export async function failoverHA(
   if (freshDbPrivateIp) {
     if (servers.standby.dbPrivateIp && servers.standby.dbPrivateIp !== freshDbPrivateIp) {
       p.log.warn(
-        `Standby supabase private IP moved since deploy ` +
+        `Standby database private IP moved since deploy ` +
           `(${servers.standby.dbPrivateIp} → ${freshDbPrivateIp}); ` +
           `using the live stack output.`,
       );

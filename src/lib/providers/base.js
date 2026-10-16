@@ -219,7 +219,7 @@ export class BaseProvider {
   // On DigitalOcean, same-region Spaces endpoints resolve INSIDE pods to a
   // VPC-internal gateway address (e.g. nyc3.digitaloceanspaces.com ->
   // 10.10.15.254, top of the cluster VPC's 10.10.0.0/20) — the S3-purposed
-  // egress rules in app-policy/registry-policy/supabase-db-s3-egress
+  // egress rules in app-policy/registry-policy/db-s3-egress
   // (carbon/k8s/base/{app,registry}/*.yaml, carbon/k8s/base/
   // network-policies.yaml) allow 443 to 0.0.0.0/0 EXCEPT RFC1918, which cuts
   // that gateway address off. Hetzner is unaffected — its Object Storage
@@ -240,7 +240,7 @@ export class BaseProvider {
 
   /**
    * Extra CIDR(s) this provider's S3-purposed NetworkPolicy egress rules
-   * (app/registry/supabase-db-s3-egress) must ADDITIONALLY allow TCP 443
+   * (app/registry/db-s3-egress) must ADDITIONALLY allow TCP 443
    * to, beyond the standard `0.0.0.0/0 except RFC1918` rule — see the
    * section doc above for the DO VPC-gateway RCA. Pure, provider-neutral
    * default: no extra CIDR needed. `applyK3sManifests` calls this (via
@@ -306,7 +306,7 @@ export class BaseProvider {
   /**
    * Render this provider's k3s DATABASE-node boot user-data — the dedicated
    * node (`node-pool: db-pool`, `dedicated=db` label + NoSchedule
-   * taint) the Supabase HelmRelease's node-affinity pins onto. Not part of
+   * taint) the db StatefulSet's nodeSelector pins onto. Not part of
    * carbon-autoscaler's node groups (the database node is Pulumi-static,
    * never CA-spawned) — see getK8sMasterUserData's doc for the
    * dynamic-import + vars-contract note, which applies identically here.
@@ -915,7 +915,7 @@ export class BaseProvider {
    * environment's. Deliberately NOT used as a delete predicate — the obvious
    * "only reap volumes newer than the environment" rule is wrong here, because
    * `envConfig.deployedAt` is the LAST deploy's timestamp and the volumes that
-   * matter (supabase-db's PVC) are created by the FIRST one.
+   * matter (the db's PVC) are created by the FIRST one.
    * @param {object} _volume - A volume object as returned by listVolumes.
    * @returns {string|null}
    */

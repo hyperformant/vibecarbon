@@ -180,8 +180,8 @@ export async function awaitCertManagerAdmission({
 /**
  * Prove Postgres is ACCEPTING connections — the condition, not the proxy.
  *
- * RCA 2026-08-14 (run 31763728135, mitigation-audit cluster 5): helm-wait
- * returned with the db pod `Running` and the very next psql died on
+ * RCA 2026-08-14 (run 31763728135, mitigation-audit cluster 5): the db
+ * install's wait returned with the db pod `Running` and the very next psql died on
  * `FATAL: the database system is shutting down` — Pod-Running is not
  * database-accepting-connections; init containers had just finished and
  * Postgres was mid-lifecycle. The PSQL_LIFECYCLE ladder absorbed that gap per
@@ -192,7 +192,7 @@ export async function awaitCertManagerAdmission({
  *
  * @param {object} params
  * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
- * @param {string} params.dbPod - e.g. supabase-supabase-db-0
+ * @param {string} params.dbPod - e.g. db-0
  * @param {string} [params.namespace]
  * @param {number} [params.budgetMs]
  * @param {Function} [params.exec] - test seam, defaults to runCommandAsync

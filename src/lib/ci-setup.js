@@ -462,14 +462,13 @@ export function updateImageReferences(projectName, githubOwner, cwd = process.cw
     'docker-compose.prod.yml',
     'k8s/base/app/deployment.yaml',
     'k8s/base/backup/cronjob.yaml',
-    'k8s/values/supabase.values.yaml',
     'k8s/overlays/production/kustomization.yaml',
     'k8s/flux/clusters/primary/vibecarbon.yaml',
     'k8s/flux/clusters/standby/vibecarbon.yaml',
   ];
 
   // Match the main app image plus the `-db` and `-backup` suffix variants
-  // that supabase.values.yaml + backup/cronjob.yaml pull.
+  // older manifests pulled.
   const imagePattern = new RegExp(`ghcr\\.io/[^/]+/${projectName}(-db|-backup)?\\b`, 'g');
   const fluxPattern = new RegExp(`github\\.com/[^/]+/${projectName}\\b`, 'g');
 

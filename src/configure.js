@@ -1574,9 +1574,7 @@ export async function runConfigureCicd(envName) {
   // cluster. This is the body that orchestrator.js used to run inline when
   // --gitops was passed (deleted in PR 5).
   p.log.step('Stage 2: install Flux + seed GitHub Environment + trigger first reconcile');
-  const { deployK8sGitOps, resolveGitopsBackupBucket } = await import(
-    './lib/deploy/k8s/gitops-deploy.js'
-  );
+  const { deployK8sGitOps } = await import('./lib/deploy/k8s/gitops-deploy.js');
   const { getImageTag } = await import('./lib/ci-setup.js');
   const providerCreds = {
     hetznerApiToken: readOperatorVar('HETZNER_API_TOKEN').value || '',
@@ -1624,7 +1622,6 @@ export async function runConfigureCicd(envName) {
       dnsProvider: subEnvConfig.dnsProvider || envConfig.dnsProvider,
       providerCreds,
       imageTag,
-      s3BackupBucket: resolveGitopsBackupBucket(subEnvConfig, envConfig, projectConfig),
     });
   }
 

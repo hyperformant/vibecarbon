@@ -19,12 +19,8 @@
 
 import { pollUntil } from '../retry.js';
 import { getPostgresPod, sshKubectl } from '../ssh.js';
+import { DB_PVC, DB_STATEFULSET } from './db-workload.js';
 import { REPL_GATEWAY_PORT } from './wireguard.js';
-
-// The supabase-db StatefulSet name (helm release `supabase`, chart `supabase`,
-// component `db` → `supabase-supabase-db`). Used by the k8s re-seed's
-// scale-to-zero quiesce.
-const DB_STATEFULSET = 'supabase-supabase-db';
 
 /**
  * Shared budget for every db-StatefulSet boot/rollout wait (the deploy-side
@@ -129,7 +125,7 @@ export function buildReplicationHbaLines(cidrs) {
  * (k8s/ha/index.js setupReplication) AND at failover/restore time (failover.js,
  * restore.js). Hardenings preserved from the previous inline copies:
  *   1. `set -e -o pipefail` — a partial pg_basebackup leaves PGDATA non-empty
- *      without PG_VERSION; the supabase-db entrypoint then runs initdb on next
+ *      without PG_VERSION; the db entrypoint then runs initdb on next
  *      restart, aborts on "directory exists but is not empty", and CrashLoops.
  *   2. Stage into a tmp dir + atomic swap — a failed backup never leaves PGDATA
  *      half-formed; the original survives at data.prev until the swap succeeds.
@@ -152,7 +148,7 @@ export function buildReplicationHbaLines(cidrs) {
  * OPTIONAL (`swap`, default true). The k8s-HA deploy seed sets `swap:false` and
  * stages the basebackup into a subdir of PGDATA (`stagingDir`), then performs
  * the atomic swap NODE-SIDE after scaling the pod to zero — because in the
- * supabase-db pod the postmaster is PID 1, so an in-pod `pg_ctl stop` (which
+ * db pod the postmaster is PID 1, so an in-pod `pg_ctl stop` (which
  * every swap-in-place path implicitly relied on the caller running first)
  * terminates the container and kubelet restarts it as a fresh independent
  * primary. compose + failover/restore keep the combined `swap:true` behavior
@@ -207,7 +203,7 @@ export function buildReplicationHbaLines(cidrs) {
  * @param {number} [opts.basebackupDelayS=15] - seconds between basebackup
  *   attempts (only relevant when basebackupAttempts > 1).
  * @param {boolean} [opts.exhaustExitZero=false] - when the attempt budget is
- *   exhausted, exit 0 instead of 1 — the chart's own initdb boots the db
+ *   exhausted, exit 0 instead of 1 — the image's own initdb boots the db
  *   independently and the serial reseed path still covers replication later,
  *   so a bounded-wait init container should not be treated as a hard failure.
  * @param {boolean} [opts.passwordFromEnv=false] - source PGPASSWORD from the
@@ -379,7 +375,7 @@ if [ ! -f ${stagingDir}/PG_VERSION ]; then
 fi`
       : (() => {
           const exhaustBlock = exhaustExitZero
-            ? `echo "[${label}] pg_basebackup budget exhausted (${basebackupAttempts} attempts) — exiting UNSEEDED; the chart's initdb boots the db independent and the serial reseed path covers replication." >&2; exit 0`
+            ? `echo "[${label}] pg_basebackup budget exhausted (${basebackupAttempts} attempts) — exiting UNSEEDED; the image's initdb boots the db independent and the serial reseed path covers replication." >&2; exit 0`
             : `echo "[${label}] pg_basebackup failed after ${basebackupAttempts} attempt(s)" >&2
   exit 1`;
           return `
@@ -444,12 +440,12 @@ ${swapBlock}`.trim();
  * probe; pg_isready cannot see pg_hba/wal_level state), staging into a
  * sibling dir on the raw volume mount and swapping in-script (no running
  * postmaster exists yet, so the in-place swap is safe here, unlike the
- * failover/restore paths). On exhaustion it exits 0 UNSEEDED — the chart's
+ * failover/restore paths). On exhaustion it exits 0 UNSEEDED — the image's
  * initdb then boots the db independent and setupReplication's serial swap
  * path covers replication (bounded wait + fallback, decision #2).
  *
  * Env contract (injected by the seed-standby init container in
- * carbon/k8s/values/supabase.values.yaml): WALG_ROLE, RESTORE_TARGET
+ * carbon/k8s/base/db/statefulset.yaml): WALG_ROLE, RESTORE_TARGET
  * (optional), REPL_PASSWORD (secretKeyRef), SEED_PRIMARY_HOST,
  * SEED_PRIMARY_PORT. Mount contract: db PVC mounted RAW (no subPath) at
  * /seed-volume; PGDATA lives at /seed-volume/postgres-data.
@@ -590,9 +586,9 @@ export const PGDATA_SWAP_POD = 'vibecarbon-pgdata-swap';
 const PGDATA_SWAP_MOUNT_ROOT = '/pgdata-vol';
 
 /**
- * Parse the supabase-db pod JSON into everything the helper-pod swap needs:
+ * Parse the db pod JSON into everything the helper-pod swap needs:
  *   - claimName: the PVC to mount into the swap pod (same volume the db uses),
- *   - subPath:   the db's volumeMount subPath (the chart mounts the PVC at
+ *   - subPath:   the db's volumeMount subPath (the StatefulSet mounts the PVC at
  *     /var/lib/postgresql/data via subPath `postgres-data`), so PGDATA on the
  *     raw volume is `<volume-root>/<subPath>`,
  *   - image:     the db container's image — reused for the swap pod so it is
@@ -627,7 +623,7 @@ export function parsePgdataClaimFromPodJson(podJson) {
     throw new Error('no persistentVolumeClaim mounted at /var/lib/postgresql/data');
   }
   if (!image) {
-    throw new Error('could not resolve the supabase-db container image for the swap pod');
+    throw new Error('could not resolve the db container image for the swap pod');
   }
   return { claimName, subPath, image };
 }
@@ -638,7 +634,7 @@ export function parsePgdataClaimFromPodJson(podJson) {
  *
  * @param {string} ip - the cluster's master IP (kubectl target)
  * @param {string} sshKeyPath
- * @param {string} pod - the supabase-db pod name
+ * @param {string} pod - the db pod name
  * @returns {Promise<{claimName:string, subPath:string, image:string}>}
  */
 async function resolvePgdataClaim(ip, sshKeyPath, pod) {
@@ -663,7 +659,7 @@ async function resolvePgdataClaim(ip, sshKeyPath, pod) {
  * root so the same-filesystem renames succeed regardless of the volume root's
  * ownership; buildNodePgdataSwapScript preserves the staged tree's numeric
  * ownership (no chown), so the reseeded PGDATA keeps the in-container postgres
- * uid. restartPolicy Never — a one-shot job. Pinned to the dedicated supabase
+ * uid. restartPolicy Never — a one-shot job. Pinned to the dedicated database
  * node (same nodeSelector as the db StatefulSet): a detached csi.hetzner.cloud
  * volume carries only ZONAL topology, so without the pin the scheduler is free
  * to place the pod on a worker that never ran the db — which then pulls the
@@ -695,7 +691,7 @@ export function buildPgdataSwapPodManifest({
     spec: {
       restartPolicy: 'Never',
       securityContext: { runAsUser: 0, runAsGroup: 0, fsGroup: 0 },
-      // Same placement contract as the db StatefulSet (supabase.values.yaml):
+      // Same placement contract as the db StatefulSet (k8s/base/db/statefulset.yaml):
       // the selector ATTRACTS the pod to the dedicated database node (see the
       // doc comment — CSI zonal topology does not), and the toleration lets it
       // pass the node's dedicated=db:NoSchedule taint (live-hit
@@ -882,9 +878,11 @@ export const STALE_ATTACH_EVENT_PATTERN =
   /MountVolume\.MountDevice failed[\s\S]*?(does not exist and no size was specified|formatting disk failed)/;
 
 /**
- * PersistentVolume names bound to the db StatefulSet's claims
- * (`<template>-<sts>-0` naming). Fail-open: unreadable/unparseable output →
- * empty list, so every caller degrades to "nothing to wait for / repair"
+ * PersistentVolume names bound to the db StatefulSet's claim (DB_PVC,
+ * `data-db-0`: the StatefulSet's only volumeClaimTemplate). Matched exactly,
+ * not by suffix, so an add-on StatefulSet whose name happens to end in `db`
+ * is never mistaken for the database. Fail-open: unreadable/unparseable output
+ * → empty list, so every caller degrades to "nothing to wait for / repair"
  * rather than failing a reseed over a diagnostic read.
  *
  * @param {(argv: string[], opts?: object) => Promise<string>} kubectl
@@ -895,7 +893,7 @@ export async function listDbPvNames(kubectl) {
     const raw = await kubectl(['get', 'pvc', '-n', 'vibecarbon', '-o', 'json']);
     const items = JSON.parse(String(raw))?.items ?? [];
     return items
-      .filter((c) => String(c?.metadata?.name ?? '').endsWith(`-${DB_STATEFULSET}-0`))
+      .filter((c) => c?.metadata?.name === DB_PVC)
       .map((c) => c?.spec?.volumeName)
       .filter(Boolean);
   } catch {
@@ -1277,7 +1275,7 @@ $$;
  *   No longer a swap target (the swap runs in a cluster-side helper pod), but
  *   still REQUIRED as a precondition that the standby HA cluster is fully
  *   identified — a re-seed must not run against a half-identified env.
- * @param {string} opts.standbyDbPrivateIp - the standby supabase
+ * @param {string} opts.standbyDbPrivateIp - the standby database
  *   node's PRIVATE IP: the local repl-gateway relay endpoint the basebackup +
  *   primary_conninfo dial. REQUIRED — a real IaC output on every provider
  *   (Hetzner pins it statically; DO exports the Pulumi-assigned VPC address),
@@ -1299,7 +1297,7 @@ export async function reseedStandbyFromPrimary(
     // missing private IP signals a half-identified HA env (or a pre-M3
     // persisted config). Never assume an address — redeploy to persist it.
     throw new Error(
-      're-seed aborted: standbyDbPrivateIp is required — the standby supabase ' +
+      're-seed aborted: standbyDbPrivateIp is required — the standby database ' +
         "node's private IP is a deploy output persisted in the environment config; " +
         'redeploy to persist it before re-seeding',
     );
@@ -1312,7 +1310,7 @@ export async function reseedStandbyFromPrimary(
     throw new Error(
       're-seed aborted: standby database node IP is unknown; the standby HA ' +
         'cluster is not fully identified. Cannot safely re-seed; redeploy to ' +
-        'persist the standby supabase IP.',
+        'persist the standby database IP.',
     );
   }
 
@@ -1446,7 +1444,7 @@ export async function reseedStandbyFromPrimary(
     }
     if (!podGone) {
       throw new Error(
-        'standby supabase-db pod did not terminate within budget after scale-to-zero, ' +
+        'standby db pod did not terminate within budget after scale-to-zero, ' +
           'refusing the helper-pod PGDATA swap while the pod may still hold the PVC.',
       );
     }
@@ -1645,7 +1643,7 @@ export async function reseedStandbyFromPrimary(
     throw new Error(
       'standby re-seed swapped in a fresh basebackup but the standby never entered ' +
         'recovery mode within the budget; the reseeded PGDATA is not replaying from ' +
-        'the primary (check the standby supabase-db logs).',
+        'the primary (check the standby db logs).',
     );
   }
   return 'reseeded';

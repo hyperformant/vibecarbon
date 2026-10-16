@@ -32,6 +32,7 @@ import { c } from './lib/colors.js';
 import { configureStandbyReplication as realConfigureStandbyReplication } from './lib/deploy/compose/ha.js';
 import { composeHaStandbyResyncHint } from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
+import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import {
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
@@ -591,14 +592,14 @@ export async function runComposeRestore({
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
 }
 
-// k8s restore is wal-g-native: postgres + wal-g live in the supabase-db pod,
+// k8s restore is wal-g-native: postgres + wal-g live in the db pod,
 // which continuously archives WAL + base backups to S3. Restore = set a
 // RESTORE_TARGET marker on vibecarbon-secrets → bounce the db StatefulSet so
 // its walg-restore init container runs `wal-g backup-fetch` into PGDATA before
 // postgres starts → clear the marker. No bytes flow through the operator and
 // no pg_dump/kubectl-cp; wal-g pulls from S3 inside the cluster. Mirrors the
 // compose wal-g restore, adapted to the StatefulSet/init-container shape.
-const DB_STATEFULSET = 'supabase-supabase-db';
+// The workload name is DB_STATEFULSET (src/lib/deploy/db-workload.js).
 
 /** Set or clear the RESTORE_TARGET marker the init container reads. */
 async function setRestoreMarker(ip, sshKeyPath, value) {

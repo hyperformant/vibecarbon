@@ -28,6 +28,7 @@ import {
 } from '../../../host-keys.js';
 import { perfAsync } from '../../../perf.js';
 import { scpWithRetry } from '../../../ssh.js';
+import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../db-workload.js';
 import {
   buildPrimaryConninfo,
   buildReplicationHbaLines,
@@ -131,10 +132,13 @@ export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
  * pattern. One db pod per node (StatefulSet), so the node's :REPL_PORT is
  * uncontended.
  *
- * The container name in the supabase chart's db StatefulSet is `supabase-db`.
- * A strategic-merge patch keyed by container `name` + port `containerPort`
- * updates the existing port entry in place (adds hostPort) rather than
- * appending a duplicate.
+ * Patched in here rather than written into k8s/base/db/statefulset.yaml: only
+ * an HA cluster needs the node port, and a single cluster's db stays
+ * cluster-internal. A strategic-merge patch keyed by container `name` + port
+ * `containerPort` updates the existing port entry in place (adds hostPort)
+ * rather than appending a duplicate, and a later `kubectl apply` of k8s/base
+ * leaves it alone (the three-way merge only removes fields the previous apply
+ * set).
  * @returns {object}
  */
 export function buildDbHostPortPatch() {
@@ -144,7 +148,7 @@ export function buildDbHostPortPatch() {
         spec: {
           containers: [
             {
-              name: 'supabase-db',
+              name: DB_CONTAINER,
               ports: [{ containerPort: 5432, hostPort: REPL_PORT }],
             },
           ],
@@ -229,7 +233,7 @@ async function applyGatewaysAndBringUpTunnel({
 
   // Generate a keypair on each database node, cross-distribute PUBLIC keys, and
   // bring up wg0. Private keys are generated on-node and never leave it (see
-  // exchangeAndBringUpTunnel). The WG endpoints/SSH targets are the supabase
+  // exchangeAndBringUpTunnel). The WG endpoints/SSH targets are the database
   // nodes' PUBLIC IPs.
   await exchangeAndBringUpTunnel({
     primaryIp: primaryDbIp,
@@ -490,7 +494,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
           'ssh',
           ...sshOpts,
           `root@${primaryIp}`,
-          'cat /tmp/primary-init.sql | kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- psql -U postgres',
+          `cat /tmp/primary-init.sql | kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres`,
         ],
         { silent: true },
       );
@@ -521,7 +525,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        'kubectl patch statefulset supabase-supabase-db -n vibecarbon --type strategic --patch-file /dev/stdin',
+        `kubectl patch statefulset ${DB_STATEFULSET} -n vibecarbon --type strategic --patch-file /dev/stdin`,
       ],
       { silent: true, input: JSON.stringify(buildDbHostPortPatch()) },
     );
@@ -530,7 +534,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        `kubectl rollout status statefulset/supabase-supabase-db -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
+        `kubectl rollout status statefulset/${DB_STATEFULSET} -n vibecarbon --timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
       ],
       { silent: true },
     );
@@ -553,7 +557,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   //
   // Both lines stay valid from BOTH sides after a failover: the tunnel /30
   // covers both peers, and both clusters run the same k3s pod CIDR — and
-  // pg_basebackup copies the (PGDATA-durable, see below) pg_hba byte-for-byte
+  // pg_basebackup copies the (PGDATA-resident, see below) pg_hba byte-for-byte
   // into the standby, so the reverse re-seed needs no per-peer bookkeeping.
   //
   // Security: both CIDRs are non-routable, cluster-internal sources. The only
@@ -561,31 +565,24 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // scoped firewall rule), and auth remains scram-sha-256 with the per-deploy
   // random REPL_PASSWORD.
   //
-  // DURABILITY (same-wave finding): an image that points hba_file at
-  // /etc/postgresql/pg_hba.conf (the previous image did; compose RCA fanout12
-  // 2026-05-01) puts it on a container-EPHEMERAL path. Our postgres:17 image
-  // keeps it in PGDATA, so the copy below is skipped there. On an ephemeral
-  // path, appending to the live file would be reverted by the very next pod
-  // restart (and step 3 deletes this pod moments from now), while appending
-  // only to PGDATA/pg_hba.conf targets a file postgres never reads. So: copy
-  // the LIVE hba file (resolved via SHOW hba_file) into PGDATA once, append our
-  // lines idempotently THERE, and repoint hba_file via ALTER SYSTEM
-  // (postgresql.auto.conf lives in PGDATA too). hba_file is a server-start
-  // parameter, so no reload here; step 3's pod restart applies it. Net: the
-  // replication hba survives pod restarts, rides wal-g base backups, and is
-  // inherited by the standby via pg_basebackup.
+  // DURABILITY: the rules must land in the file postgres actually reads AND
+  // survive the pod restart in step 3. Our db image leaves hba_file at its
+  // default, PGDATA/pg_hba.conf (docker/postgres-walg/postgresql.conf), which
+  // lives on the PVC: it survives restarts, rides wal-g base backups, and is
+  // inherited by the standby via pg_basebackup. The script resolves the live
+  // path with SHOW hba_file and REFUSES (exit 1, failing this step) when it is
+  // not under PGDATA — appending to a container-ephemeral file would be
+  // reverted by the very next restart and fail replication much later and
+  // much less clearly. Step 3's restart then loads the new rules.
   const hbaLines = buildReplicationHbaLines([WG_SUBNET_CIDR, K3S_POD_CIDR]);
   const hbaSetupScript = [
     'set -e',
-    `HBA_LIVE=$(psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]')`,
-    'HBA_DURABLE=/var/lib/postgresql/data/pg_hba.conf',
-    'if [ "$HBA_LIVE" != "$HBA_DURABLE" ]; then',
-    '  cp "$HBA_LIVE" "$HBA_DURABLE"',
-    '  chown postgres:postgres "$HBA_DURABLE"',
-    '  chmod 600 "$HBA_DURABLE"',
-    `  psql -U postgres -d postgres -c "ALTER SYSTEM SET hba_file = '$HBA_DURABLE'"`,
-    'fi',
-    ...hbaLines.map((l) => `grep -qxF '${l}' "$HBA_DURABLE" || echo '${l}' >> "$HBA_DURABLE"`),
+    `HBA=$(psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]')`,
+    'case "$HBA" in',
+    '  /var/lib/postgresql/data/*) ;;',
+    '  *) echo "hba_file is $HBA, not under PGDATA; replication rules there would not survive a restart" >&2; exit 1 ;;',
+    'esac',
+    ...hbaLines.map((l) => `grep -qxF '${l}' "$HBA" || echo '${l}' >> "$HBA"`),
   ].join('\n');
   await perfAsync('deploy.ha.replication.hba', () =>
     runCommandAsync(
@@ -593,7 +590,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        'kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- bash',
+        `kubectl exec -i -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- bash`,
       ],
       { silent: true, input: hbaSetupScript },
     ),
@@ -606,7 +603,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
         'ssh',
         ...sshOpts,
         `root@${primaryIp}`,
-        'kubectl delete pod supabase-supabase-db-0 -n vibecarbon --wait=true',
+        `kubectl delete pod ${DB_POD} -n vibecarbon --wait=true`,
       ],
       { silent: true },
     );
@@ -623,7 +620,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
             // awaitPostgresAccepting (readiness.js) for the d4 run-2 RCA.
             // This pod restarts with existing PGDATA (no init flow), so the
             // socket form was safe here, but TCP is the uniform condition.
-            'kubectl exec -n vibecarbon supabase-supabase-db-0 -- pg_isready -h 127.0.0.1 -U postgres 2>/dev/null && echo IS_READY || echo NOT_READY',
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- pg_isready -h 127.0.0.1 -U postgres 2>/dev/null && echo IS_READY || echo NOT_READY`,
           ],
           { silent: true, ignoreError: true },
         );
@@ -797,7 +794,7 @@ export async function setupReplication(options) {
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
           ],
           { silent: true, ignoreError: true },
         );
@@ -821,8 +818,8 @@ export async function setupReplication(options) {
   // (no PGSSLMODE/PGSSLROOTCERT) — WireGuard is the encryption layer.
   const primaryHost = _standbyDbPrivateIp;
   const primaryPort = String(REPL_GATEWAY_PORT);
-  const dbSts = 'supabase-supabase-db';
-  const dbPod = 'supabase-supabase-db-0';
+  const dbSts = DB_STATEFULSET;
+  const dbPod = DB_POD;
 
   // The standby streams through its LOCAL repl-gateway (own node private IP :
   // REPL_GATEWAY_PORT), NOT the primary's public IP. This explicit conninfo is
@@ -842,10 +839,10 @@ export async function setupReplication(options) {
   // on scale-to-zero, which made the old node-side-ssh swap structurally
   // impossible on CSI clusters (RCA 2026-07-07 e4 rig). All kubectl runs on the
   // standby master (standbyIp); the scheduler places the helper pod wherever the
-  // RWO PVC attaches. We also carry the db subPath (the chart mounts the PVC at
-  // /var/lib/postgresql/data via subPath postgres-data → PGDATA on the raw
-  // volume is <mount-root>/<subPath>) and the db image (reused so it is already
-  // pulled on the node).
+  // RWO PVC attaches. We also carry the db subPath (the StatefulSet mounts the
+  // PVC at /var/lib/postgresql/data via subPath postgres-data → PGDATA on the
+  // raw volume is <mount-root>/<subPath>) and the db image (reused so it is
+  // already pulled on the node).
   // Self-heal a damaged rig first: a prior deploy that died mid-reseed (or
   // predates the finally-scale-up fix) can leave the sts at replicas=0 with
   // no db pod at all — and re-running deploy is exactly what our own failure
@@ -968,7 +965,7 @@ export async function setupReplication(options) {
     }
     if (!podGone) {
       throw new Error(
-        `standby supabase-db pod did not terminate within budget after scale-to-zero, ` +
+        `standby db pod did not terminate within budget after scale-to-zero, ` +
           `refusing the helper-pod PGDATA swap while the pod may still hold the PVC.`,
       );
     }
@@ -1057,7 +1054,7 @@ export async function setupReplication(options) {
   // caught by the caller and folded into the shared hard-gate, so
   // -allow-degraded semantics are unchanged.
   // Budget: ~10 min. On csi.hetzner.cloud PVCs the scale-up alone costs
-  // minutes (volume reattach + the 4 init containers + backup recovery ran
+  // minutes (volume reattach + the init containers + backup recovery ran
   // ~5 min on a live cpx31 rig, 2026-07-07) and postgres only accepts the
   // read-only probe after reaching consistent state — the old ~2 min loop
   // declared failure while the standby was still coming up (and then
@@ -1075,13 +1072,13 @@ export async function setupReplication(options) {
           'ssh',
           ...sshOpts,
           `root@${standbyIp}`,
-          // -c supabase-db: without it kubectl prepends a 'Defaulted container
+          // -c db: without it kubectl prepends a 'Defaulted container
           // ...' stderr notice which the 2>&1 fold (needed to capture psql
           // FATAL details for config-error classification) would mix into the
           // output — the old strict === 't' match then never succeeded on this
           // multi-init-container pod and every reseed "timed out" while the
           // standby was recovering fine underneath.
-          `kubectl exec -n vibecarbon ${dbPod} -c supabase-db -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+          `kubectl exec -n vibecarbon ${dbPod} -c ${DB_CONTAINER} -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ],
         { silent: true, ignoreError: true },
       );
@@ -1119,7 +1116,7 @@ export async function setupReplication(options) {
     throw new Error(
       `standby reseed swapped in a fresh basebackup but the standby never entered ` +
         `recovery mode within the budget; the reseeded PGDATA is not replaying from ` +
-        `the primary (check the standby supabase-db logs and the repl-gateway tunnel).`,
+        `the primary (check the standby db logs and the repl-gateway tunnel).`,
     );
   }
 
@@ -1152,7 +1149,7 @@ export async function setupReplication(options) {
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon ${DB_POD} -c ${DB_CONTAINER} -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
           ],
           { silent: true },
         );

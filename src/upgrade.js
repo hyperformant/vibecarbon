@@ -65,7 +65,6 @@ const PLACEHOLDERS = {
   PROJECT_DISPLAY_NAME: '{{PROJECT_DISPLAY_NAME}}',
   GITHUB_OWNER: '{{GITHUB_OWNER}}',
   DB_PASSWORD: '{{DB_PASSWORD}}',
-  JWT_SECRET: '{{JWT_SECRET}}',
   SITE_URL: '{{SITE_URL}}',
   ADMIN_EMAIL: '{{ADMIN_EMAIL}}',
   ADMIN_PASSWORD: '{{ADMIN_PASSWORD}}',
@@ -74,7 +73,7 @@ const PLACEHOLDERS = {
 // Mirrors SECRET_PLACEHOLDERS in src/create.js — placeholders that must never
 // be substituted into checked-in files (deploy code patches them at runtime
 // from .env.local). Keep in sync with create.js.
-const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'JWT_SECRET', 'ADMIN_PASSWORD']);
+const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'ADMIN_PASSWORD']);
 
 // Files that contain {{PLACEHOLDER}} strings as their own substitution keys
 // (not vibecarbon template variables). Must be copied raw without replacement.
@@ -252,7 +251,6 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
     PROJECT_DISPLAY_NAME: resolveDisplayName(env),
     GITHUB_OWNER: manifest.services?.cicd?.owner || env.PROJECT_NAME || '',
     DB_PASSWORD: env.DB_PASSWORD || env.POSTGRES_PASSWORD || '',
-    JWT_SECRET: env.JWT_SECRET || '',
     SITE_URL: env.SITE_URL || 'http://localhost:5173',
     ADMIN_EMAIL: env.ADMIN_EMAIL || '',
     ADMIN_PASSWORD: env.ADMIN_PASSWORD || '',

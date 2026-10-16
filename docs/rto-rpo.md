@@ -247,7 +247,7 @@ vibecarbon deploy <env> -mode k8s -restore 2026-08-05T14:30:00Z -y
    deploy; the restore target is stamped into the `vibecarbon-secrets` Secret
    as `RESTORE_TARGET` (empty on normal boots, making the next step a no-op).
 2. The database StatefulSet's `walg-restore` init container
-   (`carbon/k8s/values/supabase.values.yaml`) sees `RESTORE_TARGET`, clears
+   (`carbon/k8s/base/db/statefulset.yaml`) sees `RESTORE_TARGET`, clears
    `PGDATA`, and runs `wal-g backup-fetch` against the backup bucket (with
    retries for stale storage frontends).
 3. It then configures archive recovery: `restore_command = 'wal-g wal-fetch …'`

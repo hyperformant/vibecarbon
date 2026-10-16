@@ -4,7 +4,7 @@
  * stale-deploy-ignore: historical context — describes what this file replaced.
  * Replaces the ~2000 LOC imperative `applyKubernetesManifests` with:
  *   1. Render deploy-time-varying manifests into the customer's k8s/ tree
- *      (image tag in app Deployment, rendered Supabase values.yaml).
+ *      (the image tag in the app Deployment).
  *   2. git add k8s/ && git commit && git push.
  *   3. Seed GitHub Environment secrets + vars + upload KUBECONFIG_B64.
  *   4. Trigger .github/workflows/deploy.yml + wait for completion.
@@ -33,27 +33,6 @@ import {
   uploadKubeconfig,
   waitForLatestWorkflowRun,
 } from '../../github-environments.js';
-import { deriveProjectBucketName } from '../../providers/s3-base.js';
-
-/**
- * Resolve the wal-g backup bucket for a gitops render: persisted names first
- * (sub-environment, then parent env — the keys orchestrator.js actually
- * writes are `backupS3.bucket`), deriving a fresh salt-aware name only when
- * neither environment has ever deployed.
- *
- * Regression guard: configure.js used to read `envConfig.backupBucket`, a key
- * nothing writes, so the render always fell through to a raw
- * `${projectName}-backups` interpolation — unsanitized and salt-blind.
- *
- * Pure + exported for unit tests.
- */
-export function resolveGitopsBackupBucket(subEnvConfig, envConfig, projectConfig) {
-  return (
-    subEnvConfig?.backupS3?.bucket ||
-    envConfig?.backupS3?.bucket ||
-    deriveProjectBucketName(projectConfig, 'backups')
-  );
-}
 
 /**
  * Build the operator-facing warning when observability is installed but this
@@ -155,7 +134,6 @@ function rewriteOwnerAndRepo(projectDir, projectName, owner, repoName) {
   const files = [
     'k8s/base/app/deployment.yaml',
     'k8s/base/backup/cronjob.yaml',
-    'k8s/values/supabase.values.yaml',
     'k8s/overlays/production/kustomization.yaml',
     'k8s/flux/clusters/primary/vibecarbon.yaml',
     'k8s/flux/clusters/standby/vibecarbon.yaml',
@@ -217,11 +195,10 @@ function commitAndPushManifests(cwd, message) {
  *   class): { hetznerApiToken, dnsTokens, s3AccessKey, s3SecretKey }
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
  * @param {number} [args.workflowTimeoutSec] - default 60 min. deploy.yml's
- *   internal Flux waits cap at 10m (vibecarbon-base) + 20m (vibecarbon-supabase)
- *   = 30m, on top of ~5m Flux install + ~5m CRD apply. A 30m outer budget
- *   ties with the internal ceiling — every timeout was racing the workflow
- *   to its own error. 3600s gives the workflow room to fail naturally and
- *   surface its own log.
+ *   internal Flux wait caps at 10m (vibecarbon-base), on top of ~5m Flux
+ *   install + ~5m CRD apply. A 30m outer budget once tied with the internal
+ *   ceiling and every timeout raced the workflow to its own error; 3600s
+ *   gives the workflow room to fail naturally and surface its own log.
  */
 export async function deployK8sGitOps(args) {
   const {
@@ -248,11 +225,12 @@ export async function deployK8sGitOps(args) {
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
 
-  // 1. Render image tag + values.yaml into the repo. The Supabase values.yaml
-  // (Phase 4.3a) already renders here; repeat is idempotent. The app
-  // Deployment manifest uses {{GITHUB_OWNER}}/{{PROJECT_NAME}} from create
-  // time — we add {{IMAGE_TAG}} rendering so Flux pulls the exact tag the
-  // CI build just published.
+  // 1. Render the image tag into the repo. The app Deployment manifest uses
+  // {{GITHUB_OWNER}}/{{PROJECT_NAME}} from create time — we add {{IMAGE_TAG}}
+  // rendering so Flux pulls the exact tag the CI build just published. The db
+  // StatefulSet is NOT rendered here: its values are per-cluster, so it stays
+  // with the CLI's deploy and the Flux base Kustomization drops it from its
+  // build (k8s/flux/clusters/*/vibecarbon.yaml).
   s.start('Rendering manifests for GitOps deploy');
   // Flux GitRepository URL + every ghcr.io image ref bakes in owner/repo at
   // create time as <project>/<project>. Rewrite to the real pair before we
@@ -275,22 +253,6 @@ export async function deployK8sGitOps(args) {
     // rewrite that via renderInPlace if the template exposes {{IMAGE_TAG}}
     // (follow-up: switch template to use {{IMAGE_TAG}} so SHAs can pin).
     renderInPlace(appDeployment, { IMAGE_TAG: imageTag });
-  }
-  const supabaseValues = join(projectDir, 'k8s', 'gitops', 'supabase', 'values.yaml');
-  if (existsSync(supabaseValues)) {
-    // values.yaml is already rendered by Phase 4.3a's ensureVibecarbonSecrets
-    // call chain, but re-render here with {{DOMAIN}}/{{PROJECT_NAME}} in
-    // case the caller landed us without that step (e.g., `vibecarbon
-    // configure cicd <env>` against a cluster whose initial deploy
-    // didn't run the imperative bundle path).
-    renderInPlace(supabaseValues, {
-      DOMAIN: domain,
-      PROJECT_NAME: projectName,
-      // Always provided by the single caller (configure.js) via
-      // resolveGitopsBackupBucket — no raw-interpolation fallback here.
-      S3_BACKUP_BUCKET: args.s3BackupBucket,
-      GITHUB_OWNER: repoOwner,
-    });
   }
   s.stop('Manifests rendered');
 
@@ -356,10 +318,6 @@ export function buildPerEnvSecrets(envLocal) {
     DB_PASSWORD: envLocal.DB_PASSWORD,
     // The app's session signing key; the app pod envFrom's the Secret.
     BETTER_AUTH_SECRET: envLocal.BETTER_AUTH_SECRET,
-    // Required only by the k8s Helm chart's db (its StatefulSet reads
-    // JWT_SECRET from vibecarbon-secrets); removed when our own db
-    // StatefulSet replaces the chart. The app never reads it.
-    JWT_SECRET: envLocal.JWT_SECRET,
     ADMIN_EMAIL: envLocal.ADMIN_EMAIL,
     ADMIN_PASSWORD: envLocal.ADMIN_PASSWORD,
   };

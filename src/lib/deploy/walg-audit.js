@@ -54,7 +54,7 @@
  * Wherever wal-g is deployed, on both paths, gated on backups actually being
  * configured. Backups CAN be disabled (a deploy with no S3 bucket renders
  * `WALG_S3_PREFIX` as the empty-bucket form `s3:///backups/...` — see
- * carbon/docker-compose.yml and carbon/k8s/values/supabase.values.yaml), and
+ * carbon/docker-compose.yml and carbon/k8s/base/db/statefulset.yaml), and
  * the probe detects that from INSIDE the container and reports a skip. Testing
  * the env wal-g actually sees is the same technique
  * carbon/backup/compose-backup.sh uses, and it means the gate can never drift
@@ -98,6 +98,7 @@
 import { progressLog } from '../cli/progress.js';
 import { runWithRetry } from '../retry.js';
 import { parseWalgBackupList } from '../walg-backups.js';
+import { DB_POD } from './db-workload.js';
 
 /**
  * SQL read from `pg_stat_archiver`, written for `psql -tAX` (tuples-only,
@@ -220,7 +221,7 @@ export const WALG_AUDIT_PROBE_TIMEOUT_MS = 120_000;
  */
 const VERIFY_HINTS = {
   compose: 'docker compose exec -T db wal-g backup-list',
-  k8s: 'kubectl -n vibecarbon exec supabase-supabase-db-0 -- wal-g backup-list',
+  k8s: `kubectl -n vibecarbon exec ${DB_POD} -- wal-g backup-list`,
 };
 
 /** Keep operator-facing error bodies bounded without losing the useful tail. */
@@ -644,12 +645,12 @@ export function composeWalgAuditShell(opts = {}) {
 
 /**
  * kubectl argv (without the leading `kubectl`) that runs the probe in the
- * supabase-db pod. Same probe, same evaluator — only the exec seam differs.
+ * db pod. Same probe, same evaluator — only the exec seam differs.
  *
  * @param {string} [dbPod]
  * @param {{requirePrimary?: boolean}} [opts]
  * @returns {string[]}
  */
-export function k8sWalgAuditArgv(dbPod = 'supabase-supabase-db-0', opts = {}) {
+export function k8sWalgAuditArgv(dbPod = DB_POD, opts = {}) {
   return ['-n', 'vibecarbon', 'exec', dbPod, '--', 'bash', '-c', buildWalgAuditProbe(opts)];
 }

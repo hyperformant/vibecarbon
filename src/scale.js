@@ -1141,7 +1141,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   }
   configLines.push(
     `${'Master type'.padEnd(pad)} ${c.bold(currentMasterType)}`,
-    `${'Supabase type'.padEnd(pad)} ${c.bold(currentDbType)}`,
+    `${'Database type'.padEnd(pad)} ${c.bold(currentDbType)}`,
     `${'Worker type'.padEnd(pad)} ${c.bold(currentWorkerType)}`,
   );
   p.note(configLines.join('\n'), 'Current Configuration');
@@ -1215,7 +1215,7 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
         }
         newValues.masterType = val;
       } else if (change === 'dbType') {
-        p.log.warn('Changing Supabase type will restart the database. Back up first!');
+        p.log.warn('Changing the database server type restarts the database, so back up first.');
         const val = await p.select({
           message: 'New database server type:',
           options: serverTypeOptions,
@@ -1711,7 +1711,7 @@ async function scaleVerifyK8sReady(ctx) {
   // Hetzner in-place server_type changes are ~2 min reboots per node.
   // Pulumi's upStack returns when the VM is back up + k3s reports
   // ready, but stateful workloads inside the cluster (notably
-  // supabase-supabase-db Postgres) need additional time to finish
+  // the db StatefulSet's Postgres) need additional time to finish
   // their own init / WAL replay before they accept connections. If
   // the next caller (e.g. e2e backup step) runs against a
   // still-recovering cluster, pg_dump gets "connection refused" and
@@ -1721,9 +1721,9 @@ async function scaleVerifyK8sReady(ctx) {
   // reruns had this same root cause.
   //
   // Wait for all pods in the vibecarbon namespace to reach
-  // Ready=True. The supabase chart's readiness probe on
-  // supabase-supabase-db is TCP-based on 5432, so once that pod is
-  // Ready the connection-refused window has closed.
+  // Ready=True. The db StatefulSet's readiness probe is a TCP
+  // pg_isready on 5432 (k8s/base/db/statefulset.yaml), so once that pod
+  // is Ready the connection-refused window has closed.
   //
   // clusterEnv is resolved from the persisted role↔stack mapping (same
   // resolveHaClusterRoles helper scaleApplyK8sChanges uses) so this verifies
@@ -1746,7 +1746,7 @@ async function scaleVerifyK8sReady(ctx) {
       ]
     : [{ env: environment, label: region, isStandby: false }];
   // 10 min is the floor that holds for HA (k8s-ha rerun 2026-04-28: standby
-  // timed out 12/12 pods at 5 min — supabase-db-0 alone needs ~60-90s to
+  // timed out 12/12 pods at 5 min — the db pod alone needs ~60-90s to
   // start postgres after a node reboot, then the rest of the tier
   // dependency-chains off it, then app pulls images that may not be cached
   // on the freshly-rebooted node). Single-cluster k8s only used ~70s of
@@ -1815,7 +1815,7 @@ async function scaleVerifyK8sReady(ctx) {
     // node BEFORE checking pod-Ready. RCA from k8s-ha standby failure
     // 2026-04-28 (live cluster repro under triple-node-reboot):
     // kubelet can flip the database node Ready before hcloud-csi-node
-    // pod registers; supabase-db-0 then tries to mount its PVC and
+    // pod registers; the db pod then tries to mount its PVC and
     // hits "MountVolume.MountDevice failed... driver name
     // csi.hetzner.cloud not found in the list of registered CSI
     // drivers". The pod sandbox gets killed + recreated in a tight
@@ -1855,7 +1855,7 @@ async function scaleVerifyK8sReady(ctx) {
     // (Live debug 2026-04-28 found that bouncing pods to break a
     // CrashLoopBackOff cycle leaves the underlying CSI VolumeAttachment
     // stuck in "deletionTimestamp set, finalizer external-attacher/
-    // csi-hetzner-cloud held" state — supabase-db-0 then sits in
+    // csi-hetzner-cloud held" state — the db pod then sits in
     // Init:0/1 for 10+ min waiting for the new VolumeAttachment to
     // bind. Solution: do not bounce. Rely on the csi-node rollout
     // wait above eliminating the race in the first place; a pod that

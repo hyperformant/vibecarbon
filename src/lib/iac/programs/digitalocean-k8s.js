@@ -59,7 +59,7 @@
  *   - Firewall (tag-attached)
  *   - ReservedIp + ReservedIpAssignment (to master)
  *   - Master droplet (cloud-init: do-master-init.sh via the provider static)
- *   - Supabase droplet (cloud-init: do-db-init.sh via the provider static)
+ *   - database droplet (cloud-init: do-db-init.sh via the provider static)
  *   - Worker droplets × N (cloud-init: do-worker-init.sh via the provider static)
  *
  * Outputs: masterIp, masterPrivateIp, dbIp, dbPrivateIp,
@@ -317,7 +317,7 @@ export function buildDigitalOceanK8sProgram(config) {
       // dependsOn firewall (M3 Task 5b): DO firewalls attach by tag, not by
       // droplet-id list — a droplet created before the firewall resource
       // exists sits default-OPEN until Pulumi later reconciles it. Ordering
-      // closes that window. Supabase/workers below also depend on firewall
+      // closes that window. The database node/workers below also depend on firewall
       // explicitly, rather than relying on their (also-present) dependsOn
       // master to carry it transitively.
       { dependsOn: [firewall] },
@@ -380,7 +380,7 @@ export function buildDigitalOceanK8sProgram(config) {
       dropletId: master.id.apply((id) => Number.parseInt(id, 10)),
     });
 
-    // Supabase droplet — joins master via k3s agent, pinned to the
+    // Database droplet — joins master via k3s agent, pinned to the
     // dedicated database node-pool (label + NoSchedule taint baked into
     // do-db-init.sh's k3s agent argv). master_ip MUST be the
     // master's REAL private IP, only known once Pulumi has created it —

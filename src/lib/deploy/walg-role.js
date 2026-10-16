@@ -6,8 +6,8 @@
  * `WALG_ROLE` is the wal-g write-guard: `primary` archives, `standby` no-ops.
  * It is rendered ONCE, at DEPLOY time, from the deploy's notion of which node is
  * which — compose writes it into each node's `.env` (haMergeWalgRoleStep, before
- * the stack starts) and k8s renders it into the supabase-db container env
- * (`{{WALG_ROLE}}` in k8s/values/supabase.values.yaml).
+ * the stack starts) and k8s renders it into the db container env
+ * (`{{WALG_ROLE}}` in k8s/base/db/statefulset.yaml).
  *
  * Failover moves the role WITHOUT redeploying. It promotes the standby, flips
  * DNS, and persists the swap in the project config — but nothing re-rendered
@@ -49,9 +49,7 @@
  */
 
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
-
-/** The supabase-db StatefulSet (helm release `supabase`, chart component `db`). */
-export const WALG_DB_STATEFULSET = 'supabase-supabase-db';
+import { DB_POD, DB_STATEFULSET } from './db-workload.js';
 
 /** The env var both tiers read as the wal-g write-guard. */
 export const WALG_ROLE_ENV = 'WALG_ROLE';
@@ -230,7 +228,7 @@ export function composeDbRecreateShell(remoteDir) {
 }
 
 /**
- * `kubectl` argv (no leading `kubectl`) that sets `WALG_ROLE` on the supabase-db
+ * `kubectl` argv (no leading `kubectl`) that sets `WALG_ROLE` on the db
  * StatefulSet. The template change is what rolls the pod, which is what makes
  * the new value visible to postgres' `archive_command` and to the backup
  * CronJob's `kubectl exec` (it inherits the db container's env — the CronJob has
@@ -251,7 +249,7 @@ export function k8sSetWalgRoleArgv(role) {
     'vibecarbon',
     'set',
     'env',
-    `statefulset/${WALG_DB_STATEFULSET}`,
+    `statefulset/${DB_STATEFULSET}`,
     `${WALG_ROLE_ENV}=${role}`,
   ];
 }
@@ -271,7 +269,7 @@ export function k8sDbRolloutStatusArgv(timeoutSeconds = 300) {
     'vibecarbon',
     'rollout',
     'status',
-    `statefulset/${WALG_DB_STATEFULSET}`,
+    `statefulset/${DB_STATEFULSET}`,
     `--timeout=${timeoutSeconds}s`,
   ];
 }
@@ -293,7 +291,7 @@ export function walgRoleDegradedMessage({ path, envName, promotedIp, detail }) {
   const verify =
     path === 'compose'
       ? `ssh root@${promotedIp} 'cd /opt/<project> && docker compose exec -T db printenv WALG_ROLE'`
-      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${WALG_DB_STATEFULSET}-0 -- printenv WALG_ROLE'`;
+      : `ssh root@${promotedIp} 'kubectl -n vibecarbon exec ${DB_POD} -- printenv WALG_ROLE'`;
   return (
     `FAILOVER COMPLETED, BACKUPS DID NOT. The promoted node (${promotedIp}) is serving, DNS ` +
     `is flipped and the role swap is persisted; but this failover could not prove that ` +

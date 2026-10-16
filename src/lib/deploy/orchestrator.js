@@ -1547,7 +1547,7 @@ export async function executeDeployment(args, gatheredConfig) {
     );
   } else if (deployResult.primaryIp && deployResult.standbyIp) {
     // compose-HA shape: { primaryIp, standbyIp } — no dbIp because
-    // compose-HA runs Supabase on the same VM as the app.
+    // compose-HA runs the database on the same VM as the app.
     servers.push(
       { name: 'primary', ip: deployResult.primaryIp, region, serverType },
       { name: 'standby', ip: deployResult.standbyIp, region: secondaryRegion, serverType },
@@ -1570,14 +1570,14 @@ export async function executeDeployment(args, gatheredConfig) {
     // works end-to-end across both fields.
     //
     // K8s: in addition to the master entry, persist one entry per node
-    // role (supabase + worker-N) so post-deploy commands (scale, destroy,
+    // role (db + worker-N) so post-deploy commands (scale, destroy,
     // e2e verify-scale) can enumerate every IP without having to
     // re-derive worker IPs from Pulumi outputs. Master stays at index 0 —
     // a handful of compose-only paths read `envConfig.servers?.[0]`, and
     // preserving that contract is cheap. `dbIp` is also kept on the
     // master entry so failover.js can read `servers[0].dbIp` without
-    // first iterating to find the supabase entry — redundant with the
-    // dedicated supabase entry below, but keeps the existing failover
+    // first iterating to find the db entry — redundant with the
+    // dedicated db entry below, but keeps the existing failover
     // path working.
     servers.push({
       name: 'master',
@@ -1752,14 +1752,6 @@ export async function executeDeployment(args, gatheredConfig) {
                 serverType: deployResult.standby.workerServerType,
               },
               scaleUpList: deriveScaleUpList({
-                overlayText: readFileSync(
-                  join(process.cwd(), 'k8s/values/supabase.standby.values.yaml'),
-                  'utf-8',
-                ),
-                sharedValuesText: readFileSync(
-                  join(process.cwd(), 'k8s/values/supabase.values.yaml'),
-                  'utf-8',
-                ),
                 appManifestText: readFileSync(
                   join(process.cwd(), 'k8s/base/app/deployment.yaml'),
                   'utf-8',

@@ -77,7 +77,6 @@ const PLACEHOLDERS = {
   PROJECT_DISPLAY_NAME: '{{PROJECT_DISPLAY_NAME}}',
   GITHUB_OWNER: '{{GITHUB_OWNER}}',
   DB_PASSWORD: '{{DB_PASSWORD}}',
-  JWT_SECRET: '{{JWT_SECRET}}',
   REPL_PASSWORD: '{{REPL_PASSWORD}}',
   SITE_URL: '{{SITE_URL}}',
   ADMIN_EMAIL: '{{ADMIN_EMAIL}}',
@@ -90,13 +89,8 @@ const PLACEHOLDERS = {
 // manifests at deploy time. Substituting them here would bake a high-entropy
 // secret into a file that lands in `git ls-files` and trips the preflight
 // secret-scan during the next `vibecarbon deploy` — the exact regression
-// fixed by this set (k8s/values/supabase.values.yaml ADMIN_PASSWORD).
-const SECRET_PLACEHOLDERS = new Set([
-  'DB_PASSWORD',
-  'JWT_SECRET',
-  'REPL_PASSWORD',
-  'ADMIN_PASSWORD',
-]);
+// fixed by this set (an ADMIN_PASSWORD once baked into a k8s values file).
+const SECRET_PLACEHOLDERS = new Set(['DB_PASSWORD', 'REPL_PASSWORD', 'ADMIN_PASSWORD']);
 
 // ============================================================================
 // CLI ARGUMENT PARSING
@@ -718,10 +712,6 @@ async function bootstrap(cliArgs) {
 
   // Generate secure secrets
   const dbPassword = generatePassword();
-  // Required only by the k8s Helm chart's db (its StatefulSet reads
-  // JWT_SECRET from vibecarbon-secrets); removed when our own db StatefulSet
-  // replaces the chart.
-  const jwtSecret = generatePassword(64);
   // Session signing key for the app's in-process auth (env.ts requires >= 32).
   const betterAuthSecret = generatePassword(64);
   const replPassword = generateReplPassword();
@@ -731,7 +721,6 @@ async function bootstrap(cliArgs) {
     PROJECT_DISPLAY_NAME: displayName,
     GITHUB_OWNER: projectName, // Default to project name; rewritten by `vibecarbon configure` → CI/CD (or by deploy's rewriteOwnerAndRepo fallback)
     DB_PASSWORD: dbPassword,
-    JWT_SECRET: jwtSecret,
     BETTER_AUTH_SECRET: betterAuthSecret,
     REPL_PASSWORD: replPassword,
     SITE_URL: 'http://localhost:5173',
@@ -764,6 +753,7 @@ async function bootstrap(cliArgs) {
     'volumes/s3',
     '.github/workflows',
     'k8s/base/app',
+    'k8s/base/db',
     'k8s/base/backup',
     'k8s/base/config',
     'k8s/base/traefik',
@@ -772,9 +762,7 @@ async function bootstrap(cliArgs) {
     'k8s/overlays/production',
     'k8s/flux/clusters/primary',
     'k8s/flux/clusters/standby',
-    'k8s/gitops/supabase',
     'k8s/gitops/cert-manager-webhook-hetzner',
-    'k8s/values',
   ];
   for (const dir of dirs) {
     mkdirSync(join(projectDir, dir), { recursive: true });
@@ -1492,10 +1480,6 @@ ${formatDotenvLine('VITE_PROJECT_NAME', projectName)}
 # into template files at create time; recorded here so \`vibecarbon upgrade\`
 # can re-substitute it into updated template files.
 ${formatDotenvLine('PROJECT_DISPLAY_NAME', variables.PROJECT_DISPLAY_NAME)}
-
-# Read only by the k8s Helm chart's database. The app never reads it: auth
-# runs inside the app and signs sessions with BETTER_AUTH_SECRET.
-${formatDotenvLine('JWT_SECRET', variables.JWT_SECRET)}
 
 # Signs the app's session cookies and auth tokens. Changing it signs everyone out.
 ${formatDotenvLine('BETTER_AUTH_SECRET', variables.BETTER_AUTH_SECRET)}

@@ -233,6 +233,7 @@ Known deploy-time patches:
 - `ConfigMap vibecarbon-config.SITE_URL: https://app.example.com` → `https://${domain}` (PR 1AQ)
 - `Deployment app.image: ghcr.io/<owner>/<repo>:main` → sideloaded `vibecarbon-local/<project>:<tag>` (pre-existing, set in `applyK3sManifests` step 6)
 - `CronJob backup.image: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}-backup:latest` → sideloaded `vibecarbon-local/<project>-backup:<tag>` + `imagePullPolicy=IfNotPresent` (PR 1AS)
+- `StatefulSet db` (`carbon/k8s/base/db/statefulset.yaml`) → NOT patched: its double-brace placeholders (db image, wal-g prefix and role, S3 endpoint, repl relay address, `K8S_STORAGE_CLASS`, the wal-archive ConfigMap sha) are RENDERED into a temp copy of `k8s/base` by `renderK8sBase` before `kubectl apply -k`, which refuses a copy that still carries one, because a StatefulSet's volumeClaimTemplates are immutable. Flux's base Kustomization drops the object (`$patch: delete`) and only health-checks it
 - CSI sidecars (`daemonset/hcloud-csi-node`, `deployment/hcloud-csi-controller` on Hetzner; `daemonset/csi-do-node`, `statefulset/csi-do-controller` on DO) → ghcr mirrors, `set image` at step 0a from `csiSidecarSetImagePlan(providerId)`. Unlike the rows above these manifests are **upstream's**, applied verbatim from a URL by cloud-init, so there is no placeholder to render: `set image` is the only seam.
 
 **Why this category exists:** direct/local mode never pushes to GHCR, so any GHCR-pointed image causes ImagePullBackOff. ACME prod against `app.example.com` returns 403 (IANA-reserved).

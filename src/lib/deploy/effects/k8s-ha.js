@@ -143,7 +143,7 @@ async function haK8sProvisionClusters(ctx) {
   ) {
     p.log.info(
       `Standby server types adjusted for ${standbyRegion}: ` +
-        `master=${standbyMasterType}, supabase=${standbyDbType}, worker=${standbyWorkerType}`,
+        `master=${standbyMasterType}, db=${standbyDbType}, worker=${standbyWorkerType}`,
     );
   }
 
@@ -159,7 +159,7 @@ async function haK8sProvisionClusters(ctx) {
   // deploy-state-<env>.json. When standby completes `k3s-apply` first
   // (typical — standby tends to finish sideload faster), primary's
   // `state.shouldSkip('k3s-apply', { imageTag })` then matches the stored
-  // hash and SKIPS manifest install on primary. cert-manager + Supabase
+  // hash and SKIPS manifest install on primary. cert-manager + the db
   // never land on primary → public probe to e<env>.<domain> (which DNS
   // resolves to primary's floating IP) returns nothing → deploy fails with
   // "Deploy completed but the app is not serving traffic" (caught in
@@ -420,7 +420,7 @@ async function haK8sProvisionClusters(ctx) {
  * reverse re-seed dials the promoted standby (neither failover.js nor
  * restore.js touches firewalls, so deploy must set up both directions). The
  * per-cluster firewall (`<project>-<env>-<role>-firewall`) is attached to all
- * that cluster's nodes incl. the supabase/WG node. provider.buildReplicationFirewallRules
+ * that cluster's nodes incl. the database/WG node. provider.buildReplicationFirewallRules
  * emits the udp/51821 rule (Hetzner also scrubs stale TCP 5432/5433/30432
  * rules from the retired public-IP TLS transport — see HetznerProvider's
  * implementation). Non-fatal per cluster (manual firewall config may

@@ -332,9 +332,10 @@ classes:
       master (proxy 502 dialing :10250), SSH to the public IP timed out
       during banner exchange, Hetzner Cloud API status "running"
       throughout — a kernel/host wedge, not anything the workload did. The
-      db pod froze in Init and helm's --wait expired. Detection is
+      db pod froze in Init and the db install's wait expired (then a Helm
+      chart's --wait, now the db StatefulSet's rollout wait). Detection is
       evidence-gated: summarizeNotReadyNodes (k3s.js) appends the NotReady
-      node clause to the helm-failure error, and the classifier requires
+      node clause to the db rollout failure error, and the classifier requires
       BOTH the stuck-pod and NotReady-node clauses before attributing here
       — a stuck pod on healthy nodes stays [unknown] (ours until proven
       otherwise). Retry is the only remedy: the rebuilt deploy lands on a
