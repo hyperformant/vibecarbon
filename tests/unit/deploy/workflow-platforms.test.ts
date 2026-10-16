@@ -499,7 +499,9 @@ describe('the db image dev channel (publish-db-image-dev.yml)', () => {
   it('runs on branch pushes and by hand, NEVER on pull_request*', () => {
     expect(Object.keys(wf.on).sort()).toEqual(['push', 'workflow_dispatch']);
     const push = wf.on.push as { 'branches-ignore': string[]; paths: string[] };
-    expect(push['branches-ignore']).toEqual(['main']);
+    // dependabot/**: those pushes get a read-only token and no secrets, so
+    // every db-image bump ran red here (final review M6).
+    expect(push['branches-ignore']).toEqual(['main', 'dependabot/**']);
     expect(push.paths).toEqual(
       expect.arrayContaining(['docker/postgres-walg/**', 'docker/wal-g/**']),
     );

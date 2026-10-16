@@ -17,9 +17,13 @@ name: publish-db-image-dev
 #
 # NEVER on pull_request / pull_request_target: a fork's code must not run
 # with packages: write. Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+#
+# Not on dependabot/** either: Dependabot pushes run with a read-only token
+# and no Actions secrets, so every docker/postgres-walg bump went red here.
+# Those bumps are superseded by hand with the tag edit, which runs this.
 on:
   push:
-    branches-ignore: [main]
+    branches-ignore: [main, 'dependabot/**']
     paths:
       - 'docker/postgres-walg/**'
       - 'docker/wal-g/**'
