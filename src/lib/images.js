@@ -31,7 +31,7 @@ export const DB_IMAGE_TAG = '17.11-walg3.0.9-r1';
 // hashing). Changing any input fails that test until you bump the -r revision
 // in DB_IMAGE_TAG above AND paste the new hash here: a deliberate two-line edit.
 export const DB_IMAGE_INPUTS_SHA256 =
-  '3c6c966eb49fbb89920caa8981320b9d9ff3d5d013a84ed455193f1ae71d251d';
+  'eb58af37f7a7bdf1928ef87a973dca24497d034ee5534089d56be338d4566a69';
 
 /** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r1" */
 export function dbImageRef() {

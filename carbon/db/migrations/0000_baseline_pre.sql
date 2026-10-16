@@ -26,12 +26,19 @@ SET LOCAL check_function_bodies = off;
 
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 --> statement-breakpoint
-CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+-- pg_stat_statements lives in its own schema, `monitoring`, which no role but
+-- the owner (`postgres`) may use. The extension grants its views and
+-- functions to PUBLIC, and in `public` they would also fall under every
+-- "ON ALL TABLES IN SCHEMA public" grant (the add-on roles). Without USAGE
+-- on the schema, nobody else can reach them: app_user would otherwise read
+-- the text of every query that ran as app_user. The operator reads it as
+-- `postgres`: SELECT ... FROM monitoring.pg_stat_statements. A monitoring
+-- role that needs it later gets USAGE on this schema, nothing in public.
+CREATE SCHEMA IF NOT EXISTS monitoring;
 --> statement-breakpoint
--- The extension grants its views to PUBLIC. They are for the operator (as
--- `postgres`, over `vibecarbon shell`), not for a user request: app_user
--- would otherwise read the text of every query that ran as app_user.
-REVOKE ALL ON public.pg_stat_statements, public.pg_stat_statements_info FROM PUBLIC;
+REVOKE ALL ON SCHEMA monitoring FROM PUBLIC;
+--> statement-breakpoint
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA monitoring;
 --> statement-breakpoint
 -- The jobs and the admin Jobs page run as `postgres`.
 GRANT USAGE ON SCHEMA cron TO postgres;
@@ -40,7 +47,8 @@ GRANT USAGE ON SCHEMA cron TO postgres;
 -- ============================================================================
 -- REQUEST ROLE AND IDENTITY (app_user + app.user_id())
 -- ============================================================================
--- The server connects as a role that bypasses RLS (adminDb, `postgres`) and
+-- The server connects as `postgres`, the superuser in the db image, so it
+-- bypasses RLS (adminDb runs as it; see docs/security.md) and
 -- runs every user request in a transaction that starts with ONE parameterized
 -- statement:
 --
@@ -66,7 +74,9 @@ $$;
 --> statement-breakpoint
 
 -- set_config('role', ...) requires membership. `postgres` is the app's
--- connection role (BYPASSRLS + LOGIN in the db image; adminDb runs as it).
+-- connection role: the superuser in the db image (adminDb runs as it; see
+-- docs/security.md). A superuser passes the check anyway; the grant keeps a
+-- non-superuser BYPASSRLS connection role (DB_USER) working.
 GRANT app_user TO postgres;
 --> statement-breakpoint
 

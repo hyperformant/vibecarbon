@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { connectTestDb, dbTestsEnabled } from './_helpers';
+import { asUser, connectTestDb, dbTestsEnabled } from './_helpers';
 
 /**
  * The db image preloads pg_cron and pg_stat_statements
@@ -34,17 +34,36 @@ describe.skipIf(!dbTestsEnabled)('query statistics and slow-query logging', () =
     );
     expect(rows.map((r) => r.extname)).toEqual(['pg_cron', 'pg_stat_statements']);
     const { rows: stats } = await client.query(
-      'select count(*)::int as n from pg_stat_statements where calls > 0',
+      'select count(*)::int as n from monitoring.pg_stat_statements where calls > 0',
     );
     expect(stats[0].n).toBeGreaterThan(0);
   });
 
-  it('is for the operator only: no end-user role can read it', async () => {
+  it('lives in the monitoring schema, which no role but the owner may use', async () => {
     const { rows } = await client.query(
-      `select has_table_privilege('app_user', 'public.pg_stat_statements', 'SELECT') as stats,
-              has_table_privilege('app_user', 'public.pg_stat_statements_info', 'SELECT') as info`,
+      `select n.nspname as schema from pg_extension e join pg_namespace n on n.oid = e.extnamespace
+        where e.extname = 'pg_stat_statements'`,
     );
-    expect(rows[0]).toEqual({ stats: false, info: false });
+    expect(rows[0].schema).toBe('monitoring');
+    const { rows: users } = await client.query(
+      `select r.rolname from pg_roles r
+        where not r.rolsuper and r.rolname not like 'pg\\_%'
+          and has_schema_privilege(r.rolname, 'monitoring', 'USAGE')`,
+    );
+    expect(users).toEqual([]);
+  });
+
+  it('a user request (app_user) can read neither the view nor the function behind it', async () => {
+    for (const sql of [
+      'select count(*) from monitoring.pg_stat_statements',
+      'select count(*) from monitoring.pg_stat_statements(true)',
+      'select * from monitoring.pg_stat_statements_info()',
+    ]) {
+      await expect(
+        asUser(client, null, (c) => c.query(sql)),
+        sql,
+      ).rejects.toThrow(/permission denied for schema monitoring/);
+    }
   });
 
   it('keeps utility statements out of it, and logs slow statements and lock waits', async () => {
@@ -52,5 +71,12 @@ describe.skipIf(!dbTestsEnabled)('query statistics and slow-query logging', () =
     expect(await show('pg_stat_statements.track_utility')).toBe('off');
     expect(await show('log_min_duration_statement')).toBe('1s');
     expect(await show('log_lock_waits')).toBe('on');
+  });
+
+  it('never logs bind parameters, with a slow statement or a failing one', async () => {
+    // The app's values (session and verification tokens, TOTP secrets) travel
+    // as bind parameters; a slow or failing statement must log none of them.
+    expect(await show('log_parameter_max_length')).toBe('0');
+    expect(await show('log_parameter_max_length_on_error')).toBe('0');
   });
 });

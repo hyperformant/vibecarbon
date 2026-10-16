@@ -77,9 +77,11 @@ const superAdmin = sql`is_super_admin()`;
 // Better Auth reads and writes Date objects.
 //
 // These tables hold password hashes, session tokens, OAuth tokens and TOTP
-// secrets. RLS is enabled with NO policies, and 0002_baseline_post.sql
-// revokes every request role's privileges: only the server's adminDb
-// (BYPASSRLS) reads or writes them. Never add an app_user policy here; expose
+// secrets. RLS is enabled with NO policies, which makes a table server-only:
+// app.revoke_server_only_tables() (0002_baseline_post.sql, run after every
+// migration) takes every privilege back from every non-superuser role, the
+// RLS-bypass add-on roles included, so only the server's adminDb (the
+// superuser) reads or writes them. Never add an app_user policy here; expose
 // what a user may see through a server route instead.
 // ---------------------------------------------------------------------------
 

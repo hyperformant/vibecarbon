@@ -87,7 +87,12 @@ describe('add-on app-database roles', () => {
       expect(read(`carbon/volumes/db/${role}-init.sh`)).toBe(script);
       expect(script).toMatch(new RegExp(`^ALTER ROLE ${role} NOSUPERUSER BYPASSRLS;$`, 'm'));
       expect(script).not.toMatch(/\bSUPERUSER\b/);
-      expect(script).toContain(`EXECUTE format('REVOKE ALL ON TABLE public.%I FROM ${role}', t)`);
+      // The grant and the server-only revoke share one transaction (-1), and
+      // the revoke set comes from the catalog, not a list of names.
+      const grantCall = script.slice(script.lastIndexOf('psql -1 '));
+      expect(grantCall).toContain(`ON ALL TABLES IN SCHEMA public TO ${role}`);
+      expect(grantCall).toContain('PERFORM app.revoke_server_only_tables();');
+      expect(script).not.toMatch(/ARRAY\['user'/);
     });
   }
 

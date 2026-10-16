@@ -47,6 +47,26 @@ async function ledger(client: pg.ClientBase): Promise<{ count: number; latest: n
 }
 
 /**
+ * Take every server-only table (RLS on, no policies, plus the Better Auth
+ * tables) back from every role but superusers, its owner and this one:
+ * app.revoke_server_only_tables() in db/migrations/0002_baseline_post.sql.
+ * Run after every migration run, new migrations or not, so a table a later
+ * migration creates never stays readable to an RLS-bypass add-on role (the
+ * default privileges grant it at creation, and a server never reruns the
+ * add-on init scripts). A failure fails the run: a deploy that leaves token
+ * tables readable is not a successful one. The template baseline creates the
+ * function, so every project has it; only a database whose migrations are
+ * not the template's (the runner's own tests) lacks it, and has nothing to
+ * guard.
+ */
+async function revokeServerOnlyTables(client: pg.ClientBase): Promise<void> {
+  const { rows } = await client.query<{ present: boolean }>(
+    `select to_regprocedure('app.revoke_server_only_tables()') is not null as present`
+  );
+  if (rows[0]?.present) await client.query('select app.revoke_server_only_tables()');
+}
+
+/**
  * Apply every pending migration on `client`, a dedicated connection (a
  * checked-out pool client or a plain client) that nothing else uses
  * meanwhile. Holds a session advisory lock for the whole run, so replicas
@@ -77,6 +97,7 @@ export async function runMigrations(
   try {
     const before = await ledger(client);
     await migrate(drizzle({ client }), { migrationsFolder: folder });
+    await revokeServerOnlyTables(client);
     const after = await ledger(client);
     outcome = { kind: 'applied', newlyApplied: after.count - before.count };
   } finally {

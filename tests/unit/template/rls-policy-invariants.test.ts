@@ -103,10 +103,25 @@ describe('Auth tables are server-only', () => {
     }
   });
 
-  it('revokes every auth table from PUBLIC and, per role, from every request role', () => {
-    const tableList =
-      'public."user", public.session, public.account, public.verification, public.two_factor';
-    expect(sql).toContain(`REVOKE ALL ON TABLE ${tableList} FROM %I`);
+  it('revokes every server-only table from PUBLIC and, per role, from every non-superuser role', () => {
+    // app.revoke_server_only_tables() derives the set from the catalog (RLS
+    // on, no policy) plus the Better Auth tables by name, and the baseline
+    // calls it once its tables exist; migrate.ts calls it after every run.
+    const fn = sql.match(
+      /CREATE OR REPLACE FUNCTION app\.revoke_server_only_tables\(\)[\s\S]*?\n\$\$;/,
+    )?.[0];
+    expect(fn, 'app.revoke_server_only_tables() not found').toBeDefined();
+    expect(fn).toMatch(/c\.relrowsecurity\s+AND NOT EXISTS \(SELECT 1 FROM pg_catalog\.pg_policy/);
+    expect(fn).toContain(
+      "c.relname IN ('user', 'session', 'account', 'verification', 'two_factor')",
+    );
+    expect(fn).toContain("EXECUTE format('REVOKE ALL ON TABLE %s FROM PUBLIC', t.tbl)");
+    expect(fn).toContain("EXECUTE format('REVOKE ALL ON TABLE %s FROM %I', t.tbl, r)");
+    expect(fn).toMatch(/SET search_path = ''/);
+    expect(sql).toContain(
+      'REVOKE EXECUTE ON FUNCTION app.revoke_server_only_tables() FROM PUBLIC, app_user;',
+    );
+    expect(sql).toMatch(/^SELECT app\.revoke_server_only_tables\(\);$/m);
     // Every role that is not a superuser, so app_user, the RLS-bypass add-on
     // roles (metabase and n8n, whose default privileges cover public tables)
     // and any role the image or an optional service creates. A fixed list
@@ -118,9 +133,14 @@ describe('Auth tables are server-only', () => {
     expect(loop, 'auth-table revoke loop not found').toBeDefined();
     expect(loop).toMatch(/NOT rolsuper AND rolname NOT LIKE/);
     expect(loop).not.toMatch(/rolbypassrls/);
-    expect(sql).toContain(
-      'REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;',
+  });
+
+  it('the migration runner enforces it after every run', () => {
+    const migrate = readFileSync(join(process.cwd(), 'carbon/src/server/db/migrate.ts'), 'utf8');
+    expect(migrate).toMatch(
+      /await migrate\(drizzle\(\{ client \}\), \{ migrationsFolder: folder \}\);\s+await revokeServerOnlyTables\(client\);/,
     );
+    expect(migrate).toContain("'select app.revoke_server_only_tables()'");
   });
 
   it('every former auth.users foreign key points at "user"(id)', () => {

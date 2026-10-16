@@ -119,6 +119,11 @@ describe('the baked postgresql.conf', () => {
     expect(settings.log_lock_waits).toBe('on');
   });
 
+  it('never logs bind parameters (session, verification and OAuth tokens)', () => {
+    expect(settings.log_parameter_max_length).toBe('0');
+    expect(settings.log_parameter_max_length_on_error).toBe('0');
+  });
+
   it('carries the small-box defaults', () => {
     expect(settings.shared_buffers).toBe('128MB');
     expect(settings.max_connections).toBe('100');

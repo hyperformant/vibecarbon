@@ -5,41 +5,71 @@
 -- pg_cron schedules and the app_settings rows the app reads.
 
 -- ============================================================================
--- AUTH TABLES: SERVER-ONLY
+-- SERVER-ONLY TABLES
 -- ============================================================================
--- "user", session, account, verification and two_factor hold password
--- hashes, session tokens, OAuth tokens and TOTP secrets. RLS is enabled with
--- no policies (schema.ts); on top of that, revoke every role that is not a
--- superuser, including what the default privileges in 0000 just gave
--- app_user. Role-agnostic on purpose: the loop also catches any other role
--- that exists when this runs. On a fresh volume that is the add-on roles
--- (metabase, n8n): their init scripts run before the app migrates, and their
--- default privileges hand them these tables as they are created. Those roles
--- bypass RLS (so they see every business row), which is why the loop must not
--- skip RLS-bypass roles. Only superusers and the role running this migration
--- (current_user: the owner and the adminDb connection role, which must keep
--- what it was granted) can read them. A service that grants on public tables
--- AFTER this ran must take these back itself (services/metabase/db/init.sh
--- and services/n8n/db/init.sh do, on every start). Postgres' predefined pg_*
--- roles are operator grants and are left alone.
-REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;
---> statement-breakpoint
-DO $$
+-- A table with RLS enabled and NO policies is server-only (schema.ts): only
+-- the server (adminDb) and SECURITY DEFINER functions reach it. Today that is
+-- the Better Auth tables ("user", session, account, verification,
+-- two_factor: password hashes, session tokens, OAuth tokens, TOTP secrets)
+-- and failed_login_attempts (lockout emails and IPs). RLS alone is not
+-- enough: a role that bypasses RLS (the add-on roles metabase and n8n do, so
+-- they see every business row) reads straight through it, and the default
+-- privileges hand such roles every new public table at creation.
+--
+-- So "server-only" is a catalog fact, and this function enforces it: every
+-- public table with RLS on and no policy, plus the Better Auth tables by
+-- name, loses every privilege for PUBLIC and for every role that is not a
+-- superuser, its owner or the caller (the role running migrations, which
+-- must keep what it was granted). Postgres' predefined pg_* roles are
+-- operator grants and are left alone. It derives the set each time, so a
+-- table a later migration adds is covered with no list to maintain.
+--
+-- It runs here, after every migration run (src/server/db/migrate.ts, under
+-- the migration lock, so on every app start and every deploy), and from the
+-- add-on init scripts after their grants. Whichever order those run in, the
+-- last one to run leaves the add-on roles without these tables.
+CREATE OR REPLACE FUNCTION app.revoke_server_only_tables()
+RETURNS INTEGER
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
 DECLARE
+  t RECORD;
   r TEXT;
+  n INTEGER := 0;
 BEGIN
-  FOR r IN
-    SELECT rolname FROM pg_catalog.pg_roles
-    WHERE NOT rolsuper AND rolname NOT LIKE 'pg\_%'
-      AND rolname <> current_user
+  FOR t IN
+    SELECT c.oid::regclass AS tbl, c.relowner
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
+    WHERE ns.nspname = 'public'
+      AND c.relkind IN ('r', 'p')
+      AND (
+        (c.relrowsecurity
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid))
+        OR c.relname IN ('user', 'session', 'account', 'verification', 'two_factor')
+      )
   LOOP
-    EXECUTE format(
-      'REVOKE ALL ON TABLE public."user", public.session, public.account, public.verification, public.two_factor FROM %I',
-      r
-    );
+    EXECUTE format('REVOKE ALL ON TABLE %s FROM PUBLIC', t.tbl);
+    FOR r IN
+      SELECT rolname FROM pg_catalog.pg_roles
+      WHERE NOT rolsuper AND rolname NOT LIKE 'pg\_%'
+        AND rolname <> current_user
+        AND oid <> t.relowner
+    LOOP
+      EXECUTE format('REVOKE ALL ON TABLE %s FROM %I', t.tbl, r);
+    END LOOP;
+    n := n + 1;
   END LOOP;
-END
+  RETURN n;
+END;
 $$;
+--> statement-breakpoint
+-- Server-only: the migration runner and the add-on init scripts call it as
+-- postgres. No end-user role may.
+REVOKE EXECUTE ON FUNCTION app.revoke_server_only_tables() FROM PUBLIC, app_user;
+--> statement-breakpoint
+SELECT app.revoke_server_only_tables();
 --> statement-breakpoint
 
 -- ============================================================================
