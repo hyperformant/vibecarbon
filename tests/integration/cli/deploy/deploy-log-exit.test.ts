@@ -8,6 +8,9 @@
  * `process.exit` drops whatever that stream has not flushed yet. A failure
  * that exits therefore looked exactly like a hang in the one artifact the
  * operator sends us. The log is now written synchronously.
+ *
+ * Integration tier: it spawns a child node process, since process.exit is
+ * the thing under test.
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';

@@ -53,6 +53,38 @@ describe('createTracker', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('shows a raw multi-line error as one readable line, in the spinner and the Stats box, with the full text in the log', async () => {
+    // excitingai destroy, 2026-10-16: the Pulumi automation envelope
+    // (`code: -2`, `stdout:`, `stderr:`, `err?:`) was printed raw by the
+    // spinner and again, whole, in the Stats box.
+    const raw =
+      'Failed to remove Pulumi stack state: code: -2\n stdout: \n stderr: Command failed with exit code 1: ' +
+      'pulumi stack select --stack prod --non-interactive\nerror: error listing stacks: could not list bucket: ' +
+      'NoSuchBucket: The specified bucket does not exist.\n err?: Error: Command failed with exit code 1';
+    const tracker = createTracker('destroy', { environment: 'prod' });
+    const s = tracker.spinner();
+    s.start('one');
+    s.stop('one done');
+    s.start('Removing Pulumi stack state: prod');
+    s.stop(raw);
+    const { logPath } = tracker.finish();
+
+    const shown = [
+      ...clackMock.log.success.mock.calls.map((c) => String(c[0])),
+      ...clackMock.log.error.mock.calls.map((c) => String(c[0])),
+    ].find((l) => l.includes('Failed to remove Pulumi stack state'));
+    expect(shown).toBe(
+      'Failed to remove Pulumi stack state: error: error listing stacks: could not list bucket: NoSuchBucket: The specified bucket does not exist.',
+    );
+    const stats = String(clackMock.note.mock.calls.at(-1)?.[0]);
+    expect(stats).not.toMatch(/code: -2|stdout:|stderr:|err\?:/);
+    expect(stats.split('\n').filter((l) => l.includes('Failed to remove'))).toHaveLength(1);
+
+    const { readFileSync } = await import('node:fs');
+    const log = readFileSync(logPath as string, 'utf-8');
+    expect(log).toContain('err?: Error: Command failed with exit code 1');
+  });
+
   it('records spinner start/stop pairs as steps and totals them in finish()', async () => {
     const tracker = createTracker('deploy', { environment: 'prod' });
     const s = tracker.spinner();

@@ -22,6 +22,7 @@ import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { LocalWorkspace } from '@pulumi/pulumi/automation/index.js';
+import { summarizeCommandError } from '../cli/error-line.js';
 import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
 import { getProviderClass } from '../providers/index.js';
@@ -274,16 +275,7 @@ function isStackNotFoundError(err) {
  */
 export function summarizePulumiError(err) {
   const msg = (err instanceof Error ? err.message : String(err ?? '')) || '';
-  const lines = msg.split('\n');
-  const errorLine = lines.find((l) => /^\s*error:/i.test(l));
-  if (errorLine) return errorLine.trim();
-  const panicLine = lines.find((l) => /^\s*panic:/i.test(l));
-  if (panicLine) return panicLine.trim();
-  const first = (lines[0] ?? '').trim();
-  if (!/^code:\s*-?\d+$/i.test(first)) return first || String(err ?? '');
-  // Bare envelope — surface the most informative slot we have instead.
-  const stderrLine = lines.find((l) => /^\s*stderr:\s*\S/i.test(l));
-  return (stderrLine ?? lines.filter(Boolean).join(' ')).trim() || msg.trim();
+  return summarizeCommandError(msg) || String(err ?? '');
 }
 
 /**

@@ -247,3 +247,21 @@ describe('isLeakReportLine — the renderer/scraper contract', () => {
     expect(isLeakReportLine('a LEAK was reported earlier')).toBe(false);
   });
 });
+
+describe('reasons carrying a raw command envelope', () => {
+  it('keep the informative error line, never the bare `code: -2` header', () => {
+    // excitingai destroy, 2026-10-16: the report line read
+    // "UNVERIFIED pulumi-stack prod: stack-state removal failed: code: -2".
+    const ledger = createLeakLedger();
+    ledger.unverified({
+      resourceClass: 'pulumi-stack',
+      resource: 'prod',
+      reason:
+        'stack-state removal failed: code: -2\n stdout: \n stderr: Command failed with exit code 1: pulumi stack select\n' +
+        'error: error listing stacks: could not list bucket: NoSuchBucket: The specified bucket does not exist.\n err?: Error: x',
+    });
+    expect(ledger.entries[0].reason).toBe(
+      'stack-state removal failed: error: error listing stacks: could not list bucket: NoSuchBucket: The specified bucket does not exist.',
+    );
+  });
+});
