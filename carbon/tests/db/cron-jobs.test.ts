@@ -30,6 +30,7 @@ describe.skipIf(!dbTestsEnabled)('get_cron_jobs()', () => {
       'cleanup-job-history',
       'rollup-crawler-hits',
       'cleanup-crawler-hits',
+      'cleanup-expired-sessions',
     ]) {
       expect(names).toContain(job);
     }
@@ -40,12 +41,66 @@ describe.skipIf(!dbTestsEnabled)('get_cron_jobs()', () => {
     });
   });
 
-  it('the migrations schedule exactly the five template jobs, and get_cron_jobs() lists each one', async () => {
+  it('the migrations schedule exactly the six template jobs, and get_cron_jobs() lists each one', async () => {
     const { rows: count } = await client.query('select count(*)::int as n from cron.job');
-    expect(count[0].n).toBe(5);
+    expect(count[0].n).toBe(6);
     const { rows: scheduled } = await client.query('select jobname from cron.job order by jobname');
     const { rows: listed } = await client.query('select jobname from public.get_cron_jobs()');
     expect(listed.map((r) => r.jobname)).toEqual(scheduled.map((r) => r.jobname));
+  });
+
+  it('cleanup-expired-sessions deletes sessions a day past expiry and expired verifications, and logs it', async () => {
+    // Better Auth deletes an expired session only when its cookie comes back,
+    // and a verification row only when it is read: a cleared cookie or an
+    // abandoned device leaves its plain-text token behind forever.
+    const { rows: job } = await client.query(
+      "select schedule, command from cron.job where jobname = 'cleanup-expired-sessions'"
+    );
+    expect(job[0]?.schedule).toBe('30 3 * * *');
+    await client.query('BEGIN');
+    try {
+      const userId = randomUUID();
+      await client.query(
+        `insert into public."user" (id, name, email) values ($1, 'Cron Test', $2)`,
+        [userId, `cron-${userId}@example.test`]
+      );
+      const insertSession = (token: string, expires: string) =>
+        client.query(
+          `insert into public.session (token, user_id, expires_at) values ($1, $2, now() + $3::interval)`,
+          [token, userId, expires]
+        );
+      await insertSession(`stale-${userId}`, '-2 days');
+      await insertSession(`grace-${userId}`, '-1 hour');
+      await insertSession(`live-${userId}`, '7 days');
+      const insertVerification = (value: string, expires: string) =>
+        client.query(
+          `insert into public.verification (identifier, value, expires_at) values ($1, $2, now() + $3::interval)`,
+          [`cron-${userId}`, value, expires]
+        );
+      await insertVerification('expired', '-1 minute');
+      await insertVerification('live', '10 minutes');
+
+      await client.query(job[0].command);
+
+      const { rows: sessions } = await client.query(
+        'select token from public.session where user_id = $1 order by token',
+        [userId]
+      );
+      expect(sessions.map((r) => r.token)).toEqual([`grace-${userId}`, `live-${userId}`]);
+      const { rows: verifications } = await client.query(
+        'select value from public.verification where identifier = $1',
+        [`cron-${userId}`]
+      );
+      expect(verifications.map((r) => r.value)).toEqual(['live']);
+      const { rows: logged } = await client.query(
+        `select status, result from public.cron_job_history
+          where job_name = 'cleanup-expired-sessions' order by started_at desc limit 1`
+      );
+      expect(logged[0]?.status).toBe('succeeded');
+      expect(logged[0]?.result).toMatch(/^Deleted \d+ expired sessions and \d+ expired verifications$/);
+    } finally {
+      await client.query('ROLLBACK');
+    }
   });
 
   it('is pinned to an empty search_path', async () => {

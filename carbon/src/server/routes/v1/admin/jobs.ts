@@ -3,7 +3,14 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { adminDb } from '../../../db/client';
 import { dbErrorForLog, dbErrorMessage } from '../../../db/errors';
-import { crawlerHits, crawlerHitsDaily, cronJobHistory, notifications } from '../../../db/schema';
+import {
+  crawlerHits,
+  crawlerHitsDaily,
+  cronJobHistory,
+  notifications,
+  session,
+  verification,
+} from '../../../db/schema';
 import { isoTimestamp } from '../../../db/values';
 import { sanitizeError } from '../../../lib/errors';
 import { logger } from '../../../lib/logger';
@@ -138,6 +145,7 @@ jobsRoutes.post('/trigger', async (c) => {
       'cleanup-job-history',
       'rollup-crawler-hits',
       'cleanup-crawler-hits',
+      'cleanup-expired-sessions',
     ];
 
     if (!allowedJobs.includes(body.jobName)) {
@@ -174,6 +182,10 @@ jobsRoutes.post('/trigger', async (c) => {
           .slice(0, 10);
         await adminDb.delete(crawlerHits).where(lt(crawlerHits.hitAt, ninetyDaysAgo));
         await adminDb.delete(crawlerHitsDaily).where(lt(crawlerHitsDaily.day, fourHundredDaysAgo));
+      } else if (body.jobName === 'cleanup-expired-sessions') {
+        // Mirrors the scheduled job: sessions a day past expiry, verifications past expiry.
+        await adminDb.delete(session).where(lt(session.expiresAt, sql`now() - interval '1 day'`));
+        await adminDb.delete(verification).where(lt(verification.expiresAt, sql`now()`));
       }
     } catch (err) {
       jobError = err;

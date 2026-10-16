@@ -3461,6 +3461,14 @@
       "active": true
     },
     {
+      "name": "cleanup-expired-sessions",
+      "schedule": "30 3 * * *",
+      "command": "\n  DO $body$\n  DECLARE\n    deleted_sessions INTEGER;\n    deleted_verifications INTEGER;\n  BEGIN\n    DELETE FROM public.session\n    WHERE expires_at < now() - interval '1 day';\n    GET DIAGNOSTICS deleted_sessions = ROW_COUNT;\n\n    DELETE FROM public.verification\n    WHERE expires_at < now();\n    GET DIAGNOSTICS deleted_verifications = ROW_COUNT;\n\n    PERFORM public.log_cron_job('cleanup-expired-sessions', 'succeeded',\n      'Deleted ' || deleted_sessions || ' expired sessions and '\n      || deleted_verifications || ' expired verifications');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('cleanup-expired-sessions', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",
+      "database": "postgres",
+      "username": "postgres",
+      "active": true
+    },
+    {
       "name": "cleanup-job-history",
       "schedule": "0 4 * * 0",
       "command": "\n  DO $body$\n  DECLARE\n    deleted_count INTEGER;\n  BEGIN\n    DELETE FROM public.cron_job_history\n    WHERE created_at < now() - interval '30 days';\n    GET DIAGNOSTICS deleted_count = ROW_COUNT;\n    PERFORM public.log_cron_job('cleanup-job-history', 'succeeded',\n      'Deleted ' || deleted_count || ' old history entries');\n  EXCEPTION WHEN OTHERS THEN\n    PERFORM public.log_cron_job('cleanup-job-history', 'failed', NULL, SQLERRM);\n  END $body$;\n  ",

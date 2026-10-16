@@ -238,6 +238,7 @@ describe.skipIf(!dbTestsEnabled)('lockout, contact, newsletter, jobs on Postgres
       'cleanup-expired-notifications',
       'rollup-crawler-hits',
       'cleanup-crawler-hits',
+      'cleanup-expired-sessions',
       'cleanup-job-history',
     ];
     for (const jobName of names) {

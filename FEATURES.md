@@ -203,9 +203,12 @@
 
 - Scheduled background jobs via PostgreSQL's built-in `pg_cron` extension
 - Zero additional infrastructure: no Redis, no worker process, no external queue
-- Three default jobs:
+- Six default jobs:
   - `cleanup-login-attempts`: every 6 hours, removes attempts older than 24 hours
+  - `rollup-crawler-hits`: daily at 2:15 AM, rolls yesterday's crawler hits into the daily table
   - `cleanup-expired-notifications`: daily at 3 AM, deletes past-expiry notifications
+  - `cleanup-expired-sessions`: daily at 3:30 AM, deletes sessions a day past expiry and expired verification tokens
+  - `cleanup-crawler-hits`: daily at 3:45 AM, prunes raw hits after 90 days and rollups after 400
   - `cleanup-job-history`: weekly (Sunday 4 AM), prunes history older than 30 days
 - `cron_job_history` table for execution tracking (job name, status, result, error, timestamps)
 - `log_cron_job()` helper function for logging results from custom jobs
@@ -328,7 +331,7 @@
 - Versioned routes (`/api/v1/*`) with 301 redirects from legacy paths
 - Plan gating middleware for paid-tier features
 - Graceful shutdown on SIGINT/SIGTERM (10-second drain timeout)
-- Periodic maintenance via pg_cron (login attempt cleanup, notification cleanup, job history pruning)
+- Periodic maintenance via pg_cron (login attempt, notification, expired session and crawler cleanup, job history pruning)
 
 ## UI Components (59)
 

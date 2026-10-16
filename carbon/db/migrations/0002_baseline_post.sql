@@ -467,6 +467,41 @@ SELECT cron.schedule(
 );
 --> statement-breakpoint
 
+-- Delete expired Better Auth rows (daily at 3:30 AM). Better Auth deletes an
+-- expired session only when its cookie is presented again, and a verification
+-- row only when it is read, so sessions from cleared cookies, bot sign-ups
+-- and abandoned devices (each one a plain-text token) would otherwise pile up
+-- forever:
+--   - sessions a day past expires_at (the grace day leaves a session that
+--     just ran out to Better Auth's own sign-out path);
+--   - verification rows (magic links, email and reset tokens) past expires_at.
+SELECT cron.schedule(
+  'cleanup-expired-sessions',
+  '30 3 * * *',
+  $$
+  DO $body$
+  DECLARE
+    deleted_sessions INTEGER;
+    deleted_verifications INTEGER;
+  BEGIN
+    DELETE FROM public.session
+    WHERE expires_at < now() - interval '1 day';
+    GET DIAGNOSTICS deleted_sessions = ROW_COUNT;
+
+    DELETE FROM public.verification
+    WHERE expires_at < now();
+    GET DIAGNOSTICS deleted_verifications = ROW_COUNT;
+
+    PERFORM public.log_cron_job('cleanup-expired-sessions', 'succeeded',
+      'Deleted ' || deleted_sessions || ' expired sessions and '
+      || deleted_verifications || ' expired verifications');
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM public.log_cron_job('cleanup-expired-sessions', 'failed', NULL, SQLERRM);
+  END $body$;
+  $$
+);
+--> statement-breakpoint
+
 -- ============================================================================
 -- SEED SETTINGS
 -- ============================================================================
