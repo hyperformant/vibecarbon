@@ -438,6 +438,20 @@ async function updateDns(ctx) {
   }
 }
 
+/**
+ * Refuse a server whose database the retired stack made (tables, no
+ * migration ledger): the app's baseline would fail on it after the old
+ * services are gone. Runs before the bundle upload and the image transfer,
+ * so a refusal leaves the server exactly as it was. One read per server.
+ */
+async function checkDbLedger(ctx) {
+  const { serverIp, sshKeyPath, projectConfig } = ctx;
+  const { assertDbMadeByThisStack } = await import('../compose/db-ledger-preflight.js');
+  await perfAsync('deploy.compose.checkDbLedger', () =>
+    assertDbMadeByThisStack([serverIp], sshKeyPath, projectConfig.projectName),
+  );
+}
+
 /** Reconcile the Compose stack (`docker compose pull` + `up -d`) on the VPS. */
 async function startComposeStack(ctx) {
   const { serverIp, sshKeyPath, projectConfig, services } = ctx;
@@ -624,6 +638,7 @@ export const EFFECTS = {
   ghcrLogin,
   setupServerFiles,
   updateDns,
+  checkDbLedger,
   startComposeStack,
   waitAdminReady,
   auditDatabase,

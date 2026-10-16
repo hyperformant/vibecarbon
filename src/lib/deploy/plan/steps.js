@@ -22,6 +22,14 @@ export const provisionServerStep = () =>
 /** Wait for cloud-init (and, for local/direct modes, dockerd) to be ready. */
 export const setupServerStep = () => defineStep({ name: 'setup-server', effect: 'setupServer' });
 
+/**
+ * Refuse, before anything is uploaded or swapped, a server whose database the
+ * retired stack created (no migration ledger). One read; a first deploy has
+ * no db container and passes (compose/db-ledger-preflight.js).
+ */
+export const checkDbLedgerStep = () =>
+  defineStep({ name: 'check-db-ledger', effect: 'checkDbLedger' });
+
 /** Ship the app image to the server (local sideload or direct remote build). */
 export const transferImageStep = () =>
   defineStep({
@@ -148,6 +156,13 @@ export const haSetupServersStep = () =>
 /** Wait for dockerd on both servers before any login/pull/build. */
 export const haWaitDockerReadyStep = () =>
   defineStep({ name: 'wait-docker-ready', effect: 'haWaitDockerReady' });
+
+/**
+ * compose-ha counterpart of checkDbLedgerStep: both servers are read before
+ * either gets a file or a build (compose/db-ledger-preflight.js).
+ */
+export const haCheckDbLedgerStep = () =>
+  defineStep({ name: 'check-db-ledger', effect: 'haCheckDbLedger' });
 
 /** Build the app image natively on both servers — only for a local-only tag. */
 export const haRemoteBuildStep = () =>

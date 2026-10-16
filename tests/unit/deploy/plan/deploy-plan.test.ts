@@ -13,6 +13,7 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 const EXPECTED_COMPOSE_SEQUENCE = [
   'provision-server',
   'setup-server',
+  'check-db-ledger',
   'transfer-image',
   'dockerhub-login',
   'ghcr-login',
@@ -91,6 +92,7 @@ describe('planDeploy(compose)', () => {
     // unconditional steps have no when-gate
     for (const always of [
       'setup-server',
+      'check-db-ledger',
       'setup-server-files',
       'start-compose-stack',
       'wait-admin-ready',
@@ -307,6 +309,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'seed-known-hosts',
   'setup-servers',
   'wait-docker-ready',
+  'check-db-ledger',
   'remote-build',
   'setup-server-files',
   'merge-walg-role',

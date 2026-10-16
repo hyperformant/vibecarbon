@@ -10,9 +10,11 @@
  */
 import {
   auditDatabaseStep,
+  checkDbLedgerStep,
   dockerhubLoginStep,
   ghcrLoginStep,
   haAuditDatabaseStep,
+  haCheckDbLedgerStep,
   haConfigureReplicationStep,
   haFinalizeConfigStep,
   haK8sConfigureReplicationStep,
@@ -63,6 +65,7 @@ export function planDeploy(tier, _config) {
     return [
       provisionServerStep(),
       setupServerStep(),
+      checkDbLedgerStep(),
       transferImageStep(),
       dockerhubLoginStep(),
       ghcrLoginStep(),
@@ -89,6 +92,7 @@ export function planDeploy(tier, _config) {
       haSeedKnownHostsStep(),
       haSetupServersStep(),
       haWaitDockerReadyStep(),
+      haCheckDbLedgerStep(),
       haRemoteBuildStep(),
       haSetupServerFilesStep(),
       haMergeWalgRoleStep(),

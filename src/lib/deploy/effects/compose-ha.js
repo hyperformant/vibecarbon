@@ -34,6 +34,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
+import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   buildReplicationOverlay,
   configurePrimaryReplication,
@@ -602,6 +603,19 @@ async function haUpdateDns(ctx) {
   }
 }
 
+/**
+ * Refuse, on either server, a database the retired stack made (tables, no
+ * migration ledger), before either server gets a file, a build or a swap.
+ * One read per server (compose/db-ledger-preflight.js).
+ */
+async function haCheckDbLedger(ctx) {
+  const { primary, standby, sshKeyPath } = ctx;
+  ctx.onProgress('Checking both databases were made by this stack...');
+  await perfAsync('deploy.ha.compose.checkDbLedger', () =>
+    assertDbMadeByThisStack([primary.ip, standby.ip], sshKeyPath, ctx.projectConfig.projectName),
+  );
+}
+
 /** Start compose stacks on both servers in parallel. */
 async function haStartComposeStack(ctx) {
   const projectName = ctx.projectConfig.projectName;
@@ -936,6 +950,7 @@ export const COMPOSE_HA_EFFECTS = {
   haSeedKnownHosts,
   haSetupServers,
   haWaitDockerReady,
+  haCheckDbLedger,
   haRemoteBuild,
   haSetupServerFiles,
   haMergeWalgRole,

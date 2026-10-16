@@ -12,6 +12,7 @@ describe('compose deploy plan snapshot', () => {
       [
         "provision-server",
         "setup-server",
+        "check-db-ledger",
         "transfer-image",
         "dockerhub-login",
         "ghcr-login",
@@ -36,6 +37,7 @@ describe('compose deploy plan snapshot', () => {
         "seed-known-hosts",
         "setup-servers",
         "wait-docker-ready",
+        "check-db-ledger",
         "remote-build",
         "setup-server-files",
         "merge-walg-role",
