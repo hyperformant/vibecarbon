@@ -616,6 +616,48 @@ export async function gatherDeploymentConfig(args) {
     process.exit(1);
   }
 
+  // Object-storage keys come right after the API token: on every provider
+  // both are generated in the same console visit (Hetzner: project, then
+  // Security, then API tokens / S3 credentials), so asking for them back to
+  // back saves the operator a second trip before the DNS questions.
+  const providerId = providerIdFor(envConfig);
+
+  // S3 (Standardized)
+  let s3AccessKey = args.s3AccessKey || envConfig.s3?.accessKey;
+  let s3SecretKey = args.s3SecretKey || null;
+  // Env-var override (Provider.S3_REGION_ENV — e.g. HETZNER_STORAGE_REGION,
+  // DIGITALOCEAN_STORAGE_REGION) sits between explicit CLI flag and project
+  // config so operators can route the Pulumi-state + backup buckets to a
+  // different object-storage region during a regional incident without
+  // editing .vibecarbon.json. Mirrors TOKEN_ENV's role for the cloud API.
+  // Surfaced after 2026-04-29 nbg1 OS degradation killed both HA scenarios
+  // on Pulumi backend ops (lock delete 503, history save 504, checkpoint
+  // read conn-reset) — polymorphic over Provider since B6 so it applies to
+  // every registered provider, not just Hetzner.
+  if (!s3AccessKey) {
+    const credentials = await Provider.promptObjectStorageCredentials(projectConfig.projectName);
+    s3AccessKey = credentials.accessKey;
+    s3SecretKey = credentials.secretKey;
+  }
+
+  // ORDERING IS LOAD-BEARING: resolved AFTER promptObjectStorageCredentials,
+  // whose guided flows write Provider.S3_REGION_ENV into process.env when
+  // the operator supplies a region (in-process coherence — see the guided
+  // setups' identical A2 comments). Vultr made this ordering observable
+  // (2026-08-08, caught in the configure-wiring review): its storage keys
+  // are per-SUBSCRIPTION, so the cluster the operator pastes during the
+  // prompt IS the only region those keys authenticate to — resolving
+  // beforehand froze the compute-region default and produced an opaque
+  // auth failure against the wrong cluster. Account-wide-key providers
+  // (Hetzner/DO/Linode) are indifferent to this order.
+  const s3Region =
+    args.s3Region ||
+    readOperatorVar(Provider.S3_REGION_ENV).value ||
+    envConfig.s3?.region ||
+    (await resolveS3RegionFor(providerId, region));
+
+  const s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
+
   await Provider.fetchServerTypes(apiToken);
   const regionDefaults = Provider.getRegionDefaults(region);
 
@@ -684,7 +726,6 @@ export async function gatherDeploymentConfig(args) {
   // provider* — a cross-cloud surprise on DO/Linode/Vultr deploys (their
   // operators rarely hold a HETZNER_API_TOKEN, so the deploy warmed up
   // against a zone lookup that could never succeed).
-  const providerId = providerIdFor(envConfig);
   const nativeDnsId = Object.hasOwn(DNS_PROVIDERS, providerId) ? providerId : null;
   let dnsProvider = args.dnsProvider || envConfig.dnsProvider;
   let domain = args.domain || envConfig.domain || null;
@@ -831,41 +872,6 @@ export async function gatherDeploymentConfig(args) {
     dnsZoneId = null;
   }
 
-  // S3 (Standardized)
-  let s3AccessKey = args.s3AccessKey || envConfig.s3?.accessKey;
-  let s3SecretKey = args.s3SecretKey || null;
-  // Env-var override (Provider.S3_REGION_ENV — e.g. HETZNER_STORAGE_REGION,
-  // DIGITALOCEAN_STORAGE_REGION) sits between explicit CLI flag and project
-  // config so operators can route the Pulumi-state + backup buckets to a
-  // different object-storage region during a regional incident without
-  // editing .vibecarbon.json. Mirrors TOKEN_ENV's role for the cloud API.
-  // Surfaced after 2026-04-29 nbg1 OS degradation killed both HA scenarios
-  // on Pulumi backend ops (lock delete 503, history save 504, checkpoint
-  // read conn-reset) — polymorphic over Provider since B6 so it applies to
-  // every registered provider, not just Hetzner.
-  if (!s3AccessKey) {
-    const credentials = await Provider.promptObjectStorageCredentials(projectConfig.projectName);
-    s3AccessKey = credentials.accessKey;
-    s3SecretKey = credentials.secretKey;
-  }
-
-  // ORDERING IS LOAD-BEARING: resolved AFTER promptObjectStorageCredentials,
-  // whose guided flows write Provider.S3_REGION_ENV into process.env when
-  // the operator supplies a region (in-process coherence — see the guided
-  // setups' identical A2 comments). Vultr made this ordering observable
-  // (2026-08-08, caught in the configure-wiring review): its storage keys
-  // are per-SUBSCRIPTION, so the cluster the operator pastes during the
-  // prompt IS the only region those keys authenticate to — resolving
-  // beforehand froze the compute-region default and produced an opaque
-  // auth failure against the wrong cluster. Account-wide-key providers
-  // (Hetzner/DO/Linode) are indifferent to this order.
-  const s3Region =
-    args.s3Region ||
-    readOperatorVar(Provider.S3_REGION_ENV).value ||
-    envConfig.s3?.region ||
-    (await resolveS3RegionFor(providerId, region));
-
-  const s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
   // Persisted names first: once an environment has deployed, its bucket
   // names are frozen in .vibecarbon.json and renaming the project (or adding
   // a salt to an old project) must not silently re-point wal-g/Pulumi at
