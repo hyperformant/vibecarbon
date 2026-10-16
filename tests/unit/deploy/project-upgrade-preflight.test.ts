@@ -39,6 +39,23 @@ describe('projectUpgradeProblem', () => {
     expect(msg).not.toMatch(/—/);
   });
 
+  it('passes a compose file with no db service at all (only positive evidence refuses)', () => {
+    expect(
+      projectUpgradeProblem('/p', { read: readerFor({ 'docker-compose.yml': 'services: {}\n' }) }),
+    ).toBeNull();
+  });
+
+  it('refuses on either retired marker alone', () => {
+    for (const compose of [
+      'services:\n  db:\n    build:\n      context: ./db\n',
+      `services:\n  db:\n    image: \${PROJECT_NAME}-db:latest\n`,
+    ]) {
+      expect(
+        projectUpgradeProblem('/p', { read: readerFor({ 'docker-compose.yml': compose }) }),
+      ).toContain('Run `vibecarbon upgrade` first');
+    }
+  });
+
   it('refuses a project with no docker-compose.yml, with the same next step', () => {
     expect(projectUpgradeProblem('/p', { read: () => null })).toContain(
       'Run `vibecarbon upgrade` first',
