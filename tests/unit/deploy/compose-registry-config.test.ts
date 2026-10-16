@@ -29,17 +29,19 @@ describe('registry-config (pure)', () => {
   });
 
   it('exports the expected constant shape', () => {
-    expect(REGISTRY_IMAGE).toBe('registry:2');
+    expect(REGISTRY_IMAGE).toBe(
+      'registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373',
+    );
     expect(REGISTRY_CONTAINER).toBe('vibecarbon-registry');
     expect(REGISTRY_PORT).toBe(5000);
     expect(REGISTRY_VOLUME).toBe('vibecarbon-registry-data');
     expect(REGISTRY_PREFIX).toBe('127.0.0.1:5000/');
   });
 
-  it('pins a concrete tag — never `latest` and never a bare digest reference', () => {
-    expect(REGISTRY_IMAGE).not.toBe('registry:latest');
-    expect(REGISTRY_IMAGE).not.toMatch(/@sha256:/);
-    expect(REGISTRY_IMAGE).toMatch(/^registry:\d/);
+  it('pins a concrete 2.x tag plus the index digest — never `latest`, never a bare digest', () => {
+    expect(REGISTRY_IMAGE).not.toMatch(/^registry:latest/);
+    // registry 3 changed the config format; the reconcile config is 2.x.
+    expect(REGISTRY_IMAGE).toMatch(/^registry:2\.\d+\.\d+@sha256:[a-f0-9]{64}$/);
   });
 
   describe('registryRunCommand', () => {
@@ -60,7 +62,7 @@ describe('registry-config (pure)', () => {
       expect(cmd).toContain('-v vibecarbon-registry-data:/var/lib/registry');
       expect(cmd).toContain('--restart unless-stopped');
       expect(cmd).toContain('--name vibecarbon-registry');
-      expect(cmd.trim().endsWith('registry:2')).toBe(true);
+      expect(cmd.trim().endsWith(` ${REGISTRY_IMAGE}`)).toBe(true);
     });
   });
 

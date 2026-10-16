@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: n8n
-        image: n8nio/n8n:latest
+        image: n8nio/n8n:2.43.6@sha256:dd580fe1ab6e99e85bc66f2acf8bc8c5e9409fbe61b2e2803c5024403ef52833
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5678

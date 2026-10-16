@@ -140,8 +140,13 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
     expect(finalStage).toContain('COPY postgresql.conf /etc/postgresql/postgresql.conf');
   });
 
-  it(`COPYies wal-g from the pinned ${WALG_IMAGE} stage`, () => {
-    expect(dockerfile).toContain(`FROM ${WALG_IMAGE} AS walg`);
+  it(`COPYies wal-g from the pinned ${WALG_IMAGE} stage, by multi-arch index digest`, () => {
+    // The digest is the record of which wal-g build the db image carries:
+    // publish-db-image.yml never feeds a freshly republished wal-g into the
+    // same run's db build, so adopting one is a deliberate re-pin here.
+    expect(dockerfile).toMatch(
+      new RegExp(`^FROM ${WALG_IMAGE.replace(/\./g, '\\.')}@sha256:[a-f0-9]{64} AS walg$`, 'm'),
+    );
     expect(
       finalStage.some((i) => /^COPY --from=walg\b/.test(i) && i.includes('/usr/local/bin/wal-g')),
     ).toBe(true);

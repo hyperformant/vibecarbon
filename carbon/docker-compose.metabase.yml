@@ -14,7 +14,7 @@ services:
       - ./volumes/db/metabase-init.sh:/docker-entrypoint-initdb.d/zz-metabase-init.sh:Z
 
   metabase:
-    image: metabase/metabase:latest
+    image: metabase/metabase:v0.64.2.7@sha256:f69044cd03f1a9968cdd427f23e3f50b893666f0092e6cac1ef7e2e30e100a96
     container_name: ${PROJECT_NAME:-vibecarbon}-metabase
     restart: unless-stopped
     environment:
@@ -63,7 +63,7 @@ services:
       start_period: 120s
 
   metabase-setup:
-    image: alpine:latest
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     container_name: ${PROJECT_NAME:-vibecarbon}-metabase-setup
     volumes:
       - ./volumes/metabase/scripts:/scripts:ro

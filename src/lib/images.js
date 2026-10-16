@@ -31,7 +31,7 @@ export const DB_IMAGE_TAG = '17.11-walg3.0.9-r1';
 // hashing). Changing any input fails that test until you bump the -r revision
 // in DB_IMAGE_TAG above AND paste the new hash here: a deliberate two-line edit.
 export const DB_IMAGE_INPUTS_SHA256 =
-  '9ee77bc4a5f18a6b3aee95ba01429226bc444538be7badb30f71360cd9f25c5f';
+  '9a3ed1615e042203dc229bc72174c84f26bfefa78e625cca9610e3c28f79495b';
 
 /** @returns {string} e.g. "ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r1" */
 export function dbImageRef() {
@@ -214,10 +214,15 @@ export const CLUSTER_AUTOSCALER_IMAGE = 'ghcr.io/hyperformant/cluster-autoscaler
 // Version pin shared by BOTH refs above — deliberately one constant, so the
 // mirror can never end up copying one version under another version's tag.
 export const CLUSTER_AUTOSCALER_TAG = 'v1.32.7';
+// Upstream's linux/amd64 manifest digest for that tag. The mirror copies
+// exactly this manifest, so the digest is identical on both hosts and the
+// deployed ref pins it (see MirroredImage.digest below).
+export const CLUSTER_AUTOSCALER_DIGEST =
+  'sha256:b3a67e07244033d36adc1cbe236fdbf9729b968f9c1c47477e26547a78131c81';
 
-/** @returns {string} the ref k8s deploys — e.g. "ghcr.io/hyperformant/cluster-autoscaler:v1.32.7" */
+/** @returns {string} the ref k8s deploys — e.g. "ghcr.io/hyperformant/cluster-autoscaler:v1.32.7@sha256:…" */
 export function clusterAutoscalerImageRef() {
-  return `${CLUSTER_AUTOSCALER_IMAGE}:${CLUSTER_AUTOSCALER_TAG}`;
+  return `${CLUSTER_AUTOSCALER_IMAGE}:${CLUSTER_AUTOSCALER_TAG}@${CLUSTER_AUTOSCALER_DIGEST}`;
 }
 
 /** @returns {string} the ref the mirror workflow COPIES FROM — never deployed directly */
@@ -273,10 +278,16 @@ export const K8S_MIRROR_ORG = 'ghcr.io/hyperformant';
 export const K8S_UPSTREAM_REGISTRY = 'registry.k8s.io';
 
 /**
- * @typedef {{repo: string, tag: string}} MirroredImage
+ * @typedef {{repo: string, tag: string, digest: string}} MirroredImage
  * `repo` is the path under registry.k8s.io (e.g. `sig-storage/livenessprobe`);
  * `tag` is upstream's tag, reused verbatim on the mirror so a version string
- * means exactly one thing on both hosts.
+ * means exactly one thing on both hosts. `digest` is upstream's linux/amd64
+ * manifest digest for that tag: the mirror job copies exactly that manifest
+ * (and fails if upstream's tag no longer resolves to it), so it is the same
+ * digest on ghcr, and every deployed ref pins it (`name:tag@digest`). Read it
+ * off upstream before mirroring:
+ *   docker buildx imagetools inspect --raw registry.k8s.io/<repo>:<tag> \
+ *     | jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest'
  */
 
 /**
@@ -322,10 +333,11 @@ export const DO_CSI_VERSION = 'v4.17.0';
  * same idiom applyK3sManifests already uses to re-pin the cluster-autoscaler pod.
  *
  * Only registry.k8s.io containers are listed. The driver containers themselves
- * (docker.io/hetznercloud/hcloud-csi-driver, digitalocean/do-csi-plugin) and
- * DO's `alpine:3` init container are deliberately left alone: no evidence of a
- * pull failure on those hosts, and mirroring on speculation would add packages
- * nobody has a reason to trust.
+ * (docker.io/hetznercloud/hcloud-csi-driver, digitalocean/do-csi-plugin) are
+ * deliberately not mirrored: no evidence of a pull failure on those hosts, and
+ * mirroring on speculation would add packages nobody has a reason to trust.
+ * DO's floating `alpine:3` init container is not mirrored either, but it IS
+ * re-pinned in place by digest (CSI_UPSTREAM_IMAGE_PINS below).
  *
  * @type {Record<string, Array<{workload: string, containers: Record<string, MirroredImage>}>>}
  */
@@ -344,17 +356,38 @@ export const CSI_SIDECAR_MIRRORS = {
         'csi-node-driver-registrar': {
           repo: 'sig-storage/csi-node-driver-registrar',
           tag: 'v2.15.0',
+          digest: 'sha256:1ca23bdbb1504e41233d527e826d02dac98571c45a6cd74c5fb28be485d680fa',
         },
-        'liveness-probe': { repo: 'sig-storage/livenessprobe', tag: 'v2.17.0' },
+        'liveness-probe': {
+          repo: 'sig-storage/livenessprobe',
+          tag: 'v2.17.0',
+          digest: 'sha256:e8983e659df16bda5bd8d2900651e1236b1c1bd0c96c8600aec736e7eabdb1e4',
+        },
       },
     },
     {
       workload: 'deployment/hcloud-csi-controller',
       containers: {
-        'csi-attacher': { repo: 'sig-storage/csi-attacher', tag: 'v4.10.0' },
-        'csi-resizer': { repo: 'sig-storage/csi-resizer', tag: 'v2.0.0' },
-        'csi-provisioner': { repo: 'sig-storage/csi-provisioner', tag: 'v6.0.0' },
-        'liveness-probe': { repo: 'sig-storage/livenessprobe', tag: 'v2.17.0' },
+        'csi-attacher': {
+          repo: 'sig-storage/csi-attacher',
+          tag: 'v4.10.0',
+          digest: 'sha256:8a46d7ecbb798f19d7ccd7e510a2efec00ae7ba50fd82cc2f5ac45cedbab0bc1',
+        },
+        'csi-resizer': {
+          repo: 'sig-storage/csi-resizer',
+          tag: 'v2.0.0',
+          digest: 'sha256:25b17c4f84b0ab061da6397caf407c7251a571df5c4071e4917942684c61689a',
+        },
+        'csi-provisioner': {
+          repo: 'sig-storage/csi-provisioner',
+          tag: 'v6.0.0',
+          digest: 'sha256:4c7e7c948bed9d8bb117cd4cdff59699568732147ae151842836cfcb385cbf22',
+        },
+        'liveness-probe': {
+          repo: 'sig-storage/livenessprobe',
+          tag: 'v2.17.0',
+          digest: 'sha256:e8983e659df16bda5bd8d2900651e1236b1c1bd0c96c8600aec736e7eabdb1e4',
+        },
       },
     },
   ],
@@ -365,10 +398,26 @@ export const CSI_SIDECAR_MIRRORS = {
     {
       workload: 'statefulset/csi-do-controller',
       containers: {
-        'csi-provisioner': { repo: 'sig-storage/csi-provisioner', tag: 'v6.2.0' },
-        'csi-attacher': { repo: 'sig-storage/csi-attacher', tag: 'v4.11.0' },
-        'csi-snapshotter': { repo: 'sig-storage/csi-snapshotter', tag: 'v8.5.0' },
-        'csi-resizer': { repo: 'sig-storage/csi-resizer', tag: 'v2.1.0' },
+        'csi-provisioner': {
+          repo: 'sig-storage/csi-provisioner',
+          tag: 'v6.2.0',
+          digest: 'sha256:da2f5c41881009b963c121d3605c68ad9127490f2c209a849b4eb26074b0038b',
+        },
+        'csi-attacher': {
+          repo: 'sig-storage/csi-attacher',
+          tag: 'v4.11.0',
+          digest: 'sha256:4f6b1289ffe62dbe3d2317dd938cd9dd3fb0a7c0088d505cde4effa1e0771dc2',
+        },
+        'csi-snapshotter': {
+          repo: 'sig-storage/csi-snapshotter',
+          tag: 'v8.5.0',
+          digest: 'sha256:f4d58334dc3c0873e544f110a188be47e224ff7e99c6400d2fd7b35de9b962eb',
+        },
+        'csi-resizer': {
+          repo: 'sig-storage/csi-resizer',
+          tag: 'v2.1.0',
+          digest: 'sha256:69e7bf7d929e5d98a5a74e753b45220e6e7b04f35163e48e8a5958bf1d819b4c',
+        },
       },
     },
     {
@@ -377,7 +426,30 @@ export const CSI_SIDECAR_MIRRORS = {
         'csi-node-driver-registrar': {
           repo: 'sig-storage/csi-node-driver-registrar',
           tag: 'v2.16.0',
+          digest: 'sha256:aeecba5b171b50558bab359fdb8e28b9da185f666cef35cd87ac9784e51956c5',
         },
+      },
+    },
+  ],
+};
+
+/**
+ * Upstream CSI containers re-pinned IN PLACE (same registry, digest-pinned
+ * ref) through the same `kubectl set image` seam, for images that need no
+ * mirror but ship floating in upstream's manifest. DO's v4.17.0 driver.yaml
+ * runs its `automount-udev-deleter` init container as bare `alpine:3`, a
+ * floating major; `kubectl set image` addresses init containers by name too.
+ * Values are full refs. csiSidecarSetImagePlan merges these into the same
+ * per-workload call as the mirrors, so no extra rollout happens.
+ * @type {Record<string, Array<{workload: string, containers: Record<string, string>}>>}
+ */
+export const CSI_UPSTREAM_IMAGE_PINS = {
+  digitalocean: [
+    {
+      workload: 'daemonset/csi-do-node',
+      containers: {
+        'automount-udev-deleter':
+          'alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6',
       },
     },
   ],
@@ -391,7 +463,11 @@ export const CSI_SIDECAR_MIRRORS = {
  * registry.k8s.io roulette is played). Flagged for mirroring in #222's body.
  * @type {MirroredImage}
  */
-export const PAUSE_IMAGE = { repo: 'pause', tag: '3.9' };
+export const PAUSE_IMAGE = {
+  repo: 'pause',
+  tag: '3.9',
+  digest: 'sha256:8d4106c88ec0bd28001e34c975d65175d994072d65341f62a8ab0754b0fafe10',
+};
 
 /**
  * Every registry.k8s.io image we mirror, in publish order.
@@ -408,7 +484,11 @@ export const MIRRORED_K8S_IMAGES = dedupeImages([
   // Keeps its own named constants because deploy code references the CA image
   // directly, but it is mirrored by the same matrix as everything else — one
   // mechanism, not two.
-  { repo: 'autoscaling/cluster-autoscaler', tag: CLUSTER_AUTOSCALER_TAG },
+  {
+    repo: 'autoscaling/cluster-autoscaler',
+    tag: CLUSTER_AUTOSCALER_TAG,
+    digest: CLUSTER_AUTOSCALER_DIGEST,
+  },
   ...Object.values(CSI_SIDECAR_MIRRORS).flatMap((specs) =>
     specs.flatMap((spec) => Object.values(spec.containers)),
   ),
@@ -451,10 +531,19 @@ export function k8sUpstreamRef({ repo, tag }) {
 
 /**
  * @param {MirroredImage} image
- * @returns {string} the ref clusters actually pull — e.g. "ghcr.io/hyperformant/livenessprobe:v2.13.1"
+ * @returns {string} the tag the mirror job pushes — e.g. "ghcr.io/hyperformant/livenessprobe:v2.17.0"
  */
-export function k8sMirrorRef({ repo, tag }) {
+export function k8sMirrorTagRef({ repo, tag }) {
   return `${K8S_MIRROR_ORG}/${mirroredImageName(repo)}:${tag}`;
+}
+
+/**
+ * @param {MirroredImage} image
+ * @returns {string} the ref clusters actually pull, digest-pinned — e.g.
+ *   "ghcr.io/hyperformant/livenessprobe:v2.17.0@sha256:…"
+ */
+export function k8sMirrorRef(image) {
+  return `${k8sMirrorTagRef(image)}@${image.digest}`;
 }
 
 /**
@@ -479,15 +568,35 @@ export function mirroredK8sPackageNames() {
  */
 export function csiSidecarSetImagePlan(providerId) {
   const specs = (providerId && CSI_SIDECAR_MIRRORS[providerId]) || [];
-  return specs.map(({ workload, containers }) => ({
+  const inPlace = (providerId && CSI_UPSTREAM_IMAGE_PINS[providerId]) || [];
+  const plan = specs.map(({ workload, containers }) => ({
     workload,
     setImageArgs: Object.entries(containers).map(
       ([container, image]) => `${container}=${k8sMirrorRef(image)}`,
     ),
   }));
+  for (const { workload, containers } of inPlace) {
+    const args = Object.entries(containers).map(([container, ref]) => `${container}=${ref}`);
+    const entry = plan.find((p) => p.workload === workload);
+    if (entry) entry.setImageArgs.push(...args);
+    else plan.push({ workload, setImageArgs: args });
+  }
+  return plan;
 }
 
-/** @returns {string} the mirrored pause ref — e.g. "ghcr.io/hyperformant/pause:3.9" */
+/**
+ * Throwaway probe pods `vibecarbon diagnose` runs in a cluster: busybox for
+ * the in-cluster DNS/HTTP probe, netshoot for the deep network battery.
+ * Pinned by tag and multi-arch index digest (both carry amd64), so a
+ * diagnosis never depends on what a floating tag resolved to that day.
+ * Dependabot sees them through docker/image-pins/Dockerfile.
+ */
+export const DIAG_BUSYBOX_IMAGE =
+  'busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662';
+export const DIAG_NETSHOOT_IMAGE =
+  'nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70';
+
+/** @returns {string} the mirrored pause ref — e.g. "ghcr.io/hyperformant/pause:3.9@sha256:…" */
 export function pauseImageRef() {
   return k8sMirrorRef(PAUSE_IMAGE);
 }

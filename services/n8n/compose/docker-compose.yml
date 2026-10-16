@@ -8,7 +8,7 @@ services:
       - ./volumes/db/n8n-init.sh:/docker-entrypoint-initdb.d/zz-n8n-init.sh:Z
 
   n8n:
-    image: n8nio/n8n:latest
+    image: n8nio/n8n:2.43.6@sha256:dd580fe1ab6e99e85bc66f2acf8bc8c5e9409fbe61b2e2803c5024403ef52833
     container_name: ${PROJECT_NAME}-n8n
     restart: unless-stopped
     ports:
@@ -74,7 +74,7 @@ services:
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
 
   n8n-setup:
-    image: alpine:latest
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     container_name: ${PROJECT_NAME}-n8n-setup
     volumes:
       - ./volumes/n8n/scripts:/scripts:ro

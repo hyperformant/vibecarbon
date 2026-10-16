@@ -32,7 +32,7 @@ spec:
       # keeps runAsNonRoot).
       initContainers:
         - name: chown-storage
-          image: registry:2
+          image: registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
           command: ["/bin/sh", "-c", "chown -R 1000:1000 /var/lib/registry && chmod 700 /var/lib/registry"]
           securityContext:
             runAsUser: 0
@@ -42,7 +42,7 @@ spec:
               mountPath: /var/lib/registry
       containers:
         - name: registry
-          image: registry:2
+          image: registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
           # ROOT FIX (2026-08-30, run 33332292268): image layers live on the
           # MASTER NODE DISK, never object storage. The registry is a
           # transport cache — every deploy (each k8s-ha cluster separately,

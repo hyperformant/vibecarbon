@@ -21,7 +21,8 @@
  * So EVERY registry.k8s.io image on a customer/e2e path is mirrored, and every
  * consuming reference resolves through src/lib/images.js. These tests pin:
  *
- *  (a) the mirror set's shape — flat under the org, tags never digests, no dupes;
+ *  (a) the mirror set's shape — flat under the org, upstream's tag plus its
+ *      pinned amd64 digest, no dupes;
  *  (b) the CSI sidecar re-pin spec matches the CSI driver versions cloud-init
  *      actually installs (a version bump there without re-deriving the sidecar
  *      tags here would silently re-open the 403);
@@ -36,6 +37,7 @@ import { extname, join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CSI_SIDECAR_MIRRORS,
+  CSI_UPSTREAM_IMAGE_PINS,
   clusterAutoscalerImageRef,
   clusterAutoscalerUpstreamRef,
   csiSidecarSetImagePlan,
@@ -44,6 +46,7 @@ import {
   K8S_MIRROR_ORG,
   K8S_UPSTREAM_REGISTRY,
   k8sMirrorRef,
+  k8sMirrorTagRef,
   k8sUpstreamRef,
   MIRRORED_K8S_IMAGES,
   mirroredK8sPackageNames,
@@ -126,19 +129,27 @@ describe('mirror set shape', () => {
       const afterOrg = mirror.slice(`${K8S_MIRROR_ORG}/`.length);
       expect(afterOrg).not.toContain('/');
       const basename = image.repo.slice(image.repo.lastIndexOf('/') + 1);
-      expect(afterOrg).toBe(`${basename}:${image.tag}`);
+      expect(afterOrg).toBe(`${basename}:${image.tag}@${image.digest}`);
+      expect(k8sMirrorTagRef(image)).toBe(`${K8S_MIRROR_ORG}/${basename}:${image.tag}`);
     }
   });
 
-  it('tags never diverge from upstream, and are never digest pins', () => {
+  it('tags never diverge from upstream, and every deployed ref pins the amd64 digest', () => {
     // The mirror is a digest-preserving manifest copy, so `v2.15.0` on ghcr
     // must mean the same bits as `v2.15.0` upstream. One tag field feeds both
-    // refs, which is what makes that structurally true.
+    // refs, and one digest field (upstream's linux/amd64 manifest, which the
+    // job copies verbatim) pins what clusters pull.
     for (const image of MIRRORED_K8S_IMAGES) {
       expect(image.tag).not.toContain('@');
-      expect(k8sMirrorRef(image)).not.toContain('@sha256:');
-      expect(k8sMirrorRef(image).split(':').pop()).toBe(k8sUpstreamRef(image).split(':').pop());
+      expect(image.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+      expect(k8sMirrorRef(image).endsWith(`@${image.digest}`)).toBe(true);
+      expect(k8sMirrorTagRef(image).split(':').pop()).toBe(k8sUpstreamRef(image).split(':').pop());
     }
+  });
+
+  it('no two entries share a digest (a copy-paste pin would point one image at another)', () => {
+    const digests = MIRRORED_K8S_IMAGES.map((i) => i.digest);
+    expect(digests).toEqual([...new Set(digests)]);
   });
 
   it('has no duplicate (repo, tag) entries', () => {
@@ -193,7 +204,9 @@ describe('mirror set shape', () => {
   });
 
   it('mirrors pause — the scale-trigger + local-overlay placeholder image', () => {
-    expect(pauseImageRef()).toBe('ghcr.io/hyperformant/pause:3.9');
+    expect(pauseImageRef()).toBe(
+      'ghcr.io/hyperformant/pause:3.9@sha256:8d4106c88ec0bd28001e34c975d65175d994072d65341f62a8ab0754b0fafe10',
+    );
     expect(MIRRORED_K8S_IMAGES.some((i) => i.repo === 'pause' && i.tag === '3.9')).toBe(true);
   });
 });
@@ -360,16 +373,49 @@ describe('CSI sidecar re-pin spec tracks the CSI releases cloud-init installs', 
 });
 
 describe('csiSidecarSetImagePlan()', () => {
-  it('emits kubectl `set image` args pointing only at the mirrors', () => {
+  it('emits kubectl `set image` args pointing at the mirrors or an in-place pin, all by digest', () => {
     for (const providerId of Object.keys(CSI_SIDECAR_MIRRORS)) {
       const plan = csiSidecarSetImagePlan(providerId);
       expect(plan.length).toBeGreaterThan(0);
+      const inPlace = new Set(
+        (CSI_UPSTREAM_IMAGE_PINS[providerId as keyof typeof CSI_UPSTREAM_IMAGE_PINS] ?? []).flatMap(
+          ({ containers }) => Object.entries(containers).map(([c, ref]) => `${c}=${ref}`),
+        ),
+      );
       for (const { workload, setImageArgs } of plan) {
         expect(workload).toMatch(/^(daemonset|deployment|statefulset)\//);
         expect(setImageArgs.length).toBeGreaterThan(0);
         for (const arg of setImageArgs) {
-          expect(arg).toMatch(/^[a-z0-9-]+=ghcr\.io\/hyperformant\/[a-z0-9-]+:[\w.-]+$/);
+          expect(arg).toMatch(/@sha256:[a-f0-9]{64}$/);
           expect(arg).not.toContain('registry.k8s.io');
+          if (inPlace.has(arg)) continue;
+          expect(arg).toMatch(
+            /^[a-z0-9-]+=ghcr\.io\/hyperformant\/[a-z0-9-]+:[\w.-]+@sha256:[a-f0-9]{64}$/,
+          );
+        }
+      }
+    }
+  });
+
+  it('re-pins DO’s floating alpine:3 init container in the same call as its node sidecar', () => {
+    // Upstream's driver.yaml ships `automount-udev-deleter` as bare alpine:3.
+    // It needs no mirror (Docker Hub, not registry.k8s.io), only a pin, and it
+    // rides the csi-do-node `set image` that already happens.
+    const upstream = UPSTREAM_CSI_MANIFESTS.digitalocean.workloads['daemonset/csi-do-node'];
+    expect(upstream['automount-udev-deleter']).toBe('alpine:3');
+    const node = csiSidecarSetImagePlan('digitalocean').filter(
+      (p) => p.workload === 'daemonset/csi-do-node',
+    );
+    expect(node).toHaveLength(1);
+    const arg = node[0].setImageArgs.find((a) => a.startsWith('automount-udev-deleter='));
+    expect(arg).toMatch(/^automount-udev-deleter=alpine:3\.\d+\.\d+@sha256:[a-f0-9]{64}$/);
+    // Every in-place pin addresses a container upstream actually ships.
+    for (const [provider, specs] of Object.entries(CSI_UPSTREAM_IMAGE_PINS)) {
+      const workloads = UPSTREAM_CSI_MANIFESTS[provider as keyof typeof UPSTREAM_CSI_MANIFESTS]
+        .workloads as Record<string, Record<string, string>>;
+      for (const { workload, containers } of specs) {
+        for (const container of Object.keys(containers)) {
+          expect(workloads[workload], `${provider} ${workload}`).toHaveProperty(container);
         }
       }
     }
@@ -477,13 +523,14 @@ describe('publish workflow mirrors exactly the set', () => {
     expect(code).toContain(`node ${MATRIX_SCRIPT}`);
   });
 
-  it('the generator emits one src/dst pair per mirror-set entry', () => {
+  it('the generator emits one src/dst/digest entry per mirror-set entry', () => {
     const out = execFileSync('node', [join(ROOT, MATRIX_SCRIPT)], { encoding: 'utf8' });
     const matrix = JSON.parse(out);
     expect(matrix).toEqual(
       MIRRORED_K8S_IMAGES.map((image) => ({
         src: k8sUpstreamRef(image),
-        dst: k8sMirrorRef(image),
+        dst: k8sMirrorTagRef(image),
+        digest: image.digest,
       })),
     );
     // Every destination is a distinct tag under the org — the mirror job runs

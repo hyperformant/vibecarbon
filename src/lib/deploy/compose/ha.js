@@ -200,11 +200,17 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
  * untagged `alpine/socat` meant each node cached whatever `:latest` resolved to
  * on ITS first pull, so two nodes in one HA pair could run different builds.
  *
- * LOCKSTEP: must match the tag in
- * carbon/k8s/base/repl-gateway/repl-gateway.yaml (the k8s-tier gateway).
- * tests/unit/deploy/socat-pin.test.ts fails the build if they drift.
+ * Pinned by tag AND multi-arch index digest, so even a retagged 1.8.1.3
+ * cannot reach a node.
+ *
+ * LOCKSTEP: must match the ref in
+ * carbon/k8s/base/repl-gateway/repl-gateway.yaml (the k8s-tier gateway) and
+ * docker/image-pins/Dockerfile (Dependabot's view of this pin).
+ * tests/unit/deploy/socat-pin.test.ts and image-digest-census.test.ts fail
+ * the build if they drift.
  */
-export const SOCAT_IMAGE_TAG = '1.8.1.3';
+export const SOCAT_IMAGE =
+  'alpine/socat:1.8.1.3@sha256:fb3862c949af7c79996d0e514ee96128644d840835ed5368eeecb14a869de361';
 
 export function buildReplicationOverlay(selfWgIp) {
   return `version: "3.8"
@@ -213,7 +219,7 @@ services:
     ports:
       - "${REPL_PORT}:5432"
   repl-gateway:
-    image: alpine/socat:${SOCAT_IMAGE_TAG}
+    image: ${SOCAT_IMAGE}
     network_mode: host
     restart: unless-stopped
     command:

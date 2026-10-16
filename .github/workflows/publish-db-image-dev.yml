@@ -127,8 +127,9 @@ jobs:
       image: ${{ needs.plan.outputs.image }}
       tag: ${{ needs.plan.outputs.tag }}
       smoke: .github/scripts/smoke-db-image.sh
-      # The db Dockerfile's `FROM <walg-from>` resolves to this run's wal-g
-      # digest when the branch rebuilt wal-g, else to the published tag.
+      # The db Dockerfile's `FROM <walg-from>` (the full digest-pinned ref,
+      # which is the build-context key) resolves to this run's wal-g digest
+      # when the branch rebuilt wal-g, else to the pinned published build.
       build-contexts: >-
         ${{ needs.build-walg.result == 'success' &&
         format('{0}=docker-image://{1}', needs.plan.outputs.walg-from, needs.build-walg.outputs.ref) || '' }}

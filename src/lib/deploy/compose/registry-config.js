@@ -23,7 +23,12 @@
  * volume so the layer diff pays off across deploys.
  */
 
-export const REGISTRY_IMAGE = 'registry:2';
+// Pinned by the multi-arch index digest (tests/unit/deploy/image-digest-census.test.ts).
+// Stays on the 2.x line: registry 3 changed the config format. Dependabot
+// proposes digest moves through docker/image-pins/Dockerfile, which the
+// census keeps byte-identical to this constant.
+export const REGISTRY_IMAGE =
+  'registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373';
 export const REGISTRY_CONTAINER = 'vibecarbon-registry';
 export const REGISTRY_PORT = 5000;
 

@@ -167,8 +167,9 @@ describe('cluster-autoscaler pod images lead the pre-pull list', () => {
   it('CA refs clear the same shell-safety allowlist the chart refs must clear', () => {
     // They are interpolated into a remote `sh -s` script, same as every
     // parsed chart ref.
+    // (plus `@sha256:<hex>` for a digest-pinned ref: still shell-inert).
     for (const ref of clusterAutoscalerPodImages()) {
-      expect(ref).toMatch(/^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+$/);
+      expect(ref).toMatch(/^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+(@sha256:[a-f0-9]{64})?$/);
     }
   });
 });

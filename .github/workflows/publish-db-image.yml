@@ -14,10 +14,17 @@ on:
 permissions:
   contents: read
 jobs:
-  # The static wal-g binary image publishes FIRST: the db image below
-  # COPY --froms it, so `needs:` in this one workflow is what serializes a
-  # same-push bump of both. Two workflows racing the same push was the
-  # alternative, and the db leg would lose it.
+  # The static wal-g binary image. The db image below COPY --froms it BY
+  # DIGEST (docker/postgres-walg/Dockerfile pins
+  # ghcr.io/hyperformant/wal-g:<version>@sha256:...), so that Dockerfile line
+  # is the single record of which wal-g build the db image carries, and the
+  # db build never consumes a digest this run just minted. wal-g republishes
+  # only when its own inputs changed in this push (or its tag is missing, or
+  # on a manual dispatch): every other run would otherwise move the tag's
+  # digest for nothing (the build is not byte-reproducible) and leave the
+  # pin looking stale. Adopting a republished wal-g is a re-pin of that FROM
+  # line plus a DB_IMAGE_TAG revision bump; Dependabot's docker ecosystem
+  # watches docker/postgres-walg and proposes the re-pin.
   #
   # amd64 + arm64, each built on its OWN native runner through the same
   # native-multiarch-image.yml the db image uses (ubuntu-24.04 /
@@ -34,19 +41,43 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: read   # see whether the wal-g tag already exists
     outputs:
       tag: ${{ steps.ref.outputs.tag }}
+      publish: ${{ steps.ref.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0   # diff this push's range for docker/wal-g changes
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - id: ref
-        name: Resolve wal-g version from docker/wal-g/Dockerfile
+        name: Resolve the wal-g version and whether to publish it
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           V=$(grep -oP 'ARG WALG_VERSION=v\K[0-9.]+' docker/wal-g/Dockerfile)
           test -n "$V"
+          # Only a definite "not found" counts as missing; any other lookup
+          # error fails the run rather than guess.
+          if out=$(docker buildx imagetools inspect "ghcr.io/hyperformant/wal-g:$V" 2>&1 >/dev/null); then MISSING=false
+          elif grep -q 'not found' <<<"$out"; then MISSING=true
+          else echo "$out" >&2; exit 1; fi
+          if [ "$EVENT" != push ] || [ "$MISSING" = true ]; then PUBLISH=true
+          elif ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then PUBLISH=true
+          elif git diff --quiet "$BEFORE" HEAD -- docker/wal-g ':(exclude)docker/wal-g/README.md'; then PUBLISH=false
+          else PUBLISH=true; fi
           echo "tag=$V" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "wal-g $V: missing=$MISSING publish=$PUBLISH" >> "$GITHUB_STEP_SUMMARY"
   publish-walg:
     needs: walg-ref
+    if: needs.walg-ref.outputs.publish == 'true'
     permissions:
       contents: read
       packages: write   # push the per-arch digests and the multi-arch tag to ghcr
@@ -87,8 +118,10 @@ jobs:
           TAG=$(grep -oP "^export const DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
           echo "image=$IMG" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+  # No `needs: publish-walg`: the db image takes wal-g from the digest its
+  # Dockerfile pins, which is already published, never from this run.
   build-db:
-    needs: [publish-walg, db-ref]
+    needs: db-ref
     permissions:
       contents: read
       packages: write   # push the per-arch digests and the multi-arch tag to ghcr

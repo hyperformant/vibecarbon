@@ -40,7 +40,7 @@ spec:
           # 2026-07-31 until the rollout timed out. ghcr.io is already this
           # pod's other registry (see the sidecar below). Full incident +
           # bump procedure: src/lib/images.js.
-          image: ghcr.io/hyperformant/cluster-autoscaler:v1.32.7
+          image: ghcr.io/hyperformant/cluster-autoscaler:v1.32.7@sha256:b3a67e07244033d36adc1cbe236fdbf9729b968f9c1c47477e26547a78131c81
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true

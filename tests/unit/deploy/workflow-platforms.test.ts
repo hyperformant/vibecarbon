@@ -320,7 +320,7 @@ describe('wal-g builds natively per arch in both channels (arch audit F6)', () =
     expect(read(WALG_SMOKE)).toMatch(/--entrypoint \/usr\/local\/bin\/wal-g "\$IMAGE" --version/);
   });
 
-  it('release: publish-walg is the shared workflow, and the db build waits on it', () => {
+  it('release: publish-walg is the shared workflow, gated on a wal-g change, never feeding the db build', () => {
     const wf = workflowOf('.github/workflows/publish-db-image.yml');
     const walg = wf.jobs['publish-walg'] as CallerJob;
     expect(walg.uses).toBe(REUSABLE);
@@ -334,7 +334,18 @@ describe('wal-g builds natively per arch in both channels (arch audit F6)', () =
     });
     expect(wf.jobs['walg-ref']['runs-on']).toBe('ubuntu-24.04');
     expect(runsOf(wf.jobs['walg-ref'])).toMatch(/ARG WALG_VERSION=v/);
-    expect((wf.jobs['build-db'] as CallerJob).needs).toContain('publish-walg');
+    // Republished only when docker/wal-g changed in the push (or the tag is
+    // missing, or by hand): an unchanged rebuild would move the tag's digest
+    // for nothing, since the build is not byte-reproducible.
+    expect(runsOf(wf.jobs['walg-ref'])).toMatch(
+      /git diff --quiet "\$BEFORE" HEAD -- docker\/wal-g/,
+    );
+    expect((walg as CallerJob & { if?: string }).if).toBe(
+      "needs.walg-ref.outputs.publish == 'true'",
+    );
+    // The db image COPY --froms the wal-g digest its Dockerfile pins, so it
+    // must not wait on (or consume) this run's wal-g publish.
+    expect((wf.jobs['build-db'] as CallerJob).needs).not.toContain('publish-walg');
   });
 
   it('dev: build-walg is the shared workflow, consumed by digest by the db build', () => {
@@ -413,9 +424,9 @@ describe('the release db publish is unchanged by the dev channel', () => {
     expect((wf.on.push as { branches: string[] }).branches).toEqual(['main']);
   });
 
-  it('builds the release ref through the shared workflow, after wal-g publishes', () => {
+  it('builds the release ref through the shared workflow, from the pinned wal-g digest', () => {
     expect(build.uses).toBe(REUSABLE);
-    expect(build.needs).toEqual(['publish-walg', 'db-ref']);
+    expect(build.needs).toBe('db-ref');
     expect(build.with).toMatchObject({
       context: 'docker/postgres-walg',
       image: expr('needs.db-ref.outputs.image'),
