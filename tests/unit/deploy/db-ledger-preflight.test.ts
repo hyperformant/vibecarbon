@@ -31,9 +31,14 @@ describe('dbLedgerProbeCommand', () => {
     expect(cmd).toContain(
       `running=$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null) || running=absent`,
     );
-    expect(cmd).toContain('[ "$running" = absent ] && exit 0');
+    expect(cmd).toContain('[ "$running" = absent ] && {');
     expect(cmd).toContain('[ "$running" = true ] || exit 0');
     expect(cmd).toContain('docker exec "$c" psql -U postgres -d postgres -tAc');
+  });
+
+  it('when the container is absent, looks for the compose db volume by its label', () => {
+    expect(cmd).toContain('docker volume ls -q --filter label=com.docker.compose.volume=db_data');
+    expect(cmd).toContain('VOLUME=');
   });
 
   it('ships the ledger query base64-encoded, so no quoting can bend it', () => {
@@ -47,6 +52,16 @@ describe('dbLedgerProbeCommand', () => {
 describe('parseDbLedgerProbe', () => {
   it('no container: a first deploy', () => {
     expect(parseDbLedgerProbe('STATE=absent\n', PROJECT).verdict).toBe('absent');
+  });
+
+  it('no container and no db volume (empty VOLUME): still a first deploy', () => {
+    expect(parseDbLedgerProbe('STATE=absent\nVOLUME=\n', PROJECT).verdict).toBe('absent');
+  });
+
+  it('no container but a db volume left behind: unreadable, origin cannot be checked', () => {
+    const r = parseDbLedgerProbe('STATE=absent\nVOLUME=acme_db_data\n', PROJECT);
+    expect(r.verdict).toBe('unreadable');
+    expect(r.detail).toContain('db volume exists but no db container is running');
   });
 
   it('running with tables and no ledger: the retired stack made it', () => {
@@ -137,6 +152,25 @@ describe('assertDbMadeByThisStack', () => {
     const sshRun = vi.fn().mockResolvedValue(running('psql:FATAL'));
     await expect(assertDbMadeByThisStack(['1.1.1.1'], key, PROJECT, { sshRun })).rejects.toThrow(
       /docker logs acme-db/,
+    );
+  });
+
+  it('an absent container with a db volume tells the operator to start the db and deploy again', async () => {
+    const sshRun = vi.fn().mockResolvedValue('STATE=absent\nVOLUME=acme_db_data\n');
+    const err = await assertDbMadeByThisStack(['1.1.1.1'], key, PROJECT, { sshRun }).catch(
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    const msg = String(err.message);
+    expect(msg).toContain('docker compose up -d db');
+    expect(msg).toContain('deploy again');
+    expect(msg).not.toMatch(/—/);
+  });
+
+  it('a running db that does not answer hints that stopping a crash-looping db falls back to its image', async () => {
+    const sshRun = vi.fn().mockResolvedValue(running('psql:FATAL'));
+    await expect(assertDbMadeByThisStack(['1.1.1.1'], key, PROJECT, { sshRun })).rejects.toThrow(
+      /crash-looping.*docker stop acme-db.*image/s,
     );
   });
 });

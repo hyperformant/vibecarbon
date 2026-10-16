@@ -26,7 +26,12 @@
  *    The retired stack built its db as `<project>-db:latest` on the server;
  *    a stopped container of that image holds that stack's data: refuse. A
  *    stopped container of a pulled image is left to the app's migrator.
- *  - absent: a first deploy, nothing to check.
+ *  - absent: no container. With no compose db volume either (looked up by its
+ *    `com.docker.compose.volume=db_data` label; a server hosts one project) it
+ *    is a first deploy, nothing to check. With the volume still there, an old
+ *    stack's data may be in it and nothing can be asked: unreadable, and the
+ *    operator starts the db from the compose files still on the server (the
+ *    bundle is not uploaded yet) so the running path can read the ledger.
  */
 import { sshRunAsync } from './index.js';
 
@@ -35,8 +40,8 @@ export const PRE_LEDGER_SQL =
   "select to_regclass('drizzle.__drizzle_migrations') is null and exists(select 1 from pg_tables where schemaname='public')";
 
 /**
- * The remote script. Prints `STATE=`, `IMAGE=` and (when running) `PRE_LEDGER=`
- * lines; psql's own stderr is folded in so a failed read can be quoted.
+ * The remote script. Prints `STATE=`, then `VOLUME=` (container absent) or `IMAGE=`
+ * and (when running) `PRE_LEDGER=` lines; psql's own stderr is folded in so a failed read can be quoted.
  *
  * @param {string} projectName
  * @returns {string}
@@ -50,7 +55,7 @@ export function dbLedgerProbeCommand(projectName) {
     // prints an empty line, and the substitution would capture both.
     `running=$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null) || running=absent`,
     `echo "STATE=$running"`,
-    `[ "$running" = absent ] && exit 0`,
+    `[ "$running" = absent ] && { echo "VOLUME=$(docker volume ls -q --filter label=com.docker.compose.volume=db_data | head -n 1)"; exit 0; }`,
     `echo "IMAGE=$(docker inspect -f '{{.Config.Image}}' "$c")"`,
     `[ "$running" = true ] || exit 0`,
     `out=$(docker exec "$c" psql -U postgres -d postgres -tAc "$(echo ${sqlB64} | base64 -d)" 2>&1); echo "PRE_LEDGER=$(echo "$out" | tr -d '[:space:]')"`,
@@ -68,7 +73,15 @@ export function parseDbLedgerProbe(output, projectName) {
   const field = (k) => new RegExp(`^${k}=(.*)$`, 'm').exec(String(output ?? ''))?.[1]?.trim();
   const state = field('STATE');
   const image = field('IMAGE') ?? '';
-  if (state === 'absent') return { verdict: 'absent', detail: 'no db container' };
+  if (state === 'absent') {
+    const volume = field('VOLUME');
+    return volume
+      ? {
+          verdict: 'unreadable',
+          detail: `a db volume exists but no db container is running, so its origin cannot be checked (volume ${volume.slice(0, 100)})`,
+        }
+      : { verdict: 'absent', detail: 'no db container' };
+  }
   if (state === 'false') {
     const retired = image === `${projectName}-db:latest` || image === `${projectName}-db`;
     return retired
@@ -113,11 +126,15 @@ export async function assertDbMadeByThisStack(ips, sshKeyPath, projectName, opti
     const { verdict, detail } = parseDbLedgerProbe(out, projectName);
     if (verdict === 'absent' || verdict === 'ok') continue;
     if (verdict === 'unreadable') {
+      const noContainer = /no db container is running/.test(detail);
+      const how = noContainer
+        ? `Start the db container with \`docker compose up -d db\` in the project directory on the server (\`ssh -i ${sshKeyPath} root@${ip}\`; the old compose files are still there, nothing new has been uploaded), then deploy again so the check can read its migration ledger.`
+        : `Check \`docker logs ${projectName}-db\` on the server (\`ssh -i ${sshKeyPath} root@${ip}\`). ` +
+          `If the db container is crash-looping, \`docker stop ${projectName}-db\` lets the check fall back to the container's image instead. Then deploy again.`;
       throw new Error(
         `Could not check the database on ${ip} before replacing the stack (${detail}). ` +
           'Refusing to swap the stack without knowing whether it holds data from an older ' +
-          `vibecarbon stack. Check \`docker logs ${projectName}-db\` on the server ` +
-          `(\`ssh -i ${sshKeyPath} root@${ip}\`), then deploy again.`,
+          `vibecarbon stack. ${how}`,
       );
     }
     throw new Error(
