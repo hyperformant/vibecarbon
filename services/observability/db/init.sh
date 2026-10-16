@@ -43,9 +43,13 @@ EOSQL
 # Set/rotate the password. Pass it as a psql variable and use :'pw' quoting so
 # psql does the SQL-literal escaping — safe even if an operator hand-sets a
 # password containing a quote (the heredoc is quoted, so the shell never
-# interpolates it into SQL). The value still reaches the db over the psql arg
-# vector, but it is already present in this container's env and .env.
-psql -v ON_ERROR_STOP=1 -v pw="$OBSERVABILITY_DB_PASSWORD" \
+# interpolates it into SQL). psql reads it from the container env with \getenv,
+# so it never appears in the process list, and the two SETs keep a failing or
+# slow statement's text (literal included) out of the server log.
+psql -v ON_ERROR_STOP=1 \
   --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'EOSQL'
+SET log_min_error_statement = panic;
+SET log_min_duration_statement = -1;
+\getenv pw OBSERVABILITY_DB_PASSWORD
 ALTER ROLE observability_ro WITH PASSWORD :'pw';
 EOSQL

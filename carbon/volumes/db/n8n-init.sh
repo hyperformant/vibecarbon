@@ -33,16 +33,19 @@ $$;
 ALTER ROLE n8n NOSUPERUSER BYPASSRLS;
 EOSQL
 
-# Set the password and create the role's own database. The password goes in
-# as a psql variable quoted with :'pw', so psql does the SQL-literal escaping
-# and the shell never splices it into SQL (quoted heredoc). The ALTER ROLE
-# still carries it as a literal, and a failing statement's text goes to the
-# server log (log_min_error_statement = error), so this session turns that
-# off first. CREATE DATABASE cannot run inside a transaction, so this is its
+# Set the password and create the role's own database. The password is read from the
+# container env by psql (\getenv, so it is never in the process list) into a
+# variable quoted with :'pw', so psql does the SQL-literal escaping and the
+# shell never splices it into SQL (quoted heredoc). The ALTER ROLE still
+# carries it as a literal, and a failing or slow statement's text goes to the
+# server log (log_min_error_statement = error, log_min_duration_statement), so
+# this session turns both off first. CREATE DATABASE cannot run inside a transaction, so this is its
 # own call.
-psql -v ON_ERROR_STOP=1 -v pw="$N8N_DB_PASSWORD" \
+psql -v ON_ERROR_STOP=1 \
   --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'EOSQL'
 SET log_min_error_statement = panic;
+SET log_min_duration_statement = -1;
+\getenv pw N8N_DB_PASSWORD
 ALTER ROLE n8n WITH PASSWORD :'pw';
 SELECT 'CREATE DATABASE n8n WITH OWNER n8n ENCODING ''UTF8'' TEMPLATE template0'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'n8n')\gexec

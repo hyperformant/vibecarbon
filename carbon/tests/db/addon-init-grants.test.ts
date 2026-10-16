@@ -40,6 +40,8 @@ function initSqlBlocks(role: string): string[] {
   return blocks.map((sql) =>
     sql
       .replaceAll('${POSTGRES_PASSWORD}', 'test-only-password')
+      // psql-only: the password is read from the env inside the SQL.
+      .replace(/^\\getenv pw \w+\n/m, '')
       .replaceAll(":'pw'", "'test-only-password'")
       // `SELECT 'CREATE DATABASE ...' WHERE ... \gexec` is a psql meta-command,
       // and the database grant needs that database: neither is under test.

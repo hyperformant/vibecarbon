@@ -83,16 +83,16 @@ describe('add-on database passwords', () => {
         );
       });
 
-      it('the init script refuses an empty password and sets it with :pw quoting, off the error log', () => {
+      it('the init script refuses an empty password and sets it with :pw quoting, off the error and slow-statement logs, never on argv', () => {
         for (const file of [`services/${name}/db/init.sh`, `carbon/volumes/db/${name}-init.sh`]) {
           const script = read(file);
           expect(script, file).toContain(`: "\${${key}:?`);
-          expect(script, file).toContain(`-v pw="$${key}"`);
-          const call = script.slice(script.indexOf(`-v pw="$${key}"`));
-          expect(call).toMatch(/^-v pw="[^"]+" \\\n[^\n]*<<'EOSQL'\n/);
-          expect(call).toMatch(
+          // The password is read inside the SQL, never passed on psql's argv.
+          expect(script, file).not.toMatch(/-v pw=/);
+          expect(script, file).toContain(`\\getenv pw ${key}\n`);
+          expect(script, file).toMatch(
             new RegExp(
-              `SET log_min_error_statement = panic;\\nALTER ROLE ${name} WITH PASSWORD :'pw';`,
+              `SET log_min_error_statement = panic;\\nSET log_min_duration_statement = -1;\\n\\\\getenv pw ${key}\\nALTER ROLE ${name} WITH PASSWORD :'pw';`,
             ),
           );
         }
@@ -152,5 +152,15 @@ describe('add-on database passwords', () => {
       mkdirSync(join(bare, 'x'));
       expect(ensureAddonSecrets(bare)).toEqual([]);
     });
+  });
+});
+
+describe('observability_ro password', () => {
+  it('is read with \\getenv, off argv and both statement logs', () => {
+    const script = read('services/observability/db/init.sh');
+    expect(script).not.toMatch(/-v pw=/);
+    expect(script).toContain(
+      "SET log_min_error_statement = panic;\nSET log_min_duration_statement = -1;\n\\getenv pw OBSERVABILITY_DB_PASSWORD\nALTER ROLE observability_ro WITH PASSWORD :'pw';",
+    );
   });
 });
