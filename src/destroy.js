@@ -55,6 +55,7 @@ import {
 import { envIdentityOf } from './lib/env-identity.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
+import { describeCredentialSource } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
   getObjectStorageProvider,
@@ -1954,6 +1955,19 @@ export function recordPulumiDestroyOutcome({
 }
 
 /**
+ * The line naming which DNS-cleanup token destroy will use and where it came
+ * from (the project's .env.local or the shell), the same way the provider
+ * API token lines do. It used to say "environment variable" for both.
+ * Exported for unit testing.
+ * @param {{name: string, tokenEnv: string}} dnsRow
+ * @returns {string}
+ */
+export function dnsTokenSourceLine(dnsRow) {
+  const { where } = describeCredentialSource([dnsRow.tokenEnv]);
+  return `✓ Using ${dnsRow.name} API token (${dnsRow.tokenEnv}) from ${where}`;
+}
+
+/**
  * Resolve credentials for the Pulumi state backend, provider-aware — the fix
  * for M3 Task 9g. A raw `process.env.HETZNER_ACCESS_KEY`/`HETZNER_SECRET_KEY` read
  * here (the pre-9g shape) always resolved Hetzner's Object Storage keys
@@ -3353,7 +3367,7 @@ async function main(argv = []) {
       computeToken: providerToken,
     });
     if (resolved && resolved !== providerToken) {
-      p.log.info(`✓ Using ${dnsRow.name} API token from ${dnsRow.tokenEnv} environment variable`);
+      p.log.info(dnsTokenSourceLine(dnsRow));
     } else if (!resolved) {
       const entered = await p.password({
         message: `Enter ${dnsRow.name} API token (for DNS cleanup)`,
