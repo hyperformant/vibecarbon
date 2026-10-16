@@ -119,6 +119,16 @@ jobs:
       # entrypoint). Equal digests mean the pushed image IS the smoked one; a
       # cache miss that built anything different stops the leg here, before
       # its digest can reach the merge.
+      #
+      # The two builds report it differently. The load build (docker exporter)
+      # gets no attestations, so it reports a single manifest and its
+      # `containerimage.config.digest`. The push build gets build-push-action's
+      # default provenance attestation (mode=max on a public repo), so its
+      # result is an index of [image manifest, attestation manifest] and
+      # buildx reports no config digest at all. Provenance stays on: it is
+      # what ties a published digest to this run. So the pushed side is read
+      # from the registry: the index's one image manifest (it must be this
+      # leg's platform), then that manifest's config digest.
       - name: Check the pushed image is the smoke-tested one
         run: |
           set -euo pipefail
@@ -128,17 +138,51 @@ jobs:
             echo "::error::the smoke build reported no image config digest; nothing is tagged" >&2
             exit 1
           fi
+          if [ -z "$DIGEST" ]; then
+            echo "::error::the push build reported no digest; nothing is tagged" >&2
+            exit 1
+          fi
+          raw=$(docker buildx imagetools inspect --raw "$NAME@$DIGEST")
+          media=$(jq -r '.mediaType // ""' <<<"$raw")
+          case "$media" in
+            application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
+              # Every entry that is not an attestation is an image; a leg
+              # builds one platform, so exactly one, and it is this leg's.
+              images=$(jq -c '[.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")]' <<<"$raw")
+              if [ "$(jq length <<<"$images")" != 1 ]; then
+                echo "::error::$NAME@$DIGEST holds $(jq length <<<"$images") images, not one; nothing is tagged" >&2
+                exit 1
+              fi
+              got=$(jq -r '.[0].platform | "\(.os)/\(.architecture)"' <<<"$images")
+              if [ "$got" != "$PLATFORM" ]; then
+                echo "::error::$NAME@$DIGEST is $got, not $PLATFORM; nothing is tagged" >&2
+                exit 1
+              fi
+              manifest=$(docker buildx imagetools inspect --raw "$NAME@$(jq -r '.[0].digest' <<<"$images")")
+              ;;
+            application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json)
+              manifest=$raw
+              ;;
+            *)
+              echo "::error::$NAME@$DIGEST has media type '$media', not an image or index; nothing is tagged" >&2
+              exit 1
+              ;;
+          esac
+          PUSHED=$(jq -r '.config.digest // ""' <<<"$manifest")
           if [ -z "$PUSHED" ]; then
-            echo "::error::the push build reported no image config digest; nothing is tagged" >&2
+            echo "::error::the pushed image $NAME@$DIGEST has no config digest; nothing is tagged" >&2
             exit 1
           fi
           if [ "$SMOKED" != "$PUSHED" ]; then
             echo "::error::pushed config $PUSHED is not the smoke-tested $SMOKED; nothing is tagged" >&2
             exit 1
           fi
+          echo "pushed $NAME@$DIGEST carries config $PUSHED, the smoke-tested image"
         env:
           SMOKED: ${{ fromJSON(steps.load.outputs.metadata)['containerimage.config.digest'] }}
-          PUSHED: ${{ fromJSON(steps.push.outputs.metadata)['containerimage.config.digest'] }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          NAME: ${{ inputs.image }}
+          PLATFORM: ${{ matrix.platform }}
       - name: Record the pushed digest
         run: |
           mkdir -p "$RUNNER_TEMP/digests"

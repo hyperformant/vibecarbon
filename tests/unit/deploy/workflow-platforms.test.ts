@@ -218,12 +218,32 @@ describe('the db image builds natively per arch and merges into one tag', () => 
     // -n b` does not stop `set -e`, and two empty digests compare equal.
     const check = steps[checkAt].run ?? '';
     expect(check).toMatch(/if \[ -z "\$SMOKED" \]; then[\s\S]*?exit 1/);
+    expect(check).toMatch(/if \[ -z "\$DIGEST" \]; then[\s\S]*?exit 1/);
     expect(check).toMatch(/if \[ -z "\$PUSHED" \]; then[\s\S]*?exit 1/);
     expect(check).not.toMatch(/test -n "\$\w+" &&/);
+    // The smoke side comes from the load build's metadata (docker exporter:
+    // one manifest, no attestations). The push side can NOT: the push build
+    // carries the default provenance attestation, so its result is an index
+    // and buildx reports no `containerimage.config.digest` for it (the first
+    // real run failed exactly so). It is read from the registry instead, by
+    // the digest the push reported.
     expect(steps[checkAt].env).toEqual({
       SMOKED: expr("fromJSON(steps.load.outputs.metadata)['containerimage.config.digest']"),
-      PUSHED: expr("fromJSON(steps.push.outputs.metadata)['containerimage.config.digest']"),
+      DIGEST: expr('steps.push.outputs.digest'),
+      NAME: expr('inputs.image'),
+      PLATFORM: expr('matrix.platform'),
     });
+    expect(JSON.stringify(steps[checkAt].env)).not.toMatch(/steps\.push\.outputs\.metadata/);
+    expect(check).toMatch(/docker buildx imagetools inspect --raw "\$NAME@\$DIGEST"/);
+    expect(check).toContain('"attestation-manifest"');
+    expect(check).toMatch(/PUSHED=\$\(jq -r '\.config\.digest/);
+  });
+
+  it('the push keeps its provenance attestation: the guard reads through it, never around it', () => {
+    const push = (build.steps ?? []).find((s) => isBuildPush(s) && s.id === 'push');
+    expect(push?.with?.provenance).toBeUndefined();
+    expect(push?.with?.attests).toBeUndefined();
+    expect(JSON.stringify(build.steps)).not.toMatch(/BUILDX_NO_DEFAULT_ATTESTATIONS/);
   });
 
   it('digest artifacts are named per run attempt, so a partial re-run never clashes', () => {
