@@ -72,8 +72,10 @@ jobs:
           elif ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then PUBLISH=true
           elif git diff --quiet "$BEFORE" HEAD -- docker/wal-g ':(exclude)docker/wal-g/README.md'; then PUBLISH=false
           else PUBLISH=true; fi
-          echo "tag=$V" >> "$GITHUB_OUTPUT"
-          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$V"
+            echo "publish=$PUBLISH"
+          } >> "$GITHUB_OUTPUT"
           echo "wal-g $V: missing=$MISSING publish=$PUBLISH" >> "$GITHUB_STEP_SUMMARY"
   publish-walg:
     needs: walg-ref
@@ -102,26 +104,52 @@ jobs:
   # the tag and smoke-tests the published result.
   #
   # Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+  # The release tag is immutable: DB_IMAGE_TAG's -r<N> revision moves with
+  # every input change (tests/unit/deploy/db-image-fingerprint.test.ts), so a
+  # tag names exactly one build and is published exactly once. db-ref skips
+  # the build when the tag already exists, which is what keeps a push that
+  # touches only docker/wal-g (or only this workflow) from re-minting the
+  # release image under a tag servers already hold; `immutable` re-checks after
+  # the builds so a racing run never moves it either.
   db-ref:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: read   # see whether the release tag already exists
     outputs:
       image: ${{ steps.ref.outputs.image }}
       tag: ${{ steps.ref.outputs.tag }}
+      exists: ${{ steps.ref.outputs.exists }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - id: ref
-        name: Resolve the release ref from src/lib/images.js
+        name: Resolve the release ref from src/lib/images.js and whether it exists
         run: |
+          set -euo pipefail
           IMG=$(grep -oP "^export const DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
           TAG=$(grep -oP "^export const DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
-          echo "image=$IMG" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          test -n "$IMG" && test -n "$TAG"
+          # Only a definite "not found" means build; any other lookup error
+          # fails the run rather than risk re-minting an existing tag.
+          if out=$(docker buildx imagetools inspect "$IMG:$TAG" 2>&1 >/dev/null); then EXISTS=true
+          elif grep -q 'not found' <<<"$out"; then EXISTS=false
+          else echo "$out" >&2; exit 1; fi
+          {
+            echo "image=$IMG"
+            echo "tag=$TAG"
+            echo "exists=$EXISTS"
+          } >> "$GITHUB_OUTPUT"
+          echo "db $IMG:$TAG exists=$EXISTS" >> "$GITHUB_STEP_SUMMARY"
   # No `needs: publish-walg`: the db image takes wal-g from the digest its
   # Dockerfile pins, which is already published, never from this run.
   build-db:
     needs: db-ref
+    if: needs.db-ref.outputs.exists != 'true'
     permissions:
       contents: read
       packages: write   # push the per-arch digests and the multi-arch tag to ghcr
@@ -133,3 +161,4 @@ jobs:
       tag: ${{ needs.db-ref.outputs.tag }}
       smoke: .github/scripts/smoke-db-image.sh
       environment: e2e-infra
+      immutable: true

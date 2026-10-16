@@ -434,13 +434,26 @@ describe('the release db publish is unchanged by the dev channel', () => {
       smoke: SMOKE,
       environment: 'e2e-infra',
     });
-    expect(build.with?.immutable).toBeUndefined();
     expect(build.with?.['build-contexts']).toBeUndefined();
     // Anchored on DB_IMAGE itself: DEV_DB_IMAGE must never satisfy the grep.
     const ref = runsOf(wf.jobs['db-ref']);
     expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE\\s\*=/);
     expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE_TAG\\s\*=/);
     expect(read('.github/workflows/publish-db-image.yml')).not.toMatch(/postgres-dev|DEV_DB_IMAGE/);
+  });
+
+  it('never re-mints an existing release tag (a wal-g-only push builds no db image)', () => {
+    // The tag's -r<N> revision moves with every input change, so a tag that
+    // already exists IS this build. db-ref looks it up and build-db is
+    // skipped when it is there: a push touching only docker/wal-g (which still
+    // triggers this workflow) leaves the release image alone. `immutable`
+    // re-checks after the builds so a racing run cannot move it either.
+    const ref = runsOf(wf.jobs['db-ref']);
+    expect(ref).toMatch(/docker buildx imagetools inspect "\$IMG:\$TAG"/);
+    expect(ref).toMatch(/grep -q 'not found'/);
+    expect((build as CallerJob & { if?: string }).if).toBe("needs.db-ref.outputs.exists != 'true'");
+    expect(build.with?.immutable).toBe(true);
+    expect((wf.on.push as { paths: string[] }).paths).toContain('docker/wal-g/**');
   });
 });
 
