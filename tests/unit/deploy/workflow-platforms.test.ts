@@ -457,6 +457,39 @@ describe('the release db publish is unchanged by the dev channel', () => {
   });
 });
 
+describe('release.yml refuses a release whose pinned db image users cannot pull', () => {
+  // Every mode pulls DB_IMAGE:DB_IMAGE_TAG, local `up` included. A release
+  // cut before publish-db-image finished (or with a private package, or a
+  // missing arch) breaks create/up/deploy for every user at once.
+  const jobs = jobsOf('.github/workflows/release.yml') as Record<string, Job & { needs?: string }>;
+  const gate = jobs['db-image'];
+  const run = runsOf(gate);
+
+  it('the release job needs the db-image gate', () => {
+    expect(gate).toBeDefined();
+    expect(jobs.release.needs).toBe('db-image');
+  });
+
+  it('reads the pair from src/lib/images.js, the CLI authority', () => {
+    expect(run).toContain("import('./src/lib/images.js')");
+    expect(run).toContain('$GITHUB_ENV');
+  });
+
+  it('inspects anonymously: an empty DOCKER_CONFIG and no login anywhere in the job', () => {
+    expect(run).toMatch(/DOCKER_CONFIG="\$RUNNER_TEMP\/[^"]+"/);
+    expect(run).toMatch(/docker buildx imagetools inspect "\$ref"/);
+    expect(run.indexOf('export DOCKER_CONFIG')).toBeLessThan(run.indexOf('imagetools inspect'));
+    expect(JSON.stringify(gate)).not.toMatch(/docker\/login-action|docker login|secrets\./);
+  });
+
+  it('requires both linux/amd64 and linux/arm64 children and refuses otherwise', () => {
+    expect(run).toMatch(/for want in linux\/amd64 linux\/arm64; do/);
+    expect(run).toMatch(/grep -qx "\$want"/);
+    expect(run.match(/::error::refusing to release/g)?.length).toBe(2);
+    expect(run.match(/exit 1/g)?.length).toBe(2);
+  });
+});
+
 describe('the db image dev channel (publish-db-image-dev.yml)', () => {
   const FILE = '.github/workflows/publish-db-image-dev.yml';
   const wf = workflowOf(FILE);
