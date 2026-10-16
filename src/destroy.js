@@ -42,6 +42,7 @@ import {
   resolveTier,
 } from './lib/deploy/tier-registry.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
+import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
 import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js';
 import { sweepEnvironmentServers } from './lib/destroy/server-sweep.js';
 import {
@@ -3247,56 +3248,16 @@ async function main(argv = []) {
     process.exit(1);
   }
 
-  // Show what will be deleted
-  const serverList =
-    envConfig.servers?.map((s) => `    ${c.error('•')} ${s.name} (${s.ip})`).join('\n') ||
-    '    None';
-
-  // SSH-key line below: the old string was `vibecarbon-${projectName}-${envName}`,
-  // which never matched anything created (same-shaped fixes above for the
-  // firewall/SSH-key deletion logic, and compose/ha.js — SANCTIONED
-  // DEVIATION #2). The exact suffix is tier-dependent (`-key`, `-ha-key`,
-  // `-${location}-key`), but every tier's real name starts with this
-  // `${projectName}-${envName}` slug — same shape as confirmSlug below.
+  // Show what will be deleted. Built from local evidence, with anything a
+  // stopped deploy only recorded marked "may not exist" (see preview.js).
   p.note(
-    `
-${c.danger('This will permanently delete:')}
-
-${c.bold('Servers:')}
-${serverList}
-
-${c.bold('Firewalls:')}
-${envConfig.servers?.map((s) => `    ${c.error('•')} ${s.name}-fw`).join('\n') || '    None'}
-
-${c.bold('SSH Keys:')}
-    ${c.error('•')} ${projectConfig.projectName}-${envName}
-
-${
-  hasAutomatedDns(envConfig.dns?.provider)
-    ? `${c.bold(`${DNS_PROVIDERS[envConfig.dns.provider].name} Resources:`)}
-    ${c.error('•')} DNS records: ${envConfig.domain} (apex + wildcard)
-    ${DNS_PROVIDERS[envConfig.dns.provider].healthChecks ? `${c.error('•')} Health checks` : ''}
-`
-    : ''
-}
-${
-  envConfig.s3?.bucket
-    ? `${c.bold('S3 Storage:')}
-    ${c.error('•')} Bucket: ${envConfig.s3.bucket} (all objects will be deleted)
-`
-    : ''
-}${
-  envConfig.backupS3?.bucket
-    ? `${c.bold('S3 Backups:')}
-    ${args.purgeBackups ? `${c.error('•')} Bucket: ${envConfig.backupS3.bucket} (WILL BE DELETED — --purge-backups)` : `${c.success('•')} Bucket: ${envConfig.backupS3.bucket} (PRESERVED for recovery)`}
-`
-    : ''
-}
-${c.bold('GitHub:')}
-    ${c.error('•')} Environment: ${envName}
-
-${c.danger('WARNING: All data on these servers will be permanently lost!')}
-  `,
+    destroyPreviewBody({
+      envConfig,
+      projectName: projectConfig.projectName,
+      envName,
+      purgeBackups: args.purgeBackups,
+      s3SetupCompleted: readS3SetupCompleted(cwd, envName),
+    }),
     `Destroying: ${envName}`,
   );
 
