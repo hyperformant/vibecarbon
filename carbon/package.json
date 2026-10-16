@@ -51,7 +51,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1150.0",
-    "@aws-sdk/s3-request-presigner": "^3.1150.0",
+    "@aws-sdk/s3-request-presigner": "^3.1151.0",
     "@base-ui/react": "^1.9.0",
     "@fontsource-variable/noto-sans": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
