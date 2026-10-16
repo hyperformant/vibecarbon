@@ -1,0 +1,161 @@
+name: native-multiarch-image
+# Reusable: build one image NATIVELY per arch, smoke-test each arch on its own
+# hardware before anything is pushed, push each leg by digest only, then name
+# both digests under one tag. Callers:
+#   - publish-db-image.yml      (release: ghcr.io/hyperformant/postgres)
+#   - publish-db-image-dev.yml  (branches: ghcr.io/hyperformant/postgres-dev)
+# One definition, so the dev channel is the release build with a different
+# name and tag, never a lookalike that drifts.
+#
+# Native runners, never QEMU: the db image compiles pg_cron (C, PGXS) inside
+# the target platform's postgres image, so each arch builds on its own
+# hardware (ubuntu-24.04 / ubuntu-24.04-arm) at full speed, and the smoke
+# script EXECUTES that arch's binaries for real. Each leg pushes by digest
+# only (no tag); the merge job then names both digests under the one tag, so
+# the tag never points at a half-built image.
+#
+# Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Short id, unique per caller run (names the digest artifacts)
+        type: string
+        required: true
+      context:
+        description: Docker build context directory
+        type: string
+        required: true
+      image:
+        description: Repository to push to, e.g. ghcr.io/hyperformant/postgres
+        type: string
+        required: true
+      tag:
+        description: The one tag the merge job creates
+        type: string
+        required: true
+      smoke:
+        description: Script run as `bash <smoke> <image ref>` per arch before push, and on the published tag
+        type: string
+        required: true
+      build-contexts:
+        description: Optional named build contexts (build-push-action build-contexts)
+        type: string
+        required: false
+        default: ''
+    outputs:
+      ref:
+        description: The published tag, pinned by digest (image@sha256:...)
+        value: ${{ jobs.merge.outputs.ref }}
+# Job-scoped writes only (OpenSSF Scorecard Token-Permissions).
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    environment: e2e-infra
+    permissions:
+      contents: read
+      packages: write   # push the per-arch digest to ghcr
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: ref
+        name: Resolve the arch
+        run: echo "arch=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Build once into the local daemon for the smoke test; the push step
+      # below reuses the same build cache, so it re-uploads these exact layers.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ inputs.context }}
+          build-contexts: ${{ inputs.build-contexts }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: smoke:local
+      - name: Smoke-test the built image on this arch
+        run: bash "$SMOKE" smoke:local
+        env:
+          SMOKE: ${{ inputs.smoke }}
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ inputs.context }}
+          build-contexts: ${{ inputs.build-contexts }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true,push=true
+      - name: Record the pushed digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.name }}-digest-${{ steps.ref.outputs.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: e2e-infra
+    permissions:
+      contents: read
+      packages: write   # push the multi-arch tag to ghcr
+    outputs:
+      ref: ${{ steps.verify.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: ${{ inputs.name }}-digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Exactly two digests, one per arch, or the tag is not created.
+      - name: Create the multi-arch tag from the per-arch digests
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          refs=()
+          for digest in *; do refs+=("$NAME@sha256:$digest"); done
+          test "${#refs[@]}" -eq 2
+          docker buildx imagetools create -t "$IMAGE" "${refs[@]}"
+        env:
+          IMAGE: ${{ inputs.image }}:${{ inputs.tag }}
+          NAME: ${{ inputs.image }}
+      - id: verify
+        name: Verify the published tag carries amd64 and arm64, then smoke it
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' > manifest.json
+          for arch in amd64 arm64; do
+            jq -e --arg a "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a)' manifest.json >/dev/null
+          done
+          echo "ref=$NAME@$(jq -r .digest manifest.json)" >> "$GITHUB_OUTPUT"
+          docker pull --platform linux/amd64 "$IMAGE"
+          bash "$SMOKE" "$IMAGE"
+        env:
+          IMAGE: ${{ inputs.image }}:${{ inputs.tag }}
+          NAME: ${{ inputs.image }}
+          SMOKE: ${{ inputs.smoke }}

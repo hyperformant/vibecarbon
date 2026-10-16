@@ -78,13 +78,25 @@ const PUBLISHED_IMAGES = [
       'The Dockerfile cross-compiles on $BUILDPLATFORM, so no QEMU.',
   },
   {
-    workflow: '.github/workflows/publish-db-image.yml',
-    job: 'build-db',
-    image: 'ghcr.io/hyperformant/postgres (official postgres Alpine + pg_cron + wal-g)',
+    workflow: '.github/workflows/native-multiarch-image.yml',
+    job: 'build',
+    image:
+      'ghcr.io/hyperformant/postgres (release, via publish-db-image.yml) and ' +
+      'ghcr.io/hyperformant/postgres-dev (branches, via publish-db-image-dev.yml)',
     platforms: ['linux/amd64', 'linux/arm64'],
     consumers:
       'servers (amd64 only, src/lib/deploy/platform.js) pull the amd64 child; the arm64 child ' +
-      'exists solely for local `vibecarbon up` on Apple Silicon, which pulls this image too.',
+      'exists solely for local `vibecarbon up` on Apple Silicon, which pulls this image too. ' +
+      'The dev channel is the same build, selected only by VIBECARBON_DB_IMAGE.',
+  },
+  {
+    workflow: '.github/workflows/publish-db-image-dev.yml',
+    job: 'build-walg',
+    image: 'a wal-g build pushed by digest into ghcr.io/hyperformant/postgres-dev',
+    platforms: ['linux/amd64', 'linux/arm64'],
+    consumers:
+      "only that dev run's own db legs (both arches), via a named build context, and only " +
+      'when the branch changed docker/wal-g. Cross-compiled like publish-walg, so no QEMU.',
   },
   {
     workflow: '.github/workflows/publish-images.yml',
@@ -158,11 +170,18 @@ describe.each(WORKFLOWS)('$workflow publishes its intended platforms', ({ workfl
   });
 });
 
+type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
+type CallerJob = Job & { uses?: string; with?: Record<string, string>; if?: string };
+const workflowOf = (file: string) => loadYaml(read(file)) as Workflow;
+const REUSABLE = './.github/workflows/native-multiarch-image.yml';
+const SMOKE = '.github/scripts/smoke-db-image.sh';
+/** A job's run: scripts, joined, for regex checks. */
+const runsOf = (job: Job | undefined) => (job?.steps ?? []).map((s) => s.run ?? '').join('\n');
+
 describe('the db image builds natively per arch and merges into one tag', () => {
-  const WORKFLOW = '.github/workflows/publish-db-image.yml';
-  const jobs = jobsOf(WORKFLOW);
-  const build = jobs['build-db'];
-  const merge = jobs.publish;
+  const jobs = jobsOf('.github/workflows/native-multiarch-image.yml');
+  const build = jobs.build;
+  const merge = jobs.merge;
 
   it('one matrix leg per arch, each on its own native runner', () => {
     expect(build['runs-on']).toBe(expr('matrix.runner'));
@@ -176,27 +195,140 @@ describe('the db image builds natively per arch and merges into one tag', () => 
     const steps = build.steps ?? [];
     const pushes = steps.filter(isBuildPush);
     for (const step of pushes) expect(step.with?.platforms).toBe(expr('matrix.platform'));
-    const smokeAt = steps.findIndex((s) => /CREATE EXTENSION pg_cron/.test(s.run ?? ''));
+    const smokeAt = steps.findIndex((s) => /bash "\$SMOKE" smoke:local/.test(s.run ?? ''));
     const pushAt = steps.findIndex(
       (s) => isBuildPush(s) && /push-by-digest=true/.test(String(s.with?.outputs ?? '')),
     );
-    expect(smokeAt, 'no smoke step that loads pg_cron').toBeGreaterThan(-1);
+    expect(smokeAt, 'no smoke step before the push').toBeGreaterThan(-1);
     expect(pushAt, 'no push-by-digest step').toBeGreaterThan(smokeAt);
-    const smoke = steps[smokeAt].run ?? '';
-    expect(smoke).toMatch(/postgres db-smoke:local --version/);
-    expect(smoke).toMatch(/wal-g db-smoke:local --version/);
-    expect(smoke).toMatch(/initdb -D \/tmp\//);
     // The leg never tags: only the merge job names the image.
-    for (const step of pushes) expect(step.with?.tags ?? 'db-smoke:local').toBe('db-smoke:local');
+    for (const step of pushes) expect(step.with?.tags ?? 'smoke:local').toBe('smoke:local');
   });
 
-  it('the merge job creates the multi-arch tag from both digests after both legs', () => {
-    expect(merge.needs).toBe('build-db');
-    expect(build.needs).toBe('publish-walg');
-    const run = (merge.steps ?? []).map((s) => s.run ?? '').join('\n');
+  it('the smoke script really starts postgres and loads pg_cron', () => {
+    const smoke = read(SMOKE);
+    expect(smoke).toMatch(/--entrypoint postgres "\$IMAGE" --version/);
+    expect(smoke).toMatch(/--entrypoint wal-g "\$IMAGE" --version/);
+    expect(smoke).toMatch(/initdb -D \/tmp\//);
+    expect(smoke).toMatch(/CREATE EXTENSION pg_cron/);
+  });
+
+  it('the merge job creates the tag from both digests, then verifies and smokes it', () => {
+    expect(merge.needs).toBe('build');
+    const run = runsOf(merge);
     expect(run).toMatch(/docker buildx imagetools create -t "\$IMAGE"/);
     expect(run).toMatch(/-eq 2/);
+    expect(run).toMatch(/for arch in amd64 arm64/);
+    expect(run).toMatch(/bash "\$SMOKE" "\$IMAGE"/);
     expect((merge.steps ?? []).some(isBuildPush)).toBe(false);
+  });
+});
+
+describe('the release db publish is unchanged by the dev channel', () => {
+  const wf = workflowOf('.github/workflows/publish-db-image.yml');
+  const build = wf.jobs['build-db'] as CallerJob;
+
+  it('runs only on pushes to main (and by hand), never on pull requests', () => {
+    expect(Object.keys(wf.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect((wf.on.push as { branches: string[] }).branches).toEqual(['main']);
+  });
+
+  it('builds the release ref through the shared workflow, after wal-g publishes', () => {
+    expect(build.uses).toBe(REUSABLE);
+    expect(build.needs).toEqual(['publish-walg', 'db-ref']);
+    expect(build.with).toMatchObject({
+      context: 'docker/postgres-walg',
+      image: expr('needs.db-ref.outputs.image'),
+      tag: expr('needs.db-ref.outputs.tag'),
+      smoke: SMOKE,
+    });
+    expect(build.with?.['build-contexts']).toBeUndefined();
+    // Anchored on DB_IMAGE itself: DEV_DB_IMAGE must never satisfy the grep.
+    const ref = runsOf(wf.jobs['db-ref']);
+    expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE\\s\*=/);
+    expect(ref).toMatch(/grep -oP "\^export const DB_IMAGE_TAG\\s\*=/);
+    expect(read('.github/workflows/publish-db-image.yml')).not.toMatch(/postgres-dev|DEV_DB_IMAGE/);
+  });
+});
+
+describe('the db image dev channel (publish-db-image-dev.yml)', () => {
+  const FILE = '.github/workflows/publish-db-image-dev.yml';
+  const wf = workflowOf(FILE);
+  const plan = runsOf(wf.jobs.plan);
+  const build = wf.jobs['build-db'] as CallerJob;
+
+  it('runs on branch pushes and by hand, NEVER on pull_request*', () => {
+    expect(Object.keys(wf.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    const push = wf.on.push as { 'branches-ignore': string[]; paths: string[] };
+    expect(push['branches-ignore']).toEqual(['main']);
+    expect(push.paths).toEqual(
+      expect.arrayContaining(['docker/postgres-walg/**', 'docker/wal-g/**']),
+    );
+    expect(read(FILE)).not.toMatch(/^\s*pull_request/m);
+  });
+
+  it('publishes only to postgres-dev, refusing any other name', () => {
+    expect(plan).toMatch(/grep -oP "\^export const DEV_DB_IMAGE\\s\*=/);
+    expect(plan).toMatch(/case "\$IMG" in \*\/postgres-dev\) ;;/);
+    expect(build.uses).toBe(REUSABLE);
+    expect(build.with?.image).toBe(expr('needs.plan.outputs.image'));
+    const walgPush = (wf.jobs['build-walg'].steps ?? []).find(isBuildPush);
+    expect(String(walgPush?.with?.outputs)).toMatch(
+      /^type=image,name=\$\{\{ needs\.plan\.outputs\.image \}\},push-by-digest=true,/,
+    );
+    // Nothing names the release package as a push target.
+    const code = read(FILE)
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+    expect(code).not.toMatch(/hyperformant\/postgres(?!-dev)\b/);
+  });
+
+  it('tags are <DB_IMAGE_TAG>-<sha> of the last image-input commit, never rebuilt', () => {
+    expect(build.with?.tag).toBe(expr('needs.plan.outputs.tag'));
+    expect(plan).toMatch(/DEV_TAG="\$TAG-\$\{SHA:0:\$LEN\}"/);
+    expect(plan).toMatch(/SHA=\$\(git log -1 --format=%H HEAD -- /);
+    expect(build.if).toMatch(/needs\.plan\.outputs\.exists != 'true'/);
+    expect(wf.jobs['build-walg'] as CallerJob).toMatchObject({
+      if: expect.stringMatching(/needs\.plan\.outputs\.walg-changed == 'true'/),
+    });
+  });
+
+  it('the plan pathspec is the e2e harness pathspec', async () => {
+    const { DB_IMAGE_INPUT_PATHSPEC } = await import('../../e2e/utils/db-image-select.js');
+    const quoted = DB_IMAGE_INPUT_PATHSPEC.map((p: string) =>
+      p.startsWith(':') ? `'${p}'` : p,
+    ).join(' ');
+    expect(plan).toContain(`git log -1 --format=%H HEAD -- ${quoted}`);
+  });
+});
+
+describe('the dev channel cleanup (cleanup-db-image-dev.yml)', () => {
+  const FILE = '.github/workflows/cleanup-db-image-dev.yml';
+  const wf = workflowOf(FILE);
+  const jobs = Object.entries(wf.jobs);
+
+  it('runs daily, one job, scoped to postgres-dev with packages: write only there', () => {
+    expect(Object.keys(wf.on).sort()).toEqual(['schedule', 'workflow_dispatch']);
+    expect(jobs.map(([id]) => id)).toEqual(['prune']);
+    const prune = wf.jobs.prune as Job & {
+      permissions?: Record<string, string>;
+      env?: Record<string, string>;
+    };
+    expect(prune.permissions).toEqual({ packages: 'write' });
+    expect((wf as unknown as { permissions: unknown }).permissions).toEqual({ contents: 'read' });
+    expect(prune.env).toMatchObject({ PACKAGE: 'postgres-dev', MAX_AGE_DAYS: '14' });
+    const del = (prune.steps ?? []).filter((s) =>
+      /actions\/delete-package-versions@/.test(s.uses ?? ''),
+    );
+    expect(del).toHaveLength(1);
+    expect(del[0].with).toMatchObject({
+      'package-name': 'postgres-dev',
+      'package-type': 'container',
+    });
+    // With no ids the action deletes the oldest version regardless of age.
+    expect((del[0] as Step & { if?: string }).if).toBe("steps.old.outputs.ids != ''");
+    expect(read(FILE)).not.toMatch(/package-name:\s*postgres\s*$/m);
   });
 });
 

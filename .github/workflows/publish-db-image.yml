@@ -62,133 +62,38 @@ jobs:
   # arm64 child exists solely so local `vibecarbon up` on Apple Silicon runs
   # Postgres natively, since every mode (local dev included) pulls this image.
   #
-  # Native runners, never QEMU: the builder stage compiles pg_cron (C, PGXS)
-  # inside the target platform's postgres image, so each arch builds on its
-  # own hardware (ubuntu-24.04 / ubuntu-24.04-arm) at full speed, and the smoke
-  # test below EXECUTES that arch's binaries for real before anything is
-  # pushed. Each leg pushes by digest only (no tag); the merge job then names
-  # both digests under the one tag, so the tag never points at a half-built
-  # image.
+  # The build itself is native-multiarch-image.yml, shared with the branch dev
+  # channel (publish-db-image-dev.yml): per-arch native runners, the smoke
+  # script (.github/scripts/smoke-db-image.sh) on each arch before anything is
+  # pushed, push by digest, then one merge job that names both digests under
+  # the tag and smoke-tests the published result.
   #
   # Guarded by tests/unit/deploy/workflow-platforms.test.ts.
-  build-db:
-    needs: publish-walg
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    environment: e2e-infra
-    permissions:
-      contents: read
-      packages: write   # push the per-arch digest to ghcr
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - id: ref
-        name: Resolve image name from src/lib/images.js
-        run: |
-          IMG=$(grep -oP "DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
-          echo "image=$IMG" >> "$GITHUB_OUTPUT"
-          echo "arch=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
-        env:
-          PLATFORM: ${{ matrix.platform }}
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      # Build once into the local daemon for the smoke test; the push step
-      # below reuses the same build cache, so it re-uploads these exact layers.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: docker/postgres-walg
-          platforms: ${{ matrix.platform }}
-          load: true
-          tags: db-smoke:local
-      # A real start on this arch: initdb into a tmp dir, the server up with
-      # the baked config (so shared_preload_libraries loads pg_cron.so), then
-      # CREATE EXTENSION. pg_ctl -w waits for readiness itself.
-      - name: Smoke-test the built image on this arch
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint postgres db-smoke:local --version
-          docker run --rm --entrypoint wal-g db-smoke:local --version
-          docker run --rm -i --user postgres --entrypoint bash db-smoke:local -euo pipefail <<'SH'
-          initdb -D /tmp/pgdata -U postgres --auth=trust >/dev/null
-          pg_ctl -D /tmp/pgdata -w -o "-c config_file=/etc/postgresql/postgresql.conf -c listen_addresses=" start
-          psql -U postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_cron'
-          test "$(psql -U postgres -tAc "SELECT count(*) FROM pg_extension WHERE extname = 'pg_cron'")" = 1
-          pg_ctl -D /tmp/pgdata -w stop
-          SH
-      - id: push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: docker/postgres-walg
-          platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ steps.ref.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-      - name: Record the pushed digest
-        run: |
-          mkdir -p "$RUNNER_TEMP/digests"
-          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: db-digest-${{ steps.ref.outputs.arch }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-  publish:
-    needs: build-db
+  db-ref:
     runs-on: ubuntu-24.04
-    environment: e2e-infra
     permissions:
       contents: read
-      packages: write   # push the multi-arch tag to ghcr
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      tag: ${{ steps.ref.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: ref
-        name: Resolve ref from src/lib/images.js
+        name: Resolve the release ref from src/lib/images.js
         run: |
-          IMG=$(grep -oP "DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
-          TAG=$(grep -oP "DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
-          echo "name=$IMG" >> "$GITHUB_OUTPUT"
-          echo "image=$IMG:$TAG" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: db-digest-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/digests
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      # Exactly two digests, one per arch, or the tag is not created.
-      - name: Create the multi-arch tag from the per-arch digests
-        working-directory: ${{ runner.temp }}/digests
-        run: |
-          set -euo pipefail
-          refs=()
-          for digest in *; do refs+=("$NAME@sha256:$digest"); done
-          test "${#refs[@]}" -eq 2
-          docker buildx imagetools create -t "$IMAGE" "${refs[@]}"
-        env:
-          IMAGE: ${{ steps.ref.outputs.image }}
-          NAME: ${{ steps.ref.outputs.name }}
-      - name: Verify the published tag carries amd64 and arm64
-        run: |
-          set -euo pipefail
-          docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' > manifest.json
-          for arch in amd64 arm64; do
-            jq -e --arg a "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a)' manifest.json >/dev/null
-          done
-          docker run --rm --platform linux/amd64 --entrypoint wal-g "$IMAGE" --version
-        env:
-          IMAGE: ${{ steps.ref.outputs.image }}
+          IMG=$(grep -oP "^export const DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
+          TAG=$(grep -oP "^export const DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+  build-db:
+    needs: [publish-walg, db-ref]
+    permissions:
+      contents: read
+      packages: write   # push the per-arch digests and the multi-arch tag to ghcr
+    uses: ./.github/workflows/native-multiarch-image.yml
+    with:
+      name: db
+      context: docker/postgres-walg
+      image: ${{ needs.db-ref.outputs.image }}
+      tag: ${{ needs.db-ref.outputs.tag }}
+      smoke: .github/scripts/smoke-db-image.sh

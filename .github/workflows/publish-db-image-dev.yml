@@ -1,0 +1,137 @@
+name: publish-db-image-dev
+# The db image's DEV CHANNEL: every branch push that changes the image's
+# inputs publishes a build to ghcr.io/hyperformant/postgres-dev, so a branch
+# can be tested on real infrastructure before merge without touching the
+# release package (ghcr.io/hyperformant/postgres, publish-db-image.yml only).
+#
+# Tag: <DB_IMAGE_TAG>-<sha12>, where sha12 is the first 12 hex digits of the
+# LAST COMMIT THAT TOUCHED THE IMAGE INPUTS (the pathspec below), not of the
+# pushed head. A later commit that only touches src/ keeps the same dev tag,
+# so the e2e harness (tests/e2e/utils/db-image-select.js, same pathspec) finds
+# the image at any HEAD of the branch. A tag that already exists is never
+# rebuilt or moved: every dev tag is immutable.
+#
+# Selected only by VIBECARBON_DB_IMAGE (src/lib/images.js resolveDbImage);
+# nothing picks it by default. Versions older than 14 days are deleted by
+# cleanup-db-image-dev.yml.
+#
+# NEVER on pull_request / pull_request_target: a fork's code must not run
+# with packages: write. Guarded by tests/unit/deploy/workflow-platforms.test.ts.
+on:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'docker/postgres-walg/**'
+      - 'docker/wal-g/**'
+      - '!docker/postgres-walg/README.md'
+      - '!docker/wal-g/README.md'
+  workflow_dispatch: {}
+# Job-scoped writes only (OpenSSF Scorecard Token-Permissions).
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read   # see whether the dev tag already exists (the package may still be private)
+    outputs:
+      image: ${{ steps.plan.outputs.image }}
+      tag: ${{ steps.plan.outputs.tag }}
+      exists: ${{ steps.plan.outputs.exists }}
+      walg-changed: ${{ steps.plan.outputs.walg-changed }}
+      walg-from: ${{ steps.plan.outputs.walg-from }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0   # the input-commit lookup and the main merge-base need history
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: plan
+        name: Resolve the dev tag and whether wal-g needs a build
+        run: |
+          set -euo pipefail
+          IMG=$(grep -oP "^export const DEV_DB_IMAGE\s*=\s*'\K[^']+" src/lib/images.js)
+          TAG=$(grep -oP "^export const DB_IMAGE_TAG\s*=\s*'\K[^']+" src/lib/images.js)
+          LEN=$(grep -oP "^export const DEV_DB_IMAGE_SHA_LENGTH\s*=\s*\K[0-9]+" src/lib/images.js)
+          # Same pathspec as tests/e2e/utils/db-image-select.js DB_IMAGE_INPUT_PATHSPEC.
+          SHA=$(git log -1 --format=%H HEAD -- docker/postgres-walg docker/wal-g ':(exclude)docker/postgres-walg/README.md' ':(exclude)docker/wal-g/README.md')
+          test -n "$SHA"
+          DEV_TAG="$TAG-${SHA:0:$LEN}"
+          case "$IMG" in */postgres-dev) ;; *) echo "refusing to publish to $IMG" >&2; exit 1 ;; esac
+          # Only a definite "not found" means build; any other lookup error
+          # fails the run rather than risk overwriting an existing dev tag.
+          if out=$(docker buildx imagetools inspect "$IMG:$DEV_TAG" 2>&1 >/dev/null); then EXISTS=true
+          elif grep -q 'not found' <<<"$out"; then EXISTS=false
+          else echo "$out" >&2; exit 1; fi
+          # wal-g: build it into this run only when this branch changed its
+          # inputs; otherwise the db image COPY --froms the published tag.
+          BASE=$(git merge-base origin/main HEAD)
+          if git diff --quiet "$BASE" HEAD -- docker/wal-g ':(exclude)docker/wal-g/README.md'; then WALG=false; else WALG=true; fi
+          FROM=$(grep -oP '^FROM \Kghcr\.io/hyperformant/wal-g:\S+' docker/postgres-walg/Dockerfile)
+          {
+            echo "image=$IMG"
+            echo "tag=$DEV_TAG"
+            echo "exists=$EXISTS"
+            echo "walg-changed=$WALG"
+            echo "walg-from=$FROM"
+          } >> "$GITHUB_OUTPUT"
+          echo "dev tag $IMG:$DEV_TAG (exists=$EXISTS, wal-g changed=$WALG)" >> "$GITHUB_STEP_SUMMARY"
+  # Only when this branch changed docker/wal-g. Same cross-compiled build as
+  # the release publish-walg job, but pushed BY DIGEST (no tag) into the
+  # postgres-dev package itself, so the dev channel stays one package and the
+  # db legs below consume exactly this build.
+  build-walg:
+    needs: plan
+    if: needs.plan.outputs.exists != 'true' && needs.plan.outputs.walg-changed == 'true'
+    runs-on: ubuntu-latest
+    environment: e2e-infra
+    permissions:
+      contents: read
+      packages: write   # push the wal-g digest into postgres-dev
+    outputs:
+      build-contexts: ${{ steps.ctx.outputs.build-contexts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/wal-g
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=${{ needs.plan.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+      - id: ctx
+        name: Smoke the pushed wal-g and hand its digest to the db build
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/local/bin/wal-g "$IMAGE@$DIGEST" --version
+          # The db Dockerfile's `FROM <walg-from>` resolves to this digest.
+          echo "build-contexts=$FROM=docker-image://$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          FROM: ${{ needs.plan.outputs.walg-from }}
+  build-db:
+    needs: [plan, build-walg]
+    if: >-
+      always() && needs.plan.result == 'success' && needs.plan.outputs.exists != 'true' &&
+      (needs.build-walg.result == 'success' || needs.build-walg.result == 'skipped')
+    permissions:
+      contents: read
+      packages: write   # push the per-arch digests and the dev tag to postgres-dev
+    uses: ./.github/workflows/native-multiarch-image.yml
+    with:
+      name: db-dev
+      context: docker/postgres-walg
+      image: ${{ needs.plan.outputs.image }}
+      tag: ${{ needs.plan.outputs.tag }}
+      smoke: .github/scripts/smoke-db-image.sh
+      build-contexts: ${{ needs.build-walg.outputs.build-contexts }}

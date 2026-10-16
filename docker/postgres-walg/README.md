@@ -25,15 +25,18 @@ Published for **linux/amd64 and linux/arm64**. Servers are amd64 only
 `vibecarbon up` on an Apple Silicon machine runs Postgres natively, since local
 dev pulls this image like every other mode.
 
-Each arch is built **natively**, never under QEMU: `publish-db-image.yml`'s
-`build-db` job runs one leg on `ubuntu-24.04` (amd64) and one on
+Each arch is built **natively**, never under QEMU: the shared
+`native-multiarch-image.yml` workflow (called by `publish-db-image.yml` and by
+the dev channel below) runs one leg on `ubuntu-24.04` (amd64) and one on
 `ubuntu-24.04-arm` (arm64). pg_cron is compiled inside that arch's own postgres
 image, and before anything is pushed each leg smoke-tests the image it just
-built on its own hardware: `postgres --version`, `wal-g --version`, then an
-initdb into a temp dir, a server start with the baked config (which preloads
-pg_cron.so), and `CREATE EXTENSION pg_cron`. Each leg pushes by digest only;
-the `publish` job then joins the two digests under the one tag with
-`docker buildx imagetools create`, so the tag never names a half-built image.
+built on its own hardware with `.github/scripts/smoke-db-image.sh`:
+`postgres --version`, `wal-g --version`, then an initdb into a temp dir, a
+server start with the baked config (which preloads pg_cron.so), and
+`CREATE EXTENSION pg_cron`. Each leg pushes by digest only; the `merge` job
+then joins the two digests under the one tag with
+`docker buildx imagetools create` and runs the same smoke script on the
+published tag, so the tag never names a half-built image.
 
 Tag scheme: `<PG_VERSION>-walg<WALG_VERSION>-r<N>` e.g. `17.11-walg3.0.9-r1`,
 where `PG_VERSION` is the base image's major.minor and `-r<N>` is OUR revision.
@@ -53,7 +56,7 @@ new tag.
 
 ## Testing an unpublished tag
 
-Locally:
+Locally, with no registry at all:
 
 ```bash
 pnpm db-image:build-local   # builds this directory, tags it DB_IMAGE:DB_IMAGE_TAG
@@ -63,11 +66,57 @@ Compose's default `pull_policy: missing` then uses the local image without
 contacting the registry, so a generated project's `vibecarbon up` (and
 `pnpm test:docker`) run against it. Nothing is pushed.
 
-On real infrastructure (a deploy or an e2e scenario), servers pull from ghcr,
-so the tag has to exist there first. The only way to get it there before merge
-is running `publish-db-image.yml` from the branch with `workflow_dispatch`.
-That IS a publish: it pushes a public image under a tag every future deploy
-may pull, so ask Brandon before running it.
+### The dev channel
+
+Servers pull from ghcr, so real infrastructure needs a published image. A
+branch gets one without touching the release package:
+`.github/workflows/publish-db-image-dev.yml` runs on every push to a branch
+other than `main` that changes `docker/postgres-walg/**` or `docker/wal-g/**`
+(and by hand with `workflow_dispatch`), never on pull requests. It is the
+release build (same native per-arch legs and smoke script) published to
+**`ghcr.io/hyperformant/postgres-dev`** under
+
+```
+<DB_IMAGE_TAG>-<sha12>     e.g. 17.11-walg3.0.9-r2-0123456789ab
+```
+
+where `sha12` is the first 12 hex digits of the last commit that touched the
+image inputs (the READMEs excluded), so later commits that touch only other
+files keep pointing at the same build. A dev tag is never rebuilt or moved.
+If the branch changed `docker/wal-g`, the same run builds wal-g too and the db
+image consumes that build by digest; otherwise it uses the published wal-g.
+`cleanup-db-image-dev.yml` deletes `postgres-dev` versions older than 14 days.
+
+Finding the tag: the workflow run's summary prints it (`dev tag ...`), or
+compute it from your checkout:
+
+```bash
+git log -1 --format=%H HEAD -- docker/postgres-walg docker/wal-g \
+  ':(exclude)docker/postgres-walg/README.md' ':(exclude)docker/wal-g/README.md' | cut -c1-12
+```
+
+Selecting it: nothing picks the dev channel by default. `VIBECARBON_DB_IMAGE`
+(a full `repo:tag`) replaces the release pin in the one resolver every mode
+uses (`resolveDbImage` in `src/lib/images.js`): `create`, `upgrade`, every
+deploy bundle, k8s, and local `vibecarbon up` / `pnpm dev`. Each command
+warns `using dev db image <ref>; not for production` while it is set. Unset
+it and the next `upgrade` or deploy is back on the release pin.
+
+```bash
+export VIBECARBON_DB_IMAGE=ghcr.io/hyperformant/postgres-dev:<DB_IMAGE_TAG>-<sha12>
+vibecarbon up                 # locally
+vibecarbon deploy staging     # on real infrastructure
+```
+
+The real-infra e2e harness picks it for you: with `VIBECARBON_DB_IMAGE`
+unset and the release tag not on ghcr, `pnpm test:e2e*` (and
+`scripts/iter-step.js`) look up the dev tag for HEAD and set the variable for
+the run, or stop at once if it is not published yet or the image inputs have
+uncommitted changes (`tests/e2e/utils/db-image-select.js`).
+
+One-time setup: the first dev publish creates the `postgres-dev` package as
+private. Flip it public by hand in the org's package settings, as with every
+ghcr package here, so servers and the harness pull it without credentials.
 
 ## Bump procedure
 1. Edit `Dockerfile`: both `FROM postgres:...@sha256:...` lines together (they
@@ -82,7 +131,8 @@ may pull, so ask Brandon before running it.
    `tests/unit/deploy/walg-dockerfile-arch.test.ts` if a version moved.
 3. `pnpm db-image:build-local`, then `pnpm test:docker` and a generated
    project's `npm run test:db` against it.
-4. Merge. `.github/workflows/publish-db-image.yml` runs on any push to main
+4. Push the branch and test on the dev channel (above), then merge.
+   `.github/workflows/publish-db-image.yml` runs on any push to main
    touching `docker/postgres-walg/**`, `docker/wal-g/**` or `src/lib/images.js`,
    builds and smoke-tests each platform natively, then pushes the tag.
 5. Verify: `docker run --rm --entrypoint wal-g ghcr.io/hyperformant/postgres:<tag> --version`

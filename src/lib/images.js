@@ -38,6 +38,54 @@ export function dbImageRef() {
   return `${DB_IMAGE}:${DB_IMAGE_TAG}`;
 }
 
+// The dev channel: .github/workflows/publish-db-image-dev.yml publishes every
+// branch build of docker/postgres-walg here, as `${DB_IMAGE_TAG}-<sha12>`
+// (see DEV_DB_IMAGE_SHA_LENGTH), and cleanup-db-image-dev.yml prunes it after
+// 14 days. Nothing selects it by default: only VIBECARBON_DB_IMAGE does.
+export const DEV_DB_IMAGE = 'ghcr.io/hyperformant/postgres-dev';
+export const DEV_DB_IMAGE_SHA_LENGTH = 12;
+
+/** The env var that swaps the db image for a full `repo:tag` ref (testing only). */
+export const DB_IMAGE_OVERRIDE_ENV = 'VIBECARBON_DB_IMAGE';
+
+const warnedOverrides = new Set();
+/** @param {string} msg */
+function warnOnce(msg) {
+  if (warnedOverrides.has(msg)) return;
+  warnedOverrides.add(msg);
+  process.stderr.write(`warning: ${msg}\n`);
+}
+
+/**
+ * THE db image every mode runs: create, upgrade and every deploy bundle write
+ * it into .env, k8s renders it into the chart values, and local `up` hands it
+ * to compose. Default is the pinned release (DB_IMAGE:DB_IMAGE_TAG).
+ * VIBECARBON_DB_IMAGE (a full `repo:tag`, e.g. a dev channel build) replaces
+ * it, and every resolve while it is set warns, once per process, that this is
+ * not a production image. Nothing persists the override on its own: unset
+ * the variable and the next upgrade or deploy is back on the release pin.
+ *
+ * @param {{ env?: Record<string, string | undefined>, warn?: (msg: string) => void }} [opts]
+ * @returns {{ image: string, tag: string, ref: string, override: boolean }}
+ */
+export function resolveDbImage({ env = process.env, warn = warnOnce } = {}) {
+  const raw = (env[DB_IMAGE_OVERRIDE_ENV] ?? '').trim();
+  if (!raw) return { image: DB_IMAGE, tag: DB_IMAGE_TAG, ref: dbImageRef(), override: false };
+  // Split on the last colon AFTER the last slash, so a registry port
+  // (localhost:5000/x:tag) stays in the repository. A digest ref has no tag
+  // for DB_IMAGE_TAG to carry, so it is refused rather than mangled.
+  const colon = raw.lastIndexOf(':');
+  const image = colon > raw.lastIndexOf('/') ? raw.slice(0, colon) : '';
+  const tag = image ? raw.slice(colon + 1) : '';
+  if (!image || !tag || raw.includes('@') || /\s/.test(raw)) {
+    throw new Error(
+      `${DB_IMAGE_OVERRIDE_ENV} must be a full image ref like ${DEV_DB_IMAGE}:<tag>, got "${raw}"`,
+    );
+  }
+  warn(`using dev db image ${raw}; not for production`);
+  return { image, tag, ref: raw, override: true };
+}
+
 // Single source of truth for the pre-published carbon-autoscaler image
 // (src/autoscaler/). Built once per version by
 // .github/workflows/publish-images.yml; pulled (never

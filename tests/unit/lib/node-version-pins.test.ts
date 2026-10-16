@@ -52,9 +52,12 @@ const NODE_MAJOR = read('.nvmrc').trim();
 // ships into generated projects, so its pins are customer-facing.
 const WORKFLOWS = [
   // CodeQL runs prebuilt analysis actions only — no setup-node, no Node pin.
+  join('.github', 'workflows', 'cleanup-db-image-dev.yml'),
   join('.github', 'workflows', 'codeql.yml'),
   join('.github', 'workflows', 'dependabot-auto-merge.yml'),
   join('.github', 'workflows', 'e2e-us-perf.yml'),
+  join('.github', 'workflows', 'native-multiarch-image.yml'),
+  join('.github', 'workflows', 'publish-db-image-dev.yml'),
   join('.github', 'workflows', 'publish-db-image.yml'),
   join('.github', 'workflows', 'publish-images.yml'),
   join('.github', 'workflows', 'release.yml'),

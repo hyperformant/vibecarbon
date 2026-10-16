@@ -1,11 +1,12 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { generateEnvLocal } from '../../../src/create.js';
 import { renderBundle } from '../../../src/lib/deploy/bundle.js';
+import { resolveDbImageTag } from '../../../src/lib/deploy/k8s/k3s.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
-import { DB_IMAGE, DB_IMAGE_TAG } from '../../../src/lib/images.js';
+import { DB_IMAGE, DB_IMAGE_TAG, DEV_DB_IMAGE } from '../../../src/lib/images.js';
 import { ensureDbImageEnv } from '../../../src/upgrade.js';
 
 /**
@@ -84,5 +85,43 @@ describe('DB_IMAGE / DB_IMAGE_TAG reach every project .env', () => {
     const env = envOf(stage, '.env');
     expect(env.DB_IMAGE).toBe(DB_IMAGE);
     expect(env.DB_IMAGE_TAG).toBe(DB_IMAGE_TAG);
+  });
+});
+
+describe('VIBECARBON_DB_IMAGE reaches every writer through the one resolver', () => {
+  const DEV_TAG = `${DB_IMAGE_TAG}-0123456789ab`;
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.VIBECARBON_DB_IMAGE;
+    process.env.VIBECARBON_DB_IMAGE = `${DEV_DB_IMAGE}:${DEV_TAG}`;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.VIBECARBON_DB_IMAGE;
+    else process.env.VIBECARBON_DB_IMAGE = saved;
+  });
+
+  it('upgrade, the deploy bundle and k8s all take the override; unset goes back', () => {
+    const dir = scratch(`PROJECT_NAME=demo
+DB_IMAGE=${DB_IMAGE}
+DB_IMAGE_TAG=${DB_IMAGE_TAG}
+`);
+    expect(ensureDbImageEnv(dir)).toBe(true);
+    expect(envOf(dir, '.env')).toMatchObject({ DB_IMAGE: DEV_DB_IMAGE, DB_IMAGE_TAG: DEV_TAG });
+    const cwd = process.cwd();
+    process.chdir(dir);
+    let stage = '';
+    try {
+      stage = renderBundle('demo', {});
+    } finally {
+      process.chdir(cwd);
+    }
+    dirs.push(stage);
+    expect(envOf(stage, '.env')).toMatchObject({ DB_IMAGE: DEV_DB_IMAGE, DB_IMAGE_TAG: DEV_TAG });
+    expect(resolveDbImageTag()).toBe(`${DEV_DB_IMAGE}:${DEV_TAG}`);
+
+    delete process.env.VIBECARBON_DB_IMAGE;
+    expect(ensureDbImageEnv(dir)).toBe(true);
+    expect(envOf(dir, '.env')).toMatchObject({ DB_IMAGE, DB_IMAGE_TAG });
+    expect(resolveDbImageTag()).toBe(`${DB_IMAGE}:${DB_IMAGE_TAG}`);
   });
 });

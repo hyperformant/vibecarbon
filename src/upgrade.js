@@ -32,7 +32,7 @@ import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { resolveDisplayName } from './lib/display-name.js';
 import { parseDotenv } from './lib/dotenv.js';
-import { DB_IMAGE, DB_IMAGE_TAG } from './lib/images.js';
+import { resolveDbImage } from './lib/images.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
 import {
   adaptDockerfileForPackageManager,
@@ -169,7 +169,8 @@ export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
  * @returns {boolean} whether either file was (or, under -dry, would be) changed
  */
 export function ensureDbImageEnv(cwd, { dryRun = false } = {}) {
-  const want = { DB_IMAGE, DB_IMAGE_TAG };
+  const { image, tag } = resolveDbImage();
+  const want = { DB_IMAGE: image, DB_IMAGE_TAG: tag };
   let changed = false;
   for (const file of ['.env.local', '.env']) {
     const path = join(cwd, file);
@@ -234,10 +235,11 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
   if (authNotes.info) p.log.info(authNotes.info);
   if (authNotes.warn) p.log.warn(authNotes.warn);
   if (ensureDbImageEnv(cwd, { dryRun })) {
+    const { ref } = resolveDbImage();
     p.log.info(
       dryRun
-        ? `Would set the database image to ${DB_IMAGE}:${DB_IMAGE_TAG} in .env and .env.local`
-        : `Set the database image to ${DB_IMAGE}:${DB_IMAGE_TAG} in .env and .env.local`,
+        ? `Would set the database image to ${ref} in .env and .env.local`
+        : `Set the database image to ${ref} in .env and .env.local`,
     );
   }
   const env = loadEnvVariables(cwd);

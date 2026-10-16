@@ -49,7 +49,7 @@ import {
   carbonAutoscalerImageRef,
   clusterAutoscalerImageRef,
   csiSidecarSetImagePlan,
-  dbImageRef,
+  resolveDbImage,
 } from '../../images.js';
 import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
@@ -362,7 +362,7 @@ export function digestEnvLocalSecrets(projectDir) {
 
 /** The db image is pre-published + multi-arch — pulled, never built/sideloaded. */
 export function resolveDbImageTag() {
-  return dbImageRef();
+  return resolveDbImage().ref;
 }
 
 /**

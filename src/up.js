@@ -16,6 +16,7 @@ import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
 import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-project-name.js';
 import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
+import { resolveDbImage } from './lib/images.js';
 import { formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
@@ -432,6 +433,11 @@ export async function run(args = []) {
   p.log.info(`Starting dev environment with ${c.bold(pm)}...`);
 
   const spawnArgs = pm === 'npm' ? ['run', 'dev:start'] : ['dev:start'];
+  // VIBECARBON_DB_IMAGE (a dev channel db build) reaches compose as
+  // DB_IMAGE/DB_IMAGE_TAG in the environment, which compose's interpolation
+  // ranks above .env. Unset, .env's pinned release stands untouched.
+  const dbImage = resolveDbImage();
+  const dbImageEnv = dbImage.override ? { DB_IMAGE: dbImage.image, DB_IMAGE_TAG: dbImage.tag } : {};
   const child = spawn(pm, spawnArgs, {
     cwd,
     stdio: 'inherit',
@@ -439,7 +445,7 @@ export async function run(args = []) {
     // manager hands the wrapper's npm_config_* dialect to this npm, which npm
     // 12 flags with `npm warn Unknown env config` on every run. Raw spawn has
     // no cleanEnv option; gitSafeEnv() is the exported form of that scrub.
-    env: gitSafeEnv(),
+    env: gitSafeEnv({ ...process.env, ...dbImageEnv }),
   });
 
   waitForDevTree(child);

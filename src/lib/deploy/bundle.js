@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripOperatorSecretLines } from '../config-registry.js';
 import { formatDotenvLine } from '../dotenv.js';
-import { DB_IMAGE, DB_IMAGE_TAG } from '../images.js';
+import { resolveDbImage } from '../images.js';
 import { DNS01_OVERRIDE_FILE, dnsChallengeEnv } from './acme.js';
 import { registryEnsureShell } from './compose/registry-config.js';
 
@@ -336,8 +336,10 @@ export function renderBundle(projectName, options = {}) {
   // ${DB_IMAGE}:${DB_IMAGE_TAG}, and every server runs the tag of the CLI that
   // deployed it. Set after the caller's overrides so a replayed older .env
   // (scale) cannot pin a stale tag.
-  envOverrides.DB_IMAGE = DB_IMAGE;
-  envOverrides.DB_IMAGE_TAG = DB_IMAGE_TAG;
+  // (VIBECARBON_DB_IMAGE swaps in a dev build for testing; resolveDbImage warns.)
+  const dbImage = resolveDbImage();
+  envOverrides.DB_IMAGE = dbImage.image;
+  envOverrides.DB_IMAGE_TAG = dbImage.tag;
   if (options.domain) {
     envOverrides.DOMAIN = options.domain;
     envOverrides.ACME_EMAIL = `admin@${options.domain}`;

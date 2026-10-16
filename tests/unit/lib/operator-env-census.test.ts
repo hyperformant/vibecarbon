@@ -94,6 +94,8 @@ const ALIAS_ALLOWLIST: Record<string, string> = {
     'injectable env for the telemetry status command; reads CI/DO_NOT_TRACK/VIBECARBON_TELEMETRY_DISABLED only',
   [join('lib', 'command.js')]:
     'spawn plumbing: gitSafeEnv/runCommand build child env bags from options.env || process.env',
+  [join('lib', 'images.js')]:
+    'resolveDbImage({ env }) reads env.VIBECARBON_DB_IMAGE only (a test image ref, not a credential)',
   [join('lib', 'operator-ip.js')]:
     'shouldAutoDetectOperatorIp({ env }) reads env.CI only (the CIDR itself goes through the reader)',
   [join('lib', 'cli', 'progress.js')]:
