@@ -746,7 +746,7 @@ export async function onboardDomain(secretKey, domain = null, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     const envAccessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
@@ -767,10 +767,24 @@ export async function getS3Credentials(projectName, options = {}) {
 
   // The triple flow collects (and validates) the pair; force so a partial
   // env doesn't short-circuit the collection this call exists to do.
-  const secretKey = await getApiToken(projectName, { save, force: true });
+  const secretKey = await getApiToken(projectName, { save: save && !deferSave, force: true });
   const accessKey = readOperatorVar('SCALEWAY_ACCESS_KEY').value;
   if (!secretKey || !accessKey) return null;
 
   p.log.success('Object Storage credentials received!');
+  if (deferSave) {
+    // The caller saves the triple once the pair passes its S3 check.
+    const keys = {
+      SCALEWAY_SECRET_KEY: secretKey,
+      SCALEWAY_ACCESS_KEY: accessKey,
+      SCALEWAY_DEFAULT_PROJECT_ID: readOperatorVar('SCALEWAY_DEFAULT_PROJECT_ID').value,
+    };
+    return {
+      accessKey,
+      secretKey,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
   return { accessKey, secretKey, source: 'what you pasted' };
 }

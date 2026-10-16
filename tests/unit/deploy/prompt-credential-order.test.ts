@@ -182,4 +182,73 @@ describe('deploy wizard credential order', () => {
     expect(result.s3Config.accessKey).toBe('ABCDEFGHIJ0123456789');
     expect(vi.mocked(HetznerProvider.promptObjectStorageCredentials)).toHaveBeenCalledTimes(1);
   });
+
+  it('saves pasted keys only after S3 accepts them, never the rejected pair', async () => {
+    const badSave = vi.fn(async () => {});
+    const goodSave = vi.fn(async () => {});
+    const prompt = vi.mocked(HetznerProvider.promptObjectStorageCredentials);
+    prompt.mockReset();
+    prompt
+      .mockResolvedValueOnce({
+        accessKey: 'WRONGKEY000000000000',
+        secretKey: 'y'.repeat(40),
+        source: 'what you pasted',
+        save: badSave,
+      } as never)
+      .mockResolvedValueOnce({
+        accessKey: 'ABCDEFGHIJ0123456789',
+        secretKey: 'x'.repeat(40),
+        source: 'what you pasted',
+        save: goodSave,
+      } as never);
+    const validate = vi.mocked(S3CompatibleProvider.prototype.validateCredentials);
+    validate
+      .mockImplementationOnce(async () => {
+        // Nothing may be saved while the keys are still unchecked.
+        expect(badSave).not.toHaveBeenCalled();
+        return { valid: false, rejected: true, error: 'x (SignatureDoesNotMatch)' } as never;
+      })
+      .mockResolvedValueOnce({ valid: true });
+
+    const tty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    try {
+      await gatherDeploymentConfig({
+        env: 'prod',
+        provider: 'hetzner',
+        compose: true,
+        region: 'hil',
+      });
+    } finally {
+      if (tty) Object.defineProperty(process.stdin, 'isTTY', tty);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
+
+    expect(prompt.mock.calls[0][1]).toMatchObject({ deferSave: true });
+    expect(prompt.mock.calls[1][1]).toMatchObject({ deferSave: true, force: true });
+    expect(badSave).not.toHaveBeenCalled();
+    expect(goodSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('still saves when the endpoint cannot be reached (unverified, not rejected)', async () => {
+    const save = vi.fn(async () => {});
+    vi.mocked(HetznerProvider.promptObjectStorageCredentials).mockResolvedValue({
+      accessKey: 'ABCDEFGHIJ0123456789',
+      secretKey: 'x'.repeat(40),
+      source: 'what you pasted',
+      save,
+    } as never);
+    vi.mocked(S3CompatibleProvider.prototype.validateCredentials).mockResolvedValue({
+      valid: false,
+      rejected: false,
+      error: 'no answer (TimeoutError)',
+    } as never);
+    await gatherDeploymentConfig({
+      env: 'prod',
+      provider: 'hetzner',
+      compose: true,
+      region: 'hil',
+    });
+    expect(save).toHaveBeenCalledTimes(1);
+  });
 });

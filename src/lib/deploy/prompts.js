@@ -669,11 +669,18 @@ export async function gatherDeploymentConfig(args) {
   // read conn-reset) — polymorphic over Provider since B6 so it applies to
   // every registered provider, not just Hetzner.
   let s3CredentialSource = args.s3AccessKey ? 'the -s3-access-key flag' : '.vibecarbon.json';
+  // deferSave: pasted keys are written to .env.local only after the S3 check
+  // below accepts them (or cannot reach the endpoint), never before. A wrong
+  // pair saved up front came straight back on the next run.
+  let saveS3Credentials = null;
   if (!s3AccessKey) {
-    const credentials = await Provider.promptObjectStorageCredentials(projectConfig.projectName);
+    const credentials = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
+      deferSave: true,
+    });
     s3AccessKey = credentials.accessKey;
     s3SecretKey = credentials.secretKey;
     s3CredentialSource = credentials.source ?? 'what you pasted';
+    saveS3Credentials = credentials.save ?? null;
   }
 
   // ORDERING IS LOAD-BEARING: resolved AFTER promptObjectStorageCredentials,
@@ -701,7 +708,10 @@ export async function gatherDeploymentConfig(args) {
   // wrong, so that case says so and carries on.
   for (;;) {
     const { verdict, reason } = await verifyObjectStorageKeys(s3Provider, s3CredentialSource);
-    if (verdict !== 'rejected') break;
+    if (verdict !== 'rejected') {
+      if (saveS3Credentials) await saveS3Credentials();
+      break;
+    }
     if (args.yes || !process.stdin.isTTY) {
       p.log.error(
         `Deploy stopped before creating anything: S3 rejected the keys from ${s3CredentialSource} ` +
@@ -713,10 +723,12 @@ export async function gatherDeploymentConfig(args) {
     }
     const again = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
       force: true,
+      deferSave: true,
     });
     s3AccessKey = again.accessKey;
     s3SecretKey = again.secretKey;
     s3CredentialSource = again.source ?? 'what you pasted';
+    saveS3Credentials = again.save ?? null;
     s3Region = await resolveStorageRegion();
     s3Provider = await getObjectStorageProvider(providerId, s3AccessKey, s3SecretKey, s3Region);
   }

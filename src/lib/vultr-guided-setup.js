@@ -289,7 +289,7 @@ export async function getApiToken(projectName, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string, region?: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     const envAccessKey = readOperatorVar('VULTR_ACCESS_KEY').value;
@@ -389,12 +389,24 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.VULTR_SECRET_KEY = secretKey;
   process.env.VULTR_STORAGE_REGION = region;
 
+  const keys = {
+    VULTR_ACCESS_KEY: accessKey,
+    VULTR_SECRET_KEY: secretKey,
+    VULTR_STORAGE_REGION: region,
+  };
+  // deferSave: the caller verifies the keys against S3 first and calls
+  // save() only once they pass, so a rejected pair is never written.
+  if (deferSave) {
+    return {
+      accessKey,
+      secretKey,
+      region,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
   if (save) {
-    await saveIfWanted({
-      VULTR_ACCESS_KEY: accessKey,
-      VULTR_SECRET_KEY: secretKey,
-      VULTR_STORAGE_REGION: region,
-    });
+    await saveIfWanted(keys);
   }
 
   return { accessKey, secretKey, region, source: 'what you pasted' };

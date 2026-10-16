@@ -252,7 +252,7 @@ export async function getApiToken(projectName, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     const envAccessKey = readOperatorVar('LINODE_ACCESS_KEY').value;
@@ -321,11 +321,22 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.LINODE_ACCESS_KEY = accessKey;
   process.env.LINODE_SECRET_KEY = secretKey;
 
+  const keys = {
+    LINODE_ACCESS_KEY: accessKey,
+    LINODE_SECRET_KEY: secretKey,
+  };
+  // deferSave: the caller verifies the keys against S3 first and calls
+  // save() only once they pass, so a rejected pair is never written.
+  if (deferSave) {
+    return {
+      accessKey,
+      secretKey,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
   if (save) {
-    await saveIfWanted({
-      LINODE_ACCESS_KEY: accessKey,
-      LINODE_SECRET_KEY: secretKey,
-    });
+    await saveIfWanted(keys);
   }
 
   return { accessKey, secretKey, source: 'what you pasted' };
