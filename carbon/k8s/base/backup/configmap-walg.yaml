@@ -73,6 +73,19 @@ data:
         exit 0
     fi
 
+    # No backup target: nothing to push to. Local dev sets WALG_S3_PREFIX to ""
+    # (docker-compose.override.yml), and a deploy with no bucket name renders a
+    # bucketless "s3:///..." prefix. Without this, every segment waits out the
+    # wal-g attempts below and logs WAL_ARCHIVE_FAILED. Same guard as
+    # backup/compose-backup.sh; a real deploy without archiving is still failed
+    # by the deploy's wal-g audit (src/lib/deploy/walg-audit.js).
+    case "${WALG_S3_PREFIX:-}" in
+        ""|s3:///*)
+            echo "wal-archive: no backup target (WALG_S3_PREFIX='${WALG_S3_PREFIX:-}'), not archiving '${WAL_PATH}'." >&2
+            exit 0
+            ;;
+    esac
+
     # Recovery gate: a node in recovery (a streaming standby) must NEVER archive
     # WAL. Doing so would let a standby write into the shared/canonical WAL stream
     # and corrupt the PITR timeline (invisible until a restore during an incident).

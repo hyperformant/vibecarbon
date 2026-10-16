@@ -22,6 +22,7 @@
  * (RCA prod-1 2026-05-26) — which is worse than the PITR gap it would be
  * signalling.
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
@@ -126,5 +127,48 @@ describe('a changed wal-archive.sh actually reaches the running db pod', () => {
     expect(k3s).toContain("createHash('sha256')");
     expect(k3s).toContain('walArchiveSha: walArchiveConfigSha(projectDir)');
     expect(k3s).toContain("WAL_ARCHIVE_SHA: walArchiveSha || 'none'");
+  });
+});
+
+// Final review M2: with no backup target (local dev's empty WALG_S3_PREFIX,
+// or a bucketless `s3:///...` render) every segment waited out the wal-g
+// attempts and logged WAL_ARCHIVE_FAILED. The script now exits 0 before any
+// wal-g call, like backup/compose-backup.sh. Runs the real script with bash.
+describe('wal-archive.sh with no backup target', () => {
+  const run = (prefix: string) =>
+    spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'], {
+      encoding: 'utf-8',
+      env: {
+        PATH: process.env.PATH,
+        WALG_S3_PREFIX: prefix,
+        WAL_ARCHIVE_RETRIES: '1',
+        WAL_ARCHIVE_SLEEP: '0',
+        PGDATA: '/nonexistent',
+      },
+      timeout: 10_000,
+    });
+
+  for (const prefix of ['', 's3:///backups/acme']) {
+    it(`"${prefix}" exits 0 at once with one line, never reaching wal-g`, () => {
+      const r = run(prefix);
+      expect(r.status).toBe(0);
+      expect(r.stderr).toContain('wal-archive: no backup target');
+      expect(r.stderr).not.toContain('WAL_ARCHIVE_FAILED');
+      expect(r.stderr.trim().split('\n')).toHaveLength(1);
+    });
+  }
+
+  it('a real target still goes through the wal-g attempts (control)', () => {
+    const r = run('s3://bucket/backups/acme');
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain('no backup target');
+    expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
+  });
+
+  it('the guard sits before the wal-g retry loop in both copies', () => {
+    for (const body of [composeBody, k8sBody]) {
+      expect(body.indexOf('""|s3:///*)')).toBeGreaterThan(-1);
+      expect(body.indexOf('""|s3:///*)')).toBeLessThan(body.indexOf('wal-g wal-push "$WAL_PATH"'));
+    }
   });
 });

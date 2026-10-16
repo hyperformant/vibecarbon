@@ -23,7 +23,8 @@ services:
     # this container is the container itself: every WAL segment would wait
     # out wal-archive.sh's attempts and then be dropped with a
     # WAL_ARCHIVE_FAILED line. Empty values here win over the base file's
-    # interpolation.
+    # interpolation, and an empty WALG_S3_PREFIX makes wal-archive.sh skip
+    # the segment at once with one "no backup target" line.
     environment:
       WALG_S3_PREFIX: ""
       AWS_ENDPOINT: ""
