@@ -211,6 +211,10 @@ describe('every operator-supplied server type is guarded', () => {
     ['scale.js', '-type'],
     ['failover.js', '-server-type'],
     ['lib/deploy/prompts.js', '.vibecarbon.json'],
+    // Persisted per-role types reused with no flag (scale's converge re-feed
+    // and CA re-patch; failover's partially overridden converge).
+    ['scale.js', '.vibecarbon.json'],
+    ['lib/iac/converge-cluster.js', '.vibecarbon.json'],
   ] as const;
 
   it.each(GUARDED_ENTRY_POINTS)('%s calls assertAmd64ServerType (%s)', (rel, label) => {

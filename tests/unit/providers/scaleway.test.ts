@@ -188,11 +188,105 @@ describe('IP extraction (routed-IP era)', () => {
 });
 
 describe('ARM guard', () => {
-  it("recognizes Scaleway's ARM lines (BASIC*-A*, COPARM)", () => {
-    expect(ScalewayProvider.isArmServerType('BASIC2-A2C-4G')).toBe(true);
-    expect(ScalewayProvider.isArmServerType('COPARM1-2C-8G')).toBe(true);
-    expect(ScalewayProvider.isArmServerType('BASIC3-X2C-4G')).toBe(false);
-    expect(ScalewayProvider.isArmServerType('DEV1-M')).toBe(false);
+  type ScwStatics = {
+    _typeArch: Record<string, string> | null;
+    _locationTypes: Record<string, Set<string>> | null;
+    SERVER_TYPES: Record<string, unknown>;
+  };
+  const scw = ScalewayProvider as unknown as ScwStatics;
+  const saved = {
+    typeArch: scw._typeArch,
+    locationTypes: scw._locationTypes,
+    serverTypes: scw.SERVER_TYPES,
+  };
+  afterEach(() => {
+    scw._typeArch = saved.typeArch;
+    scw._locationTypes = saved.locationTypes;
+    scw.SERVER_TYPES = saved.serverTypes;
+  });
+
+  // Every arm64 commercial type in the live products/servers catalog
+  // (2026-10-16, all nine zones walked), plus the historical COPARM1 line.
+  const ARM_TYPES = [
+    'BASIC2-A2C-4G',
+    'BASIC2-A16C-64G',
+    'STANDARD2-A2C-8G',
+    'STANDARD2-A64C-256G',
+    'COPARM1-2C-8G',
+  ];
+  // A spread of the x86_64 families from the same catalog, including the
+  // shapes most likely to trip a loose name rule.
+  const X86_TYPES = [
+    'BASIC3-X2C-4G',
+    'STANDARD3-X2C-8G',
+    'COMPUTE3-X4C-8G',
+    'MEMORY3-X2C-16G',
+    'POP2-2C-8G',
+    'POP2-HC-2C-4G',
+    'POP2-HM-2C-16G',
+    'DEV1-M',
+    'GP1-XS',
+    'PLAY2-PICO',
+    'PRO2-XXS',
+    'L4-1-24G',
+    'H100-SXM-2-80G',
+    'STARDUST1-S',
+  ];
+
+  describe('without a catalog (name rule)', () => {
+    it.each(ARM_TYPES)('%s is ARM', (type) => {
+      expect(ScalewayProvider.isArmServerType(type)).toBe(true);
+    });
+    it.each(X86_TYPES)('%s is x86', (type) => {
+      expect(ScalewayProvider.isArmServerType(type)).toBe(false);
+    });
+  });
+
+  describe('with the live catalog (arch field)', () => {
+    const catalog = {
+      servers: {
+        'BASIC3-X2C-4G': { arch: 'x86_64', ncpus: 2, ram: 4 * 2 ** 30 },
+        'STANDARD3-X2C-8G': { arch: 'x86_64', ncpus: 2, ram: 8 * 2 ** 30 },
+        'STANDARD2-A2C-8G': { arch: 'arm64', ncpus: 2, ram: 8 * 2 ** 30 },
+        // An arm64 type whose name the fallback rule would NOT catch: the
+        // catalog arch must win over the name.
+        'NEWLINE9-Q2C-8G': { arch: 'arm64', ncpus: 2, ram: 8 * 2 ** 30 },
+      },
+    };
+    beforeEach(async () => {
+      scw._typeArch = null;
+      scw._locationTypes = null;
+      fetchWithRetryMock.mockImplementation(async () => jsonResp(catalog));
+      expect(await ScalewayProvider.fetchServerTypes('tok')).toBe(true);
+    });
+
+    it('classifies by the arch Scaleway reports, not by name', () => {
+      expect(ScalewayProvider.isArmServerType('STANDARD2-A2C-8G')).toBe(true);
+      expect(ScalewayProvider.isArmServerType('NEWLINE9-Q2C-8G')).toBe(true);
+      expect(ScalewayProvider.isArmServerType('BASIC3-X2C-4G')).toBe(false);
+      expect(ScalewayProvider.isArmServerType('STANDARD3-X2C-8G')).toBe(false);
+    });
+
+    it('still keeps arm64 out of the presented catalog', () => {
+      expect(Object.keys(scw.SERVER_TYPES).sort()).toEqual(['BASIC3-X2C-4G', 'STANDARD3-X2C-8G']);
+    });
+
+    it('falls back to the name rule for a type the catalog does not list', () => {
+      expect(ScalewayProvider.isArmServerType('BASIC2-A2C-4G')).toBe(true);
+      expect(ScalewayProvider.isArmServerType('DEV1-M')).toBe(false);
+    });
+
+    it('maps STANDARD2-A size-preservingly onto STANDARD3-X when the catalog has it', () => {
+      expect(ScalewayProvider.armToAmd64Equivalent('STANDARD2-A2C-8G')).toBe('STANDARD3-X2C-8G');
+    });
+  });
+
+  it('records no arch map from an incomplete catalog walk', async () => {
+    scw._typeArch = null;
+    scw._locationTypes = null;
+    fetchWithRetryMock.mockImplementation(async () => jsonResp({}, 503));
+    expect(await ScalewayProvider.fetchServerTypes('tok')).toBe(false);
+    expect(scw._typeArch).toBeNull();
   });
 
   it('maps BASIC2-A size-preservingly onto BASIC3-X', () => {
@@ -200,6 +294,27 @@ describe('ARM guard', () => {
     expect(ScalewayProvider.armToAmd64Equivalent('COPARM1-2C-8G')).toBe(
       ScalewayProvider.DEFAULT_TYPE,
     );
+  });
+
+  // Every raw-input path (deploy prompt's -server-type and .vibecarbon.json
+  // chain, scale -type, failover -server-type and its persisted standby spec,
+  // scale/converge's persisted per-role types) calls the polymorphic
+  // Provider.assertAmd64ServerType with its own source label. The call sites
+  // themselves are pinned in tests/unit/deploy/amd64-only.test.ts.
+  it.each([
+    '-server-type',
+    '.vibecarbon.json serverType',
+    '.vibecarbon.json workerServerType',
+    '-type',
+    '.vibecarbon.json ha.standbyWorkerSpec.serverType',
+  ])('rejects STANDARD2-A2C-8G through %s', (source) => {
+    expect(() => ScalewayProvider.assertAmd64ServerType('STANDARD2-A2C-8G', source)).toThrow(
+      `${source}: 'STANDARD2-A2C-8G' is an ARM (aarch64) Scaleway server type.`,
+    );
+  });
+
+  it.each(X86_TYPES)('accepts x86 %s on every path', (type) => {
+    expect(ScalewayProvider.assertAmd64ServerType(type, '-type')).toBe(type);
   });
 });
 

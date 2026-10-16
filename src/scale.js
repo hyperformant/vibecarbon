@@ -1113,6 +1113,30 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   const currentDbType = envConfig.dbServerType || fallbackType;
   const currentWorkerType = envConfig.workerServerType || fallbackType;
 
+  // With no `-type`, the persisted per-role types above are what converge and
+  // the CA worker-pool re-patch reuse. They passed the deploy guard, but a
+  // hand edit of .vibecarbon.json after deploy would otherwise slip an ARM
+  // type through, so refuse it here with the same message `-type` gets.
+  // (`-type` already passed the guard in scale(); convergeClusterInfra also
+  // re-checks whichever persisted roles a run leaves un-overridden.)
+  if (!parsed.type) {
+    for (const [key, value] of [
+      ['masterServerType', currentMasterType],
+      ['dbServerType', currentDbType],
+      ['workerServerType', currentWorkerType],
+    ]) {
+      try {
+        Provider.assertAmd64ServerType(
+          value,
+          `.vibecarbon.json ${envConfig[key] ? key : 'serverType'}`,
+        );
+      } catch (err) {
+        p.log.error(err.message);
+        process.exit(1);
+      }
+    }
+  }
+
   // 3. Display current config
   const pad = 18;
   const configLines = [`${'Environment'.padEnd(pad)} ${c.bold(environment)}`];
