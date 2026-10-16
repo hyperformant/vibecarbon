@@ -11,6 +11,7 @@ import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
+import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { runCommandThroughTaskLog } from './lib/command.js';
 import { localComposeEnv } from './lib/images.js';
 import { detectPackageManager } from './lib/project.js';
@@ -54,6 +55,14 @@ export async function run(args = []) {
     p.log.error('No "dev:reset" script found in package.json.');
     process.exit(1);
   }
+
+  // Off a TTY without -y there is nobody to confirm: exit 1 with the
+  // canonical message instead of the prompt library crashing (exit 70).
+  requireTTYOrFlags({
+    requirements: [
+      { flag: 'y', description: 'confirm deleting all local database data', satisfied: yes },
+    ],
+  });
 
   if (!yes) {
     const confirmed = await p.confirm({

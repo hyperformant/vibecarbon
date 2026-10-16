@@ -35,6 +35,16 @@ describe('vibecarbon reset', () => {
     assertExitWith(r, 1, /Not in a Vibecarbon project/i);
   });
 
+  // Final review M9: without a TTY and without -y the confirm prompt had
+  // nobody to ask and the run crashed with exit 70. Now: exit 1, name -y,
+  // and never run dev:reset.
+  it('refuses without a TTY and without -y: pass -y, exit 1, nothing reset', () => {
+    const r = runCli('reset', [], { cwd: project, execStubs: stubs, timeoutMs: 30_000 });
+    assertExitWith(r, 1, 'needs an interactive terminal');
+    assertExitWith(r, 1, /-y\s+confirm deleting all local database data/);
+    expect(stubs.callsTo('npm').some((c) => c.argv.includes('dev:reset'))).toBe(false);
+  });
+
   it('invokes npm run dev:reset with -y', () => {
     const r = runCli('reset', ['-y'], { cwd: project, execStubs: stubs, timeoutMs: 30_000 });
     if (r.exitCode === null) throw new Error(`reset timed out`);
