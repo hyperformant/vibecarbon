@@ -66,6 +66,15 @@ classes:
         detectable: false
         notes: wal-g reads of the BACKUP bucket riding documented Hetzner OS staleness
       - site: "src/lib/deploy/walg-staleness.js :: WALG_STALE_RETRY_DELAYS_MS"
+      - site: "carbon/k8s/base/db/statefulset.yaml :: walg-restore WALG_FETCH_ATTEMPTS"
+        detectable: false
+        notes: >-
+          The k8s restore init container's backup-fetch runs in the kubelet,
+          with no JS seam, so it carries a shell mirror of walg-staleness.js:
+          the same storage-404 signatures and the same 5-attempt 2/4/8/16 s
+          budget, against the same documented Hetzner OS staleness. Ported
+          from the deleted chart values. Anything that is not a storage 404
+          fails on attempt 1.
       - site: "src/lib/providers/s3-base.js :: createBucket-consistency-ladder"
         detectable: false
         notes: bucket create/exists propagation on genuinely-first deploys
