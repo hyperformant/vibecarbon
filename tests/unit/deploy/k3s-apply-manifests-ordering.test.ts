@@ -137,6 +137,21 @@ let retiredChartStsOut = '';
 // The chart's Helm release record (a Secret), which outlives a deleted StatefulSet.
 let retiredChartReleaseOut = '';
 
+const APP_POD = 'app-6f7d9c-abcde';
+const APP_RS_JSON = JSON.stringify({
+  items: [
+    {
+      metadata: {
+        annotations: { 'deployment.kubernetes.io/revision': '1' },
+        labels: { 'pod-template-hash': '6f7d9c' },
+      },
+    },
+  ],
+});
+const APP_PODS_JSON = JSON.stringify({
+  items: [{ metadata: { name: APP_POD, creationTimestamp: '2026-10-16T05:00:00Z' } }],
+});
+
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
     cmdCalls.push([cmd, ...(args ?? [])]);
@@ -196,10 +211,20 @@ function installSpawnMock() {
         typeof spawn
       >;
     }
+    // The migration watch resolves the rollout's newest pod first
+    // (readiness.js newestAppPod): one current ReplicaSet, one pod.
+    if (cmd === 'kubectl' && argv.includes('get') && argv.includes('replicasets')) {
+      return fakeChild({ stdout: APP_RS_JSON, argv: full }) as unknown as ReturnType<typeof spawn>;
+    }
+    if (cmd === 'kubectl' && argv.includes('get') && argv.includes('pods')) {
+      return fakeChild({ stdout: APP_PODS_JSON, argv: full }) as unknown as ReturnType<
+        typeof spawn
+      >;
+    }
     if (
       cmd === 'kubectl' &&
       argv.includes('exec') &&
-      argv.includes('deploy/app') &&
+      (argv.includes('deploy/app') || argv.includes(`pod/${APP_POD}`)) &&
       argv.includes('node')
     ) {
       return fakeChild({ exitCode: appProbeExit, argv: full }) as unknown as ReturnType<
@@ -1182,13 +1207,16 @@ describe('applyK3sManifests — waits for the app to report its super admin', ()
       expect(err).toBeInstanceOf(Error);
       expect(err.message).toMatch(/database migration failed/);
       expect(err.message).toMatch(/app log tail/);
-      expect(err.message).toMatch(/kubectl -n vibecarbon logs deploy\/app -c app/);
+      // The rollout's own pod, not whichever pod deploy/app picks.
+      expect(err.message).toContain(`kubectl -n vibecarbon logs pod/${APP_POD} -c app`);
     } finally {
       appProbeExit = 0;
       rolloutHangs = false;
     }
     expect(
-      cmdCalls.some((a) => a[0] === 'kubectl' && a.includes('logs') && a.includes('deploy/app')),
+      cmdCalls.some(
+        (a) => a[0] === 'kubectl' && a.includes('logs') && a.includes(`pod/${APP_POD}`),
+      ),
     ).toBe(true);
     // Nothing after the rollout ran: no RLS audit on a schema that failed.
     expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);

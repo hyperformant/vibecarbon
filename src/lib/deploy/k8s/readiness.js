@@ -319,6 +319,48 @@ export async function awaitAppAdminReady({
   }
 }
 
+/** The app Deployment's pod selector (k8s/base/app/deployment.yaml). */
+export const APP_POD_SELECTOR = 'app=vibecarbon-app';
+
+/**
+ * The newest pod of the app Deployment's CURRENT ReplicaSet, or null while
+ * it has none. During a rolling update `kubectl exec deploy/app` may pick an
+ * old-ReplicaSet pod, which reports the migrations it applied long ago, so
+ * the watch would miss the new pod's failure until the rollout timeout. The
+ * current ReplicaSet is the one with the highest
+ * `deployment.kubernetes.io/revision`; its pods carry its
+ * `pod-template-hash` label.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env
+ * @param {string} params.namespace
+ * @param {Function} params.exec
+ * @returns {Promise<string|null>} a pod name
+ */
+export async function newestAppPod({ env, namespace, exec }) {
+  const getJson = async (kind, selector) =>
+    JSON.parse(
+      String(
+        (await exec(['kubectl', '-n', namespace, 'get', kind, '-l', selector, '-o', 'json'], {
+          env,
+          silent: true,
+        })) ?? '',
+      ) || '{"items":[]}',
+    ).items ?? [];
+  const sets = await getJson('replicasets', APP_POD_SELECTOR);
+  const revision = (rs) =>
+    Number(rs?.metadata?.annotations?.['deployment.kubernetes.io/revision'] ?? -1);
+  const current = sets.reduce((best, rs) => (revision(rs) > revision(best) ? rs : best), null);
+  const hash = current?.metadata?.labels?.['pod-template-hash'];
+  if (!hash) return null;
+  const pods = await getJson('pods', `${APP_POD_SELECTOR},pod-template-hash=${hash}`);
+  const created = (pod) => Date.parse(pod?.metadata?.creationTimestamp ?? '') || 0;
+  const newest = pods
+    .filter((pod) => !pod?.metadata?.deletionTimestamp)
+    .reduce((best, pod) => (created(pod) >= created(best) ? pod : best), null);
+  return newest?.metadata?.name ?? null;
+}
+
 /**
  * Watch, alongside `kubectl rollout status deployment/app`, for the one
  * outcome the rollout wait cannot see: a failed database migration. The app
@@ -330,7 +372,9 @@ export async function awaitAppAdminReady({
  * log tail and the probe's hint. Every other answer (no pod yet, pending,
  * ready) just means keep watching. It is a condition watch for the rollout's
  * lifetime, not a retry: it resolves when `signal` aborts, which the caller
- * does as soon as the rollout settles.
+ * does as soon as the rollout settles. Each poll probes the newest pod of the
+ * rollout's current ReplicaSet (newestAppPod), so an old pod that migrated
+ * long ago cannot answer for the new one.
  *
  * @param {object} params
  * @param {NodeJS.ProcessEnv} params.env - carries KUBECONFIG
@@ -353,26 +397,32 @@ export async function watchAppMigrationFailure({
   const pause =
     sleep === defaultSleep ? (ms) => delay(ms, undefined, { signal }).catch(() => {}) : sleep;
   while (!signal.aborted) {
-    let code = 0;
-    try {
-      await exec(
-        [
-          'kubectl',
-          '-n',
-          namespace,
-          'exec',
-          'deploy/app',
-          '-c',
-          'app',
-          '--',
-          'node',
-          '-e',
-          adminReadyProbeScript(),
-        ],
-        { env, silent: true },
-      );
-    } catch (err) {
-      code = err?.status ?? null;
+    let code = null;
+    // The rollout's own pod, never an old-ReplicaSet one (newestAppPod). A
+    // failed lookup is "no pod yet": only the probe's exit code decides.
+    const pod = await newestAppPod({ env, namespace, exec }).catch(() => null);
+    if (pod) {
+      try {
+        await exec(
+          [
+            'kubectl',
+            '-n',
+            namespace,
+            'exec',
+            `pod/${pod}`,
+            '-c',
+            'app',
+            '--',
+            'node',
+            '-e',
+            adminReadyProbeScript(),
+          ],
+          { env, silent: true },
+        );
+        code = 0;
+      } catch (err) {
+        code = err?.status ?? null;
+      }
     }
     if (signal.aborted) return;
     if (code === ADMIN_PROBE_EXIT.MIGRATIONS_FAILED) {
@@ -380,7 +430,7 @@ export async function watchAppMigrationFailure({
       try {
         logs = String(
           (await exec(
-            ['kubectl', '-n', namespace, 'logs', 'deploy/app', '-c', 'app', '--tail=40'],
+            ['kubectl', '-n', namespace, 'logs', `pod/${pod}`, '-c', 'app', '--tail=40'],
             {
               env,
               silent: true,
@@ -391,8 +441,8 @@ export async function watchAppMigrationFailure({
         /* best effort */
       }
       throw new Error(
-        `The app is not ready: ${describeAdminProbeExit(code)}.\n` +
-          `${adminNotReadyHint(`kubectl -n ${namespace} logs deploy/app -c app`)}\n` +
+        `The app is not ready: ${describeAdminProbeExit(code)} (pod ${pod}).\n` +
+          `${adminNotReadyHint(`kubectl -n ${namespace} logs pod/${pod} -c app`)}\n` +
           `--- app log tail ---\n${logs.trim()}`,
       );
     }

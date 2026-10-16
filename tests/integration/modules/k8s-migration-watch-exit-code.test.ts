@@ -20,15 +20,34 @@ afterEach(() => {
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A `kubectl` whose `exec` exits `code` and whose `logs` prints a tail. */
+/**
+ * A `kubectl` whose `get replicasets` / `get pods` name one current pod (the
+ * watch resolves the rollout's newest pod first), whose `exec` exits `code`
+ * and whose `logs` prints a tail.
+ */
 function fakeKubectl(code: number) {
   dir = mkdtempSync(join(tmpdir(), 'vc-kubectl-'));
   const bin = join(dir, 'kubectl');
+  const rs = JSON.stringify({
+    items: [
+      {
+        metadata: {
+          annotations: { 'deployment.kubernetes.io/revision': '2' },
+          labels: { 'pod-template-hash': 'h2' },
+        },
+      },
+    ],
+  });
+  const pods = JSON.stringify({
+    items: [{ metadata: { name: 'app-h2-x', creationTimestamp: '2026-10-16T05:00:00Z' } }],
+  });
   writeFileSync(
     bin,
     [
       '#!/bin/sh',
       'for a in "$@"; do',
+      `  if [ "$a" = replicasets ]; then echo '${rs}'; exit 0; fi`,
+      `  if [ "$a" = pods ]; then echo '${pods}'; exit 0; fi`,
       '  if [ "$a" = logs ]; then echo "migration 0003 failed: relation exists"; exit 0; fi',
       'done',
       `exit ${code}`,
@@ -49,7 +68,7 @@ describe('watchAppMigrationFailure with the real exec', () => {
     try {
       await expect(
         watchAppMigrationFailure({ env, signal: controller.signal, intervalMs: 10 }),
-      ).rejects.toThrow(/migration 0003 failed: relation exists/);
+      ).rejects.toThrow(/pod app-h2-x[\s\S]*migration 0003 failed: relation exists/);
     } finally {
       clearTimeout(stop);
     }
