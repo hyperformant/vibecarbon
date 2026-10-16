@@ -255,9 +255,11 @@ vibecarbon deploy <env> -mode k8s -restore 2026-08-05T14:30:00Z -y
    archive recovery pinned to the base backup's own timeline, and (for PITR)
    `recovery_target_time` stops replay at the requested instant. On reaching
    the target (or the end of WAL), Postgres promotes to read-write.
-4. Database migrations are **skipped** (`-restore` implies it): the restored
-   dataset already carries `schema_migrations` and is authoritative. Admin-user
-   seeding still runs; it is idempotent against restored data.
+4. The app applies its migrations itself at startup, once the restored
+   database accepts connections. The restored dataset carries its migration
+   ledger, so only migrations newer than the backup run (none, when the backup
+   came from the same release). The app's super-admin creation also runs at
+   startup and is idempotent against restored data.
 5. The app tier rolls out normally and the deploy finishes with the standard
    public health probe.
 

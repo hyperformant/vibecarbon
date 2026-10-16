@@ -1291,7 +1291,7 @@ const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})
  * which avoids the quoting collision that would arise from embedding
  * single-quoted postgres config values in a deeply-nested ssh command.
  *
- * Mirrors the k8s walg-restore init container in carbon/k8s/values/supabase.values.yaml.
+ * Mirrors the k8s walg-restore init container in carbon/k8s/base/db/statefulset.yaml.
  *
  * @param {'latest' | string} target  'latest' for the most-recent base backup,
  *   or an ISO-8601 datetime string for point-in-time recovery.

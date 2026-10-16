@@ -24,7 +24,11 @@ carbon/k8s/
 
 1. `ensureFluxRunning(env)` — applies `https://github.com/fluxcd/flux2/releases/download/v2.8.5/install.yaml`, then `kubectl rollout status` on the four flux-system controllers (`source`, `helm`, `kustomize`, `notification`).
 2. **Cert-manager webhook** (only when DNS provider = hetzner): `kubectl apply -k carbon/k8s/gitops/cert-manager-webhook-hetzner/` → `kubectl wait helmrelease/cert-manager-webhook-hetzner`.
-3. **Database**: the Postgres StatefulSet is part of `k8s/base` (`k8s/base/db/`), but it carries per-cluster deploy-time placeholders, so the `vibecarbon-base` Kustomization drops it from its build (`$patch: delete`) and only health-checks the live `statefulset/db` the CLI's deploy created. Its Services and NetworkPolicy are reconciled by Flux like the rest of base. No chart, no HelmRelease.
+3. **Database**: the Postgres StatefulSet is part of `k8s/base` (`k8s/base/db/`), but it carries per-cluster deploy-time placeholders, so the `vibecarbon-base` Kustomization drops it from its build (`$patch: delete`) and only health-checks the live `statefulset/db` the CLI's deploy created. That Kustomization uses an explicit `healthChecks` list and no `wait: true`, because Flux ignores `healthChecks` whenever `wait` is on, and `wait` only covers objects Flux applied itself. The db's Services and NetworkPolicy are reconciled by Flux like the rest of base. No chart, no HelmRelease.
+
+   **GitOps never updates the database.** A push changes everything in base except the db StatefulSet. After an upgrade that touches the database (a db image bump, a changed `k8s/base/backup/configmap-walg.yaml`, any edit to `k8s/base/db/statefulset.yaml`), run `vibecarbon deploy <env>` from the CLI so the StatefulSet is re-rendered and rolled.
+
+   **Clusters set up before the db StatefulSet** still carry the `vibecarbon-supabase` Kustomization in flux-system. Do not simply delete it: it has `prune: true`, so deleting it garbage-collects its HelmRelease, which uninstalls the old chart and deletes its database volume. Set `prune: false` on it first, then delete it, then follow the steps `vibecarbon deploy` prints for a chart-era cluster (destroy and redeploy, or `helm uninstall supabase -n vibecarbon` and `vibecarbon deploy <env> -restore latest`).
 
 Flux's 5-minute HelmRepository interval means transient source-controller fetch failures self-heal inside the HelmRelease wait budget. There is no client-side reconcile poking.
 

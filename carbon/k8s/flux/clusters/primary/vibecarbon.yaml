@@ -44,7 +44,10 @@ spec:
     name: vibecarbon
   path: ./k8s/base
   prune: true
-  wait: true
+  # No `wait: true`: Flux ignores `healthChecks` when wait is on, and the
+  # db StatefulSet below is not in this Kustomization's own inventory (see
+  # `patches`), so `wait` alone would never look at the database. The
+  # explicit list covers every workload base runs on this cluster.
   timeout: 10m
   # The db StatefulSet stays with the vibecarbon CLI's deploy, which renders
   # its per-cluster values (image, StorageClass, S3 endpoint, wal-g role,
@@ -70,6 +73,14 @@ spec:
     - apiVersion: apps/v1
       kind: Deployment
       name: app
+      namespace: vibecarbon
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: traefik
+      namespace: vibecarbon
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: local-registry
       namespace: vibecarbon
 ---
 # cert-manager-webhook-hetzner chart install (Phase 3 overlay).

@@ -2221,8 +2221,106 @@ async function describeDbPods(env) {
  * the seed-standby init's pg_basebackup (up to ~6 minutes of retries before it
  * gives up and lets the serial reseed take over). 15 minutes is the budget the
  * chart install had for the same work.
+ *
+ * Deliberately longer than DB_STS_BOOT_TIMEOUT_S (600s, src/lib/deploy/
+ * replication.js), the shared budget for re-booting an EXISTING db pod (the
+ * HA hostPort recreate, the reseed standby boot): those waits pay a CSI
+ * re-attach, this one also pays the first provision, the image pull and
+ * initdb. Must never drop below that floor:
+ * tests/unit/deploy/db-sts-boot-timeout-census.test.ts pins it.
  */
 export const DB_ROLLOUT_TIMEOUT_S = 900;
+
+/**
+ * The workloads the retired Postgres Helm chart left in a cluster: its db
+ * StatefulSet (release `supabase`, chart `supabase`) and Helm's release
+ * record (a `sh.helm.release.v1.<release>.v<n>` Secret labelled
+ * owner=helm,name=<release>). Named here only so the deploy can recognize a
+ * chart-era cluster and refuse to build a second database beside it.
+ */
+export const RETIRED_CHART_DB_STATEFULSET = 'supabase-supabase-db';
+export const RETIRED_CHART_RELEASE = 'supabase';
+
+/**
+ * Refuse to deploy onto a cluster that still runs the retired chart's
+ * database.
+ *
+ * WHY: the db now lives on a new StatefulSet and a new volume (`data-db-0`).
+ * Applied beside a running chart release it would start an EMPTY database
+ * and the app (DB_HOST=db) would switch to it, so every row would look gone;
+ * on k8s-ha the new pod could not even schedule, because the chart pod
+ * already holds the node's replication hostPort (5433), and the rollout
+ * would burn its whole budget. Nothing moves the data across automatically,
+ * so the operator has to choose how, and this says how.
+ *
+ * A single read of the live cluster, not a retry: it runs after
+ * awaitControlPlaneServing proved the apiserver answers, so a failing read
+ * is a real failure and is reported as one rather than guessed at.
+ *
+ * @param {{env: NodeJS.ProcessEnv, namespace?: string, exec?: typeof runCommandAsync}} args
+ */
+export async function assertNoRetiredChartDb({
+  env,
+  namespace = 'vibecarbon',
+  exec = runCommandAsync,
+}) {
+  let sts;
+  let release;
+  try {
+    sts = await exec(
+      [
+        'kubectl',
+        '-n',
+        namespace,
+        'get',
+        'statefulset',
+        RETIRED_CHART_DB_STATEFULSET,
+        '--ignore-not-found',
+        '-o',
+        'name',
+      ],
+      { env, silent: true },
+    );
+    release = await exec(
+      [
+        'kubectl',
+        '-n',
+        namespace,
+        'get',
+        'secret',
+        '-l',
+        `owner=helm,name=${RETIRED_CHART_RELEASE}`,
+        '-o',
+        'name',
+      ],
+      { env, silent: true },
+    );
+  } catch (err) {
+    throw new Error(
+      'assertNoRetiredChartDb: could not read the cluster to check for the retired database ' +
+        `chart (${String(err?.message ?? err).slice(0, 200)}). Refusing to create the db ` +
+        'StatefulSet without knowing whether an older database is still running here.',
+    );
+  }
+  const found = [String(sts ?? '').trim(), String(release ?? '').trim()].filter(Boolean);
+  if (found.length === 0) return;
+  throw new Error(
+    `This cluster still runs the database from the retired Helm chart (${found.join(', ')} in ` +
+      `namespace ${namespace}). This version runs Postgres as its own StatefulSet on a NEW ` +
+      'volume, and existing data does not carry over automatically: deploying now would point ' +
+      'the app at an empty database.\n' +
+      'Pick one:\n' +
+      '  - Start clean: `vibecarbon destroy <env>`, then `vibecarbon deploy <env>`.\n' +
+      `  - Keep the data: \`helm uninstall ${RETIRED_CHART_RELEASE} -n ${namespace}\`, then ` +
+      '`vibecarbon deploy <env> -restore latest`. The restore reads the same wal-g prefix ' +
+      'the chart database archived to (unchanged), so it replays every segment archived ' +
+      'before the uninstall. On k8s-ha do this on both clusters.\n' +
+      'GitOps clusters (`vibecarbon configure cicd`): first set `prune: false` on the ' +
+      '`vibecarbon-supabase` Flux Kustomization in flux-system and then delete it; deleting it ' +
+      'with prune on garbage-collects the HelmRelease, which uninstalls the chart and deletes ' +
+      'its database volume before you chose to.',
+  );
+}
 
 /**
  * Wait for `statefulset/db` to roll out (its pod Ready: the real server
@@ -3221,6 +3319,9 @@ export async function applyK3sManifests({
   // no-op on the standby. The S3 prefix itself stays canonical.
   const walgRole = role === 'standby' ? 'standby' : 'primary';
   const storageClass = ProviderClass?.K8S_STORAGE_CLASS;
+  // A chart-era cluster keeps its database on the chart's StatefulSet; a new
+  // one beside it would be empty. Refuse before anything is created.
+  await assertNoRetiredChartDb({ env });
   await assertDbStorageClass({ storageClass, env });
   const baseDir = renderK8sBase(
     join(projectDir, 'k8s/base'),
