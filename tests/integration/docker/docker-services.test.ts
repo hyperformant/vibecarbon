@@ -297,15 +297,16 @@ describeDocker('Docker Services Smoke Test', () => {
       });
 
     // Presigned PUT and GET with the project's own SDK and the .env.local
-    // key, plus a browser preflight from the Vite origin: the round trip an
-    // avatar upload makes. Prints one JSON line.
-    const roundTrip = () =>
+    // key, plus browser preflights from the Vite origin and a foreign one:
+    // the round trip an avatar upload makes. With readKey, also reads back an
+    // object an earlier call wrote. Prints one JSON line.
+    const roundTrip = (readKey?: string) =>
       JSON.parse(
         execSync('node --input-type=module -', {
           cwd: projectDir(),
           encoding: 'utf-8',
           timeout: 30000,
-          env: getExecEnv(),
+          env: { ...getExecEnv(), READ_KEY: readKey ?? '' },
           input: `
             import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
             import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -315,21 +316,32 @@ describeDocker('Docker Services Smoke Test', () => {
               requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
               credentials: { accessKeyId: e.S3_ACCESS_KEY, secretAccessKey: e.S3_SECRET_KEY },
             });
-            const Key = 'smoke/' + Date.now() + '.txt';
-            const put = await getSignedUrl(client, new PutObjectCommand({ Bucket: e.S3_BUCKET, Key, ContentType: 'text/plain' }), { expiresIn: 60 });
-            const preflight = await fetch(put, { method: 'OPTIONS', headers: {
-              Origin: 'http://localhost:5173', 'Access-Control-Request-Method': 'PUT',
-              'Access-Control-Request-Headers': 'content-type' } });
-            const putRes = await fetch(put, { method: 'PUT', body: 'hello garage', headers: { 'content-type': 'text/plain' } });
-            const get = await getSignedUrl(client, new GetObjectCommand({ Bucket: e.S3_BUCKET, Key }), { expiresIn: 60 });
-            const getRes = await fetch(get);
+            const read = async (Key) => {
+              const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: e.S3_BUCKET, Key }), { expiresIn: 60 });
+              const res = await fetch(url);
+              return { status: res.status, body: await res.text() };
+            };
+            const preflight = (url, Origin) => fetch(url, { method: 'OPTIONS', headers: {
+              Origin, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'content-type' } });
+            const key = 'smoke/' + Date.now() + '.txt';
+            const put = await getSignedUrl(client, new PutObjectCommand({ Bucket: e.S3_BUCKET, Key: key, ContentType: 'text/plain' }), { expiresIn: 60 });
+            const dev = await preflight(put, 'http://localhost:5173');
+            const foreign = await preflight(put, 'http://evil.example');
+            const putRes = await fetch(put, { method: 'PUT', body: 'hello ' + key, headers: { 'content-type': 'text/plain' } });
+            const got = await read(key);
             console.log(JSON.stringify({
-              allowOrigin: preflight.headers.get('access-control-allow-origin'),
-              put: putRes.status, get: getRes.status, body: await getRes.text(),
+              key,
+              allowOrigin: dev.headers.get('access-control-allow-origin'),
+              foreign: { status: foreign.status, allowOrigin: foreign.headers.get('access-control-allow-origin') },
+              put: putRes.status, get: got.status, body: got.body,
+              earlier: e.READ_KEY ? await read(e.READ_KEY) : null,
             }));
           `,
         }),
       );
+
+    // Written before the recreate, read back after it.
+    let firstKey = '';
 
     it('container is running', ({ skip }) => {
       if (!s3Available) skip();
@@ -339,16 +351,25 @@ describeDocker('Docker Services Smoke Test', () => {
     it('takes a presigned upload and serves it back, CORS scoped to the dev origin', ({ skip }) => {
       if (!s3Available) skip();
       ensureDevBucket();
-      expect(roundTrip()).toEqual({
+      const result = roundTrip();
+      firstKey = result.key;
+      expect(result).toMatchObject({
         allowOrigin: 'http://localhost:5173',
         put: 200,
         get: 200,
-        body: 'hello garage',
+        body: `hello ${result.key}`,
       });
+      // A foreign origin's preflight is refused. Browsers need a 2xx
+      // preflight, so the 403 blocks the upload; Garage's error responses
+      // carry a wildcard ACAO header, which a non-2xx preflight never uses.
+      // (A bucket held under a key-local alias would answer 200 here.)
+      expect(result.foreign.status).toBe(403);
+      expect(result.foreign.allowOrigin).not.toBe('http://evil.example');
     });
 
     it('sets itself up again idempotently when recreated on the same volume', ({ skip }) => {
       if (!s3Available) skip();
+      expect(firstKey, 'the upload case runs first and writes an object').not.toBe('');
       execSync('docker compose up -d --force-recreate s3', {
         cwd: projectDir(),
         encoding: 'utf-8',
@@ -357,7 +378,10 @@ describeDocker('Docker Services Smoke Test', () => {
       });
       expect(runningServices()).toContain('s3');
       ensureDevBucket();
-      expect(roundTrip()).toMatchObject({ put: 200, get: 200, body: 'hello garage' });
+      const result = roundTrip(firstKey);
+      expect(result).toMatchObject({ put: 200, get: 200, body: `hello ${result.key}` });
+      // The object written before the recreate survived it.
+      expect(result.earlier).toEqual({ status: 200, body: `hello ${firstKey}` });
     });
   });
 

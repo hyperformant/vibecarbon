@@ -35,10 +35,11 @@ export function devOrigins(env) {
   return [`http://localhost:${port}`];
 }
 
-/** Wait-free check that the bucket exists, then always (re)apply CORS. */
+/**
+ * Check the bucket exists, then (re)apply its CORS. Throws NotFound until
+ * Garage has created the bucket; prepareDevBucket waits that out.
+ */
 export async function ensureDevBucket({ client, bucket, origins }) {
-  // Throws (NotFound) until the S3 service has created the bucket; main()
-  // retries.
   await client.send(new HeadBucketCommand({ Bucket: bucket }));
   await client.send(
     new PutBucketCorsCommand({
@@ -61,6 +62,58 @@ export async function ensureDevBucket({ client, bucket, origins }) {
   );
 }
 
+const CONNECTION_ERRORS = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT']);
+
+/**
+ * True while the local S3 is still starting: the port refuses or drops the
+ * connection, or Garage has not created the bucket yet. Waiting for a
+ * container to come up, not a retry of a failed request.
+ */
+export function isStillStarting(error) {
+  if (error?.name === 'NotFound' || error?.name === 'NoSuchBucket') return true;
+  if (error?.$metadata?.httpStatusCode === 404) return true;
+  const code = error?.code ?? error?.cause?.code;
+  return CONNECTION_ERRORS.has(code);
+}
+
+/** True when the S3 service rejected the key: no amount of waiting fixes it. */
+export function isAuthFailure(error) {
+  if (['InvalidAccessKeyId', 'SignatureDoesNotMatch', 'AccessDenied'].includes(error?.name)) {
+    return true;
+  }
+  return error?.$metadata?.httpStatusCode === 403;
+}
+
+export const AUTH_FAILURE_HELP =
+  "the S3 key in .env.local doesn't match the local Garage. Run `node scripts/dev-init.js --force` " +
+  '(this repo), or copy S3_ACCESS_KEY and S3_SECRET_KEY from a fresh `vibecarbon create`';
+
+/**
+ * Apply CORS once the local S3 is up. Waits (attempts x delayMs) only while
+ * isStillStarting; any other error, an auth failure included, throws at once.
+ */
+export async function prepareDevBucket({
+  client,
+  bucket,
+  origins,
+  attempts = 10,
+  delayMs = 1000,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await ensureDevBucket({ client, bucket, origins });
+      return;
+    } catch (error) {
+      if (isAuthFailure(error)) {
+        throw Object.assign(new Error(AUTH_FAILURE_HELP), { cause: error, authFailure: true });
+      }
+      if (!isStillStarting(error) || attempt >= attempts) throw error;
+      await sleep(delayMs);
+    }
+  }
+}
+
 async function main() {
   // Shell wins, but a blank export falls through to the .env files.
   const env = { ...readEnvFiles(process.cwd()) };
@@ -80,25 +133,15 @@ async function main() {
     responseChecksumValidation: 'WHEN_REQUIRED',
     credentials: { accessKeyId: S3_ACCESS_KEY, secretAccessKey: S3_SECRET_KEY },
   });
-  // The S3 container accepts connections, and creates the bucket, a moment
-  // after compose reports it up.
-  let lastError;
-  for (let attempt = 1; attempt <= 10; attempt++) {
-    try {
-      await ensureDevBucket({ client, bucket: S3_BUCKET, origins: devOrigins(env) });
-      console.log(`Dev bucket ready: ${S3_BUCKET}`);
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  throw lastError;
+  await prepareDevBucket({ client, bucket: S3_BUCKET, origins: devOrigins(env) });
+  console.log(`Dev bucket ready: ${S3_BUCKET}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     // Non-fatal for dev: the app boots without storage; uploads just 503/fail.
-    console.warn(`Warning: could not prepare the dev bucket (${error.message}).`);
+    // A refused connection arrives as an AggregateError with an empty message.
+    const reason = error.message || error.code || error.name;
+    console.warn(`Warning: could not prepare the dev bucket (${reason}).`);
   });
 }
