@@ -81,32 +81,31 @@ function CopyCommand({ command, className }: { command: string; className?: stri
  * - the connector runs from this node's bottom edge (`py-2.5 - 2 + 9 = 9.5`) to
  *   the next node's top edge (`-bottom-0.5`), never behind the nodes, whose
  *   fills are translucent.
- * Rows carry `px-2` for the hover/selected highlight, hence `left-6.5`.
+ * Rows carry `px-2` of padding, hence `left-6.5`.
  */
 const CONNECTOR = 'top-9.5 -bottom-0.5 left-6.5 w-0.5 -translate-x-1/2';
 
 interface StepNodeProps {
   step: SetupStep;
   selected: boolean;
-  hovered: boolean;
 }
 
 /**
  * The step's circle carries every interaction state, so the row itself stays
  * unhighlighted:
  * - current: primary border plus a soft 4px glow (unchanged);
- * - hovered: a faint primary ring set off from the circle by a 2px gap;
+ * - hovered: a faint primary ring set off from the circle by a 2px gap, a
+ *   cue that the step is clickable (pure CSS: hovering anywhere on the row
+ *   hovers the step button's overlay, and the button is the `group/step`);
  * - selected: the same ring at full strength, which wins over hover;
- * - keyboard focus: an outline outside the ring (the step button is the
- *   `group/step`).
+ * - keyboard focus: an outline outside the ring.
  * Ring, offset and glow are composed box-shadows; on a current step that is
  * also hovered or selected the glow widens to 8px so it shows past the ring.
  */
-function StepNode({ step, selected, hovered }: StepNodeProps) {
+function StepNode({ step, selected }: StepNodeProps) {
   return (
     <span
       data-selected={selected || undefined}
-      data-hovered={(hovered && !selected) || undefined}
       className={cn(
         'relative z-10 -mt-2 flex size-9 shrink-0 items-center justify-center rounded-full border-2 bg-muted transition-shadow',
         'ring-offset-card outline-ring group-focus-visible/step:outline-2 group-focus-visible/step:outline-offset-[6px]',
@@ -115,10 +114,14 @@ function StepNode({ step, selected, hovered }: StepNodeProps) {
         step.done && 'border-success bg-success text-primary-foreground',
         step.current && 'border-primary text-primary shadow-[0_0_0_4px_var(--glow-primary)]',
         // A ring would cover the 4px glow, so push the glow out past it.
-        step.current && (selected || hovered) && 'shadow-[0_0_0_8px_var(--glow-primary)]',
+        step.current &&
+          (selected
+            ? 'shadow-[0_0_0_8px_var(--glow-primary)]'
+            : 'group-hover/step:shadow-[0_0_0_8px_var(--glow-primary)]'),
         !step.done && !step.current && 'border-border text-muted-foreground',
-        hovered && !selected && 'ring-primary/45 ring-2 ring-offset-2',
-        selected && 'ring-primary ring-2 ring-offset-2'
+        selected
+          ? 'ring-primary ring-2 ring-offset-2'
+          : 'group-hover/step:ring-primary/45 group-hover/step:ring-2 group-hover/step:ring-offset-2'
       )}
     >
       {step.done ? (
@@ -138,12 +141,10 @@ interface TimelineStepProps {
   step: SetupStep;
   isLast: boolean;
   selected: boolean;
-  hovered: boolean;
-  onPreview: (id: SetupStepId) => void;
   onSelect: (id: SetupStepId) => void;
 }
 
-function TimelineStep({ step, isLast, selected, hovered, onPreview, onSelect }: TimelineStepProps) {
+function TimelineStep({ step, isLast, selected, onSelect }: TimelineStepProps) {
   const partner = step.integrations?.find((i) => i.isPartner);
   return (
     // The step button is the row's only control. Its ::after overlay is
@@ -152,8 +153,8 @@ function TimelineStep({ step, isLast, selected, hovered, onPreview, onSelect }: 
     // circle, padding included. Only the copy button is lifted above the
     // overlay. The row has no background or pointer cursor of its own (the
     // normal arrow throughout); hover, selection and focus show on the circle.
-    // biome-ignore lint/a11y/noStaticElementInteractions: hover only previews; the step button below is the keyboard and click control
-    <div className="relative px-2 py-2.5" onMouseEnter={() => onPreview(step.id)}>
+    // Hover never changes the Spotlight panel; only a click or Enter/Space does.
+    <div className="relative px-2 py-2.5">
       {!isLast && (
         <span
           aria-hidden="true"
@@ -168,7 +169,7 @@ function TimelineStep({ step, isLast, selected, hovered, onPreview, onSelect }: 
         onClick={() => onSelect(step.id)}
         className="group/step grid w-full cursor-default grid-cols-[--spacing(9)_1fr] gap-3.5 text-left outline-none after:absolute after:inset-0 after:z-20 after:content-['']"
       >
-        <StepNode step={step} selected={selected} hovered={hovered} />
+        <StepNode step={step} selected={selected} />
         <span className="min-w-0">
           <span className="flex flex-wrap items-center gap-2">
             <span className="text-muted-foreground text-xs tabular-nums">
@@ -224,7 +225,7 @@ function spotlightEyebrow(step: SetupStep, total: number): string {
 }
 
 // Rendered with `key={step.id}`, so the provider choice starts fresh for every
-// step the operator previews or selects.
+// step the operator selects.
 function Spotlight({
   step,
   total,
@@ -355,7 +356,6 @@ export function SetupProgress() {
   // `null` follows the current step, so the panel advances as steps complete
   // until the operator picks one explicitly.
   const [selectedId, setSelectedId] = useState<SetupStepId | null>(null);
-  const [hoveredId, setHoveredId] = useState<SetupStepId | null>(null);
 
   if (isLoading) {
     return (
@@ -374,8 +374,7 @@ export function SetupProgress() {
   // finale so the panel, and step browsing, stay available.
   const defaultId = progress.current?.id ?? 'deploy';
   const activeId = selectedId ?? defaultId;
-  const spotlightStep =
-    progress.steps.find((s) => s.id === (hoveredId ?? activeId)) ?? progress.steps[0];
+  const spotlightStep = progress.steps.find((s) => s.id === activeId) ?? progress.steps[0];
 
   return (
     <Card className="glass relative overflow-hidden">
@@ -422,16 +421,13 @@ export function SetupProgress() {
 
       <CardContent className="relative">
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_366px] lg:gap-8">
-          {/* biome-ignore lint/a11y/noStaticElementInteractions: clears the hover preview only */}
-          <div className="-mx-2" onMouseLeave={() => setHoveredId(null)}>
+          <div className="-mx-2">
             {progress.steps.map((step, i) => (
               <TimelineStep
                 key={step.id}
                 step={step}
                 isLast={i === progress.steps.length - 1}
                 selected={step.id === activeId}
-                hovered={step.id === hoveredId}
-                onPreview={setHoveredId}
                 onSelect={setSelectedId}
               />
             ))}

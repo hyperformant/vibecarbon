@@ -6,9 +6,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildSetupProgress, type SetupFlags } from '@/lib/setup-progress';
 
-// The Overview setup stepper: every step is browsable. Hover previews a step in
-// the Spotlight panel, click or Enter/Space selects it, and the selection
-// sticks once the pointer leaves. The default selection is the current step.
+// The Overview setup stepper: every step is browsable. Clicking a step (its
+// circle or anywhere on its row) or pressing Enter/Space on it selects it and
+// shows it in the Spotlight panel. Hover never changes the panel; it only
+// rings the circle as a cue. The default selection is the current step.
 
 const NOTHING_DONE: SetupFlags = {
   email: false,
@@ -61,16 +62,19 @@ describe('SetupProgress stepper', () => {
     expect(stepButton(/Payments/)).toHaveAttribute('aria-pressed', 'false');
   });
 
-  it('previews a hovered step and falls back when the pointer leaves', () => {
+  it('does not change the spotlight on hover, only on click', async () => {
+    const user = userEvent.setup();
     renderStepper();
+    await user.hover(stepButton(/Payments/));
     fireEvent.mouseEnter(rowOf(/Payments/));
-    expect(within(spotlight()).getByRole('heading', { name: 'Payments' })).toBeInTheDocument();
-    expect(eyebrow()).toHaveTextContent(/^Step 6 of 7$/);
-    // Hover is only a preview: the selection is unchanged.
+    fireEvent.mouseOver(rowOf(/Payments/));
+    expect(eyebrow()).toHaveTextContent('Next up · Step 3 of 7');
+    expect(within(spotlight()).getByRole('heading', { name: 'Email' })).toBeInTheDocument();
     expect(stepButton(/Payments/)).toHaveAttribute('aria-pressed', 'false');
 
-    fireEvent.mouseLeave(rowOf(/Payments/).parentElement as HTMLElement);
-    expect(eyebrow()).toHaveTextContent('Next up · Step 3 of 7');
+    await user.click(stepButton(/Payments/));
+    expect(eyebrow()).toHaveTextContent(/^Step 6 of 7$/);
+    expect(within(spotlight()).getByRole('heading', { name: 'Payments' })).toBeInTheDocument();
   });
 
   it('selects a step on click and keeps it after the pointer leaves', async () => {
@@ -137,19 +141,19 @@ describe('SetupProgress stepper', () => {
     renderStepper();
     const circle = (label: RegExp) => stepButton(label).firstElementChild as HTMLElement;
 
-    // Default: the current step (Email) is selected; nothing is hovered.
+    // Default: the current step (Email) is selected.
     expect(circle(/Email/)).toHaveAttribute('data-selected');
-    expect(circle(/Payments/)).not.toHaveAttribute('data-hovered');
+    expect(circle(/Payments/)).not.toHaveAttribute('data-selected');
 
-    fireEvent.mouseEnter(rowOf(/Payments/));
-    expect(circle(/Payments/)).toHaveAttribute('data-hovered');
-    expect(circle(/Payments/).className).toContain('ring-primary/45');
-    expect(circle(/Email/)).toHaveAttribute('data-selected');
+    // Hover is a CSS cue on the circle, driven by hovering the step button
+    // (its overlay spans the row): a faint ring, never a state change.
+    expect(stepButton(/Payments/).className).toContain('group/step');
+    expect(circle(/Payments/).className).toContain('group-hover/step:ring-primary/45');
 
     await user.click(stepButton(/Payments/));
     expect(circle(/Payments/)).toHaveAttribute('data-selected');
     // Selected wins over hover, at full strength.
-    expect(circle(/Payments/)).not.toHaveAttribute('data-hovered');
+    expect(circle(/Payments/).className).not.toContain('group-hover/step:ring');
     expect(circle(/Payments/).className).toMatch(/(^|\s)ring-primary(\s|$)/);
     expect(circle(/Email/)).not.toHaveAttribute('data-selected');
     // The current step keeps its glow whether or not it is selected.
