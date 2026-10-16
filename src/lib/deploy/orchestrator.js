@@ -1056,8 +1056,9 @@ export async function executeDeployment(args, gatheredConfig) {
     backupConfig,
     backupBucketName: backupS3Config?.bucket || null,
     // DR: when set (`deploy -restore latest|<ts>`), the db pod's init
-    // container seeds PGDATA from S3 via wal-g and applyMigrations is
-    // skipped (the restored DB is authoritative).
+    // container seeds PGDATA from S3 via wal-g. The restored DB carries its
+    // migration ledger, so the app's startup migrations apply only what the
+    // backup lacks.
     restore: args.restore || null,
     // Finding #1: hard-gate k8s-HA replication unless the operator opts into a
     // warm/degraded standby via `deploy -allow-degraded`.

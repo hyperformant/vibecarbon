@@ -44,7 +44,7 @@ import {
 import {
   dockerLoginOnServer,
   pullComposeImages,
-  runMigrations,
+  runDatabaseAudits,
   setupComposeBackupCron,
   setupServer,
   setupServerFiles,
@@ -625,19 +625,6 @@ async function haStartComposeStack(ctx) {
 }
 
 /**
- * Run migrations on the PRIMARY only. Let failures propagate — shipping an
- * empty/partial schema is worse than a visibly-failed deploy.
- */
-async function haRunMigrations(ctx) {
-  const projectName = ctx.projectConfig.projectName;
-  const { primary, sshKeyPath } = ctx;
-  ctx.onProgress('Running database migrations on primary...');
-  await perfAsync('deploy.ha.compose.migrations', () =>
-    runMigrations(primary.ip, sshKeyPath, projectName),
-  );
-}
-
-/**
  * Wait for the PRIMARY's app to report its super admin ready (it creates the
  * admin at startup from ADMIN_EMAIL / ADMIN_PASSWORD in the bundled .env).
  * FATAL on failure — shares waitForAdminReady (compose/index.js) with the
@@ -652,6 +639,20 @@ async function haWaitAdminReady(ctx) {
     waitForAdminReady(primary.ip, sshKeyPath, projectName),
   );
   p.log.success(result.message);
+}
+
+/**
+ * The RLS + wal-g backup audits on the PRIMARY, once its app has migrated
+ * the database (haWaitAdminReady waits for that). The standby is a replica
+ * of the same catalog and its wal-g probe skips itself.
+ */
+async function haAuditDatabase(ctx) {
+  const projectName = ctx.projectConfig.projectName;
+  const { primary, sshKeyPath } = ctx;
+  ctx.onProgress('Auditing the primary database (RLS, backups)...');
+  await perfAsync('deploy.ha.compose.databaseAudits', () =>
+    runDatabaseAudits(primary.ip, sshKeyPath, projectName),
+  );
 }
 
 /**
@@ -941,8 +942,8 @@ export const COMPOSE_HA_EFFECTS = {
   haPullImages,
   haUpdateDns,
   haStartComposeStack,
-  haRunMigrations,
   haWaitAdminReady,
+  haAuditDatabase,
   haWaitPrimaryPostgres,
   haWriteReplicationOverlay,
   haConfigureReplication,

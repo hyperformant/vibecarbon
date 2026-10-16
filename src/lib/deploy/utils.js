@@ -235,15 +235,7 @@ export async function setupServerFiles(host, sshKeyPath, projectName, options = 
 
   // Create remote directory and required subdirectories
   await runCommandAsync(
-    [
-      'ssh',
-      ...sshOpts.split(' '),
-      `root@${host}`,
-      'mkdir',
-      '-p',
-      `${remoteDir}/volumes/db`,
-      `${remoteDir}/db/migrations`,
-    ],
+    ['ssh', ...sshOpts.split(' '), `root@${host}`, 'mkdir', '-p', `${remoteDir}/volumes/db`],
     { silent: true, ignoreError: true },
   );
 
@@ -288,20 +280,6 @@ export async function setupServerFiles(host, sshKeyPath, projectName, options = 
         );
       }
     }
-  }
-
-  // Copy the migrations directory
-  const migrationsDir = join(cwd, 'db', 'migrations');
-  if (existsSync(migrationsDir)) {
-    await scpWithRetry(
-      [
-        ...sshOpts.split(' '),
-        '-r',
-        `${migrationsDir}/*`,
-        `root@${host}:${remoteDir}/db/migrations/`,
-      ],
-      { ignoreError: true }, // handle the 2>/dev/null || true semantics
-    );
   }
 
   // Copy local .env file if it exists

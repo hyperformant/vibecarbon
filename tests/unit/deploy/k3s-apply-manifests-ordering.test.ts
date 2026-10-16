@@ -162,7 +162,7 @@ function installSpawnMock() {
         typeof spawn
       >;
     }
-    // Post-migration RLS audit (applyMigrations, -tAc). Empty stdout = clean
+    // RLS audit after the app migrated (auditRls, -tAc). Empty stdout = clean
     // schema (no public tables without RLS) so the audit passes — a non-empty
     // result would be read as a list of unprotected tables and abort the deploy.
     if (cmd === 'kubectl' && argv.includes('exec') && argv.includes('-tAc')) {
@@ -176,11 +176,7 @@ function installSpawnMock() {
   }) as unknown as typeof spawn);
 }
 
-function makeProjectDir({
-  withMigrations = false,
-  withStandbyOverlay = false,
-  withObservability = false,
-} = {}) {
+function makeProjectDir({ withStandbyOverlay = false, withObservability = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-k3s-apply-'));
   mkdirSync(join(dir, 'k8s', 'values'), { recursive: true });
   writeFileSync(
@@ -198,15 +194,6 @@ function makeProjectDir({
       join(dir, 'k8s', 'base', 'observability', 'kustomization.yaml'),
       'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: vibecarbon-observability\n',
     );
-  }
-  if (withMigrations) {
-    // Gives applyMigrations something to actually exec, so the
-    // pilot-standby tests below can assert its absence/presence by argv
-    // (an empty migrations dir makes applyMigrations a silent no-op
-    // regardless of the standby gate, which would make the assertion
-    // vacuous).
-    mkdirSync(join(dir, 'db', 'migrations'), { recursive: true });
-    writeFileSync(join(dir, 'db', 'migrations', '0001_init.sql'), 'select 1;\n');
   }
   if (withStandbyOverlay) {
     // installSupabase (Task 4) requires this overlay whenever role ===
@@ -543,7 +530,6 @@ describe('applyK3sManifests pilot-standby role', () => {
   it('standby role zeroes app + CA and skips app-tier steps', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir({
-      withMigrations: true,
       withStandbyOverlay: true,
       withObservability: true,
     });
@@ -585,9 +571,8 @@ describe('applyK3sManifests pilot-standby role', () => {
         (a) => a.includes('rollout') && a.includes('status') && a.includes('deployment/app'),
       ),
     ).toBe(false);
-    // applyMigrations skipped — would exec against a pod that's fine, but
-    // there's nothing to migrate FOR (no app tier reading the schema yet).
-    expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(false);
+    // No RLS audit either: no app tier has migrated anything on a standby.
+    expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);
 
     // Registry wait + push stay: failover pulls the app image from it.
     expect(
@@ -612,7 +597,7 @@ describe('applyK3sManifests pilot-standby role', () => {
 
   it('primary role call list is unchanged (patches/waits/app-tier steps all still run)', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir({ withMigrations: true, withObservability: true });
+    const projectDir = makeProjectDir({ withObservability: true });
 
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'primary' });
 
@@ -625,7 +610,17 @@ describe('applyK3sManifests pilot-standby role', () => {
         (a) => a.includes('rollout') && a.includes('status') && a.includes('deployment/app'),
       ),
     ).toBe(true);
-    expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(true);
+    // The deploy applies no SQL itself (the app migrates at startup), and
+    // audits RLS on the live catalog after the app reports migrations applied.
+    expect(cmdCalls.some((a) => a.includes('ON_ERROR_STOP=1'))).toBe(false);
+    const adminProbe = cmdCalls.findIndex(
+      (a) =>
+        a.includes('exec') && a.some((s) => typeof s === 'string' && s.includes('/api/health')),
+    );
+    const rlsAudit = cmdCalls.findIndex((a) => a.includes('-tAc'));
+    expect(adminProbe).toBeGreaterThan(-1);
+    expect(rlsAudit).toBeGreaterThan(-1);
+    expect(rlsAudit).toBeGreaterThan(adminProbe);
     // No schema-cache reload after migrations: nothing in the cluster caches
     // the schema now that the chart runs only the db.
     expect(cmdCalls.some((a) => a.some((s) => s.includes('reload schema')))).toBe(false);

@@ -17,6 +17,7 @@ import {
   ADMIN_PROBE_EXIT,
   adminReadyProbeScript,
   describeAdminProbeExit,
+  isTerminalAdminProbeExit,
 } from '../../../src/lib/deploy/admin-ready.js';
 import { waitForAdminReady } from '../../../src/lib/deploy/compose/index.js';
 import { awaitAppAdminReady } from '../../../src/lib/deploy/k8s/readiness.js';
@@ -89,13 +90,43 @@ function runProbe(port: number): Promise<number> {
 }
 
 describe('adminReadyProbeScript (runs inside the app container)', () => {
-  it('exits READY only when /api/health says adminReady: true', async () => {
-    const port = await serve(200, JSON.stringify({ status: 'ok', adminReady: true }));
+  it('exits READY only when /api/health says migrations applied and adminReady: true', async () => {
+    const port = await serve(
+      200,
+      JSON.stringify({ status: 'ok', migrationStatus: 'applied', adminReady: true }),
+    );
     expect(await runProbe(port)).toBe(ADMIN_PROBE_EXIT.READY);
   });
 
+  // The app migrates before it bootstraps the admin, so ready without
+  // applied cannot happen; the probe still requires both.
+  it('exits MIGRATIONS_PENDING until the migrations are applied, whatever adminReady says', async () => {
+    for (const body of [
+      { migrationStatus: 'pending', adminReady: false },
+      { migrationStatus: 'pending', adminReady: true },
+    ]) {
+      const port = await serve(200, JSON.stringify(body));
+      expect(await runProbe(port), JSON.stringify(body)).toBe(ADMIN_PROBE_EXIT.MIGRATIONS_PENDING);
+      await new Promise<void>((r) => server?.close(() => r()));
+      server = null;
+    }
+  });
+
+  it('a failed migration is terminal (MIGRATIONS_FAILED)', async () => {
+    const port = await serve(
+      200,
+      JSON.stringify({ migrationStatus: 'failed', migrationError: 'SQLSTATE 42P07' }),
+    );
+    expect(await runProbe(port)).toBe(ADMIN_PROBE_EXIT.MIGRATIONS_FAILED);
+    expect(isTerminalAdminProbeExit(ADMIN_PROBE_EXIT.MIGRATIONS_FAILED)).toBe(true);
+    expect(isTerminalAdminProbeExit(ADMIN_PROBE_EXIT.MIGRATIONS_PENDING)).toBe(false);
+  });
+
   it('exits ADMIN_PENDING while the app serves but the admin is not ready', async () => {
-    const port = await serve(200, JSON.stringify({ status: 'ok', adminReady: false }));
+    const port = await serve(
+      200,
+      JSON.stringify({ status: 'ok', migrationStatus: 'applied', adminReady: false }),
+    );
     expect(await runProbe(port)).toBe(ADMIN_PROBE_EXIT.ADMIN_PENDING);
   });
 
@@ -107,16 +138,23 @@ describe('adminReadyProbeScript (runs inside the app container)', () => {
       ['pending', ADMIN_PROBE_EXIT.ADMIN_PENDING],
     ];
     for (const [adminStatus, code] of cases) {
-      const port = await serve(200, JSON.stringify({ adminReady: false, adminStatus }));
+      const port = await serve(
+        200,
+        JSON.stringify({ migrationStatus: 'applied', adminReady: false, adminStatus }),
+      );
       expect(await runProbe(port), adminStatus).toBe(code);
       await new Promise<void>((r) => server?.close(() => r()));
       server = null;
     }
   });
 
-  it('treats a missing flag (an app image from before the flag) as not ready', async () => {
+  it('treats missing flags (an app image from before them) as not ready', async () => {
     const port = await serve(200, JSON.stringify({ status: 'ok' }));
-    expect(await runProbe(port)).toBe(ADMIN_PROBE_EXIT.ADMIN_PENDING);
+    expect(await runProbe(port)).toBe(ADMIN_PROBE_EXIT.MIGRATIONS_PENDING);
+    await new Promise<void>((r) => server?.close(() => r()));
+    server = null;
+    const port2 = await serve(200, JSON.stringify({ status: 'ok', migrationStatus: 'applied' }));
+    expect(await runProbe(port2)).toBe(ADMIN_PROBE_EXIT.ADMIN_PENDING);
   });
 
   it('exits UNHEALTHY on a non-2xx or a non-JSON body', async () => {

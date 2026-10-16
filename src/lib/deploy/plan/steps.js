@@ -66,18 +66,20 @@ export const startComposeStackStep = () =>
   defineStep({ name: 'start-compose-stack', effect: 'startComposeStack' });
 
 /**
- * Apply db/migrations/* + the two ground-truth audits (RLS, wal-g
- * backups) (shipped-bug guard). Either audit fails the step.
- */
-export const runMigrationsStep = () =>
-  defineStep({ name: 'run-migrations', effect: 'runMigrations' });
-
-/**
- * Wait for the app to report its super admin ready: the app creates it at
- * startup from ADMIN_EMAIL / ADMIN_PASSWORD (shipped-bug guard).
+ * Wait for the app to report its migrations applied and its super admin
+ * ready (one /api/health probe): the app applies db/migrations at startup,
+ * then creates the admin from ADMIN_EMAIL / ADMIN_PASSWORD (shipped-bug
+ * guard). No deploy step applies migrations itself.
  */
 export const waitAdminReadyStep = () =>
   defineStep({ name: 'wait-admin-ready', effect: 'waitAdminReady' });
+
+/**
+ * The two ground-truth audits against the migrated database: RLS and wal-g
+ * backups (shipped-bug guard). Either audit fails the step.
+ */
+export const auditDatabaseStep = () =>
+  defineStep({ name: 'audit-database', effect: 'auditDatabase' });
 
 /** Gate deploy success on the app's own /api/health probe. */
 export const verifyHealthStep = () => defineStep({ name: 'verify-health', effect: 'verifyHealth' });
@@ -101,7 +103,7 @@ export const setupBackupCronStep = () =>
 // These mirror, block-for-block, the operations the (now removed) inlined
 // `deployComposeHA` ran over the primary+standby pair, in order. Step NAMES
 // reuse the single-compose names where the operation is conceptually shared
-// (setup-server-files, start-compose-stack, run-migrations, wait-admin-ready,
+// (setup-server-files, start-compose-stack, wait-admin-ready, audit-database,
 // update-dns, setup-backup-cron) so the read symmetry with the single plan is
 // visible; the EFFECTS are HA-specific (`ha*` registry keys) because they
 // fan out across two nodes and carry `deploy.ha.compose.*` perf labels — a
@@ -174,16 +176,18 @@ export const haStartComposeStackStep = () =>
   defineStep({ name: 'start-compose-stack', effect: 'haStartComposeStack' });
 
 /**
- * Apply app migrations on the PRIMARY only, plus the RLS + wal-g backup audits
- * that ride along inside runMigrations (shipped-bug guard). The standby is
- * deliberately not audited — see src/lib/deploy/walg-audit.js.
+ * Wait for the PRIMARY's app to report its migrations applied and its super
+ * admin ready (shipped-bug guard).
  */
-export const haRunMigrationsStep = () =>
-  defineStep({ name: 'run-migrations', effect: 'haRunMigrations' });
-
-/** Wait for the PRIMARY's app to report its super admin ready (shipped-bug guard). */
 export const haWaitAdminReadyStep = () =>
   defineStep({ name: 'wait-admin-ready', effect: 'haWaitAdminReady' });
+
+/**
+ * The RLS + wal-g backup audits on the PRIMARY (shipped-bug guard). The
+ * standby is deliberately not audited — see src/lib/deploy/walg-audit.js.
+ */
+export const haAuditDatabaseStep = () =>
+  defineStep({ name: 'audit-database', effect: 'haAuditDatabase' });
 
 /** Poll the primary's Postgres until it accepts connections (pre-replication). */
 export const haWaitPrimaryPostgresStep = () =>

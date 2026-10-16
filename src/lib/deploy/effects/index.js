@@ -470,24 +470,10 @@ async function startComposeStack(ctx) {
 }
 
 /**
- * Apply app migrations. Shipped-bug guard: the inlined
- * single-compose path once skipped this and shipped an EMPTY app schema.
- * runMigrations waits for supabase_admin, applies each db/migrations/*
- * with ON_ERROR_STOP=1 (a real failure aborts the deploy), runs the two
- * ground-truth audits against the live system — RLS (rls-audit.js) and wal-g
- * backups (walg-audit.js), each of which FAILS the deploy.
- */
-async function runMigrations(ctx) {
-  const { serverIp, sshKeyPath, projectConfig } = ctx;
-  const { runMigrations: runMigrationsRemote } = await import('../compose/index.js');
-  await perfAsync('deploy.compose.migrations', () =>
-    runMigrationsRemote(serverIp, sshKeyPath, projectConfig.projectName),
-  );
-}
-
-/**
- * Wait for the app to report its super admin ready. The app creates it at
- * startup from ADMIN_EMAIL / ADMIN_PASSWORD in the bundled .env. Shipped-bug
+ * Wait for the app to report its migrations applied and its super admin
+ * ready (one /api/health probe). The app applies db/migrations at startup,
+ * then creates the admin from ADMIN_EMAIL / ADMIN_PASSWORD in the bundled
+ * .env. Shipped-bug
  * guard: a deploy once reported success with no admin, shipping a prod app
  * the operator couldn't log into. FATAL on failure (waitForAdminReady throws
  * with the app's log tail; mirrors k3s.js's awaitAppAdminReady).
@@ -499,6 +485,21 @@ async function waitAdminReady(ctx) {
     waitForAdminReady(serverIp, sshKeyPath, projectConfig.projectName),
   );
   p.log.success(result.message);
+}
+
+/**
+ * The two ground-truth audits against the live database once the app has
+ * migrated it: RLS (rls-audit.js) and wal-g backups (walg-audit.js), each of
+ * which FAILS the deploy. Shipped-bug guard: they used to ride inside the
+ * deploy's own migration runner, which the app's startup migrations
+ * replaced; they must not be lost with it.
+ */
+async function auditDatabase(ctx) {
+  const { serverIp, sshKeyPath, projectConfig } = ctx;
+  const { runDatabaseAudits } = await import('../compose/index.js');
+  await perfAsync('deploy.compose.databaseAudits', () =>
+    runDatabaseAudits(serverIp, sshKeyPath, projectConfig.projectName),
+  );
 }
 
 /**
@@ -624,8 +625,8 @@ export const EFFECTS = {
   setupServerFiles,
   updateDns,
   startComposeStack,
-  runMigrations,
   waitAdminReady,
+  auditDatabase,
   verifyHealth,
   verifyTlsReady,
   setupBackupCron,

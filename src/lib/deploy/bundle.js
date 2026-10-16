@@ -410,8 +410,9 @@ export function renderBundle(projectName, options = {}) {
     }
   };
 
-  // db/ carries the migrations (db/migrations/) and the seed.
-  copyDirIfExist('db', 'db');
+  // No db/: the migrations ship inside the app image (the Dockerfile copies
+  // db/migrations) and the app applies them at startup, so nothing on the
+  // server reads them.
   copyDirIfExist('volumes/db', 'volumes/db');
 
   // volumes/traefik/ — dynamic-config directory mounted into Traefik.

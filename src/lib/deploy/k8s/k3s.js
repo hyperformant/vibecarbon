@@ -126,6 +126,9 @@ export const APP_BUILD_CONTEXT_PATHS = Object.freeze([
   'biome.json',
   'components.json',
   'content',
+  // The app applies its migrations at startup, so they ship in the image: a
+  // new migration must rebuild it.
+  'db/migrations',
   'docker-entrypoint.sh',
   'package-lock.json',
   'package.json',
@@ -2735,69 +2738,16 @@ export async function installSupabase({
 }
 
 /**
- * Apply the project's `db/migrations/*.sql` against the chart-installed
- * supabase-postgres pod. Runs each file in lexicographic order via
- * `kubectl exec -i ... psql -U supabase_admin -d postgres`. Errors per file
- * are surfaced — unlike compose's `|| true` swallow — so a broken migration
- * stops the deploy with a useful error instead of a 503 readiness probe
- * loop downstream.
+ * Ground-truth RLS audit for the k8s path (see src/lib/deploy/rls-audit.js),
+ * against the live catalog once the app has migrated it: the app applies
+ * db/migrations itself at startup (carbon/src/server/db/migrate.ts), and
+ * awaitAppAdminReady waits for `migrationStatus: 'applied'` before this
+ * runs. THROWS (failing the deploy) when any public table lacks RLS.
  *
- * The supabase-db StatefulSet pod must be Ready (helm `--wait` ensures this).
- *
- * @param {{kubeconfig: string, projectDir: string}} args
+ * @param {{kubeconfig: string}} args
  */
-export async function applyMigrations({ kubeconfig, projectDir }) {
+export async function auditRls({ kubeconfig }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const migrationsDir = join(projectDir, 'db', 'migrations');
-  if (!existsSync(migrationsDir)) {
-    // Project has no migrations directory — skip silently. Matches compose
-    // behaviour (which `|| true`'s past a missing dir).
-    return;
-  }
-  const files = readdirSync(migrationsDir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-  if (files.length === 0) return;
-  for (const file of files) {
-    const sql = readFileSync(join(migrationsDir, file), 'utf-8');
-    try {
-      // One shot: nothing else running writes the relations our migrations
-      // touch, so any failure, a deadlock included, is ours and fatal.
-      await runCommandAsync(
-        [
-          'kubectl',
-          '-n',
-          'vibecarbon',
-          'exec',
-          '-i',
-          'supabase-supabase-db-0',
-          '--',
-          'psql',
-          '-U',
-          'supabase_admin',
-          '-d',
-          'postgres',
-          '-v',
-          'ON_ERROR_STOP=1',
-          // Each migration file is atomic — a mid-file failure must not leave
-          // partial schema behind (see docs/rca/2026-08-25-migration-drift.md).
-          '--single-transaction',
-        ],
-        { env, input: sql, silent: true },
-      );
-    } catch (err) {
-      // silent:true buffers stdout/stderr instead of streaming them
-      // (unlike the old stdio: [...,'inherit','inherit']) — print them here
-      // on failure so the operator still sees the psql error output.
-      if (err.stdout) process.stdout.write(err.stdout);
-      if (err.stderr) process.stderr.write(err.stderr);
-      throw new Error(
-        `applyMigrations: ${file} failed with exit ${err.status}. ` +
-          `Fix the migration or set ON_ERROR_STOP=0 manually.`,
-      );
-    }
-  }
-
   // Ground-truth RLS audit (see src/lib/deploy/rls-audit.js): query the live
   // catalog and refuse to proceed if any public table reached the schema
   // without row-level security — RLS is what scopes every query the app runs
@@ -2825,13 +2775,13 @@ export async function applyMigrations({ kubeconfig, projectDir }) {
   // runCommandAsync(silent) resolves the stdout string directly.
   const unprotected = String(auditOut ?? '').trim();
   if (unprotected) {
-    throw new Error(`applyMigrations: ${rlsAuditFailureMessage(unprotected)}`);
+    throw new Error(`auditRls: ${rlsAuditFailureMessage(unprotected)}`);
   }
 }
 
 /**
  * Ground-truth BACKUP audit for the k8s path — the kubectl-exec twin of the
- * `docker compose exec` probe compose/index.js runs inside runMigrations.
+ * `docker compose exec` probe compose/index.js runs inside runDatabaseAudits.
  * Same probe string, same pure evaluator, same failure message; only the exec
  * seam differs. See src/lib/deploy/walg-audit.js for why `wal-g backup-list`
  * is the load-bearing signal and why a standby / unconfigured node skips.
@@ -3044,8 +2994,9 @@ export function renderS3EgressVpcManifest(template, vpcCidrs) {
  * via `vibecarbon configure cicd`.
  *
  * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: string|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
- *   `restore` (when set, e.g. 'latest' or an ISO timestamp) skips applyMigrations
- *   — the wal-g-restored DB already carries schema_migrations.
+ *   `restore` is accepted for the caller's input hash and ignored here: the
+ *   wal-g-restored DB carries its migration ledger, so the app's startup
+ *   migrations apply only what the backup lacks (no restore special case).
  */
 export async function applyK3sManifests({
   kubeconfig,
@@ -3057,7 +3008,6 @@ export async function applyK3sManifests({
   domain,
   s3Config,
   backupBucketName,
-  restore,
   dnsProvider,
   // The ONE DNS-01 credential, already resolved for whichever `dnsProvider`
   // is selected (see DNS01_PROVIDERS). Never five per-provider token args:
@@ -4251,25 +4201,10 @@ export async function applyK3sManifests({
   // check whose subject can rot with ZERO in-cluster change (keys revoked at the
   // provider, bucket deleted), so it must not sit behind the persisted
   // `k3s-apply` skip gate — see deployK3s, which runs it unconditionally.
-  // 8. Apply project SQL migrations against the chart-installed postgres.
-  //    SKIPPED when restoring: a wal-g restore brings the full DB including
-  //    supabase_migrations.schema_migrations, so re-running migrations would
-  //    hit duplicate-key errors (applyMigrations deliberately does not
-  //    swallow them). On a normal deploy, helm's `--wait` guarantees the db
-  //    pod is up; without migrations the app's /api/health/ready 503s.
-  if (pilotStandby) {
-    // Pilot-light: no app tier is reading the schema on a standby yet, and
-    // applyMigrations execs against a pod whose migrations wouldn't matter.
-    console.error('[pilot-standby] skipping applyMigrations, app tier is zeroed until failover');
-  } else if (restore) {
-    progressLog(
-      `[k3s] restore=${restore} requested, skipping applyMigrations (restored DB carries schema_migrations).`,
-    );
-  } else {
-    await perfAsync(`deploy.${perfPrefix}.applyMigrations`, async () =>
-      applyMigrations({ kubeconfig, projectDir }),
-    );
-  }
+  // 8. No migration step: the app applies db/migrations itself at startup
+  //    (under an advisory lock, so replicas take turns) and the readiness
+  //    probe stays 503 until it has. A restored database carries its ledger,
+  //    so there is no restore special case either.
   // 9. Wait for app rollout. The deployment template already has
   //    imagePullPolicy: IfNotPresent, so kubelet uses the sideloaded image
   //    without pulling. 300s wasn't enough on a cold deploy where the app
@@ -4349,7 +4284,8 @@ export async function applyK3sManifests({
       );
     });
   }
-  // 9b. Wait for the app to report its super admin ready. The app creates it
+  // 9b. Wait for the app to report its migrations applied and its super
+  //     admin ready (one probe). The app migrates, then creates the admin
   //     at startup from ADMIN_EMAIL / ADMIN_PASSWORD (delivered through the
   //     vibecarbon-secrets envFrom, see SECRET_KEYS) once the database
   //     answers; the deploy is not done until the operator can sign in.
@@ -4360,6 +4296,9 @@ export async function applyK3sManifests({
     console.error('[pilot-standby] skipping awaitAppAdminReady, app tier is zeroed until failover');
   } else {
     await perfAsync(`deploy.${perfPrefix}.awaitAdminReady`, () => awaitAppAdminReady({ env }));
+    // 9c. The app has migrated the database (awaitAppAdminReady waits for
+    //     migrationStatus 'applied'): audit the live catalog for RLS.
+    await perfAsync(`deploy.${perfPrefix}.auditRls`, () => auditRls({ kubeconfig }));
   }
   // 10. Force-restart traefik so it starts AFTER kube-router has installed
   //     iptables rules for the NetworkPolicies. RCA from k8s-hetzner

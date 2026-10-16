@@ -1,17 +1,21 @@
 /**
  * The deploy's "can the operator sign in?" gate, shared by every deploy mode.
  *
- * The app creates its own super admin at startup from ADMIN_EMAIL and
- * ADMIN_PASSWORD (carbon/src/server/auth/bootstrap-admin.ts, under a
- * cross-replica advisory lock; db/startup.ts waits on the schema, the
- * connection and a read-only standby) and reports it on `GET /api/health`
- * as `adminReady` plus `adminStatus` (pending | ready | skipped | refused |
- * failed). A deploy therefore has two jobs and no auth API to call: make
- * sure those two keys (plus BETTER_AUTH_SECRET) reach the app container,
- * then wait for the app to say the admin exists. It stops at the first
- * skipped, refused or failed: those need the operator (failed is retried
- * inside the app, but only fixing its cause makes it pass). Only the transport
- * differs per mode:
+ * The app applies its own database migrations at startup
+ * (carbon/src/server/db/migrate.ts, under an advisory lock) and reports
+ * `migrationStatus` (pending | applied | failed) on `GET /api/health`. Then
+ * it creates its own super admin from ADMIN_EMAIL and ADMIN_PASSWORD
+ * (carbon/src/server/auth/bootstrap-admin.ts, under a cross-replica advisory
+ * lock; db/startup.ts waits on the connection and a read-only standby) and
+ * reports it as `adminReady` plus `adminStatus` (pending | ready | skipped |
+ * refused | failed). A deploy therefore has two jobs and no migration step
+ * or auth API to call: make sure those two keys (plus BETTER_AUTH_SECRET)
+ * reach the app container, then wait for ONE probe to say the migrations
+ * are applied and the admin exists. It stops at the first failed migration
+ * (terminal for that boot) and at skipped, refused or failed admin
+ * statuses: those need the operator (an admin failure is retried inside the
+ * app, but only fixing its cause makes it pass). Only the transport differs
+ * per mode:
  *   - compose / compose-ha: `docker compose exec -T app node -` over SSH.
  *   - k8s / k8s-ha:         `kubectl exec deploy/app -c app -- node -e`.
  *
@@ -41,6 +45,13 @@ export const ADMIN_PROBE_EXIT = Object.freeze({
    * retrying, but the cause needs the operator, so a deploy stops here.
    */
   ADMIN_FAILED: 7,
+  /**
+   * Terminal: a database migration failed. The app serves only /api/health
+   * until the migration is fixed and the app restarted.
+   */
+  MIGRATIONS_FAILED: 9,
+  /** Serving, but the migrations are not applied yet. */
+  MIGRATIONS_PENDING: 10,
 });
 
 /** Exit codes after which polling again cannot change the answer. */
@@ -48,6 +59,7 @@ const TERMINAL = new Set([
   ADMIN_PROBE_EXIT.ADMIN_REFUSED,
   ADMIN_PROBE_EXIT.ADMIN_SKIPPED,
   ADMIN_PROBE_EXIT.ADMIN_FAILED,
+  ADMIN_PROBE_EXIT.MIGRATIONS_FAILED,
 ]);
 
 const PROBE_CODES = new Set(Object.values(ADMIN_PROBE_EXIT));
@@ -72,8 +84,9 @@ export function isTerminalAdminProbeExit(code) {
 
 /**
  * Node one-liner run inside the app container: GET localhost:3000/api/health
- * and exit 0 only when the JSON body says `adminReady: true`; a terminal
- * `adminStatus` gets its own exit code so the caller can stop waiting.
+ * and exit 0 only when the JSON body says `migrationStatus: 'applied'` and
+ * `adminReady: true`; a failed migration and each terminal `adminStatus` get
+ * their own exit code so the caller can stop waiting.
  *
  * @returns {string}
  */
@@ -84,7 +97,10 @@ export function adminReadyProbeScript() {
     "let b='';res.on('data',c=>{b+=c});res.on('end',()=>{" +
     `if(res.statusCode<200||res.statusCode>=300)process.exit(${e.UNHEALTHY});` +
     `let j;try{j=JSON.parse(b)}catch{process.exit(${e.UNHEALTHY})}` +
-    `if(j&&j.adminReady===true)process.exit(${e.READY});` +
+    `const m=j&&j.migrationStatus;` +
+    `if(m==='failed')process.exit(${e.MIGRATIONS_FAILED});` +
+    `if(m!=='applied')process.exit(${e.MIGRATIONS_PENDING});` +
+    `if(j.adminReady===true)process.exit(${e.READY});` +
     `const t={refused:${e.ADMIN_REFUSED},skipped:${e.ADMIN_SKIPPED},failed:${e.ADMIN_FAILED}};` +
     `process.exit(t[j&&j.adminStatus]||${e.ADMIN_PENDING})})});` +
     `r.on('error',()=>process.exit(${e.UNREACHABLE}));` +
@@ -113,6 +129,13 @@ export function describeAdminProbeExit(code) {
       return 'the app has no ADMIN_EMAIL / ADMIN_PASSWORD, so it created no super admin';
     case ADMIN_PROBE_EXIT.ADMIN_FAILED:
       return 'the app could not create its super admin (the app log names the error)';
+    case ADMIN_PROBE_EXIT.MIGRATIONS_FAILED:
+      return (
+        'a database migration failed, so the app serves only /api/health ' +
+        '(its log has the "Database migrations failed" line with the error)'
+      );
+    case ADMIN_PROBE_EXIT.MIGRATIONS_PENDING:
+      return 'app is serving but has not applied its database migrations yet';
     case ADMIN_PROBE_EXIT.UNHEALTHY:
       return 'app answered /api/health with an error';
     case ADMIN_PROBE_EXIT.UNREACHABLE:
@@ -134,8 +157,9 @@ export function describeAdminProbeExit(code) {
  */
 export function adminNotReadyHint(logsCommand) {
   return (
-    'The app creates its super admin from ADMIN_EMAIL and ADMIN_PASSWORD at startup and logs ' +
-    `why when it cannot. Read the app log (${logsCommand}) for the "super admin" line, fix ` +
-    'the cause, then deploy again.'
+    'The app applies its database migrations, then creates its super admin from ADMIN_EMAIL ' +
+    'and ADMIN_PASSWORD, at startup, and logs why when it cannot. Read the app log ' +
+    `(${logsCommand}) for the "Database migrations" or "super admin" line, fix the cause, ` +
+    'then deploy again.'
   );
 }

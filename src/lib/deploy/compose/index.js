@@ -836,7 +836,7 @@ async function waitForServicesHealthy(ip, sshKeyPath, projectName, maxWaitMs = 1
 /**
  * App-health probe backoff ramp (F4).
  *
- * verifyAppHealth runs LAST (after migrations + wait-admin-ready), so the app is
+ * verifyAppHealth runs LAST (after wait-admin-ready + audit-database), so the app is
  * usually already serving and the very first probe passes. When it isn't, the
  * app typically binds :3000 within ~10-30s — probe fast (2s) for the first
  * few gaps so a fast-converging app is detected within ~2s instead of waiting
@@ -951,8 +951,10 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
 }
 
 /**
- * Wait until the app reports its super admin ready (`adminReady: true` on
- * its own /api/health). The app creates the admin at startup from
+ * Wait until the app reports its migrations applied and its super admin
+ * ready (`migrationStatus: 'applied'` and `adminReady: true` on its own
+ * /api/health, one probe). The app applies db/migrations itself at startup,
+ * then creates the admin from
  * ADMIN_EMAIL / ADMIN_PASSWORD, which reach the container through the
  * bundled `.env` (env_file); the prod overlay refuses to start without them,
  * and deploy's required-env preflight checks them before anything is
@@ -961,10 +963,11 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
  * involved.
  *
  * Polls with the shared pollUntil (2 s doubling to 10 s, 150 s budget): the
- * app starts with the stack, before migrations, and creates the admin a few
- * seconds after the schema lands. Stops at once when the app reports a terminal status (refused,
- * skipped, failed), and throws, with the reason and the app's log tail, if
- * the admin is not ready: a deploy the operator cannot sign in to is not a
+ * app starts with the stack, migrates, and creates the admin a few seconds
+ * after the schema lands. Stops at once when the app reports a terminal
+ * status (a failed migration; admin refused, skipped, failed), and throws,
+ * with the reason and the app's log tail, if it is not ready: a deploy whose
+ * schema is not in place, or that the operator cannot sign in to, is not a
  * successful deploy.
  *
  * @param {string} ip
@@ -1087,57 +1090,17 @@ export async function pullComposeImages(ip, sshKeyPath, projectName, options = {
 }
 
 /**
- * Run database migrations on the remote server, then the two deploy-time
- * ground-truth audits that gate success: RLS (src/lib/deploy/rls-audit.js) and
- * wal-g backups (src/lib/deploy/walg-audit.js). Either one failing throws and
- * fails the deploy. Shared by the single-compose run-migrations effect and
- * compose-ha's, which invokes it against the PRIMARY.
+ * The two deploy-time ground-truth audits that gate success, against the
+ * live database: RLS (src/lib/deploy/rls-audit.js) and wal-g backups
+ * (src/lib/deploy/walg-audit.js). Either one failing throws and fails the
+ * deploy. Runs after waitForAdminReady, which waits for the app to report
+ * its migrations applied (the app applies db/migrations itself at startup,
+ * carbon/src/server/db/migrate.ts), so the audits see the final schema.
+ * Shared by the single-compose audit-database effect and compose-ha's, which
+ * invokes it against the PRIMARY.
  */
-export async function runMigrations(ip, sshKeyPath, projectName) {
+export async function runDatabaseAudits(ip, sshKeyPath, projectName) {
   const remoteDir = `/opt/${projectName}`;
-
-  // On a fresh volume, supabase/postgres runs its own first-boot initdb scripts
-  // (creating the supabase_admin role + auth/storage/realtime schemas) before
-  // our app migrations can apply. `pg_isready` flips true as soon as PG accepts
-  // connections — which can be *during* that init, before supabase_admin
-  // exists. Running migrations then errors (missing role/extension). Previously
-  // those errors were piped to /dev/null with `|| true`, so a fully-failed
-  // migration was indistinguishable from success and an empty schema shipped to
-  // prod (RCA prod-1 2026-05-26: 0 public tables, every DB feature 500'd).
-  //
-  // Gate on supabase_admin actually being able to run a query (not just
-  // pg_isready), polling up to ~3 min.
-  await sshRunAsync(
-    ip,
-    sshKeyPath,
-    `cd ${remoteDir} && ` +
-      `for i in $(seq 1 60); do ` +
-      `docker compose exec -T db psql -U supabase_admin -d postgres -c 'SELECT 1' >/dev/null 2>&1 && exit 0; ` +
-      `echo "[migrate] waiting for supabase_admin to accept queries (attempt $i/60)"; sleep 3; ` +
-      `done; echo "[migrate] supabase_admin never became ready" >&2; exit 1`,
-    { timeout: 240_000 },
-  );
-
-  // Apply each migration with ON_ERROR_STOP=1 and abort on the first failure.
-  // A failed migration MUST fail the deploy — silently shipping an empty schema
-  // is far worse than a deploy the operator can see failed and retry. Errors
-  // propagate (no 2>/dev/null, no `|| true`); sshRunAsync throws on non-zero.
-  // --single-transaction: each FILE is atomic, so a mid-file failure leaves no
-  // partial schema (2026-08-25 vibecarbon.com: 00008 failed at cron.schedule
-  // AFTER its tables had already been created — see docs/rca/). No retry:
-  // nothing else running writes the relations our migrations touch, so any
-  // failure, a deadlock included, is ours and must surface.
-  await sshRunAsync(
-    ip,
-    sshKeyPath,
-    `cd ${remoteDir} && ` +
-      `for f in $(ls db/migrations/ 2>/dev/null | sort); do ` +
-      `echo "[migrate] applying $f"; ` +
-      `cat "db/migrations/$f" | docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction || ` +
-      `{ echo "[migrate] FAILED applying $f" >&2; exit 1; }; ` +
-      `done`,
-    { timeout: 300_000 },
-  );
 
   // Ground-truth RLS audit: refuse to finish the deploy if any public table
   // reached the live schema without row-level security (see rls-audit.js).
@@ -1154,7 +1117,7 @@ export async function runMigrations(ip, sshKeyPath, projectName) {
   // binary runs, but neither says the credentials/bucket/network line up — a
   // deploy can be green and archiving nothing. Runs here (post-migration, same
   // slot as the RLS audit) so BOTH compose plans get it: the single-compose
-  // run-migrations step and compose-ha's, which calls this against the PRIMARY.
+  // audit-database step and compose-ha's, which calls this against the PRIMARY.
   // The probe skips itself on an unconfigured or standby node; anything else
   // that isn't a clean pass throws and fails the deploy.
   await assertWalgBackupsWorking({

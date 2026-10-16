@@ -636,7 +636,7 @@ describe('compose deploy path calls the audit', () => {
   afterEach(() => vi.useRealTimers());
 
   /**
-   * runMigrations issues a series of ssh commands; only the audit one carries
+   * runDatabaseAudits issues a series of ssh commands; only the audit one carries
    * the WALG_AUDIT marker, so key the fake off the remote command string.
    */
   function mockSsh(auditStdout: string) {
@@ -648,18 +648,18 @@ describe('compose deploy path calls the audit', () => {
     }) as never) as unknown as { mock: { calls: unknown[][] } } & ReturnType<typeof vi.fn>;
   }
 
-  it('runs the audit over ssh after migrations and passes when healthy', async () => {
+  it('runs the audit over ssh after the RLS audit and passes when healthy', async () => {
     const { spawn } = await import('node:child_process');
     const mocked = vi.mocked(spawn);
     mocked.mockReset();
     const impl = mockSsh(probeOutput({ list: ONE_BACKUP }));
     mocked.mockImplementation(impl as unknown as typeof spawn);
 
-    const r = await settled(compose.runMigrations('10.0.0.1', '/tmp/key', 'proj'));
+    const r = await settled(compose.runDatabaseAudits('10.0.0.1', '/tmp/key', 'proj'));
     expect(r.ok).toBe(true);
     const remoteCmds = mocked.mock.calls.map((c) => (c[1] as string[]).at(-1) as string);
     const auditCmd = remoteCmds.find((c) => c.includes('WALG_AUDIT'));
-    expect(auditCmd, 'runMigrations must run the post-migration wal-g audit').toBeDefined();
+    expect(auditCmd, 'runDatabaseAudits must run the wal-g audit').toBeDefined();
     expect(auditCmd).toContain('cd /opt/proj &&');
     expect(auditCmd).toContain('docker compose exec -T db bash -c');
     // The RLS audit still runs, and the backup audit follows it.
@@ -675,7 +675,7 @@ describe('compose deploy path calls the audit', () => {
     const impl = mockSsh(probeOutput({ rc: 1, list: 'ERROR: NoSuchBucket: the bucket is gone' }));
     mocked.mockImplementation(impl as unknown as typeof spawn);
 
-    const r = await settled(compose.runMigrations('10.0.0.1', '/tmp/key', 'proj'));
+    const r = await settled(compose.runDatabaseAudits('10.0.0.1', '/tmp/key', 'proj'));
     expect(r.ok).toBe(false);
     expect(r.e.message).toContain('ZERO recoverable backups');
     expect(r.e.message).toContain('NoSuchBucket');
@@ -688,7 +688,7 @@ describe('compose deploy path calls the audit', () => {
     const impl = mockSsh('WALG_AUDIT=skip:no-backup-target');
     mocked.mockImplementation(impl as unknown as typeof spawn);
 
-    const r = await settled(compose.runMigrations('10.0.0.1', '/tmp/key', 'proj'));
+    const r = await settled(compose.runDatabaseAudits('10.0.0.1', '/tmp/key', 'proj'));
     expect(r.ok).toBe(true);
   });
 });
