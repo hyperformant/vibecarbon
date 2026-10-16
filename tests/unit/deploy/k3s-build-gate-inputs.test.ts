@@ -15,7 +15,7 @@ import { StateTracker } from '../../../src/lib/deploy/state.js';
 /**
  * Regression coverage for the content-blind `k3s-build` skip gate.
  *
- * The gate's inputs were `{projectName, domain, supabaseUrl, masterPrivateIp}`
+ * The gate's inputs were `{projectName, domain, siteUrl, masterPrivateIp}`
  * — no signal at all from the app source tree the build consumes. On a warm
  * redeploy all four are unchanged, so `k3s-build` skipped, `imageTag` was read
  * back from the PRIOR step result, `k3s-sideload` skipped on that same tag, and
@@ -64,9 +64,9 @@ describe('buildK3sBuildInputs — the app source tree is part of the gate', () =
     const inputs = buildK3sBuildInputs(args());
     expect(inputs.projectName).toBe('proj');
     expect(inputs.domain).toBe('e3.example.test');
-    // Baked into the browser bundle (VITE_SUPABASE_URL), so a change to the
-    // URL DERIVATION must bust the gate on upgrade, not just a domain change.
-    expect(inputs.supabaseUrl).toBe('https://e3.example.test');
+    // Baked into the browser bundle (the site URL), so a change to the URL
+    // DERIVATION must bust the gate on upgrade, not just a domain change.
+    expect(inputs.siteUrl).toBe('https://e3.example.test');
     // Baked into the built tag's registry-ref prefix (M3 Task 2).
     expect(inputs.masterPrivateIp).toBe('10.0.1.1');
   });
@@ -184,7 +184,10 @@ describe('buildK3sBuildInputs — the docker build args are part of the gate', (
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'vc-k3s-build-args-'));
     writeProject(dir);
-    writeFileSync(join(dir, '.env.local'), 'VITE_SUPABASE_ANON_KEY=key-v1\nDB_PASSWORD=hunter2\n');
+    writeFileSync(
+      join(dir, '.env.local'),
+      'VITE_STRIPE_PUBLISHABLE_KEY=key-v1\nDB_PASSWORD=hunter2\n',
+    );
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(dir);
   });
   afterEach(() => {
@@ -206,16 +209,19 @@ describe('buildK3sBuildInputs — the docker build args are part of the gate', (
 
     // `.env.local` is excluded from the build CONTEXT by `.dockerignore`, so
     // the source digest cannot see it — but its VITE_* keys are passed as
-    // --build-arg and baked into the browser bundle. Rotating the anon key
+    // --build-arg and baked into the browser bundle. Rotating the publishable key
     // with no source change must still rebuild.
-    writeFileSync(join(dir, '.env.local'), 'VITE_SUPABASE_ANON_KEY=key-v2\nDB_PASSWORD=hunter2\n');
+    writeFileSync(
+      join(dir, '.env.local'),
+      'VITE_STRIPE_PUBLISHABLE_KEY=key-v2\nDB_PASSWORD=hunter2\n',
+    );
     const t2 = new StateTracker('proj', 'e3');
     expect(t2.shouldSkip('k3s-build', buildK3sBuildInputs(args()))).toBe(false);
   });
 
   it('does not leak the build-arg VALUES into the gate inputs', () => {
     // Inputs are JSON-stringified by StateTracker; keep secrets to a digest so
-    // no future change to the state format can spill an anon key onto disk.
+    // no future change to the state format can spill a public key onto disk.
     const serialized = JSON.stringify(buildK3sBuildInputs(args()));
     expect(serialized).not.toContain('key-v1');
     expect(buildK3sBuildInputs(args()).buildArgsDigest).toMatch(/^[0-9a-f]{64}$/);
@@ -223,7 +229,10 @@ describe('buildK3sBuildInputs — the docker build args are part of the gate', (
 
   it('ignores non-VITE_ keys (a DB password rotation is not a rebuild)', () => {
     const before = buildK3sBuildInputs(args()).buildArgsDigest;
-    writeFileSync(join(dir, '.env.local'), 'VITE_SUPABASE_ANON_KEY=key-v1\nDB_PASSWORD=rotated\n');
+    writeFileSync(
+      join(dir, '.env.local'),
+      'VITE_STRIPE_PUBLISHABLE_KEY=key-v1\nDB_PASSWORD=rotated\n',
+    );
     expect(buildK3sBuildInputs(args()).buildArgsDigest).toBe(before);
   });
 });
@@ -311,7 +320,7 @@ describe('a source change cascades build → sideload → apply', () => {
     const preFix = {
       projectName: 'proj',
       domain: 'e3.example.test',
-      supabaseUrl: 'https://e3.example.test',
+      siteUrl: 'https://e3.example.test',
       masterPrivateIp: '10.0.1.1',
     };
     const t1 = new StateTracker('proj', 'e3');

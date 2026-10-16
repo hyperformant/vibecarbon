@@ -307,27 +307,41 @@ describe('census: every psql-over-kubectl call site opts into the lifecycle ladd
     expect(sites.length).toBeGreaterThan(5);
   });
 
-  it('every site that execs psql sits AFTER the pg-accepting gate — and none re-grows a ladder', () => {
+  it('every psql-bearing step applyK3sManifests runs sits AFTER the pg-accepting gate — and none re-grows a ladder', () => {
     // Inverted 2026-08-16 (band-aid removal): the per-call lifecycle ladder is
     // deleted. The guard is the CONDITION — awaitPostgresAccepting proves the
     // db accepts before any psql runs — and this census pins two things: every
-    // psql call site is downstream of that gate in source order, and no call
+    // psql-bearing step is downstream of that gate in source order, and no call
     // site quietly reintroduces a lifecycle opt-in (the band-aid coming back
-    // under the old name).
-    const psqlSites = sites.filter((s) => s.text.includes("'psql'") || /PsqlArgs\(/.test(s.text));
-    expect(psqlSites.length).toBeGreaterThanOrEqual(2);
+    // under the old name). Since the db is our own StatefulSet, WAL archiving
+    // is a startup flag: the only psql steps left in the apply are the RLS
+    // audit and anything a future change adds inside the function.
+    const fnStart = source.indexOf('export async function applyK3sManifests(');
+    expect(fnStart, 'applyK3sManifests must exist').toBeGreaterThan(-1);
+    const fnEnd = source.indexOf('\nexport ', fnStart + 1);
+    const body = source.slice(fnStart, fnEnd === -1 ? undefined : fnEnd);
 
-    const gateIdx = source.indexOf('awaitPostgresAccepting({ env, dbPod })');
+    const gateIdx = body.indexOf('awaitPostgresAccepting({ env, dbPod: DB_POD })');
     expect(gateIdx, 'the pg-accepting gate must be wired').toBeGreaterThan(-1);
-    const gateLine = source.slice(0, gateIdx).split('\n').length;
-    for (const site of psqlSites) {
+    expect(
+      body.indexOf('awaitDbRollout({ env })'),
+      'the gate re-proves the condition after the db rollout wait',
+    ).toBeLessThan(gateIdx);
+
+    const psqlSteps = [...body.matchAll(/'psql'|PsqlArgs\(|auditRls\(\{/g)].map(
+      (m) => m.index ?? 0,
+    );
+    expect(psqlSteps.length, 'the RLS audit is a psql-bearing step').toBeGreaterThanOrEqual(1);
+    for (const idx of psqlSteps) {
+      const line = source.slice(0, fnStart + idx).split('\n').length;
       expect(
-        site.line,
-        `k3s.js:${site.line}: psql call site BEFORE the pg-accepting gate — it would race a ` +
+        idx,
+        `k3s.js:${line}: psql-bearing step BEFORE the pg-accepting gate — it would race a ` +
           'mid-lifecycle database (the 0fbb296f RCA, reintroduced by reordering)',
-      ).toBeGreaterThan(gateLine);
+      ).toBeGreaterThan(gateIdx);
     }
 
+    const psqlSites = sites.filter((s) => s.text.includes("'psql'") || /PsqlArgs\(/.test(s.text));
     const regrown = psqlSites
       .filter((s) => /PSQL_LIFECYCLE|transientExtra/.test(s.text))
       .map((s) => `k3s.js:${s.line}`);

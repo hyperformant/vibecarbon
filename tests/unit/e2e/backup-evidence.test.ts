@@ -97,10 +97,10 @@ describe('buildWalSwitchRemoteCommand', () => {
     expect(cmd.startsWith('cd /opt/myapp && docker compose exec -T db bash -c ')).toBe(true);
   });
 
-  it('uses the supabase-db pod with an explicit KUBECONFIG on k8s', () => {
+  it('uses the db pod with an explicit KUBECONFIG on k8s', () => {
     const cmd = buildWalSwitchRemoteCommand('myapp', false);
     expect(cmd).toContain('KUBECONFIG=/etc/rancher/k3s/k3s.yaml');
-    expect(cmd).toContain('kubectl -n vibecarbon exec supabase-supabase-db-0 -- bash -c ');
+    expect(cmd).toContain('kubectl -n vibecarbon exec db-0 -- bash -c ');
   });
 
   it('wraps the probe in exactly one single-quoted word on both seams', () => {

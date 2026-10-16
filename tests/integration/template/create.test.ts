@@ -134,7 +134,7 @@ describe('create-vibecarbon E2E', () => {
     it('generates .env.local with secrets', () => {
       const envContent = readFileSync(join(projectDir(), '.env.local'), 'utf-8');
       expect(envContent).toContain('BETTER_AUTH_SECRET=');
-      expect(envContent).toContain('JWT_SECRET=');
+      expect(envContent).not.toContain('JWT_SECRET');
       expect(envContent).not.toContain('SUPABASE_');
       expect(envContent).toContain('DB_PASSWORD=');
     });
@@ -160,21 +160,21 @@ describe('create-vibecarbon E2E', () => {
       expect(dockerCompose.length).toBeGreaterThan(100);
     });
 
-    it('k8s/values/supabase.values.yaml carries no admin credentials, only deploy-time placeholders', () => {
-      // The chart's admin console is off, so the values file has no reason to
-      // hold the admin login: a password substituted at create time would be
-      // a high-entropy secret in a checked-in file, tripping the preflight
-      // secret-scan during `vibecarbon deploy`. The deploy-time placeholders
-      // installSupabase() renders (src/lib/deploy/k8s/k3s.js) stay unsubstituted.
-      const valuesYaml = readFileSync(
-        join(projectDir(), 'k8s/values/supabase.values.yaml'),
-        'utf-8',
-      );
-      expect(valuesYaml).not.toMatch(/ADMIN_(EMAIL|PASSWORD)|username:/);
-      // The only password mapping left is the db secretRef key name.
-      expect(valuesYaml.match(/^\s*password:.*$/gm)).toEqual(['      password: DB_PASSWORD']);
-      expect(valuesYaml).toContain('{{DB_IMAGE}}');
-      expect(valuesYaml).toContain('{{WALG_S3_PREFIX}}');
+    it('k8s/base/db/statefulset.yaml carries no credentials, only deploy-time placeholders', () => {
+      // A password substituted at create time would be a high-entropy secret
+      // in a checked-in file, tripping the preflight secret-scan during
+      // `vibecarbon deploy`. The db reads its password from vibecarbon-secrets,
+      // and the deploy-time placeholders renderK8sBase resolves
+      // (src/lib/deploy/k8s/k3s.js) stay unsubstituted.
+      const sts = readFileSync(join(projectDir(), 'k8s/base/db/statefulset.yaml'), 'utf-8');
+      expect(sts).not.toMatch(/ADMIN_(EMAIL|PASSWORD)|username:|password:/);
+      expect(sts).toContain('key: DB_PASSWORD');
+      expect(sts).toContain('{{DB_IMAGE}}');
+      expect(sts).toContain('{{WALG_S3_PREFIX}}');
+      expect(sts).toContain('{{K8S_STORAGE_CLASS}}');
+      // The chart era's files are not scaffolded any more.
+      expect(existsSync(join(projectDir(), 'k8s/values'))).toBe(false);
+      expect(existsSync(join(projectDir(), 'k8s/gitops/supabase'))).toBe(false);
     });
 
     it('copies binary icon assets byte-identical to the template (no UTF-8 corruption)', () => {
@@ -660,7 +660,7 @@ describe('create-vibecarbon E2E', () => {
       // the bare alphabet, so each is written unquoted.
       const BARE = '[A-Za-z0-9_./:@+=,%-]+';
       expect(envLocal).toMatch(new RegExp(`^BETTER_AUTH_SECRET=${BARE}$`, 'm'));
-      expect(envLocal).toMatch(new RegExp(`^JWT_SECRET=${BARE}$`, 'm'));
+      expect(envLocal).not.toMatch(/^JWT_SECRET=/m);
       expect(envLocal).toMatch(new RegExp(`^DB_PASSWORD=${BARE}$`, 'm'));
       expect(envLocal).toMatch(/^ADMIN_PASSWORD=testpass123$/m);
 
@@ -668,7 +668,7 @@ describe('create-vibecarbon E2E', () => {
       // through parseDotenv, the codebase's one dotenv reader.
       const env = parseDotenv(envLocal);
       expect(env.BETTER_AUTH_SECRET).toBeTruthy();
-      expect(env.BETTER_AUTH_SECRET).not.toBe(env.JWT_SECRET);
+      expect(env.BETTER_AUTH_SECRET).not.toBe(env.DB_PASSWORD);
     }, 60000);
 
     it('-display-name overrides the derived display name', () => {

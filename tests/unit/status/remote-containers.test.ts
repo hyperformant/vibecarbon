@@ -67,7 +67,7 @@ describe('planContainerTargets', () => {
     ]);
   });
 
-  it('kubernetes: only the master, kind k8s; workers and supabase omitted', () => {
+  it('kubernetes: only the master, kind k8s; workers and the db node omitted', () => {
     expect(
       planContainerTargets({
         deployMode: 'kubernetes',
@@ -307,13 +307,13 @@ describe('podDisplayName', () => {
       podDisplayName(
         pod({
           metadata: {
-            name: 'supabase-db-0',
+            name: 'db-0',
             namespace: 'vibecarbon',
-            ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-db' }],
+            ownerReferences: [{ kind: 'StatefulSet', name: 'db' }],
           },
         }),
       ),
-    ).toBe('supabase-db-0');
+    ).toBe('db-0');
   });
 
   it('falls back to the pod name with no owner', () => {
@@ -356,38 +356,15 @@ describe('podDisplayName', () => {
     expect(podDisplayName(p)).toBe('web-abc');
   });
 
-  it('collapses the Helm release/chart double prefix for ReplicaSet-owned pods', () => {
+  it('leaves a StatefulSet pod name exactly as it is', () => {
     const p = pod({
       metadata: {
-        name: 'supabase-supabase-worker-5b8f9c7dxz-q2w4r',
+        name: 'db-0',
         namespace: 'vibecarbon',
-        labels: { 'pod-template-hash': '5b8f9c7dxz' },
-        ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-supabase-worker-5b8f9c7dxz' }],
+        ownerReferences: [{ kind: 'StatefulSet', name: 'db' }],
       },
     });
-    expect(podDisplayName(p)).toBe('supabase-worker');
-  });
-
-  it('collapses the Helm release/chart double prefix for StatefulSet-owned pods', () => {
-    const p = pod({
-      metadata: {
-        name: 'supabase-supabase-db-0',
-        namespace: 'vibecarbon',
-        ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-supabase-db' }],
-      },
-    });
-    expect(podDisplayName(p)).toBe('supabase-db-0');
-  });
-
-  it('leaves a single supabase- prefix unchanged', () => {
-    const p = pod({
-      metadata: {
-        name: 'supabase-db-0',
-        namespace: 'vibecarbon',
-        ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-db' }],
-      },
-    });
-    expect(podDisplayName(p)).toBe('supabase-db-0');
+    expect(podDisplayName(p)).toBe('db-0');
   });
 });
 
@@ -397,16 +374,16 @@ describe('rowsFromPods', () => {
       pod({}),
       pod({
         metadata: {
-          name: 'supabase-db-0',
+          name: 'db-0',
           namespace: 'vibecarbon',
-          ownerReferences: [{ kind: 'StatefulSet', name: 'supabase-db' }],
+          ownerReferences: [{ kind: 'StatefulSet', name: 'db' }],
         },
       }),
       pod({
         metadata: {
-          name: 'supabase-realtime-9b7c2z-q',
+          name: 'redis-9b7c2z-q',
           namespace: 'vibecarbon',
-          ownerReferences: [{ kind: 'ReplicaSet', name: 'supabase-realtime-9b7c2z' }],
+          ownerReferences: [{ kind: 'ReplicaSet', name: 'redis-9b7c2z' }],
         },
         status: {
           phase: 'Running',
@@ -451,16 +428,16 @@ describe('rowsFromPods', () => {
         latencyMs: 0,
       },
       {
-        name: 'supabase-db-0',
-        container: 'supabase-db-0',
+        name: 'db-0',
+        container: 'db-0',
         health: 'healthy',
         label: 'healthy',
         detail: '',
         latencyMs: 0,
       },
       {
-        name: 'supabase-realtime',
-        container: 'supabase-realtime',
+        name: 'redis',
+        container: 'redis',
         health: 'unhealthy',
         label: 'CrashLoopBackOff',
         detail: 'restarts 12',

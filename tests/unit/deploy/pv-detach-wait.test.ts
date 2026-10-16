@@ -25,12 +25,13 @@ import {
 const PVC_LIST = JSON.stringify({
   items: [
     {
-      metadata: { name: 'data-supabase-supabase-db-0' },
+      metadata: { name: 'data-db-0' },
       spec: { volumeName: 'pvc-data-111' },
     },
+    // An add-on StatefulSet whose name ends in `db`: never the database.
     {
-      metadata: { name: 'pgsodium-supabase-supabase-db-0' },
-      spec: { volumeName: 'pvc-sodium-222' },
+      metadata: { name: 'data-redis-db-0' },
+      spec: { volumeName: 'pvc-redis-222' },
     },
     { metadata: { name: 'storage-something-else' }, spec: { volumeName: 'pvc-other-333' } },
   ],
@@ -47,7 +48,7 @@ const VA_LIST = (pvs: string[]) =>
 describe('listDbPvNames', () => {
   it('returns only the db StatefulSet claims’ PVs', async () => {
     const kubectl = vi.fn(async () => PVC_LIST);
-    await expect(listDbPvNames(kubectl)).resolves.toEqual(['pvc-data-111', 'pvc-sodium-222']);
+    await expect(listDbPvNames(kubectl)).resolves.toEqual(['pvc-data-111']);
   });
 
   it('fails open on unreadable output', async () => {
@@ -111,7 +112,7 @@ describe('deleteStaleDbVolumeAttachments', () => {
     const kubectl = vi.fn(async (argv: string[]) => {
       if (argv.includes('pvc')) return PVC_LIST;
       if (argv.includes('volumeattachment') && argv.includes('get'))
-        return VA_LIST(['pvc-data-111', 'pvc-other-333', 'pvc-sodium-222']);
+        return VA_LIST(['pvc-data-111', 'pvc-other-333', 'pvc-redis-222']);
       if (argv.includes('delete')) {
         deleted.push(argv[2]);
         return '';
@@ -119,9 +120,10 @@ describe('deleteStaleDbVolumeAttachments', () => {
       return '';
     });
     const res = await deleteStaleDbVolumeAttachments(kubectl, { log: () => {} });
-    expect(res).toHaveLength(2);
-    // csi-att-1 references pvc-other-333 — a foreign volume, never touched.
-    expect(deleted).toEqual(['csi-att-0', 'csi-att-2']);
+    expect(res).toHaveLength(1);
+    // csi-att-1 references pvc-other-333 and csi-att-2 the add-on's
+    // pvc-redis-222 — neither is the database's volume, neither is touched.
+    expect(deleted).toEqual(['csi-att-0']);
   });
 
   it('fails open when listings are unreadable', async () => {

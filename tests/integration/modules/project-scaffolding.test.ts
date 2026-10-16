@@ -24,7 +24,6 @@ describe('Project Scaffolding Integration', () => {
       const variables = {
         PROJECT_NAME: 'test-project',
         DB_PASSWORD: 'test-password',
-        JWT_SECRET: 'test-jwt-secret',
       };
 
       const result = copyTemplate('package.json', destPath, variables);
@@ -66,7 +65,6 @@ describe('Project Scaffolding Integration', () => {
 
       // Every value line is emitted by formatDotenvLine: these all fit the
       // bare alphabet, so no quotes at all.
-      expect(content).toContain('\nJWT_SECRET=test-jwt-secret\n');
       expect(content).toContain('\nBETTER_AUTH_SECRET=test-better-auth-secret\n');
       expect(content).toContain('\nDB_PASSWORD=test-db-password\n');
       expect(content).toContain('\nADMIN_EMAIL=test@example.com\n');
@@ -78,6 +76,7 @@ describe('Project Scaffolding Integration', () => {
       // The removed services' URL, keys and secrets are never written.
       const keys = Object.keys(parseDotenv(content));
       for (const gone of [
+        'JWT_SECRET',
         'SUPABASE_URL',
         'SUPABASE_ANON_KEY',
         'SUPABASE_SERVICE_ROLE_KEY',

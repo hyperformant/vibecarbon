@@ -4,8 +4,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  buildDbManifestValues,
+  renderK8sBase,
   renderK8sStorageClassPlaceholder,
-  renderK8sStorageClassPlaceholderIfPresent,
 } from '../../../src/lib/deploy/k8s/k3s.js';
 
 // Two coupled defects, both silent.
@@ -17,7 +18,7 @@ import {
 //    creationTimestamp — so which storage redis' data landed on was decided by
 //    a race the deploy never asserted. On the unlucky flip the PV's node
 //    affinity pinned redis to that node and the data died with it. Redis comes
-//    up Ready either way. Same defect #234 fixed for the Supabase PVCs; redis
+//    up Ready either way. Same defect #234 fixed for the database PVCs; redis
 //    is a LIVE addon (only n8n/metabase are parked).
 //
 // 2. Adding the placeholder alone would have introduced the OTHER half:
@@ -110,21 +111,57 @@ describe('renderK8sStorageClassPlaceholder resolves nested addon trees', () => {
   });
 });
 
-describe('renderK8sStorageClassPlaceholderIfPresent is a no-op without a placeholder', () => {
-  it('returns the ORIGINAL path when nothing needs substituting', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-sc-clean-'));
-    writeFileSync(join(root, 'kustomization.yaml'), 'resources: []\n');
-    // Byte-identical argv for the common case — the temp-copy path is entered
-    // only when it is load-bearing.
-    expect(renderK8sStorageClassPlaceholderIfPresent(root, 'provider-csi')).toBe(root);
-  });
+describe('renderK8sBase renders the whole tree k8s/base apply reads', () => {
+  const values = () =>
+    buildDbManifestValues({
+      projectName: 'proj',
+      dbImageTag: 'ghcr.io/org/postgres:17-walg1',
+      storageClass: 'provider-csi',
+      dbPrivateIp: '10.0.1.2',
+      walArchiveSha: 'abc',
+    });
+  const baseWithDb = () => {
+    const root = mkdtempSync(join(tmpdir(), 'vc-base-'));
+    mkdirSync(join(root, 'db'), { recursive: true });
+    writeFileSync(
+      join(root, 'db', 'statefulset.yaml'),
+      readFileSync(join(repoRoot, 'carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
+    );
+    return root;
+  };
 
-  it('renders when a nested file DOES carry the placeholder', () => {
-    const root = mkdtempSync(join(tmpdir(), 'vc-sc-dirty-'));
+  it('resolves an add-on PVC nested under k8s/base/<addon>/ together with the db', () => {
+    const root = baseWithDb();
     mkdirSync(join(root, 'n8n'), { recursive: true });
     writeFileSync(join(root, 'n8n', 'pvc.yaml'), `storageClassName: ${PLACEHOLDER}\n`);
-    const out = renderK8sStorageClassPlaceholderIfPresent(root, 'provider-csi');
+    const out = renderK8sBase(root, values());
     expect(out).not.toBe(root);
     expect(readFileSync(join(out, 'n8n', 'pvc.yaml'), 'utf-8')).toContain('provider-csi');
+    expect(readFileSync(join(out, 'db', 'statefulset.yaml'), 'utf-8')).toContain(
+      'storageClassName: "provider-csi"',
+    );
+    // The project's own files stay untouched.
+    expect(readFileSync(join(root, 'n8n', 'pvc.yaml'), 'utf-8')).toContain(PLACEHOLDER);
+  });
+
+  it('refuses a base that predates the db StatefulSet (nothing would create the database)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'vc-base-old-'));
+    writeFileSync(join(root, 'kustomization.yaml'), 'resources: []\n');
+    expect(() => renderK8sBase(root, values())).toThrow(/predates the db StatefulSet/);
+  });
+
+  it('refuses a db StatefulSet that still carries a placeholder after rendering', () => {
+    const root = baseWithDb();
+    writeFileSync(
+      join(root, 'db', 'statefulset.yaml'),
+      `${readFileSync(join(root, 'db', 'statefulset.yaml'), 'utf-8')}\n# {{SOMETHING_NEW}}\n`,
+    );
+    expect(() => renderK8sBase(root, values())).toThrow(/\{\{SOMETHING_NEW\}\}/);
+  });
+
+  it('refuses an empty storage class rather than binding the cluster default', () => {
+    expect(() => renderK8sBase(baseWithDb(), { ...values(), K8S_STORAGE_CLASS: '' })).toThrow(
+      /K8S_STORAGE_CLASS is empty/,
+    );
   });
 });

@@ -26,7 +26,7 @@ import {
   reestablishReplicationTransport,
   setupReplication,
 } from '../../../src/lib/deploy/k8s/ha/index.js';
-import { installSupabase } from '../../../src/lib/deploy/k8s/k3s.js';
+import { buildDbManifestValues } from '../../../src/lib/deploy/k8s/k3s.js';
 import { reseedStandbyFromPrimary } from '../../../src/lib/deploy/replication.js';
 
 const ROOT = join(__dirname, '../../..');
@@ -78,18 +78,17 @@ describe('dbPrivateIp is required (no 10.0.1.2 fallback)', () => {
     ).rejects.toThrow(/standbyDbPrivateIp.*required/i);
   });
 
-  it('installSupabase throws when dbPrivateIp is absent (before any shell-out)', async () => {
-    await expect(
-      installSupabase({
-        kubeconfig: '/tmp/nonexistent-kubeconfig',
-        projectDir: '/tmp/nonexistent-project',
+  it('buildDbManifestValues throws when dbPrivateIp is absent (before any shell-out)', () => {
+    expect(() =>
+      buildDbManifestValues({
         projectName: 'testapp',
         s3Config: {},
-        dbImageTag: 'x',
+        dbImageTag: 'ghcr.io/x/postgres:1',
         backupBucketName: 'b',
         storageClass: 'hcloud-volumes',
+        walArchiveSha: 'abc',
       }),
-    ).rejects.toThrow(/dbPrivateIp.*required/i);
+    ).toThrow(/dbPrivateIp.*required/i);
   });
 });
 

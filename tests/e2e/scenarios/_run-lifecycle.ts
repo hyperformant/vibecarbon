@@ -503,10 +503,10 @@ async function captureFailureDiagnostics(
       // (their --previous is "not found" and their current logs can be huge) —
       // RCA 2026-06-23: an earlier version filtered on not-ready, so a noisy app
       // pod's logs blew safeRun's 10s budget BEFORE the loop reached the
-      // crash-looping supabase-db, and its FATAL went uncaptured. Each logs call
+      // crash-looping db pod, and its FATAL went uncaptured. Each logs call
       // is `timeout`-bounded so one slow pod can't starve the rest, and the
       // section gets a larger budget. --all-containers includes init containers
-      // (walg-restore / init-db / init-pgsodium).
+      // (walg-restore / seed-standby).
       sections.push([
         `${label}: logs from crash-looping pods (--previous, all containers)`,
         safeRun(
@@ -539,10 +539,10 @@ async function captureFailureDiagnostics(
       // replica (t) from an independent writable primary (f) — decisive for
       // any standby-seeding or replication RCA, and cheap.
       sections.push([
-        `${label}: supabase-db pg_is_in_recovery`,
+        `${label}: db pg_is_in_recovery`,
         safeRun('bash', [
           '-c',
-          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec supabase-supabase-db-0 -c supabase-db -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec db-0 -c db -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ]),
       ]);
       // 100 events for k8s-ha (applyManifests on standby can emit 50+ in

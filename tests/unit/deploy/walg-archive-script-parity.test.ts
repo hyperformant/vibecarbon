@@ -98,44 +98,33 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
 });
 
 // Restoring parity in the ConfigMap achieves NOTHING on an existing cluster by
-// itself: supabase.values.yaml mounts the script with `subPath: wal-archive.sh`,
+// itself: the db StatefulSet mounts the script with `subPath: wal-archive.sh`,
 // and a subPath ConfigMap mount is materialised once at container start and
 // never updated in place. `kubectl apply` changes the object; the database keeps
-// executing the old script until its pod is recreated. Routine `vibecarbon
-// deploy` never recreated that pod, so without the step below this fix would
-// reach zero existing installations.
+// executing the old script until its pod is recreated. So the pod template
+// carries the ConfigMap's sha: a changed script changes the template, and the
+// same apply rolls the pod (inside the db rollout wait).
 describe('a changed wal-archive.sh actually reaches the running db pod', () => {
   const k3s = readFileSync(`${repoRoot}src/lib/deploy/k8s/k3s.js`, 'utf-8');
-  const values = readFileSync(`${repoRoot}carbon/k8s/values/supabase.values.yaml`, 'utf-8');
+  const sts = readFileSync(`${repoRoot}carbon/k8s/base/db/statefulset.yaml`, 'utf-8');
 
-  it('is still mounted by subPath — the premise of the freshness step', () => {
+  it('is still mounted by subPath — the premise of the sha annotation', () => {
     // If this ever becomes a whole-directory mount, the kubelet updates it in
-    // place and the restart step below becomes unnecessary rather than wrong.
-    expect(values).toMatch(
+    // place and the annotation becomes unnecessary rather than wrong.
+    expect(sts).toMatch(
       /mountPath: \/etc\/postgresql\/wal-archive\.sh\n\s+subPath: wal-archive\.sh/,
     );
   });
 
-  it('hashes the shipped ConfigMap and rolls the db StatefulSet when it changes', () => {
-    expect(k3s).toContain('walArchiveScriptFreshness');
+  it('stamps the ConfigMap sha into the POD TEMPLATE, so a change rolls the pod', () => {
+    const template = sts.slice(sts.indexOf('  template:'), sts.indexOf('    spec:'));
+    expect(template).toContain('vibecarbon.dev/wal-archive-sha: "{{WAL_ARCHIVE_SHA}}"');
+  });
+
+  it('hashes the shipped ConfigMap file and renders it into the StatefulSet', () => {
     expect(k3s).toContain("join(projectDir, 'k8s/base/backup/configmap-walg.yaml')");
     expect(k3s).toContain("createHash('sha256')");
-    expect(k3s).toContain('applyK3sManifests: restart supabase-db (wal-archive.sh changed)');
-    // Waits for the roll, so a deploy cannot report success while the old
-    // script is still the one postgres will exec.
-    expect(k3s).toContain('applyK3sManifests: wait supabase-db rollout (wal-archive.sh)');
-  });
-
-  it('records the sha on the StatefulSet so the next deploy is a no-op', () => {
-    expect(k3s).toContain("WAL_ARCHIVE_SHA_ANNOTATION = 'vibecarbon.dev/wal-archive-sha'");
-    expect(k3s).toContain('applyK3sManifests: record wal-archive.sh sha');
-  });
-
-  it('does not roll the pod twice when the archiving-enable step already did', () => {
-    // A pod this deploy just recreated is running the current ConfigMap by
-    // construction; rolling again would restart the database for nothing.
-    expect(k3s).toContain('let dbPodJustRolled = false');
-    expect(k3s).toContain('dbPodJustRolled = true');
-    expect(k3s).toContain('if (dbPodJustRolled)');
+    expect(k3s).toContain('walArchiveSha: walArchiveConfigSha(projectDir)');
+    expect(k3s).toContain("WAL_ARCHIVE_SHA: walArchiveSha || 'none'");
   });
 });

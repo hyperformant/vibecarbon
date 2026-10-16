@@ -21,7 +21,7 @@
  * Mode anatomy (how we reach postgres per mode):
  *   compose-ha: postgres is the `db` compose service on each VPS. We SSH to the
  *     VPS and `docker compose exec -T db psql -U postgres`.
- *   k8s-ha:     postgres is pod supabase-supabase-db-0 (ns vibecarbon) on each
+ *   k8s-ha:     postgres is pod db-0 (ns vibecarbon) on each
  *     cluster. We SSH to that cluster's MASTER node (k3s API server) and
  *     `kubectl exec ... -- psql -U postgres`. The standby postgres is a
  *     streaming replica, so read-only queries against it are safe.
@@ -124,9 +124,9 @@ export function buildPsqlCommand(mode: DeployMode, projectName: string, sql: str
   if (mode.startsWith('compose')) {
     return `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${sql}"`;
   }
-  // k8s / k8s-ha: exec into the supabase-db pod from the master node.
+  // k8s / k8s-ha: exec into the db pod from the master node.
   return (
-    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl exec -n vibecarbon supabase-supabase-db-0 ` +
+    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl exec -n vibecarbon db-0 ` +
     `-- psql -U postgres -d postgres -tAc "${sql}"`
   );
 }
@@ -142,7 +142,7 @@ export function buildLogDiagCommand(mode: DeployMode, projectName: string): stri
     return `cd /opt/${projectName} && docker compose logs --no-color --tail=400 db 2>&1 | ${filter}`;
   }
   return (
-    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl logs -n vibecarbon supabase-supabase-db-0 ` +
+    `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl logs -n vibecarbon db-0 ` +
     `--tail=400 2>&1 | ${filter}`
   );
 }

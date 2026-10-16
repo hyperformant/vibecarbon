@@ -15,7 +15,7 @@
  *   - pilot_light_deployments_zero    — EVERY Deployment in ns `vibecarbon`
  *                                        has spec.replicas === 0 (app tier is
  *                                        fully quiesced).
- *   - pilot_light_db_statefulset_ready — the `supabase-supabase-db`
+ *   - pilot_light_db_statefulset_ready — the `db`
  *                                        StatefulSet is 1/1 (the streaming
  *                                        replica postgres is up and ready).
  *   - pilot_light_autoscaler_zero      — the `cluster-autoscaler` Deployment
@@ -43,7 +43,7 @@ import { e2eSshOpts } from '../utils/ssh.js';
 import { classifySshExecFailure, type SshExecFailureKind } from './replication.js';
 
 const NAMESPACE = 'vibecarbon';
-const DB_STATEFULSET = 'supabase-supabase-db';
+const DB_STATEFULSET = 'db';
 const AUTOSCALER_NAMESPACE = 'kube-system';
 const AUTOSCALER_DEPLOYMENT = 'cluster-autoscaler';
 const WORKER_NAME_MARKER = '-worker-';

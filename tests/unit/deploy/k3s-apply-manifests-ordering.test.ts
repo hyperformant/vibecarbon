@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,7 +9,7 @@ import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-orde
  * Integration-style unit tests for applyK3sManifests deploy-time behavior:
  *
  *   #1 — the in-cluster registry push runs CONCURRENTLY with the CA rollout +
- *        Supabase install + app rollout (nothing between reads the registry —
+ *        db rollout + app rollout (nothing between reads the registry —
  *        app pods use the sideloaded image via IfNotPresent), yet it is still
  *        AWAITED before the function returns so a failed push fails the deploy.
  *
@@ -27,7 +27,7 @@ import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-orde
  * function: the fake child succeeds everywhere and captures every stdin
  * write (so tests can inspect the Secret YAML piped via `apply -f -`).
  * retry.js / perf.js / command.js / fs stay real; the temp projectDir carries
- * the supabase values template installSupabase reads.
+ * the real db StatefulSet that renderK8sBase reads.
  *
  * Admin: applyK3sManifests no longer provisions an account. It waits for
  * the app to report its super admin ready (`kubectl exec deploy/app … node
@@ -203,12 +203,15 @@ function installSpawnMock() {
   }) as unknown as typeof spawn);
 }
 
-function makeProjectDir({ withStandbyOverlay = false, withObservability = false } = {}) {
+function makeProjectDir({ withObservability = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-k3s-apply-'));
-  mkdirSync(join(dir, 'k8s', 'values'), { recursive: true });
+  // renderK8sBase refuses a base without the db StatefulSet, so the project
+  // carries the real one, as `create` lays it down.
+  mkdirSync(join(dir, 'k8s', 'base', 'db'), { recursive: true });
+  writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources:\n  - db/\n');
   writeFileSync(
-    join(dir, 'k8s', 'values', 'supabase.values.yaml'),
-    'image:\n  db:\n    repository: {{DB_IMAGE}}\n    tag: {{DB_IMAGE_TAG}}\n',
+    join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
+    readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
   if (withObservability) {
     // The isolated observability stack applies via `kubectl apply -k
@@ -220,15 +223,6 @@ function makeProjectDir({ withStandbyOverlay = false, withObservability = false 
     writeFileSync(
       join(dir, 'k8s', 'base', 'observability', 'kustomization.yaml'),
       'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: vibecarbon-observability\n',
-    );
-  }
-  if (withStandbyOverlay) {
-    // installSupabase (Task 4) requires this overlay whenever role ===
-    // 'standby'. Mirrors carbon/k8s/values/supabase.standby.values.yaml's
-    // shape — see tests/unit/deploy/k3s-install-supabase.test.ts.
-    writeFileSync(
-      join(dir, 'k8s', 'values', 'supabase.standby.values.yaml'),
-      'deployment: {}\npersistence: {}\n',
     );
   }
   return dir;
@@ -265,7 +259,7 @@ function baseArgs(projectDir: string) {
       BETTER_AUTH_SECRET: 'test-better-auth-secret-0123456789abcdef',
     },
     domain: 'app.example.test',
-    // s3Config omitted → WAL-archiving block skipped (fewer calls).
+    // s3Config omitted → no wal-g backup credentials (fewer calls).
     restore: null,
     // dnsProvider omitted → no DNS secret / hetzner webhook path.
     apiToken: 'hetzner-token',
@@ -276,7 +270,7 @@ function baseArgs(projectDir: string) {
     minWorkers: 1,
     maxWorkers: 3,
     workerServerType: 'cx23',
-    // Required since the d4 lift — installSupabase refuses to assume the
+    // Required since the d4 lift — buildDbManifestValues refuses to assume the
     // Hetzner-static relay host. See db-private-ip-required.test.ts.
     dbPrivateIp: '10.0.1.2',
     k3sToken: 'k3s-token',
@@ -298,7 +292,8 @@ async function waitFor(cond: () => boolean, timeoutMs: number) {
   return cond();
 }
 
-const isHelmUpgrade = (a: string[]) => a[0] === 'helm' && a.includes('upgrade');
+const isDbRolloutWait = (a: string[]) =>
+  a[0] === 'kubectl' && a.includes('rollout') && a.includes('statefulset/db');
 const isObservabilityApply = (a: string[]) =>
   a[0] === 'kubectl' &&
   a.includes('apply') &&
@@ -363,24 +358,24 @@ describe('applyK3sManifests deploy-time optimizations', () => {
     installSpawnMock();
   });
 
-  it('#1 registry push runs concurrently with installSupabase (helm), yet stays awaited', async () => {
+  it('#1 registry push runs concurrently with the db rollout wait, yet stays awaited', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir();
     // Hold the docker push open: a SERIAL (awaited-inline) push would block the
-    // whole function here and helm would never be reached; a BACKGROUNDED push
-    // lets the function proceed to installSupabase while the push is pending.
+    // whole function here and the db wait would never be reached; a
+    // BACKGROUNDED push lets the function proceed while the push is pending.
     pushGate = makeGate();
 
     const done = applyK3sManifests(baseArgs(projectDir));
     done.catch(() => {}); // avoid unhandled-rejection noise during the poll window
 
-    const helmRanWhilePushPending = await waitFor(() => cmdCalls.some(isHelmUpgrade), 2000);
+    const dbWaitRanWhilePushPending = await waitFor(() => cmdCalls.some(isDbRolloutWait), 2000);
 
     // Release the push so the function can complete its end-of-run await.
     pushGate.release();
     await done;
 
-    expect(helmRanWhilePushPending).toBe(true);
+    expect(dbWaitRanWhilePushPending).toBe(true);
   });
 
   it('#1 a failed registry push still fails the deploy (push stays awaited)', async () => {
@@ -517,7 +512,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     // is stale by definition; reap declaratively, don't race the CCM.
     const { applyK3sManifests } = await k3sPromise;
     getNodesOut = 'node/citest-k8s-ha-x-primary-worker-1\nnode/citest-k8s-ha-x-standby-master\n';
-    const projectDir = makeProjectDir({ withStandbyOverlay: true });
+    const projectDir = makeProjectDir();
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
     const dels = cmdCalls.filter(
       (c) => c[0] === 'kubectl' && c.includes('delete') && c.includes('node'),
@@ -556,10 +551,7 @@ describe('applyK3sManifests pilot-standby role', () => {
 
   it('standby role zeroes app + CA and skips app-tier steps', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir({
-      withStandbyOverlay: true,
-      withObservability: true,
-    });
+    const projectDir = makeProjectDir({ withObservability: true });
 
     await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
 
@@ -600,6 +592,8 @@ describe('applyK3sManifests pilot-standby role', () => {
     ).toBe(false);
     // No RLS audit either: no app tier has migrated anything on a standby.
     expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);
+    // The db itself still comes up (a streaming replica) and is waited on.
+    expect(cmdCalls.some(isDbRolloutWait)).toBe(true);
 
     // Registry wait + push stay: failover pulls the app image from it.
     expect(
@@ -695,7 +689,7 @@ describe('applyK3sManifests pilot-standby role', () => {
     // must not be an active ACME issuer; the annotation is what the failover
     // promote (and every reconverge under the swapped role) re-points from.
     const { applyK3sManifests } = await k3sPromise;
-    const projectDir = makeProjectDir({ withStandbyOverlay: true });
+    const projectDir = makeProjectDir();
 
     await applyK3sManifests({
       ...baseArgs(projectDir),
@@ -811,7 +805,7 @@ describe('cert-manager DNS-01 webhook install fails loud', () => {
   // their result — runCommandAsync resolves `false` (does NOT reject) for
   // non-silent callers, so a failed webhook chart install or readiness wait
   // let the deploy march on and ACME DNS-01 issuance died minutes later with
-  // no pointer back. Same class as the installSupabase helm check.
+  // no pointer back. Same class as the db rollout wait's check.
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
@@ -1012,28 +1006,33 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
     installSpawnMock();
   });
 
-  it('runs pg_isready against the db pod BEFORE the archive_mode psql', async () => {
+  it('waits for the db rollout, then runs pg_isready against db-0 BEFORE the first psql', async () => {
     const { applyK3sManifests } = await k3sPromise;
-    // baseArgs omits s3Config, which skips the WAL-archiving block entirely —
-    // supply it so the psql the gate protects actually runs.
-    await applyK3sManifests({
-      ...baseArgs(makeProjectDir()),
-      s3Config: {
-        accessKey: 'AK',
-        secretKey: 'SK',
-        bucket: 'proj-backups',
-        endpoint: 'https://nbg1.example',
-        region: 'nbg1',
-      },
-    });
+    await applyK3sManifests(baseArgs(makeProjectDir()));
 
-    const isReadyIdx = cmdCalls.findIndex((a) => a[0] === 'kubectl' && a.includes('pg_isready'));
-    const archModeIdx = cmdCalls.findIndex(
-      (a) => a[0] === 'kubectl' && a.some((x) => String(x).includes('SHOW archive_mode')),
+    const rolloutIdx = cmdCalls.findIndex(isDbRolloutWait);
+    const isReadyIdx = cmdCalls.findIndex(
+      (a) => a[0] === 'kubectl' && a.includes('pg_isready') && a.includes('db-0'),
     );
-    expect(isReadyIdx, 'the accepting-gate must run').toBeGreaterThan(-1);
-    expect(archModeIdx, 'the psql the gate protects must still run').toBeGreaterThan(-1);
-    expect(archModeIdx).toBeGreaterThan(isReadyIdx);
+    const psqlIdx = cmdCalls.findIndex((a) => a[0] === 'kubectl' && a.includes('psql'));
+    expect(rolloutIdx, 'the db rollout wait must run').toBeGreaterThan(-1);
+    expect(isReadyIdx, 'the accepting-gate must run').toBeGreaterThan(rolloutIdx);
+    expect(psqlIdx, 'the psql the gate protects (the RLS audit) must still run').toBeGreaterThan(
+      -1,
+    );
+    expect(psqlIdx).toBeGreaterThan(isReadyIdx);
+    // WAL archiving is a startup flag on the StatefulSet: no ALTER SYSTEM, no
+    // db restart.
+    expect(
+      cmdCalls.some((a) => a.some((x) => String(x).includes('ALTER SYSTEM'))),
+      'no ALTER SYSTEM step',
+    ).toBe(false);
+    expect(
+      cmdCalls.some(
+        (a) => a.includes('restart') && a.some((x) => String(x).includes('statefulset')),
+      ),
+      'no db restart',
+    ).toBe(false);
   });
 });
 
@@ -1171,7 +1170,7 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     const yaml = hit.data;
 
     expect(yaml).toContain('name: app-s3-vpc-egress');
-    expect(yaml).toContain('name: supabase-db-s3-vpc-egress');
+    expect(yaml).toContain('name: db-s3-vpc-egress');
     expect(yaml).not.toContain('__VPC_CIDR__');
 
     // Pinned against the SAME variable the deploy call used (TEST_VPC_CIDR),
@@ -1191,7 +1190,7 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     expect(yaml).not.toMatch(/name: traefik-policy\b/);
     expect(yaml).not.toMatch(/name: (allow-db-)?repl-gateway\S*/);
     const policyNames = [...yaml.matchAll(/^\s*name:\s*(\S+)/gm)].map((m) => m[1]);
-    expect(policyNames.sort()).toEqual(['app-s3-vpc-egress', 'supabase-db-s3-vpc-egress'].sort());
+    expect(policyNames.sort()).toEqual(['app-s3-vpc-egress', 'db-s3-vpc-egress'].sort());
   });
 
   it('Hetzner-shaped ProviderClass (no getS3EgressExtraCidrs, no vpcCidr): no S3-egress-VPC apply at all — real render path byte-identical', async () => {

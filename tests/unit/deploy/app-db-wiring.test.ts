@@ -13,7 +13,7 @@
  *     (src/lib/deploy/bundle.js), so the base file must carry it.
  *   - k8s (+ k8s-ha): the Deployment names DB_HOST/DB_PORT/DB_NAME from the
  *     vibecarbon-config ConfigMap and DB_PASSWORD from vibecarbon-secrets,
- *     and the app NetworkPolicy admits egress to the chart's db pod on 5432.
+ *     and the app NetworkPolicy admits egress to the db StatefulSet's pod on 5432.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -97,28 +97,23 @@ describe('k8s: app → db', () => {
     expect(SECRET_KEYS).toContain('DB_PASSWORD');
   });
 
-  it("DB_HOST is the Supabase chart's db Service in base and the production overlay", () => {
+  it("DB_HOST is the db StatefulSet's Service in base and the production overlay", () => {
     const config = docs('k8s/base/config/configmap.yaml').find((d) => d.kind === 'ConfigMap');
-    expect(config.data.DB_HOST).toBe('supabase-supabase-db');
+    expect(config.data.DB_HOST).toBe('db');
     expect(config.data.DB_PORT).toBe('5432');
-    expect(carbon('k8s/overlays/production/kustomization.yaml')).toContain(
-      '- DB_HOST=supabase-supabase-db',
-    );
+    expect(carbon('k8s/overlays/production/kustomization.yaml')).toContain('- DB_HOST=db');
+    const service = docs('k8s/base/db/service.yaml').find((d) => d.metadata.name === 'db');
+    expect(service.spec.ports[0].port).toBe(5432);
   });
 
-  it('the app NetworkPolicy admits egress to the chart db pod on 5432', () => {
+  it('the app NetworkPolicy admits egress to the db pod on 5432', () => {
     const policy = docs('k8s/base/app/network-policy.yaml').find(
       (d) => d.kind === 'NetworkPolicy' && d.metadata.name === 'app-policy',
     );
-    // The chart's own db pod labels, as the db S3-egress policy selects them.
-    const dbPolicy = docs('k8s/base/network-policies.yaml').find(
-      (d) => d.metadata?.name === 'supabase-db-s3-egress',
-    );
-    const dbLabels = dbPolicy.spec.podSelector.matchLabels;
-    expect(dbLabels).toEqual({
-      'app.kubernetes.io/name': 'supabase-db',
-      'app.kubernetes.io/instance': 'supabase',
-    });
+    // The db pod's own labels, as the StatefulSet stamps them.
+    const sts = docs('k8s/base/db/statefulset.yaml').find((d) => d.kind === 'StatefulSet');
+    const dbLabels = { app: sts.spec.template.metadata.labels.app };
+    expect(dbLabels).toEqual({ app: 'vibecarbon-db' });
     const toDb = policy.spec.egress.filter((rule: Doc) =>
       (rule.to ?? []).some(
         (peer: Doc) => JSON.stringify(peer.podSelector?.matchLabels) === JSON.stringify(dbLabels),

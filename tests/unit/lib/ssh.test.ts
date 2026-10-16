@@ -358,20 +358,19 @@ describe('getPostgresPod', () => {
     mockRun.mockReset();
   });
 
-  it('uses the Supabase Helm chart db pod label selector', async () => {
-    mockRun.mockResolvedValue('supabase-supabase-db-0');
+  it('uses the db StatefulSet pod label selector', async () => {
+    mockRun.mockResolvedValue('db-0');
     await getPostgresPod('1.2.3.4', '/path/to/key');
     const [cmd] = mockRun.mock.calls[0] as [string[]];
     const joined = cmd.join(' ');
     // Each remote argv token is POSIX-quoted; the label value survives intact.
-    // Supabase community Helm chart labels the db StatefulSet with
-    // app.kubernetes.io/name=supabase-db (release=supabase + subchart=db).
-    expect(joined).toContain("'-l' 'app.kubernetes.io/name=supabase-db'");
+    // carbon/k8s/base/db/statefulset.yaml labels its pod app=vibecarbon-db.
+    expect(joined).toContain("'-l' 'app=vibecarbon-db'");
   });
 
   it('returns the trimmed pod name', async () => {
-    mockRun.mockResolvedValue('  supabase-supabase-db-0  \n');
-    expect(await getPostgresPod('1.2.3.4', '/path/to/key')).toBe('supabase-supabase-db-0');
+    mockRun.mockResolvedValue('  db-0  \n');
+    expect(await getPostgresPod('1.2.3.4', '/path/to/key')).toBe('db-0');
   });
 });
 

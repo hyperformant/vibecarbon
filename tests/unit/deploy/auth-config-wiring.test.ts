@@ -92,12 +92,6 @@ describe('k8s: the app pod reads auth config from vibecarbon-secrets', () => {
     );
   });
 
-  it('the chart runs no auth service', () => {
-    expect(read('carbon/k8s/values/supabase.values.yaml')).toMatch(
-      /^deployment:\n {2}auth:\n(?: {4}#.*\n)* {4}enabled: false$/m,
-    );
-  });
-
   // vibecarbon-secrets is built from SECRET_KEYS (dev-push) and from the
   // GitHub Environment secrets buildPerEnvSecrets seeds (GitOps). Both must
   // carry what the app's auth reads, or the pod boots without a session key

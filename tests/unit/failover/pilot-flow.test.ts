@@ -363,7 +363,7 @@ describe('waitForWorkersReady', () => {
 describe('waitForStandbyCaughtUp (planned zero-data-loss gate)', () => {
   const servers = { primary: { ip: '10.0.0.1' }, standby: { ip: '10.0.0.9' } };
   const baseDeps = () => ({
-    getPostgresPod: vi.fn(async () => 'supabase-supabase-db-0'),
+    getPostgresPod: vi.fn(async () => 'db-0'),
     isStreaming: vi.fn(async () => true),
     sleep: vi.fn(async () => {}),
   });

@@ -147,44 +147,44 @@ describe('M3 Task 3 — do-worker-init.sh shape', () => {
 });
 
 describe('M3 Task 5 — do-db-init.sh shape', () => {
-  const supabase = loadCloudInit('do-db-init.sh');
+  const dbInit = loadCloudInit('do-db-init.sh');
 
   it('pre-seeds the provider-id kubelet arg and cloud-provider=external', () => {
-    expect(supabase).toContain('--kubelet-arg="provider-id=digitalocean://$DROPLET_ID"');
-    expect(supabase).toContain('--kubelet-arg="cloud-provider=external"');
+    expect(dbInit).toContain('--kubelet-arg="provider-id=digitalocean://$DROPLET_ID"');
+    expect(dbInit).toContain('--kubelet-arg="cloud-provider=external"');
   });
 
   it('pins the database node-pool via BOOT-TIME k3s agent flags (label + taint), not a post-join kubectl step', () => {
-    expect(supabase).toContain('--node-label="dedicated=db"');
-    expect(supabase).toContain('--node-label="node-pool=db-pool"');
-    expect(supabase).toContain('--node-taint="dedicated=db:NoSchedule"');
-    expect(supabase).not.toMatch(/kubectl (label|taint) node/);
+    expect(dbInit).toContain('--node-label="dedicated=db"');
+    expect(dbInit).toContain('--node-label="node-pool=db-pool"');
+    expect(dbInit).toContain('--node-taint="dedicated=db:NoSchedule"');
+    expect(dbInit).not.toMatch(/kubectl (label|taint) node/);
   });
 
   it('does NOT install any CCM/CSI/secret (master-only)', () => {
-    expect(supabase).not.toContain('create secret generic digitalocean');
-    expect(supabase).not.toMatch(/digitalocean-cloud-controller-manager/);
-    expect(supabase).not.toMatch(/csi-digitalocean/);
+    expect(dbInit).not.toContain('create secret generic digitalocean');
+    expect(dbInit).not.toMatch(/digitalocean-cloud-controller-manager/);
+    expect(dbInit).not.toMatch(/csi-digitalocean/);
   });
 
   it('does NOT grep for a private-NIC interface name', () => {
-    expect(supabase).not.toContain('inet 10');
-    expect(supabase).not.toContain('dhcpcd');
+    expect(dbInit).not.toContain('inet 10');
+    expect(dbInit).not.toContain('dhcpcd');
   });
 
   it('pre-pulls no chart image: the db image is published and pulled at deploy time', () => {
     // The old background pre-warm pulled a stale postgres tag and the chart
     // gateway, neither of which the deploy runs.
-    expect(supabase).not.toContain('crictl pull');
-    expect(supabase).not.toContain('image-prewarm');
+    expect(dbInit).not.toContain('crictl pull');
+    expect(dbInit).not.toContain('image-prewarm');
   });
 
   it('carries zero hetzner|hcloud|floating|10.0.1. tokens (case-insensitive)', () => {
-    expect(supabase).not.toMatch(/hetzner|hcloud|floating|10\.0\.1\./i);
+    expect(dbInit).not.toMatch(/hetzner|hcloud|floating|10\.0\.1\./i);
   });
 
   it('uses the DigitalOcean metadata path root, not the Hetzner-shaped one', () => {
-    expect(supabase).toContain('169.254.169.254/metadata/v1/');
-    expect(supabase).not.toContain('/hetzner/v1/metadata/');
+    expect(dbInit).toContain('169.254.169.254/metadata/v1/');
+    expect(dbInit).not.toContain('/hetzner/v1/metadata/');
   });
 });

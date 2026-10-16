@@ -429,9 +429,9 @@ describe('csiSidecarSetImagePlan()', () => {
   });
 });
 
-describe('applyK3sManifests re-pins the CSI sidecars before Supabase installs', () => {
+describe('applyK3sManifests re-pins the CSI sidecars before the db StatefulSet is applied', () => {
   const whole = read('src/lib/deploy/k8s/k3s.js');
-  // Scoped to applyK3sManifests' BODY: `installSupabase` is also defined
+  // Scoped to applyK3sManifests' BODY: `renderK8sBase` is also defined
   // earlier in this file, and ordering assertions against the definition
   // rather than the call site would pass while proving nothing.
   const bodyStart = whole.indexOf('export async function applyK3sManifests({');
@@ -439,7 +439,7 @@ describe('applyK3sManifests re-pins the CSI sidecars before Supabase installs', 
 
   it('found the applyK3sManifests body to reason about', () => {
     expect(bodyStart).toBeGreaterThan(-1);
-    expect(k3s).toContain('installSupabase({');
+    expect(k3s).toContain('renderK8sBase(');
   });
 
   it('imports the plan builder from images.js', () => {
@@ -456,12 +456,12 @@ describe('applyK3sManifests re-pins the CSI sidecars before Supabase installs', 
     expect(call).toMatch(/\.\.\.setImageArgs/);
   });
 
-  it('runs BEFORE installSupabase — the PVCs it unblocks are that helm release’s', () => {
-    // The 2026-08-05 incident died in `helm upgrade --wait`: the db PVC could
+  it('runs BEFORE the db StatefulSet is applied — the PVC it unblocks is the db’s', () => {
+    // The 2026-08-05 incident died in the db install's wait: the db PVC could
     // not provision because the node plugin never registered. Re-pinning after
     // that point would fix nothing.
     const repinAt = k3s.indexOf('csiSidecarSetImagePlan(providerId)');
-    const helmAt = k3s.indexOf('installSupabase({');
+    const helmAt = k3s.indexOf('renderK8sBase(');
     expect(repinAt).toBeGreaterThan(-1);
     expect(helmAt).toBeGreaterThan(-1);
     expect(repinAt).toBeLessThan(helmAt);

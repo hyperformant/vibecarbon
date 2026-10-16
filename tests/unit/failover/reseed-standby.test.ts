@@ -50,7 +50,7 @@ const POD_JSON = JSON.stringify({
   spec: {
     containers: [
       {
-        name: 'supabase-db',
+        name: 'db',
         image: DB_IMAGE,
         volumeMounts: [
           {
@@ -64,7 +64,7 @@ const POD_JSON = JSON.stringify({
     volumes: [
       {
         name: 'postgres-volume',
-        persistentVolumeClaim: { claimName: 'data-supabase-supabase-db-0' },
+        persistentVolumeClaim: { claimName: 'data-db-0' },
       },
     ],
   },
@@ -107,7 +107,7 @@ function happyKubectl(
 
 beforeEach(() => {
   vi.clearAllMocks();
-  (ssh.getPostgresPod as ReturnType<typeof vi.fn>).mockResolvedValue('supabase-supabase-db-0');
+  (ssh.getPostgresPod as ReturnType<typeof vi.fn>).mockResolvedValue('db-0');
 });
 
 describe('getReplPasswordFromSecret', () => {
@@ -301,7 +301,7 @@ describe('reseedStandbyFromPrimary', () => {
     expect(ssh.sshRun).not.toHaveBeenCalled();
     // Its manifest mounts the SAME PVC (claimName), reuses the db image, and its
     // command runs the swap script against PGDATA=<mount-root>/<subPath>.
-    expect(swapManifest).toContain('data-supabase-supabase-db-0');
+    expect(swapManifest).toContain('data-db-0');
     expect(swapManifest).toContain(DB_IMAGE);
     expect(swapManifest).toContain('/pgdata-vol');
     expect(swapManifest).toContain(`PGDATA='${PGDATA_IN_POD}'`);
@@ -544,7 +544,7 @@ describe('stale-VolumeAttachment recovery on the post-swap rollout wait (d4 run 
     ],
   });
   const PVC_LIST = JSON.stringify({
-    items: [{ metadata: { name: 'data-supabase-supabase-db-0' }, spec: { volumeName: 'pvc-x' } }],
+    items: [{ metadata: { name: 'data-db-0' }, spec: { volumeName: 'pvc-x' } }],
   });
   const VA_LIST = JSON.stringify({
     items: [

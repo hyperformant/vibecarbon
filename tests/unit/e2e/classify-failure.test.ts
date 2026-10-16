@@ -181,14 +181,14 @@ describe('classifyFailure', () => {
     ).toBe('unknown');
   });
 
-  it('flags a helm-wait pod stuck on a NotReady NODE as infra — host died', () => {
+  it('flags a db-rollout pod stuck on a NotReady NODE as infra — host died', () => {
     // RCA 2026-09-01 (PG17 cert, k8s-ha standby): worker went dark
     // mid-deploy (kubelet 502, SSH timeout, provider API "running"), db
     // pod froze in Init, run hard-failed [unknown]. Both clauses required.
     const withNode = classifyFailure({
       errorMessage:
-        'HA deploy failed — standby: installSupabase: helm upgrade --install failed ... ' +
-        '0/1 Supabase pods are Ready; 1 never became Ready: supabase-supabase-db-0 (Pending). ' +
+        'HA deploy failed — standby: awaitDbRollout: statefulset/db did not become Ready within 900s ... ' +
+        'The db pod never became Ready: db-0 (Pending). ' +
         'Node(s) NotReady: testapp-e4-standby-db (Ready=Unknown) — the pod may be stuck ' +
         'because its HOST died or lost its kubelet, not because of the workload.',
     });
@@ -198,8 +198,7 @@ describe('classifyFailure', () => {
     // proven otherwise.
     expect(
       classifyFailure({
-        errorMessage:
-          '0/1 Supabase pods are Ready; 1 never became Ready: supabase-supabase-db-0 (Pending).',
+        errorMessage: 'The db pod never became Ready: db-0 (Pending).',
       }).category,
     ).toBe('unknown');
   });

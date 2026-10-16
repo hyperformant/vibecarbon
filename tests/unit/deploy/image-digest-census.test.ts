@@ -423,13 +423,13 @@ describe('every shipped image ref is pinned by digest', () => {
     ]);
   });
 
-  it('Helm-style repository/tag blocks are parsed (the db image is the only one)', () => {
-    const helm = K8S_FILES.flatMap(yamlImageSites).filter(({ ref }) =>
+  it('the db StatefulSet is scanned: its deploy-time image placeholder is an allowlisted site', () => {
+    const db = K8S_FILES.flatMap(yamlImageSites).filter(({ ref }) =>
       ref.startsWith('{{DB_IMAGE}}:'),
     );
-    expect(
-      helm.some(({ where }) => where.startsWith('carbon/k8s/values/supabase.values.yaml:')),
-    ).toBe(true);
+    expect(db.some(({ where }) => where.startsWith('carbon/k8s/base/db/statefulset.yaml:'))).toBe(
+      true,
+    );
     expect(
       K8S_FILES.flatMap(yamlImageSites).filter(({ ref }) =>
         ref.includes('(repository with no tag)'),

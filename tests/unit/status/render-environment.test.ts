@@ -73,7 +73,7 @@ describe('formatServerLines', () => {
         'prod-primary': {
           kind: 'k8s',
           ip: '1.1.1.1',
-          rows: [row('app', 'healthy'), row('supabase-db-0', 'healthy')],
+          rows: [row('app', 'healthy'), row('db-0', 'healthy')],
           platform: {
             'flux-system': { healthy: 4, total: 4 },
             'cert-manager': { healthy: 2, total: 3 },

@@ -144,19 +144,37 @@ describe('Routing: the app is the only public data path', () => {
     }
   });
 
-  it('no k8s route or policy targets a gateway, database API or admin console', () => {
-    // The k8s twin of the compose check above: the chart still hosts the db,
-    // so its other components must stay off and nothing may point at them.
-    const chartService = /supabase-supabase-(kong|rest|realtime|meta|studio)\b|app: vibecarbon-(kong|studio)\b/;
-    const offenders = yamlUnder('k8s').filter((f) => chartService.test(uncommented(read(f))));
-    expect(offenders, `Chart gateway/console referenced in ${offenders.join(', ')}.`).toEqual([]);
-    const values = uncommented(read('k8s/values/supabase.values.yaml'));
-    for (const name of ['kong', 'rest', 'realtime', 'meta', 'studio']) {
-      expect(
-        new RegExp(`^ {2}${name}:\\n {4}enabled: false$`, 'm').test(values),
-        `k8s/values/supabase.values.yaml must keep deployment.${name}.enabled: false.`
-      ).toBe(true);
-    }
+  // Every workload (and Helm release) the k8s manifests define, as
+  // `<Kind>/<name>`: the k8s twin of the compose service list.
+  const k8sWorkloads = () =>
+    yamlUnder('k8s').flatMap((f) =>
+      uncommented(read(f))
+        .split(/^---\s*$/m)
+        .flatMap((doc) => {
+          const kind = doc.match(/^kind: (Deployment|StatefulSet|DaemonSet|HelmRelease)\s*$/m)?.[1];
+          const name = doc.match(/^metadata:\n(?: {2}.*\n)*? {2}name: (\S+)/m)?.[1];
+          return kind && name ? [`${kind}/${name}`] : [];
+        })
+    );
+
+  it('no k8s workload is a gateway, database API or admin console', () => {
+    // The k8s twin of the compose check above. Postgres is our own StatefulSet
+    // (k8s/base/db); everything else is the app, its edge and the platform.
+    expect(k8sWorkloads().sort()).toEqual(
+      [
+        'Deployment/app',
+        'Deployment/cluster-autoscaler',
+        'Deployment/local-registry',
+        'Deployment/traefik',
+        'HelmRelease/cert-manager-webhook-hetzner',
+        'StatefulSet/db',
+      ].sort()
+    );
+  });
+
+  it('the workload check sees the db StatefulSet', () => {
+    // Guards the parser above against silently matching nothing.
+    expect(k8sWorkloads()).toContain('StatefulSet/db');
   });
 
   it('the service-name check sees a top-level service key', () => {
@@ -192,14 +210,17 @@ describe('Auth: only the in-process auth exists, and it is not permissive', () =
     ).toEqual([]);
   });
 
-  it('no compose file or chart value runs a separate auth service', () => {
+  it('no compose file or k8s manifest runs a separate auth service', () => {
     for (const f of routingFiles.filter((f) => f.startsWith('docker-compose'))) {
       expect(uncommented(read(f)), `${f} defines an auth service`).not.toMatch(/^ {2}auth:\s*$/m);
     }
-    expect(
-      read('k8s/values/supabase.values.yaml'),
-      "the chart's auth service must stay disabled"
-    ).toMatch(/^deployment:\n {2}auth:\n(?: {4}#.*\n)* {4}enabled: false$/m);
+    // The k8s workload list is pinned above; an auth workload would also have
+    // to be named here to pass it.
+    for (const f of yamlUnder('k8s')) {
+      expect(uncommented(read(f)), `${f} defines an auth workload`).not.toMatch(
+        /^kind: (Deployment|StatefulSet)\s*\nmetadata:\n(?: {2}.*\n)*? {2}name: \S*auth\S*$/m
+      );
+    }
   });
 
   // trustedOrigins decides which origins may call the auth API with cookies

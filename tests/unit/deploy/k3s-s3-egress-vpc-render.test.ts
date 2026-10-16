@@ -30,7 +30,7 @@ function kustomizeBuild(path: string) {
 
 // registry-s3-vpc-egress left the family 2026-08-30: the in-cluster registry
 // is filesystem-backed (no S3) — see registry-no-object-storage.test.ts.
-const POLICY_NAMES = ['app-s3-vpc-egress', 'supabase-db-s3-vpc-egress'];
+const POLICY_NAMES = ['app-s3-vpc-egress', 'db-s3-vpc-egress'];
 
 describe('renderS3EgressVpcManifest', () => {
   it('the real checked-in s3-egress-vpc.yaml ships the placeholder for both policies, not a hardcoded literal', () => {

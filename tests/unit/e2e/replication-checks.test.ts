@@ -60,10 +60,10 @@ describe('buildPsqlCommand', () => {
     expect(cmd).toContain('"SELECT 1"');
   });
 
-  it('uses kubectl exec into the supabase-db pod for k8s-ha', () => {
+  it('uses kubectl exec into the db pod for k8s-ha', () => {
     const cmd = buildPsqlCommand('k8s-ha', 'acme', 'SELECT 1');
     expect(cmd).toContain('KUBECONFIG=/etc/rancher/k3s/k3s.yaml');
-    expect(cmd).toContain('kubectl exec -n vibecarbon supabase-supabase-db-0');
+    expect(cmd).toContain('kubectl exec -n vibecarbon db-0');
     expect(cmd).toContain('psql -U postgres -d postgres -tAc');
     expect(cmd).not.toContain('docker compose');
   });
@@ -85,7 +85,7 @@ describe('buildLogDiagCommand', () => {
 
   it('greps k8s pod logs for replication/pg_hba', () => {
     const cmd = buildLogDiagCommand('k8s-ha', 'acme');
-    expect(cmd).toContain('kubectl logs -n vibecarbon supabase-supabase-db-0');
+    expect(cmd).toContain('kubectl logs -n vibecarbon db-0');
     expect(cmd).toContain('tail -20');
   });
 });

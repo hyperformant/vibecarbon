@@ -270,7 +270,7 @@ export function parseWalSwitchOutput(raw: string): WalSwitchResult {
 
 /**
  * Remote command that runs the probe in the db container (compose) or the
- * supabase-db pod (k8s). Same probe, same evaluator — only the exec seam
+ * db pod (k8s). Same probe, same evaluator — only the exec seam
  * differs, mirroring walg-audit's composeWalgAuditShell / k8sWalgAuditArgv
  * split. Exported for the unit test that pins the single-quote invariant.
  *
@@ -284,7 +284,7 @@ export function buildWalSwitchRemoteCommand(projectName: string, isCompose: bool
   }
   return (
     'KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n vibecarbon exec ' +
-    `supabase-supabase-db-0 -- bash -c '${probe}'`
+    `db-0 -- bash -c '${probe}'`
   );
 }
 

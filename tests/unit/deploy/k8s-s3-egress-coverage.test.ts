@@ -44,7 +44,7 @@ const s3EgressTargets = (rel: string) =>
         (e.ports ?? []).some((port) => port.port === 443),
       ),
     )
-    .map((p) => p.spec?.podSelector?.matchLabels?.['app.kubernetes.io/name'])
+    .map((p) => p.spec?.podSelector?.matchLabels?.app)
     .filter(Boolean);
 
 describe('k8s S3 egress coverage', () => {
@@ -54,6 +54,7 @@ describe('k8s S3 egress coverage', () => {
     const vpc = s3EgressTargets('base/s3-egress-vpc/s3-egress-vpc.yaml');
     const pub = [
       ...s3EgressTargets('base/network-policies.yaml'),
+      ...s3EgressTargets('base/db/network-policy.yaml'),
       ...s3EgressTargets('base/app/network-policy.yaml'),
       ...s3EgressTargets('base/registry/local-registry.yaml'),
     ];
@@ -64,8 +65,8 @@ describe('k8s S3 egress coverage', () => {
 
   it('the db keeps its own allowance — wal-g depends on it', () => {
     // Regression floor: wal-g backups and restores need both arms.
-    expect(s3EgressTargets('base/network-policies.yaml')).toContain('supabase-db');
-    expect(s3EgressTargets('base/s3-egress-vpc/s3-egress-vpc.yaml')).toContain('supabase-db');
+    expect(s3EgressTargets('base/db/network-policy.yaml')).toContain('vibecarbon-db');
+    expect(s3EgressTargets('base/s3-egress-vpc/s3-egress-vpc.yaml')).toContain('vibecarbon-db');
   });
 
   it('the VPC file still renders its placeholder, never a literal CIDR', () => {

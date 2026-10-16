@@ -353,9 +353,9 @@ describe('backupCompose — wal-g backup-push staleness retry', () => {
 });
 
 describe('k8s walg-restore init container — bash mirror of the same retry', () => {
-  const valuesPath = join(REPO_ROOT, 'carbon', 'k8s', 'values', 'supabase.values.yaml');
+  const valuesPath = join(REPO_ROOT, 'carbon', 'k8s', 'base', 'db', 'statefulset.yaml');
 
-  /** Extract the walg-restore init container's inline bash body from the values file. */
+  /** Extract the walg-restore init container's inline bash body from the db StatefulSet. */
   function walgRestoreScript(): string {
     const yaml = readFileSync(valuesPath, 'utf-8');
     const start = yaml.indexOf('- name: walg-restore');

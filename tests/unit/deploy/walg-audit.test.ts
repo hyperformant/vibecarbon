@@ -408,7 +408,7 @@ describe('walgAuditFailureMessage', () => {
   it('gives the reproduce command for the caller’s deploy path', () => {
     expect(msg).toContain('docker compose exec -T db wal-g backup-list');
     expect(walgAuditFailureMessage({ failures: [] }, 'k8s')).toContain(
-      'kubectl -n vibecarbon exec supabase-supabase-db-0 -- wal-g backup-list',
+      'kubectl -n vibecarbon exec db-0 -- wal-g backup-list',
     );
   });
 });
@@ -496,7 +496,7 @@ describe('exec seams', () => {
       '-n',
       'vibecarbon',
       'exec',
-      'supabase-supabase-db-0',
+      'db-0',
       '--',
       'bash',
       '-c',
@@ -535,7 +535,7 @@ describe('k8s deploy path calls the audit', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('execs the probe in the supabase-db pod and passes when healthy', async () => {
+  it('execs the probe in the db pod and passes when healthy', async () => {
     const { spawn } = await import('node:child_process');
     const mocked = vi.mocked(spawn);
     mocked.mockReset();
