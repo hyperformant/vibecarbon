@@ -94,7 +94,7 @@ All under `tests/_helpers/`:
 | `jwt.ts` → `mockJwt(payload, secret?)` | HS256-signed bearer token for auth-protected routes. |
 | `env.ts` → `mockEnv({...})` | Temporarily swap process.env vars for one test; returns a restore closure. |
 | `setup-rtl.ts` | Wired into the `component` project — loads jest-dom matchers and runs RTL's cleanup between tests. |
-| `setup-integration.ts` | Wired into the `integration` project — seeds plausible Supabase env values so server modules pass zod validation when imported. |
+| `setup-integration.ts` | Wired into the `integration` project — seeds plausible env values (auth secret, site URL, db host) so server modules pass zod validation when imported. |
 
 ## Mocking the external boundary
 

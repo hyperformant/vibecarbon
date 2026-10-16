@@ -28,7 +28,7 @@ carbon/k8s/
 
    **GitOps never updates the database.** A push changes everything in base except the db StatefulSet. After an upgrade that touches the database (a db image bump, a changed `k8s/base/backup/configmap-walg.yaml`, any edit to `k8s/base/db/statefulset.yaml`), run `vibecarbon deploy <env>` from the CLI so the StatefulSet is re-rendered and rolled.
 
-   **Clusters set up before the db StatefulSet** still carry the `vibecarbon-supabase` Kustomization in flux-system. Do not simply delete it: it has `prune: true`, so deleting it garbage-collects its HelmRelease, which uninstalls the old chart and deletes its database volume. Set `prune: false` on it first, then delete it, then follow the steps `vibecarbon deploy` prints for a chart-era cluster (destroy and redeploy, or `helm uninstall supabase -n vibecarbon` and `vibecarbon deploy <env> -restore latest`).
+   **Clusters set up before the db StatefulSet** still carry the old database chart's Kustomization in flux-system, and `vibecarbon deploy` refuses to run beside it and prints its exact name. Do not simply delete that Kustomization: it has `prune: true`, so deleting it garbage-collects its HelmRelease, which uninstalls the old chart and deletes its database volume. Set `prune: false` on it first, then delete it, then follow the rest of the steps `vibecarbon deploy` prints (destroy and redeploy, or uninstall the old Helm release and run `vibecarbon deploy <env> -restore latest`).
 
 Flux's 5-minute HelmRepository interval means transient source-controller fetch failures self-heal inside the HelmRelease wait budget. There is no client-side reconcile poking.
 

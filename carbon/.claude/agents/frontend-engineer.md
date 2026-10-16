@@ -37,7 +37,7 @@ src/client/
 │   ├── auth/            # AuthProvider, login/signup components
 │   └── [feature]/       # Feature-specific composite components
 ├── pages/               # Route-level page components
-├── lib/                 # Utilities (supabase.ts, utils.ts)
+├── lib/                 # Utilities (api.ts, auth-client.ts, utils.ts)
 ├── hooks/               # Custom React hooks
 └── App.tsx              # Root component with router
 ```

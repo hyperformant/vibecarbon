@@ -63,7 +63,7 @@ Follow these principles:
 - Test loading, error, and empty states
 - Test accessibility basics (roles, labels)
 - Use `@testing-library/react` with user-event for interactions
-- Mock Supabase client and TanStack Query when needed
+- Mock `fetch` (the `apiJson` seam) and TanStack Query when needed
 
 **For Utilities and Shared Code:**
 - Test all exported functions
@@ -139,7 +139,7 @@ You may be spawned as a **teammate** in a Claude Code agent team, with your own 
 
 Examples of what to record:
 - Testing patterns and conventions used in each test directory
-- Common mock setups (Supabase client, file system, CLI prompts)
+- Common mock setups (db client, auth session, file system)
 - Tests that are known to be flaky or slow
 - Coverage gaps you've identified but couldn't address in the current session
 - Relationships between source files and their test files

@@ -1,6 +1,6 @@
 # {{PROJECT_NAME}}
 
-A full-stack application: a React 19 single-page app, a Hono API with authentication built in, and self-hosted Supabase for data and realtime, with file uploads stored in S3-compatible object storage. Authentication, multi-provider billing, multi-tenant organizations, an admin panel, transactional email, MDX content, and background jobs are already wired together and running against a real database. The same CLI that scaffolded this project also deploys and operates it, from a single Docker Compose server through multi-region Kubernetes, on Hetzner Cloud, DigitalOcean, Linode, Vultr, or Scaleway.
+A full-stack application: a React 19 single-page app, a Hono API with authentication built in, and your own PostgreSQL 17 database, with file uploads stored in S3-compatible object storage. Authentication, multi-provider billing, multi-tenant organizations, an admin panel, transactional email, MDX content, and background jobs are already wired together and running against a real database. The same CLI that scaffolded this project also deploys and operates it, from a single Docker Compose server through multi-region Kubernetes, on Hetzner Cloud, DigitalOcean, Linode, Vultr, or Scaleway.
 
 ## Quick Start
 
@@ -18,7 +18,6 @@ vibecarbon up
 | App | http://app.localhost (or http://localhost:5173) |
 | API | http://localhost:3000 |
 | API docs | http://localhost:3000/api/docs |
-| Supabase Studio | http://studio.localhost |
 | Traefik dashboard | http://traefik.localhost |
 
 Sign in with the admin email and password you chose during `vibecarbon create`.
@@ -29,7 +28,7 @@ Sign in with the admin email and password you chose during `vibecarbon create`.
 |-------|------------|---------|
 | Frontend | React 19, Vite, React Router, TanStack Query, Shadcn UI, Tailwind CSS v4, i18next | SPA with client-side routing, UI components, and i18n |
 | Backend | Hono, Pino logger, Zod validation | Lightweight API server |
-| Database | PostgreSQL | Self-hosted Supabase + RLS |
+| Database | PostgreSQL 17, Drizzle ORM | Your own Postgres with RLS on every table, pg_cron, WAL-G backups |
 | Auth | Better Auth (in the API server) | Email, OAuth, magic links, MFA, & SSO |
 | Security | Traefik, Cloudflare (optional) | TLS termination, host and path routing, admin-surface auth in production |
 | Automation | Node, Docker, K8s, Pulumi | Auto scaling, Backups, Failover, High Availability |
@@ -37,32 +36,23 @@ Sign in with the admin email and password you chose during `vibecarbon create`.
 
 ## Architecture
 
-Traefik is the only public entrance. It routes the apex host to the Hono API, path-routes the Supabase APIs to Kong, and puts super-admin auth in front of Studio. The API handles sign-in itself (auth runs in-process at `/api/auth`) and queries PostgreSQL directly, running each user's queries under row-level security, so the same policies decide what every request can see.
+Traefik is the only public entrance, and it sends every public path to one place: the app. The API handles sign-in itself (Better Auth runs in-process at `/api/auth`) and queries PostgreSQL directly, running each user's queries under row-level security, so the same policies decide what every request can see. The database has no public port; you reach it over `vibecarbon shell`.
 
 ```mermaid
 flowchart TD
     NET(["Internet"])
     CF["Cloudflare<br/>optional · DNS, TLS, WAF"]
-    TR["traefik<br/>TLS via Let's Encrypt · host + path routing"]
+    TR["traefik<br/>TLS via Let's Encrypt · host routing"]
 
     NET --> CF
     CF --> TR
     NET -.->|"without Cloudflare"| TR
 
-    TR -->|"apex host"| APP["app<br/>Hono API + auth · :3000"]
-    TR -->|"/rest/v1 · /realtime/v1"| KONG["kong<br/>Supabase gateway · :8000"]
-    TR -->|"studio subdomain<br/>super-admin auth"| STUDIO["studio<br/>Supabase Studio"]
+    TR -->|"apex host"| APP["app<br/>SPA + Hono API + Better Auth · :3000"]
+    TR -->|"admin subdomains<br/>super-admin auth"| ADMIN["admin tools<br/>Traefik dashboard, add-ons"]
+    APP -->|"presigned URLs"| S3[("S3 buckets<br/>uploads · backups")]
 
-    subgraph SUPA["Supabase services"]
-        REST["rest<br/>PostgREST"]
-        RT["realtime"]
-    end
-
-    KONG --> REST
-    KONG --> RT
-    STUDIO --> META["meta<br/>postgres-meta"]
-
-    subgraph PG["db · PostgreSQL 17"]
+    subgraph PG["db · PostgreSQL 17 (private network only)"]
         DB[("Tables + migrations")]
         RLS["RLS policies<br/>per-table · per-role"]
         FN["Helper functions<br/>app.user_id · org membership"]
@@ -71,9 +61,7 @@ flowchart TD
     end
 
     APP --> DB
-    REST --> DB
-    RT --> DB
-    META --> DB
+    PG -->|"WAL-G"| S3
 ```
 
 ## Features
@@ -120,7 +108,7 @@ npm test                # Run tests
 npm run test:prepush    # Lint + unit + component + integration
 
 # Docker
-npm run docker:up       # Start Supabase services
+npm run docker:up       # Start Postgres, Traefik and local S3
 npm run docker:down     # Stop services
 npm run db:migrate      # Apply pending migrations (the app also does at startup)
 ```
@@ -147,7 +135,7 @@ src/
 │   │   ├── settings/        # User settings (profile, billing, security)
 │   │   └── organizations/   # Org details, members
 │   ├── hooks/               # Custom React hooks
-│   ├── lib/                 # Supabase client, i18n, blog/docs loaders
+│   ├── lib/                 # API + auth clients, i18n, blog/docs loaders
 │   └── locales/             # Translation files (en.json)
 │
 ├── server/                  # Hono API
@@ -206,7 +194,7 @@ An environment is bound to the provider it was first deployed with, and `-provid
 To run multiple vibecarbon projects simultaneously on the same machine, configure port offsets in `.env.local`:
 
 ```bash
-# Shift all ports by 100 (Vite: 5273, API: 3100, Kong: 8100)
+# Shift all ports by 100 (Vite: 5273, API: 3100, Postgres: 5532)
 DEV_PORT_OFFSET=100
 ```
 
@@ -215,14 +203,15 @@ Or override individual ports:
 ```bash
 DEV_VITE_PORT=5273
 DEV_API_PORT=3100
-DEV_KONG_PORT=8100
+DEV_DB_PORT=5532
 ```
 
 | Service | Default | With Offset 100 |
 |---------|---------|-----------------|
 | Vite | 5173 | 5273 |
 | API | 3000 | 3100 |
-| Kong | 8000 | 8100 |
+| Postgres | 5432 | 5532 |
+| Local S3 | 8333 | 8433 |
 | Traefik | 80 | 180 |
 
 ## Default Credentials

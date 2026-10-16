@@ -21,7 +21,9 @@ version: "0.1.0"
 - Webhook-driven subscription lifecycle
 
 ### Infrastructure
-- Self-hosted Supabase (PostgreSQL, Auth, REST API, Realtime, Storage)
+- Your own PostgreSQL 17 database with row-level security, pg_cron and WAL-G backups
+- Sign-in built into the app (email and password, magic links, Google and Microsoft, MFA)
+- File uploads to S3-compatible storage
 - Docker Compose for local development
 - Kubernetes manifests with Kustomize overlays
 - High-availability deployment with PostgreSQL replication

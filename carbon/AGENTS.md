@@ -6,7 +6,8 @@ Guidance for AI coding agents working on this codebase. The **Security Rules** s
 
 - **Frontend**: React 19, Vite, React Router, TanStack Query, Shadcn UI, Launch UI, Tailwind CSS v4, i18next
 - **Backend**: Hono (lightweight Node.js framework), Pino logger, Zod validation, nodemailer (SMTP email)
-- **Auth/Database**: In-process auth (Better Auth, `src/server/auth/`) on self-hosted Supabase (PostgreSQL, Realtime); the API server queries Postgres directly with Drizzle ORM (node-postgres); file uploads go to S3 object storage via presigned URLs
+- **Auth/Database**: In-process auth (Better Auth, `src/server/auth/`) on your own PostgreSQL 17 (pg_cron, WAL-G backups); the API server queries Postgres directly with Drizzle ORM (node-postgres); file uploads go to S3 object storage via presigned URLs
+- **Edge**: Traefik (TLS, routing, ForwardAuth for admin tools); extras (observability, Redis) arrive through `vibecarbon add`
 - **Billing**: Multi-provider — Stripe, Paddle, Polar (subscriptions, checkout, webhooks, plan gating)
 - **Content**: MDX (blog, changelog, docs) with remark/rehype plugins
 - **Tooling**: Biome (lint/format), TypeScript, esbuild, Vitest
@@ -33,7 +34,7 @@ npm run test:coverage   # Generate coverage/ report (v8)
 npm run test:prepush    # What the pre-push git hook runs
 
 # Docker
-npm run docker:up       # Start Supabase services
+npm run docker:up       # Start the local services (Postgres, Traefik, S3)
 npm run docker:down     # Stop services
 npm run docker:reset    # Remove containers, volumes, and built images
 npm run db:migrate      # Apply pending database migrations (the app also does at startup)
@@ -139,7 +140,7 @@ await adminDb.insert(items).values({ ... });
 - **Before any `adminDb` query that takes a user-supplied id**, check authorization yourself (super_admin, or org membership via `requireOrgRole`). RLS is not there to catch you.
 - **Never build SQL text from input.** Use Drizzle's query builder or the `sql` template, which binds values as parameters. Never `sql.raw()` user input. RLS inside `withUserDb` catches logic mistakes (a missing `where`), not injection: injected SQL could `reset role`.
 - **Log database errors through `dbErrorForLog(err)`** (`src/server/db/errors.ts`), and never log or return `err.message` of one: Drizzle puts the SQL and every bound value (emails, tokens) in it. The logger strips them from `err`/`error` fields as a backstop.
-- **The server has no Supabase client.** Auth is the in-process auth API (`src/server/auth/`); users are rows in `"user"`, read and written through `adminDb` in the census-allowlisted files (the auth tables have no `app_user` privileges). The census fails on any `@supabase/supabase-js` import under `src/server`.
+- **The server reaches Postgres only through db/client.ts.** Auth is the in-process auth API (`src/server/auth/`); users are rows in `"user"`, read and written through `adminDb` in the census-allowlisted files (the auth tables have no `app_user` privileges). The census fails on any string-table query builder call (`.from('table')`, `.rpc(...)`) under `src/server`.
 - **Schema changes** start in `src/server/db/schema.ts` and become a migration with `npx drizzle-kit generate` (see Changing the Database Schema); `tests/structural/migrations-drift.test.ts` fails while a change has no migration.
 
 ## Key Patterns
@@ -365,7 +366,7 @@ The rules below are mandatory — violations introduce real vulnerabilities. The
 
 There are **two independent role axes** — do not conflate them:
 
-- **Platform role** lives in the server-controlled `user.role` column. The only elevated value is **`super_admin`**. There is **no platform `admin` role.** Check it with `isSuperAdmin(user)` (server) or `is_super_admin()` (SQL). Every platform-admin surface (the `/admin/*` API, Studio, Grafana, n8n, Metabase, the Traefik dashboard) requires `super_admin`.
+- **Platform role** lives in the server-controlled `user.role` column. The only elevated value is **`super_admin`**. There is **no platform `admin` role.** Check it with `isSuperAdmin(user)` (server) or `is_super_admin()` (SQL). Every platform-admin surface (the `/admin/*` API, Grafana, n8n, Metabase, the Traefik dashboard) requires `super_admin`.
 - **Org role** lives in the `memberships` table as `OWNER` / `ADMIN` / `MEMBER`. This is a per-organization membership tier enforced by RLS (`get_user_admin_org_ids()` etc.) and `requireOrgRole(...)`. An org `ADMIN` has authority **only within its own org** and **never** any platform capability.
 
 Rules:
@@ -382,7 +383,7 @@ Rules:
 Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-split`, invariants pinned in `tests/structural/security-invariants.test.ts`):
 
 - **The session cookie** is set by the auth API (`/api/auth/*`): **HttpOnly** and **host-only** (apex). Page JS never sees it or any session token, and the SPA keeps no session store of its own. It **MUST NOT** get a `domain=` attribute: a parent-domain scope would send every user's session to every admin subdomain, where XSS in any bundled tool (Grafana, Metabase, n8n) could ride it. It is **NOT** a ForwardAuth credential.
-- **`vc-admin-token`** is the only credential `/api/_internal/verify-role` accepts (no session cookie, no `Authorization` / `X-Forwarded-Access-Token` header): **HttpOnly**, 1h, parent-domain scoped, minted by `POST /api/v1/admin/forwardauth-cookie` for super admins only (aal2 while MFA is globally on, never from an impersonation session). It carries a dedicated ForwardAuth token, **never the session token** (the parent-domain cookie reaches Grafana, n8n, Metabase and Studio): 32 random bytes, stored only as a SHA-256 hash in the `verification` table (`forwardauth:<hash>`, bound to the minting session, expires in 1 h; minting again keeps the session's two newest tokens, DELETE forgets all of them). verify-role looks the hash up, then the bound session, from the database every time, so an expired or forgotten token, signing out, a revoked or banned session, a role change, or MFA turned on with an aal1 session ends it at once. The token is useless against the app's own API. Never log it. Regular users carry no domain-wide cookie at all. **NEVER** let verify-role read the app's session cookie.
+- **`vc-admin-token`** is the only credential `/api/_internal/verify-role` accepts (no session cookie, no `Authorization` / `X-Forwarded-Access-Token` header): **HttpOnly**, 1h, parent-domain scoped, minted by `POST /api/v1/admin/forwardauth-cookie` for super admins only (aal2 while MFA is globally on, never from an impersonation session). It carries a dedicated ForwardAuth token, **never the session token** (the parent-domain cookie reaches Grafana, n8n and Metabase): 32 random bytes, stored only as a SHA-256 hash in the `verification` table (`forwardauth:<hash>`, bound to the minting session, expires in 1 h; minting again keeps the session's two newest tokens, DELETE forgets all of them). verify-role looks the hash up, then the bound session, from the database every time, so an expired or forgotten token, signing out, a revoked or banned session, a role change, or MFA turned on with an aal1 session ends it at once. The token is useless against the app's own API. Never log it. Regular users carry no domain-wide cookie at all. **NEVER** let verify-role read the app's session cookie.
 - **Impersonation never client-stores the admin session.** The client impersonates through the admin plugin (`POST /api/auth/admin/impersonate-user`, `stop-impersonating`), which keeps the admin's session server-side in its own HttpOnly signed cookie. Rules (`src/server/auth/impersonation.ts`): super admin only, aal2 while MFA is on, never yourself (400 `CANNOT_IMPERSONATE_SELF`), never another super admin (403 `CANNOT_IMPERSONATE_ADMIN`), no nesting. The impersonation session lasts at most 1 h (its expiry never slides forward), and may not change how the account signs in or read its provider tokens (`/change-password`, `/change-email`, `/link-social`, `/unlink-account`, `/verify-password`, token endpoints: 403 `IMPERSONATION_NOT_ALLOWED`), touch two-factor, mint the ForwardAuth cookie, or pass `requireAal2` (403 `impersonation_not_allowed`). **NEVER** write a session into `localStorage`/`sessionStorage`.
 
 ## Database Security (RLS)
@@ -496,17 +497,17 @@ myRoutes.post('/', async (c) => {
 
 ## Privileged Services
 
-- **MUST** protect Studio, the Traefik dashboard, n8n, Metabase, and Grafana with `super-admin-auth` (compose) / `admin-auth` (k8s) in production
+- **MUST** protect the Traefik dashboard, n8n, Metabase, and Grafana with `super-admin-auth` (compose) / `admin-auth` (k8s) in production
 - **MUST** use Docker socket proxy in production — never mount `/var/run/docker.sock` directly into Traefik
-- **NEVER** expose internal Supabase services (PostgREST, Realtime) directly — they must go through Kong
+- **NEVER** publish the database port: reach Postgres through `vibecarbon shell` (SSH), never a public port
 - **NEVER** remove ForwardAuth middleware from production compose files or Kubernetes manifests
 
 ### Public Exposure (single origin)
 
-The app has **one public origin** (the apex). Traefik path-routes only the **versioned** Supabase prefixes — `/rest/v1`, `/realtime/v1` — to Kong; everything else is the app (SPA + Hono API, auth at `/api/auth`). Rules:
+The app has **one public origin** (the apex). Traefik sends every path there: the SPA, the Hono API under `/api`, and auth at `/api/auth`. Rules:
 
-- **NEVER** add a new public path that reaches Kong or an internal Supabase service, and **NEVER** use a **bare** `/rest`/`/storage`/`/realtime` prefix, or any `/auth` prefix, in a Traefik rule — the SPA owns `/auth/callback` and `/reset-password`, and auth is the app's own `/api/auth`. **NEVER** run or route a separate auth service (`tests/structural/security-invariants.test.ts` fails on any `/auth/v1` route).
-- **NEVER** re-introduce an `api.<domain>` host for Supabase. `SITE_URL` is the single origin; it feeds auth links and OAuth callbacks, billing return URLs, and CSP.
+- **NEVER** add a public path that reaches anything but the app, and **NEVER** use a `/rest`/`/storage`/`/realtime` prefix (versioned or bare), or any `/auth` prefix, in a Traefik rule — the SPA owns `/auth/callback` and `/reset-password`, and auth is the app's own `/api/auth`. **NEVER** run or route a separate auth service (`tests/structural/security-invariants.test.ts` fails on any `/auth/v1` route).
+- **NEVER** re-introduce a separate `api.<domain>` host. `SITE_URL` is the single origin; it feeds auth links and OAuth callbacks, billing return URLs, and CSP.
 
 ### Adding a New Admin Service
 
@@ -528,15 +529,15 @@ Both gates require `super_admin` (the only elevated platform role). `super-admin
 
 | Middleware | Required Role | Used By |
 |-----------|--------------|---------|
-| `super-admin-auth` | `super_admin` | Studio, Traefik dashboard, n8n, Metabase, Grafana (Docker Compose) |
-| `admin-auth` | `super_admin` | Studio, Traefik dashboard, admin routes (Kubernetes) |
+| `super-admin-auth` | `super_admin` | Traefik dashboard, n8n, Metabase, Grafana (Docker Compose) |
+| `admin-auth` | `super_admin` | Traefik dashboard, admin routes (Kubernetes) |
 
 ## Environment & Secrets
 
 - **NEVER** commit `.env`, `.env.local`, or any file containing secrets
 - **NEVER** hardcode secrets, API keys, or passwords in source code
 - **MUST** use the `VITE_` prefix for any environment variable that needs client-side access
-- **NEVER** expose `SUPABASE_SERVICE_ROLE_KEY` to the client — it bypasses all RLS
+- **NEVER** expose `BETTER_AUTH_SECRET` or a database password to the client: nothing secret may carry a `VITE_` prefix
 - **MUST** validate all server environment variables in `src/server/lib/env.ts`
 
 ## CSRF

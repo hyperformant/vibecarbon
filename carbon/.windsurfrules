@@ -68,12 +68,12 @@
 ### Data Fetching
 - **NEVER use raw `fetch` in `useEffect`** — always use `useQuery` for reads, `useMutation` for writes. Raw fetch bypasses deduplication/caching and React StrictMode will double-fire it.
 - **Gate authenticated queries** with `enabled: !!user` to prevent 401s for logged-out users
-- **Use `getAuthHeaders()`** from `@/lib/api.ts` — never duplicate it locally, never send empty `Authorization` headers
+- **Call the API through `apiJson` / `apiFetch`** from `@/lib/api.ts`: the session is an HttpOnly cookie sent same-origin, so never add an `Authorization` header
 - Shared hooks in `src/client/hooks/api/`
 - Invalidate related queries after mutations: `queryClient.invalidateQueries({ queryKey: ['items'] })`
 
 ### Database (migrations)
-- Migrations in `db/migrations/` with incrementing prefix
+- Schema changes start in `src/server/db/schema.ts`; `npx drizzle-kit generate` writes the migration to `db/migrations/`, and the app applies it at startup
 - Always enable RLS on new tables
 - Helper functions: `get_user_org_ids()`, `get_user_admin_org_ids()`, `is_super_admin()`
 

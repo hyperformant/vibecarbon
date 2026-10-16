@@ -23,7 +23,7 @@ These are wrappers around the `npm` scripts listed below; use whichever you pref
 | `npm run dev:start` | Full cold start: Docker, migrations, and dev servers |
 | `npm run dev` | Start API + Vite (assumes Docker is already running) |
 | `npm run dev:reset` | Remove containers, volumes, and built images (run `npm run dev:start` to restart) |
-| `npm run docker:up` | Start Supabase and infrastructure services |
+| `npm run docker:up` | Start Postgres, Traefik and local S3 |
 | `npm run docker:down` | Stop all Docker services |
 | `npm run db:migrate` | Run SQL migrations from `db/migrations/` |
 | `npm run build` | Build client (Vite) and server (esbuild) for production |
@@ -59,7 +59,6 @@ Traefik routes `*.localhost` subdomains to each service:
 | Service | URL |
 |---------|-----|
 | App | http://app.localhost |
-| Supabase Studio | http://studio.localhost |
 | Traefik Dashboard | http://traefik.localhost |
 
 Optional services like observability (Grafana) get their own subdomains when enabled; see the [CLI reference](/docs/cli#add).
@@ -74,9 +73,9 @@ Optional services like observability (Grafana) get their own subdomains when ena
 
 ## Debugging
 
-**Container logs**: run `npm run docker:logs` to tail logs from all Docker services. Useful for debugging PostgREST issues or Kong routing problems (auth errors show up in the API server's own output).
+**Container logs**: run `npm run docker:logs` to tail logs from all Docker services. Useful for debugging database or Traefik routing problems (auth errors show up in the API server's own output).
 
-**Supabase Studio**: open [http://studio.localhost](http://studio.localhost) to browse your database, inspect tables, view RLS policies, and manage auth users directly.
+**Database**: connect any Postgres client to `localhost:5432` (or your shifted `DEV_DB_PORT`; user `postgres`, password `POSTGRES_PASSWORD` from `.env.local`) to browse tables and RLS policies, or run `npx drizzle-kit studio` for a browser view of your schema.
 
 **React DevTools**: Vite's dev server supports React DevTools out of the box. Install the browser extension for component inspection and state debugging.
 
@@ -220,12 +219,12 @@ To run two Vibecarbon projects simultaneously, set a port offset in `.env.local`
 DEV_PORT_OFFSET=100
 ```
 
-This shifts all ports by 100 (Vite → 5273, API → 3100, Kong → 8100, etc.). You can also override individual ports:
+This shifts all ports by 100 (Vite → 5273, API → 3100, Postgres → 5532, etc.). You can also override individual ports:
 
 ```bash
 DEV_VITE_PORT=5273
 DEV_API_PORT=3100
-DEV_KONG_PORT=8100
+DEV_DB_PORT=5532
 ```
 
 ## Resetting the Environment

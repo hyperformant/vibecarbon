@@ -111,7 +111,7 @@ vibecarbon create my-saas -y -admin-email admin@example.com -admin-password secr
 vibecarbon create my-saas -install
 ```
 
-Generates secure secrets (JWT, database password, Supabase keys), copies the
+Generates secure secrets (auth secret, database and replication passwords), copies the
 template, initializes a git repository (with pre-commit + pre-push hooks),
 and optionally runs `npm install`. The app creates the admin user the first time it starts.
 
@@ -144,7 +144,7 @@ vibecarbon up
 ```
 
 Auto-detects the project's package manager and runs the `dev:start` script,
-which boots Docker services (PostgreSQL, Supabase, Traefik), runs database
+which boots Docker services (PostgreSQL, Traefik, local S3), runs database
 migrations, and starts the Hono API and Vite dev servers. If ports are already
 in use, a port offset is applied automatically.
 
@@ -413,7 +413,7 @@ Files are classified into three categories:
 
 - **Safe**: auto-replaced if you haven't modified them
 - **Merge**: always shown for review (e.g. `docker-compose.yml`, `package.json`)
-- **Never**: your code, never touched (e.g. `src/**`, `supabase/**`, `.env`)
+- **Never**: your code, never touched (e.g. `src/**`, `db/migrations/**`, `.env`)
 
 A project created before sign-in moved into the app gets a `BETTER_AUTH_SECRET` in `.env.local` and `.env`, and `upgrade` warns you that a server you already deployed needs a fresh database: accounts are not carried over, and the old tables still point at the previous auth service. Run `vibecarbon backup` if you want a copy of the old data, then `vibecarbon destroy` and `vibecarbon deploy`.
 
@@ -694,7 +694,7 @@ vibecarbon scale -env prod -type cx33 -y
 | Topology | What you can change |
 |----------|---------------------|
 | Compose / Compose HA | VPS server type (blue-green; zero downtime) |
-| Kubernetes | Worker / master / supabase server types (in-place) |
+| Kubernetes | Worker / master / database server types (in-place) |
 | Kubernetes | Worker bounds (autoscaler floor + ceiling) |
 
 {/* BEGIN GENERATED: flags scale */}
@@ -782,7 +782,7 @@ _No flags beyond -h and -v._
 vibecarbon console master
 
 # Specific server by full name
-vibecarbon console myproject-prod-supabase
+vibecarbon console myproject-prod-db
 ```
 
 The `<node>` argument is a substring matched against server names. Tries

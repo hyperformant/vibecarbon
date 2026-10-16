@@ -107,11 +107,12 @@ The `k8s/` directory structure:
 ```
 k8s/
 ├── base/                # Shared manifests
-│   ├── app/             # App deployment, service, ingress
-│   ├── supabase/        # Supabase services
+│   ├── app/             # App deployment, service, autoscaling
+│   ├── db/              # Postgres StatefulSet and services
+│   ├── backup/          # WAL-G base backups and archiving config
+│   ├── traefik/         # Ingress routes and middlewares
 │   └── kustomization.yaml
 └── overlays/
-    ├── staging/         # Staging-specific config
     └── production/      # Production-specific config
 ```
 
@@ -199,7 +200,7 @@ Point your domain to the server's IP address:
 |--------|------|-------|
 | A | `app.example.com` | `<server-ip>` |
 
-The app is served from a single origin. Auth lives in the app (`/api/auth`), and the REST and realtime APIs are path-routed under the same origin (`/rest/v1`, `/realtime/v1`), so no separate `api.` record exists.
+The app is served from a single origin. Auth lives in the app (`/api/auth`) next to the rest of the API (`/api`), so no separate `api.` record exists.
 
 If you have optional services enabled, add records for their subdomains too (e.g., `grafana.example.com`).
 

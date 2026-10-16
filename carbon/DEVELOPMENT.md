@@ -68,7 +68,7 @@ api_key: dev-key-not-for-production
 
 Add the volume mount to the appropriate override file based on **which service** the volume is mounted to:
 
-- If mounting to a service in `docker-compose.yml` (db, kong, etc.) → use `docker-compose.override.yml`
+- If mounting to a service in `docker-compose.yml` (db, traefik, app) → use `docker-compose.override.yml`
 - If mounting to a service in `docker-compose.{feature}.yml` → use `docker-compose.{feature}.override.yml`
 
 Example for a service in the base compose file:
@@ -118,7 +118,7 @@ cd test-app && npm run dev:start
 
 | Service Compose | Dev Override | Notes |
 |-----------------|--------------|-------|
-| `docker-compose.yml` | `docker-compose.override.yml` | Core services (db, kong, traefik) |
+| `docker-compose.yml` | `docker-compose.override.yml` | Core services (db, traefik, app, local S3) |
 | `docker-compose.observability.yml` | `docker-compose.observability.override.yml` | Grafana: volumes + no ForwardAuth (installed via `vibecarbon add observability`) |
 | `docker-compose.n8n.yml` | `docker-compose.n8n.override.yml` | n8n: no ForwardAuth |
 | `docker-compose.metabase.yml` | `docker-compose.metabase.override.yml` | Metabase: no ForwardAuth |
