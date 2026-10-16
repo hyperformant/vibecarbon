@@ -385,6 +385,55 @@ async function selectZoneAndDomain(zones, providerLabel, existingDomain) {
 /**
  * Gather full deployment configuration through interactive prompts and CLI args
  */
+/**
+ * Manual DNS with no domain is the absence of a DNS setup, not a choice worth
+ * keeping: it is where a native pick lands when the account has no zones,
+ * and manual itself never asks for a domain. Persisted (or carried through
+ * destroy's identity record), it skipped the DNS prompt on every later
+ * deploy, leaving no way to add a domain. The caller asks again with Manual
+ * preselected, so Enter keeps the old behavior. `-y` keeps it silently.
+ *
+ * @param {{ dnsProvider?: string|null, yes?: boolean }} args
+ * @param {string|null|undefined} dnsProvider - the saved (or seeded) pick
+ * @param {string|null|undefined} domain
+ * @returns {boolean}
+ */
+export function shouldReaskManualDns(args, dnsProvider, domain) {
+  return !args.dnsProvider && dnsProvider === 'manual' && !domain && !args.yes;
+}
+
+/** Env names become branch, server and bucket name parts. */
+const ENV_NAME_FORMAT = /^[a-z][a-z0-9-]{0,19}$/;
+
+/**
+ * Ask which environment to deploy when none was named. A bare
+ * `vibecarbon deploy` used to go straight to "prod" without a pause, so a
+ * first deploy never offered the choice. `prod` stays the default: Enter
+ * accepts it. Skipped for `-y` and non-interactive runs, which keep the
+ * silent `prod` default.
+ *
+ * @param {{ env: string|null, yes: boolean }} args
+ * @param {{ isTTY?: boolean }} [opts]
+ * @returns {Promise<string|null>} the chosen name, or args.env unchanged
+ */
+export async function promptEnvironmentName(args, { isTTY = Boolean(process.stdin.isTTY) } = {}) {
+  if (args.env || args.yes || !isTTY) return args.env;
+  const answer = await p.text({
+    message: 'Environment name:',
+    initialValue: 'prod',
+    defaultValue: 'prod',
+    validate: (value) => {
+      const name = normalizeEnvName((value || 'prod').trim());
+      if (!ENV_NAME_FORMAT.test(name)) {
+        return 'Use lowercase letters, numbers and hyphens, starting with a letter (max 20).';
+      }
+      return undefined;
+    },
+  });
+  if (p.isCancel(answer)) exitCancelled();
+  return normalizeEnvName((answer || 'prod').trim());
+}
+
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();
@@ -638,6 +687,9 @@ export async function gatherDeploymentConfig(args) {
   let dnsZoneId = envConfig.dns?.zoneId || null;
   let dnsToken = null;
 
+  const reaskManualDns = shouldReaskManualDns(args, dnsProvider, domain);
+  if (reaskManualDns) dnsProvider = null;
+
   if (!dnsProvider) {
     if (args.yes) {
       dnsProvider = nativeDnsId ?? 'manual';
@@ -672,7 +724,7 @@ export async function gatherDeploymentConfig(args) {
             hint: 'Skip DNS automation: configure records yourself',
           },
         ],
-        initialValue: nativeDnsId ?? 'manual',
+        initialValue: reaskManualDns ? 'manual' : (nativeDnsId ?? 'manual'),
       });
       if (p.isCancel(choice)) {
         exitCancelled();

@@ -17,11 +17,23 @@ import type { HonoVariables } from '../types';
  * SECURITY: the membership lookup runs under RLS as the caller (`withUserDb`),
  * never through `adminDb`. A caller can only see memberships in organizations
  * they belong to, so this can neither be bypassed nor used to probe arbitrary
- * organizations. When `type !== 'organization'` the guard is inert.
+ * organizations.
+ *
+ * Fails closed: `type` must be exactly 'user' or 'organization'. Any other
+ * value is rejected with 400 here, because handlers that branch on
+ * `type === 'user'` would otherwise treat an unknown type as the org path and
+ * skip the membership check entirely. Only `type === 'user'` passes without a
+ * membership lookup.
  *
  * Applying this as route middleware (rather than an inline check per handler)
  * ensures no org-scoped billing route can silently skip the membership check.
  */
+export type BillingTargetType = 'user' | 'organization';
+
+export function isBillingTargetType(value: unknown): value is BillingTargetType {
+  return value === 'user' || value === 'organization';
+}
+
 export function requireOrgRole(roles: string[]) {
   return async (
     c: Context<{ Variables: HonoVariables }>,
@@ -36,7 +48,7 @@ export function requireOrgRole(roles: string[]) {
     let organizationId: string | undefined;
 
     if (c.req.method === 'GET') {
-      type = c.req.query('type') ?? 'user';
+      type = c.req.query('type') || 'user';
       organizationId = c.req.query('organizationId');
     } else {
       try {
@@ -54,7 +66,11 @@ export function requireOrgRole(roles: string[]) {
       }
     }
 
-    if (type !== 'organization') {
+    if (!isBillingTargetType(type)) {
+      return c.json({ error: 'Invalid type' }, 400);
+    }
+
+    if (type === 'user') {
       await next();
       return;
     }

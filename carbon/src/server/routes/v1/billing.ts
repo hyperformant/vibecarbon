@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, type SQL } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { planIdFromPriceId, plans } from '../../../shared/pricing';
@@ -10,7 +10,7 @@ import { env } from '../../lib/env';
 import { sanitizeError } from '../../lib/errors';
 import { createRateLimiter } from '../../lib/rate-limiter';
 import { requireAal2 } from '../../middleware/requireAal2';
-import { requireOrgRole } from '../../middleware/requireOrgRole';
+import { isBillingTargetType, requireOrgRole } from '../../middleware/requireOrgRole';
 import type { HonoVariables } from '../../types';
 
 // Organization billing actions require an owner/admin of the target org.
@@ -66,6 +66,22 @@ function validateRedirectUrl(url: string, baseUrl: string): string | null {
 }
 
 /**
+ * The customers-row predicate for a billing target. Each type is matched
+ * explicitly and anything else fails closed: an unknown type, or an
+ * organization target without an id, yields null so no caller can run an
+ * org-scoped (or unscoped) service-role query by accident.
+ */
+function customerOwner(type: string, userId: string, organizationId?: string): SQL | null {
+  if (type === 'user') {
+    return and(eq(customers.userId, userId), isNull(customers.organizationId)) ?? null;
+  }
+  if (type === 'organization' && organizationId) {
+    return and(eq(customers.organizationId, organizationId), isNull(customers.userId)) ?? null;
+  }
+  return null;
+}
+
+/**
  * Get or create a billing customer for a user or organization.
  *
  * Uses the active billing provider to create the customer in the external
@@ -85,10 +101,12 @@ async function getOrCreateCustomer(
   }
 
   // The customer row for this user (personal) or organization
-  const owner =
-    type === 'user'
-      ? and(eq(customers.userId, userId), isNull(customers.organizationId))
-      : and(eq(customers.organizationId, organizationId as string), isNull(customers.userId));
+  const owner = customerOwner(type, userId, organizationId);
+  if (!owner) {
+    // Unreachable via the typed signature; fail closed rather than run an
+    // unscoped customers query with the service-role client.
+    throw new Error('Invalid billing target type');
+  }
 
   let existingCustomer: { id: string; stripeCustomerId: string } | undefined;
   try {
@@ -260,29 +278,29 @@ billingRoutes.get('/subscription', requireOrgRole(ORG_BILLING_ROLES), async (c) 
     return c.json({ error: 'Billing is not configured' }, 503);
   }
 
+  // Strict allowlist (defense in depth; requireOrgRole also rejects). Anything
+  // that is not 'user' must never fall through to the org branch below.
   const type = c.req.query('type') || 'user';
+  if (!isBillingTargetType(type)) {
+    return c.json({ error: 'Invalid type' }, 400);
+  }
   const organizationId = c.req.query('organizationId');
 
   try {
-    // requireOrgRole gates only type=organization, so any other type must not
-    // fall through to the organization lookup below.
-    if (type !== 'user' && type !== 'organization') {
-      return c.json({ error: 'Invalid billing type' }, 400);
-    }
-
     if (type === 'organization' && !organizationId) {
       return c.json({ error: 'Organization ID is required' }, 400);
     }
 
-    // The customer row for this user (personal) or organization
+    // The customer row for this user (personal) or organization. The org
+    // branch is explicit: only type === 'organization' reaches it.
+    const owner = customerOwner(type, user.id, organizationId);
+    if (!owner) {
+      return c.json({ error: 'Invalid type' }, 400);
+    }
     const [customer] = await adminDb
       .select({ id: customers.id, stripeCustomerId: customers.stripeCustomerId })
       .from(customers)
-      .where(
-        type === 'user'
-          ? and(eq(customers.userId, user.id), isNull(customers.organizationId))
-          : and(eq(customers.organizationId, organizationId as string), isNull(customers.userId))
-      )
+      .where(owner)
       .limit(1);
 
     if (!customer) {
@@ -581,19 +599,17 @@ billingRoutes.post('/portal', requireAal2, requireOrgRole(ORG_BILLING_ROLES), as
 
   try {
     // Find existing customer
+    const owner = customerOwner(body.type, user.id, body.organizationId);
+    if (!owner) {
+      return c.json({ error: 'Organization ID is required for organization billing' }, 400);
+    }
+
     let customer: { stripeCustomerId: string } | undefined;
     try {
       [customer] = await adminDb
         .select({ stripeCustomerId: customers.stripeCustomerId })
         .from(customers)
-        .where(
-          body.type === 'user'
-            ? and(eq(customers.userId, user.id), isNull(customers.organizationId))
-            : and(
-                eq(customers.organizationId, body.organizationId as string),
-                isNull(customers.userId)
-              )
-        )
+        .where(owner)
         .limit(1);
     } catch (fetchError) {
       return c.json({ error: sanitizeError(fetchError, 'Failed to fetch customer') }, 500);
