@@ -1,10 +1,10 @@
 /**
  * Admin Performance Tests
  *
- * Requires PERF_BASE_URL + PERF_ADMIN_TOKEN.
+ * Requires PERF_BASE_URL + PERF_ADMIN_COOKIE.
  *
  * Usage:
- *   PERF_BASE_URL=http://localhost:8000 PERF_ADMIN_TOKEN=eyJ... pnpm test:loadtest
+ *   PERF_BASE_URL=http://localhost:3000 PERF_ADMIN_COOKIE='better-auth.session_token=...' pnpm test:loadtest
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -12,7 +12,7 @@ import { testConfig } from '../config';
 import { isReachable, runScenario, type ScenarioResult, saveResults } from './runner';
 
 const BASE_URL = process.env.PERF_BASE_URL ?? '';
-const ADMIN_TOKEN = process.env.PERF_ADMIN_TOKEN ?? '';
+const ADMIN_COOKIE = process.env.PERF_ADMIN_COOKIE ?? '';
 const DURATION = Number(process.env.PERF_DURATION ?? testConfig.perf.defaults.duration);
 const CONNECTIONS = Number(process.env.PERF_CONNECTIONS ?? testConfig.perf.defaults.connections);
 const LABEL = process.env.PERF_LABEL ?? testConfig.perf.defaults.label;
@@ -48,12 +48,12 @@ afterAll(() => {
 
 describe('Admin endpoints', () => {
   it('GET /api/v1/admin/stats — parallel listUsers calls', async () => {
-    if (baseSkip || !ADMIN_TOKEN) return;
+    if (baseSkip || !ADMIN_COOKIE) return;
 
     const result = await runScenario(BASE_URL, {
       title: 'GET /api/v1/admin/stats',
       path: '/api/v1/admin/stats',
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Cookie: ADMIN_COOKIE },
       duration: DURATION,
       connections: CONNECTIONS,
       thresholds: testConfig.perf.thresholds.admin,
@@ -69,12 +69,12 @@ describe('Admin endpoints', () => {
   });
 
   it('GET /api/v1/admin/performance — 6 internal service probes', async () => {
-    if (baseSkip || !ADMIN_TOKEN) return;
+    if (baseSkip || !ADMIN_COOKIE) return;
 
     const result = await runScenario(BASE_URL, {
       title: 'GET /api/v1/admin/performance',
       path: '/api/v1/admin/performance',
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Cookie: ADMIN_COOKIE },
       duration: DURATION,
       connections: CONNECTIONS,
       thresholds: testConfig.perf.thresholds.admin,

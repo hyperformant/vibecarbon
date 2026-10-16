@@ -4,7 +4,7 @@
  * Vibecarbon Performance Test Launcher
  *
  * Interactive CLI that discovers deployed environments from .vibecarbon.json,
- * prompts for selection, auto-fetches auth tokens, runs the performance test
+ * prompts for selection, signs in for a session cookie, runs the performance test
  * suite against each target, and produces a side-by-side comparison.
  *
  * Usage:
@@ -13,7 +13,7 @@
  *   pnpm test:loadtest --duration 30 --connections 20
  *
  * Skip the discovery flow by setting PERF_BASE_URL directly (backwards-compat):
- *   PERF_BASE_URL=http://localhost:8000 pnpm test:loadtest
+ *   PERF_BASE_URL=http://localhost:3000 pnpm test:loadtest
  */
 
 import { spawnSync } from 'node:child_process';
@@ -94,25 +94,32 @@ function loadProjectEnv(): Record<string, string> {
 
 // ── Token fetching ────────────────────────────────────────────────────────────
 
-async function fetchJwt(
+/**
+ * Sign in through the app's auth API and return the session as a Cookie
+ * header value (`name=value; ...`), or null when sign-in fails. Sessions are
+ * HttpOnly cookies, never bearer tokens.
+ */
+async function fetchSessionCookie(
   baseUrl: string,
   email: string,
   password: string,
-  anonKey: string,
 ): Promise<string | null> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6000);
-    const res = await fetch(`${baseUrl}/auth/v1/token?grant_type=password`, {
+    const res = await fetch(`${baseUrl}/api/auth/sign-in/email`, {
       method: 'POST',
-      headers: { apikey: anonKey, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: baseUrl },
       body: JSON.stringify({ email, password }),
       signal: controller.signal,
     });
     clearTimeout(timer);
     if (!res.ok) return null;
-    const data = (await res.json()) as { access_token?: string };
-    return data.access_token ?? null;
+    const cookie = res.headers
+      .getSetCookie()
+      .map((c) => c.split(';')[0])
+      .join('; ');
+    return cookie || null;
   } catch {
     return null;
   }
@@ -230,7 +237,7 @@ async function main() {
   }
 
   // Local Docker option — if docker-compose.yml exists in project dir
-  const localUrl = 'http://localhost:8000';
+  const localUrl = 'http://localhost:3000';
   if (existsSync(join(projectDir, 'docker-compose.yml'))) {
     options.push({
       value: '__local__',
@@ -273,7 +280,6 @@ async function main() {
   log.info('');
 
   // ── Credential lookup ─────────────────────────────────────────────────────
-  const anonKey = projectEnv.SUPABASE_ANON_KEY ?? projectEnv.VITE_SUPABASE_ANON_KEY ?? '';
   const adminEmail = projectEnv.ADMIN_EMAIL ?? '';
   const adminPassword = projectEnv.ADMIN_PASSWORD ?? '';
 
@@ -291,22 +297,22 @@ async function main() {
     console.log('');
     log.step(`▶  ${opt.label}  (${baseUrl})`);
 
-    // Fetch tokens
+    // Sign in
     const s = spinner();
-    s.start('Fetching auth tokens…');
+    s.start('Signing in…');
 
-    let authToken = '';
-    let adminToken = '';
+    let authCookie = '';
+    let adminCookie = '';
 
-    if (anonKey && adminEmail && adminPassword) {
+    if (adminEmail && adminPassword) {
       // Admin user is valid for both user-scoped and admin endpoints
-      const token = await fetchJwt(baseUrl, adminEmail, adminPassword, anonKey);
-      if (token) {
-        authToken = token;
-        adminToken = token;
-        s.stop('Auth tokens obtained ✓');
+      const cookie = await fetchSessionCookie(baseUrl, adminEmail, adminPassword);
+      if (cookie) {
+        authCookie = cookie;
+        adminCookie = cookie;
+        s.stop('Signed in ✓');
       } else {
-        s.stop('Could not fetch tokens — running public tests only');
+        s.stop('Could not sign in — running public tests only');
       }
     } else {
       s.stop('No credentials in .env.local — running public tests only');
@@ -322,8 +328,8 @@ async function main() {
       PERF_DURATION: duration,
       PERF_CONNECTIONS: connections,
     };
-    if (authToken) vitestEnv.PERF_AUTH_TOKEN = authToken;
-    if (adminToken) vitestEnv.PERF_ADMIN_TOKEN = adminToken;
+    if (authCookie) vitestEnv.PERF_AUTH_COOKIE = authCookie;
+    if (adminCookie) vitestEnv.PERF_ADMIN_COOKIE = adminCookie;
 
     // Run vitest (streams output to terminal)
     const exitCode = runVitest(vitestEnv);
