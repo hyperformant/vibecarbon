@@ -9,17 +9,19 @@
 -- ============================================================================
 -- "user", session, account, verification and two_factor hold password
 -- hashes, session tokens, OAuth tokens and TOTP secrets. RLS is enabled with
--- no policies (schema.ts); on top of that, revoke every role that is neither
--- a superuser nor RLS-bypass, including what the default privileges in 0000
--- just gave app_user. Role-agnostic on purpose: the loop also catches any
--- other role that exists when this runs (on a fresh volume, metabase, whose
--- default privileges cover these tables), so only the owner and the
--- connection role behind adminDb can read them. A service that grants on
--- public tables AFTER this ran must take these back itself
--- (services/metabase/db/init.sh does, on every start). Postgres' predefined
--- pg_* roles are operator grants and are left
--- alone, and so is the role running this migration (current_user): it is
--- the owner or the adminDb role, and must keep what it was granted.
+-- no policies (schema.ts); on top of that, revoke every role that is not a
+-- superuser, including what the default privileges in 0000 just gave
+-- app_user. Role-agnostic on purpose: the loop also catches any other role
+-- that exists when this runs. On a fresh volume that is the add-on roles
+-- (metabase, n8n): their init scripts run before the app migrates, and their
+-- default privileges hand them these tables as they are created. Those roles
+-- bypass RLS (so they see every business row), which is why the loop must not
+-- skip RLS-bypass roles. Only superusers and the role running this migration
+-- (current_user: the owner and the adminDb connection role, which must keep
+-- what it was granted) can read them. A service that grants on public tables
+-- AFTER this ran must take these back itself (services/metabase/db/init.sh
+-- and services/n8n/db/init.sh do, on every start). Postgres' predefined pg_*
+-- roles are operator grants and are left alone.
 REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;
 --> statement-breakpoint
 DO $$
@@ -28,7 +30,7 @@ DECLARE
 BEGIN
   FOR r IN
     SELECT rolname FROM pg_catalog.pg_roles
-    WHERE NOT rolsuper AND NOT rolbypassrls AND rolname NOT LIKE 'pg\_%'
+    WHERE NOT rolsuper AND rolname NOT LIKE 'pg\_%'
       AND rolname <> current_user
   LOOP
     EXECUTE format(

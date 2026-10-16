@@ -107,15 +107,17 @@ describe('Auth tables are server-only', () => {
     const tableList =
       'public."user", public.session, public.account, public.verification, public.two_factor';
     expect(sql).toContain(`REVOKE ALL ON TABLE ${tableList} FROM %I`);
-    // Every role that is neither superuser nor RLS-bypass, so app_user,
-    // metabase (default SELECT on public tables) and any role the image or an
-    // optional service creates. A fixed list would miss a role it never named
-    // and re-expose password hashes and session tokens to it.
+    // Every role that is not a superuser, so app_user, the RLS-bypass add-on
+    // roles (metabase and n8n, whose default privileges cover public tables)
+    // and any role the image or an optional service creates. A fixed list
+    // would miss a role it never named and re-expose password hashes and
+    // session tokens to it.
     const loop = sql.match(
       /FOR r IN\s+SELECT rolname FROM pg_catalog\.pg_roles\s+WHERE ([^\n]*)/,
     )?.[1];
     expect(loop, 'auth-table revoke loop not found').toBeDefined();
-    expect(loop).toMatch(/NOT rolsuper AND NOT rolbypassrls/);
+    expect(loop).toMatch(/NOT rolsuper AND rolname NOT LIKE/);
+    expect(loop).not.toMatch(/rolbypassrls/);
     expect(sql).toContain(
       'REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;',
     );

@@ -71,6 +71,10 @@ services:
       - METABASE_URL=http://metabase:3000
       - METABASE_ADMIN_EMAIL=${METABASE_ADMIN_EMAIL:-${ADMIN_EMAIL}}
       - METABASE_ADMIN_PASSWORD=${METABASE_ADMIN_PASSWORD:-${ADMIN_PASSWORD}}
+      # "Application Data" connects as the metabase role (never the superuser):
+      # metabase-init.sh makes it NOSUPERUSER BYPASSRLS, read-only, with the
+      # auth tables revoked. Its password is the shared POSTGRES_PASSWORD.
+      - APP_DB_USER=metabase
       - DB_PASSWORD=${DB_PASSWORD}
     entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq && sh /scripts/setup.sh"]
     depends_on:

@@ -53,7 +53,9 @@ services:
       APP_DB_HOST: db
       APP_DB_PORT: 5432
       APP_DB_NAME: postgres
-      APP_DB_USER: postgres
+      # The metabase role, never the superuser: metabase-init.sh makes it
+      # NOSUPERUSER BYPASSRLS, read-only, with the auth tables revoked.
+      APP_DB_USER: metabase
       DB_PASSWORD: ${DB_PASSWORD}
     entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq && sh /scripts/setup.sh"]
     depends_on:

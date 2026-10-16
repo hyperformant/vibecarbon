@@ -35,7 +35,7 @@ Metabase uses **two database connections**:
 
 ### Example Queries
 
-Metabase reads `public` tables with SELECT only. The auth tables (`"user"`, `session`, `account`, `verification`, `two_factor`) are deliberately unreadable to it, so passwords, sessions and tokens never reach a dashboard. Report on your own tables:
+"Application Data" connects as Metabase's own `metabase` role, never the `postgres` superuser. The role bypasses row-level security, so your reports see every row, and it can only read: SELECT on the `public` tables, including the ones a later migration adds. The auth tables (`"user"`, `session`, `account`, `verification`, `two_factor`) are deliberately unreadable to it, so passwords, sessions and tokens never reach a dashboard. And because it is not a superuser, the SQL editor cannot run shell commands in the db container (`COPY ... TO PROGRAM`). `volumes/db/metabase-init.sh` sets this up on every start. Report on your own tables:
 
 **Organizations created over time:**
 ```sql

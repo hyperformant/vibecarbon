@@ -237,10 +237,11 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
     ).rejects.toThrow(/permission denied/);
   });
 
-  it('only superuser and RLS-bypass roles hold any privilege on the auth tables', async () => {
+  it('only superusers hold any privilege on the auth tables', async () => {
     // Password hashes, session tokens and TOTP secrets are reachable through
-    // the app's connection role and nothing else: no other login role, and
-    // not app_user, may read or write them. Postgres' own pg_* predefined
+    // the app's connection role and nothing else: no other login role (the
+    // RLS-bypass add-on roles metabase and n8n included), and not app_user,
+    // may read or write them. Postgres' own pg_* predefined
     // roles (pg_read_all_data and friends) are grants an operator makes on
     // purpose, so they are not counted.
     const { rows } = await db.query<{ role: string; tbl: string; priv: string }>(
@@ -250,7 +251,6 @@ describe.skipIf(!dbTestsEnabled)('RLS policies (app_user + app.user_id())', () =
                                  'public.verification', 'public.two_factor']) as t(tbl)
          cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as p(priv)
         where not r.rolsuper
-          and not r.rolbypassrls
           and r.rolname not like 'pg\\_%'
           and has_table_privilege(r.rolname, t.tbl, p.priv)`,
     );

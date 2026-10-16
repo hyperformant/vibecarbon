@@ -220,6 +220,25 @@ app replica, plus replication, the WAL-G backup, add-ons such as n8n or
 Metabase when installed, and `superuser_reserved`, with plenty of room for
 scale-ups.
 
+**Add-ons never connect as the superuser.** Metabase's "Application Data"
+connection and n8n's `APP_DB_*` credential are driven by whoever can use
+Metabase's SQL editor or edit an n8n workflow, so each connects as its own
+role (`metabase`, `n8n`), never as `postgres`. A superuser connection would
+let that person run `COPY ... TO PROGRAM` (a shell in the db container,
+which holds the backup bucket's keys) and read the auth tables, where Better
+Auth keeps session tokens in plain text. The add-on's init script
+(`volumes/db/metabase-init.sh`, `volumes/db/n8n-init.sh`) runs on every start
+and makes its role `NOSUPERUSER BYPASSRLS`: it sees every business row,
+`metabase` with SELECT only and `n8n` with SELECT, INSERT, UPDATE and DELETE,
+including tables a later migration adds (default privileges). Both lose every
+privilege on the auth tables (`"user"`, `session`, `account`, `verification`,
+`two_factor`): the init script takes them back on every start, and the
+baseline migration's revoke loop takes them from every non-superuser role,
+which covers a first boot where the init script runs before the app migrates.
+The two roles still share `POSTGRES_PASSWORD` (see the `DB_PASSWORD`
+rotation above). Proven against a real database by
+`carbon/tests/db/addon-init-grants.test.ts`.
+
 **No public database port.** No firewall rule in any mode or provider opens
 5432 or 6543 to the internet or to the operator CIDRs; `deploy` and `access`
 remove any such rule an older deploy left behind. To run SQL, a migration

@@ -31,11 +31,11 @@ On Docker Compose, n8n has these environment variables available:
 APP_DB_HOST=db
 APP_DB_PORT=5432
 APP_DB_NAME=postgres
-APP_DB_USER=postgres
+APP_DB_USER=n8n
 APP_DB_PASSWORD=your_password
 ```
 
-These give workflows admin access to your app's data. Row-level security does not apply to them, so treat any workflow that uses them as trusted code.
+They connect as n8n's own `n8n` role, never the `postgres` superuser. The role bypasses row-level security, so a workflow sees and can change every row of your business tables (read, insert, update, delete). It cannot read or write the auth tables (`"user"`, `session`, `account`, `verification`, `two_factor`), so passwords, sessions and tokens stay out of your workflows, and it cannot run anything a superuser can, such as shell commands through `COPY ... TO PROGRAM`. `volumes/db/n8n-init.sh` sets this up on every start, and tables a later migration adds get the same grants. Treat any workflow that uses it as trusted code all the same: it can change any business row.
 
 On Kubernetes these variables are not set. Add a Postgres credential in n8n yourself (host `db`, port `5432`), ideally with a role that has only the access your workflows need.
 
@@ -54,7 +54,7 @@ Connection Settings:
 - Password: {{$env.APP_DB_PASSWORD}}
 
 Query:
-SELECT * FROM users WHERE created_at > NOW() - INTERVAL '1 day';
+SELECT id, name, created_at FROM organizations WHERE created_at > NOW() - INTERVAL '1 day';
 ```
 
 ### Example 2: Call your app's API
