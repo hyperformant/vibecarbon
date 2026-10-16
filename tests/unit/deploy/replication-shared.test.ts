@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { DB_CONTAINER, DB_PVC } from '../../../src/lib/deploy/db-workload.js';
 import {
   assertReplicationStreamingOrDegraded,
   buildNodePgdataSwapScript,
@@ -302,7 +303,7 @@ const POD_JSON_FIXTURE = JSON.stringify({
   spec: {
     containers: [
       {
-        name: 'supabase-db',
+        name: DB_CONTAINER,
         image: 'postgres:17',
         volumeMounts: [
           {
@@ -316,7 +317,7 @@ const POD_JSON_FIXTURE = JSON.stringify({
     volumes: [
       {
         name: 'postgres-volume',
-        persistentVolumeClaim: { claimName: 'data-supabase-supabase-db-0' },
+        persistentVolumeClaim: { claimName: DB_PVC },
       },
     ],
   },
@@ -325,7 +326,7 @@ const POD_JSON_FIXTURE = JSON.stringify({
 describe('parsePgdataClaimFromPodJson', () => {
   it('extracts claimName, subPath, and the db image (works for local-path AND CSI)', () => {
     expect(parsePgdataClaimFromPodJson(POD_JSON_FIXTURE)).toEqual({
-      claimName: 'data-supabase-supabase-db-0',
+      claimName: DB_PVC,
       subPath: 'postgres-data',
       image: 'postgres:17',
     });
@@ -333,12 +334,12 @@ describe('parsePgdataClaimFromPodJson', () => {
 
   it('accepts a pre-parsed object too', () => {
     const obj = JSON.parse(POD_JSON_FIXTURE);
-    expect(parsePgdataClaimFromPodJson(obj).claimName).toBe('data-supabase-supabase-db-0');
+    expect(parsePgdataClaimFromPodJson(obj).claimName).toBe(DB_PVC);
   });
 
   it('throws when no PVC is mounted at /var/lib/postgresql/data', () => {
     const noPvc = JSON.stringify({
-      spec: { containers: [{ name: 'supabase-db', image: 'x', volumeMounts: [] }], volumes: [] },
+      spec: { containers: [{ name: DB_CONTAINER, image: 'x', volumeMounts: [] }], volumes: [] },
     });
     expect(() => parsePgdataClaimFromPodJson(noPvc)).toThrow(/no persistentVolumeClaim/);
   });
@@ -348,7 +349,7 @@ describe('parsePgdataClaimFromPodJson', () => {
       spec: {
         containers: [
           {
-            name: 'supabase-db',
+            name: DB_CONTAINER,
             volumeMounts: [{ name: 'v', mountPath: '/var/lib/postgresql/data' }],
           },
         ],
@@ -362,7 +363,7 @@ describe('parsePgdataClaimFromPodJson', () => {
 describe('buildPgdataSwapPodManifest', () => {
   const manifest = JSON.parse(
     buildPgdataSwapPodManifest({
-      claimName: 'data-supabase-supabase-db-0',
+      claimName: DB_PVC,
       image: 'postgres:17',
       swapScript: buildNodePgdataSwapScript({ pgdataDir: '/pgdata-vol/postgres-data' }),
     }),
@@ -370,9 +371,7 @@ describe('buildPgdataSwapPodManifest', () => {
 
   it('mounts the SAME PVC (no subPath) so the swap can rename PGDATA aside', () => {
     const c = manifest.spec.containers[0];
-    expect(manifest.spec.volumes[0].persistentVolumeClaim.claimName).toBe(
-      'data-supabase-supabase-db-0',
-    );
+    expect(manifest.spec.volumes[0].persistentVolumeClaim.claimName).toBe(DB_PVC);
     // Whole volume mounted at the root; NO subPath (PGDATA is a subdir under it).
     expect(c.volumeMounts[0].mountPath).toBe('/pgdata-vol');
     expect(c.volumeMounts[0].subPath).toBeUndefined();
@@ -444,7 +443,7 @@ describe('swapPgdataViaHelperPod', () => {
   }
 
   const inputs = {
-    claimName: 'data-supabase-supabase-db-0',
+    claimName: DB_PVC,
     subPath: 'postgres-data',
     image: 'postgres:17',
   };
@@ -457,7 +456,7 @@ describe('swapPgdataViaHelperPod', () => {
     const cmds = calls.map((c) => c.argv.join(' '));
     // Manifest carries the PVC, the reused image, and PGDATA=<root>/<subPath>.
     const apply = calls.find((c) => c.argv.join(' ').includes('apply -f -'));
-    expect(apply?.input).toContain('data-supabase-supabase-db-0');
+    expect(apply?.input).toContain(DB_PVC);
     expect(apply?.input).toContain('postgres:17');
     expect(apply?.input).toContain("PGDATA='/pgdata-vol/postgres-data'");
     // Waited on the pod status via shell-safe `-o json` (no jsonpath metachars

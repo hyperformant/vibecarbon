@@ -19,7 +19,8 @@
  * mocked; `spawnSync` stays real for the kustomize builds.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load, loadAll } from 'js-yaml';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -31,6 +32,7 @@ vi.mock('node:child_process', async () => {
 
 const {
   assertDbStorageClass,
+  assertNoRetiredChartDb,
   awaitDbRollout,
   buildDbManifestValues,
   dbPodListArgs,
@@ -461,7 +463,14 @@ describe('summarizeDbPods / summarizeNotReadyNodes', () => {
 describe('the chart is gone for good', () => {
   it('k3s.js installs no chart for the database and patches no db config at runtime', () => {
     const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
-    expect(k3s).not.toMatch(/supabase/i);
+    // The retired chart is named in exactly one place: the probe that refuses
+    // to deploy beside it (assertNoRetiredChartDb).
+    const start = k3s.indexOf('/**\n * The workloads the retired Postgres Helm chart');
+    const end = k3s.indexOf('\n}\n', k3s.indexOf('export async function assertNoRetiredChartDb('));
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const outside = k3s.slice(0, start) + k3s.slice(end);
+    expect(outside).not.toMatch(/supabase/i);
     expect(k3s).not.toContain('ALTER SYSTEM');
   });
 
@@ -470,4 +479,144 @@ describe('the chart is gone for good', () => {
       expect(existsSync(join(ROOT, gone)), gone).toBe(false);
     }
   });
+});
+
+describe('assertNoRetiredChartDb — a chart-era cluster is refused, not silently forked', () => {
+  // A read of the live cluster: [statefulset get, helm release secret get].
+  const execWith = (stsOut: string, releaseOut: string) => {
+    const calls: string[][] = [];
+    const exec = vi.fn(async (argv: string[]) => {
+      calls.push(argv);
+      return argv.includes('statefulset') ? stsOut : releaseOut;
+    });
+    return { exec, calls };
+  };
+
+  it('proceeds on a cluster with no trace of the chart (two reads, no retry)', async () => {
+    const { exec, calls } = execWith('', '');
+    await expect(assertNoRetiredChartDb({ env, exec })).resolves.toBeUndefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual([
+      'kubectl',
+      '-n',
+      'vibecarbon',
+      'get',
+      'statefulset',
+      'supabase-supabase-db',
+      '--ignore-not-found',
+      '-o',
+      'name',
+    ]);
+    expect(calls[1]).toContain('owner=helm,name=supabase');
+  });
+
+  it('refuses when the chart StatefulSet still runs, and says what to do', async () => {
+    const { exec } = execWith(
+      'statefulset.apps/supabase-supabase-db\n',
+      'secret/sh.helm.release.v1.supabase.v3\n',
+    );
+    const msg = String(
+      ((await assertNoRetiredChartDb({ env, exec }).catch((e) => e)) as Error).message,
+    );
+    expect(msg).toContain('statefulset.apps/supabase-supabase-db');
+    expect(msg).toContain('existing data does not carry over automatically');
+    expect(msg).toContain('`vibecarbon destroy <env>`');
+    expect(msg).toContain('`helm uninstall supabase -n vibecarbon`');
+    expect(msg).toContain('`vibecarbon deploy <env> -restore latest`');
+    expect(msg).toMatch(/same wal-g prefix/);
+    // GitOps: deleting the old Flux Kustomization with prune on would delete
+    // the volume before the operator chose to.
+    expect(msg).toContain('`prune: false`');
+    expect(msg).toContain('vibecarbon-supabase');
+  });
+
+  it('refuses on the Helm release record alone (the StatefulSet already gone)', async () => {
+    const { exec } = execWith('', 'secret/sh.helm.release.v1.supabase.v1\n');
+    await expect(assertNoRetiredChartDb({ env, exec })).rejects.toThrow(/retired Helm chart/);
+  });
+
+  it('refuses rather than guesses when the cluster cannot be read', async () => {
+    const exec = vi.fn(async () => {
+      throw new Error('Unable to connect to the server');
+    });
+    await expect(assertNoRetiredChartDb({ env, exec })).rejects.toThrow(
+      /could not read the cluster/,
+    );
+    expect(exec).toHaveBeenCalledTimes(1);
+  });
+
+  it('applyK3sManifests runs it before anything creates the db StatefulSet', () => {
+    const k3s = readFileSync(join(ROOT, 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = k3s.slice(k3s.indexOf('export async function applyK3sManifests('));
+    const probe = body.indexOf('await assertNoRetiredChartDb({ env })');
+    expect(probe).toBeGreaterThan(-1);
+    expect(probe).toBeLessThan(body.indexOf('renderK8sBase('));
+    expect(probe).toBeLessThan(body.indexOf("runKubectlWithRetry(['apply', '-k', baseDir]"));
+  });
+});
+
+describe('Flux never applies the unrendered db StatefulSet', () => {
+  // Without the delete patch Flux would apply `{{DB_IMAGE}}:{{DB_IMAGE_TAG}}`
+  // and a literal StorageClass: an InvalidImageName outage on the next roll.
+  for (const cluster of ['primary', 'standby']) {
+    const file = join(ROOT, `carbon/k8s/flux/clusters/${cluster}/vibecarbon.yaml`);
+    const base = () =>
+      (loadAll(readFileSync(file, 'utf-8')) as Doc[]).find(
+        (d) => d?.kind === 'Kustomization' && d.metadata.name === 'vibecarbon-base',
+      );
+
+    it(`${cluster}: vibecarbon-base deletes StatefulSet/db from its build`, () => {
+      const patches = base().spec.patches ?? [];
+      const del = patches.filter(
+        (p: Doc) =>
+          p.target?.kind === 'StatefulSet' &&
+          p.target?.name === 'db' &&
+          /\$patch: delete/.test(p.patch) &&
+          /kind: StatefulSet/.test(p.patch) &&
+          /name: db\b/.test(p.patch),
+      );
+      expect(del).toHaveLength(1);
+    });
+
+    it(`${cluster}: health-checks the live db explicitly (no wait: true, which ignores healthChecks)`, () => {
+      const spec = base().spec;
+      expect(spec.wait).toBeUndefined();
+      expect(spec.healthChecks).toContainEqual({
+        apiVersion: 'apps/v1',
+        kind: 'StatefulSet',
+        name: 'db',
+        namespace: 'vibecarbon',
+      });
+    });
+
+    it(`${cluster}: a kustomize build with that patch drops StatefulSet/db and keeps Service/db`, () => {
+      const dir = mkdtempSync(join(tmpdir(), `vc-flux-${cluster}-`));
+      try {
+        cpSync(BASE, join(dir, 'base'), { recursive: true });
+        const { patch, target } = base().spec.patches[0];
+        writeFileSync(join(dir, 'patch.yaml'), patch);
+        writeFileSync(
+          join(dir, 'kustomization.yaml'),
+          [
+            'apiVersion: kustomize.config.k8s.io/v1beta1',
+            'kind: Kustomization',
+            'resources:',
+            '  - base',
+            'patches:',
+            '  - path: patch.yaml',
+            '    target:',
+            `      kind: ${target.kind}`,
+            `      name: ${target.name}`,
+            '',
+          ].join('\n'),
+        );
+        const docs = kustomize(dir);
+        expect(docs.some((d) => d.kind === 'StatefulSet')).toBe(false);
+        expect(docs.some((d) => d.kind === 'Service' && d.metadata.name === 'db')).toBe(true);
+        expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'app')).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 60_000);
+  }
 });

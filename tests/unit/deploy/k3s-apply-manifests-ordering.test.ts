@@ -130,6 +130,9 @@ function fakeChild({
 // standby). Default: no nodes reported — every unrelated test sees an empty
 // cluster and the reap stays a no-op.
 let getNodesOut = '';
+// `kubectl get statefulset <retired chart db>` answer. Default: absent, so
+// every test deploys onto a cluster with no chart-era database.
+let retiredChartStsOut = '';
 
 function installSpawnMock() {
   vi.mocked(spawn).mockImplementation(((cmd: string, args: string[] = []) => {
@@ -145,6 +148,17 @@ function installSpawnMock() {
       return fakeChild({ exitCode: 0, stdout: getNodesOut, argv: full }) as unknown as ReturnType<
         typeof spawn
       >;
+    }
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('statefulset') &&
+      argv.includes('supabase-supabase-db')
+    ) {
+      return fakeChild({
+        exitCode: 0,
+        stdout: retiredChartStsOut,
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'docker' && argv[0] === 'push') {
       return fakeChild({
@@ -344,6 +358,54 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('applyK3sManifests refuses a chart-era cluster', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    installSpawnMock();
+  });
+  afterEach(() => {
+    retiredChartStsOut = '';
+  });
+
+  it('refuses before applying k8s/base when the old chart database still runs', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    retiredChartStsOut = 'statefulset.apps/supabase-supabase-db\n';
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      /existing data does not carry over automatically/,
+    );
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.includes('-k') &&
+          a.some((x) => /k8s-base/.test(String(x))),
+      ),
+    ).toBe(false);
+  });
+
+  it('proceeds to apply k8s/base when there is no trace of it', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    expect(cmdCalls.some((a) => a.includes('supabase-supabase-db'))).toBe(true);
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a[0] === 'kubectl' &&
+          a.includes('apply') &&
+          a.includes('-k') &&
+          a.some((x) => /k8s-base/.test(String(x))),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('applyK3sManifests deploy-time optimizations', () => {

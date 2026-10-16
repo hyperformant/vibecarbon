@@ -17,8 +17,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The db pod name (DB_POD in src/lib/deploy/db-workload.js), spelled out:
+// vi.mock factories are hoisted above every import.
 vi.mock('../../../src/lib/ssh.js', () => ({
-  getPostgresPod: vi.fn().mockResolvedValue('supabase-supabase-db-0'),
+  getPostgresPod: vi.fn().mockResolvedValue('db-0'),
   sshKubectl: vi.fn().mockResolvedValue(''),
   sshRun: vi.fn().mockResolvedValue(''),
   getSSHKeyPath: vi.fn(),
