@@ -96,6 +96,7 @@ const API_BASE = 'https://api.scaleway.com';
 // (SCALEWAY_SECRET_KEY). configure-providers.js reads this to persist and
 // summarize the full triple generically.
 export const EXTRA_ENV_KEYS = ['SCALEWAY_ACCESS_KEY', 'SCALEWAY_DEFAULT_PROJECT_ID'];
+const SCALEWAY_TRIPLE = ['SCALEWAY_SECRET_KEY', ...EXTRA_ENV_KEYS];
 
 // Access key: 20 chars, self-prefixed (SDK validator ^SCW[A-Z0-9]{17}$ —
 // validation/is.go). Secret key and Project ID are both plain UUIDs (same
@@ -320,13 +321,17 @@ export async function getApiToken(projectName, options = {}) {
       warnIfBadFormat(envSecret, 'secret key', UUID_FORMAT, 'a UUID');
       const check = await validateScalewaySecretKey(envSecret);
       if (!check.valid) {
-        p.log.warn(`SCALEWAY_SECRET_KEY environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `SCALEWAY_SECRET_KEY from ${describeCredentialSource(SCALEWAY_TRIPLE).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Scaleway API to verify key, proceeding with saved key');
         }
-        p.log.info('✓ Using Scaleway credentials from SCALEWAY_* environment variables');
+        p.log.info(
+          `✓ Using Scaleway credentials from ${describeCredentialSource(SCALEWAY_TRIPLE).label}`,
+        );
         return envSecret;
       }
     } else if (envSecret) {

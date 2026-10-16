@@ -190,7 +190,7 @@ export async function getApiToken(projectName, options = {}) {
       const check = await validateDigitalOceanToken(envToken);
       if (!check.valid) {
         p.log.warn(
-          `DIGITALOCEAN_API_TOKEN environment variable is set but invalid: ${check.error}`,
+          `DIGITALOCEAN_API_TOKEN from ${describeCredentialSource(['DIGITALOCEAN_API_TOKEN']).where} is set but invalid: ${check.error}`,
         );
         // Fall through to interactive prompt
       } else {
@@ -200,7 +200,7 @@ export async function getApiToken(projectName, options = {}) {
           );
         }
         p.log.info(
-          '✓ Using DigitalOcean API token from DIGITALOCEAN_API_TOKEN environment variable',
+          `✓ Using DigitalOcean API token from ${describeCredentialSource(['DIGITALOCEAN_API_TOKEN']).label}`,
         );
         return envToken;
       }

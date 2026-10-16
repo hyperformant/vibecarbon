@@ -201,13 +201,17 @@ export async function getApiToken(projectName, options = {}) {
       warnIfBadTokenFormat(envToken);
       const check = await validateVultrToken(envToken);
       if (!check.valid) {
-        p.log.warn(`VULTR_API_TOKEN environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `VULTR_API_TOKEN from ${describeCredentialSource(['VULTR_API_TOKEN']).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Vultr API to verify key, proceeding with saved key');
         }
-        p.log.info('✓ Using Vultr API key from VULTR_API_TOKEN environment variable');
+        p.log.info(
+          `✓ Using Vultr API key from ${describeCredentialSource(['VULTR_API_TOKEN']).label}`,
+        );
         return envToken;
       }
     }

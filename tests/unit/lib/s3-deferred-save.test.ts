@@ -33,6 +33,7 @@ vi.mock('../../../src/lib/project.js', () => ({
   describeCredentialSource: (keys: string[]) => ({
     source: 'shell',
     label: `your shell environment (${keys.join(', ')})`,
+    where: 'your shell environment',
   }),
 }));
 vi.mock('../../../src/lib/cli/tty-guard.js', () => ({ assertInteractiveStdin: vi.fn() }));

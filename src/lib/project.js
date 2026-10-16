@@ -463,14 +463,22 @@ export function getBootstrappedKeys() {
  * `env-local` when bootstrapOperatorEnv loaded every key from the project's
  * .env.local, else `shell` (an export, a CI secret, a parent process).
  *
+ * `label` names the variables for the shell case; `where` is the bare place,
+ * for a line that already names the variable itself.
+ *
  * @param {string[]} keys
- * @returns {{ source: 'env-local' | 'shell', label: string }}
+ * @returns {{ source: 'env-local' | 'shell', label: string, where: string }}
  */
 export function describeCredentialSource(keys) {
   if (keys.length > 0 && keys.every((k) => bootstrappedKeys.has(k))) {
-    return { source: 'env-local', label: "your project's .env.local" };
+    const where = "your project's .env.local";
+    return { source: 'env-local', label: where, where };
   }
-  return { source: 'shell', label: `your shell environment (${keys.join(', ')})` };
+  return {
+    source: 'shell',
+    label: `your shell environment (${keys.join(', ')})`,
+    where: 'your shell environment',
+  };
 }
 
 // ============================================================================

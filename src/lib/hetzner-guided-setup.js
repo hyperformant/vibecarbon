@@ -156,13 +156,17 @@ export async function getApiToken(projectName, options = {}) {
     if (envToken) {
       const check = await validateHetznerToken(envToken);
       if (!check.valid) {
-        p.log.warn(`HETZNER_API_TOKEN environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `HETZNER_API_TOKEN from ${describeCredentialSource(['HETZNER_API_TOKEN']).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Hetzner API to verify token, proceeding with saved token');
         }
-        p.log.info('✓ Using Hetzner API token from HETZNER_API_TOKEN environment variable');
+        p.log.info(
+          `✓ Using Hetzner API token from ${describeCredentialSource(['HETZNER_API_TOKEN']).label}`,
+        );
         return envToken;
       }
     }

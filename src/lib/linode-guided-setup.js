@@ -170,13 +170,17 @@ export async function getApiToken(projectName, options = {}) {
       warnIfBadTokenFormat(envToken);
       const check = await validateLinodeToken(envToken);
       if (!check.valid) {
-        p.log.warn(`LINODE_API_TOKEN environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `LINODE_API_TOKEN from ${describeCredentialSource(['LINODE_API_TOKEN']).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Linode API to verify token, proceeding with saved token');
         }
-        p.log.info('✓ Using Linode API token from LINODE_API_TOKEN environment variable');
+        p.log.info(
+          `✓ Using Linode API token from ${describeCredentialSource(['LINODE_API_TOKEN']).label}`,
+        );
         return envToken;
       }
     }

@@ -35,6 +35,7 @@ describe('describeCredentialSource', () => {
     expect(describeCredentialSource(KEYS)).toEqual({
       source: 'env-local',
       label: "your project's .env.local",
+      where: "your project's .env.local",
     });
   });
 
@@ -46,6 +47,7 @@ describe('describeCredentialSource', () => {
     expect(describeCredentialSource(KEYS)).toEqual({
       source: 'shell',
       label: 'your shell environment (HETZNER_ACCESS_KEY, HETZNER_SECRET_KEY)',
+      where: 'your shell environment',
     });
   });
 });
