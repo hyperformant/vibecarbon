@@ -1631,15 +1631,15 @@ export async function reseedStandbyFromPrimary(
     await new Promise((r) => setTimeout(r, i < 5 ? 500 : 4000));
   }
   if (!inRecovery) {
-    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won —
-    // the image's wal-g.conf ships it off and the staged auto.conf override
-    // did not take), NOT a timing issue: waiting longer can never fix it.
+    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won
+    // because the staged auto.conf override did not take), NOT a timing issue:
+    // waiting longer can never fix it.
     if (lastRecoveryErr.includes('Hot standby mode is disabled')) {
       throw new Error(
         'standby re-seed: the standby is streaming but refusing read-only connections ' +
           '("Hot standby mode is disabled") — hot_standby is OFF in its effective config ' +
-          "(the image's wal-g.conf ships hot_standby=off; the staged postgresql.auto.conf " +
-          'must override it with hot_standby = on). Config error, not a timing issue.',
+          '(the staged postgresql.auto.conf must pin hot_standby = on, and it did not take). ' +
+          'Config error, not a timing issue.',
       );
     }
     throw new Error(

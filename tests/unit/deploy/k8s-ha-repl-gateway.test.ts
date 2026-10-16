@@ -408,9 +408,9 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     expect(stageInput).not.toMatch(/find \/var\/lib\/postgresql\/data -mindepth 1 -delete/);
     // conninfo is folded into the staged basebackup (present at first boot).
     expect(stageInput).toContain('primary_conninfo');
-    // hot_standby forced on in the staged auto.conf — the image's wal-g.conf
-    // ships hot_standby=off, which would make the reseeded standby refuse
-    // read-only connections while streaming fine.
+    // hot_standby pinned on in the staged auto.conf (read last): with it off,
+    // the reseeded standby would stream fine but refuse read-only connections,
+    // whatever the image config says.
     expect(stageInput).toContain('hot_standby = on');
 
     // The swap runs in a helper pod applied on the standby MASTER (2.2.2.2), NOT
@@ -478,7 +478,9 @@ describe('setupReplication — WireGuard repl-gateway transport', () => {
     vi.useFakeTimers();
     try {
       const promise = setupReplication(opts);
-      const assertion = expect(promise).rejects.toThrow(/hot_standby is OFF .* wal-g\.conf/s);
+      const assertion = expect(promise).rejects.toThrow(
+        /hot_standby is OFF .* must pin hot_standby = on/s,
+      );
       await vi.runAllTimersAsync();
       await assertion;
     } finally {

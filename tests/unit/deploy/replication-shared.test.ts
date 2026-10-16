@@ -186,12 +186,12 @@ describe('buildStagedBasebackupScript', () => {
     expect(script).toContain('-S vibecarbon_standby_slot');
   });
 
-  it('forces hot_standby=on in the staged auto.conf (image wal-g.conf ships it off)', () => {
-    // Live RCA 2026-07-06 e4 rig: the standby STREAMED fine but refused
-    // read-only connections ("FATAL: ... Hot standby mode is disabled") — the
-    // supabase image's /etc/postgresql-custom/wal-g.conf sets hot_standby=off
-    // and postgresql.conf leaves it commented, so the include wins unless
-    // postgresql.auto.conf (read last) overrides it.
+  it('pins hot_standby=on in the staged auto.conf, whatever the image config says', () => {
+    // With hot_standby off, a reseeded standby streams fine but refuses
+    // read-only connections ("FATAL: ... Hot standby mode is disabled"), so
+    // every pg_is_in_recovery() check fails (live RCA 2026-07-06 e4 rig, when
+    // an image config include shipped it off). postgresql.auto.conf is read
+    // last, so the staged line wins over any image or include setting.
     // BOTH staging modes must carry the override:
     const combined = buildStagedBasebackupScript({ replPassword: 'pw', primaryHost: 'h' });
     expect(combined).toContain(

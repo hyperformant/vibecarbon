@@ -211,8 +211,8 @@ describe('configureStandbyReplication — WireGuard transport', () => {
     expect(script).not.toMatch(/-S \S/);
     expect(script).toContain("primary_slot_name = 'vibecarbon_standby_slot'");
 
-    // hot_standby forced on in the staged auto.conf (image wal-g.conf ships
-    // it off — same image family as k8s).
+    // hot_standby pinned on in the staged auto.conf (read last), so no image
+    // config can leave the reseeded standby refusing read-only connections.
     expect(script).toContain('hot_standby = on');
 
     // No app-layer TLS anywhere.

@@ -564,15 +564,16 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // DURABILITY (same-wave finding): an image that points hba_file at
   // /etc/postgresql/pg_hba.conf (the previous image did; compose RCA fanout12
   // 2026-05-01) puts it on a container-EPHEMERAL path. Our postgres:17 image
-  // keeps it in PGDATA, so the copy below is skipped there. Appending to the live file would be reverted by
-  // the very next pod restart — and step 3 deletes this pod moments from now —
-  // while appending only to PGDATA/pg_hba.conf targets a file postgres never
-  // reads. So: copy the LIVE hba file (resolved via SHOW hba_file) into PGDATA
-  // once, append our lines idempotently THERE, and repoint hba_file via ALTER
-  // SYSTEM (postgresql.auto.conf lives in PGDATA too). hba_file is a
-  // server-start parameter — no reload here; step 3's pod restart applies it.
-  // Net: the replication hba survives pod restarts, rides wal-g base backups,
-  // and is inherited by the standby via pg_basebackup.
+  // keeps it in PGDATA, so the copy below is skipped there. On an ephemeral
+  // path, appending to the live file would be reverted by the very next pod
+  // restart (and step 3 deletes this pod moments from now), while appending
+  // only to PGDATA/pg_hba.conf targets a file postgres never reads. So: copy
+  // the LIVE hba file (resolved via SHOW hba_file) into PGDATA once, append our
+  // lines idempotently THERE, and repoint hba_file via ALTER SYSTEM
+  // (postgresql.auto.conf lives in PGDATA too). hba_file is a server-start
+  // parameter, so no reload here; step 3's pod restart applies it. Net: the
+  // replication hba survives pod restarts, rides wal-g base backups, and is
+  // inherited by the standby via pg_basebackup.
   const hbaLines = buildReplicationHbaLines([WG_SUBNET_CIDR, K3S_POD_CIDR]);
   const hbaSetupScript = [
     'set -e',
@@ -1104,15 +1105,15 @@ export async function setupReplication(options) {
     }
   });
   if (!inRecovery) {
-    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won —
-    // the image's wal-g.conf ships it off and the staged auto.conf override
-    // did not take), NOT a timing issue: waiting longer can never fix it.
+    // "Hot standby mode is disabled" is a CONFIG error (hot_standby=off won
+    // because the staged auto.conf override did not take), NOT a timing issue:
+    // waiting longer can never fix it.
     if (lastRecoveryOut.includes('Hot standby mode is disabled')) {
       throw new Error(
         `standby reseed: the standby is streaming but refusing read-only connections ` +
           `("Hot standby mode is disabled") — hot_standby is OFF in its effective config ` +
-          `(the image's wal-g.conf ships hot_standby=off; the staged postgresql.auto.conf ` +
-          `must override it with hot_standby = on). Config error, not a timing issue.`,
+          `(the staged postgresql.auto.conf must pin hot_standby = on, and it did not take). ` +
+          `Config error, not a timing issue.`,
       );
     }
     throw new Error(

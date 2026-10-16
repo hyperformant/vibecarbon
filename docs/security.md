@@ -142,9 +142,16 @@ Vibecarbon uses several types of secrets. Rotate on the cadence below or immedia
 #### `DB_PASSWORD`
 
 1. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/[+/=]/g, 'x'))"`
-2. `ALTER USER postgres WITH PASSWORD '…'` (the `postgres` superuser is the only login role that uses it).
-3. Update `DB_PASSWORD` / `POSTGRES_PASSWORD` in `.env.local` and restart services.
-4. Verify every service reconnects.
+2. Set it on every role that shares it. The `postgres` superuser uses it, and so do the `n8n` and `metabase` roles when those services are installed: their init scripts (`volumes/db/n8n-init.sh`, `volumes/db/metabase-init.sh`) set the same `POSTGRES_PASSWORD` on them, and compose hands n8n and Metabase `${POSTGRES_PASSWORD}`. Rotating only `postgres` breaks n8n and Metabase at their next restart. Put the new value in `NEW_DB_PASSWORD` in your shell, then send the SQL over stdin (the unquoted heredoc expands it locally, so it never reaches an argv), from the project directory on the server:
+   ```bash
+   docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=1 <<SQL
+   SELECT format('ALTER ROLE %I WITH PASSWORD %L', rolname, '${NEW_DB_PASSWORD}')
+   FROM pg_roles WHERE rolname IN ('postgres', 'n8n', 'metabase')\gexec
+   SQL
+   ```
+   Only roles that exist are altered. On Kubernetes, pipe the same heredoc into `kubectl exec -i -n vibecarbon <db-pod> -- psql -U postgres -v ON_ERROR_STOP=1`.
+3. Update `DB_PASSWORD` / `POSTGRES_PASSWORD` in `.env.local`, then `docker compose up -d` so the app, n8n and Metabase are recreated with the new value (Kubernetes: update `vibecarbon-secrets` as above and `kubectl rollout restart deployment -n vibecarbon`).
+4. Verify every service reconnects: the app, and n8n and Metabase when installed.
 
 #### `HETZNER_API_TOKEN`
 
