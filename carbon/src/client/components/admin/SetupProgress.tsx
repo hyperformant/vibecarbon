@@ -9,7 +9,7 @@ import {
   IconRocket,
   IconSparkles,
 } from '@tabler/icons-react';
-import { type ComponentType, useEffect, useState } from 'react';
+import { type ComponentType, useState } from 'react';
 import { Link } from 'react-router';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -24,6 +24,7 @@ import {
   type SetupIcon,
   type SetupIntegration,
   type SetupStep,
+  type SetupStepId,
 } from '@/lib/setup-progress';
 import { cn } from '@/lib/utils';
 
@@ -69,18 +70,36 @@ function CopyCommand({ command, className }: { command: string; className?: stri
   );
 }
 
-function StepNode({ step }: { step: SetupStep }) {
+/**
+ * Geometry of one timeline row, all in spacing units so it scales with the root
+ * font size (18px here; mixing rem-sized nodes with px columns pushed the node
+ * 4.5px wider than its column and 2px right of the connector):
+ * - the node is `size-9` in a `--spacing(9)` column, so its centre sits at
+ *   `4.5`; the connector is centred there with `-translate-x-1/2`;
+ * - the title line is `5` tall (`text-sm`), so the node is pulled up by half the
+ *   difference (`-mt-2`) to put its centre on the title's centre;
+ * - the connector runs from this node's bottom edge (`py-2.5 - 2 + 9 = 9.5`) to
+ *   the next node's top edge (`-bottom-0.5`), never behind the nodes, whose
+ *   fills are translucent.
+ * Rows carry `px-2` for the hover/selected highlight, hence `left-6.5`.
+ */
+const CONNECTOR = 'top-9.5 -bottom-0.5 left-6.5 w-0.5 -translate-x-1/2';
+
+function StepNode({ step, selected }: { step: SetupStep; selected: boolean }) {
   return (
-    <div
+    <span
       className={cn(
-        'relative z-10 flex size-9 shrink-0 items-center justify-center rounded-full border-2 bg-muted',
-        step.done && 'border-success bg-success text-background',
+        'relative z-10 -mt-2 flex size-9 shrink-0 items-center justify-center rounded-full border-2 bg-muted transition-shadow',
+        // `text-background` is transparent in this theme (the canvas shows
+        // through), which hid the check, so done nodes use primary-foreground.
+        step.done && 'border-success bg-success text-primary-foreground',
         step.current && 'border-primary text-primary shadow-[0_0_0_4px_var(--glow-primary)]',
-        !step.done && !step.current && 'border-border text-muted-foreground'
+        !step.done && !step.current && 'border-border text-muted-foreground',
+        selected && 'ring-ring ring-2 ring-offset-2 ring-offset-card'
       )}
     >
       {step.done ? (
-        <IconCheck className="size-4" />
+        <IconCheck className="size-4" stroke={3} />
       ) : step.launch ? (
         <IconRocket className="size-4" />
       ) : step.current ? (
@@ -88,84 +107,113 @@ function StepNode({ step }: { step: SetupStep }) {
       ) : (
         <span className="size-2 rounded-full bg-current opacity-45" />
       )}
-    </div>
+    </span>
   );
 }
 
-function TimelineStep({ step, isLast }: { step: SetupStep; isLast: boolean }) {
+interface TimelineStepProps {
+  step: SetupStep;
+  isLast: boolean;
+  selected: boolean;
+  onPreview: (id: SetupStepId) => void;
+  onSelect: (id: SetupStepId) => void;
+}
+
+function TimelineStep({ step, isLast, selected, onPreview, onSelect }: TimelineStepProps) {
   const partner = step.integrations?.find((i) => i.isPartner);
   return (
-    <div className="relative grid grid-cols-[36px_1fr] gap-3.5 py-2.5">
+    // biome-ignore lint/a11y/noStaticElementInteractions: hover only previews; the step button below is the keyboard and click control
+    <div
+      className={cn(
+        'relative rounded-xl px-2 py-2.5 transition-colors hover:bg-accent/40',
+        selected && 'bg-accent/60 hover:bg-accent/60'
+      )}
+      onMouseEnter={() => onPreview(step.id)}
+    >
       {!isLast && (
         <span
           aria-hidden="true"
-          className={cn(
-            'absolute top-[18px] -bottom-[18px] left-[17px] z-0 w-0.5 rounded',
-            step.done ? 'bg-primary' : 'bg-border'
-          )}
+          className={cn('absolute z-0 rounded', CONNECTOR, step.done ? 'bg-primary' : 'bg-border')}
         />
       )}
-      <StepNode step={step} />
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-muted-foreground text-xs tabular-nums">
-            {String(step.index).padStart(2, '0')}
-          </span>
-          <span className={cn('text-sm font-semibold', step.done && 'text-muted-foreground')}>
-            {step.label}
-          </span>
-          {step.current && (
-            <Badge className="h-4 px-1.5 text-[9.5px] tracking-wide uppercase">Next up</Badge>
-          )}
-          {step.launch && (
-            <Badge
-              variant="outline"
-              className="text-primary border-primary h-4 px-1.5 text-[9.5px] tracking-wide uppercase"
-            >
-              Launch
-            </Badge>
-          )}
-        </div>
-        <p className="text-muted-foreground mt-0.5 text-xs">{step.description}</p>
-        <div className="mt-2 flex flex-wrap items-center gap-2.5">
-          <CopyCommand command={step.command} className="w-[320px] max-w-full" />
-          {step.done ? (
-            step.optedOut ? (
-              <Badge variant="secondary" className="h-5 px-2 text-[10px]">
-                Skipped
-              </Badge>
-            ) : (
-              <span className="text-success text-xs">✓ Done</span>
-            )
-          ) : partner ? (
-            <span className="text-foreground flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs">
-              <span className="text-muted-foreground text-[10px] tracking-wide uppercase">Rec</span>
-              {partner.name}
+      <button
+        type="button"
+        aria-pressed={selected}
+        aria-current={step.current ? 'step' : undefined}
+        aria-controls="setup-spotlight"
+        onClick={() => onSelect(step.id)}
+        className="focus-visible:ring-ring grid w-full cursor-pointer grid-cols-[--spacing(9)_1fr] gap-3.5 rounded-lg text-left outline-none focus-visible:ring-2"
+      >
+        <StepNode step={step} selected={selected} />
+        <span className="min-w-0">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-muted-foreground text-xs tabular-nums">
+              {String(step.index).padStart(2, '0')}
             </span>
-          ) : null}
-        </div>
+            <span className={cn('text-sm font-semibold', step.done && 'text-muted-foreground')}>
+              {step.label}
+            </span>
+            {step.current && (
+              <Badge className="h-4 px-1.5 text-[9.5px] tracking-wide uppercase">Next up</Badge>
+            )}
+            {step.launch && (
+              <Badge
+                variant="outline"
+                className="text-primary border-primary h-4 px-1.5 text-[9.5px] tracking-wide uppercase"
+              >
+                Launch
+              </Badge>
+            )}
+          </span>
+          <span className="text-muted-foreground mt-0.5 block text-xs">{step.description}</span>
+        </span>
+      </button>
+      <div className="mt-2 flex flex-wrap items-center gap-2.5 pl-12.5">
+        <CopyCommand command={step.command} className="w-[320px] max-w-full" />
+        {step.done ? (
+          step.optedOut ? (
+            <Badge variant="secondary" className="h-5 px-2 text-[10px]">
+              Skipped
+            </Badge>
+          ) : (
+            <span className="text-success text-xs">✓ Done</span>
+          )
+        ) : partner ? (
+          <span className="text-foreground flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs">
+            <span className="text-muted-foreground text-[10px] tracking-wide uppercase">Rec</span>
+            {partner.name}
+          </span>
+        ) : null}
       </div>
     </div>
   );
 }
 
+/** Spotlight eyebrow: what this step is relative to the journey. */
+function spotlightEyebrow(step: SetupStep, total: number): string {
+  const position = `Step ${step.index} of ${total}`;
+  if (step.current) return `◆ Next up · ${position}`;
+  if (step.optedOut) return `Skipped · ${position}`;
+  if (step.done) return `✓ Done · ${position}`;
+  return position;
+}
+
+// Rendered with `key={step.id}`, so the provider choice starts fresh for every
+// step the operator previews or selects.
 function Spotlight({
   step,
+  total,
   onSkipBilling,
   busy,
 }: {
   step: SetupStep;
+  total: number;
   onSkipBilling: () => void;
   busy: boolean;
 }) {
   const Icon = STEP_ICON[step.icon];
   const integrations = step.integrations;
   const [provider, setProvider] = useState<string>(integrations?.[0]?.id ?? '');
-
-  // Reset the selection when the spotlighted step changes.
-  useEffect(() => {
-    setProvider(integrations?.[0]?.id ?? '');
-  }, [integrations]);
 
   const selected: SetupIntegration | undefined = integrations?.find((i) => i.id === provider);
   const command = commandForStep(step, integrations ? provider : undefined);
@@ -178,9 +226,20 @@ function Spotlight({
   const showCta = selected ? isDocsHrefVisible(selected.url, docsVisibility) : false;
 
   return (
-    <aside className="border-border/80 relative self-start rounded-2xl border bg-[linear-gradient(160deg,var(--glow-primary),transparent_60%)] p-5">
-      <div className="text-primary text-[10px] font-semibold tracking-[0.1em] uppercase">
-        ◆ Next up · Step {step.index} of 7
+    <aside
+      id="setup-spotlight"
+      aria-live="polite"
+      aria-label={`${step.label} setup`}
+      className="border-border/80 relative self-start rounded-2xl border bg-[linear-gradient(160deg,var(--glow-primary),transparent_60%)] p-5"
+    >
+      <div
+        data-testid="spotlight-eyebrow"
+        className={cn(
+          'text-[10px] font-semibold tracking-[0.1em] uppercase',
+          step.current ? 'text-primary' : step.done ? 'text-success' : 'text-muted-foreground'
+        )}
+      >
+        {spotlightEyebrow(step, total)}
       </div>
       <div className="mt-3 flex items-center gap-3">
         <div className="bg-primary/15 text-primary flex size-11 items-center justify-center rounded-xl">
@@ -250,7 +309,7 @@ function Spotlight({
       ) : (
         <>
           <CopyCommand command={step.command} className="mt-4 w-full" />
-          {step.id === 'payments' && (
+          {step.id === 'payments' && !step.done && (
             <button
               type="button"
               onClick={onSkipBilling}
@@ -268,6 +327,10 @@ function Spotlight({
 
 export function SetupProgress() {
   const { progress, isLoading, isError, setBillingOptOut } = useSetupStatus();
+  // `null` follows the current step, so the panel advances as steps complete
+  // until the operator picks one explicitly.
+  const [selectedId, setSelectedId] = useState<SetupStepId | null>(null);
+  const [hoveredId, setHoveredId] = useState<SetupStepId | null>(null);
 
   if (isLoading) {
     return (
@@ -281,6 +344,13 @@ export function SetupProgress() {
   }
 
   if (isError || !progress) return null;
+
+  // With every step complete there is no current step: default to the deploy
+  // finale so the panel, and step browsing, stay available.
+  const defaultId = progress.current?.id ?? 'deploy';
+  const activeId = selectedId ?? defaultId;
+  const spotlightStep =
+    progress.steps.find((s) => s.id === (hoveredId ?? activeId)) ?? progress.steps[0];
 
   return (
     <Card className="glass relative overflow-hidden">
@@ -327,14 +397,24 @@ export function SetupProgress() {
 
       <CardContent className="relative">
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_366px] lg:gap-8">
-          <div>
+          {/* biome-ignore lint/a11y/noStaticElementInteractions: clears the hover preview only */}
+          <div className="-mx-2" onMouseLeave={() => setHoveredId(null)}>
             {progress.steps.map((step, i) => (
-              <TimelineStep key={step.id} step={step} isLast={i === progress.steps.length - 1} />
+              <TimelineStep
+                key={step.id}
+                step={step}
+                isLast={i === progress.steps.length - 1}
+                selected={step.id === activeId}
+                onPreview={setHoveredId}
+                onSelect={setSelectedId}
+              />
             ))}
           </div>
-          {progress.current && (
+          {spotlightStep && (
             <Spotlight
-              step={progress.current}
+              key={spotlightStep.id}
+              step={spotlightStep}
+              total={progress.total}
               busy={setBillingOptOut.isPending}
               onSkipBilling={() => setBillingOptOut.mutate(true)}
             />
