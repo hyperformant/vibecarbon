@@ -27,3 +27,23 @@ GRANT USAGE ON SCHEMA public TO metabase;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO metabase;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO metabase;
 EOSQL
+
+# The blanket SELECT above reruns on every start (scripts/docker-up.js), and
+# it covers the auth tables the baseline migration locks down
+# (db/migrations/0002_baseline_post.sql: password hashes, session and OAuth
+# tokens, TOTP secrets). Take them back every time, and only where they exist:
+# on a first boot this runs before the app has migrated. Quoted heredoc, so
+# the shell leaves the $$ quoting alone.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'EOSQL'
+DO $$
+DECLARE
+    t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['user', 'session', 'account', 'verification', 'two_factor'] LOOP
+        IF to_regclass(format('public.%I', t)) IS NOT NULL THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM metabase', t);
+        END IF;
+    END LOOP;
+END
+$$;
+EOSQL

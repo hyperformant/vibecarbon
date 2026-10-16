@@ -11,10 +11,13 @@
 -- hashes, session tokens, OAuth tokens and TOTP secrets. RLS is enabled with
 -- no policies (schema.ts); on top of that, revoke every role that is neither
 -- a superuser nor RLS-bypass, including what the default privileges in 0000
--- just gave app_user. Role-agnostic on purpose: the loop also catches roles
--- an optional service creates (metabase gets default SELECT on public
--- tables), so only the owner and the connection role behind adminDb can read
--- them. Postgres' predefined pg_* roles are operator grants and are left
+-- just gave app_user. Role-agnostic on purpose: the loop also catches any
+-- other role that exists when this runs (on a fresh volume, metabase, whose
+-- default privileges cover these tables), so only the owner and the
+-- connection role behind adminDb can read them. A service that grants on
+-- public tables AFTER this ran must take these back itself
+-- (services/metabase/db/init.sh does, on every start). Postgres' predefined
+-- pg_* roles are operator grants and are left
 -- alone, and so is the role running this migration (current_user): it is
 -- the owner or the adminDb role, and must keep what it was granted.
 REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;
