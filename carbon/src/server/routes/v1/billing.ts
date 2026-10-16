@@ -543,7 +543,7 @@ billingRoutes.post('/setup', requireAal2, requireOrgRole(ORG_BILLING_ROLES), asy
     const session = await stripe.checkout.sessions.create({
       customer: providerCustomerId,
       mode: 'setup',
-      payment_method_types: ['card'],
+      allowed_payment_method_types: ['card'],
       success_url: `${returnUrl}?setup=success`,
       cancel_url: `${returnUrl}?setup=canceled`,
       metadata: {
