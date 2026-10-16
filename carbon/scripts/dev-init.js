@@ -12,6 +12,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
+import { devS3Endpoint } from './lib/dev-s3.js';
 import { formatDotenvLine, readEnvFiles } from './lib/dotenv.js';
 
 const force = process.argv.includes('--force');
@@ -19,6 +20,7 @@ const force = process.argv.includes('--force');
 // Fixed local dev values (BETTER_AUTH_SECRET excepted, see below).
 const DEV = {
   PROJECT_NAME: 'vibecarbon',
+  PORT_OFFSET: '0',
   // Random per checkout (64 characters, like `vibecarbon create`): it signs
   // session cookies, so a value shared by every checkout would let any of them
   // forge sessions for another. An existing one (from either env file) is
@@ -97,8 +99,9 @@ const envLines = [
   formatDotenvLine('SMTP_SENDER_NAME', DEV.PROJECT_NAME),
   '',
   '# Local S3 for uploads (Garage from docker-compose.override.yml, dev-only key',
-  '# it imports at start). If you change DEV_S3_PORT, change S3_ENDPOINT to match.',
-  formatDotenvLine('S3_ENDPOINT', 'http://localhost:8333'),
+  '# it imports at start). Its port is 8333 + DEV_PORT_OFFSET unless DEV_S3_PORT is',
+  '# set; `vibecarbon up` keeps S3_ENDPOINT in step when it changes the offset.',
+  formatDotenvLine('S3_ENDPOINT', devS3Endpoint({ DEV_PORT_OFFSET: DEV.PORT_OFFSET })),
   formatDotenvLine('S3_REGION', 'us-east-1'),
   formatDotenvLine('S3_BUCKET', `${DEV.PROJECT_NAME}-local`),
   formatDotenvLine('S3_ACCESS_KEY', DEV.S3_ACCESS_KEY),
@@ -114,7 +117,7 @@ const envLines = [
   formatDotenvLine('VITE_GITHUB_REPO_URL', ''),
   '',
   '# Ports',
-  formatDotenvLine('DEV_PORT_OFFSET', '0'),
+  formatDotenvLine('DEV_PORT_OFFSET', DEV.PORT_OFFSET),
   '',
   '# Environment',
   formatDotenvLine('NODE_ENV', 'development'),

@@ -10,6 +10,7 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { DEV_S3_BASE_PORT } from './lib/dev-s3.js';
 import { readEnvFiles } from './lib/dotenv.js';
 import {
   buildComposeCommand,
@@ -45,6 +46,9 @@ function getPortEnvVars() {
 
   return {
     DEV_DB_PORT: getPort('DEV_DB_PORT', 5432, portOffset),
+    // Local S3 (Garage). dev-init.js writes S3_ENDPOINT from the same base
+    // and rule (scripts/lib/dev-s3.js).
+    DEV_S3_PORT: getPort('DEV_S3_PORT', DEV_S3_BASE_PORT, portOffset),
     DEV_TRAEFIK_PORT: getPort('DEV_TRAEFIK_PORT', 80, portOffset),
     DEV_PROMETHEUS_PORT: getPort('DEV_PROMETHEUS_PORT', 9190, portOffset),
     DEV_GRAFANA_PORT: getPort('DEV_GRAFANA_PORT', 3002, portOffset),
@@ -192,9 +196,10 @@ if (hasOptionalServices) {
   }
 }
 
-// Dev only: the local S3 container (docker-compose.override.yml) starts empty.
-// Create its bucket + browser-upload CORS. Idempotent; non-fatal (the script
-// warns and exits 0 on failure, and skips when S3_* is unset).
+// Dev only: the local S3 container (docker-compose.override.yml) creates its
+// key and bucket itself; put the browser-upload CORS on that bucket.
+// Idempotent; non-fatal (the script warns and exits 0 on failure, and skips
+// when S3_* is unset).
 if (!args.prod) {
   try {
     execSync('node scripts/ensure-dev-bucket.js', { stdio: 'inherit' });

@@ -32,6 +32,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommand } from './lib/command.js';
 import { registerProject } from './lib/config.js';
+import { devS3Endpoint } from './lib/dev-s3.js';
 import { titleizeSlug } from './lib/display-name.js';
 import { dotenvValueProblem, formatDotenvLine } from './lib/dotenv.js';
 import { resolveDbImage } from './lib/images.js';
@@ -1461,6 +1462,9 @@ ${runCmd} test:prepush
 // the same). Garage requires GK + 24 hex for the id and 64 hex for the secret.
 const DEV_S3_ACCESS_KEY = 'GK6c6f63616c2d6465762d7333';
 const DEV_S3_SECRET_KEY = '6c6f63616c2d6465762d73332d7365637265742d6e6f742d666f722d70726f64';
+// A new project starts on the base ports; `vibecarbon up` picks an offset
+// (and rewrites S3_ENDPOINT with it) only when those are taken.
+const DEV_PORT_OFFSET_AT_CREATE = '0';
 
 function generateEnvLocal(projectName, variables) {
   // Every value-bearing line goes through formatDotenvLine (src/lib/dotenv.js):
@@ -1580,9 +1584,10 @@ ${formatDotenvLine('VITE_OBSERVABILITY_ENABLED', 'false')}
 # =============================================================================
 # Garage from docker-compose.override.yml (dev-only, never deployed). The key
 # is the one it imports at start. vibecarbon deploy overwrites every S3_* value
-# with the real bucket's. If you change DEV_S3_PORT, change S3_ENDPOINT too.
+# with the real bucket's. The port is 8333 + DEV_PORT_OFFSET unless DEV_S3_PORT
+# is set; vibecarbon up keeps S3_ENDPOINT in step when it changes the offset.
 
-${formatDotenvLine('S3_ENDPOINT', 'http://localhost:8333')}
+${formatDotenvLine('S3_ENDPOINT', devS3Endpoint({ DEV_PORT_OFFSET: DEV_PORT_OFFSET_AT_CREATE }))}
 ${formatDotenvLine('S3_REGION', 'us-east-1')}
 ${formatDotenvLine('S3_BUCKET', `${projectName}-local`)}
 ${formatDotenvLine('S3_ACCESS_KEY', DEV_S3_ACCESS_KEY)}
@@ -1594,12 +1599,13 @@ ${formatDotenvLine('S3_SECRET_KEY', DEV_S3_SECRET_KEY)}
 # Use DEV_PORT_OFFSET to shift all ports when running multiple projects.
 # Example: DEV_PORT_OFFSET=100 shifts Vite to 5273, API to 3100, etc.
 
-${formatDotenvLine('DEV_PORT_OFFSET', '0')}
+${formatDotenvLine('DEV_PORT_OFFSET', DEV_PORT_OFFSET_AT_CREATE)}
 
 # Override individual ports (takes precedence over offset):
 # DEV_VITE_PORT="5173"
 # DEV_API_PORT="3000"
 # DEV_TRAEFIK_PORT="80"
+# DEV_S3_PORT="8333"
 
 # =============================================================================
 # ENVIRONMENT

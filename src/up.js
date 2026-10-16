@@ -15,6 +15,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
 import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-project-name.js';
+import { devS3Endpoint, devS3Port } from './lib/dev-s3.js';
 import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
 import { localComposeEnv } from './lib/images.js';
 import { formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
@@ -84,6 +85,13 @@ function getProjectPorts(cwd) {
     { name: 'Vite', port: Number(getEnvValue('DEV_VITE_PORT', cwd)) || 5173 + offset },
     { name: 'API', port: Number(getEnvValue('DEV_API_PORT', cwd)) || 3000 + offset },
     { name: 'DB (PostgreSQL)', port: Number(getEnvValue('DEV_DB_PORT', cwd)) || 5432 + offset },
+    {
+      name: 'Local S3',
+      port: devS3Port({
+        DEV_S3_PORT: getEnvValue('DEV_S3_PORT', cwd),
+        DEV_PORT_OFFSET: String(offset),
+      }),
+    },
   ];
 }
 
@@ -141,7 +149,13 @@ function getOwnDockerPorts(cwd) {
  */
 async function findFreeOffset(_cwd) {
   for (let offset = 100; offset <= 500; offset += 100) {
-    const ports = [80 + offset, 5173 + offset, 3000 + offset, 5432 + offset];
+    const ports = [
+      80 + offset,
+      5173 + offset,
+      3000 + offset,
+      5432 + offset,
+      devS3Port({ DEV_PORT_OFFSET: String(offset) }),
+    ];
     const results = await Promise.all(ports.map(isPortInUse));
     if (results.every((inUse) => !inUse)) return offset;
   }
@@ -191,8 +205,33 @@ export function setPortOffset(offset, cwd) {
     content = `${content.trimEnd()}\n${viteLine}\n`;
   }
 
+  // The local S3 port moves with the offset (docker-up.js publishes
+  // DEV_S3_PORT, else 8333 + offset), so the endpoint the app and
+  // ensure-dev-bucket.js dial must move with it. Only a localhost endpoint is
+  // the dev Garage; a real bucket's endpoint is left alone, and an explicit
+  // DEV_S3_PORT still wins inside devS3Port.
+  const endpointRegex = /^S3_ENDPOINT=.*$/m;
+  const endpointLine = content.match(endpointRegex)?.[0];
+  const endpoint = endpointLine ? parseDotenv(endpointLine).S3_ENDPOINT : '';
+  if (endpoint && isLocalhostUrl(endpoint)) {
+    const next = devS3Endpoint({
+      DEV_S3_PORT: getEnvValue('DEV_S3_PORT', cwd),
+      DEV_PORT_OFFSET: String(offset),
+    });
+    content = content.replace(endpointRegex, () => formatDotenvLine('S3_ENDPOINT', next));
+  }
+
   writeFileSync(envPath, content, { mode: 0o600 });
   return true;
+}
+
+function isLocalhostUrl(value) {
+  try {
+    const { hostname } = new URL(value);
+    return hostname === 'localhost' || hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
 }
 
 /**

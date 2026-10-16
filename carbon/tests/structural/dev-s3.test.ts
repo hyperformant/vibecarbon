@@ -65,7 +65,13 @@ describe('local S3 (Garage)', () => {
   it('publishes the S3 API on localhost only, at the port the .env files name', () => {
     const apiPort = tomlValue('api_bind_addr')?.split(':').at(-1);
     expect(s3.ports).toEqual([`127.0.0.1:\${DEV_S3_PORT:-8333}:${apiPort}`]);
-    expect(read('scripts/dev-init.js')).toContain("formatDotenvLine('S3_ENDPOINT', 'http://localhost:8333')");
+    // The default is the shared base port, and the endpoint dev-init.js
+    // writes comes from the same rule (scripts/lib/dev-s3.js).
+    expect(read('scripts/lib/dev-s3.js')).toContain('export const DEV_S3_BASE_PORT = 8333;');
+    expect(read('scripts/dev-init.js')).toContain("formatDotenvLine('S3_ENDPOINT', devS3Endpoint(");
+    expect(read('scripts/docker-up.js')).toContain(
+      "DEV_S3_PORT: getPort('DEV_S3_PORT', DEV_S3_BASE_PORT, portOffset)",
+    );
   });
 
   // A bucket made through the S3 API gets a key-local alias in Garage, whose
