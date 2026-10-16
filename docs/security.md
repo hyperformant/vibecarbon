@@ -147,6 +147,8 @@ It signs the app's session cookies and auth tokens (email verification, password
    SQL
    ```
    Only roles that exist are altered. On Kubernetes, pipe the same heredoc into `kubectl exec -i -n vibecarbon <db-pod> -- psql -U postgres -v ON_ERROR_STOP=1`.
+
+   The `ALTER ROLE` statements carry the new password in plain text to the server: a superuser can see them in `pg_stat_activity` while they run, and the server log records them when `log_statement` is `ddl` or `all` (the image ships with it off). To keep the plain text off the server entirely, run psql's `\password <role>` for each role instead (interactively, `docker compose exec db psql -U postgres`): it sends a SCRAM verifier, never the password.
 3. Update `DB_PASSWORD` / `POSTGRES_PASSWORD` in `.env.local`, then `docker compose up -d` so the app, n8n and Metabase are recreated with the new value (Kubernetes: update `vibecarbon-secrets` as above and `kubectl rollout restart deployment -n vibecarbon`).
 4. Verify every service reconnects: the app, and n8n and Metabase when installed.
 
