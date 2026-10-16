@@ -20,6 +20,22 @@ pinned by digest:
   WAL archiving off the init-time temporary server, so a first boot with an
   unreachable backup bucket cannot crash (the script explains why).
 
+**Authentication inside the container.** The image keeps the official
+initdb's `pg_hba.conf`: `trust` for the local socket and for `127.0.0.1` /
+`::1`, and `scram-sha-256` for every other address. So anything running in
+the db container (or, on k8s, the db pod, which runs no other container)
+connects as superuser without a password, and everything else needs one. The
+deploy's own tooling relies on this: pg_cron's job connections (`cron.host`
+defaults to `localhost`), `wal-archive.sh`'s recovery check, and every
+`docker compose exec db psql -U postgres` / `kubectl exec statefulset/db`
+path (backup, RLS and wal-g audits, HA probes, restore), which run as root
+in the container, so peer authentication would refuse them. The app,
+add-ons and the compose-ha standby connect over the network and always
+authenticate with a password. Tightening this (peer for the socket,
+scram-sha-256 for loopback, `cron.host` on the socket) is possible but has to
+move every one of those exec paths to the `postgres` OS user first; until
+then the boundary is the container itself.
+
 Published for **linux/amd64 and linux/arm64**. Servers are amd64 only
 (`src/lib/deploy/platform.js`); the arm64 child exists solely so local
 `vibecarbon up` on an Apple Silicon machine runs Postgres natively, since local

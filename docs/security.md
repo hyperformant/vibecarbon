@@ -225,6 +225,16 @@ check or a BI query by hand, use `vibecarbon shell` (SSH to the server, then
 `psql` inside the db container). The compose-ha replication port (5433)
 travels only over the WireGuard tunnel between the two servers.
 
+**Loopback trust inside the db container.** The db image keeps the official
+Postgres `pg_hba.conf`: the local socket and `127.0.0.1`/`::1` are `trust`,
+every other address needs `scram-sha-256`. Anything already running inside
+the db container (on k8s, the db pod, which runs nothing else) is superuser
+without a password; nothing outside it is. pg_cron, the WAL archive script
+and the CLI's `docker compose exec db` / `kubectl exec statefulset/db` paths
+(backups, audits, HA probes, restore) depend on it. Treat a shell in the db
+container as database superuser, and never add a sidecar to the db pod.
+Details and what tightening it would take: `docker/postgres-walg/README.md`.
+
 ### Incident response
 
 **Suspected credential compromise**:
