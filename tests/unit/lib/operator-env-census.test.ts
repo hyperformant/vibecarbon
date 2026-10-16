@@ -92,14 +92,12 @@ const ALIAS_ALLOWLIST: Record<string, string> = {
     'passes the whole env to a child-process runner (env: process.env), a spawn bag not a read',
   'cli.js':
     'checkDbImageOverride({ env }) reads env.VIBECARBON_DB_IMAGE only, to validate it before dispatch',
-  'up.js':
-    'devStartEnv(base) is the dev:start child env bag (a spawn bag), plus the resolved db image',
   'telemetry.js':
     'injectable env for the telemetry status command; reads CI/DO_NOT_TRACK/VIBECARBON_TELEMETRY_DISABLED only',
   [join('lib', 'command.js')]:
     'spawn plumbing: gitSafeEnv/runCommand build child env bags from options.env || process.env',
   [join('lib', 'images.js')]:
-    'resolveDbImage({ env }) reads env.VIBECARBON_DB_IMAGE only (a test image ref, not a credential)',
+    'resolveDbImage({ env }) reads env.VIBECARBON_DB_IMAGE only (a test image ref, not a credential); localComposeEnv(base) is the local compose child env bag (a spawn bag) plus the resolved db image',
   [join('lib', 'operator-ip.js')]:
     'shouldAutoDetectOperatorIp({ env }) reads env.CI only (the CIDR itself goes through the reader)',
   [join('lib', 'cli', 'progress.js')]:

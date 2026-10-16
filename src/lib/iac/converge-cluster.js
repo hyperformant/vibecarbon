@@ -42,7 +42,7 @@ import * as p from '@clack/prompts';
 import { spinner } from '../cli/progress.js';
 import { perfAsync } from '../perf.js';
 import { providerIdFor } from '../providers/index.js';
-import { buildProgramConfig } from '../scale-plan.js';
+import { assertPersistedRoleTypes, buildProgramConfig } from '../scale-plan.js';
 
 /**
  * Build an abort Error whose `logLines` are the exact `p.log.error(...)` lines
@@ -101,16 +101,11 @@ export async function convergeClusterInfra({
   label = clusterEnv,
   action = 'scale',
 }) {
-  // `current*Type` are re-derived here from envConfig with the SAME formula
-  // scaleK8s uses (envConfig.<role>ServerType || (envConfig.serverType ||
-  // Provider.DEFAULT_COMPOSE_TYPE)) so buildProgramConfig's fallback slot is
-  // byte-identical to the scale path; `overrides` (the newValues slot) wins
-  // via `??` when set. `Provider` is the resolved class passed in by the
-  // caller (providerFor(envConfig) at the call site) — see the @param doc above.
-  const fallbackType = envConfig.serverType || Provider.DEFAULT_COMPOSE_TYPE;
-  const currentMasterType = envConfig.masterServerType || fallbackType;
-  const currentDbType = envConfig.dbServerType || fallbackType;
-  const currentWorkerType = envConfig.workerServerType || fallbackType;
+  // `current*Type` (below) come from currentRoleTypes, the SAME formula
+  // scaleK8s uses, so buildProgramConfig's fallback slot is byte-identical to
+  // the scale path; `overrides` (the newValues slot) wins via `??` when set.
+  // `Provider` is the resolved class passed in by the caller
+  // (providerFor(envConfig) at the call site) — see the @param doc above.
   // Normalize long-form server-type override keys to the short keys
   // buildProgramConfig reads. `scale` passes the short keys verbatim; the
   // pilot-light `failover` provisioning passes the persisted long-form spec
@@ -129,22 +124,13 @@ export async function convergeClusterInfra({
 
   // The persisted per-role types are reused verbatim for every role this call
   // does not override (scale with no `-type`, the CA worker-pool re-patch, a
-  // failover that only overrides some roles). They passed the deploy guard,
-  // but a hand edit of .vibecarbon.json after deploy would otherwise reach
-  // Pulumi unchecked, so refuse an ARM type here with the same message as a
-  // flag, before any stack is touched. vibecarbon is x86-64 only; see
-  // src/lib/deploy/platform.js.
-  for (const [key, override, persisted] of [
-    ['masterServerType', normalizedOverrides.masterType, currentMasterType],
-    ['dbServerType', normalizedOverrides.dbType, currentDbType],
-    ['workerServerType', normalizedOverrides.workerType, currentWorkerType],
-  ]) {
-    if (override != null) continue;
-    Provider.assertAmd64ServerType(
-      persisted,
-      `.vibecarbon.json ${envConfig[key] ? key : 'serverType'}`,
-    );
-  }
+  // failover that only overrides some roles): refuse an ARM one before any
+  // stack is touched (assertPersistedRoleTypes).
+  const {
+    masterType: currentMasterType,
+    dbType: currentDbType,
+    workerType: currentWorkerType,
+  } = assertPersistedRoleTypes(Provider, envConfig, normalizedOverrides);
 
   // Apply server type changes via Pulumi. Hetzner server_type is an in-place
   // resize via the provider's update path (~2 min reboot), so a legitimate

@@ -125,8 +125,10 @@ export async function runMigrationsOnOwnConnection(
     database,
     connectionTimeoutMillis: 5_000,
   });
-  await client.connect();
   try {
+    // Inside the try: a connect that fails (refused, timed out) still ends
+    // the client, so its socket and timer never outlive the failure.
+    await client.connect();
     await client.query(
       'set statement_timeout = 0; set lock_timeout = 0; set idle_in_transaction_session_timeout = 0'
     );

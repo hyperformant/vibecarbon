@@ -18,9 +18,7 @@
  * would chase the public HTTPS URL and report a running Traefik as down.
  */
 
-const isKubernetes = !!process.env.KUBERNETES_SERVICE_HOST;
-const isDocker =
-  !isKubernetes && (process.env.NODE_ENV === 'production' || process.env.DOCKER === 'true');
+import { isDocker, isKubernetes } from './runtime-env';
 
 function devTraefikPort(): number {
   const explicit = process.env.DEV_TRAEFIK_PORT;

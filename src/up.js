@@ -16,7 +16,7 @@ import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandThroughTaskLog } from './lib/command.js';
 import { releaseMovedStack, resolveComposeProjectName } from './lib/compose-project-name.js';
 import { formatDotenvLine, parseDotenv } from './lib/dotenv.js';
-import { resolveDbImage } from './lib/images.js';
+import { localComposeEnv } from './lib/images.js';
 import { formatStackPath, listVibecarbonStacks } from './lib/local-stacks.js';
 import { reclaimOrphanPorts } from './lib/orphan.js';
 import { warnAboutOrphanStacks } from './lib/orphan-stack-notice.js';
@@ -111,6 +111,7 @@ function getOwnDockerPorts(cwd) {
   try {
     const output = execFileSync('docker', ['compose', 'ps', '--format', 'json'], {
       cwd,
+      env: localComposeEnv(),
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -440,27 +441,10 @@ export async function run(args = []) {
     // manager hands the wrapper's npm_config_* dialect to this npm, which npm
     // 12 flags with `npm warn Unknown env config` on every run. Raw spawn has
     // no cleanEnv option; gitSafeEnv() is the exported form of that scrub.
-    env: gitSafeEnv(devStartEnv()),
+    env: gitSafeEnv(localComposeEnv()),
   });
 
   waitForDevTree(child);
-}
-
-/**
- * The dev:start child's environment (before the gitSafeEnv scrub): the parent env plus the db
- * image this CLI resolves, ALWAYS. Compose ranks the environment above .env
- * for interpolation, so the CLI decides locally just as the deploy bundle
- * does on a server: a project .env that lacks the pair (the carbon/ source
- * tree's dev-init writes none) still starts, and a dev-channel ref a past
- * `create` wrote while VIBECARBON_DB_IMAGE was set is never run silently once
- * the variable is gone. While it is set, resolveDbImage warns.
- *
- * @param {Record<string, string | undefined>} [base]
- * @returns {Record<string, string | undefined>}
- */
-export function devStartEnv(base = process.env) {
-  const { image, tag } = resolveDbImage({ env: base });
-  return { ...base, DB_IMAGE: image, DB_IMAGE_TAG: tag };
 }
 
 /**

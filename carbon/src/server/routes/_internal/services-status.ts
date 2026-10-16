@@ -9,6 +9,7 @@ import { type Pingable, pingDb } from '../../db/client';
 import { dbErrorForLog } from '../../db/errors';
 import { fetchContainerLogs, listProjectContainers } from '../../lib/docker-api';
 import { logger } from '../../lib/logger';
+import { isDocker, isKubernetes } from '../../lib/runtime-env';
 import { probeTraefik, TRAEFIK_HEALTH_URL } from '../../lib/traefik-probe';
 import { checkSuperAdmin } from '../../middleware/requireSuperAdmin';
 
@@ -44,11 +45,6 @@ interface ServiceConfig {
   acceptCodes?: number[]; // HTTP status codes considered healthy (default: 200-399)
   k8sUnavailable?: boolean; // Service cannot be checked in Kubernetes
 }
-
-// Detect runtime environment
-const isKubernetes = !!process.env.KUBERNETES_SERVICE_HOST;
-const isDocker =
-  !isKubernetes && (process.env.NODE_ENV === 'production' || process.env.DOCKER === 'true');
 
 // The app reaches the Docker API through the read-only socket proxy in a
 // production compose deployment (docker-compose.prod.yml sets this). Local

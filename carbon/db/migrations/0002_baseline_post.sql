@@ -15,7 +15,8 @@
 -- an optional service creates (metabase gets default SELECT on public
 -- tables), so only the owner and the connection role behind adminDb can read
 -- them. Postgres' predefined pg_* roles are operator grants and are left
--- alone.
+-- alone, and so is the role running this migration (current_user): it is
+-- the owner or the adminDb role, and must keep what it was granted.
 REVOKE ALL ON TABLE "user", session, account, verification, two_factor FROM PUBLIC;
 --> statement-breakpoint
 DO $$
@@ -25,6 +26,7 @@ BEGIN
   FOR r IN
     SELECT rolname FROM pg_catalog.pg_roles
     WHERE NOT rolsuper AND NOT rolbypassrls AND rolname NOT LIKE 'pg\_%'
+      AND rolname <> current_user
   LOOP
     EXECUTE format(
       'REVOKE ALL ON TABLE public."user", public.session, public.account, public.verification, public.two_factor FROM %I',

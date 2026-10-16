@@ -1,8 +1,8 @@
 /**
- * Compose half of `vibecarbon up`'s db image contract (unit half:
+ * Compose half of the local db image contract (up, down, reset) (unit half:
  * tests/unit/cli/up-db-image-env.test.ts). The db service's real `image:` line
  * from carbon/docker-compose.yml is resolved by `docker compose config` (no
- * pull) with the environment devStartEnv() builds, against a .env that
+ * pull) with the environment localComposeEnv() builds, against a .env that
  * either lacks the pair or holds a stale dev-channel ref. The environment
  * must win both times: that precedence is what makes the CLI, not the .env,
  * decide which db image runs locally.
@@ -12,8 +12,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DB_IMAGE, DB_IMAGE_TAG, DEV_DB_IMAGE } from '../../../src/lib/images.js';
-import { devStartEnv } from '../../../src/up.js';
+import { DB_IMAGE, DB_IMAGE_TAG, DEV_DB_IMAGE, localComposeEnv } from '../../../src/lib/images.js';
 
 // Skipped by default like the other docker tests; run explicitly via
 // `DOCKER_INTEGRATION=true pnpm test:docker` (the script sets the variable).
@@ -40,7 +39,7 @@ describeDocker('docker compose runs the db image up resolves, not the .env one',
       {
         cwd: dir,
         encoding: 'utf-8',
-        env: devStartEnv({
+        env: localComposeEnv({
           PATH: process.env.PATH,
           HOME: process.env.HOME,
           ...base,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Arch audit 2026-10-15 (F2, F4): `scale` must refuse an ARM server type
 // whether it arrives as `-type` or is reused from .vibecarbon.json with no
@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // must stop at process.exit(1) before any provider or Pulumi work.
 
 const errors: string[] = [];
+const prompted = vi.hoisted(() => ({ calls: [] as string[] }));
 vi.mock('@clack/prompts', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -15,6 +16,14 @@ vi.mock('@clack/prompts', async (orig) => {
     note() {},
     outro() {},
     spinner: () => ({ start() {}, stop() {}, message() {} }),
+    multiselect: async () => {
+      prompted.calls.push('multiselect');
+      return [];
+    },
+    select: async () => {
+      prompted.calls.push('select');
+      return undefined;
+    },
     log: {
       info() {},
       warn() {},
@@ -50,12 +59,17 @@ class ExitError extends Error {
   }
 }
 
+let exitSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   errors.length = 0;
+  prompted.calls.length = 0;
   vi.mocked(convergeClusterInfra).mockClear();
-  vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+  exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
     throw new ExitError(code);
   }) as never);
+});
+afterEach(() => {
+  exitSpy.mockRestore();
 });
 
 function project(env: Record<string, unknown>) {
@@ -125,5 +139,37 @@ describe('scale refuses ARM server types', () => {
     expect(errors.join('\n')).toContain(
       "-type: 'STANDARD2-A2C-8G' is an ARM (aarch64) Scaleway server type.",
     );
+  });
+
+  it('k8s with -type but no -y still refuses an ARM type persisted for the other roles, before any prompt', async () => {
+    projectConfig = project({
+      provider: 'hetzner',
+      deployMode: 'kubernetes',
+      region: 'fsn1',
+      serverType: 'cpx22',
+      dbServerType: 'cax21',
+    });
+    // Without -y there is no scripted plan: the multiselect may resize any
+    // subset, so every persisted role is checked up front.
+    await expect(run(['prod', '-type', 'cpx32'])).rejects.toThrow(ExitError);
+    expect(errors.join('\n')).toContain(
+      ".vibecarbon.json dbServerType: 'cax21' is an ARM (aarch64) Hetzner Cloud server type.",
+    );
+    expect(prompted.calls).toEqual([]);
+    expect(convergeClusterInfra).not.toHaveBeenCalled();
+  });
+
+  it('k8s -y -type resizes every role, so persisted ARM types are not in the way', async () => {
+    projectConfig = project({
+      provider: 'hetzner',
+      deployMode: 'kubernetes',
+      region: 'fsn1',
+      serverType: 'cpx22',
+      workerServerType: 'cax21',
+    });
+    // Past the guard the run asks for an API token (mocked away here as a
+    // refusal); what matters is that no ARM refusal was printed.
+    await run(['prod', '-y', '-type', 'cpx32']).catch(() => {});
+    expect(errors.join('\n')).not.toContain('is an ARM');
   });
 });

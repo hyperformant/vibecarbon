@@ -122,6 +122,25 @@ export function resolveDbImage({ env = process.env, warn = warnOnce } = {}) {
   return { ...split, ref: raw, override: true };
 }
 
+/**
+ * The environment for every LOCAL `docker compose` run (up, down, reset, the
+ * `compose ps` probes): `base` plus the db image this CLI resolves, ALWAYS.
+ * The compose file requires DB_IMAGE/DB_IMAGE_TAG (`:?`), and compose ranks
+ * the environment above .env for interpolation, so the CLI decides locally
+ * just as the deploy bundle does on a server: a project .env that lacks the
+ * pair (the carbon/ source tree's dev-init writes none) still works, and a
+ * dev-channel ref a past `create` wrote while VIBECARBON_DB_IMAGE was set is
+ * never run silently once the variable is gone. While it is set,
+ * resolveDbImage warns.
+ *
+ * @param {Record<string, string | undefined>} [base]
+ * @returns {Record<string, string | undefined>}
+ */
+export function localComposeEnv(base = process.env) {
+  const { image, tag } = resolveDbImage({ env: base });
+  return { ...base, DB_IMAGE: image, DB_IMAGE_TAG: tag };
+}
+
 // Single source of truth for the pre-published carbon-autoscaler image
 // (src/autoscaler/). Built once per version by
 // .github/workflows/publish-images.yml; pulled (never

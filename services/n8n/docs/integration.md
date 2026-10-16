@@ -59,11 +59,16 @@ SELECT * FROM users WHERE created_at > NOW() - INTERVAL '1 day';
 
 ### Example 2: Call your app's API
 
-Use the **HTTP Request** node:
+Use the **HTTP Request** node. `/api/todos` is a placeholder: replace it with a
+route your app actually has. Your app's API routes sign people in with a
+session cookie, which n8n doesn't have, so give n8n a route of its own that
+checks who is calling, for example one under `/api/webhooks/` that compares a
+shared secret header against a value in your app's `.env.local` (keep the same
+secret in an n8n credential). Never open an unauthenticated route for this.
 
 ```
 Method: POST
-URL: http://app:3000/api/todos
+URL: http://app:3000/api/todos   (placeholder: your route here)
 
 Headers:
 - Content-Type: application/json

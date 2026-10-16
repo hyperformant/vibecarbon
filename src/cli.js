@@ -69,16 +69,21 @@ export function checkPlatform(platform = process.platform) {
  * A malformed VIBECARBON_DB_IMAGE stops the CLI before any command runs, with
  * one line saying what is wrong and how to fix it, instead of a throw from
  * deep inside create/upgrade/deploy. A good one routes the resolver's
- * "using dev db image" warning through the clack logger.
+ * "using dev db image" warning through the clack logger. All of it goes to
+ * stderr: it is a diagnostic, and stdout belongs to the command (a `status`
+ * or `-dry` run piped into a file must not carry it). main() calls this
+ * after top-level `-h`/`-v` and skips it for a command's own `-h`/`-v`, so
+ * help and version always print.
  *
  * @param {Record<string, string | undefined>} [env]
  */
 export function checkDbImageOverride(env = process.env) {
-  setDbImageWarningSink((msg) => p.log.warn(msg));
+  const toStderr = { output: process.stderr };
+  setDbImageWarningSink((msg) => p.log.warn(msg, toStderr));
   const problem = dbImageOverrideProblem(env);
   if (!problem) return;
-  p.log.error(problem);
-  p.log.info('fix the ref, or unset VIBECARBON_DB_IMAGE to use the release db image');
+  p.log.error(problem, toStderr);
+  p.log.info('fix the ref, or unset VIBECARBON_DB_IMAGE to use the release db image', toStderr);
   process.exit(1);
 }
 
@@ -205,7 +210,6 @@ function showVersion() {
 async function main() {
   checkPlatform();
   checkNodeVersion();
-  checkDbImageOverride();
 
   // Fold operator-secret provider credentials (Hetzner/DO/Cloudflare tokens,
   // S3/Spaces keys) from this project's .env.local into process.env, so
@@ -242,11 +246,15 @@ async function main() {
     process.exit(0);
   }
 
+  // After help/version: a bad VIBECARBON_DB_IMAGE must never hide them, at
+  // the top level or for one command (`vibecarbon up -h`).
+  const subcommandArgs = args.slice(1);
+  if (!subcommandArgs.includes('-h') && !subcommandArgs.includes('-v')) checkDbImageOverride();
+
   // Route to subcommands. Every command's total wall-clock is logged as
   // `[perf] cli.<command>.total <ms>ms` when VIBECARBON_PERF=1 is set — the
   // e2e runner forces it on so we always have total + sub-step
   // breakdowns per CLI invocation.
-  const subcommandArgs = args.slice(1);
 
   // Central license gate chokepoint: any command classified 'paid' in
   // COMMAND_GATES is gated HERE, pre-dispatch, so it can never ship

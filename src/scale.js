@@ -61,7 +61,7 @@ import { runProjectAssignment } from './lib/project-assignment.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerFor, providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { pollUntil } from './lib/retry.js';
-import { planK8sScaleChanges } from './lib/scale-plan.js';
+import { assertPersistedRoleTypes, planK8sScaleChanges } from './lib/scale-plan.js';
 import { buildComposeTypeOptions, buildSimpleTypeOptions } from './lib/server-types.js';
 import { sshRun, sshRunScript } from './lib/ssh.js';
 
@@ -1108,33 +1108,24 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   // placeholder to Pulumi: doing so triggered ~serverType against the
   // already-provisioned `cx23` master/database servers and Hetzner replied
   // 'server type — not found'. `Provider` was resolved once above.
-  const fallbackType = envConfig.serverType || Provider.DEFAULT_COMPOSE_TYPE;
-  const currentMasterType = envConfig.masterServerType || fallbackType;
-  const currentDbType = envConfig.dbServerType || fallbackType;
-  const currentWorkerType = envConfig.workerServerType || fallbackType;
-
-  // With no `-type`, the persisted per-role types above are what converge and
-  // the CA worker-pool re-patch reuse. They passed the deploy guard, but a
-  // hand edit of .vibecarbon.json after deploy would otherwise slip an ARM
-  // type through, so refuse it here with the same message `-type` gets.
-  // (`-type` already passed the guard in scale(); convergeClusterInfra also
-  // re-checks whichever persisted roles a run leaves un-overridden.)
-  if (!parsed.type) {
-    for (const [key, value] of [
-      ['masterServerType', currentMasterType],
-      ['dbServerType', currentDbType],
-      ['workerServerType', currentWorkerType],
-    ]) {
-      try {
-        Provider.assertAmd64ServerType(
-          value,
-          `.vibecarbon.json ${envConfig[key] ? key : 'serverType'}`,
-        );
-      } catch (err) {
-        p.log.error(err.message);
-        process.exit(1);
-      }
-    }
+  //
+  // Every role the scripted plan does not resize keeps its persisted type,
+  // which converge and the CA worker-pool re-patch reuse. Refuse an ARM one
+  // here, before any prompt, with the same message `-type` gets: with no
+  // scripted plan (no `-y`, or `-type` without `-y`) that is every role.
+  // (`-type` itself already passed the guard in scale(); convergeClusterInfra
+  // re-checks whichever roles a run leaves un-overridden.)
+  const plan = planK8sScaleChanges(parsed, envConfig);
+  let currentMasterType, currentDbType, currentWorkerType;
+  try {
+    ({
+      masterType: currentMasterType,
+      dbType: currentDbType,
+      workerType: currentWorkerType,
+    } = assertPersistedRoleTypes(Provider, envConfig, plan?.newValues));
+  } catch (err) {
+    p.log.error(err.message);
+    process.exit(1);
   }
 
   // 3. Display current config
@@ -1167,7 +1158,6 @@ async function scaleK8s(environment, envConfig, projectConfig, parsed) {
   // the branch rationale (in-place resize vs. master-replace guard, phase-8
   // bounds TODO). The user-facing logging stays here (side-effectful).
   let changes;
-  const plan = planK8sScaleChanges(parsed, envConfig);
   if (plan) {
     changes = plan.changes;
     Object.assign(newValues, plan.newValues);

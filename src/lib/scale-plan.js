@@ -14,6 +14,57 @@
 import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './deploy/utils.js';
 
 /**
+ * The per-role server types an existing k8s environment runs, from
+ * .vibecarbon.json: each role's own type, else the unified `serverType`, else
+ * the provider's default. `scale` and `convergeClusterInfra` both reuse these
+ * for every role a run does not override, so the formula lives once here.
+ *
+ * @param {{ DEFAULT_COMPOSE_TYPE: string }} Provider
+ * @param {Record<string, any>} envConfig
+ * @returns {{ masterType: string, dbType: string, workerType: string }}
+ */
+export function currentRoleTypes(Provider, envConfig) {
+  const fallbackType = envConfig.serverType || Provider.DEFAULT_COMPOSE_TYPE;
+  return {
+    masterType: envConfig.masterServerType || fallbackType,
+    dbType: envConfig.dbServerType || fallbackType,
+    workerType: envConfig.workerServerType || fallbackType,
+  };
+}
+
+/** Short override key (scale's newValues) → the .vibecarbon.json key it replaces. */
+const ROLE_TYPE_KEYS = /** @type {const} */ ([
+  ['masterType', 'masterServerType'],
+  ['dbType', 'dbServerType'],
+  ['workerType', 'workerServerType'],
+]);
+
+/**
+ * Refuse an ARM type persisted for any role `overrides` does not replace,
+ * with the same guard message a flag gets. Persisted types passed the deploy
+ * guard, but a hand edit of .vibecarbon.json afterwards would otherwise reach
+ * Pulumi unchecked. vibecarbon is x86-64 only; see src/lib/deploy/platform.js.
+ * Throws the provider's guard error; callers in an interactive flow print it
+ * with p.log.error and exit 1.
+ *
+ * @param {{ DEFAULT_COMPOSE_TYPE: string, assertAmd64ServerType: (type: string, label: string) => void }} Provider
+ * @param {Record<string, any>} envConfig
+ * @param {{ masterType?: string|null, dbType?: string|null, workerType?: string|null }} [overrides]
+ * @returns {{ masterType: string, dbType: string, workerType: string }} the current types
+ */
+export function assertPersistedRoleTypes(Provider, envConfig, overrides = {}) {
+  const current = currentRoleTypes(Provider, envConfig);
+  for (const [short, long] of ROLE_TYPE_KEYS) {
+    if (overrides[short] != null) continue;
+    Provider.assertAmd64ServerType(
+      current[short],
+      `.vibecarbon.json ${envConfig[long] ? long : 'serverType'}`,
+    );
+  }
+  return current;
+}
+
+/**
  * Resolve the non-interactive scale plan from parsed flags.
  *
  * Returns `{ changes, newValues }` for the two scripted branches:

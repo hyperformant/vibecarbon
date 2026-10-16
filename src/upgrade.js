@@ -32,7 +32,7 @@ import { c } from './lib/colors.js';
 import { gitSafeEnv, runCommandAsync } from './lib/command.js';
 import { resolveDisplayName } from './lib/display-name.js';
 import { parseDotenv } from './lib/dotenv.js';
-import { resolveDbImage } from './lib/images.js';
+import { localComposeEnv, resolveDbImage } from './lib/images.js';
 import { mergePackageJson } from './lib/merge-package-json.js';
 import {
   adaptDockerfileForPackageManager,
@@ -387,6 +387,7 @@ async function main(cliArgs) {
     const { execFileSync } = await import('node:child_process');
     const ps = execFileSync('docker', ['compose', 'ps', '--format', 'json'], {
       cwd,
+      env: localComposeEnv(),
       encoding: 'utf-8',
       timeout: 10000,
     }).trim();

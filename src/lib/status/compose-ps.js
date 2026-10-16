@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { localComposeEnv } from '../images.js';
 
 /**
  * Which services of the project's compose stack are running, from one
@@ -18,6 +19,9 @@ export function composeRunningServices(cwd, { execFile = execFileSync, timeoutMs
   try {
     output = execFile('docker', ['compose', 'ps', '--format', 'json'], {
       cwd,
+      // `compose ps` interpolates the compose file, which requires the db
+      // image pair (see localComposeEnv).
+      env: localComposeEnv(),
       encoding: 'utf-8',
       timeout: timeoutMs,
       stdio: ['pipe', 'pipe', 'pipe'],

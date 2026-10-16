@@ -30,6 +30,12 @@ export interface ExecStubSpec {
   matches?: RegExp;
   /** Default response if the matcher fires (or there's no matcher). */
   respond: { stdout?: string; stderr?: string; exitCode?: number };
+  /**
+   * Environment variables to record on every call to this command (the
+   * union across the command's specs), so a test can assert what the CLI
+   * handed its child. Unset variables are recorded as absent.
+   */
+  recordEnv?: string[];
 }
 
 export interface ExecCall {
@@ -37,6 +43,8 @@ export interface ExecCall {
   argv: string[];
   /** ISO timestamp of the call. */
   ts: string;
+  /** The `recordEnv` variables as the call saw them. */
+  env?: Record<string, string>;
 }
 
 export interface ExecStubs {
@@ -115,6 +123,7 @@ function renderWrapperScript(command: string, specs: ExecStubSpec[], logPath: st
       exitCode: s.respond.exitCode ?? 0,
     })),
   );
+  const recordEnv = [...new Set(specs.flatMap((s) => s.recordEnv ?? []))];
   return [
     '#!/usr/bin/env node',
     '"use strict";',
@@ -122,9 +131,11 @@ function renderWrapperScript(command: string, specs: ExecStubSpec[], logPath: st
     `const command = ${JSON.stringify(command)};`,
     `const logPath = ${JSON.stringify(logPath)};`,
     `const specs = ${specsJson};`,
+    `const recordEnv = ${JSON.stringify(recordEnv)};`,
     'const argv = process.argv.slice(2);',
     'const joined = argv.join(" ");',
     'const call = { command, argv, ts: new Date().toISOString() };',
+    'if (recordEnv.length) call.env = Object.fromEntries(recordEnv.filter((k) => k in process.env).map((k) => [k, process.env[k]]));',
     'fs.appendFileSync(logPath, JSON.stringify(call) + "\\n");',
     'for (const spec of specs) {',
     '  let match = true;',
