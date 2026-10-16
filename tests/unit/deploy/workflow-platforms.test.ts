@@ -214,6 +214,12 @@ describe('the db image builds natively per arch and merges into one tag', () => 
     expect(checkAt, 'no config-digest check after the push').toBeGreaterThan(pushAt);
     const recordAt = steps.findIndex((s) => /digests\/\$ARCH/.test(s.run ?? ''));
     expect(recordAt, 'the digest is recorded only once it is proven').toBeGreaterThan(checkAt);
+    // One emptiness guard per digest, each its own exit: `test -n a && test
+    // -n b` does not stop `set -e`, and two empty digests compare equal.
+    const check = steps[checkAt].run ?? '';
+    expect(check).toMatch(/if \[ -z "\$SMOKED" \]; then[\s\S]*?exit 1/);
+    expect(check).toMatch(/if \[ -z "\$PUSHED" \]; then[\s\S]*?exit 1/);
+    expect(check).not.toMatch(/test -n "\$\w+" &&/);
     expect(steps[checkAt].env).toEqual({
       SMOKED: expr("fromJSON(steps.load.outputs.metadata)['containerimage.config.digest']"),
       PUSHED: expr("fromJSON(steps.push.outputs.metadata)['containerimage.config.digest']"),

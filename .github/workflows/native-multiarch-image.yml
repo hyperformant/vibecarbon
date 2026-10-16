@@ -122,7 +122,16 @@ jobs:
       - name: Check the pushed image is the smoke-tested one
         run: |
           set -euo pipefail
-          test -n "$SMOKED" && test -n "$PUSHED"
+          # One guard each: `test a && test b` would not stop `set -e` on the
+          # first, and two empty digests would then compare equal.
+          if [ -z "$SMOKED" ]; then
+            echo "::error::the smoke build reported no image config digest; nothing is tagged" >&2
+            exit 1
+          fi
+          if [ -z "$PUSHED" ]; then
+            echo "::error::the push build reported no image config digest; nothing is tagged" >&2
+            exit 1
+          fi
           if [ "$SMOKED" != "$PUSHED" ]; then
             echo "::error::pushed config $PUSHED is not the smoke-tested $SMOKED; nothing is tagged" >&2
             exit 1
