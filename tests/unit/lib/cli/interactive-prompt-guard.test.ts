@@ -36,7 +36,10 @@ const clackMock = vi.hoisted(() => ({
   log: { info: vi.fn(), warn: vi.fn(), success: vi.fn(), error: vi.fn() },
 }));
 vi.mock('@clack/prompts', () => clackMock);
-vi.mock('../../../../src/lib/project.js', () => ({ setEnvVar: vi.fn() }));
+vi.mock('../../../../src/lib/project.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../src/lib/project.js')>()),
+  setEnvVar: vi.fn(),
+}));
 
 const SRC_LIB = fileURLToPath(new URL('../../../../src/lib/', import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));

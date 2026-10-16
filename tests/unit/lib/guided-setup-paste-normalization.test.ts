@@ -175,7 +175,7 @@ describe('guided setups normalize an accepted paste before verifying, exporting 
 
     const result = await getS3Credentials('my-project', { force: true, save: false });
 
-    expect(result).toEqual({ accessKey: 'AK-fresh-1234567', secretKey: 'SK-fresh-1234567' });
+    expect(result).toMatchObject({ accessKey: 'AK-fresh-1234567', secretKey: 'SK-fresh-1234567' });
     expect(process.env.HETZNER_ACCESS_KEY).toBe('AK-fresh-1234567');
     expect(process.env.HETZNER_SECRET_KEY).toBe('SK-fresh-1234567');
   });

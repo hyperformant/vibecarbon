@@ -26,7 +26,14 @@ vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/cli/tty-guard.js', () => ({ assertInteractiveStdin: vi.fn() }));
 
 const setEnvVarMock = vi.hoisted(() => vi.fn());
-vi.mock('../../../src/lib/project.js', () => ({ setEnvVar: setEnvVarMock }));
+vi.mock('../../../src/lib/project.js', () => ({
+  setEnvVar: setEnvVarMock,
+  describeCredentialSource: (keys: string[]) => ({
+    source: 'shell',
+    label: `your shell environment (${keys.join(', ')})`,
+    where: 'your shell environment',
+  }),
+}));
 
 const fetchMock = vi.hoisted(() => vi.fn());
 vi.stubGlobal('fetch', fetchMock);
@@ -291,7 +298,11 @@ describe('getS3Credentials (per-subscription keys + cluster)', () => {
 
     const result = await getS3Credentials('my-project');
 
-    expect(result).toEqual({ accessKey: 'AK123456789', secretKey: 'SK987654321', region: 'ewr1' });
+    expect(result).toMatchObject({
+      accessKey: 'AK123456789',
+      secretKey: 'SK987654321',
+      region: 'ewr1',
+    });
     expect(clackMock.text).not.toHaveBeenCalled();
     expect(clackMock.log.warn).not.toHaveBeenCalled();
   });
@@ -330,6 +341,7 @@ describe('getS3Credentials (per-subscription keys + cluster)', () => {
       accessKey: 'AK123456789',
       secretKey: 'SK987654321',
       region: 'sjc1',
+      source: 'what you pasted',
     });
     expect(clackMock.text).toHaveBeenCalledTimes(2);
   });

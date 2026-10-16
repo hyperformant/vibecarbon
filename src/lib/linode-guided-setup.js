@@ -19,8 +19,13 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import {
+  dotenvPromptProblem,
+  normalizeOperatorValue,
+  pastedKeyShapeProblem,
+  readOperatorVar,
+} from './operator-env.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.linode.com/v4';
 
@@ -165,13 +170,17 @@ export async function getApiToken(projectName, options = {}) {
       warnIfBadTokenFormat(envToken);
       const check = await validateLinodeToken(envToken);
       if (!check.valid) {
-        p.log.warn(`LINODE_API_TOKEN environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `LINODE_API_TOKEN from ${describeCredentialSource(['LINODE_API_TOKEN']).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Linode API to verify token, proceeding with saved token');
         }
-        p.log.info('✓ Using Linode API token from LINODE_API_TOKEN environment variable');
+        p.log.info(
+          `✓ Using Linode API token from ${describeCredentialSource(['LINODE_API_TOKEN']).label}`,
+        );
         return envToken;
       }
     }
@@ -247,15 +256,16 @@ export async function getApiToken(projectName, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     const envAccessKey = readOperatorVar('LINODE_ACCESS_KEY').value;
     const envSecretKey = readOperatorVar('LINODE_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
-      p.log.info('✓ Using Object Storage credentials from environment variables');
-      return { accessKey: envAccessKey, secretKey: envSecretKey };
+      const from = describeCredentialSource(['LINODE_ACCESS_KEY', 'LINODE_SECRET_KEY']);
+      p.log.info(`✓ Using Object Storage credentials from ${from.label}`);
+      return { accessKey: envAccessKey, secretKey: envSecretKey, source: from.label };
     }
   }
 
@@ -275,7 +285,9 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return dotenvPromptProblem('LINODE_ACCESS_KEY', v);
+      return (
+        pastedKeyShapeProblem('LINODE_ACCESS_KEY', v) ?? dotenvPromptProblem('LINODE_ACCESS_KEY', v)
+      );
     },
   });
 
@@ -287,7 +299,9 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return dotenvPromptProblem('LINODE_SECRET_KEY', v);
+      return (
+        pastedKeyShapeProblem('LINODE_SECRET_KEY', v) ?? dotenvPromptProblem('LINODE_SECRET_KEY', v)
+      );
     },
   });
 
@@ -311,12 +325,23 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.LINODE_ACCESS_KEY = accessKey;
   process.env.LINODE_SECRET_KEY = secretKey;
 
+  const keys = {
+    LINODE_ACCESS_KEY: accessKey,
+    LINODE_SECRET_KEY: secretKey,
+  };
+  // deferSave: the caller verifies the keys against S3 first and calls
+  // save() only once they pass, so a rejected pair is never written.
+  if (deferSave) {
+    return {
+      accessKey,
+      secretKey,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
   if (save) {
-    await saveIfWanted({
-      LINODE_ACCESS_KEY: accessKey,
-      LINODE_SECRET_KEY: secretKey,
-    });
+    await saveIfWanted(keys);
   }
 
-  return { accessKey, secretKey };
+  return { accessKey, secretKey, source: 'what you pasted' };
 }

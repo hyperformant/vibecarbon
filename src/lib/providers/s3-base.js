@@ -65,6 +65,74 @@ function isTransientS3Error(error) {
   return false;
 }
 
+// Connection and socket-idle bounds for every S3 client this module builds.
+// The SDK's Node handler has none by default, so an endpoint that accepts the
+// TCP connection and then goes quiet would hold a call forever.
+const S3_HTTP_TIMEOUTS = { connectionTimeout: 10_000, requestTimeout: 60_000 };
+
+// S3 error codes that mean "these keys are wrong or not allowed", translated
+// to plain words. Keyed by the code S3 puts in the error name. The code
+// itself stays in the line so an operator can search for it.
+const S3_KEY_PROBLEMS = {
+  InvalidAccessKeyId:
+    "the access key isn't recognized, so it was mistyped, deleted, or belongs to another project",
+  SignatureDoesNotMatch:
+    "the secret key doesn't match the access key, so it was mistyped or belongs to another key pair",
+  AccessDenied:
+    "these keys aren't allowed to do this, so check that they have full Object Storage access",
+};
+
+/** True when an S3 error says the credentials themselves are the problem. */
+export function isS3KeyProblem(error) {
+  return Boolean(error && Object.hasOwn(S3_KEY_PROBLEMS, error.name));
+}
+
+/**
+ * One readable line for an S3 error: plain words first, the S3 code in
+ * parentheses. Never a multi-line SDK dump.
+ * @param {Error & {name?: string, Code?: string, $metadata?: {httpStatusCode?: number}}} error
+ * @param {{endpoint?: string}} [opts]
+ * @returns {string}
+ */
+export function describeS3Error(error, { endpoint } = {}) {
+  if (!error) return 'unknown S3 error';
+  const name = error.name || error.Code || 'Error';
+  if (Object.hasOwn(S3_KEY_PROBLEMS, name)) return `${S3_KEY_PROBLEMS[name]} (${name})`;
+  if (
+    /TimeoutError|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET/.test(
+      `${name} ${error.message ?? ''}`,
+    )
+  ) {
+    return `no answer from ${endpoint ?? 'the storage endpoint'}, so check your network and that the region is right (${name})`;
+  }
+  const first = String(error.message ?? '')
+    .split('\n')[0]
+    .trim();
+  const status = error.$metadata?.httpStatusCode;
+  if (first && name === 'Error') return first;
+  if (first && first !== name) return `${name}: ${first}`;
+  return status ? `${name} (HTTP ${status})` : name;
+}
+
+/**
+ * The one line a failed S3 setup step prints before the deploy exits: the
+ * cause in plain words, the endpoint, and where the keys came from, so a
+ * stale or other-project key is obvious without opening the log.
+ * @param {Error} error
+ * @param {{endpoint?: string, source?: string}} ctx
+ * @returns {string}
+ */
+export function formatS3SetupFailure(error, { endpoint, source } = {}) {
+  const cause = describeS3Error(error, { endpoint });
+  const where = [endpoint && `endpoint ${endpoint}`, source && `keys from ${source}`]
+    .filter(Boolean)
+    .join(', ');
+  const next = isS3KeyProblem(error)
+    ? ' Fix the keys and deploy again; nothing was provisioned yet.'
+    : '';
+  return `S3 setup failed: ${cause}${where ? ` (${where})` : ''}.${next}`;
+}
+
 export class S3CompatibleProvider {
   /**
    * Create a new S3-compatible provider instance.
@@ -121,10 +189,7 @@ export class S3CompatibleProvider {
           secretAccessKey: this.secretAccessKey,
         },
         maxAttempts: 3,
-        requestHandler: {
-          connectionTimeout: 10_000,
-          requestTimeout: 60_000,
-        },
+        requestHandler: { ...S3_HTTP_TIMEOUTS },
       });
     }
     return this._client;
@@ -199,22 +264,12 @@ export class S3CompatibleProvider {
         }
       }
     }
-    if (lastError.name === 'InvalidAccessKeyId') {
-      return { valid: false, error: 'Invalid Access Key ID' };
-    }
-    if (lastError.name === 'SignatureDoesNotMatch') {
-      return { valid: false, error: 'Invalid Secret Key' };
-    }
-    if (lastError.name === 'AccessDenied') {
-      return { valid: false, error: 'Access denied. Check credentials permissions.' };
-    }
+    const rejected = isS3KeyProblem(lastError);
     return {
       valid: false,
-      error:
-        lastError.message ||
-        lastError.Code ||
-        lastError.name ||
-        `S3 error (HTTP ${lastError.$metadata?.httpStatusCode || 'unknown'})`,
+      rejected,
+      code: lastError.name || lastError.Code || null,
+      error: describeS3Error(lastError, { endpoint: this.endpoint }),
     };
   }
 
@@ -263,6 +318,24 @@ export class S3CompatibleProvider {
       const status = error.$metadata?.httpStatusCode;
       if (error.name === 'NotFound' || status === 404) return false;
       if (status === 403) {
+        // A HEAD response has no body, so a 403 here carries no error code:
+        // it is either a name another account owns OR keys S3 rejects
+        // outright. Ask a question whose answer does carry a code. Wrong keys
+        // were reported as "owned by another account. Try a different project
+        // name" (excitingai, 2026-10-16), which sent the operator after the
+        // wrong fix.
+        try {
+          await this._send(new ListBucketsCommand({}), { maxAttempts: 1 });
+        } catch (listError) {
+          if (isS3KeyProblem(listError)) {
+            const keyError = new Error(
+              `S3 rejected these keys: ${describeS3Error(listError, { endpoint: this.endpoint })}`,
+            );
+            keyError.name = listError.name;
+            keyError.keyProblem = true;
+            throw keyError;
+          }
+        }
         throw new Error(
           `Bucket "${bucketName}" exists but is owned by another account. Try a different project name.`,
         );
@@ -363,11 +436,47 @@ export class S3CompatibleProvider {
             accessKeyId: this.accessKeyId,
             secretAccessKey: this.secretAccessKey,
           },
+          // Same socket bounds as getClient: without them a region endpoint
+          // that accepts the connection and never answers stalls this walk
+          // (and the createBucket that called it) with no end.
+          requestHandler: { ...S3_HTTP_TIMEOUTS },
         });
         await client.send(new HeadBucketCommand({ Bucket: bucketName }));
         return region;
       } catch {
         // Not in this region or not accessible — try next
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Strict twin of findBucketRegion for decisions that treat "missing" as
+   * proof: asks every region of this store whether it holds the bucket, and
+   * returns null ONLY when every region answered not-found. findBucketRegion
+   * swallows every per-region failure, so an unreachable store reads as
+   * "nowhere"; this throws instead, so a caller never mistakes silence for
+   * absence.
+   * @param {string} bucketName
+   * @returns {Promise<string|null>} the region holding the bucket, or null
+   */
+  async locateBucket(bucketName) {
+    for (const [region, endpoint] of Object.entries(this.constructor.ENDPOINTS)) {
+      const client = new S3Client({
+        region: this.constructor.S3_SIGNING_REGION ?? region,
+        endpoint,
+        forcePathStyle: true,
+        credentials: { accessKeyId: this.accessKeyId, secretAccessKey: this.secretAccessKey },
+        requestHandler: { ...S3_HTTP_TIMEOUTS },
+      });
+      try {
+        await client.send(new HeadBucketCommand({ Bucket: bucketName }));
+        return region;
+      } catch (error) {
+        const status = error?.$metadata?.httpStatusCode;
+        if (error?.name === 'NotFound' || error?.name === 'NoSuchBucket' || status === 404)
+          continue;
+        throw error;
       }
     }
     return null;

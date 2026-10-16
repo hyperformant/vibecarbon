@@ -22,7 +22,7 @@ import { verifyToken } from './cloudflare-dns.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
 import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 
 /**
  * Display improved visual guide for API token creation.
@@ -104,13 +104,17 @@ export async function getApiToken(projectName, options = {}) {
     if (envToken) {
       const check = await verifyToken(envToken);
       if (!check.valid) {
-        p.log.warn(`CLOUDFLARE_API_TOKEN environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `CLOUDFLARE_API_TOKEN from ${describeCredentialSource(['CLOUDFLARE_API_TOKEN']).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Cloudflare API to verify token, proceeding with saved token');
         }
-        p.log.info('✓ Using Cloudflare API token from CLOUDFLARE_API_TOKEN environment variable');
+        p.log.info(
+          `✓ Using Cloudflare API token from ${describeCredentialSource(['CLOUDFLARE_API_TOKEN']).label}`,
+        );
         return envToken;
       }
     }

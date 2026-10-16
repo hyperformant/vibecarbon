@@ -25,7 +25,10 @@ vi.mock('@clack/prompts', () => clackMock);
 vi.mock('../../../src/lib/cli/tty-guard.js', () => ({ assertInteractiveStdin: vi.fn() }));
 
 const setEnvVarMock = vi.hoisted(() => vi.fn());
-vi.mock('../../../src/lib/project.js', () => ({ setEnvVar: setEnvVarMock }));
+vi.mock('../../../src/lib/project.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/project.js')>()),
+  setEnvVar: setEnvVarMock,
+}));
 
 const verifyTokenMock = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/lib/cloudflare-dns.js', () => ({ verifyToken: verifyTokenMock }));

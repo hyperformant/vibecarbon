@@ -28,8 +28,13 @@ import { spinner } from './cli/progress.js';
 import { assertInteractiveStdin } from './cli/tty-guard.js';
 import { c } from './colors.js';
 import { registryEntry } from './config-registry.js';
-import { dotenvPromptProblem, normalizeOperatorValue, readOperatorVar } from './operator-env.js';
-import { setEnvVar } from './project.js';
+import {
+  dotenvPromptProblem,
+  normalizeOperatorValue,
+  pastedKeyShapeProblem,
+  readOperatorVar,
+} from './operator-env.js';
+import { describeCredentialSource, setEnvVar } from './project.js';
 
 const API_BASE = 'https://api.vultr.com/v2';
 
@@ -196,13 +201,17 @@ export async function getApiToken(projectName, options = {}) {
       warnIfBadTokenFormat(envToken);
       const check = await validateVultrToken(envToken);
       if (!check.valid) {
-        p.log.warn(`VULTR_API_TOKEN environment variable is set but invalid: ${check.error}`);
+        p.log.warn(
+          `VULTR_API_TOKEN from ${describeCredentialSource(['VULTR_API_TOKEN']).where} is set but invalid: ${check.error}`,
+        );
         // Fall through to interactive prompt
       } else {
         if (check.unreachable) {
           p.log.warn('Could not reach Vultr API to verify key, proceeding with saved key');
         }
-        p.log.info('✓ Using Vultr API key from VULTR_API_TOKEN environment variable');
+        p.log.info(
+          `✓ Using Vultr API key from ${describeCredentialSource(['VULTR_API_TOKEN']).label}`,
+        );
         return envToken;
       }
     }
@@ -284,14 +293,15 @@ export async function getApiToken(projectName, options = {}) {
  * @returns {Promise<{accessKey: string, secretKey: string, region?: string}|null>}
  */
 export async function getS3Credentials(projectName, options = {}) {
-  const { save = true, force = false, skipPrompts = false } = options;
+  const { save = true, force = false, skipPrompts = false, deferSave = false } = options;
 
   if (!force) {
     const envAccessKey = readOperatorVar('VULTR_ACCESS_KEY').value;
     const envSecretKey = readOperatorVar('VULTR_SECRET_KEY').value;
 
     if (envAccessKey && envSecretKey) {
-      p.log.info('✓ Using Object Storage credentials from environment variables');
+      const from = describeCredentialSource(['VULTR_ACCESS_KEY', 'VULTR_SECRET_KEY']);
+      p.log.info(`✓ Using Object Storage credentials from ${from.label}`);
       const envRegion = readOperatorVar('VULTR_STORAGE_REGION').value;
       if (!envRegion) {
         // Not fatal — resolveS3Region still returns the compute region's
@@ -302,7 +312,12 @@ export async function getS3Credentials(projectName, options = {}) {
           'VULTR_STORAGE_REGION is not set; set it to your subscription’s cluster (e.g. ewr1) if backups fail to authenticate.',
         );
       }
-      return { accessKey: envAccessKey, secretKey: envSecretKey, region: envRegion };
+      return {
+        accessKey: envAccessKey,
+        secretKey: envSecretKey,
+        region: envRegion,
+        source: from.label,
+      };
     }
   }
 
@@ -322,7 +337,9 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Access Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Access Key is required';
-      return dotenvPromptProblem('VULTR_ACCESS_KEY', v);
+      return (
+        pastedKeyShapeProblem('VULTR_ACCESS_KEY', v) ?? dotenvPromptProblem('VULTR_ACCESS_KEY', v)
+      );
     },
   });
 
@@ -334,7 +351,9 @@ export async function getS3Credentials(projectName, options = {}) {
     message: 'Paste your Object Storage Secret Key here',
     validate: (v) => {
       if (!v || v.length < 10) return 'Secret Key is required';
-      return dotenvPromptProblem('VULTR_SECRET_KEY', v);
+      return (
+        pastedKeyShapeProblem('VULTR_SECRET_KEY', v) ?? dotenvPromptProblem('VULTR_SECRET_KEY', v)
+      );
     },
   });
 
@@ -374,13 +393,25 @@ export async function getS3Credentials(projectName, options = {}) {
   process.env.VULTR_SECRET_KEY = secretKey;
   process.env.VULTR_STORAGE_REGION = region;
 
+  const keys = {
+    VULTR_ACCESS_KEY: accessKey,
+    VULTR_SECRET_KEY: secretKey,
+    VULTR_STORAGE_REGION: region,
+  };
+  // deferSave: the caller verifies the keys against S3 first and calls
+  // save() only once they pass, so a rejected pair is never written.
+  if (deferSave) {
+    return {
+      accessKey,
+      secretKey,
+      region,
+      source: 'what you pasted',
+      save: save ? () => saveIfWanted(keys) : async () => {},
+    };
+  }
   if (save) {
-    await saveIfWanted({
-      VULTR_ACCESS_KEY: accessKey,
-      VULTR_SECRET_KEY: secretKey,
-      VULTR_STORAGE_REGION: region,
-    });
+    await saveIfWanted(keys);
   }
 
-  return { accessKey, secretKey, region };
+  return { accessKey, secretKey, region, source: 'what you pasted' };
 }

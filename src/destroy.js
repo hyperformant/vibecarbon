@@ -42,6 +42,7 @@ import {
   resolveTier,
 } from './lib/deploy/tier-registry.js';
 import { createLeakLedger, describeResource, formatLeakReport } from './lib/destroy/leak-ledger.js';
+import { destroyPreviewBody, readS3SetupCompleted } from './lib/destroy/preview.js';
 import { checkS3CredentialMismatch } from './lib/destroy/s3-credential-check.js';
 import { sweepEnvironmentServers } from './lib/destroy/server-sweep.js';
 import {
@@ -54,6 +55,7 @@ import {
 import { envIdentityOf } from './lib/env-identity.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
+import { describeCredentialSource } from './lib/project.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import {
   getObjectStorageProvider,
@@ -1953,6 +1955,19 @@ export function recordPulumiDestroyOutcome({
 }
 
 /**
+ * The line naming which DNS-cleanup token destroy will use and where it came
+ * from (the project's .env.local or the shell), the same way the provider
+ * API token lines do. It used to say "environment variable" for both.
+ * Exported for unit testing.
+ * @param {{name: string, tokenEnv: string}} dnsRow
+ * @returns {string}
+ */
+export function dnsTokenSourceLine(dnsRow) {
+  const { where } = describeCredentialSource([dnsRow.tokenEnv]);
+  return `✓ Using ${dnsRow.name} API token (${dnsRow.tokenEnv}) from ${where}`;
+}
+
+/**
  * Resolve credentials for the Pulumi state backend, provider-aware — the fix
  * for M3 Task 9g. A raw `process.env.HETZNER_ACCESS_KEY`/`HETZNER_SECRET_KEY` read
  * here (the pre-9g shape) always resolved Hetzner's Object Storage keys
@@ -2928,7 +2943,7 @@ async function removePulumiStackStateEffect(ctx) {
   for (const stackEnv of plan.stackEnvs) {
     s.start(`Removing Pulumi stack state: ${stackEnv}`);
     try {
-      const { removed } = await removeStackState(stackEnv, {
+      const { removed, stateBucketMissing } = await removeStackState(stackEnv, {
         projectName: projectConfig.projectName,
         provider: providerIdFor(envConfig),
         s3Config,
@@ -2936,7 +2951,9 @@ async function removePulumiStackStateEffect(ctx) {
       s.stop(
         removed
           ? `Pulumi stack state removed: ${stackEnv}`
-          : `Pulumi stack state already absent: ${stackEnv}`,
+          : stateBucketMissing
+            ? `Pulumi stack state already absent: ${stackEnv} (its state bucket was never created, so there was nothing to remove)`
+            : `Pulumi stack state already absent: ${stackEnv}`,
       );
     } catch (error) {
       s.stop(`Failed to remove Pulumi stack state: ${error.message}`);
@@ -3245,56 +3262,16 @@ async function main(argv = []) {
     process.exit(1);
   }
 
-  // Show what will be deleted
-  const serverList =
-    envConfig.servers?.map((s) => `    ${c.error('•')} ${s.name} (${s.ip})`).join('\n') ||
-    '    None';
-
-  // SSH-key line below: the old string was `vibecarbon-${projectName}-${envName}`,
-  // which never matched anything created (same-shaped fixes above for the
-  // firewall/SSH-key deletion logic, and compose/ha.js — SANCTIONED
-  // DEVIATION #2). The exact suffix is tier-dependent (`-key`, `-ha-key`,
-  // `-${location}-key`), but every tier's real name starts with this
-  // `${projectName}-${envName}` slug — same shape as confirmSlug below.
+  // Show what will be deleted. Built from local evidence, with anything a
+  // stopped deploy only recorded marked "may not exist" (see preview.js).
   p.note(
-    `
-${c.danger('This will permanently delete:')}
-
-${c.bold('Servers:')}
-${serverList}
-
-${c.bold('Firewalls:')}
-${envConfig.servers?.map((s) => `    ${c.error('•')} ${s.name}-fw`).join('\n') || '    None'}
-
-${c.bold('SSH Keys:')}
-    ${c.error('•')} ${projectConfig.projectName}-${envName}
-
-${
-  hasAutomatedDns(envConfig.dns?.provider)
-    ? `${c.bold(`${DNS_PROVIDERS[envConfig.dns.provider].name} Resources:`)}
-    ${c.error('•')} DNS records: ${envConfig.domain} (apex + wildcard)
-    ${DNS_PROVIDERS[envConfig.dns.provider].healthChecks ? `${c.error('•')} Health checks` : ''}
-`
-    : ''
-}
-${
-  envConfig.s3?.bucket
-    ? `${c.bold('S3 Storage:')}
-    ${c.error('•')} Bucket: ${envConfig.s3.bucket} (all objects will be deleted)
-`
-    : ''
-}${
-  envConfig.backupS3?.bucket
-    ? `${c.bold('S3 Backups:')}
-    ${args.purgeBackups ? `${c.error('•')} Bucket: ${envConfig.backupS3.bucket} (WILL BE DELETED — --purge-backups)` : `${c.success('•')} Bucket: ${envConfig.backupS3.bucket} (PRESERVED for recovery)`}
-`
-    : ''
-}
-${c.bold('GitHub:')}
-    ${c.error('•')} Environment: ${envName}
-
-${c.danger('WARNING: All data on these servers will be permanently lost!')}
-  `,
+    destroyPreviewBody({
+      envConfig,
+      projectName: projectConfig.projectName,
+      envName,
+      purgeBackups: args.purgeBackups,
+      s3SetupCompleted: readS3SetupCompleted(cwd, envName),
+    }),
     `Destroying: ${envName}`,
   );
 
@@ -3390,7 +3367,7 @@ ${c.danger('WARNING: All data on these servers will be permanently lost!')}
       computeToken: providerToken,
     });
     if (resolved && resolved !== providerToken) {
-      p.log.info(`✓ Using ${dnsRow.name} API token from ${dnsRow.tokenEnv} environment variable`);
+      p.log.info(dnsTokenSourceLine(dnsRow));
     } else if (!resolved) {
       const entered = await p.password({
         message: `Enter ${dnsRow.name} API token (for DNS cleanup)`,
