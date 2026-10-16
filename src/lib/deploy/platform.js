@@ -55,15 +55,6 @@ export const TARGET_PLATFORM = 'linux/amd64';
 export const PLATFORM_BUILD_FLAG = `--platform=${TARGET_PLATFORM}`;
 
 /**
- * Appended to every build-failure message raised by a pinned build.
- *
- * Pinning the platform turns "silently built the wrong architecture" into a
- * loud build failure — the intended trade. But on an arm64 host without
- * binfmt/QEMU registered, BuildKit's failure is cryptic (`exec /bin/sh: exec
- * format error`, or `no match for platform in manifest`), and an operator has
- * no way to connect that to a flag they never passed. This hint does.
- */
-/**
  * The binfmt installer the hint below tells an operator to run, pinned by tag
  * and multi-arch index digest like every other image ref
  * (tests/unit/deploy/image-digest-census.test.ts); mirrored in
@@ -72,6 +63,15 @@ export const PLATFORM_BUILD_FLAG = `--platform=${TARGET_PLATFORM}`;
 export const BINFMT_IMAGE =
   'tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0';
 
+/**
+ * Appended to every build-failure message raised by a pinned build.
+ *
+ * Pinning the platform turns "silently built the wrong architecture" into a
+ * loud build failure — the intended trade. But on an arm64 host without
+ * binfmt/QEMU registered, BuildKit's failure is cryptic (`exec /bin/sh: exec
+ * format error`, or `no match for platform in manifest`), and an operator has
+ * no way to connect that to a flag they never passed. This hint does.
+ */
 export const AMD64_BUILD_HINT =
   `Builds are pinned to ${TARGET_PLATFORM}, vibecarbon is x86-64 only. ` +
   `If you are building on an arm64 machine (e.g. Apple Silicon) and the failure ` +

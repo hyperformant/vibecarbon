@@ -247,9 +247,12 @@ const IMAGE_TOKEN =
  * interpolation; a `${...}` image is a runtime value or a registered constant
  * and is covered by the JS checks instead.
  */
-function pullLiteralSites(): Site[] {
+function pullLiteralSites(
+  sources: Array<{ rel: string; text: string }> = ALL_FILES.filter((f) =>
+    /^(src|scripts)\/.*\.(m?js|ts|sh)$/.test(f),
+  ).map((rel) => ({ rel, text: read(rel) })),
+): Site[] {
   const out: Site[] = [];
-  const files = ALL_FILES.filter((f) => /^(src|scripts)\/.*\.(m?js|ts|sh)$/.test(f));
   const FLAGS_WITH_VALUE = new Set([
     '--name',
     '-p',
@@ -269,32 +272,28 @@ function pullLiteralSites(): Site[] {
     '--label',
     '-l',
   ]);
-  for (const rel of files) {
-    read(rel)
-      .split('\n')
-      .forEach((line, i) => {
-        if (/^\s*(\*|\/\/|#)/.test(line)) return;
-        const m = line.match(
-          /\b(?:docker|nerdctl)\s+(?:run|pull)\s+(.*)$|\b(?:ctr|crictl)\b.*?\bpull\s+(.*)$/,
-        );
-        if (!m) return;
-        const tokens = (m[1] ?? m[2])
-          .split(/\s+/)
-          .map((t) => t.replace(/^[`'"]+|[`'".,;)]+$/g, ''));
-        for (let k = 0; k < tokens.length; k++) {
-          const t = tokens[k];
-          if (!t) continue;
-          if (t.startsWith('-')) {
-            if (FLAGS_WITH_VALUE.has(t)) k++;
-            continue;
-          }
-          if (t.includes('${') || t.includes('$')) break; // runtime / registered
-          if (IMAGE_TOKEN.test(t) && (t.includes('/') || t.includes(':'))) {
-            out.push({ where: `${rel}:${i + 1}`, ref: t });
-          }
-          break;
+  for (const { rel, text } of sources) {
+    text.split('\n').forEach((line, i) => {
+      if (/^\s*(\*|\/\/|#)/.test(line)) return;
+      const m = line.match(
+        /\b(?:docker|nerdctl)\s+(?:run|pull)\s+(.*)$|\b(?:ctr|crictl)\b.*?\bpull\s+(.*)$/,
+      );
+      if (!m) return;
+      const tokens = (m[1] ?? m[2]).split(/\s+/).map((t) => t.replace(/^[`'"]+|[`'".,;)]+$/g, ''));
+      for (let k = 0; k < tokens.length; k++) {
+        const t = tokens[k];
+        if (!t) continue;
+        if (t.startsWith('-')) {
+          if (FLAGS_WITH_VALUE.has(t)) k++;
+          continue;
         }
-      });
+        if (t.includes('${') || t.includes('$')) break; // runtime / registered
+        if (IMAGE_TOKEN.test(t) && (t.includes('/') || t.includes(':'))) {
+          out.push({ where: `${rel}:${i + 1}`, ref: t });
+        }
+        break;
+      }
+    });
   }
   return out;
 }
@@ -302,7 +301,9 @@ function pullLiteralSites(): Site[] {
 /** src/ lines that put an image into YAML or a CLI flag. */
 function srcSweepSites(): Site[] {
   const out: Site[] = [];
-  for (const rel of gitFiles('src/**/*.js', 'src/**/*.mjs')) {
+  // git pathspec `*` crosses `/`, so this is recursive; `src/**/*.js` would
+  // skip the top-level src/*.js commands.
+  for (const rel of gitFiles('src/*.js', 'src/*.mjs')) {
     read(rel)
       .split('\n')
       .forEach((line, i) => {
@@ -392,15 +393,34 @@ describe('every shipped image ref is pinned by digest', () => {
   });
 
   it('the run/pull sweep sees literals (it would catch an unpinned one)', () => {
-    // Self-check of the parser on the shapes the sweep exists for.
-    const probe = (line: string) => {
-      const m = line.match(/\b(?:docker|nerdctl)\s+(?:run|pull)\s+(.*)$/);
-      return m ? m[1].split(/\s+/).find((t) => !t.startsWith('-') && IMAGE_TOKEN.test(t)) : null;
-    };
-    expect(probe('docker run --privileged --rm tonistiigi/binfmt --install amd64')).toBe(
-      'tonistiigi/binfmt',
-    );
-    expect(probe('docker pull registry:2')).toBe('registry:2');
+    // Self-check of the real sweep on the shapes it exists for: an unpinned
+    // literal on each verb is reported, a pinned one and an interpolated one
+    // are not, and comment lines are skipped.
+    const sites = pullLiteralSites([
+      {
+        rel: 'src/probe.js',
+        text: [
+          'docker run --privileged --rm tonistiigi/binfmt --install amd64',
+          'docker pull registry:2',
+          'ctr -n k8s.io images pull docker.io/library/busybox:1.36',
+          `docker pull ${BINFMT_IMAGE}`,
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: the probe is source text with an interpolated image
+          'docker run --rm ${IMAGE} true',
+          '// docker pull alpine:3.20',
+        ].join('\n'),
+      },
+    ]);
+    expect(sites).toEqual([
+      { where: 'src/probe.js:1', ref: 'tonistiigi/binfmt' },
+      { where: 'src/probe.js:2', ref: 'registry:2' },
+      { where: 'src/probe.js:3', ref: 'docker.io/library/busybox:1.36' },
+      { where: 'src/probe.js:4', ref: BINFMT_IMAGE },
+    ]);
+    expect(offenders(sites)).toEqual([
+      'src/probe.js:1: tonistiigi/binfmt',
+      'src/probe.js:2: registry:2',
+      'src/probe.js:3: docker.io/library/busybox:1.36',
+    ]);
   });
 
   it('Helm-style repository/tag blocks are parsed (the db image is the only one)', () => {
