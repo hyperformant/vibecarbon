@@ -35,21 +35,25 @@ Metabase uses **two database connections**:
 
 ### Example Queries
 
-**User signups over time:**
+Metabase reads `public` tables with SELECT only. The auth tables (`"user"`, `session`, `account`, `verification`, `two_factor`) are deliberately unreadable to it, so passwords, sessions and tokens never reach a dashboard. Report on your own tables:
+
+**Organizations created over time:**
 ```sql
 SELECT
-  DATE_TRUNC('day', created_at) as signup_date,
-  COUNT(*) as signups
-FROM auth.users
+  DATE_TRUNC('day', created_at) as day,
+  COUNT(*) as organizations
+FROM organizations
 GROUP BY 1
 ORDER BY 1
 ```
 
-**Active users last 30 days:**
+**Members per organization:**
 ```sql
-SELECT COUNT(DISTINCT id)
-FROM auth.users
-WHERE last_sign_in_at > NOW() - INTERVAL '30 days'
+SELECT o.name, COUNT(m.user_id) as members
+FROM organizations o
+LEFT JOIN memberships m ON m.organization_id = o.id
+GROUP BY o.name
+ORDER BY members DESC
 ```
 
 ## Embedding Dashboards

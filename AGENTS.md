@@ -6,7 +6,7 @@ Guidance for AI coding agents working on this repository.
 
 ## Project Overview
 
-Vibecarbon is a CLI tool that generates production-ready software applications with Hono + Vite + React 19 + self-hosted Supabase. The repository contains:
+Vibecarbon is a CLI tool that generates production-ready software applications with Hono + Vite + React 19 on its own Postgres 17 (Better Auth for sign-in, Drizzle for data, Traefik at the edge; extras such as observability and Redis arrive through `vibecarbon add`). The repository contains:
 
 1. **CLI tools** (`src/`): `cli.js` (entry point) + command modules (`next.js`, `create.js`, `add.js`, `remove.js`, `up.js`, `down.js`, `reset.js`, `push.js`, `deploy.js`, `destroy.js`, `status.js`, `backup.js`, `restore.js`, `failover.js`, `scale.js`, `configure.js`, `upgrade.js`, `activate.js`)
 2. **Template directory** (`carbon/`): The complete template that gets copied and configured when users run `vibecarbon create`
@@ -186,7 +186,7 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 `src/create.js` uses `@clack/prompts` for interactive CLI. It:
 1. Parses CLI arguments via the shared spec-driven parser (`-y`, `-pm <npm|pnpm|bun>`, `-admin-email <email>`, `-admin-password <pw>`, `-install`, `-skip-lockfile`)
 2. Prompts for admin email and password (required for dashboard access)
-3. Generates secure secrets (BETTER_AUTH_SECRET for the app's sessions, database passwords, and the JWT/keys the remaining Supabase services read)
+3. Generates secure secrets (BETTER_AUTH_SECRET for the app's sessions, the database and replication passwords)
 4. Copies template files from `carbon/` directory
 5. Replaces placeholders (e.g., `{{PROJECT_NAME}}`, `{{ADMIN_EMAIL}}`)
 6. Writes ADMIN_EMAIL/ADMIN_PASSWORD to `.env`/`.env.local`; the app creates the super admin from them at startup, and every deploy waits for `/api/health` to report `adminReady` (`src/lib/deploy/admin-ready.js`)
@@ -205,12 +205,12 @@ on a NEW workflow or Dockerfile that isn't registered in its inventory.
 ## Template Placeholders
 
 When modifying template files in `carbon/`, these placeholders are replaced at generation time:
-- `{{PROJECT_NAME}}` - User's project name (machine slug: containers, pooler tenant, k8s resources)
+- `{{PROJECT_NAME}}` - User's project name (machine slug: containers, k8s resources)
 - `{{PROJECT_DISPLAY_NAME}}` - Human-facing name (browser titles, PWA manifest, emails, legal copy); defaults to the titleized slug, overridable via `-display-name`
 - `{{ADMIN_EMAIL}}`, `{{ADMIN_PASSWORD}}` - Admin user credentials (entered during creation)
-- `{{JWT_SECRET}}`, `{{DB_PASSWORD}}`, `{{ANON_KEY}}`, `{{SERVICE_ROLE_KEY}}`
-- `{{REALTIME_SECRET}}`, `{{VAULT_ENC_KEY}}`
-- `{{N8N_PASSWORD}}`, `{{GRAFANA_PASSWORD}}`
+- `{{GITHUB_OWNER}}`, `{{SITE_URL}}` - GitOps owner and the app's public origin
+- `{{DB_PASSWORD}}`, `{{REPL_PASSWORD}}` - Secret placeholders: never substituted into checked-in files; their values go to `.env.local` and deploy patches them in (`SECRET_PLACEHOLDERS` in `src/create.js`)
+- Deploy-time placeholders (`{{DOMAIN}}`, `{{DB_IMAGE}}`, `{{WALG_S3_PREFIX}}`, `{{K8S_STORAGE_CLASS}}`, ...) stay in the scaffold and are filled by `vibecarbon deploy`
 
 ### Localization
 

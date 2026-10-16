@@ -107,12 +107,9 @@ Vibecarbon uses several types of secrets. Rotate on the cadence below or immedia
 
 | Secret | Purpose | Rotation |
 |---|---|---|
-| `JWT_SECRET` | Signs Supabase JWTs | Yearly or on compromise |
-| `DB_PASSWORD` | PostgreSQL superuser | Yearly or on compromise |
-| `ANON_KEY` | Public API key (derived from `JWT_SECRET`) | When `JWT_SECRET` rotates |
-| `SERVICE_ROLE_KEY` | Server-side API key (bypasses RLS) | When `JWT_SECRET` rotates |
-| `REALTIME_SECRET` | Realtime service encryption | Yearly |
-| `VAULT_ENC_KEY` | Vault encryption key | Yearly |
+| `BETTER_AUTH_SECRET` | Signs the app's session cookies and auth tokens | Yearly or on compromise |
+| `DB_PASSWORD` / `POSTGRES_PASSWORD` | PostgreSQL superuser (the app's connection role) | Yearly or on compromise |
+| `ADMIN_PASSWORD` | The first super admin's password, read at startup to create the account | Change it in the app after first sign-in |
 | `REPL_PASSWORD` | HA replication auth (generated per-deploy from `crypto.randomBytes`) | Regenerated automatically on every `vibecarbon deploy` to a `compose-ha` or `k8s-ha` env |
 
 **Infrastructure secrets**:
@@ -129,15 +126,15 @@ Vibecarbon uses several types of secrets. Rotate on the cadence below or immedia
 
 ### Rotation procedures
 
-#### `JWT_SECRET` (high impact: all sessions invalidated)
+#### `BETTER_AUTH_SECRET` (high impact: everyone is signed out)
 
-1. Generate: `node -e "console.log(require('crypto').randomBytes(64).toString('base64'))"`
-2. Re-derive `ANON_KEY` and `SERVICE_ROLE_KEY` with the new secret (a 10-year-expiring JWT signed with `role: 'anon'` / `role: 'service_role'`).
-3. Update deployment:
-   - Compose: update `.env.local`, then `docker compose down && docker compose up -d`.
-   - Kubernetes: recreate the `vibecarbon-secrets` Secret (`kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`, argv form on both halves) and `kubectl rollout restart deployment -n vibecarbon`.
-4. Rebuild the frontend with the new `VITE_SUPABASE_ANON_KEY` and redeploy.
-5. Verify auth works and watch error logs for JWT validation failures.
+It signs the app's session cookies and auth tokens (email verification, password reset, magic links). Rotating it invalidates every session and every link already sent.
+
+1. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
+2. Update deployment:
+   - Compose: update `.env.local`, then `vibecarbon deploy <env>` (the deploy ships the server `.env` and recreates the app).
+   - Kubernetes: `vibecarbon deploy <env>` re-renders `vibecarbon-secrets` from `.env.local` and rolls the app; or recreate the Secret by hand (`kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`, argv form on both halves) and `kubectl rollout restart deployment/app -n vibecarbon`.
+3. Verify sign-in works and watch the app log for session errors.
 
 #### `DB_PASSWORD`
 
@@ -170,9 +167,9 @@ Vibecarbon uses several types of secrets. Rotate on the cadence below or immedia
 
 ### Access control
 
-- **Database**: every table is RLS-protected by default. The `service_role` key bypasses RLS and must never leak to clients.
+- **Database**: every table is RLS-protected by default. The server's `adminDb` handle bypasses RLS; only census-listed files may use it, and the database has no public port.
 - **SSH / k8s API**: both ports are locked to a project-level operator-CIDR allowlist persisted in `.vibecarbon.json` under `operatorCidrs`. There is no default: a deploy with no CIDRs configured fails loudly rather than silently provisioning an open firewall. See [Operator-IP firewall lock](#operator-ip-firewall-lock-h-2) below.
-- **Admin role**: assigned via `app_metadata.role = 'super_admin'`. Audit assignments quarterly.
+- **Admin role**: the server-controlled `"user".role` column set to `super_admin`. Audit assignments quarterly.
 
 #### Operator-IP firewall lock (H-2)
 
@@ -206,39 +203,27 @@ Manage the list with `vibecarbon access`:
 - **NetworkPolicies** (K8s): default-deny, explicit service-to-service allowlists, DB reachable only from authorised services, egress restricted to HTTPS.
 - **TLS**: Let's Encrypt certificates, auto-renewed 30 days before expiry.
 
-### Database connection pooling
+### Database connections
 
-The internal Supabase stack (`auth`, `rest`, `realtime`, `meta`)
-connects to Postgres **directly** on `db:5432`: required, because a
-transaction pooler breaks realtime's replication slot, PostgREST's
-`NOTIFY pgrst 'reload schema'`, and migration advisory locks.
+The app is the database's only client on the public path. Each app replica
+connects to Postgres **directly** on `db:5432` over the private network with
+its own `pg` pool (`max: 10`, `carbon/src/server/db/client.ts`), with a 5 s
+checkout timeout so an unreachable database fails `/api/health/ready`
+promptly, and server-side statement and idle-transaction timeouts so a stuck
+request cannot hold a connection indefinitely.
 
 **Connection budget.** `db` runs with an explicit `max_connections=200`
-(`carbon/docker-compose.yml`). The real consumers (PostgREST pool + auth +
-realtime + meta + Supavisor's server pool + replication +
-`superuser_reserved`) sum to ~65, leaving headroom for the HA standby and
-scale-ups. PostgREST's own pool is capped explicitly (`PGRST_DB_POOL`) with a
-fail-fast acquisition timeout so a saturated pool errors clearly instead of
-hanging.
+(`carbon/docker-compose.yml`, `carbon/k8s/base/db/statefulset.yaml`): ten per
+app replica, plus replication, the WAL-G backup, add-ons such as n8n or
+Metabase when installed, and `superuser_reserved`, with plenty of room for
+scale-ups.
 
-**Supavisor (external pooler).** Provisioned in `docker-compose.prod.yml` for
-**external** direct-DB clients (BI tools, scripts, serverless), not the
-internal stack. Session mode on `:5432`, transaction mode on `:6543`
-(Supavisor's defaults, pinned explicitly via `PROXY_PORT_SESSION` /
-`PROXY_PORT_TRANSACTION` so config and docs can't drift); the client username
-carries the tenant id (`postgres.<PROJECT_NAME>`). The cloud firewall scopes
-both ports to the operator CIDR allowlist (same list as SSH; managed by
-`vibecarbon access`): they are never world-open, and `access
-add/remove/prune` rewrites the pooler rules in lockstep with the SSH rule. Its `VAULT_ENC_KEY` and
-`REALTIME_SECRET` are auto-generated into `.env.local` by `vibecarbon create`
-(like `JWT_SECRET`), and the prod overlay requires them with `${VAR:?}` syntax:
-a missing secret aborts `docker compose` loudly instead of booting a service
-on a blank value. A structural test (`tests/structural/supavisor-config.test.ts`
-in the template) pins the port/mode mapping and the fail-closed requirement.
-The pooler is exercised end-to-end by the compose e2e scenario
-(`supavisor_*` verification checks: tenant-routed queries through both pooler
-modes from inside the rig, plus external dials proving the operator-scoped
-firewall path).
+**No public database port.** No firewall rule in any mode or provider opens
+5432 or 6543 to the internet or to the operator CIDRs; `deploy` and `access`
+remove any such rule an older deploy left behind. To run SQL, a migration
+check or a BI query by hand, use `vibecarbon shell` (SSH to the server, then
+`psql` inside the db container). The compose-ha replication port (5433)
+travels only over the WireGuard tunnel between the two servers.
 
 ### Incident response
 
@@ -254,9 +239,8 @@ firewall path).
 4. Restore from backup if data was tampered with.
 5. Notify affected users per legal requirements.
 
-**API key exposure**:
-- `SERVICE_ROLE_KEY`: rotate `JWT_SECRET` (invalidates all keys). Audit API logs.
-- `ANON_KEY`: low severity (public by design); verify RLS policies are correct and monitor for abuse.
+**Session secret exposure**:
+- `BETTER_AUTH_SECRET`: rotate it (signs everyone out, see above). Audit the app log and the `session` table for sessions you did not expect.
 
 ### Pre-deployment checklist
 
@@ -290,7 +274,7 @@ firewall path).
 ### MFA assurance-level gating (aal2)
 
 Destructive and financial API endpoints in the generated app require an `aal2`
-(MFA-validated) Supabase session when MFA is enabled application-wide:
+(MFA-validated) session when MFA is enabled application-wide:
 
 - `DELETE /api/v1/me`: account deletion
 - `DELETE /api/v1/organizations/:orgId`: organization deletion
@@ -312,17 +296,23 @@ MFA on.
 403 { "error": "mfa_required", "current_aal": "aal1", "aal_required": "aal2" }
 ```
 
-The client elevates via the Supabase MFA SDK (`auth.mfa.listFactors()`, then
-challenge/verify) and retries with the elevated token.
+The body also carries `mfa_enrolled`. With an authenticator, the client
+verifies a code from the same session (`POST /api/auth/two-factor/verify-totp`
+or `/verify-backup-code`) and retries; without one, it enrolls first
+(`POST /api/auth/two-factor/enable`). `apiFetch` in `src/client/lib/api.ts`
+does this for every call: it asks the user for a code, or sends them to
+enroll, then retries once. aal2 is a property of the session
+(`session.twoFactorVerified`), read from the database on every request.
+An impersonation session gets `403 impersonation_not_allowed` instead.
 
-**Fail-open.** The global flag is read via the service-role client and cached
+**Fail-open.** The global flag is read through `adminDb` and cached
 for 60s. If the read fails, the gate falls back to the last-known value (or
 inert) and logs a warning. Because this control is opt-in and defaults off,
 failing open only restores pre-feature behavior, and a held `aal2` session is
 always honored regardless. Flipping the toggle takes up to 60s to take effect.
 
 Implementation: `carbon/src/server/middleware/requireAal2.ts`,
-`carbon/src/server/lib/mfa-settings.ts`, `carbon/src/server/lib/jwt.ts`.
+`carbon/src/server/lib/mfa-settings.ts`, `carbon/src/server/auth/assurance.ts`.
 
 ---
 

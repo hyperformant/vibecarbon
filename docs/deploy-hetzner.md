@@ -63,8 +63,8 @@ node). You can override them in the deploy prompt or `.vibecarbon.json`.
 ## x86-64 only
 
 Vibecarbon targets **x86-64 (amd64) servers only**. Every image it builds is
-pinned to `linux/amd64`, and every image it pulls (the Supabase stack, Traefik,
-Kong, cert-manager, the Hetzner CCM/CSI drivers, cluster-autoscaler) is
+pinned to `linux/amd64`, and every image it pulls (the Postgres image, Traefik,
+cert-manager, the Hetzner CCM/CSI drivers, cluster-autoscaler) is
 published for `linux/amd64`. Hetzner's ARM line (`cax11`/`cax21`/`cax31`/
 `cax41`) is not offered in the deploy prompt and is **rejected** wherever a
 server type can still arrive as raw text:
@@ -146,8 +146,9 @@ A deploy:
    opt-in; or manual if you manage DNS elsewhere)
 3. Issues TLS certificates via ACME DNS-01 (wildcard-capable)
 4. Builds your app image locally and pushes it to the servers over SSH
-5. Starts the stack (Supabase, Kong, Traefik, your app), runs database
-   migrations, creates the admin user, and verifies health
+5. Starts the stack (Postgres, Traefik, your app); the app applies its
+   migrations and creates the admin user at startup, and the deploy
+   verifies health
 6. On HA modes: seeds the standby via `pg_basebackup` and verifies TLS
    streaming replication is live: the deploy **fails** if the standby is not
    confirmably streaming (use `-allow-degraded` to accept a warm standby)
@@ -220,7 +221,7 @@ vibecarbon destroy <env> -y -confirm <project>-<env>   # scripted
 
 The backup bucket is preserved (only `-purge` deletes it). The app storage
 bucket *is* deleted and `storageBucketGeneration` is rotated, so the redeploy
-derives a fresh bucket name — anything in Supabase Storage (user uploads,
+derives a fresh bucket name — anything in app storage (user uploads,
 avatars) does not come back with the database restore; copy it out first if
 you need it. The Pulumi state bucket is kept and recorded as
 `retainedStateBucket` in `.vibecarbon.json`, so the redeploy resumes the same
@@ -323,7 +324,7 @@ Fail-back) describes **k8s-ha** specifically.
 
 The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
 - **Idle floor: 2 nodes**, a master (control plane, ingress, replication gateway) and a dedicated database node (the streaming replica database)
-- **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app, auth, rest, realtime, meta, kong, studio, cluster-autoscaler)
+- **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app and cluster-autoscaler)
 - **Seeded at deploy:** The database boots from a seed snapshot on first start, immediately becoming a live streaming replica, with no separate reseed cycle
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance
 

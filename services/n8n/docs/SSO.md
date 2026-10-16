@@ -4,11 +4,11 @@
 
 ### Production (real domains)
 
-In production, the app and n8n share a parent domain (e.g., `app.example.com` and `n8n.example.com`). The Supabase auth cookie is set with `domain=.example.com`, so it's sent to all subdomains. The flow:
+In production, the app and n8n share a parent domain (e.g., `example.com` and `n8n.example.com`). When a super admin opens an admin tool, the app mints a `vc-admin-token` cookie scoped to `domain=.example.com`, so it's sent to all subdomains. It carries a dedicated ForwardAuth token (1 hour, bound to the minting session), never the app's session token. The flow:
 
 1. User visits `n8n.example.com`
 2. Traefik applies `super-admin-auth@file` middleware (ForwardAuth)
-3. `verify-role.ts` reads the `sb-auth-token` cookie, validates the JWT, checks `super_admin` role
+3. `verify-role.ts` reads the `vc-admin-token` cookie, looks its hash up in the database together with the session it is bound to, and checks the `super_admin` role
 4. On success, Traefik forwards `X-User-Email` header to n8n
 5. `hooks.js` middleware reads the header, finds/creates the n8n user, issues `n8n-auth` session cookie
 6. User sees the n8n editor — no login page
@@ -31,7 +31,7 @@ The SSO hook (`hooks.js`) is still loaded but has no effect since ForwardAuth he
 Production:
   Browser → Traefik → ForwardAuth (verify-role) → n8n (hooks.js sets cookie)
                            │                            │
-                      Reads sb-auth-token          Reads X-User-Email
+                      Reads vc-admin-token         Reads X-User-Email
                       Sets X-User-* headers        Issues n8n-auth cookie
 
 Development:
@@ -46,7 +46,7 @@ Development:
 | DB setup sidecar | `volumes/n8n/scripts/setup.sh` | Creates owner user in PostgreSQL so setup wizard is skipped |
 | ForwardAuth config (prod) | `volumes/traefik/middlewares.yml` | Chains header stripping → role verification |
 | ForwardAuth config (dev) | `volumes/traefik/middlewares.dev.yml` | Same, routes to `host.docker.internal:3000` |
-| Verify-role endpoint | `src/server/routes/_internal/verify-role.ts` | Validates JWT, checks role, sets `X-User-*` headers |
+| Verify-role endpoint | `src/server/routes/_internal/verify-role.ts` | Checks the ForwardAuth token and role, sets `X-User-*` headers |
 | Compose (dev) | `docker-compose.n8n.yml` | No ForwardAuth middleware on n8n router |
 | Compose (prod) | Production overlay adds `super-admin-auth@file` middleware label |
 
@@ -112,9 +112,10 @@ The n8n compose DB password doesn't match what `n8n-init.sh` set. Ensure both us
 
 ### ForwardAuth returns 401 in production
 
-1. Check the `sb-auth-token` cookie is set with the correct domain (`.example.com`)
-2. Check `authRequestHeaders` includes `Cookie`, `Authorization`, and `Accept`
-3. Check the user has `super_admin` in `app_metadata.role`
+1. Check the `vc-admin-token` cookie is set with the correct domain (`.example.com`); open the tool from the app's admin panel, which mints it
+2. Check `authRequestHeaders` includes `Cookie` and `Accept`
+3. Check the user's `role` column is `super_admin` (`SELECT role FROM "user" WHERE email = '...'`)
+4. With MFA on globally, the minting session must have passed its second factor
 
 ### SSO hook doesn't fire (no log output)
 

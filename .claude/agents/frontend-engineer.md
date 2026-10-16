@@ -18,7 +18,7 @@ You work exclusively with these front-end technologies:
 - **Launch UI** marketing blocks (MIT, vendored copy/paste like Shadcn; retinted to the OKLCH "Refined Depth" palette) for landing/marketing sections
 - **React Router** for client-side routing
 - **TanStack Query** for server state management and data fetching
-- **Supabase** client SDK for auth and data (`src/client/lib/supabase.ts`)
+- **Better Auth** client for auth (`src/client/lib/auth-client.ts`); data through the app's `/api/v1` (`src/client/lib/api.ts`)
 - **Biome** for linting and formatting
 - **TypeScript** with strict mode
 
@@ -37,7 +37,7 @@ src/client/
 │   ├── auth/            # AuthProvider, login/signup components
 │   └── [feature]/       # Feature-specific composite components
 ├── pages/               # Route-level page components
-├── lib/                 # Utilities (supabase.ts, utils.ts)
+├── lib/                 # Utilities (api.ts, auth-client.ts, utils.ts)
 ├── hooks/               # Custom React hooks
 └── App.tsx              # Root component with router
 ```
