@@ -54,14 +54,17 @@ function topologyLayers(t: TFunction) {
       key: 'application',
       name: t('admin.infrastructure.layers.application.name'),
       icon: Server,
-      services: ['app', 'auth'],
+      // Better Auth runs inside the app, so it has no tile of its own.
+      services: ['app'],
       description: t('admin.infrastructure.layers.application.description'),
     },
     {
       key: 'data',
       name: t('admin.infrastructure.layers.data.name'),
       icon: Database,
-      services: ['db', 'redis'],
+      // s3 is Garage, the local dev object store; production uses the
+      // provider's S3 and runs no container for it.
+      services: ['db', 's3', 'redis'],
       description: t('admin.infrastructure.layers.data.description'),
     },
     {
@@ -154,7 +157,8 @@ export default function Infrastructure() {
                       name,
                       status: serviceMap.get(name),
                     }))
-                    .filter((s) => s.status || layer.services.length <= 3);
+                    // Only containers this environment runs.
+                    .filter((s) => s.status);
 
                   if (layerServices.length === 0) return null;
 

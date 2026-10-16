@@ -31,8 +31,8 @@ interface ServiceStatus {
   status: 'healthy' | 'unhealthy' | 'unknown';
   latencyMs?: number;
   error?: string;
-  /** Runs inside the app (authentication): nothing to restart. */
-  inProcess?: boolean;
+  /** The dashboard can restart this container in this deployment. */
+  restartable?: boolean;
 }
 
 interface ServicesStatusResponse {
@@ -142,7 +142,7 @@ export function ServicesStatus() {
     onMutate: () => {
       if (data?.services) {
         setRestartingContainers(
-          new Set(data.services.filter((s) => !s.inProcess).map((s) => s.container))
+          new Set(data.services.filter((s) => s.restartable).map((s) => s.container))
         );
       }
     },
@@ -209,6 +209,8 @@ export function ServicesStatus() {
   }
 
   const { summary, services } = data;
+  // Restarts only work where the API can run docker compose (local dev).
+  const anyRestartable = services.some((s) => s.restartable);
 
   return (
     <Card>
@@ -259,18 +261,13 @@ export function ServicesStatus() {
                     <span className="text-xs text-muted-foreground">Restarting...</span>
                   ) : isRefreshing ? (
                     <Loader2 className="size-3 animate-spin text-muted-foreground" />
-                  ) : !service.inProcess &&
-                    service.latencyMs !== undefined &&
-                    service.status === 'healthy' ? (
+                  ) : service.latencyMs !== undefined && service.status === 'healthy' ? (
                     <span className="text-xs text-muted-foreground">{service.latencyMs}ms</span>
                   ) : service.error ? (
                     <span className="text-xs text-destructive">{service.error}</span>
                   ) : null}
                   {isRestarting ? null : <StatusBadge status={service.status} />}
-                  {service.inProcess ? (
-                    // Keeps the column aligned with the rows that have a button.
-                    <span className="size-7" />
-                  ) : (
+                  {service.restartable ? (
                     <Button
                       variant="ghost"
                       size="icon"
@@ -278,32 +275,38 @@ export function ServicesStatus() {
                       onClick={() => handleRestart(service.container)}
                       disabled={isAnyRestarting}
                       title={`Restart ${service.name}`}
+                      aria-label={`Restart ${service.name}`}
                     >
                       <Power className="size-3.5" />
                     </Button>
-                  )}
+                  ) : anyRestartable ? (
+                    // Keeps the column aligned with the rows that have a button.
+                    <span className="size-7" />
+                  ) : null}
                 </div>
               </div>
             );
           })}
         </div>
       </CardContent>
-      <CardFooter className="border-t pt-4">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleRestartAll}
-          disabled={isAnyRestarting}
-          className="w-full"
-        >
-          {restartAllMutation.isPending ? (
-            <Loader2 className="mr-2 size-4 animate-spin" />
-          ) : (
-            <Power className="mr-2 size-4" />
-          )}
-          {restartAllMutation.isPending ? 'Restarting All Services...' : 'Restart All Services'}
-        </Button>
-      </CardFooter>
+      {anyRestartable && (
+        <CardFooter className="border-t pt-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRestartAll}
+            disabled={isAnyRestarting}
+            className="w-full"
+          >
+            {restartAllMutation.isPending ? (
+              <Loader2 className="mr-2 size-4 animate-spin" />
+            ) : (
+              <Power className="mr-2 size-4" />
+            )}
+            {restartAllMutation.isPending ? 'Restarting All Services...' : 'Restart All Services'}
+          </Button>
+        </CardFooter>
+      )}
     </Card>
   );
 }

@@ -388,7 +388,7 @@
         },
         "data": {
           "name": "Data",
-          "description": "PostgreSQL & caching"
+          "description": "PostgreSQL, object storage & caching"
         },
         "observability": {
           "name": "Observability",

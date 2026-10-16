@@ -84,9 +84,15 @@ export function PerformanceMetrics() {
     refetchInterval: 30_000,
   });
 
+  // Only services with a measured round trip: an unhealthy probe's number is
+  // its timeout, not a latency.
   const sortedServices = perfData
-    ? [...perfData.services.items].sort((a, b) => b.latencyMs - a.latencyMs)
+    ? perfData.services.items
+        .filter((s) => s.status === 'healthy')
+        .sort((a, b) => b.latencyMs - a.latencyMs)
     : [];
+  // Fit the y-axis to the longest label (12px text, about 7px a character).
+  const yAxisWidth = Math.max(48, ...sortedServices.map((s) => s.name.length * 7 + 12));
 
   const weeklySignups = statsData?.users?.weeklySignups ?? [];
 
@@ -116,7 +122,7 @@ export function PerformanceMetrics() {
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <Activity className="size-4" />
-              Avg API Latency
+              Avg service latency
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -134,15 +140,26 @@ export function PerformanceMetrics() {
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <Cpu className="size-4" />
-              Memory Used
+              App memory
             </CardTitle>
           </CardHeader>
           <CardContent>
             {perfLoading ? (
               <Skeleton className="h-7 w-20" />
             ) : (
-              <p className="text-2xl font-bold">
-                {perfData ? `${Math.round(perfData.server.memoryMB.heapUsed)} MB` : '--'}
+              // The app process's resident memory (RSS), not the whole stack:
+              // Postgres and Traefik are separate processes.
+              <p className="text-2xl font-bold" title="Resident memory of the app process">
+                {perfData ? (
+                  <>
+                    {`${perfData.server.memoryMB.rss} MB`}
+                    <span className="ml-2 text-sm font-normal text-muted-foreground">
+                      {`${perfData.server.memoryMB.heapUsed} MB heap`}
+                    </span>
+                  </>
+                ) : (
+                  '--'
+                )}
               </p>
             )}
           </CardContent>
@@ -193,7 +210,7 @@ export function PerformanceMetrics() {
                   dataKey="name"
                   tickLine={false}
                   axisLine={false}
-                  width={80}
+                  width={yAxisWidth}
                   tick={{ fontSize: 12 }}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />

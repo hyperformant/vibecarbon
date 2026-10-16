@@ -65,6 +65,21 @@ describe('mapContainerList', () => {
     ];
     expect(mapContainerList(dashed, 'my-app')[0].service).toBe('db');
   });
+
+  it("reads each container's healthcheck verdict from its Status text", () => {
+    const withStatus = [
+      { Id: 'h1', Names: ['/p-db'], Status: 'Up 3 minutes (healthy)' },
+      { Id: 'h2', Names: ['/p-s3'], Status: 'Up 10 seconds (health: starting)' },
+      { Id: 'h3', Names: ['/p-app'], Status: 'Up 2 hours (unhealthy)' },
+      { Id: 'h4', Names: ['/p-traefik'], Status: 'Up 2 hours' },
+    ];
+    expect(mapContainerList(withStatus, 'p').map((c) => c.health)).toEqual([
+      'healthy',
+      'starting',
+      'unhealthy',
+      undefined,
+    ]);
+  });
 });
 
 function frame(type: number, payload: string): Buffer {

@@ -1,10 +1,17 @@
 /**
- * The core rows on the admin Infrastructure page, and restart-all.
+ * The rows on the admin Services Status panel, and restarts.
  *
- * docker-socket-proxy is listed only where it runs: a production compose
- * deployment, which sets DOCKER_API_PROXY. Local dev talks to the host
- * socket and k8s has no Docker API, so neither lists it. Restart-all never
- * restarts `app`: that is the process answering the request.
+ * The panel lists the containers this environment runs and no others:
+ * - app, db and traefik everywhere;
+ * - docker-socket-proxy only where it runs: a production compose deployment,
+ *   which sets DOCKER_API_PROXY. Local dev talks to the host socket and k8s
+ *   has no Docker API, so neither lists it;
+ * - s3 (Garage, the dev object store) only when Docker reports it running.
+ *
+ * Restarts need the docker CLI and compose files next to the API, which only
+ * local dev has, so production and k8s offer none. docker-socket-proxy is
+ * never restartable, and restart-all never restarts `app`: that is the
+ * process answering the request.
  */
 
 import type { AuthUser as User } from '@server/auth';
@@ -27,6 +34,24 @@ const { exec } = vi.hoisted(() => ({
 vi.mock('node:child_process', async (orig) => ({
   ...(await orig<typeof import('node:child_process')>()),
   exec,
+}));
+
+vi.mock('@server/auth', () => ({
+  auth: { handler: vi.fn(async () => Response.json({ ok: true })) },
+}));
+const { listProjectContainers } = vi.hoisted(() => ({
+  listProjectContainers: vi.fn(async (): Promise<Array<Record<string, string>>> => []),
+}));
+vi.mock('@server/lib/docker-api', async (orig) => ({
+  ...(await orig<typeof import('@server/lib/docker-api')>()),
+  listProjectContainers,
+}));
+
+/** What the Docker listing returns for a running litetest dev stack. */
+const DEV_STACK = ['app', 'traefik', 'db', 's3'].map((service) => ({
+  id: `id-${service}`,
+  name: `litetest-${service}`,
+  service,
 }));
 
 const SUPER_ADMIN: Partial<User> = { id: 'admin-1', role: 'super_admin' };
@@ -53,15 +78,27 @@ async function appWith(env: Record<string, string>) {
   return app;
 }
 
-async function containers(env: Record<string, string>): Promise<string[]> {
+interface Row {
+  name: string;
+  container: string;
+  status: string;
+  restartable?: boolean;
+}
+
+async function rows(env: Record<string, string>): Promise<Row[]> {
   const res = await (await appWith(env)).request('/status');
   expect(res.status).toBe(200);
-  const body = (await res.json()) as { services: Array<{ container: string }> };
-  return body.services.map((s) => s.container);
+  return ((await res.json()) as { services: Row[] }).services;
+}
+
+async function containers(env: Record<string, string>): Promise<string[]> {
+  return (await rows(env)).map((s) => s.container);
 }
 
 afterEach(() => {
   exec.mockClear();
+  listProjectContainers.mockReset();
+  listProjectContainers.mockResolvedValue([]);
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
 });
@@ -90,16 +127,81 @@ describe('services status: core rows', () => {
   });
 });
 
-describe('services restart-all', () => {
-  it('restarts every core service except app, the process answering the request', async () => {
-    const app = await appWith({ DOCKER_API_PROXY: 'http://docker-socket-proxy:2375' });
+describe('services status: discovered containers', () => {
+  it('lists the running dev stack, Garage included, and nothing else', async () => {
+    listProjectContainers.mockResolvedValue(DEV_STACK);
+    const listed = await rows({ PROJECT_NAME: 'litetest' });
+    expect(listed.map((r) => r.container).sort()).toEqual(['app', 'db', 's3', 'traefik']);
+    expect(listed.find((r) => r.container === 's3')).toMatchObject({
+      name: 'Storage (S3)',
+      status: 'healthy',
+    });
+  });
+
+  it('never lists s3 when no s3 container runs (production)', async () => {
+    listProjectContainers.mockResolvedValue(DEV_STACK.filter((c) => c.service !== 's3'));
+    expect(await containers({ PROJECT_NAME: 'litetest' })).not.toContain('s3');
+  });
+
+  it("reports s3 unhealthy when its container's healthcheck fails", async () => {
+    listProjectContainers.mockResolvedValue(
+      DEV_STACK.map((c) => (c.service === 's3' ? { ...c, health: 'unhealthy' } : c)),
+    );
+    const s3 = (await rows({ PROJECT_NAME: 'litetest' })).find((r) => r.container === 's3');
+    expect(s3).toMatchObject({ status: 'unhealthy', error: 'Container not healthy' });
+  });
+
+  it('does not list env-flagged add-ons whose containers Docker says are absent', async () => {
+    listProjectContainers.mockResolvedValue(DEV_STACK);
+    expect(await containers({ PROJECT_NAME: 'litetest', N8N_ENABLED: 'true' })).not.toContain(
+      'n8n',
+    );
+  });
+});
+
+describe('services restart', () => {
+  it('restarts every restartable service except app, the process answering', async () => {
+    listProjectContainers.mockResolvedValue(DEV_STACK);
+    const app = await appWith({ PROJECT_NAME: 'litetest' });
     const res = await app.request('/status/restart', { method: 'POST' });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { results: Array<{ container: string }> };
     const restarted = body.results.map((r) => r.container).sort();
-    expect(restarted).toEqual(['db', 'docker-socket-proxy', 'traefik']);
+    expect(restarted).toEqual(['db', 's3', 'traefik']);
     const commands = exec.mock.calls.map(([cmd]) => cmd);
     expect(commands).not.toContain('docker compose restart app');
     expect(commands).toContain('docker compose restart db');
+  });
+
+  it('never restarts docker-socket-proxy, alone or in restart-all', async () => {
+    const env = { DOCKER_API_PROXY: 'http://docker-socket-proxy:2375' };
+    const listed = await rows(env);
+    expect(listed.find((r) => r.container === 'docker-socket-proxy')?.restartable).toBe(false);
+
+    const single = await (await appWith(env)).request('/status/restart/docker-socket-proxy', {
+      method: 'POST',
+    });
+    expect(single.status).toBe(400);
+
+    const all = await (await appWith(env)).request('/status/restart', { method: 'POST' });
+    const body = (await all.json()) as { results: Array<{ container: string }> };
+    expect(body.results.map((r) => r.container)).not.toContain('docker-socket-proxy');
+    expect(exec.mock.calls.map(([cmd]) => cmd)).not.toContain(
+      'docker compose restart docker-socket-proxy',
+    );
+  });
+
+  it('offers no restart in the production container, which has no docker CLI', async () => {
+    const env = { NODE_ENV: 'production', DOCKER_API_PROXY: 'http://docker-socket-proxy:2375' };
+    expect((await rows(env)).every((r) => r.restartable === false)).toBe(true);
+    const res = await (await appWith(env)).request('/status/restart/db', { method: 'POST' });
+    expect(res.status).toBe(501);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('marks the dev stack restartable', async () => {
+    listProjectContainers.mockResolvedValue(DEV_STACK);
+    const listed = await rows({ PROJECT_NAME: 'litetest' });
+    expect(listed.every((r) => r.restartable === true)).toBe(true);
   });
 });

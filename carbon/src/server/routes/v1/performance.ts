@@ -15,7 +15,11 @@ const SERVICE_TIMEOUT_MS = 2000;
 /** Round trip from the app to Postgres over its own connection. */
 async function checkDatabaseLatency(): Promise<Latency> {
   const ping = await pingDb(undefined, { timeoutMs: SERVICE_TIMEOUT_MS });
-  return { name: 'Database', latencyMs: ping.latencyMs, status: ping.ok ? 'healthy' : 'unhealthy' };
+  return {
+    name: 'PostgreSQL',
+    latencyMs: ping.latencyMs,
+    status: ping.ok ? 'healthy' : 'unhealthy',
+  };
 }
 
 /** Round trip from the app to Traefik (lib/traefik-probe.ts). */
@@ -76,14 +80,13 @@ performanceRoutes.get('/', async (c) => {
     platform: `${process.platform} ${process.arch}`,
   };
 
-  // Check all service latencies in parallel
-  const probed = await Promise.all([checkDatabaseLatency(), checkTraefikLatency()]);
-  // Authentication runs in this process (/api/auth), so it is up whenever
-  // this handler runs. Counted, but kept out of the latency average.
-  const items = [...probed, { name: 'Authentication', latencyMs: 0, status: 'healthy' as const }];
+  // The services one network hop from the app, each with a measured round
+  // trip. Authentication runs inside this process, so it has no hop of its
+  // own to time and is not an item (the Services panel folds it into App).
+  const items = await Promise.all([checkDatabaseLatency(), checkTraefikLatency()]);
 
   const healthy = items.filter((s) => s.status === 'healthy').length;
-  const healthyItems = probed.filter((s) => s.status === 'healthy');
+  const healthyItems = items.filter((s) => s.status === 'healthy');
   const avgLatencyMs =
     healthyItems.length > 0
       ? Math.round(healthyItems.reduce((sum, s) => sum + s.latencyMs, 0) / healthyItems.length)
