@@ -165,21 +165,20 @@ services:
   # PRODUCTION OPTIMIZATIONS
   # ===========================================
 
-  # Add resource limits to core services in production
+  # No CPU or memory limits on the db, on purpose. Docker refuses a `cpus`
+  # figure above the host's CPU count, so any limit over 1.0 stops
+  # `docker compose up` on a 1-vCPU server, and one fixed memory figure cannot
+  # fit both a 1 GB and a 16 GB server: too high it means nothing, too low the
+  # kernel kills postgres inside its own cgroup. Postgres bounds its own
+  # memory (shared_buffers and max_connections, docker/postgres-walg/
+  # postgresql.conf and the base file's `-c` flags). Keep any `cpus` you add
+  # elsewhere at 1.0 or below (tests/unit/template/compose-cpu-limits.test.ts).
   db:
     environment:
       # Required (`:?`) so deploy's preflight refuses a .env without the
       # database password before anything is created (findMissingRequiredEnv
       # in src/lib/project.js reads these markers).
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — vibecarbon create writes it to .env.local}
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 4G
-        reservations:
-          cpus: '1.0'
-          memory: 2G
 
 volumes:
   letsencrypt_data:
