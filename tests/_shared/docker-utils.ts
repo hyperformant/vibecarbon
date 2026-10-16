@@ -1,5 +1,5 @@
 import { type ExecSyncOptions, execFileSync, execSync } from 'node:child_process';
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { delimiter } from 'node:path';
 import { testConfig } from '../config.js';
 
@@ -83,17 +83,44 @@ export interface ExecResult {
 // =============================================================================
 
 /**
- * Check if a port is available for binding
+ * Check if a port is free for a compose service to publish.
+ *
+ * Binds it ourselves first. A non-root user cannot bind a port below
+ * net.ipv4.ip_unprivileged_port_start (1024 by default), so EACCES on :80
+ * says nothing about whether the port is free: Docker publishes it as root
+ * either way. Treating EACCES as "busy" skipped the Traefik smoke on every
+ * non-root host. On EACCES this asks the port instead: a refused connection
+ * means nothing listens there, so compose can publish it.
  */
 export function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
-    server.once('error', () => resolve(false));
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EACCES') {
+        nothingListensOn(port).then(resolve);
+        return;
+      }
+      resolve(false);
+    });
     server.once('listening', () => {
       server.close();
       resolve(true);
     });
     server.listen(port, '0.0.0.0');
+  });
+}
+
+/** True when a TCP connect to 127.0.0.1:<port> is refused (no listener). */
+export function nothingListensOn(port: number, timeoutMs = 2000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ port, host: '127.0.0.1' });
+    const done = (free: boolean) => {
+      socket.destroy();
+      resolve(free);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(false));
+    socket.once('error', (err: NodeJS.ErrnoException) => done(err.code === 'ECONNREFUSED'));
   });
 }
 
