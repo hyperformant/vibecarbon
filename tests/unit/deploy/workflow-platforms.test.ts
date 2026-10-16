@@ -18,10 +18,12 @@
  * THE arm64 IMAGES: ghcr.io/hyperformant/postgres, and the wal-g image it is
  * built from. Servers stay amd64; the db image's arm64 child exists solely so
  * local `vibecarbon up` on Apple Silicon runs Postgres natively (every mode,
- * local dev included, pulls that image). wal-g cross-compiles (GOARCH from
- * TARGETARCH on $BUILDPLATFORM); the db image builds natively per arch on
- * GitHub's ubuntu-24.04 / ubuntu-24.04-arm runners and a merge job joins the
- * two digests under one tag. No workflow sets up QEMU.
+ * local dev included, pulls that image). Both build natively per arch on
+ * GitHub's ubuntu-24.04 / ubuntu-24.04-arm runners through one reusable
+ * workflow (native-multiarch-image.yml), each arch smoke-tested on its own
+ * hardware before its digest is pushed, and a merge job joins the two digests
+ * under one tag. No workflow sets up QEMU, and no build step leans on the
+ * runner's preinstalled binfmt to execute a foreign-arch binary.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -69,34 +71,18 @@ function builtPlatforms(job: Job): string[] {
  */
 const PUBLISHED_IMAGES = [
   {
-    workflow: '.github/workflows/publish-db-image.yml',
-    job: 'publish-walg',
-    image: 'ghcr.io/hyperformant/wal-g (static wal-g binary)',
-    platforms: ['linux/amd64', 'linux/arm64'],
-    consumers:
-      'docker/postgres-walg COPY --froms this image in both of its native per-arch builds. ' +
-      'The Dockerfile cross-compiles on $BUILDPLATFORM, so no QEMU.',
-  },
-  {
     workflow: '.github/workflows/native-multiarch-image.yml',
     job: 'build',
     image:
-      'ghcr.io/hyperformant/postgres (release, via publish-db-image.yml) and ' +
-      'ghcr.io/hyperformant/postgres-dev (branches, via publish-db-image-dev.yml)',
+      'ghcr.io/hyperformant/postgres and ghcr.io/hyperformant/wal-g (release, via ' +
+      'publish-db-image.yml), and both into ghcr.io/hyperformant/postgres-dev (branches, via ' +
+      'publish-db-image-dev.yml)',
     platforms: ['linux/amd64', 'linux/arm64'],
     consumers:
-      'servers (amd64 only, src/lib/deploy/platform.js) pull the amd64 child; the arm64 child ' +
+      'servers (amd64 only, src/lib/deploy/platform.js) pull the db amd64 child; the arm64 child ' +
       'exists solely for local `vibecarbon up` on Apple Silicon, which pulls this image too. ' +
-      'The dev channel is the same build, selected only by VIBECARBON_DB_IMAGE.',
-  },
-  {
-    workflow: '.github/workflows/publish-db-image-dev.yml',
-    job: 'build-walg',
-    image: 'a wal-g build pushed by digest into ghcr.io/hyperformant/postgres-dev',
-    platforms: ['linux/amd64', 'linux/arm64'],
-    consumers:
-      "only that dev run's own db legs (both arches), via a named build context, and only " +
-      'when the branch changed docker/wal-g. Cross-compiled like publish-walg, so no QEMU.',
+      'wal-g is consumed only by the db build (COPY --from, both arches). The dev channel is the ' +
+      'same build, selected only by VIBECARBON_DB_IMAGE.',
   },
   {
     workflow: '.github/workflows/publish-images.yml',
@@ -244,6 +230,94 @@ describe('the db image builds natively per arch and merges into one tag', () => 
   });
 });
 
+const WALG_SMOKE = '.github/scripts/smoke-walg-image.sh';
+const DB_WORKFLOWS = [
+  '.github/workflows/publish-db-image.yml',
+  '.github/workflows/publish-db-image-dev.yml',
+] as const;
+
+describe('wal-g builds natively per arch in both channels (arch audit F6)', () => {
+  // wal-g's Dockerfile executes the binary in a TARGETPLATFORM smoke stage.
+  // Built for both arches on one amd64 runner, that RUN only worked through the
+  // runner image's preinstalled binfmt. Each arch now builds on its own runner
+  // via the shared workflow, so nothing depends on emulation.
+  it.each(DB_WORKFLOWS)(
+    '%s builds no image itself: every build goes through the shared workflow',
+    (file) => {
+      for (const [id, job] of Object.entries(workflowOf(file).jobs)) {
+        expect((job.steps ?? []).some(isBuildPush), `${file}#${id} runs build-push itself`).toBe(
+          false,
+        );
+      }
+      const code = read(file)
+        .split('\n')
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n');
+      expect(code).not.toMatch(/setup-qemu-action/);
+      expect(code, `${file}: pin runners (ubuntu-24.04), never ubuntu-latest`).not.toMatch(
+        /ubuntu-latest/,
+      );
+    },
+  );
+
+  it('the smoke script executes wal-g', () => {
+    expect(read(WALG_SMOKE)).toMatch(/--entrypoint \/usr\/local\/bin\/wal-g "\$IMAGE" --version/);
+  });
+
+  it('release: publish-walg is the shared workflow, and the db build waits on it', () => {
+    const wf = workflowOf('.github/workflows/publish-db-image.yml');
+    const walg = wf.jobs['publish-walg'] as CallerJob;
+    expect(walg.uses).toBe(REUSABLE);
+    expect(walg.needs).toBe('walg-ref');
+    expect(walg.with).toMatchObject({
+      context: 'docker/wal-g',
+      image: 'ghcr.io/hyperformant/wal-g',
+      tag: expr('needs.walg-ref.outputs.tag'),
+      smoke: WALG_SMOKE,
+      environment: 'e2e-infra',
+    });
+    expect(wf.jobs['walg-ref']['runs-on']).toBe('ubuntu-24.04');
+    expect(runsOf(wf.jobs['walg-ref'])).toMatch(/ARG WALG_VERSION=v/);
+    expect((wf.jobs['build-db'] as CallerJob).needs).toContain('publish-walg');
+  });
+
+  it('dev: build-walg is the shared workflow, consumed by digest by the db build', () => {
+    const wf = workflowOf('.github/workflows/publish-db-image-dev.yml');
+    const walg = wf.jobs['build-walg'] as CallerJob;
+    const db = wf.jobs['build-db'] as CallerJob;
+    expect(walg.uses).toBe(REUSABLE);
+    expect(walg.with).toMatchObject({
+      context: 'docker/wal-g',
+      image: expr('needs.plan.outputs.image'),
+      tag: expr('needs.plan.outputs.walg-tag'),
+      smoke: WALG_SMOKE,
+      immutable: true,
+    });
+    // Like build-db, dev needs no e2e-infra secrets: no environment.
+    expect(walg.with?.environment).toBeUndefined();
+    expect(runsOf(wf.jobs.plan)).toMatch(/echo "walg-tag=walg-\$\{SHA:0:\$LEN\}"/);
+    expect(db.needs).toEqual(['plan', 'build-walg']);
+    // The db legs resolve FROM <walg-from> to the reusable workflow's
+    // digest-pinned `ref` output, never to the walg-<sha> tag.
+    const ctx = String(db.with?.['build-contexts']);
+    expect(ctx).toMatch(/needs\.build-walg\.result == 'success'/);
+    expect(ctx).toContain(
+      "format('{0}=docker-image://{1}', needs.plan.outputs.walg-from, needs.build-walg.outputs.ref)",
+    );
+    expect(ctx).not.toMatch(/walg-tag/);
+  });
+
+  it('the shared workflow exposes the digest-pinned ref the dev db build consumes', () => {
+    const wf = workflowOf('.github/workflows/native-multiarch-image.yml');
+    const call = (wf.on as { workflow_call: { outputs: Record<string, { value: string }> } })
+      .workflow_call;
+    expect(call.outputs.ref.value).toBe(expr('jobs.merge.outputs.ref'));
+    expect(runsOf(jobsOf('.github/workflows/native-multiarch-image.yml').merge)).toMatch(
+      /echo "ref=\$NAME@\$\(jq -r \.digest manifest\.json\)"/,
+    );
+  });
+});
+
 describe('the release db publish is unchanged by the dev channel', () => {
   const wf = workflowOf('.github/workflows/publish-db-image.yml');
   const build = wf.jobs['build-db'] as CallerJob;
@@ -294,10 +368,7 @@ describe('the db image dev channel (publish-db-image-dev.yml)', () => {
     expect(plan).toMatch(/case "\$IMG" in \*\/postgres-dev\) ;;/);
     expect(build.uses).toBe(REUSABLE);
     expect(build.with?.image).toBe(expr('needs.plan.outputs.image'));
-    const walgPush = (wf.jobs['build-walg'].steps ?? []).find(isBuildPush);
-    expect(String(walgPush?.with?.outputs)).toMatch(
-      /^type=image,name=\$\{\{ needs\.plan\.outputs\.image \}\},push-by-digest=true,/,
-    );
+    expect((wf.jobs['build-walg'] as CallerJob).with?.image).toBe(expr('needs.plan.outputs.image'));
     // Nothing names the release package as a push target.
     const code = read(FILE)
       .split('\n')

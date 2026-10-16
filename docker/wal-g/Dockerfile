@@ -10,8 +10,12 @@
 # renamed assets in v3.0.8) — we pin a source tag instead of a release
 # asset name.
 #
-# Cross-compile on the BUILD platform (no QEMU): Go targets TARGETARCH
-# directly, so the multi-arch publish is two `go build`s, not emulation.
+# CI builds each arch on its own native runner (ubuntu-24.04 /
+# ubuntu-24.04-arm, .github/workflows/native-multiarch-image.yml), so there
+# BUILDPLATFORM equals TARGETPLATFORM and the smoke stage below executes
+# natively, never under QEMU. The build stage still runs on $BUILDPLATFORM
+# with GOARCH from TARGETARCH, so a local cross-platform build keeps the
+# `go build` itself emulation-free.
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 RUN apk add --no-cache git
 ARG WALG_VERSION=v3.0.9
@@ -42,5 +46,5 @@ COPY --from=smoke /usr/local/bin/wal-g /usr/local/bin/wal-g
 # edits never invalidate the build layers; no versions in the prose — the
 # tag and ARG WALG_VERSION above already carry them).
 LABEL org.opencontainers.image.title="wal-g" \
-      org.opencontainers.image.description="Statically linked wal-g PostgreSQL binary, built from the pinned upstream source tag with CGO disabled so it runs on musl and glibc images alike. This is the single build point for the wal-g binary that vibecarbon's database images copy in: both the pre-published Kubernetes postgres image and the Docker Compose db image built on each target server take the binary from here instead of downloading upstream release assets. The tag names the wal-g version it contains." \
+      org.opencontainers.image.description="Statically linked wal-g PostgreSQL binary, built from the pinned upstream source tag with CGO disabled so it runs on musl and glibc images alike. This is the single build point for the wal-g binary in vibecarbon's database image, the one published image every deploy mode and local development pull, so it takes the binary from here instead of downloading upstream release assets. The tag names the wal-g version it contains." \
       org.opencontainers.image.source="https://github.com/hyperformant/vibecarbon"

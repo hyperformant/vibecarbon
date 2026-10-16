@@ -85,7 +85,8 @@ image inputs or `src/lib/images.js` (the READMEs excluded), so later commits tha
 files keep pointing at the same build. A dev tag is never rebuilt or moved. A push that does not trigger the
 workflow (history rewritten with the same inputs) needs it run by hand:
 `gh workflow run publish-db-image-dev.yml --ref <branch>`.
-If the branch changed `docker/wal-g`, the same run builds wal-g too and the db
+If the branch changed `docker/wal-g`, the same run builds wal-g too (natively
+per arch, like the release, tagged `walg-<sha12>` in `postgres-dev`) and the db
 image consumes that build by digest; otherwise it uses the published wal-g.
 `cleanup-db-image-dev.yml` deletes `postgres-dev` versions older than 14 days.
 

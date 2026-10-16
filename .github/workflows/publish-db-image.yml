@@ -15,47 +15,49 @@ permissions:
   contents: read
 jobs:
   # The static wal-g binary image publishes FIRST: the db image below
-  # COPY --froms it, so `needs:`
-  # in this one workflow is what serializes a same-push bump of both — two
-  # workflows racing the same push was the alternative, and the db leg would
-  # lose it.
+  # COPY --froms it, so `needs:` in this one workflow is what serializes a
+  # same-push bump of both. Two workflows racing the same push was the
+  # alternative, and the db leg would lose it.
   #
-  # multi-arch (amd64 + arm64) with NO QEMU: docker/wal-g/Dockerfile builds
-  # on $BUILDPLATFORM and cross-compiles per TARGETARCH, so both platforms
-  # are native-speed `go build`s. Its one consumer is the db image's two
-  # native per-arch builds below. Guarded by
+  # amd64 + arm64, each built on its OWN native runner through the same
+  # native-multiarch-image.yml the db image uses (ubuntu-24.04 /
+  # ubuntu-24.04-arm), never QEMU. docker/wal-g/Dockerfile's smoke stage
+  # (`RUN wal-g --version` on TARGETPLATFORM) therefore executes natively on
+  # both arches instead of leaning on whatever binfmt the runner image ships,
+  # and .github/scripts/smoke-walg-image.sh runs each arch before its digest
+  # is pushed, then again on the merged tag. Its one consumer is the db
+  # image's two native per-arch builds below. Guarded by
   # tests/unit/deploy/workflow-platforms.test.ts.
   #
   # The ghcr package must be PUBLIC (same rule as ghcr.io/hyperformant/postgres).
-  publish-walg:
-    runs-on: ubuntu-latest
-    environment: e2e-infra
+  walg-ref:
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-      packages: write   # push to ghcr
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: ref
         name: Resolve wal-g version from docker/wal-g/Dockerfile
         run: |
+          set -euo pipefail
           V=$(grep -oP 'ARG WALG_VERSION=v\K[0-9.]+' docker/wal-g/Dockerfile)
-          echo "image=ghcr.io/hyperformant/wal-g:$V" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: docker/wal-g
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.ref.outputs.image }}
-      # The Dockerfile's own smoke stage already executed the amd64 binary
-      # in-build; this proves the PUBLISHED manifest resolves and runs.
-      - name: Smoke-test the published amd64 binary
-        run: docker run --rm --entrypoint /usr/local/bin/wal-g ${{ steps.ref.outputs.image }} --version
+          test -n "$V"
+          echo "tag=$V" >> "$GITHUB_OUTPUT"
+  publish-walg:
+    needs: walg-ref
+    permissions:
+      contents: read
+      packages: write   # push the per-arch digests and the multi-arch tag to ghcr
+    uses: ./.github/workflows/native-multiarch-image.yml
+    with:
+      name: walg
+      context: docker/wal-g
+      image: ghcr.io/hyperformant/wal-g
+      tag: ${{ needs.walg-ref.outputs.tag }}
+      smoke: .github/scripts/smoke-walg-image.sh
+      environment: e2e-infra
   # The db image: one NATIVE build per arch, then one multi-arch tag.
   #
   # amd64 + arm64. Servers are amd64 only (src/lib/deploy/platform.js); the

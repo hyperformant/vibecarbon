@@ -2,15 +2,18 @@ name: native-multiarch-image
 # Reusable: build one image NATIVELY per arch, smoke-test each arch on its own
 # hardware before anything is pushed, push each leg by digest only, then name
 # both digests under one tag. Callers:
-#   - publish-db-image.yml      (release: ghcr.io/hyperformant/postgres)
-#   - publish-db-image-dev.yml  (branches: ghcr.io/hyperformant/postgres-dev)
+#   - publish-db-image.yml      (release: ghcr.io/hyperformant/wal-g, then
+#                                ghcr.io/hyperformant/postgres)
+#   - publish-db-image-dev.yml  (branches: wal-g and the db image, both into
+#                                ghcr.io/hyperformant/postgres-dev)
 # One definition, so the dev channel is the release build with a different
 # name and tag, never a lookalike that drifts.
 #
 # Native runners, never QEMU: the db image compiles pg_cron (C, PGXS) inside
-# the target platform's postgres image, so each arch builds on its own
-# hardware (ubuntu-24.04 / ubuntu-24.04-arm) at full speed, and the smoke
-# script EXECUTES that arch's binaries for real. Each leg pushes by digest
+# the target platform's postgres image, and both images execute their
+# binaries in-build (wal-g's smoke stage, the db image's `wal-g --version`),
+# so each arch builds on its own hardware (ubuntu-24.04 / ubuntu-24.04-arm)
+# at full speed, and the smoke script EXECUTES that arch's binaries for real. Each leg pushes by digest
 # only (no tag); the merge job then names both digests under the one tag, so
 # the tag never points at a half-built image.
 #

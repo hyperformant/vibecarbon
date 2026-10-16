@@ -1,7 +1,7 @@
 name: cleanup-db-image-dev
 # Daily prune of the db image dev channel: deletes every version of
-# ghcr.io/hyperformant/postgres-dev (tagged builds, their per-arch children
-# and the untagged wal-g digests publish-db-image-dev.yml pushes) created more
+# ghcr.io/hyperformant/postgres-dev (tagged db builds, the walg-<sha> wal-g
+# builds, and their per-arch children, all pushed by publish-db-image-dev.yml) created more
 # than 14 days ago. Scoped to that ONE package: the release package
 # ghcr.io/hyperformant/postgres is never listed or touched here.
 #
