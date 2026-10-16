@@ -54,7 +54,7 @@ fi
 PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
 in_recovery=""
 if command -v psql >/dev/null 2>&1; then
-    in_recovery="$(psql -U "${PGUSER:-supabase_admin}" -d postgres -tAXc 'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '[:space:]')"
+    in_recovery="$(psql -U "${PGUSER:-postgres}" -d postgres -tAXc 'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '[:space:]')"
 fi
 # Fall back to the standby.signal marker if psql couldn't answer (e.g. socket
 # not reachable from the archive_command context). Postgres removes this file

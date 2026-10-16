@@ -412,15 +412,13 @@ ${connectTimeoutBlock}${probeBlock}${basebackupBlock}
 # -R should already have created standby.signal; touch belt-and-suspenders.
 touch ${stagingDir}/standby.signal
 echo "primary_slot_name = '${slotName}'" >> ${stagingDir}/postgresql.auto.conf
-# hot_standby MUST be forced on: the supabase/postgres image ships
-# /etc/postgresql-custom/wal-g.conf with 'hot_standby = off' (postgresql.conf
-# leaves it commented, so the included wal-g.conf wins) — the reseeded standby
-# then streams fine but REFUSES read-only connections ("FATAL: the database
-# system is not accepting connections / DETAIL: Hot standby mode is disabled"),
-# failing every pg_is_in_recovery() check. postgresql.auto.conf is read LAST,
-# so this wins over the include. Harmless after promotion (ignored outside
-# recovery). Live RCA 2026-07-06 e4 rig; k8s + compose ship the same image
-# family, so this applies to BOTH staging paths.
+# hot_standby MUST be on: with it off, the reseeded standby streams fine but
+# REFUSES read-only connections ("FATAL: the database system is not accepting
+# connections / DETAIL: Hot standby mode is disabled"), failing every
+# pg_is_in_recovery() check. The previous image shipped a config include with
+# 'hot_standby = off' (live RCA 2026-07-06 e4 rig); postgresql.auto.conf is read
+# LAST, so pinning it here wins over any image config on both staging paths
+# (k8s + compose). Harmless after promotion (ignored outside recovery).
 echo "hot_standby = on" >> ${stagingDir}/postgresql.auto.conf
 ${conninfoBlock}chown -R postgres:postgres ${stagingDir}
 ${swapBlock}`.trim();
@@ -1209,7 +1207,7 @@ $$;
       '--',
       'psql',
       '-U',
-      'supabase_admin',
+      'postgres',
       '-d',
       'postgres',
       '-v',
@@ -1616,7 +1614,7 @@ export async function reseedStandbyFromPrimary(
         '--',
         'psql',
         '-U',
-        'supabase_admin',
+        'postgres',
         '-tAc',
         'SELECT pg_is_in_recovery()',
       ]);
@@ -1693,7 +1691,7 @@ export async function promoteStandby(standbyIp, sshKeyPath) {
         '--',
         'psql',
         '-U',
-        'supabase_admin',
+        'postgres',
         '-tAc',
         'SELECT pg_is_in_recovery()',
       ]);
@@ -1733,7 +1731,7 @@ export async function isStandbyStreaming(standbyIp, sshKeyPath) {
       '--',
       'psql',
       '-U',
-      'supabase_admin',
+      'postgres',
       '-tAc',
       'SELECT status FROM pg_stat_wal_receiver',
     ]);
@@ -1771,7 +1769,7 @@ export async function isStandbyPromoted(standbyIp, sshKeyPath) {
       '--',
       'psql',
       '-U',
-      'supabase_admin',
+      'postgres',
       '-tAc',
       'SELECT pg_is_in_recovery()',
     ]);
@@ -1800,7 +1798,7 @@ export async function readK8sReplicationState(primaryIp, sshKeyPath) {
     '--',
     'psql',
     '-U',
-    'supabase_admin',
+    'postgres',
     '-tAc',
     "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1",
   ]);

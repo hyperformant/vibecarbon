@@ -33,10 +33,10 @@ function cPayloads(args: string[]): string[] {
 describe('enableWalArchivingPsqlArgs', () => {
   const args = enableWalArchivingPsqlArgs('supabase-supabase-db-0');
 
-  it('targets the named db pod via kubectl exec + psql as supabase_admin', () => {
+  it('targets the named db pod via kubectl exec + psql as postgres', () => {
     expect(args.slice(0, 5)).toEqual(['-n', 'vibecarbon', 'exec', 'supabase-supabase-db-0', '--']);
     expect(args).toContain('psql');
-    expect(args).toContain('supabase_admin');
+    expect(args).toContain('postgres');
   });
 
   it('sends each ALTER SYSTEM as its OWN -c so none runs inside a transaction block', () => {

@@ -303,7 +303,7 @@ const POD_JSON_FIXTURE = JSON.stringify({
     containers: [
       {
         name: 'supabase-db',
-        image: 'supabase/postgres:15.8.1.060',
+        image: 'postgres:17',
         volumeMounts: [
           {
             name: 'postgres-volume',
@@ -327,7 +327,7 @@ describe('parsePgdataClaimFromPodJson', () => {
     expect(parsePgdataClaimFromPodJson(POD_JSON_FIXTURE)).toEqual({
       claimName: 'data-supabase-supabase-db-0',
       subPath: 'postgres-data',
-      image: 'supabase/postgres:15.8.1.060',
+      image: 'postgres:17',
     });
   });
 
@@ -363,7 +363,7 @@ describe('buildPgdataSwapPodManifest', () => {
   const manifest = JSON.parse(
     buildPgdataSwapPodManifest({
       claimName: 'data-supabase-supabase-db-0',
-      image: 'supabase/postgres:15.8.1.060',
+      image: 'postgres:17',
       swapScript: buildNodePgdataSwapScript({ pgdataDir: '/pgdata-vol/postgres-data' }),
     }),
   );
@@ -380,7 +380,7 @@ describe('buildPgdataSwapPodManifest', () => {
 
   it('reuses the db image (already pulled on the node) and runs the swap script via bash', () => {
     const c = manifest.spec.containers[0];
-    expect(c.image).toBe('supabase/postgres:15.8.1.060');
+    expect(c.image).toBe('postgres:17');
     expect(c.command[0]).toBe('bash');
     expect(c.command[1]).toBe('-c');
     expect(c.command[2]).toContain("PGDATA='/pgdata-vol/postgres-data'");
@@ -446,7 +446,7 @@ describe('swapPgdataViaHelperPod', () => {
   const inputs = {
     claimName: 'data-supabase-supabase-db-0',
     subPath: 'postgres-data',
-    image: 'supabase/postgres:15.8.1.060',
+    image: 'postgres:17',
   };
 
   it('applies the swap pod, waits for Succeeded, returns its logs, and deletes it', async () => {
@@ -458,7 +458,7 @@ describe('swapPgdataViaHelperPod', () => {
     // Manifest carries the PVC, the reused image, and PGDATA=<root>/<subPath>.
     const apply = calls.find((c) => c.argv.join(' ').includes('apply -f -'));
     expect(apply?.input).toContain('data-supabase-supabase-db-0');
-    expect(apply?.input).toContain('supabase/postgres:15.8.1.060');
+    expect(apply?.input).toContain('postgres:17');
     expect(apply?.input).toContain("PGDATA='/pgdata-vol/postgres-data'");
     // Waited on the pod status via shell-safe `-o json` (no jsonpath metachars
     // that the joined-argv ssh transport would hand to bash), then always

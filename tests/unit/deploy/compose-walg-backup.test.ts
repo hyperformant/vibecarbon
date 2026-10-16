@@ -35,7 +35,7 @@ describe('compose-backup.sh (the single source of truth)', () => {
   const script = readFileSync(SCRIPT_PATH, 'utf-8');
 
   it('connects as the superuser and runs a guarded wal-g base backup', () => {
-    expect(script).toContain('PGUSER=supabase_admin');
+    expect(script).toContain('PGUSER=postgres');
     expect(script).toContain('pg_is_in_recovery');
     expect(script).toContain('wal-g backup-push');
     expect(script).toContain('wal-g delete retain FULL');

@@ -158,7 +158,7 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
         // write-guard (the post-failover rot state); `t` = a node that is still
         // a replica and should never have been audited as a primary; empty =
         // psql could not answer, which changes neither.
-        `  REC="$(psql -U supabase_admin -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"`,
+        `  REC="$(psql -U postgres -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"`,
         '  echo "WALG_AUDIT=fail:stale-standby-role"; echo "WALG_AUDIT_PREFIX=$PFX"',
         '  echo "WALG_AUDIT_RECOVERY=$REC"; exit 0',
       ]
@@ -178,7 +178,7 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
     'fi',
     'LIST="$(wal-g backup-list --json 2>&1)"',
     'RC=$?',
-    `ARCHIVER="$(psql -U supabase_admin -d postgres -tAX -c "${WALG_ARCHIVER_SQL}" 2>/dev/null)"`,
+    `ARCHIVER="$(psql -U postgres -d postgres -tAX -c "${WALG_ARCHIVER_SQL}" 2>/dev/null)"`,
     'echo "WALG_AUDIT=probed"',
     'echo "WALG_AUDIT_PREFIX=$PFX"',
     'echo "WALG_AUDIT_RC=$RC"',

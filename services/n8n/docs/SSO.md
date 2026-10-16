@@ -95,11 +95,11 @@ The hooks.js spliced a plain object into Express 5's router stack. Use `require(
 Check all three conditions:
 ```bash
 # 1. Owner has password or lastActiveAt
-docker compose exec db psql -U supabase_admin -d n8n -c \
+docker compose exec db psql -U postgres -d n8n -c \
   "SELECT email, password IS NOT NULL, \"lastActiveAt\" FROM \"user\" WHERE \"roleSlug\" = 'global:owner';"
 
 # 2. Setting is true
-docker compose exec db psql -U supabase_admin -d n8n -c \
+docker compose exec db psql -U postgres -d n8n -c \
   "SELECT value FROM settings WHERE key = 'userManagement.isInstanceOwnerSetUp';"
 
 # 3. REST API confirms

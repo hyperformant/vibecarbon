@@ -1157,7 +1157,7 @@ export async function destroyCompose(ip, sshKeyPath, projectName) {
  * Build the shell command that runs the wal-g base backup on a Compose VPS.
  *
  * `carbon/backup/compose-backup.sh` is the SINGLE source of truth for the
- * backup logic (guard + PGUSER=supabase_admin + wal-g backup-push + delete
+ * backup logic (guard + PGUSER=postgres + wal-g backup-push + delete
  * retain, plus a flock and set -e). This builder is a thin, quote-safe
  * wrapper so the on-demand path and the cron path run byte-identical commands.
  *

@@ -4,7 +4,7 @@ set -e
 # Observability Database Initialization
 # Creates a dedicated, least-privilege read-only role used by BOTH the Grafana
 # PostgreSQL datasource and the postgres-exporter. Replaces the previous use of
-# the superuser `supabase_admin` for metrics access (H-9 follow-up).
+# the superuser `postgres` for metrics access (H-9 follow-up).
 #
 # The role is granted `pg_monitor` — Postgres' built-in monitoring role
 # (pg_read_all_stats + pg_read_all_settings + pg_stat_scan_tables), which is

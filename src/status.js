@@ -397,7 +397,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
             [
               'bash',
               '-lc',
-              `cd /opt/${projectName} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "${targetSql}"`,
+              `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${targetSql}"`,
             ],
             { timeout: timeoutMs },
           )
@@ -412,7 +412,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
               '--',
               'psql',
               '-U',
-              'supabase_admin',
+              'postgres',
               '-d',
               'postgres',
               '-tAc',
@@ -470,7 +470,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
             '--',
             'psql',
             '-U',
-            'supabase_admin',
+            'postgres',
             '-d',
             'postgres',
             '-tAc',

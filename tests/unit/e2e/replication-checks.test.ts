@@ -56,7 +56,7 @@ describe('buildPsqlCommand', () => {
   it('uses docker compose exec for compose-ha and cds into the project dir', () => {
     const cmd = buildPsqlCommand('compose-ha', 'acme', 'SELECT 1');
     expect(cmd).toContain('cd /opt/acme');
-    expect(cmd).toContain('docker compose exec -T db psql -U supabase_admin -d postgres -tAc');
+    expect(cmd).toContain('docker compose exec -T db psql -U postgres -d postgres -tAc');
     expect(cmd).toContain('"SELECT 1"');
   });
 
@@ -64,7 +64,7 @@ describe('buildPsqlCommand', () => {
     const cmd = buildPsqlCommand('k8s-ha', 'acme', 'SELECT 1');
     expect(cmd).toContain('KUBECONFIG=/etc/rancher/k3s/k3s.yaml');
     expect(cmd).toContain('kubectl exec -n vibecarbon supabase-supabase-db-0');
-    expect(cmd).toContain('psql -U supabase_admin -d postgres -tAc');
+    expect(cmd).toContain('psql -U postgres -d postgres -tAc');
     expect(cmd).not.toContain('docker compose');
   });
 

@@ -670,7 +670,7 @@ async function haWaitPrimaryPostgres(ctx) {
         const health = await sshRun(
           primary.ip,
           sshKeyPath,
-          `cd /opt/${projectName} && docker compose exec -T db pg_isready -h localhost -p 5432 2>/dev/null`,
+          `cd /opt/${projectName} && docker compose exec -T db pg_isready -h localhost -p 5432 -U postgres 2>/dev/null`,
           { timeout: 10_000 },
         );
         if (health?.includes('accepting connections')) return true;
@@ -810,7 +810,7 @@ async function haVerifyStreaming(ctx) {
       const state = await sshRun(
         primary.ip,
         sshKeyPath,
-        `cd /opt/${projectName} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+        `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
         { timeout: 10_000 },
       );
       return typeof state === 'string' ? state.trim() : '';

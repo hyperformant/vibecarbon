@@ -315,7 +315,7 @@ END $$;
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres`,
+    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres`,
     { timeout: 30_000, input: createRoleSql, what: 'replicator role + replication slot creation' },
   );
 
@@ -337,15 +337,13 @@ END $$;
   // scoped firewall), and auth remains scram-sha-256 with the per-deploy
   // random REPL_PASSWORD.
   //
-  // The supabase/postgres image overrides hba_file to
-  // /etc/postgresql/pg_hba.conf (NOT the default
-  // /var/lib/postgresql/data/pg_hba.conf). RCA: compose-ha 2026-05-01 fanout12
-  // — appended to the wrong file, postgres never saw the rule, every
-  // replication connection was rejected with "no pg_hba.conf entry" while
-  // pg_hba_file_rules reflected the actual /etc loaded contents (no replicator
-  // entry). Resolve the path at runtime via SHOW hba_file so we don't break
-  // again if the image moves the file. Appends are idempotent (grep -qxF) so
-  // re-deploys / failover re-seeds don't grow the file.
+  // Resolve the hba path at runtime via SHOW hba_file rather than assuming
+  // one. Our postgres:17 image keeps it at $PGDATA/pg_hba.conf, but the
+  // previous image overrode it to /etc/postgresql/pg_hba.conf, and appending to
+  // a file postgres never reads rejects every replication connection with "no
+  // pg_hba.conf entry" (RCA: compose-ha 2026-05-01 fanout12). Appends are
+  // idempotent (grep -qxF) so re-deploys / failover re-seeds don't grow the
+  // file.
   const netOut = await sshRun(
     primaryIp,
     sshKeyPath,
@@ -370,9 +368,9 @@ END $$;
   const hbaOut = await sshRun(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && HBA_FILE=$(docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]') && ` +
+    `cd ${remoteDir} && HBA_FILE=$(docker compose exec -T db psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]') && ` +
       `docker compose exec -T db sh -c "${hbaAppendCmds}; ` +
-      `psql -U supabase_admin -d postgres -tAc 'SELECT pg_reload_conf();'"`,
+      `psql -U postgres -d postgres -tAc 'SELECT pg_reload_conf();'"`,
     { timeout: 15_000 },
   );
   if (hbaOut === false) {
@@ -389,7 +387,7 @@ END $$;
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET wal_level = 'replica';" && docker compose exec -T db psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET max_wal_senders = 5;" && docker compose exec -T db psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET wal_keep_size = '512MB';"`,
+    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_level = 'replica';" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET max_wal_senders = 5;" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_keep_size = '512MB';"`,
     { timeout: 30_000, what: 'WAL replication settings (ALTER SYSTEM)' },
   );
 
@@ -474,7 +472,7 @@ END $$;`;
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
-    `cd ${remoteDir} && echo ${ensureSlotB64} | base64 -d | docker compose exec -T db psql -U supabase_admin -d postgres`,
+    `cd ${remoteDir} && echo ${ensureSlotB64} | base64 -d | docker compose exec -T db psql -U postgres -d postgres`,
     { timeout: 30_000, what: 'replication-slot re-create on the primary' },
   );
 
@@ -544,9 +542,9 @@ END $$;`;
   })}
 echo COMPOSE_RESEED_STAGED
 `;
-  // Stage into the RUNNING db container. Use bash, not sh: the supabase/postgres
-  // image symlinks /bin/sh → dash, which rejects `set -o pipefail` and silently
-  // neuters every failure check (RCA: compose-ha 2026-05-01 fanout10 failover).
+  // Stage into the RUNNING db container. Use bash, not sh: an image whose
+  // /bin/sh is dash rejects `set -o pipefail` and silently neuters every
+  // failure check (RCA: compose-ha 2026-05-01 fanout10 failover, previous image).
   // The script (which embeds the replication password in PGPASSWORD +
   // primary_conninfo) is piped to bash via STDIN (`input:`), so it never appears
   // in argv / the ssh command string. `-T` forwards stdin. `|| true` keeps the
@@ -684,7 +682,7 @@ echo COMPOSE_RESEED_STAGED
       const result = await sshRun(
         standbyIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
         { timeout: 10_000 },
       );
       lastProbeResult = typeof result === 'string' ? result.trim() : '';
@@ -696,7 +694,7 @@ echo COMPOSE_RESEED_STAGED
       const primaryResult = await sshRun(
         primaryIp,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "SELECT state FROM pg_stat_replication WHERE client_addr = '${standbyIp}'::inet"`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT state FROM pg_stat_replication WHERE client_addr = '${standbyIp}'::inet"`,
         { timeout: 10_000 },
       );
       lastPrimarySignal = typeof primaryResult === 'string' ? primaryResult.trim() : '';
@@ -718,7 +716,7 @@ echo COMPOSE_RESEED_STAGED
       `within ${PROBE_BUDGET_S}s after pg_basebackup. Last standby pg_is_in_recovery() = ` +
       `${JSON.stringify(lastProbeResult)}, last primary pg_stat_replication.state for this ` +
       `standby = ${JSON.stringify(lastPrimarySignal)}. SSH in and check: docker compose exec ` +
-      `db psql -U supabase_admin -d postgres -tAc 'SELECT pg_is_in_recovery()' and ` +
+      `db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()' and ` +
       `ls /var/lib/postgresql/data/standby.signal`,
   );
 }
@@ -826,7 +824,7 @@ export async function isComposeStandbyStreaming(standbyIp, sshKeyPath, remoteDir
     const result = await sshRun(
       standbyIp,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SELECT status FROM pg_stat_wal_receiver'`,
+      `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT status FROM pg_stat_wal_receiver'`,
       { silent: true, timeout: 10_000 },
     );
     return (typeof result === 'string' ? result : '').trim() === 'streaming';
@@ -1499,7 +1497,7 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
       const r = await sshRun(
         standbyServer.ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
         { silent: true, timeout: 10_000 },
       );
       return typeof r === 'string' ? r.trim() : '';
@@ -1523,7 +1521,7 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
       const result = await sshRun(
         standbyServer.ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "SELECT pg_promote(wait => true, wait_seconds => 120)"`,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => true, wait_seconds => 120)"`,
         { silent: true, timeout: 150_000 },
       );
       const trimmed = typeof result === 'string' ? result.trim() : '';

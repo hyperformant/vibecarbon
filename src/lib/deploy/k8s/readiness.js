@@ -236,7 +236,7 @@ export async function awaitPostgresAccepting({
           '-h',
           '127.0.0.1',
           '-U',
-          'supabase_admin',
+          'postgres',
         ],
         { env, silent: true },
       ),

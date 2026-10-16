@@ -202,7 +202,7 @@ export function buildWalSwitchProbe(): string {
     'if [ "${WALG_ROLE:-primary}" = "standby" ]; then',
     '  echo "WAL_SWITCH=fail:standby-role"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
     'fi',
-    'REC="$(psql -U supabase_admin -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"',
+    'REC="$(psql -U postgres -d postgres -tAXc "SELECT pg_is_in_recovery()" 2>/dev/null | tr -d "[:space:]")"',
     'if [ "$REC" = "t" ]; then',
     '  echo "WAL_SWITCH=fail:in-recovery"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
     'fi',
@@ -210,7 +210,7 @@ export function buildWalSwitchProbe(): string {
     // session, in order; `tr -d "[:blank:]"` strips padding but KEEPS newlines
     // (a [:space:] class would fold both answers onto one line), and the last
     // non-empty line is the walfile name.
-    'SEG="$(psql -U supabase_admin -d postgres -tAX -c "SELECT txid_current()" -c "SELECT pg_walfile_name(pg_switch_wal())" 2>/dev/null | tr -d "[:blank:]" | grep -v "^$" | tail -1)"',
+    'SEG="$(psql -U postgres -d postgres -tAX -c "SELECT txid_current()" -c "SELECT pg_walfile_name(pg_switch_wal())" 2>/dev/null | tr -d "[:blank:]" | grep -v "^$" | tail -1)"',
     'if [ -z "$SEG" ]; then',
     '  echo "WAL_SWITCH=fail:switch-returned-nothing"; echo "WAL_SWITCH_PREFIX=$PFX"; exit 0',
     'fi',

@@ -372,7 +372,7 @@ export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
     '--',
     'psql',
     '-U',
-    'supabase_admin',
+    'postgres',
     '-tAc',
     'SELECT pg_current_wal_lsn()',
   ]);
@@ -397,7 +397,7 @@ export async function waitForStandbyCaughtUp(servers, sshKeyPath, opts = {}) {
         '--',
         'psql',
         '-U',
-        'supabase_admin',
+        'postgres',
         '-tAc',
         `SELECT pg_wal_lsn_diff(pg_last_wal_replay_lsn(), '${target}') >= 0`,
       ]);

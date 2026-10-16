@@ -45,7 +45,7 @@ const STANDBY_OPTS = { standbyDbIp: '10.0.0.8', standbyDbPrivateIp: '10.0.1.2' }
 // chart mounts the volume at (postgres-data), and the db container image (reused
 // for the swap pod). No PV node-path walk — the swap runs in a helper pod that
 // mounts the PVC, so local-path AND csi.hetzner.cloud volumes work identically.
-const DB_IMAGE = 'supabase/postgres:15.8.1.060';
+const DB_IMAGE = 'postgres:17';
 const POD_JSON = JSON.stringify({
   spec: {
     containers: [

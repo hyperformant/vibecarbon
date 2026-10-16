@@ -142,7 +142,7 @@ Vibecarbon uses several types of secrets. Rotate on the cadence below or immedia
 #### `DB_PASSWORD`
 
 1. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/[+/=]/g, 'x'))"`
-2. `ALTER USER postgres WITH PASSWORD '…'` for each Supabase role (`postgres`, `supabase_admin`, `authenticator`, `supabase_auth_admin`, `supabase_storage_admin`).
+2. `ALTER USER postgres WITH PASSWORD '…'` (the `postgres` superuser is the only login role that uses it).
 3. Update `DB_PASSWORD` / `POSTGRES_PASSWORD` in `.env.local` and restart services.
 4. Verify every service reconnects.
 

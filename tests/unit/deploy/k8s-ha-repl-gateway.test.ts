@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 // `postgres-data`), and the db container image (reused for the swap pod). No PV
 // node-path walk anymore — the swap runs in a helper pod that mounts the PVC, so
 // it works for local-path AND csi.hetzner.cloud volumes alike.
-const DB_IMAGE = 'supabase/postgres:15.8.1.060';
+const DB_IMAGE = 'postgres:17';
 // Pretty-printed (null, 2) like real kubectl -o json output: the ha/index
 // self-heal waits on the literal substring `"phase": "Running"` before reading
 // the pod spec.

@@ -458,12 +458,12 @@ describe('sshKubectl', () => {
       '--',
       'sh',
       '-c',
-      'gunzip -c /tmp/f.gz | psql -U supabase_admin postgres',
+      'gunzip -c /tmp/f.gz | psql -U postgres postgres',
     ]);
     const [cmd] = mockRun.mock.calls[0] as [string[]];
     const dashIdx = cmd.indexOf('--');
     expect(cmd.slice(dashIdx + 2)).toEqual([
-      "'env' 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' 'kubectl' 'exec' '-n' 'vibecarbon' 'postgres-0' '--' 'sh' '-c' 'gunzip -c /tmp/f.gz | psql -U supabase_admin postgres'",
+      "'env' 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml' 'kubectl' 'exec' '-n' 'vibecarbon' 'postgres-0' '--' 'sh' '-c' 'gunzip -c /tmp/f.gz | psql -U postgres postgres'",
     ]);
   });
 });

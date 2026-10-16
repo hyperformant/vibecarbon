@@ -9,7 +9,7 @@
 # least-privilege `observability_ro` datasource role (provisioned by the db
 # init script); k8s has neither an exporter nor a role-provisioning path, and
 # the shipped dashboards query only Prometheus/Loki. The previous PostgreSQL
-# datasource here was hardcoded to the `supabase_admin` SUPERUSER yet was
+# datasource here was hardcoded to the `postgres` SUPERUSER yet was
 # non-functional anyway (its $DB_PASSWORD was never set in the Grafana env, and
 # its host `postgres` does not match the chart's `supabase-supabase-db`
 # Service). It was removed rather than shipped as a dormant superuser

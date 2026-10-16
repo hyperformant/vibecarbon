@@ -55,7 +55,7 @@ export function rlsAuditFailureMessage(tableList) {
 export function composeRlsAuditShell() {
   // -tAc: tuples-only, unaligned, single command → stdout is the list or empty.
   return (
-    `UNPROTECTED=$(docker compose exec -T db psql -U supabase_admin -d postgres -tAc ` +
+    `UNPROTECTED=$(docker compose exec -T db psql -U postgres -d postgres -tAc ` +
     `"${RLS_AUDIT_SQL}" 2>/dev/null | tr -d '[:space:]'); ` +
     `if [ -n "$UNPROTECTED" ]; then ` +
     `echo "[migrate] SECURITY: public tables without RLS: $UNPROTECTED, refusing to deploy an exposed schema" >&2; ` +

@@ -490,7 +490,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
           'ssh',
           ...sshOpts,
           `root@${primaryIp}`,
-          'cat /tmp/primary-init.sql | kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin',
+          'cat /tmp/primary-init.sql | kubectl exec -i -n vibecarbon supabase-supabase-db-0 -- psql -U postgres',
         ],
         { silent: true },
       );
@@ -561,10 +561,10 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   // scoped firewall rule), and auth remains scram-sha-256 with the per-deploy
   // random REPL_PASSWORD.
   //
-  // DURABILITY (same-wave finding): the supabase/postgres image points
-  // hba_file at /etc/postgresql/pg_hba.conf — a container-EPHEMERAL path
-  // (compose RCA fanout12 2026-05-01 established the override; the k8s db
-  // image is the same family). Appending to the live file would be reverted by
+  // DURABILITY (same-wave finding): an image that points hba_file at
+  // /etc/postgresql/pg_hba.conf (the previous image did; compose RCA fanout12
+  // 2026-05-01) puts it on a container-EPHEMERAL path. Our postgres:17 image
+  // keeps it in PGDATA, so the copy below is skipped there. Appending to the live file would be reverted by
   // the very next pod restart — and step 3 deletes this pod moments from now —
   // while appending only to PGDATA/pg_hba.conf targets a file postgres never
   // reads. So: copy the LIVE hba file (resolved via SHOW hba_file) into PGDATA
@@ -576,13 +576,13 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
   const hbaLines = buildReplicationHbaLines([WG_SUBNET_CIDR, K3S_POD_CIDR]);
   const hbaSetupScript = [
     'set -e',
-    `HBA_LIVE=$(psql -U supabase_admin -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]')`,
+    `HBA_LIVE=$(psql -U postgres -d postgres -tAc 'SHOW hba_file;' | tr -d '[:space:]')`,
     'HBA_DURABLE=/var/lib/postgresql/data/pg_hba.conf',
     'if [ "$HBA_LIVE" != "$HBA_DURABLE" ]; then',
     '  cp "$HBA_LIVE" "$HBA_DURABLE"',
     '  chown postgres:postgres "$HBA_DURABLE"',
     '  chmod 600 "$HBA_DURABLE"',
-    `  psql -U supabase_admin -d postgres -c "ALTER SYSTEM SET hba_file = '$HBA_DURABLE'"`,
+    `  psql -U postgres -d postgres -c "ALTER SYSTEM SET hba_file = '$HBA_DURABLE'"`,
     'fi',
     ...hbaLines.map((l) => `grep -qxF '${l}' "$HBA_DURABLE" || echo '${l}' >> "$HBA_DURABLE"`),
   ].join('\n');
@@ -622,7 +622,7 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
             // awaitPostgresAccepting (readiness.js) for the d4 run-2 RCA.
             // This pod restarts with existing PGDATA (no init flow), so the
             // socket form was safe here, but TCP is the uniform condition.
-            'kubectl exec -n vibecarbon supabase-supabase-db-0 -- pg_isready -h 127.0.0.1 -U supabase_admin 2>/dev/null && echo IS_READY || echo NOT_READY',
+            'kubectl exec -n vibecarbon supabase-supabase-db-0 -- pg_isready -h 127.0.0.1 -U postgres 2>/dev/null && echo IS_READY || echo NOT_READY',
           ],
           { silent: true, ignoreError: true },
         );
@@ -796,7 +796,7 @@ export async function setupReplication(options) {
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
           ],
           { silent: true, ignoreError: true },
         );
@@ -1080,7 +1080,7 @@ export async function setupReplication(options) {
           // output — the old strict === 't' match then never succeeded on this
           // multi-init-container pod and every reseed "timed out" while the
           // standby was recovering fine underneath.
-          `kubectl exec -n vibecarbon ${dbPod} -c supabase-db -- psql -U supabase_admin -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+          `kubectl exec -n vibecarbon ${dbPod} -c supabase-db -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ],
         { silent: true, ignoreError: true },
       );
@@ -1151,7 +1151,7 @@ export async function setupReplication(options) {
             'ssh',
             ...sshOpts,
             `root@${primaryIp}`,
-            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U supabase_admin -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
+            `kubectl exec -n vibecarbon supabase-supabase-db-0 -- psql -U postgres -tAc "SELECT state FROM pg_stat_replication ORDER BY (state = 'streaming') DESC LIMIT 1"`,
           ],
           { silent: true },
         );

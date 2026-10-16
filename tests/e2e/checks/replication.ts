@@ -20,10 +20,10 @@
  *
  * Mode anatomy (how we reach postgres per mode):
  *   compose-ha: postgres is the `db` compose service on each VPS. We SSH to the
- *     VPS and `docker compose exec -T db psql -U supabase_admin`.
+ *     VPS and `docker compose exec -T db psql -U postgres`.
  *   k8s-ha:     postgres is pod supabase-supabase-db-0 (ns vibecarbon) on each
  *     cluster. We SSH to that cluster's MASTER node (k3s API server) and
- *     `kubectl exec ... -- psql -U supabase_admin`. The standby postgres is a
+ *     `kubectl exec ... -- psql -U postgres`. The standby postgres is a
  *     streaming replica, so read-only queries against it are safe.
  *
  * All SSH command strings are built from trusted test config + a sanitized
@@ -69,11 +69,11 @@ const QUALIFIED_PROBE_TABLE = `public.${REPL_PROBE_TABLE}`;
  * security on it, and inserts the marker row — in that order, in ONE
  * statement batch. Belt #1 against the deploy-time RLS audit
  * (src/lib/deploy/rls-audit.js), which fails any warm-deploy/restore/
- * reconverge that finds a public table with RLS disabled. supabase_admin is
- * a postgres SUPERUSER (the db image's own init creates it), and superusers always
+ * reconverge that finds a public table with RLS disabled. postgres is
+ * the SUPERUSER (the db image's initdb creates it), and superusers always
  * bypass RLS regardless of table ownership or FORCE ROW LEVEL SECURITY — so
  * enabling RLS here never blocks the probe's own reads/writes, which all run
- * as supabase_admin.
+ * as postgres.
  */
 export function buildCreateMarkerSql(markerId: string): string {
   return (
@@ -122,12 +122,12 @@ export function buildMarkerId(runId: string, step: string, ts: number): string {
  */
 export function buildPsqlCommand(mode: DeployMode, projectName: string, sql: string): string {
   if (mode.startsWith('compose')) {
-    return `cd /opt/${projectName} && docker compose exec -T db psql -U supabase_admin -d postgres -tAc "${sql}"`;
+    return `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${sql}"`;
   }
   // k8s / k8s-ha: exec into the supabase-db pod from the master node.
   return (
     `KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl exec -n vibecarbon supabase-supabase-db-0 ` +
-    `-- psql -U supabase_admin -d postgres -tAc "${sql}"`
+    `-- psql -U postgres -d postgres -tAc "${sql}"`
   );
 }
 

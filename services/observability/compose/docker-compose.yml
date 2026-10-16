@@ -135,7 +135,7 @@ services:
     container_name: ${PROJECT_NAME:-vibecarbon}-postgres-exporter
     restart: unless-stopped
     environment:
-      # Least-privilege metrics role (pg_monitor), not the supabase_admin
+      # Least-privilege metrics role (pg_monitor), not the postgres
       # superuser. Provisioned by volumes/db/observability-init.sh.
       DATA_SOURCE_NAME: "postgresql://observability_ro:${OBSERVABILITY_DB_PASSWORD}@db:5432/postgres?sslmode=disable"
     networks:

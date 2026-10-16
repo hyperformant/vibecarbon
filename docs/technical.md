@@ -448,12 +448,6 @@ When accessing an admin dashboard without a valid session:
 |------|---------|---------|
 | `postgres` | API server (`adminDb`), migrations | Connection role; bypasses RLS and is a member of `app_user` |
 | `app_user` | API server (`withUserDb`) | NOLOGIN; every user request switches to it, RLS enforced |
-| `authenticator` | PostgREST | API gateway connection, switches roles based on JWT |
-| `supabase_admin` | Realtime, Meta, Studio | Admin operations on database |
-| `supabase_auth_admin` | GoTrue | Manages auth schema and user records |
-| `anon` | Anonymous API | SELECT only, RLS enforced |
-| `authenticated` | Logged-in users | CRUD operations, RLS enforced |
-| `service_role` | Server-side code | Bypasses RLS for admin operations |
 
 ### Authentication Security
 - **Supabase Auth** - Battle-tested GoTrue authentication

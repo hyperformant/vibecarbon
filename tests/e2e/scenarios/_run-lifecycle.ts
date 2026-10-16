@@ -542,7 +542,7 @@ async function captureFailureDiagnostics(
         `${label}: supabase-db pg_is_in_recovery`,
         safeRun('bash', [
           '-c',
-          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec supabase-supabase-db-0 -c supabase-db -- psql -U supabase_admin -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
+          `timeout 10 kubectl --kubeconfig ${kc} -n vibecarbon exec supabase-supabase-db-0 -c supabase-db -- psql -U postgres -tAc 'SELECT pg_is_in_recovery()' 2>&1 || true`,
         ]),
       ]);
       // 100 events for k8s-ha (applyManifests on standby can emit 50+ in
