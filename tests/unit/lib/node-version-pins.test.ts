@@ -126,7 +126,8 @@ function jobRunCommands(relPath: string, jobId: string): string[] {
 
 // Dockerfiles that pin a `node:` base image, and those that deliberately
 // don't (the db image is FROM the official postgres Alpine image; docker/wal-g
-// is a Go build). Listing the second group is what makes the inventory meaningful:
+// is a Go build; .github/image-pins is never built, it only shows Dependabot
+// the image pins held in JS constants). Listing the second group is what makes the inventory meaningful:
 // adding Node to one of them, or adding a new Dockerfile entirely, has to be
 // triaged here.
 const NODE_DOCKERFILES = [
@@ -136,6 +137,7 @@ const NODE_DOCKERFILES = [
 const NON_NODE_DOCKERFILES = [
   join('docker', 'postgres-walg', 'Dockerfile'),
   join('docker', 'wal-g', 'Dockerfile'),
+  join('.github', 'image-pins', 'Dockerfile'),
 ];
 
 // Only genuinely irrelevant trees are skipped. Dot-directories are NOT

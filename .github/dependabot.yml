@@ -107,21 +107,55 @@ updates:
       all-actions:
         patterns: ["*"]
 
-  # Docker base-image digests (FROM/ARG lines are pinned by sha256 for the
-  # OpenSSF Scorecard Pinned-Dependencies check; these entries keep the
-  # digests moving when upstream retags).
+  # Docker image digests. Every image ref this repo ships is pinned as
+  # `name:tag@sha256:<index digest>` (tests/unit/deploy/image-digest-census.test.ts
+  # fails on one that is not); these entries keep the digests moving when
+  # upstream retags and propose new tags. Directories:
+  #   - Dockerfiles: the template app, our three published images (wal-g's
+  #     golang/alpine build stages included), and .github/image-pins, the
+  #     never-built Dockerfile that mirrors the pins held in JS constants
+  #     (socat, registry, diagnose probes, DO CSI init); its header says which
+  #     constant to update in the same PR.
+  #   - Kubernetes manifests (the docker ecosystem reads `image:` in
+  #     Deployment/StatefulSet/CronJob YAML): carbon/k8s/base/* and the
+  #     add-on services' k8s directories.
+  # Not reachable by any ecosystem, so not listed: the registry.k8s.io mirror
+  # digests in src/lib/images.js (re-derived with the CSI / cluster-autoscaler
+  # version, and verified by publish-images.yml on every run), and the
+  # project's own app image and our own db / carbon-autoscaler images
+  # (published by this repo's workflows; see the census allowlist).
   - package-ecosystem: docker
     directories:
       - /carbon
       - /docker/carbon-autoscaler
       - /docker/postgres-walg
-    # A PostgreSQL major is a data-format change (dump/restore or pg_upgrade),
-    # never a routine bump. Minors and digest moves still come through; each
-    # one also moves DB_IMAGE_TAG (src/lib/images.js), which the PR must do by
-    # hand (tests/unit/deploy/walg-dockerfile-arch.test.ts fails until then).
+      - /docker/wal-g
+      - /.github/image-pins
+      - /carbon/k8s/base/*
+      - /services/*/k8s
     ignore:
+      # A PostgreSQL major is a data-format change (dump/restore or
+      # pg_upgrade), never a routine bump. Minors and digest moves still come
+      # through; each one also moves DB_IMAGE_TAG (src/lib/images.js), which
+      # the PR must do by hand (tests/unit/deploy/walg-dockerfile-arch.test.ts
+      # fails until then). The same holds for a wal-g re-pin in
+      # docker/postgres-walg (bump the DB_IMAGE_TAG -r revision).
       - dependency-name: postgres
         update-types: ["version-update:semver-major"]
+      # registry 3 changed its config format; the compose registry and the
+      # k8s local registry both run a 2.x config.
+      - dependency-name: registry
+        update-types: ["version-update:semver-major"]
+      # alpine/k8s tags track Kubernetes minors and the backup CronJob's
+      # kubectl must stay within one minor of k3s (K3S_VERSION in
+      # src/lib/deploy/k8s/k3s.js). Patches and digest moves still come.
+      - dependency-name: alpine/k8s
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # Our ghcr mirror: the manifest pins upstream's amd64 child digest
+      # (CLUSTER_AUTOSCALER_DIGEST in src/lib/images.js), not the mirror
+      # tag's index digest, so a Dependabot "update" would only break the
+      # parity guard. images.js owns this ref.
+      - dependency-name: ghcr.io/hyperformant/cluster-autoscaler
     schedule:
       interval: weekly
       day: monday
@@ -135,4 +169,28 @@ updates:
       - dependencies
     groups:
       all-docker:
+        patterns: ["*"]
+
+  # Compose files: the template's (shipped into every project), the add-on
+  # services', and the ACME isolation harness. Same pin form and the same
+  # census as above. A Traefik tag bump must also move the CRD URL in
+  # carbon/k8s/base/traefik (tests/unit/template/traefik-crd-version.test.ts).
+  - package-ecosystem: docker-compose
+    directories:
+      - /carbon
+      - /services/*/compose
+      - /scripts/acme-iso
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(docker-deps)
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      all-compose:
         patterns: ["*"]
