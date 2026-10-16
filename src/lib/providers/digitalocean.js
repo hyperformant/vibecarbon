@@ -29,6 +29,10 @@ import { BaseProvider } from './base.js';
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs; applyOperatorCidrs deletes any such rule (the database has no
+// public port).
+const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
 // The single replication port for the WireGuard tunnel (see wireguard.js —
 // WG_PORT=51821; 51820 is flannel-wg's). Shared by buildReplicationFirewallRules.
@@ -1414,7 +1418,8 @@ export class DigitalOceanProvider extends BaseProvider {
    * Rewrite the SSH (port 22) and Kubernetes API (port 6443) inbound rules
    * on a named firewall to use the given CIDR list as their
    * `sources.addresses`, leaving every other rule (HTTP/HTTPS, internal
-   * cluster traffic) unchanged. Composes findFirewallByName + a
+   * cluster traffic, WireGuard replication) unchanged, and deleting any
+   * inbound tcp/5432 or tcp/6543 rule (RETIRED_DB_PORTS). Composes findFirewallByName + a
    * `{protocol, ports, sources}` rule-rewrite + setFirewallRules — mirrors
    * HetznerProvider.applyOperatorCidrs's SSH_PORT/K8S_API_PORT pair (Task 7
    * controller-added requirement: post-Task-6 tier lift, an operator-IP
@@ -1427,12 +1432,14 @@ export class DigitalOceanProvider extends BaseProvider {
   async applyOperatorCidrs({ firewallName, cidrs }) {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
-    const newRules = (fw.inbound_rules || []).map((rule) => {
-      if (rule.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
-        return { ...rule, sources: { ...rule.sources, addresses: cidrs } };
-      }
-      return rule;
-    });
+    const newRules = (fw.inbound_rules || [])
+      .filter((rule) => !(rule.protocol === 'tcp' && RETIRED_DB_PORTS.has(rule.ports)))
+      .map((rule) => {
+        if (rule.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
+          return { ...rule, sources: { ...rule.sources, addresses: cidrs } };
+        }
+        return rule;
+      });
     await this.setFirewallRules(fw.id, newRules);
     return true;
   }

@@ -18,6 +18,10 @@ import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs. Nothing listens on them any more; applyOperatorCidrs deletes any
+// such rule it finds, so an `access` change or a redeploy leaves none behind.
+const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
 export class HetznerProvider extends BaseProvider {
   /**
@@ -1313,8 +1317,9 @@ export class HetznerProvider extends BaseProvider {
   /**
    * Rewrite the SSH (port 22) and Kubernetes API (port 6443) ingress rules
    * on a named firewall to use the given CIDR list as their `source_ips`,
-   * leaving every other rule (HTTP/HTTPS, internal cluster traffic)
-   * unchanged (C9 — composes findFirewallByName + the
+   * leaving every other rule (HTTP/HTTPS, internal cluster traffic,
+   * WireGuard replication) unchanged, and deleting any inbound tcp/5432 or
+   * tcp/6543 rule (RETIRED_DB_PORTS: the database has no public port) (C9 — composes findFirewallByName + the
    * `{direction, port, source_ips}` rule-rewrite, moved verbatim from
    * operator-ip.js's old applyToFirewall body, + setFirewallRules). This
    * rule-JSON shape never leaves the class. No `ports` option —
@@ -1327,12 +1332,17 @@ export class HetznerProvider extends BaseProvider {
   async applyOperatorCidrs({ firewallName, cidrs }) {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
-    const newRules = fw.rules.map((rule) => {
-      if (rule.direction === 'in' && OPERATOR_LOCKED_PORTS.has(rule.port)) {
-        return { ...rule, source_ips: cidrs };
-      }
-      return rule;
-    });
+    const newRules = fw.rules
+      .filter(
+        (rule) =>
+          !(rule.direction === 'in' && rule.protocol === 'tcp' && RETIRED_DB_PORTS.has(rule.port)),
+      )
+      .map((rule) => {
+        if (rule.direction === 'in' && OPERATOR_LOCKED_PORTS.has(rule.port)) {
+          return { ...rule, source_ips: cidrs };
+        }
+        return rule;
+      });
     await this.setFirewallRules(fw.id, newRules);
     return true;
   }

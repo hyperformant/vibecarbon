@@ -31,6 +31,10 @@ import { BaseProvider } from './base.js';
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs; applyOperatorCidrs deletes any such rule (the database has no
+// public port).
+const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
 // WireGuard replication port (wireguard.js WG_PORT) — only reachable via
 // compose-ha (declared since tier-parity wave 1); the member is
@@ -974,7 +978,8 @@ export class VultrProvider extends BaseProvider {
 
   /**
    * Rewrite the operator-locked ports' inbound rules to the given CIDR
-   * list, leaving every other rule unchanged. Vultr keeps one subnet per
+   * list, deleting any tcp/5432 or tcp/6543 rule (RETIRED_DB_PORTS), and
+   * leaving every other rule unchanged. Vultr keeps one subnet per
    * rule, so each locked port gets one rule PER CIDR (the same expansion
    * the compose program applies at create time).
    * @param {{firewallName: string, cidrs: string[]}} args
@@ -986,6 +991,7 @@ export class VultrProvider extends BaseProvider {
 
     const kept = (fw.rules || [])
       .filter((r) => !(r.protocol === 'tcp' && OPERATOR_LOCKED_PORTS.has(String(r.port))))
+      .filter((r) => !(r.protocol === 'tcp' && RETIRED_DB_PORTS.has(String(r.port))))
       .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
       ...new Set(

@@ -17,8 +17,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /** The Hetzner firewall rule shape named in the header above. */
-type HetznerRule = { direction: string; port: string; source_ips: string[] };
-
 const fetchWithRetryMock = vi.fn();
 vi.mock('../../../src/lib/fetch-retry.js', () => ({
   fetchWithRetry: (...args: unknown[]) => fetchWithRetryMock(...args),
@@ -198,14 +196,19 @@ describe('HetznerProvider.applyOperatorCidrs (C9)', () => {
     );
   });
 
-  it('rewrites only SSH and the k8s API, never a database port (5432/6543)', async () => {
+  it('deletes leftover inbound tcp/5432 and tcp/6543 rules, touching nothing else', async () => {
     // The database has no public port (operators use `vibecarbon shell` /
-    // SSH), so `vibecarbon access add/remove/prune` must never widen a
-    // leftover 5432/6543 rule to the operator allowlist.
+    // SSH). A firewall from before the external pooler was retired still
+    // carries operator-CIDR rules on 5432/6543; the next reconcile (any
+    // `vibecarbon access` change, or the auto-add on deploy) removes them.
+    // SSH, the k8s API, HTTPS, the WireGuard replication rule and egress
+    // stay exactly as they were (SSH/k8s API get the new CIDRs as always).
     const rulesWithDbPorts = [
       ...existingRules,
       { direction: 'in', protocol: 'tcp', port: '5432', source_ips: ['9.9.9.9/32'] },
       { direction: 'in', protocol: 'tcp', port: '6543', source_ips: ['9.9.9.9/32'] },
+      { direction: 'in', protocol: 'udp', port: '51821', source_ips: ['5.5.5.5/32'] },
+      { direction: 'out', protocol: 'tcp', port: '5432', source_ips: ['0.0.0.0/0'] },
     ];
     fetchWithRetryMock.mockResolvedValueOnce({
       ok: true,
@@ -218,17 +221,27 @@ describe('HetznerProvider.applyOperatorCidrs (C9)', () => {
     const cidrs = ['1.2.3.4/32'];
     await provider.applyOperatorCidrs({ firewallName: 'proj-prod-firewall', cidrs });
 
-    const setBody = JSON.parse(fetchWithRetryMock.mock.calls[1][1].body);
-    const byPort = Object.fromEntries(
-      setBody.rules
-        .filter((r: HetznerRule) => r.direction === 'in')
-        .map((r: HetznerRule) => [r.port, r]),
+    expect(fetchWithRetryMock).toHaveBeenNthCalledWith(
+      2,
+      'https://api.hetzner.cloud/v1/firewalls/7/actions/set_rules',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-api-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rules: [
+            { direction: 'in', protocol: 'tcp', port: '22', source_ips: cidrs },
+            { direction: 'in', protocol: 'tcp', port: '6443', source_ips: cidrs },
+            { direction: 'in', protocol: 'tcp', port: '443', source_ips: ['0.0.0.0/0', '::/0'] },
+            { direction: 'out', protocol: 'tcp', port: '22', source_ips: ['0.0.0.0/0'] },
+            { direction: 'in', protocol: 'udp', port: '51821', source_ips: ['5.5.5.5/32'] },
+            { direction: 'out', protocol: 'tcp', port: '5432', source_ips: ['0.0.0.0/0'] },
+          ],
+        }),
+      },
     );
-    expect(byPort['22'].source_ips).toEqual(cidrs);
-    expect(byPort['5432'].source_ips).toEqual(['9.9.9.9/32']);
-    expect(byPort['6543'].source_ips).toEqual(['9.9.9.9/32']);
-    // Public web rules stay world-open; egress untouched.
-    expect(byPort['443'].source_ips).toEqual(['0.0.0.0/0', '::/0']);
   });
 
   it('returns false and never calls set_rules when the firewall does not exist', async () => {

@@ -23,6 +23,10 @@ import { BaseProvider } from './base.js';
 const SSH_PORT = '22';
 const K8S_API_PORT = '6443';
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs; applyOperatorCidrs deletes any such rule (the database has no
+// public port).
+const RETIRED_DB_PORTS = new Set(['5432', '6543']);
 
 // The single replication port for the WireGuard tunnel (see wireguard.js —
 // WG_PORT=51821). Only reachable via compose-ha, which Linode does not
@@ -1176,8 +1180,9 @@ export class LinodeProvider extends BaseProvider {
 
   /**
    * Rewrite the operator-locked ports' inbound rules (SSH 22, k8s API 6443)
-   * on a named firewall to the given CIDR list, leaving
-   * every other rule unchanged. CIDRs are split into Linode's per-family
+   * on a named firewall to the given CIDR list, deleting any inbound
+   * TCP/5432 or TCP/6543 rule (RETIRED_DB_PORTS), and leaving every other
+   * rule unchanged. CIDRs are split into Linode's per-family
    * `{ipv4, ipv6}` arrays (splitCidrsByFamily).
    * @param {{firewallName: string, cidrs: string[]}} args
    * @returns {Promise<boolean>} true if found and updated; false if the
@@ -1187,12 +1192,14 @@ export class LinodeProvider extends BaseProvider {
     const fw = await this.findFirewallByName(firewallName);
     if (!fw) return false;
     const addresses = splitCidrsByFamily(cidrs);
-    const newRules = (fw.rules?.inbound || []).map((rule) => {
-      if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
-        return { ...rule, addresses };
-      }
-      return rule;
-    });
+    const newRules = (fw.rules?.inbound || [])
+      .filter((rule) => !(rule.protocol === 'TCP' && RETIRED_DB_PORTS.has(String(rule.ports))))
+      .map((rule) => {
+        if (rule.protocol === 'TCP' && OPERATOR_LOCKED_PORTS.has(rule.ports)) {
+          return { ...rule, addresses };
+        }
+        return rule;
+      });
     await this.setFirewallRules(fw.id, newRules);
     return true;
   }

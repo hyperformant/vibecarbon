@@ -63,6 +63,10 @@ import { BaseProvider } from './base.js';
 const SSH_PORT = 22;
 const K8S_API_PORT = 6443;
 const OPERATOR_LOCKED_PORTS = new Set([SSH_PORT, K8S_API_PORT]);
+// Inbound DB ports a retired external pooler once opened to the operator
+// CIDRs; applyOperatorCidrs deletes any such rule (the database has no
+// public port).
+const RETIRED_DB_PORTS = new Set([5432, 6543]);
 
 // WireGuard replication port (wireguard.js WG_PORT) — only reachable via
 // compose-ha (declared since tier-parity wave 1). Numeric (see above).
@@ -1415,7 +1419,8 @@ export class ScalewayProvider extends BaseProvider {
 
   /**
    * Rewrite the operator-locked ports' inbound rules to the given CIDR
-   * list, leaving every other rule unchanged. Scaleway rules carry ONE
+   * list, deleting any inbound TCP/5432 or TCP/6543 rule (RETIRED_DB_PORTS),
+   * and leaving every other rule unchanged. Scaleway rules carry ONE
    * ip_range each, so each locked port gets one rule PER CIDR (the same
    * expansion the compose program applies at create time); the whole set
    * lands in one atomic PUT (closest in shape to Hetzner's
@@ -1432,7 +1437,13 @@ export class ScalewayProvider extends BaseProvider {
       r.direction === 'inbound' &&
       r.protocol === 'TCP' &&
       OPERATOR_LOCKED_PORTS.has(Number(r.dest_port_from));
-    const kept = (fw.rules || []).filter((r) => !isLocked(r)).map(({ id: _id, ...rest }) => rest);
+    const isRetiredDbPort = (r) =>
+      r.direction === 'inbound' &&
+      r.protocol === 'TCP' &&
+      RETIRED_DB_PORTS.has(Number(r.dest_port_from));
+    const kept = (fw.rules || [])
+      .filter((r) => !isLocked(r) && !isRetiredDbPort(r))
+      .map(({ id: _id, ...rest }) => rest);
     const lockedPorts = [
       ...new Set((fw.rules || []).filter(isLocked).map((r) => Number(r.dest_port_from))),
     ];
