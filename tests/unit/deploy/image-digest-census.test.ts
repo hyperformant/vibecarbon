@@ -46,6 +46,7 @@ import {
   MIRRORED_K8S_IMAGES,
   pauseImageRef,
 } from '../../../src/lib/images.js';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 const ROOT = process.cwd();
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
@@ -507,9 +508,7 @@ describe('Dependabot can bump every pinned location', () => {
   /** Dependabot directory globs (`*` = one path segment) as a matcher. */
   const covered = (globs: string[], dir: string) =>
     globs.some((g) =>
-      new RegExp(`^${g.replace(/^\//, '').replace(/\./g, '\\.').replace(/\*/g, '[^/]+')}$`).test(
-        dir,
-      ),
+      new RegExp(`^${escapeRegExp(g.replace(/^\//, '')).replace(/\\\*/g, '[^/]+')}$`).test(dir),
     );
 
   it('the docker ecosystem watches every Dockerfile directory', () => {

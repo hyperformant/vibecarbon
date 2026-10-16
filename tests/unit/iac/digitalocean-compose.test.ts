@@ -7,6 +7,7 @@ import {
   renderDoUserData,
   transliterateToAscii,
 } from '../../../src/lib/iac/programs/digitalocean-compose.js';
+import { namesHost } from '../../_shared/hosts.js';
 
 const CLOUD_INIT_PATH = join(process.cwd(), 'carbon', 'cloud-init', 'docker-ce-setup.yaml');
 const sharedCloudInit = readFileSync(CLOUD_INIT_PATH, 'utf-8');
@@ -41,7 +42,7 @@ describe('renderDoUserData (cloud-init parity splice)', () => {
         Array.isArray(step) &&
         step[0] === 'sh' &&
         typeof step[2] === 'string' &&
-        step[2].includes('download.docker.com'),
+        namesHost(step[2], 'download.docker.com'),
     );
     // Matched on the package list, not on `apt-get install -y docker-ce` as a
     // contiguous string: the invocation carries `-o DPkg::Lock::Timeout=…`
@@ -184,7 +185,7 @@ describe('renderDoUserData (cloud-init parity splice)', () => {
         Array.isArray(step) &&
         step[0] === 'sh' &&
         typeof step[2] === 'string' &&
-        step[2].includes('download.docker.com') &&
+        namesHost(step[2], 'download.docker.com') &&
         step[2].includes('echo'),
     );
 

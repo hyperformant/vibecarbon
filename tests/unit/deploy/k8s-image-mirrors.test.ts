@@ -53,6 +53,7 @@ import {
   pauseImageRef,
 } from '../../../src/lib/images.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
+import { namesHost } from '../../_shared/hosts.js';
 
 const ROOT = process.cwd();
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
@@ -499,7 +500,7 @@ describe('every consuming reference resolves through the mirror', () => {
       read(rel)
         .split('\n')
         .forEach((line, i) => {
-          if (!line.includes('registry.k8s.io')) return;
+          if (!namesHost(line, 'registry.k8s.io')) return;
           if (/^\s*(#|\/\/|\*|-\s*#)/.test(line)) return; // comments may name it
           offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
         });

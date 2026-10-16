@@ -6,6 +6,7 @@ import {
   itParsesEnvSeed,
   itRejectsDoubleDash,
 } from '../../_shared/arg-parser-suite.js';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 describe('deploy SPEC + parseFlags integration', () => {
   it('returns sane defaults when no args are supplied', () => {
@@ -95,7 +96,7 @@ describe('deploy SPEC + parseFlags integration', () => {
       '--secondary-region',
     ]) {
       const r = parseFlags([dropped, 'value'], SPEC);
-      expect(r.errors[0]).toMatch(new RegExp(`unknown flag: ${dropped.replace(/-/g, '\\-')}`));
+      expect(r.errors[0]).toMatch(new RegExp(`unknown flag: ${escapeRegExp(dropped)}`));
     }
   });
 

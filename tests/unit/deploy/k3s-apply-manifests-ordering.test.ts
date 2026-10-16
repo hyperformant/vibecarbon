@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_OWNED_CERTIFICATES } from '../../../src/lib/deploy/k8s/acme-order-recovery.js';
+import { namesHost } from '../../_shared/hosts.js';
 
 /**
  * Integration-style unit tests for applyK3sManifests deploy-time behavior:
@@ -572,7 +573,7 @@ describe('applyK3sManifests deploy-time optimizations', () => {
         s.startsWith('cluster-autoscaler=ghcr.io/hyperformant/cluster-autoscaler:'),
       ),
     ).toBe(true);
-    expect(cmdCalls[setImageIdx].some((s) => s.includes('registry.k8s.io'))).toBe(false);
+    expect(cmdCalls[setImageIdx].some((s) => namesHost(s, 'registry.k8s.io'))).toBe(false);
     // One `set image` invocation, not two. (`caCalls` matches the
     // `deploy/cluster-autoscaler` short form; `set image` addresses the same
     // Deployment as `deployment/cluster-autoscaler`, so count directly.)

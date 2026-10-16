@@ -41,6 +41,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 const ROOT = process.cwd();
 const read = (...parts: string[]) => readFileSync(join(ROOT, ...parts), 'utf-8');
@@ -624,7 +625,7 @@ describe('the engines.node floor is EXECUTED in CI, not merely declared', () => 
     expect(check, 'that step must read the floor from package.json, not a second literal').toMatch(
       /engines/,
     );
-    expect(check).not.toMatch(new RegExp(ENGINES_FLOOR.replace(/\./g, '\\.')));
+    expect(check).not.toMatch(new RegExp(escapeRegExp(ENGINES_FLOOR)));
   });
 
   it('carbon declares the same floor, so this one leg covers both projects', () => {

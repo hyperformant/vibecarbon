@@ -53,9 +53,12 @@ describe('Nav', () => {
 
     renderNav();
 
-    const calledGitHub = fetchSpy.mock.calls.some((args) =>
-      String(args[0]).includes('api.github.com'),
-    );
+    // Parsed, so the assertion is "no request went to the GitHub API host",
+    // whatever form fetch was handed (string, URL or Request).
+    const calledGitHub = fetchSpy.mock.calls.some(([input]) => {
+      const href = input instanceof Request ? input.url : String(input);
+      return new URL(href, 'http://localhost').hostname === 'api.github.com';
+    });
     expect(calledGitHub).toBe(false);
     expect(screen.queryByLabelText('GitHub repository')).toBeNull();
   });

@@ -27,6 +27,7 @@ import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { DB_IMAGE_TAG } from '../../../src/lib/images.js';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 const ROOT = process.cwd();
 
@@ -145,7 +146,7 @@ describe(`${DB_IMAGE_DOCKERFILE} is the one db image`, () => {
     // publish-db-image.yml never feeds a freshly republished wal-g into the
     // same run's db build, so adopting one is a deliberate re-pin here.
     expect(dockerfile).toMatch(
-      new RegExp(`^FROM ${WALG_IMAGE.replace(/\./g, '\\.')}@sha256:[a-f0-9]{64} AS walg$`, 'm'),
+      new RegExp(`^FROM ${escapeRegExp(WALG_IMAGE)}@sha256:[a-f0-9]{64} AS walg$`, 'm'),
     );
     expect(
       finalStage.some((i) => /^COPY --from=walg\b/.test(i) && i.includes('/usr/local/bin/wal-g')),

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { escapeRegExp } from '../../_shared/regexp.js';
 
 /**
  * Escape-class guard: every FILE the core compose files bind-mount from
@@ -48,7 +49,7 @@ describe('compose file bind-mount sources', () => {
     const createSrc = read('src/create.js');
     // Must match the SOURCE argument position — `join(projectDir, '<rel>')`
     // destination args also contain the literal and must not satisfy this.
-    const asCopySource = new RegExp(`copyTemplate\\(\\s*'${rel.replace(/[.]/g, '\\.')}'`);
+    const asCopySource = new RegExp(`copyTemplate\\(\\s*'${escapeRegExp(rel)}'`);
     expect(
       asCopySource.test(createSrc),
       `${rel} is bind-mounted by a core compose file but create.js never copies it — ` +
