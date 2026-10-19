@@ -7,6 +7,8 @@
  */
 
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { VerificationResult } from '../scenarios/types.js';
 import { createPresignedTransfer, type PresignedTransfer } from '../utils/presigned-transfer.js';
 import { dnsSafeFetch } from './health.js';
@@ -607,6 +609,182 @@ export async function runDbChecks(sql: SqlRunner | string): Promise<Verification
 }
 
 // ---------------------------------------------------------------------------
+// Database runtime checks: migrations, scheduled jobs, server config
+// ---------------------------------------------------------------------------
+
+/**
+ * The pg_cron jobs carbon/db/migrations/0002_baseline_post.sql schedules.
+ * tests/unit/e2e/lean-stack-checks.test.ts keeps this list equal to the
+ * cron.schedule() calls in that file.
+ */
+export const CRON_JOBS = [
+  'cleanup-crawler-hits',
+  'cleanup-expired-notifications',
+  'cleanup-expired-sessions',
+  'cleanup-job-history',
+  'cleanup-login-attempts',
+  'rollup-crawler-hits',
+] as const;
+
+/** Libraries the db image's postgresql.conf preloads (docker/postgres-walg/postgresql.conf). */
+export const PRELOADED_LIBRARIES = ['pg_cron', 'pg_stat_statements'] as const;
+
+/** Every deploy mode starts postgres with `-c config_file=` this path. */
+export const DB_CONFIG_FILE = '/etc/postgresql/postgresql.conf';
+
+const MIGRATIONS_JOURNAL = fileURLToPath(
+  new URL('../../../carbon/db/migrations/meta/_journal.json', import.meta.url),
+);
+
+/** How many migrations the template ships, from drizzle's journal. */
+export function templateMigrationCount(journalPath = MIGRATIONS_JOURNAL): number {
+  const journal = JSON.parse(readFileSync(journalPath, 'utf-8')) as { entries?: unknown[] };
+  return journal.entries?.length ?? 0;
+}
+
+/**
+ * What the lean stack's database must be doing once a deploy is up, asked
+ * directly over the same SSH psql path as runDbChecks:
+ *
+ * - db_migrations_applied: the app's startup migrator wrote its ledger
+ *   (drizzle.__drizzle_migrations) with at least the template's migrations.
+ *   Add-ons append their own, so more is fine; fewer means the app booted on
+ *   a half-migrated database.
+ * - db_cron_jobs: every scheduled job exists and is active, and the pg_cron
+ *   launcher is running. A job row without the launcher never fires, which is
+ *   what a db started without shared_preload_libraries looks like.
+ * - db_server_config: postgres read the image's baked config file (it
+ *   replaces the one initdb writes, so a wrong -c flag silently drops every
+ *   setting in it): both libraries preloaded and created, pg_stat_statements
+ *   readable, and bind parameters kept out of the server log.
+ *
+ * Like runDbChecks, a missing SSH handle FAILS all three, never skips.
+ */
+export async function runDbRuntimeChecks(
+  sql: SqlRunner | string,
+  expectedMigrations = templateMigrationCount(),
+): Promise<VerificationResult[]> {
+  const names = ['db_migrations_applied', 'db_cron_jobs', 'db_server_config'];
+  if (typeof sql === 'string') {
+    const errorMessage = `Cannot reach the database: ${sql}`;
+    return names.map((checkName) => ({
+      checkName,
+      status: 'fail' as const,
+      errorMessage,
+      details: { missing: sql },
+    }));
+  }
+  return [
+    await checkMigrationsApplied(sql, expectedMigrations),
+    await checkCronJobs(sql),
+    await checkServerConfig(sql),
+  ];
+}
+
+async function checkMigrationsApplied(
+  sql: SqlRunner,
+  expected: number,
+): Promise<VerificationResult> {
+  const start = Date.now();
+  const fail = (errorMessage: string, details: Record<string, unknown> = {}) =>
+    result('db_migrations_applied', 'fail', start, {
+      errorMessage,
+      details: { expected, ...details },
+    });
+
+  const ledger = await sql(`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL`);
+  if (!ledger.ok) return fail(`Ledger lookup failed: ${ledger.error ?? 'unknown error'}`);
+  if (psqlLines(ledger.output)[0] !== 't') {
+    return fail('No drizzle.__drizzle_migrations ledger: the app never ran its migrations');
+  }
+  const count = await sql('SELECT count(*) FROM drizzle.__drizzle_migrations');
+  const applied = Number(psqlLines(count.output)[0]);
+  if (!count.ok || !Number.isInteger(applied)) {
+    return fail(`Ledger count failed: ${count.error ?? count.output.slice(0, 200)}`);
+  }
+  if (applied < expected) {
+    return fail(`Only ${applied} of the template's ${expected} migrations are applied`, {
+      applied,
+    });
+  }
+  return result('db_migrations_applied', 'pass', start, { details: { expected, applied } });
+}
+
+async function checkCronJobs(sql: SqlRunner): Promise<VerificationResult> {
+  const start = Date.now();
+  const fail = (errorMessage: string, details: Record<string, unknown> = {}) =>
+    result('db_cron_jobs', 'fail', start, { errorMessage, details });
+
+  const jobs = await sql('SELECT jobname FROM cron.job WHERE active');
+  if (!jobs.ok) return fail(`cron.job query failed: ${jobs.error ?? 'unknown error'}`);
+  const active = new Set(psqlLines(jobs.output));
+  const missing = CRON_JOBS.filter((j) => !active.has(j));
+  if (missing.length > 0) {
+    return fail(`Missing or inactive cron jobs: ${missing.join(', ')}`, {
+      missing,
+      active: [...active],
+    });
+  }
+  const launcher = await sql(
+    `SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'pg_cron launcher'`,
+  );
+  if (!launcher.ok || Number(psqlLines(launcher.output)[0]) < 1) {
+    return fail(
+      `pg_cron launcher is not running, so no job will fire${launcher.error ? `: ${launcher.error}` : ''}`,
+    );
+  }
+  return result('db_cron_jobs', 'pass', start, { details: { jobs: CRON_JOBS, launcher: true } });
+}
+
+async function checkServerConfig(sql: SqlRunner): Promise<VerificationResult> {
+  const start = Date.now();
+  const fail = (errorMessage: string, details: Record<string, unknown> = {}) =>
+    result('db_server_config', 'fail', start, { errorMessage, details });
+
+  // One row, `|`-separated (psql -tA). No `$` anywhere: the statement rides
+  // inside a double-quoted shell argument.
+  const row = await sql(
+    `SELECT current_setting('config_file'), current_setting('shared_preload_libraries'), current_setting('log_parameter_max_length'), (SELECT coalesce(string_agg(extname, ',' ORDER BY extname), '') FROM pg_extension WHERE extname IN ('pg_cron','pg_stat_statements'))`,
+  );
+  if (!row.ok) return fail(`Settings query failed: ${row.error ?? 'unknown error'}`);
+  const [configFile = '', preload = '', paramLength = '', extensions = ''] = (
+    psqlLines(row.output)[0] ?? ''
+  ).split('|');
+  const preloaded = preload.split(',').map((l) => l.trim());
+  const created = extensions.split(',').filter(Boolean);
+  const details = {
+    configFile,
+    preloaded,
+    extensions: created,
+    logParameterMaxLength: paramLength,
+  };
+
+  const problems: string[] = [];
+  if (configFile !== DB_CONFIG_FILE) {
+    problems.push(`config_file is ${configFile || '(empty)'}, not ${DB_CONFIG_FILE}`);
+  }
+  const notPreloaded = PRELOADED_LIBRARIES.filter((l) => !preloaded.includes(l));
+  if (notPreloaded.length > 0) problems.push(`not preloaded: ${notPreloaded.join(', ')}`);
+  const notCreated = PRELOADED_LIBRARIES.filter((l) => !created.includes(l));
+  if (notCreated.length > 0) problems.push(`extension not created: ${notCreated.join(', ')}`);
+  if (paramLength !== '0') {
+    problems.push(
+      `log_parameter_max_length is ${paramLength || '(empty)'}, so bind values reach the log`,
+    );
+  }
+  if (problems.length > 0) return fail(problems.join('; '), details);
+
+  const stats = await sql('SELECT count(*) FROM monitoring.pg_stat_statements');
+  if (!stats.ok || !Number.isInteger(Number(psqlLines(stats.output)[0]))) {
+    return fail(
+      `monitoring.pg_stat_statements is not readable: ${stats.error ?? stats.output.slice(0, 200)}`,
+      details,
+    );
+  }
+  return result('db_server_config', 'pass', start, { details });
+}
+
+// ---------------------------------------------------------------------------
 // File upload round-trip
 // ---------------------------------------------------------------------------
 
@@ -794,7 +972,10 @@ export async function runAppFunctionalChecks(opts: {
   const auth = await runAuthChecks(domain, adminEmail, adminPassword, smtpConfigured);
   results.push(...auth.results);
 
-  results.push(...(await runDbChecks(typeof db === 'string' ? db : (sql) => runPsql(db, sql))));
+  const sql: SqlRunner | string =
+    typeof db === 'string' ? db : (statement) => runPsql(db, statement);
+  results.push(...(await runDbChecks(sql)));
+  results.push(...(await runDbRuntimeChecks(sql)));
 
   // Uploads are an app feature (presign + read routes on the app domain), so
   // they run as the signed-in throwaway user from the auth checks above.

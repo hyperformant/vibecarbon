@@ -10,9 +10,13 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CORE_TABLES,
+  CRON_JOBS,
+  DB_CONFIG_FILE,
   missingDbHandle,
   runDbChecks,
+  runDbRuntimeChecks,
   type SqlRunner,
+  templateMigrationCount,
 } from '../../e2e/checks/app-functional.js';
 import { APP_SHELL_MARKER, checkUnknownPathNotFound } from '../../e2e/checks/health.js';
 
@@ -114,6 +118,130 @@ describe('runDbChecks (direct SQL)', () => {
     expect(missingDbHandle(undefined, '/k')).toBe('no serverIp (sshKeyPath present)');
     expect(missingDbHandle(undefined, null)).toBe('no serverIp and no sshKeyPath');
     expect(missingDbHandle('1.2.3.4', null)).toBe('no sshKeyPath (serverIp present)');
+  });
+});
+
+/** A fake lean-stack database for the runtime checks; each field overrides one answer. */
+function fakeRuntimeDb(
+  opts: {
+    ledger?: boolean;
+    applied?: number;
+    jobs?: readonly string[];
+    launchers?: number;
+    configFile?: string;
+    preload?: string;
+    paramLength?: string;
+    extensions?: string;
+    statsReadable?: boolean;
+  } = {},
+) {
+  const statements: string[] = [];
+  const run = vi.fn<SqlRunner>(async (sql) => {
+    statements.push(sql);
+    if (sql.includes('to_regclass')) return ok(opts.ledger === false ? 'f' : 't');
+    if (sql.includes('FROM drizzle.__drizzle_migrations')) return ok(String(opts.applied ?? 3));
+    if (sql.includes('FROM cron.job')) return ok((opts.jobs ?? CRON_JOBS).join('\n'));
+    if (sql.includes('pg_cron launcher')) return ok(String(opts.launchers ?? 1));
+    if (sql.includes("current_setting('config_file')")) {
+      return ok(
+        [
+          opts.configFile ?? DB_CONFIG_FILE,
+          opts.preload ?? 'pg_cron,pg_stat_statements',
+          opts.paramLength ?? '0',
+          opts.extensions ?? 'pg_cron,pg_stat_statements',
+        ].join('|'),
+      );
+    }
+    if (sql.includes('monitoring.pg_stat_statements')) {
+      return opts.statsReadable === false
+        ? { ok: false, output: '', error: '[psql] relation does not exist' }
+        : ok('12');
+    }
+    return { ok: false, output: '', error: `unexpected sql: ${sql}` };
+  });
+  return { run, statements };
+}
+
+const statusOf = (results: { checkName: string; status: string }[], name: string) =>
+  results.find((r) => r.checkName === name)?.status;
+
+describe('runDbRuntimeChecks (migrations, cron, server config)', () => {
+  it('passes all three on a healthy lean-stack database', async () => {
+    const db = fakeRuntimeDb();
+    const results = await runDbRuntimeChecks(db.run, 3);
+    expect(results.map((r) => [r.checkName, r.status])).toEqual([
+      ['db_migrations_applied', 'pass'],
+      ['db_cron_jobs', 'pass'],
+      ['db_server_config', 'pass'],
+    ]);
+  });
+
+  it('emits single-line SQL with no double quotes or $ (psql -c "…" over SSH)', async () => {
+    const db = fakeRuntimeDb();
+    await runDbRuntimeChecks(db.run, 3);
+    for (const sql of db.statements) {
+      expect(sql).not.toMatch(/["\n$]/);
+    }
+  });
+
+  it('fails db_migrations_applied when the ledger does not exist', async () => {
+    const results = await runDbRuntimeChecks(fakeRuntimeDb({ ledger: false }).run, 3);
+    expect(results[0]).toMatchObject({ checkName: 'db_migrations_applied', status: 'fail' });
+    expect(results[0].errorMessage).toContain('never ran its migrations');
+  });
+
+  it('fails db_migrations_applied on fewer than the template ships, passes on add-on extras', async () => {
+    const short = await runDbRuntimeChecks(fakeRuntimeDb({ applied: 2 }).run, 3);
+    expect(short[0].status).toBe('fail');
+    expect(short[0].errorMessage).toContain('Only 2 of');
+    const extra = await runDbRuntimeChecks(fakeRuntimeDb({ applied: 4 }).run, 3);
+    expect(extra[0].status).toBe('pass');
+  });
+
+  it('fails db_cron_jobs naming a missing job', async () => {
+    const results = await runDbRuntimeChecks(
+      fakeRuntimeDb({ jobs: CRON_JOBS.filter((j) => j !== 'cleanup-expired-sessions') }).run,
+      3,
+    );
+    expect(statusOf(results, 'db_cron_jobs')).toBe('fail');
+    expect(results[1].errorMessage).toContain('cleanup-expired-sessions');
+  });
+
+  it('fails db_cron_jobs when the jobs exist but the launcher is not running', async () => {
+    const results = await runDbRuntimeChecks(fakeRuntimeDb({ launchers: 0 }).run, 3);
+    expect(results[1].status).toBe('fail');
+    expect(results[1].errorMessage).toContain('launcher is not running');
+  });
+
+  it.each([
+    [{ configFile: '/var/lib/postgresql/data/postgresql.conf' }, 'config_file is'],
+    [{ preload: 'pg_cron' }, 'not preloaded: pg_stat_statements'],
+    [{ extensions: 'pg_cron' }, 'extension not created: pg_stat_statements'],
+    [{ paramLength: '-1' }, 'bind values reach the log'],
+    [{ statsReadable: false }, 'not readable'],
+  ])('fails db_server_config on %o', async (override, message) => {
+    const results = await runDbRuntimeChecks(fakeRuntimeDb(override).run, 3);
+    expect(results[2]).toMatchObject({ checkName: 'db_server_config', status: 'fail' });
+    expect(results[2].errorMessage).toContain(message);
+  });
+
+  it('FAILS all three (never skips) when there is no SSH handle', async () => {
+    const results = await runDbRuntimeChecks('no serverIp and no sshKeyPath', 3);
+    expect(results.map((r) => r.status)).toEqual(['fail', 'fail', 'fail']);
+    for (const r of results) expect(r.errorMessage).toContain('no serverIp and no sshKeyPath');
+  });
+
+  it('CRON_JOBS matches the cron.schedule() calls in the template baseline', () => {
+    const post = readFileSync(
+      join(process.cwd(), 'carbon/db/migrations/0002_baseline_post.sql'),
+      'utf-8',
+    );
+    const scheduled = [...post.matchAll(/cron\.schedule\(\s*'([^']+)'/g)].map((m) => m[1]).sort();
+    expect(scheduled).toEqual([...CRON_JOBS]);
+  });
+
+  it("reads the template's migration count from drizzle's journal", () => {
+    expect(templateMigrationCount()).toBeGreaterThanOrEqual(3);
   });
 });
 
