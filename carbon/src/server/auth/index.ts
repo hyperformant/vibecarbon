@@ -103,6 +103,9 @@ export const auth = betterAuth({
     minPasswordLength: 8,
     requireEmailVerification: emailConfigured,
     resetPasswordTokenExpiresIn: 60 * 60,
+    // A reset is how an owner takes a compromised account back, so every
+    // session issued on the old password ends with it, the attacker's too.
+    revokeSessionsOnPasswordReset: true,
     sendResetPassword: async ({ user, url }) => {
       await sendAuthEmail('password reset', user.email, url);
     },

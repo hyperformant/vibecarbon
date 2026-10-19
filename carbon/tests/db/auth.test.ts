@@ -633,6 +633,40 @@ describe.skipIf(!dbTestsEnabled)('auth (real database)', () => {
     });
   });
 
+  describe('password reset', () => {
+    const resetToken = (email: string) => {
+      const mail = sentEmails.find((m) => m.kind === 'password reset' && m.to === email);
+      const token = mail && /\/reset-password\/([^/?]+)/.exec(mail.url)?.[1];
+      if (!token) throw new Error(`no password reset email for ${email}`);
+      return token;
+    };
+
+    it('signs every existing session out, so a stolen cookie dies with the old password', async () => {
+      const email = newEmail();
+      const signedUp = await signUp(email);
+      const thief = cookieHeader(await signIn(email, PASSWORD, '203.0.113.71'), TOKEN_COOKIE);
+      const owner = cookieHeader(signedUp, TOKEN_COOKIE);
+      for (const cookie of [thief, owner]) {
+        expect((await app.request('/api/v1/whoami', { headers: { cookie } })).status).toBe(200);
+      }
+
+      sentEmails.length = 0;
+      expect(
+        (await post('/api/auth/request-password-reset', { email, redirectTo: '/reset-password' }))
+          .status,
+      ).toBe(200);
+      const newPassword = 'a-brand-new-passphrase';
+      expect(
+        (await post('/api/auth/reset-password', { token: resetToken(email), newPassword })).status,
+      ).toBe(200);
+
+      for (const cookie of [thief, owner]) {
+        expect((await app.request('/api/v1/whoami', { headers: { cookie } })).status).toBe(401);
+      }
+      expect((await signIn(email, newPassword, '203.0.113.72')).status).toBe(200);
+    });
+  });
+
   describe('emailed links always use SITE_URL', () => {
     const spoofed = (path: string, body: unknown) =>
       app.request(`http://evil.example${path}`, {
