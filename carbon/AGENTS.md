@@ -460,6 +460,9 @@ CREATE POLICY "dangerous_update"
 - **MUST** validate redirect URLs against an allowlist — never redirect to arbitrary user-supplied URLs
 - **MUST** verify webhook signatures before processing webhook payloads (Stripe uses `stripe.webhooks.constructEvent()`)
 - **MUST** perform your own authorization check (super_admin, or org membership via `requireOrgRole`) **before** any `adminDb` query that touches user-supplied IDs — `adminDb` bypasses ALL RLS, so a missing check is a direct IDOR
+- **MUST** make the guard and the handler agree. Parse the selector a guard reads (`type`, role, target, which id) once, against an exact allowlist, and reject anything else with 400 before any data access. The handler then branches on that same parsed value, with an explicit match for the privileged branch (`type === 'organization'`), never by elimination (`type !== 'user'`). A guard that is inert for values it doesn't recognise, while the handler treats them as privileged, lets `?type=foo` straight past it
+- **MUST** test every guard with values it should refuse (unknown, wrong case, empty), and assert the privileged query never ran. Valid values alone prove nothing about a guard
+- **MUST** filter a response to what the endpoint promises, even under RLS: RLS lets a member read every membership in their org, so "my memberships" needs `user_id = caller` too
 - **NEVER** use `adminDb` for data shown to end users — it bypasses RLS
 - **NEVER** build SQL text from input — query builder or the `sql` template only (values become bound parameters)
 - **NEVER** return raw database errors to clients (`sanitizeError(err, 'Failed to ...')`), and log them as `{ err: dbErrorForLog(err) }` — a Drizzle error message carries the query's bound values

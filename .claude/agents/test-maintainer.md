@@ -53,7 +53,7 @@ Follow these principles:
 
 **For API Routes (Hono):**
 - Test all HTTP methods the route handles
-- Test authentication/authorization requirements
+- Test authentication/authorization requirements, including the unexpected-value case for every selector the guard reads (`type`, role, target): an unknown value, wrong case, empty, and a value sent in the other place (body vs query). Each must be refused (400/403) and must never reach the privileged query; assert the query did not run. Valid values alone prove nothing about a guard (#178: `type=foo` bypassed `requireOrgRole`). Pattern: `carbon/tests/integration/server/routes/billing-subscription-idor.test.ts`.
 - Test request validation (missing fields, invalid types, boundary values)
 - Test success responses (status code, response shape)
 - Test error responses (4xx, 5xx scenarios)

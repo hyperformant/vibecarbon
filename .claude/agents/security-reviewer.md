@@ -34,6 +34,12 @@ For every review, systematically evaluate changes against these security domains
   - `adminDb`: bypasses RLS. Server-side work only, on the allowlist in `tests/structural/db-access-census.test.ts`.
   - Flag any `adminDb` query on a user-supplied id that is not preceded by an authorization check (super_admin or `requireOrgRole`), any `sql.raw()`/string-built SQL with input, and any log or response carrying a db error's `message` (it holds the query's bound values).
   - Auth is in-process (Better Auth, `src/server/auth/`); the browser holds no session or token (HttpOnly cookie only).
+- **A guard must agree with the handler it protects.** A guard like `requireOrgRole` is only as strong as its agreement with the code behind it. Real bug (#178): the guard checked membership only when `type === 'organization'`, the handler ran an org-scoped `adminDb` query whenever `type !== 'user'`, so `type=foo` skipped the guard and read another org's subscription. The route *had* `requireOrgRole`; that is not enough. For every guarded route, check that:
+  - the selector (`type`, `role`, `target`, `scope`, which id) is parsed ONCE against an exact allowlist, and anything else is rejected (400) before data access. A guard that falls through to `next()` on an unrecognised value fails open.
+  - the guard and the handler branch on that same parsed value: same field, same source (query vs body vs param), same default when missing, same case. Two independent readings of the raw input are a finding even if they agree today.
+  - the privileged branch is selected by an explicit match (`type === 'organization'`), never by elimination (`type !== 'user'`). "Not A, therefore B" in an authorization path is a finding when B is privileged.
+  - the id the guard authorised is the id the handler queries.
+  - a response built from rows RLS lets the caller see is filtered to what the endpoint promises (#178's `/me` returned other members' memberships because it had no `user_id = caller` filter).
 - **Session validation:** Ensure API routes that require auth read the user from `c.get('user')` (set by the session middleware from the session cookie, checked against the database) and refuse a missing one.
 - **Role checks:** The only elevated platform role is `super_admin` (the server-controlled `user.role` column); there is no platform `admin` role (`admin` is an org-membership tier, RLS-enforced). Platform-admin routes (`/api/v1/admin/*`, `/api/_internal/services/*`) must require `super_admin`. Flag any `role === 'admin'` exact check (excludes super admins) and any ForwardAuth gate at `?role=admin`.
 - **Never trust proxy headers as auth input:** `X-User-Id`/`X-User-Email`/`X-User-Role`/`X-Authenticated-User` are set by Traefik for downstream services. Flag any app code that reads them to determine identity or authorization. Identity must come from the verified session (`c.get('user')`).
@@ -117,6 +123,7 @@ Highlight things done well — this reinforces good patterns and helps other age
 6. **No false positives.** If you're uncertain whether something is a vulnerability, say so explicitly and explain the conditions under which it would be exploitable.
 7. **Consider the full stack.** A change in one layer may have security implications in another. A new database column might need RLS policy updates. A new API route might need rate limiting.
 8. **Check database client usage carefully.** This is the #1 source of security issues in Vibecarbon apps: `withUserDb` keeps RLS on, `adminDb` turns it off. The wrong one in the wrong context bypasses all data access controls.
+9. **Diff reviews do not revisit unchanged code.** A guard added in an old fix is not proven by being present. When a change touches an authorization path, re-read its guard and handler together, and say in the review which unexpected-value cases its tests cover.
 
 ## Agent Team Context
 
