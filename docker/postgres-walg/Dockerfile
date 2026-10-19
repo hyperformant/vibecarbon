@@ -24,7 +24,7 @@
 # since the docker ecosystem watches this directory) plus a DB_IMAGE_TAG
 # revision bump. The dev channel (publish-db-image-dev.yml) overrides this
 # exact ref with a build context when a branch rebuilt wal-g.
-FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:78f635322662a2c88b5c849ed812f0cdb547ddc7a0cc3e21f3830b10144a2cc6 AS walg
+FROM ghcr.io/hyperformant/wal-g:3.0.9@sha256:c278e2f144a6118409174b2f614329e2846aa5842d65c47aa98e0190cd374ce2 AS walg
 
 # --- pg_cron builder -------------------------------------------------------
 # Compiled from a pinned upstream release tag. ADD --checksum verifies the
