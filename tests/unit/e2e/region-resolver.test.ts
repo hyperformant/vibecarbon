@@ -15,25 +15,31 @@ interface DC {
 }
 
 /**
- * Minimal stub of the two Hetzner endpoints the resolver hits. Returns
- * a `fetch`-shaped function whose `ok`/`json` matches what the real API
- * returns. Server-type IDs match production: cx23=114, cx33=115, cpx21=23,
- * cpx31=24, cpx22=45, cpx32=46. All x86 — vibecarbon is amd64-only, so an ARM
- * pair is never a legal capacityPreferences entry.
+ * Minimal stub of `GET /v1/server_types`, the one Hetzner endpoint the
+ * resolver hits since /v1/datacenters was removed (2026-10-01). Fixtures stay
+ * per-datacenter (`available` = server-type IDs, matching production: cx23=114,
+ * cx33=115, cpx21=23, cpx31=24, cpx22=45, cpx32=46; all x86, vibecarbon is
+ * amd64-only) and are folded into each type's `locations[]` the way the real
+ * API reports them: a type is available in a location when any of its
+ * datacenters has it. The stub also asserts the resolver never calls the
+ * removed endpoint.
  */
 function makeFetch(dcs: DC[], typeNameToId: Record<string, number>): typeof fetch {
-  const datacenters = dcs.map((d) => ({
-    name: d.name,
-    location: { name: d.loc },
-    server_types: { available: d.available, supported: d.supported ?? d.available },
-  }));
-  const server_types = Object.entries(typeNameToId).map(([name, id]) => ({ id, name }));
+  const server_types = Object.entries(typeNameToId).map(([name, id]) => {
+    const locs = new Map<string, boolean>();
+    for (const d of dcs) {
+      const supported = d.supported ?? d.available;
+      if (!supported.includes(id) && !d.available.includes(id)) continue;
+      locs.set(d.loc, (locs.get(d.loc) ?? false) || d.available.includes(id));
+    }
+    return { id, name, locations: [...locs].map(([loc, available]) => ({ name: loc, available })) };
+  });
   return (async (url: string) => {
-    const body = url.includes('/datacenters') ? { datacenters } : { server_types };
+    if (url.includes('/datacenters')) throw new Error('resolver called the removed /datacenters');
     return {
       ok: true,
       status: 200,
-      json: async () => body,
+      json: async () => ({ server_types, meta: { pagination: { next_page: null } } }),
     };
   }) as unknown as typeof fetch;
 }
@@ -82,7 +88,7 @@ describe('resolveCapacity', () => {
       region: 'nbg1',
       serverType: 'cx23',
       scaleToType: 'cx33',
-      datacenter: 'nbg1-dc3',
+      datacenter: 'nbg1',
     });
   });
 
@@ -116,7 +122,7 @@ describe('resolveCapacity', () => {
       region: 'ash',
       serverType: 'cpx21',
       scaleToType: 'cpx31',
-      datacenter: 'ash-dc1',
+      datacenter: 'ash',
     });
   });
 
@@ -145,7 +151,7 @@ describe('resolveCapacity', () => {
       region: 'hel1',
       serverType: 'cx23',
       scaleToType: 'cx33',
-      datacenter: 'hel1-dc2',
+      datacenter: 'hel1',
     });
   });
 
@@ -189,15 +195,50 @@ describe('resolveCapacity', () => {
     );
     await resolveCapacity(prefs, 't', { fetchFn: fn as unknown as typeof fetch });
     await resolveCapacity(prefs, 't', { fetchFn: fn as unknown as typeof fetch });
-    // Two endpoints (datacenters, server_types) hit once total.
-    expect(fn).toHaveBeenCalledTimes(2);
+    // One page of /server_types, fetched once across both calls.
+    expect(fn).toHaveBeenCalledTimes(1);
   });
 
   it('returns a clear error if the API returns non-2xx', async () => {
     const fetchFn = (async () => ({ ok: false, status: 502 })) as unknown as typeof fetch;
     await expect(
       resolveCapacity({ regions: ['nbg1'], typePairs: [['cx23', 'cx33']] }, 't', { fetchFn }),
-    ).rejects.toThrow(/GET \/datacenters → 502/);
+    ).rejects.toThrow(/GET \/server_types → 502/);
+  });
+
+  it('follows /server_types pagination and ignores locations marked unavailable', async () => {
+    const pages = [
+      {
+        server_types: [{ name: 'cx23', locations: [{ name: 'nbg1', available: true }] }],
+        meta: { pagination: { next_page: 2 } },
+      },
+      {
+        server_types: [
+          {
+            name: 'cx33',
+            locations: [
+              { name: 'nbg1', available: false },
+              { name: 'hel1', available: true },
+            ],
+          },
+          { name: 'cx23', locations: [{ name: 'hel1', available: true }] },
+        ],
+        meta: { pagination: { next_page: null } },
+      },
+    ];
+    const urls: string[] = [];
+    const fetchFn = (async (url: string) => {
+      urls.push(url);
+      const page = Number(new URL(url).searchParams.get('page'));
+      return { ok: true, status: 200, json: async () => pages[page - 1] };
+    }) as unknown as typeof fetch;
+    const r = await resolveCapacity(
+      { regions: ['nbg1', 'hel1'], typePairs: [['cx23', 'cx33']] },
+      't',
+      { fetchFn },
+    );
+    expect(r).toMatchObject({ region: 'hel1', serverType: 'cx23', scaleToType: 'cx33' });
+    expect(urls).toHaveLength(2);
   });
 
   describe('provider: digitalocean', () => {

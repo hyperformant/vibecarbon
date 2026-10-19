@@ -538,6 +538,35 @@ async function cleanupAutoscalerWorkers(provider, clusterName) {
 }
 
 /**
+ * Regions that host servers this environment does not own (the layer-2
+ * heuristic defers `pvc-*` matches there). A foreign server whose region
+ * cannot be read could sit in any of our regions, so it is reported as
+ * `unreadable` and the caller blocks every region: unknown occupancy is never
+ * "nobody is there". (Hetzner dropped `server.datacenter` on 2026-07-01; a
+ * provider field going missing must fail closed, not silently empty this.)
+ * @param {{ serverLabels: (s: object) => Record<string, string>, serverRegion: (s: object) => string|null }} provider
+ * @param {object[]} servers - Every server still in the project.
+ * @param {string} projectName
+ * @param {string[]} clusterNames - This environment's cluster names (`<project>-<env>`).
+ * @returns {{ regions: Set<string>, unreadable: string|null }}
+ */
+export function foreignServerRegions(provider, servers, projectName, clusterNames) {
+  const regions = new Set();
+  let unreadable = null;
+  for (const sv of servers) {
+    const labels = provider.serverLabels(sv);
+    const isOurs =
+      labels.project === projectName &&
+      clusterNames.some((cn) => labels.environment === cn.replace(`${projectName}-`, ''));
+    if (isOurs) continue;
+    const region = provider.serverRegion(sv);
+    if (region) regions.add(region);
+    else unreadable ??= String(sv.name ?? sv.id);
+  }
+  return { regions, unreadable };
+}
+
+/**
  * Every region this environment is configured to occupy, straight from the
  * persisted env config — no API call, so it survives exactly the failures that
  * blank out the live sources (dead cluster, soft-failing listing).
@@ -2215,7 +2244,7 @@ async function destroyK8sTier({
             // contain no cluster/server name, so without this a detached DO
             // volume is caught by nothing and leaks. serverRegion (Task 7 fix
             // round 1) reads the provider-native region/location field —
-            // Hetzner's `datacenter.location.name`, DO's `region.slug`.
+            // Hetzner's `location.name`, DO's `region.slug`.
             const region = provider.serverRegion(server);
             if (region) clusterLocations.add(region);
           }
@@ -2727,17 +2756,14 @@ async function destroyK8sTier({
       if (!complete) {
         blockEverything('Server listing was incomplete');
       } else {
-        for (const sv of remaining) {
-          const labels = provider.serverLabels(sv);
-          const isOurs =
-            labels.project === projectConfig.projectName &&
-            clusterNames.some(
-              (cn) => labels.environment === cn.replace(`${projectConfig.projectName}-`, ''),
-            );
-          if (isOurs) continue;
-          const region = provider.serverRegion(sv);
-          if (region) foreignRegions.add(region);
-        }
+        const { regions, unreadable } = foreignServerRegions(
+          provider,
+          remaining,
+          projectConfig.projectName,
+          clusterNames,
+        );
+        for (const region of regions) foreignRegions.add(region);
+        if (unreadable) blockEverything(`Could not read the region of server ${unreadable}`);
       }
     } catch (error) {
       blockEverything(`Could not check for foreign servers (${error.message})`);

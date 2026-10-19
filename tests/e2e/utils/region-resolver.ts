@@ -5,7 +5,7 @@
  * scenario. Hetzner's per-DC capacity for cx/cpx/cax shifts through the
  * day; one bad slot in `hel1` for cx33 (the scale target) used to fail
  * an entire scenario at the `scale` step even though `nbg1` had headroom
- * the whole time. This resolver queries `/v1/datacenters` once at
+ * the whole time. This resolver queries `/v1/server_types` once at
  * preflight and picks the first preferred type-pair for which some region,
  * in the operator's preferred order, has BOTH `serverType` and
  * `scaleToType` currently available (type-pairs are a price ladder, so
@@ -37,19 +37,19 @@ export interface ResolvedCapacity {
   region: string;
   serverType: string;
   scaleToType: string;
-  /** The full datacenter name (e.g. `nbg1-dc3`) for diagnostics. */
+  /** Where the capacity was found, for diagnostics: the Hetzner location or DO region. */
   datacenter: string;
 }
 
-interface HetznerDatacenter {
-  name: string;
-  location: { name: string };
-  server_types: { available: number[]; supported: number[] };
-}
-
+/**
+ * A server type as `GET /v1/server_types` returns it. Hetzner removed
+ * `/v1/datacenters` on 2026-10-01 (410 Gone); per-location availability now
+ * lives on each type (changelog 2026-04-01-datacenter-deprecations). A
+ * location missing from `locations` means the type is not offered there.
+ */
 interface HetznerServerType {
-  id: number;
   name: string;
+  locations?: { name: string; available: boolean }[];
 }
 
 /** A single DigitalOcean droplet size, as returned by `GET /v2/sizes`. */
@@ -64,7 +64,8 @@ const DIGITALOCEAN_API = 'https://api.digitalocean.com/v2';
 /** Provider a scenario provisions against. Defaults to 'hetzner' everywhere upstream. */
 export type CapacityProvider = 'hetzner' | 'digitalocean' | 'linode' | 'vultr' | 'scaleway';
 
-let hetznerCache: { datacenters: HetznerDatacenter[]; nameToId: Map<string, number> } | null = null;
+/** location name -> server type names currently available there. */
+let hetznerCache: Map<string, Set<string>> | null = null;
 let digitaloceanCache: { sizeRegions: Map<string, Set<string>> } | null = null;
 let vultrCache: { planLocations: Map<string, Set<string>> } | null = null;
 let scalewayCache: Map<string, Set<string>> | null = null;
@@ -80,19 +81,28 @@ export function clearResolverCache(): void {
 async function loadHetznerInventory(
   token: string,
   fetchFn: typeof fetch = fetch,
-): Promise<{ datacenters: HetznerDatacenter[]; nameToId: Map<string, number> }> {
+): Promise<Map<string, Set<string>>> {
   if (hetznerCache) return hetznerCache;
   const headers = { Authorization: `Bearer ${token}` };
-  const [dcRes, stRes] = await Promise.all([
-    fetchFn(`${HETZNER_API}/datacenters`, { headers }),
-    fetchFn(`${HETZNER_API}/server_types?per_page=100`, { headers }),
-  ]);
-  if (!dcRes.ok) throw new Error(`region-resolver: GET /datacenters → ${dcRes.status}`);
-  if (!stRes.ok) throw new Error(`region-resolver: GET /server_types → ${stRes.status}`);
-  const dcData = (await dcRes.json()) as { datacenters: HetznerDatacenter[] };
-  const stData = (await stRes.json()) as { server_types: HetznerServerType[] };
-  const nameToId = new Map<string, number>(stData.server_types.map((t) => [t.name, t.id]));
-  hetznerCache = { datacenters: dcData.datacenters, nameToId };
+  const available = new Map<string, Set<string>>();
+  for (let page: number | null = 1; page != null; ) {
+    const res = await fetchFn(`${HETZNER_API}/server_types?per_page=50&page=${page}`, { headers });
+    if (!res.ok) throw new Error(`region-resolver: GET /server_types → ${res.status}`);
+    const data = (await res.json()) as {
+      server_types: HetznerServerType[];
+      meta?: { pagination?: { next_page?: number | null } };
+    };
+    for (const type of data.server_types) {
+      for (const loc of type.locations ?? []) {
+        if (!loc.available) continue;
+        const names = available.get(loc.name) ?? new Set<string>();
+        names.add(type.name);
+        available.set(loc.name, names);
+      }
+    }
+    page = data.meta?.pagination?.next_page ?? null;
+  }
+  hetznerCache = available;
   return hetznerCache;
 }
 
@@ -151,7 +161,7 @@ async function resolveHetznerCapacity(
     fetchFn?: typeof fetch;
   } = {},
 ): Promise<ResolvedCapacity> {
-  const { datacenters, nameToId } = await loadHetznerInventory(token, options.fetchFn ?? fetch);
+  const available = await loadHetznerInventory(token, options.fetchFn ?? fetch);
   const excluded = new Set(options.excludeRegions ?? []);
 
   // Type-pair-major, region-minor — the same walk resolveHetznerCapacityPair
@@ -160,23 +170,11 @@ async function resolveHetznerCapacity(
   // any listed region must beat a pricier pair in an earlier-listed one.
   // Region order still breaks ties within a pair.
   for (const [deployType, scaleType] of prefs.typePairs) {
-    const deployId = nameToId.get(deployType);
-    const scaleId = nameToId.get(scaleType);
-    if (deployId == null || scaleId == null) continue;
     for (const region of prefs.regions) {
       if (excluded.has(region)) continue;
-      const dcsForRegion = datacenters.filter((dc) => dc.location.name === region);
-      if (dcsForRegion.length === 0) continue;
-      for (const dc of dcsForRegion) {
-        const avail = new Set(dc.server_types.available);
-        if (avail.has(deployId) && avail.has(scaleId)) {
-          return {
-            region,
-            serverType: deployType,
-            scaleToType: scaleType,
-            datacenter: dc.name,
-          };
-        }
+      const here = available.get(region);
+      if (here?.has(deployType) && here.has(scaleType)) {
+        return { region, serverType: deployType, scaleToType: scaleType, datacenter: region };
       }
     }
   }
@@ -211,26 +209,19 @@ async function resolveHetznerCapacityPair(
   token: string,
   options: { fetchFn?: typeof fetch } = {},
 ): Promise<{ primary: ResolvedCapacity; standby: ResolvedCapacity }> {
-  const { datacenters, nameToId } = await loadHetznerInventory(token, options.fetchFn ?? fetch);
+  const available = await loadHetznerInventory(token, options.fetchFn ?? fetch);
 
   // Walk type-pairs in preference order; for each, find at least two
   // distinct regions where the pair is available. This is stricter than
   // resolving primary then standby separately, which could legally pick
   // mismatched families for the two sides.
   for (const [deployType, scaleType] of prefs.typePairs) {
-    const deployId = nameToId.get(deployType);
-    const scaleId = nameToId.get(scaleType);
-    if (deployId == null || scaleId == null) continue;
-
     const viableRegions: { region: string; datacenter: string }[] = [];
     for (const region of prefs.regions) {
-      const dc = datacenters.find(
-        (d) =>
-          d.location.name === region &&
-          d.server_types.available.includes(deployId) &&
-          d.server_types.available.includes(scaleId),
-      );
-      if (dc) viableRegions.push({ region, datacenter: dc.name });
+      const here = available.get(region);
+      if (here?.has(deployType) && here.has(scaleType)) {
+        viableRegions.push({ region, datacenter: region });
+      }
       if (viableRegions.length >= 2) break;
     }
 

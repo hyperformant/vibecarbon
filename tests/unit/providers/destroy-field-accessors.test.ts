@@ -55,8 +55,9 @@ describe('HetznerProvider destroy-sweep field accessors', () => {
     expect(hetzner.serverVolumeIds({})).toEqual([]);
   });
 
-  it('serverRegion reads datacenter.location.name', () => {
-    expect(hetzner.serverRegion({ datacenter: { location: { name: 'fsn1' } } })).toBe('fsn1');
+  it('serverRegion reads location.name (Hetzner removed server.datacenter on 2026-07-01)', () => {
+    expect(hetzner.serverRegion({ location: { name: 'fsn1' } })).toBe('fsn1');
+    expect(hetzner.serverRegion({ datacenter: { location: { name: 'fsn1' } } })).toBeNull();
     expect(hetzner.serverRegion({})).toBeNull();
   });
 

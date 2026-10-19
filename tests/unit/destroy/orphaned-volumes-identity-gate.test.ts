@@ -25,7 +25,11 @@ vi.mock('../../../src/lib/fetch-retry.js', async (orig) => {
   };
 });
 
-import { cleanupOrphanedVolumes, configuredClusterRegions } from '../../../src/destroy.js';
+import {
+  cleanupOrphanedVolumes,
+  configuredClusterRegions,
+  foreignServerRegions,
+} from '../../../src/destroy.js';
 import { HetznerProvider } from '../../../src/lib/providers/hetzner.js';
 
 const provider = new HetznerProvider('test-hcloud-token');
@@ -406,5 +410,36 @@ describe('configuredClusterRegions — the region source that cannot go blank', 
   it('returns nothing for a config that carries no region at all', () => {
     expect(configuredClusterRegions({})).toEqual([]);
     expect(configuredClusterRegions(undefined)).toEqual([]);
+  });
+});
+
+describe('foreignServerRegions — which regions still host servers we do not own', () => {
+  const hetzner = new HetznerProvider('t');
+  const server = (name: string, env: string, location?: string) => ({
+    name,
+    labels: { project: 'proj', environment: env },
+    ...(location ? { location: { name: location } } : {}),
+  });
+
+  it('reads the region from the live Hetzner server shape (location, not the removed datacenter)', () => {
+    const { regions, unreadable } = foreignServerRegions(
+      hetzner,
+      [server('proj-prod-1', 'prod', 'nbg1'), server('proj-e1-1', 'e1', 'hel1')],
+      'proj',
+      ['proj-e1'],
+    );
+    expect([...regions]).toEqual(['nbg1']);
+    expect(unreadable).toBeNull();
+  });
+
+  it('reports a foreign server with no readable region instead of dropping it', () => {
+    const legacy = {
+      name: 'proj-prod-1',
+      labels: { project: 'proj', environment: 'prod' },
+      datacenter: { location: { name: 'nbg1' } },
+    };
+    const { regions, unreadable } = foreignServerRegions(hetzner, [legacy], 'proj', ['proj-e1']);
+    expect(regions.size).toBe(0);
+    expect(unreadable).toBe('proj-prod-1');
   });
 });
