@@ -13,13 +13,13 @@ The e2e matrix is the only test suite that provisions real Hetzner infrastructur
 |---|---|---|
 | **Iterate on one failing scenario** (default for debugging) | `pnpm test:e2e:batch -- --scenario hetzner/<mode>` | 30–60 min |
 | Iterate on the failing step against a kept rig | `pnpm test:e2e:batch -- --scenario hetzner/<mode> --skip-steps <step> --keep` then `node scripts/iter-step.js hetzner/<mode> <step>` | step-only (1–10 min) |
-| Confidence check before merging | `pnpm test:e2e:batch` (bare invocation = the Hetzner four, serial) | ~3 hr wall-clock |
+| Confidence check before merging | `pnpm test:e2e:batch -- --provider hetzner` (the Hetzner four, serial) | ~3 hr wall-clock |
 | Drop already-green scenarios | `pnpm test:e2e:batch -- --except hetzner/compose,hetzner/k8s` | matrix minus the named ones |
 | Skip slow steps you don't need | `pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --minimal` (skips scale/backup/destroy/restore) | ~25 min |
-| Run DigitalOcean's default scenarios (opt-in, never in the bare matrix) | `pnpm test:e2e:batch -- --provider digitalocean` — requires `DIGITALOCEAN_API_TOKEN`, `DIGITALOCEAN_ACCESS_KEY`, `DIGITALOCEAN_SECRET_KEY` | 30–60 min |
+| Run DigitalOcean's default scenarios | `pnpm test:e2e:batch -- --provider digitalocean` — requires `DIGITALOCEAN_API_TOKEN`, `DIGITALOCEAN_ACCESS_KEY`, `DIGITALOCEAN_SECRET_KEY` | 30–60 min |
 | Run every provider's default scenarios | `pnpm test:e2e:batch -- --provider all` | ~3 hr + DO scenarios |
 
-Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **Bare invocation (no `--scenario`/`--provider`) = the Hetzner four** (`compose`, `compose-ha`, `k8s`, `k8s-ha` — the release-gating provider's defaults); `--provider digitalocean` runs DO's four (d1–d4; `digitalocean/k8s-ha` is d4, the DO pilot-light standby + failover scenario since 2026-08-27). See `tests/e2e/selection.ts` for the full grammar.
+Scenario tokens are always `provider/mode` (e.g. `hetzner/k8s-ha`, `digitalocean/compose`), with an optional `-dnsProvider` refinement for disambiguation (`hetzner/k8s-ha-cloudflare`). Bare mode tokens (`k8s-ha`) and the old opt-in `d1`/`d2`/`d3` tokens are not accepted — an invalid token throws with the valid forms named. **A bare invocation (no `--scenario`/`--provider`) refuses to run**: there is deliberately no default provider. `--provider hetzner` runs the Hetzner four (`compose`, `compose-ha`, `k8s`, `k8s-ha`); `--provider digitalocean` runs DO's four (d1–d4; `digitalocean/k8s-ha` is d4, the DO pilot-light standby + failover scenario since 2026-08-27). See `tests/e2e/selection.ts` for the full grammar.
 
 ## Serial execution
 
@@ -105,8 +105,8 @@ This is the discipline that makes the matrix stabilize.
 ## Quick reference
 
 ```bash
-# Full matrix, serial (merge-gating confidence check; bare = the Hetzner four)
-pnpm test:e2e:batch
+# Full matrix, serial (merge-gating confidence check: the Hetzner four)
+pnpm test:e2e:batch -- --provider hetzner
 
 # Single scenario
 pnpm test:e2e:batch -- --scenario hetzner/k8s-ha

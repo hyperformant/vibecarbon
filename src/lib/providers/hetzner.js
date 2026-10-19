@@ -1648,11 +1648,14 @@ export class HetznerProvider extends BaseProvider {
   }
 
   /**
+   * Hetzner removed `server.datacenter` from the API on 2026-07-01
+   * (changelog 2026-07-01-removing-datacenters); `server.location` carries
+   * the same location object.
    * @param {object} server
    * @returns {string|null}
    */
   serverRegion(server) {
-    return server.datacenter?.location?.name ?? null;
+    return server.location?.name ?? null;
   }
 
   /**

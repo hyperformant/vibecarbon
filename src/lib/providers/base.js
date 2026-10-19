@@ -866,7 +866,7 @@ export class BaseProvider {
    * volumeRegion), or null when the provider doesn't report one. Task 7 fix
    * round 1: without this, destroyK8sTier's pre-scan populated
    * `clusterLocations` from a Hetzner-only field read
-   * (`server.datacenter?.location?.name`), which is always absent on a DO
+   * (then `server.datacenter?.location?.name`), which is always absent on a DO
    * droplet — silently disabling cleanupOrphanedVolumes's
    * isPvcInClusterLocation fallback (the only thing that catches a CSI volume
    * DETACHED before destroy runs) for DO, leaking it.
