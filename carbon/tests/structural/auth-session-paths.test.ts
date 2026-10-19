@@ -21,7 +21,7 @@ import { describe, expect, it } from 'vitest';
  * src/server/auth/, then a bump of PINNED_VERSION.
  */
 
-const PINNED_VERSION = '1.7.7';
+const PINNED_VERSION = '1.7.10';
 
 const ROOT = join(__dirname, '..', '..');
 const DIST = join(ROOT, 'node_modules', 'better-auth', 'dist');
