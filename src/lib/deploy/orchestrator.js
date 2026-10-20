@@ -383,10 +383,11 @@ export async function removeAppBucketCorsOrigins({ provider, bucket, origins }) 
  * bucket to settle (R5). A 0 window costs nothing: no read, no note, and no
  * `bucketCreatedAt` on the result.
  *
- * Never rejects early: the CORS merge warns instead of throwing, and an
+ * Never rejects: the CORS merge warns instead of throwing, and an
  * unreadable creation time is recorded as unknown (null). A provider class
- * without a declared window is a bug the census catches; it surfaces from
- * `finish`.
+ * without a declared window is a bug the census catches; `finish` warns
+ * about it and treats the window as absent, because it runs after IaC
+ * succeeded and a throw would skip the final config save.
  *
  * @param {object} opts
  * @param {string} opts.providerId - the env's provider id, for its settle window
@@ -432,7 +433,8 @@ export function startAppBucketFinalize({
     async finish(log) {
       const corsOrigins = await done;
       for (const message of warnings) log.warn(message);
-      const { windowMs, createdAt } = await settle;
+      const { windowMs, createdAt, warning } = await settle;
+      if (warning) log.warn(warning);
       if (windowMs === 0) return { corsOrigins };
       const status = storageSettleStatus(createdAt, Date.now(), windowMs);
       if (status.settling) log.info(bucketSettleNote(status, windowMs));
@@ -443,13 +445,22 @@ export function startAppBucketFinalize({
 
 /**
  * The provider's settle window and, only when it is non-zero, the bucket's
- * creation time (null when it cannot be read).
+ * creation time (null when it cannot be read). An undeclared window comes
+ * back as 0 with a `warning`, never a throw.
  *
  * @param {{ providerId: string, createProvider: () => Promise<object>, bucket: string }} opts
- * @returns {Promise<{ windowMs: number, createdAt?: Date|null }>}
+ * @returns {Promise<{ windowMs: number, createdAt?: Date|null, warning?: string }>}
  */
 async function readBucketSettleState({ providerId, createProvider, bucket }) {
-  const windowMs = await settleWindowFor(providerId);
+  let windowMs;
+  try {
+    windowMs = await settleWindowFor(providerId);
+  } catch (err) {
+    return {
+      windowMs: 0,
+      warning: `Storage settle window unknown (${err.message}), so no settle note or status row for this bucket.`,
+    };
+  }
   if (windowMs === 0) return { windowMs };
   let createdAt = null;
   try {

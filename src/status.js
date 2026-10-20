@@ -902,8 +902,19 @@ async function storageSettleLine(envConfig, now = Date.now()) {
     envConfig.provider && hasProvider(envConfig.provider)
       ? envConfig.provider.toLowerCase()
       : 'hetzner';
-  const windowMs = await settleWindowFor(providerId);
-  const status = storageSettleStatus(envConfig.s3.bucketCreatedAt ?? null, now, windowMs);
+  // An env deployed before creation times were recorded has no key at all:
+  // nothing to say. An explicit null means the deploy could not read it.
+  if (!Object.hasOwn(envConfig.s3, 'bucketCreatedAt')) return null;
+  let windowMs;
+  try {
+    windowMs = await settleWindowFor(providerId);
+  } catch (err) {
+    // An advisory row must never fail the environment's checks. stderr, so
+    // `-json` output stays parseable.
+    console.warn(`storage settle window unknown: ${err.message}`);
+    return null;
+  }
+  const status = storageSettleStatus(envConfig.s3.bucketCreatedAt, now, windowMs);
   if (!status.settling) return null;
   if (status.remainingMs === null) return 'storage settling';
   return `storage settling (about ${Math.ceil(status.remainingMs / 60_000)} min left)`;

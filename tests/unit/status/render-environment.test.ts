@@ -261,6 +261,12 @@ describe('storageSettleLine (R5: age-based, no network)', () => {
     await expect(storageSettleLine(env('digitalocean', MIN), now)).resolves.toBeNull();
   });
 
+  it('a Hetzner env deployed before creation times were recorded (no key) shows no row', async () => {
+    await expect(
+      storageSettleLine({ provider: 'hetzner', s3: { bucket: 'p-abc-storage' } }, now),
+    ).resolves.toBeNull();
+  });
+
   it('an env with no bucket shows no row', async () => {
     await expect(storageSettleLine({ provider: 'hetzner' }, now)).resolves.toBeNull();
   });
