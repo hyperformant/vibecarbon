@@ -100,6 +100,28 @@ describe('destroyPreviewBody app bucket under -purge', () => {
   });
 });
 
+describe('destroyPreviewBody pinned app bucket', () => {
+  it('says a pinned bucket is kept, even under -purge, as the destroy does', () => {
+    for (const purgeBackups of [false, true]) {
+      const body = strip(
+        destroyPreviewBody({
+          envConfig: {
+            ...SKELETON,
+            status: 'deployed',
+            s3: { bucket: 'legacy-uploads', bucketPin: 'legacy-uploads', region: 'fsn1' },
+          },
+          projectName: 'excitingai',
+          envName: 'prod',
+          purgeBackups,
+          s3SetupCompleted: true,
+        }),
+      );
+      expect(body).toContain('Bucket: legacy-uploads (kept: pinned, delete manually)');
+      expect(body).not.toMatch(/legacy-uploads \(WILL BE DELETED/);
+    }
+  });
+});
+
 describe('readS3SetupCompleted', () => {
   let dir: string;
   afterEach(() => rmSync(dir, { recursive: true, force: true }));

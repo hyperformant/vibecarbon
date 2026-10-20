@@ -1275,7 +1275,7 @@ function otherEnvironmentNames(projectConfig, environment) {
 //    of any Pulumi stack's resource graph). Plain destroy keeps it and its
 //    uploads, the same way it keeps this env's backups, and the destroyed
 //    env's seed names it so a redeploy lands on it again. -purge empties and
-//    deletes it; no other environment uses it, so nothing else is checked.
+//    deletes it (the derived name is this env's alone), unless it is pinned.
 async function deleteAppBucketEffect(ctx) {
   const { envConfig, projectConfig, args, results, spinner } = ctx;
   const s3BucketName = envConfig.s3?.bucket;
@@ -1284,6 +1284,17 @@ async function deleteAppBucketEffect(ctx) {
     // Kept by design, so not a ledger entry (see retainStateBucket).
     spinner.start('S3 bucket');
     spinner.stop(`S3 bucket kept with its uploads: ${s3BucketName} (delete with -purge)`);
+    return;
+  }
+  // A PINNED bucket (envConfig.s3.bucketPin, the E6 escape hatch) may be the
+  // old per-project bucket that several environments pin, so -purge on one
+  // of them must not delete the others' uploads. Kept always, like a pinned
+  // state bucket in retainStateBucket.
+  if (envConfig.s3?.bucketPin) {
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept (pinned): ${s3BucketName}. A pinned bucket may serve other environments; delete it manually if nothing uses it anymore.`,
+    );
     return;
   }
   const s3Region = envConfig.s3?.region || 'fsn1';

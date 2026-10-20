@@ -159,6 +159,33 @@ describe('destroy keeps or purges the environment’s own app bucket', () => {
     noSurvivors(results);
   });
 
+  it('destroy staging -purge never deletes a bucket that prod and staging both pin', async () => {
+    const SHARED = 'myapp-cd9ecc-storage';
+    const config = project(['prod', 'staging']);
+    for (const e of Object.values(config.environments)) {
+      Object.assign(e.s3, { bucket: SHARED, bucketPin: SHARED });
+    }
+    const { results, text } = await destroy(config, 'staging', { purgeBackups: true }, [
+      ...ALL_BUCKET_STEPS,
+    ]);
+    expect(calledBuckets(s3.emptyAndDeleteBucket)).not.toContain(SHARED);
+    expect(text).toContain(`S3 bucket kept (pinned): ${SHARED}`);
+    expect(text).toContain('delete it manually');
+    expect(results.s3Bucket).toBeNull();
+    noSurvivors(results);
+  });
+
+  it('a single pinned environment with -purge keeps its pinned bucket', async () => {
+    const PINNED = 'legacy-uploads';
+    const config = project(['prod']);
+    Object.assign(config.environments.prod.s3, { bucket: PINNED, bucketPin: PINNED });
+    const { results, text } = await destroy(config, 'prod', { purgeBackups: true });
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(text).toContain(`S3 bucket kept (pinned): ${PINNED}`);
+    expect(results.s3Bucket).toBeNull();
+    noSurvivors(results);
+  });
+
   it('never reads or writes the bucket CORS rule', async () => {
     await destroy(project(['prod', 'staging']), 'staging');
     await destroy(project(['prod']), 'prod', { purgeBackups: true });

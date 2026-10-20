@@ -46,7 +46,7 @@ export const ENV_IDENTITY_FIELDS = Object.freeze([
  * it lives in. The state bucket can rotate on -purge, and the endpoint and
  * creation time describe the bucket as it last existed, so they stay behind.
  */
-export const ENV_IDENTITY_S3_FIELDS = Object.freeze(['bucket', 'bucketPin', 'region']);
+const ENV_IDENTITY_S3_FIELDS = Object.freeze(['bucket', 'bucketPin', 'region']);
 
 /**
  * @param {Record<string, unknown>} envConfig - a live `environments.<env>` block

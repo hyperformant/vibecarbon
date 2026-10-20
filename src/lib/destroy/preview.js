@@ -91,14 +91,16 @@ export function destroyPreviewBody({
     : '';
 
   // The env's own app bucket: plain destroy keeps it and its uploads (with
-  // the env's backups), -purge deletes it.
+  // the env's backups), -purge deletes it. A pinned bucket may serve other
+  // environments, so destroy never deletes it (deleteAppBucketEffect).
+  const storageLine = envConfig.s3?.bucketPin
+    ? `${c.success('•')} Bucket: ${envConfig.s3.bucket} (kept: pinned, delete manually)`
+    : purgeBackups
+      ? `${c.error('•')} Bucket: ${envConfig.s3?.bucket} (WILL BE DELETED, because you passed -purge)`
+      : `${c.success('•')} Bucket: ${envConfig.s3?.bucket} (kept; deleted with -purge)`;
   const storageBlock = envConfig.s3?.bucket
     ? `${c.bold('S3 Storage:')}
-    ${
-      purgeBackups
-        ? `${c.error('•')} Bucket: ${envConfig.s3.bucket} (WILL BE DELETED, because you passed -purge)`
-        : `${c.success('•')} Bucket: ${envConfig.s3.bucket} (kept; deleted with -purge)`
-    }${mark(bucketsKnown)}
+    ${storageLine}${mark(bucketsKnown)}
 `
     : '';
 
