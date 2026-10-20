@@ -1,7 +1,12 @@
 /**
- * Value flow of the APP storage bucket name across destroy -> redeploy ->
- * restore (e2e e1, Hetzner compose, 2026-10-20: verify-restore's
- * file_upload_roundtrip failed its CORS preflight with a 403).
+ * Value flow of the APP storage bucket name and the environment's key prefix
+ * across destroy -> redeploy -> restore (e2e e1, Hetzner compose,
+ * 2026-10-20: verify-restore's file_upload_roundtrip failed its CORS
+ * preflight with a 403).
+ *
+ * Environments share one long-lived bucket per project; destroy removes only
+ * the env's `<env>/` objects and keeps the bucket, so the redeploy must land
+ * on the SAME bucket under the SAME prefix.
  *
  * The suspicion was that the restored app presigns against the bucket the
  * destroy had just deleted. This pins the chain end to end with the real
@@ -62,6 +67,7 @@ function deployedProject() {
           region: 'nbg1',
           endpoint: 'https://nbg1.your-objectstorage.com',
           stateBucket: 'vc-state',
+          keyPrefix: 'e1/',
         },
         backupS3: {
           bucket: BACKUPS,
@@ -74,13 +80,18 @@ function deployedProject() {
   };
 }
 
-/** Run destroy's config effect the way a destroy that deleted the app bucket does. */
+/** Run destroy's config effect the way a destroy that kept the shared bucket does. */
 async function destroyE1(projectConfig: ReturnType<typeof deployedProject>) {
   await DESTROY_EFFECTS.updateProjectConfig({
     projectConfig,
     environment: 'e1',
     spinner: { start: vi.fn(), stop: vi.fn() },
-    results: { leaks: createLeakLedger(), pulumiDestroyFailed: false, s3Bucket: BUCKET },
+    results: {
+      leaks: createLeakLedger(),
+      pulumiDestroyFailed: false,
+      s3Bucket: null,
+      s3Prefix: 'e1/',
+    },
   });
   expect(saveProjectConfigMock).toHaveBeenCalledTimes(1);
   return saveProjectConfigMock.mock.calls[0][0];
@@ -104,15 +115,27 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     }
   });
 
+  it('the redeploy resolves the SAME bucket and key prefix the destroyed environment had', async () => {
+    const before = deployedProject();
+    const live = resolveEnvStorage('e1', before.environments.e1, before);
+    const afterDestroy = await destroyE1(deployedProject());
+
+    const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
+    const redeploy = resolveEnvStorage('e1', envConfig, afterDestroy);
+    expect(redeploy.bucket).toBe(live.bucket);
+    expect(redeploy.keyPrefix).toBe(live.keyPrefix);
+    expect(redeploy.keyPrefix).toBe('e1/');
+  });
+
   it('the redeploy creates, configures CORS on, and points the app at ONE stable bucket', async () => {
     const afterDestroy = await destroyE1(deployedProject());
 
     const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
-    const { bucket: bucketName, backupBucket: backupBucketName } = resolveEnvStorage(
-      'e1',
-      envConfig,
-      afterDestroy,
-    );
+    const {
+      bucket: bucketName,
+      keyPrefix,
+      backupBucket: backupBucketName,
+    } = resolveEnvStorage('e1', envConfig, afterDestroy);
     expect(bucketName).toBe(BUCKET);
     // Restore depends on the backups bucket keeping its name.
     expect(backupBucketName).toBe(BACKUPS);
@@ -123,10 +146,12 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     process.chdir(projectDir);
     const stage = renderBundle('myapp', {
       domain: 'e1.example.com',
+      environment: 'e1',
       s3: {
         accessKey: 'ak',
         secretKey: 'sk',
         bucket: bucketName,
+        keyPrefix,
         region: 'nbg1',
         endpoint: 'https://nbg1.your-objectstorage.com',
       },
@@ -136,6 +161,7 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     const serverEnv = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
     expect(serverEnv.S3_BUCKET).toBe(bucketName);
     expect(serverEnv.S3_BACKUP_BUCKET).toBe(BACKUPS);
+    expect(serverEnv.S3_KEY_PREFIX).toBe('e1/');
 
     const setBucketCors = vi.fn(async () => {});
     await applyAppBucketCors({

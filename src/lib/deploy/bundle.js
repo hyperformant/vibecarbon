@@ -357,6 +357,12 @@ export function renderBundle(projectName, options = {}) {
     envOverrides.S3_REGION = options.s3.region;
     envOverrides.S3_ENDPOINT = options.s3.endpoint;
     envOverrides.S3_BUCKET = options.s3.bucket;
+    // Environments share one app bucket; the app keys every object under
+    // this env's prefix (`<env>/`) so destroy can remove exactly its own.
+    if (options.s3.keyPrefix) envOverrides.S3_KEY_PREFIX = options.s3.keyPrefix;
+  }
+  if (options.environment) {
+    envOverrides.VC_ENV = options.environment;
   }
   if (options.backupS3) {
     envOverrides.S3_BACKUP_BUCKET = options.backupS3.bucket;

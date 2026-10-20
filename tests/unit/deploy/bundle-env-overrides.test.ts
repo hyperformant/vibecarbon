@@ -350,4 +350,31 @@ describe('renderBundle tls-default.yml', () => {
       rmSync(stage, { recursive: true, force: true });
     }
   });
+  it('scopes the server .env to its environment: S3_KEY_PREFIX and VC_ENV', () => {
+    // Environments share one app bucket; the app keys every object under its
+    // own prefix, so a server .env without it would write at the bucket root
+    // where another environment's destroy can never find it.
+    projectDir = makeProjectDir('S3_KEY_PREFIX=prod/\nVC_ENV=prod\n');
+    process.chdir(projectDir);
+
+    const stage = renderBundle('myproj', {
+      environment: 'staging',
+      s3: {
+        accessKey: 'ak',
+        secretKey: 'sk',
+        bucket: 'myproj-abc123-storage',
+        keyPrefix: 'staging/',
+        region: 'fsn1',
+        endpoint: 'https://fsn1.your-objectstorage.com',
+      },
+    });
+
+    try {
+      const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
+      expect(env.S3_KEY_PREFIX).toBe('staging/');
+      expect(env.VC_ENV).toBe('staging');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
 });

@@ -157,7 +157,7 @@ describe('applyAppBucketCors', () => {
         spin: spin(),
         log: { warn },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual(['https://example.com']);
     expect(warn.mock.calls[0][0]).toContain('NotImplemented');
     expect(warn.mock.calls[0][0]).toContain('Re-run');
   });
@@ -174,7 +174,7 @@ describe('applyAppBucketCors', () => {
         spin: spin(),
         log: { warn },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual(['https://example.com']);
     expect(warn).toHaveBeenCalledOnce();
   });
 });

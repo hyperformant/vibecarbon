@@ -1833,25 +1833,15 @@ const INFRA_SECRET_KEYS = [
 export const SECRET_KEYS = [...INFRA_SECRET_KEYS, ...featureSecretKeys(), ...featureConfigKeys()];
 
 /**
- * Apply the in-cluster `vibecarbon-secrets` Secret from the project's
- * `.env.local`. Idempotent: rendered as a Secret manifest and piped to
- * `kubectl apply -f -` (server-side apply semantics) so re-runs upsert
- * cleanly.
+ * The `stringData` of the `vibecarbon-secrets` Secret: the allow-listed
+ * `.env.local` keys, the Redis addon wiring, the S3 storage keys (bucket,
+ * this env's key prefix, credentials) and the environment name. Pure, so the
+ * Secret's contents are testable without a cluster.
  *
- * Must run BEFORE the base/ kustomization apply, because the app
- * Deployment in base/ references this Secret via envFrom.
- *
- * S3 backup credentials (S3_ACCESS_KEY/SECRET_KEY/BUCKET/ENDPOINT/REGION)
- * are merged in if `s3Config` is provided — backup CronJob reads them.
- * `backupBucketName` is the dedicated backup bucket (separate from the
- * storage bucket in s3Config.bucket); without it, backup.sh falls back to
- * the storage bucket and uploads dumps next to user files (observed
- * 2026-04-27 k8s-ha matrix #6 — restore couldn't find backups).
- *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, keyPrefix?: string, endpoint: string, region: string}, backupBucketName?: string|null, environment?: string}} args
+ * @returns {Record<string,string>}
  */
-export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName }) {
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
+export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName, environment }) {
   /** @type {Record<string,string>} */
   const stringData = {};
   for (const key of SECRET_KEYS) {
@@ -1871,6 +1861,9 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
     stringData.S3_ACCESS_KEY = s3Config.accessKey;
     stringData.S3_SECRET_KEY = s3Config.secretKey;
     stringData.S3_BUCKET = s3Config.bucket;
+    // Environments share one app bucket; the app keys every object under
+    // this env's prefix (`<env>/`) so destroy can remove exactly its own.
+    if (s3Config.keyPrefix) stringData.S3_KEY_PREFIX = s3Config.keyPrefix;
     stringData.S3_ENDPOINT = s3Config.endpoint;
     stringData.S3_REGION = s3Config.region;
     // AWS-SDK-format credentials file for wal-g in the db pod, mounted as a
@@ -1882,6 +1875,42 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
   if (backupBucketName) {
     stringData.S3_BACKUP_BUCKET = backupBucketName;
   }
+  if (environment) stringData.VC_ENV = environment;
+  return stringData;
+}
+
+/**
+ * Apply the in-cluster `vibecarbon-secrets` Secret from the project's
+ * `.env.local`. Idempotent: rendered as a Secret manifest and piped to
+ * `kubectl apply -f -` (server-side apply semantics) so re-runs upsert
+ * cleanly.
+ *
+ * Must run BEFORE the base/ kustomization apply, because the app
+ * Deployment in base/ references this Secret via envFrom.
+ *
+ * S3 backup credentials (S3_ACCESS_KEY/SECRET_KEY/BUCKET/ENDPOINT/REGION)
+ * are merged in if `s3Config` is provided — backup CronJob reads them.
+ * `backupBucketName` is the dedicated backup bucket (separate from the
+ * storage bucket in s3Config.bucket); without it, backup.sh falls back to
+ * the storage bucket and uploads dumps next to user files (observed
+ * 2026-04-27 k8s-ha matrix #6 — restore couldn't find backups).
+ *
+ * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, keyPrefix?: string, endpoint: string, region: string}, backupBucketName?: string|null, environment?: string}} args
+ */
+export async function applyVibecarbonSecrets({
+  kubeconfig,
+  envLocal,
+  s3Config,
+  backupBucketName,
+  environment,
+}) {
+  const env = { ...process.env, KUBECONFIG: kubeconfig };
+  const stringData = buildVibecarbonSecretData({
+    envLocal,
+    s3Config,
+    backupBucketName,
+    environment,
+  });
   // Ensure the namespace exists before we try to land a Secret in it.
   // base/ kustomization creates it too, but we run before base/.
   // Two-step (render → apply) instead of `bash -c '… | kubectl apply -f -'`
@@ -3343,7 +3372,7 @@ export async function applyK3sManifests({
   // 4. Create vibecarbon-secrets BEFORE base/ — base/'s Deployment
   //    references it via envFrom; without it kubelet fails container
   //    creation with `secret "vibecarbon-secrets" not found`.
-  await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName });
+  await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, environment });
   // 4b. Create the kube-system/carbon-autoscaler-config Secret the
   //     carbon-autoscaler sidecar reads on startup (and on every
   //     mtime-changed Refresh — see ConfigWatcher). Two keys:

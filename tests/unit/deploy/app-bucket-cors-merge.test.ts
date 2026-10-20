@@ -118,7 +118,8 @@ describe('applyAppBucketCors merge', () => {
         spin: spin(),
         log: { warn },
       }),
-    ).resolves.toBeUndefined();
+      // Resolves to the origins it claims, since it could not tell what the rule holds.
+    ).resolves.toEqual(['https://staging.dev']);
     expect(setBucketCors).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0][0]).toContain('bucket');
@@ -219,5 +220,109 @@ describe('orchestrator call site', () => {
     expect(finish).toBeGreaterThan(-1);
     expect(finish).toBeGreaterThan(src.lastIndexOf("perfAsync('deploy.ha.k8s.full'"));
     expect(finish).toBeLessThan(src.indexOf('complete! ${c.dim('));
+  });
+});
+
+describe('each environment owns the origins it recorded (s3.corsOrigins)', () => {
+  it('a domainless -> domain redeploy drops its localhost pair and keeps another env origin', async () => {
+    const setBucketCors = vi.fn(async () => {});
+    const held = await applyAppBucketCors({
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => [
+          'http://localhost:3000',
+          'http://localhost:5173',
+          'https://prod.dev',
+        ],
+        setBucketCors,
+      }),
+      bucket: 'app-b',
+      domain: 'staging.dev',
+      previousOrigins: ['http://localhost:3000', 'http://localhost:5173'],
+      spin: spin(),
+      log: { warn: vi.fn() },
+    });
+    expect(setBucketCors).toHaveBeenCalledWith('app-b', [
+      'https://prod.dev',
+      'https://staging.dev',
+    ]);
+    expect(held).toEqual(['https://staging.dev']);
+  });
+
+  it('keeps a previous origin that another environment still records', async () => {
+    const setBucketCors = vi.fn(async () => {});
+    await applyAppBucketCors({
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => ['http://localhost:3000', 'http://localhost:5173'],
+        setBucketCors,
+      }),
+      bucket: 'app-b',
+      domain: 'staging.dev',
+      previousOrigins: ['http://localhost:3000', 'http://localhost:5173'],
+      otherEnvOrigins: ['http://localhost:3000', 'http://localhost:5173'],
+      spin: spin(),
+      log: { warn: vi.fn() },
+    });
+    expect(setBucketCors).toHaveBeenCalledWith('app-b', [
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'https://staging.dev',
+    ]);
+  });
+
+  it('a stale previous origin alone is enough to PUT', async () => {
+    const setBucketCors = vi.fn(async () => {});
+    await applyAppBucketCors({
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => ['https://old.dev', 'https://staging.dev'],
+        setBucketCors,
+      }),
+      bucket: 'app-b',
+      domain: 'staging.dev',
+      previousOrigins: ['https://old.dev'],
+      spin: spin(),
+      log: { warn: vi.fn() },
+    });
+    expect(setBucketCors).toHaveBeenCalledWith('app-b', ['https://staging.dev']);
+  });
+
+  it('a failed read claims the previous and the new origins, so a later destroy removes both', async () => {
+    const held = await applyAppBucketCors({
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => {
+          throw new Error('Access Denied');
+        },
+        setBucketCors: vi.fn(),
+      }),
+      bucket: 'app-b',
+      domain: 'staging.dev',
+      previousOrigins: ['https://old.dev'],
+      spin: spin(),
+      log: { warn: vi.fn() },
+    });
+    expect(held).toEqual(['https://old.dev', 'https://staging.dev']);
+  });
+
+  it('finish resolves to the origins the environment now holds', async () => {
+    const finalize = startAppBucketFinalize({
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => [],
+        setBucketCors: vi.fn(async () => {}),
+      }),
+      bucket: 'app-b',
+      domain: 'staging.dev',
+      previousOrigins: [],
+    });
+    await expect(finalize.finish({ warn: vi.fn() })).resolves.toEqual(['https://staging.dev']);
+  });
+
+  it('deploy persists the held origins and the key prefix in the env s3 block', () => {
+    const src = readFileSync(
+      join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
+      'utf-8',
+    );
+    expect(src).toContain('const appBucketCorsOrigins = await appBucketFinalize.finish(p.log);');
+    expect(src).toContain('corsOrigins: appBucketCorsOrigins,');
+    expect(src.match(/keyPrefix: s3Config\.keyPrefix,/g)).toHaveLength(2);
+    expect(src).toContain('previousOrigins: envConfig.s3?.corsOrigins');
   });
 });

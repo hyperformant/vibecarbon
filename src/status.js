@@ -1043,7 +1043,8 @@ function renderEnvironment(envName, envConfig, checks) {
   // S3 Bucket
   if (envConfig.s3?.bucket) {
     const s3Region = envConfig.s3.region ? ` ${c.dim(`(${envConfig.s3.region})`)}` : '';
-    lines.push(`${c.dim('S3 Bucket')}      ${envConfig.s3.bucket}${s3Region}`);
+    const s3Prefix = envConfig.s3.keyPrefix ? `/${envConfig.s3.keyPrefix}` : '';
+    lines.push(`${c.dim('S3 Bucket')}      ${envConfig.s3.bucket}${s3Prefix}${s3Region}`);
   }
 
   // Deployed date

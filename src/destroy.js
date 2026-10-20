@@ -32,6 +32,11 @@ import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js';
+import {
+  otherEnvCorsOrigins,
+  recordedCorsOrigins,
+  removeAppBucketCorsOrigins,
+} from './lib/deploy/orchestrator.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import {
@@ -1230,18 +1235,38 @@ export function destroyOutro(envName, timeStr, results) {
  * (delete-github-env, print-summary) appear only in the k8s destroy plan.
  */
 
-// 1. Delete the app S3 bucket (created during deploy bootstrap, not part of any
-//    Pulumi stack's resource graph). k8s can fall back to the predictable
-//    deploy-time name; compose tiers only act on a configured bucket.
+// 1. The app S3 bucket (created during deploy bootstrap, not part of any
+//    Pulumi stack's resource graph) is shared by every environment of the
+//    project, each under its `<env>/` key prefix. Destroy removes this env's
+//    objects and its CORS origins, and deletes the bucket itself only on
+//    -purge once no other environment uses it. k8s can fall back to the
+//    predictable bucket name; compose tiers only act on a configured bucket.
 async function deleteAppBucketEffect(ctx) {
-  const { envConfig, projectConfig, results, spinner, isK8s } = ctx;
+  const { envConfig, projectConfig, environment, args, results, spinner, isK8s } = ctx;
   const s3BucketName =
-    envConfig.s3?.bucket || (isK8s ? deriveProjectBucketName(projectConfig) : null);
+    envConfig.s3?.bucket ||
+    (isK8s ? projectConfig.appBucket || deriveProjectBucketName(projectConfig) : null);
   if (!s3BucketName) return;
+  const keyPrefix = envConfig.s3?.keyPrefix;
   const s3Region = envConfig.s3?.region || 'fsn1';
+  const otherEnvs = Object.keys(projectConfig.environments ?? {}).filter(
+    (name) => name !== environment,
+  );
+  const deleteBucket = !!args?.purgeBackups && otherEnvs.length === 0;
+  const keptFor =
+    otherEnvs.length > 0
+      ? `bucket kept for ${otherEnvs.length} other environment(s)`
+      : 'bucket kept for reuse (delete with -purge)';
+  // What is left behind if this step fails: the env's objects, or the whole
+  // bucket when this destroy was meant to delete it.
+  const target = deleteBucket || !keyPrefix ? s3BucketName : `${s3BucketName}/${keyPrefix}`;
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
-  spinner.start(`Deleting S3 bucket: ${s3BucketName}`);
+  spinner.start(
+    keyPrefix
+      ? `Deleting S3 objects under ${s3BucketName}/${keyPrefix}`
+      : `Checking S3 bucket: ${s3BucketName}`,
+  );
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
       save: false,
@@ -1255,21 +1280,39 @@ async function deleteAppBucketEffect(ctx) {
         s3Region,
       );
       try {
-        const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
-        if (result.deleted) {
-          results.s3Bucket = s3BucketName;
+        if (keyPrefix) {
+          const { objectsRemoved } = await s3Provider.deletePrefix(s3BucketName, keyPrefix);
+          results.s3Prefix = keyPrefix;
           spinner.stop(
-            result.objectsRemoved > 0
-              ? `S3 bucket deleted (${result.objectsRemoved} objects removed)`
-              : 'S3 bucket deleted',
-          );
-        } else if (result.shellDeferred) {
-          results.s3Bucket = s3BucketName;
-          spinner.stop(
-            `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
+            `S3 objects deleted under ${keyPrefix} (${objectsRemoved} objects); ${deleteBucket ? 'deleting the bucket (-purge, no other environment uses it)' : keptFor}`,
           );
         } else {
-          spinner.stop('S3 bucket not found');
+          // Written before per-environment prefixes: nothing tells this env's
+          // objects from another's, so none are deleted. Kept by design, so
+          // not a ledger entry.
+          spinner.stop(
+            `S3 objects in ${s3BucketName} were written before per-environment prefixes, so none were deleted; ${deleteBucket ? 'deleting the bucket (-purge, no other environment uses it)' : keptFor}`,
+          );
+        }
+        await removeEnvCorsOrigins({ s3Provider, bucket: s3BucketName, ctx, spinner });
+        if (deleteBucket) {
+          spinner.start(`Deleting S3 bucket: ${s3BucketName}`);
+          const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
+          if (result.deleted) {
+            results.s3Bucket = s3BucketName;
+            spinner.stop(
+              result.objectsRemoved > 0
+                ? `S3 bucket deleted (${result.objectsRemoved} objects removed)`
+                : 'S3 bucket deleted',
+            );
+          } else if (result.shellDeferred) {
+            results.s3Bucket = s3BucketName;
+            spinner.stop(
+              `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
+            );
+          } else {
+            spinner.stop('S3 bucket not found');
+          }
         }
       } catch (bucketError) {
         // NoSuchBucket means it was already deleted or never created — not an error
@@ -1283,19 +1326,43 @@ async function deleteAppBucketEffect(ctx) {
       spinner.stop('S3 bucket skipped (no credentials available)');
       results.leaks.leak({
         resourceClass: 'bucket',
-        resource: describeResource({ name: s3BucketName, region: s3Region }),
+        resource: describeResource({ name: target, region: s3Region }),
         reason: 'not deleted: no object-storage credentials available',
         hint: `Run \`vibecarbon destroy\` again with credentials configured, or delete via the ${Provider.NAME} console.`,
       });
     }
   } catch (error) {
-    spinner.stop(`S3 bucket deletion failed: ${error.message}`);
+    spinner.stop(`S3 deletion failed: ${error.message}`);
     results.leaks.leak({
       resourceClass: 'bucket',
-      resource: describeResource({ name: s3BucketName, region: s3Region }),
+      resource: describeResource({ name: target, region: s3Region }),
       reason: `not deleted: ${error.message}`,
       hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket. Bucket continues to incur storage charges until deleted.`,
     });
+  }
+}
+
+/**
+ * Take this environment's origins off the shared app-bucket CORS rule: the
+ * set it recorded as `s3.corsOrigins`, or the set its domain computes to for
+ * an entry that predates the record. An origin another environment still
+ * holds stays. A failure here costs no data or money, only a stale origin on
+ * the rule, so it warns instead of failing the step.
+ */
+async function removeEnvCorsOrigins({ s3Provider, bucket, ctx, spinner }) {
+  const { envConfig, projectConfig, environment } = ctx;
+  const others = new Set(otherEnvCorsOrigins(projectConfig, environment));
+  const origins = recordedCorsOrigins(envConfig).filter((o) => !others.has(o));
+  if (origins.length === 0) return;
+  spinner.start('Removing this environment from the bucket CORS rule');
+  try {
+    await removeAppBucketCorsOrigins({ provider: s3Provider, bucket, origins });
+    spinner.stop('Bucket CORS rule updated');
+  } catch (corsErr) {
+    if (corsErr.name === 'NoSuchBucket' || corsErr.$metadata?.httpStatusCode === 404) throw corsErr;
+    spinner.stop(
+      `Bucket CORS rule not updated (${corsErr.message}); remove ${origins.join(', ')} from ${bucket} in your provider console`,
+    );
   }
 }
 
@@ -1420,6 +1487,7 @@ ${c.success('Deleted resources:')}
     Health Checks:  ${results.healthChecks.length > 0 ? results.healthChecks.join(', ') : 'None'}
     Load Balancers: ${results.loadBalancers.length > 0 ? results.loadBalancers.join(', ') : 'None'}
     S3 Bucket:      ${results.s3Bucket || 'None'}
+    S3 Objects:     ${results.s3Prefix ? `under ${results.s3Prefix}` : 'None'}
     GitHub Env:     ${results.github ? environment : 'None'}
 
 ${c.dim(`Total: ${deletedCount} resources deleted`)}
@@ -3408,6 +3476,8 @@ async function main(argv = []) {
     healthChecks: [],
     loadBalancers: [],
     s3Bucket: null,
+    // This env's key prefix in the shared app bucket, once its objects are deleted.
+    s3Prefix: null,
     github: false,
     // THE LEAK ACCOUNTING. Every teardown class records its verdicts here as it
     // goes — failed deletes, deferred/gated survivors, incomplete listings,

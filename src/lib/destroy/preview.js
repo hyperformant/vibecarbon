@@ -90,9 +90,16 @@ export function destroyPreviewBody({
 `
     : '';
 
+  // Environments share one app bucket under `<env>/` key prefixes: destroy
+  // removes this env's objects, and the bucket only on -purge once no other
+  // environment uses it.
+  const bucketTail = 'bucket deleted only with -purge when no other environment uses it';
+  const storageScope = envConfig.s3?.keyPrefix
+    ? `, objects under ${envConfig.s3.keyPrefix} (${bucketTail})`
+    : `, no objects deleted (written before per-environment prefixes; ${bucketTail})`;
   const storageBlock = envConfig.s3?.bucket
     ? `${c.bold('S3 Storage:')}
-    ${c.error('•')} Bucket: ${envConfig.s3.bucket} (all objects will be deleted)${mark(bucketsKnown)}
+    ${c.error('•')} Bucket: ${envConfig.s3.bucket}${storageScope}${mark(bucketsKnown)}
 `
     : '';
 

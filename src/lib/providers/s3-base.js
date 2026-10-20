@@ -689,6 +689,58 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * Delete every object under one key prefix, leaving the rest of the bucket
+   * alone. Environments share one app bucket under `<env>/` prefixes, and this
+   * is how destroy removes one environment's objects.
+   *
+   * SECURITY: a prefix that is empty, only slashes, or not `/`-terminated is
+   * refused before any request. Each of those would match more than one
+   * environment's keys (`prod` also matches `prod-eu/`), and the empty one
+   * matches the whole bucket.
+   *
+   * @param {string} bucketName
+   * @param {string} prefix - e.g. `staging/`
+   * @returns {Promise<{objectsRemoved: number}>}
+   */
+  async deletePrefix(bucketName, prefix) {
+    if (typeof prefix !== 'string' || !prefix.endsWith('/') || /^\/+$/.test(prefix)) {
+      throw new Error(
+        `Refusing to delete under key prefix ${JSON.stringify(prefix)} in ${bucketName}: a prefix must be a non-empty path ending in "/"`,
+      );
+    }
+    const BATCH = 1000;
+    let objectsRemoved = 0;
+    let continuationToken;
+    do {
+      const listResult = await this._send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      const keys = (listResult.Contents || []).map((obj) => ({ Key: obj.Key }));
+      for (let i = 0; i < keys.length; i += BATCH) {
+        const batch = keys.slice(i, i + BATCH);
+        const res = await this._send(
+          new DeleteObjectsCommand({ Bucket: bucketName, Delete: { Objects: batch } }),
+        );
+        // DeleteObjects answers 200 even when some keys failed; those come
+        // back in Errors, and counting them as removed would hide survivors.
+        const failed = res?.Errors ?? [];
+        if (failed.length > 0) {
+          throw new Error(
+            `${failed.length} object(s) under ${prefix} in ${bucketName} were not deleted (first: ${failed[0].Key}: ${failed[0].Code || failed[0].Message})`,
+          );
+        }
+        objectsRemoved += batch.length;
+      }
+      continuationToken = listResult.IsTruncated ? listResult.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return { objectsRemoved };
+  }
+
+  /**
    * Empty all objects from a bucket and then delete it.
    * Handles current objects, versioned objects/delete markers, and incomplete
    * multipart uploads.
