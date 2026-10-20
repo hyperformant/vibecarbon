@@ -48,8 +48,8 @@ describe('verify block backfills ssh handles before the ssh-based checks', () =>
     expect(backfillAt()).toBeLessThan(canaryAt());
   });
 
-  it('backfills BEFORE sshCheckMasterIp is derived from serverIps[0]', () => {
-    const derivedAt = code.indexOf('sshCheckMasterIp: string | undefined = serverIps[0]');
+  it('backfills BEFORE sshCheckMasterIp is derived from serverIps', () => {
+    const derivedAt = code.indexOf('const sshCheckMasterIp = resolveSshCheckMasterIp(serverIps');
     expect(derivedAt).toBeGreaterThan(-1);
     expect(backfillAt()).toBeLessThan(derivedAt);
   });
@@ -58,11 +58,14 @@ describe('verify block backfills ssh handles before the ssh-based checks', () =>
     // THE hazard. verify-failover re-points sshCheckMasterIp at the PROMOTED
     // node; a backfill running after that would send every ssh check at the
     // decommissioned primary — a bug this repo already paid two nights for
-    // (2026-08-10/-11). The backfill must precede the re-point, and the
-    // re-point must still be there.
-    const repointAt = code.indexOf('if (primaryIp) sshCheckMasterIp = primaryIp;');
-    expect(repointAt, 'the failover re-point disappeared').toBeGreaterThan(-1);
-    expect(backfillAt()).toBeLessThan(repointAt);
+    // (2026-08-10/-11). The re-point lives in resolveSshCheckMasterIp
+    // (behaviour pinned per mode in db-handle-per-mode.test.ts), so the
+    // backfill must run before that single call and nothing may reassign
+    // the result afterwards.
+    const resolveAt = code.indexOf('resolveSshCheckMasterIp(serverIps');
+    expect(resolveAt, 'the failover re-point disappeared').toBeGreaterThan(-1);
+    expect(backfillAt()).toBeLessThan(resolveAt);
+    expect(code).not.toMatch(/\bsshCheckMasterIp = (?!resolveSshCheckMasterIp)/);
   });
 
   it('only backfills when empty — never re-reads over resolved handles', () => {

@@ -45,13 +45,7 @@ const K3S_KUBECONFIG = '/etc/rancher/k3s/k3s.yaml';
  * compose-HA, and k8s-HA all use `deploy_key_<env>`.)
  */
 export function getSSHKeyPath(environment) {
-  const baseEnv = environment.replace(/-(primary|standby)$/, '');
-  const candidates = [
-    join(process.cwd(), '.vibecarbon', `deploy_key_${baseEnv}`),
-    join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`),
-    join(process.cwd(), '.vibecarbon', `ssh-${baseEnv}`),
-    join(process.cwd(), '.vibecarbon', `ssh-${environment}`),
-  ];
+  const candidates = sshKeyCandidates(environment, join(process.cwd(), '.vibecarbon'));
   for (const path of candidates) {
     if (existsSync(path)) return path;
   }
@@ -59,6 +53,28 @@ export function getSSHKeyPath(environment) {
   // error messages name what they asked for. Matches pre-fallback
   // semantics for HA-suffixed environments.
   return join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
+}
+
+/**
+ * Every path a deploy may have written the environment's SSH private key to,
+ * in probe order. The single source for "where is the key": the CLI resolves
+ * through getSSHKeyPath above and the e2e harness (tests/e2e/utils/ssh.ts
+ * getSshKeyPath) probes this same list against its project dir. The harness
+ * once kept its own list without `ssh-<env>`, so every k8s single-cluster
+ * scenario ran its database checks with no key (2026-10-19).
+ *
+ * @param {string} environment
+ * @param {string} vibecarbonDir  the project's `.vibecarbon` directory
+ * @returns {string[]}
+ */
+export function sshKeyCandidates(environment, vibecarbonDir) {
+  const baseEnv = environment.replace(/-(primary|standby)$/, '');
+  return [
+    join(vibecarbonDir, `deploy_key_${baseEnv}`),
+    join(vibecarbonDir, `deploy_key_${environment}`),
+    join(vibecarbonDir, `ssh-${baseEnv}`),
+    join(vibecarbonDir, `ssh-${environment}`),
+  ];
 }
 
 /**

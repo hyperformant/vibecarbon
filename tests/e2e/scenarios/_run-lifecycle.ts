@@ -23,8 +23,9 @@ import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
 import {
-  missingDbHandle,
+  buildDbHandle,
   resolveAppBucket,
+  resolveSshCheckMasterIp,
   runAppFunctionalChecks,
   smtpConfiguredFromEnv,
 } from '../checks/app-functional.js';
@@ -1718,7 +1719,7 @@ export async function runLifecycle(
         // -11) running every SSH/exec check against the decommissioned node.
         // Lazily backfill the SSH handles if the step that would have set them
         // has not run yet. Both accessors are pure reads of the project dir
-        // (.vibecarbon.json / .vibecarbon/deploy_key_<env>) and return
+        // (.vibecarbon.json / .vibecarbon/deploy_key_<env> or ssh-<env>) and return
         // empty/null rather than throwing, so this costs nothing when they are
         // already populated.
         //
@@ -1740,11 +1741,12 @@ export async function runLifecycle(
         if (!sshKeyPath) {
           sshKeyPath = getSshKeyPath(config.projectDir, config.envPrefix);
         }
-        let sshCheckMasterIp: string | undefined = serverIps[0];
-        if (stepName === 'verify-failover' && config.mode.endsWith('-ha')) {
-          const { primaryIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
-          if (primaryIp) sshCheckMasterIp = primaryIp;
-        }
+        const sshCheckMasterIp = resolveSshCheckMasterIp(serverIps, {
+          stepName,
+          mode: config.mode,
+          projectDir: config.projectDir,
+          envPrefix: config.envPrefix,
+        });
 
         // DNS-propagation gate for verify-failover: a fast failover (71.6s
         // post apikey-fix, run 2 2026-07-09) can finish before the A-record
@@ -1862,17 +1864,10 @@ export async function runLifecycle(
         // round-trip as direct SQL over SSH, file upload round-trip)
         const { results: appResults, adminJar } = await runAppFunctionalChecks({
           domain: config.domain,
-          db:
-            sshCheckMasterIp && sshKeyPath
-              ? {
-                  ip: sshCheckMasterIp,
-                  sshKeyPath,
-                  mode: config.mode,
-                  projectName: config.projectName,
-                  label: 'primary',
-                }
-              : // Non-null here: the condition above is exactly its null case.
-                (missingDbHandle(sshCheckMasterIp, sshKeyPath) as string),
+          db: buildDbHandle(sshCheckMasterIp, sshKeyPath, {
+            mode: config.mode,
+            projectName: config.projectName,
+          }),
           adminEmail: adminCreds.adminEmail,
           adminPassword: adminCreds.adminPassword,
           smtpConfigured: adminCreds.smtpConfigured,

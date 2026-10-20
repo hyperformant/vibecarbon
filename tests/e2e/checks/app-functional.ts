@@ -10,14 +10,14 @@ import crypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { VerificationResult } from '../scenarios/types.js';
+import type { DeployMode, StepName, VerificationResult } from '../scenarios/types.js';
 import {
   bucketOfPresignedUrl,
   createPresignedTransfer,
   type PresignedTransfer,
 } from '../utils/presigned-transfer.js';
 import { dnsSafeFetch } from './health.js';
-import { type PsqlResult, type ReplTarget, runPsql } from './replication.js';
+import { type PsqlResult, type ReplTarget, resolveHaDbIps, runPsql } from './replication.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1049,6 +1049,45 @@ export function missingDbHandle(ip?: string | null, sshKeyPath?: string | null):
   if (ip && sshKeyPath) return null;
   if (!ip) return sshKeyPath ? 'no serverIp (sshKeyPath present)' : 'no serverIp and no sshKeyPath';
   return 'no sshKeyPath (serverIp present)';
+}
+
+/**
+ * The node every SSH/exec-based verify check targets: serverIps[0] (compose's
+ * VPS, compose-HA's role-primary, k8s's master, k8s-HA's primary master), or,
+ * at verify-failover on an HA mode, the PROMOTED primary.
+ *
+ * Both HA modes retire the old primary on failover and neither reorders
+ * servers[], so serverIps[0] would keep naming the decommissioned node.
+ * resolveHaDbIps() reads both shapes (k8s-HA's swapped ha.primary/ha.standby,
+ * compose-HA's in-place `role` flip). Two nights (2026-08-10, -11) of
+ * compose-HA checks ran against the retired node when this read `=== 'k8s-ha'`.
+ */
+export function resolveSshCheckMasterIp(
+  serverIps: readonly string[],
+  opts: { stepName: StepName; mode: DeployMode; projectDir: string; envPrefix: string },
+): string | undefined {
+  let ip: string | undefined = serverIps[0];
+  if (opts.stepName === 'verify-failover' && opts.mode.endsWith('-ha')) {
+    const { primaryIp } = resolveHaDbIps(opts.projectDir, opts.envPrefix);
+    if (primaryIp) ip = primaryIp;
+  }
+  return ip;
+}
+
+/**
+ * The `db` argument for runAppFunctionalChecks: the SSH target that fronts the
+ * database, or the missingDbHandle() reason when either half is absent.
+ */
+export function buildDbHandle(
+  ip: string | null | undefined,
+  sshKeyPath: string | null | undefined,
+  opts: { mode: DeployMode; projectName: string },
+): ReplTarget | string {
+  if (ip && sshKeyPath) {
+    return { ip, sshKeyPath, mode: opts.mode, projectName: opts.projectName, label: 'primary' };
+  }
+  // Non-null: the condition above is exactly its null case.
+  return missingDbHandle(ip, sshKeyPath) as string;
 }
 
 /** The functional check results, plus the super-admin session when auth_admin_login passed. */
