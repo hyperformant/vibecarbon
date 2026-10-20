@@ -42,7 +42,8 @@
 - The standby arm is owned by `docs/superpowers/plans/2026-10-20-k8s-ha-registry-copy.md`, which removes the standby sideload and push. This plan does not duplicate it. It removes the **primary** cluster's sideload through the shared k8s delivery in Task 5.
 
 **Candidates recorded, outside the cold-deploy budgets:**
-- **k8s-ha standby `awaitDb` takes 345-360 s** in 8 of 9 restore and reconverge logs; one log has 1.2 s. That is pinned near a 360 s seed-init deadline, so it looks deadline-bound, not work-bound. It needs RCA, and Task 6 has a bounded RCA step.
+- **k8s-ha standby `awaitDb` takes 345-360 s** on every cold deploy (1.2 s on a redeploy with data): the `seed-standby` init container waits out its 360 s deadline and never seeds; the serial reseed does the work in ~30 s. Masked today by the standby's registry push; Task 6 deletes the seed path (root-caused 2026-10-20).
+- **compose-ha standby `upStack` is ~100 s late** on every cold run since 2026-09-01: the state lock (`de0f522`) serializes the HA pair's Pulumi `up`. Task 6 scopes the lock (root-caused 2026-10-20).
 - **k8s-ha scale runs primary and standby converge serially** (6.1-6.8 min, perf-analysis.md). That belongs to a separate scale plan.
 
 ### History check (required by Brandon before reviving any approach)
@@ -103,6 +104,7 @@ Sources: the archived private repo `brandonpowers/vibecarbon` (cloned, filter=bl
 - A delta that has to send every layer is not a fallback. That is the algorithm itself, for example with a custom Dockerfile or an empty target.
 - **No provider-specific slowdowns.** Every change is provider-neutral. GHCR pulls work from every provider. No new firewall rules.
 - No cloud-init pre-pulls (`7babb8e`, `e9192f9`). Server-side pulls start only after `dockerhub-login` (Docker Hub images) or need no auth (public GHCR).
+- **Core-path images never come from Docker Hub** (Task 7): traefik, docker-socket-proxy, alpine, registry, socat and alpine/k8s are pulled from `ghcr.io/hyperformant` mirrors, copied as amd64 manifests by `publish-images.yml`, and enforced by `core-images-from-mirror-census.test.ts`. Optional add-ons keep their upstream registries.
 - **Images are pinned by digest everywhere.** The runtime base joins the `image-digest-census` and dependabot like every other pin.
 - **The runtime image stays minimal:** Alpine, libstdc++ and the node binary only. No npm, yarn or corepack in the running image.
 - **No customers, no compatibility shims.** The compose per-server registry is deleted outright (container, volume, `registryEnsureShell`, settle ladder). Ship with a Compatibility note and no `!:` footer.
@@ -112,7 +114,9 @@ Sources: the archived private repo `brandonpowers/vibecarbon` (cloned, filter=bl
   - `docs/superpowers/plans/2026-10-20-tls-cert-reuse.md` (TLS pending, so `tls.ready` stops blocking success);
   - `docs/superpowers/plans/2026-10-20-project-app-bucket.md` (non-blocking settle, option 1);
   - `docs/superpowers/plans/2026-10-20-k8s-ha-registry-copy.md` (k8s-ha standby).
-- Tasks 1-6 can land before those. **Task 7 (the budgets) lands only after all three.**
+- Tasks 1-7 can land before those. **Task 8 (the budgets) lands only after all three.**
+- **Task 6 must land before, or in the same release as, the registry-copy plan:** removing the standby's registry push unmasks the 346 s seed wait Task 6 deletes. Task 6 also lands before `docs/superpowers/plans/2026-10-20-ha-correctness.md`'s replication changes; that plan rebases onto Task 6's deferreds.
+- **The state lock is scoped, not removed** (Task 6, Ruling A): select, refresh and state repair stay serialized per backend; `stack.up()` runs outside it.
 
 ## Review Focus
 1. **A user's custom Dockerfile with no runtime base** (or any FROM): the delta sends every layer the target lacks, and the deploy still succeeds. Tested in Task 3.
@@ -120,6 +124,8 @@ Sources: the archived private repo `brandonpowers/vibecarbon` (cloned, filter=bl
 3. **The reconstruct dies halfway** (disk full, killed SSH): no partial image is tagged and the temp dir is removed. The next deploy starts clean. Tested in Task 3 (the script's trap, under real bash).
 4. **An autoscaler-spawned k8s worker** joining after delivery still pulls the app image. Delivery has to put it in the master registry before any workload references it. Tested in Task 5.
 5. **An ARM Mac operator:** the local build still targets linux/amd64 (`src/lib/deploy/platform.js`), and the runtime base is published for amd64 and arm64 (release gate). Tested in Task 2 (workflow-platforms census).
+6. **A freshly mirrored GHCR package that is still private:** every anonymous server pull fails with `unauthorized`, while CI's authenticated verify step passes. Task 7 Step 4 checks with an empty Docker config before merge.
+7. **A real state-backend throttle after the lock scope change:** two HA engines' `up` overlap and the backend answers 503/SlowDown. The existing `withStateBackendRetry` classifier absorbs it and the `[state]` line reports `backpressure`, which Task 8's e2e invariant turns into a failure instead of a silent slowdown. Tested in Task 6 (state-lock-scope test drives a fake 503 during overlapping `up`).
 
 ---
 
@@ -290,30 +296,120 @@ Sources: the archived private repo `brandonpowers/vibecarbon` (cloned, filter=bl
 - [ ] **Step 4: Run** `pnpm lint && pnpm typecheck && pnpm test:unit && pnpm test:integration`. Expected: PASS.
 - [ ] **Step 5: Commit** `perf(k8s): deliver the app once to the master registry; nodes pull in-cluster instead of a sideload per node`.
 
-### Task 6: compose-ha and k8s-ha serial costs: RCA before any change
+### Task 6: compose-ha and k8s-ha serial waits: lock scope, dead seed path, event-triggered transport
+
+Both waits are root-caused (2026-10-20 RCAs, evidence quoted below; full reports were written to the session scratchpad `arch-review/rca-composeha-upstack.md` and `arch-review/rca-k8sha-awaitdb.md` and are summarized here so this plan stands alone).
+
+**Cause A, compose-ha standby `upStack` ~100 s late: our state lock.**
+- `withStateLock` (`src/lib/iac/state-lock.js`) wraps the whole of `upStack` (`src/lib/iac/index.js` ~1086), provisioning included. compose-ha fans the primary and standby `upStack` out under `Promise.all` (`src/lib/deploy/effects/compose-ha.js` ~176-201) against one state bucket, so they run one after the other. The k8s-ha infra fan-out shares the same lock and the same serialization.
+- Evidence: `e2-2026-10-20T09-17…log` prints `state lock acquired after 93s`; primary 92.9 s, standby 188.8 s, standby's own work 95.8 s. Every e2 log since 2026-09-01 shows a lock wait equal to the primary's up; none before 2026-08-12 shows any wait, and back then standby ≈ primary. The standby's own up is 91-103 s in hel1 against 90-97 s for the primary in nbg1, so there is no location effect.
+- Origin: `de0f522` (2026-08-15, archived private repo, shipped via `32afb12`), "one Pulumi engine at a time per state bucket", a deliberate trade against throttle events in CI run 31898658781 (38 of 40 recovery events classified as throttle: 24 `stack-select`, 11 `up`). Since then every run logs `backpressure none` with `ops up=2 stack-select=1`, orders of magnitude under Hetzner's documented 750 rps per bucket.
+
+**Ruling A: scope the lock to the select/refresh/state-repair phases and release it before `stack.up()`; do not merge the HA pair into one stack.**
+- Why not one stack for the pair (the RCA's first option): about 18 files key on the `-primary`/`-standby` stack names (role swap, reconverge, failover, destroy, status, diagnose), and the HA-correctness plan (`docs/superpowers/plans/2026-10-20-ha-correctness.md`) is rewriting role tracking in exactly those files. Renaming stacks under it doubles the blast radius for the same ~90 s.
+- Why scoping is enough: the measured throttle mass was `stack-select` (24 of 35 events), which stays serialized. The 11 `up` events are consistent with the young-state-bucket window. The bucket plan (`2026-10-20-project-app-bucket.md`) makes the state bucket stable across redeploys and only rotates its name on the last environment's `-purge`, so steady-state deploys never meet a young state bucket.
+- Gate before the change (Step 1): pull the run 31898658781 telemetry (`gh run view 31898658781 --log`) and check the 11 `up` throttle timestamps against the state bucket's creation time. If any landed outside the young-bucket window, this ruling flips to the one-stack design, recorded as a new ruling, and Task 6 stops for a plan amendment.
+- Cost if wrong: two engines' `up` checkpoint traffic overlaps; any real throttle is still caught by the existing `withStateBackendRetry` classifier and shows as `backpressure` in the `[state]` line, which the e2e invariant below turns into a failure.
+
+**Cause B, k8s-ha standby `awaitDb` 345-360 s: a seed path that never succeeds on a cold deploy.**
+- The `seed-standby` init container (built by `buildStandbySeedInitScript`, `deadlineSeconds: 360`, applied via the `vibecarbon-seed-standby` ConfigMap in `k3s.js`) waits its full budget, exits unseeded and runs initdb. 8 cold runs on 2026-10-20 took 345-359 s; the one redeploy with existing data took 1.2 s (the "already initialized" branch); the primary's awaitDb is about 1 s.
+- Nothing it needs exists in its window (about T+820 to T+1180 s in `e4-2026-10-20T00-57-18-475Z.log`):
+  - **no transport:** early prep (`prepareReplicationTransport`) polls for the standby namespace with a fixed 180 s budget (`waitForNamespace`, 36 × 5 s, `src/lib/deploy/k8s/ha/index.js` ~255) counted from infra-ready; on a cold deploy the namespace appears after the 8-9 min sideload, so prep gives up first (`transportEarly ~197s (failed)` in every cold run since 2026-08-28);
+  - **no primary replication config:** `configurePrimaryForReplication` awaits the whole primary deploy (`await primaryPromise`, including its 546 s registry push), finishing at about T+1268, though it only needs the primary db Ready (about T+640).
+- What actually seeds the standby is the serial `setupReplication` reseed, every time (`reseed: staged=yes swapped=yes`, about 30 s). The 346 s is masked today by the standby's ~1047 s registry push; it becomes the k8s-ha critical path the moment `2026-10-20-k8s-ha-registry-copy.md` removes that push. **So this task must land before, or in the same release as, the registry-copy plan.**
+
+**Ruling B: delete the first-boot seed path; the reseed is the single owner of standby seeding.** Making the seed work would need a cross-cluster happens-before (standby db apply after primary db Ready and after the tunnel) inside the parallel fan-out, which is the coupling the fan-out exists to avoid, and would only replace a 30 s reseed. Cost if wrong: none observable; the reseed already does the work.
+
+**Ruling C: replace poll-and-give-up with signalled preconditions** (not retries):
+- each cluster's deploy resolves a `namespaceReady` deferred right after `applyK3sManifests` creates the namespace (applyBase), the same pattern as the existing `onInfraReady` deferreds in `src/lib/deploy/effects/k8s-ha.js`; `prepareReplicationTransport` starts when both have resolved; `waitForNamespace` and its 180 s budget are deleted;
+- `configurePrimaryForReplication` starts on a `primaryDbReady` deferred, resolved after the primary's `awaitPostgresAccepting`, not on `primaryPromise`.
+
+**Coordination with `2026-10-20-ha-correctness.md`:** that plan changes failover/reseed role detection inside `replication.js` (`configureStandbyReplication`, the promote guards). This task touches only the **deploy-time** callers' timing (`effects/k8s-ha.js` ordering, `k8s/ha/index.js` transport start, the seed init) and must not change the bodies of `configureStandbyReplication`, `promoteStandby` or the reseed functions. If both plans are in flight, land this task first; the HA-correctness plan rebases onto the deferreds.
 
 **Files:**
-- Investigate:
-  - `src/lib/deploy/ha` compose upStack fan (the `deploy.ha.compose.iac.upStack.standby` marker): why the standby takes about 100 s longer than the primary across 4 cold runs (188-198 s against 92-96);
-  - the k8s-ha standby `awaitDb` (345-360 s against a 360 s seed-init deadline).
-- Modify: only what the RCA proves code-owned (for example a standby stack that waits on primary outputs it does not need, or a seed init waiting for a condition that never arrives).
-- Test: a unit test per proven cause, pinning the corrected ordering or condition.
+- Modify: `src/lib/iac/state-lock.js` and `src/lib/iac/index.js` (`upStack`): lock held for select, refresh and state repair; released before `stack.up()`; the lock header's "compose-ha provisioning roughly doubles" note replaced with the new scope and its evidence.
+- Modify: `carbon/k8s/base/db/statefulset.yaml` (delete the `seed-standby` init container), `src/lib/deploy/k8s/k3s.js` (delete the `vibecarbon-seed-standby` ConfigMap apply, `buildStandbySeedInitScript`, and the `REPL_RELAY_HOST/PORT` render tokens if nothing else reads them — grep first).
+- Modify: `src/lib/deploy/effects/k8s-ha.js` (the `namespaceReady` and `primaryDbReady` deferreds), `src/lib/deploy/k8s/ha/index.js` (delete `waitForNamespace`; start transport on both `namespaceReady`), the primary-config call site.
+- Test: `tests/unit/iac/state-lock-scope.test.ts` (new), `tests/unit/deploy/ha-upstack-fan-census.test.ts` (new), `tests/unit/deploy/db-init-no-peer-census.test.ts` (new), `tests/unit/deploy/k8s-ha-signalled-preconditions.test.ts` (new); trim the seed pins in `db-sts-boot-timeout-census.test.ts` and `reseed-standby.test.ts` (justify in the commit).
 
 **Interfaces:**
-- Produces: a ledger entry for each cause, with file:line and evidence (the log lines). Either a fix commit, or a ruling that the cost is provider-side, citing the Hetzner action timings from the log.
+- Produces: `withStateLock(backendKey, phase, fn)` where `phase` is `'select' | 'refresh' | 'repair'`; `upStack` calls it for those phases only. `effects/k8s-ha.js` exposes `namespaceReady: { primary: Promise<void>, standby: Promise<void> }` and `primaryDbReady: Promise<void>` to the HA orchestration.
+- Consumes: nothing from earlier tasks in this plan; independent of Tasks 1-5.
 
-- [ ] **Step 1: Read** `e2-2026-10-20T09-33-51-610Z.log` around the upStack lines, and the Pulumi program for the standby stack. Write the cause and evidence to the ledger.
-- [ ] **Step 2: Read** the k8s-ha restore and reconverge logs with `standby.awaitDb` ≈ 346 s and the seed-init code (grep `seed-standby` in `carbon/k8s/base/db/` and `src/lib/deploy/k8s/ha/`). Write the cause and evidence.
-- [ ] **Step 3:** For each code-owned cause, write the failing test, fix, and run `pnpm test:unit`. Expected: PASS.
-- [ ] **Step 4: Commit** one commit per cause, `perf(<mode>): <cause in plain words>`. **No retry ladders, and no shortening of the deadline:** the condition is fixed, not the timer.
+- [ ] **Step 1: The Ruling A gate.** Run `gh run view 31898658781 --log | grep -i throttle` (or the telemetry artifact) and record, in the ledger, each of the 11 `up` events' timestamp against the state bucket's creation time. Expected: all inside the young-bucket window. If not, stop: record the flip to the one-stack design and ask for a plan amendment.
+- [ ] **Step 2: Write the failing tests.**
+  - `state-lock-scope.test.ts`: with a fake Pulumi stack whose `up()` resolves only when released by the test, two concurrent `upStack` calls on one backend reach `up()` together (peak concurrent `up` = 2) while peak concurrent `select` stays 1.
+  - `ha-upstack-fan-census.test.ts` (a walk over `src/lib/deploy/effects/*.js` and `src/lib/iac/`): any `Promise.all`/fan containing two or more `upStack(` calls against one backend requires that `upStack` releases the lock before `up` — asserted by importing the real `upStack` with a fake engine and measuring overlap, not by a source regex.
+  - `db-init-no-peer-census.test.ts`: no init container in `carbon/k8s/base/db/statefulset.yaml` references `SEED_PRIMARY_`, `REPL_RELAY_` or `pg_basebackup`; no manifest under `carbon/k8s/base` references the `vibecarbon-seed-standby` ConfigMap.
+  - `k8s-ha-signalled-preconditions.test.ts`: with a fake where `primaryPromise` never resolves, `configurePrimaryForReplication` still runs once `primaryDbReady` resolves; `prepareReplicationTransport` is called exactly once, after both `namespaceReady` resolve, and never before; `waitForNamespace` is not exported.
+- [ ] **Step 3: Run** `pnpm vitest run tests/unit/iac/state-lock-scope.test.ts tests/unit/deploy/ha-upstack-fan-census.test.ts tests/unit/deploy/db-init-no-peer-census.test.ts tests/unit/deploy/k8s-ha-signalled-preconditions.test.ts`. Expected: FAIL.
+- [ ] **Step 4: Implement** the Files list.
+- [ ] **Step 5: Run** `pnpm test:unit`. Expected: PASS. Prove each census arm bites (temporarily re-add the seed init container; temporarily hold the lock through `up`) and record it in the report.
+- [ ] **Step 6: Commit**, one commit per cause:
+  - `perf(iac): hold the state lock for select and refresh only, so an HA pair provisions in parallel`;
+  - `perf(k8s-ha): drop the standby first-boot seed that never succeeded, and start transport and primary config when their preconditions are signalled`.
+- **No retry ladders and no deadline changes:** conditions are fixed, not timers.
 
-### Task 7: Per-mode cold-deploy budgets, enforced in e2e
+### Task 7: Core-path Docker Hub images come from our GHCR mirror
+
+Brandon approved this on 2026-10-20. Docker Hub rate-limits anonymous pulls per IP, and cloud servers often inherit IPs that have already hit the limit. A cloud-init pre-pull was reverted over exactly this (`7babb8e`). After this task, a cold deploy's core path pulls nothing from Docker Hub.
+
+**Scope** (core path only; every ref is already digest-pinned today):
+
+| Upstream (docker.io) | Where it runs |
+|---|---|
+| `traefik:v3.6.11` | compose (`carbon/docker-compose.yml:9`), k8s (`carbon/k8s/base/traefik/deployment.yaml:28`) |
+| `tecnativa/docker-socket-proxy:v0.4.2` | compose prod (`carbon/docker-compose.prod.yml:81`) |
+| `alpine:3.24.2` | the DO CSI init-container pin (`src/lib/images.js:452`, `CSI_UPSTREAM_IMAGE_PINS`) |
+| `registry:2.8.3` | k8s in-cluster registry (`carbon/k8s/base/registry/local-registry.yaml:35,45`). The compose per-server registry (`src/lib/deploy/compose/registry-config.js:31`) is deleted by Task 4, so it is out of scope. |
+| `alpine/socat:1.8.1.3` | k8s-ha `repl-gateway.yaml:61`, compose-ha `src/lib/deploy/compose/ha.js:213`, and the registry-copy plan's `registry-relay.yaml` |
+| `alpine/k8s:1.31.12` | the k8s backup CronJob (`carbon/k8s/base/backup/cronjob.yaml:48`). It is not on the deploy path, but every k8s cluster pulls it daily, so it gets the same rate-limit exposure. |
+
+Out of scope: n8n, Metabase, Redis, observability (Grafana, Prometheus, Loki, Promtail, postgres-exporter), garage, the n8n `alpine` helper, and the diagnose-only `DIAG_*` images. They are optional or not part of a deploy.
+
+**Files:**
+- Modify: `src/lib/images.js`. Generalize the registry.k8s.io mirror set and do not duplicate it:
+  - Add `DOCKERHUB_UPSTREAM_REGISTRY = 'docker.io'` and `DOCKERHUB_MIRRORS`, a list of `MirroredImage` entries `{ repo, tag, digest }`, where `repo` is the Docker Hub path (`library/traefik`, `tecnativa/docker-socket-proxy`, `library/alpine`, `library/registry`, `alpine/socat`, `alpine/k8s`).
+  - Give each `MirroredImage` an `upstream` registry field, defaulting to `K8S_UPSTREAM_REGISTRY` for existing entries. Rename `MIRRORED_K8S_IMAGES` to `MIRRORED_IMAGES` (the union, still `dedupeImages`), `k8sUpstreamRef` to `upstreamRef`, and `mirroredK8sPackageNames` to `mirroredPackageNames`, and update every importer.
+  - Package names stay flat basenames (`traefik`, `docker-socket-proxy`, `alpine`, `registry`, `socat`, `k8s`). `mirroredImageName` must refuse a basename collision between two different repos. `alpine/k8s` → `k8s` and `library/alpine` → `alpine` do not collide today; the guard keeps it that way.
+  - Add `mirrorRef(repoTag)` helpers per image, e.g. `traefikImageRef()`, returning `ghcr.io/hyperformant/<name>:<tag>@<digest>`.
+- Modify: `scripts/mirror-matrix.mjs`: emit from `MIRRORED_IMAGES`. `src` is `upstreamRef(image)`, so the copy reads `docker.io/library/traefik:v3.6.11`.
+- Modify: `.github/workflows/publish-images.yml` `mirror-upstream-images`: no logic change. The same amd64-only `imagetools create` copy and verify steps serve both registries. Add a `docker/login-action` step for Docker Hub using the existing Docker Hub CI credential (the one `dockerhub-login` uses; read its name from the repo), so the mirror job itself is not rate-limited. Update the header comments that say "registry.k8s.io".
+- Modify every core-path ref in the scope table to the ghcr mirror, pinned by digest. The digest is unchanged, because an amd64 manifest copy is bit-identical.
+  - `carbon/docker-compose.yml` and `carbon/docker-compose.prod.yml`: the literal `ghcr.io/hyperformant/traefik:v3.6.11@sha256:…` and `ghcr.io/hyperformant/docker-socket-proxy:v0.4.2@sha256:…`, since compose files cannot import JS.
+  - The k8s base YAMLs: literal refs as well.
+  - `ha.js`, `CSI_UPSTREAM_IMAGE_PINS` and the registry-copy plan's relay: through the `images.js` helpers.
+- Modify: `.github/dependabot.yml`. Dependabot stops seeing these images once the refs point at our mirror, and they never had a dependabot path that could re-pin the mirror anyway. Bumps follow the existing registry.k8s.io mirrors' flow: edit `{tag, digest}` in `images.js` and the literal refs, merge, and `publish-images` mirrors the new tag. Add a comment block in `dependabot.yml` saying so.
+  - Add a weekly `schedule:` job to `publish-images.yml`, `mirror-upstream-drift`. It lists newer upstream tags for each mirrored repo (registry `tags/list` with a semver filter) and writes them to the job summary. It only reports, never re-pins.
+- Create: `tests/unit/deploy/core-images-from-mirror-census.test.ts` (a walk, not a hand list):
+  - (a) Walk `carbon/docker-compose*.yml`, skipping add-on overlay files (`docker-compose.n8n*.yml`, `docker-compose.metabase*.yml`, `docker-compose.observability*.yml`, and `services/**`, read from the add-on registry the primary-only-addons plan introduces if it has landed, otherwise a named skip list with a comment), plus `carbon/k8s/base/**/*.yaml` excluding the add-on directories, `carbon/cloud-init/**`, and `src/**/*.js`.
+  - (b) Every `image:` value, and every string literal matching `^[a-z0-9./-]+:[^@\s]+@sha256:`, must start with `ghcr.io/hyperformant/`, `{{`, `${`, or be in a short documented allowlist (the app image placeholders). A bare Docker Hub name (no registry host, or `docker.io/`) fails with `core-path image <ref> pulls from Docker Hub; mirror it in DOCKERHUB_MIRRORS`.
+  - (c) Every `ghcr.io/hyperformant/<name>:<tag>@<digest>` literal found must match a `MIRRORED_IMAGES` entry on name, tag and digest, so no ref can point at a tag the workflow never mirrors.
+  - Prove each arm bites: revert `traefik` in `docker-compose.yml` to the docker.io ref (b fails), and change one mirror ref's digest (c fails). Restore both.
+- Modify: `tests/unit/deploy/k8s-image-mirrors.test.ts` and its importers for the renames. Add a case where `node scripts/mirror-matrix.mjs` includes `docker.io/library/traefik:v3.6.11` → `ghcr.io/hyperformant/traefik:v3.6.11`.
+
+**Interfaces:**
+- Consumes: nothing from Tasks 1-6. It can land any time before Task 8.
+- Produces: `MIRRORED_IMAGES`, `DOCKERHUB_MIRRORS`, `upstreamRef`, `mirroredPackageNames`, and the per-image ref helpers (`traefikImageRef`, `socatImageRef`, `registryImageRef`, `alpineImageRef`, `dockerSocketProxyImageRef`, `alpineK8sImageRef`). The registry-copy plan's relay uses `socatImageRef()`.
+
+**Rulings:**
+- **amd64-only copy, as today.** Deploy is amd64-only (`assertAmd64ServerType`), and the existing mirror job copies only the linux/amd64 child manifest. Copying full indexes would bring in blobs for platforms nothing runs. When the price plan's ARM "Later" section lands, it switches the job to copy the amd64 and arm64 children for every `MIRRORED_IMAGES` entry, in one place. Cost if wrong: none until ARM is supported.
+- **Release gate:** a newly mirrored package is created PRIVATE, and servers pull anonymously. The six new packages (`traefik`, `docker-socket-proxy`, `alpine`, `registry`, `socat`, `k8s`) must be flipped PUBLIC by hand in the org's package settings before this task's refs merge. The verify step authenticates, so it cannot catch a private package. Add the six names to `mirroredPackageNames()`, which is the operator checklist. The step is: run the mirror job on the branch, flip the packages public, then merge.
+- **`dockerhub-login` stays for the add-ons.** After this task it only matters for n8n, Metabase, Redis and observability pulls.
+
+- [ ] **Step 1: Write the census and the matrix case.** Run `pnpm vitest run tests/unit/deploy/core-images-from-mirror-census.test.ts tests/unit/deploy/k8s-image-mirrors.test.ts`. Expected: FAIL. Arm (b) names every docker.io ref in the scope table.
+- [ ] **Step 2: Implement** the `images.js` generalization, the matrix, the workflow login and drift job, and the ref rewrites.
+- [ ] **Step 3: Run** the same command plus `pnpm test:unit`. Expected: PASS, with both arm-bite proofs recorded in the report.
+- [ ] **Step 4: Publish.** Run `gh workflow run publish-images.yml --ref <branch>`. Then confirm `docker buildx imagetools inspect ghcr.io/hyperformant/<name>:<tag>@<digest>` for all six with no login (`DOCKER_CONFIG=$(mktemp -d)`). Stop and ask Brandon to flip any package that still reports unauthorized.
+- [ ] **Step 5: Commit** `feat(images): core-path Docker Hub images come from our ghcr mirror`.
+
+### Task 8: Per-mode cold-deploy budgets, enforced in e2e
 
 Lands only after the TLS-pending, bucket-settle and k8s-ha registry-copy plans.
 
 **Files:**
 - Modify: `src/lib/deploy/orchestrator.js`: emit `[perf] deploy.total <ms>` from deploy start to the success outro, excluding the TLS-pending and bucket-settle background tails.
-- Create: `tests/e2e/checks/deploy-budget.ts`. It reads the scenario's deploy CLI log through the existing `[perf]` parser (`tests/e2e/metrics/collector.ts`). It fails when `deploy.total` exceeds the mode budget, or when a cold compose or k8s `deploy.image.delta bytes` exceeds 10 MB. It prints the top three serial markers, so the failure names its cause.
+- Create: `tests/e2e/checks/deploy-budget.ts`. It reads the scenario's deploy CLI log through the existing `[perf]` parser (`tests/e2e/metrics/collector.ts`). It fails when `deploy.total` exceeds the mode budget, or when a cold compose or k8s `deploy.image.delta bytes` exceeds 10 MB. It prints the top three serial markers, so the failure names its cause. It also enforces Task 6's invariants on HA cold deploys: the `[state] up` lines show `lock-waits 0` and no `backpressure`; `iac.upStack.fan ≤ 1.25 × max(primary, standby)` (2.0× before Task 6); on k8s-ha, `deploy.k3s.standby.awaitDb < 60 s` and `deploy.ha.replication.transportEarly` not `(failed)`.
 - Modify: the compose, compose-ha, k8s and k8s-ha cold-deploy steps in `tests/e2e/scenarios/_run-lifecycle.ts`, to run the check on cold deploys only (`iac.upStack` > 30 s, the existing cold definition).
 - Test: `tests/unit/e2e/deploy-budget.test.ts` with fixture logs, covering each mode's pass, fail on time, and fail on bytes.
 
@@ -322,9 +418,9 @@ Lands only after the TLS-pending, bucket-settle and k8s-ha registry-copy plans.
 | Mode | Budget | What it assumes |
 |---|---|---|
 | compose | **180 s** | upStack about 70, SSH and cloud-init 5, base pull plus 4-5 MB delta 10-45 (45 at last night's 0.1 MB/s), stack up about 15 with pulls overlapped, admin, audits and health about 17, backup cron 5, preamble about 15 |
-| compose-ha | **300 s** | Task 6 brings the standby upStack to about 100 s; cold remote build 60-90 s; replication 30. If Task 6 rules the gap provider-side, the budget becomes 360 s, and the ledger says why |
+| compose-ha | **300 s** | Task 6 removes the ~93 s lock wait, so the infra fan is max(primary, standby) ≈ 100 s instead of ~190; cold remote build 60-90 s; replication 30; health and audits about 20; TLS pending and bucket settle non-blocking. The Aug baseline before the lock (533 s total, with TLS and Supabase start-up) minus those gives about 280 s |
 | k8s | **300 s** | upStack about 96, k3s ready 17, delta about 10-45, cert-manager 36, base apply 30, observability 11, traefik 11, app rollout 10, health 21 |
-| k8s-ha | **420 s** | The registry-copy plan has landed; the primary arm is about 230 s after Task 5; replication about 80 s; the standby upStack about 105 s overlaps |
+| k8s-ha | **420 s** | The registry-copy plan has landed; the primary arm is about 230 s after Task 5; Task 6's lock scope lets the standby upStack (~105 s) overlap instead of queueing; with the seed path deleted the standby db is up in seconds, and transport plus primary config run inside the fan-out (signalled), leaving the reseed (~30 s) and replication verify serial, about 60-80 s |
 
 Rationale for the hard limit:
 - After Tasks 3-5, uplink cost is bounded by the delta's byte count, which is also asserted. A slow uplink can then move a deploy by tens of seconds, not minutes, so an exemption would only hide regressions.
@@ -336,7 +432,7 @@ Rationale for the hard limit:
 - [ ] **Step 4: Run** `pnpm test:unit`. Expected: PASS.
 - [ ] **Step 5: Commit** `test(e2e): enforce per-mode cold-deploy budgets and the cold image-bytes ceiling`.
 
-### Task 8: Real-infra verification (needs Brandon's OK for spend)
+### Task 9: Real-infra verification (needs Brandon's OK for spend)
 
 - [ ] **Step 1: Ask Brandon for spend approval.** Then run `pnpm test:e2e:batch -- --provider hetzner` from a dedicated worktree (see the `running-e2e-matrix` skill), then `--scenario digitalocean/compose` and `--scenario digitalocean/k8s` to show there's no provider-specific regression.
 - [ ] **Step 2: Record per-mode `deploy.total`,** the delta bytes and the top serial markers in the ledger, then compare with the Context table. Expected: every cold deploy within budget and every cold delta ≤ 10 MB.
