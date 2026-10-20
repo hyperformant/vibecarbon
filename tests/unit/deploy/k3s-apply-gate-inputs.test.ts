@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -91,5 +91,56 @@ describe('buildK3sApplyInputs — bundled manifest tree is part of the gate', ()
     writeFileSync(join(dir, 'k8s', 'base', 'kustomization.yaml'), 'resources: [app.yaml]\n');
     const t2 = new StateTracker('proj', 'prod');
     expect(t2.shouldSkip('k3s-apply', buildK3sApplyInputs(baseArgs()))).toBe(false);
+  });
+
+  // Post-failover reconverge (e4, 2026-10-20). Each cluster's deploy-state
+  // file is keyed by its STACK name; failover swaps which stack holds which
+  // role and touches neither file. The reconverge redeploy then hashed the
+  // same image tags + manifests as each stack's last deploy and skipped the
+  // apply on both, so the promoted cluster never got observability.
+  it('re-runs the gate on a stack promoted from standby to primary', () => {
+    const asStandby = new StateTracker('proj', 'e4-standby');
+    asStandby.startStep('k3s-apply', buildK3sApplyInputs({ ...baseArgs(), role: 'standby' }));
+    asStandby.completeStep('k3s-apply');
+
+    const promoted = new StateTracker('proj', 'e4-standby');
+    expect(
+      promoted.shouldSkip('k3s-apply', buildK3sApplyInputs({ ...baseArgs(), role: 'primary' })),
+    ).toBe(false);
+  });
+
+  it('re-runs the gate on a stack demoted from primary to standby', () => {
+    const asPrimary = new StateTracker('proj', 'e4-primary');
+    asPrimary.startStep('k3s-apply', buildK3sApplyInputs({ ...baseArgs(), role: 'primary' }));
+    asPrimary.completeStep('k3s-apply');
+
+    const demoted = new StateTracker('proj', 'e4-primary');
+    expect(
+      demoted.shouldSkip('k3s-apply', buildK3sApplyInputs({ ...baseArgs(), role: 'standby' })),
+    ).toBe(false);
+  });
+
+  it('a same-role redeploy still skips, and single-cluster hashes as primary', () => {
+    const t1 = new StateTracker('proj', 'e4-standby');
+    t1.startStep('k3s-apply', buildK3sApplyInputs({ ...baseArgs(), role: 'standby' }));
+    t1.completeStep('k3s-apply');
+    expect(
+      new StateTracker('proj', 'e4-standby').shouldSkip(
+        'k3s-apply',
+        buildK3sApplyInputs({ ...baseArgs(), role: 'standby' }),
+      ),
+    ).toBe(true);
+    expect(buildK3sApplyInputs(baseArgs())).toEqual(
+      buildK3sApplyInputs({ ...baseArgs(), role: 'primary' }),
+    );
+  });
+});
+
+describe('deployK3s feeds the pilot-light role into the k3s-apply gate', () => {
+  it('passes options.role to buildK3sApplyInputs', () => {
+    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
+    expect(gateCall.slice(0, gateCall.indexOf('});'))).toMatch(/\n\s+role: options\.role,\n/);
   });
 });
