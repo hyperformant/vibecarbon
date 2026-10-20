@@ -5,12 +5,14 @@
  * objects sit at that bucket's root. That only holds while:
  *   (a) the bucket NAME is derived in one place and read through
  *       resolveEnvStorage, so no site re-derives a different name;
- *   (b) every writer that hands the app S3_BUCKET also hands it VC_ENV, and
- *       nothing deployed, the template app or the e2e checks knows an object
- *       key prefix (S3_KEY_PREFIX / keyPrefix, removed by design);
- *   (c) every WAL-G prefix carries an env segment, so two envs never share a
+ *   (b) the compose writer of the app S3_BUCKET also hands it VC_ENV (compose's
+ *       WAL-G prefix reads it), the k8s writer does not (nothing in k8s reads
+ *       it), and nothing deployed, the template app or the e2e checks knows
+ *       an object key prefix (S3_KEY_PREFIX / keyPrefix, removed by design);
+ *   (c) no CORS rule is merged across environments;
+ *   (d) every WAL-G prefix carries an env segment, so two envs never share a
  *       backup chain (the documented exception: local dev's empty string);
- *   (d) nothing reads the retired storageBucketGeneration key.
+ *   (e) nothing reads the retired storageBucketGeneration key.
  * These walk the tree rather than list sites, so a new site is caught.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -68,7 +70,7 @@ describe('app bucket single resolver census', () => {
     expect(calls.filter((c) => !/'backups'/.test(c))).toEqual([]);
   });
 
-  it('(b) every file that assigns S3_BUCKET also assigns VC_ENV', () => {
+  it('(b) the compose S3_BUCKET writer assigns VC_ENV, the k8s one does not', () => {
     const assignsBucket = /S3_BUCKET\s*[=:]|\.S3_BUCKET\s*=/;
     const assignsEnv = /\.VC_ENV\s*=/;
     const writers = srcFiles
@@ -79,8 +81,16 @@ describe('app bucket single resolver census', () => {
       'src/lib/deploy/bundle.js',
       'src/lib/deploy/k8s/k3s.js',
     ]);
-    const offenders = writers.filter((f) => !assignsEnv.test(readFileSync(f, 'utf-8'))).map(rel);
-    expect(offenders, `assigns S3_BUCKET without VC_ENV: ${offenders.join(', ')}`).toEqual([]);
+    const read = (r: string) => readFileSync(join(ROOT, r), 'utf-8');
+    // compose's WALG_S3_PREFIX reads ${VC_ENV}.
+    expect(read('src/lib/deploy/bundle.js')).toMatch(assignsEnv);
+    // k8s renders its WAL-G prefix from walgPrefix and nothing there reads
+    // VC_ENV, so the Secret must not carry a dead (in k8s-ha, wrong) value.
+    expect(read('src/lib/deploy/k8s/k3s.js')).not.toMatch(assignsEnv);
+    const k8sReaders = walk(join(ROOT, 'carbon/k8s'), () => true)
+      .filter((f) => readFileSync(f, 'utf-8').includes('VC_ENV'))
+      .map(rel);
+    expect(k8sReaders, `carbon/k8s now reads VC_ENV: ${k8sReaders.join(', ')}`).toEqual([]);
   });
 
   it('(b) no object key prefix survives in src/, the template app or the e2e checks', () => {
@@ -109,7 +119,7 @@ describe('app bucket single resolver census', () => {
     ).toEqual([]);
   });
 
-  it('(c) every WALG_S3_PREFIX construction has an env segment, except the empty dev override', () => {
+  it('(d) every WALG_S3_PREFIX construction has an env segment, except the empty dev override', () => {
     const files = [
       ...srcFiles,
       ...walk(join(ROOT, 'carbon'), (f) => /docker-compose[^/]*\.yml$/.test(f)),
@@ -132,7 +142,7 @@ describe('app bucket single resolver census', () => {
     expect(offenders, `WALG_S3_PREFIX without an env segment: ${offenders.join('; ')}`).toEqual([]);
   });
 
-  it('(d) no file under src/ mentions storageBucketGeneration', () => {
+  it('(e) no file under src/ mentions storageBucketGeneration', () => {
     const offenders = srcFiles
       .filter((f) => readFileSync(f, 'utf-8').includes('storageBucketGeneration'))
       .map(rel);

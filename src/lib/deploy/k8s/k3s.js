@@ -309,12 +309,8 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * render. Normalized the same way as walgRole below, so single-cluster deploys
  * (role undefined) hash as 'primary'.
  *
- * `environment` (VC_ENV, which the WAL-G prefix embeds) is rendered into the
- * Secret this step applies, and no manifest digest sees it, so a change to it
- * must re-run the apply.
- *
- * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby', environment?: string }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', environment: string, manifestDigest: string, bundledManifestDigest: string }}
+ * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby' }} args
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -323,7 +319,6 @@ export function buildK3sApplyInputs({
   projectDir,
   storageClass,
   role,
-  environment,
 }) {
   return {
     imageTag,
@@ -331,7 +326,6 @@ export function buildK3sApplyInputs({
     restore: restore ?? '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
-    environment: environment ?? '',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -1840,14 +1834,17 @@ export const SECRET_KEYS = [...INFRA_SECRET_KEYS, ...featureSecretKeys(), ...fea
 
 /**
  * The `stringData` of the `vibecarbon-secrets` Secret: the allow-listed
- * `.env.local` keys, the Redis addon wiring, the S3 storage keys (bucket and
- * credentials) and the environment name. Pure, so the Secret's contents are
- * testable without a cluster.
+ * `.env.local` keys, the Redis addon wiring and the S3 storage keys (bucket and
+ * credentials). Pure, so the Secret's contents are testable without a cluster.
  *
- * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, environment?: string}} args
+ * No VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX
+ * from s3Config.walgPrefix (buildDbManifestValues) and nothing in carbon/k8s
+ * reads it; in k8s-ha the stack env (prod-primary) is not even the env's name.
+ *
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
  * @returns {Record<string,string>}
  */
-export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName, environment }) {
+export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName }) {
   /** @type {Record<string,string>} */
   const stringData = {};
   for (const key of SECRET_KEYS) {
@@ -1878,7 +1875,6 @@ export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName
   if (backupBucketName) {
     stringData.S3_BACKUP_BUCKET = backupBucketName;
   }
-  if (environment) stringData.VC_ENV = environment;
   return stringData;
 }
 
@@ -1898,22 +1894,11 @@ export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName
  * the storage bucket and uploads dumps next to user files (observed
  * 2026-04-27 k8s-ha matrix #6 — restore couldn't find backups).
  *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, environment?: string}} args
+ * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
  */
-export async function applyVibecarbonSecrets({
-  kubeconfig,
-  envLocal,
-  s3Config,
-  backupBucketName,
-  environment,
-}) {
+export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const stringData = buildVibecarbonSecretData({
-    envLocal,
-    s3Config,
-    backupBucketName,
-    environment,
-  });
+  const stringData = buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName });
   // Ensure the namespace exists before we try to land a Secret in it.
   // base/ kustomization creates it too, but we run before base/.
   // Two-step (render → apply) instead of `bash -c '… | kubectl apply -f -'`
@@ -3380,7 +3365,7 @@ export async function applyK3sManifests({
   // 4. Create vibecarbon-secrets BEFORE base/ — base/'s Deployment
   //    references it via envFrom; without it kubelet fails container
   //    creation with `secret "vibecarbon-secrets" not found`.
-  await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName, environment });
+  await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName });
   // 4b. Create the kube-system/carbon-autoscaler-config Secret the
   //     carbon-autoscaler sidecar reads on startup (and on every
   //     mtime-changed Refresh — see ConfigWatcher). Two keys:
@@ -4516,8 +4501,6 @@ export async function deployK3s(options) {
     // The pilot-light role: a failover swaps it between stacks, and each
     // role renders a different cluster — see buildK3sApplyInputs.
     role: options.role,
-    // Rendered into the Secret (VC_ENV) — see buildK3sApplyInputs.
-    environment: options.environment,
   });
   if (!state.shouldSkip('k3s-apply', applyInputs)) {
     state.startStep('k3s-apply', applyInputs);

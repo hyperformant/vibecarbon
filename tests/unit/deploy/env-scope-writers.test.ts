@@ -1,9 +1,10 @@
 /**
- * Every writer of a deployed server's environment carries the env's name
- * (VC_ENV, which WAL-G's prefix uses): compose and compose-ha through the
- * rendered bundle .env, k8s through the vibecarbon-secrets Secret. Each env
- * has its own app bucket, so no writer carries an object key prefix
- * (S3_KEY_PREFIX was removed by design).
+ * Compose and compose-ha carry the env's name (VC_ENV) in the rendered bundle
+ * .env, because compose's WALG_S3_PREFIX reads it. k8s does not: its WAL-G
+ * prefix is rendered from s3Config.walgPrefix, nothing in carbon/k8s reads
+ * VC_ENV, and in k8s-ha the stack env (prod-primary / prod-standby) is not
+ * even the environment's name. Each env has its own app bucket, so no writer
+ * carries an object key prefix (S3_KEY_PREFIX was removed by design).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,10 +14,9 @@ import { buildVibecarbonSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
 const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
 
 describe('k8s vibecarbon-secrets', () => {
-  it('carries VC_ENV beside the bucket and no S3_KEY_PREFIX', () => {
+  it('carries the bucket, and neither VC_ENV nor S3_KEY_PREFIX', () => {
     const stringData = buildVibecarbonSecretData({
       envLocal: {},
-      environment: 'prod',
       s3Config: {
         accessKey: 'ak',
         secretKey: 'sk',
@@ -27,15 +27,16 @@ describe('k8s vibecarbon-secrets', () => {
       backupBucketName: null,
     });
     expect(stringData).not.toHaveProperty('S3_KEY_PREFIX');
-    expect(stringData.VC_ENV).toBe('prod');
+    expect(stringData).not.toHaveProperty('VC_ENV');
     expect(stringData.S3_BUCKET).toBe('myapp-abc123-storage');
   });
 
-  it('applyK3sManifests hands the environment to the Secret', () => {
+  it('applyK3sManifests hands the Secret no environment', () => {
     const k3s = src('src/lib/deploy/k8s/k3s.js');
     expect(k3s).toMatch(
-      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupBucketName,\s*environment,?\s*\}\)/,
+      /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupBucketName\s*\}\)/,
     );
+    expect(k3s).not.toMatch(/VC_ENV\s*=/);
   });
 });
 
