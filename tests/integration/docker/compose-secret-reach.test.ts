@@ -10,7 +10,7 @@
  * No container runs: `config` only resolves the files. Values are sentinels.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -24,7 +24,26 @@ import { PROVIDERS } from '../../../src/lib/providers/index.js';
 const describeDocker = process.env.DOCKER_INTEGRATION === 'true' ? describe : describe.skip;
 
 const ROOT = process.cwd();
-const ADDONS = ['observability', 'n8n', 'metabase', 'redis'] as const;
+// Every add-on that ships a compose overlay, found on disk so a new one is
+// covered with no edit here.
+const ADDONS = readdirSync(join(ROOT, 'services'), { withFileTypes: true })
+  .filter((d) => d.isDirectory())
+  .map((d) => d.name)
+  .filter((name) => existsSync(join(ROOT, 'services', name, 'compose', 'docker-compose.yml')))
+  .sort();
+// Each add-on's base overlay, then its prod overlay when it has one, in the
+// same order the bundle's -f set uses (base before prod).
+const ADDON_FILES = ADDONS.flatMap((name) =>
+  ['docker-compose.yml', 'docker-compose.prod.yml']
+    .filter((f) => existsSync(join(ROOT, 'services', name, 'compose', f)))
+    .map((f) => ({
+      from: `services/${name}/compose/${f}`,
+      to:
+        f === 'docker-compose.yml'
+          ? `docker-compose.${name}.yml`
+          : `docker-compose.${name}.prod.yml`,
+    })),
+);
 
 const dnsTokenNames = [...new Set(Object.values(DNS01_PROVIDERS).map((r) => r.tokenEnvVar))];
 const providerTokenNames = [
@@ -60,13 +79,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     stage('carbon/docker-compose.yml', 'docker-compose.yml');
     stage('carbon/docker-compose.prod.yml', 'docker-compose.prod.yml');
     stage('carbon/docker-compose.dns01.prod.yml', 'docker-compose.dns01.prod.yml');
-    for (const addon of ADDONS) {
-      stage(`services/${addon}/compose/docker-compose.yml`, `docker-compose.${addon}.yml`);
-      stage(
-        `services/${addon}/compose/docker-compose.prod.yml`,
-        `docker-compose.${addon}.prod.yml`,
-      );
-    }
+    for (const file of ADDON_FILES) stage(file.from, file.to);
     const serverEnv: Record<string, string> = {
       PROJECT_NAME: 'reach',
       DOMAIN: 'example.com',
@@ -126,8 +139,12 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       'docker-compose.yml',
       'docker-compose.prod.yml',
       'docker-compose.dns01.prod.yml',
-      ...ADDONS.flatMap((a) => [`docker-compose.${a}.yml`, `docker-compose.${a}.prod.yml`]),
+      ...ADDON_FILES.map((f) => f.to),
     ]);
+
+  it('found the add-on overlays', () => {
+    expect(ADDONS).toEqual(expect.arrayContaining(['metabase', 'n8n', 'observability', 'redis']));
+  });
 
   it('base + prod: the app holds no provider token', () => {
     const services = render(['docker-compose.yml', 'docker-compose.prod.yml']);

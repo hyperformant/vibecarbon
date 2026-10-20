@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  APP_RUNTIME_EXTRA_KEYS,
+  APP_RUNTIME_KEYS,
+} from '../../../src/lib/deploy/app-runtime-env.js';
 import { INFRA_SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 import { DNS_PROVIDERS, DNS01_PROVIDERS } from '../../../src/lib/dns-provider.js';
 import { PROVIDERS } from '../../../src/lib/providers/index.js';
@@ -57,6 +61,16 @@ describe('deploy.yml splits the app Secret from the infra Secret', () => {
     expect(names.size).toBeGreaterThan(10);
     const kept = [...names].filter((n) => !new RegExp(`\\.${n}\\b`).test(delList));
     expect(kept, 'tokens the app Secret would carry').toEqual([]);
+  });
+
+  it('selects exactly APP_RUNTIME_KEYS and the extras for the app Secret', () => {
+    const app = wf.match(/APP_KEYS='(\[[^']*\])'/)?.[1];
+    expect(app, 'APP_KEYS not found').toBeTruthy();
+    expect([...JSON.parse(app as string)].sort()).toEqual(
+      [...APP_RUNTIME_KEYS, ...APP_RUNTIME_EXTRA_KEYS].sort(),
+    );
+    // Positive selection: the app branch keeps only APP_KEYS members.
+    expect(wf).toMatch(/else \(\$app \| index\(\$k\)\) != null/);
   });
 
   it('routes exactly INFRA_SECRET_KEYS to the infra Secret', () => {

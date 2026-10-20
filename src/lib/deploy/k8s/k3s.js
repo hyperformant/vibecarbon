@@ -1825,6 +1825,12 @@ export const INFRA_SECRET_KEYS = [
  */
 export const SECRET_KEYS = [...new Set([...INFRA_SECRET_KEYS, ...APP_RUNTIME_KEYS])];
 
+/**
+ * The single Secret the app and infra keys shared before they were split.
+ * applyK3sManifests deletes it once the rollout has moved every pod off it.
+ */
+export const LEGACY_VIBECARBON_SECRET = 'vibecarbon-secrets';
+
 /** The Redis add-on's password, when the add-on is on. */
 function redisPassword(envLocal) {
   return envLocal.REDIS_ENABLED === 'true' && envLocal.REDIS_PASSWORD
@@ -4057,6 +4063,16 @@ export async function applyK3sManifests({
       migrationWatch.catch(() => {});
     }
   }
+  // 9a. Delete the pre-split `vibecarbon-secrets` Secret. The app, the db and
+  //     the add-ons now read vibecarbon-app-secrets and
+  //     vibecarbon-infra-secrets, and this deploy's rollout replaced every pod
+  //     that referenced the old Secret, so nothing uses it any more. Leaving
+  //     it would keep a copy of every infra password in a Secret no one owns.
+  //     A no-op once it is gone.
+  await runKubectlWithRetry(
+    ['-n', 'vibecarbon', 'delete', 'secret', LEGACY_VIBECARBON_SECRET, '--ignore-not-found'],
+    { env, description: `applyK3sManifests: delete Secret/${LEGACY_VIBECARBON_SECRET}` },
+  );
   // 9b. Wait for the app to report its migrations applied and its super
   //     admin ready (one probe). The app migrates, then creates the admin
   //     at startup from ADMIN_EMAIL / ADMIN_PASSWORD (delivered through the

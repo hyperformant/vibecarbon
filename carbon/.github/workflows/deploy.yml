@@ -78,20 +78,20 @@ jobs:
       # manager ensures Flux doesn't try to prune these fields later, and that
       # rotations simply overwrite.
       #
-      # Self-syncing: instead of enumerating every key (which silently drops
-      # any new `vibecarbon configure` secret that the CLI started seeding),
-      # we materialize ALL environment+repo secrets from `toJSON(secrets)` and
-      # build the Secrets from them. Adding a feature key to the CLI's
-      # seedEnvironmentSecrets is enough — no edit here. Two lists are
-      # maintained here:
-      #   - the del() list: CI and every cloud/DNS token the CLI can seed.
-      #     These have their own Secrets or none, and must never reach any
-      #     pod through these two. Census-guarded by
-      #     tests/unit/deploy/deploy-workflow-secret-sync.test.ts.
+      # Both Secrets are built from ALL environment+repo secrets
+      # (`toJSON(secrets)`), each by a positive list, so a secret seeded for
+      # some other purpose never lands in a pod by default:
+      #   - APP_KEYS: the app's runtime keys (APP_RUNTIME_KEYS and
+      #     APP_RUNTIME_EXTRA_KEYS in src/lib/deploy/app-runtime-env.js). The
+      #     app envFrom's this Secret whole. SITE_URL comes from vars instead.
       #   - INFRA_KEYS: the infra passwords (INFRA_SECRET_KEYS in
-      #     src/lib/deploy/k8s/k3s.js). They go only to the infra Secret, which
-      #     the db and add-on pods read by key; the app envFrom's its own
-      #     Secret whole, so they must never land there.
+      #     src/lib/deploy/k8s/k3s.js), read by the db and add-on pods by key.
+      #   - the del() list, defence in depth: CI and every cloud/DNS token the
+      #     CLI can seed, which have their own Secrets or none.
+      # A new configure-managed key joins APP_KEYS here. All three lists are
+      # census-pinned to their sources by
+      # tests/unit/deploy/deploy-workflow-secret-sync.test.ts, which fails
+      # until this file matches.
       # `toJSON(secrets)` is bound to an env var (not interpolated inline in
       # the script) for defense-in-depth; kubectl --from-literal passes values
       # through argv with no shell interpretation.
@@ -100,9 +100,28 @@ jobs:
           ALL_SECRETS: ${{ toJSON(secrets) }}
           SITE_URL: ${{ vars.SITE_URL }}
         run: |
+          APP_KEYS='[
+            "BETTER_AUTH_SECRET","ADMIN_EMAIL","ADMIN_PASSWORD","SITE_URL",
+            "CORS_ORIGINS","MAGIC_LINK_ENABLED","TRUSTED_PROXY_HOPS",
+            "FULLERENE_PRICE_ID","PROJECT_NAME","REDIS_ENABLED","N8N_ENABLED",
+            "METABASE_ENABLED","OBSERVABILITY_ENABLED",
+            "VITE_PLAUSIBLE_DOMAIN","VITE_PLAUSIBLE_SCRIPT_URL",
+            "STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET","PADDLE_API_KEY",
+            "PADDLE_WEBHOOK_SECRET","POLAR_ACCESS_TOKEN",
+            "POLAR_WEBHOOK_SECRET","GOOGLE_CLIENT_SECRET",
+            "MICROSOFT_CLIENT_SECRET","SMTP_PASS","BILLING_PROVIDER",
+            "STRIPE_PRICE_STARTER","STRIPE_PRICE_PRO","PADDLE_ENVIRONMENT",
+            "PADDLE_PRICE_STARTER","PADDLE_PRICE_PRO","POLAR_ORGANIZATION_ID",
+            "POLAR_PRICE_STARTER","POLAR_PRICE_PRO","GOOGLE_ENABLED",
+            "GOOGLE_CLIENT_ID","MICROSOFT_ENABLED","MICROSOFT_CLIENT_ID",
+            "MICROSOFT_TENANT_ID","SMTP_HOST","SMTP_PORT","SMTP_USER",
+            "SMTP_ADMIN_EMAIL","SMTP_SENDER_NAME","ACME_CA_SERVER",
+            "ALLOWED_SSH_IPS","S3_ACCESS_KEY","S3_SECRET_KEY","S3_BUCKET",
+            "S3_ENDPOINT","S3_REGION","REDIS_URL"
+          ]'
           INFRA_KEYS='["DB_PASSWORD","REPL_PASSWORD","METABASE_DB_PASSWORD","N8N_DB_PASSWORD"]'
           secret_args() {
-            printf '%s' "$ALL_SECRETS" | jq -r --argjson infra "$INFRA_KEYS" --arg want "$1" '
+            printf '%s' "$ALL_SECRETS" | jq -r --argjson app "$APP_KEYS" --argjson infra "$INFRA_KEYS" --arg want "$1" '
               del(
                 .KUBECONFIG_B64,
                 .GITHUB_TOKEN, .github_token,
@@ -115,8 +134,9 @@ jobs:
               )
               | to_entries[]
               | select(.value != null and .value != "")
-              | select((.key as $k | $infra | index($k)) as $i
-                  | if $want == "infra" then $i != null else $i == null end)
+              | select(.key as $k
+                  | if $want == "infra" then ($infra | index($k)) != null
+                    else ($app | index($k)) != null and $k != "SITE_URL" end)
               | "--from-literal=\(.key)=\(.value)"'
           }
           mapfile -t APP_ARGS < <(secret_args app)

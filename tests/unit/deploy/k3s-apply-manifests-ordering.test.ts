@@ -1297,6 +1297,27 @@ describe('applyK3sManifests — waits for the app to report its super admin', ()
       expect(secret?.data, key).toMatch(new RegExp(`\\b${key}:`));
     }
   });
+
+  it('deletes the pre-split vibecarbon-secrets Secret only after the app rollout', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+
+    const rolloutIdx = cmdCalls.findIndex(
+      (a) => a[0] === 'kubectl' && a.includes('rollout') && a.includes('deployment/app'),
+    );
+    const deleteIdx = cmdCalls.findIndex(
+      (a) =>
+        a[0] === 'kubectl' &&
+        a.includes('delete') &&
+        a.includes('secret') &&
+        a.includes('vibecarbon-secrets'),
+    );
+    expect(rolloutIdx, 'app rollout status missing').toBeGreaterThan(-1);
+    expect(deleteIdx, 'old Secret delete missing').toBeGreaterThan(rolloutIdx);
+    const del = cmdCalls[deleteIdx];
+    expect(del).toContain('--ignore-not-found');
+    expect(del.slice(del.indexOf('-n'), del.indexOf('-n') + 2)).toEqual(['-n', 'vibecarbon']);
+  });
 });
 
 /**

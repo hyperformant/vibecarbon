@@ -412,6 +412,46 @@ export function dropUnportableEnv(env, { log = p.log } = {}) {
 }
 
 /**
+ * The old server's `app.env`, for the scale replay: it holds the storage pair
+ * the old app used, which need not be the `.env`'s (the db's WAL-G pair).
+ * `null` when the server has none (deployed before app.env existed): then
+ * renderBundle carries the pair from the replayed `.env`, which is what that
+ * app read. A failed read also yields `null`, with a warning naming the
+ * fallback, and never discards the `.env` replay already read.
+ * `run` and `log` are injectable for tests.
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ * @param {{ run?: typeof sshRun, log?: { warn: (m: string) => void } }} [opts]
+ * @returns {Promise<Record<string, string> | null>}
+ */
+export async function readOldAppEnv(
+  ip,
+  sshKeyPath,
+  projectName,
+  { run = sshRun, log = p.log } = {},
+) {
+  let text;
+  try {
+    // Empty output, not an error, when the file does not exist.
+    text = await run(ip, sshKeyPath, [
+      'sh',
+      '-c',
+      'if [ -f "$1" ]; then cat "$1"; fi',
+      'sh',
+      `/opt/${projectName}/app.env`,
+    ]);
+  } catch {
+    log.warn(
+      "could not read app.env on the old server; the new server's app gets the storage keys from its .env",
+    );
+    return null;
+  }
+  if (!text) return null;
+  return dropUnportableEnv(parseDotenv(text), { log });
+}
+
+/**
  * compose/compose-ha `scale-servers` effect: blue-green replace every target
  * server (backup old → create new → wait for SSH → provision → copy files →
  * registry logins → optional remote build → pull images → compose up →
@@ -595,30 +635,23 @@ async function scaleServers(ctx) {
       s.start('Reading current server configuration...');
       try {
         const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
-        // The old server's app.env holds the storage pair its app used, which
-        // need not be the .env's (the db's WAL-G pair). A server deployed
-        // before app.env existed has none (empty output): renderBundle then
-        // carries the pair from the replayed .env, which is what that app read.
-        const appEnvText = await sshRun(server.ip, sshKeyPath, [
-          'sh',
-          '-c',
-          'if [ -f "$1" ]; then cat "$1"; fi',
-          'sh',
-          `/opt/${projectName}/app.env`,
-        ]);
         s.stop('Current server configuration read');
         // renderBundle re-encodes every override and throws on a value the
         // portable grammar refuses (a hand-edited server value with a tab,
         // or `'` beside `"`) — mid-scale, after the new server exists. Drop
         // and warn here instead; the operator re-enters it with configure.
         oldEnv = dropUnportableEnv(parseDotenv(envText));
-        if (appEnvText) oldAppEnv = dropUnportableEnv(parseDotenv(appEnvText));
       } catch {
         // Old server may be unreachable; renderBundle will fall back to the
         // project's local `.env`. That path is degraded (missing S3 secrets)
         // but at least surfaces a meaningful error during reconcile rather
         // than crashing scale silently.
         s.stop('Could not read old-server config, falling back to project .env');
+      }
+      // Only once the .env replay is in hand: its own read decides whether
+      // the old server answers at all.
+      if (Object.keys(oldEnv).length > 0) {
+        oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
       }
       const oldAppImage = oldEnv.APP_IMAGE || '';
 
