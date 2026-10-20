@@ -1228,9 +1228,12 @@ export function deriveProjectBucketName(projectConfig, suffix = 'storage') {
 
 /**
  * The per-project base the Pulumi state bucket name derives from
- * (deriveStateBucketName). Pinned to `<project>-<salt>-storage`, the name the
- * project-wide app bucket had, so live state buckets keep their names now that
- * the app bucket is per environment.
+ * (deriveStateBucketName): `<project>-<salt>-storage`, independent of the
+ * per-environment app bucket. It does NOT reproduce every older derivation
+ * (main derived from the persisted app bucket, `...-storage-<gen>` for a
+ * project with a bucket generation), so a live environment keeps its
+ * state bucket through the PERSISTED `s3.stateBucket` that deploy carries
+ * (resolveStateBucketName rule 1), never through this base.
  *
  * @param {{ projectName: string, bucketSalt?: string }} projectConfig
  * @returns {string}

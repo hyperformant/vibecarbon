@@ -1098,6 +1098,13 @@ export async function gatherDeploymentConfig(args) {
       bucket: storage.bucket,
       // Carried so the post-deploy save keeps the pin (E6 escape hatch).
       ...(envConfig.s3?.bucketPin && { bucketPin: envConfig.s3.bucketPin }),
+      // The persisted Pulumi state bucket, so resolveStateBucketName's first
+      // rule (the env's PERSISTED name) answers. Deriving it fresh on a
+      // redeploy picks an EMPTY bucket wherever an older CLI derived it
+      // differently (main derived from `<project>-<salt>-storage-<sgen>`),
+      // and Pulumi would then plan from empty state. A destroyed env's seed
+      // never carries it (env-identity), so a rebuild derives as before.
+      ...(envConfig.s3?.stateBucket && { stateBucket: envConfig.s3.stateBucket }),
       walgPrefix: storage.walgPrefix,
       region: s3Region,
       endpoint: s3Provider.getEndpoint(),
