@@ -83,6 +83,36 @@ describe('dnsSafeFetch response headers', () => {
   });
 });
 
+describe('dnsSafeFetch null-body statuses', () => {
+  // `new Response('', { status: 204 })` throws; the ForwardAuth cookie mint
+  // answers 204, so dnsSafeFetch must build null-body statuses with null.
+  it.each([204, 304])('turns a %i into a Response instead of throwing', async (status) => {
+    const httpsRequest = ((_o: unknown, cb: (res: unknown) => void) => {
+      const res = new PassThrough() as PassThrough & Record<string, unknown>;
+      res.statusCode = status;
+      res.statusMessage = '';
+      res.headers = { 'set-cookie': ['vc-admin-token=t; Path=/; HttpOnly'] };
+      setImmediate(() => {
+        cb(res);
+        res.end();
+      });
+      const req = { on: () => req, write: () => {}, end: () => {}, destroy: () => {} };
+      return req;
+      // biome-ignore lint/suspicious/noExplicitAny: narrow stub for an injected seam
+    }) as any;
+    const res = await dnsSafeFetch(
+      'https://app.example.com/x',
+      { method: 'POST' },
+      {
+        resolveIp: async () => '203.0.113.9',
+        httpsRequest,
+      },
+    );
+    expect(res.status).toBe(status);
+    expect(res.headers.getSetCookie()).toEqual(['vc-admin-token=t; Path=/; HttpOnly']);
+  });
+});
+
 describe('fetchSessionUser', () => {
   it('replays the jar and sends the same-origin Origin header', async () => {
     const jar = new CookieJar();
