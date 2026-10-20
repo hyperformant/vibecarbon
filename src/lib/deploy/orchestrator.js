@@ -671,11 +671,11 @@ export async function executeDeployment(args, gatheredConfig) {
   //      records the kept name so the redeploy resumes it.
   //   3. Derivation from the app bucket, for everyone else.
   //
-  // `stateBucketGeneration` is still embedded by the derivation but is no
-  // longer rotated on destroy: destroy KEEPS the state bucket now
-  // (retainStateBucket), so nothing is ever recreated under a name that just
-  // got deleted — the acked-write-loss hazard that rotation existed for (e4
-  // restore->failover 2026-08-07) cannot arise.
+  // `stateBucketGeneration` is embedded by the derivation. A plain destroy
+  // KEEPS the state bucket (retainStateBucket) and leaves the generation
+  // alone; only a last-environment -purge that deletes the bucket rotates it,
+  // so nothing is ever recreated under a name that just got deleted (the
+  // acked-write-loss hazard, e4 restore->failover 2026-08-07).
   //
   // Both HA stacks share this ONE bucket.
   const stateBucket = resolveStateBucketName({

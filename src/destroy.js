@@ -69,6 +69,7 @@ import {
   resolveProviderToken,
 } from './lib/providers/index.js';
 import { deriveProjectBucketName } from './lib/providers/s3-base.js';
+import { generateBucketSalt } from './lib/secrets.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
 import { recordLeakedVolumes } from './lib/volume-ledger.js';
@@ -946,8 +947,15 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
   // Every environment archives under its own backups/<project>/<env>/ prefix,
   // so -purge removes this environment's backups and the bucket itself only
   // goes with the last live environment.
+  // A plain-destroyed environment keeps its backups for recovery and is
+  // recorded under destroyedEnvironments with its backupS3, so it holds the
+  // bucket just as a live environment does.
   const envBackupPrefix = `backups/${projectConfig.projectName}/${environment}/`;
-  const deleteBucket = otherEnvironmentNames(projectConfig, environment).length === 0;
+  const preservedHolders = Object.entries(projectConfig.destroyedEnvironments ?? {}).filter(
+    ([name, entry]) => name !== environment && entry?.backupS3?.bucket === bucketName,
+  );
+  const deleteBucket =
+    otherEnvironmentNames(projectConfig, environment).length === 0 && preservedHolders.length === 0;
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
   spinner.start(`Purging backup bucket: ${bucketName}`);
@@ -1013,7 +1021,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
       ]);
       spinner.stop(
         result.kept
-          ? `Backups under ${envBackupPrefix} purged (${result.objectsRemoved} objects removed); bucket kept for the other environments`
+          ? `Backups under ${envBackupPrefix} purged (${result.objectsRemoved} objects removed); bucket kept for the other environments${preservedHolders.length > 0 ? ` (preserved backups of ${preservedHolders.map(([n]) => n).join(', ')})` : ''}`
           : result.deleted
             ? result.objectsRemoved > 0
               ? `Backup bucket purged (${result.objectsRemoved} objects removed)`
@@ -1072,7 +1080,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
  * Hetzner, object storage bills per ACCOUNT rather than per bucket, so an extra
  * empty bucket is close to free.
  */
-async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks) {
+async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks, environment) {
   const stateBucket = envConfig.s3?.stateBucket;
   // Pre-split environments kept Pulumi state in the app storage bucket, which
   // the normal app-bucket path deletes; there is no separate bucket to keep.
@@ -1097,13 +1105,29 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
     return;
   }
 
-  // -purge means "leave nothing behind" — with backups it already deletes the
-  // backup bucket, and the state bucket follows the same rule. This is the ONE
-  // deletion path for the retained bucket (review finding, 2026-08-15: there
-  // was previously none at all), and it is safe where the old always-delete
-  // was not: it runs only on explicit request, after stack teardown, and a
-  // redeploy after -purge is a fresh project start, not a same-name recreate
-  // racing acked writes.
+  // The derived name is project-level (app bucket + stateBucketGeneration),
+  // so every environment of the project keeps its Pulumi stacks in this one
+  // bucket. -purge on one environment while others are live keeps it: its
+  // own stack file is already gone (pulumi destroy + removeStack ran before
+  // this), and the other environments' state must survive.
+  const others = otherEnvironmentNames(projectConfig, environment);
+  if (args?.purgeBackups && others.length > 0) {
+    spinner.start('Pulumi state bucket');
+    spinner.stop(
+      `Pulumi state bucket kept for ${others.length} other environment(s): ${stateBucket}`,
+    );
+    return { purged: false };
+  }
+
+  // -purge of the last environment means "leave nothing behind": with backups
+  // it already deletes the backup bucket, and the state bucket follows the
+  // same rule. This is the ONE deletion path for the retained bucket (review
+  // finding, 2026-08-15: there was previously none at all), and it is safe
+  // where the old always-delete was not: it runs only on explicit request,
+  // after stack teardown, and a successful delete returns `purged`, which
+  // makes updateProjectConfig rotate stateBucketGeneration. The next deploy
+  // then derives a fresh name instead of recreating this one, which is the
+  // same-name recreate that lost acked writes on 2026-08-07.
   if (args?.purgeBackups) {
     // A purge carries nothing forward: drop any retained name whether or not
     // the delete below succeeds, so the next deploy never resolves to a
@@ -1139,6 +1163,7 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
           ? `Pulumi state bucket purged (${result.objectsRemoved} objects removed)`
           : 'Pulumi state bucket not found',
       );
+      return { purged: !!result.deleted };
     } catch (error) {
       spinner.stop(`State bucket purge failed: ${error.message}`);
       leaks.leak({
@@ -1152,11 +1177,12 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
   }
 
   // Keeping the bucket is only useful if the next deploy finds it. The
-  // derived state-bucket name embeds the app bucket name, and
-  // the state name stays stable across destroy→deploy, so a redeploy finds
+  // derived name is stable across a plain destroy→deploy (stateBucketGeneration
+  // rotates only when -purge deletes the bucket), and recording the kept name
+  // also covers a bucket derived under an older scheme, so a redeploy finds
   // this bucket again instead of orphaning it (vibecarbon-web 2026-09-15).
-  // Record the kept name; resolveStateBucketName reads it ahead of
-  // derivation, and updateProjectConfig persists this same object.
+  // resolveStateBucketName reads it ahead of derivation, and
+  // updateProjectConfig persists this same object.
   projectConfig.retainedStateBucket = stateBucket;
   spinner.start('Pulumi state bucket');
   spinner.stop(
@@ -1384,8 +1410,16 @@ async function removeEnvCorsOrigins({ s3Provider, bucket, ctx, spinner }) {
 // 2. State bucket: kept on purpose, so the next deploy reuses a warm bucket
 //    instead of recreating one under the same name — see retainStateBucket.
 async function retainStateBucketEffect(ctx) {
-  const { envConfig, projectConfig, args, spinner, results } = ctx;
-  await retainStateBucket(envConfig, projectConfig, args, spinner, results.leaks);
+  const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
+  const outcome = await retainStateBucket(
+    envConfig,
+    projectConfig,
+    args,
+    spinner,
+    results.leaks,
+    environment,
+  );
+  if (outcome?.purged) results.stateBucketPurged = true;
 }
 
 // 3. Backup bucket: preserved by default, deleted with -purge.
@@ -1458,16 +1492,18 @@ async function updateProjectConfigEffect(ctx) {
     }
     delete updatedConfig.environments[environment];
   }
-  // `stateBucketGeneration` is deliberately NOT rotated here any more. It was
-  // rotated so the next deploy would derive a FRESH state-bucket name rather
-  // than recreate the one this destroy had just deleted — Hetzner Object
-  // Storage can ack writes into a just-recreated same-name bucket and lose them
-  // (e4 restore->failover, 2026-08-07). We no longer delete the state bucket
-  // (see retainStateBucket), so nothing gets recreated and the hazard cannot
-  // arise; rotating would now do the opposite of what we want, stranding the
-  // warm bucket and sending every redeploy to a brand-new one.
+  // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
+  // deleted the derived state bucket (the last live environment). The next
+  // deploy then derives a FRESH state-bucket name rather than recreating the
+  // one just deleted: Hetzner Object Storage can ack writes into a
+  // just-recreated same-name bucket and lose them (e4 restore->failover,
+  // 2026-08-07). Every other destroy keeps the state bucket (see
+  // retainStateBucket), and rotating then would strand the warm bucket.
   //
-  // The app bucket is never recreated, so there is nothing to rotate.
+  // The app bucket name stays stable; it is not rotated here.
+  if (results.stateBucketPurged) {
+    updatedConfig.stateBucketGeneration = generateBucketSalt();
+  }
   saveProjectConfig(updatedConfig);
   spinner.stop('Configuration updated');
 }

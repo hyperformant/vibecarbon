@@ -1102,9 +1102,10 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
  * state bucket).
  *
  * GENERATION (2026-08-07): when the project carries a
- * `stateBucketGeneration`, it is embedded in the name and ROTATED by a
- * verified destroy — so a redeploy after destroy derives a FRESH state-bucket
- * name instead of recreating the deleted one. Hetzner Object Storage can ack
+ * `stateBucketGeneration`, it is embedded in the name and ROTATED when a
+ * last-environment `destroy -purge` deletes the derived bucket — so the next
+ * deploy derives a FRESH state-bucket name instead of recreating the deleted
+ * one. A plain destroy keeps the bucket and leaves the generation alone. Hetzner Object Storage can ack
  * writes against a just-deleted-and-recreated same-name bucket and then lose
  * them (e4 restore→failover, 2026-08-07: the standby's up succeeded, its
  * state was gone from the bucket 45+ minutes later — not staleness, loss).
@@ -1136,10 +1137,12 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
  *      bucket is the worst window for state-backend staleness and throttling,
  *      and a real customer's bucket is warm by the time it matters.
  *   3. `retained` — the bucket the last `destroy` KEPT (project-level
- *      `retainedStateBucket`). Derivation embeds the app bucket name, which
- *      destroy rotates, so without this handoff every destroy→deploy cycle
+ *      `retainedStateBucket`). Destroy used to rotate the app bucket name the
+ *      derivation embeds, so without this handoff every destroy→deploy cycle
  *      derived a fresh name and orphaned the kept bucket (vibecarbon-web
- *      2026-09-15). Recorded by retainStateBucket, cleared by `-purge`.
+ *      2026-09-15). The app bucket name is stable now; the handoff still
+ *      covers a bucket derived under an older name. Recorded by
+ *      retainStateBucket, cleared by `-purge`.
  *   4. Derivation from the app bucket name.
  *
  * @param {object} args

@@ -47,10 +47,11 @@ describe('retainStateBucket', () => {
 
   it('records the kept bucket on the project config so the next deploy reuses it', async () => {
     // Keeping the bucket is only half the promise ("next deploy resumes a warm
-    // state backend"). The derived name embeds the app bucket name, which
-    // destroy rotates, so without a handoff the next deploy derived a fresh
+    // state backend"). Destroy used to rotate the app bucket name the
+    // derivation embeds, so without a handoff the next deploy derived a fresh
     // name and the kept bucket was orphaned — one leaked bucket per
-    // destroy→deploy cycle (vibecarbon-web 2026-09-15). updateProjectConfig
+    // destroy→deploy cycle (vibecarbon-web 2026-09-15). The handoff still
+    // covers a bucket derived under an older name. updateProjectConfig
     // persists this object, so the mutation is what carries the name over.
     const spinner = spinnerStub();
     const cfg: Record<string, unknown> = { projectName: 'proj' };

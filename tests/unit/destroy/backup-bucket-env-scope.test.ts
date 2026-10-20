@@ -42,10 +42,11 @@ function env(name: string) {
   };
 }
 
-const project = (names: string[]) => ({
+const project = (names: string[], destroyedEnvironments?: Record<string, unknown>) => ({
   projectName: 'myapp',
   bucketSalt: 'cd9ecc',
   environments: Object.fromEntries(names.map((n) => [n, env(n)])),
+  ...(destroyedEnvironments ? { destroyedEnvironments } : {}),
 });
 
 async function destroy(
@@ -89,6 +90,34 @@ describe('handleBackupBucket is scoped to one environment', () => {
   it('-purge on the last environment removes its prefix, then the bucket', async () => {
     await destroy(project(['prod']), 'prod', { purgeBackups: true });
     expect(s3.deletePrefix).toHaveBeenCalledWith(BACKUPS, 'backups/myapp/prod/');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BACKUPS);
+  });
+
+  it('-purge on the last live environment keeps the bucket while a destroyed environment preserved backups in it', async () => {
+    // A plain destroy keeps backups for recovery and records the env under
+    // destroyedEnvironments with its backupS3. A later -purge of the last
+    // live env must not wipe those preserved backups.
+    const { messages } = await destroy(
+      project(['prod'], {
+        staging: { backupS3: { bucket: BACKUPS, region: 'fsn1' }, destroyedAt: 'x' },
+      }),
+      'prod',
+      { purgeBackups: true },
+    );
+    expect(s3.deletePrefix).toHaveBeenCalledWith(BACKUPS, 'backups/myapp/prod/');
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(messages.join('\n')).toMatch(/bucket kept/);
+  });
+
+  it('a destroyed environment recorded against a different bucket does not hold this one', async () => {
+    await destroy(
+      project(['prod'], {
+        staging: { backupS3: { bucket: 'elsewhere-backups' }, destroyedAt: 'x' },
+        prod: { backupS3: { bucket: BACKUPS }, destroyedAt: 'x' },
+      }),
+      'prod',
+      { purgeBackups: true },
+    );
     expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BACKUPS);
   });
 

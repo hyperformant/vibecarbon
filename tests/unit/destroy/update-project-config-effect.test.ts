@@ -156,18 +156,15 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
   });
 
   // Same-name state-bucket recreation can silently lose acked writes (e4
-  // restore→failover, 2026-08-07): a VERIFIED destroy rotates the generation
-  // so the next deploy derives a fresh state-bucket name. An unverified
-  // destroy must NOT rotate — its retry targets the old names.
-  it('does NOT rotate stateBucketGeneration on a verified destroy', async () => {
-    // Inverted deliberately. Rotation existed so the next deploy would derive a
-    // fresh state-bucket name rather than recreate the one destroy had just
-    // deleted, because Hetzner Object Storage can ack writes into a recreated
-    // same-name bucket and lose them (e4 restore->failover, 2026-08-07). We no
-    // longer delete the state bucket (retainStateBucket), so nothing is
-    // recreated and the hazard cannot arise — and rotating now would do the
-    // opposite of what we want, stranding the warm bucket and sending every
-    // redeploy to a brand-new one, which is the worst window for this class.
+  // restore→failover, 2026-08-07). The generation rotates only when a
+  // last-environment -purge deleted the state bucket (covered in
+  // state-bucket-purge-scope.test.ts). An unverified destroy must NOT rotate —
+  // its retry targets the old names.
+  it('does NOT rotate stateBucketGeneration on a verified destroy that kept the state bucket', async () => {
+    // A plain destroy keeps the state bucket (retainStateBucket), so nothing
+    // is recreated and the hazard cannot arise — rotating would strand the
+    // warm bucket and send the redeploy to a brand-new one, which is the
+    // worst window for this class.
     const ctx = makeCtx({ pulumiDestroyFailed: false });
     ctx.projectConfig.stateBucketGeneration = 'aaaaaa';
 
