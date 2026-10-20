@@ -1085,39 +1085,6 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
 }
 
 /**
- * Derive the dedicated Pulumi-state bucket name from the project base name
- * (`projectStateBucketBase`, `<project>-<salt>-storage`). Pulumi state used to
- * live in the app storage bucket, which created a destroy-time circular hazard
- * (deleting the storage bucket nuked the state backend mid-destroy). State now
- * lives in a separate, per-project bucket derived once, deterministically, from
- * that base, so the derivation is stable across deploy / scale / destroy and
- * identical for every environment and both HA stacks (they share one state
- * bucket). The base is the name the per-project app bucket used to have; it is
- * kept byte-for-byte so existing state buckets keep their names, and it is NOT
- * the per-environment app bucket (deriveEnvAppBucketName).
- *
- * GENERATION (2026-08-07): when the project carries a
- * `stateBucketGeneration`, it is embedded in the name and ROTATED when a
- * last-environment `destroy -purge` deletes the derived bucket — so the next
- * deploy derives a FRESH state-bucket name instead of recreating the deleted
- * one. A plain destroy keeps the bucket and leaves the generation alone. Hetzner Object Storage can ack
- * writes against a just-deleted-and-recreated same-name bucket and then lose
- * them (e4 restore→failover, 2026-08-07: the standby's up succeeded, its
- * state was gone from the bucket 45+ minutes later — not staleness, loss).
- * Persisted names always win over derivation, so live environments are
- * untouched by a rotation; only future derivations move.
- *
- * The generation suffix must SURVIVE the 63-char clip (a tail `.slice` would
- * eat it on long project names — observed as `…-storage-pulumi-stat`), so the
- * BASE is clipped and the functional suffix is preserved whole.
- *
- * @param {string} projectBaseName - The project base (e.g. `myapp-cd9ecc-storage`)
- * @param {string} [generation] - 6-hex state-bucket generation; omitted for
- *   legacy projects (pre-generation names remain byte-stable)
- * @returns {string} - Valid state bucket name (e.g.
- *   `myapp-storage-pulumi-state-a1b2c3`)
- */
-/**
  * A bucket pin is REJECTED rather than rewritten: the operator chose this exact
  * name, and deploying under a different one than they wrote is worse than
  * telling them to fix it. Same rules sanitizeBucketName enforces.
@@ -1194,6 +1161,40 @@ export function resolveStateBucketName({
   return deriveStateBucketName(projectBase, generation);
 }
 
+/**
+ * Derive the dedicated Pulumi-state bucket name from the project base name
+ * (`projectStateBucketBase`, `<project>-<salt>-storage`). Pulumi state used to
+ * live in the app storage bucket, which created a destroy-time circular hazard
+ * (deleting the storage bucket nuked the state backend mid-destroy). State now
+ * lives in a separate, per-project bucket derived once, deterministically, from
+ * that base, so the derivation is stable across deploy / scale / destroy and
+ * identical for every environment and both HA stacks (they share one state
+ * bucket). The base is NOT the per-environment app bucket
+ * (deriveEnvAppBucketName). An older CLI may have derived a different name, so
+ * a deployed environment keeps its bucket through its persisted
+ * `s3.stateBucket` (resolveStateBucketName rule 1), not through this function.
+ *
+ * GENERATION (2026-08-07): when the project carries a
+ * `stateBucketGeneration`, it is embedded in the name and ROTATED when a
+ * last-environment `destroy -purge` deletes the derived bucket — so the next
+ * deploy derives a FRESH state-bucket name instead of recreating the deleted
+ * one. A plain destroy keeps the bucket and leaves the generation alone. Hetzner Object Storage can ack
+ * writes against a just-deleted-and-recreated same-name bucket and then lose
+ * them (e4 restore→failover, 2026-08-07: the standby's up succeeded, its
+ * state was gone from the bucket 45+ minutes later — not staleness, loss).
+ * Persisted names always win over derivation, so live environments are
+ * untouched by a rotation; only future derivations move.
+ *
+ * The generation suffix must SURVIVE the 63-char clip (a tail `.slice` would
+ * eat it on long project names — observed as `…-storage-pulumi-stat`), so the
+ * BASE is clipped and the functional suffix is preserved whole.
+ *
+ * @param {string} projectBaseName - The project base (e.g. `myapp-cd9ecc-storage`)
+ * @param {string} [generation] - 6-hex state-bucket generation; omitted for
+ *   legacy projects (pre-generation names remain byte-stable)
+ * @returns {string} - Valid state bucket name (e.g.
+ *   `myapp-storage-pulumi-state-a1b2c3`)
+ */
 export function deriveStateBucketName(projectBaseName, generation) {
   const suffix = generation ? `pulumi-state-${generation}` : 'pulumi-state';
   const clipped = projectBaseName.slice(0, Math.max(3, 63 - suffix.length - 1));
