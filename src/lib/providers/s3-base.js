@@ -1012,7 +1012,8 @@ export class S3CompatibleProvider {
    * A bucket with no rule yet answers NoSuchCORSConfiguration (or a bare 404
    * on some providers); that is an empty list, not an error. Anything else
    * throws, because writing a merge over a failed read would drop the other
-   * environments' origins.
+   * environments' origins. That includes NoSuchBucket, which a young Hetzner
+   * bucket answers transiently even though it exists.
    * @param {string} bucketName - Bucket name
    * @returns {Promise<string[]>}
    */
@@ -1021,8 +1022,9 @@ export class S3CompatibleProvider {
       const result = await this._send(new GetBucketCorsCommand({ Bucket: bucketName }));
       return (result?.CORSRules ?? []).flatMap((rule) => rule.AllowedOrigins ?? []);
     } catch (err) {
-      if ((err?.name ?? '') === 'NoSuchCORSConfiguration') return [];
-      if (err?.$metadata?.httpStatusCode === 404) return [];
+      const name = err?.name ?? err?.Code ?? '';
+      if (name === 'NoSuchCORSConfiguration') return [];
+      if (err?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket') return [];
       throw err;
     }
   }

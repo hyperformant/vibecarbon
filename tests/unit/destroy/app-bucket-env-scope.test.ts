@@ -124,6 +124,24 @@ describe('deleteAppBucket is scoped to one environment', () => {
     expect(results.s3Prefix).toBe('prod/');
   });
 
+  it('a NoSuchBucket on the CORS read only warns, and the -purge bucket delete still runs', async () => {
+    // getBucketCorsOrigins throws on NoSuchBucket (a young Hetzner bucket
+    // answers it transiently), and the prefix delete just proved the bucket
+    // exists, so the CORS step must not short-circuit the bucket delete.
+    const project = twoEnvProject();
+    delete (project.environments as Record<string, unknown>).staging;
+    s3.getBucketCorsOrigins.mockRejectedValueOnce(
+      Object.assign(new Error('The specified bucket does not exist'), {
+        name: 'NoSuchBucket',
+        $metadata: { httpStatusCode: 404 },
+      }),
+    );
+    const { results, text } = await destroy(project, 'prod', { purgeBackups: true });
+    expect(text).toContain('Bucket CORS rule not updated');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BUCKET);
+    expect(results.s3Bucket).toBe(BUCKET);
+  });
+
   it('the last environment without -purge deletes its prefix only and keeps the bucket for reuse', async () => {
     const project = twoEnvProject();
     delete (project.environments as Record<string, unknown>).staging;

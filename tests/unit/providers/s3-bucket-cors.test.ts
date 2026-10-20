@@ -89,6 +89,19 @@ describe('getBucketCorsOrigins', () => {
     await expect(p.getBucketCorsOrigins('b')).resolves.toEqual([]);
   });
 
+  it('throws on NoSuchBucket, even as a 404 (a young Hetzner bucket answers it transiently)', async () => {
+    // An empty list here makes the deploy PUT only its own origins and wipe
+    // every other environment's; throwing sends it down the warn-and-skip path.
+    const { p, send } = provider();
+    send.mockRejectedValueOnce(
+      Object.assign(new Error('The specified bucket does not exist'), {
+        name: 'NoSuchBucket',
+        $metadata: { httpStatusCode: 404 },
+      }),
+    );
+    await expect(p.getBucketCorsOrigins('b')).rejects.toThrow('bucket does not exist');
+  });
+
   it('throws on any other error', async () => {
     const { p, send } = provider();
     send.mockRejectedValueOnce(

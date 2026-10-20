@@ -1400,7 +1400,8 @@ async function removeEnvCorsOrigins({ s3Provider, bucket, ctx, spinner }) {
     await removeAppBucketCorsOrigins({ provider: s3Provider, bucket, origins });
     spinner.stop('Bucket CORS rule updated');
   } catch (corsErr) {
-    if (corsErr.name === 'NoSuchBucket' || corsErr.$metadata?.httpStatusCode === 404) throw corsErr;
+    // NoSuchBucket included: a young Hetzner bucket answers it transiently,
+    // and a bucket that is really gone is reported by the delete that follows.
     spinner.stop(
       `Bucket CORS rule not updated (${corsErr.message}); remove ${origins.join(', ')} from ${bucket} in your provider console`,
     );
