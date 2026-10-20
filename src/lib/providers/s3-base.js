@@ -1107,22 +1107,5 @@ export function deriveProjectBucketName(projectConfig, suffix = 'storage') {
   const base = projectConfig.bucketSalt
     ? `${projectConfig.projectName}-${projectConfig.bucketSalt}`
     : projectConfig.projectName;
-  // STORAGE generation (2026-08-17, registry-500 RCA run 32013980356): a
-  // purge-destroy deletes the storage bucket and a redeploy used to recreate
-  // it under the SAME name — Hetzner's delete→recreate propagation worst
-  // case, which flapped NoSuchBucket at the in-cluster registry for >10
-  // minutes. The generation (seeded by `create`, rotated by a verified
-  // destroy that actually deleted the bucket) makes every recreate a FRESH
-  // name. Persisted env bucket names win over derivation, so live
-  // environments never move; legacy projects without the key keep their
-  // byte-stable names. STORAGE ONLY: the backups bucket must keep its stable
-  // name — restore finds its wal-g backups by it right after a destroy.
-  // Clip-safe like deriveStateBucketName: the functional tail survives the
-  // 63-char limit on long project names.
-  if (suffix === 'storage' && projectConfig.storageBucketGeneration) {
-    const genSuffix = `storage-${projectConfig.storageBucketGeneration}`;
-    const clipped = base.slice(0, Math.max(3, 63 - genSuffix.length - 1));
-    return sanitizeBucketName(clipped, genSuffix);
-  }
   return sanitizeBucketName(base, suffix);
 }

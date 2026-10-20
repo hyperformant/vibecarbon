@@ -1136,9 +1136,8 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
 
   // Keeping the bucket is only useful if the next deploy finds it. The
   // derived state-bucket name embeds the app bucket name, and
-  // updateProjectConfig rotates storageBucketGeneration below, so a redeploy
-  // would derive a NEW name and this bucket would just be orphaned — one
-  // leaked bucket per destroy→deploy cycle (vibecarbon-web 2026-09-15).
+  // the state name stays stable across destroy→deploy, so a redeploy finds
+  // this bucket again instead of orphaning it (vibecarbon-web 2026-09-15).
   // Record the kept name; resolveStateBucketName reads it ahead of
   // derivation, and updateProjectConfig persists this same object.
   projectConfig.retainedStateBucket = stateBucket;
@@ -1386,20 +1385,7 @@ async function updateProjectConfigEffect(ctx) {
   // arise; rotating would now do the opposite of what we want, stranding the
   // warm bucket and sending every redeploy to a brand-new one.
   //
-  // `storageBucketGeneration` IS rotated — precisely when this destroy
-  // actually DELETED the storage bucket (results.s3Bucket is the deleted
-  // name — which is every destroy that had one, not only -purge; the app
-  // bucket is always deleted, -purge governs the backup + state buckets). The storage bucket cannot be retained across `-purge`
-  // (purge means the data is deleted), so the redeploy-side of the hazard is
-  // closed by naming instead: the next deploy derives a FRESH bucket name
-  // rather than recreating the deleted one and riding Hetzner's
-  // delete→same-name-recreate propagation worst case (registry-500 RCA,
-  // run 32013980356: NoSuchBucket flapping >10min at the in-cluster
-  // registry). No rotation when the bucket survived — that would strand the
-  // warm bucket — and legacy projects without the key never gain one here.
-  if (ctx.results?.s3Bucket && updatedConfig.storageBucketGeneration) {
-    updatedConfig.storageBucketGeneration = generateBucketSalt();
-  }
+  // The app bucket is never recreated, so there is nothing to rotate.
   saveProjectConfig(updatedConfig);
   spinner.stop('Configuration updated');
 }

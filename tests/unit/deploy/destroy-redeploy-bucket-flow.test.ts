@@ -9,7 +9,7 @@
  * creates and the bucket the CORS rule is applied to are one value:
  *
  *   destroy's updateProjectConfig effect (drops environments.<env>, records
- *   the identity, rotates storageBucketGeneration)
+ *   the identity, leaves the stable bucket name alone)
  *   -> resolveEnvSeed (deploy's seed for a destroyed name)
  *   -> resolveEnvBucketNames (gatheredConfig.s3Config.bucket)
  *   -> renderBundle (the server .env's S3_BUCKET)
@@ -42,14 +42,13 @@ const { renderBundle } = await import('../../../src/lib/deploy/bundle.js');
 const { applyAppBucketCors } = await import('../../../src/lib/deploy/orchestrator.js');
 const { parseDotenv } = await import('../../../src/lib/dotenv.js');
 
-const OLD_BUCKET = 'myapp-cd9ecc-storage-93872b';
+const BUCKET = 'myapp-cd9ecc-storage';
 const BACKUPS = 'myapp-cd9ecc-backups';
 
 function deployedProject() {
   return {
     projectName: 'myapp',
     bucketSalt: 'cd9ecc',
-    storageBucketGeneration: '93872b',
     environments: {
       e1: {
         provider: 'hetzner',
@@ -59,7 +58,7 @@ function deployedProject() {
         region: 'nbg1',
         status: 'deployed',
         s3: {
-          bucket: OLD_BUCKET,
+          bucket: BUCKET,
           region: 'nbg1',
           endpoint: 'https://nbg1.your-objectstorage.com',
           stateBucket: 'vc-state',
@@ -81,7 +80,7 @@ async function destroyE1(projectConfig: ReturnType<typeof deployedProject>) {
     projectConfig,
     environment: 'e1',
     spinner: { start: vi.fn(), stop: vi.fn() },
-    results: { leaks: createLeakLedger(), pulumiDestroyFailed: false, s3Bucket: OLD_BUCKET },
+    results: { leaks: createLeakLedger(), pulumiDestroyFailed: false, s3Bucket: BUCKET },
   });
   expect(saveProjectConfigMock).toHaveBeenCalledTimes(1);
   return saveProjectConfigMock.mock.calls[0][0];
@@ -105,20 +104,18 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     }
   });
 
-  it('the redeploy creates, configures CORS on, and points the app at ONE fresh bucket, never the deleted one', async () => {
+  it('the redeploy creates, configures CORS on, and points the app at ONE stable bucket', async () => {
     const afterDestroy = await destroyE1(deployedProject());
-    expect(afterDestroy.storageBucketGeneration).not.toBe('93872b');
 
     const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
     const { bucketName, backupBucketName } = resolveEnvBucketNames(envConfig, afterDestroy);
-    expect(bucketName).toBe(`myapp-cd9ecc-storage-${afterDestroy.storageBucketGeneration}`);
-    expect(bucketName).not.toBe(OLD_BUCKET);
+    expect(bucketName).toBe(BUCKET);
     // Restore depends on the backups bucket keeping its name.
     expect(backupBucketName).toBe(BACKUPS);
 
     // The project-local .env still names some other bucket (dev's `-local`,
     // or a stale copy of the deleted one); the deploy override must win.
-    writeFileSync(join(projectDir, '.env'), `S3_BUCKET=${OLD_BUCKET}\nFOO=bar\n`);
+    writeFileSync(join(projectDir, '.env'), `S3_BUCKET=${BUCKET}\nFOO=bar\n`);
     process.chdir(projectDir);
     const stage = renderBundle('myapp', {
       domain: 'e1.example.com',
@@ -159,7 +156,9 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
 
   it('a live environment keeps its persisted bucket (no derivation, no move)', () => {
     const project = deployedProject();
-    project.storageBucketGeneration = 'ffffff';
-    expect(resolveEnvBucketNames(project.environments.e1, project).bucketName).toBe(OLD_BUCKET);
+    project.environments.e1.s3.bucket = 'myapp-cd9ecc-storage-persisted';
+    expect(resolveEnvBucketNames(project.environments.e1, project).bucketName).toBe(
+      'myapp-cd9ecc-storage-persisted',
+    );
   });
 });

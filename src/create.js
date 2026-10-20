@@ -1359,11 +1359,6 @@ ${runCmd} test:prepush
       projectId: randomUUID(),
       bucketSalt: generateBucketSalt(),
       stateBucketGeneration: generateBucketSalt(),
-      // Rotated by a verified purge-destroy so a redeploy derives a FRESH
-      // storage-bucket name instead of recreating the deleted one (Hetzner's
-      // delete→same-name-recreate propagation worst case; registry-500 RCA
-      // 2026-08-17 — see deriveProjectBucketName).
-      storageBucketGeneration: generateBucketSalt(),
       templateVersion: VERSION,
       fileChecksums,
       services: {},

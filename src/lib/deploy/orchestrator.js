@@ -463,9 +463,8 @@ export async function executeDeployment(args, gatheredConfig) {
   //      every scenario at a single long-lived bucket instead of creating a
   //      brand-new one per run.
   //   2b. The bucket the last destroy KEPT (`retainedStateBucket`). destroy
-  //      retains the state bucket but rotates storageBucketGeneration, and
-  //      the derived name embeds the app bucket name — so without this the
-  //      redeploy derived a fresh name and the kept bucket was orphaned.
+  //      retains the state bucket and the state name stays stable; this
+  //      records the kept name so the redeploy resumes it.
   //   3. Derivation from the app bucket, for everyone else.
   //
   // `stateBucketGeneration` is still embedded by the derivation but is no

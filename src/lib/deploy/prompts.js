@@ -475,20 +475,18 @@ async function verifyObjectStorageKeys(s3Provider, source) {
  * are frozen in .vibecarbon.json and renaming the project (or adding a salt
  * to an old project) must not silently re-point wal-g/Pulumi at buckets that
  * don't exist. Fresh derivations embed the per-project bucketSalt (created
- * projects since 2026-08) to keep names globally unique across customers,
- * and the storage name embeds `storageBucketGeneration`, which destroy
- * rotates when it deletes the app bucket.
+ * projects since 2026-08) to keep names globally unique across customers.
  *
  * After a destroy, `envConfig` is the destroyedEnvironments identity seed,
  * which carries `backupS3` (restore reads its backups there) but never `s3`
  * (ENV_IDENTITY_FIELDS in lib/env-identity.js), so the app bucket name is
- * re-derived under the rotated generation. Every consumer of the app bucket
+ * re-derived, and derivation is stable, so it is the same name. Every consumer of the app bucket
  * (bucket creation, the CORS rule, the server .env, the k8s Secret) reads
  * this one value through gatheredConfig.s3Config.bucket; the value-flow test
  * in tests/unit/deploy/destroy-redeploy-bucket-flow.test.ts pins that.
  *
  * @param {{ s3?: { bucket?: string }, backupS3?: { bucket?: string } }} envConfig
- * @param {{ projectName: string, bucketSalt?: string, storageBucketGeneration?: string }} projectConfig
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
  * @returns {{ bucketName: string, backupBucketName: string }}
  */
 export function resolveEnvBucketNames(envConfig, projectConfig) {

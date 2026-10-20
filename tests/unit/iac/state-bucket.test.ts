@@ -179,11 +179,11 @@ describe('resolveStateBucketName — precedence', () => {
     );
   });
 
-  it('a bucket retained by destroy wins over derivation (survives the storage-generation rotation)', () => {
-    // destroy KEEPS the state bucket but also rotates storageBucketGeneration,
-    // and the derived state-bucket name embeds the app bucket name — so a
-    // redeploy after destroy used to derive a NEW name and the kept bucket
-    // was simply orphaned (vibecarbon-web 2026-09-15:
+  it('a bucket retained by destroy wins over derivation', () => {
+    // destroy KEEPS the state bucket, and the derived state-bucket name embeds
+    // the app bucket name. The app name used to rotate per destroy, so a
+    // redeploy after destroy derived a NEW name and the kept bucket was
+    // simply orphaned (vibecarbon-web 2026-09-15:
     // …-storage-7b6f58-pulumi-state-c86bb1 left behind, …-d7f3af-… created).
     // destroy now records the kept name; the next deploy resolves to it.
     expect(

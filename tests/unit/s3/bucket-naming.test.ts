@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { sanitizeBucketName } from '../../../src/lib/providers/hetzner-s3.js';
 import { deriveProjectBucketName } from '../../../src/lib/providers/s3-base.js';
@@ -34,6 +36,26 @@ describe('deriveProjectBucketName (per-project salt)', () => {
   it('keeps the project name as the leading prefix (e2e sweeps filter on it)', () => {
     const name = deriveProjectBucketName({ projectName: 'testapp-rig', bucketSalt: 'ab12cd' });
     expect(name.startsWith('testapp-rig-')).toBe(true);
+  });
+});
+
+describe('deriveProjectBucketName ignores storageBucketGeneration', () => {
+  const project = { projectName: 'myapp', bucketSalt: 'cd9ecc', storageBucketGeneration: 'f00d42' };
+
+  it('derives one stable storage name regardless of storageBucketGeneration', () => {
+    expect(deriveProjectBucketName(project)).toBe('myapp-cd9ecc-storage');
+  });
+
+  it('derives the same backups name', () => {
+    expect(deriveProjectBucketName(project, 'backups')).toBe('myapp-cd9ecc-backups');
+  });
+
+  it('create no longer seeds storageBucketGeneration', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../src/create.js', import.meta.url)),
+      'utf8',
+    );
+    expect(src).not.toMatch(/storageBucketGeneration/);
   });
 });
 

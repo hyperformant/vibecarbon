@@ -201,50 +201,19 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
   });
 });
 
-describe('storageBucketGeneration rotation (registry-500 RCA, 2026-08-17)', () => {
-  // A purge-destroy that DELETED the storage bucket must rotate the
-  // generation so the next deploy derives a FRESH bucket name instead of
-  // recreating the deleted one — Hetzner's delete→same-name-recreate
-  // propagation flapped NoSuchBucket at the registry for >10 minutes (run
-  // 32013980356). A destroy that did NOT delete the bucket must not rotate:
-  // rotation would strand the still-existing warm bucket.
+describe('storageBucketGeneration', () => {
   beforeEach(() => {
     saveProjectConfigMock.mockReset();
   });
 
-  function ctxWithBucketResult(s3Bucket: string | null) {
+  it('never writes storageBucketGeneration', async () => {
     const ctx = makeCtx({ pulumiDestroyFailed: false });
     (ctx.projectConfig as Record<string, unknown>).storageBucketGeneration = 'aaaaaa';
-    (ctx.results as Record<string, unknown>).s3Bucket = s3Bucket;
-    return ctx;
-  }
-
-  it('rotates the generation when this destroy deleted the storage bucket', async () => {
-    const ctx = ctxWithBucketResult('proj-a1b2c3-storage-aaaaaa');
-
-    await DESTROY_EFFECTS.updateProjectConfig(ctx);
-
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
-    expect(savedConfig.storageBucketGeneration).toBeTruthy();
-    expect(savedConfig.storageBucketGeneration).not.toBe('aaaaaa');
-  });
-
-  it('does NOT rotate when the storage bucket was not deleted', async () => {
-    const ctx = ctxWithBucketResult(null);
+    (ctx.results as Record<string, unknown>).s3Bucket = 'proj-a1b2c3-storage';
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
     const savedConfig = saveProjectConfigMock.mock.calls[0][0];
     expect(savedConfig.storageBucketGeneration).toBe('aaaaaa');
-  });
-
-  it('does NOT invent a generation for legacy projects that never had one', async () => {
-    const ctx = makeCtx({ pulumiDestroyFailed: false });
-    (ctx.results as Record<string, unknown>).s3Bucket = 'proj-storage';
-
-    await DESTROY_EFFECTS.updateProjectConfig(ctx);
-
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
-    expect(savedConfig).not.toHaveProperty('storageBucketGeneration');
   });
 });
