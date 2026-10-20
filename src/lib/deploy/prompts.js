@@ -468,6 +468,37 @@ async function verifyObjectStorageKeys(s3Provider, source) {
   return { verdict: 'unverified', reason: check.error };
 }
 
+/**
+ * The app-storage and backup bucket names a deploy of `envConfig` uses.
+ *
+ * Persisted names first: once an environment has deployed, its bucket names
+ * are frozen in .vibecarbon.json and renaming the project (or adding a salt
+ * to an old project) must not silently re-point wal-g/Pulumi at buckets that
+ * don't exist. Fresh derivations embed the per-project bucketSalt (created
+ * projects since 2026-08) to keep names globally unique across customers,
+ * and the storage name embeds `storageBucketGeneration`, which destroy
+ * rotates when it deletes the app bucket.
+ *
+ * After a destroy, `envConfig` is the destroyedEnvironments identity seed,
+ * which carries `backupS3` (restore reads its backups there) but never `s3`
+ * (ENV_IDENTITY_FIELDS in lib/env-identity.js), so the app bucket name is
+ * re-derived under the rotated generation. Every consumer of the app bucket
+ * (bucket creation, the CORS rule, the server .env, the k8s Secret) reads
+ * this one value through gatheredConfig.s3Config.bucket; the value-flow test
+ * in tests/unit/deploy/destroy-redeploy-bucket-flow.test.ts pins that.
+ *
+ * @param {{ s3?: { bucket?: string }, backupS3?: { bucket?: string } }} envConfig
+ * @param {{ projectName: string, bucketSalt?: string, storageBucketGeneration?: string }} projectConfig
+ * @returns {{ bucketName: string, backupBucketName: string }}
+ */
+export function resolveEnvBucketNames(envConfig, projectConfig) {
+  return {
+    bucketName: envConfig.s3?.bucket || deriveProjectBucketName(projectConfig),
+    backupBucketName:
+      envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
+  };
+}
+
 export async function gatherDeploymentConfig(args) {
   console.clear();
   printBanner();
@@ -950,15 +981,7 @@ export async function gatherDeploymentConfig(args) {
     dnsZoneId = null;
   }
 
-  // Persisted names first: once an environment has deployed, its bucket
-  // names are frozen in .vibecarbon.json and renaming the project (or adding
-  // a salt to an old project) must not silently re-point wal-g/Pulumi at
-  // buckets that don't exist. Fresh derivations embed the per-project
-  // bucketSalt (created projects since 2026-08) to keep names globally
-  // unique across customers.
-  const bucketName = envConfig.s3?.bucket || deriveProjectBucketName(projectConfig);
-  const backupBucketName =
-    envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups');
+  const { bucketName, backupBucketName } = resolveEnvBucketNames(envConfig, projectConfig);
   const backupConfig = {
     schedule: args.backupSchedule || envConfig.backup?.schedule || '0 */6 * * *',
     retentionDays: Number.parseInt(
