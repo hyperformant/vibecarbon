@@ -112,6 +112,8 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 
 ## Review Focus
 
+- **H11:** from the app container on compose, no request (inspect, top, stats, archive, export, attach, any POST) through any reachable proxy returns another container's env or mutates anything; only container list and logs succeed (Task 3).
+
 1. **A configure-managed key added later** (for example a new billing provider's secret): the app must still receive it in compose and k8s with no hand edit. Test in Task 1 (census: every key the app reads is delivered).
 2. **compose-ha and scale write the server `.env` through the same bundle:** both nodes, and a scaled-in server, get `app.env`. Test in Task 1.
 3. **An add-on overlay that adds env to `app`** (redis adds `REDIS_URL`): it still reaches the app after `env_file: !override`. Test in Task 1, with the rendered config for base + prod + each add-on.
@@ -200,19 +202,40 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 - [ ] **Step 4: Run** `cd carbon && npm run test:prepush && npm run test:db`, plus `pnpm test:unit` and `DOCKER_INTEGRATION=true pnpm vitest run --project integration-docker`. Expected: PASS. Then run a fresh `vibecarbon create` and `vibecarbon up` and check that sign-up, sign-in, the admin Jobs page and an upload work.
 - [ ] **Step 5: Commit** `fix(security): the app connects as a least-privilege role and migrations run as the owner outside the app`.
 
-### Task 3: Prod Traefik uses only the socket proxy (H3)
+### Task 3: Prod Traefik uses only the socket proxy, and the app's Docker access can never read another container's env (H3, H11)
+
+**Finding H11 (from the Task 2 review, verified in code):** the app reaches `docker-socket-proxy` (`DOCKER_API_PROXY`, `carbon/docker-compose.prod.yml:34`) and that proxy enables `CONTAINERS: 1` (`:105`). tecnativa/docker-socket-proxy gates by API *section*, so `CONTAINERS` also serves `GET /containers/{id}/json`, whose `Config.Env` holds db's `POSTGRES_PASSWORD`, the exited `app-migrate`'s owner `DB_PASSWORD`, and Traefik's DNS-01 cloud token. A compromised app can read all three, which defeats Task 1 (C1) and Task 2 (H10) on compose. The overlay's own comment already concedes it ("a write barrier, not a secrets boundary").
+
+**What the app actually uses** (`carbon/src/server/lib/docker-api.ts`, `routes/_internal/services-status.ts`): exactly two GETs, `/containers/json?filters=...` (the admin Infrastructure list: name, state, health) and `/containers/{id}/logs` (the log viewer). Restart already runs `docker compose restart` and is refused in prod (no CLI, read-only access), so it needs no Docker API. The list response carries Names/State/Status/Labels and no Env (verify in Step 1 against a real daemon); labels are Traefik router rules, not secrets.
+
+**Ruling R11, split the proxies and give the app a path-allowlisted one:**
+- `docker-socket-proxy` (Traefik's) stays as is for the Traefik provider, but moves to a dedicated internal network `socket-proxy` that only `traefik` joins. The app can no longer resolve or reach it.
+- New service `app-docker-proxy`: a second socket proxy whose allowlist admits only `GET ^/v[0-9.]+/containers/json` and `GET ^/v[0-9.]+/containers/[a-zA-Z0-9_.-]+/logs`, everything else 403 (inspect, top, stats, export, archive, attach, every non-GET). The app joins only its network; `DOCKER_API_PROXY=http://app-docker-proxy:2375`.
+- Mechanism, decided in Step 1 with evidence (context7 or the image README plus a live probe), in this order of preference:
+  1. tecnativa/docker-socket-proxy (already pinned and mirrored by the speed plan) with a mounted, path-regex `haproxy.cfg`, if the image honours a full-config override;
+  2. otherwise `wollomatic/socket-proxy` (regex `-allowGET`), pinned by digest and added to the speed plan's mirror table.
+- Log viewer scope: logs stay readable for the project's containers (the feature needs them). Containers' own logs are not a credential channel by design; the census below also checks no service prints a secret env at start.
+- Rejected: dropping Docker access entirely (loses the admin Infrastructure page on compose) and a purpose-built status agent (new code and image for what an allowlist does).
+- k8s is already narrow: the app SA can `get/list pods` and `get pods/log` in `vibecarbon` only, and pod specs carry `secretKeyRef` names, not values. Add a census so it stays that way (below).
 
 **Files:**
-- Modify: `carbon/docker-compose.prod.yml` traefik `volumes: !override` (the dynamic dir and `letsencrypt_data` only). Also restore the `--providers.docker.constraints=Label(...)` project-scoping flag that prod's `command:` drops (the same overlay-drift class).
-- Test: extend `tests/integration/docker/compose-secret-reach.test.ts`, or add `compose-socket-reach.test.ts`.
+- Modify: `carbon/docker-compose.prod.yml`: traefik `volumes: !override` (the dynamic dir and `letsencrypt_data` only); restore the `--providers.docker.constraints=Label(...)` project-scoping flag that prod's `command:` drops (the same overlay-drift class); the `socket-proxy` network; the new `app-docker-proxy` service; the app's `DOCKER_API_PROXY` and networks. Correct the stale "write barrier" comments.
+- Modify: `carbon/docker-compose.dns01.prod.yml` if it re-points Traefik's endpoint (keep it on `docker-socket-proxy`).
+- Modify: `carbon/src/server/lib/docker-api.ts` comments only (no behaviour change: same two GETs).
+- Test: extend `tests/integration/docker/compose-secret-reach.test.ts`, or add `compose-socket-reach.test.ts`; add `tests/unit/deploy/k8s-app-rbac-census.test.ts`.
 
-- [ ] **Step 1: Write the failing test.** Over the same rendered matrix, assert:
-  - the only services binding `/var/run/docker.sock` are `docker-socket-proxy`, and `promtail` when the observability overlay is present (it reads container logs; note it in the test with the reason);
-  - Traefik's rendered command contains `--providers.docker.constraints=` and `--providers.docker.endpoint=tcp://docker-socket-proxy:2375`.
-- [ ] **Step 2: Run it.** Expected: FAIL (traefik binds the socket).
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run it.** Expected: PASS. Then run `pnpm test:unit`.
-- [ ] **Step 5: Commit** `fix(security): production Traefik reaches Docker only through the socket proxy`.
+- [ ] **Step 1: Decide the mechanism (evidence in the report).** Check whether tecnativa/docker-socket-proxy v0.4.2 honours a mounted full `haproxy.cfg` (README/context7, then a live `docker run` probe: list 200, logs 200, inspect 403). If not, probe `wollomatic/socket-proxy` the same way. Also confirm against a live daemon that `/containers/json` carries no `Env`.
+- [ ] **Step 2: Write the failing tests.** Over the rendered compose matrix (base + prod + dns01 + every `services/*/compose` overlay):
+  - the only services binding `/var/run/docker.sock` are `docker-socket-proxy`, `app-docker-proxy` and, with the observability overlay, `promtail` (it reads container logs; say so in the test);
+  - Traefik's rendered command contains `--providers.docker.constraints=` and `--providers.docker.endpoint=tcp://docker-socket-proxy:2375`;
+  - **reachability census:** for each service, the set of socket proxies it shares a network with; `app` (and every add-on service) reaches only `app-docker-proxy`; only `traefik` reaches `docker-socket-proxy`; any new proxy-like service (one that mounts the socket) must appear in the test's table with its allowed paths;
+  - `app`'s `DOCKER_API_PROXY` points at `app-docker-proxy`.
+  - Docker-tier behaviour test (DOCKER_INTEGRATION): bring up `app-docker-proxy` plus a throwaway container holding a sentinel env value; from a container on the app network, `GET /containers/json` → 200 without the sentinel, `GET /containers/{id}/logs` → 200, `GET /containers/{id}/json` → 403, `POST /containers/{id}/restart` → 403; the sentinel never appears in any response body.
+  - k8s census: the app ServiceAccount's Role grants only `get/list` on `pods` and `get` on `pods/log`, never `secrets`, `configmaps` or wildcard verbs/resources; no workload under `carbon/k8s/base` sets a credential-looking env (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, `*_KEY`) as a literal `value:` (it must be `valueFrom`).
+- [ ] **Step 3: Run them.** Expected: FAIL (traefik binds the socket; the app reaches `docker-socket-proxy`; inspect returns 200).
+- [ ] **Step 4: Implement** the files above.
+- [ ] **Step 5: Run them.** Expected: PASS. Then `pnpm test:unit` and the docker tier for the new test. Prove each census arm bites with a temporary edit (put `app` on the `socket-proxy` network; allow inspect) and record it.
+- [ ] **Step 6: Commit** `fix(security): Traefik reaches Docker only through its proxy, and the app's proxy serves list and logs only`.
 
 ### Task 4: Each environment's app gets its own object-storage key where the provider can scope one (H2)
 
