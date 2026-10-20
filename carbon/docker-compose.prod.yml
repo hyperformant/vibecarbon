@@ -17,6 +17,12 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}:latest}
     build: !reset null
+    # On a server the app reads app.env, never .env. The deploy writes app.env
+    # with only the keys the app uses (src/lib/deploy/app-runtime-env.js), while
+    # .env stays the substitution source for every ${VAR} here, cloud and DNS
+    # tokens included, which the app must never hold.
+    env_file: !override
+      - app.env
     environment:
       # Admin Infrastructure pages (service discovery + container logs) reach
       # the Docker Engine API through the read-only socket proxy below — the

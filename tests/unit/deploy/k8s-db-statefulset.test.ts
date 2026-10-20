@@ -159,10 +159,10 @@ describe('k8s/base renders the db StatefulSet', () => {
     expect(container.args).toContain('archive_command=bash /etc/postgresql/wal-archive.sh %p');
   });
 
-  it('reads its superuser password from vibecarbon-secrets and needs no other chart-era key', () => {
+  it('reads its superuser password from vibecarbon-infra-secrets and needs no other chart-era key', () => {
     const env = Object.fromEntries(container.env.map((e: Doc) => [e.name, e]));
     expect(env.POSTGRES_PASSWORD.valueFrom.secretKeyRef).toEqual({
-      name: 'vibecarbon-secrets',
+      name: 'vibecarbon-infra-secrets',
       key: 'DB_PASSWORD',
     });
     expect(env.POSTGRES_USER.value).toBe('postgres');

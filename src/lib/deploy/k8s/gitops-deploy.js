@@ -10,7 +10,8 @@
  *   4. Trigger .github/workflows/deploy.yml + wait for completion.
  *
  * The workflow (Phase 4.3b.C) installs Flux + root Kustomization + applies
- * vibecarbon-secrets / cert-manager `hetzner` / kube-system/hcloud Secrets.
+ * vibecarbon-app-secrets / vibecarbon-infra-secrets / cert-manager `hetzner` /
+ * kube-system/hcloud Secrets.
  * Flux reconciles the rest from the committed k8s/ tree.
  *
  * Callers: `vibecarbon configure cicd <env>` (PR 7) layers this onto an

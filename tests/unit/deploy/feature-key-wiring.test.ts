@@ -3,17 +3,17 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // These guard the "manifest actually references the keys" half of feature-key
-// propagation. Without them, the CLI can seed vibecarbon-secrets perfectly and
+// propagation. Without them, the CLI can seed vibecarbon-app-secrets perfectly and
 // the app pod / container still never reads STRIPE_*/SMTP_*/BILLING_PROVIDER.
 // The repo has no YAML parser dependency, so these assert on raw text.
 const CARBON = join(process.cwd(), 'carbon');
 
-describe('k8s app deployment wires vibecarbon-secrets', () => {
+describe('k8s app deployment wires vibecarbon-app-secrets', () => {
   const yaml = readFileSync(join(CARBON, 'k8s/base/app/deployment.yaml'), 'utf-8');
 
-  it('envFrom pulls in the vibecarbon-secrets Secret', () => {
-    // `- secretRef:` followed by `name: vibecarbon-secrets` (any indentation).
-    expect(yaml).toMatch(/-\s*secretRef:\s*\n\s*name:\s*vibecarbon-secrets/);
+  it('envFrom pulls in the vibecarbon-app-secrets Secret', () => {
+    // `- secretRef:` followed by `name: vibecarbon-app-secrets` (any indentation).
+    expect(yaml).toMatch(/-\s*secretRef:\s*\n\s*name:\s*vibecarbon-app-secrets/);
   });
 
   it('keeps the existing vibecarbon-config ConfigMap reference', () => {

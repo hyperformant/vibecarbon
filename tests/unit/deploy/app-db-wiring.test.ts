@@ -12,14 +12,14 @@
  *     Deploys ship docker-compose.yml + docker-compose.prod.yml only
  *     (src/lib/deploy/bundle.js), so the base file must carry it.
  *   - k8s (+ k8s-ha): the Deployment names DB_HOST/DB_PORT/DB_NAME from the
- *     vibecarbon-config ConfigMap and DB_PASSWORD from vibecarbon-secrets,
+ *     vibecarbon-config ConfigMap and DB_PASSWORD from vibecarbon-infra-secrets,
  *     and the app NetworkPolicy admits egress to the db StatefulSet's pod on 5432.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { load, loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
-import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
+import { INFRA_SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 
 const carbon = (rel: string) =>
   readFileSync(fileURLToPath(new URL(`../../../carbon/${rel}`, import.meta.url)), 'utf8');
@@ -89,12 +89,12 @@ describe('k8s: app → db', () => {
     }
   });
 
-  it('names DB_PASSWORD from vibecarbon-secrets, a key the deploy writes', () => {
+  it('names DB_PASSWORD from vibecarbon-infra-secrets, a key the deploy writes', () => {
     expect(env.DB_PASSWORD?.valueFrom?.secretKeyRef).toEqual({
-      name: 'vibecarbon-secrets',
+      name: 'vibecarbon-infra-secrets',
       key: 'DB_PASSWORD',
     });
-    expect(SECRET_KEYS).toContain('DB_PASSWORD');
+    expect(INFRA_SECRET_KEYS).toContain('DB_PASSWORD');
   });
 
   it("DB_HOST is the db StatefulSet's Service in base and the production overlay", () => {

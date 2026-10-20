@@ -64,9 +64,9 @@ services:
     container_name: ${PROJECT_NAME}-app
     restart: unless-stopped
     # Make every configure-managed runtime key (billing/OAuth/SMTP) available to
-    # the app container. `create` writes .env and the deploy bundle stages it
-    # alongside this file; the `environment:` overrides below still take
-    # precedence over anything in .env.
+    # the app container in local dev. On a server the prod overlay swaps this
+    # for app.env, which holds only the app's own keys. The `environment:`
+    # overrides below still take precedence over either file.
     env_file:
       - .env
     security_opt:

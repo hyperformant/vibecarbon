@@ -1222,7 +1222,7 @@ describe('postgres accepting-gate precedes the first psql (cluster 5 root fix)',
 
 describe('applyK3sManifests — waits for the app to report its super admin', () => {
   // The app creates the super admin itself at startup from ADMIN_EMAIL /
-  // ADMIN_PASSWORD (delivered via vibecarbon-secrets). The deploy's job is
+  // ADMIN_PASSWORD (delivered via vibecarbon-app-secrets). The deploy's job is
   // to ship those keys and then not report success until the app says the
   // admin is ready, so the operator can always sign in to what was deployed.
   beforeEach(() => {
@@ -1284,12 +1284,15 @@ describe('applyK3sManifests — waits for the app to report its super admin', ()
     expect(cmdCalls.some((a) => a.includes('-tAc'))).toBe(false);
   }, 15_000);
 
-  it('ships the session secret and the admin credentials in vibecarbon-secrets', async () => {
+  it('ships the session secret and the admin credentials in vibecarbon-app-secrets', async () => {
     const { applyK3sManifests } = await k3sPromise;
     await applyK3sManifests(baseArgs(makeProjectDir()));
 
-    const secret = stdinCalls.find((c) => c.data.includes('name: vibecarbon-secrets'));
-    expect(secret, 'vibecarbon-secrets apply missing').toBeDefined();
+    const secret = stdinCalls.find((c) => c.data.includes('name: vibecarbon-app-secrets'));
+    expect(secret, 'vibecarbon-app-secrets apply missing').toBeDefined();
+    const infra = stdinCalls.find((c) => c.data.includes('name: vibecarbon-infra-secrets'));
+    expect(infra, 'vibecarbon-infra-secrets apply missing').toBeDefined();
+    expect(infra?.data).not.toMatch(/\bBETTER_AUTH_SECRET:/);
     for (const key of ['BETTER_AUTH_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']) {
       expect(secret?.data, key).toMatch(new RegExp(`\\b${key}:`));
     }

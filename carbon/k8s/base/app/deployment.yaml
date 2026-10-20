@@ -52,11 +52,14 @@ spec:
         envFrom:
         - configMapRef:
             name: vibecarbon-config
-        # All configure-managed runtime keys (billing/OAuth/SMTP) live in
-        # vibecarbon-secrets; envFrom makes them available to the app without a
-        # per-key list here. Explicit env entries below still win on conflict.
+        # The app's own runtime keys (auth, admin, billing/OAuth/SMTP, its
+        # storage keys) live in vibecarbon-app-secrets, built from one
+        # allowlist (src/lib/deploy/app-runtime-env.js); envFrom makes them
+        # available without a per-key list here. Infra passwords live in
+        # vibecarbon-infra-secrets, which the app never reads whole.
+        # Explicit env entries below still win on conflict.
         - secretRef:
-            name: vibecarbon-secrets
+            name: vibecarbon-app-secrets
         env:
         - name: NODE_ENV
           value: production
@@ -67,7 +70,7 @@ spec:
               key: SITE_URL
         # Auth runs in-process (src/server/auth/): its public URL is SITE_URL,
         # and BETTER_AUTH_SECRET (session signing key) arrives through the
-        # vibecarbon-secrets envFrom above.
+        # vibecarbon-app-secrets envFrom above.
         - name: BETTER_AUTH_URL
           valueFrom:
             configMapKeyRef:
@@ -95,7 +98,7 @@ spec:
         - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: vibecarbon-secrets
+              name: vibecarbon-infra-secrets
               key: DB_PASSWORD
         resources:
           requests:

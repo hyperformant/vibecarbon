@@ -14,7 +14,7 @@
 # its host `postgres` did not match the database's Service, now `db`). It was removed rather than shipped as a dormant superuser
 # credential. FOLLOW-UP: to add app-DB panels on k8s, deploy a postgres-exporter
 # and provision an `observability_ro` (pg_monitor) role with its password
-# threaded into vibecarbon-secrets — see the H-9 addendum in
+# threaded into vibecarbon-infra-secrets — see the H-9 addendum in
 # the security-remediation-design spec.
 apiVersion: v1
 kind: ConfigMap

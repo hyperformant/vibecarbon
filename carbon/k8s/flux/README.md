@@ -44,6 +44,6 @@ kubectl logs -n flux-system deploy/source-controller --tail=200
 
 ## Secrets
 
-The db StatefulSet and the app read secrets from the `vibecarbon-secrets` Secret in the `vibecarbon` namespace (created by deploy before base is applied). The cert-manager-webhook-hetzner webhook reads the `hetzner` Secret (key `token`) in the `cert-manager` namespace — bound via the ClusterIssuers' `tokenSecretKeyRef`, not via chart values.
+The app reads its own keys from the `vibecarbon-app-secrets` Secret, and the db StatefulSet and add-ons read infra passwords by key from `vibecarbon-infra-secrets`, both in the `vibecarbon` namespace (created by deploy before base is applied). The cert-manager-webhook-hetzner webhook reads the `hetzner` Secret (key `token`) in the `cert-manager` namespace — bound via the ClusterIssuers' `tokenSecretKeyRef`, not via chart values.
 
 If you need to ship additional secrets through Git (e.g. for other HelmReleases), use Sealed Secrets, SOPS, or External Secrets Operator. Phase 4 of the GitOps refactor (GitRepository-driven reconciliation, see plan doc) is when we introduce this.

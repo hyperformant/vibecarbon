@@ -2,7 +2,8 @@
  * Helpers for managing GitHub Environments + secrets/vars on the customer's
  * repo. Used by Phase 4.3b of the GitOps refactor — the deploy workflow
  * (.github/workflows/deploy.yml) reads per-environment `${{ secrets.X }}`
- * + `${{ vars.Y }}` to apply the vibecarbon-secrets Secret, the cert-manager
+ * + `${{ vars.Y }}` to apply the vibecarbon-app-secrets and
+ * vibecarbon-infra-secrets Secrets, the cert-manager
  * `hetzner` Secret (DNS-01 webhook token), and the kube-system/hcloud Secret
  * into the cluster.
  *

@@ -594,7 +594,7 @@ export async function runComposeRestore({
 
 // k8s restore is wal-g-native: postgres + wal-g live in the db pod,
 // which continuously archives WAL + base backups to S3. Restore = set a
-// RESTORE_TARGET marker on vibecarbon-secrets → bounce the db StatefulSet so
+// RESTORE_TARGET marker on vibecarbon-infra-secrets → bounce the db StatefulSet so
 // its walg-restore init container runs `wal-g backup-fetch` into PGDATA before
 // postgres starts → clear the marker. No bytes flow through the operator and
 // no pg_dump/kubectl-cp; wal-g pulls from S3 inside the cluster. Mirrors the
@@ -606,7 +606,7 @@ async function setRestoreMarker(ip, sshKeyPath, value) {
   await sshKubectl(ip, sshKeyPath, [
     'patch',
     'secret',
-    'vibecarbon-secrets',
+    'vibecarbon-infra-secrets',
     '-n',
     'vibecarbon',
     '--type=merge',

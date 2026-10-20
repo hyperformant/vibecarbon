@@ -590,15 +590,29 @@ async function scaleServers(ctx) {
       // between "Docker installed" and "Copying project files" — the exact
       // stalled-spinner symptom flaky links produce.
       let oldEnv = {};
+      /** @type {Record<string, string> | null} */
+      let oldAppEnv = null;
       s.start('Reading current server configuration...');
       try {
         const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
+        // The old server's app.env holds the storage pair its app used, which
+        // need not be the .env's (the db's WAL-G pair). A server deployed
+        // before app.env existed has none (empty output): renderBundle then
+        // carries the pair from the replayed .env, which is what that app read.
+        const appEnvText = await sshRun(server.ip, sshKeyPath, [
+          'sh',
+          '-c',
+          'if [ -f "$1" ]; then cat "$1"; fi',
+          'sh',
+          `/opt/${projectName}/app.env`,
+        ]);
         s.stop('Current server configuration read');
         // renderBundle re-encodes every override and throws on a value the
         // portable grammar refuses (a hand-edited server value with a tab,
         // or `'` beside `"`) — mid-scale, after the new server exists. Drop
         // and warn here instead; the operator re-enters it with configure.
         oldEnv = dropUnportableEnv(parseDotenv(envText));
+        if (appEnvText) oldAppEnv = dropUnportableEnv(parseDotenv(appEnvText));
       } catch {
         // Old server may be unreachable; renderBundle will fall back to the
         // project's local `.env`. That path is degraded (missing S3 secrets)
@@ -637,6 +651,7 @@ async function scaleServers(ctx) {
           // SITE_URL, APP_IMAGE, etc.) on top — so the new bundle is a
           // superset of both sources.
           envOverrides: oldEnv,
+          appEnvReplay: oldAppEnv,
         }),
       );
       s.stop('Project files copied');

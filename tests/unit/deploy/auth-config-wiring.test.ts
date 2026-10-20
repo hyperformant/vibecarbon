@@ -9,8 +9,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { APP_RUNTIME_KEYS } from '../../../src/lib/deploy/app-runtime-env.js';
 import { buildPerEnvSecrets } from '../../../src/lib/deploy/k8s/gitops-deploy.js';
-import { SECRET_KEYS } from '../../../src/lib/deploy/k8s/k3s.js';
 import { COMPOSE_REQUIRED_ENV_FALLBACK } from '../../../src/lib/project.js';
 
 const ROOT = join(__dirname, '../../..');
@@ -73,11 +73,11 @@ describe('compose: the app reads auth config from its own environment', () => {
   });
 });
 
-describe('k8s: the app pod reads auth config from vibecarbon-secrets', () => {
+describe('k8s: the app pod reads auth config from vibecarbon-app-secrets', () => {
   const deployment = read('carbon/k8s/base/app/deployment.yaml');
 
   it('takes every secret key (OAuth, SMTP, BETTER_AUTH_SECRET) via envFrom', () => {
-    expect(deployment).toMatch(/envFrom:[\s\S]*?- secretRef:\s+name: vibecarbon-secrets/);
+    expect(deployment).toMatch(/envFrom:[\s\S]*?- secretRef:\s+name: vibecarbon-app-secrets/);
   });
 
   it('pins BETTER_AUTH_URL to the SITE_URL config key', () => {
@@ -86,15 +86,15 @@ describe('k8s: the app pod reads auth config from vibecarbon-secrets', () => {
     );
   });
 
-  // vibecarbon-secrets is built from SECRET_KEYS (dev-push) and from the
+  // vibecarbon-app-secrets is built from APP_RUNTIME_KEYS (dev-push) and from the
   // GitHub Environment secrets buildPerEnvSecrets seeds (GitOps). Both must
   // carry what the app's auth reads, or the pod boots without a session key
   // or the deploy waits forever for an admin that cannot be created.
-  it('vibecarbon-secrets carries the session secret and the admin credentials', () => {
+  it('vibecarbon-app-secrets carries the session secret and the admin credentials', () => {
     for (const key of ['BETTER_AUTH_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']) {
-      expect(SECRET_KEYS, key).toContain(key);
+      expect(APP_RUNTIME_KEYS, key).toContain(key);
     }
-    expect(SECRET_KEYS).not.toContain('ADMIN_PASSWORD_HASH');
+    expect(APP_RUNTIME_KEYS).not.toContain('ADMIN_PASSWORD_HASH');
     const perEnv = buildPerEnvSecrets({
       BETTER_AUTH_SECRET: 's'.repeat(64),
       ADMIN_EMAIL: 'admin@example.com',

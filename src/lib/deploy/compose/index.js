@@ -956,7 +956,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
  * /api/health, one probe). The app applies db/migrations itself at startup,
  * then creates the admin from
  * ADMIN_EMAIL / ADMIN_PASSWORD, which reach the container through the
- * bundled `.env` (env_file); the prod overlay refuses to start without them,
+ * bundled `app.env` (env_file); the prod overlay refuses to start without them,
  * and deploy's required-env preflight checks them before anything is
  * provisioned. The probe runs inside the app container with its own `node`
  * (see src/lib/deploy/admin-ready.js), so no tunnel or published port is

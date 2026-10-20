@@ -85,7 +85,7 @@ spec:
           effect: NoSchedule
       initContainers:
         # Restore bootstrap: ONLY when a restore is requested (RESTORE_TARGET
-        # set in vibecarbon-secrets), fetch the latest wal-g base backup into
+        # set in vibecarbon-infra-secrets), fetch the latest wal-g base backup into
         # PGDATA before postgres starts. On a normal boot RESTORE_TARGET is
         # empty and this is a logged no-op. Runs before postgres, so the app's
         # startup migrations always see the restored database (its ledger
@@ -190,7 +190,7 @@ spec:
             - name: RESTORE_TARGET
               valueFrom:
                 secretKeyRef:
-                  name: vibecarbon-secrets
+                  name: vibecarbon-infra-secrets
                   key: RESTORE_TARGET
                   optional: true
             - name: WALG_S3_PREFIX
@@ -243,13 +243,13 @@ spec:
             - name: RESTORE_TARGET
               valueFrom:
                 secretKeyRef:
-                  name: vibecarbon-secrets
+                  name: vibecarbon-infra-secrets
                   key: RESTORE_TARGET
                   optional: true
             - name: REPL_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: vibecarbon-secrets
+                  name: vibecarbon-infra-secrets
                   key: REPL_PASSWORD
                   optional: true
           volumeMounts:
@@ -305,12 +305,12 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: vibecarbon-secrets
+                  name: vibecarbon-infra-secrets
                   key: DB_PASSWORD
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: vibecarbon-secrets
+                  name: vibecarbon-infra-secrets
                   key: DB_PASSWORD
             - name: POSTGRES_DB
               value: postgres
@@ -389,7 +389,7 @@ spec:
             name: vibecarbon-wal-archive
         - name: walg-s3-creds
           secret:
-            secretName: vibecarbon-secrets
+            secretName: vibecarbon-infra-secrets
             # Optional so a no-S3 deploy still schedules the db pod; wal-g is
             # simply unconfigured then. items maps the INI key → credentials.
             optional: true
