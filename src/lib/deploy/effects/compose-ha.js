@@ -267,6 +267,13 @@ async function haPersistPendingConfig(ctx) {
   } = ctx;
 
   const loadedProjectConfig = loadProjectConfig() || { projectName, environments: {} };
+  // The per-environment storage field this save must carry forward: the
+  // recorded bucket creation time (on disk, else from the last deploy), which
+  // status' settling row reads.
+  const priorS3 = {
+    ...envConfig.s3,
+    ...loadedProjectConfig.environments?.[environment]?.s3,
+  };
   const pendingEnvConfig = {
     ...envConfig,
     status: 'deploying',
@@ -316,6 +323,10 @@ async function haPersistPendingConfig(ctx) {
     ...(s3Config && {
       s3: {
         bucket: s3Config.bucket,
+        ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
+        ...(Object.hasOwn(priorS3, 'bucketCreatedAt') && {
+          bucketCreatedAt: priorS3.bucketCreatedAt,
+        }),
         region: s3Config.region,
         endpoint: s3Config.endpoint,
         stateBucket: s3Config.stateBucket,

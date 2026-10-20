@@ -1833,25 +1833,18 @@ const INFRA_SECRET_KEYS = [
 export const SECRET_KEYS = [...INFRA_SECRET_KEYS, ...featureSecretKeys(), ...featureConfigKeys()];
 
 /**
- * Apply the in-cluster `vibecarbon-secrets` Secret from the project's
- * `.env.local`. Idempotent: rendered as a Secret manifest and piped to
- * `kubectl apply -f -` (server-side apply semantics) so re-runs upsert
- * cleanly.
+ * The `stringData` of the `vibecarbon-secrets` Secret: the allow-listed
+ * `.env.local` keys, the Redis addon wiring and the S3 storage keys (bucket and
+ * credentials). Pure, so the Secret's contents are testable without a cluster.
  *
- * Must run BEFORE the base/ kustomization apply, because the app
- * Deployment in base/ references this Secret via envFrom.
+ * No VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX
+ * from s3Config.walgPrefix (buildDbManifestValues) and nothing in carbon/k8s
+ * reads it; in k8s-ha the stack env (prod-primary) is not even the env's name.
  *
- * S3 backup credentials (S3_ACCESS_KEY/SECRET_KEY/BUCKET/ENDPOINT/REGION)
- * are merged in if `s3Config` is provided — backup CronJob reads them.
- * `backupBucketName` is the dedicated backup bucket (separate from the
- * storage bucket in s3Config.bucket); without it, backup.sh falls back to
- * the storage bucket and uploads dumps next to user files (observed
- * 2026-04-27 k8s-ha matrix #6 — restore couldn't find backups).
- *
- * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
+ * @returns {Record<string,string>}
  */
-export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName }) {
-  const env = { ...process.env, KUBECONFIG: kubeconfig };
+export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName }) {
   /** @type {Record<string,string>} */
   const stringData = {};
   for (const key of SECRET_KEYS) {
@@ -1882,6 +1875,30 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
   if (backupBucketName) {
     stringData.S3_BACKUP_BUCKET = backupBucketName;
   }
+  return stringData;
+}
+
+/**
+ * Apply the in-cluster `vibecarbon-secrets` Secret from the project's
+ * `.env.local`. Idempotent: rendered as a Secret manifest and piped to
+ * `kubectl apply -f -` (server-side apply semantics) so re-runs upsert
+ * cleanly.
+ *
+ * Must run BEFORE the base/ kustomization apply, because the app
+ * Deployment in base/ references this Secret via envFrom.
+ *
+ * S3 backup credentials (S3_ACCESS_KEY/SECRET_KEY/BUCKET/ENDPOINT/REGION)
+ * are merged in if `s3Config` is provided — backup CronJob reads them.
+ * `backupBucketName` is the dedicated backup bucket (separate from the
+ * storage bucket in s3Config.bucket); without it, backup.sh falls back to
+ * the storage bucket and uploads dumps next to user files (observed
+ * 2026-04-27 k8s-ha matrix #6 — restore couldn't find backups).
+ *
+ * @param {{kubeconfig: string, envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
+ */
+export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName }) {
+  const env = { ...process.env, KUBECONFIG: kubeconfig };
+  const stringData = buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName });
   // Ensure the namespace exists before we try to land a Secret in it.
   // base/ kustomization creates it too, but we run before base/.
   // Two-step (render → apply) instead of `bash -c '… | kubectl apply -f -'`
@@ -2435,8 +2452,7 @@ export async function applyDbSeedConfigMap({ env }) {
  *
  * @param {object} o
  * @param {string} o.dbImageTag - full db image ref, `<repo>:<tag>`
- * @param {string} [o.projectName]
- * @param {{bucket?: string, endpoint?: string, region?: string}} [o.s3Config]
+ * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
  * @param {string|null} [o.backupBucketName]
  * @param {'primary'|'standby'} [o.walgRole]
  * @param {string} o.dbPrivateIp - this cluster's database node private IP
@@ -2446,7 +2462,6 @@ export async function applyDbSeedConfigMap({ env }) {
  */
 export function buildDbManifestValues({
   dbImageTag,
-  projectName,
   s3Config,
   backupBucketName,
   walgRole = 'primary',
@@ -2489,12 +2504,19 @@ export function buildDbManifestValues({
   // never WRITE here) is enforced by the WALG_ROLE WRITE-GUARD: wal-archive.sh
   // and the backup CronJob both no-op when WALG_ROLE=standby.
   const walgBucket = backupBucketName || s3Config?.bucket || '';
+  // The path inside the bucket is resolveEnvStorage's per-environment
+  // `backups/<project>/<env>/walg`. Without it two environments would archive
+  // into one stream, so a bucket with no prefix is an error, not a default.
+  const walgPrefix = s3Config?.walgPrefix;
+  if (walgBucket && !walgPrefix) {
+    throw new Error(
+      'buildDbManifestValues: s3Config.walgPrefix is required with a bucket (resolveEnvStorage supplies it)',
+    );
+  }
   return {
     DB_IMAGE: dbImageTag.slice(0, lastColon),
     DB_IMAGE_TAG: dbImageTag.slice(lastColon + 1),
-    WALG_S3_PREFIX: walgBucket
-      ? `s3://${walgBucket}/backups/${projectName || 'vibecarbon'}/walg`
-      : '',
+    WALG_S3_PREFIX: walgBucket ? `s3://${walgBucket}/${walgPrefix}` : '',
     WALG_ROLE: walgRole,
     S3_ENDPOINT: s3Config?.endpoint ?? '',
     S3_REGION: s3Config?.region ?? '',
@@ -3432,7 +3454,6 @@ export async function applyK3sManifests({
     join(projectDir, 'k8s/base'),
     buildDbManifestValues({
       dbImageTag,
-      projectName,
       s3Config,
       backupBucketName,
       walgRole,

@@ -350,4 +350,29 @@ describe('renderBundle tls-default.yml', () => {
       rmSync(stage, { recursive: true, force: true });
     }
   });
+  it('scopes the server .env to its environment: VC_ENV, and no S3_KEY_PREFIX', () => {
+    // Each environment has its own app bucket, so objects carry no key
+    // prefix; VC_ENV stays because WAL-G's prefix uses it.
+    projectDir = makeProjectDir('VC_ENV=prod\n');
+    process.chdir(projectDir);
+
+    const stage = renderBundle('myproj', {
+      environment: 'staging',
+      s3: {
+        accessKey: 'ak',
+        secretKey: 'sk',
+        bucket: 'myproj-abc123-staging-storage',
+        region: 'fsn1',
+        endpoint: 'https://fsn1.your-objectstorage.com',
+      },
+    });
+
+    try {
+      const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
+      expect(env).not.toHaveProperty('S3_KEY_PREFIX');
+      expect(env.VC_ENV).toBe('staging');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
 });

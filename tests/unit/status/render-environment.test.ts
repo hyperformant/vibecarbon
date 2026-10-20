@@ -3,6 +3,7 @@ import {
   formatHealthLines,
   formatServerLines,
   isEnvironmentUnhealthy,
+  storageSettleLine,
 } from '../../../src/status.js';
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI stripping for assertions
@@ -228,5 +229,45 @@ describe('isEnvironmentUnhealthy', () => {
       false,
     );
     expect(isEnvironmentUnhealthy({ config: {}, checks: {} })).toBe(false);
+  });
+});
+
+describe('storageSettleLine (R5: age-based, no network)', () => {
+  const MIN = 60_000;
+  const now = Date.parse('2026-10-20T12:00:00Z');
+  const env = (provider: string, ageMs: number | null) => ({
+    provider,
+    s3: {
+      bucket: 'p-abc-storage',
+      bucketCreatedAt: ageMs === null ? null : new Date(now - ageMs).toISOString(),
+    },
+  });
+
+  it('a Hetzner bucket 4 minutes old shows the minutes left', async () => {
+    await expect(storageSettleLine(env('hetzner', 4 * MIN), now)).resolves.toBe(
+      'storage settling (about 16 min left)',
+    );
+  });
+
+  it('a Hetzner bucket 30 minutes old shows no row', async () => {
+    await expect(storageSettleLine(env('hetzner', 30 * MIN), now)).resolves.toBeNull();
+  });
+
+  it('a Hetzner bucket of unknown age shows settling with no estimate', async () => {
+    await expect(storageSettleLine(env('hetzner', null), now)).resolves.toBe('storage settling');
+  });
+
+  it('a DigitalOcean bucket 1 minute old shows no row (0 window)', async () => {
+    await expect(storageSettleLine(env('digitalocean', MIN), now)).resolves.toBeNull();
+  });
+
+  it('a Hetzner env deployed before creation times were recorded (no key) shows no row', async () => {
+    await expect(
+      storageSettleLine({ provider: 'hetzner', s3: { bucket: 'p-abc-storage' } }, now),
+    ).resolves.toBeNull();
+  });
+
+  it('an env with no bucket shows no row', async () => {
+    await expect(storageSettleLine({ provider: 'hetzner' }, now)).resolves.toBeNull();
   });
 });

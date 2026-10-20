@@ -63,7 +63,7 @@ import {
   providerIdFor,
   resolveProviderToken,
 } from './lib/providers/index.js';
-import { deriveProjectBucketName } from './lib/providers/s3-base.js';
+import { deriveEnvAppBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
@@ -924,20 +924,28 @@ function deleteGitHubEnvironment(envName) {
 /**
  * Handle the backup S3 bucket at the end of destroy. Default behavior is to
  * preserve the bucket for recovery (production users); --purge-backups deletes
- * it (used by e2e tests, which require a clean tear-down).
+ * this environment's backups (used by e2e tests, which require a clean tear-down);
+ * the bucket itself goes only with the last live environment.
  */
-async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks) {
-  if (!envConfig.backupS3?.bucket) return;
+async function handleBackupBucket(envConfig, projectConfig, environment, args, spinner, leaks) {
+  if (!envConfig.backupS3?.bucket) return { purged: false };
   const bucketName = envConfig.backupS3.bucket;
 
   // Not a leak: preservation is the DEFAULT and the whole point of the flag.
   // Nothing was asked of us, so nothing survived that shouldn't have.
   if (!args.purgeBackups) {
     p.log.info(`Backup bucket ${c.bold(bucketName)} preserved for recovery`);
-    return;
+    return { purged: false };
   }
 
   const region = envConfig.backupS3.region || envConfig.s3?.region || 'fsn1';
+  // Every environment archives under its own backups/<project>/<env>/ prefix,
+  // so -purge removes this environment's backups and the bucket itself only
+  // goes with the last live environment.
+  const envBackupPrefix = `backups/${projectConfig.projectName}/${environment}/`;
+  const preservedHolders = preservedBackupHolders(projectConfig, environment, bucketName);
+  const deleteBucket =
+    otherEnvironmentNames(projectConfig, environment).length === 0 && preservedHolders.length === 0;
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
   spinner.start(`Purging backup bucket: ${bucketName}`);
@@ -958,7 +966,7 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
         reason: 'purge requested (-purge) but no object-storage credentials were available',
         hint: `Export ${(Provider.OBJECT_STORAGE_ENV ?? []).join(' and ') || 'the object-storage credentials'} and re-run, or delete it via the ${Provider.NAME} console — it keeps billing until removed.`,
       });
-      return;
+      return { purged: false };
     }
     const s3Provider = await getObjectStorageProvider(
       providerIdFor(envConfig),
@@ -976,8 +984,13 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
       // final-destroy timeout and getting the whole step SIGKILLed. On timeout
       // we leave the bucket for the orphan sweep / next destroy rather than hang.
       const PURGE_TIMEOUT_MS = 180_000;
+      const purge = async () => {
+        const { objectsRemoved } = await s3Provider.deletePrefix(bucketName, envBackupPrefix);
+        if (!deleteBucket) return { kept: true, objectsRemoved };
+        return s3Provider.emptyAndDeleteBucket(bucketName);
+      };
       const result = await Promise.race([
-        s3Provider.emptyAndDeleteBucket(bucketName),
+        purge(),
         new Promise((_, reject) => {
           // Detach the timer from the event loop so a fast purge win doesn't
           // leave it holding the process open — handle-probe evidence
@@ -997,20 +1010,23 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
         }),
       ]);
       spinner.stop(
-        result.deleted
-          ? result.objectsRemoved > 0
-            ? `Backup bucket purged (${result.objectsRemoved} objects removed)`
-            : 'Backup bucket purged'
-          : result.shellDeferred
-            ? `Backup bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
-            : 'Backup bucket not found',
+        result.kept
+          ? `Backups under ${envBackupPrefix} purged (${result.objectsRemoved} objects removed); bucket kept for the other environments${preservedHolders.length > 0 ? ` (preserved backups of ${preservedHolders.map(([n]) => n).join(', ')})` : ''}`
+          : result.deleted
+            ? result.objectsRemoved > 0
+              ? `Backup bucket purged (${result.objectsRemoved} objects removed)`
+              : 'Backup bucket purged'
+            : result.shellDeferred
+              ? `Backup bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
+              : 'Backup bucket not found',
       );
+      return { purged: true };
     } catch (bucketError) {
       if (bucketError.name === 'NoSuchBucket' || bucketError.$metadata?.httpStatusCode === 404) {
         spinner.stop('Backup bucket not found (already deleted or never created)');
-      } else {
-        throw bucketError;
+        return { purged: true };
       }
+      throw bucketError;
     }
   } catch (error) {
     spinner.stop(`Backup bucket purge failed: ${error.message}`);
@@ -1020,7 +1036,24 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
       reason: `purge failed: ${error.message}`,
       hint: `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`,
     });
+    return { purged: false };
   }
+}
+
+/**
+ * Destroyed environments whose backups still sit in `bucketName`. A plain
+ * destroy keeps an environment's backups for recovery and records it under
+ * destroyedEnvironments with its backupS3, so it holds the bucket just as a
+ * live environment does. A -purge that removed the environment's backup
+ * folder records `backupsPurged`, and such an entry holds nothing.
+ *
+ * @returns {Array<[string, any]>}
+ */
+function preservedBackupHolders(projectConfig, environment, bucketName) {
+  return Object.entries(projectConfig.destroyedEnvironments ?? {}).filter(
+    ([name, entry]) =>
+      name !== environment && !entry?.backupsPurged && entry?.backupS3?.bucket === bucketName,
+  );
 }
 
 /**
@@ -1055,7 +1088,7 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
  * Hetzner, object storage bills per ACCOUNT rather than per bucket, so an extra
  * empty bucket is close to free.
  */
-async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks) {
+async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks, environment) {
   const stateBucket = envConfig.s3?.stateBucket;
   // Pre-split environments kept Pulumi state in the app storage bucket, which
   // the normal app-bucket path deletes; there is no separate bucket to keep.
@@ -1080,13 +1113,29 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
     return;
   }
 
-  // -purge means "leave nothing behind" — with backups it already deletes the
-  // backup bucket, and the state bucket follows the same rule. This is the ONE
-  // deletion path for the retained bucket (review finding, 2026-08-15: there
-  // was previously none at all), and it is safe where the old always-delete
-  // was not: it runs only on explicit request, after stack teardown, and a
-  // redeploy after -purge is a fresh project start, not a same-name recreate
-  // racing acked writes.
+  // The derived name is project-level (project storage base + stateBucketGeneration),
+  // so every environment of the project keeps its Pulumi stacks in this one
+  // bucket. -purge on one environment while others are live keeps it: its
+  // own stack file is already gone (pulumi destroy + removeStack ran before
+  // this), and the other environments' state must survive.
+  const others = otherEnvironmentNames(projectConfig, environment);
+  if (args?.purgeBackups && others.length > 0) {
+    spinner.start('Pulumi state bucket');
+    spinner.stop(
+      `Pulumi state bucket kept for ${others.length} other environment(s): ${stateBucket}`,
+    );
+    return { purged: false };
+  }
+
+  // -purge of the last environment means "leave nothing behind": with backups
+  // it already deletes the backup bucket, and the state bucket follows the
+  // same rule. This is the ONE deletion path for the retained bucket (review
+  // finding, 2026-08-15: there was previously none at all), and it is safe
+  // where the old always-delete was not: it runs only on explicit request,
+  // after stack teardown, and a successful delete returns `purged`, which
+  // makes updateProjectConfig rotate stateBucketGeneration. The next deploy
+  // then derives a fresh name instead of recreating this one, which is the
+  // same-name recreate that lost acked writes on 2026-08-07.
   if (args?.purgeBackups) {
     // A purge carries nothing forward: drop any retained name whether or not
     // the delete below succeeds, so the next deploy never resolves to a
@@ -1122,6 +1171,7 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
           ? `Pulumi state bucket purged (${result.objectsRemoved} objects removed)`
           : 'Pulumi state bucket not found',
       );
+      return { purged: !!result.deleted };
     } catch (error) {
       spinner.stop(`State bucket purge failed: ${error.message}`);
       leaks.leak({
@@ -1135,12 +1185,12 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks)
   }
 
   // Keeping the bucket is only useful if the next deploy finds it. The
-  // derived state-bucket name embeds the app bucket name, and
-  // updateProjectConfig rotates storageBucketGeneration below, so a redeploy
-  // would derive a NEW name and this bucket would just be orphaned — one
-  // leaked bucket per destroy→deploy cycle (vibecarbon-web 2026-09-15).
-  // Record the kept name; resolveStateBucketName reads it ahead of
-  // derivation, and updateProjectConfig persists this same object.
+  // derived name is stable across a plain destroy→deploy (stateBucketGeneration
+  // rotates only when -purge deletes the bucket), and recording the kept name
+  // also covers a bucket derived under an older scheme, so a redeploy finds
+  // this bucket again instead of orphaning it (vibecarbon-web 2026-09-15).
+  // resolveStateBucketName reads it ahead of derivation, and
+  // updateProjectConfig persists this same object.
   projectConfig.retainedStateBucket = stateBucket;
   spinner.start('Pulumi state bucket');
   spinner.stop(
@@ -1225,20 +1275,89 @@ export function destroyOutro(envName, timeStr, results) {
  * from and mutating the shared destroy `ctx` (envConfig, projectConfig,
  * environment, args, results, spinner, tracker, cwd, isK8s).
  *
- * Tier divergence is carried on ctx.isK8s: only k8s tiers fall back to the
- * predictable deploy-time bucket name (deleteAppBucketEffect), delete the GitHub
- * environment, and print the summary note — and the k8s-only steps
+ * Tier divergence is carried on ctx.isK8s: only k8s tiers delete the GitHub
+ * environment and print the summary note — and the k8s-only steps
  * (delete-github-env, print-summary) appear only in the k8s destroy plan.
  */
 
-// 1. Delete the app S3 bucket (created during deploy bootstrap, not part of any
-//    Pulumi stack's resource graph). k8s can fall back to the predictable
-//    deploy-time name; compose tiers only act on a configured bucket.
+/** Names of the project's environments other than the one being destroyed. */
+function otherEnvironmentNames(projectConfig, environment) {
+  return Object.keys(projectConfig.environments ?? {}).filter((name) => name !== environment);
+}
+
+/**
+ * Is the environment's recorded app bucket its OWN: the per-environment name
+ * deriveEnvAppBucketName gives it, and not pinned? Only such a bucket is this
+ * environment's alone. An env still on an older CLI's per-project bucket
+ * (`<project>-<salt>-storage`, or `...-storage-<gen>`, never pinned) shares
+ * it with every other environment of the project, and a pinned bucket may be
+ * that same bucket, so -purge deletes neither.
+ */
+function ownsAppBucket(envConfig, projectConfig, environment) {
+  const bucket = envConfig?.s3?.bucket;
+  if (!bucket || envConfig.s3.bucketPin) return false;
+  try {
+    return bucket === deriveEnvAppBucketName(projectConfig, environment);
+  } catch {
+    // An env name too long to derive from never deployed one of its own.
+    return false;
+  }
+}
+
+/**
+ * What the destroy preview needs to know about the buckets, decided by the
+ * same rules the teardown applies (deleteAppBucketEffect, handleBackupBucket),
+ * so the preview never promises a deletion the destroy will not do.
+ *
+ * @returns {{ appBucketOwned: boolean, backupBucketHeld: boolean }}
+ */
+export function destroyPreviewBucketFacts(projectConfig, environment) {
+  const envConfig = projectConfig.environments?.[environment] ?? {};
+  const backupBucket = envConfig.backupS3?.bucket;
+  return {
+    appBucketOwned: ownsAppBucket(envConfig, projectConfig, environment),
+    backupBucketHeld:
+      otherEnvironmentNames(projectConfig, environment).length > 0 ||
+      (backupBucket
+        ? preservedBackupHolders(projectConfig, environment, backupBucket).length > 0
+        : false),
+  };
+}
+
+// 1. The env's own app S3 bucket (created during deploy bootstrap, not part
+//    of any Pulumi stack's resource graph). Plain destroy keeps it and its
+//    uploads, the same way it keeps this env's backups, and the destroyed
+//    env's seed names it so a redeploy lands on it again. -purge empties and
+//    deletes it only when it is this env's own (ownsAppBucket): never a
+//    pinned bucket, never a legacy per-project bucket other envs share.
 async function deleteAppBucketEffect(ctx) {
-  const { envConfig, projectConfig, results, spinner, isK8s } = ctx;
-  const s3BucketName =
-    envConfig.s3?.bucket || (isK8s ? deriveProjectBucketName(projectConfig) : null);
+  const { envConfig, projectConfig, environment, args, results, spinner } = ctx;
+  const s3BucketName = envConfig.s3?.bucket;
   if (!s3BucketName) return;
+  if (!args?.purgeBackups) {
+    // Kept by design, so not a ledger entry (see retainStateBucket).
+    spinner.start('S3 bucket');
+    spinner.stop(`S3 bucket kept with its uploads: ${s3BucketName} (delete with -purge)`);
+    return;
+  }
+  // A PINNED bucket (envConfig.s3.bucketPin, the E6 escape hatch) may be the
+  // old per-project bucket that several environments pin, so -purge on one
+  // of them must not delete the others' uploads. Kept always, like a pinned
+  // state bucket in retainStateBucket.
+  if (envConfig.s3?.bucketPin) {
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept (pinned): ${s3BucketName}. A pinned bucket may serve other environments; delete it manually if nothing uses it anymore.`,
+    );
+    return;
+  }
+  if (!ownsAppBucket(envConfig, projectConfig, environment)) {
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept: ${s3BucketName}. It is the legacy per-project bucket, which other environments may still use; delete it manually if nothing uses it anymore.`,
+    );
+    return;
+  }
   const s3Region = envConfig.s3?.region || 'fsn1';
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
@@ -1285,12 +1404,12 @@ async function deleteAppBucketEffect(ctx) {
       results.leaks.leak({
         resourceClass: 'bucket',
         resource: describeResource({ name: s3BucketName, region: s3Region }),
-        reason: 'not deleted: no object-storage credentials available',
+        reason: 'purge requested (-purge) but no object-storage credentials were available',
         hint: `Run \`vibecarbon destroy\` again with credentials configured, or delete via the ${Provider.NAME} console.`,
       });
     }
   } catch (error) {
-    spinner.stop(`S3 bucket deletion failed: ${error.message}`);
+    spinner.stop(`S3 deletion failed: ${error.message}`);
     results.leaks.leak({
       resourceClass: 'bucket',
       resource: describeResource({ name: s3BucketName, region: s3Region }),
@@ -1303,14 +1422,30 @@ async function deleteAppBucketEffect(ctx) {
 // 2. State bucket: kept on purpose, so the next deploy reuses a warm bucket
 //    instead of recreating one under the same name — see retainStateBucket.
 async function retainStateBucketEffect(ctx) {
-  const { envConfig, projectConfig, args, spinner, results } = ctx;
-  await retainStateBucket(envConfig, projectConfig, args, spinner, results.leaks);
+  const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
+  const outcome = await retainStateBucket(
+    envConfig,
+    projectConfig,
+    args,
+    spinner,
+    results.leaks,
+    environment,
+  );
+  if (outcome?.purged) results.stateBucketPurged = true;
 }
 
 // 3. Backup bucket: preserved by default, deleted with -purge.
 async function handleBackupBucketEffect(ctx) {
-  const { envConfig, projectConfig, args, spinner, results } = ctx;
-  await handleBackupBucket(envConfig, projectConfig, args, spinner, results.leaks);
+  const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
+  const outcome = await handleBackupBucket(
+    envConfig,
+    projectConfig,
+    environment,
+    args,
+    spinner,
+    results.leaks,
+  );
+  if (outcome?.purged) results.backupsPurged = true;
 }
 
 // 4. GitHub environment (k8s only — this step is absent from the compose plans).
@@ -1372,33 +1507,28 @@ async function updateProjectConfigEffect(ctx) {
     if (Object.keys(identity).length > 0) {
       updatedConfig.destroyedEnvironments = {
         ...(updatedConfig.destroyedEnvironments ?? {}),
-        [environment]: { ...identity, destroyedAt: new Date().toISOString() },
+        [environment]: {
+          ...identity,
+          // This env's backup folder is gone, so it no longer holds the
+          // backup bucket (preservedBackupHolders).
+          ...(results.backupsPurged && { backupsPurged: true }),
+          destroyedAt: new Date().toISOString(),
+        },
       };
     }
     delete updatedConfig.environments[environment];
   }
-  // `stateBucketGeneration` is deliberately NOT rotated here any more. It was
-  // rotated so the next deploy would derive a FRESH state-bucket name rather
-  // than recreate the one this destroy had just deleted — Hetzner Object
-  // Storage can ack writes into a just-recreated same-name bucket and lose them
-  // (e4 restore->failover, 2026-08-07). We no longer delete the state bucket
-  // (see retainStateBucket), so nothing gets recreated and the hazard cannot
-  // arise; rotating would now do the opposite of what we want, stranding the
-  // warm bucket and sending every redeploy to a brand-new one.
+  // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
+  // deleted the derived state bucket (the last live environment). The next
+  // deploy then derives a FRESH state-bucket name rather than recreating the
+  // one just deleted: Hetzner Object Storage can ack writes into a
+  // just-recreated same-name bucket and lose them (e4 restore->failover,
+  // 2026-08-07). Every other destroy keeps the state bucket (see
+  // retainStateBucket), and rotating then would strand the warm bucket.
   //
-  // `storageBucketGeneration` IS rotated — precisely when this destroy
-  // actually DELETED the storage bucket (results.s3Bucket is the deleted
-  // name — which is every destroy that had one, not only -purge; the app
-  // bucket is always deleted, -purge governs the backup + state buckets). The storage bucket cannot be retained across `-purge`
-  // (purge means the data is deleted), so the redeploy-side of the hazard is
-  // closed by naming instead: the next deploy derives a FRESH bucket name
-  // rather than recreating the deleted one and riding Hetzner's
-  // delete→same-name-recreate propagation worst case (registry-500 RCA,
-  // run 32013980356: NoSuchBucket flapping >10min at the in-cluster
-  // registry). No rotation when the bucket survived — that would strand the
-  // warm bucket — and legacy projects without the key never gain one here.
-  if (ctx.results?.s3Bucket && updatedConfig.storageBucketGeneration) {
-    updatedConfig.storageBucketGeneration = generateBucketSalt();
+  // The app bucket name stays stable; it is not rotated here.
+  if (results.stateBucketPurged) {
+    updatedConfig.stateBucketGeneration = generateBucketSalt();
   }
   saveProjectConfig(updatedConfig);
   spinner.stop('Configuration updated');
@@ -3297,6 +3427,7 @@ async function main(argv = []) {
       envName,
       purgeBackups: args.purgeBackups,
       s3SetupCompleted: readS3SetupCompleted(cwd, envName),
+      ...destroyPreviewBucketFacts(projectConfig, envName),
     }),
     `Destroying: ${envName}`,
   );

@@ -61,7 +61,12 @@ const values = (overrides: Record<string, unknown> = {}) =>
   buildDbManifestValues({
     dbImageTag: 'ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r1',
     projectName: 'proj',
-    s3Config: { bucket: 'proj-storage', endpoint: 'https://nbg1.example', region: 'nbg1' },
+    s3Config: {
+      bucket: 'proj-storage',
+      walgPrefix: 'backups/proj/prod/walg',
+      endpoint: 'https://nbg1.example',
+      region: 'nbg1',
+    },
     backupBucketName: 'proj-backups',
     walgRole: 'primary',
     dbPrivateIp: '10.0.1.2',
@@ -236,11 +241,19 @@ describe('buildDbManifestValues', () => {
   });
 
   it('uses ONE canonical wal-g prefix: backup bucket first, then the storage bucket', () => {
-    expect(values().WALG_S3_PREFIX).toBe('s3://proj-backups/backups/proj/walg');
+    expect(values().WALG_S3_PREFIX).toBe('s3://proj-backups/backups/proj/prod/walg');
     expect(values({ backupBucketName: null }).WALG_S3_PREFIX).toBe(
-      's3://proj-storage/backups/proj/walg',
+      's3://proj-storage/backups/proj/prod/walg',
     );
     expect(values({ backupBucketName: null, s3Config: undefined }).WALG_S3_PREFIX).toBe('');
+    // Another environment of the same project archives under its own prefix.
+    expect(
+      values({
+        s3Config: { bucket: 'proj-storage', walgPrefix: 'backups/proj/staging/walg' },
+      }).WALG_S3_PREFIX,
+    ).toBe('s3://proj-backups/backups/proj/staging/walg');
+    // A bucket with no resolved prefix would write into a shared path: refuse.
+    expect(() => values({ s3Config: { bucket: 'proj-storage' } })).toThrow(/walgPrefix/);
     // The role is a write-guard, never a path segment.
     expect(values({ walgRole: 'standby' }).WALG_S3_PREFIX).not.toMatch(/standby/);
     expect(values({ walgRole: 'standby' }).WALG_ROLE).toBe('standby');
@@ -270,7 +283,7 @@ describe('renderK8sBase on the shipped base', () => {
       expect(container.image).toBe('ghcr.io/hyperformant/postgres:17.11-walg3.0.9-r1');
       expect(sts.spec.volumeClaimTemplates[0].spec.storageClassName).toBe('hcloud-volumes');
       const env = Object.fromEntries(container.env.map((e: Doc) => [e.name, e.value]));
-      expect(env.WALG_S3_PREFIX).toBe('s3://proj-backups/backups/proj/walg');
+      expect(env.WALG_S3_PREFIX).toBe('s3://proj-backups/backups/proj/prod/walg');
       expect(env.WALG_ROLE).toBe('primary');
       expect(env.AWS_ENDPOINT).toBe('https://nbg1.example');
       // The source tree is untouched.

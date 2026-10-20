@@ -10,12 +10,22 @@ import crypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  appBucketEndpoint,
+  BUCKET_SETTLE_BUDGET_MS,
+  bucketNeedsSettle,
+  makeAppBucketProbeRound,
+  makeSignedHead,
+  settleWindowFor,
+  waitForBucketSettled,
+} from '../../../src/lib/deploy/bucket-settle.js';
 import type { DeployMode, StepName, VerificationResult } from '../scenarios/types.js';
 import {
   bucketOfPresignedUrl,
   createPresignedTransfer,
   type PresignedTransfer,
 } from '../utils/presigned-transfer.js';
+import { resolveObjectStorageCreds } from './backup-evidence.js';
 import { dnsSafeFetch } from './health.js';
 import { type PsqlResult, type ReplTarget, resolveHaDbIps, runPsql } from './replication.js';
 
@@ -873,6 +883,134 @@ interface PresignBody {
 }
 
 /**
+ * The environment's app storage as `.vibecarbon.json` records it: what the
+ * upload check needs to run the bucket settle gate.
+ */
+export interface AppStorage {
+  providerId: string;
+  bucket: string;
+  region: string;
+  endpoint: string;
+  /** The environment's name; its bucket ends with `-<envName>-storage` unless pinned. */
+  envName?: string;
+  /** `.vibecarbon.json` environments.<env>.s3.bucketPin, when the operator pinned the bucket. */
+  bucketPin?: string;
+  /**
+   * ISO string, or null when the deploy could not read it (treated as young).
+   * Absent when nothing was recorded: a 0-window provider, or an env deployed
+   * before creation times were recorded; neither runs the gate.
+   */
+  bucketCreatedAt?: string | null;
+}
+
+type ProbeRound = () => Promise<{ ok: number; total: number; failures: string[] }>;
+
+/** Injection points for the settle gate (tests drive a fake clock). */
+export interface SettleDeps {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  probeRound?: ProbeRound;
+}
+
+type SettleOutcome =
+  | { kind: 'skipped' }
+  | { kind: 'settled'; rounds: number; elapsedSeconds: number }
+  | { kind: 'failed'; message: string; details: Record<string, unknown> };
+
+/**
+ * The bucket settle gate, run before the first upload. A 0-window provider
+ * returns at once: no probes, no delay. Otherwise, when the bucket is young
+ * (or its age unknown), wait for three clean probe rounds in a row within
+ * BUCKET_SETTLE_BUDGET_MS. Verification waits here so the deploy never has to.
+ */
+async function settleAppBucket(
+  storage: AppStorage,
+  origin: string,
+  deps: SettleDeps,
+): Promise<SettleOutcome> {
+  if (storage.bucketCreatedAt === undefined) return { kind: 'skipped' };
+  const windowMs = await settleWindowFor(storage.providerId);
+  if (windowMs === 0) return { kind: 'skipped' };
+  const now = deps.now ?? Date.now;
+  const createdAt = storage.bucketCreatedAt ? new Date(storage.bucketCreatedAt) : null;
+  const startedAt = now();
+  if (!bucketNeedsSettle(createdAt, startedAt, windowMs)) return { kind: 'skipped' };
+
+  const age = createdAt
+    ? `${Math.floor((startedAt - createdAt.getTime()) / 60_000)} min old`
+    : 'of unknown age';
+  let probeRound = deps.probeRound;
+  if (!probeRound) {
+    // The preflights must hit the same endpoint as HeadBucket; the recorded
+    // `endpoint` can be '' (relative URLs, every preflight failing for the
+    // whole budget), so resolve it from the provider and fail fast if absent.
+    let endpoint: string;
+    try {
+      endpoint = await appBucketEndpoint(storage.providerId, storage.region);
+    } catch (err) {
+      return {
+        kind: 'failed',
+        message: `bucket ${JSON.stringify(storage.bucket)} is ${age} and needs the settle gate, but ${(err as Error).message}`,
+        details: { bucket: storage.bucket, region: storage.region },
+      };
+    }
+    const creds = resolveObjectStorageCreds(storage.providerId);
+    if ('missing' in creds) {
+      return {
+        kind: 'failed',
+        message: `bucket ${JSON.stringify(storage.bucket)} is ${age} and needs the settle gate, but ${creds.missing.join(' and ')} not set`,
+        details: { bucket: storage.bucket, missing: creds.missing },
+      };
+    }
+    probeRound = makeAppBucketProbeRound({
+      endpoint,
+      bucket: storage.bucket,
+      origin,
+      signedHead: makeSignedHead({
+        providerId: storage.providerId,
+        accessKey: creds.accessKey,
+        secretKey: creds.secretKey,
+        region: storage.region,
+        bucket: storage.bucket,
+      }),
+    });
+  }
+  const r = await waitForBucketSettled({
+    probeRound,
+    now,
+    sleep: deps.sleep,
+    budgetMs: BUCKET_SETTLE_BUDGET_MS,
+  });
+  const elapsedSeconds = Math.round((now() - startedAt) / 1000);
+  if (r.settled) return { kind: 'settled', rounds: r.rounds, elapsedSeconds };
+  return {
+    kind: 'failed',
+    message:
+      `bucket ${JSON.stringify(storage.bucket)} (${age}) did not settle in ${elapsedSeconds}s ` +
+      `over ${r.rounds} rounds; last failures: ${r.lastFailures.join(', ')}`,
+    details: {
+      bucket: storage.bucket,
+      rounds: r.rounds,
+      elapsedSeconds,
+      lastFailures: r.lastFailures,
+    },
+  };
+}
+
+/**
+ * Each environment owns its app bucket: `<project>-<salt>-<env>-storage`, or
+ * `<project>-<salt>-<env>-<8hex>-storage` when the name had to be clipped
+ * (deriveEnvAppBucketName). A pinned bucket may be named anything. Returns the
+ * failure message, or null when the bucket is the env's own.
+ */
+function perEnvBucketFailure(storage: AppStorage | null | undefined, bucket: string | null) {
+  if (!storage?.envName || storage.bucketPin || !bucket) return null;
+  const own = new RegExp(`-${storage.envName.replace(/[^a-z0-9-]/gi, '')}(-[0-9a-f]{8})?-storage$`);
+  if (own.test(bucket)) return null;
+  return `the app presigned against bucket ${JSON.stringify(bucket)}, which is not environment ${JSON.stringify(storage.envName)}'s own bucket (expected a name ending in "-${storage.envName}-storage" unless s3.bucketPin is set)`;
+}
+
+/**
  * The upload path end to end, the way the browser walks it: the signed-in user
  * asks the app for a presigned PUT (`POST /api/v1/files/presign`), confirms the
  * page CSP and the bucket CORS would let a browser make that PUT, PUTs the
@@ -899,6 +1037,12 @@ export async function checkFileUploadRoundtrip(
      * `bucket`, before the preflight, instead of surfacing as a CORS 403.
      */
     expectedBucket?: string | null;
+    /**
+     * The env's app storage (resolveAppStorage). When given, the bucket settle
+     * gate runs before the first upload; a 0-window provider skips it.
+     */
+    storage?: AppStorage | null;
+    settle?: SettleDeps;
   } = {},
 ): Promise<VerificationResult> {
   const appFetch = deps.appFetch ?? safeFetch;
@@ -911,6 +1055,18 @@ export async function checkFileUploadRoundtrip(
     });
 
   try {
+    let settleDetail: Record<string, unknown> = {};
+    if (deps.storage) {
+      const origin = appDomain ? `https://${appDomain}` : 'http://localhost:3000';
+      const settled = await settleAppBucket(deps.storage, origin, deps.settle ?? {});
+      if (settled.kind === 'failed') return fail('settle', settled.message, settled.details);
+      if (settled.kind === 'settled') {
+        settleDetail = {
+          settle: { rounds: settled.rounds, elapsedSeconds: settled.elapsedSeconds },
+        };
+      }
+    }
+
     const presignRes = await appFetch(`https://${appDomain}/api/v1/files/presign`, {
       method: 'POST',
       headers: {
@@ -948,6 +1104,9 @@ export async function checkFileUploadRoundtrip(
         { key, bucket, expectedBucket: deps.expectedBucket },
       );
     }
+
+    const perEnvFailure = perEnvBucketFailure(deps.storage, bucket);
+    if (perEnvFailure) return fail('bucket', perEnvFailure, { key, bucket });
 
     // The browser PUTs straight to object storage, so two things outside the
     // byte transfer must hold or the real upload button fails while this
@@ -1012,7 +1171,7 @@ export async function checkFileUploadRoundtrip(
       );
     }
 
-    return result('file_upload_roundtrip', 'pass', start, { details: { key } });
+    return result('file_upload_roundtrip', 'pass', start, { details: { key, ...settleDetail } });
   } catch (err) {
     return fail('request', err instanceof Error ? err.message : String(err));
   }
@@ -1023,19 +1182,45 @@ export async function checkFileUploadRoundtrip(
 // ---------------------------------------------------------------------------
 
 /**
- * The app storage bucket an environment records in `.vibecarbon.json`
- * (environments.<env>.s3.bucket), or null. Read from the same file deploy
- * writes, so the upload check compares the app's presigned bucket against the
- * bucket deploy created and configured CORS on.
+ * The env's app storage from `.vibecarbon.json` (environments.<env>: its
+ * provider and s3 block), or null when it records no bucket. Read from the
+ * same file deploy writes, so the upload check compares the app's presigned
+ * bucket against the bucket deploy created and configured CORS on, and runs
+ * the settle gate against the creation time deploy recorded. The provider
+ * falls back to hetzner, as the CLI's providerIdFor does.
  */
-export function resolveAppBucket(projectDir: string, envPrefix: string): string | null {
+export function resolveAppStorage(projectDir: string, envPrefix: string): AppStorage | null {
   try {
     const configPath = join(projectDir, '.vibecarbon.json');
     if (!existsSync(configPath)) return null;
     const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
-      environments?: Record<string, { s3?: { bucket?: string } }>;
+      environments?: Record<
+        string,
+        {
+          provider?: string;
+          s3?: {
+            bucket?: string;
+            bucketPin?: string;
+            region?: string;
+            endpoint?: string;
+            bucketCreatedAt?: string | null;
+          };
+        }
+      >;
     };
-    return config.environments?.[envPrefix]?.s3?.bucket || null;
+    const env = config.environments?.[envPrefix];
+    if (!env?.s3?.bucket) return null;
+    return {
+      providerId: (env.provider ?? 'hetzner').toLowerCase(),
+      bucket: env.s3.bucket,
+      envName: envPrefix,
+      ...(env.s3.bucketPin && { bucketPin: env.s3.bucketPin }),
+      region: env.s3.region ?? '',
+      endpoint: env.s3.endpoint ?? '',
+      ...(Object.hasOwn(env.s3, 'bucketCreatedAt') && {
+        bucketCreatedAt: env.s3.bucketCreatedAt ?? null,
+      }),
+    };
   } catch {
     return null;
   }
@@ -1107,10 +1292,10 @@ export async function runAppFunctionalChecks(opts: {
   adminEmail?: string;
   adminPassword?: string;
   smtpConfigured?: boolean;
-  /** See checkFileUploadRoundtrip's `expectedBucket`. */
-  appBucket?: string | null;
+  /** The env's app storage: its bucket is checkFileUploadRoundtrip's `expectedBucket`, and it drives the settle gate. */
+  appStorage?: AppStorage | null;
 }): Promise<AppFunctionalOutcome> {
-  const { domain, db, adminEmail, adminPassword, smtpConfigured = false, appBucket } = opts;
+  const { domain, db, adminEmail, adminPassword, smtpConfigured = false, appStorage } = opts;
   const results: VerificationResult[] = [];
 
   // Run check groups sequentially — auth creates state the others do not
@@ -1128,7 +1313,10 @@ export async function runAppFunctionalChecks(opts: {
   // they run as the signed-in throwaway user from the auth checks above.
   results.push(
     auth.jar
-      ? await checkFileUploadRoundtrip(domain, auth.jar, { expectedBucket: appBucket })
+      ? await checkFileUploadRoundtrip(domain, auth.jar, {
+          expectedBucket: appStorage?.bucket ?? null,
+          storage: appStorage,
+        })
       : skip('file_upload_roundtrip', 'Skipped because no signed-in user (auth checks failed)'),
   );
 

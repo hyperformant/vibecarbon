@@ -6,13 +6,15 @@ import {
   deriveStateBucketName,
   resolveStateBucketName,
 } from '../../../src/lib/providers/hetzner-s3.js';
+// @ts-expect-error — JS module without types
+import { projectStateBucketBase } from '../../../src/lib/providers/s3-base.js';
 
 // Finding 1: Pulumi state must live in a DEDICATED bucket, not the app storage
 // bucket. These tests pin the naming derivation + that resolveBackendUrl
 // targets the state bucket (with a safe fallback for un-migrated configs).
 
 describe('deriveStateBucketName', () => {
-  it('appends -pulumi-state to the app bucket name', () => {
+  it('appends -pulumi-state to the project base name', () => {
     expect(deriveStateBucketName('myapp-storage')).toBe('myapp-storage-pulumi-state');
   });
 
@@ -150,8 +152,33 @@ describe('state-bucket region/endpoint passthrough census', () => {
   });
 });
 
+describe('state bucket stays per project when the app bucket goes per env', () => {
+  const P = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
+
+  it('derives from the project base, not the env app bucket', () => {
+    // The literal the branch pins today; a rename orphans every live state bucket.
+    expect(projectStateBucketBase(P)).toBe('myapp-cd9ecc-storage');
+    expect(resolveStateBucketName({ projectBase: projectStateBucketBase(P) })).toBe(
+      deriveStateBucketName('myapp-cd9ecc-storage', undefined),
+    );
+    expect(resolveStateBucketName({ projectBase: projectStateBucketBase(P) })).toBe(
+      'myapp-cd9ecc-storage-pulumi-state',
+    );
+  });
+
+  it('deploy hands the resolver the project base, never s3Config.bucket', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(
+      new URL('../../../src/lib/deploy/orchestrator.js', import.meta.url),
+      'utf8',
+    );
+    expect(src).toContain('projectBase: projectStateBucketBase(projectConfig),');
+    expect(src).not.toMatch(/appBucket: s3Config\.bucket/);
+  });
+});
+
 describe('resolveStateBucketName — precedence', () => {
-  const appBucket = 'myapp-storage';
+  const projectBase = 'myapp-storage';
 
   it('a persisted env bucket wins over everything', () => {
     // An environment that has deployed must keep the exact bucket it has been
@@ -161,7 +188,7 @@ describe('resolveStateBucketName — precedence', () => {
       resolveStateBucketName({
         envStateBucket: 'live-env-state',
         projectPin: 'pinned-state',
-        appBucket,
+        projectBase,
         generation: 'a1b2c3',
       }),
     ).toBe('live-env-state');
@@ -169,27 +196,27 @@ describe('resolveStateBucketName — precedence', () => {
 
   it('a project pin wins over derivation', () => {
     expect(
-      resolveStateBucketName({ projectPin: 'pinned-state', appBucket, generation: 'a1b2c3' }),
+      resolveStateBucketName({ projectPin: 'pinned-state', projectBase, generation: 'a1b2c3' }),
     ).toBe('pinned-state');
   });
 
   it('falls back to derivation when nothing is pinned', () => {
-    expect(resolveStateBucketName({ appBucket, generation: 'a1b2c3' })).toBe(
-      deriveStateBucketName(appBucket, 'a1b2c3'),
+    expect(resolveStateBucketName({ projectBase, generation: 'a1b2c3' })).toBe(
+      deriveStateBucketName(projectBase, 'a1b2c3'),
     );
   });
 
-  it('a bucket retained by destroy wins over derivation (survives the storage-generation rotation)', () => {
-    // destroy KEEPS the state bucket but also rotates storageBucketGeneration,
-    // and the derived state-bucket name embeds the app bucket name — so a
-    // redeploy after destroy used to derive a NEW name and the kept bucket
-    // was simply orphaned (vibecarbon-web 2026-09-15:
+  it('a bucket retained by destroy wins over derivation', () => {
+    // destroy KEEPS the state bucket, and the derived state-bucket name embeds
+    // the app bucket name. The app name used to rotate per destroy, so a
+    // redeploy after destroy derived a NEW name and the kept bucket was
+    // simply orphaned (vibecarbon-web 2026-09-15:
     // …-storage-7b6f58-pulumi-state-c86bb1 left behind, …-d7f3af-… created).
     // destroy now records the kept name; the next deploy resolves to it.
     expect(
       resolveStateBucketName({
         retained: 'myapp-a5acfe-storage-7b6f58-pulumi-state-c86bb1',
-        appBucket: 'myapp-a5acfe-storage-d7f3af',
+        projectBase: 'myapp-a5acfe-storage-d7f3af',
         generation: 'c86bb1',
       }),
     ).toBe('myapp-a5acfe-storage-7b6f58-pulumi-state-c86bb1');
@@ -200,7 +227,7 @@ describe('resolveStateBucketName — precedence', () => {
       resolveStateBucketName({
         envStateBucket: 'live-env-state',
         retained: 'kept-by-destroy',
-        appBucket,
+        projectBase,
         generation: 'a1b2c3',
       }),
     ).toBe('live-env-state');
@@ -208,7 +235,7 @@ describe('resolveStateBucketName — precedence', () => {
       resolveStateBucketName({
         projectPin: 'pinned-state',
         retained: 'kept-by-destroy',
-        appBucket,
+        projectBase,
         generation: 'a1b2c3',
       }),
     ).toBe('pinned-state');
@@ -220,7 +247,7 @@ describe('resolveStateBucketName — precedence', () => {
     // state as .pulumi/stacks/<project>/<stack>.json and the stack names differ.
     const pinned = 'vc-e2e-pulumi-state';
     const forScenario = (app: string) =>
-      resolveStateBucketName({ projectPin: pinned, appBucket: app, generation: 'a1b2c3' });
+      resolveStateBucketName({ projectPin: pinned, projectBase: app, generation: 'a1b2c3' });
     expect(forScenario('citest-compose-1-storage')).toBe(pinned);
     expect(forScenario('citest-k8s-ha-2-storage')).toBe(pinned);
   });
@@ -230,14 +257,14 @@ describe('resolveStateBucketName — pin validation', () => {
   it('rejects an empty-string pin instead of letting it win the fallback chain', () => {
     // '' is not nullish, so it used to beat derivation and build the malformed
     // backend URL `s3://?endpoint=...` (review finding, 2026-08-15).
-    expect(() => resolveStateBucketName({ projectPin: '', appBucket: 'myapp-storage' })).toThrow(
+    expect(() => resolveStateBucketName({ projectPin: '', projectBase: 'myapp-storage' })).toThrow(
       /Invalid stateBucket pin/,
     );
   });
 
   it('rejects invalid bucket characters and over-length names loudly, naming the fix', () => {
     for (const pin of ['My_State Bucket', 'UPPER', `x${'a'.repeat(80)}`, '-lead', 'trail-']) {
-      expect(() => resolveStateBucketName({ projectPin: pin, appBucket: 'a-b' })).toThrow(
+      expect(() => resolveStateBucketName({ projectPin: pin, projectBase: 'a-b' })).toThrow(
         /stateBucket/,
       );
     }
@@ -246,7 +273,7 @@ describe('resolveStateBucketName — pin validation', () => {
   it('does not silently rewrite a pin — the operator chose that exact name', () => {
     // sanitizeBucketName would "fix" it; deploying under a different name than
     // the operator wrote is worse than telling them.
-    expect(resolveStateBucketName({ projectPin: 'valid-pin-name', appBucket: 'a-b' })).toBe(
+    expect(resolveStateBucketName({ projectPin: 'valid-pin-name', projectBase: 'a-b' })).toBe(
       'valid-pin-name',
     );
   });

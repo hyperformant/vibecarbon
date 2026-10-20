@@ -24,9 +24,10 @@ import {
   providerFor,
   providerIdFor,
 } from '../providers/index.js';
-import { formatS3SetupFailure } from '../providers/s3-base.js';
+import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
+import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
@@ -214,46 +215,151 @@ async function probePublicHealth(
 }
 
 /**
- * Apply the browser-upload CORS rule to the app bucket. Runs on EVERY deploy,
- * outside the skippable s3-setup step, so deployments that predate the rule
- * (or whose rule was edited out-of-band) converge on re-run; the PUT is
- * idempotent. A failure only costs browser uploads, so it warns and returns.
+ * The origins one environment's app bucket allows. SECURITY: never a `*`
+ * wildcard (setBucketCors refuses it). With a domain that is exactly
+ * `https://<domain>`, the single public origin the app serves from. A
+ * domainless env has no browser origin to trust yet, so it gets the localhost
+ * dev origins.
  *
- * SECURITY: never a `*` wildcard (setBucketCors refuses it). With a domain
- * the rule allows exactly `https://<domain>`, the single public origin the
- * app serves from. A domainless deploy has no browser origin to trust yet,
- * so it gets localhost dev origins and a warning; re-run deploy once a
- * domain is set.
+ * @param {string} [domain]
+ * @returns {string[]}
+ */
+export function envCorsOrigins(domain) {
+  return domain ? [`https://${domain}`] : ['http://localhost:3000', 'http://localhost:5173'];
+}
+
+/**
+ * Set the app bucket's CORS rule to exactly this environment's origins. The
+ * bucket belongs to this environment alone, so the rule has one owner and is
+ * replaced outright. Runs on EVERY deploy, outside the skippable s3-setup
+ * step, so deployments whose rule is missing or was edited out-of-band
+ * converge on re-run. One GET, and a PUT only when the rule differs, so a
+ * warm redeploy writes nothing. A failed GET just means the rule is unknown,
+ * so it PUTs. A failure only costs browser uploads, so it warns and returns.
  *
  * @param {object} opts
  * @param {() => Promise<object>} opts.createProvider - builds a provider at the
  *   APP bucket's region (the shared one may point at the state bucket's)
  * @param {string} opts.bucket - app bucket name
  * @param {string} [opts.domain]
- * @param {{ start: Function, stop: Function }} opts.spin
  * @param {{ warn: Function }} opts.log
+ * @returns {Promise<void>}
  */
-export async function applyAppBucketCors({ createProvider, bucket, domain, spin, log }) {
+export async function applyAppBucketCors({ createProvider, bucket, domain, log }) {
+  const origins = envCorsOrigins(domain);
   try {
-    spin.start('Configuring bucket CORS');
-    let corsOrigins;
-    if (domain) {
-      corsOrigins = [`https://${domain}`];
-    } else {
-      corsOrigins = ['http://localhost:3000', 'http://localhost:5173'];
+    if (!domain) {
       log.warn(
-        'No domain configured, so bucket CORS only allows localhost dev origins. Re-run deploy with a domain to allow your production origin.',
+        'No domain configured, so bucket CORS only allows localhost dev origins for this environment. Re-run deploy with a domain to allow your production origin.',
       );
     }
     const provider = await createProvider();
-    await provider.setBucketCors(bucket, corsOrigins);
-    spin.stop('Bucket CORS configured');
+    const existing = await provider.getBucketCorsOrigins(bucket).catch(() => null);
+    if (existing && sameOrigins(existing, origins)) return;
+    await provider.setBucketCors(bucket, origins);
   } catch (corsErr) {
-    spin.stop('Bucket CORS not set');
     log.warn(
       `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to apply it again, or set CORS on ${bucket} in your provider console.`,
     );
   }
+}
+
+/** Equal as sets, whatever order or duplicates a provider returns. */
+function sameOrigins(a, b) {
+  const left = new Set(a);
+  const right = new Set(b);
+  return left.size === right.size && [...left].every((o) => right.has(o));
+}
+
+/**
+ * Start the app-bucket storage work that does not gate provisioning, so it
+ * runs beside the IaC step instead of ahead of it (R7): the CORS rule and,
+ * only on a provider whose S3 class declares a non-zero
+ * `bucketSettleWindowMs`, one read of the bucket's creation time. Its output
+ * is held back while IaC prints, and `finish(log)`, awaited just before the
+ * success outro, waits for it, reports any warnings, and prints one note
+ * when the bucket is still inside its settle window. It never waits for the
+ * bucket to settle (R5). A 0 window costs nothing: no read, no note, and no
+ * `bucketCreatedAt` on the result.
+ *
+ * Never rejects: the CORS step warns instead of throwing, and an
+ * unreadable creation time is recorded as unknown (null). A provider class
+ * without a declared window is a bug the census catches; `finish` warns
+ * about it and treats the window as absent, because it runs after IaC
+ * succeeded and a throw would skip the final config save.
+ *
+ * @param {object} opts
+ * @param {string} opts.providerId - the env's provider id, for its settle window
+ * @param {() => Promise<object>} opts.createProvider
+ * @param {string} opts.bucket
+ * @param {string} [opts.domain]
+ * @returns {{
+ *   done: Promise<void>,
+ *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null }>,
+ * }}
+ *   `bucketCreatedAt` (ISO string, or null when unknown) is present only for
+ *   a non-zero settle window.
+ */
+export function startAppBucketFinalize({ providerId, createProvider, bucket, domain }) {
+  const warnings = [];
+  const heldLog = { warn: (message) => warnings.push(message) };
+  // One S3 client for the CORS step and the creation-time read.
+  let providerPromise;
+  const sharedProvider = () => {
+    providerPromise ??= createProvider();
+    return providerPromise;
+  };
+  const done = applyAppBucketCors({
+    createProvider: sharedProvider,
+    bucket,
+    domain,
+    log: heldLog,
+  });
+  const settle = readBucketSettleState({ providerId, createProvider: sharedProvider, bucket });
+  // Handled at `finish`; this only keeps an early rejection from counting as
+  // unhandled while IaC runs.
+  settle.catch(() => {});
+  return {
+    done,
+    async finish(log) {
+      await done;
+      for (const message of warnings) log.warn(message);
+      const { windowMs, createdAt, warning } = await settle;
+      if (warning) log.warn(warning);
+      if (windowMs === 0) return {};
+      const status = storageSettleStatus(createdAt, Date.now(), windowMs);
+      if (status.settling) log.info(bucketSettleNote(status, windowMs));
+      return { bucketCreatedAt: createdAt ? createdAt.toISOString() : null };
+    },
+  };
+}
+
+/**
+ * The provider's settle window and, only when it is non-zero, the bucket's
+ * creation time (null when it cannot be read). An undeclared window comes
+ * back as 0 with a `warning`, never a throw.
+ *
+ * @param {{ providerId: string, createProvider: () => Promise<object>, bucket: string }} opts
+ * @returns {Promise<{ windowMs: number, createdAt?: Date|null, warning?: string }>}
+ */
+async function readBucketSettleState({ providerId, createProvider, bucket }) {
+  let windowMs;
+  try {
+    windowMs = await settleWindowFor(providerId);
+  } catch (err) {
+    return {
+      windowMs: 0,
+      warning: `Storage settle window unknown (${err.message}), so no settle note or status row for this bucket.`,
+    };
+  }
+  if (windowMs === 0) return { windowMs };
+  let createdAt = null;
+  try {
+    createdAt = await (await createProvider()).bucketCreatedAt(bucket);
+  } catch {
+    // An unknown age is treated as a young bucket (R5).
+  }
+  return { windowMs, createdAt };
 }
 
 /**
@@ -279,6 +385,31 @@ export function assertBucketReady(result, role) {
       'consistently). Nothing was provisioned. Re-run `vibecarbon deploy` once the bucket is ' +
       'visible in the provider console; bucket creation is idempotent and the existing bucket is reused.',
   );
+}
+
+/**
+ * The `s3` block of the deploy's skeleton env save (status 'deploying').
+ * Rebuilt from s3Config, but `bucketCreatedAt` (status' "storage settling"
+ * row, the e2e upload gate's clock) only exists in the PRIOR record, so it is
+ * carried from there, null included, the way compose-ha's pending save does.
+ *
+ * @param {{ bucket: string, bucketPin?: string, region: string, endpoint: string, stateBucket?: string, stateBucketRegion?: string, stateEndpoint?: string }} s3Config
+ * @param {{ bucketCreatedAt?: string|null } | undefined} priorS3 - the env's persisted `s3`
+ */
+export function skeletonS3Block(s3Config, priorS3) {
+  return {
+    bucket: s3Config.bucket,
+    ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
+    ...(priorS3 &&
+      Object.hasOwn(priorS3, 'bucketCreatedAt') && {
+        bucketCreatedAt: priorS3.bucketCreatedAt,
+      }),
+    region: s3Config.region,
+    endpoint: s3Config.endpoint,
+    stateBucket: s3Config.stateBucket,
+    ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
+    ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
+  };
 }
 
 /**
@@ -463,23 +594,24 @@ export async function executeDeployment(args, gatheredConfig) {
   //      every scenario at a single long-lived bucket instead of creating a
   //      brand-new one per run.
   //   2b. The bucket the last destroy KEPT (`retainedStateBucket`). destroy
-  //      retains the state bucket but rotates storageBucketGeneration, and
-  //      the derived name embeds the app bucket name — so without this the
-  //      redeploy derived a fresh name and the kept bucket was orphaned.
-  //   3. Derivation from the app bucket, for everyone else.
+  //      retains the state bucket and the state name stays stable; this
+  //      records the kept name so the redeploy resumes it.
+  //   3. Derivation from the project base (projectStateBucketBase), for
+  //      everyone else. Not s3Config.bucket: the app bucket is per env, the
+  //      state bucket per project.
   //
-  // `stateBucketGeneration` is still embedded by the derivation but is no
-  // longer rotated on destroy: destroy KEEPS the state bucket now
-  // (retainStateBucket), so nothing is ever recreated under a name that just
-  // got deleted — the acked-write-loss hazard that rotation existed for (e4
-  // restore->failover 2026-08-07) cannot arise.
+  // `stateBucketGeneration` is embedded by the derivation. A plain destroy
+  // KEEPS the state bucket (retainStateBucket) and leaves the generation
+  // alone; only a last-environment -purge that deletes the bucket rotates it,
+  // so nothing is ever recreated under a name that just got deleted (the
+  // acked-write-loss hazard, e4 restore->failover 2026-08-07).
   //
   // Both HA stacks share this ONE bucket.
   const stateBucket = resolveStateBucketName({
     envStateBucket: s3Config.stateBucket,
     projectPin: projectConfig.stateBucket,
     retained: projectConfig.retainedStateBucket,
-    appBucket: s3Config.bucket,
+    projectBase: projectStateBucketBase(projectConfig),
     generation: projectConfig.stateBucketGeneration,
   });
 
@@ -527,14 +659,7 @@ export async function executeDeployment(args, gatheredConfig) {
       ...(secondaryRegion ? { secondaryRegion } : {}),
       ...(domain ? { domain } : {}),
       ...(dnsProvider ? { dnsProvider } : {}),
-      s3: {
-        bucket: s3Config.bucket,
-        region: s3Config.region,
-        endpoint: s3Config.endpoint,
-        stateBucket: s3Config.stateBucket,
-        ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
-        ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
-      },
+      s3: skeletonS3Block(s3Config, existingEnv.s3),
       backupS3: backupS3Config?.bucket
         ? {
             bucket: backupS3Config.bucket,
@@ -766,8 +891,10 @@ export async function executeDeployment(args, gatheredConfig) {
 
   // Browser uploads need CORS on the app bucket. Outside the s3-setup step on
   // purpose: that step is skipped on re-run, and existing deployments must
-  // still pick the rule up.
-  await applyAppBucketCors({
+  // still pick the rule up. Started here, not awaited: provisioning does not
+  // depend on it, so it runs beside IaC and is awaited before the outro (R7).
+  const appBucketFinalize = startAppBucketFinalize({
+    providerId: providerIdFor(envConfig),
     createProvider: () =>
       getObjectStorageProvider(
         providerIdFor(envConfig),
@@ -777,8 +904,6 @@ export async function executeDeployment(args, gatheredConfig) {
       ),
     bucket: s3Config.bucket,
     domain,
-    spin: s3Spinner,
-    log: p.log,
   });
 
   // SKELETON SAVE: persist the minimum env entry that `vibecarbon destroy`
@@ -968,6 +1093,7 @@ export async function executeDeployment(args, gatheredConfig) {
   const dnsChallenge = isComposeTier(tier) && useDnsChallenge(dnsProvider);
   const bundlePath = renderBundle(projectConfig.projectName, {
     domain,
+    environment,
     image: imageRef,
     observability: services.observability,
     n8n: services.n8n,
@@ -1666,6 +1792,12 @@ export async function executeDeployment(args, gatheredConfig) {
   // reject the duplicate SshKey post.
   const isHADeploy = !!config.ha && !!secondaryRegion;
 
+  // The app-bucket finalize started after s3-setup ran beside IaC; wait for
+  // it here, before the final save and the outro, and report its warnings.
+  // On a provider with a settle window it also prints the young-bucket note;
+  // it never waits for the bucket to settle (R5).
+  const appBucketFinal = await appBucketFinalize.finish(p.log);
+
   // Re-read the on-disk project config before merging. Inner deploy paths
   // (compose/ha.js, k8s/ha/index.js) call saveProjectConfig themselves
   // mid-flight to persist server IDs / per-cluster details that this
@@ -1830,6 +1962,12 @@ export async function executeDeployment(args, gatheredConfig) {
         ...(deployedDirty !== null && { deployedDirty }),
         s3: {
           bucket: s3Config.bucket,
+          ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
+          // Only on a provider with a settle window: status reads it for the
+          // "storage settling" row, the e2e upload check for its gate.
+          ...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {
+            bucketCreatedAt: appBucketFinal.bucketCreatedAt,
+          }),
           region: s3Config.region,
           endpoint: s3Config.endpoint,
           stateBucket: s3Config.stateBucket,

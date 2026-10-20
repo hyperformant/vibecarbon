@@ -23,7 +23,7 @@
  *
  *   INFO: Selecting the latest backup...
  *   ERROR: Failed to select backup: list folder in storage "default": failed to
- *   list s3 folder: 'backups/<project>/walg/basebackups_005/': NoSuchBucket:
+ *   list s3 folder: 'backups/<project>/<env>/walg/basebackups_005/': NoSuchBucket:
  *     status code: 404, request id: tx…-nbg1-prod1-ceph5
  *
  * The e2e runner already classifies this as `[infra: S3 transient]`, but the

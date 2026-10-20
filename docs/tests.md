@@ -386,7 +386,7 @@ vacuously is worse than none: it launders confidence.
   `txid_current()` (so an idle cluster cannot no-op the switch) then
   `pg_walfile_name(pg_switch_wal())`, which *names* the segment Postgres just
   handed to `archive_command`; the runner then LISTs the backup bucket for that
-  exact key under `backups/<project>/walg/wal_005/`. A second assertion pins that
+  exact key under `backups/<project>/<env>/walg/wal_005/`. A second assertion pins that
   nothing lives under a role-namespaced prefix (`…/walg/primary|standby/`), the
   split that makes a promoted standby read an empty folder. Bucket/region/endpoint
   come from the project's own `.vibecarbon.json` `backupS3` block and the client is

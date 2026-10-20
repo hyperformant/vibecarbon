@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
+import { resolveEnvStorage } from '../../../src/lib/deploy/prompts.js';
 import {
   buildWalSwitchProbe,
   buildWalSwitchRemoteCommand,
@@ -29,13 +30,18 @@ import {
  */
 
 describe('wal-g prefix derivation', () => {
-  it('builds the single canonical prefix with no role segment', () => {
-    expect(walgPrefixFor('myapp-e3')).toBe('backups/myapp-e3/walg/');
+  it('builds the single canonical per-env prefix with no role segment', () => {
+    expect(walgPrefixFor('myapp', 'e3')).toBe('backups/myapp/e3/walg/');
+  });
+
+  it('matches the prefix the deploy hands WAL-G (resolveEnvStorage.walgPrefix)', () => {
+    const { walgPrefix } = resolveEnvStorage('e3', {}, { projectName: 'myapp' });
+    expect(walgPrefixFor('myapp', 'e3')).toBe(`${walgPrefix}/`);
   });
 
   it('builds the WAL segment key under wal_005/', () => {
-    expect(walSegmentKeyPrefix('myapp-e3', '000000010000000000000003')).toBe(
-      'backups/myapp-e3/walg/wal_005/000000010000000000000003',
+    expect(walSegmentKeyPrefix('myapp', 'e3', '000000010000000000000003')).toBe(
+      'backups/myapp/e3/walg/wal_005/000000010000000000000003',
     );
   });
 
@@ -117,13 +123,13 @@ describe('parseWalSwitchOutput', () => {
     const parsed = parseWalSwitchOutput(
       [
         'WAL_SWITCH=switched',
-        'WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/walg',
+        'WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/e3/walg',
         'WAL_SWITCH_SEGMENT=000000010000000000000007',
       ].join('\n'),
     );
     expect(parsed.status).toBe('switched');
     expect(parsed.segment).toBe('000000010000000000000007');
-    expect(parsed.prefix).toBe('s3://myapp-backups/backups/myapp/walg');
+    expect(parsed.prefix).toBe('s3://myapp-backups/backups/myapp/e3/walg');
   });
 
   it.each([
@@ -245,7 +251,7 @@ describe('runBackupEvidenceChecks', () => {
 
   const probeOutput = [
     'WAL_SWITCH=switched',
-    'WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/walg',
+    'WAL_SWITCH_PREFIX=s3://myapp-backups/backups/myapp/e3/walg',
     `WAL_SWITCH_SEGMENT=${SEGMENT}`,
   ].join('\n');
 
@@ -288,14 +294,14 @@ describe('runBackupEvidenceChecks', () => {
         execRemote: () => probeOutput,
         probePrefix: async (prefix: string) => {
           seen.push(prefix);
-          return prefix === walSegmentKeyPrefix(PROJECT, SEGMENT);
+          return prefix === walSegmentKeyPrefix(PROJECT, 'e3', SEGMENT);
         },
       }),
     );
     expect(byName(results, 'backup_walg_wal_archived').status).toBe('pass');
     expect(byName(results, 'backup_walg_canonical_prefix').status).toBe('pass');
     // It probed for the exact segment, not a vague "anything under walg/".
-    expect(seen).toContain('backups/myapp/walg/wal_005/000000010000000000000009');
+    expect(seen).toContain('backups/myapp/e3/walg/wal_005/000000010000000000000009');
   });
 
   // The load-bearing mutation test: WAL is silently dropped (wal-archive.sh
@@ -321,7 +327,7 @@ describe('runBackupEvidenceChecks', () => {
           calls += 1;
           // Hetzner read-after-write staleness (#223) on the first two reads.
           if (calls <= 2) throw new Error('NoSuchBucket: status code: 404');
-          return prefix === walSegmentKeyPrefix(PROJECT, SEGMENT);
+          return prefix === walSegmentKeyPrefix(PROJECT, 'e3', SEGMENT);
         },
       }),
     );
@@ -334,14 +340,14 @@ describe('runBackupEvidenceChecks', () => {
       opts({
         execRemote: () => probeOutput,
         probePrefix: async (prefix: string) =>
-          prefix === walSegmentKeyPrefix(PROJECT, SEGMENT) ||
-          prefix === 'backups/myapp/walg/standby/',
+          prefix === walSegmentKeyPrefix(PROJECT, 'e3', SEGMENT) ||
+          prefix === 'backups/myapp/e3/walg/standby/',
       }),
     );
     expect(byName(results, 'backup_walg_wal_archived').status).toBe('pass');
     const canonical = byName(results, 'backup_walg_canonical_prefix');
     expect(canonical.status).toBe('fail');
-    expect(canonical.errorMessage).toContain('backups/myapp/walg/standby/');
+    expect(canonical.errorMessage).toContain('backups/myapp/e3/walg/standby/');
   });
 
   it('FAILS when the node we resolved as primary still carries the standby role', async () => {

@@ -93,7 +93,7 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
       region: 'ash',
       serverType: 'cpx21',
       servers: [{ ip: '1.2.3.4' }],
-      s3: { bucket: 'proj-storage-7b6f58' },
+      s3: { bucket: 'proj-a1b2c3-prod-storage', stateBucket: 'proj-state' },
     } as never;
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
     const saved = saveProjectConfigMock.mock.calls[0][0];
@@ -107,11 +107,14 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
       backupS3: { bucket: 'proj-backups', region: 'fsn1', endpoint: 'https://fsn1.x' },
       region: 'ash',
       serverType: 'cpx21',
+      // plain destroy keeps the env's bucket, so the seed names it
+      s3: { bucket: 'proj-a1b2c3-prod-storage' },
     });
     expect(saved.destroyedEnvironments.prod.destroyedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    for (const k of ['status', 'servers', 's3']) {
+    for (const k of ['status', 'servers']) {
       expect(saved.destroyedEnvironments.prod).not.toHaveProperty(k);
     }
+    expect(saved.destroyedEnvironments.prod.s3).not.toHaveProperty('stateBucket');
   });
 
   it('does not record an identity when the destroy is unverified (the live entry is kept instead)', async () => {
@@ -156,18 +159,15 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
   });
 
   // Same-name state-bucket recreation can silently lose acked writes (e4
-  // restore→failover, 2026-08-07): a VERIFIED destroy rotates the generation
-  // so the next deploy derives a fresh state-bucket name. An unverified
-  // destroy must NOT rotate — its retry targets the old names.
-  it('does NOT rotate stateBucketGeneration on a verified destroy', async () => {
-    // Inverted deliberately. Rotation existed so the next deploy would derive a
-    // fresh state-bucket name rather than recreate the one destroy had just
-    // deleted, because Hetzner Object Storage can ack writes into a recreated
-    // same-name bucket and lose them (e4 restore->failover, 2026-08-07). We no
-    // longer delete the state bucket (retainStateBucket), so nothing is
-    // recreated and the hazard cannot arise — and rotating now would do the
-    // opposite of what we want, stranding the warm bucket and sending every
-    // redeploy to a brand-new one, which is the worst window for this class.
+  // restore→failover, 2026-08-07). The generation rotates only when a
+  // last-environment -purge deleted the state bucket (covered in
+  // state-bucket-purge-scope.test.ts). An unverified destroy must NOT rotate —
+  // its retry targets the old names.
+  it('does NOT rotate stateBucketGeneration on a verified destroy that kept the state bucket', async () => {
+    // A plain destroy keeps the state bucket (retainStateBucket), so nothing
+    // is recreated and the hazard cannot arise — rotating would strand the
+    // warm bucket and send the redeploy to a brand-new one, which is the
+    // worst window for this class.
     const ctx = makeCtx({ pulumiDestroyFailed: false });
     ctx.projectConfig.stateBucketGeneration = 'aaaaaa';
 
@@ -201,50 +201,19 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
   });
 });
 
-describe('storageBucketGeneration rotation (registry-500 RCA, 2026-08-17)', () => {
-  // A purge-destroy that DELETED the storage bucket must rotate the
-  // generation so the next deploy derives a FRESH bucket name instead of
-  // recreating the deleted one — Hetzner's delete→same-name-recreate
-  // propagation flapped NoSuchBucket at the registry for >10 minutes (run
-  // 32013980356). A destroy that did NOT delete the bucket must not rotate:
-  // rotation would strand the still-existing warm bucket.
+describe('storageBucketGeneration', () => {
   beforeEach(() => {
     saveProjectConfigMock.mockReset();
   });
 
-  function ctxWithBucketResult(s3Bucket: string | null) {
+  it('never writes storageBucketGeneration', async () => {
     const ctx = makeCtx({ pulumiDestroyFailed: false });
     (ctx.projectConfig as Record<string, unknown>).storageBucketGeneration = 'aaaaaa';
-    (ctx.results as Record<string, unknown>).s3Bucket = s3Bucket;
-    return ctx;
-  }
-
-  it('rotates the generation when this destroy deleted the storage bucket', async () => {
-    const ctx = ctxWithBucketResult('proj-a1b2c3-storage-aaaaaa');
-
-    await DESTROY_EFFECTS.updateProjectConfig(ctx);
-
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
-    expect(savedConfig.storageBucketGeneration).toBeTruthy();
-    expect(savedConfig.storageBucketGeneration).not.toBe('aaaaaa');
-  });
-
-  it('does NOT rotate when the storage bucket was not deleted', async () => {
-    const ctx = ctxWithBucketResult(null);
+    (ctx.results as Record<string, unknown>).s3Bucket = 'proj-a1b2c3-storage';
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
     const savedConfig = saveProjectConfigMock.mock.calls[0][0];
     expect(savedConfig.storageBucketGeneration).toBe('aaaaaa');
-  });
-
-  it('does NOT invent a generation for legacy projects that never had one', async () => {
-    const ctx = makeCtx({ pulumiDestroyFailed: false });
-    (ctx.results as Record<string, unknown>).s3Bucket = 'proj-storage';
-
-    await DESTROY_EFFECTS.updateProjectConfig(ctx);
-
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
-    expect(savedConfig).not.toHaveProperty('storageBucketGeneration');
   });
 });

@@ -1,6 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { sanitizeBucketName } from '../../../src/lib/providers/hetzner-s3.js';
-import { deriveProjectBucketName } from '../../../src/lib/providers/s3-base.js';
+import {
+  deriveEnvAppBucketName,
+  deriveProjectBucketName,
+} from '../../../src/lib/providers/s3-base.js';
 import { generateBucketSalt } from '../../../src/lib/secrets.js';
 
 describe('deriveProjectBucketName (per-project salt)', () => {
@@ -34,6 +39,116 @@ describe('deriveProjectBucketName (per-project salt)', () => {
   it('keeps the project name as the leading prefix (e2e sweeps filter on it)', () => {
     const name = deriveProjectBucketName({ projectName: 'testapp-rig', bucketSalt: 'ab12cd' });
     expect(name.startsWith('testapp-rig-')).toBe(true);
+  });
+});
+
+describe('deriveProjectBucketName ignores storageBucketGeneration', () => {
+  const project = { projectName: 'myapp', bucketSalt: 'cd9ecc', storageBucketGeneration: 'f00d42' };
+
+  it('derives one stable storage name regardless of storageBucketGeneration', () => {
+    expect(deriveProjectBucketName(project)).toBe('myapp-cd9ecc-storage');
+  });
+
+  it('derives the same backups name', () => {
+    expect(deriveProjectBucketName(project, 'backups')).toBe('myapp-cd9ecc-backups');
+  });
+
+  it('create no longer seeds storageBucketGeneration', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../../src/create.js', import.meta.url)),
+      'utf8',
+    );
+    expect(src).not.toMatch(/storageBucketGeneration/);
+  });
+});
+
+describe('deriveEnvAppBucketName (one app bucket per environment)', () => {
+  const VALID = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
+
+  it('builds <project>-<salt>-<env>-storage', () => {
+    expect(deriveEnvAppBucketName({ projectName: 'myapp', bucketSalt: 'cd9ecc' }, 'staging')).toBe(
+      'myapp-cd9ecc-staging-storage',
+    );
+  });
+
+  it('keeps an unsalted project unsalted', () => {
+    expect(deriveEnvAppBucketName({ projectName: 'old' }, 'prod')).toBe('old-prod-storage');
+  });
+
+  it('gives two environments of one project different buckets', () => {
+    const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
+    expect(deriveEnvAppBucketName(project, 'staging')).not.toBe(
+      deriveEnvAppBucketName(project, 'prod'),
+    );
+  });
+
+  describe('the 63-character boundary', () => {
+    const SALT = 'cd9ecc';
+    // <project>-<salt>-prod-storage is 43 + 1 + 6 + 1 + 4 + 8 = 63 characters.
+    it('keeps the short form at exactly 63 characters', () => {
+      const name = deriveEnvAppBucketName(
+        { projectName: 'a'.repeat(43), bucketSalt: SALT },
+        'prod',
+      );
+      expect(name).toHaveLength(63);
+      expect(name).toBe(`${'a'.repeat(43)}-${SALT}-prod-storage`);
+    });
+
+    it('switches to the hash form at 64 characters', () => {
+      const name = deriveEnvAppBucketName(
+        { projectName: 'a'.repeat(44), bucketSalt: SALT },
+        'prod',
+      );
+      expect(name.length).toBeLessThanOrEqual(63);
+      expect(name).toMatch(/-prod-[0-9a-f]{8}-storage$/);
+    });
+  });
+
+  it('uses the hash form when the env name needed sanitizing, so folded names stay apart', () => {
+    const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
+    const upper = deriveEnvAppBucketName(project, 'Prod_X');
+    const lower = deriveEnvAppBucketName(project, 'prod-x');
+    expect(lower).toBe('myapp-cd9ecc-prod-x-storage');
+    expect(upper).toMatch(/-[0-9a-f]{8}-storage$/);
+    expect(upper).not.toBe(lower);
+    expect(upper).toMatch(VALID);
+  });
+
+  it('throws a clear error when the env is too long for any bucket name', () => {
+    const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
+    expect(() => deriveEnvAppBucketName(project, 'e'.repeat(60))).toThrow(
+      /Environment name "e{60}" is too long for an app bucket name/,
+    );
+  });
+
+  describe('a 63-character project with a 20-character env', () => {
+    const project = { projectName: `p${'a'.repeat(62)}`, bucketSalt: 'cd9ecc' };
+    const envA = `env-a${'x'.repeat(15)}`;
+    const envB = `env-b${'x'.repeat(15)}`;
+
+    it('stays a valid bucket name of 63 characters or fewer', () => {
+      expect(project.projectName).toHaveLength(63);
+      expect(envA).toHaveLength(20);
+      const name = deriveEnvAppBucketName(project, envA);
+      expect(name.length).toBeLessThanOrEqual(63);
+      expect(name.length).toBeGreaterThanOrEqual(3);
+      expect(name).toMatch(VALID);
+    });
+
+    it('keeps the whole env, clips the project and places the hash before -storage', () => {
+      const name = deriveEnvAppBucketName(project, envA);
+      expect(name).toContain(envA);
+      expect(name).toMatch(/-[0-9a-f]{8}-storage$/);
+      expect(name.startsWith('paaa')).toBe(true);
+    });
+
+    it('differs for env-a and env-b', () => {
+      expect(deriveEnvAppBucketName(project, envA)).not.toBe(deriveEnvAppBucketName(project, envB));
+    });
+
+    it('is identical across two calls', () => {
+      expect(deriveEnvAppBucketName(project, envA)).toBe(deriveEnvAppBucketName(project, envA));
+    });
   });
 });
 

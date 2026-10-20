@@ -52,6 +52,10 @@ export function readS3SetupCompleted(cwd, envName) {
  * @param {string} opts.envName
  * @param {boolean} [opts.purgeBackups]
  * @param {boolean} [opts.s3SetupCompleted]  From readS3SetupCompleted.
+ * @param {boolean} [opts.appBucketOwned]  The app bucket is this env's own
+ *   (destroyPreviewBucketFacts); a legacy shared bucket is never deleted.
+ * @param {boolean} [opts.backupBucketHeld]  Another environment still keeps
+ *   backups in the bucket, so -purge removes only this env's folder.
  * @returns {string} the note body
  */
 export function destroyPreviewBody({
@@ -60,6 +64,8 @@ export function destroyPreviewBody({
   envName,
   purgeBackups = false,
   s3SetupCompleted = false,
+  appBucketOwned = true,
+  backupBucketHeld = false,
 }) {
   const finished = envConfig.status === 'deployed';
   const servers = envConfig.servers ?? [];
@@ -90,18 +96,34 @@ export function destroyPreviewBody({
 `
     : '';
 
+  // The env's own app bucket: plain destroy keeps it and its uploads (with
+  // the env's backups), -purge deletes it. A pinned bucket or a legacy
+  // per-project bucket may serve other environments, so destroy never
+  // deletes either (deleteAppBucketEffect).
+  const storageLine = envConfig.s3?.bucketPin
+    ? `${c.success('•')} Bucket: ${envConfig.s3.bucket} (kept: pinned, delete manually)`
+    : !appBucketOwned
+      ? `${c.success('•')} Bucket: ${envConfig.s3?.bucket} (kept: legacy shared bucket, delete manually)`
+      : purgeBackups
+        ? `${c.error('•')} Bucket: ${envConfig.s3?.bucket} (WILL BE DELETED, because you passed -purge)`
+        : `${c.success('•')} Bucket: ${envConfig.s3?.bucket} (kept; deleted with -purge)`;
   const storageBlock = envConfig.s3?.bucket
     ? `${c.bold('S3 Storage:')}
-    ${c.error('•')} Bucket: ${envConfig.s3.bucket} (all objects will be deleted)${mark(bucketsKnown)}
+    ${storageLine}${mark(bucketsKnown)}
 `
     : '';
 
+  // The backup bucket is per project: -purge deletes this env's folder, and
+  // the bucket only with the last environment that keeps backups in it
+  // (handleBackupBucket).
   const backupBlock = envConfig.backupS3?.bucket
     ? `${c.bold('S3 Backups:')}
     ${
-      purgeBackups
-        ? `${c.error('•')} Bucket: ${envConfig.backupS3.bucket} (WILL BE DELETED, because you passed -purge)`
-        : `${c.success('•')} Bucket: ${envConfig.backupS3.bucket} (PRESERVED for recovery)`
+      !purgeBackups
+        ? `${c.success('•')} Bucket: ${envConfig.backupS3.bucket} (PRESERVED for recovery)`
+        : backupBucketHeld
+          ? `${c.error('•')} Bucket: ${envConfig.backupS3.bucket} (backups/${projectName}/${envName}/ WILL BE DELETED, because you passed -purge; the bucket stays for the other environments)`
+          : `${c.error('•')} Bucket: ${envConfig.backupS3.bucket} (WILL BE DELETED, because you passed -purge)`
     }${mark(bucketsKnown)}
 `
     : '';

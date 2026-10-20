@@ -25,7 +25,7 @@ import { runAppApiChecks } from '../checks/app-api.js';
 import {
   adminSignIn,
   buildDbHandle,
-  resolveAppBucket,
+  resolveAppStorage,
   resolveSshCheckMasterIp,
   runAppFunctionalChecks,
   smtpConfiguredFromEnv,
@@ -1881,7 +1881,8 @@ export async function runLifecycle(
           smtpConfigured: adminCreds.smtpConfigured,
           // The upload check asserts the app presigns against the bucket deploy
           // created and configured CORS on (2026-10-20 verify-restore CORS 403).
-          appBucket: resolveAppBucket(config.projectDir, config.envPrefix),
+          // The settle gate runs inside that check, before its first upload.
+          appStorage: resolveAppStorage(config.projectDir, config.envPrefix),
         });
         allResults.push(...appResults);
 

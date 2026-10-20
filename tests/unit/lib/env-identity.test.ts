@@ -3,8 +3,8 @@ import { ENV_IDENTITY_FIELDS, envIdentityOf } from '../../../src/lib/env-identit
 
 /**
  * The fields of an environment that describe WHAT it is (placement, domain,
- * DNS, backup bucket, server sizing) as opposed to what currently EXISTS
- * (servers, live storage bucket, deploy state). destroy records the former
+ * DNS, its app and backup buckets, server sizing) as opposed to what
+ * currently EXISTS (servers, state bucket, deploy state). destroy records the former
  * under `destroyedEnvironments.<env>` so a redeploy of the same name starts
  * from them instead of a hand-typed JSON block (region-move runbook,
  * 2026-09-15); deploy reads it back and clears it once the env is live.
@@ -28,7 +28,14 @@ describe('envIdentityOf', () => {
     // runtime — must NOT carry over
     status: 'deployed',
     servers: [{ name: 'master', id: '1', ip: '5.161.241.125' }],
-    s3: { bucket: 'proj-abc-storage-7b6f58', stateBucket: 'x-pulumi-state-c86bb1' },
+    // the app bucket a plain destroy keeps; its state bucket and endpoint are runtime
+    s3: {
+      bucket: 'proj-abc-prod-storage',
+      region: 'fsn1',
+      endpoint: 'https://fsn1.x',
+      stateBucket: 'x-pulumi-state-c86bb1',
+      bucketCreatedAt: '2026-08-30T15:20:00Z',
+    },
     deployedAt: '2026-08-30T15:30:41Z',
     deployedCommit: 'edd67e5',
     lastAttempt: '2026-08-30T15:29:56Z',
@@ -54,15 +61,15 @@ describe('envIdentityOf', () => {
       masterServerType: 'cpx22',
       dbServerType: 'cpx32',
       workerServerType: 'cpx22',
+      s3: { bucket: 'proj-abc-prod-storage', region: 'fsn1' },
     });
   });
 
-  it('drops every runtime field (servers, live storage bucket, deploy state, HA topology)', () => {
+  it('drops every runtime field (servers, state bucket, deploy state, HA topology)', () => {
     const id = envIdentityOf(live) as Record<string, unknown>;
     for (const k of [
       'status',
       'servers',
-      's3',
       'deployedAt',
       'deployedCommit',
       'lastAttempt',
@@ -81,9 +88,15 @@ describe('envIdentityOf', () => {
     });
   });
 
-  it('the allowlist is explicit and never includes the live storage bucket', () => {
+  it('keeps a bucket pin with the app bucket', () => {
+    expect(
+      envIdentityOf({ s3: { bucket: 'old-uploads', bucketPin: 'old-uploads', stateBucket: 'x' } }),
+    ).toEqual({ s3: { bucket: 'old-uploads', bucketPin: 'old-uploads' } });
+  });
+
+  it('the allowlist is explicit: the kept app bucket is identity, the servers are not', () => {
     expect(ENV_IDENTITY_FIELDS).toContain('backupS3');
-    expect(ENV_IDENTITY_FIELDS).not.toContain('s3');
+    expect(ENV_IDENTITY_FIELDS).toContain('s3');
     expect(ENV_IDENTITY_FIELDS).not.toContain('servers');
   });
 });
@@ -120,6 +133,25 @@ describe('resolveEnvSeed (deploy-side read)', () => {
     // destroyedAt is bookkeeping, not env config — it must not leak into the
     // block deploy persists.
     expect(r.envConfig).not.toHaveProperty('destroyedAt');
+  });
+
+  it('keeps backupsPurged (destroy bookkeeping) out of the seed', async () => {
+    const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+    const r = resolveEnvSeed(
+      {
+        environments: {},
+        destroyedEnvironments: {
+          staging: {
+            region: 'nbg1',
+            backupS3: { bucket: 'b' },
+            backupsPurged: true,
+            destroyedAt: 'x',
+          },
+        },
+      },
+      'staging',
+    );
+    expect(r.envConfig).toEqual({ region: 'nbg1', backupS3: { bucket: 'b' } });
   });
 
   it('returns an empty block for a name that never existed', async () => {

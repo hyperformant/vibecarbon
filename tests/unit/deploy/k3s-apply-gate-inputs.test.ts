@@ -144,3 +144,24 @@ describe('deployK3s feeds the pilot-light role into the k3s-apply gate', () => {
     expect(gateCall.slice(0, gateCall.indexOf('});'))).toMatch(/\n\s+role: options\.role,\n/);
   });
 });
+
+// Nothing k3s-apply renders carries the environment name (the k8s Secret has
+// no VC_ENV; the WAL-G prefix is rendered from walgPrefix, constant per env),
+// so the environment is not a gate input, and there is no key prefix either.
+describe('buildK3sApplyInputs — no environment or key prefix input', () => {
+  const base = { imageTag: 'r:5000/app:abc', dbImageTag: 'db:v1', projectDir: tmpdir() };
+
+  it('records neither environment nor keyPrefix', () => {
+    const inputs = buildK3sApplyInputs(base);
+    expect(inputs).not.toHaveProperty('environment');
+    expect(inputs).not.toHaveProperty('keyPrefix');
+  });
+
+  it('deployK3s does not pass an environment to the gate', () => {
+    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
+    const args = gateCall.slice(0, gateCall.indexOf('});'));
+    expect(args).not.toMatch(/environment:/);
+  });
+});

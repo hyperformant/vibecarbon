@@ -22,6 +22,7 @@
  * same posture is a reasonable default for any S3-compatible backend.
  */
 
+import { createHash } from 'node:crypto';
 import {
   AbortMultipartUploadCommand,
   CopyObjectCommand,
@@ -29,6 +30,7 @@ import {
   DeleteBucketCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
+  GetBucketCorsCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListBucketsCommand,
@@ -294,6 +296,25 @@ export class S3CompatibleProvider {
       name: bucket.Name,
       creationDate: bucket.CreationDate,
     }));
+  }
+
+  /**
+   * When a bucket was created, from ListBuckets' CreationDate. Null on any
+   * error, an unlisted bucket or a missing date: callers treat an unknown
+   * age as a young bucket, so this never needs to throw.
+   *
+   * @param {string} bucketName
+   * @returns {Promise<Date|null>}
+   */
+  async bucketCreatedAt(bucketName) {
+    try {
+      const found = (await this.listBuckets()).find((b) => b.name === bucketName);
+      if (!found?.creationDate) return null;
+      const date = new Date(found.creationDate);
+      return Number.isNaN(date.getTime()) ? null : date;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -687,6 +708,58 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * Delete every object under one key prefix, leaving the rest of the bucket
+   * alone. This is how destroy removes one environment's folder from a bucket
+   * it shares with other environments, such as its backup folder.
+   *
+   * SECURITY: a prefix that is empty, only slashes, or not `/`-terminated is
+   * refused before any request. Each of those would match more than one
+   * environment's keys (`prod` also matches `prod-eu/`), and the empty one
+   * matches the whole bucket.
+   *
+   * @param {string} bucketName
+   * @param {string} prefix - e.g. `staging/`
+   * @returns {Promise<{objectsRemoved: number}>}
+   */
+  async deletePrefix(bucketName, prefix) {
+    if (typeof prefix !== 'string' || !prefix.endsWith('/') || /^\/+$/.test(prefix)) {
+      throw new Error(
+        `Refusing to delete under key prefix ${JSON.stringify(prefix)} in ${bucketName}: a prefix must be a non-empty path ending in "/"`,
+      );
+    }
+    const BATCH = 1000;
+    let objectsRemoved = 0;
+    let continuationToken;
+    do {
+      const listResult = await this._send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      const keys = (listResult.Contents || []).map((obj) => ({ Key: obj.Key }));
+      for (let i = 0; i < keys.length; i += BATCH) {
+        const batch = keys.slice(i, i + BATCH);
+        const res = await this._send(
+          new DeleteObjectsCommand({ Bucket: bucketName, Delete: { Objects: batch } }),
+        );
+        // DeleteObjects answers 200 even when some keys failed; those come
+        // back in Errors, and counting them as removed would hide survivors.
+        const failed = res?.Errors ?? [];
+        if (failed.length > 0) {
+          throw new Error(
+            `${failed.length} object(s) under ${prefix} in ${bucketName} were not deleted (first: ${failed[0].Key}: ${failed[0].Code || failed[0].Message})`,
+          );
+        }
+        objectsRemoved += batch.length;
+      }
+      continuationToken = listResult.IsTruncated ? listResult.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return { objectsRemoved };
+  }
+
+  /**
    * Empty all objects from a bucket and then delete it.
    * Handles current objects, versioned objects/delete markers, and incomplete
    * multipart uploads.
@@ -934,6 +1007,29 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * Every origin the bucket's CORS rules allow today. Deploy reads this to
+   * skip the PUT when the rule already equals the environment's origins.
+   * A bucket with no rule yet answers NoSuchCORSConfiguration (or a bare 404
+   * on some providers); that is an empty list, not an error. Anything else
+   * throws, so the caller treats the rule as unknown. That includes
+   * NoSuchBucket, which a young Hetzner bucket answers transiently even
+   * though it exists.
+   * @param {string} bucketName - Bucket name
+   * @returns {Promise<string[]>}
+   */
+  async getBucketCorsOrigins(bucketName) {
+    try {
+      const result = await this._send(new GetBucketCorsCommand({ Bucket: bucketName }));
+      return (result?.CORSRules ?? []).flatMap((rule) => rule.AllowedOrigins ?? []);
+    } catch (err) {
+      const name = err?.name ?? err?.Code ?? '';
+      if (name === 'NoSuchCORSConfiguration') return [];
+      if (err?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket') return [];
+      throw err;
+    }
+  }
+
+  /**
    * Get the S3 endpoint URL for this region
    * @returns {string}
    */
@@ -989,34 +1085,27 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
 }
 
 /**
- * Derive the dedicated Pulumi-state bucket name from the app storage bucket
- * name. Pulumi state used to live in the app storage bucket, which created a
- * destroy-time circular hazard (deleting the storage bucket nuked the state
- * backend mid-destroy). State now lives in a separate bucket derived once,
- * deterministically, from the app bucket — so the derivation is stable across
- * deploy / scale / destroy and identical for both HA stacks (they share one
- * state bucket).
+ * A bucket pin is REJECTED rather than rewritten: the operator chose this exact
+ * name, and deploying under a different one than they wrote is worse than
+ * telling them to fix it. Same rules sanitizeBucketName enforces.
  *
- * GENERATION (2026-08-07): when the project carries a
- * `stateBucketGeneration`, it is embedded in the name and ROTATED by a
- * verified destroy — so a redeploy after destroy derives a FRESH state-bucket
- * name instead of recreating the deleted one. Hetzner Object Storage can ack
- * writes against a just-deleted-and-recreated same-name bucket and then lose
- * them (e4 restore→failover, 2026-08-07: the standby's up succeeded, its
- * state was gone from the bucket 45+ minutes later — not staleness, loss).
- * Persisted names always win over derivation, so live environments are
- * untouched by a rotation; only future derivations move.
- *
- * The generation suffix must SURVIVE the 63-char clip (a tail `.slice` would
- * eat it on long project names — observed as `…-storage-pulumi-stat`), so the
- * BASE is clipped and the functional suffix is preserved whole.
- *
- * @param {string} appBucketName - The app storage bucket (e.g. `myapp-storage`)
- * @param {string} [generation] - 6-hex state-bucket generation; omitted for
- *   legacy projects (pre-generation names remain byte-stable)
- * @returns {string} - Valid state bucket name (e.g.
- *   `myapp-storage-pulumi-state-a1b2c3`)
+ * @param {unknown} value
+ * @param {string} what - e.g. `stateBucket pin`, shown after "Invalid"
+ * @param {string} entry - the .vibecarbon.json entry to fix
+ * @returns {string}
  */
+export function assertBucketPin(value, what, entry) {
+  const pin = String(value);
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(pin)) {
+    throw new Error(
+      `Invalid ${what} ${JSON.stringify(value)} in .vibecarbon.json: bucket ` +
+        'names must be 3-63 chars of lowercase letters, digits and hyphens, starting and ' +
+        `ending alphanumeric. Fix or remove the "${entry}" entry.`,
+    );
+  }
+  return pin;
+}
+
 /**
  * Pick the Pulumi state bucket for an environment, in precedence order.
  *
@@ -1032,17 +1121,19 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
  *      bucket is the worst window for state-backend staleness and throttling,
  *      and a real customer's bucket is warm by the time it matters.
  *   3. `retained` — the bucket the last `destroy` KEPT (project-level
- *      `retainedStateBucket`). Derivation embeds the app bucket name, which
- *      destroy rotates, so without this handoff every destroy→deploy cycle
+ *      `retainedStateBucket`). Destroy used to rotate the bucket name the
+ *      derivation embeds, so without this handoff every destroy→deploy cycle
  *      derived a fresh name and orphaned the kept bucket (vibecarbon-web
- *      2026-09-15). Recorded by retainStateBucket, cleared by `-purge`.
- *   4. Derivation from the app bucket name.
+ *      2026-09-15). The project base is stable now; the handoff still
+ *      covers a bucket derived under an older name. Recorded by
+ *      retainStateBucket, cleared by `-purge`.
+ *   4. Derivation from the project base (projectStateBucketBase).
  *
  * @param {object} args
  * @param {string} [args.envStateBucket]
  * @param {string} [args.projectPin]
  * @param {string} [args.retained]
- * @param {string} args.appBucket
+ * @param {string} args.projectBase - projectStateBucketBase(projectConfig)
  * @param {string} [args.generation]
  * @returns {string}
  */
@@ -1050,7 +1141,7 @@ export function resolveStateBucketName({
   envStateBucket,
   projectPin,
   retained,
-  appBucket,
+  projectBase,
   generation,
 }) {
   if (envStateBucket) return envStateBucket;
@@ -1064,23 +1155,49 @@ export function resolveStateBucketName({
     // but a pin is REJECTED rather than silently rewritten: the operator chose
     // this exact name, and deploying under a different one than they wrote is
     // worse than telling them to fix it.
-    const pin = String(projectPin);
-    if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(pin)) {
-      throw new Error(
-        `Invalid stateBucket pin ${JSON.stringify(projectPin)} in .vibecarbon.json: bucket ` +
-          'names must be 3-63 chars of lowercase letters, digits and hyphens, starting and ' +
-          'ending alphanumeric. Fix or remove the "stateBucket" entry.',
-      );
-    }
-    return pin;
+    return assertBucketPin(projectPin, 'stateBucket pin', 'stateBucket');
   }
   if (retained) return retained;
-  return deriveStateBucketName(appBucket, generation);
+  return deriveStateBucketName(projectBase, generation);
 }
 
-export function deriveStateBucketName(appBucketName, generation) {
+/**
+ * Derive the dedicated Pulumi-state bucket name from the project base name
+ * (`projectStateBucketBase`, `<project>-<salt>-storage`). Pulumi state used to
+ * live in the app storage bucket, which created a destroy-time circular hazard
+ * (deleting the storage bucket nuked the state backend mid-destroy). State now
+ * lives in a separate, per-project bucket derived once, deterministically, from
+ * that base, so the derivation is stable across deploy / scale / destroy and
+ * identical for every environment and both HA stacks (they share one state
+ * bucket). The base is NOT the per-environment app bucket
+ * (deriveEnvAppBucketName). An older CLI may have derived a different name, so
+ * a deployed environment keeps its bucket through its persisted
+ * `s3.stateBucket` (resolveStateBucketName rule 1), not through this function.
+ *
+ * GENERATION (2026-08-07): when the project carries a
+ * `stateBucketGeneration`, it is embedded in the name and ROTATED when a
+ * last-environment `destroy -purge` deletes the derived bucket — so the next
+ * deploy derives a FRESH state-bucket name instead of recreating the deleted
+ * one. A plain destroy keeps the bucket and leaves the generation alone. Hetzner Object Storage can ack
+ * writes against a just-deleted-and-recreated same-name bucket and then lose
+ * them (e4 restore→failover, 2026-08-07: the standby's up succeeded, its
+ * state was gone from the bucket 45+ minutes later — not staleness, loss).
+ * Persisted names always win over derivation, so live environments are
+ * untouched by a rotation; only future derivations move.
+ *
+ * The generation suffix must SURVIVE the 63-char clip (a tail `.slice` would
+ * eat it on long project names — observed as `…-storage-pulumi-stat`), so the
+ * BASE is clipped and the functional suffix is preserved whole.
+ *
+ * @param {string} projectBaseName - The project base (e.g. `myapp-cd9ecc-storage`)
+ * @param {string} [generation] - 6-hex state-bucket generation; omitted for
+ *   legacy projects (pre-generation names remain byte-stable)
+ * @returns {string} - Valid state bucket name (e.g.
+ *   `myapp-storage-pulumi-state-a1b2c3`)
+ */
+export function deriveStateBucketName(projectBaseName, generation) {
   const suffix = generation ? `pulumi-state-${generation}` : 'pulumi-state';
-  const clipped = appBucketName.slice(0, Math.max(3, 63 - suffix.length - 1));
+  const clipped = projectBaseName.slice(0, Math.max(3, 63 - suffix.length - 1));
   return sanitizeBucketName(clipped, suffix);
 }
 
@@ -1107,22 +1224,67 @@ export function deriveProjectBucketName(projectConfig, suffix = 'storage') {
   const base = projectConfig.bucketSalt
     ? `${projectConfig.projectName}-${projectConfig.bucketSalt}`
     : projectConfig.projectName;
-  // STORAGE generation (2026-08-17, registry-500 RCA run 32013980356): a
-  // purge-destroy deletes the storage bucket and a redeploy used to recreate
-  // it under the SAME name — Hetzner's delete→recreate propagation worst
-  // case, which flapped NoSuchBucket at the in-cluster registry for >10
-  // minutes. The generation (seeded by `create`, rotated by a verified
-  // destroy that actually deleted the bucket) makes every recreate a FRESH
-  // name. Persisted env bucket names win over derivation, so live
-  // environments never move; legacy projects without the key keep their
-  // byte-stable names. STORAGE ONLY: the backups bucket must keep its stable
-  // name — restore finds its wal-g backups by it right after a destroy.
-  // Clip-safe like deriveStateBucketName: the functional tail survives the
-  // 63-char limit on long project names.
-  if (suffix === 'storage' && projectConfig.storageBucketGeneration) {
-    const genSuffix = `storage-${projectConfig.storageBucketGeneration}`;
-    const clipped = base.slice(0, Math.max(3, 63 - genSuffix.length - 1));
-    return sanitizeBucketName(clipped, genSuffix);
-  }
   return sanitizeBucketName(base, suffix);
+}
+
+/**
+ * The per-project base the Pulumi state bucket name derives from
+ * (deriveStateBucketName): `<project>-<salt>-storage`, independent of the
+ * per-environment app bucket. It does NOT reproduce every older derivation
+ * (main derived from the persisted app bucket, `...-storage-<gen>` for a
+ * project with a bucket generation), so a live environment keeps its
+ * state bucket through the PERSISTED `s3.stateBucket` that deploy carries
+ * (resolveStateBucketName rule 1), never through this base.
+ *
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @returns {string}
+ */
+export function projectStateBucketBase(projectConfig) {
+  return deriveProjectBucketName(projectConfig, 'storage');
+}
+
+const APP_BUCKET_SUFFIX = 'storage';
+const MAX_BUCKET_NAME = 63;
+
+/**
+ * The app uploads bucket of one environment: `<project>-<salt>-<env>-storage`
+ * (`<project>-<env>-storage` for a project created before the salt existed).
+ *
+ * A pure function of (projectName, bucketSalt, envName), so an environment
+ * resolves the same bucket on every deploy, including after a plain destroy.
+ *
+ * When that does not fit in 63 characters, the project part is clipped and an
+ * 8-hex hash of sha256(projectName \0 salt \0 env) goes before `-storage`.
+ * The env segment is never clipped, so two environments never collide; the
+ * hash form is also used when the env itself needed sanitizing, because
+ * sanitizing could fold two env names together.
+ *
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @param {string} envName
+ * @returns {string}
+ */
+export function deriveEnvAppBucketName(projectConfig, envName) {
+  const { projectName, bucketSalt } = projectConfig;
+  const env = sanitizeBucketName(envName, '');
+  const salt = bucketSalt ? sanitizeBucketName(bucketSalt, '') : '';
+  const tail = [salt, env].filter(Boolean).join('-');
+  const full = sanitizeBucketName(`${projectName}-${tail}`, '');
+  if (env === envName && full.length + 1 + APP_BUCKET_SUFFIX.length <= MAX_BUCKET_NAME) {
+    return `${full}-${APP_BUCKET_SUFFIX}`;
+  }
+  const hash = createHash('sha256')
+    .update(`${projectName}\0${bucketSalt ?? ''}\0${envName}`)
+    .digest('hex')
+    .slice(0, 8);
+  const fixed = `${tail}-${hash}-${APP_BUCKET_SUFFIX}`;
+  const room = MAX_BUCKET_NAME - fixed.length - 1;
+  if (room < 0) {
+    throw new Error(
+      `Environment name "${envName}" is too long for an app bucket name: ` +
+        `"${fixed}" alone is ${fixed.length} characters and bucket names allow ${MAX_BUCKET_NAME}. ` +
+        'Use a shorter environment name.',
+    );
+  }
+  const project = sanitizeBucketName(projectName, '').slice(0, room).replace(/-+$/, '');
+  return project ? `${project}-${fixed}` : fixed;
 }

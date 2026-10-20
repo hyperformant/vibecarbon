@@ -27,7 +27,11 @@ import {
   providerIdFor,
   resolveS3RegionFor,
 } from '../providers/index.js';
-import { deriveProjectBucketName } from '../providers/s3-base.js';
+import {
+  assertBucketPin,
+  deriveEnvAppBucketName,
+  deriveProjectBucketName,
+} from '../providers/s3-base.js';
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
@@ -469,33 +473,62 @@ async function verifyObjectStorageKeys(s3Provider, source) {
 }
 
 /**
- * The app-storage and backup bucket names a deploy of `envConfig` uses.
- *
- * Persisted names first: once an environment has deployed, its bucket names
- * are frozen in .vibecarbon.json and renaming the project (or adding a salt
- * to an old project) must not silently re-point wal-g/Pulumi at buckets that
- * don't exist. Fresh derivations embed the per-project bucketSalt (created
- * projects since 2026-08) to keep names globally unique across customers,
- * and the storage name embeds `storageBucketGeneration`, which destroy
- * rotates when it deletes the app bucket.
- *
- * After a destroy, `envConfig` is the destroyedEnvironments identity seed,
- * which carries `backupS3` (restore reads its backups there) but never `s3`
- * (ENV_IDENTITY_FIELDS in lib/env-identity.js), so the app bucket name is
- * re-derived under the rotated generation. Every consumer of the app bucket
- * (bucket creation, the CORS rule, the server .env, the k8s Secret) reads
- * this one value through gatheredConfig.s3Config.bucket; the value-flow test
- * in tests/unit/deploy/destroy-redeploy-bucket-flow.test.ts pins that.
- *
- * @param {{ s3?: { bucket?: string }, backupS3?: { bucket?: string } }} envConfig
- * @param {{ projectName: string, bucketSalt?: string, storageBucketGeneration?: string }} projectConfig
- * @returns {{ bucketName: string, backupBucketName: string }}
+ * An environment's persisted app bucket disagrees with the bucket derived for
+ * that environment. Built from names only, so it is safe to print.
  */
-export function resolveEnvBucketNames(envConfig, projectConfig) {
+export class StorageBucketMismatchError extends Error {
+  constructor(envName, persisted, expected) {
+    super(
+      `Environment "${envName}" is configured for bucket "${persisted}", but its app bucket is now "${expected}" (one bucket per environment). ` +
+        `To keep using the old bucket, set environments.${envName}.s3.bucketPin to "${persisted}" in .vibecarbon.json. ` +
+        `Or copy the objects across and redeploy: for a bucket that kept this environment's files under "${envName}/" run ` +
+        `aws s3 sync s3://${persisted}/${envName}/ s3://${expected}/, ` +
+        `for one that kept them at the root run aws s3 sync s3://${persisted} s3://${expected}; ` +
+        `then clear environments.${envName}.s3.bucket.`,
+    );
+    this.name = 'StorageBucketMismatchError';
+  }
+}
+
+/**
+ * Where a deploy of `envName` keeps its objects.
+ *
+ * Each environment has its own long-lived app bucket, derived from the project
+ * name, bucketSalt and env name (deriveEnvAppBucketName); `envConfig.s3.bucketPin`
+ * pins a different one. A persisted `envConfig.s3.bucket` never overrides this;
+ * if it names a different bucket the deploy stops rather than silently
+ * re-pointing the app.
+ *
+ * The backup bucket is per project and keeps its persisted name once an
+ * environment has deployed (restore reads backups there; after a destroy the
+ * identity seed carries `backupS3`). WAL-G archives under `walgPrefix` in it.
+ *
+ * `bucket` is the only source of the app bucket name, so a scoped app key
+ * (security plan, S3 scoping) targets exactly this bucket.
+ *
+ * @param {string} envName already validated by ENV_NAME_FORMAT
+ * @param {{ s3?: { bucket?: string, bucketPin?: string }, backupS3?: { bucket?: string } }} envConfig
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @returns {{ bucket: string, backupBucket: string, walgPrefix: string }}
+ */
+export function resolveEnvStorage(envName, envConfig, projectConfig) {
+  const pin = envConfig.s3?.bucketPin;
+  const bucket =
+    pin !== undefined && pin !== null
+      ? assertBucketPin(
+          pin,
+          `bucketPin for environment "${envName}"`,
+          `environments.${envName}.s3.bucketPin`,
+        )
+      : deriveEnvAppBucketName(projectConfig, envName);
+  const persisted = envConfig.s3?.bucket;
+  if (persisted && persisted !== bucket) {
+    throw new StorageBucketMismatchError(envName, persisted, bucket);
+  }
   return {
-    bucketName: envConfig.s3?.bucket || deriveProjectBucketName(projectConfig),
-    backupBucketName:
-      envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
+    bucket,
+    backupBucket: envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
+    walgPrefix: `backups/${projectConfig.projectName}/${envName}/walg`,
   };
 }
 
@@ -981,7 +1014,14 @@ export async function gatherDeploymentConfig(args) {
     dnsZoneId = null;
   }
 
-  const { bucketName, backupBucketName } = resolveEnvBucketNames(envConfig, projectConfig);
+  let storage;
+  try {
+    storage = resolveEnvStorage(config.environment, envConfig, projectConfig);
+  } catch (err) {
+    if (!(err instanceof StorageBucketMismatchError)) throw err;
+    p.log.error(err.message);
+    process.exit(1);
+  }
   const backupConfig = {
     schedule: args.backupSchedule || envConfig.backup?.schedule || '0 */6 * * *',
     retentionDays: Number.parseInt(
@@ -1055,12 +1095,22 @@ export async function gatherDeploymentConfig(args) {
     s3Config: {
       accessKey: s3AccessKey,
       secretKey: s3SecretKey,
-      bucket: bucketName,
+      bucket: storage.bucket,
+      // Carried so the post-deploy save keeps the pin (E6 escape hatch).
+      ...(envConfig.s3?.bucketPin && { bucketPin: envConfig.s3.bucketPin }),
+      // The persisted Pulumi state bucket, so resolveStateBucketName's first
+      // rule (the env's PERSISTED name) answers. Deriving it fresh on a
+      // redeploy picks an EMPTY bucket wherever an older CLI derived it
+      // differently (main derived from `<project>-<salt>-storage-<sgen>`),
+      // and Pulumi would then plan from empty state. A destroyed env's seed
+      // never carries it (env-identity), so a rebuild derives as before.
+      ...(envConfig.s3?.stateBucket && { stateBucket: envConfig.s3.stateBucket }),
+      walgPrefix: storage.walgPrefix,
       region: s3Region,
       endpoint: s3Provider.getEndpoint(),
     },
     backupS3Config: {
-      bucket: backupBucketName,
+      bucket: storage.backupBucket,
       region: s3Region,
       endpoint: s3Provider.getEndpoint(),
     },

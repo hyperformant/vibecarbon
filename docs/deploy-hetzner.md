@@ -219,11 +219,16 @@ vibecarbon destroy <env>                          # type "<project>-<env>" when 
 vibecarbon destroy <env> -y -confirm <project>-<env>   # scripted
 ```
 
-The backup bucket is preserved (only `-purge` deletes it). The app storage
-bucket *is* deleted and `storageBucketGeneration` is rotated, so the redeploy
-derives a fresh bucket name, and anything in app storage (user uploads,
-avatars) does not come back with the database restore; copy it out first if
-you need it. The Pulumi state bucket is kept and recorded as
+A plain destroy preserves the environment's backups. The backup bucket is
+shared by the project: `-purge` deletes this environment's folder in it
+(`backups/<project>/<env>/`), and the bucket itself only when no other
+environment keeps backups there. Each environment has its own app storage
+bucket (`<project>-<salt>-<env>-storage`), and a plain destroy keeps it with its
+uploads, so a redeploy of the same environment finds them again. `-purge`
+deletes this environment's app bucket and its backup folder together. A bucket
+you pinned with `environments.<env>.s3.bucketPin`, or the one per-project
+bucket (`<project>-<salt>-storage`) that environments deployed by older CLIs
+share, is never deleted by destroy; delete it by hand once nothing uses it. The Pulumi state bucket is kept and recorded as
 `retainedStateBucket` in `.vibecarbon.json`, so the redeploy resumes the same
 warm state backend. (CLIs before that field existed derived a fresh
 `…-pulumi-state-…` name on redeploy and left the kept one behind; if you find

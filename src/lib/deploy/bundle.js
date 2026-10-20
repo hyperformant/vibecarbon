@@ -358,6 +358,9 @@ export function renderBundle(projectName, options = {}) {
     envOverrides.S3_ENDPOINT = options.s3.endpoint;
     envOverrides.S3_BUCKET = options.s3.bucket;
   }
+  if (options.environment) {
+    envOverrides.VC_ENV = options.environment;
+  }
   if (options.backupS3) {
     envOverrides.S3_BACKUP_BUCKET = options.backupS3.bucket;
   }

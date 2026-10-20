@@ -50,6 +50,9 @@ export function zoneToS3Region(zone) {
 }
 
 export class ScalewayObjectStorageProvider extends S3CompatibleProvider {
+  /** No settle window has been observed on a new bucket here. */
+  static bucketSettleWindowMs = 0;
+
   static ENDPOINTS = {
     'fr-par': 'https://s3.fr-par.scw.cloud',
     'nl-ams': 'https://s3.nl-ams.scw.cloud',

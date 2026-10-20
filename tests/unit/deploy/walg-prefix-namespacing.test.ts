@@ -22,7 +22,7 @@ describe('wal-g S3 prefix is a single canonical path (NO role segment)', () => {
     const compose = read('carbon/docker-compose.yml');
     // Canonical prefix ends at /walg (end of line — no trailing /role).
     expect(compose).toMatch(
-      /WALG_S3_PREFIX:\s*s3:\/\/[^\n]*\/backups\/\$\{PROJECT_NAME\}\/walg\s*$/m,
+      /WALG_S3_PREFIX:\s*s3:\/\/[^\n]*\/backups\/\$\{PROJECT_NAME\}\/\$\{VC_ENV:-local\}\/walg\s*$/m,
     );
     // The old role-segmented form must be gone.
     expect(compose).not.toMatch(/walg\/\$\{WALG_ROLE/);
@@ -30,7 +30,7 @@ describe('wal-g S3 prefix is a single canonical path (NO role segment)', () => {
 
   it('k8s buildDbManifestValues builds …/walg with no /<role> segment', () => {
     const k3s = read('src/lib/deploy/k8s/k3s.js');
-    expect(k3s).toMatch(/backups\/\$\{projectName \|\| 'vibecarbon'\}\/walg`/);
+    expect(k3s).toMatch(/s3Config\.walgPrefix/);
     expect(k3s).not.toMatch(/\/walg\/\$\{walgRole\}/);
   });
 });
