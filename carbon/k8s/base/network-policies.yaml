@@ -127,3 +127,36 @@ spec:
           port: 9090
         - protocol: TCP
           port: 3100
+
+---
+# Traefik's side of the /admin/grafana route. Grafana's IngressRoute lives in
+# vibecarbon-observability (beside its Service: Traefik has no
+# allowCrossNamespace), and grafana-policy admits Traefik's ingress there, but
+# traefik-policy only allows egress inside this namespace. A NetworkPolicy
+# path needs both ends, so without this every /admin/grafana request was
+# dropped between Traefik and Grafana and answered 502. Grafana only (port
+# 3000): Prometheus and Loki are never routed publicly. Matches nothing when
+# observability is not installed. Pinned by
+# tests/unit/deploy/traefik-cross-namespace-egress.test.ts.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traefik-observability-egress
+  namespace: vibecarbon
+spec:
+  podSelector:
+    matchLabels:
+      app: vibecarbon-traefik
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vibecarbon-observability
+          podSelector:
+            matchLabels:
+              app: vibecarbon-grafana
+      ports:
+        - protocol: TCP
+          port: 3000
