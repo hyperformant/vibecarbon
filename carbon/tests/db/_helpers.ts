@@ -13,8 +13,9 @@ import pg from 'pg';
  * password never needs URL-encoding:
  *   TEST_DB_HOST      required (e.g. localhost)
  *   TEST_DB_PORT      default 5432
- *   TEST_DB_USER      default postgres (the app's connection role, which
- *                     bypasses RLS and is a member of app_user)
+ *   TEST_DB_USER      default postgres (the owner, which the suites seed data
+ *                     as; the server's DB module connects as app_service,
+ *                     see tests/_helpers/setup-db.ts)
  *   TEST_DB_PASSWORD  POSTGRES_PASSWORD from .env
  *   TEST_DB_NAME      default postgres
  */

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -103,7 +104,7 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
   // the role nor the id may leak to the next request on a pooled connection.
   it('role and user id do not leak to the next query on a pooled connection', async () => {
     await withUserDb(userA.id, (tx) => whoAmI(tx));
-    expect(await whoAmI(adminDb)).toEqual({ role: 'postgres', uid: null });
+    expect(await whoAmI(adminDb)).toEqual({ role: 'app_service', uid: null });
 
     // Every connection in the pool, not just the one the last call reused.
     await Promise.all(
@@ -122,7 +123,7 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
         }),
       ),
     );
-    for (const who of after) expect(who).toEqual({ role: 'postgres', uid: null });
+    for (const who of after) expect(who).toEqual({ role: 'app_service', uid: null });
   });
 
   // Review Focus 2: a throwing callback rolls back and gives the connection
@@ -133,7 +134,9 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
     for (let i = 0; i < 15; i++) {
       await expect(
         withUserDb(userA.id, async (tx) => {
-          await tx.execute(sql`select set_config('role', 'postgres', true)`);
+          // Back to the connection role (app_service, which bypasses RLS):
+          // the write lands, then the throw must roll it back.
+          await tx.execute(sql`select set_config('role', 'app_service', true)`);
           await tx.insert(organizations).values({ name: slug, slug: `${slug}-${i}` });
           throw new Error('boom');
         }),
@@ -157,7 +160,7 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
       ).rejects.toThrow();
     }
     expect(pool.waitingCount).toBe(0);
-    expect(await whoAmI(adminDb)).toEqual({ role: 'postgres', uid: null });
+    expect(await whoAmI(adminDb)).toEqual({ role: 'app_service', uid: null });
   });
 
   it('assertBypassRole accepts the connection role', async () => {
@@ -175,8 +178,16 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
 
   // A role that bypasses RLS but is not a member of app_user would pass the
   // bypass check and then fail every withUserDb call at `set role app_user`.
+  it('withUserDb cannot climb to the owner: app_service is no member of postgres', async () => {
+    await expect(
+      withUserDb(userA.id, (tx) => tx.execute(sql`select set_config('role', 'postgres', true)`)),
+    ).rejects.toMatchObject({ cause: { code: '42501' } });
+  });
+
   it('assertBypassRole refuses a bypass role that is not a member of app_user', async () => {
-    const err = await adminDb
+    // Making a probe role takes the owner; the app role cannot create roles.
+    const owner = drizzle({ client: seed });
+    const err = await owner
       .transaction(async (tx) => {
         await tx.execute(sql`create role t6_bypass_no_member nologin bypassrls`);
         await tx.execute(sql`grant t6_bypass_no_member to current_user`);
@@ -187,7 +198,7 @@ describe.skipIf(!dbTestsEnabled)('db client: withUserDb / adminDb', () => {
     expect(err).toBeInstanceOf(DbRoleError);
     expect((err as Error).message).toMatch(/not a member of app_user/);
     // The transaction rolled back, so the probe role is gone.
-    const { rows } = await adminDb.execute(
+    const { rows } = await owner.execute(
       sql`select 1 from pg_roles where rolname = 't6_bypass_no_member'`,
     );
     expect(rows).toHaveLength(0);

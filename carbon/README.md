@@ -110,7 +110,7 @@ npm run test:prepush    # Lint + unit + component + integration
 # Docker
 npm run docker:up       # Start Postgres, Traefik and local S3
 npm run docker:down     # Stop services
-npm run db:migrate      # Apply pending migrations (the app also does at startup)
+npm run db:migrate      # Apply pending migrations as the owner and set up the app's role
 ```
 
 ## Project Structure
@@ -153,7 +153,7 @@ content/
 └── docs/                    # Documentation pages (MDX with ordering)
 
 db/
-└── migrations/              # Drizzle migrations, applied by the app at startup
+└── migrations/              # Drizzle migrations, applied by the migrate step before the app starts
 ```
 
 </details>

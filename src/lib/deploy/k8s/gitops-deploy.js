@@ -317,6 +317,9 @@ export async function deployK8sGitOps(args) {
 export function buildPerEnvSecrets(envLocal) {
   const infra = {
     DB_PASSWORD: envLocal.DB_PASSWORD,
+    // The app's own database role's password (app_service); the owner
+    // password above reaches only the migrate init container.
+    APP_DB_PASSWORD: envLocal.APP_DB_PASSWORD,
     // The app's session signing key; the app pod envFrom's the Secret.
     BETTER_AUTH_SECRET: envLocal.BETTER_AUTH_SECRET,
     ADMIN_EMAIL: envLocal.ADMIN_EMAIL,

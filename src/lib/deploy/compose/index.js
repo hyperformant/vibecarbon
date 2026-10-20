@@ -774,6 +774,21 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
     } catch (logErr) {
       err.message = `${err.message}\n(failed to capture db logs: ${logErr.message})`;
     }
+    // A failed migration fails app-migrate, which keeps the app from
+    // starting; its log has the one-line cause.
+    try {
+      const migrateLogs = await sshRunAsync(
+        ip,
+        sshKeyPath,
+        `cd ${remoteDir} && docker compose logs app-migrate --tail=30 2>&1 || true`,
+        { timeout: 30_000 },
+      );
+      if (typeof migrateLogs === 'string' && migrateLogs.trim()) {
+        err.message = `${err.message}\n--- app-migrate logs (last 30 lines) ---\n${migrateLogs.trim()}`;
+      }
+    } catch (logErr) {
+      err.message = `${err.message}\n(failed to capture app-migrate logs: ${logErr.message})`;
+    }
     throw err;
   }
 }
@@ -926,7 +941,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       (await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose ps --format '{{.Name}}\\t{{.State}}\\t{{.Status}}' 2>&1 | head -20`,
+        `cd ${remoteDir} && docker compose ps -a --format '{{.Name}}\\t{{.State}}\\t{{.Status}}' 2>&1 | head -20`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   } catch {
@@ -937,7 +952,8 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       (await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose logs --tail=40 app 2>&1 | tail -40`,
+        // app-migrate too: a failed migration stops the app from starting.
+        `cd ${remoteDir} && docker compose logs --tail=40 app-migrate app 2>&1 | tail -60`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   } catch {
@@ -946,15 +962,15 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
   const details =
     `Health probe failed after ${attempts} attempts (last status: ${lastStatus})\n` +
     `--- docker compose ps ---\n${ps.trim()}\n` +
-    `--- app container log tail ---\n${logs.trim()}`;
+    `--- app-migrate and app log tail ---\n${logs.trim()}`;
   return { healthy: false, status: lastStatus, details };
 }
 
 /**
  * Wait until the app reports its migrations applied and its super admin
  * ready (`migrationStatus: 'applied'` and `adminReady: true` on its own
- * /api/health, one probe). The app applies db/migrations itself at startup,
- * then creates the admin from
+ * /api/health, one probe). The app-migrate step applies db/migrations before
+ * the app starts; the app checks the ledger, then creates the admin from
  * ADMIN_EMAIL / ADMIN_PASSWORD, which reach the container through the
  * bundled `app.env` (env_file); the prod overlay refuses to start without them,
  * and deploy's required-env preflight checks them before anything is

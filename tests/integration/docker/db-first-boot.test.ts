@@ -59,6 +59,8 @@ describeDocker('db image first boot with an unreachable backup bucket', () => {
       DB_IMAGE: IMAGE,
       DB_IMAGE_TAG: TAG,
       POSTGRES_PASSWORD: 'first-boot-test',
+      // docker-compose.yml requires it (`:?`) for the app and app-migrate.
+      APP_DB_PASSWORD: 'first-boot-test-app',
       DEV_SUBNET_PREFIX: prefix,
       S3_BUCKET: 'first-boot-test',
       S3_ENDPOINT: 'http://192.0.2.1:9000',

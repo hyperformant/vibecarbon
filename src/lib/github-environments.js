@@ -16,7 +16,7 @@
  * the session 2026-04-20 discussion:
  *   Org-level:       HETZNER_API_TOKEN, CLOUDFLARE_API_TOKEN,
  *                    S3_ACCESS_KEY, S3_SECRET_KEY
- *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, BETTER_AUTH_SECRET,
+ *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, APP_DB_PASSWORD, BETTER_AUTH_SECRET,
  *                    ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*, and the add-ons'
  *                    METABASE_DB_PASSWORD / N8N_DB_PASSWORD when installed
  *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL, DNS_PROVIDER

@@ -19,7 +19,7 @@
     "dev:client": "vite",
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build && tsx scripts/generate-sitemap.ts && tsx scripts/generate-rss.ts && tsx scripts/generate-seo.ts",
-    "build:server": "esbuild src/server/index.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/server/index.js --external:pino --external:pino-pretty --banner:js=\"import{createRequire as __cr}from'module';const require=__cr(import.meta.url);\"",
+    "build:server": "esbuild index=src/server/index.ts migrate-cli=src/server/db/migrate-cli.ts --bundle --platform=node --target=node24 --format=esm --outdir=dist/server --external:pino --external:pino-pretty --banner:js=\"import{createRequire as __cr}from'module';const require=__cr(import.meta.url);\"",
     "start": "node dist/server/index.js",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

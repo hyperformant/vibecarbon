@@ -222,6 +222,7 @@ export function findEnvDrift(cwd = process.cwd()) {
 export const COMPOSE_REQUIRED_ENV_FALLBACK = Object.freeze([
   'ADMIN_EMAIL',
   'ADMIN_PASSWORD',
+  'APP_DB_PASSWORD',
   'BETTER_AUTH_SECRET',
   'POSTGRES_PASSWORD',
 ]);

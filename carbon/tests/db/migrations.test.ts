@@ -10,9 +10,10 @@ import {
   migrationsFolder,
   runMigrations,
   runMigrationsOnOwnConnection,
+  verifyMigrations,
 } from '@server/db/migrate';
 import { getMigrationStatus, setMigrationStatus } from '@server/db/migration-status';
-import { migrateAtStartup } from '@server/db/startup';
+import { verifyMigrationsAtStartup } from '@server/db/startup';
 import { migrationsGate } from '@server/middleware/migrations-gate';
 import { healthRoutes } from '@server/routes/health';
 import { catalogSnapshot } from './_catalog';
@@ -203,29 +204,49 @@ describe.skipIf(!dbTestsEnabled)('runMigrations', () => {
     expect(locks[0].n).toBe(0);
   });
 
-  it('a failing migration leaves health `failed` and the app serving only /api/health', async () => {
-    const folder = writeFolder(root, [{ tag: '0000_bad', sql: 'select * from no_such_table' }]);
+  it('a ledger behind db/migrations leaves health `pending` and the app serving only /api/health', async () => {
+    // The migrate step applies the first migration; the folder already has a
+    // second one, which it has not run yet. The app only reads the ledger.
+    const applied = writeFolder(root, [{ tag: '0000_first', sql: 'create table verify_first (id int)' }]);
     const c = await connect();
-    const errors: unknown[] = [];
-    const status = await migrateAtStartup({
-      run: () => runMigrations(c, folder),
-      log: { info: () => {}, warn: () => {}, error: (...args: unknown[]) => errors.push(args) },
+    await runMigrations(c, applied);
+    const ahead = writeFolder(root, [
+      { tag: '0000_first', sql: 'create table verify_first (id int)' },
+      { tag: '0001_second', sql: 'create table verify_second (id int)' },
+    ]);
+    expect(await verifyMigrations(c, ahead)).toEqual({ upToDate: false });
+
+    setMigrationStatus('pending');
+    let looks = 0;
+    let release: () => void = () => {};
+    const sawPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const infos: unknown[] = [];
+    const status = verifyMigrationsAtStartup({
+      verify: async () => {
+        looks += 1;
+        if (looks === 2) release();
+        // Behind until the test has checked the gate, then current.
+        return looks >= 3 ? { upToDate: true } : verifyMigrations(c, ahead);
+      },
+      log: { info: (...args: unknown[]) => infos.push(args), warn: () => {}, error: () => {} },
       retryMs: 10,
     });
-    expect(status).toBe('failed');
-    expect(getMigrationStatus()).toBe('failed');
-    expect(errors).toHaveLength(1);
+    await sawPending;
+    expect(getMigrationStatus()).toBe('pending');
 
     const app = new Hono();
     app.use('*', migrationsGate());
     app.route('/api/health', healthRoutes);
     app.get('/api/v1/anything', (ctx) => ctx.text('served'));
     const health = await app.request('/api/health');
-    expect(await health.json()).toMatchObject({
-      migrationStatus: 'failed',
-      migrationError: 'SQLSTATE 42P01',
-    });
+    expect(await health.json()).toMatchObject({ migrationStatus: 'pending' });
     expect((await app.request('/api/v1/anything')).status).toBe(503);
     expect((await app.request('/api/health/ready')).status).toBe(503);
+    expect(await status).toBe('applied');
+    // Nothing was applied from `ahead`: the app never migrates.
+    const { rows } = await c.query("select to_regclass('public.verify_second') is null as absent");
+    expect(rows[0].absent).toBe(true);
   });
 });

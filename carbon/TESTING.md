@@ -39,7 +39,7 @@ TEST_DB_HOST=localhost TEST_DB_PASSWORD=<POSTGRES_PASSWORD from .env> npm run te
 
 Only `db` is needed: auth runs inside the app, and its tables come from the migrations.
 
-Optional overrides: `TEST_DB_PORT` (default 5432), `TEST_DB_USER` (default `postgres`, the app's connection role, which bypasses RLS and is a member of `app_user`), `TEST_DB_NAME` (default `postgres`). The suites insert their own users and orgs with random ids and delete them afterwards.
+Optional overrides: `TEST_DB_PORT` (default 5432), `TEST_DB_USER` (default `postgres`, the owner the suites seed data as), `TEST_DB_NAME` (default `postgres`), `TEST_APP_DB_PASSWORD` (default: `APP_DB_PASSWORD` from `.env.local`, which `npm run db:migrate` set on the role). The server's DB module (`adminDb`, `withUserDb`) connects as the app does, as `app_service`, so a server path missing a privilege fails here with `42501`. The suites insert their own users and orgs with random ids and delete them afterwards.
 
 When you are done, tear the stack down (`-v` drops the database volume):
 

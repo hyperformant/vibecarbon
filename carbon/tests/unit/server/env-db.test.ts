@@ -42,11 +42,11 @@ afterEach(() => {
 });
 
 describe('env DB_* connection vars', () => {
-  it('defaults DB_PORT to 5432 and DB_USER / DB_NAME to postgres', async () => {
+  it('defaults DB_PORT to 5432, DB_USER to app_service and DB_NAME to postgres', async () => {
     const env = await loadEnv({});
     expect(env.DB_HOST).toBe('db.internal');
     expect(env.DB_PORT).toBe(5432);
-    expect(env.DB_USER).toBe('postgres');
+    expect(env.DB_USER).toBe('app_service');
     expect(env.DB_NAME).toBe('postgres');
     expect(env.DB_PASSWORD).toBe('pw');
   });

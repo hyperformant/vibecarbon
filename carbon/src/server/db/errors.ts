@@ -108,3 +108,43 @@ export function dbErrorMessage(err: unknown): string | undefined {
   const safe = dbErrorForLog(err);
   return safe !== err ? (safe as DbErrorLog).message : undefined;
 }
+
+// Connection loss only: the database went away or refused us. These are a
+// dependency wait (the db container restarting, a failover), not a failure:
+// startup, the admin bootstrap and the migrate step all wait them out. Node
+// errno codes for the socket, SQLSTATE class 08 (connection exception) and
+// 57P01-03 (admin/crash shutdown, cannot connect now).
+const CONNECTION_ERRNO = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+const CONNECTION_SQLSTATE = new Set(['57P01', '57P02', '57P03']);
+
+/**
+ * True when an error is the connection to Postgres dropping or being
+ * refused. Looks through Drizzle's (and Better Auth's) `cause` wrapping.
+ * Lives here, not in startup.ts, so the migrate step (migrate-cli.ts) can use
+ * it without loading the app's env and pool.
+ */
+export function isConnectionLoss(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string') {
+      if (CONNECTION_ERRNO.has(code) || CONNECTION_SQLSTATE.has(code) || code.startsWith('08')) {
+        return true;
+      }
+    } else if (/^Connection terminated/.test(current.message)) {
+      // node-pg raises "Connection terminated (unexpectedly)" with no code at
+      // all when the server closes the socket mid-query. Matched only when
+      // there is no code, as the same dependency wait as the codes above.
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}

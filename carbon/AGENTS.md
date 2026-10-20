@@ -37,7 +37,7 @@ npm run test:prepush    # What the pre-push git hook runs
 npm run docker:up       # Start the local services (Postgres, Traefik, S3)
 npm run docker:down     # Stop services
 npm run docker:reset    # Remove containers, volumes, and built images
-npm run db:migrate      # Apply pending database migrations (the app also does at startup)
+npm run db:migrate      # Apply pending database migrations as the owner (the app never migrates)
 ```
 
 ## Architecture
@@ -62,7 +62,7 @@ src/
 │   └── lib/                 # auth.ts (isSuperAdmin), env.ts, email.ts, stripe.ts, logger.ts, rate-limiter.ts, seo.ts
 ├── shared/                  # Shared TypeScript types (types.ts, pricing.ts)
 content/                     # MDX content (blog/, changelog/, docs/)
-db/migrations/               # Drizzle migrations, applied by the app at startup (see Changing the Database Schema)
+db/migrations/               # Drizzle migrations, applied by the migrate step (see Changing the Database Schema)
 ```
 
 ### API Routes
@@ -169,7 +169,7 @@ Set `VITE_PROJECT_NAME` to your project name; it supplies the logo images' `alt`
 
 ### Changing the Database Schema
 
-`src/server/db/schema.ts` is the source of truth for tables, columns, constraints, indexes, foreign keys and RLS policies (`pgPolicy`, with `appUser` from the same file for `to: appUser`). `drizzle-kit` turns a change there into a SQL migration in `db/migrations/`, and **the app applies pending migrations itself at startup** (`src/server/db/migrate.ts`, under a Postgres advisory lock so replicas take turns, ledger in `drizzle.__drizzle_migrations`). Nothing else applies migrations: no deploy step, no psql. `npm run db:migrate` runs the same code locally. Until migrations are applied the server answers every route except `/api/health` with 503, and `/api/health` reports `migrationStatus` (`pending | applied | failed`); a failed migration is final for that boot, so fix it and restart.
+`src/server/db/schema.ts` is the source of truth for tables, columns, constraints, indexes, foreign keys and RLS policies (`pgPolicy`, with `appUser` from the same file for `to: appUser`). `drizzle-kit` turns a change there into a SQL migration in `db/migrations/`, and **the migrate step applies pending migrations, as the owner `postgres`, before the app starts** (`src/server/db/migrate-cli.ts`: the compose `app-migrate` one-shot, the k8s `migrate` init container, and `npm run db:migrate` locally; under a Postgres advisory lock so replicas take turns, ledger in `drizzle.__drizzle_migrations`). The same step creates or updates the app's own role, `app_service` (`src/server/db/app-service-role.ts`), with `APP_DB_PASSWORD`. The app connects as `app_service` and never holds the owner password: it only checks the ledger at startup, and until it is current the server answers every route except `/api/health` with 503 and `/api/health` reports `migrationStatus` (`pending | applied | failed`). A failed migration fails the migrate step, so the app does not start; fix it and deploy again.
 
 1. **Tables, columns, indexes, policies**: edit `schema.ts`, then
    ```bash
@@ -396,7 +396,7 @@ Two cookies, two jobs — never merge them (spec `2026-07-24-session-cookie-spli
 
 **Why this is load-bearing:** every user request's queries run through `withUserDb` as role `app_user`. RLS is what stands between one tenant's rows and another's — a missing or under-scoped policy is a live data breach, not a theoretical one. Enable RLS + write policies in the **same migration** that creates the table, before it ships.
 
-- **MUST** enable RLS on every new table: give it `pgPolicy(...)` entries in `schema.ts` (which enables RLS), or `.enableRLS()` for a server-only table with no policies. RLS on with no policies is what makes a table server-only: after every migration run the runner calls `app.revoke_server_only_tables()` (`src/server/db/migrate.ts`), which takes every privilege on such a table from every role but superusers and its owner, `app_user` and the RLS-bypass add-on roles (Metabase, n8n) included. Nothing to write in the migration. The flip side: a table that later gains its first policy does not get the add-on grants back; rerun the add-on init script (`vibecarbon up` locally) or grant them by hand
+- **MUST** enable RLS on every new table: give it `pgPolicy(...)` entries in `schema.ts` (which enables RLS), or `.enableRLS()` for a server-only table with no policies. RLS on with no policies is what makes a table server-only: after every migration run the runner calls `app.revoke_server_only_tables()` (`src/server/db/migrate.ts`), which takes every privilege on such a table from every role but superusers, its owner and the app's own role `app_service`, `app_user` and the RLS-bypass add-on roles (Metabase, n8n) included. Nothing to write in the migration. The flip side: a table that later gains its first policy does not get the add-on grants back; rerun the add-on init script (`vibecarbon up` locally) or grant them by hand
 - **MUST** give every `UPDATE`/`INSERT` policy a `WITH CHECK` that mirrors the full scope of its `USING`. Postgres evaluates `USING` (which rows you may target) and `WITH CHECK` (what the row may become) **independently** — a `WITH CHECK` that drops the org/owner scope lets a user rewrite a row they can see into a tenant they cannot, a cross-tenant takeover. Never rely on the implicit `WITH CHECK = USING` default for a boundary column.
 - **MUST** use `(SELECT app.user_id())` in RLS policies, not bare `app.user_id()` — the subquery form prevents the query planner from re-evaluating per row. User requests run as role `app_user` with `app.user_id` set for the transaction (`NULL` when anonymous); `auth.uid()` is never set on that path, so a policy reading it silently matches nothing
 - **MUST** read roles in policies via `is_super_admin()`, which reads the caller's server-controlled `"user".role` (SECURITY DEFINER, since `app_user` cannot read the auth tables)

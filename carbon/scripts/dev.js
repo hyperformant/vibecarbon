@@ -143,12 +143,28 @@ const names = new Map();
 // for these dev tool processes — tsx/vite write their own logs, not via npm.
 const childEnv = { ...process.env, npm_config_loglevel: 'error' };
 
+// The API server connects as the app's own database role, app_service, as
+// it does on every deploy: never as the owner, whose password .env.local also
+// holds for `npm run db:migrate` (which creates the role). Set here rather
+// than in .env.local because DB_PASSWORD there is the owner password the
+// deploy reads. Variables already in the environment win over --env-file.
+function appDbEnv() {
+  const appPassword = process.env.APP_DB_PASSWORD || readEnvFiles(process.cwd()).APP_DB_PASSWORD;
+  if (!appPassword) {
+    console.error(
+      `${yellow('APP_DB_PASSWORD is missing from .env.local.')} Run \`vibecarbon upgrade\` to add it, then \`npm run db:migrate\`.`,
+    );
+    process.exit(1);
+  }
+  return { DB_USER: 'app_service', DB_PASSWORD: appPassword };
+}
+
 // Spawn server process with its own process group for clean shutdown
 const server = spawn('npx', ['tsx', 'watch', '--env-file=.env.local', 'src/server/index.ts'], {
   stdio: 'inherit',
   shell: isWindows,
   detached: !isWindows, // Create process group on Unix for clean group kill
-  env: childEnv,
+  env: { ...childEnv, ...appDbEnv() },
 });
 children.push(server);
 names.set(server, 'API');

@@ -158,6 +158,31 @@ export function ensureBetterAuthSecret(cwd, { dryRun = false } = {}) {
 }
 
 /**
+ * Give a project created before the app had its own database role the
+ * password for it, APP_DB_PASSWORD. The app now connects as `app_service`
+ * (never as the owner), and compose refuses to start without the password
+ * (`:?`). Checks BOTH .env.local and .env, like ensureBetterAuthSecret: a
+ * value in either is copied to the other, never rotated; otherwise a new one
+ * is generated. Generating is safe: the migrate step sets the role's
+ * password from it on every run (locally `npm run db:migrate`, on a server
+ * the next deploy). Values are never printed.
+ *
+ * @param {string} cwd
+ * @param {{dryRun?: boolean}} [opts]
+ * @returns {'generated' | 'copied' | null}
+ */
+export function ensureAppDbPassword(cwd, { dryRun = false } = {}) {
+  const local = loadEnvVariables(cwd).APP_DB_PASSWORD;
+  const basePath = join(cwd, '.env');
+  const hasBase = existsSync(basePath);
+  const base = hasBase ? parseDotenv(readFileSync(basePath, 'utf-8')).APP_DB_PASSWORD : undefined;
+  if (local && (!hasBase || base)) return null;
+  const existing = local || base || null;
+  if (!dryRun) setEnvVar('APP_DB_PASSWORD', existing ?? generatePassword(), cwd);
+  return existing ? 'copied' : 'generated';
+}
+
+/**
  * Give every installed add-on the generated secrets its manifest declares
  * (`envVars` with `generate: 'password'`, services/<name>/manifest.json),
  * when the project lacks them. `vibecarbon add` generates them once; a
@@ -277,6 +302,15 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
   const authNotes = betterAuthUpgradeNotes(ensureBetterAuthSecret(cwd, { dryRun }), { dryRun });
   if (authNotes.info) p.log.info(authNotes.info);
   if (authNotes.warn) p.log.warn(authNotes.warn);
+  const appDb = ensureAppDbPassword(cwd, { dryRun });
+  if (appDb) {
+    p.log.info(
+      `${dryRun ? 'Would set' : appDb === 'generated' ? 'Generated' : 'Copied'} APP_DB_PASSWORD in .env and .env.local` +
+        (appDb === 'generated'
+          ? ': the app now connects as its own database role, app_service. Run `npm run db:migrate` (or `vibecarbon up`) so the role gets it; a server gets it on the next deploy'
+          : ''),
+    );
+  }
   for (const { key, status } of ensureAddonSecrets(cwd, { dryRun })) {
     const verb = status === 'generated' ? 'Generated' : 'Copied';
     p.log.info(

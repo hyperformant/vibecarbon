@@ -25,10 +25,14 @@ import { featureConfigKeys, featureSecretKeys } from '../config-registry.js';
  * bootstrap, the public origin, a few app settings, the add-on flags the
  * admin Services page reads, and the Plausible pair the CSP derives from.
  * DB_* are absent on purpose: compose's `environment:` block and the k8s
- * Deployment's `env:` set the connection explicitly.
+ * Deployment's `env:` set the connection explicitly. APP_DB_PASSWORD is the
+ * password of the app's own role, app_service (security plan R8): on k8s the
+ * app container's DB_PASSWORD reads it from the app Secret by key. The
+ * owner's password (POSTGRES_PASSWORD / DB_PASSWORD) is never an app key.
  */
 const CORE_APP_KEYS = [
   'BETTER_AUTH_SECRET',
+  'APP_DB_PASSWORD',
   'ADMIN_EMAIL',
   'ADMIN_PASSWORD',
   'SITE_URL',

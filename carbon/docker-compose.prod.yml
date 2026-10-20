@@ -39,6 +39,10 @@ services:
       # a missing value fails deploy's preflight, before anything is created.
       - ADMIN_EMAIL=${ADMIN_EMAIL:?ADMIN_EMAIL missing — vibecarbon create writes it to .env.local}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD missing — vibecarbon create writes it to .env.local}
+      # The app's own database role's password (app_service). Required here
+      # so a missing value fails deploy's preflight, before anything is
+      # created; the owner password never reaches the app.
+      - DB_PASSWORD=${APP_DB_PASSWORD:?APP_DB_PASSWORD missing, run vibecarbon upgrade to write it to .env}
     labels:
       - "traefik.enable=true"
       # HTTP to HTTPS redirect (whole host)
@@ -71,6 +75,11 @@ services:
       - "traefik.http.routers.app-internal-deny.tls=true"
       - "traefik.http.routers.app-internal-deny.middlewares=internal-only@file"
       - "traefik.http.routers.app-internal-deny.service=app"
+
+  # The migrate step runs the same pre-built image as the app.
+  app-migrate:
+    image: ${APP_IMAGE:-ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}:latest}
+    build: !reset null
 
   # ===========================================
   # SECURITY HARDENING

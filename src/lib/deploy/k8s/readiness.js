@@ -338,6 +338,20 @@ export const APP_POD_SELECTOR = 'app=vibecarbon-app';
  * @returns {Promise<string|null>} a pod name
  */
 export async function newestAppPod({ env, namespace, exec }) {
+  return (await newestAppPodObject({ env, namespace, exec }))?.metadata?.name ?? null;
+}
+
+/**
+ * The newest pod of the current ReplicaSet as kubectl's JSON (newestAppPod),
+ * status included, or null.
+ *
+ * @param {object} params
+ * @param {NodeJS.ProcessEnv} params.env
+ * @param {string} params.namespace
+ * @param {Function} params.exec
+ * @returns {Promise<any|null>}
+ */
+async function newestAppPodObject({ env, namespace, exec }) {
   const getJson = async (kind, selector) =>
     JSON.parse(
       String(
@@ -355,21 +369,45 @@ export async function newestAppPod({ env, namespace, exec }) {
   if (!hash) return null;
   const pods = await getJson('pods', `${APP_POD_SELECTOR},pod-template-hash=${hash}`);
   const created = (pod) => Date.parse(pod?.metadata?.creationTimestamp ?? '') || 0;
-  const newest = pods
+  return pods
     .filter((pod) => !pod?.metadata?.deletionTimestamp)
     .reduce((best, pod) => (created(pod) >= created(best) ? pod : best), null);
-  return newest?.metadata?.name ?? null;
+}
+
+/** The app pod's init container that runs the migrations (deployment.yaml). */
+export const MIGRATE_INIT_CONTAINER = 'migrate';
+
+/**
+ * The exit code of the pod's `migrate` init container when its current or
+ * last run ended in failure, else null. It exits non-zero only for a real
+ * failure (a failed migration, rejected owner credentials): it waits out a
+ * database that is not up yet instead of exiting.
+ *
+ * @param {any} pod - kubectl's pod JSON
+ * @returns {number|null}
+ */
+export function failedMigrateExitCode(pod) {
+  const status = (pod?.status?.initContainerStatuses ?? []).find(
+    (c) => c?.name === MIGRATE_INIT_CONTAINER,
+  );
+  for (const state of [status?.state, status?.lastState]) {
+    const code = state?.terminated?.exitCode;
+    if (typeof code === 'number' && code !== 0) return code;
+  }
+  return null;
 }
 
 /**
  * Watch, alongside `kubectl rollout status deployment/app`, for the one
- * outcome the rollout wait cannot see: a failed database migration. The app
- * migrates at startup, and until migrations are applied its readiness probe
- * answers 503, so a failed migration would otherwise surface only as the
- * rollout's 600 s timeout. This polls the same in-container /api/health
- * probe as awaitAppAdminReady (exec works on a running container whether or
- * not it is Ready) and REJECTS at once on MIGRATIONS_FAILED, with the app's
- * log tail and the probe's hint. Every other answer (no pod yet, pending,
+ * outcome the rollout wait cannot see: a failed database migration. The
+ * pod's `migrate` init container applies them before the app container
+ * starts, and until they are applied the app's readiness probe answers 503,
+ * so a failed migration would otherwise surface only as the rollout's 600 s
+ * timeout. This REJECTS at once when the newest pod's migrate init container
+ * exited non-zero, with its log tail; and it polls the same in-container
+ * /api/health probe as awaitAppAdminReady (exec works on a running container
+ * whether or not it is Ready), rejecting on MIGRATIONS_FAILED (the app could
+ * not read the ledger), with the app's log tail and the probe's hint. Every other answer (no pod yet, pending,
  * ready) just means keep watching. It is a condition watch for the rollout's
  * lifetime, not a retry: it resolves when `signal` aborts, which the caller
  * does as soon as the rollout settles. Each poll probes the newest pod of the
@@ -400,7 +438,44 @@ export async function watchAppMigrationFailure({
     let code = null;
     // The rollout's own pod, never an old-ReplicaSet one (newestAppPod). A
     // failed lookup is "no pod yet": only the probe's exit code decides.
-    const pod = await newestAppPod({ env, namespace, exec }).catch(() => null);
+    const podObject = await newestAppPodObject({ env, namespace, exec }).catch(() => null);
+    const pod = podObject?.metadata?.name ?? null;
+    // The migrations run in the pod's `migrate` init container, before the
+    // app container exists: a failure there is the one this watch is for.
+    const migrateExit = failedMigrateExitCode(podObject);
+    if (pod && migrateExit !== null) {
+      const terminatedNow = (podObject.status.initContainerStatuses ?? []).find(
+        (c) => c?.name === MIGRATE_INIT_CONTAINER,
+      )?.state?.terminated;
+      let logs = '';
+      try {
+        logs = String(
+          (await exec(
+            [
+              'kubectl',
+              '-n',
+              namespace,
+              'logs',
+              `pod/${pod}`,
+              '-c',
+              MIGRATE_INIT_CONTAINER,
+              ...(terminatedNow ? [] : ['--previous']),
+              '--tail=40',
+            ],
+            { env, silent: true },
+          )) ?? '',
+        );
+      } catch {
+        /* best effort */
+      }
+      if (signal.aborted) return;
+      throw new Error(
+        `The database migrations failed: the migrate init container exited ${migrateExit} ` +
+          `(pod ${pod}).\n` +
+          `See \`kubectl -n ${namespace} logs pod/${pod} -c ${MIGRATE_INIT_CONTAINER}\` for the error.\n` +
+          `--- migrate log tail ---\n${logs.trim()}`,
+      );
+    }
     if (pod) {
       try {
         await exec(

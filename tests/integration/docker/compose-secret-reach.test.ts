@@ -92,6 +92,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       ADMIN_EMAIL: 'admin@example.com',
       ADMIN_PASSWORD: sentinel('ADMIN_PASSWORD'),
       POSTGRES_PASSWORD: sentinel('POSTGRES_PASSWORD'),
+      APP_DB_PASSWORD: sentinel('APP_DB_PASSWORD'),
       STRIPE_SECRET_KEY: sentinel('STRIPE_SECRET_KEY'),
       REDIS_ENABLED: 'true',
       REDIS_PASSWORD: sentinel('REDIS_PASSWORD'),
@@ -174,6 +175,24 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       );
       expect(reached, k).toEqual([]);
     }
+  });
+
+  // Task 2 (R8): the app connects as app_service; only the db and the
+  // one-shot migrate step hold the owner password.
+  it('full deploy set: the owner password reaches only db and app-migrate', () => {
+    const services = full();
+    const holders_ = holders(services, sentinel('POSTGRES_PASSWORD'));
+    expect(holders_).toContain('app-migrate');
+    expect(holders_).not.toContain('app');
+    const appEnv = services.app.environment as Record<string, string>;
+    expect(appEnv.DB_USER).toBe('app_service');
+    expect(appEnv.DB_PASSWORD).toBe(sentinel('APP_DB_PASSWORD'));
+    const migrateEnv = services['app-migrate'].environment as Record<string, string>;
+    expect(migrateEnv.DB_USER).toBe('postgres');
+    expect(migrateEnv.DB_PASSWORD).toBe(sentinel('POSTGRES_PASSWORD'));
+    expect((services['app-migrate'] as { image?: string }).image).toBe(
+      (services.app as { image?: string }).image,
+    );
   });
 
   it('full deploy set: the app gets no infra password, and REDIS_URL still reaches it', () => {

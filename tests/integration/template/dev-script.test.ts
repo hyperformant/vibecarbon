@@ -249,7 +249,9 @@ describe('carbon/scripts/dev.js shutdown ordering', () => {
     const vitePort = await freePort();
     await writeFile(
       join(tmpDir, '.env.local'),
-      `DEV_API_PORT="${apiPort}"\nDEV_VITE_PORT="${vitePort}"\n`,
+      // APP_DB_PASSWORD: dev.js hands it to the API server as app_service's
+      // password and refuses to start without it.
+      `DEV_API_PORT="${apiPort}"\nDEV_VITE_PORT="${vitePort}"\nAPP_DB_PASSWORD="SENTINEL_APP_DB_PASSWORD"\n`,
     );
   });
 

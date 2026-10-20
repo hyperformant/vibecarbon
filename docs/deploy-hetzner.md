@@ -146,9 +146,9 @@ A deploy:
    opt-in; or manual if you manage DNS elsewhere)
 3. Issues TLS certificates via ACME DNS-01 (wildcard-capable)
 4. Builds your app image locally and pushes it to the servers over SSH
-5. Starts the stack (Postgres, Traefik, your app); the app applies its
-   migrations and creates the admin user at startup, and the deploy
-   verifies health
+5. Starts the stack (Postgres, Traefik, your app); a one-shot migrate step
+   applies the migrations as the database owner before the app starts, the
+   app creates the admin user at startup, and the deploy verifies health
 6. On HA modes: seeds the standby via `pg_basebackup` and verifies TLS
    streaming replication is live: the deploy **fails** if the standby is not
    confirmably streaming (use `-allow-degraded` to accept a warm standby)

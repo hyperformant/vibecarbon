@@ -46,7 +46,7 @@ describe.skipIf(!dbTestsEnabled)('server-only tables', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('no role but superusers and owners holds any privilege on a server-only table', async () => {
+  it('no role but superusers, owners and the app role holds any privilege on a server-only table', async () => {
     const { rows: tables } = await client.query<{ tbl: string }>(
       `select c.relname as tbl from pg_class c join pg_namespace n on n.oid = c.relnamespace
         where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity
@@ -73,9 +73,17 @@ describe.skipIf(!dbTestsEnabled)('server-only tables', () => {
         where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity
           and not exists (select 1 from pg_policy pol where pol.polrelid = c.oid)
           and not r.rolsuper and r.oid <> c.relowner and r.rolname not like 'pg\\_%'
+          and r.rolname <> 'app_service'
           and has_table_privilege(r.oid, c.oid, p.priv)`,
     );
     expect(rows).toEqual([]);
+    // app_service is the app's own connection role (adminDb), so it keeps
+    // them, but only to read and write rows: never TRUNCATE.
+    const { rows: app } = await client.query(
+      `select has_table_privilege('app_service', 'public.account', 'SELECT') as reads,
+              has_table_privilege('app_service', 'public.account', 'TRUNCATE') as truncates`,
+    );
+    expect(app[0]).toEqual({ reads: true, truncates: false });
   });
 
   it('a later migration that adds a no-policy table leaves it unreadable to an RLS-bypass role', async () => {
