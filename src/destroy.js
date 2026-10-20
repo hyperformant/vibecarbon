@@ -63,6 +63,7 @@ import {
   providerIdFor,
   resolveProviderToken,
 } from './lib/providers/index.js';
+import { deriveEnvAppBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
@@ -1284,13 +1285,53 @@ function otherEnvironmentNames(projectConfig, environment) {
   return Object.keys(projectConfig.environments ?? {}).filter((name) => name !== environment);
 }
 
+/**
+ * Is the environment's recorded app bucket its OWN: the per-environment name
+ * deriveEnvAppBucketName gives it, and not pinned? Only such a bucket is this
+ * environment's alone. An env still on an older CLI's per-project bucket
+ * (`<project>-<salt>-storage`, or `...-storage-<gen>`, never pinned) shares
+ * it with every other environment of the project, and a pinned bucket may be
+ * that same bucket, so -purge deletes neither.
+ */
+function ownsAppBucket(envConfig, projectConfig, environment) {
+  const bucket = envConfig?.s3?.bucket;
+  if (!bucket || envConfig.s3.bucketPin) return false;
+  try {
+    return bucket === deriveEnvAppBucketName(projectConfig, environment);
+  } catch {
+    // An env name too long to derive from never deployed one of its own.
+    return false;
+  }
+}
+
+/**
+ * What the destroy preview needs to know about the buckets, decided by the
+ * same rules the teardown applies (deleteAppBucketEffect, handleBackupBucket),
+ * so the preview never promises a deletion the destroy will not do.
+ *
+ * @returns {{ appBucketOwned: boolean, backupBucketHeld: boolean }}
+ */
+export function destroyPreviewBucketFacts(projectConfig, environment) {
+  const envConfig = projectConfig.environments?.[environment] ?? {};
+  const backupBucket = envConfig.backupS3?.bucket;
+  return {
+    appBucketOwned: ownsAppBucket(envConfig, projectConfig, environment),
+    backupBucketHeld:
+      otherEnvironmentNames(projectConfig, environment).length > 0 ||
+      (backupBucket
+        ? preservedBackupHolders(projectConfig, environment, backupBucket).length > 0
+        : false),
+  };
+}
+
 // 1. The env's own app S3 bucket (created during deploy bootstrap, not part
 //    of any Pulumi stack's resource graph). Plain destroy keeps it and its
 //    uploads, the same way it keeps this env's backups, and the destroyed
 //    env's seed names it so a redeploy lands on it again. -purge empties and
-//    deletes it (the derived name is this env's alone), unless it is pinned.
+//    deletes it only when it is this env's own (ownsAppBucket): never a
+//    pinned bucket, never a legacy per-project bucket other envs share.
 async function deleteAppBucketEffect(ctx) {
-  const { envConfig, projectConfig, args, results, spinner } = ctx;
+  const { envConfig, projectConfig, environment, args, results, spinner } = ctx;
   const s3BucketName = envConfig.s3?.bucket;
   if (!s3BucketName) return;
   if (!args?.purgeBackups) {
@@ -1307,6 +1348,13 @@ async function deleteAppBucketEffect(ctx) {
     spinner.start('S3 bucket');
     spinner.stop(
       `S3 bucket kept (pinned): ${s3BucketName}. A pinned bucket may serve other environments; delete it manually if nothing uses it anymore.`,
+    );
+    return;
+  }
+  if (!ownsAppBucket(envConfig, projectConfig, environment)) {
+    spinner.start('S3 bucket');
+    spinner.stop(
+      `S3 bucket kept: ${s3BucketName}. It is the legacy per-project bucket, which other environments may still use; delete it manually if nothing uses it anymore.`,
     );
     return;
   }
@@ -3379,6 +3427,7 @@ async function main(argv = []) {
       envName,
       purgeBackups: args.purgeBackups,
       s3SetupCompleted: readS3SetupCompleted(cwd, envName),
+      ...destroyPreviewBucketFacts(projectConfig, envName),
     }),
     `Destroying: ${envName}`,
   );

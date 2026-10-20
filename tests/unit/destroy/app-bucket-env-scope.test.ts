@@ -40,7 +40,7 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   };
 });
 
-const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
+const { DESTROY_EFFECTS, destroyPreviewBucketFacts } = await import('../../../src/destroy.js');
 
 function env(name: string, bucket: string) {
   return {
@@ -186,6 +186,31 @@ describe('destroy keeps or purges the environment’s own app bucket', () => {
     noSurvivors(results);
   });
 
+  it('destroy staging -purge keeps the per-project bucket an older CLI shared across environments', async () => {
+    // Before per-environment app buckets every env persisted the project's
+    // one bucket (`<project>-<salt>-storage`, or `...-storage-<gen>`), with no
+    // pin. Deleting it would delete prod's uploads too.
+    for (const SHARED of ['myapp-cd9ecc-storage', 'myapp-cd9ecc-storage-0f1e2d']) {
+      s3.emptyAndDeleteBucket.mockClear();
+      const config = project(['prod', 'staging']);
+      for (const e of Object.values(config.environments)) e.s3.bucket = SHARED;
+      const { results, text } = await destroy(config, 'staging', { purgeBackups: true });
+      expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+      expect(text).toContain(`S3 bucket kept: ${SHARED}`);
+      expect(text).toContain('delete it manually');
+      expect(results.s3Bucket).toBeNull();
+      noSurvivors(results);
+    }
+  });
+
+  it('a single environment on a legacy bucket keeps it under -purge too', async () => {
+    const config = project(['prod']);
+    config.environments.prod.s3.bucket = 'myapp-cd9ecc-storage';
+    const { text } = await destroy(config, 'prod', { purgeBackups: true });
+    expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
+    expect(text).toContain('S3 bucket kept: myapp-cd9ecc-storage');
+  });
+
   it('never reads or writes the bucket CORS rule', async () => {
     await destroy(project(['prod', 'staging']), 'staging');
     await destroy(project(['prod']), 'prod', { purgeBackups: true });
@@ -206,5 +231,36 @@ describe('destroy keeps or purges the environment’s own app bucket', () => {
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
     expect(text).toBe('');
     noSurvivors(results);
+  });
+});
+
+describe('destroyPreviewBucketFacts', () => {
+  it('names the environment’s own bucket as owned, and a legacy or pinned one as not', () => {
+    const config = project(['prod', 'staging']);
+    expect(destroyPreviewBucketFacts(config, 'staging').appBucketOwned).toBe(true);
+    config.environments.staging.s3.bucket = 'myapp-cd9ecc-storage';
+    expect(destroyPreviewBucketFacts(config, 'staging').appBucketOwned).toBe(false);
+    const pinned = project(['prod']);
+    Object.assign(pinned.environments.prod.s3, { bucketPin: PROD_BUCKET });
+    expect(destroyPreviewBucketFacts(pinned, 'prod').appBucketOwned).toBe(false);
+  });
+
+  it('says the backup bucket is held while another environment uses it', () => {
+    expect(
+      destroyPreviewBucketFacts(project(['prod', 'staging']), 'staging').backupBucketHeld,
+    ).toBe(true);
+    expect(destroyPreviewBucketFacts(project(['prod']), 'prod').backupBucketHeld).toBe(false);
+    const withPreserved = {
+      ...project(['prod']),
+      destroyedEnvironments: { staging: { backupS3: { bucket: BACKUPS }, destroyedAt: 'x' } },
+    };
+    expect(destroyPreviewBucketFacts(withPreserved, 'prod').backupBucketHeld).toBe(true);
+    const withPurged = {
+      ...project(['prod']),
+      destroyedEnvironments: {
+        staging: { backupS3: { bucket: BACKUPS }, backupsPurged: true, destroyedAt: 'x' },
+      },
+    };
+    expect(destroyPreviewBucketFacts(withPurged, 'prod').backupBucketHeld).toBe(false);
   });
 });

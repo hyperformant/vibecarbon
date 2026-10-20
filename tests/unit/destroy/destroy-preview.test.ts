@@ -91,12 +91,63 @@ describe('destroyPreviewBody app bucket under -purge', () => {
         envName: 'prod',
         purgeBackups: true,
         s3SetupCompleted: true,
+        appBucketOwned: true,
       }),
     );
     expect(body).toContain(
       'Bucket: excitingai-88d16c-prod-storage (WILL BE DELETED, because you passed -purge)',
     );
     expect(body).not.toContain('kept; deleted with -purge');
+  });
+
+  it('keeps a bucket that is not the environment’s own (a legacy per-project bucket), as the destroy does', () => {
+    const body = strip(
+      destroyPreviewBody({
+        envConfig: {
+          ...SKELETON,
+          status: 'deployed',
+          s3: { bucket: 'excitingai-88d16c-storage', region: 'fsn1' },
+        },
+        projectName: 'excitingai',
+        envName: 'prod',
+        purgeBackups: true,
+        s3SetupCompleted: true,
+        appBucketOwned: false,
+      }),
+    );
+    expect(body).toContain(
+      'Bucket: excitingai-88d16c-storage (kept: legacy shared bucket, delete manually)',
+    );
+    expect(body).not.toMatch(/excitingai-88d16c-storage \(WILL BE DELETED/);
+  });
+});
+
+describe('destroyPreviewBody backup bucket under -purge', () => {
+  const purge = (backupBucketHeld: boolean) =>
+    strip(
+      destroyPreviewBody({
+        envConfig: { ...SKELETON, status: 'deployed' },
+        projectName: 'excitingai',
+        envName: 'staging',
+        purgeBackups: true,
+        s3SetupCompleted: true,
+        appBucketOwned: true,
+        backupBucketHeld,
+      }),
+    );
+
+  it('deletes only this environment’s folder while other environments keep the bucket', () => {
+    const body = purge(true);
+    expect(body).toContain(
+      'Bucket: excitingai-88d16c-backups (backups/excitingai/staging/ WILL BE DELETED, because you passed -purge; the bucket stays for the other environments)',
+    );
+    expect(body).not.toMatch(/excitingai-88d16c-backups \(WILL BE DELETED/);
+  });
+
+  it('deletes the bucket only when no environment remains', () => {
+    expect(purge(false)).toContain(
+      'Bucket: excitingai-88d16c-backups (WILL BE DELETED, because you passed -purge)',
+    );
   });
 });
 
