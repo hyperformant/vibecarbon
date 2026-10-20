@@ -91,19 +91,21 @@ export const WALG_WAL_SUBDIR = 'wal_005/';
 export const WALG_BASEBACKUP_SUBDIR = 'basebackups_005/';
 
 /**
- * The canonical, SINGLE prefix both roles share. There is deliberately NO role
- * segment: a `primary/` vs `standby/` split would let a promoted node read an
- * empty prefix and fail restore with "No backups found" (the anti-collision
- * reasoning in carbon/docker-compose.yml, and the rot #218 fixed). We assert
- * that invariant against live S3 below.
+ * The canonical, SINGLE prefix both roles of one environment share. Each
+ * environment archives under its own `backups/<project>/<env>/walg/`
+ * (`resolveEnvStorage(...).walgPrefix`, pinned by a parity unit test). There
+ * is deliberately NO role segment: a `primary/` vs `standby/` split would let a
+ * promoted node read an empty prefix and fail restore with "No backups found"
+ * (the anti-collision reasoning in carbon/docker-compose.yml, and the rot #218
+ * fixed). We assert that invariant against live S3 below.
  */
-export function walgPrefixFor(projectName: string): string {
-  return `backups/${projectName}/walg/`;
+export function walgPrefixFor(projectName: string, envName: string): string {
+  return `backups/${projectName}/${envName}/walg/`;
 }
 
 /** Object key (prefix form) of one archived WAL segment. */
-export function walSegmentKeyPrefix(projectName: string, segment: string): string {
-  return `${walgPrefixFor(projectName)}${WALG_WAL_SUBDIR}${segment}`;
+export function walSegmentKeyPrefix(projectName: string, envName: string, segment: string): string {
+  return `${walgPrefixFor(projectName, envName)}${WALG_WAL_SUBDIR}${segment}`;
 }
 
 /**
@@ -482,7 +484,7 @@ export async function runBackupEvidenceChecks(
     probePrefix = (prefix: string) => s3.hasObjectsWithPrefix(target.bucket, prefix);
   }
 
-  const segmentPrefix = walSegmentKeyPrefix(projectName, probe.segment);
+  const segmentPrefix = walSegmentKeyPrefix(projectName, envPrefix, probe.segment);
   const deadline = Date.now() + budgetMs;
   let landed = false;
   let lastError: string | undefined;
@@ -532,7 +534,7 @@ export async function runBackupEvidenceChecks(
   }
 
   // --- 3. Nothing may live under a role-namespaced prefix ----------------
-  const base = walgPrefixFor(projectName);
+  const base = walgPrefixFor(projectName, envPrefix);
   const offenders: string[] = [];
   let roleProbeError: string | undefined;
   for (const role of FORBIDDEN_ROLE_PREFIXES) {
