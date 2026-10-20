@@ -11,7 +11,7 @@ import {
   CookieJar,
   checkFileUploadRoundtrip,
   ONE_PIXEL_PNG,
-  resolveAppBucket,
+  resolveAppStorage,
 } from '../../e2e/checks/app-functional.js';
 import {
   assertObjectStorageUrl,
@@ -252,6 +252,105 @@ describe('checkFileUploadRoundtrip', () => {
     expect(r.errorMessage).toMatch(/^request: DNS resolution failed/);
   });
 
+  describe('the bucket settle gate before the first upload', () => {
+    const MIN = 60_000;
+    const T0 = Date.parse('2026-10-20T12:00:00Z');
+    const storage = (providerId: string, ageMs: number | null) => ({
+      providerId,
+      bucket: 'bucket',
+      keyPrefix: 'prod/',
+      region: providerId === 'hetzner' ? 'fsn1' : 'fra1',
+      endpoint: STORAGE_ORIGIN,
+      bucketCreatedAt: ageMs === null ? null : new Date(T0 - ageMs).toISOString(),
+    });
+    const settleDeps = (
+      probeRound: () => Promise<{ ok: number; total: number; failures: string[] }>,
+    ) => {
+      let t = T0;
+      return {
+        now: () => t,
+        sleep: vi.fn(async (ms: number) => {
+          t += ms;
+        }),
+        probeRound: vi.fn(probeRound),
+      };
+    };
+
+    it('a 0-window provider with a 1-minute-old bucket makes zero probes and never sleeps', async () => {
+      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
+      const transfer = transferWith();
+      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith(),
+        transfer,
+        storage: storage('digitalocean', MIN),
+        settle,
+      });
+      expect(r.status).toBe('pass');
+      expect(settle.probeRound).not.toHaveBeenCalled();
+      expect(settle.sleep).not.toHaveBeenCalled();
+      expect(transfer.put).toHaveBeenCalledOnce();
+      expect(r.details).not.toHaveProperty('settle');
+    });
+
+    it('an old Hetzner bucket runs no gate', async () => {
+      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
+      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith(),
+        transfer: transferWith(),
+        storage: storage('hetzner', 30 * MIN),
+        settle,
+      });
+      expect(r.status).toBe('pass');
+      expect(settle.probeRound).not.toHaveBeenCalled();
+    });
+
+    it('a young Hetzner bucket waits for the gate, then uploads, with rounds and seconds in the detail', async () => {
+      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
+      const transfer = transferWith();
+      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith(),
+        transfer,
+        storage: storage('hetzner', MIN),
+        settle,
+      });
+      expect(r.status).toBe('pass');
+      expect(settle.probeRound).toHaveBeenCalledTimes(3);
+      expect(r.details).toMatchObject({ settle: { rounds: 3, elapsedSeconds: 60 } });
+      const firstPut = (transfer.put as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+      expect(settle.probeRound.mock.invocationCallOrder[2]).toBeLessThan(firstPut);
+    });
+
+    it('an unknown Hetzner bucket age is treated as young', async () => {
+      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
+      await checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith(),
+        transfer: transferWith(),
+        storage: storage('hetzner', null),
+        settle,
+      });
+      expect(settle.probeRound).toHaveBeenCalled();
+    });
+
+    it('an exhausted gate fails with the bucket, its age and the last failures, and uploads nothing', async () => {
+      const settle = settleDeps(async () => ({
+        ok: 19,
+        total: 20,
+        failures: ['options:403'],
+      }));
+      const transfer = transferWith();
+      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith(),
+        transfer,
+        storage: storage('hetzner', MIN),
+        settle,
+      });
+      expect(r.status).toBe('fail');
+      expect(r.errorMessage).toMatch(/^settle: bucket "bucket" .*1 min old.*options:403/);
+      expect(r.details).toMatchObject({ step: 'settle', lastFailures: ['options:403'] });
+      expect(transfer.put).not.toHaveBeenCalled();
+    });
+  });
+
   it('ships a real PNG (signature + IHDR), not arbitrary bytes', () => {
     expect([...ONE_PIXEL_PNG.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
     expect(ONE_PIXEL_PNG.subarray(12, 16).toString('latin1')).toBe('IHDR');
@@ -285,17 +384,43 @@ describe('presigned URL helpers', () => {
   });
 });
 
-describe('resolveAppBucket', () => {
-  it('reads environments.<env>.s3.bucket from .vibecarbon.json, null when there is none', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vc-app-bucket-'));
+describe('resolveAppStorage', () => {
+  it('reads the env provider and s3 block from .vibecarbon.json, null when there is no bucket', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-app-storage-'));
     try {
-      expect(resolveAppBucket(dir, 'e1')).toBeNull();
+      expect(resolveAppStorage(dir, 'e1')).toBeNull();
       writeFileSync(
         join(dir, '.vibecarbon.json'),
-        JSON.stringify({ environments: { e1: { s3: { bucket: 'myapp-storage-7f3e8e' } } } }),
+        JSON.stringify({
+          environments: {
+            e1: {
+              provider: 'hetzner',
+              s3: {
+                bucket: 'myapp-storage',
+                keyPrefix: 'e1/',
+                region: 'fsn1',
+                endpoint: 'https://fsn1.your-objectstorage.com',
+                bucketCreatedAt: '2026-10-20T12:00:00.000Z',
+              },
+            },
+            e2: { s3: { bucket: 'other', region: 'fsn1', endpoint: 'https://x' } },
+          },
+        }),
       );
-      expect(resolveAppBucket(dir, 'e1')).toBe('myapp-storage-7f3e8e');
-      expect(resolveAppBucket(dir, 'e2')).toBeNull();
+      expect(resolveAppStorage(dir, 'e1')).toEqual({
+        providerId: 'hetzner',
+        bucket: 'myapp-storage',
+        keyPrefix: 'e1/',
+        region: 'fsn1',
+        endpoint: 'https://fsn1.your-objectstorage.com',
+        bucketCreatedAt: '2026-10-20T12:00:00.000Z',
+      });
+      expect(resolveAppStorage(dir, 'e2')).toMatchObject({
+        providerId: 'hetzner',
+        keyPrefix: '',
+        bucketCreatedAt: null,
+      });
+      expect(resolveAppStorage(dir, 'e3')).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

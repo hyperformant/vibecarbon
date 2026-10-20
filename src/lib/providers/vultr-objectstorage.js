@@ -26,6 +26,9 @@
 import { deriveStateBucketName, S3CompatibleProvider, sanitizeBucketName } from './s3-base.js';
 
 export class VultrObjectStorageProvider extends S3CompatibleProvider {
+  /** No settle window has been observed on a new bucket here. */
+  static bucketSettleWindowMs = 0;
+
   /**
    * SIGNING region for every S3 client this class builds — same seam as
    * LinodeObjectStorageProvider.S3_SIGNING_REGION (s3-base getClient /

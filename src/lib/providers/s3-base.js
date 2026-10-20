@@ -299,6 +299,25 @@ export class S3CompatibleProvider {
   }
 
   /**
+   * When a bucket was created, from ListBuckets' CreationDate. Null on any
+   * error, an unlisted bucket or a missing date: callers treat an unknown
+   * age as a young bucket, so this never needs to throw.
+   *
+   * @param {string} bucketName
+   * @returns {Promise<Date|null>}
+   */
+  async bucketCreatedAt(bucketName) {
+    try {
+      const found = (await this.listBuckets()).find((b) => b.name === bucketName);
+      if (!found?.creationDate) return null;
+      const date = new Date(found.creationDate);
+      return Number.isNaN(date.getTime()) ? null : date;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Check if a bucket exists. NotFound and 403 short-circuit `_send`'s
    * retry via the terminal classifier — they're deterministic outcomes
    * (bucket missing / cross-account collision), not a provider blip. Only

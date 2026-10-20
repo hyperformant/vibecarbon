@@ -27,6 +27,7 @@ import {
 import { formatS3SetupFailure } from '../providers/s3-base.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
+import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
@@ -373,22 +374,37 @@ export async function removeAppBucketCorsOrigins({ provider, bucket, origins }) 
 
 /**
  * Start the app-bucket storage work that does not gate provisioning, so it
- * runs beside the IaC step instead of ahead of it (R7). Today that is the
- * CORS merge. Its output is held back while IaC prints, and `finish(log)`,
- * awaited just before the success outro, waits for it and reports any
- * warnings there. Never rejects: applyAppBucketCors warns instead of
- * throwing, so a deploy that fails before `finish` leaves nothing unhandled.
+ * runs beside the IaC step instead of ahead of it (R7): the CORS merge and,
+ * only on a provider whose S3 class declares a non-zero
+ * `bucketSettleWindowMs`, one read of the bucket's creation time. Its output
+ * is held back while IaC prints, and `finish(log)`, awaited just before the
+ * success outro, waits for it, reports any warnings, and prints one note
+ * when the bucket is still inside its settle window. It never waits for the
+ * bucket to settle (R5). A 0 window costs nothing: no read, no note, and no
+ * `bucketCreatedAt` on the result.
+ *
+ * Never rejects early: the CORS merge warns instead of throwing, and an
+ * unreadable creation time is recorded as unknown (null). A provider class
+ * without a declared window is a bug the census catches; it surfaces from
+ * `finish`.
  *
  * @param {object} opts
+ * @param {string} opts.providerId - the env's provider id, for its settle window
  * @param {() => Promise<object>} opts.createProvider
  * @param {string} opts.bucket
  * @param {string} [opts.domain]
  * @param {string[]} [opts.previousOrigins]
  * @param {string[]} [opts.otherEnvOrigins]
- * @returns {{ done: Promise<string[]>, finish: (log: { warn: Function }) => Promise<string[]> }}
- *   `finish` resolves to the origins this env now holds (see applyAppBucketCors).
+ * @returns {{
+ *   done: Promise<string[]>,
+ *   finish: (log: { warn: Function, info: Function }) => Promise<{ corsOrigins: string[], bucketCreatedAt?: string|null }>,
+ * }}
+ *   `corsOrigins` are the origins this env now holds (see applyAppBucketCors);
+ *   `bucketCreatedAt` (ISO string, or null when unknown) is present only for
+ *   a non-zero settle window.
  */
 export function startAppBucketFinalize({
+  providerId,
   createProvider,
   bucket,
   domain,
@@ -407,14 +423,41 @@ export function startAppBucketFinalize({
     spin: quietSpin,
     log: heldLog,
   });
+  const settle = readBucketSettleState({ providerId, createProvider, bucket });
+  // Handled at `finish`; this only keeps an early rejection from counting as
+  // unhandled while IaC runs.
+  settle.catch(() => {});
   return {
     done,
     async finish(log) {
-      const held = await done;
+      const corsOrigins = await done;
       for (const message of warnings) log.warn(message);
-      return held;
+      const { windowMs, createdAt } = await settle;
+      if (windowMs === 0) return { corsOrigins };
+      const status = storageSettleStatus(createdAt, Date.now(), windowMs);
+      if (status.settling) log.info(bucketSettleNote(status, windowMs));
+      return { corsOrigins, bucketCreatedAt: createdAt ? createdAt.toISOString() : null };
     },
   };
+}
+
+/**
+ * The provider's settle window and, only when it is non-zero, the bucket's
+ * creation time (null when it cannot be read).
+ *
+ * @param {{ providerId: string, createProvider: () => Promise<object>, bucket: string }} opts
+ * @returns {Promise<{ windowMs: number, createdAt?: Date|null }>}
+ */
+async function readBucketSettleState({ providerId, createProvider, bucket }) {
+  const windowMs = await settleWindowFor(providerId);
+  if (windowMs === 0) return { windowMs };
+  let createdAt = null;
+  try {
+    createdAt = await (await createProvider()).bucketCreatedAt(bucket);
+  } catch {
+    // An unknown age is treated as a young bucket (R5).
+  }
+  return { windowMs, createdAt };
 }
 
 /**
@@ -933,6 +976,7 @@ export async function executeDeployment(args, gatheredConfig) {
   // still pick the rule up. Started here, not awaited: provisioning does not
   // depend on it, so it runs beside IaC and is awaited before the outro (R7).
   const appBucketFinalize = startAppBucketFinalize({
+    providerId: providerIdFor(envConfig),
     createProvider: () =>
       getObjectStorageProvider(
         providerIdFor(envConfig),
@@ -1834,7 +1878,10 @@ export async function executeDeployment(args, gatheredConfig) {
 
   // The app-bucket finalize started after s3-setup ran beside IaC; wait for
   // it here, before the final save and the outro, and report its warnings.
-  const appBucketCorsOrigins = await appBucketFinalize.finish(p.log);
+  // On a provider with a settle window it also prints the young-bucket note;
+  // it never waits for the bucket to settle (R5).
+  const appBucketFinal = await appBucketFinalize.finish(p.log);
+  const appBucketCorsOrigins = appBucketFinal.corsOrigins;
 
   // Re-read the on-disk project config before merging. Inner deploy paths
   // (compose/ha.js, k8s/ha/index.js) call saveProjectConfig themselves
@@ -2002,6 +2049,11 @@ export async function executeDeployment(args, gatheredConfig) {
           bucket: s3Config.bucket,
           keyPrefix: s3Config.keyPrefix,
           corsOrigins: appBucketCorsOrigins,
+          // Only on a provider with a settle window: status reads it for the
+          // "storage settling" row, the e2e upload check for its gate.
+          ...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {
+            bucketCreatedAt: appBucketFinal.bucketCreatedAt,
+          }),
           region: s3Config.region,
           endpoint: s3Config.endpoint,
           stateBucket: s3Config.stateBucket,

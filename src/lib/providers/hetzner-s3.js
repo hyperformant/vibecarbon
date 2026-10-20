@@ -18,6 +18,15 @@ import {
 } from './s3-base.js';
 
 export class HetznerS3Provider extends S3CompatibleProvider {
+  /**
+   * A new Hetzner bucket answers inconsistently for about 16 minutes. The
+   * 2026-10-20 probes against a minutes-old bucket saw about 40% of CORS
+   * preflights refused with a 403 and some NoSuchBucket answers, then 58/60
+   * and 60/60 three times, settled about 16 minutes after create. Rounded up
+   * to 20 for margin; see src/lib/deploy/bucket-settle.js.
+   */
+  static bucketSettleWindowMs = 20 * 60_000;
+
   static ENDPOINTS = {
     fsn1: 'https://fsn1.your-objectstorage.com',
     nbg1: 'https://nbg1.your-objectstorage.com',

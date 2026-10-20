@@ -152,6 +152,7 @@ describe('startAppBucketFinalize (R7: beside IaC, awaited before the outro)', ()
       events.push('cors-put');
     });
     const finalize = startAppBucketFinalize({
+      providerId: 'digitalocean',
       createProvider: async () => ({
         getBucketCorsOrigins: () => readGate,
         setBucketCors,
@@ -182,6 +183,7 @@ describe('startAppBucketFinalize (R7: beside IaC, awaited before the outro)', ()
 
   it('holds warnings until finish so they never interleave with IaC output', async () => {
     const finalize = startAppBucketFinalize({
+      providerId: 'digitalocean',
       createProvider: async () => ({
         getBucketCorsOrigins: async () => {
           throw new Error('Access Denied');
@@ -304,6 +306,7 @@ describe('each environment owns the origins it recorded (s3.corsOrigins)', () =>
 
   it('finish resolves to the origins the environment now holds', async () => {
     const finalize = startAppBucketFinalize({
+      providerId: 'digitalocean',
       createProvider: async () => ({
         getBucketCorsOrigins: async () => [],
         setBucketCors: vi.fn(async () => {}),
@@ -312,7 +315,9 @@ describe('each environment owns the origins it recorded (s3.corsOrigins)', () =>
       domain: 'staging.dev',
       previousOrigins: [],
     });
-    await expect(finalize.finish({ warn: vi.fn() })).resolves.toEqual(['https://staging.dev']);
+    await expect(finalize.finish({ warn: vi.fn(), info: vi.fn() })).resolves.toEqual({
+      corsOrigins: ['https://staging.dev'],
+    });
   });
 
   it('deploy persists the held origins and the key prefix in the env s3 block', () => {
@@ -320,7 +325,8 @@ describe('each environment owns the origins it recorded (s3.corsOrigins)', () =>
       join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
       'utf-8',
     );
-    expect(src).toContain('const appBucketCorsOrigins = await appBucketFinalize.finish(p.log);');
+    expect(src).toContain('const appBucketFinal = await appBucketFinalize.finish(p.log);');
+    expect(src).toContain('const appBucketCorsOrigins = appBucketFinal.corsOrigins;');
     expect(src).toContain('corsOrigins: appBucketCorsOrigins,');
     expect(src.match(/keyPrefix: s3Config\.keyPrefix,/g)).toHaveLength(2);
     expect(src).toContain('previousOrigins: envConfig.s3?.corsOrigins');
