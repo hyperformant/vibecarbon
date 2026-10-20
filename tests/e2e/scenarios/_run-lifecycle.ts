@@ -23,6 +23,7 @@ import { getProvider } from '../../../src/lib/providers/index.js';
 import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
 import {
+  adminSignIn,
   buildDbHandle,
   resolveAppBucket,
   resolveSshCheckMasterIp,
@@ -107,6 +108,13 @@ import {
   WARM_REDEPLOY_ROUTE_URL_PATH,
   warmRedeployMarker,
 } from '../utils/warm-redeploy-mutations.js';
+import {
+  OBSERVABILITY_CHECK_NAMES,
+  observabilityPlanForStep,
+  observabilitySkipResults,
+  provesObservabilityAfterReconverge,
+  runPostReconvergeObservability,
+} from './observability-step-plan.js';
 import type {
   ScenarioConfig,
   ScenarioResult,
@@ -1942,7 +1950,14 @@ export async function runLifecycle(
         }
 
         // Feature-specific checks (only if the feature is enabled)
-        if (config.features.includes('observability')) {
+        // k8s-ha verify-failover skips these by design (pilot-light standby has
+        // no observability until reconverge-deploy, which proves them instead);
+        // see scenarios/observability-step-plan.ts.
+        const obsPlan = observabilityPlanForStep(stepName, config.mode, config.features);
+        if (obsPlan.kind === 'skip') {
+          console.log(`${tag} [${stepName}] observability checks skipped: ${obsPlan.reason}`);
+          allResults.push(...observabilitySkipResults(obsPlan.reason));
+        } else if (obsPlan.kind === 'run') {
           // Grafana is behind super-admin ForwardAuth in every mode: the checks
           // mint the vc-admin-token cookie from the admin session that
           // auth_admin_login signed in, then read Grafana's and Prometheus'
@@ -1975,9 +1990,7 @@ export async function runLifecycle(
         const subdomainFails = allResults.filter(
           (r) =>
             r.status === 'fail' &&
-            ['grafana_route_protected', 'grafana_health', 'prometheus_targets'].includes(
-              r.checkName,
-            ),
+            (OBSERVABILITY_CHECK_NAMES as readonly string[]).includes(r.checkName),
         );
         if (subdomainFails.length > 0 && serverIps[0] && sshKeyPath) {
           try {
@@ -4049,6 +4062,46 @@ EOF`;
                 `${tag} [reconverge-deploy] ha.primary.stack=${currentPrimary.stack} ` +
                   `(new primary ${newPrimaryIp}, new standby ${newStandbyIp}) — pilot-light OK`,
               );
+
+              // OBSERVABILITY RESTORED: the pilot-light standby never installed
+              // Grafana/Prometheus, so verify-failover skipped those checks
+              // (scenarios/observability-step-plan.ts). This redeploy applied
+              // observability to the promoted cluster as the full primary; prove
+              // it from the outside with a fresh super-admin session. No DNS pin:
+              // verify-failover already waited for the domain to resolve to the
+              // promoted cluster, and the ha.primary.stack assertion above proves
+              // this redeploy did not move it.
+              if (provesObservabilityAfterReconverge(config.mode, config.features)) {
+                if (!adminCreds) adminCreds = readAdminCredentials(config.projectDir);
+                const obsResults = await runPostReconvergeObservability(
+                  {
+                    domain: config.domain,
+                    adminEmail: adminCreds?.adminEmail,
+                    adminPassword: adminCreds?.adminPassword,
+                    // Grafana's pod may still be starting right after the apply:
+                    // 12 x 5s instead of the verify steps' 4.
+                    attempts: 12,
+                  },
+                  { signIn: adminSignIn, runChecks: runObservabilityChecks },
+                );
+                collector.recordVerifications(stepId, obsResults);
+                const obsFailures = obsResults.filter((r) => r.status === 'fail');
+                if (obsFailures.length > 0) {
+                  const detailLines = obsFailures
+                    .map(
+                      (f) =>
+                        `[fail] ${f.checkName}: ${(f.errorMessage || JSON.stringify(f.details || {})).slice(0, 400)}`,
+                    )
+                    .join('\n');
+                  for (const line of detailLines.split('\n')) console.error(`${tag} ${line}`);
+                  throw new Error(
+                    `reconverge-deploy: ${obsFailures.length} observability check(s) failed after ` +
+                      `the reconverge, so it did not restore Grafana/Prometheus on the primary: ` +
+                      `${obsFailures.map((f) => f.checkName).join(', ')}\n${detailLines}`,
+                  );
+                }
+                console.log(`${tag} [reconverge-deploy] observability restored on the primary`);
+              }
             },
           ),
       });
