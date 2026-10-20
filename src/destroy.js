@@ -63,7 +63,6 @@ import {
   providerIdFor,
   resolveProviderToken,
 } from './lib/providers/index.js';
-import { deriveProjectBucketName } from './lib/providers/s3-base.js';
 import { generateBucketSalt } from './lib/secrets.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
@@ -1100,7 +1099,7 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks,
     return;
   }
 
-  // The derived name is project-level (app bucket + stateBucketGeneration),
+  // The derived name is project-level (project storage base + stateBucketGeneration),
   // so every environment of the project keeps its Pulumi stacks in this one
   // bucket. -purge on one environment while others are live keeps it: its
   // own stack file is already gone (pulumi destroy + removeStack ran before
@@ -1262,9 +1261,8 @@ export function destroyOutro(envName, timeStr, results) {
  * from and mutating the shared destroy `ctx` (envConfig, projectConfig,
  * environment, args, results, spinner, tracker, cwd, isK8s).
  *
- * Tier divergence is carried on ctx.isK8s: only k8s tiers fall back to the
- * predictable deploy-time bucket name (deleteAppBucketEffect), delete the GitHub
- * environment, and print the summary note — and the k8s-only steps
+ * Tier divergence is carried on ctx.isK8s: only k8s tiers delete the GitHub
+ * environment and print the summary note — and the k8s-only steps
  * (delete-github-env, print-summary) appear only in the k8s destroy plan.
  */
 
@@ -1273,35 +1271,25 @@ function otherEnvironmentNames(projectConfig, environment) {
   return Object.keys(projectConfig.environments ?? {}).filter((name) => name !== environment);
 }
 
-// 1. The app S3 bucket (created during deploy bootstrap, not part of any
-//    Pulumi stack's resource graph) is shared by every environment of the
-//    project, each under its `<env>/` key prefix. Destroy removes this env's
-//    objects, and deletes the bucket itself only on
-//    -purge once no other environment uses it. k8s can fall back to the
-//    predictable bucket name; compose tiers only act on a configured bucket.
+// 1. The env's own app S3 bucket (created during deploy bootstrap, not part
+//    of any Pulumi stack's resource graph). Plain destroy keeps it and its
+//    uploads, the same way it keeps this env's backups, and the destroyed
+//    env's seed names it so a redeploy lands on it again. -purge empties and
+//    deletes it; no other environment uses it, so nothing else is checked.
 async function deleteAppBucketEffect(ctx) {
-  const { envConfig, projectConfig, environment, args, results, spinner, isK8s } = ctx;
-  const s3BucketName =
-    envConfig.s3?.bucket || (isK8s ? deriveProjectBucketName(projectConfig) : null);
+  const { envConfig, projectConfig, args, results, spinner } = ctx;
+  const s3BucketName = envConfig.s3?.bucket;
   if (!s3BucketName) return;
-  const keyPrefix = envConfig.s3?.keyPrefix;
+  if (!args?.purgeBackups) {
+    // Kept by design, so not a ledger entry (see retainStateBucket).
+    spinner.start('S3 bucket');
+    spinner.stop(`S3 bucket kept with its uploads: ${s3BucketName} (delete with -purge)`);
+    return;
+  }
   const s3Region = envConfig.s3?.region || 'fsn1';
-  const otherEnvs = otherEnvironmentNames(projectConfig, environment);
-  const deleteBucket = !!args?.purgeBackups && otherEnvs.length === 0;
-  const keptFor =
-    otherEnvs.length > 0
-      ? `bucket kept for ${otherEnvs.length} other environment(s)`
-      : 'bucket kept for reuse (delete with -purge)';
-  // What is left behind if this step fails: the env's objects, or the whole
-  // bucket when this destroy was meant to delete it.
-  const target = deleteBucket || !keyPrefix ? s3BucketName : `${s3BucketName}/${keyPrefix}`;
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
-  spinner.start(
-    keyPrefix
-      ? `Deleting S3 objects under ${s3BucketName}/${keyPrefix}`
-      : `Checking S3 bucket: ${s3BucketName}`,
-  );
+  spinner.start(`Deleting S3 bucket: ${s3BucketName}`);
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
       save: false,
@@ -1315,38 +1303,21 @@ async function deleteAppBucketEffect(ctx) {
         s3Region,
       );
       try {
-        if (keyPrefix) {
-          const { objectsRemoved } = await s3Provider.deletePrefix(s3BucketName, keyPrefix);
-          results.s3Prefix = keyPrefix;
+        const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
+        if (result.deleted) {
+          results.s3Bucket = s3BucketName;
           spinner.stop(
-            `S3 objects deleted under ${keyPrefix} (${objectsRemoved} objects); ${deleteBucket ? 'deleting the bucket (-purge, no other environment uses it)' : keptFor}`,
+            result.objectsRemoved > 0
+              ? `S3 bucket deleted (${result.objectsRemoved} objects removed)`
+              : 'S3 bucket deleted',
+          );
+        } else if (result.shellDeferred) {
+          results.s3Bucket = s3BucketName;
+          spinner.stop(
+            `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
           );
         } else {
-          // Written before per-environment prefixes: nothing tells this env's
-          // objects from another's, so none are deleted. Kept by design, so
-          // not a ledger entry.
-          spinner.stop(
-            `S3 objects in ${s3BucketName} were written before per-environment prefixes, so none were deleted; ${deleteBucket ? 'deleting the bucket (-purge, no other environment uses it)' : keptFor}`,
-          );
-        }
-        if (deleteBucket) {
-          spinner.start(`Deleting S3 bucket: ${s3BucketName}`);
-          const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
-          if (result.deleted) {
-            results.s3Bucket = s3BucketName;
-            spinner.stop(
-              result.objectsRemoved > 0
-                ? `S3 bucket deleted (${result.objectsRemoved} objects removed)`
-                : 'S3 bucket deleted',
-            );
-          } else if (result.shellDeferred) {
-            results.s3Bucket = s3BucketName;
-            spinner.stop(
-              `S3 bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`,
-            );
-          } else {
-            spinner.stop('S3 bucket not found');
-          }
+          spinner.stop('S3 bucket not found');
         }
       } catch (bucketError) {
         // NoSuchBucket means it was already deleted or never created — not an error
@@ -1360,8 +1331,8 @@ async function deleteAppBucketEffect(ctx) {
       spinner.stop('S3 bucket skipped (no credentials available)');
       results.leaks.leak({
         resourceClass: 'bucket',
-        resource: describeResource({ name: target, region: s3Region }),
-        reason: 'not deleted: no object-storage credentials available',
+        resource: describeResource({ name: s3BucketName, region: s3Region }),
+        reason: 'purge requested (-purge) but no object-storage credentials were available',
         hint: `Run \`vibecarbon destroy\` again with credentials configured, or delete via the ${Provider.NAME} console.`,
       });
     }
@@ -1369,7 +1340,7 @@ async function deleteAppBucketEffect(ctx) {
     spinner.stop(`S3 deletion failed: ${error.message}`);
     results.leaks.leak({
       resourceClass: 'bucket',
-      resource: describeResource({ name: target, region: s3Region }),
+      resource: describeResource({ name: s3BucketName, region: s3Region }),
       reason: `not deleted: ${error.message}`,
       hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket. Bucket continues to incur storage charges until deleted.`,
     });
@@ -1507,7 +1478,6 @@ ${c.success('Deleted resources:')}
     Health Checks:  ${results.healthChecks.length > 0 ? results.healthChecks.join(', ') : 'None'}
     Load Balancers: ${results.loadBalancers.length > 0 ? results.loadBalancers.join(', ') : 'None'}
     S3 Bucket:      ${results.s3Bucket || 'None'}
-    S3 Objects:     ${results.s3Prefix ? `under ${results.s3Prefix}` : 'None'}
     GitHub Env:     ${results.github ? environment : 'None'}
 
 ${c.dim(`Total: ${deletedCount} resources deleted`)}
@@ -3496,8 +3466,6 @@ async function main(argv = []) {
     healthChecks: [],
     loadBalancers: [],
     s3Bucket: null,
-    // This env's key prefix in the shared app bucket, once its objects are deleted.
-    s3Prefix: null,
     github: false,
     // THE LEAK ACCOUNTING. Every teardown class records its verdicts here as it
     // goes — failed deletes, deferred/gated survivors, incomplete listings,

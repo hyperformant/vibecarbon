@@ -93,7 +93,7 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
       region: 'ash',
       serverType: 'cpx21',
       servers: [{ ip: '1.2.3.4' }],
-      s3: { bucket: 'proj-storage-7b6f58' },
+      s3: { bucket: 'proj-a1b2c3-prod-storage', stateBucket: 'proj-state' },
     } as never;
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
     const saved = saveProjectConfigMock.mock.calls[0][0];
@@ -107,11 +107,14 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
       backupS3: { bucket: 'proj-backups', region: 'fsn1', endpoint: 'https://fsn1.x' },
       region: 'ash',
       serverType: 'cpx21',
+      // plain destroy keeps the env's bucket, so the seed names it
+      s3: { bucket: 'proj-a1b2c3-prod-storage' },
     });
     expect(saved.destroyedEnvironments.prod.destroyedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    for (const k of ['status', 'servers', 's3']) {
+    for (const k of ['status', 'servers']) {
       expect(saved.destroyedEnvironments.prod).not.toHaveProperty(k);
     }
+    expect(saved.destroyedEnvironments.prod.s3).not.toHaveProperty('stateBucket');
   });
 
   it('does not record an identity when the destroy is unverified (the live entry is kept instead)', async () => {

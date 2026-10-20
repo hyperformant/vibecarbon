@@ -40,7 +40,9 @@ describe('destroyPreviewBody', () => {
       }),
     );
     expect(body).toMatch(/excitingai-prod .*may not exist/);
-    expect(body).toMatch(/excitingai-88d16c-prod-storage, .*may not exist/);
+    expect(body).toMatch(
+      /excitingai-88d16c-prod-storage \(kept; deleted with -purge\) .*may not exist/,
+    );
     expect(body).toMatch(/excitingai-88d16c-backups .*may not exist/);
     expect(body).toContain('Destroy checks each one and skips what is already gone');
   });
@@ -61,9 +63,7 @@ describe('destroyPreviewBody', () => {
     );
     expect(body).not.toContain('may not exist');
     expect(body).toContain('excitingai-prod (203.0.113.7)');
-    expect(body).toContain(
-      'Bucket: excitingai-88d16c-prod-storage, kept (deleted only with -purge when no other environment uses it)',
-    );
+    expect(body).toContain('Bucket: excitingai-88d16c-prod-storage (kept; deleted with -purge)');
     expect(body).not.toContain('all objects will be deleted');
   });
 
@@ -77,8 +77,26 @@ describe('destroyPreviewBody', () => {
         s3SetupCompleted: true,
       }),
     );
-    expect(body).not.toMatch(/prod-storage, .*may not exist/);
+    expect(body).not.toMatch(/prod-storage .*may not exist/);
     expect(body).toMatch(/excitingai-prod .*may not exist/);
+  });
+});
+
+describe('destroyPreviewBody app bucket under -purge', () => {
+  it('says the environment’s own bucket will be deleted', () => {
+    const body = strip(
+      destroyPreviewBody({
+        envConfig: { ...SKELETON, status: 'deployed' },
+        projectName: 'excitingai',
+        envName: 'prod',
+        purgeBackups: true,
+        s3SetupCompleted: true,
+      }),
+    );
+    expect(body).toContain(
+      'Bucket: excitingai-88d16c-prod-storage (WILL BE DELETED, because you passed -purge)',
+    );
+    expect(body).not.toContain('kept; deleted with -purge');
   });
 });
 

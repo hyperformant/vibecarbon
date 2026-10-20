@@ -34,12 +34,8 @@ const rel = (f: string) => relative(ROOT, f);
 const srcFiles = walk(join(ROOT, 'src'), (f) => f.endsWith('.js'));
 
 describe('app bucket single resolver census', () => {
-  it('(a) deriveProjectBucketName( is called only from s3-base.js, prompts.js and destroy.js', () => {
-    const allowed = new Set([
-      'src/lib/providers/s3-base.js',
-      'src/lib/deploy/prompts.js',
-      'src/destroy.js',
-    ]);
+  it('(a) deriveProjectBucketName( is called only from s3-base.js and prompts.js', () => {
+    const allowed = new Set(['src/lib/providers/s3-base.js', 'src/lib/deploy/prompts.js']);
     expect(srcFiles.length).toBeGreaterThan(50);
     const offenders = srcFiles
       .filter((f) => /deriveProjectBucketName\(/.test(readFileSync(f, 'utf-8')))
@@ -73,11 +69,7 @@ describe('app bucket single resolver census', () => {
       join(ROOT, 'carbon/.env.example'),
       ...walk(join(ROOT, 'tests/e2e'), (f) => f.endsWith('.ts')),
     ];
-    // destroy.js still reads a recorded keyPrefix in its app-bucket step;
-    // that step's per-environment rewrite removes it and this exemption.
-    const exempt = new Set(['src/destroy.js']);
     const offenders = files
-      .filter((f) => !exempt.has(rel(f)))
       .filter((f) => /S3_KEY_PREFIX|keyPrefix/.test(readFileSync(f, 'utf-8')))
       .map(rel);
     expect(

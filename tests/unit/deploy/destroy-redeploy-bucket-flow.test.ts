@@ -13,7 +13,7 @@
  * creates and the bucket the CORS rule is applied to are one value:
  *
  *   destroy's updateProjectConfig effect (drops environments.<env>, records
- *   the identity, leaves the stable bucket name alone)
+ *   the identity, which names the bucket a plain destroy keeps)
  *   -> resolveEnvSeed (deploy's seed for a destroyed name)
  *   -> resolveEnvStorage (gatheredConfig.s3Config.bucket)
  *   -> renderBundle (the server .env's S3_BUCKET)
@@ -78,7 +78,7 @@ function deployedProject() {
   };
 }
 
-/** Run destroy's config effect the way a destroy that kept the shared bucket does. */
+/** Run destroy's config effect the way a plain destroy (bucket kept) does. */
 async function destroyE1(projectConfig: ReturnType<typeof deployedProject>) {
   await DESTROY_EFFECTS.updateProjectConfig({
     projectConfig,
@@ -167,14 +167,38 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     expect(setBucketCors).toHaveBeenCalledWith(serverEnv.S3_BUCKET, ['https://e1.example.com']);
   });
 
-  it('the destroyed-environment identity never carries the app bucket', async () => {
-    // The seam that would leak the deleted name into the redeploy: if `s3`
-    // were an identity field, resolveEnvStorage would prefer it over the
-    // fresh derivation and the app would presign against a deleted bucket.
-    expect(ENV_IDENTITY_FIELDS).not.toContain('s3');
+  it('the destroyed-environment identity carries the app bucket it keeps', async () => {
+    // Plain destroy keeps the env's bucket and its uploads, so the seed names
+    // it: the redeploy lands on the same bucket, and a pin survives.
+    expect(ENV_IDENTITY_FIELDS).toContain('s3');
     const afterDestroy = await destroyE1(deployedProject());
-    expect(afterDestroy.destroyedEnvironments.e1.s3).toBeUndefined();
+    expect(afterDestroy.destroyedEnvironments.e1.s3).toEqual({ bucket: BUCKET, region: 'nbg1' });
     expect(afterDestroy.destroyedEnvironments.e1.backupS3.bucket).toBe(BACKUPS);
+  });
+
+  it('the seed never carries runtime storage state (state bucket, endpoint, creation time)', async () => {
+    const project = deployedProject();
+    Object.assign(project.environments.e1.s3, { bucketCreatedAt: '2026-10-20T00:00:00Z' });
+    const afterDestroy = await destroyE1(project);
+    const seeded = afterDestroy.destroyedEnvironments.e1.s3;
+    expect(seeded).not.toHaveProperty('stateBucket');
+    expect(seeded).not.toHaveProperty('endpoint');
+    expect(seeded).not.toHaveProperty('bucketCreatedAt');
+  });
+
+  it('a pinned environment survives destroy -> redeploy on the same pinned bucket', async () => {
+    const PINNED = 'legacy-myapp-uploads';
+    const project = deployedProject();
+    Object.assign(project.environments.e1.s3, { bucket: PINNED, bucketPin: PINNED });
+    expect(resolveEnvStorage('e1', project.environments.e1, project).bucket).toBe(PINNED);
+
+    const afterDestroy = await destroyE1(project);
+    expect(afterDestroy.destroyedEnvironments.e1.s3).toMatchObject({
+      bucket: PINNED,
+      bucketPin: PINNED,
+    });
+    const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
+    expect(resolveEnvStorage('e1', envConfig, afterDestroy).bucket).toBe(PINNED);
   });
 
   it('a live environment whose persisted bucket differs is refused, not re-pointed', () => {

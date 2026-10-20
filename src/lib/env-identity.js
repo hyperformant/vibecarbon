@@ -1,8 +1,8 @@
 /**
  * The IDENTITY of an environment: the `.vibecarbon.json` fields that say what
- * it is — placement, domain, DNS backend, backup bucket, server sizing — as
- * opposed to what currently exists (servers, the live storage bucket, deploy
- * state, HA topology).
+ * it is — placement, domain, DNS backend, its app and backup buckets, server
+ * sizing — as opposed to what currently exists (servers, the state bucket,
+ * deploy state, HA topology).
  *
  * `destroy` records this block under `destroyedEnvironments.<env>` after it
  * removes the live entry, and `deploy` reads it back when asked to deploy an
@@ -27,6 +27,10 @@ export const ENV_IDENTITY_FIELDS = Object.freeze([
   'domain',
   'dnsProvider',
   'dns',
+  // Plain destroy keeps the env's app bucket and its uploads, so the seed
+  // names it (and any pin): a redeploy lands on the same bucket. Only the
+  // ENV_IDENTITY_S3_FIELDS subset is kept; see envIdentityOf.
+  's3',
   'backupS3',
   'backup',
   'region',
@@ -38,6 +42,13 @@ export const ENV_IDENTITY_FIELDS = Object.freeze([
 ]);
 
 /**
+ * The part of `s3` that is identity: the app bucket, its pin, and the region
+ * it lives in. The state bucket can rotate on -purge, and the endpoint and
+ * creation time describe the bucket as it last existed, so they stay behind.
+ */
+export const ENV_IDENTITY_S3_FIELDS = Object.freeze(['bucket', 'bucketPin', 'region']);
+
+/**
  * @param {Record<string, unknown>} envConfig - a live `environments.<env>` block
  * @returns {Record<string, unknown>} the identity subset (only fields present)
  */
@@ -46,6 +57,16 @@ export function envIdentityOf(envConfig) {
   const out = {};
   for (const key of ENV_IDENTITY_FIELDS) {
     if (envConfig?.[key] !== undefined) out[key] = envConfig[key];
+  }
+  if (out.s3) {
+    const s3 = /** @type {Record<string, unknown>} */ (out.s3);
+    /** @type {Record<string, unknown>} */
+    const kept = {};
+    for (const key of ENV_IDENTITY_S3_FIELDS) {
+      if (s3[key] !== undefined) kept[key] = s3[key];
+    }
+    if (Object.keys(kept).length > 0) out.s3 = kept;
+    else delete out.s3;
   }
   return out;
 }

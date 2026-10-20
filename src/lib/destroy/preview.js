@@ -90,12 +90,15 @@ export function destroyPreviewBody({
 `
     : '';
 
-  // Plain destroy keeps the app bucket and its objects; -purge deletes it
-  // once no other environment uses it.
-  const storageScope = ', kept (deleted only with -purge when no other environment uses it)';
+  // The env's own app bucket: plain destroy keeps it and its uploads (with
+  // the env's backups), -purge deletes it.
   const storageBlock = envConfig.s3?.bucket
     ? `${c.bold('S3 Storage:')}
-    ${c.error('•')} Bucket: ${envConfig.s3.bucket}${storageScope}${mark(bucketsKnown)}
+    ${
+      purgeBackups
+        ? `${c.error('•')} Bucket: ${envConfig.s3.bucket} (WILL BE DELETED, because you passed -purge)`
+        : `${c.success('•')} Bucket: ${envConfig.s3.bucket} (kept; deleted with -purge)`
+    }${mark(bucketsKnown)}
 `
     : '';
 
