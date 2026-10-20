@@ -137,6 +137,10 @@ let getNodesOut = '';
 let retiredChartStsOut = '';
 // The chart's Helm release record (a Secret), which outlives a deleted StatefulSet.
 let retiredChartReleaseOut = '';
+// Whether the cluster still carries the observability stack (namespace +
+// grafana-tls) from a life as primary — the demoted-standby reconverge case.
+// Default: absent, as on every freshly deployed cluster.
+let leftoverObservability = false;
 
 const APP_POD = 'app-6f7d9c-abcde';
 const APP_RS_JSON = JSON.stringify({
@@ -189,6 +193,18 @@ function installSpawnMock() {
         stdout: retiredChartReleaseOut,
         argv: full,
       }) as unknown as ReturnType<typeof spawn>;
+    }
+    if (
+      leftoverObservability &&
+      cmd === 'kubectl' &&
+      argv.includes('get') &&
+      argv.includes('--ignore-not-found') &&
+      (argv.includes('vibecarbon-observability') || argv.includes('grafana-tls'))
+    ) {
+      const stdout = argv.includes('grafana-tls')
+        ? 'certificate.cert-manager.io/grafana-tls\n'
+        : 'namespace/vibecarbon-observability\n';
+      return fakeChild({ stdout, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
     if (cmd === 'docker' && argv[0] === 'push') {
       return fakeChild({
@@ -737,6 +753,51 @@ describe('applyK3sManifests pilot-standby role', () => {
         cmdCalls.some((a) => a.includes('patch') && a.includes(d) && a.includes('cert-manager')),
       ).toBe(true);
     }
+  });
+
+  // Reverse of the post-failover reconverge: the old primary is redeployed as
+  // the pilot standby and still runs the observability stack it got as
+  // primary. A fresh standby has none, so the demoted one must end up with
+  // its pods at zero and grafana-tls off the ACME issuer.
+  it('a standby demoted from primary scales its leftover observability to zero', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir({ withObservability: true });
+    leftoverObservability = true;
+    try {
+      await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
+    } finally {
+      leftoverObservability = false;
+    }
+    expect(cmdCalls.some(isObservabilityApply)).toBe(false);
+    expect(cmdCalls).toContainEqual([
+      'kubectl',
+      '-n',
+      'vibecarbon-observability',
+      'scale',
+      'deployment',
+      '--all',
+      '--replicas=0',
+    ]);
+    const grafanaPatch =
+      cmdCalls.find(
+        (a) => a.includes('patch') && a.includes('grafana-tls') && a.includes('certificate'),
+      ) ?? [];
+    expect(grafanaPatch.length, 'grafana-tls must leave the ACME issuer').toBeGreaterThan(0);
+    const body = JSON.parse(grafanaPatch[grafanaPatch.indexOf('-p') + 1]);
+    expect(body.spec.issuerRef.name).toBe('vibecarbon-standby-selfsigned');
+    expect(Object.values(body.metadata.annotations)[0]).toMatch(/^letsencrypt/);
+  });
+
+  it('a fresh standby (no leftover namespace) scales and patches nothing in observability', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir({ withObservability: true });
+    await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
+    expect(
+      cmdCalls.some(
+        (a) =>
+          a.includes('vibecarbon-observability') && (a.includes('scale') || a.includes('patch')),
+      ),
+    ).toBe(false);
   });
 
   it('primary role call list is unchanged (patches/waits/app-tier steps all still run)', async () => {

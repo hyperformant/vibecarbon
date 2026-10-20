@@ -328,7 +328,7 @@ The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
 - **Seeded at deploy:** The database boots from a seed snapshot on first start, immediately becoming a live streaming replica, with no separate reseed cycle
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance
 
-**Deployment as role reconciler:** After any failover, re-running `vibecarbon deploy` converges each cluster to its current role: the new primary keeps its warm tier and workers, while the recovered ex-primary reconverges to pilot-light (cold app tier, workers removed).
+**Deployment as role reconciler:** After any failover, re-running `vibecarbon deploy` converges each cluster to its current role: the new primary keeps its warm tier and workers and gets the add-ons a primary runs (observability included), while the recovered ex-primary reconverges to pilot-light (cold app tier, observability scaled to zero, workers removed).
 
 ### Failover (k8s-ha)
 

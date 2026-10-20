@@ -296,15 +296,36 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * redeploy after this CLI upgrade re-runs the step everywhere, which is exactly
  * how the fix reaches already-deployed environments.
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, manifestDigest: string, bundledManifestDigest: string }}
+ * `role` (the k8s-ha pilot-light role) is an input because applyK3sManifests
+ * renders a DIFFERENT cluster for each role: the standby zeroes the app tier and
+ * the cluster-autoscaler, skips observability, points its Certificates at the
+ * self-signed issuer and renders WALG_ROLE=standby into the db StatefulSet.
+ * Each cluster keeps its own deploy-state file keyed by its STACK name, and a
+ * failover swaps which stack holds which role without touching either file. So
+ * without this key the post-failover reconverge redeploy found byte-identical
+ * inputs on both stacks and SKIPPED the apply on both: the promoted cluster
+ * never got its observability stack (no Grafana IngressRoute, the SPA answered
+ * /admin/grafana; e4 run 2026-10-20) and the demoted one kept its primary-shaped
+ * render. Normalized the same way as walgRole below, so single-cluster deploys
+ * (role undefined) hash as 'primary'.
+ *
+ * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby' }} args
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', manifestDigest: string, bundledManifestDigest: string }}
  */
-export function buildK3sApplyInputs({ imageTag, dbImageTag, restore, projectDir, storageClass }) {
+export function buildK3sApplyInputs({
+  imageTag,
+  dbImageTag,
+  restore,
+  projectDir,
+  storageClass,
+  role,
+}) {
   return {
     imageTag,
     dbImageTag,
     restore: restore ?? '',
     storageClass: storageClass ?? '',
+    role: role === 'standby' ? 'standby' : 'primary',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -2746,6 +2767,81 @@ export function renderS3EgressVpcManifest(template, vpcCidrs) {
   return template.replaceAll('__VPC_CIDR__', vpcCidrs[0]);
 }
 
+// The isolated observability stack's namespace (services/observability/k8s).
+const OBSERVABILITY_NAMESPACE = 'vibecarbon-observability';
+
+/**
+ * Pilot-light standby: scale down an observability stack this cluster still
+ * carries from its life as a primary, and point its grafana-tls Certificate at
+ * the standby's self-signed issuer (the real issuer rides the promote
+ * annotation, as on vibecarbon-tls). No-op when the namespace is absent, which
+ * is every freshly deployed standby.
+ *
+ * @param {{ env: Record<string, string|undefined>, issuerName: string }} args
+ * @returns {Promise<boolean>} true when a leftover stack was demoted
+ */
+export async function demoteObservabilityOnStandby({ env, issuerName }) {
+  const ns = String(
+    (await runKubectlWithRetry(
+      ['get', 'namespace', OBSERVABILITY_NAMESPACE, '--ignore-not-found', '-o', 'name'],
+      {
+        env,
+        captureStdout: true,
+        description: 'applyK3sManifests: look for a leftover observability namespace (standby)',
+      },
+    )) ?? '',
+  ).trim();
+  if (!ns) return false;
+  console.error(
+    `[pilot-standby] demoting the observability stack left from this cluster's primary life`,
+  );
+  await runKubectlWithRetry(
+    ['-n', OBSERVABILITY_NAMESPACE, 'scale', 'deployment', '--all', '--replicas=0'],
+    { env, description: 'applyK3sManifests: zero observability deployments (pilot standby)' },
+  );
+  const cert = String(
+    (await runKubectlWithRetry(
+      [
+        '-n',
+        OBSERVABILITY_NAMESPACE,
+        'get',
+        'certificate',
+        'grafana-tls',
+        '--ignore-not-found',
+        '-o',
+        'name',
+      ],
+      {
+        env,
+        captureStdout: true,
+        description: 'applyK3sManifests: look for grafana-tls (pilot standby)',
+      },
+    )) ?? '',
+  ).trim();
+  if (cert) {
+    await runKubectlWithRetry(
+      [
+        '-n',
+        OBSERVABILITY_NAMESPACE,
+        'patch',
+        'certificate',
+        'grafana-tls',
+        '--type=merge',
+        '-p',
+        JSON.stringify({
+          metadata: { annotations: { [PROMOTE_ISSUER_ANNOTATION]: issuerName } },
+          spec: { issuerRef: { name: STANDBY_SELFSIGNED_ISSUER, kind: 'ClusterIssuer' } },
+        }),
+      ],
+      {
+        env,
+        description: 'applyK3sManifests: grafana-tls -> standby self-signed issuer (pilot standby)',
+      },
+    );
+  }
+  return true;
+}
+
 /**
  * Apply cert-manager + vibecarbon-secrets + the project's k8s/infra +
  * k8s/base kustomizations (the db StatefulSet included, rendered), wait for
@@ -3647,6 +3743,16 @@ export async function applyK3sManifests({
     // installs it when this cluster becomes primary (the apply above is
     // idempotent across redeploys, so nothing is lost).
     console.error('[pilot-standby] skipping observability, app tier is zeroed until failover');
+    // A cluster demoted by the post-failover reconverge was a full primary
+    // and still runs the stack it was given then. Bring it to what a fresh
+    // pilot standby looks like: no observability pods (no scrape or Grafana
+    // spend, no second Prometheus watching a zeroed app tier) and no ACME
+    // issuer behind grafana-tls (single-ACME-issuer policy, see the
+    // vibecarbon-tls patch above). Scale, not delete, so the PVCs keep their
+    // history; the apply above restores `replicas: 1` from the manifests and
+    // re-points the issuer the day this cluster is promoted again. A fresh
+    // standby has no such namespace and this is a no-op.
+    await demoteObservabilityOnStandby({ env, issuerName });
   } else if (
     existsSync(join(observabilityDir, 'kustomization.yaml')) &&
     !baseAggregatesObservability
@@ -4371,6 +4477,9 @@ export async function deployK3s(options) {
     // The db StatefulSet's PVC class is rendered from this provider static,
     // and no manifest digest can see it — see buildK3sApplyInputs.
     storageClass: Provider.K8S_STORAGE_CLASS,
+    // The pilot-light role: a failover swaps it between stacks, and each
+    // role renders a different cluster — see buildK3sApplyInputs.
+    role: options.role,
   });
   if (!state.shouldSkip('k3s-apply', applyInputs)) {
     state.startStep('k3s-apply', applyInputs);
