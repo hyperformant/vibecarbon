@@ -929,9 +929,10 @@ function deleteGitHubEnvironment(envName) {
 /**
  * Handle the backup S3 bucket at the end of destroy. Default behavior is to
  * preserve the bucket for recovery (production users); --purge-backups deletes
- * it (used by e2e tests, which require a clean tear-down).
+ * this environment's backups (used by e2e tests, which require a clean tear-down);
+ * the bucket itself goes only with the last live environment.
  */
-async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks) {
+async function handleBackupBucket(envConfig, projectConfig, environment, args, spinner, leaks) {
   if (!envConfig.backupS3?.bucket) return;
   const bucketName = envConfig.backupS3.bucket;
 
@@ -943,6 +944,11 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
   }
 
   const region = envConfig.backupS3.region || envConfig.s3?.region || 'fsn1';
+  // Every environment archives under its own backups/<project>/<env>/ prefix,
+  // so -purge removes this environment's backups and the bucket itself only
+  // goes with the last live environment.
+  const envBackupPrefix = `backups/${projectConfig.projectName}/${environment}/`;
+  const deleteBucket = otherEnvironmentNames(projectConfig, environment).length === 0;
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
   spinner.start(`Purging backup bucket: ${bucketName}`);
@@ -981,8 +987,13 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
       // final-destroy timeout and getting the whole step SIGKILLed. On timeout
       // we leave the bucket for the orphan sweep / next destroy rather than hang.
       const PURGE_TIMEOUT_MS = 180_000;
+      const purge = async () => {
+        const { objectsRemoved } = await s3Provider.deletePrefix(bucketName, envBackupPrefix);
+        if (!deleteBucket) return { kept: true, objectsRemoved };
+        return s3Provider.emptyAndDeleteBucket(bucketName);
+      };
       const result = await Promise.race([
-        s3Provider.emptyAndDeleteBucket(bucketName),
+        purge(),
         new Promise((_, reject) => {
           // Detach the timer from the event loop so a fast purge win doesn't
           // leave it holding the process open — handle-probe evidence
@@ -1002,13 +1013,15 @@ async function handleBackupBucket(envConfig, projectConfig, args, spinner, leaks
         }),
       ]);
       spinner.stop(
-        result.deleted
-          ? result.objectsRemoved > 0
-            ? `Backup bucket purged (${result.objectsRemoved} objects removed)`
-            : 'Backup bucket purged'
-          : result.shellDeferred
-            ? `Backup bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
-            : 'Backup bucket not found',
+        result.kept
+          ? `Backups under ${envBackupPrefix} purged (${result.objectsRemoved} objects removed); bucket kept for the other environments`
+          : result.deleted
+            ? result.objectsRemoved > 0
+              ? `Backup bucket purged (${result.objectsRemoved} objects removed)`
+              : 'Backup bucket purged'
+            : result.shellDeferred
+              ? `Backup bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
+              : 'Backup bucket not found',
       );
     } catch (bucketError) {
       if (bucketError.name === 'NoSuchBucket' || bucketError.$metadata?.httpStatusCode === 404) {
@@ -1235,6 +1248,11 @@ export function destroyOutro(envName, timeStr, results) {
  * (delete-github-env, print-summary) appear only in the k8s destroy plan.
  */
 
+/** Names of the project's environments other than the one being destroyed. */
+function otherEnvironmentNames(projectConfig, environment) {
+  return Object.keys(projectConfig.environments ?? {}).filter((name) => name !== environment);
+}
+
 // 1. The app S3 bucket (created during deploy bootstrap, not part of any
 //    Pulumi stack's resource graph) is shared by every environment of the
 //    project, each under its `<env>/` key prefix. Destroy removes this env's
@@ -1249,9 +1267,7 @@ async function deleteAppBucketEffect(ctx) {
   if (!s3BucketName) return;
   const keyPrefix = envConfig.s3?.keyPrefix;
   const s3Region = envConfig.s3?.region || 'fsn1';
-  const otherEnvs = Object.keys(projectConfig.environments ?? {}).filter(
-    (name) => name !== environment,
-  );
+  const otherEnvs = otherEnvironmentNames(projectConfig, environment);
   const deleteBucket = !!args?.purgeBackups && otherEnvs.length === 0;
   const keptFor =
     otherEnvs.length > 0
@@ -1375,8 +1391,8 @@ async function retainStateBucketEffect(ctx) {
 
 // 3. Backup bucket: preserved by default, deleted with -purge.
 async function handleBackupBucketEffect(ctx) {
-  const { envConfig, projectConfig, args, spinner, results } = ctx;
-  await handleBackupBucket(envConfig, projectConfig, args, spinner, results.leaks);
+  const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
+  await handleBackupBucket(envConfig, projectConfig, environment, args, spinner, results.leaks);
 }
 
 // 4. GitHub environment (k8s only — this step is absent from the compose plans).

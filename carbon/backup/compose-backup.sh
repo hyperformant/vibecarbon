@@ -36,7 +36,7 @@ echo "Retain: ${RETAIN} full base backups"
 #
 # The S3-configured guard exits 0 BEFORE wal-g runs when no S3 backup target is
 # configured. docker-compose.yml renders WALG_S3_PREFIX as
-#   s3://${S3_BACKUP_BUCKET:-${S3_BUCKET:-}}/backups/${PROJECT_NAME}/walg
+#   s3://${S3_BACKUP_BUCKET:-${S3_BUCKET:-}}/backups/${PROJECT_NAME}/${VC_ENV:-local}/walg
 # so an unconfigured deploy yields the empty-bucket form `s3:///backups/...`
 # (and empty AWS_ACCESS_KEY_ID). Without this guard an always-installed cron
 # would `set -e`-fail nightly into backup.log on no-S3 deploys. Checking inside

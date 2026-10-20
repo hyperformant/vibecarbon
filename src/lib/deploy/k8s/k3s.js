@@ -2465,7 +2465,7 @@ export async function applyDbSeedConfigMap({ env }) {
  * @param {object} o
  * @param {string} o.dbImageTag - full db image ref, `<repo>:<tag>`
  * @param {string} [o.projectName]
- * @param {{bucket?: string, endpoint?: string, region?: string}} [o.s3Config]
+ * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
  * @param {string|null} [o.backupBucketName]
  * @param {'primary'|'standby'} [o.walgRole]
  * @param {string} o.dbPrivateIp - this cluster's database node private IP
@@ -2518,12 +2518,19 @@ export function buildDbManifestValues({
   // never WRITE here) is enforced by the WALG_ROLE WRITE-GUARD: wal-archive.sh
   // and the backup CronJob both no-op when WALG_ROLE=standby.
   const walgBucket = backupBucketName || s3Config?.bucket || '';
+  // The path inside the bucket is resolveEnvStorage's per-environment
+  // `backups/<project>/<env>/walg`. Without it two environments would archive
+  // into one stream, so a bucket with no prefix is an error, not a default.
+  const walgPrefix = s3Config?.walgPrefix;
+  if (walgBucket && !walgPrefix) {
+    throw new Error(
+      'buildDbManifestValues: s3Config.walgPrefix is required with a bucket (resolveEnvStorage supplies it)',
+    );
+  }
   return {
     DB_IMAGE: dbImageTag.slice(0, lastColon),
     DB_IMAGE_TAG: dbImageTag.slice(lastColon + 1),
-    WALG_S3_PREFIX: walgBucket
-      ? `s3://${walgBucket}/backups/${projectName || 'vibecarbon'}/walg`
-      : '',
+    WALG_S3_PREFIX: walgBucket ? `s3://${walgBucket}/${walgPrefix}` : '',
     WALG_ROLE: walgRole,
     S3_ENDPOINT: s3Config?.endpoint ?? '',
     S3_REGION: s3Config?.region ?? '',

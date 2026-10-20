@@ -16,8 +16,9 @@
 # volumeClaimTemplates cannot be changed afterwards.
 #
 #   DB_IMAGE / DB_IMAGE_TAG   the db image (resolveDbImage, src/lib/images.js)
-#   WALG_S3_PREFIX            s3://<backup bucket>/backups/<project>/walg, one
-#                             canonical prefix shared by primary and standby
+#   WALG_S3_PREFIX            s3://<backup bucket>/backups/<project>/<env>/walg,
+#                             one prefix per environment, shared by primary
+#                             and standby
 #   WALG_ROLE                 primary | standby: the wal-g WRITE-GUARD that
 #                             wal-archive.sh and the backup CronJob read
 #   S3_ENDPOINT / S3_REGION   the backup bucket's endpoint
