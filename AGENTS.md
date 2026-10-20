@@ -62,10 +62,13 @@ state writes were lost on 2026-08-07, and a warm bucket is what a redeploy
 resumes against; a kept-by-design bucket is neither a leak, unverified,
 foreign, nor a predicted leak, so it takes none of those labels. The kept
 name is recorded as project-level `retainedStateBucket` in `.vibecarbon.json`
-(the derived name embeds the app bucket name, which destroy rotates, so
-without the record the next deploy would derive a fresh bucket and orphan the
-kept one); `resolveStateBucketName` reads it after the operator pin and before
-derivation, and `-purge` clears it. destroy also records the environment's
+(it also covers a bucket derived under an older app bucket name, so the next
+deploy never derives a fresh bucket and orphans the kept one);
+`resolveStateBucketName` reads it after the operator pin and before
+derivation. The derived state bucket is project-level, so `-purge` deletes it
+only with the last live environment, then clears the record and rotates
+`stateBucketGeneration` so the next deploy derives a fresh name instead of
+recreating the deleted one. destroy also records the environment's
 identity (provider, domain, DNS, backup bucket, region, server types — see
 `lib/env-identity.js`) under `destroyedEnvironments.<env>`; `deploy` seeds a
 same-named environment from it and clears it once the env is live. A sibling
