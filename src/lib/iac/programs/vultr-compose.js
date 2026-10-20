@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import * as vultr from '@ediri/vultr';
 import { APT_LOCK_OPT } from '../../deploy/apt.js';
 import { cidrToVultrRuleFields, encodeLabels } from '../../providers/vultr.js';
+import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -181,19 +182,25 @@ export function buildVultrComposeProgram(config) {
       });
     });
 
-    const instance = new vultr.Instance('server', {
-      label: name,
-      region: config.location,
-      plan: config.serverType,
-      // MUST byte-match VultrProvider.COMPOSE_IMAGE ('2284' — Ubuntu 24.04
-      // LTS x64; Vultr images are numeric os_ids).
-      osId: 2284,
-      sshKeyIds: [sshKeyIdForInstance],
-      // RAW — see the module doc's encoding VERIFY note.
-      userData,
-      firewallGroupId: firewall.id,
-      tags: encodeLabels({ ...labels, role: 'compose' }),
-    });
+    const instance = new vultr.Instance(
+      'server',
+      {
+        label: name,
+        region: config.location,
+        plan: config.serverType,
+        // MUST byte-match VultrProvider.COMPOSE_IMAGE ('2284' — Ubuntu 24.04
+        // LTS x64; Vultr images are numeric os_ids).
+        osId: 2284,
+        sshKeyIds: [sshKeyIdForInstance],
+        // RAW — see the module doc's encoding VERIFY note.
+        userData,
+        firewallGroupId: firewall.id,
+        tags: encodeLabels({ ...labels, role: 'compose' }),
+      },
+      // Bounded create: a provider host that never finishes the create fails the
+      // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
+      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+    );
 
     return {
       serverIp: instance.mainIp,

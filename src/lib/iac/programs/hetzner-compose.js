@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as hcloud from '@pulumi/hcloud';
+import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -107,22 +108,28 @@ export function buildHetznerComposeProgram(config) {
       { replaceOnChanges: ['*'], deleteBeforeReplace: true },
     );
 
-    const server = new hcloud.Server('server', {
-      name,
-      serverType: config.serverType,
-      // Hetzner-maintained app image: Ubuntu LTS with docker + the
-      // docker-compose plugin pre-installed. Matches the contract in
-      // carbon/cloud-init/docker-ce-setup.yaml ("VPS boot time in parallel
-      // with Hetzner's default docker-ce app"). Plain `ubuntu-24.04` leaves
-      // the VM without docker and the deploy hits `docker: command not
-      // found` on the first `docker compose up` call.
-      image: 'docker-ce',
-      location: config.location,
-      sshKeys: [sshKeyId],
-      firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
-      labels: { ...labels, role: 'compose' },
-      userData,
-    });
+    const server = new hcloud.Server(
+      'server',
+      {
+        name,
+        serverType: config.serverType,
+        // Hetzner-maintained app image: Ubuntu LTS with docker + the
+        // docker-compose plugin pre-installed. Matches the contract in
+        // carbon/cloud-init/docker-ce-setup.yaml ("VPS boot time in parallel
+        // with Hetzner's default docker-ce app"). Plain `ubuntu-24.04` leaves
+        // the VM without docker and the deploy hits `docker: command not
+        // found` on the first `docker compose up` call.
+        image: 'docker-ce',
+        location: config.location,
+        sshKeys: [sshKeyId],
+        firewallIds: [firewall.id.apply((id) => Number.parseInt(id, 10))],
+        labels: { ...labels, role: 'compose' },
+        userData,
+      },
+      // Bounded create: a provider host that never finishes the create fails the
+      // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
+      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+    );
 
     return {
       serverIp: server.ipv4Address,

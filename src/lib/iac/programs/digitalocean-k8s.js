@@ -82,6 +82,7 @@ import { randomBytes } from 'node:crypto';
 import * as digitalocean from '@pulumi/digitalocean';
 import * as pulumi from '@pulumi/pulumi';
 import { DigitalOceanProvider, encodeLabels } from '../../providers/digitalocean.js';
+import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
 import { transliterateToAscii } from './digitalocean-compose.js';
 
 /**
@@ -320,7 +321,7 @@ export function buildDigitalOceanK8sProgram(config) {
       // closes that window. The database node/workers below also depend on firewall
       // explicitly, rather than relying on their (also-present) dependsOn
       // master to carry it transitively.
-      { dependsOn: [firewall] },
+      { dependsOn: [firewall], customTimeouts: SERVER_CUSTOM_TIMEOUTS },
     );
 
     // Reserved IP (stable ingress) + assignment to master. Created after
@@ -412,7 +413,7 @@ export function buildDigitalOceanK8sProgram(config) {
       },
       // dependsOn firewall explicitly (M3 Task 5b), not just transitively
       // through master — see master's own dependsOn comment.
-      { dependsOn: [master, firewall] },
+      { dependsOn: [master, firewall], customTimeouts: SERVER_CUSTOM_TIMEOUTS },
     );
 
     // Workers. NO PlacementGroup here — DO has no droplet spread/anti-
@@ -456,7 +457,7 @@ export function buildDigitalOceanK8sProgram(config) {
           // dependsOn firewall explicitly (M3 Task 5b), not just
           // transitively through master — see master's own dependsOn
           // comment.
-          { dependsOn: [master, firewall] },
+          { dependsOn: [master, firewall], customTimeouts: SERVER_CUSTOM_TIMEOUTS },
         ),
       );
     }

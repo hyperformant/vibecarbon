@@ -34,6 +34,7 @@ import {
   squeezeLinodeInstanceLabel,
   squeezeLinodeLabel,
 } from '../../providers/linode.js';
+import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -190,26 +191,32 @@ export function buildLinodeComposeProgram(config) {
       tags: encodeLabels(labels),
     });
 
-    const instance = new linode.Instance('server', {
-      // Squeezed to Linode's 3-50 instance cap through the shared helper, so
-      // findServersByName (and the destroy path behind it) derives the same
-      // wire label. compose-HA's `-primary`/`-standby` suffix is what pushes
-      // realistic project names past 50 — live CI failure 2026-08-20.
-      label: squeezeLinodeInstanceLabel(name),
-      region: config.location,
-      type: config.serverType,
-      // Plain Ubuntu LTS — see the module doc comment (no Docker image on
-      // Linode; cloud-init installs it).
-      image: 'linode/ubuntu24.04',
-      // Raw OpenSSH key material — Linode's create contract (ids/names are
-      // a REST-path resolution concern, see LinodeProvider._resolveSshKeyMaterial).
-      authorizedKeys: [config.sshPublicKey.trim()],
-      // Base64-encoded by US (the provider does not encode) — verified on
-      // the registry's instance docs 2026-08-07.
-      metadatas: [{ userData: userDataB64 }],
-      firewallId: firewall.id.apply((id) => Number.parseInt(id, 10)),
-      tags: encodeLabels({ ...labels, role: 'compose' }),
-    });
+    const instance = new linode.Instance(
+      'server',
+      {
+        // Squeezed to Linode's 3-50 instance cap through the shared helper, so
+        // findServersByName (and the destroy path behind it) derives the same
+        // wire label. compose-HA's `-primary`/`-standby` suffix is what pushes
+        // realistic project names past 50 — live CI failure 2026-08-20.
+        label: squeezeLinodeInstanceLabel(name),
+        region: config.location,
+        type: config.serverType,
+        // Plain Ubuntu LTS — see the module doc comment (no Docker image on
+        // Linode; cloud-init installs it).
+        image: 'linode/ubuntu24.04',
+        // Raw OpenSSH key material — Linode's create contract (ids/names are
+        // a REST-path resolution concern, see LinodeProvider._resolveSshKeyMaterial).
+        authorizedKeys: [config.sshPublicKey.trim()],
+        // Base64-encoded by US (the provider does not encode) — verified on
+        // the registry's instance docs 2026-08-07.
+        metadatas: [{ userData: userDataB64 }],
+        firewallId: firewall.id.apply((id) => Number.parseInt(id, 10)),
+        tags: encodeLabels({ ...labels, role: 'compose' }),
+      },
+      // Bounded create: a provider host that never finishes the create fails the
+      // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
+      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+    );
 
     return {
       serverIp: instance.ipAddress,
