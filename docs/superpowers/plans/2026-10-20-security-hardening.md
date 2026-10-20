@@ -5,14 +5,19 @@
 **Goal:** Close the nine deploy-path and security findings, plus the database-superuser finding (H10), from the 2026-10-20 architecture review. Every fix ships a census that covers its whole bug class, not just the one instance.
 
 **Architecture:** The plan fixes four classes:
-1. **Secrets reaching processes that don't need them.** Each process gets an explicit runtime env from one shared allowlist instead of the whole server `.env`. The app's object-storage key is split from the infra key wherever the provider can scope keys.
+1. **Secrets reaching processes that don't need them.** Each process gets an explicit runtime env from one shared allowlist instead of the whole server `.env`. Each environment's app gets its own object-storage key, limited to that environment's app bucket, wherever the provider can scope keys (measured live on 2026-10-20, see R2).
 2. **Overlay merge drift.** The prod Traefik's socket mount is removed with `!override`, and a check on the rendered compose config pins it.
 3. **Single-layer network exposure.** hostPorts are bound to specific interfaces, and NetworkPolicies give pods that call the Kubernetes API the egress they need.
 4. **Fail-open gates and log leaks.** Request logs are redacted, the MFA check fails closed, and stale WireGuard firewall rules are removed.
 
 **Tech Stack:** Node ESM CLI (`src/`), template app (Hono, Better Auth 1.7.10, pino) in `carbon/`, Docker Compose v5 (`docker compose config --format json` for rendered checks), k3s manifests, vitest.
 
-**Spec:** the review report `/tmp/claude-1000/-home-brandon-repos-vibecarbon/0b7ee7cd-7067-44f6-a72a-5ce5d7505b2c/scratchpad/arch-review/deploy-security.md`. It was re-verified on 2026-10-20 against `feat/project-app-bucket` @ 7de7f0d (see "Verification of findings" below). Stacks on branch `feat/project-app-bucket`.
+**Spec:** the review report `/tmp/claude-1000/-home-brandon-repos-vibecarbon/0b7ee7cd-7067-44f6-a72a-5ce5d7505b2c/scratchpad/arch-review/deploy-security.md`. It was re-verified on 2026-10-20 against `feat/project-app-bucket` @ 7de7f0d (see "Verification of findings" below). The object-storage scoping evidence is the real-account spike `/tmp/claude-1000/-home-brandon-repos-vibecarbon/0b7ee7cd-7067-44f6-a72a-5ce5d7505b2c/scratchpad/arch-review/s3-scoping-spike.md`, including its "Hetzner second key" section. Task 4 commits a copy as `docs/research/2026-10-object-storage-key-scoping.md`.
+
+**Base:** branch `feat/project-app-bucket` @ af2897b (PR #233). On that branch:
+- the app uploads bucket is **one per environment** (`deriveEnvAppBucketName`, read only through `resolveEnvStorage(envName, envConfig, projectConfig).bucket`);
+- the Pulumi state bucket and the backups bucket are per project;
+- `S3_KEY_PREFIX` no longer exists, and `VC_ENV` is written only into the compose `.env` for WAL-G's folder (it is not in the k8s Secret).
 
 ## Verification of findings (done while planning)
 
@@ -21,7 +26,7 @@ All nine findings hold. None were dropped. Two were corrected or extended:
 | # | Finding | Re-verification |
 |---|---|---|
 | C1 | The compose app gets the full cloud and DNS token | **Confirmed by render.** Base + prod with `HETZNER_API_TOKEN=SENTINELTOK` in `.env`: the sentinel appears in `app`'s environment (`carbon/docker-compose.yml:70-71` `env_file: .env`). Extended: on k8s the app's `envFrom: vibecarbon-secrets` (`carbon/k8s/base/app/deployment.yaml:58`) also carries `REPL_PASSWORD`, `METABASE_DB_PASSWORD` and `N8N_DB_PASSWORD` (`k3s.js` `INFRA_SECRET_KEYS`), which the app never reads. This is the same class, so it is fixed in Task 1. |
-| H2 | The app's S3 key is the account-wide infra key | Confirmed (`bundle.js:354-358`, `k3s.js` `buildVibecarbonSecretData`, `iac/index.js:196`). **Corrected scope:** per-bucket keys can protect the backups and the Pulumi state from the app. They cannot separate environments inside the one shared app bucket, because no provider here supports per-prefix keys through its API. That gap stays as a stated residual risk (Task 5). |
+| H2 | The app's S3 key is the account-wide infra key | Confirmed (`bundle.js` envOverrides, `k3s.js` `buildVibecarbonSecretData`, `iac/index.js:196`). **Scope after PR #233:** every environment now has its own app bucket, so a key limited to one bucket keeps an app away from the backups, the Pulumi state **and** the other environments' uploads. No provider supports prefix-scoped keys, and the per-env bucket makes that unnecessary. What stays is the per-provider ability to mint such a key (R2, Task 4). |
 | H3 | Prod Traefik still mounts `/var/run/docker.sock` | **Confirmed by render.** Base + prod: `traefik` and `docker-socket-proxy` both bind the socket. |
 | M4 | The Hono logger logs token-bearing URLs | Confirmed: `carbon/src/server/index.ts:6,118`, `app.use('*', honoLogger())`. |
 | M5 | k8s-ha hostPorts 5433 and 5000 have no `hostIP` | Confirmed: `src/lib/deploy/k8s/ha/index.js:145-156` (`buildDbHostPortPatch`) and `carbon/k8s/base/registry/local-registry.yaml:68-72`. **Correction:** the registry is not k8s-ha only. It is in `carbon/k8s/base`, so plain k8s is affected too. |
@@ -46,21 +51,34 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
   - compose: the bundler writes `app.env` with only those keys, through `formatDotenvLine`, and the prod overlay sets `app: env_file: !override [app.env]`. `.env` stays as the source compose substitutes `${VAR}` values from. Local dev (base + `docker-compose.override.yml`) keeps `env_file: .env`, since a developer's own machine is not the threat model.
   - k8s: `vibecarbon-secrets` splits into `vibecarbon-app-secrets` (the app's `envFrom`) and `vibecarbon-infra-secrets` (DB superuser, replication and add-on role passwords, read by the db, backup and add-on pods by key).
   - Cost if wrong: a key the app reads but the list leaves out is missing at runtime. The Task 1 census (every key the app reads is delivered) prevents that.
-- **R2. App and infra object-storage credentials are separate roles everywhere. Where they can be distinct keys depends on the provider, as measured below.**
+- **R2. App and infra object-storage credentials are separate roles everywhere. Whether they are distinct keys depends on the provider, as measured on real accounts on 2026-10-20** (the spike file named under Spec; every test key and bucket it made was deleted). Each S3 provider class declares `static appKeyScoping: 'mint' | 'paste-fence' | 'none'`, and the resulting tier per env is `isolated`, `fenced` or `shared`.
 
-  | Provider | How a key can be scoped (research, 2026-10-20) | Plan |
-  |---|---|---|
-  | Linode | Limited-access keys with `bucket_access` (read_only or read_write per bucket) can be **created through the API** ([Akamai: create a key](https://techdocs.akamai.com/linode-api/reference/post-object-storage-keys), [manage access keys](https://techdocs.akamai.com/cloud-computing/docs/manage-access-keys)). | Deploy mints a read_write key for the app bucket, using the Linode token already held. Destroy of the last env deletes it. |
-  | Scaleway | IAM application, plus a policy with ObjectStorage permission sets, plus an API key for that application ([Scaleway IAM concepts](https://scaleway.com/en/docs/iam/concepts), [bucket policy](https://www.scaleway.com/en/docs/object-storage/api-cli/bucket-policy/)). Whether a policy can be scoped to **one bucket**, and whether our token has IAM write, is unconfirmed. | Task 4 spike. If confirmed, mint as for Linode. If not, treat as DigitalOcean. |
-  | DigitalOcean | Per-bucket limited keys exist, but they **cannot be created through the API or CLI**, only in the control panel ([DO Spaces: manage access](https://docs.digitalocean.com/products/spaces/how-to/manage-access/index.html.md)). | `vibecarbon configure` offers an optional "app storage key" paste with instructions to create a limited key for the app bucket. Without it, the env runs at the shared tier. |
-  | Hetzner | Every access key works on every bucket in its **Cloud project** ([Hetzner FAQ](https://docs.hetzner.com/de/storage/object-storage/faq/buckets-objects)). Bucket policies may restrict individual keys, but that is only reported second-hand ([blog](https://jsteuernagel.de/posts/hetzner-object-storage)), and keys cannot be created through the API. | Task 4 spike tests a bucket policy that denies a second key everything except the app bucket. If that works, `configure` offers the same paste as DigitalOcean, plus the policy, which deploy applies. If not, the documented isolation is an app bucket in a **separate Hetzner project** with its own key. |
-  | Vultr | Keys are scoped to the **subscription** ([Vultr security guide](https://docs.vultr.com/platform/security-best-practices/vultr-object-storage)). No bucket scoping was found. | Shared tier only. The residual risk is stated in docs and in `status`. |
+  | Provider | Measured | `appKeyScoping` | Tier |
+  |---|---|---|---|
+  | Linode | `POST /v4/object-storage/keys` with `{"label","regions":[<region>],"bucket_access":[{"region","bucket_name":<env bucket>,"permissions":"read_write"}]}` returns `limited: true` plus the key pair. The key works on its bucket and gets 403 on every other bucket. Revoke: `DELETE /v4/object-storage/keys/{id}`. Region comes from `GET /v4/object-storage/endpoints`. Usable about 5 s after minting. | `mint` | `isolated` |
+  | DigitalOcean | `POST /v2/spaces/keys` with `{"name","grants":[{"bucket":<env bucket>,"permission":"readwrite"}]}` returns 201 with the key pair. It works on its bucket, and gets 403 on other buckets and on ListBuckets. Revoke: `DELETE /v2/spaces/keys/{access_key}`. Usable about 10 s after minting. A prefix grant returns 400. The API also offers `fullaccess`, which the deploy must never mint. A custom-scoped DO token needs the `spaces_key` create/delete scopes. **Minting works, so no control-panel paste is needed** (this corrects the earlier plan). | `mint` | `isolated` |
+  | Hetzner | Keys can only be made in the console (every Cloud API credential route returns 404). Bucket policies are enforced, and each key is its own subuser: the principal `arn:aws:iam:::user/<ownerId>:<accessKeyId>` matches exactly one key. `<ownerId>` is the `p…` ID ListBuckets reports. This works **only as a deny-list**: Deny `s3:*` for the app key on `<bucket>` and `<bucket>/*`, placed on every bucket the app must not reach. It stopped object reads, writes and listing, plus policy, ACL, versioning, lifecycle and CORS changes. Limits a policy cannot close: the app key can still list every bucket name, create buckets, fully use any bucket without the fence (new ones included), and delete an **empty** fenced bucket. Policy changes take more than 30–60 s to apply on every gateway, unevenly. | `paste-fence` | `shared` by default; `fenced` when the operator pastes an app key |
+  | Scaleway | Not verified: the e2e key has no IAM permissions (`iam create application` returns 403). Docs say IAM grants are project-wide, so a one-bucket key needs either a dedicated project or a policy on every other bucket, and minting needs org-level IAM write on the deploy key. **Ruling:** that write access would let the deploy credential mint org-wide keys, which is a privilege escalation, so Scaleway stays on the shared key. | `none` | `shared` |
+  | Vultr | No key API beyond regenerating the subscription's single key pair. Policies apply to everyone, so they cannot separate keys. | `none` | `shared` |
 
-  - Cost if wrong: an env believed to be isolated is not. The Task 5 invariant test, plus `status` naming each env's tier, keep it visible.
-- **R3. Backup immutability:** out of scope for this plan. Object lock or versioning on the backup bucket is a separate decision (cost, and how retention interacts with WAL-G deletes). Task 4's spike records whether each provider supports it, so the decision has data.
-- **R4. Residual risk, said plainly.** Even at the best tier, environments of one project share the app bucket, so a compromised app in one env can read and write the other envs' uploads. The bucket-per-project design (`2026-10-20-project-app-bucket.md`) traded that isolation for not creating buckets on every redeploy. Getting it back means an app bucket per env (stable, created once per env), which a later plan can do. Task 5 states this in `docs/` and in the PR.
+  - **Hetzner ruling:** the default is the shared key. `vibecarbon configure` offers an optional "app storage key" paste per environment, with console steps. When a key is pasted, deploy writes the deny-fence (Task 4) and verifies it with repeated probes. The documented stronger option, an app bucket in a separate Hetzner project with its own key, stays documentation only.
+  - Cost if wrong: an env believed to be isolated is not. The Task 4 invariant tests, plus `status` naming each env's tier and reason, keep it visible.
+- **R3. Backup immutability:** out of scope for this plan. Object lock or versioning on the backup bucket is a separate decision (cost, and how retention interacts with WAL-G deletes). Data from the spike: Hetzner accepts bucket versioning, and object lock needs a create-time flag (not tested).
+- **R4. Residual risk, said plainly** (per tier, after PR #233's per-environment app buckets):
+  - `isolated` (Linode, DigitalOcean): the app key reaches only its own environment's bucket. No backups, no state, no other environment.
+  - `fenced` (Hetzner with a pasted key): the app key is denied on the project's state and backups buckets and on every other environment's app bucket that vibecarbon manages. It can still list bucket names, create buckets, use any bucket created outside vibecarbon, and delete a fenced bucket while it is empty.
+  - `shared` (Hetzner by default, Scaleway, Vultr): the app holds the account-wide infra key, so a compromised app can read and delete every environment's uploads, all backups and the Pulumi state.
+  - Task 4 states this in `docs/` and in the PR, and `vibecarbon status` shows each environment's tier.
+- **R9. The app key's lifecycle is tied to the environment.**
+  - **Mint:** in the deploy's `s3-setup` step, right after the env bucket is ensured, and only when the env has no usable app key. A minted key is recorded as `envConfig.s3.appKey = { id, scoping, tier }`, where `id` is the Linode key id or the DO access key id. The record holds no secret.
+  - **Secret storage:** the secret pair is written through `formatDotenvLine` into the CLI's per-environment secret store, keyed so two environments never overwrite each other. The implementer first verifies how env-scoped secrets are stored today (grep `.env.local` writers and the per-env GitHub environments sync), uses that mechanism, and records the choice in the report.
+  - **Reuse:** a redeploy reuses the recorded key when its secret is present locally. When the secret is missing (a fresh checkout on another machine), or the provider no longer lists the id, the deploy mints a new key, records it, and revokes the old id. That is a state reconcile, not a retry: one mint, and a failure fails the deploy.
+  - **Revoke:** every destroy of the env, plain or `-purge`, revokes its minted key, because no server uses it after the servers are gone and a redeploy mints a fresh one. A revoke failure is a ledger entry (a leak), like a bucket that could not be deleted.
+  - **Hetzner pasted keys** cannot be revoked by the CLI. Destroy prints the console step to delete the key, and removes that key's principal from the deny-fences it wrote.
+  - **Readiness:** a new key can take about 5–10 s before it works. The deploy checks that the app key can `HeadBucket` its bucket inside the concurrent storage-finalize task that already runs beside provisioning (`startAppBucketFinalize`), awaited before the success outro. It never adds a serial wait.
+  - Cost if wrong: one extra mint or revoke API call per deploy or destroy.
 - **R5. Registry hostIP.** The registry binds the master's private IP (`hostIP: <masterPrivateIp>`, rendered at apply time like `registries.yaml`). The operator push tunnel then forwards to `<masterPrivateIp>:5000` instead of `localhost:5000` on the far side. The local end stays `localhost:5000`, so Docker's loopback insecure-registry rule still applies. Coordinate with `2026-10-20-cold-deploy-speed.md` and `2026-10-20-k8s-ha-registry-copy.md`, which also push to or relay from that registry, by naming the same `masterPrivateIp:5000` target.
-- **R6. The db hostPort binds `127.0.0.1`.** `repl-gateway` already dials `127.0.0.1:5433`. A portmap DNAT from loopback needs `route_localnet`, which the CNI portmap plugin enables for its loopback hostIP case. The k8s-ha replication checks in e2e are the proof (Task 7 Step 5).
+- **R6. The db hostPort binds `127.0.0.1`.** `repl-gateway` already dials `127.0.0.1:5433`. A portmap DNAT from loopback needs `route_localnet`, which the CNI portmap plugin enables for its loopback hostIP case. The k8s-ha replication checks in e2e are the proof (Task 6 Step 5).
 - **R8. Least-privilege database roles (H10).**
   - `postgres` stays the owner. It runs migrations, owns the SECURITY DEFINER functions and runs pg_cron jobs.
   - A new LOGIN role, `app_service`, is the only credential the app process holds. It is `NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION BYPASSRLS`, a member of `app_user` (so `withUserDb` can switch), and has `SELECT, INSERT, UPDATE, DELETE` on the app's tables, `USAGE` on their schemas and sequences, and `EXECUTE` on exactly the SECURITY DEFINER functions that `adminDb` calls today (the lockout and admin-unlock family in `0002_baseline_post.sql`, `get_cron_jobs`, `log_cron_job`). It owns nothing, so it cannot `ALTER` or `DROP`.
@@ -82,7 +100,9 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 
 ## Global Constraints
 
-- No retry ladders. A failed security step fails the deploy with a one-line cause, except the DO and Hetzner app-key paste, which is optional (R2).
+- No retry ladders. A failed security step fails the deploy with a one-line cause. The one optional step is the Hetzner app-key paste (R2): not pasting means the `shared` tier, never a failure. A failed mint on a `mint` provider never falls back to the infra key.
+- The app key is never minted with account-wide rights: DigitalOcean grants are `readwrite` on the env bucket only (never `fullaccess`), and Linode `bucket_access` is `read_write` on the env bucket only.
+- The app bucket name always comes from `resolveEnvStorage(...).bucket`. The bucket branch's census enforces it.
 - No customers: no migration code. Old single-Secret k8s envs are re-applied on the next deploy (the k3s-apply inputs change). Ship with a Compatibility note and no `!:` footer.
 - dotenv writes go only through `formatDotenvLine`. `app.env` is a new write site and gets added to `tests/unit/lib/dotenv-dialect-census.test.ts`.
 - Never print secret values: not in logs, tests, the PR or census failure messages. Censuses use sentinels like `SENTINEL_<NAME>`.
@@ -95,9 +115,10 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 1. **A configure-managed key added later** (for example a new billing provider's secret): the app must still receive it in compose and k8s with no hand edit. Test in Task 1 (census: every key the app reads is delivered).
 2. **compose-ha and scale write the server `.env` through the same bundle:** both nodes, and a scaled-in server, get `app.env`. Test in Task 1.
 3. **An add-on overlay that adds env to `app`** (redis adds `REDIS_URL`): it still reaches the app after `env_file: !override`. Test in Task 1, with the rendered config for base + prod + each add-on.
-4. **The k8s push tunnel after R5:** a cold k8s deploy still pushes to the registry, and kubelets still pull. Test in Task 7 (unit test on the tunnel target), plus a real-infra k8s run.
+4. **The k8s push tunnel after R5:** a cold k8s deploy still pushes to the registry, and kubelets still pull. Test in Task 6 (unit test on the tunnel target), plus a real-infra k8s run.
 5. **A table added by a later migration:** the app (`app_service`) can still read and write it, and server-only tables stay revoked from the add-on roles. Test in Task 2 (default privileges plus the revoke rerun).
-6. **A transient database error on the first MFA read in a fresh process:** the aal2 gate refuses (403 or 503), never lets the request through. Test in Task 9.
+6. **A transient database error on the first MFA read in a fresh process:** the aal2 gate refuses (403 or 503), never lets the request through. Test in Task 8.
+7. **A second environment deployed after the first, on a `paste-fence` provider (Hetzner):** the new env's bucket must deny the first env's app key, and the first env's key must still be denied on the state and backups buckets. Otherwise a bucket created later is open to an older env's app. Test in Task 4.
 
 ---
 
@@ -111,7 +132,7 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 **Interfaces:**
 - Produces:
   - `APP_RUNTIME_KEYS: readonly string[]`.
-  - `buildAppRuntimeEnv(envLocal: Record<string,string>, extras: Record<string,string>) -> Record<string,string>`, which keeps only `APP_RUNTIME_KEYS` plus the explicit `extras` (S3 app credentials, `S3_KEY_PREFIX`, `VC_ENV`, `REDIS_URL`).
+  - `buildAppRuntimeEnv(envLocal: Record<string,string>, extras: Record<string,string>) -> Record<string,string>`, which keeps only `APP_RUNTIME_KEYS` plus the explicit `extras` (the app's S3 credential pair from the `appStorageCredential` seam, and `REDIS_URL`). `VC_ENV` stays only in the compose `.env`, as the substitution source for the db service's WAL-G folder. The app never reads it.
   - `buildAppSecretData(...)` and `buildInfraSecretData(...)`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -124,7 +145,10 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
     - `REDIS_URL` still reaches `app` with the redis overlay.
   - The bundle test: the rendered bundle contains an `app.env` holding `BETTER_AUTH_SECRET` and not `HETZNER_API_TOKEN` (sentinel values).
 - [ ] **Step 2: Run** `pnpm vitest run tests/unit/deploy/app-runtime-env-census.test.ts` and `DOCKER_INTEGRATION=true pnpm vitest run --project integration-docker tests/integration/docker/compose-secret-reach.test.ts`. Expected: FAIL.
-- [ ] **Step 3: Implement** the files listed above. compose-ha ships the same bundle (verify `effects/compose-ha.js` uses `ctx.bundlePath`). Scale replays the old server `.env`, so make it also replay or regenerate `app.env`.
+- [ ] **Step 3: Implement** the files listed above.
+  - compose-ha ships the same bundle (verify `effects/compose-ha.js` uses `ctx.bundlePath`).
+  - Scale replays the old server `.env`, so make it also replay or regenerate `app.env`.
+  - Route the app's S3 pair through one seam, `appStorageCredential` (the `extras` passed to `buildAppRuntimeEnv` and `buildAppSecretData`). In this task it still carries the infra pair, which is today's behaviour. Task 4 replaces what flows into it and touches no other call site.
 - [ ] **Step 4: Run** the same commands plus `pnpm test:unit`. Expected: PASS.
 - [ ] **Step 5: Commit** `fix(security): the app receives only its own runtime keys, never cloud or infra credentials`.
 
@@ -190,58 +214,73 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 - [ ] **Step 4: Run it.** Expected: PASS. Then run `pnpm test:unit`.
 - [ ] **Step 5: Commit** `fix(security): production Traefik reaches Docker only through the socket proxy`.
 
-### Task 4: Spike: what object-storage key scoping each provider really supports (input to Task 5)
-
-**Needs Brandon's OK before Steps 2 and 3.** They create and delete test access keys, an IAM application and a test bucket in his provider accounts. No servers are created.
+### Task 4: Each environment's app gets its own object-storage key where the provider can scope one (H2)
 
 **Files:**
-- Create: `docs/research/2026-10-object-storage-key-scoping.md`. It is committed and is the evidence Task 5 cites.
-
-- [ ] **Step 1: Desk research** (context7 or the providers' API references through `gh`/web). For each provider, record:
-  - can a key be scoped to one bucket?
-  - can it be created through the API, and with which token scope?
-  - can a key be scoped to a prefix?
-  - does the provider support bucket policies, object lock or versioning?
-- [ ] **Step 2: Linode and Scaleway, through the API.** Create a key limited to the test bucket, then show that a request with it to a second bucket gets `AccessDenied` and a request to the test bucket succeeds. For Scaleway, also check that the deploy token can create the IAM application and policy.
-- [ ] **Step 3: Hetzner.** With a second key from the console, apply a bucket policy on the test bucket and show what it can deny:
-  - (a) another bucket, as a deny on the backup bucket;
-  - (b) a prefix.
-
-  Record the exact policy JSON that worked, or the error.
-- [ ] **Step 4: Write the decision table** into the research doc, updating R2's table cell by cell. Then delete every test key, application and bucket, and record that.
-- [ ] **Step 5: Commit** `docs(research): object storage key scoping per provider`.
-
-### Task 5: Separate app and infra object-storage credentials (H2)
-
-**Files:**
-- Create: `src/lib/deploy/app-storage-credential.js`.
+- Create:
+  - `src/lib/deploy/app-storage-credential.js`;
+  - `src/lib/deploy/hetzner-app-key-fence.js`;
+  - `docs/research/2026-10-object-storage-key-scoping.md`: a copy of the spike file named under Spec. Strip any access-key fragments, keep the API shapes, results and cleanup record. It is the evidence R2 cites.
 - Modify:
-  - `src/lib/providers/s3-base.js`: `static appKeyScoping: 'mint' | 'paste' | 'none'` on each S3 class, set from Task 4's table;
-  - `src/lib/providers/{linode-objectstorage,scaleway-objectstorage}.js`: `mintAppKey(bucket)` and `revokeAppKey(id)`, as Task 4 confirmed;
-  - `src/lib/deploy/prompts.js` and `configure` (the optional paste for `'paste'` providers);
-  - `src/lib/deploy/bundle.js` and `k3s.js`: the app gets the app credential; WAL-G and the CLI keep the infra one;
-  - `src/destroy.js`: revoke the minted key when the last env goes;
-  - `src/status.js`: a row `storage access: isolated | shared (reason)`;
-  - `docs/deploy-*.md`: the R4 residual risk and the per-provider steps.
-- Test: `tests/unit/deploy/app-storage-credential.test.ts` (new) and `tests/unit/providers/app-key-scoping-census.test.ts` (new).
+  - `src/lib/providers/s3-base.js`: the base class declares no `appKeyScoping`, so a missing declaration fails the census, the same pattern as `bucketSettleWindowMs`;
+  - `src/lib/providers/{linode-objectstorage,digitalocean-spaces}.js`: `static appKeyScoping = 'mint'`, plus `mintAppKey(bucket)`, `revokeAppKey(id)` and `appKeyExists(id)`, using the exact API shapes in R2;
+  - `src/lib/providers/hetzner-s3.js`: `static appKeyScoping = 'paste-fence'`, plus `ownerId()` read from ListBuckets `Owner.ID`;
+  - `src/lib/providers/{scaleway-objectstorage,vultr-objectstorage}.js`: `static appKeyScoping = 'none'`, with a one-line comment giving the R2 reason;
+  - `src/lib/deploy/orchestrator.js` `s3-setup`: resolve or mint the app credential after the env bucket is ensured (R9). Add the app-key `HeadBucket` readiness check to `startAppBucketFinalize`;
+  - `src/lib/deploy/prompts.js` and `configure`: for `paste-fence` providers, an optional per-environment "app storage key" paste with console steps. It is skippable, and skipping means the `shared` tier;
+  - `src/lib/deploy/app-runtime-env.js` (Task 1 seam `appStorageCredential`): carries the app pair. `bundle.js` and `k3s.js` need no other change;
+  - `src/destroy.js`: revoke the env's minted key on every destroy (R9). For a pasted Hetzner key, print the console delete step and drop its principal from the fences;
+  - `src/lib/destroy/preview.js`: name the key that will be revoked;
+  - `src/status.js`: a row `storage access: isolated | fenced | shared (<reason>)`;
+  - `docs/deploy-*.md`: the R4 residual risk per tier, and the Hetzner paste steps.
+- Test:
+  - `tests/unit/deploy/app-storage-credential.test.ts` (new);
+  - `tests/unit/providers/app-key-scoping-census.test.ts` (new);
+  - `tests/unit/deploy/hetzner-app-key-fence.test.ts` (new).
 
 **Interfaces:**
-- Consumes: `APP_RUNTIME_KEYS` and `buildAppRuntimeEnv` (Task 1); `resolveEnvStorage` (bucket branch).
-- Produces: `resolveAppStorageCredential({ provider, envConfig, projectConfig, infraCredential }) -> { accessKey, secretKey, tier: 'isolated'|'shared', reason: string }`, persisted as `envConfig.s3.appKey` (id and tier only; the secret goes in `.env.local` through `formatDotenvLine`).
+- Consumes:
+  - `resolveEnvStorage(envName, envConfig, projectConfig) -> { bucket, backupBucket, walgPrefix, bucketPin? }` (bucket branch);
+  - `startAppBucketFinalize` (bucket branch);
+  - the `appStorageCredential` seam, `buildAppRuntimeEnv` and `buildAppSecretData` (Task 1).
+- Produces:
+  - `resolveAppStorageCredential({ provider, environment, envConfig, projectConfig, bucket, infraCredential, secrets }) -> Promise<{ accessKey, secretKey, tier: 'isolated'|'fenced'|'shared', reason: string, record: { id, scoping, tier } | null }>`;
+  - `revokeAppStorageCredential({ provider, envConfig }) -> Promise<{ revoked: boolean, leak?: string }>`;
+  - `renderHetznerFencePolicy({ bucket, ownerId, deniedAccessKeyIds: string[] }) -> object`. It renders one Deny statement over `arn:aws:s3:::<bucket>` and `arn:aws:s3:::<bucket>/*`, with principals `arn:aws:iam:::user/<ownerId>:<id>`;
+  - `fenceTargets({ projectConfig, environment }) -> { bucket: string, deniedAccessKeyIds: string[] }[]`. Every project bucket vibecarbon manages (state, backups, each env's app bucket) gets a policy denying every **other** environment's pasted app key. An env's own bucket never denies its own key.
 
 - [ ] **Step 1: Write the failing tests.**
-  - Census: every S3 provider class declares its own `appKeyScoping`, and the base class does not.
-  - Invariant: for `'mint'` and `'paste'`-with-a-key, the credential rendered into `app.env` and the app k8s Secret is never the one rendered for WAL-G (`.env` `S3_ACCESS_KEY` used by db) or for the Pulumi backend.
-  - `'none'` gives `tier: 'shared'` with a reason naming the provider.
-  - A mint failure fails the deploy with one line, with no fallback to the infra key.
-  - Status prints the tier.
-  - Destroy of the last env revokes a minted key; destroy of a non-last env does not.
-- [ ] **Step 2: Run** `pnpm vitest run tests/unit/deploy/app-storage-credential.test.ts tests/unit/providers/app-key-scoping-census.test.ts`. Expected: FAIL.
-- [ ] **Step 3: Implement** per Task 4's table. The app needs GetObject, PutObject, HeadObject and ListBucket on the app bucket. CORS stays an infra-key operation done by the CLI.
+  - **Census:** every S3 provider class declares its own `appKeyScoping`, and the base class does not.
+    - The values are `linode: 'mint'`, `digitalocean: 'mint'`, `hetzner: 'paste-fence'`, `scaleway: 'none'`, `vultr: 'none'`.
+    - A `'mint'` value without an entry in the test's `APP_KEY_EVIDENCE` map (pointing at the research doc section) fails.
+    - Prove each arm bites with a temporary edit.
+  - **Never account-wide:** with a stubbed HTTP layer, the DO mint body is exactly `{ name, grants: [{ bucket: <env bucket>, permission: 'readwrite' }] }`, and the string `fullaccess` never appears in any request. The Linode body has exactly one `bucket_access` entry naming the env bucket with `read_write`.
+  - **Separation invariant:** for `mint`, and for `paste-fence` with a pasted key, the pair rendered into `app.env` and the app k8s Secret is never the pair rendered for the db service (WAL-G) or the Pulumi backend. Use sentinel values.
+  - **R9 lifecycle:**
+    - A first deploy mints once and records `s3.appKey` with no secret in `.vibecarbon.json`. The secret is written through `formatDotenvLine`, keyed per env.
+    - A redeploy with the secret present makes zero mint calls.
+    - A redeploy with the secret missing locally mints a new key, records it, and revokes the old id.
+    - A mint failure fails the deploy with one line naming the missing permission (for example the DO `spaces_key` scope), and there is no fallback to the infra key.
+    - Plain destroy and `-purge` each revoke the minted key. A revoke failure produces a leak entry.
+  - **Readiness:** the `HeadBucket` check with the app key runs inside the concurrent finalize task. With a fake whose first two `HeadBucket` calls fail and the third succeeds inside the bounded window, the deploy succeeds. The orchestrator source shows no serial await of it before IaC.
+  - **Hetzner fence:**
+    - `renderHetznerFencePolicy` gives exactly the R2 statement shape.
+    - Review Focus 7: with prod (pasted key `AK_P`) and then staging (pasted key `AK_S`), `fenceTargets` gives the state and backups buckets `[AK_P, AK_S]`, prod's bucket `[AK_S]`, and staging's bucket `[AK_P]`.
+    - Destroying staging removes `AK_S` from every remaining fence.
+    - The fence is written once per changed bucket. Its verification probe passes only after `N = 3` consecutive denied app-key probes, within a fixed budget of 120 s, and an exhausted budget fails the deploy with the bucket name. It is a consistency gate like the settle gate, not a retry of the write.
+    - Without a pasted key, no policy is written and the tier is `shared` with reason `hetzner: no app key pasted`.
+  - **`none` providers:** `tier: 'shared'`, with a reason naming the provider and the R2 cause. Zero mint or policy calls.
+  - **Status** prints the tier and reason for each of the three tiers.
+- [ ] **Step 2: Run** `pnpm vitest run tests/unit/deploy/app-storage-credential.test.ts tests/unit/providers/app-key-scoping-census.test.ts tests/unit/deploy/hetzner-app-key-fence.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement** per R2 and R9.
+  - The app needs GetObject, PutObject, HeadObject, DeleteObject and ListBucket on its env bucket. DO `readwrite` and Linode `read_write` cover them.
+  - CORS stays an infra-key operation done by the CLI. So do the settle-gate probes and bucket creation.
+  - Write the research doc.
 - [ ] **Step 4: Run** `pnpm test:unit`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(security): the app uses its own object storage key where the provider can scope one`.
+- [ ] **Step 5: Real accounts (cents, no servers; covered by Brandon's 2026-10-20 approval for object-storage key tests).** Run a scripted mint, use, revoke round trip for Linode and DigitalOcean through `resolveAppStorageCredential` against a throwaway bucket. Do the same for a Hetzner fence round trip using the second console key in `tests/.env.e2e` (`HETZNER_ACCESS_KEY_2`/`HETZNER_SECRET_KEY_2`) if it still exists; skip it with a note if Brandon deleted it. Delete everything created and record that in the report.
+- [ ] **Step 6: Commit** `feat(security): each environment's app gets its own object storage key where the provider can scope one`.
 
-### Task 6: Request logs never contain auth tokens (M4)
+### Task 5: Request logs never contain auth tokens (M4)
 
 **Files:**
 - Create: `carbon/src/server/middleware/access-log.ts`.
@@ -263,7 +302,7 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 - [ ] **Step 4: Run** `cd carbon && npm run test:prepush`. Expected: PASS.
 - [ ] **Step 5: Commit** `fix(template): access logs redact auth tokens and drop query strings`.
 
-### Task 7: hostPorts bind specific interfaces (M5)
+### Task 6: hostPorts bind specific interfaces (M5)
 
 **Files:**
 - Modify:
@@ -283,7 +322,7 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 - [ ] **Step 5: Real infra (needs Brandon's OK for spend):** `pnpm test:e2e:batch -- --scenario hetzner/k8s-ha --minimal`. Expected: replication checks green (R6), and the image pull from the registry works (R5).
 - [ ] **Step 6: Commit** `fix(k8s): bind the replication and registry hostPorts to loopback and the private network`.
 
-### Task 8: Prometheus can reach the Kubernetes API; observability comments corrected (M6, I9)
+### Task 7: Prometheus can reach the Kubernetes API; observability comments corrected (M6, I9)
 
 **Files:**
 - Modify: `services/observability/k8s/network-policy.yaml` (`prometheus-policy` egress adds `10.43.0.1/32:443` and `0.0.0.0/0:6443`, the same pair as `carbon/k8s/base/traefik/network-policy.yaml`). Rewrite the "service-role key" comments in `network-policy.yaml:96` and `grafana-deployment.yaml:73,81` to name what an app pod actually holds after Task 1.
@@ -295,7 +334,7 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 - [ ] **Step 4: Run** `pnpm test:unit`. Expected: PASS.
 - [ ] **Step 5: Commit** `fix(observability): let Prometheus reach the Kubernetes API for service discovery`.
 
-### Task 9: The MFA gate fails closed (L8)
+### Task 8: The MFA gate fails closed (L8)
 
 **Files:**
 - Modify: `carbon/src/server/lib/mfa-settings.ts` (`isMfaGloballyEnabled(): Promise<boolean|null>`, with `null` when unknown), `middleware/requireAal2.ts`, `routes/_internal/verify-role.ts` and `auth/assurance.ts` (treat `null` as enabled, R7).
@@ -312,7 +351,7 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 - [ ] **Step 4: Run** `cd carbon && npm run test:prepush`. Expected: PASS.
 - [ ] **Step 5: Commit** `fix(template): an unreadable MFA setting fails the aal2 gate closed`.
 
-### Task 10: WireGuard firewall rules follow the current peer on every provider (L7)
+### Task 9: WireGuard firewall rules follow the current peer on every provider (L7)
 
 **Files:**
 - Modify:
@@ -337,8 +376,12 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
 
 - compose: the app now reads `app.env`. A server deployed before this change gets it on the next deploy. Until then nothing changes.
 - k8s: `vibecarbon-secrets` becomes two Secrets. The next deploy applies both, and the old Secret is deleted once nothing references it.
-- Object storage: Linode (and Scaleway, if Task 4 confirms it) envs get a minted app key on their next deploy. DigitalOcean and Hetzner envs keep the shared key unless the operator pastes an app key in `vibecarbon configure`. Vultr stays shared. `vibecarbon status` shows which.
-- Residual risk (R4): environments of one project share the app bucket, so an app in one env can read the others' uploads.
+- Object storage:
+  - Linode and DigitalOcean envs get a minted app key, limited to the env's own bucket, on their next deploy (tier `isolated`). A DigitalOcean token with custom scopes needs `spaces_key` create/delete.
+  - Hetzner envs keep the shared key unless the operator pastes a console-made app key in `vibecarbon configure`, which turns on the deny-fence (tier `fenced`).
+  - Scaleway and Vultr stay `shared`.
+  - `vibecarbon status` shows each env's tier and reason.
+- Residual risk (R4): on the `shared` tier the app holds the account-wide key, so it can reach every env's uploads, the backups and the Pulumi state. On `fenced` (Hetzner) it can still list and create buckets and delete an empty fenced bucket.
 
 ## Verification
 
@@ -349,4 +392,4 @@ Added by the coordinator (H10): **the template app connects to Postgres as the `
   - `cd carbon && npm run test:prepush && npm run test:db`.
 - Real infra (needs Brandon's OK):
   - `hetzner/compose`: the app env holds no provider token. Check with a `docker inspect` check that reports only the key names, never values.
-  - `hetzner/k8s-ha --minimal` (Task 7).
+  - `hetzner/k8s-ha --minimal` (Task 6).
