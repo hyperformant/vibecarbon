@@ -3,15 +3,21 @@
  * to object storage, read them back through the app's 302, compare. These pin
  * the check's own logic with fakes; the live round-trip only runs on real infra.
  */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CookieJar,
   checkFileUploadRoundtrip,
   ONE_PIXEL_PNG,
+  resolveAppBucket,
 } from '../../e2e/checks/app-functional.js';
 import {
   assertObjectStorageUrl,
+  bucketOfPresignedUrl,
   type PresignedTransfer,
+  s3ErrorCode,
 } from '../../e2e/utils/presigned-transfer.js';
 
 const DOMAIN = 'app.example.com';
@@ -152,6 +158,49 @@ describe('checkFileUploadRoundtrip', () => {
     expect(transfer.put).not.toHaveBeenCalled();
   });
 
+  it('names the presigned bucket and the S3 error code in a refused preflight', async () => {
+    // 2026-10-20 verify-restore: a bare "403 with Access-Control-Allow-Origin
+    // null" could not tell "no CORS rule on this bucket" from "this bucket
+    // does not exist"; the bucket and <Code> together do.
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+      appFetch: appFetchWith(),
+      transfer: transferWith({
+        preflight: vi.fn(async () => ({
+          status: 403,
+          allowOrigin: null,
+          errorCode: 'CORSForbidden',
+        })),
+      }),
+    });
+    expect(r.errorMessage).toBe(
+      `cors: preflight from https://${DOMAIN} to bucket "bucket" returned 403 (CORSForbidden) with Access-Control-Allow-Origin null`,
+    );
+    expect(r.details).toMatchObject({ bucket: 'bucket', errorCode: 'CORSForbidden' });
+  });
+
+  it("fails as `bucket`, before any preflight, when the app presigns against a bucket other than the environment's", async () => {
+    const transfer = transferWith();
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+      appFetch: appFetchWith(),
+      transfer,
+      expectedBucket: 'myapp-cd9ecc-storage-7f3e8e',
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(
+      /^bucket: the app presigned against bucket "bucket", .* is "myapp-cd9ecc-storage-7f3e8e"$/,
+    );
+    expect(transfer.preflight).not.toHaveBeenCalled();
+  });
+
+  it('passes when the presigned bucket is the environment bucket', async () => {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+      appFetch: appFetchWith(),
+      transfer: transferWith(),
+      expectedBucket: 'bucket',
+    });
+    expect(r.status).toBe('pass');
+  });
+
   it('fails when the preflight allows a different origin', async () => {
     const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith(),
@@ -217,5 +266,38 @@ describe('assertObjectStorageUrl', () => {
   it('refuses the environment apex and its subdomains (those must stay on the pinned seam)', () => {
     expect(() => assertObjectStorageUrl(`https://${DOMAIN}/x`, DOMAIN)).toThrow(/dnsSafeFetch/);
     expect(() => assertObjectStorageUrl(`https://s3.${DOMAIN}/x`, DOMAIN)).toThrow(/dnsSafeFetch/);
+  });
+});
+
+describe('presigned URL helpers', () => {
+  it('reads the bucket from a path-style presigned URL', () => {
+    expect(bucketOfPresignedUrl(PUT_URL)).toBe('bucket');
+    expect(bucketOfPresignedUrl('https://nbg1.your-objectstorage.com/')).toBeNull();
+  });
+
+  it('reads the <Code> of an S3 XML error body', () => {
+    expect(
+      s3ErrorCode(
+        '<?xml version="1.0"?><Error><Code>NoSuchBucket</Code><BucketName>b</BucketName></Error>',
+      ),
+    ).toBe('NoSuchBucket');
+    expect(s3ErrorCode('')).toBeNull();
+  });
+});
+
+describe('resolveAppBucket', () => {
+  it('reads environments.<env>.s3.bucket from .vibecarbon.json, null when there is none', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-app-bucket-'));
+    try {
+      expect(resolveAppBucket(dir, 'e1')).toBeNull();
+      writeFileSync(
+        join(dir, '.vibecarbon.json'),
+        JSON.stringify({ environments: { e1: { s3: { bucket: 'myapp-storage-7f3e8e' } } } }),
+      );
+      expect(resolveAppBucket(dir, 'e1')).toBe('myapp-storage-7f3e8e');
+      expect(resolveAppBucket(dir, 'e2')).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -24,6 +24,7 @@ import { gitScrubbedEnv } from '../../_shared/git-env.js';
 import { runAppApiChecks } from '../checks/app-api.js';
 import {
   missingDbHandle,
+  resolveAppBucket,
   runAppFunctionalChecks,
   smtpConfiguredFromEnv,
 } from '../checks/app-functional.js';
@@ -1875,6 +1876,9 @@ export async function runLifecycle(
           adminEmail: adminCreds.adminEmail,
           adminPassword: adminCreds.adminPassword,
           smtpConfigured: adminCreds.smtpConfigured,
+          // The upload check asserts the app presigns against the bucket deploy
+          // created and configured CORS on (2026-10-20 verify-restore CORS 403).
+          appBucket: resolveAppBucket(config.projectDir, config.envPrefix),
         });
         allResults.push(...appResults);
 

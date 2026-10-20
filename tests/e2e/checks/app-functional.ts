@@ -7,10 +7,15 @@
  */
 
 import crypto from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { VerificationResult } from '../scenarios/types.js';
-import { createPresignedTransfer, type PresignedTransfer } from '../utils/presigned-transfer.js';
+import {
+  bucketOfPresignedUrl,
+  createPresignedTransfer,
+  type PresignedTransfer,
+} from '../utils/presigned-transfer.js';
 import { dnsSafeFetch } from './health.js';
 import { type PsqlResult, type ReplTarget, runPsql } from './replication.js';
 
@@ -884,7 +889,17 @@ interface PresignBody {
 export async function checkFileUploadRoundtrip(
   appDomain: string,
   jar: CookieJar,
-  deps: { appFetch?: typeof safeFetch; transfer?: PresignedTransfer } = {},
+  deps: {
+    appFetch?: typeof safeFetch;
+    transfer?: PresignedTransfer;
+    /**
+     * The app bucket the environment records (`.vibecarbon.json`
+     * environments.<env>.s3.bucket): the bucket deploy created and put the
+     * CORS rule on. When given, a presigned URL for any other bucket fails as
+     * `bucket`, before the preflight, instead of surfacing as a CORS 403.
+     */
+    expectedBucket?: string | null;
+  } = {},
 ): Promise<VerificationResult> {
   const appFetch = deps.appFetch ?? safeFetch;
   const transfer = deps.transfer ?? createPresignedTransfer(appDomain);
@@ -925,6 +940,14 @@ export async function checkFileUploadRoundtrip(
       return fail('presign', `200 but unexpected shape: ${JSON.stringify(presign).slice(0, 300)}`);
     }
     const key = presign.key;
+    const bucket = bucketOfPresignedUrl(presign.url);
+    if (deps.expectedBucket && bucket !== deps.expectedBucket) {
+      return fail(
+        'bucket',
+        `the app presigned against bucket ${JSON.stringify(bucket)}, but the environment's bucket (.vibecarbon.json s3.bucket, the one deploy created and configured CORS on) is ${JSON.stringify(deps.expectedBucket)}`,
+        { key, bucket, expectedBucket: deps.expectedBucket },
+      );
+    }
 
     // The browser PUTs straight to object storage, so two things outside the
     // byte transfer must hold or the real upload button fails while this
@@ -948,8 +971,10 @@ export async function checkFileUploadRoundtrip(
     if (preflight.status < 200 || preflight.status >= 300 || preflight.allowOrigin !== appOrigin) {
       return fail(
         'cors',
-        `preflight from ${appOrigin} returned ${preflight.status} with Access-Control-Allow-Origin ${JSON.stringify(preflight.allowOrigin)}`,
-        { key },
+        `preflight from ${appOrigin} to bucket ${JSON.stringify(bucket)} returned ${preflight.status}` +
+          `${preflight.errorCode ? ` (${preflight.errorCode})` : ''}` +
+          ` with Access-Control-Allow-Origin ${JSON.stringify(preflight.allowOrigin)}`,
+        { key, bucket, errorCode: preflight.errorCode ?? null },
       );
     }
 
@@ -998,6 +1023,25 @@ export async function checkFileUploadRoundtrip(
 // ---------------------------------------------------------------------------
 
 /**
+ * The app storage bucket an environment records in `.vibecarbon.json`
+ * (environments.<env>.s3.bucket), or null. Read from the same file deploy
+ * writes, so the upload check compares the app's presigned bucket against the
+ * bucket deploy created and configured CORS on.
+ */
+export function resolveAppBucket(projectDir: string, envPrefix: string): string | null {
+  try {
+    const configPath = join(projectDir, '.vibecarbon.json');
+    if (!existsSync(configPath)) return null;
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
+      environments?: Record<string, { s3?: { bucket?: string } }>;
+    };
+    return config.environments?.[envPrefix]?.s3?.bucket || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Which SSH handle to the database host is missing, in the same words as the
  * config-canary checks, or null when both are present.
  */
@@ -1024,8 +1068,10 @@ export async function runAppFunctionalChecks(opts: {
   adminEmail?: string;
   adminPassword?: string;
   smtpConfigured?: boolean;
+  /** See checkFileUploadRoundtrip's `expectedBucket`. */
+  appBucket?: string | null;
 }): Promise<AppFunctionalOutcome> {
-  const { domain, db, adminEmail, adminPassword, smtpConfigured = false } = opts;
+  const { domain, db, adminEmail, adminPassword, smtpConfigured = false, appBucket } = opts;
   const results: VerificationResult[] = [];
 
   // Run check groups sequentially — auth creates state the others do not
@@ -1043,7 +1089,7 @@ export async function runAppFunctionalChecks(opts: {
   // they run as the signed-in throwaway user from the auth checks above.
   results.push(
     auth.jar
-      ? await checkFileUploadRoundtrip(domain, auth.jar)
+      ? await checkFileUploadRoundtrip(domain, auth.jar, { expectedBucket: appBucket })
       : skip('file_upload_roundtrip', 'Skipped because no signed-in user (auth checks failed)'),
   );
 
