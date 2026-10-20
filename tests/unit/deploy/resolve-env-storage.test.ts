@@ -106,8 +106,11 @@ describe('envConfig.s3.bucketPin survives every save that rebuilds s3', () => {
     );
   });
 
+  // The orchestrator's skeleton save builds its s3 through skeletonS3Block,
+  // whose pin is pinned by skeleton-s3-block.test.ts; the post-deploy save is
+  // the one inline rebuild left there.
   it.each([
-    ['src/lib/deploy/orchestrator.js', 2],
+    ['src/lib/deploy/orchestrator.js', 1],
     ['src/lib/deploy/effects/compose-ha.js', 1],
   ])('%s persists the pin next to every rebuilt s3.bucket', (file, count) => {
     const persist =

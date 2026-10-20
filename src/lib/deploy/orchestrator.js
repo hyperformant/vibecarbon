@@ -388,6 +388,31 @@ export function assertBucketReady(result, role) {
 }
 
 /**
+ * The `s3` block of the deploy's skeleton env save (status 'deploying').
+ * Rebuilt from s3Config, but `bucketCreatedAt` (status' "storage settling"
+ * row, the e2e upload gate's clock) only exists in the PRIOR record, so it is
+ * carried from there, null included, the way compose-ha's pending save does.
+ *
+ * @param {{ bucket: string, bucketPin?: string, region: string, endpoint: string, stateBucket?: string, stateBucketRegion?: string, stateEndpoint?: string }} s3Config
+ * @param {{ bucketCreatedAt?: string|null } | undefined} priorS3 - the env's persisted `s3`
+ */
+export function skeletonS3Block(s3Config, priorS3) {
+  return {
+    bucket: s3Config.bucket,
+    ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
+    ...(priorS3 &&
+      Object.hasOwn(priorS3, 'bucketCreatedAt') && {
+        bucketCreatedAt: priorS3.bucketCreatedAt,
+      }),
+    region: s3Config.region,
+    endpoint: s3Config.endpoint,
+    stateBucket: s3Config.stateBucket,
+    ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
+    ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
+  };
+}
+
+/**
  * Where the SERVING cluster's kubeconfig lives. Exported for unit tests.
  *
  * HA deploys split into kubeconfig-<env>-primary / -standby; standalone uses
@@ -634,15 +659,7 @@ export async function executeDeployment(args, gatheredConfig) {
       ...(secondaryRegion ? { secondaryRegion } : {}),
       ...(domain ? { domain } : {}),
       ...(dnsProvider ? { dnsProvider } : {}),
-      s3: {
-        bucket: s3Config.bucket,
-        ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
-        region: s3Config.region,
-        endpoint: s3Config.endpoint,
-        stateBucket: s3Config.stateBucket,
-        ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
-        ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
-      },
+      s3: skeletonS3Block(s3Config, existingEnv.s3),
       backupS3: backupS3Config?.bucket
         ? {
             bucket: backupS3Config.bucket,
