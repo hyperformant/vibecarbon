@@ -40,6 +40,12 @@ const envSchema = z.object({
   S3_BUCKET: z.string().optional(),
   S3_ACCESS_KEY: z.string().optional(),
   S3_SECRET_KEY: z.string().optional(),
+  // `<env>/` prefix every object key lives under in the project's shared bucket.
+  // Empty for local dev. Same shape as the CLI's env names (ENV_NAME_FORMAT).
+  S3_KEY_PREFIX: z
+    .string()
+    .regex(/^([a-z][a-z0-9-]{0,19}\/)?$/)
+    .default(''),
 
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

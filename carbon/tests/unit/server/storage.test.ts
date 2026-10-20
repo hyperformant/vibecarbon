@@ -6,6 +6,7 @@ const fakeEnv = vi.hoisted(() => ({
   S3_BUCKET: 'test-bucket' as string | undefined,
   S3_ACCESS_KEY: 'test' as string | undefined,
   S3_SECRET_KEY: 'test' as string | undefined,
+  S3_KEY_PREFIX: '',
 }));
 vi.mock('@server/lib/env', () => ({ env: fakeEnv }));
 
