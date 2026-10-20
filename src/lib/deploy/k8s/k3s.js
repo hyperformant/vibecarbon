@@ -309,8 +309,12 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * render. Normalized the same way as walgRole below, so single-cluster deploys
  * (role undefined) hash as 'primary'.
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby' }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', manifestDigest: string, bundledManifestDigest: string }}
+ * `keyPrefix` (the app's S3_KEY_PREFIX) and `environment` (VC_ENV, which the
+ * WAL-G prefix embeds) are rendered into the Secret this step applies, and no
+ * manifest digest sees them, so a change to either must re-run the apply.
+ *
+ * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby', keyPrefix?: string, environment?: string }} args
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', keyPrefix: string, environment: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -319,6 +323,8 @@ export function buildK3sApplyInputs({
   projectDir,
   storageClass,
   role,
+  keyPrefix,
+  environment,
 }) {
   return {
     imageTag,
@@ -326,6 +332,8 @@ export function buildK3sApplyInputs({
     restore: restore ?? '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
+    keyPrefix: keyPrefix ?? '',
+    environment: environment ?? '',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -4513,6 +4521,9 @@ export async function deployK3s(options) {
     // The pilot-light role: a failover swaps it between stacks, and each
     // role renders a different cluster — see buildK3sApplyInputs.
     role: options.role,
+    // Rendered into the Secret (S3_KEY_PREFIX, VC_ENV) — see buildK3sApplyInputs.
+    keyPrefix: options.s3Config?.keyPrefix,
+    environment: options.environment,
   });
   if (!state.shouldSkip('k3s-apply', applyInputs)) {
     state.startStep('k3s-apply', applyInputs);

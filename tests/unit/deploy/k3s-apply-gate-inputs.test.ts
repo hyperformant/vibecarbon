@@ -144,3 +144,32 @@ describe('deployK3s feeds the pilot-light role into the k3s-apply gate', () => {
     expect(gateCall.slice(0, gateCall.indexOf('});'))).toMatch(/\n\s+role: options\.role,\n/);
   });
 });
+
+// The Secret k3s-apply renders carries S3_KEY_PREFIX and VC_ENV (the WAL-G
+// prefix embeds the env). Neither is visible to a manifest digest, so without
+// them in the gate a warm redeploy whose prefix or env changed kept the old
+// Secret.
+describe('buildK3sApplyInputs — storage key prefix and environment are gate inputs', () => {
+  const base = { imageTag: 'r:5000/app:abc', dbImageTag: 'db:v1', projectDir: tmpdir() };
+
+  it('records keyPrefix and environment', () => {
+    expect(buildK3sApplyInputs({ ...base, keyPrefix: 'prod/', environment: 'prod' })).toMatchObject(
+      { keyPrefix: 'prod/', environment: 'prod' },
+    );
+  });
+
+  it('a changed key prefix or environment changes the inputs', () => {
+    const a = buildK3sApplyInputs({ ...base, keyPrefix: 'prod/', environment: 'prod' });
+    expect(buildK3sApplyInputs({ ...base, keyPrefix: 'stg/', environment: 'prod' })).not.toEqual(a);
+    expect(buildK3sApplyInputs({ ...base, keyPrefix: 'prod/', environment: 'stg' })).not.toEqual(a);
+  });
+
+  it('deployK3s passes options.s3Config.keyPrefix and options.environment', () => {
+    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
+    const body = src.slice(src.indexOf('export async function deployK3s('));
+    const gateCall = body.slice(body.indexOf('buildK3sApplyInputs({'));
+    const args = gateCall.slice(0, gateCall.indexOf('});'));
+    expect(args).toMatch(/\n\s+keyPrefix: options\.s3Config\?\.keyPrefix,\n/);
+    expect(args).toMatch(/\n\s+environment: options\.environment,\n/);
+  });
+});
