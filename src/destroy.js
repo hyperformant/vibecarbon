@@ -69,7 +69,6 @@ import {
   resolveProviderToken,
 } from './lib/providers/index.js';
 import { deriveProjectBucketName } from './lib/providers/s3-base.js';
-import { generateBucketSalt } from './lib/secrets.js';
 import { createTracker } from './lib/tracker.js';
 import { VERSION } from './lib/version.js';
 import { recordLeakedVolumes } from './lib/volume-ledger.js';

@@ -2464,7 +2464,6 @@ export async function applyDbSeedConfigMap({ env }) {
  *
  * @param {object} o
  * @param {string} o.dbImageTag - full db image ref, `<repo>:<tag>`
- * @param {string} [o.projectName]
  * @param {{bucket?: string, walgPrefix?: string, endpoint?: string, region?: string}} [o.s3Config]
  * @param {string|null} [o.backupBucketName]
  * @param {'primary'|'standby'} [o.walgRole]
@@ -2475,7 +2474,6 @@ export async function applyDbSeedConfigMap({ env }) {
  */
 export function buildDbManifestValues({
   dbImageTag,
-  projectName,
   s3Config,
   backupBucketName,
   walgRole = 'primary',
@@ -3468,7 +3466,6 @@ export async function applyK3sManifests({
     join(projectDir, 'k8s/base'),
     buildDbManifestValues({
       dbImageTag,
-      projectName,
       s3Config,
       backupBucketName,
       walgRole,

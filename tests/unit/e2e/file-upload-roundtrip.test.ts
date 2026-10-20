@@ -192,6 +192,36 @@ describe('checkFileUploadRoundtrip', () => {
     expect(transfer.preflight).not.toHaveBeenCalled();
   });
 
+  it("fails as `prefix`, before any preflight, when the presigned path is outside the environment's key prefix", async () => {
+    const transfer = transferWith();
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+      appFetch: appFetchWith(),
+      transfer,
+      expectedBucket: 'bucket',
+      expectedKeyPrefix: 'prod/',
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toContain('prefix: ');
+    expect(r.errorMessage).toContain('"/bucket/prod/"');
+    expect(r.errorMessage).toContain('"/bucket/put"');
+    expect(transfer.preflight).not.toHaveBeenCalled();
+  });
+
+  it('passes when the presigned path starts with /<bucket>/<keyPrefix>', async () => {
+    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+      appFetch: appFetchWith({
+        presign: () =>
+          presignResponse({
+            url: 'https://fsn1.your-objectstorage.com/bucket/prod/avatars/x.png?sig=1',
+          }),
+      }),
+      transfer: transferWith(),
+      expectedBucket: 'bucket',
+      expectedKeyPrefix: 'prod/',
+    });
+    expect(r.status).toBe('pass');
+  });
+
   it('passes when the presigned bucket is the environment bucket', async () => {
     const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith(),
