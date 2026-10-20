@@ -206,6 +206,46 @@ describe('checkFileUploadRoundtrip', () => {
     expect(r.status).toBe('pass');
   });
 
+  describe('per-environment bucket name', () => {
+    const storage = (extra: object) => ({
+      providerId: 'hetzner',
+      bucket: 'bucket',
+      region: 'fsn1',
+      endpoint: 'https://fsn1.your-objectstorage.com',
+      envName: 'staging',
+      ...extra,
+    });
+    const run = (bucket: string, extra: object = {}) =>
+      checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith({
+          presign: () =>
+            presignResponse({
+              url: `https://fsn1.your-objectstorage.com/${bucket}/avatars/x.png?sig=1`,
+            }),
+        }),
+        transfer: transferWith(),
+        storage: storage(extra),
+      });
+
+    it('passes a bucket ending -<env>-storage', async () => {
+      expect((await run('myapp-cd9ecc-staging-storage')).status).toBe('pass');
+    });
+
+    it('passes the clipped form -<env>-<hash>-storage', async () => {
+      expect((await run('myap-staging-0a1b2c3d-storage')).status).toBe('pass');
+    });
+
+    it("fails as `bucket` on another environment's bucket", async () => {
+      const r = await run('myapp-cd9ecc-prod-storage');
+      expect(r.status).toBe('fail');
+      expect(r.errorMessage).toMatch(/^bucket: .*not environment "staging"'s own bucket/);
+    });
+
+    it('accepts any name when the bucket is pinned', async () => {
+      expect((await run('legacy-bucket', { bucketPin: 'legacy-bucket' })).status).toBe('pass');
+    });
+  });
+
   it('passes when the presigned bucket is the environment bucket', async () => {
     const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith(),
@@ -458,6 +498,7 @@ describe('resolveAppStorage', () => {
       expect(resolveAppStorage(dir, 'e1')).toEqual({
         providerId: 'hetzner',
         bucket: 'myapp-storage',
+        envName: 'e1',
         region: 'fsn1',
         endpoint: 'https://fsn1.your-objectstorage.com',
         bucketCreatedAt: '2026-10-20T12:00:00.000Z',

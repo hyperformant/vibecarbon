@@ -62,10 +62,12 @@ state writes were lost on 2026-08-07, and a warm bucket is what a redeploy
 resumes against; a kept-by-design bucket is neither a leak, unverified,
 foreign, nor a predicted leak, so it takes none of those labels. The kept
 name is recorded as project-level `retainedStateBucket` in `.vibecarbon.json`
-(it also covers a bucket derived under an older app bucket name, so the next
+(it also covers a state bucket derived under an older name, so the next
 deploy never derives a fresh bucket and orphans the kept one);
 `resolveStateBucketName` reads it after the operator pin and before
-derivation. The derived state bucket is project-level, so `-purge` deletes it
+derivation. The app uploads bucket is separate: one per environment
+(`deriveEnvAppBucketName`, read only through `resolveEnvStorage`), kept on
+plain destroy and deleted by `-purge`. The derived state bucket is project-level, so `-purge` deletes it
 only with the last live environment, then clears the record and rotates
 `stateBucketGeneration` so the next deploy derives a fresh name instead of
 recreating the deleted one. destroy also records the environment's

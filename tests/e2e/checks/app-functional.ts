@@ -891,6 +891,10 @@ export interface AppStorage {
   bucket: string;
   region: string;
   endpoint: string;
+  /** The environment's name; its bucket ends with `-<envName>-storage` unless pinned. */
+  envName?: string;
+  /** `.vibecarbon.json` environments.<env>.s3.bucketPin, when the operator pinned the bucket. */
+  bucketPin?: string;
   /**
    * ISO string, or null when the deploy could not read it (treated as young).
    * Absent when nothing was recorded: a 0-window provider, or an env deployed
@@ -994,6 +998,19 @@ async function settleAppBucket(
 }
 
 /**
+ * Each environment owns its app bucket: `<project>-<salt>-<env>-storage`, or
+ * `<project>-<salt>-<env>-<8hex>-storage` when the name had to be clipped
+ * (deriveEnvAppBucketName). A pinned bucket may be named anything. Returns the
+ * failure message, or null when the bucket is the env's own.
+ */
+function perEnvBucketFailure(storage: AppStorage | null | undefined, bucket: string | null) {
+  if (!storage?.envName || storage.bucketPin || !bucket) return null;
+  const own = new RegExp(`-${storage.envName.replace(/[^a-z0-9-]/gi, '')}(-[0-9a-f]{8})?-storage$`);
+  if (own.test(bucket)) return null;
+  return `the app presigned against bucket ${JSON.stringify(bucket)}, which is not environment ${JSON.stringify(storage.envName)}'s own bucket (expected a name ending in "-${storage.envName}-storage" unless s3.bucketPin is set)`;
+}
+
+/**
  * The upload path end to end, the way the browser walks it: the signed-in user
  * asks the app for a presigned PUT (`POST /api/v1/files/presign`), confirms the
  * page CSP and the bucket CORS would let a browser make that PUT, PUTs the
@@ -1088,6 +1105,9 @@ export async function checkFileUploadRoundtrip(
       );
     }
 
+    const perEnvFailure = perEnvBucketFailure(deps.storage, bucket);
+    if (perEnvFailure) return fail('bucket', perEnvFailure, { key, bucket });
+
     // The browser PUTs straight to object storage, so two things outside the
     // byte transfer must hold or the real upload button fails while this
     // server-side PUT succeeds: the page's CSP connect-src must allow the
@@ -1180,6 +1200,7 @@ export function resolveAppStorage(projectDir: string, envPrefix: string): AppSto
           provider?: string;
           s3?: {
             bucket?: string;
+            bucketPin?: string;
             region?: string;
             endpoint?: string;
             bucketCreatedAt?: string | null;
@@ -1192,6 +1213,8 @@ export function resolveAppStorage(projectDir: string, envPrefix: string): AppSto
     return {
       providerId: (env.provider ?? 'hetzner').toLowerCase(),
       bucket: env.s3.bucket,
+      envName: envPrefix,
+      ...(env.s3.bucketPin && { bucketPin: env.s3.bucketPin }),
       region: env.s3.region ?? '',
       endpoint: env.s3.endpoint ?? '',
       ...(Object.hasOwn(env.s3, 'bucketCreatedAt') && {

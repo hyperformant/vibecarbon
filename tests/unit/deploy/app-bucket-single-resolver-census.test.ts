@@ -34,17 +34,38 @@ const rel = (f: string) => relative(ROOT, f);
 const srcFiles = walk(join(ROOT, 'src'), (f) => f.endsWith('.js'));
 
 describe('app bucket single resolver census', () => {
-  it('(a) deriveProjectBucketName( is called only from s3-base.js and prompts.js', () => {
-    const allowed = new Set(['src/lib/providers/s3-base.js', 'src/lib/deploy/prompts.js']);
+  it('(a) deriveEnvAppBucketName( is called only from s3-base.js, prompts.js and destroy.js', () => {
+    const allowed = new Set([
+      'src/lib/providers/s3-base.js',
+      'src/lib/deploy/prompts.js',
+      'src/destroy.js',
+    ]);
     expect(srcFiles.length).toBeGreaterThan(50);
+    const offenders = srcFiles
+      .filter((f) => /deriveEnvAppBucketName\(/.test(readFileSync(f, 'utf-8')))
+      .map(rel)
+      .filter((f) => !allowed.has(f));
+    expect(
+      offenders,
+      `read the app bucket through resolveEnvStorage, not deriveEnvAppBucketName: ${offenders.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('(a) deriveProjectBucketName( is limited to the backups and state derivations', () => {
+    const allowed = new Set(['src/lib/providers/s3-base.js', 'src/lib/deploy/prompts.js']);
     const offenders = srcFiles
       .filter((f) => /deriveProjectBucketName\(/.test(readFileSync(f, 'utf-8')))
       .map(rel)
       .filter((f) => !allowed.has(f));
     expect(
       offenders,
-      `read the bucket through resolveEnvStorage, not deriveProjectBucketName: ${offenders.join(', ')}`,
+      `read the app bucket through resolveEnvStorage: ${offenders.join(', ')}`,
     ).toEqual([]);
+    // prompts.js may derive only the backups bucket; the app bucket never
+    // comes from the per-project derivation.
+    const prompts = readFileSync(join(ROOT, 'src/lib/deploy/prompts.js'), 'utf-8');
+    const calls = [...prompts.matchAll(/deriveProjectBucketName\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(calls.filter((c) => !/'backups'/.test(c))).toEqual([]);
   });
 
   it('(b) every file that assigns S3_BUCKET also assigns VC_ENV', () => {
@@ -75,6 +96,16 @@ describe('app bucket single resolver census', () => {
     expect(
       offenders,
       `an object key prefix is still read or written: ${offenders.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  it('(c) no CORS merge across environments survives in src/', () => {
+    const offenders = srcFiles
+      .filter((f) => /corsOrigins|mergeCorsOrigins/.test(readFileSync(f, 'utf-8')))
+      .map(rel);
+    expect(
+      offenders,
+      `the bucket has one owner env, so its CORS rule is never merged: ${offenders.join(', ')}`,
     ).toEqual([]);
   });
 
