@@ -78,6 +78,11 @@ export class CookieJar {
     return this.cookies.size;
   }
 
+  /** One cookie's value, or undefined when the jar does not hold it. */
+  get(name: string): string | undefined {
+    return this.cookies.get(name);
+  }
+
   /** The Cookie request header value ('' when empty). */
   header(): string {
     return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
@@ -95,7 +100,7 @@ export interface AuthSession {
  * matching SITE_URL (https://<domain>): the auth API and the CSRF middleware
  * on /api/* both refuse a cookie-authenticated write without it.
  */
-function apiHeaders(domain: string, jar?: CookieJar): Record<string, string> {
+export function apiHeaders(domain: string, jar?: CookieJar): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Origin: `https://${domain}`,
@@ -148,34 +153,65 @@ function isUnverifiedEmail(status: number, body: string, smtpConfigured: boolean
 // Auth checks
 // ---------------------------------------------------------------------------
 
-async function checkAuthSignup(
+/**
+ * What a real sign-up answers: Better Auth's `{ user: { email, ... } }` (the
+ * token is stripped from the body, see carbon/src/server/auth/
+ * strip-session-token.ts). Null when the body is anything else. A bare 2xx is
+ * not proof: anything that answers 200 at the path would read as a sign-up.
+ */
+export function signupBodyError(body: string, email: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return `not JSON: ${body.slice(0, 120)}`;
+  }
+  const user = (parsed as { user?: { email?: unknown } } | null)?.user;
+  if (!user || typeof user.email !== 'string') return 'missing user.email';
+  if (user.email.toLowerCase() !== email.toLowerCase()) {
+    return `user.email is ${user.email}, not the address signed up`;
+  }
+  return null;
+}
+
+export async function checkAuthSignup(
   domain: string,
   email: string,
   password: string,
+  deps: { fetcher?: typeof safeFetch; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<VerificationResult> {
+  const fetcher = deps.fetcher ?? safeFetch;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const start = Date.now();
   const MAX_RETRIES = 4;
   const RETRY_DELAY_MS = 5_000;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await safeFetch(`https://${domain}/api/auth/sign-up/email`, {
+      const res = await fetcher(`https://${domain}/api/auth/sign-up/email`, {
         method: 'POST',
         headers: apiHeaders(domain),
         body: JSON.stringify({ email, password, name: 'E2E Test' }),
       });
 
+      const body = await res.text();
+
       if (res.ok) {
+        const bodyError = signupBodyError(body, email);
+        if (bodyError) {
+          return result('auth_signup', 'fail', start, {
+            errorMessage: `Signup returned ${res.status} but not a Better Auth user: ${bodyError}`,
+            details: { attempts: attempt + 1 },
+          });
+        }
         return result('auth_signup', 'pass', start, { details: { attempt } });
       }
-
-      const body = await res.text();
 
       // Retry only while the app is still coming up (gateway 502/503/504, or a
       // 404 before the route table is live). A 4xx from the auth API is a real
       // answer, and the sign-up cap (3 per 10s per IP) punishes blind retries.
       if ([404, 502, 503, 504].includes(res.status) && attempt < MAX_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        await sleep(RETRY_DELAY_MS);
         continue;
       }
 
@@ -185,7 +221,7 @@ async function checkAuthSignup(
       });
     } catch (err) {
       if (attempt < MAX_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        await sleep(RETRY_DELAY_MS);
         continue;
       }
       return result('auth_signup', 'fail', start, {
@@ -269,17 +305,18 @@ export async function checkAuthSignin(
   }
 }
 
-async function checkAuthProtected(
+export async function checkAuthProtected(
   domain: string,
   jar: CookieJar,
   expectedEmail: string,
+  fetcher: typeof safeFetch = safeFetch,
 ): Promise<VerificationResult> {
   const start = Date.now();
   try {
     // The session cookie from sign-in must resolve to the same user through
     // get-session. The user-context DB path is covered separately by
     // app_api_me_authenticated.
-    const { status, user } = await fetchSessionUser(domain, jar);
+    const { status, user } = await fetchSessionUser(domain, jar, fetcher);
 
     if (status !== 200) {
       return result('auth_protected', 'fail', start, {
@@ -377,7 +414,25 @@ export async function checkAdminLogin(
   adminPassword: string,
   fetcher: typeof safeFetch = safeFetch,
 ): Promise<VerificationResult> {
+  return (await adminSignIn(domain, adminEmail, adminPassword, fetcher)).result;
+}
+
+/**
+ * The auth_admin_login check, plus the signed-in super-admin session when it
+ * passed. The observability checks reuse that session to mint the ForwardAuth
+ * cookie instead of signing in again (password sign-in is capped at 10 per
+ * 15 min per IP).
+ */
+export async function adminSignIn(
+  domain: string,
+  adminEmail: string,
+  adminPassword: string,
+  fetcher: typeof safeFetch = safeFetch,
+): Promise<{ result: VerificationResult; jar?: CookieJar }> {
   const start = Date.now();
+  const failed = (errorMessage: string, details?: Record<string, unknown>) => ({
+    result: result('auth_admin_login', 'fail', start, { errorMessage, details }),
+  });
   try {
     const { jar, status, body } = await signInWithPassword(
       domain,
@@ -387,54 +442,55 @@ export async function checkAdminLogin(
     );
 
     if (status < 200 || status >= 300) {
-      return result('auth_admin_login', 'fail', start, {
-        errorMessage:
-          `Admin sign-in returned ${status}: ${body.slice(0, 200)} — the configured admin ` +
+      return failed(
+        `Admin sign-in returned ${status}: ${body.slice(0, 200)} — the configured admin ` +
           `(${adminEmail}) was not provisioned on this deploy mode (startup bootstrap gap)`,
-      });
+      );
     }
 
     const session = await fetchSessionUser(domain, jar, fetcher);
     if (session.status !== 200 || !session.user) {
-      return result('auth_admin_login', 'fail', start, {
-        errorMessage: `Admin signed in but get-session returned ${session.status} with ${session.user ? 'a user' : 'no session'}`,
-      });
+      return failed(
+        `Admin signed in but get-session returned ${session.status} with ${session.user ? 'a user' : 'no session'}`,
+      );
     }
 
     const role = session.user.role ?? null;
     if (role !== 'super_admin') {
-      return result('auth_admin_login', 'fail', start, {
-        errorMessage: `Admin logged in but user.role is "${role ?? 'absent'}" (expected "super_admin")`,
-        details: { role },
-      });
+      return failed(
+        `Admin logged in but user.role is "${role ?? 'absent'}" (expected "super_admin")`,
+        { role },
+      );
     }
 
-    return result('auth_admin_login', 'pass', start, { details: { role } });
+    return { result: result('auth_admin_login', 'pass', start, { details: { role } }), jar };
   } catch (err) {
-    return result('auth_admin_login', 'fail', start, {
-      errorMessage: err instanceof Error ? err.message : String(err),
-    });
+    return failed(err instanceof Error ? err.message : String(err));
   }
 }
 
 // Request budget per verify pass against the per-IP caps
 // (carbon/src/server/middleware/auth-rate-limits.ts): 2 password sign-ins (cap
 // 10 per 15 min), 1 sign-up (cap 3 per 10 s), 2 get-session (shared 100 per
-// min). Several verify passes inside 15 minutes still fit.
+// min). Several verify passes inside 15 minutes still fit. The observability
+// checks reuse the admin session returned here rather than a third sign-in.
 async function runAuthChecks(
   domain: string,
   adminEmail?: string,
   adminPassword?: string,
   smtpConfigured = false,
-): Promise<{ results: VerificationResult[]; jar?: CookieJar }> {
+): Promise<{ results: VerificationResult[]; jar?: CookieJar; adminJar?: CookieJar }> {
   const results: VerificationResult[] = [];
+  let adminJar: CookieJar | undefined;
 
   // Admin login first — independent of the throwaway-signup pipeline below, so
   // a signup hiccup never masks (skips) the admin-provisioning regression. A
   // real deploy always has ADMIN_EMAIL/ADMIN_PASSWORD in .env.local; only skip
   // when they genuinely couldn't be parsed.
   if (adminEmail && adminPassword) {
-    results.push(await checkAdminLogin(domain, adminEmail, adminPassword));
+    const admin = await adminSignIn(domain, adminEmail, adminPassword);
+    results.push(admin.result);
+    adminJar = admin.jar;
   } else {
     results.push(skip('auth_admin_login', 'ADMIN_EMAIL/ADMIN_PASSWORD not found in .env.local'));
   }
@@ -450,7 +506,7 @@ async function runAuthChecks(
     results.push(skip('auth_signin', 'Skipped because signup failed'));
     results.push(skip('auth_protected', 'Skipped because signup failed'));
     results.push(skip('app_api_me_authenticated', 'Skipped because signup failed'));
-    return { results };
+    return { results, adminJar };
   }
 
   // Sign in
@@ -462,7 +518,7 @@ async function runAuthChecks(
       : 'Skipped because signin failed';
     results.push(skip('auth_protected', why));
     results.push(skip('app_api_me_authenticated', why));
-    return { results };
+    return { results, adminJar };
   }
 
   // Protected endpoint: the cookie resolves to the signed-in user
@@ -471,7 +527,7 @@ async function runAuthChecks(
   // User-context DB path through the app's own API (see check docstring)
   results.push(await checkAppApiMeAuthenticated(domain, signinOutcome.jar));
 
-  return { results, jar: signinOutcome.jar };
+  return { results, jar: signinOutcome.jar, adminJar };
 }
 
 // ---------------------------------------------------------------------------
@@ -951,9 +1007,15 @@ export function missingDbHandle(ip?: string | null, sshKeyPath?: string | null):
   return 'no sshKeyPath (serverIp present)';
 }
 
+/** The functional check results, plus the super-admin session when auth_admin_login passed. */
+export interface AppFunctionalOutcome {
+  results: VerificationResult[];
+  adminJar?: CookieJar;
+}
+
 /**
  * Run all application functional checks against a deployed environment.
- * Returns array of individual check results. `db` is the SSH target that
+ * Returns the check results and the admin session (see AppFunctionalOutcome). `db` is the SSH target that
  * fronts the database, or the missingDbHandle() reason when there is none.
  */
 export async function runAppFunctionalChecks(opts: {
@@ -962,7 +1024,7 @@ export async function runAppFunctionalChecks(opts: {
   adminEmail?: string;
   adminPassword?: string;
   smtpConfigured?: boolean;
-}): Promise<VerificationResult[]> {
+}): Promise<AppFunctionalOutcome> {
   const { domain, db, adminEmail, adminPassword, smtpConfigured = false } = opts;
   const results: VerificationResult[] = [];
 
@@ -985,5 +1047,5 @@ export async function runAppFunctionalChecks(opts: {
       : skip('file_upload_roundtrip', 'Skipped because no signed-in user (auth checks failed)'),
   );
 
-  return results;
+  return { results, adminJar: auth.adminJar };
 }

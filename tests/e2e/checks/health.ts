@@ -132,6 +132,9 @@ export interface DnsSafeFetchDeps {
   httpsRequest?: typeof https.request;
 }
 
+/** Statuses a fetch Response must carry with a null body (Fetch spec). */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+
 export async function dnsSafeFetch(
   url: string,
   init?: RequestInit,
@@ -214,9 +217,14 @@ export async function dnsSafeFetch(
                 responseHeaders.set(name, value);
               }
             }
+            const status = res.statusCode ?? 500;
+            // A null-body status (204 No Content, 304, ...) must be built with
+            // a null body: `new Response('', { status: 204 })` throws, which
+            // turned every 204 (the ForwardAuth cookie mint answers one) into
+            // a transport error.
             resolve(
-              new Response(body, {
-                status: res.statusCode ?? 500,
+              new Response(NULL_BODY_STATUSES.has(status) ? null : body, {
+                status,
                 statusText: res.statusMessage ?? '',
                 headers: responseHeaders,
               }),
@@ -345,7 +353,38 @@ const HEALTH_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 10_000, 10_000];
 // Individual checks
 // ---------------------------------------------------------------------------
 
-async function checkApiHealth(domain: string): Promise<VerificationResult> {
+/**
+ * Injectable seams for the retrying health checks: the unit tier drives them
+ * with a faked fetch and an instant sleep.
+ */
+export interface HealthCheckDeps {
+  fetcher?: typeof dnsSafeFetch;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * The app's liveness route answers `{"status":"ok", ...}` as JSON
+ * (carbon/src/server/routes/health.ts). A bare 200 proves nothing: the SPA
+ * catch-all answered 200 HTML for any path it did not know, so a check that
+ * keyed on the status alone passed with the API not mounted at all.
+ */
+export function isAppHealthBody(contentType: string, body: string): boolean {
+  if (contentType.includes('text/html')) return false;
+  try {
+    return (JSON.parse(body) as { status?: unknown } | null)?.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+export async function checkApiHealth(
+  domain: string,
+  deps: HealthCheckDeps = {},
+): Promise<VerificationResult> {
+  const fetcher = deps.fetcher ?? dnsSafeFetch;
+  const sleep = deps.sleep ?? defaultSleep;
   const url = `https://${domain}/api/health`;
   const start = process.hrtime();
 
@@ -359,14 +398,16 @@ async function checkApiHealth(domain: string): Promise<VerificationResult> {
   let lastErr: Error | null = null;
   let lastStatus = 0;
   let lastBody = '';
+  let lastContentType = '';
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await dnsSafeFetch(url);
+      const res = await fetcher(url);
       const responseTimeMs = elapsedMs(start);
       const body = await res.text().catch(() => '');
+      const contentType = res.headers.get('content-type') ?? '';
 
-      if (res.status === 200) {
+      if (res.status === 200 && isAppHealthBody(contentType, body)) {
         return {
           checkName: 'api_health',
           status: 'pass',
@@ -376,12 +417,14 @@ async function checkApiHealth(domain: string): Promise<VerificationResult> {
       }
       lastStatus = res.status;
       lastBody = body;
+      lastContentType = contentType;
+      lastErr = null;
     } catch (err) {
       lastErr = err instanceof Error ? err : new Error(String(err));
     }
 
     if (attempt < MAX_RETRIES) {
-      await new Promise((r) => setTimeout(r, HEALTH_RETRY_DELAYS_MS[attempt]));
+      await sleep(HEALTH_RETRY_DELAYS_MS[attempt]);
     }
   }
 
@@ -391,7 +434,9 @@ async function checkApiHealth(domain: string): Promise<VerificationResult> {
     responseTimeMs: elapsedMs(start),
     errorMessage: lastErr
       ? `${lastErr.message}${(lastErr as Error & { cause?: unknown }).cause ? ` (cause: ${String((lastErr as Error & { cause?: unknown }).cause)})` : ''}`
-      : `Expected HTTP 200, got ${lastStatus} after ${MAX_RETRIES + 1} attempts`,
+      : lastStatus === 200
+        ? `Got 200 ${lastContentType || 'without a content type'} instead of the app's {"status":"ok"} after ${MAX_RETRIES + 1} attempts`
+        : `Expected HTTP 200 {"status":"ok"}, got ${lastStatus} after ${MAX_RETRIES + 1} attempts`,
     details: {
       httpStatus: lastStatus,
       body: lastBody.slice(0, 256),
@@ -401,7 +446,12 @@ async function checkApiHealth(domain: string): Promise<VerificationResult> {
   };
 }
 
-async function checkAuthHealth(domain: string): Promise<VerificationResult> {
+export async function checkAuthHealth(
+  domain: string,
+  deps: HealthCheckDeps = {},
+): Promise<VerificationResult> {
+  const fetcher = deps.fetcher ?? dnsSafeFetch;
+  const sleep = deps.sleep ?? defaultSleep;
   // Better Auth's own liveness endpoint, served in-process by the app:
   // `{ ok: true }`. The app answers it, so there is no separate auth service
   // to wait for, only the app's own cold start.
@@ -414,7 +464,7 @@ async function checkAuthHealth(domain: string): Promise<VerificationResult> {
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await dnsSafeFetch(url);
+      const res = await fetcher(url);
       const responseTimeMs = elapsedMs(start);
       const body = await res.text().catch(() => '');
       const contentType = res.headers.get('content-type') ?? '';
@@ -462,7 +512,7 @@ async function checkAuthHealth(domain: string): Promise<VerificationResult> {
       }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, HEALTH_RETRY_DELAYS_MS[attempt]));
+    await sleep(HEALTH_RETRY_DELAYS_MS[attempt]);
   }
 
   // Unreachable, but TypeScript needs it

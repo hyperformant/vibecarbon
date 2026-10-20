@@ -1,8 +1,8 @@
 /**
  * Redis feature verification checks.
  *
- * Validates Redis connectivity via SSH (preferred) or the application's
- * health endpoint. All checks are fault-tolerant and never throw.
+ * Validates Redis connectivity via SSH (redis-cli in the container/pod).
+ * All checks are fault-tolerant and never throw.
  *
  * SECURITY: This module uses execSync with shell expansion intentionally,
  * matching the pattern established in cli-runner.ts. All command arguments
@@ -18,9 +18,7 @@ import { performance } from 'node:perf_hooks';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
-import { dnsSafeFetch } from './health.js';
 
-const FETCH_TIMEOUT_MS = 10_000;
 const SSH_TIMEOUT_MS = 10_000;
 
 // argv form — used with execFileSync (no shell). `runSSH` joins the
@@ -32,7 +30,7 @@ const SSH_OPTIONS = e2eSshOpts(5);
  * Run Redis feature checks.
  */
 export async function runRedisChecks(
-  domain: string,
+  _domain: string,
   serverIp?: string,
   sshKeyPath?: string,
   projectDir?: string,
@@ -77,7 +75,6 @@ export async function runRedisChecks(
 
   results.push(
     await checkRedisPing(
-      domain,
       hasSSH ? serverIp : undefined,
       hasSSH ? sshKeyPath : undefined,
       authFlag,
@@ -104,10 +101,9 @@ export async function runRedisChecks(
  * Verify Redis is responding to PING.
  *
  * Primary (SSH): docker exec into the Redis container and run `redis-cli PING`.
- * Fallback (HTTP): check the app's health endpoint for Redis status.
+ * Without SSH it fails: there is no HTTP route that reports Redis.
  */
-async function checkRedisPing(
-  domain: string,
+export async function checkRedisPing(
   serverIp?: string,
   sshKeyPath?: string,
   authFlag = '',
@@ -153,45 +149,18 @@ async function checkRedisPing(
     };
   }
 
-  // Fallback: check health endpoint for Redis status
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-    const res = await dnsSafeFetch(`https://${domain}/health`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-
-    const responseTimeMs = Math.round(performance.now() - start);
-    const body = await res.json();
-
-    // Health endpoint may include a redis field with status info
-    if (res.status === 200 && body?.redis) {
-      return {
-        checkName: 'redis_ping',
-        status: 'pass',
-        responseTimeMs,
-        details: { method: 'health_endpoint', redis: body.redis },
-      };
-    }
-
-    return {
-      checkName: 'redis_ping',
-      status: 'fail',
-      responseTimeMs,
-      errorMessage: 'Health endpoint returned 200 but no Redis status found',
-      details: { method: 'health_endpoint', statusCode: res.status, body },
-    };
-  } catch (err) {
-    return {
-      checkName: 'redis_ping',
-      status: 'fail',
-      responseTimeMs: Math.round(performance.now() - start),
-      errorMessage: `No SSH access and health endpoint failed: ${err instanceof Error ? err.message : String(err)}`,
-      details: { method: 'health_endpoint' },
-    };
-  }
+  // No HTTP fallback: no app route reports Redis. The old fallback probed
+  // `https://{domain}/health` (not a route; the liveness route is /api/health
+  // and carries no redis field) and passed on any truthy `body.redis`, so it
+  // could only ever fail or pass on content that does not prove a PONG.
+  return {
+    checkName: 'redis_ping',
+    status: 'fail',
+    responseTimeMs: Math.round(performance.now() - start),
+    errorMessage:
+      'No SSH access to the Redis host: PING cannot be verified (no app route reports Redis)',
+    details: { method: 'none' },
+  };
 }
 
 /**

@@ -28,11 +28,17 @@ function timeoutSignal(ms: number): AbortSignal {
  * a shape predicate. Retries briefly — the app container may still be warming
  * up right after deploy even once Traefik routes traffic to it.
  */
-async function checkRoute(
+export async function checkRoute(
   checkName: string,
   url: string,
   validate: (body: unknown) => string | null,
+  deps: {
+    fetcher?: (url: string, init?: RequestInit) => Promise<Response>;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<VerificationResult> {
+  const fetcher = deps.fetcher ?? dnsSafeFetch;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const start = Date.now();
   const MAX_RETRIES = 3;
   const RETRY_DELAY_MS = 5_000;
@@ -40,13 +46,13 @@ async function checkRoute(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await dnsSafeFetch(url, { signal: timeoutSignal(TIMEOUT_MS) });
+      const res = await fetcher(url, { signal: timeoutSignal(TIMEOUT_MS) });
       if (res.status !== 200) {
         const text = await res.text();
         lastError = `HTTP ${res.status}: ${text.slice(0, 200)}`;
         // 502/503/404 can be transient while the app boots behind Traefik.
         if ([404, 502, 503].includes(res.status) && attempt < MAX_RETRIES) {
-          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          await sleep(RETRY_DELAY_MS);
           continue;
         }
         return {
@@ -91,7 +97,7 @@ async function checkRoute(
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       if (attempt < MAX_RETRIES) {
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        await sleep(RETRY_DELAY_MS);
       }
     }
   }
@@ -105,6 +111,22 @@ async function checkRoute(
   };
 }
 
+/** `{ notifications: [...] }`, or why the body is not that. */
+export function notificationsShapeError(body: unknown): string | null {
+  const b = body as { notifications?: unknown };
+  if (!b || typeof b !== 'object') return 'not an object';
+  if (!Array.isArray(b.notifications)) return 'missing notifications[] array';
+  return null;
+}
+
+/** `{ settings: {...} }`, or why the body is not that. */
+export function authSettingsShapeError(body: unknown): string | null {
+  const b = body as { settings?: unknown };
+  if (!b || typeof b !== 'object') return 'not an object';
+  if (!b.settings || typeof b.settings !== 'object') return 'missing settings object';
+  return null;
+}
+
 /**
  * Run app API-layer checks against the main domain (where the app's Hono
  * server serves /api/v1/*).
@@ -116,19 +138,9 @@ export async function runAppApiChecks(domain: string): Promise<VerificationResul
     // Public notifications feed — unauthenticated, served via the admin DB
     // client. This is the exact route that 500'd on prod-1. Expect a
     // { notifications: [...] } envelope.
-    checkRoute('app_api_notifications', `${base}/notifications`, (body) => {
-      const b = body as { notifications?: unknown };
-      if (!b || typeof b !== 'object') return 'not an object';
-      if (!Array.isArray(b.notifications)) return 'missing notifications[] array';
-      return null;
-    }),
+    checkRoute('app_api_notifications', `${base}/notifications`, notificationsShapeError),
     // Auth settings — public config the login UI reads on first paint.
     // Exercises the app layer's read of app_settings/auth config.
-    checkRoute('app_api_auth_settings', `${base}/auth/settings`, (body) => {
-      const b = body as { settings?: unknown };
-      if (!b || typeof b !== 'object') return 'not an object';
-      if (!b.settings || typeof b.settings !== 'object') return 'missing settings object';
-      return null;
-    }),
+    checkRoute('app_api_auth_settings', `${base}/auth/settings`, authSettingsShapeError),
   ]);
 }

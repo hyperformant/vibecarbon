@@ -1859,7 +1859,7 @@ export async function runLifecycle(
 
         // App functional checks (auth, real-schema assertion and DB write
         // round-trip as direct SQL over SSH, file upload round-trip)
-        const appResults = await runAppFunctionalChecks({
+        const { results: appResults, adminJar } = await runAppFunctionalChecks({
           domain: config.domain,
           db:
             sshCheckMasterIp && sshKeyPath
@@ -1944,8 +1944,19 @@ export async function runLifecycle(
 
         // Feature-specific checks (only if the feature is enabled)
         if (config.features.includes('observability')) {
-          const grafanaDomain = isCompose ? `grafana.${config.domain}` : config.domain;
-          const obsResults = await runObservabilityChecks(grafanaDomain, isCompose);
+          // Grafana is behind super-admin ForwardAuth in every mode: the checks
+          // mint the vc-admin-token cookie from the admin session that
+          // auth_admin_login signed in, then read Grafana's and Prometheus'
+          // own JSON (see checks/feature-observability.ts).
+          const obsResults = await runObservabilityChecks({
+            appDomain: config.domain,
+            isCompose,
+            adminJar,
+            adminUnavailableReason:
+              adminCreds.adminEmail && adminCreds.adminPassword
+                ? undefined
+                : 'ADMIN_EMAIL/ADMIN_PASSWORD not found in .env.local',
+          });
           allResults.push(...obsResults);
         }
 
@@ -1964,7 +1975,10 @@ export async function runLifecycle(
         // Diagnostic: if subdomain checks failed, SSH into server and dump Traefik state
         const subdomainFails = allResults.filter(
           (r) =>
-            r.status === 'fail' && ['grafana_health', 'prometheus_targets'].includes(r.checkName),
+            r.status === 'fail' &&
+            ['grafana_route_protected', 'grafana_health', 'prometheus_targets'].includes(
+              r.checkName,
+            ),
         );
         if (subdomainFails.length > 0 && serverIps[0] && sshKeyPath) {
           try {
