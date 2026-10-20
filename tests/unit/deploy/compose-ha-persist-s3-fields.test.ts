@@ -92,4 +92,15 @@ describe('haPersistPendingConfig keeps the per-environment storage fields', () =
     expect(s3Of(disk.saved)).not.toHaveProperty('corsOrigins');
     expect(s3Of(disk.saved).keyPrefix).toBe('prod/');
   });
+
+  it('keeps an env bucketPin, so the E6 escape hatch survives the save', async () => {
+    disk.config = { projectName: 'myapp', environments: {} };
+    const c = ctx({ provider: 'hetzner' });
+    (c.s3Config as Record<string, unknown>).bucketPin = 'legacy-b';
+    await COMPOSE_HA_EFFECTS.haPersistPendingConfig(c);
+    expect(s3Of(disk.saved).bucketPin).toBe('legacy-b');
+
+    await COMPOSE_HA_EFFECTS.haPersistPendingConfig(ctx({ provider: 'hetzner' }));
+    expect(s3Of(disk.saved)).not.toHaveProperty('bucketPin');
+  });
 });

@@ -22,6 +22,7 @@
  * same posture is a reasonable default for any S3-compatible backend.
  */
 
+import { createHash } from 'node:crypto';
 import {
   AbortMultipartUploadCommand,
   CopyObjectCommand,
@@ -1095,13 +1096,16 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
 }
 
 /**
- * Derive the dedicated Pulumi-state bucket name from the app storage bucket
- * name. Pulumi state used to live in the app storage bucket, which created a
- * destroy-time circular hazard (deleting the storage bucket nuked the state
- * backend mid-destroy). State now lives in a separate bucket derived once,
- * deterministically, from the app bucket — so the derivation is stable across
- * deploy / scale / destroy and identical for both HA stacks (they share one
- * state bucket).
+ * Derive the dedicated Pulumi-state bucket name from the project base name
+ * (`projectStateBucketBase`, `<project>-<salt>-storage`). Pulumi state used to
+ * live in the app storage bucket, which created a destroy-time circular hazard
+ * (deleting the storage bucket nuked the state backend mid-destroy). State now
+ * lives in a separate, per-project bucket derived once, deterministically, from
+ * that base, so the derivation is stable across deploy / scale / destroy and
+ * identical for every environment and both HA stacks (they share one state
+ * bucket). The base is the name the per-project app bucket used to have; it is
+ * kept byte-for-byte so existing state buckets keep their names, and it is NOT
+ * the per-environment app bucket (deriveEnvAppBucketName).
  *
  * GENERATION (2026-08-07): when the project carries a
  * `stateBucketGeneration`, it is embedded in the name and ROTATED when a
@@ -1118,7 +1122,7 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
  * eat it on long project names — observed as `…-storage-pulumi-stat`), so the
  * BASE is clipped and the functional suffix is preserved whole.
  *
- * @param {string} appBucketName - The app storage bucket (e.g. `myapp-storage`)
+ * @param {string} projectBaseName - The project base (e.g. `myapp-cd9ecc-storage`)
  * @param {string} [generation] - 6-hex state-bucket generation; omitted for
  *   legacy projects (pre-generation names remain byte-stable)
  * @returns {string} - Valid state bucket name (e.g.
@@ -1139,19 +1143,19 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
  *      bucket is the worst window for state-backend staleness and throttling,
  *      and a real customer's bucket is warm by the time it matters.
  *   3. `retained` — the bucket the last `destroy` KEPT (project-level
- *      `retainedStateBucket`). Destroy used to rotate the app bucket name the
+ *      `retainedStateBucket`). Destroy used to rotate the bucket name the
  *      derivation embeds, so without this handoff every destroy→deploy cycle
  *      derived a fresh name and orphaned the kept bucket (vibecarbon-web
- *      2026-09-15). The app bucket name is stable now; the handoff still
+ *      2026-09-15). The project base is stable now; the handoff still
  *      covers a bucket derived under an older name. Recorded by
  *      retainStateBucket, cleared by `-purge`.
- *   4. Derivation from the app bucket name.
+ *   4. Derivation from the project base (projectStateBucketBase).
  *
  * @param {object} args
  * @param {string} [args.envStateBucket]
  * @param {string} [args.projectPin]
  * @param {string} [args.retained]
- * @param {string} args.appBucket
+ * @param {string} args.projectBase - projectStateBucketBase(projectConfig)
  * @param {string} [args.generation]
  * @returns {string}
  */
@@ -1159,7 +1163,7 @@ export function resolveStateBucketName({
   envStateBucket,
   projectPin,
   retained,
-  appBucket,
+  projectBase,
   generation,
 }) {
   if (envStateBucket) return envStateBucket;
@@ -1184,12 +1188,12 @@ export function resolveStateBucketName({
     return pin;
   }
   if (retained) return retained;
-  return deriveStateBucketName(appBucket, generation);
+  return deriveStateBucketName(projectBase, generation);
 }
 
-export function deriveStateBucketName(appBucketName, generation) {
+export function deriveStateBucketName(projectBaseName, generation) {
   const suffix = generation ? `pulumi-state-${generation}` : 'pulumi-state';
-  const clipped = appBucketName.slice(0, Math.max(3, 63 - suffix.length - 1));
+  const clipped = projectBaseName.slice(0, Math.max(3, 63 - suffix.length - 1));
   return sanitizeBucketName(clipped, suffix);
 }
 
@@ -1217,4 +1221,56 @@ export function deriveProjectBucketName(projectConfig, suffix = 'storage') {
     ? `${projectConfig.projectName}-${projectConfig.bucketSalt}`
     : projectConfig.projectName;
   return sanitizeBucketName(base, suffix);
+}
+
+/**
+ * The per-project base the Pulumi state bucket name derives from
+ * (deriveStateBucketName). Pinned to `<project>-<salt>-storage`, the name the
+ * project-wide app bucket had, so live state buckets keep their names now that
+ * the app bucket is per environment.
+ *
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @returns {string}
+ */
+export function projectStateBucketBase(projectConfig) {
+  return deriveProjectBucketName(projectConfig, 'storage');
+}
+
+const APP_BUCKET_SUFFIX = 'storage';
+const MAX_BUCKET_NAME = 63;
+
+/**
+ * The app uploads bucket of one environment: `<project>-<salt>-<env>-storage`
+ * (`<project>-<env>-storage` for a project created before the salt existed).
+ *
+ * A pure function of (projectName, bucketSalt, envName), so an environment
+ * resolves the same bucket on every deploy, including after a plain destroy.
+ *
+ * When that does not fit in 63 characters, the project part is clipped and an
+ * 8-hex hash of sha256(projectName \0 salt \0 env) goes before `-storage`.
+ * The env segment is never clipped, so two environments never collide; the
+ * hash form is also used when the env itself needed sanitizing, because
+ * sanitizing could fold two env names together.
+ *
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @param {string} envName
+ * @returns {string}
+ */
+export function deriveEnvAppBucketName(projectConfig, envName) {
+  const { projectName, bucketSalt } = projectConfig;
+  const env = sanitizeBucketName(envName, '');
+  const salt = bucketSalt ? sanitizeBucketName(bucketSalt, '') : '';
+  const tail = [salt, env].filter(Boolean).join('-');
+  const full = sanitizeBucketName(`${projectName}-${tail}`, '');
+  if (env === envName && full.length + 1 + APP_BUCKET_SUFFIX.length <= MAX_BUCKET_NAME) {
+    return `${full}-${APP_BUCKET_SUFFIX}`;
+  }
+  const hash = createHash('sha256')
+    .update(`${projectName}\0${bucketSalt ?? ''}\0${envName}`)
+    .digest('hex')
+    .slice(0, 8);
+  const fixed = `${tail}-${hash}-${APP_BUCKET_SUFFIX}`;
+  const room = MAX_BUCKET_NAME - fixed.length - 1;
+  const project = sanitizeBucketName(projectName, '').slice(0, room).replace(/-+$/, '');
+  return project ? `${project}-${fixed}` : fixed;
 }

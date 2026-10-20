@@ -1287,8 +1287,7 @@ function otherEnvironmentNames(projectConfig, environment) {
 async function deleteAppBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, results, spinner, isK8s } = ctx;
   const s3BucketName =
-    envConfig.s3?.bucket ||
-    (isK8s ? projectConfig.appBucket || deriveProjectBucketName(projectConfig) : null);
+    envConfig.s3?.bucket || (isK8s ? deriveProjectBucketName(projectConfig) : null);
   if (!s3BucketName) return;
   const keyPrefix = envConfig.s3?.keyPrefix;
   const s3Region = envConfig.s3?.region || 'fsn1';

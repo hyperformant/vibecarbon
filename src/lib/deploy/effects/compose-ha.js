@@ -325,6 +325,7 @@ async function haPersistPendingConfig(ctx) {
     ...(s3Config && {
       s3: {
         bucket: s3Config.bucket,
+        ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
         keyPrefix: s3Config.keyPrefix,
         ...(priorS3.corsOrigins && { corsOrigins: priorS3.corsOrigins }),
         ...(Object.hasOwn(priorS3, 'bucketCreatedAt') && {

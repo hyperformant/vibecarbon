@@ -35,7 +35,7 @@ describe('wal-g prefix derivation', () => {
   });
 
   it('matches the prefix the deploy hands WAL-G (resolveEnvStorage.walgPrefix)', () => {
-    const { walgPrefix } = resolveEnvStorage('e3', {}, { projectName: 'myapp', appBucket: 'b' });
+    const { walgPrefix } = resolveEnvStorage('e3', {}, { projectName: 'myapp' });
     expect(walgPrefixFor('myapp', 'e3')).toBe(`${walgPrefix}/`);
   });
 

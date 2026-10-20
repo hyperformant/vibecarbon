@@ -27,7 +27,7 @@ import {
   providerIdFor,
   resolveS3RegionFor,
 } from '../providers/index.js';
-import { deriveProjectBucketName } from '../providers/s3-base.js';
+import { deriveEnvAppBucketName, deriveProjectBucketName } from '../providers/s3-base.js';
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
@@ -469,15 +469,15 @@ async function verifyObjectStorageKeys(s3Provider, source) {
 }
 
 /**
- * An environment's persisted app bucket disagrees with the project's one
- * stable bucket. Built from names only, so it is safe to print.
+ * An environment's persisted app bucket disagrees with the bucket derived for
+ * that environment. Built from names only, so it is safe to print.
  */
 export class StorageBucketMismatchError extends Error {
   constructor(envName, persisted, expected) {
     super(
-      `Environment "${envName}" is configured for bucket "${persisted}", but this project's app bucket is "${expected}". ` +
-        `Either move the objects (aws s3 mv --recursive s3://${persisted}/ s3://${expected}/${envName}/) and clear the environment's s3.bucket in .vibecarbon.json, ` +
-        `or keep the old bucket by setting "appBucket": "${persisted}" in .vibecarbon.json.`,
+      `Environment "${envName}" is configured for bucket "${persisted}", but its app bucket is now "${expected}" (one bucket per environment). ` +
+        `To keep using the old bucket, set environments.${envName}.s3.bucketPin to "${persisted}" in .vibecarbon.json. ` +
+        `Or copy the objects across (aws s3 sync s3://${persisted} s3://${expected}), clear environments.${envName}.s3.bucket and redeploy.`,
     );
     this.name = 'StorageBucketMismatchError';
   }
@@ -486,30 +486,32 @@ export class StorageBucketMismatchError extends Error {
 /**
  * Where a deploy of `envName` keeps its objects.
  *
- * One long-lived app bucket per project (`projectConfig.appBucket` pins it,
- * otherwise it is derived from the project name and bucketSalt), with each
- * environment under its own `<env>/` key prefix. A persisted
- * `envConfig.s3.bucket` never overrides this; if it names a different
- * bucket the deploy stops rather than silently re-pointing the app.
+ * Each environment has its own long-lived app bucket, derived from the project
+ * name, bucketSalt and env name (deriveEnvAppBucketName); `envConfig.s3.bucketPin`
+ * pins a different one. A persisted `envConfig.s3.bucket` never overrides this;
+ * if it names a different bucket the deploy stops rather than silently
+ * re-pointing the app.
  *
- * The backup bucket keeps its persisted name once an environment has
- * deployed (restore reads backups there; after a destroy the identity seed
- * carries `backupS3`). WAL-G archives under `walgPrefix` in that bucket.
+ * The backup bucket is per project and keeps its persisted name once an
+ * environment has deployed (restore reads backups there; after a destroy the
+ * identity seed carries `backupS3`). WAL-G archives under `walgPrefix` in it.
+ *
+ * `bucket` is the only source of the app bucket name, so a scoped app key
+ * (security plan, S3 scoping) targets exactly this bucket.
  *
  * @param {string} envName already validated by ENV_NAME_FORMAT
- * @param {{ s3?: { bucket?: string }, backupS3?: { bucket?: string } }} envConfig
- * @param {{ projectName: string, bucketSalt?: string, appBucket?: string }} projectConfig
- * @returns {{ bucket: string, keyPrefix: string, backupBucket: string, walgPrefix: string }}
+ * @param {{ s3?: { bucket?: string, bucketPin?: string }, backupS3?: { bucket?: string } }} envConfig
+ * @param {{ projectName: string, bucketSalt?: string }} projectConfig
+ * @returns {{ bucket: string, backupBucket: string, walgPrefix: string }}
  */
 export function resolveEnvStorage(envName, envConfig, projectConfig) {
-  const bucket = projectConfig.appBucket || deriveProjectBucketName(projectConfig);
+  const bucket = envConfig.s3?.bucketPin || deriveEnvAppBucketName(projectConfig, envName);
   const persisted = envConfig.s3?.bucket;
   if (persisted && persisted !== bucket) {
     throw new StorageBucketMismatchError(envName, persisted, bucket);
   }
   return {
     bucket,
-    keyPrefix: `${envName}/`,
     backupBucket: envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
     walgPrefix: `backups/${projectConfig.projectName}/${envName}/walg`,
   };
@@ -1079,7 +1081,8 @@ export async function gatherDeploymentConfig(args) {
       accessKey: s3AccessKey,
       secretKey: s3SecretKey,
       bucket: storage.bucket,
-      keyPrefix: storage.keyPrefix,
+      // Carried so the post-deploy save keeps the pin (E6 escape hatch).
+      ...(envConfig.s3?.bucketPin && { bucketPin: envConfig.s3.bucketPin }),
       walgPrefix: storage.walgPrefix,
       region: s3Region,
       endpoint: s3Provider.getEndpoint(),

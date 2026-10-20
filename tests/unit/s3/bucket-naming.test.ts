@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { sanitizeBucketName } from '../../../src/lib/providers/hetzner-s3.js';
-import { deriveProjectBucketName } from '../../../src/lib/providers/s3-base.js';
+import {
+  deriveEnvAppBucketName,
+  deriveProjectBucketName,
+} from '../../../src/lib/providers/s3-base.js';
 import { generateBucketSalt } from '../../../src/lib/secrets.js';
 
 describe('deriveProjectBucketName (per-project salt)', () => {
@@ -56,6 +59,57 @@ describe('deriveProjectBucketName ignores storageBucketGeneration', () => {
       'utf8',
     );
     expect(src).not.toMatch(/storageBucketGeneration/);
+  });
+});
+
+describe('deriveEnvAppBucketName (one app bucket per environment)', () => {
+  const VALID = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
+
+  it('builds <project>-<salt>-<env>-storage', () => {
+    expect(deriveEnvAppBucketName({ projectName: 'myapp', bucketSalt: 'cd9ecc' }, 'staging')).toBe(
+      'myapp-cd9ecc-staging-storage',
+    );
+  });
+
+  it('keeps an unsalted project unsalted', () => {
+    expect(deriveEnvAppBucketName({ projectName: 'old' }, 'prod')).toBe('old-prod-storage');
+  });
+
+  it('gives two environments of one project different buckets', () => {
+    const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
+    expect(deriveEnvAppBucketName(project, 'staging')).not.toBe(
+      deriveEnvAppBucketName(project, 'prod'),
+    );
+  });
+
+  describe('a 63-character project with a 20-character env', () => {
+    const project = { projectName: `p${'a'.repeat(62)}`, bucketSalt: 'cd9ecc' };
+    const envA = `env-a${'x'.repeat(15)}`;
+    const envB = `env-b${'x'.repeat(15)}`;
+
+    it('stays a valid bucket name of 63 characters or fewer', () => {
+      expect(project.projectName).toHaveLength(63);
+      expect(envA).toHaveLength(20);
+      const name = deriveEnvAppBucketName(project, envA);
+      expect(name.length).toBeLessThanOrEqual(63);
+      expect(name.length).toBeGreaterThanOrEqual(3);
+      expect(name).toMatch(VALID);
+    });
+
+    it('keeps the whole env, clips the project and places the hash before -storage', () => {
+      const name = deriveEnvAppBucketName(project, envA);
+      expect(name).toContain(envA);
+      expect(name).toMatch(/-[0-9a-f]{8}-storage$/);
+      expect(name.startsWith('paaa')).toBe(true);
+    });
+
+    it('differs for env-a and env-b', () => {
+      expect(deriveEnvAppBucketName(project, envA)).not.toBe(deriveEnvAppBucketName(project, envB));
+    });
+
+    it('is identical across two calls', () => {
+      expect(deriveEnvAppBucketName(project, envA)).toBe(deriveEnvAppBucketName(project, envA));
+    });
   });
 });
 

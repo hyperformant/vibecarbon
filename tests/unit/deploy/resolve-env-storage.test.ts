@@ -1,64 +1,103 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveEnvStorage, StorageBucketMismatchError } from '../../../src/lib/deploy/prompts.js';
 
 const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
 
+function mismatchOf(envConfig: object): Error {
+  let err: unknown;
+  try {
+    resolveEnvStorage('prod', envConfig, project);
+  } catch (e) {
+    err = e;
+  }
+  expect(err).toBeInstanceOf(StorageBucketMismatchError);
+  return err as Error;
+}
+
 describe('resolveEnvStorage', () => {
-  it('derives bucket, key prefix, backup bucket and wal-g prefix', () => {
-    expect(resolveEnvStorage('staging', {}, project)).toEqual({
-      bucket: 'myapp-cd9ecc-storage',
-      keyPrefix: 'staging/',
+  it('derives the env bucket, backup bucket and wal-g prefix, with no key prefix', () => {
+    const r = resolveEnvStorage('prod', {}, project);
+    expect(r).toEqual({
+      bucket: 'myapp-cd9ecc-prod-storage',
       backupBucket: 'myapp-cd9ecc-backups',
-      walgPrefix: 'backups/myapp/staging/walg',
+      walgPrefix: 'backups/myapp/prod/walg',
     });
+    expect(Object.hasOwn(r, 'keyPrefix')).toBe(false);
   });
 
-  it('gives two environments one bucket and different key prefixes', () => {
+  it('gives two environments two buckets and one backup bucket', () => {
     const a = resolveEnvStorage('staging', {}, project);
-    const b = resolveEnvStorage('production', {}, project);
-    expect(a.bucket).toBe(b.bucket);
-    expect(a.keyPrefix).not.toBe(b.keyPrefix);
+    const b = resolveEnvStorage('prod', {}, project);
+    expect(a.bucket).not.toBe(b.bucket);
+    expect(a.backupBucket).toBe(b.backupBucket);
   });
 
   it('prefers a persisted backupS3.bucket', () => {
-    const r = resolveEnvStorage('staging', { backupS3: { bucket: 'old-backups' } }, project);
+    const r = resolveEnvStorage('prod', { backupS3: { bucket: 'old-backups' } }, project);
     expect(r.backupBucket).toBe('old-backups');
   });
 
-  it('throws StorageBucketMismatchError when a persisted s3.bucket differs', () => {
-    const envConfig = {
-      s3: { bucket: 'myapp-cd9ecc-storage-93872b', accessKey: 'AKIASECRET', secretKey: 'SKSECRET' },
-    };
-    let err: unknown;
-    try {
-      resolveEnvStorage('staging', envConfig, project);
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(StorageBucketMismatchError);
-    const msg = (err as Error).message;
-    expect(msg).toContain('myapp-cd9ecc-storage-93872b');
+  it('fails closed on a persisted per-project bucket, naming the pin and the copy step', () => {
+    const msg = mismatchOf({
+      s3: { bucket: 'myapp-cd9ecc-storage', accessKey: 'AKIASECRET', secretKey: 'SKSECRET' },
+    }).message;
     expect(msg).toContain('myapp-cd9ecc-storage');
-    expect(msg).toContain('"appBucket"');
-    expect(msg).toContain('aws s3 mv');
+    expect(msg).toContain('myapp-cd9ecc-prod-storage');
+    expect(msg).toContain('bucketPin');
+    expect(msg).toContain('aws s3 sync');
     expect(msg).not.toContain('AKIASECRET');
     expect(msg).not.toContain('SKSECRET');
   });
 
-  it('does not throw when the persisted s3.bucket equals the derived name', () => {
-    const r = resolveEnvStorage('staging', { s3: { bucket: 'myapp-cd9ecc-storage' } }, project);
-    expect(r.bucket).toBe('myapp-cd9ecc-storage');
+  it('fails closed on an old generation-suffixed name', () => {
+    expect(mismatchOf({ s3: { bucket: 'myapp-cd9ecc-storage-93872b' } }).message).toContain(
+      'myapp-cd9ecc-storage-93872b',
+    );
   });
 
-  it('lets projectConfig.appBucket win over derivation', () => {
-    const r = resolveEnvStorage('staging', {}, { ...project, appBucket: 'my-pinned' });
-    expect(r.bucket).toBe('my-pinned');
+  it('does not throw when the persisted s3.bucket equals the derived env name', () => {
+    const r = resolveEnvStorage('prod', { s3: { bucket: 'myapp-cd9ecc-prod-storage' } }, project);
+    expect(r.bucket).toBe('myapp-cd9ecc-prod-storage');
+  });
+
+  it('lets envConfig.s3.bucketPin win over derivation', () => {
+    expect(resolveEnvStorage('prod', { s3: { bucketPin: 'legacy-b' } }, project).bucket).toBe(
+      'legacy-b',
+    );
     expect(
-      resolveEnvStorage(
-        'staging',
-        { s3: { bucket: 'my-pinned' } },
-        { ...project, appBucket: 'my-pinned' },
-      ).bucket,
-    ).toBe('my-pinned');
+      resolveEnvStorage('prod', { s3: { bucketPin: 'legacy-b', bucket: 'legacy-b' } }, project)
+        .bucket,
+    ).toBe('legacy-b');
+  });
+
+  it('ignores the removed project-wide appBucket pin', () => {
+    expect(resolveEnvStorage('prod', {}, { ...project, appBucket: 'my-pinned' }).bucket).toBe(
+      'myapp-cd9ecc-prod-storage',
+    );
+  });
+});
+
+describe('envConfig.s3.bucketPin survives every save that rebuilds s3', () => {
+  // A pin dropped by the post-deploy save would make the next deploy derive
+  // the env name again and fail closed on its own persisted bucket.
+  const read = (f: string) => readFileSync(new URL(`../../../${f}`, import.meta.url), 'utf8');
+
+  it('deploy hands the pin from envConfig to s3Config', () => {
+    expect(read('src/lib/deploy/prompts.js')).toContain(
+      '...(envConfig.s3?.bucketPin && { bucketPin: envConfig.s3.bucketPin }),',
+    );
+  });
+
+  it.each([
+    ['src/lib/deploy/orchestrator.js', 2],
+    ['src/lib/deploy/effects/compose-ha.js', 1],
+  ])('%s persists the pin next to every rebuilt s3.bucket', (file, count) => {
+    const persist =
+      /s3: \{\s*bucket: s3Config\.bucket,\s*\.\.\.\(s3Config\.bucketPin && \{ bucketPin: s3Config\.bucketPin \}\),/g;
+    const rebuilt = /s3: \{\s*bucket: s3Config\.bucket,/g;
+    const src = read(file);
+    expect(src.match(rebuilt)).toHaveLength(count);
+    expect(src.match(persist)).toHaveLength(count);
   });
 });

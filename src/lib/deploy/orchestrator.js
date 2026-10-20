@@ -24,7 +24,7 @@ import {
   providerFor,
   providerIdFor,
 } from '../providers/index.js';
-import { formatS3SetupFailure } from '../providers/s3-base.js';
+import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
 import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
@@ -686,7 +686,9 @@ export async function executeDeployment(args, gatheredConfig) {
   //   2b. The bucket the last destroy KEPT (`retainedStateBucket`). destroy
   //      retains the state bucket and the state name stays stable; this
   //      records the kept name so the redeploy resumes it.
-  //   3. Derivation from the app bucket, for everyone else.
+  //   3. Derivation from the project base (projectStateBucketBase), for
+  //      everyone else. Not s3Config.bucket: the app bucket is per env, the
+  //      state bucket per project.
   //
   // `stateBucketGeneration` is embedded by the derivation. A plain destroy
   // KEEPS the state bucket (retainStateBucket) and leaves the generation
@@ -699,7 +701,7 @@ export async function executeDeployment(args, gatheredConfig) {
     envStateBucket: s3Config.stateBucket,
     projectPin: projectConfig.stateBucket,
     retained: projectConfig.retainedStateBucket,
-    appBucket: s3Config.bucket,
+    projectBase: projectStateBucketBase(projectConfig),
     generation: projectConfig.stateBucketGeneration,
   });
 
@@ -749,6 +751,7 @@ export async function executeDeployment(args, gatheredConfig) {
       ...(dnsProvider ? { dnsProvider } : {}),
       s3: {
         bucket: s3Config.bucket,
+        ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
         keyPrefix: s3Config.keyPrefix,
         // Claim the origins this deploy may put on the shared rule before it
         // can, so a destroy after a crash still removes them.
@@ -2064,6 +2067,7 @@ export async function executeDeployment(args, gatheredConfig) {
         ...(deployedDirty !== null && { deployedDirty }),
         s3: {
           bucket: s3Config.bucket,
+          ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
           keyPrefix: s3Config.keyPrefix,
           corsOrigins: appBucketCorsOrigins,
           // Only on a provider with a settle window: status reads it for the

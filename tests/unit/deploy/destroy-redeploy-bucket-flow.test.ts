@@ -1,12 +1,11 @@
 /**
- * Value flow of the APP storage bucket name and the environment's key prefix
- * across destroy -> redeploy -> restore (e2e e1, Hetzner compose,
+ * Value flow of the APP storage bucket name across destroy -> redeploy ->
+ * restore (e2e e1, Hetzner compose,
  * 2026-10-20: verify-restore's file_upload_roundtrip failed its CORS
  * preflight with a 403).
  *
- * Environments share one long-lived bucket per project; destroy removes only
- * the env's `<env>/` objects and keeps the bucket, so the redeploy must land
- * on the SAME bucket under the SAME prefix.
+ * Each environment has its own long-lived app bucket, derived from the
+ * project and env names, so the redeploy must land on the SAME bucket.
  *
  * The suspicion was that the restored app presigns against the bucket the
  * destroy had just deleted. This pins the chain end to end with the real
@@ -47,7 +46,7 @@ const { renderBundle } = await import('../../../src/lib/deploy/bundle.js');
 const { applyAppBucketCors } = await import('../../../src/lib/deploy/orchestrator.js');
 const { parseDotenv } = await import('../../../src/lib/dotenv.js');
 
-const BUCKET = 'myapp-cd9ecc-storage';
+const BUCKET = 'myapp-cd9ecc-e1-storage';
 const BACKUPS = 'myapp-cd9ecc-backups';
 
 function deployedProject() {
@@ -67,7 +66,6 @@ function deployedProject() {
           region: 'nbg1',
           endpoint: 'https://nbg1.your-objectstorage.com',
           stateBucket: 'vc-state',
-          keyPrefix: 'e1/',
         },
         backupS3: {
           bucket: BACKUPS,
@@ -90,7 +88,6 @@ async function destroyE1(projectConfig: ReturnType<typeof deployedProject>) {
       leaks: createLeakLedger(),
       pulumiDestroyFailed: false,
       s3Bucket: null,
-      s3Prefix: 'e1/',
     },
   });
   expect(saveProjectConfigMock).toHaveBeenCalledTimes(1);
@@ -115,7 +112,7 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     }
   });
 
-  it('the redeploy resolves the SAME bucket and key prefix the destroyed environment had', async () => {
+  it('the redeploy resolves the SAME bucket the destroyed environment had', async () => {
     const before = deployedProject();
     const live = resolveEnvStorage('e1', before.environments.e1, before);
     const afterDestroy = await destroyE1(deployedProject());
@@ -123,19 +120,18 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
     const redeploy = resolveEnvStorage('e1', envConfig, afterDestroy);
     expect(redeploy.bucket).toBe(live.bucket);
-    expect(redeploy.keyPrefix).toBe(live.keyPrefix);
-    expect(redeploy.keyPrefix).toBe('e1/');
+    expect(redeploy.bucket).toBe(BUCKET);
   });
 
   it('the redeploy creates, configures CORS on, and points the app at ONE stable bucket', async () => {
     const afterDestroy = await destroyE1(deployedProject());
 
     const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
-    const {
-      bucket: bucketName,
-      keyPrefix,
-      backupBucket: backupBucketName,
-    } = resolveEnvStorage('e1', envConfig, afterDestroy);
+    const { bucket: bucketName, backupBucket: backupBucketName } = resolveEnvStorage(
+      'e1',
+      envConfig,
+      afterDestroy,
+    );
     expect(bucketName).toBe(BUCKET);
     // Restore depends on the backups bucket keeping its name.
     expect(backupBucketName).toBe(BACKUPS);
@@ -151,7 +147,6 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
         accessKey: 'ak',
         secretKey: 'sk',
         bucket: bucketName,
-        keyPrefix,
         region: 'nbg1',
         endpoint: 'https://nbg1.your-objectstorage.com',
       },
@@ -161,7 +156,6 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     const serverEnv = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
     expect(serverEnv.S3_BUCKET).toBe(bucketName);
     expect(serverEnv.S3_BACKUP_BUCKET).toBe(BACKUPS);
-    expect(serverEnv.S3_KEY_PREFIX).toBe('e1/');
 
     const setBucketCors = vi.fn(async () => {});
     await applyAppBucketCors({
@@ -186,9 +180,9 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
 
   it('a live environment whose persisted bucket differs is refused, not re-pointed', () => {
     const project = deployedProject();
-    project.environments.e1.s3.bucket = 'myapp-cd9ecc-storage-persisted';
+    project.environments.e1.s3.bucket = 'myapp-cd9ecc-storage';
     expect(() => resolveEnvStorage('e1', project.environments.e1, project)).toThrow(
-      'myapp-cd9ecc-storage-persisted',
+      'myapp-cd9ecc-storage',
     );
   });
 });
