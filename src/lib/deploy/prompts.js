@@ -469,31 +469,49 @@ async function verifyObjectStorageKeys(s3Provider, source) {
 }
 
 /**
- * The app-storage and backup bucket names a deploy of `envConfig` uses.
- *
- * Persisted names first: once an environment has deployed, its bucket names
- * are frozen in .vibecarbon.json and renaming the project (or adding a salt
- * to an old project) must not silently re-point wal-g/Pulumi at buckets that
- * don't exist. Fresh derivations embed the per-project bucketSalt (created
- * projects since 2026-08) to keep names globally unique across customers.
- *
- * After a destroy, `envConfig` is the destroyedEnvironments identity seed,
- * which carries `backupS3` (restore reads its backups there) but never `s3`
- * (ENV_IDENTITY_FIELDS in lib/env-identity.js), so the app bucket name is
- * re-derived, and derivation is stable, so it is the same name. Every consumer of the app bucket
- * (bucket creation, the CORS rule, the server .env, the k8s Secret) reads
- * this one value through gatheredConfig.s3Config.bucket; the value-flow test
- * in tests/unit/deploy/destroy-redeploy-bucket-flow.test.ts pins that.
- *
- * @param {{ s3?: { bucket?: string }, backupS3?: { bucket?: string } }} envConfig
- * @param {{ projectName: string, bucketSalt?: string }} projectConfig
- * @returns {{ bucketName: string, backupBucketName: string }}
+ * An environment's persisted app bucket disagrees with the project's one
+ * stable bucket. Built from names only, so it is safe to print.
  */
-export function resolveEnvBucketNames(envConfig, projectConfig) {
+export class StorageBucketMismatchError extends Error {
+  constructor(envName, persisted, expected) {
+    super(
+      `Environment "${envName}" is configured for bucket "${persisted}", but this project's app bucket is "${expected}". ` +
+        `Either move the objects (aws s3 mv --recursive s3://${persisted}/ s3://${expected}/${envName}/) and clear the environment's s3.bucket in .vibecarbon.json, ` +
+        `or keep the old bucket by setting "appBucket": "${persisted}" in .vibecarbon.json.`,
+    );
+    this.name = 'StorageBucketMismatchError';
+  }
+}
+
+/**
+ * Where a deploy of `envName` keeps its objects.
+ *
+ * One long-lived app bucket per project (`projectConfig.appBucket` pins it,
+ * otherwise it is derived from the project name and bucketSalt), with each
+ * environment under its own `<env>/` key prefix. A persisted
+ * `envConfig.s3.bucket` never overrides this; if it names a different
+ * bucket the deploy stops rather than silently re-pointing the app.
+ *
+ * The backup bucket keeps its persisted name once an environment has
+ * deployed (restore reads backups there; after a destroy the identity seed
+ * carries `backupS3`). WAL-G archives under `walgPrefix` in that bucket.
+ *
+ * @param {string} envName already validated by ENV_NAME_FORMAT
+ * @param {{ s3?: { bucket?: string }, backupS3?: { bucket?: string } }} envConfig
+ * @param {{ projectName: string, bucketSalt?: string, appBucket?: string }} projectConfig
+ * @returns {{ bucket: string, keyPrefix: string, backupBucket: string, walgPrefix: string }}
+ */
+export function resolveEnvStorage(envName, envConfig, projectConfig) {
+  const bucket = projectConfig.appBucket || deriveProjectBucketName(projectConfig);
+  const persisted = envConfig.s3?.bucket;
+  if (persisted && persisted !== bucket) {
+    throw new StorageBucketMismatchError(envName, persisted, bucket);
+  }
   return {
-    bucketName: envConfig.s3?.bucket || deriveProjectBucketName(projectConfig),
-    backupBucketName:
-      envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
+    bucket,
+    keyPrefix: `${envName}/`,
+    backupBucket: envConfig.backupS3?.bucket || deriveProjectBucketName(projectConfig, 'backups'),
+    walgPrefix: `backups/${projectConfig.projectName}/${envName}/walg`,
   };
 }
 
@@ -979,7 +997,14 @@ export async function gatherDeploymentConfig(args) {
     dnsZoneId = null;
   }
 
-  const { bucketName, backupBucketName } = resolveEnvBucketNames(envConfig, projectConfig);
+  let storage;
+  try {
+    storage = resolveEnvStorage(config.environment, envConfig, projectConfig);
+  } catch (err) {
+    if (!(err instanceof StorageBucketMismatchError)) throw err;
+    p.log.error(err.message);
+    process.exit(1);
+  }
   const backupConfig = {
     schedule: args.backupSchedule || envConfig.backup?.schedule || '0 */6 * * *',
     retentionDays: Number.parseInt(
@@ -1053,12 +1078,14 @@ export async function gatherDeploymentConfig(args) {
     s3Config: {
       accessKey: s3AccessKey,
       secretKey: s3SecretKey,
-      bucket: bucketName,
+      bucket: storage.bucket,
+      keyPrefix: storage.keyPrefix,
+      walgPrefix: storage.walgPrefix,
       region: s3Region,
       endpoint: s3Provider.getEndpoint(),
     },
     backupS3Config: {
-      bucket: backupBucketName,
+      bucket: storage.backupBucket,
       region: s3Region,
       endpoint: s3Provider.getEndpoint(),
     },

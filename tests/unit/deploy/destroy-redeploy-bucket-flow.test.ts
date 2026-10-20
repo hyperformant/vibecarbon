@@ -11,7 +11,7 @@
  *   destroy's updateProjectConfig effect (drops environments.<env>, records
  *   the identity, leaves the stable bucket name alone)
  *   -> resolveEnvSeed (deploy's seed for a destroyed name)
- *   -> resolveEnvBucketNames (gatheredConfig.s3Config.bucket)
+ *   -> resolveEnvStorage (gatheredConfig.s3Config.bucket)
  *   -> renderBundle (the server .env's S3_BUCKET)
  *   -> applyAppBucketCors (the bucket the browser-upload rule lands on)
  *
@@ -37,7 +37,7 @@ vi.mock('../../../src/lib/config.js', async (orig) => {
 const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
 const { createLeakLedger } = await import('../../../src/lib/destroy/leak-ledger.js');
 const { resolveEnvSeed, ENV_IDENTITY_FIELDS } = await import('../../../src/lib/env-identity.js');
-const { resolveEnvBucketNames } = await import('../../../src/lib/deploy/prompts.js');
+const { resolveEnvStorage } = await import('../../../src/lib/deploy/prompts.js');
 const { renderBundle } = await import('../../../src/lib/deploy/bundle.js');
 const { applyAppBucketCors } = await import('../../../src/lib/deploy/orchestrator.js');
 const { parseDotenv } = await import('../../../src/lib/dotenv.js');
@@ -108,7 +108,11 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     const afterDestroy = await destroyE1(deployedProject());
 
     const { envConfig } = resolveEnvSeed(afterDestroy, 'e1');
-    const { bucketName, backupBucketName } = resolveEnvBucketNames(envConfig, afterDestroy);
+    const { bucket: bucketName, backupBucket: backupBucketName } = resolveEnvStorage(
+      'e1',
+      envConfig,
+      afterDestroy,
+    );
     expect(bucketName).toBe(BUCKET);
     // Restore depends on the backups bucket keeping its name.
     expect(backupBucketName).toBe(BACKUPS);
@@ -146,7 +150,7 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
 
   it('the destroyed-environment identity never carries the app bucket', async () => {
     // The seam that would leak the deleted name into the redeploy: if `s3`
-    // were an identity field, resolveEnvBucketNames would prefer it over the
+    // were an identity field, resolveEnvStorage would prefer it over the
     // fresh derivation and the app would presign against a deleted bucket.
     expect(ENV_IDENTITY_FIELDS).not.toContain('s3');
     const afterDestroy = await destroyE1(deployedProject());
@@ -154,10 +158,10 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
     expect(afterDestroy.destroyedEnvironments.e1.backupS3.bucket).toBe(BACKUPS);
   });
 
-  it('a live environment keeps its persisted bucket (no derivation, no move)', () => {
+  it('a live environment whose persisted bucket differs is refused, not re-pointed', () => {
     const project = deployedProject();
     project.environments.e1.s3.bucket = 'myapp-cd9ecc-storage-persisted';
-    expect(resolveEnvBucketNames(project.environments.e1, project).bucketName).toBe(
+    expect(() => resolveEnvStorage('e1', project.environments.e1, project)).toThrow(
       'myapp-cd9ecc-storage-persisted',
     );
   });
