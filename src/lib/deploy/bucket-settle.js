@@ -204,6 +204,27 @@ export function makeAppBucketProbeRound({
 }
 
 /**
+ * The object-storage endpoint for a provider region, from the provider S3
+ * class's ENDPOINTS: the one source both probe kinds use (the recorded
+ * `s3.endpoint` can be ''). Throws when the region has none, so a probe
+ * fails at once instead of sending relative URLs for the whole budget.
+ *
+ * @param {string} providerId
+ * @param {string} region - object-storage region
+ * @returns {Promise<string>}
+ */
+export async function appBucketEndpoint(providerId, region) {
+  const S3Class = await getProviderClass(providerId).getObjectStorageProviderClass();
+  const endpoint = S3Class.ENDPOINTS?.[region];
+  if (!endpoint) {
+    throw new Error(
+      `no object-storage endpoint for ${providerId} region ${JSON.stringify(region)}`,
+    );
+  }
+  return endpoint;
+}
+
+/**
  * A `signedHead` for makeAppBucketProbeRound: one HeadBucket through a new
  * S3 client per call (so a new connection), with the SDK's own retry off,
  * so a transient answer counts against the round instead of being hidden.
@@ -222,7 +243,7 @@ export function makeSignedHead({ providerId, accessKey, secretKey, region, bucke
     const S3Class = await getProviderClass(providerId).getObjectStorageProviderClass();
     const client = new S3Client({
       region: S3Class.S3_SIGNING_REGION ?? region,
-      endpoint: S3Class.ENDPOINTS[region],
+      endpoint: await appBucketEndpoint(providerId, region),
       forcePathStyle: true,
       credentials: { accessKeyId: accessKey, secretAccessKey: secretKey },
       maxAttempts: 1,

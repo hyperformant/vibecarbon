@@ -6,6 +6,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
+  appBucketEndpoint,
   BUCKET_SETTLE_BUDGET_MS,
   BUCKET_SETTLE_ROUND_INTERVAL_MS,
   BUCKET_SETTLE_ROUND_SIZE,
@@ -78,6 +79,21 @@ describe('bucketSettleNote', () => {
       'new storage bucket, browser uploads can fail for about 16 more minutes while it settles; vibecarbon status shows when it is done',
     );
     expect(bucketSettleNote({ settling: true, remainingMs: null }, W)).toContain('about 20 more');
+  });
+});
+
+describe('appBucketEndpoint', () => {
+  it("reads the provider S3 class's ENDPOINTS, the source makeSignedHead uses", async () => {
+    await expect(appBucketEndpoint('hetzner', 'fsn1')).resolves.toBe(
+      HetznerS3Provider.ENDPOINTS.fsn1,
+    );
+  });
+
+  it('throws, naming provider and region, when the region has no endpoint', async () => {
+    await expect(appBucketEndpoint('hetzner', 'nowhere')).rejects.toThrow(
+      /no object-storage endpoint for hetzner region "nowhere"/,
+    );
+    await expect(appBucketEndpoint('hetzner', '')).rejects.toThrow(/region ""/);
   });
 });
 

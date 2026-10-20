@@ -361,6 +361,39 @@ describe('checkFileUploadRoundtrip', () => {
       expect(settle.probeRound).toHaveBeenCalled();
     });
 
+    it('a Hetzner env with no recorded creation time (deployed before it was recorded) runs no gate', async () => {
+      const settle = settleDeps(async () => ({ ok: 20, total: 20, failures: [] }));
+      const { bucketCreatedAt: _, ...unrecorded } = storage('hetzner', MIN);
+      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith(),
+        transfer: transferWith(),
+        storage: unrecorded,
+        settle,
+      });
+      expect(r.status).toBe('pass');
+      expect(settle.probeRound).not.toHaveBeenCalled();
+    });
+
+    it('fails fast, before any probe, when the region has no object-storage endpoint', async () => {
+      // The probes must hit the provider's ENDPOINTS[region] (what HeadBucket
+      // uses), never the recorded endpoint, which can be ''. An unresolvable
+      // region fails at once instead of burning the 25-minute budget.
+      const sleep = vi.fn(async () => {});
+      const transfer = transferWith();
+      const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
+        appFetch: appFetchWith(),
+        transfer,
+        storage: { ...storage('hetzner', MIN), region: 'nowhere' },
+        settle: { now: () => T0, sleep },
+      });
+      expect(r.status).toBe('fail');
+      expect(r.errorMessage).toMatch(
+        /^settle: .*no object-storage endpoint for hetzner region "nowhere"/,
+      );
+      expect(sleep).not.toHaveBeenCalled();
+      expect(transfer.put).not.toHaveBeenCalled();
+    });
+
     it('an exhausted gate fails with the bucket, its age and the last failures, and uploads nothing', async () => {
       const settle = settleDeps(async () => ({
         ok: 19,
@@ -434,6 +467,7 @@ describe('resolveAppStorage', () => {
               },
             },
             e2: { s3: { bucket: 'other', region: 'fsn1', endpoint: 'https://x' } },
+            e4: { provider: 'Hetzner', s3: { bucket: 'b', bucketCreatedAt: null } },
           },
         }),
       );
@@ -445,9 +479,13 @@ describe('resolveAppStorage', () => {
         endpoint: 'https://fsn1.your-objectstorage.com',
         bucketCreatedAt: '2026-10-20T12:00:00.000Z',
       });
-      expect(resolveAppStorage(dir, 'e2')).toMatchObject({
+      // No recorded creation time stays absent (no gate); an explicit null
+      // (unreadable at deploy) stays null (treated as young).
+      const e2 = resolveAppStorage(dir, 'e2');
+      expect(e2).toMatchObject({ providerId: 'hetzner', keyPrefix: '' });
+      expect(e2).not.toHaveProperty('bucketCreatedAt');
+      expect(resolveAppStorage(dir, 'e4')).toMatchObject({
         providerId: 'hetzner',
-        keyPrefix: '',
         bucketCreatedAt: null,
       });
       expect(resolveAppStorage(dir, 'e3')).toBeNull();

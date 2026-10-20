@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  appBucketEndpoint,
   BUCKET_SETTLE_BUDGET_MS,
   bucketNeedsSettle,
   makeAppBucketProbeRound,
@@ -891,8 +892,12 @@ export interface AppStorage {
   keyPrefix: string;
   region: string;
   endpoint: string;
-  /** ISO string, or null when unknown. Only providers with a settle window record it. */
-  bucketCreatedAt: string | null;
+  /**
+   * ISO string, or null when the deploy could not read it (treated as young).
+   * Absent when nothing was recorded: a 0-window provider, or an env deployed
+   * before creation times were recorded; neither runs the gate.
+   */
+  bucketCreatedAt?: string | null;
 }
 
 type ProbeRound = () => Promise<{ ok: number; total: number; failures: string[] }>;
@@ -920,6 +925,7 @@ async function settleAppBucket(
   origin: string,
   deps: SettleDeps,
 ): Promise<SettleOutcome> {
+  if (storage.bucketCreatedAt === undefined) return { kind: 'skipped' };
   const windowMs = await settleWindowFor(storage.providerId);
   if (windowMs === 0) return { kind: 'skipped' };
   const now = deps.now ?? Date.now;
@@ -932,6 +938,19 @@ async function settleAppBucket(
     : 'of unknown age';
   let probeRound = deps.probeRound;
   if (!probeRound) {
+    // The preflights must hit the same endpoint as HeadBucket; the recorded
+    // `endpoint` can be '' (relative URLs, every preflight failing for the
+    // whole budget), so resolve it from the provider and fail fast if absent.
+    let endpoint: string;
+    try {
+      endpoint = await appBucketEndpoint(storage.providerId, storage.region);
+    } catch (err) {
+      return {
+        kind: 'failed',
+        message: `bucket ${JSON.stringify(storage.bucket)} is ${age} and needs the settle gate, but ${(err as Error).message}`,
+        details: { bucket: storage.bucket, region: storage.region },
+      };
+    }
     const creds = resolveObjectStorageCreds(storage.providerId);
     if ('missing' in creds) {
       return {
@@ -941,7 +960,7 @@ async function settleAppBucket(
       };
     }
     probeRound = makeAppBucketProbeRound({
-      endpoint: storage.endpoint,
+      endpoint,
       bucket: storage.bucket,
       keyPrefix: storage.keyPrefix,
       origin,
@@ -1193,12 +1212,14 @@ export function resolveAppStorage(projectDir: string, envPrefix: string): AppSto
     const env = config.environments?.[envPrefix];
     if (!env?.s3?.bucket) return null;
     return {
-      providerId: env.provider ?? 'hetzner',
+      providerId: (env.provider ?? 'hetzner').toLowerCase(),
       bucket: env.s3.bucket,
       keyPrefix: env.s3.keyPrefix ?? '',
       region: env.s3.region ?? '',
       endpoint: env.s3.endpoint ?? '',
-      bucketCreatedAt: env.s3.bucketCreatedAt ?? null,
+      ...(Object.hasOwn(env.s3, 'bucketCreatedAt') && {
+        bucketCreatedAt: env.s3.bucketCreatedAt ?? null,
+      }),
     };
   } catch {
     return null;
