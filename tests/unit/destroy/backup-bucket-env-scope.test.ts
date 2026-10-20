@@ -30,12 +30,12 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   };
 });
 
-const saved = vi.hoisted(() => ({ configs: [] as Array<Record<string, any>> }));
+const saved = vi.hoisted(() => ({ configs: [] as Array<Record<string, unknown>> }));
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const real = (await orig()) as Record<string, unknown>;
   return {
     ...real,
-    saveProjectConfig: (c: Record<string, any>) => {
+    saveProjectConfig: (c: Record<string, unknown>) => {
       saved.configs.push(structuredClone(c));
     },
   };
@@ -66,7 +66,9 @@ async function destroy(
   args: Record<string, unknown> = {},
   withConfigUpdate = false,
 ) {
-  const results: Record<string, any> = { leaks: createLeakLedger() };
+  const results: { leaks: ReturnType<typeof createLeakLedger>; backupsPurged?: boolean } = {
+    leaks: createLeakLedger(),
+  };
   const messages: string[] = [];
   const spinner = {
     start: (m?: string) => messages.push(`start:${m ?? ''}`),
