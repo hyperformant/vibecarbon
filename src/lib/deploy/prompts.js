@@ -27,7 +27,11 @@ import {
   providerIdFor,
   resolveS3RegionFor,
 } from '../providers/index.js';
-import { deriveEnvAppBucketName, deriveProjectBucketName } from '../providers/s3-base.js';
+import {
+  assertBucketPin,
+  deriveEnvAppBucketName,
+  deriveProjectBucketName,
+} from '../providers/s3-base.js';
 import { printUpdateNotice } from '../telemetry/update-check.js';
 import { validateDomain } from '../validators.js';
 import { VERSION } from '../version.js';
@@ -477,7 +481,10 @@ export class StorageBucketMismatchError extends Error {
     super(
       `Environment "${envName}" is configured for bucket "${persisted}", but its app bucket is now "${expected}" (one bucket per environment). ` +
         `To keep using the old bucket, set environments.${envName}.s3.bucketPin to "${persisted}" in .vibecarbon.json. ` +
-        `Or copy the objects across (aws s3 sync s3://${persisted} s3://${expected}), clear environments.${envName}.s3.bucket and redeploy.`,
+        `Or copy the objects across and redeploy: for a bucket that kept this environment's files under "${envName}/" run ` +
+        `aws s3 sync s3://${persisted}/${envName}/ s3://${expected}/, ` +
+        `for one that kept them at the root run aws s3 sync s3://${persisted} s3://${expected}; ` +
+        `then clear environments.${envName}.s3.bucket.`,
     );
     this.name = 'StorageBucketMismatchError';
   }
@@ -505,7 +512,15 @@ export class StorageBucketMismatchError extends Error {
  * @returns {{ bucket: string, backupBucket: string, walgPrefix: string }}
  */
 export function resolveEnvStorage(envName, envConfig, projectConfig) {
-  const bucket = envConfig.s3?.bucketPin || deriveEnvAppBucketName(projectConfig, envName);
+  const pin = envConfig.s3?.bucketPin;
+  const bucket =
+    pin !== undefined && pin !== null
+      ? assertBucketPin(
+          pin,
+          `bucketPin for environment "${envName}"`,
+          `environments.${envName}.s3.bucketPin`,
+        )
+      : deriveEnvAppBucketName(projectConfig, envName);
   const persisted = envConfig.s3?.bucket;
   if (persisted && persisted !== bucket) {
     throw new StorageBucketMismatchError(envName, persisted, bucket);

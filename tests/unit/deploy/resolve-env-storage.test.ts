@@ -71,6 +71,23 @@ describe('resolveEnvStorage', () => {
     ).toBe('legacy-b');
   });
 
+  it.each(['', 'Has_Caps', 'a', '-lead', `${'x'.repeat(64)}`])(
+    'rejects a malformed bucketPin %j with the pin error shape',
+    (pin) => {
+      expect(() => resolveEnvStorage('prod', { s3: { bucketPin: pin } }, project)).toThrow(
+        /Invalid bucketPin for environment "prod" .*3-63 chars.*"environments\.prod\.s3\.bucketPin" entry/,
+      );
+    },
+  );
+
+  it('tells a prefixed legacy bucket and an un-prefixed one how to copy across', () => {
+    const msg = mismatchOf({ s3: { bucket: 'myapp-cd9ecc-storage' } }).message;
+    expect(msg).toContain(
+      'aws s3 sync s3://myapp-cd9ecc-storage/prod/ s3://myapp-cd9ecc-prod-storage/',
+    );
+    expect(msg).toContain('aws s3 sync s3://myapp-cd9ecc-storage s3://myapp-cd9ecc-prod-storage;');
+  });
+
   it('ignores the removed project-wide appBucket pin', () => {
     expect(resolveEnvStorage('prod', {}, { ...project, appBucket: 'my-pinned' }).bucket).toBe(
       'myapp-cd9ecc-prod-storage',

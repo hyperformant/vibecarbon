@@ -82,6 +82,45 @@ describe('deriveEnvAppBucketName (one app bucket per environment)', () => {
     );
   });
 
+  describe('the 63-character boundary', () => {
+    const SALT = 'cd9ecc';
+    // <project>-<salt>-prod-storage is 43 + 1 + 6 + 1 + 4 + 8 = 63 characters.
+    it('keeps the short form at exactly 63 characters', () => {
+      const name = deriveEnvAppBucketName(
+        { projectName: 'a'.repeat(43), bucketSalt: SALT },
+        'prod',
+      );
+      expect(name).toHaveLength(63);
+      expect(name).toBe(`${'a'.repeat(43)}-${SALT}-prod-storage`);
+    });
+
+    it('switches to the hash form at 64 characters', () => {
+      const name = deriveEnvAppBucketName(
+        { projectName: 'a'.repeat(44), bucketSalt: SALT },
+        'prod',
+      );
+      expect(name.length).toBeLessThanOrEqual(63);
+      expect(name).toMatch(/-prod-[0-9a-f]{8}-storage$/);
+    });
+  });
+
+  it('uses the hash form when the env name needed sanitizing, so folded names stay apart', () => {
+    const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
+    const upper = deriveEnvAppBucketName(project, 'Prod_X');
+    const lower = deriveEnvAppBucketName(project, 'prod-x');
+    expect(lower).toBe('myapp-cd9ecc-prod-x-storage');
+    expect(upper).toMatch(/-[0-9a-f]{8}-storage$/);
+    expect(upper).not.toBe(lower);
+    expect(upper).toMatch(VALID);
+  });
+
+  it('throws a clear error when the env is too long for any bucket name', () => {
+    const project = { projectName: 'myapp', bucketSalt: 'cd9ecc' };
+    expect(() => deriveEnvAppBucketName(project, 'e'.repeat(60))).toThrow(
+      /Environment name "e{60}" is too long for an app bucket name/,
+    );
+  });
+
   describe('a 63-character project with a 20-character env', () => {
     const project = { projectName: `p${'a'.repeat(62)}`, bucketSalt: 'cd9ecc' };
     const envA = `env-a${'x'.repeat(15)}`;

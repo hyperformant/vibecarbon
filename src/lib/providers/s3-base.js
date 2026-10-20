@@ -1118,6 +1118,28 @@ export function sanitizeBucketName(projectName, suffix = 'storage') {
  *   `myapp-storage-pulumi-state-a1b2c3`)
  */
 /**
+ * A bucket pin is REJECTED rather than rewritten: the operator chose this exact
+ * name, and deploying under a different one than they wrote is worse than
+ * telling them to fix it. Same rules sanitizeBucketName enforces.
+ *
+ * @param {unknown} value
+ * @param {string} what - e.g. `stateBucket pin`, shown after "Invalid"
+ * @param {string} entry - the .vibecarbon.json entry to fix
+ * @returns {string}
+ */
+export function assertBucketPin(value, what, entry) {
+  const pin = String(value);
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(pin)) {
+    throw new Error(
+      `Invalid ${what} ${JSON.stringify(value)} in .vibecarbon.json: bucket ` +
+        'names must be 3-63 chars of lowercase letters, digits and hyphens, starting and ' +
+        `ending alphanumeric. Fix or remove the "${entry}" entry.`,
+    );
+  }
+  return pin;
+}
+
+/**
  * Pick the Pulumi state bucket for an environment, in precedence order.
  *
  *   1. `envStateBucket` — the environment's PERSISTED name. An env that has
@@ -1166,15 +1188,7 @@ export function resolveStateBucketName({
     // but a pin is REJECTED rather than silently rewritten: the operator chose
     // this exact name, and deploying under a different one than they wrote is
     // worse than telling them to fix it.
-    const pin = String(projectPin);
-    if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(pin)) {
-      throw new Error(
-        `Invalid stateBucket pin ${JSON.stringify(projectPin)} in .vibecarbon.json: bucket ` +
-          'names must be 3-63 chars of lowercase letters, digits and hyphens, starting and ' +
-          'ending alphanumeric. Fix or remove the "stateBucket" entry.',
-      );
-    }
-    return pin;
+    return assertBucketPin(projectPin, 'stateBucket pin', 'stateBucket');
   }
   if (retained) return retained;
   return deriveStateBucketName(projectBase, generation);
@@ -1260,6 +1274,13 @@ export function deriveEnvAppBucketName(projectConfig, envName) {
     .slice(0, 8);
   const fixed = `${tail}-${hash}-${APP_BUCKET_SUFFIX}`;
   const room = MAX_BUCKET_NAME - fixed.length - 1;
+  if (room < 0) {
+    throw new Error(
+      `Environment name "${envName}" is too long for an app bucket name: ` +
+        `"${fixed}" alone is ${fixed.length} characters and bucket names allow ${MAX_BUCKET_NAME}. ` +
+        'Use a shorter environment name.',
+    );
+  }
   const project = sanitizeBucketName(projectName, '').slice(0, room).replace(/-+$/, '');
   return project ? `${project}-${fixed}` : fixed;
 }
