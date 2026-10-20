@@ -415,8 +415,14 @@ export function startAppBucketFinalize({
   const warnings = [];
   const heldLog = { warn: (message) => warnings.push(message) };
   const quietSpin = { start() {}, stop() {} };
+  // One S3 client for both reads below.
+  let providerPromise;
+  const sharedProvider = () => {
+    providerPromise ??= createProvider();
+    return providerPromise;
+  };
   const done = applyAppBucketCors({
-    createProvider,
+    createProvider: sharedProvider,
     bucket,
     domain,
     previousOrigins,
@@ -424,7 +430,7 @@ export function startAppBucketFinalize({
     spin: quietSpin,
     log: heldLog,
   });
-  const settle = readBucketSettleState({ providerId, createProvider, bucket });
+  const settle = readBucketSettleState({ providerId, createProvider: sharedProvider, bucket });
   // Handled at `finish`; this only keeps an early rejection from counting as
   // unhandled while IaC runs.
   settle.catch(() => {});

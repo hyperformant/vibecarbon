@@ -181,6 +181,23 @@ describe('startAppBucketFinalize (R7: beside IaC, awaited before the outro)', ()
     ]);
   });
 
+  it('builds one S3 client for the CORS merge and the creation-time read', async () => {
+    const createProvider = vi.fn(async () => ({
+      getBucketCorsOrigins: async () => ['https://prod.dev'],
+      setBucketCors: vi.fn(),
+      bucketCreatedAt: async () => new Date(Date.now() - 60 * 60_000),
+    }));
+    const finalize = startAppBucketFinalize({
+      providerId: 'hetzner',
+      createProvider,
+      bucket: 'app-b',
+      domain: 'prod.dev',
+    });
+    const result = await finalize.finish({ warn: vi.fn(), info: vi.fn() });
+    expect(result.bucketCreatedAt).toEqual(expect.any(String));
+    expect(createProvider).toHaveBeenCalledOnce();
+  });
+
   it('holds warnings until finish so they never interleave with IaC output', async () => {
     const finalize = startAppBucketFinalize({
       providerId: 'digitalocean',
