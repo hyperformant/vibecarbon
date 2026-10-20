@@ -24,7 +24,7 @@ const SKELETON = {
   deployMode: 'compose',
   provider: 'hetzner',
   region: 'hil',
-  s3: { bucket: 'excitingai-88d16c-storage-2074c7', region: 'fsn1', keyPrefix: 'prod/' },
+  s3: { bucket: 'excitingai-88d16c-prod-storage', region: 'fsn1' },
   backupS3: { bucket: 'excitingai-88d16c-backups', region: 'fsn1' },
 };
 
@@ -40,7 +40,7 @@ describe('destroyPreviewBody', () => {
       }),
     );
     expect(body).toMatch(/excitingai-prod .*may not exist/);
-    expect(body).toMatch(/excitingai-88d16c-storage-2074c7, .*may not exist/);
+    expect(body).toMatch(/excitingai-88d16c-prod-storage, .*may not exist/);
     expect(body).toMatch(/excitingai-88d16c-backups .*may not exist/);
     expect(body).toContain('Destroy checks each one and skips what is already gone');
   });
@@ -62,28 +62,9 @@ describe('destroyPreviewBody', () => {
     expect(body).not.toContain('may not exist');
     expect(body).toContain('excitingai-prod (203.0.113.7)');
     expect(body).toContain(
-      'Bucket: excitingai-88d16c-storage-2074c7, objects under prod/ (bucket deleted only with -purge when no other environment uses it)',
+      'Bucket: excitingai-88d16c-prod-storage, kept (deleted only with -purge when no other environment uses it)',
     );
     expect(body).not.toContain('all objects will be deleted');
-  });
-
-  it('says an environment without a recorded key prefix deletes no objects', () => {
-    const body = strip(
-      destroyPreviewBody({
-        envConfig: {
-          ...SKELETON,
-          status: 'deployed',
-          s3: { bucket: 'excitingai-88d16c-storage-2074c7', region: 'fsn1' },
-        },
-        projectName: 'excitingai',
-        envName: 'prod',
-        purgeBackups: false,
-        s3SetupCompleted: true,
-      }),
-    );
-    expect(body).toContain(
-      'Bucket: excitingai-88d16c-storage-2074c7, no objects deleted (written before per-environment prefixes; bucket deleted only with -purge when no other environment uses it)',
-    );
   });
 
   it('trusts the buckets once the S3 step completed, even if a later step failed', () => {
@@ -96,7 +77,7 @@ describe('destroyPreviewBody', () => {
         s3SetupCompleted: true,
       }),
     );
-    expect(body).not.toMatch(/storage-2074c7, .*may not exist/);
+    expect(body).not.toMatch(/prod-storage, .*may not exist/);
     expect(body).toMatch(/excitingai-prod .*may not exist/);
   });
 });

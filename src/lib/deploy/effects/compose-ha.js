@@ -267,11 +267,9 @@ async function haPersistPendingConfig(ctx) {
   } = ctx;
 
   const loadedProjectConfig = loadProjectConfig() || { projectName, environments: {} };
-  // The per-environment storage fields this save must carry forward: the
-  // origins the orchestrator's skeleton save claimed on the shared CORS rule
-  // (on disk), else the ones recorded by the last deploy, and the recorded
-  // bucket creation time. Without them a destroy after a crash here would
-  // leave this env's objects and origins on the shared bucket.
+  // The per-environment storage field this save must carry forward: the
+  // recorded bucket creation time (on disk, else from the last deploy), which
+  // status' settling row reads.
   const priorS3 = {
     ...envConfig.s3,
     ...loadedProjectConfig.environments?.[environment]?.s3,
@@ -326,8 +324,6 @@ async function haPersistPendingConfig(ctx) {
       s3: {
         bucket: s3Config.bucket,
         ...(s3Config.bucketPin && { bucketPin: s3Config.bucketPin }),
-        keyPrefix: s3Config.keyPrefix,
-        ...(priorS3.corsOrigins && { corsOrigins: priorS3.corsOrigins }),
         ...(Object.hasOwn(priorS3, 'bucketCreatedAt') && {
           bucketCreatedAt: priorS3.bucketCreatedAt,
         }),

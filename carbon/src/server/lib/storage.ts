@@ -96,7 +96,7 @@ export async function presignUpload(args: {
   const key = buildObjectKey(args.kind, args.userId, contentType);
   const command = new PutObjectCommand({
     Bucket: env.S3_BUCKET,
-    Key: env.S3_KEY_PREFIX + key,
+    Key: key,
     ContentType: contentType,
     ContentLength: args.size,
   });
@@ -119,7 +119,7 @@ export async function presignRead(key: string): Promise<string> {
     s3(),
     new GetObjectCommand({
       Bucket: env.S3_BUCKET,
-      Key: env.S3_KEY_PREFIX + key,
+      Key: key,
       // Private files never render inline from the storage origin.
       ...(key.startsWith('private/') ? { ResponseContentDisposition: 'attachment' } : {}),
     }),

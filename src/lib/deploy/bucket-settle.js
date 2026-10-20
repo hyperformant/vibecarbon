@@ -142,7 +142,7 @@ export async function waitForBucketSettled({
 /**
  * One probe round against the app bucket, shaped like what a browser upload
  * and the app server do first:
- *   - unauthenticated CORS preflights for a PUT under the env's key prefix,
+ *   - unauthenticated CORS preflights for a PUT of a fixed object key,
  *     clean when the answer is 200 and echoes the origin;
  *   - signed HeadBucket calls, each through `signedHead` (which must use a
  *     fresh client, so each lands on a new connection), clean when no error.
@@ -153,7 +153,6 @@ export async function waitForBucketSettled({
  * @param {object} opts
  * @param {string} opts.endpoint - e.g. https://fsn1.your-objectstorage.com
  * @param {string} opts.bucket
- * @param {string} opts.keyPrefix - `<env>/`
  * @param {string} opts.origin - the app origin the CORS rule must allow
  * @param {() => Promise<unknown>} opts.signedHead - one signed HeadBucket
  * @param {typeof fetch} [opts.fetchImpl]
@@ -162,12 +161,11 @@ export async function waitForBucketSettled({
 export function makeAppBucketProbeRound({
   endpoint,
   bucket,
-  keyPrefix,
   origin,
   signedHead,
   fetchImpl = globalThis.fetch,
 }) {
-  const url = `${endpoint}/${bucket}/${keyPrefix}.settle-probe`;
+  const url = `${endpoint}/${bucket}/.settle-probe`;
   const preflight = async () => {
     let res;
     try {

@@ -6,7 +6,6 @@ const fakeEnv = vi.hoisted(() => ({
   S3_BUCKET: 'test-bucket' as string | undefined,
   S3_ACCESS_KEY: 'test' as string | undefined,
   S3_SECRET_KEY: 'test' as string | undefined,
-  S3_KEY_PREFIX: '',
 }));
 vi.mock('@server/lib/env', () => ({ env: fakeEnv }));
 
@@ -64,6 +63,16 @@ describe('presignUpload', () => {
     expect(r.url).toContain('X-Amz-Signature');
     expect(r.headers).toEqual({ 'Content-Type': 'image/png', 'Content-Length': '1000' });
     expect(r.expiresIn).toBe(300);
+    expect(r.key.startsWith('avatars/u1/')).toBe(true);
+  });
+  it('signs the key at the bucket root, with no prefix: /<bucket>/avatars/...', async () => {
+    const r = await presignUpload({
+      kind: 'avatar',
+      userId: 'u1',
+      contentType: 'image/png',
+      size: 1000,
+    });
+    expect(new URL(r.url).pathname).toBe(`/test-bucket/${r.key}`);
     expect(r.key.startsWith('avatars/u1/')).toBe(true);
   });
   it('embeds no checksum params and signs content-length and content-type', async () => {
@@ -124,7 +133,7 @@ describe('presignRead', () => {
   it('signs a 300s GET url', async () => {
     const key = `private/u1/${UUID}.pdf`;
     const url = await presignRead(key);
-    expect(new URL(url).pathname.endsWith(key)).toBe(true);
+    expect(new URL(url).pathname).toBe(`/test-bucket/${key}`);
     expect(url).toContain('X-Amz-Expires=300');
   });
   it('forces attachment for private reads only', async () => {

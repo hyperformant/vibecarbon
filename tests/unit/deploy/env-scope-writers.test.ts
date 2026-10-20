@@ -1,9 +1,9 @@
 /**
- * Every writer of a deployed server's environment carries the env's key
- * prefix (S3_KEY_PREFIX) and name (VC_ENV): compose and compose-ha through
- * the rendered bundle .env, k8s through the vibecarbon-secrets Secret.
- * Environments share one app bucket, so a writer that dropped the prefix
- * would put that env's objects at the bucket root.
+ * Every writer of a deployed server's environment carries the env's name
+ * (VC_ENV, which WAL-G's prefix uses): compose and compose-ha through the
+ * rendered bundle .env, k8s through the vibecarbon-secrets Secret. Each env
+ * has its own app bucket, so no writer carries an object key prefix
+ * (S3_KEY_PREFIX was removed by design).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,7 +13,7 @@ import { buildVibecarbonSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
 const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
 
 describe('k8s vibecarbon-secrets', () => {
-  it('carries S3_KEY_PREFIX and VC_ENV beside the bucket', () => {
+  it('carries VC_ENV beside the bucket and no S3_KEY_PREFIX', () => {
     const stringData = buildVibecarbonSecretData({
       envLocal: {},
       environment: 'prod',
@@ -21,13 +21,12 @@ describe('k8s vibecarbon-secrets', () => {
         accessKey: 'ak',
         secretKey: 'sk',
         bucket: 'myapp-abc123-storage',
-        keyPrefix: 'prod/',
         endpoint: 'https://fsn1.your-objectstorage.com',
         region: 'fsn1',
       },
       backupBucketName: null,
     });
-    expect(stringData.S3_KEY_PREFIX).toBe('prod/');
+    expect(stringData).not.toHaveProperty('S3_KEY_PREFIX');
     expect(stringData.VC_ENV).toBe('prod');
     expect(stringData.S3_BUCKET).toBe('myapp-abc123-storage');
   });
@@ -37,6 +36,12 @@ describe('k8s vibecarbon-secrets', () => {
     expect(k3s).toMatch(
       /applyVibecarbonSecrets\(\{\s*kubeconfig,\s*envLocal,\s*s3Config,\s*backupBucketName,\s*environment,?\s*\}\)/,
     );
+  });
+});
+
+describe('no writer knows S3_KEY_PREFIX', () => {
+  it.each(['src/lib/deploy/bundle.js', 'src/lib/deploy/k8s/k3s.js'])('%s', (rel) => {
+    expect(src(rel).match(/S3_KEY_PREFIX|keyPrefix/g) ?? []).toEqual([]);
   });
 });
 

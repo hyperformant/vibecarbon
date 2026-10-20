@@ -13,7 +13,6 @@ function provider() {
     _send: (c: Sent) => Promise<unknown>;
     setBucketCors: (b: string, origins: string[]) => Promise<void>;
     getBucketCorsOrigins: (b: string) => Promise<string[]>;
-    deleteBucketCors: (b: string) => Promise<void>;
   };
   const send = vi.fn(async (_c: Sent) => ({}));
   p._send = send;
@@ -114,26 +113,13 @@ describe('getBucketCorsOrigins', () => {
   });
 });
 
-describe('deleteBucketCors', () => {
-  it('sends DeleteBucketCors for the bucket', async () => {
-    const { p, send } = provider();
-    await p.deleteBucketCors('app-bucket');
-    const cmd = send.mock.calls[0][0];
-    expect(cmd.constructor.name).toBe('DeleteBucketCorsCommand');
-    expect(cmd.input).toEqual({ Bucket: 'app-bucket' });
-  });
-});
-
 describe('applyAppBucketCors', () => {
-  const spin = () => ({ start: vi.fn(), stop: vi.fn() });
-
   it('allows exactly the https domain origin', async () => {
     const setBucketCors = vi.fn(async () => {});
     await applyAppBucketCors({
       createProvider: async () => ({ setBucketCors, getBucketCorsOrigins: async () => [] }),
       bucket: 'app-b',
       domain: 'example.com',
-      spin: spin(),
       log: { warn: vi.fn() },
     });
     expect(setBucketCors).toHaveBeenCalledWith('app-b', ['https://example.com']);
@@ -145,7 +131,6 @@ describe('applyAppBucketCors', () => {
     await applyAppBucketCors({
       createProvider: async () => ({ setBucketCors, getBucketCorsOrigins: async () => [] }),
       bucket: 'app-b',
-      spin: spin(),
       log: { warn },
     });
     expect(setBucketCors).toHaveBeenCalledWith('app-b', [
@@ -167,10 +152,9 @@ describe('applyAppBucketCors', () => {
         }),
         bucket: 'app-b',
         domain: 'example.com',
-        spin: spin(),
         log: { warn },
       }),
-    ).resolves.toEqual(['https://example.com']);
+    ).resolves.toBeUndefined();
     expect(warn.mock.calls[0][0]).toContain('NotImplemented');
     expect(warn.mock.calls[0][0]).toContain('Re-run');
   });
@@ -184,10 +168,9 @@ describe('applyAppBucketCors', () => {
         },
         bucket: 'b',
         domain: 'example.com',
-        spin: spin(),
         log: { warn },
       }),
-    ).resolves.toEqual(['https://example.com']);
+    ).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledOnce();
   });
 });

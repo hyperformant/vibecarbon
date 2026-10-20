@@ -162,7 +162,6 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
       createProvider: async () => ({ setBucketCors, getBucketCorsOrigins: async () => [] }),
       bucket: bucketName,
       domain: 'e1.example.com',
-      spin: { start: vi.fn(), stop: vi.fn() },
       log: { warn: vi.fn() },
     });
     expect(setBucketCors).toHaveBeenCalledWith(serverEnv.S3_BUCKET, ['https://e1.example.com']);

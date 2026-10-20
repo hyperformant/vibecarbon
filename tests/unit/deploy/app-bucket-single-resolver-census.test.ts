@@ -1,12 +1,13 @@
 /**
- * Census: one project app bucket, env-scoped prefixes, one resolver.
+ * Census: one app bucket per environment, one resolver.
  *
- * Each environment of a project shares one long-lived app bucket and lives
- * under its own `<env>/` key prefix. That only holds while:
+ * Each environment of a project has its own long-lived app bucket, and its
+ * objects sit at that bucket's root. That only holds while:
  *   (a) the bucket NAME is derived in one place and read through
  *       resolveEnvStorage, so no site re-derives a different name;
- *   (b) every writer that hands the app S3_BUCKET also hands it S3_KEY_PREFIX,
- *       so no env writes at the bucket root;
+ *   (b) every writer that hands the app S3_BUCKET also hands it VC_ENV, and
+ *       nothing deployed, the template app or the e2e checks knows an object
+ *       key prefix (S3_KEY_PREFIX / keyPrefix, removed by design);
  *   (c) every WAL-G prefix carries an env segment, so two envs never share a
  *       backup chain (the documented exception: local dev's empty string);
  *   (d) nothing reads the retired storageBucketGeneration key.
@@ -50,17 +51,39 @@ describe('app bucket single resolver census', () => {
     ).toEqual([]);
   });
 
-  it('(b) every file that assigns S3_BUCKET also assigns S3_KEY_PREFIX', () => {
+  it('(b) every file that assigns S3_BUCKET also assigns VC_ENV', () => {
     const assignsBucket = /S3_BUCKET\s*[=:]|\.S3_BUCKET\s*=/;
-    const assignsPrefix = /S3_KEY_PREFIX\s*[=:]|\.S3_KEY_PREFIX\s*=/;
-    const writers = srcFiles.filter((f) => assignsBucket.test(readFileSync(f, 'utf-8')));
-    expect(writers.map(rel).sort()).toEqual(
-      expect.arrayContaining(['src/lib/deploy/bundle.js', 'src/lib/deploy/k8s/k3s.js']),
-    );
-    const offenders = writers.filter((f) => !assignsPrefix.test(readFileSync(f, 'utf-8'))).map(rel);
-    expect(offenders, `assigns S3_BUCKET without S3_KEY_PREFIX: ${offenders.join(', ')}`).toEqual(
-      [],
-    );
+    const assignsEnv = /\.VC_ENV\s*=/;
+    const writers = srcFiles
+      .filter((f) => assignsBucket.test(readFileSync(f, 'utf-8')))
+      // create.js writes the local-dev .env, which has no deployed environment.
+      .filter((f) => rel(f) !== 'src/create.js');
+    expect(writers.map(rel).sort()).toEqual([
+      'src/lib/deploy/bundle.js',
+      'src/lib/deploy/k8s/k3s.js',
+    ]);
+    const offenders = writers.filter((f) => !assignsEnv.test(readFileSync(f, 'utf-8'))).map(rel);
+    expect(offenders, `assigns S3_BUCKET without VC_ENV: ${offenders.join(', ')}`).toEqual([]);
+  });
+
+  it('(b) no object key prefix survives in src/, the template app or the e2e checks', () => {
+    const files = [
+      ...srcFiles,
+      ...walk(join(ROOT, 'carbon/src'), (f) => /\.tsx?$/.test(f)),
+      join(ROOT, 'carbon/.env.example'),
+      ...walk(join(ROOT, 'tests/e2e'), (f) => f.endsWith('.ts')),
+    ];
+    // destroy.js still reads a recorded keyPrefix in its app-bucket step;
+    // that step's per-environment rewrite removes it and this exemption.
+    const exempt = new Set(['src/destroy.js']);
+    const offenders = files
+      .filter((f) => !exempt.has(rel(f)))
+      .filter((f) => /S3_KEY_PREFIX|keyPrefix/.test(readFileSync(f, 'utf-8')))
+      .map(rel);
+    expect(
+      offenders,
+      `an object key prefix is still read or written: ${offenders.join(', ')}`,
+    ).toEqual([]);
   });
 
   it('(c) every WALG_S3_PREFIX construction has an env segment, except the empty dev override', () => {

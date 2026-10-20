@@ -167,8 +167,7 @@ describe('waitForBucketSettled', () => {
 describe('makeAppBucketProbeRound', () => {
   const opts = {
     endpoint: 'https://fsn1.your-objectstorage.com',
-    bucket: 'p-abc123-storage',
-    keyPrefix: 'prod/',
+    bucket: 'p-abc123-prod-storage',
     origin: 'https://app.example.com',
   };
 
@@ -186,7 +185,7 @@ describe('makeAppBucketProbeRound', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(10);
     expect(signedHead).toHaveBeenCalledTimes(10);
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('https://fsn1.your-objectstorage.com/p-abc123-storage/prod/.settle-probe');
+    expect(url).toBe('https://fsn1.your-objectstorage.com/p-abc123-prod-storage/.settle-probe');
     expect(init).toMatchObject({
       method: 'OPTIONS',
       headers: { Origin: opts.origin, 'Access-Control-Request-Method': 'PUT' },

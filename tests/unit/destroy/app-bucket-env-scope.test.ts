@@ -2,8 +2,9 @@
  * Environments share one app bucket per project, each under its `<env>/` key
  * prefix. Destroying one environment used to empty and delete that whole
  * bucket, taking every other environment's uploads with it. Destroy now
- * removes only this environment's prefix and CORS origins, and deletes the
- * bucket itself only on -purge once no other environment uses it.
+ * removes only this environment's prefix, and deletes the bucket itself only
+ * on -purge once no other environment uses it. It never touches the bucket's
+ * CORS rule, which deploy owns.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLeakLedger } from '../../../src/lib/destroy/leak-ledger.js';
@@ -19,7 +20,6 @@ const s3 = {
   })),
   getBucketCorsOrigins: vi.fn(async (_b: string) => [] as string[]),
   setBucketCors: vi.fn(async (_b: string, _o: string[]) => {}),
-  deleteBucketCors: vi.fn(async (_b: string) => {}),
 };
 
 vi.mock('../../../src/lib/providers/index.js', async (orig) => {
@@ -90,18 +90,12 @@ async function destroy(
 describe('deleteAppBucket is scoped to one environment', () => {
   beforeEach(() => {
     for (const fn of Object.values(s3)) fn.mockClear();
-    s3.getBucketCorsOrigins.mockImplementation(async () => [
-      'https://prod.dev',
-      'https://staging.dev',
-    ]);
   });
 
   it('destroying staging with -purge deletes only staging/ and keeps the bucket for prod', async () => {
     const { results, text } = await destroy(twoEnvProject(), 'staging', { purgeBackups: true });
     expect(s3.deletePrefix).toHaveBeenCalledWith(BUCKET, 'staging/');
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
-    expect(s3.setBucketCors).toHaveBeenCalledWith(BUCKET, ['https://prod.dev']);
-    expect(s3.deleteBucketCors).not.toHaveBeenCalled();
     expect(text).toContain(
       'S3 objects deleted under staging/ (3 objects); bucket kept for 1 other environment(s)',
     );
@@ -116,7 +110,6 @@ describe('deleteAppBucket is scoped to one environment', () => {
   it('the last environment with -purge deletes its prefix, then the bucket', async () => {
     const project = twoEnvProject();
     delete (project.environments as Record<string, unknown>).staging;
-    s3.getBucketCorsOrigins.mockImplementation(async () => ['https://prod.dev']);
     const { results } = await destroy(project, 'prod', { purgeBackups: true });
     expect(s3.deletePrefix).toHaveBeenCalledWith(BUCKET, 'prod/');
     expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BUCKET);
@@ -124,79 +117,25 @@ describe('deleteAppBucket is scoped to one environment', () => {
     expect(results.s3Prefix).toBe('prod/');
   });
 
-  it('a NoSuchBucket on the CORS read only warns, and the -purge bucket delete still runs', async () => {
-    // getBucketCorsOrigins throws on NoSuchBucket (a young Hetzner bucket
-    // answers it transiently), and the prefix delete just proved the bucket
-    // exists, so the CORS step must not short-circuit the bucket delete.
-    const project = twoEnvProject();
-    delete (project.environments as Record<string, unknown>).staging;
-    s3.getBucketCorsOrigins.mockRejectedValueOnce(
-      Object.assign(new Error('The specified bucket does not exist'), {
-        name: 'NoSuchBucket',
-        $metadata: { httpStatusCode: 404 },
-      }),
-    );
-    const { results, text } = await destroy(project, 'prod', { purgeBackups: true });
-    expect(text).toContain('Bucket CORS rule not updated');
-    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BUCKET);
-    expect(results.s3Bucket).toBe(BUCKET);
-  });
-
   it('the last environment without -purge deletes its prefix only and keeps the bucket for reuse', async () => {
     const project = twoEnvProject();
     delete (project.environments as Record<string, unknown>).staging;
-    s3.getBucketCorsOrigins.mockImplementation(async () => ['https://prod.dev']);
     const { results, text } = await destroy(project, 'prod');
     expect(s3.deletePrefix).toHaveBeenCalledWith(BUCKET, 'prod/');
     expect(s3.emptyAndDeleteBucket).not.toHaveBeenCalled();
-    // Its origin was the only one, so the rule goes.
-    expect(s3.deleteBucketCors).toHaveBeenCalledWith(BUCKET);
     expect(text).toContain(
       'S3 objects deleted under prod/ (3 objects); bucket kept for reuse (delete with -purge)',
     );
     expect(results.s3Bucket).toBeNull();
   });
 
-  it('a domainless environment removes its localhost pair, leaving the other origins', async () => {
+  it('never reads or writes the bucket CORS rule', async () => {
+    await destroy(twoEnvProject(), 'staging');
     const project = twoEnvProject();
-    project.environments.staging = env('staging', null);
-    s3.getBucketCorsOrigins.mockImplementation(async () => [
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'https://prod.dev',
-    ]);
-    await destroy(project, 'staging');
-    expect(s3.setBucketCors).toHaveBeenCalledWith(BUCKET, ['https://prod.dev']);
-  });
-
-  it('removes the origins the environment recorded, not the ones its domain computes to', async () => {
-    const project = twoEnvProject();
-    project.environments.staging = env('staging', 'staging.dev', {
-      corsOrigins: ['https://old-staging.dev'],
-    });
-    s3.getBucketCorsOrigins.mockImplementation(async () => [
-      'https://old-staging.dev',
-      'https://prod.dev',
-      'https://staging.dev',
-    ]);
-    await destroy(project, 'staging');
-    expect(s3.setBucketCors).toHaveBeenCalledWith(BUCKET, [
-      'https://prod.dev',
-      'https://staging.dev',
-    ]);
-  });
-
-  it('never removes an origin another environment still records', async () => {
-    const project = twoEnvProject();
-    project.environments.prod = env('prod', null);
-    project.environments.staging = env('staging', null);
-    s3.getBucketCorsOrigins.mockImplementation(async () => [
-      'http://localhost:3000',
-      'http://localhost:5173',
-    ]);
-    await destroy(project, 'staging');
+    delete (project.environments as Record<string, unknown>).staging;
+    await destroy(project, 'prod', { purgeBackups: true });
+    expect(s3.getBucketCorsOrigins).not.toHaveBeenCalled();
     expect(s3.setBucketCors).not.toHaveBeenCalled();
-    expect(s3.deleteBucketCors).not.toHaveBeenCalled();
   });
 
   it('an environment with no recorded key prefix deletes no objects and is not a leak', async () => {

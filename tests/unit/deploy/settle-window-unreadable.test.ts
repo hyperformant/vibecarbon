@@ -25,7 +25,7 @@ const { storageSettleLine } = await import('../../../src/status.js');
 afterEach(() => vi.restoreAllMocks());
 
 describe('an undeclared settle window', () => {
-  it('deploy finish warns, resolves the CORS origins, and records no bucketCreatedAt', async () => {
+  it('deploy finish warns and records no bucketCreatedAt', async () => {
     const bucketCreatedAt = vi.fn();
     const finalize = startAppBucketFinalize({
       providerId: 'hetzner',
@@ -40,7 +40,7 @@ describe('an undeclared settle window', () => {
     const warn = vi.fn();
     const info = vi.fn();
     const result = await finalize.finish({ warn, info });
-    expect(result).toEqual({ corsOrigins: ['https://prod.dev'] });
+    expect(result).toEqual({});
     expect(bucketCreatedAt).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledOnce();

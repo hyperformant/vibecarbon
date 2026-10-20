@@ -889,7 +889,6 @@ interface PresignBody {
 export interface AppStorage {
   providerId: string;
   bucket: string;
-  keyPrefix: string;
   region: string;
   endpoint: string;
   /**
@@ -962,7 +961,6 @@ async function settleAppBucket(
     probeRound = makeAppBucketProbeRound({
       endpoint,
       bucket: storage.bucket,
-      keyPrefix: storage.keyPrefix,
       origin,
       signedHead: makeSignedHead({
         providerId: storage.providerId,
@@ -1022,13 +1020,6 @@ export async function checkFileUploadRoundtrip(
      * `bucket`, before the preflight, instead of surfacing as a CORS 403.
      */
     expectedBucket?: string | null;
-    /**
-     * The key prefix the environment records (`.vibecarbon.json`
-     * environments.<env>.s3.keyPrefix, `<env>/`). When given, the presigned
-     * URL's path must start with `/<bucket>/<keyPrefix>`: uploads live under
-     * the environment's prefix in the shared project bucket.
-     */
-    expectedKeyPrefix?: string | null;
     /**
      * The env's app storage (resolveAppStorage). When given, the bucket settle
      * gate runs before the first upload; a 0-window provider skips it.
@@ -1095,18 +1086,6 @@ export async function checkFileUploadRoundtrip(
         `the app presigned against bucket ${JSON.stringify(bucket)}, but the environment's bucket (.vibecarbon.json s3.bucket, the one deploy created and configured CORS on) is ${JSON.stringify(deps.expectedBucket)}`,
         { key, bucket, expectedBucket: deps.expectedBucket },
       );
-    }
-
-    if (deps.expectedKeyPrefix) {
-      const expectedPath = `/${bucket}/${deps.expectedKeyPrefix}`;
-      const actualPath = decodeURIComponent(new URL(presign.url).pathname);
-      if (!actualPath.startsWith(expectedPath)) {
-        return fail(
-          'prefix',
-          `the presigned URL path is ${JSON.stringify(actualPath)}, which does not start with ${JSON.stringify(expectedPath)} (bucket ${JSON.stringify(bucket)} + .vibecarbon.json s3.keyPrefix ${JSON.stringify(deps.expectedKeyPrefix)})`,
-          { key, bucket, expectedKeyPrefix: deps.expectedKeyPrefix, path: actualPath },
-        );
-      }
     }
 
     // The browser PUTs straight to object storage, so two things outside the
@@ -1201,7 +1180,6 @@ export function resolveAppStorage(projectDir: string, envPrefix: string): AppSto
           provider?: string;
           s3?: {
             bucket?: string;
-            keyPrefix?: string;
             region?: string;
             endpoint?: string;
             bucketCreatedAt?: string | null;
@@ -1214,7 +1192,6 @@ export function resolveAppStorage(projectDir: string, envPrefix: string): AppSto
     return {
       providerId: (env.provider ?? 'hetzner').toLowerCase(),
       bucket: env.s3.bucket,
-      keyPrefix: env.s3.keyPrefix ?? '',
       region: env.s3.region ?? '',
       endpoint: env.s3.endpoint ?? '',
       ...(Object.hasOwn(env.s3, 'bucketCreatedAt') && {
@@ -1315,7 +1292,6 @@ export async function runAppFunctionalChecks(opts: {
     auth.jar
       ? await checkFileUploadRoundtrip(domain, auth.jar, {
           expectedBucket: appStorage?.bucket ?? null,
-          expectedKeyPrefix: appStorage?.keyPrefix ?? null,
           storage: appStorage,
         })
       : skip('file_upload_roundtrip', 'Skipped because no signed-in user (auth checks failed)'),

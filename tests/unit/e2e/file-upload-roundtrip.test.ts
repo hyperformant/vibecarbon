@@ -192,32 +192,16 @@ describe('checkFileUploadRoundtrip', () => {
     expect(transfer.preflight).not.toHaveBeenCalled();
   });
 
-  it("fails as `prefix`, before any preflight, when the presigned path is outside the environment's key prefix", async () => {
-    const transfer = transferWith();
-    const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
-      appFetch: appFetchWith(),
-      transfer,
-      expectedBucket: 'bucket',
-      expectedKeyPrefix: 'prod/',
-    });
-    expect(r.status).toBe('fail');
-    expect(r.errorMessage).toContain('prefix: ');
-    expect(r.errorMessage).toContain('"/bucket/prod/"');
-    expect(r.errorMessage).toContain('"/bucket/put"');
-    expect(transfer.preflight).not.toHaveBeenCalled();
-  });
-
-  it('passes when the presigned path starts with /<bucket>/<keyPrefix>', async () => {
+  it('has no key-prefix step: an unprefixed /<bucket>/avatars/... path passes', async () => {
     const r = await checkFileUploadRoundtrip(DOMAIN, jar, {
       appFetch: appFetchWith({
         presign: () =>
           presignResponse({
-            url: 'https://fsn1.your-objectstorage.com/bucket/prod/avatars/x.png?sig=1',
+            url: 'https://fsn1.your-objectstorage.com/bucket/avatars/x.png?sig=1',
           }),
       }),
       transfer: transferWith(),
       expectedBucket: 'bucket',
-      expectedKeyPrefix: 'prod/',
     });
     expect(r.status).toBe('pass');
   });
@@ -288,7 +272,6 @@ describe('checkFileUploadRoundtrip', () => {
     const storage = (providerId: string, ageMs: number | null) => ({
       providerId,
       bucket: 'bucket',
-      keyPrefix: 'prod/',
       region: providerId === 'hetzner' ? 'fsn1' : 'fra1',
       endpoint: STORAGE_ORIGIN,
       bucketCreatedAt: ageMs === null ? null : new Date(T0 - ageMs).toISOString(),
@@ -471,10 +454,10 @@ describe('resolveAppStorage', () => {
           },
         }),
       );
+      // A stale keyPrefix on disk is ignored: buckets are per env now.
       expect(resolveAppStorage(dir, 'e1')).toEqual({
         providerId: 'hetzner',
         bucket: 'myapp-storage',
-        keyPrefix: 'e1/',
         region: 'fsn1',
         endpoint: 'https://fsn1.your-objectstorage.com',
         bucketCreatedAt: '2026-10-20T12:00:00.000Z',
@@ -482,7 +465,8 @@ describe('resolveAppStorage', () => {
       // No recorded creation time stays absent (no gate); an explicit null
       // (unreadable at deploy) stays null (treated as young).
       const e2 = resolveAppStorage(dir, 'e2');
-      expect(e2).toMatchObject({ providerId: 'hetzner', keyPrefix: '' });
+      expect(e2).toMatchObject({ providerId: 'hetzner' });
+      expect(e2).not.toHaveProperty('keyPrefix');
       expect(e2).not.toHaveProperty('bucketCreatedAt');
       expect(resolveAppStorage(dir, 'e4')).toMatchObject({
         providerId: 'hetzner',

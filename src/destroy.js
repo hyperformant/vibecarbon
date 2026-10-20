@@ -32,11 +32,6 @@ import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js';
-import {
-  otherEnvCorsOrigins,
-  recordedCorsOrigins,
-  removeAppBucketCorsOrigins,
-} from './lib/deploy/orchestrator.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import {
@@ -1281,7 +1276,7 @@ function otherEnvironmentNames(projectConfig, environment) {
 // 1. The app S3 bucket (created during deploy bootstrap, not part of any
 //    Pulumi stack's resource graph) is shared by every environment of the
 //    project, each under its `<env>/` key prefix. Destroy removes this env's
-//    objects and its CORS origins, and deletes the bucket itself only on
+//    objects, and deletes the bucket itself only on
 //    -purge once no other environment uses it. k8s can fall back to the
 //    predictable bucket name; compose tiers only act on a configured bucket.
 async function deleteAppBucketEffect(ctx) {
@@ -1334,7 +1329,6 @@ async function deleteAppBucketEffect(ctx) {
             `S3 objects in ${s3BucketName} were written before per-environment prefixes, so none were deleted; ${deleteBucket ? 'deleting the bucket (-purge, no other environment uses it)' : keptFor}`,
           );
         }
-        await removeEnvCorsOrigins({ s3Provider, bucket: s3BucketName, ctx, spinner });
         if (deleteBucket) {
           spinner.start(`Deleting S3 bucket: ${s3BucketName}`);
           const result = await s3Provider.emptyAndDeleteBucket(s3BucketName);
@@ -1379,31 +1373,6 @@ async function deleteAppBucketEffect(ctx) {
       reason: `not deleted: ${error.message}`,
       hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket. Bucket continues to incur storage charges until deleted.`,
     });
-  }
-}
-
-/**
- * Take this environment's origins off the shared app-bucket CORS rule: the
- * set it recorded as `s3.corsOrigins`, or the set its domain computes to for
- * an entry that predates the record. An origin another environment still
- * holds stays. A failure here costs no data or money, only a stale origin on
- * the rule, so it warns instead of failing the step.
- */
-async function removeEnvCorsOrigins({ s3Provider, bucket, ctx, spinner }) {
-  const { envConfig, projectConfig, environment } = ctx;
-  const others = new Set(otherEnvCorsOrigins(projectConfig, environment));
-  const origins = recordedCorsOrigins(envConfig).filter((o) => !others.has(o));
-  if (origins.length === 0) return;
-  spinner.start('Removing this environment from the bucket CORS rule');
-  try {
-    await removeAppBucketCorsOrigins({ provider: s3Provider, bucket, origins });
-    spinner.stop('Bucket CORS rule updated');
-  } catch (corsErr) {
-    // NoSuchBucket included: a young Hetzner bucket answers it transiently,
-    // and a bucket that is really gone is reported by the delete that follows.
-    spinner.stop(
-      `Bucket CORS rule not updated (${corsErr.message}); remove ${origins.join(', ')} from ${bucket} in your provider console`,
-    );
   }
 }
 

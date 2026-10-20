@@ -1,11 +1,10 @@
 /**
  * compose-HA persists the env mid-flight (status 'deploying') so a destroy can
  * clean up a deploy that dies later. That save rebuilt `s3` from scratch and
- * dropped the per-environment storage fields: `keyPrefix` (without it destroy
- * deletes none of this env's objects), the `corsOrigins` the skeleton save
- * claimed (without them destroy falls back to the computed set), and
- * `bucketCreatedAt` (status' settling row). This drives haPersistPendingConfig
- * directly and checks all three survive.
+ * dropped `bucketCreatedAt` (status' settling row). This drives
+ * haPersistPendingConfig directly and checks it survives, and that the save
+ * carries no `keyPrefix` or `corsOrigins` (both removed by design: each env
+ * has its own app bucket and owns its CORS rule outright).
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -45,8 +44,7 @@ function ctx(envConfig: Record<string, unknown>) {
     dnsProvider: 'hetzner',
     services: {},
     s3Config: {
-      bucket: 'myapp-cd9ecc-storage',
-      keyPrefix: 'prod/',
+      bucket: 'myapp-cd9ecc-prod-storage',
       region: 'fsn1',
       endpoint: 'https://fsn1.your-objectstorage.com',
       stateBucket: 'myapp-cd9ecc-storage-pulumi-state-aaaaaa',
@@ -55,14 +53,14 @@ function ctx(envConfig: Record<string, unknown>) {
 }
 
 describe('haPersistPendingConfig keeps the per-environment storage fields', () => {
-  it('persists keyPrefix, the skeleton-claimed corsOrigins and bucketCreatedAt', async () => {
+  it('persists bucketCreatedAt and drops a stale keyPrefix and corsOrigins', async () => {
     disk.config = {
       projectName: 'myapp',
       environments: {
         prod: {
           status: 'deploying',
           s3: {
-            bucket: 'myapp-cd9ecc-storage',
+            bucket: 'myapp-cd9ecc-prod-storage',
             keyPrefix: 'prod/',
             corsOrigins: ['https://prod.dev'],
           },
@@ -73,11 +71,11 @@ describe('haPersistPendingConfig keeps the per-environment storage fields', () =
       ctx({ provider: 'hetzner', s3: { bucketCreatedAt: '2026-10-20T10:00:00.000Z' } }),
     );
     expect(s3Of(disk.saved)).toMatchObject({
-      bucket: 'myapp-cd9ecc-storage',
-      keyPrefix: 'prod/',
-      corsOrigins: ['https://prod.dev'],
+      bucket: 'myapp-cd9ecc-prod-storage',
       bucketCreatedAt: '2026-10-20T10:00:00.000Z',
     });
+    expect(s3Of(disk.saved)).not.toHaveProperty('keyPrefix');
+    expect(s3Of(disk.saved)).not.toHaveProperty('corsOrigins');
   });
 
   it('keeps an explicit null bucketCreatedAt and adds no key when none was recorded', async () => {
@@ -90,7 +88,7 @@ describe('haPersistPendingConfig keeps the per-environment storage fields', () =
     await COMPOSE_HA_EFFECTS.haPersistPendingConfig(ctx({ provider: 'hetzner' }));
     expect(s3Of(disk.saved)).not.toHaveProperty('bucketCreatedAt');
     expect(s3Of(disk.saved)).not.toHaveProperty('corsOrigins');
-    expect(s3Of(disk.saved).keyPrefix).toBe('prod/');
+    expect(s3Of(disk.saved)).not.toHaveProperty('keyPrefix');
   });
 
   it('keeps an env bucketPin, so the E6 escape hatch survives the save', async () => {

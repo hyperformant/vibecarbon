@@ -28,7 +28,6 @@ import {
   CopyObjectCommand,
   CreateBucketCommand,
   DeleteBucketCommand,
-  DeleteBucketCorsCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetBucketCorsCommand,
@@ -710,8 +709,8 @@ export class S3CompatibleProvider {
 
   /**
    * Delete every object under one key prefix, leaving the rest of the bucket
-   * alone. Environments share one app bucket under `<env>/` prefixes, and this
-   * is how destroy removes one environment's objects.
+   * alone. This is how destroy removes one environment's folder from a bucket
+   * it shares with other environments, such as its backup folder.
    *
    * SECURITY: a prefix that is empty, only slashes, or not `/`-terminated is
    * refused before any request. Each of those would match more than one
@@ -1008,13 +1007,13 @@ export class S3CompatibleProvider {
   }
 
   /**
-   * Every origin the bucket's CORS rules allow today. Environments share one
-   * app bucket, so deploy and destroy read this before writing back a merge.
+   * Every origin the bucket's CORS rules allow today. Deploy reads this to
+   * skip the PUT when the rule already equals the environment's origins.
    * A bucket with no rule yet answers NoSuchCORSConfiguration (or a bare 404
    * on some providers); that is an empty list, not an error. Anything else
-   * throws, because writing a merge over a failed read would drop the other
-   * environments' origins. That includes NoSuchBucket, which a young Hetzner
-   * bucket answers transiently even though it exists.
+   * throws, so the caller treats the rule as unknown. That includes
+   * NoSuchBucket, which a young Hetzner bucket answers transiently even
+   * though it exists.
    * @param {string} bucketName - Bucket name
    * @returns {Promise<string[]>}
    */
@@ -1028,16 +1027,6 @@ export class S3CompatibleProvider {
       if (err?.$metadata?.httpStatusCode === 404 && name !== 'NoSuchBucket') return [];
       throw err;
     }
-  }
-
-  /**
-   * Remove the bucket's CORS configuration. Used once the last environment's
-   * origin leaves, since a rule cannot hold an empty origin list.
-   * @param {string} bucketName - Bucket name
-   * @returns {Promise<void>}
-   */
-  async deleteBucketCors(bucketName) {
-    await this._send(new DeleteBucketCorsCommand({ Bucket: bucketName }));
   }
 
   /**

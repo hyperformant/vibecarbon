@@ -54,7 +54,6 @@ describe('a Hetzner-shaped deploy (20 minute window) against a new bucket', () =
     expect(notes).toHaveLength(1);
     expect(notes[0][0]).toMatch(/about 19 more minutes/);
     expect(result.bucketCreatedAt).toBe(createdAt.toISOString());
-    expect(result.corsOrigins).toEqual(['https://prod.dev']);
   });
 
   it('an unreadable creation time is recorded as null and still gets the note', async () => {

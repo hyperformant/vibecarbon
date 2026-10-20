@@ -350,11 +350,10 @@ describe('renderBundle tls-default.yml', () => {
       rmSync(stage, { recursive: true, force: true });
     }
   });
-  it('scopes the server .env to its environment: S3_KEY_PREFIX and VC_ENV', () => {
-    // Environments share one app bucket; the app keys every object under its
-    // own prefix, so a server .env without it would write at the bucket root
-    // where another environment's destroy can never find it.
-    projectDir = makeProjectDir('S3_KEY_PREFIX=prod/\nVC_ENV=prod\n');
+  it('scopes the server .env to its environment: VC_ENV, and no S3_KEY_PREFIX', () => {
+    // Each environment has its own app bucket, so objects carry no key
+    // prefix; VC_ENV stays because WAL-G's prefix uses it.
+    projectDir = makeProjectDir('VC_ENV=prod\n');
     process.chdir(projectDir);
 
     const stage = renderBundle('myproj', {
@@ -362,8 +361,7 @@ describe('renderBundle tls-default.yml', () => {
       s3: {
         accessKey: 'ak',
         secretKey: 'sk',
-        bucket: 'myproj-abc123-storage',
-        keyPrefix: 'staging/',
+        bucket: 'myproj-abc123-staging-storage',
         region: 'fsn1',
         endpoint: 'https://fsn1.your-objectstorage.com',
       },
@@ -371,7 +369,7 @@ describe('renderBundle tls-default.yml', () => {
 
     try {
       const env = parseDotenv(readFileSync(join(stage, '.env'), 'utf-8'));
-      expect(env.S3_KEY_PREFIX).toBe('staging/');
+      expect(env).not.toHaveProperty('S3_KEY_PREFIX');
       expect(env.VC_ENV).toBe('staging');
     } finally {
       rmSync(stage, { recursive: true, force: true });
