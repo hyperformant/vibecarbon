@@ -2,17 +2,18 @@
  * A stand-in for a Pulumi provider SDK in unit tests: every resource class
  * records its constructor args into `created`, and every output property is
  * an inert value whose `.apply()` returns another one. Namespaced SDKs
- * (`scaleway.instance.Server`) resolve through nested namespaces.
+ * (`scaleway.instance.Server`) resolve through nested namespaces. The
+ * resource options (third constructor argument) are recorded as `opts`.
  */
-export type Created = Array<{ type: string; name: string; args: unknown }>;
+export type Created = Array<{ type: string; name: string; args: unknown; opts?: unknown }>;
 
 type Output = { apply: () => Output };
 const output = (): Output => ({ apply: () => output() });
 
 function resourceClass(type: string, created: Created) {
   return class {
-    constructor(name: string, args: unknown) {
-      created.push({ type, name, args });
+    constructor(name: string, args: unknown, opts?: unknown) {
+      created.push({ type, name, args, opts });
       // biome-ignore lint/correctness/noConstructorReturn: the inert resource stands in for Pulumi's
       return new Proxy(this, {
         get: (_target, prop) => (prop === 'then' ? undefined : output()),
@@ -38,7 +39,7 @@ function namespace(path: string, created: Created): any {
 /**
  * The module object for `vi.mock('<sdk>', () => recorderModule(...))`. ESM
  * namespaces need explicit keys, so the classes and namespaces the compose
- * programs use are listed.
+ * and k8s programs use are listed.
  */
 export function recorderModule(prefix: string, created: Created) {
   const root = namespace(prefix, created);
@@ -51,6 +52,15 @@ export function recorderModule(prefix: string, created: Created) {
     'Instance',
     'SshKey',
     'SSHKey',
+    'Network',
+    'NetworkSubnet',
+    'FloatingIp',
+    'FloatingIpAssignment',
+    'PlacementGroup',
+    'Vpc',
+    'Tag',
+    'ReservedIp',
+    'ReservedIpAssignment',
     'instance',
     'iam',
   ];

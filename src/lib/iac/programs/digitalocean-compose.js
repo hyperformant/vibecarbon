@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import * as digitalocean from '@pulumi/digitalocean';
 import { APT_LOCK_OPT } from '../../deploy/apt.js';
 import { encodeLabels } from '../../providers/digitalocean.js';
+import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -211,22 +212,28 @@ export function buildDigitalOceanComposeProgram(config) {
       sshKeyIdForDroplet = sshKey.id;
     }
 
-    const droplet = new digitalocean.Droplet('server', {
-      name,
-      region: config.location,
-      size: config.serverType,
-      // Plain Ubuntu LTS — see the module doc comment for why this isn't
-      // a docker-preinstalled marketplace image yet (Step 1 parity note).
-      image: 'ubuntu-24-04-x64',
-      // Despite DO's REST API using numeric key IDs, @pulumi/digitalocean's
-      // DropletArgs.sshKeys type is Input<string>[] — the TF-bridged
-      // provider does its own string/id marshaling internally, so this
-      // must NOT be parseInt'd (unlike dropletIds below, which the SDK
-      // types as number[]).
-      sshKeys: [sshKeyIdForDroplet],
-      tags: encodeLabels({ ...labels, role: 'compose' }),
-      userData,
-    });
+    const droplet = new digitalocean.Droplet(
+      'server',
+      {
+        name,
+        region: config.location,
+        size: config.serverType,
+        // Plain Ubuntu LTS — see the module doc comment for why this isn't
+        // a docker-preinstalled marketplace image yet (Step 1 parity note).
+        image: 'ubuntu-24-04-x64',
+        // Despite DO's REST API using numeric key IDs, @pulumi/digitalocean's
+        // DropletArgs.sshKeys type is Input<string>[] — the TF-bridged
+        // provider does its own string/id marshaling internally, so this
+        // must NOT be parseInt'd (unlike dropletIds below, which the SDK
+        // types as number[]).
+        sshKeys: [sshKeyIdForDroplet],
+        tags: encodeLabels({ ...labels, role: 'compose' }),
+        userData,
+      },
+      // Bounded create: a provider host that never finishes the create fails the
+      // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
+      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+    );
 
     const firewall = new digitalocean.Firewall('firewall', {
       name: `${name}-firewall`,

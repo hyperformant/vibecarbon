@@ -26,6 +26,7 @@ import { summarizeCommandError } from '../cli/error-line.js';
 import { progressLog } from '../cli/progress.js';
 import { readOperatorVar } from '../operator-env.js';
 import { getProviderClass } from '../providers/index.js';
+import { createTimeoutError, parseCreateTimeouts } from './create-timeout.js';
 import {
   classifyStateError,
   failingPulumiCommandVerb,
@@ -708,6 +709,22 @@ async function upStackImpl(stackName, program, options = {}) {
       // discarded message body). Bounded — the interesting lines lead.
       for (const line of (err?.message || String(err)).split('\n').slice(0, 120)) {
         progressLog(`[pulumi:error] ${line}`);
+      }
+      // A create the provider never finished (2026-10-20: a Hetzner hel1
+      // server stuck at progress 0 for 70+ minutes) now fails at the program's
+      // customTimeouts.create. Say so in one line that names the provider,
+      // resource and location, with what to do next; the full text above is
+      // already in the deploy log. The checkpoint read is best-effort: it only
+      // adds the provider-side name and the location to the message.
+      if (parseCreateTimeouts(msg).length > 0) {
+        let resources = [];
+        try {
+          resources = (await stack.exportStack())?.deployment?.resources ?? [];
+        } catch {
+          /* unreadable state: the message falls back to the Pulumi name */
+        }
+        const stalled = createTimeoutError(err, { resources });
+        if (stalled) throw stalled;
       }
       throw err;
     }

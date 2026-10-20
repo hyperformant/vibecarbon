@@ -66,6 +66,7 @@ import {
   encodeLabels,
   transliterateCloudInitToAscii,
 } from '../../providers/scaleway.js';
+import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -216,32 +217,38 @@ export function buildScalewayComposeProgram(config) {
       tags: encodeLabels(labels),
     });
 
-    const server = new scaleway.instance.Server('server', {
-      name,
-      zone,
-      type: config.serverType,
-      // Marketplace LABEL — MUST byte-match ScalewayProvider.COMPOSE_IMAGE
-      // ('ubuntu_noble'; UUIDs are per-zone AND per-volume-type, audit).
-      image: 'ubuntu_noble',
-      securityGroupId: securityGroup.id,
-      ipIds: [ip.id],
-      // SBS root with EXPLICIT deleteOnTermination — never default-trusted
-      // (terminate only detaches sbs_volume; see the module header).
-      rootVolume: {
-        // Provider ENUM VALUE — snake_case, and not subject to the camelCase
-        // conversion Pulumi applies to property NAMES. `sbsVolume` reads
-        // plausible next to `volumeType`/`sizeInGb` and is rejected at
-        // provision time: "expected volume_type to be one of [... sbs_volume
-        // ...], got sbsVolume" (CI run 31706718048).
-        volumeType: 'sbs_volume',
-        sizeInGb: ROOT_VOLUME_GB,
-        deleteOnTermination: true,
+    const server = new scaleway.instance.Server(
+      'server',
+      {
+        name,
+        zone,
+        type: config.serverType,
+        // Marketplace LABEL — MUST byte-match ScalewayProvider.COMPOSE_IMAGE
+        // ('ubuntu_noble'; UUIDs are per-zone AND per-volume-type, audit).
+        image: 'ubuntu_noble',
+        securityGroupId: securityGroup.id,
+        ipIds: [ip.id],
+        // SBS root with EXPLICIT deleteOnTermination — never default-trusted
+        // (terminate only detaches sbs_volume; see the module header).
+        rootVolume: {
+          // Provider ENUM VALUE — snake_case, and not subject to the camelCase
+          // conversion Pulumi applies to property NAMES. `sbsVolume` reads
+          // plausible next to `volumeType`/`sizeInGb` and is rejected at
+          // provision time: "expected volume_type to be one of [... sbs_volume
+          // ...], got sbsVolume" (CI run 31706718048).
+          volumeType: 'sbs_volume',
+          sizeInGb: ROOT_VOLUME_GB,
+          deleteOnTermination: true,
+        },
+        // Plain text under the `cloud-init` user-data key (audit: the
+        // key-value user-data store; no base64/gzip leg).
+        userData: { 'cloud-init': userData },
+        tags: encodeLabels({ ...labels, role: 'compose' }),
       },
-      // Plain text under the `cloud-init` user-data key (audit: the
-      // key-value user-data store; no base64/gzip leg).
-      userData: { 'cloud-init': userData },
-      tags: encodeLabels({ ...labels, role: 'compose' }),
-    });
+      // Bounded create: a provider host that never finishes the create fails the
+      // deploy at 15 minutes instead of holding it forever (see create-timeout.js).
+      { customTimeouts: SERVER_CUSTOM_TIMEOUTS },
+    );
 
     // Zoned Pulumi resources carry COMPOSITE ids (`{zone}/{uuid}` — the
     // bridged TF provider's convention for zone-scoped resources). The

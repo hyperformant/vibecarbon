@@ -23,6 +23,7 @@ import { randomBytes } from 'node:crypto';
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
 import { loadCloudInit, renderScript } from '../cloud-init.js';
+import { SERVER_CUSTOM_TIMEOUTS } from '../create-timeout.js';
 
 // Hetzner location → private-network zone. Single source of truth: this is
 // the ONLY place that derives a networkZone, and it's derived here — inside
@@ -283,7 +284,7 @@ export function buildHetznerK8sProgram(config) {
         ],
         userData: masterUserData,
       },
-      { dependsOn: [subnet] },
+      { dependsOn: [subnet], customTimeouts: SERVER_CUSTOM_TIMEOUTS },
     );
 
     // Attach floating IP to master
@@ -323,7 +324,7 @@ export function buildHetznerK8sProgram(config) {
         ],
         userData: dbUserData,
       },
-      { dependsOn: [subnet] },
+      { dependsOn: [subnet], customTimeouts: SERVER_CUSTOM_TIMEOUTS },
     );
 
     // Workers (spread across placement group). Name includes region so
@@ -367,7 +368,7 @@ export function buildHetznerK8sProgram(config) {
             ],
             userData: workerUserData,
           },
-          { dependsOn: [subnet] },
+          { dependsOn: [subnet], customTimeouts: SERVER_CUSTOM_TIMEOUTS },
         ),
       );
     }
