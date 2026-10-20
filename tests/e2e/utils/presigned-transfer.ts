@@ -18,8 +18,16 @@
 const TRANSFER_TIMEOUT_MS = 15_000;
 
 export interface PresignedTransfer {
-  /** Browser-shaped CORS preflight for a PUT with a Content-Type, from `origin`. */
-  preflight(url: string, origin: string): Promise<{ status: number; allowOrigin: string | null }>;
+  /**
+   * Browser-shaped CORS preflight for a PUT with a Content-Type, from `origin`.
+   * `errorCode` is the S3 `<Code>` of a refused preflight (CORSForbidden,
+   * NoSuchBucket, AccessDenied...), the one field that tells "no matching CORS
+   * rule" apart from "that bucket does not exist" in a 403.
+   */
+  preflight(
+    url: string,
+    origin: string,
+  ): Promise<{ status: number; allowOrigin: string | null; errorCode?: string | null }>;
   put(
     url: string,
     headers: Record<string, string>,
@@ -42,6 +50,21 @@ export function assertObjectStorageUrl(url: string, envDomain: string): void {
   }
 }
 
+/** The `<Code>` of an S3 XML error body, or null when there is none. */
+export function s3ErrorCode(body: string): string | null {
+  const m = /<Code>([^<]{1,64})<\/Code>/.exec(body);
+  return m ? m[1] : null;
+}
+
+/**
+ * The bucket a path-style presigned URL targets (the template's S3 client
+ * sets forcePathStyle, so it is the first path segment), or null.
+ */
+export function bucketOfPresignedUrl(url: string): string | null {
+  const first = new URL(url).pathname.split('/')[1];
+  return first ? decodeURIComponent(first) : null;
+}
+
 export function createPresignedTransfer(envDomain: string): PresignedTransfer {
   return {
     async preflight(url, origin) {
@@ -55,8 +78,12 @@ export function createPresignedTransfer(envDomain: string): PresignedTransfer {
         },
         signal: AbortSignal.timeout(TRANSFER_TIMEOUT_MS),
       });
-      await res.arrayBuffer();
-      return { status: res.status, allowOrigin: res.headers.get('access-control-allow-origin') };
+      const body = await res.text();
+      return {
+        status: res.status,
+        allowOrigin: res.headers.get('access-control-allow-origin'),
+        errorCode: res.ok ? null : s3ErrorCode(body),
+      };
     },
     async put(url, headers, body) {
       assertObjectStorageUrl(url, envDomain);
