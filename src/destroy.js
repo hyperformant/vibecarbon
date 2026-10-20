@@ -927,27 +927,22 @@ function deleteGitHubEnvironment(envName) {
  * the bucket itself goes only with the last live environment.
  */
 async function handleBackupBucket(envConfig, projectConfig, environment, args, spinner, leaks) {
-  if (!envConfig.backupS3?.bucket) return;
+  if (!envConfig.backupS3?.bucket) return { purged: false };
   const bucketName = envConfig.backupS3.bucket;
 
   // Not a leak: preservation is the DEFAULT and the whole point of the flag.
   // Nothing was asked of us, so nothing survived that shouldn't have.
   if (!args.purgeBackups) {
     p.log.info(`Backup bucket ${c.bold(bucketName)} preserved for recovery`);
-    return;
+    return { purged: false };
   }
 
   const region = envConfig.backupS3.region || envConfig.s3?.region || 'fsn1';
   // Every environment archives under its own backups/<project>/<env>/ prefix,
   // so -purge removes this environment's backups and the bucket itself only
   // goes with the last live environment.
-  // A plain-destroyed environment keeps its backups for recovery and is
-  // recorded under destroyedEnvironments with its backupS3, so it holds the
-  // bucket just as a live environment does.
   const envBackupPrefix = `backups/${projectConfig.projectName}/${environment}/`;
-  const preservedHolders = Object.entries(projectConfig.destroyedEnvironments ?? {}).filter(
-    ([name, entry]) => name !== environment && entry?.backupS3?.bucket === bucketName,
-  );
+  const preservedHolders = preservedBackupHolders(projectConfig, environment, bucketName);
   const deleteBucket =
     otherEnvironmentNames(projectConfig, environment).length === 0 && preservedHolders.length === 0;
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
@@ -970,7 +965,7 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
         reason: 'purge requested (-purge) but no object-storage credentials were available',
         hint: `Export ${(Provider.OBJECT_STORAGE_ENV ?? []).join(' and ') || 'the object-storage credentials'} and re-run, or delete it via the ${Provider.NAME} console — it keeps billing until removed.`,
       });
-      return;
+      return { purged: false };
     }
     const s3Provider = await getObjectStorageProvider(
       providerIdFor(envConfig),
@@ -1024,12 +1019,13 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
               ? `Backup bucket emptied (${result.objectsRemoved} objects removed); empty shell left for the orphan sweep; no data or storage cost remains`
               : 'Backup bucket not found',
       );
+      return { purged: true };
     } catch (bucketError) {
       if (bucketError.name === 'NoSuchBucket' || bucketError.$metadata?.httpStatusCode === 404) {
         spinner.stop('Backup bucket not found (already deleted or never created)');
-      } else {
-        throw bucketError;
+        return { purged: true };
       }
+      throw bucketError;
     }
   } catch (error) {
     spinner.stop(`Backup bucket purge failed: ${error.message}`);
@@ -1039,7 +1035,24 @@ async function handleBackupBucket(envConfig, projectConfig, environment, args, s
       reason: `purge failed: ${error.message}`,
       hint: `Empty it via the ${Provider.NAME} Object Storage console, then DeleteBucket; it keeps billing until removed.`,
     });
+    return { purged: false };
   }
+}
+
+/**
+ * Destroyed environments whose backups still sit in `bucketName`. A plain
+ * destroy keeps an environment's backups for recovery and records it under
+ * destroyedEnvironments with its backupS3, so it holds the bucket just as a
+ * live environment does. A -purge that removed the environment's backup
+ * folder records `backupsPurged`, and such an entry holds nothing.
+ *
+ * @returns {Array<[string, any]>}
+ */
+function preservedBackupHolders(projectConfig, environment, bucketName) {
+  return Object.entries(projectConfig.destroyedEnvironments ?? {}).filter(
+    ([name, entry]) =>
+      name !== environment && !entry?.backupsPurged && entry?.backupS3?.bucket === bucketName,
+  );
 }
 
 /**
@@ -1376,7 +1389,15 @@ async function retainStateBucketEffect(ctx) {
 // 3. Backup bucket: preserved by default, deleted with -purge.
 async function handleBackupBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
-  await handleBackupBucket(envConfig, projectConfig, environment, args, spinner, results.leaks);
+  const outcome = await handleBackupBucket(
+    envConfig,
+    projectConfig,
+    environment,
+    args,
+    spinner,
+    results.leaks,
+  );
+  if (outcome?.purged) results.backupsPurged = true;
 }
 
 // 4. GitHub environment (k8s only — this step is absent from the compose plans).
@@ -1438,7 +1459,13 @@ async function updateProjectConfigEffect(ctx) {
     if (Object.keys(identity).length > 0) {
       updatedConfig.destroyedEnvironments = {
         ...(updatedConfig.destroyedEnvironments ?? {}),
-        [environment]: { ...identity, destroyedAt: new Date().toISOString() },
+        [environment]: {
+          ...identity,
+          // This env's backup folder is gone, so it no longer holds the
+          // backup bucket (preservedBackupHolders).
+          ...(results.backupsPurged && { backupsPurged: true }),
+          destroyedAt: new Date().toISOString(),
+        },
       };
     }
     delete updatedConfig.environments[environment];

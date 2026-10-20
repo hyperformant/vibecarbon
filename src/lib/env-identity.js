@@ -79,15 +79,17 @@ export function envIdentityOf(envConfig) {
  * @param {string} envName
  * @returns {{ envConfig: Record<string, unknown>, fromDestroyed: { destroyedAt?: string } | null }}
  *   `fromDestroyed` is non-null exactly when the seed came from a destroyed
- *   record, so the caller can say so; `destroyedAt` is bookkeeping and is
- *   kept OUT of `envConfig` so it never lands in the persisted env block.
+ *   record, so the caller can say so; `destroyedAt` and `backupsPurged` are
+ *   bookkeeping and are kept OUT of `envConfig` so they never land in the
+ *   persisted env block.
  */
 export function resolveEnvSeed(projectConfig, envName) {
   const live = projectConfig?.environments?.[envName];
   if (live) return { envConfig: live, fromDestroyed: null };
   const recorded = projectConfig?.destroyedEnvironments?.[envName];
   if (!recorded) return { envConfig: {}, fromDestroyed: null };
-  const { destroyedAt, ...identity } = recorded;
+  // backupsPurged is destroy's bookkeeping too (preservedBackupHolders).
+  const { destroyedAt, backupsPurged: _purged, ...identity } = recorded;
   return { envConfig: identity, fromDestroyed: { destroyedAt } };
 }
 

@@ -30,6 +30,17 @@ vi.mock('../../../src/lib/providers/index.js', async (orig) => {
   };
 });
 
+const saved = vi.hoisted(() => ({ configs: [] as Array<Record<string, any>> }));
+vi.mock('../../../src/lib/config.js', async (orig) => {
+  const real = (await orig()) as Record<string, unknown>;
+  return {
+    ...real,
+    saveProjectConfig: (c: Record<string, any>) => {
+      saved.configs.push(structuredClone(c));
+    },
+  };
+});
+
 const { DESTROY_EFFECTS } = await import('../../../src/destroy.js');
 
 function env(name: string) {
@@ -53,15 +64,16 @@ async function destroy(
   projectConfig: ReturnType<typeof project>,
   environment: string,
   args: Record<string, unknown> = {},
+  withConfigUpdate = false,
 ) {
-  const results = { leaks: createLeakLedger() };
+  const results: Record<string, any> = { leaks: createLeakLedger() };
   const messages: string[] = [];
   const spinner = {
     start: (m?: string) => messages.push(`start:${m ?? ''}`),
     stop: (m?: string) => messages.push(`stop:${m ?? ''}`),
     message: (m?: string) => messages.push(`message:${m ?? ''}`),
   };
-  await DESTROY_EFFECTS.handleBackupBucket({
+  const ctx = {
     envConfig: projectConfig.environments[environment],
     projectConfig,
     environment,
@@ -69,7 +81,9 @@ async function destroy(
     results,
     spinner,
     isK8s: false,
-  });
+  };
+  await DESTROY_EFFECTS.handleBackupBucket(ctx);
+  if (withConfigUpdate) await DESTROY_EFFECTS.updateProjectConfig(ctx);
   return { results, messages };
 }
 
@@ -119,6 +133,42 @@ describe('handleBackupBucket is scoped to one environment', () => {
       { purgeBackups: true },
     );
     expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BACKUPS);
+  });
+
+  it('an environment destroyed with -purge no longer holds the bucket for its (deleted) backups', async () => {
+    // destroy staging -purge, then destroy prod -purge: staging's folder is
+    // gone, so the last environment's -purge deletes the backups bucket.
+    saved.configs.length = 0;
+    const first = await destroy(
+      project(['prod', 'staging']),
+      'staging',
+      { purgeBackups: true },
+      true,
+    );
+    expect(first.results.backupsPurged).toBe(true);
+    const afterStaging = saved.configs.at(-1) as ReturnType<typeof project>;
+    expect(afterStaging.destroyedEnvironments?.staging).toMatchObject({ backupsPurged: true });
+    s3.emptyAndDeleteBucket.mockClear();
+
+    const { messages } = await destroy(afterStaging, 'prod', { purgeBackups: true }, true);
+    expect(s3.deletePrefix).toHaveBeenLastCalledWith(BACKUPS, 'backups/myapp/prod/');
+    expect(s3.emptyAndDeleteBucket).toHaveBeenCalledWith(BACKUPS);
+    expect(messages.join('\n')).not.toContain('preserved backups of staging');
+  });
+
+  it('a -purge that could not purge keeps the environment a holder', async () => {
+    saved.configs.length = 0;
+    s3.deletePrefix.mockRejectedValueOnce(new Error('boom'));
+    const { results } = await destroy(
+      project(['prod', 'staging']),
+      'staging',
+      { purgeBackups: true },
+      true,
+    );
+    expect(results.backupsPurged).toBeUndefined();
+    const after = saved.configs.at(-1) as ReturnType<typeof project>;
+    expect(after.destroyedEnvironments?.staging).not.toHaveProperty('backupsPurged');
+    expect(after.destroyedEnvironments?.staging).toMatchObject({ backupS3: { bucket: BACKUPS } });
   });
 
   it('plain destroy preserves the backups', async () => {

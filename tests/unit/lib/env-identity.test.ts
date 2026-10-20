@@ -135,6 +135,25 @@ describe('resolveEnvSeed (deploy-side read)', () => {
     expect(r.envConfig).not.toHaveProperty('destroyedAt');
   });
 
+  it('keeps backupsPurged (destroy bookkeeping) out of the seed', async () => {
+    const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
+    const r = resolveEnvSeed(
+      {
+        environments: {},
+        destroyedEnvironments: {
+          staging: {
+            region: 'nbg1',
+            backupS3: { bucket: 'b' },
+            backupsPurged: true,
+            destroyedAt: 'x',
+          },
+        },
+      },
+      'staging',
+    );
+    expect(r.envConfig).toEqual({ region: 'nbg1', backupS3: { bucket: 'b' } });
+  });
+
   it('returns an empty block for a name that never existed', async () => {
     const { resolveEnvSeed } = await import('../../../src/lib/env-identity.js');
     expect(resolveEnvSeed({ environments: {} }, 'staging')).toEqual({
