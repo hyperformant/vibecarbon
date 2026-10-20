@@ -27,8 +27,10 @@ import {
   CopyObjectCommand,
   CreateBucketCommand,
   DeleteBucketCommand,
+  DeleteBucketCorsCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
+  GetBucketCorsCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListBucketsCommand,
@@ -931,6 +933,37 @@ export class S3CompatibleProvider {
       },
     });
     await this._send(command);
+  }
+
+  /**
+   * Every origin the bucket's CORS rules allow today. Environments share one
+   * app bucket, so deploy and destroy read this before writing back a merge.
+   * A bucket with no rule yet answers NoSuchCORSConfiguration (or a bare 404
+   * on some providers); that is an empty list, not an error. Anything else
+   * throws, because writing a merge over a failed read would drop the other
+   * environments' origins.
+   * @param {string} bucketName - Bucket name
+   * @returns {Promise<string[]>}
+   */
+  async getBucketCorsOrigins(bucketName) {
+    try {
+      const result = await this._send(new GetBucketCorsCommand({ Bucket: bucketName }));
+      return (result?.CORSRules ?? []).flatMap((rule) => rule.AllowedOrigins ?? []);
+    } catch (err) {
+      if ((err?.name ?? '') === 'NoSuchCORSConfiguration') return [];
+      if (err?.$metadata?.httpStatusCode === 404) return [];
+      throw err;
+    }
+  }
+
+  /**
+   * Remove the bucket's CORS configuration. Used once the last environment's
+   * origin leaves, since a rule cannot hold an empty origin list.
+   * @param {string} bucketName - Bucket name
+   * @returns {Promise<void>}
+   */
+  async deleteBucketCors(bucketName) {
+    await this._send(new DeleteBucketCorsCommand({ Bucket: bucketName }));
   }
 
   /**

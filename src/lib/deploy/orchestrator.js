@@ -214,16 +214,43 @@ async function probePublicHealth(
 }
 
 /**
- * Apply the browser-upload CORS rule to the app bucket. Runs on EVERY deploy,
- * outside the skippable s3-setup step, so deployments that predate the rule
- * (or whose rule was edited out-of-band) converge on re-run; the PUT is
- * idempotent. A failure only costs browser uploads, so it warns and returns.
+ * The union of the existing origins and `add`, minus `remove`, deduped and
+ * sorted so equal sets compare equal whatever order a provider returns.
+ * Environments share one app bucket, so its CORS rule holds every env's
+ * origin; deploy adds its own and destroy removes only its own.
  *
+ * @param {string[]} existing
+ * @param {string[]} add
+ * @param {string[]} [remove]
+ * @returns {string[]}
+ */
+export function mergeCorsOrigins(existing, add, remove = []) {
+  const drop = new Set(remove);
+  return [...new Set([...existing, ...add])].filter((o) => !drop.has(o)).sort();
+}
+
+/**
+ * The origins one environment contributes to the shared bucket rule.
  * SECURITY: never a `*` wildcard (setBucketCors refuses it). With a domain
- * the rule allows exactly `https://<domain>`, the single public origin the
- * app serves from. A domainless deploy has no browser origin to trust yet,
- * so it gets localhost dev origins and a warning; re-run deploy once a
- * domain is set.
+ * that is exactly `https://<domain>`, the single public origin the app serves
+ * from. A domainless env has no browser origin to trust yet, so it gets the
+ * localhost dev origins.
+ *
+ * @param {string} [domain]
+ * @returns {string[]}
+ */
+function envCorsOrigins(domain) {
+  return domain ? [`https://${domain}`] : ['http://localhost:3000', 'http://localhost:5173'];
+}
+
+/**
+ * Merge this environment's origin into the app bucket's shared CORS rule.
+ * Runs on EVERY deploy, outside the skippable s3-setup step, so deployments
+ * that predate the rule (or whose rule was edited out-of-band) converge on
+ * re-run. One GET, and a PUT only when this env's origins are missing, so a
+ * warm redeploy writes nothing. A failure only costs browser uploads, so it
+ * warns and returns. A failed read never PUTs: writing over it would drop
+ * the other environments' origins.
  *
  * @param {object} opts
  * @param {() => Promise<object>} opts.createProvider - builds a provider at the
@@ -236,17 +263,28 @@ async function probePublicHealth(
 export async function applyAppBucketCors({ createProvider, bucket, domain, spin, log }) {
   try {
     spin.start('Configuring bucket CORS');
-    let corsOrigins;
-    if (domain) {
-      corsOrigins = [`https://${domain}`];
-    } else {
-      corsOrigins = ['http://localhost:3000', 'http://localhost:5173'];
+    const ownOrigins = envCorsOrigins(domain);
+    if (!domain) {
       log.warn(
-        'No domain configured, so bucket CORS only allows localhost dev origins. Re-run deploy with a domain to allow your production origin.',
+        'No domain configured, so bucket CORS only allows localhost dev origins for this environment. Re-run deploy with a domain to allow your production origin.',
       );
     }
     const provider = await createProvider();
-    await provider.setBucketCors(bucket, corsOrigins);
+    let existing;
+    try {
+      existing = await provider.getBucketCorsOrigins(bucket);
+    } catch (readErr) {
+      spin.stop('Bucket CORS not set');
+      log.warn(
+        `Could not read the CORS rule on bucket ${bucket} (${readErr.message}), so it was left as is: writing without it would drop your other environments' origins. Re-run \`vibecarbon deploy\` to apply it again.`,
+      );
+      return;
+    }
+    if (ownOrigins.every((o) => existing.includes(o))) {
+      spin.stop('Bucket CORS already allows this environment');
+      return;
+    }
+    await provider.setBucketCors(bucket, mergeCorsOrigins(existing, ownOrigins));
     spin.stop('Bucket CORS configured');
   } catch (corsErr) {
     spin.stop('Bucket CORS not set');
@@ -254,6 +292,63 @@ export async function applyAppBucketCors({ createProvider, bucket, domain, spin,
       `Browser uploads will fail until the bucket allows your origin (${corsErr.message}). Re-run \`vibecarbon deploy\` to apply it again, or set CORS on ${bucket} in your provider console.`,
     );
   }
+}
+
+/**
+ * Take an environment's origins off the shared app bucket rule, leaving the
+ * other environments' in place. When nothing is left the rule is deleted,
+ * since a rule cannot hold an empty origin list. Throws on any provider
+ * error; the caller decides how loud that is.
+ *
+ * @param {object} opts
+ * @param {object} opts.provider - S3CompatibleProvider at the app bucket's region
+ * @param {string} opts.bucket
+ * @param {string[]} opts.origins - the origins this environment contributed
+ * @returns {Promise<void>}
+ */
+export async function removeAppBucketCorsOrigins({ provider, bucket, origins }) {
+  const existing = await provider.getBucketCorsOrigins(bucket);
+  if (!origins.some((o) => existing.includes(o))) return;
+  const next = mergeCorsOrigins(existing, [], origins);
+  if (next.length === 0) {
+    await provider.deleteBucketCors(bucket);
+    return;
+  }
+  await provider.setBucketCors(bucket, next);
+}
+
+/**
+ * Start the app-bucket storage work that does not gate provisioning, so it
+ * runs beside the IaC step instead of ahead of it (R7). Today that is the
+ * CORS merge. Its output is held back while IaC prints, and `finish(log)`,
+ * awaited just before the success outro, waits for it and reports any
+ * warnings there. Never rejects: applyAppBucketCors warns instead of
+ * throwing, so a deploy that fails before `finish` leaves nothing unhandled.
+ *
+ * @param {object} opts
+ * @param {() => Promise<object>} opts.createProvider
+ * @param {string} opts.bucket
+ * @param {string} [opts.domain]
+ * @returns {{ done: Promise<void>, finish: (log: { warn: Function }) => Promise<void> }}
+ */
+export function startAppBucketFinalize({ createProvider, bucket, domain }) {
+  const warnings = [];
+  const heldLog = { warn: (message) => warnings.push(message) };
+  const quietSpin = { start() {}, stop() {} };
+  const done = applyAppBucketCors({
+    createProvider,
+    bucket,
+    domain,
+    spin: quietSpin,
+    log: heldLog,
+  });
+  return {
+    done,
+    async finish(log) {
+      await done;
+      for (const message of warnings) log.warn(message);
+    },
+  };
 }
 
 /**
@@ -765,8 +860,9 @@ export async function executeDeployment(args, gatheredConfig) {
 
   // Browser uploads need CORS on the app bucket. Outside the s3-setup step on
   // purpose: that step is skipped on re-run, and existing deployments must
-  // still pick the rule up.
-  await applyAppBucketCors({
+  // still pick the rule up. Started here, not awaited: provisioning does not
+  // depend on it, so it runs beside IaC and is awaited before the outro (R7).
+  const appBucketFinalize = startAppBucketFinalize({
     createProvider: () =>
       getObjectStorageProvider(
         providerIdFor(envConfig),
@@ -776,8 +872,6 @@ export async function executeDeployment(args, gatheredConfig) {
       ),
     bucket: s3Config.bucket,
     domain,
-    spin: s3Spinner,
-    log: p.log,
   });
 
   // SKELETON SAVE: persist the minimum env entry that `vibecarbon destroy`
@@ -1664,6 +1758,10 @@ export async function executeDeployment(args, gatheredConfig) {
   // k8s-HA scale would try to create a fresh stack and Hetzner would
   // reject the duplicate SshKey post.
   const isHADeploy = !!config.ha && !!secondaryRegion;
+
+  // The app-bucket finalize started after s3-setup ran beside IaC; wait for
+  // it here, before the final save and the outro, and report its warnings.
+  await appBucketFinalize.finish(p.log);
 
   // Re-read the on-disk project config before merging. Inner deploy paths
   // (compose/ha.js, k8s/ha/index.js) call saveProjectConfig themselves

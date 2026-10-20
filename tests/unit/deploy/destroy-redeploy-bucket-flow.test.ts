@@ -139,7 +139,7 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
 
     const setBucketCors = vi.fn(async () => {});
     await applyAppBucketCors({
-      createProvider: async () => ({ setBucketCors }),
+      createProvider: async () => ({ setBucketCors, getBucketCorsOrigins: async () => [] }),
       bucket: bucketName,
       domain: 'e1.example.com',
       spin: { start: vi.fn(), stop: vi.fn() },

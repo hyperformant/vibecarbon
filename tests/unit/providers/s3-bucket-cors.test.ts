@@ -2,8 +2,6 @@
  * Browsers PUT uploads straight to the app bucket and GET reads back through
  * presigned URLs, so the bucket needs a CORS rule scoped to the app origin.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { applyAppBucketCors } from '../../../src/lib/deploy/orchestrator.js';
 import { HetznerS3Provider } from '../../../src/lib/providers/hetzner-s3.js';
@@ -14,6 +12,8 @@ function provider() {
   const p = new HetznerS3Provider('ak', 'sk', 'fsn1') as unknown as {
     _send: (c: Sent) => Promise<unknown>;
     setBucketCors: (b: string, origins: string[]) => Promise<void>;
+    getBucketCorsOrigins: (b: string) => Promise<string[]>;
+    deleteBucketCors: (b: string) => Promise<void>;
   };
   const send = vi.fn(async (_c: Sent) => ({}));
   p._send = send;
@@ -50,13 +50,74 @@ describe('setBucketCors', () => {
   });
 });
 
+describe('getBucketCorsOrigins', () => {
+  it('returns every origin across the rules on the bucket', async () => {
+    const { p, send } = provider();
+    send.mockResolvedValueOnce({
+      CORSRules: [
+        { AllowedOrigins: ['https://prod.dev'] },
+        { AllowedOrigins: ['https://staging.dev'] },
+      ],
+    });
+    await expect(p.getBucketCorsOrigins('app-bucket')).resolves.toEqual([
+      'https://prod.dev',
+      'https://staging.dev',
+    ]);
+    const cmd = send.mock.calls[0][0];
+    expect(cmd.constructor.name).toBe('GetBucketCorsCommand');
+    expect(cmd.input).toEqual({ Bucket: 'app-bucket' });
+  });
+
+  it('returns [] when the bucket has no CORS rule yet', async () => {
+    const { p, send } = provider();
+    send.mockRejectedValueOnce(
+      Object.assign(new Error('The CORS configuration does not exist'), {
+        name: 'NoSuchCORSConfiguration',
+      }),
+    );
+    await expect(p.getBucketCorsOrigins('b')).resolves.toEqual([]);
+  });
+
+  it('returns [] on a bare 404', async () => {
+    const { p, send } = provider();
+    send.mockRejectedValueOnce(
+      Object.assign(new Error('Not Found'), {
+        name: 'NotFound',
+        $metadata: { httpStatusCode: 404 },
+      }),
+    );
+    await expect(p.getBucketCorsOrigins('b')).resolves.toEqual([]);
+  });
+
+  it('throws on any other error', async () => {
+    const { p, send } = provider();
+    send.mockRejectedValueOnce(
+      Object.assign(new Error('Access Denied'), {
+        name: 'AccessDenied',
+        $metadata: { httpStatusCode: 403 },
+      }),
+    );
+    await expect(p.getBucketCorsOrigins('b')).rejects.toThrow('Access Denied');
+  });
+});
+
+describe('deleteBucketCors', () => {
+  it('sends DeleteBucketCors for the bucket', async () => {
+    const { p, send } = provider();
+    await p.deleteBucketCors('app-bucket');
+    const cmd = send.mock.calls[0][0];
+    expect(cmd.constructor.name).toBe('DeleteBucketCorsCommand');
+    expect(cmd.input).toEqual({ Bucket: 'app-bucket' });
+  });
+});
+
 describe('applyAppBucketCors', () => {
   const spin = () => ({ start: vi.fn(), stop: vi.fn() });
 
   it('allows exactly the https domain origin', async () => {
     const setBucketCors = vi.fn(async () => {});
     await applyAppBucketCors({
-      createProvider: async () => ({ setBucketCors }),
+      createProvider: async () => ({ setBucketCors, getBucketCorsOrigins: async () => [] }),
       bucket: 'app-b',
       domain: 'example.com',
       spin: spin(),
@@ -69,7 +130,7 @@ describe('applyAppBucketCors', () => {
     const setBucketCors = vi.fn(async () => {});
     const warn = vi.fn();
     await applyAppBucketCors({
-      createProvider: async () => ({ setBucketCors }),
+      createProvider: async () => ({ setBucketCors, getBucketCorsOrigins: async () => [] }),
       bucket: 'app-b',
       spin: spin(),
       log: { warn },
@@ -86,6 +147,7 @@ describe('applyAppBucketCors', () => {
     await expect(
       applyAppBucketCors({
         createProvider: async () => ({
+          getBucketCorsOrigins: async () => [],
           setBucketCors: async () => {
             throw new Error('NotImplemented');
           },
@@ -114,20 +176,5 @@ describe('applyAppBucketCors', () => {
       }),
     ).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledOnce();
-  });
-});
-
-describe('orchestrator call site', () => {
-  const src = readFileSync(
-    join(import.meta.dirname, '../../../src/lib/deploy/orchestrator.js'),
-    'utf-8',
-  );
-  it('applies CORS once, after the skippable s3-setup step has resolved', () => {
-    const calls = [...src.matchAll(/await applyAppBucketCors\(/g)];
-    expect(calls).toHaveLength(1);
-    const at = calls[0].index as number;
-    expect(src.indexOf('if (!skipS3Setup) {')).toBeGreaterThan(-1);
-    expect(at).toBeGreaterThan(src.indexOf("state.getStepResult('s3-setup')"));
-    expect(src).not.toContain('setBucketCors(s3Config.bucket');
   });
 });
