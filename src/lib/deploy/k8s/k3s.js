@@ -309,8 +309,13 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * render. Normalized the same way as walgRole below, so single-cluster deploys
  * (role undefined) hash as 'primary'.
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby' }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', manifestDigest: string, bundledManifestDigest: string }}
+ * `appStorageKeyDigest` folds in the app's own object-storage key (security
+ * plan R9): a redeploy that mints a new one (its secret was missing here)
+ * revokes the old key, so a skipped apply would leave the app Secret holding
+ * a dead key. Only a digest of the access key id, never the key itself.
+ *
+ * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string }} args
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -319,6 +324,7 @@ export function buildK3sApplyInputs({
   projectDir,
   storageClass,
   role,
+  appStorageAccessKey,
 }) {
   return {
     imageTag,
@@ -326,6 +332,9 @@ export function buildK3sApplyInputs({
     restore: restore ?? '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
+    appStorageKeyDigest: appStorageAccessKey
+      ? createHash('sha256').update(appStorageAccessKey).digest('hex').slice(0, 16)
+      : '',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -4544,6 +4553,8 @@ export async function deployK3s(options) {
     // The pilot-light role: a failover swaps it between stacks, and each
     // role renders a different cluster — see buildK3sApplyInputs.
     role: options.role,
+    // A re-minted app storage key must reach the app Secret.
+    appStorageAccessKey: options.s3Config?.appCredential?.accessKey,
   });
   if (!state.shouldSkip('k3s-apply', applyInputs)) {
     state.startStep('k3s-apply', applyInputs);

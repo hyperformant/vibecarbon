@@ -1,7 +1,9 @@
 /**
  * Scale replays the old server's `app.env` storage pair (security plan
- * 2026-10-20, Task 1). The read is its own step after the `.env` replay, so a
- * failed or empty app.env read never throws away the `.env` already read.
+ * 2026-10-20, Task 1). The read is its own step after the `.env` replay.
+ * Task 4: an app.env the server says it does not have is told apart from a
+ * read that failed; a failed read stops that server's scale rather than hand
+ * the new app the `.env`'s infra pair.
  * Sentinel values only.
  */
 import { describe, expect, it, vi } from 'vitest';
@@ -24,7 +26,7 @@ vi.mock('../../../src/lib/iac/converge-cluster.js', () => ({
 vi.mock('../../../src/lib/command.js', () => ({ runCommand: vi.fn(() => '') }));
 vi.mock('../../../src/lib/config.js', () => ({ saveProjectConfig: vi.fn() }));
 
-const { readOldAppEnv } = await import('../../../src/scale.js');
+const { NO_APP_ENV_MARKER, readOldAppEnv } = await import('../../../src/scale.js');
 
 const silent = { warn: vi.fn() };
 
@@ -39,22 +41,41 @@ describe('readOldAppEnv', () => {
     expect(argv.at(-1)).toBe('/opt/proj/app.env');
   });
 
-  it('a server without app.env yields null (the .env pair is then carried)', async () => {
-    const run = vi.fn(async () => '');
+  it('a server that answers it has no app.env yields null (the .env pair is then carried)', async () => {
+    const run = vi.fn(async () => `${NO_APP_ENV_MARKER}`);
     expect(await readOldAppEnv('1.2.3.4', '/k', 'proj', { run, log: silent })).toBeNull();
+    const argv = run.mock.calls[0][2] as string[];
+    expect(argv[2]).toContain(`else printf '%s' ${NO_APP_ENV_MARKER}`);
   });
 
-  it('a failed read yields null with a warning, never a throw', async () => {
-    const log = { warn: vi.fn() };
+  it('an empty app.env is an app with no storage keys, not a missing file', async () => {
+    const run = vi.fn(async () => '');
+    expect(await readOldAppEnv('1.2.3.4', '/k', 'proj', { run, log: silent })).toEqual({});
+  });
+
+  it('a failed read throws, so that server scale stops instead of falling back to the infra pair', async () => {
     const run = vi.fn(async () => {
       throw new Error('ssh: connect to host 1.2.3.4 port 22: Connection timed out');
     });
-    expect(await readOldAppEnv('1.2.3.4', '/k', 'proj', { run, log })).toBeNull();
-    expect(log.warn).toHaveBeenCalledWith(expect.stringMatching(/could not read app\.env/));
+    await expect(readOldAppEnv('1.2.3.4', '/k', 'proj', { run, log: silent })).rejects.toThrow(
+      /could not read app\.env on the old server 1\.2\.3\.4.*account-wide storage key/,
+    );
   });
 });
 
 describe('scale keeps the .env replay when the app.env read fails', () => {
+  it('a failed app.env read is thrown inside the per-server try, whose catch deletes the new server', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
+    const tryStart = src.indexOf('let newIp;\n    try {');
+    const appRead = src.indexOf('oldAppEnv = await readOldAppEnv(', tryStart);
+    expect(tryStart).toBeGreaterThan(-1);
+    expect(appRead).toBeGreaterThan(tryStart);
+    // Not wrapped in its own catch that would swallow it.
+    expect(src.slice(appRead - 200, appRead)).not.toMatch(/try\s*\{\s*$/);
+  });
+
   it('reads app.env only after, and outside, the .env read', async () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
@@ -64,7 +85,7 @@ describe('scale keeps the .env replay when the app.env read fails', () => {
     const appRead = src.indexOf('oldAppEnv = await readOldAppEnv(', envRead);
     expect(envRead).toBeGreaterThan(-1);
     // The app.env read sits after the .env try/catch closes, so its failure
-    // cannot reach that catch, and readOldAppEnv itself never throws.
+    // cannot reach that catch.
     expect(appRead).toBeGreaterThan(catchAfter);
   });
 });

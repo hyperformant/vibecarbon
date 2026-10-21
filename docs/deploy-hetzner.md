@@ -390,6 +390,40 @@ After a failover completes:
   `/var/log/vibecarbon-private-net.log`) shows every repair it has made, and
   `ip -4 addr show enp7s0` shows the current state
 
+## The app's storage key
+
+Hetzner only makes object storage keys in the console, and every key reaches
+every bucket in the project. So by default the app holds the same key the
+deploy uses (`storage access: shared` in `vibecarbon status`). That is the
+residual risk to know about: a compromised app could read and delete every
+environment's uploads, all backups and the Pulumi state.
+
+You can give an environment's app a key of its own:
+
+1. In the [Hetzner Console](https://console.hetzner.cloud/projects), open the
+   project, then **Security**, then **S3 credentials**, and click
+   **Generate credentials**. Name it after the environment, for example
+   `myapp-prod-app`. This must be a new key, not the one deploys use.
+2. Run `vibecarbon configure storage prod` and paste the access key and the
+   secret key. They go to `.env.local` only and never ship to a server.
+3. Run `vibecarbon deploy prod`. The app gets the pasted key, and the deploy
+   puts a deny policy on every other bucket vibecarbon manages in the project
+   (the Pulumi state, the backups and each other environment's bucket). It
+   waits until Hetzner enforces it before it reports success. Status then
+   shows `storage access: fenced`.
+
+Skipping the paste is fine; the environment simply stays `shared`.
+
+What the fence cannot close (`fenced` tier): the app key can still list
+bucket names, create new buckets, use any bucket vibecarbon does not manage,
+and delete a fenced bucket while it is empty. The strongest isolation is an
+app bucket in a separate Hetzner project with its own key, which vibecarbon
+does not set up for you.
+
+`vibecarbon destroy` takes a pasted key out of every fence and prints a
+reminder to delete it in the console, since vibecarbon cannot revoke a key it
+did not make.
+
 ## Security notes
 
 - Firewalls are provisioned automatically and scoped to operator CIDRs for

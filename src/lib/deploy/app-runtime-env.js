@@ -94,22 +94,26 @@ export function buildAppRuntimeEnv(serverEnv, extras = {}) {
  * The app's object-storage env (S3_*): the single hand-off point between the
  * storage setup and the app, on compose and k8s alike.
  *
- * Today it hands the app the same pair the infra uses (the deploy's
- * `s3Config`). Without an `s3Config` (a scale replay), it carries forward the
- * pair the app had: the old server's `app.env`, or its `.env` on a server
- * deployed before `app.env` existed.
+ * The pair is the env's own app key, `s3Config.appCredential`, which the
+ * deploy resolves or mints per provider (app-storage-credential.js, security
+ * plan R2/R9). Only an `s3Config` without one (a caller that resolved no app
+ * credential: the shared tier is resolved too, so in practice a test) falls
+ * back to the infra pair beside it. Without an `s3Config` (a scale replay),
+ * it carries forward the pair the app had: the old server's `app.env`, or its
+ * `.env` on a server deployed before `app.env` existed.
  *
  * @param {{
- *   s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string} | null,
+ *   s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string, appCredential?: {accessKey: string, secretKey: string}} | null,
  *   previousAppEnv?: Record<string, string> | null,
  * }} [source]
  * @returns {Record<string, string>}
  */
 export function appStorageCredential({ s3Config, previousAppEnv } = {}) {
   if (s3Config) {
+    const pair = s3Config.appCredential ?? s3Config;
     return {
-      S3_ACCESS_KEY: s3Config.accessKey,
-      S3_SECRET_KEY: s3Config.secretKey,
+      S3_ACCESS_KEY: pair.accessKey,
+      S3_SECRET_KEY: pair.secretKey,
       S3_BUCKET: s3Config.bucket,
       S3_ENDPOINT: s3Config.endpoint,
       S3_REGION: s3Config.region,

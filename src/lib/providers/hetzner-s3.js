@@ -5,11 +5,13 @@
  * (s3-base.js): endpoint/region maps and the deploy-region → S3-region
  * resolver. Every actual S3 operation (client construction, retry, bucket
  * lifecycle, CORS) lives in the base class.
- * Note: S3 credentials must be created manually in Hetzner Console.
+ * Note: S3 credentials must be created manually in Hetzner Console, the
+ * optional per-environment app key included (vibecarbon configure storage).
  *
  * API Documentation: https://docs.hetzner.com/storage/object-storage/
  */
 
+import { ListBucketsCommand } from '@aws-sdk/client-s3';
 import {
   deriveStateBucketName,
   resolveStateBucketName,
@@ -26,6 +28,26 @@ export class HetznerS3Provider extends S3CompatibleProvider {
    * to 20 for margin; see src/lib/deploy/bucket-settle.js.
    */
   static bucketSettleWindowMs = 20 * 60_000;
+
+  /**
+   * Keys are made only in the console (every API credential route is a 404),
+   * but each key is its own principal, `arn:aws:iam:::user/<ownerId>:<accessKeyId>`,
+   * so a pasted app key can be fenced out of the other buckets with a Deny
+   * policy (security plan R2, measured 2026-10-20). See hetzner-app-key-fence.js.
+   */
+  static appKeyScoping = 'paste-fence';
+
+  /**
+   * The project user every key here belongs to (`p…`), from ListBuckets'
+   * `Owner.ID`. The fence policy's principals are `<ownerId>:<accessKeyId>`.
+   * @returns {Promise<string>}
+   */
+  async ownerId() {
+    const response = await this._send(new ListBucketsCommand({}));
+    const id = response?.Owner?.ID;
+    if (!id) throw new Error('Hetzner object storage did not report the project owner id');
+    return id;
+  }
 
   static ENDPOINTS = {
     fsn1: 'https://fsn1.your-objectstorage.com',

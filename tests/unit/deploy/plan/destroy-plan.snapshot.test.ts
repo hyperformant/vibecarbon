@@ -13,6 +13,7 @@ describe('destroy plan snapshot', () => {
       [
         "destroy-compose-services",
         "remove-stack-state",
+        "revoke-app-storage-key",
         "delete-app-bucket",
         "retain-state-bucket",
         "handle-backup-bucket",
@@ -28,6 +29,7 @@ describe('destroy plan snapshot', () => {
       [
         "destroy-compose-ha",
         "remove-stack-state",
+        "revoke-app-storage-key",
         "delete-app-bucket",
         "retain-state-bucket",
         "handle-backup-bucket",
@@ -42,6 +44,7 @@ describe('destroy plan snapshot', () => {
     expect(planStepNames(planDestroy('k8s', {}))).toMatchInlineSnapshot(`
       [
         "destroy-k8s-infra",
+        "revoke-app-storage-key",
         "delete-app-bucket",
         "retain-state-bucket",
         "handle-backup-bucket",
@@ -58,6 +61,7 @@ describe('destroy plan snapshot', () => {
     expect(planStepNames(planDestroy('k8s-ha', {}))).toMatchInlineSnapshot(`
       [
         "destroy-k8s-infra",
+        "revoke-app-storage-key",
         "delete-app-bucket",
         "retain-state-bucket",
         "handle-backup-bucket",

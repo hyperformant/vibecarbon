@@ -14,9 +14,11 @@
  *
  * Decision: secret scope (1=org/repo-level, 2=per-environment) matches
  * the session 2026-04-20 discussion:
- *   Org-level:       HETZNER_API_TOKEN, CLOUDFLARE_API_TOKEN,
- *                    S3_ACCESS_KEY, S3_SECRET_KEY
+ *   Org-level:       HETZNER_API_TOKEN, CLOUDFLARE_API_TOKEN
  *   Per-env:         KUBECONFIG_B64, DB_PASSWORD, APP_DB_PASSWORD, BETTER_AUTH_SECRET,
+ *                    S3_ACCESS_KEY / S3_SECRET_KEY (the env app's own storage
+ *                    key, from appStorageCredential's resolution; never the
+ *                    infra pair on a provider that scopes keys),
  *                    ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*, and the add-ons'
  *                    METABASE_DB_PASSWORD / N8N_DB_PASSWORD when installed
  *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL, DNS_PROVIDER
@@ -96,8 +98,11 @@ async function setVariable(key, value, env) {
  *   candidates keyed by env-var name, registry-derived from DNS_PROVIDERS
  *   (empty values are skipped; native rows share the compute token's env
  *   var, so seeding stays deduped).
- * @param {string} [providerCreds.s3AccessKey]
- * @param {string} [providerCreds.s3SecretKey]
+ *
+ * No object-storage pair here: the app's S3 pair is per environment (the
+ * env's own key where the provider scopes one, security plan R2), so
+ * deployK8sGitOps seeds it with the env's secrets. A repo-level pair would
+ * be the infra key, and the app Secret would pick it up.
  */
 export async function seedOrgSecrets(providerCreds = {}) {
   const applied = [];
@@ -111,10 +116,6 @@ export async function seedOrgSecrets(providerCreds = {}) {
     if (await setSecretFromBodyFile(row.tokenEnv, providerCreds.dnsTokens?.[row.tokenEnv] ?? ''))
       applied.push(row.tokenEnv);
   }
-  if (await setSecretFromBodyFile('S3_ACCESS_KEY', providerCreds.s3AccessKey ?? ''))
-    applied.push('S3_ACCESS_KEY');
-  if (await setSecretFromBodyFile('S3_SECRET_KEY', providerCreds.s3SecretKey ?? ''))
-    applied.push('S3_SECRET_KEY');
   return applied;
 }
 

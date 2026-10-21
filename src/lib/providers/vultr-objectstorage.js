@@ -29,6 +29,9 @@ export class VultrObjectStorageProvider extends S3CompatibleProvider {
   /** No settle window has been observed on a new bucket here. */
   static bucketSettleWindowMs = 0;
 
+  // R2: one key pair per subscription and policies apply to everyone, so the app shares it.
+  static appKeyScoping = 'none';
+
   /**
    * SIGNING region for every S3 client this class builds — same seam as
    * LinodeObjectStorageProvider.S3_SIGNING_REGION (s3-base getClient /

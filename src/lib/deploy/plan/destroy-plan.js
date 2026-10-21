@@ -49,6 +49,8 @@ const composeTail = () => [
   // verdict it reads. The k8s tail needs no twin: destroyStack already runs
   // `pulumi destroy` + `removeStack` per stackEnv.
   defineStep({ name: 'remove-stack-state', effect: 'removePulumiStackState' }),
+  // The env's app storage key goes before its bucket, on every destroy.
+  defineStep({ name: 'revoke-app-storage-key', effect: 'revokeAppStorageKey' }),
   defineStep({ name: 'delete-app-bucket', effect: 'deleteAppBucket' }),
   defineStep({ name: 'retain-state-bucket', effect: 'retainStateBucket' }),
   defineStep({ name: 'handle-backup-bucket', effect: 'handleBackupBucket' }),
@@ -58,6 +60,7 @@ const composeTail = () => [
 ];
 
 const k8sTail = () => [
+  defineStep({ name: 'revoke-app-storage-key', effect: 'revokeAppStorageKey' }),
   defineStep({ name: 'delete-app-bucket', effect: 'deleteAppBucket' }),
   // Ungated, unlike the deletion it replaces. That step carried
   // `when: (ctx) => !ctx.results.pulumiDestroyFailed` (M3 Task 9f round 1),

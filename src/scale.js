@@ -411,13 +411,20 @@ export function dropUnportableEnv(env, { log = p.log } = {}) {
   return kept;
 }
 
+/** What the old server prints instead of app.env when it has none. */
+export const NO_APP_ENV_MARKER = '__VC_NO_APP_ENV__';
+
 /**
  * The old server's `app.env`, for the scale replay: it holds the storage pair
- * the old app used, which need not be the `.env`'s (the db's WAL-G pair).
- * `null` when the server has none (deployed before app.env existed): then
- * renderBundle carries the pair from the replayed `.env`, which is what that
- * app read. A failed read also yields `null`, with a warning naming the
- * fallback, and never discards the `.env` replay already read.
+ * the old app used, which need not be the `.env`'s (the db's WAL-G pair, and
+ * on an isolated or fenced env the app's own key, security plan R2).
+ *
+ * `null` only when the server answers that it has no app.env (the remote
+ * marker): a server deployed before app.env existed gave its app the whole
+ * `.env`, so renderBundle carries the pair from the replayed `.env`, which is
+ * what that app read. A read that FAILS throws instead: guessing would hand
+ * the new app the `.env`'s infra pair, the account-wide key, so the caller
+ * aborts that server's scale (its catch deletes the new server).
  * `run` and `log` are injectable for tests.
  * @param {string} ip
  * @param {string} sshKeyPath
@@ -433,22 +440,20 @@ export async function readOldAppEnv(
 ) {
   let text;
   try {
-    // Empty output, not an error, when the file does not exist.
     text = await run(ip, sshKeyPath, [
       'sh',
       '-c',
-      'if [ -f "$1" ]; then cat "$1"; fi',
+      `if [ -f "$1" ]; then cat "$1"; else printf '%s' ${NO_APP_ENV_MARKER}; fi`,
       'sh',
       `/opt/${projectName}/app.env`,
     ]);
-  } catch {
-    log.warn(
-      "could not read app.env on the old server; the new server's app gets the storage keys from its .env",
+  } catch (err) {
+    throw new Error(
+      `could not read app.env on the old server ${ip} (${err.message}), so scale stopped rather than give the new app the account-wide storage key. Run scale again once the old server answers.`,
     );
-    return null;
   }
-  if (!text) return null;
-  return dropUnportableEnv(parseDotenv(text), { log });
+  if (String(text ?? '').trim() === NO_APP_ENV_MARKER) return null;
+  return dropUnportableEnv(parseDotenv(String(text ?? '')), { log });
 }
 
 /**
@@ -649,7 +654,8 @@ async function scaleServers(ctx) {
         s.stop('Could not read old-server config, falling back to project .env');
       }
       // Only once the .env replay is in hand: its own read decides whether
-      // the old server answers at all.
+      // the old server answers at all. A failed app.env read throws here, so
+      // the catch below deletes the new server instead of guessing a pair.
       if (Object.keys(oldEnv).length > 0) {
         oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
       }

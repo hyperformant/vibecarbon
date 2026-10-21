@@ -27,6 +27,12 @@ import {
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
+import {
+  localAppStorageSecrets,
+  resolveAppStorageCredential,
+  syncHetznerFences,
+  waitForAppKeyReady,
+} from './app-storage-credential.js';
 import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
@@ -282,17 +288,27 @@ function sameOrigins(a, b) {
  * bucket to settle (R5). A 0 window costs nothing: no read, no note, and no
  * `bucketCreatedAt` on the result.
  *
- * Never rejects: the CORS step warns instead of throwing, and an
- * unreadable creation time is recorded as unknown (null). A provider class
- * without a declared window is a bug the census catches; `finish` warns
- * about it and treats the window as absent, because it runs after IaC
- * succeeded and a throw would skip the final config save.
+ * The CORS step warns instead of throwing, and an unreadable creation time
+ * is recorded as unknown (null). A provider class without a declared window
+ * is a bug the census catches; `finish` warns about it and treats the window
+ * as absent, because it runs after IaC succeeded and a throw would skip the
+ * final config save.
+ *
+ * Two security checks run here too (security plan R2, R9), and they DO make
+ * `finish` reject, because an app whose own key cannot reach its bucket, or
+ * whose fence did not take, is a failed deploy: `createAppProvider` (an
+ * isolated or fenced env) polls HeadBucket with the app key inside a fixed
+ * budget, and `fence` writes and verifies the Hetzner deny-fence.
  *
  * @param {object} opts
  * @param {string} opts.providerId - the env's provider id, for its settle window
  * @param {() => Promise<object>} opts.createProvider
  * @param {string} opts.bucket
  * @param {string} [opts.domain]
+ * @param {() => Promise<{ canHeadBucket(bucket: string): Promise<boolean> }>} [opts.createAppProvider]
+ *   - a client on the env's own app key; absent on the shared tier
+ * @param {() => Promise<{ unverified?: string[] }>} [opts.fence] - the Hetzner fence sync
+ * @param {(ms: number) => Promise<void>} [opts.sleep] - test seam for the readiness poll
  * @returns {{
  *   done: Promise<void>,
  *   finish: (log: { warn: Function, info: Function }) => Promise<{ bucketCreatedAt?: string|null }>,
@@ -300,7 +316,15 @@ function sameOrigins(a, b) {
  *   `bucketCreatedAt` (ISO string, or null when unknown) is present only for
  *   a non-zero settle window.
  */
-export function startAppBucketFinalize({ providerId, createProvider, bucket, domain }) {
+export function startAppBucketFinalize({
+  providerId,
+  createProvider,
+  bucket,
+  domain,
+  createAppProvider,
+  fence,
+  sleep,
+}) {
   const warnings = [];
   const heldLog = { warn: (message) => warnings.push(message) };
   // One S3 client for the CORS step and the creation-time read.
@@ -316,14 +340,31 @@ export function startAppBucketFinalize({ providerId, createProvider, bucket, dom
     log: heldLog,
   });
   const settle = readBucketSettleState({ providerId, createProvider: sharedProvider, bucket });
+  // The env's own app key (isolated or fenced tier) must reach its bucket
+  // before the deploy calls itself done: a new key can take 5 to 10 s to
+  // answer (R9). Polled here, beside IaC, never as a serial step before it.
+  const appKeyReady = createAppProvider
+    ? waitForAppKeyReady({ createAppProvider, bucket, ...(sleep && { sleep }) })
+    : Promise.resolve();
+  // The Hetzner deny-fence write and its consistency probes (R2), likewise.
+  const fenced = fence ? Promise.resolve().then(fence) : Promise.resolve(null);
   // Handled at `finish`; this only keeps an early rejection from counting as
   // unhandled while IaC runs.
   settle.catch(() => {});
+  appKeyReady.catch(() => {});
+  fenced.catch(() => {});
   return {
     done,
     async finish(log) {
       await done;
       for (const message of warnings) log.warn(message);
+      await appKeyReady;
+      const fence = await fenced;
+      if (fence?.unverified?.length) {
+        log.info(
+          `app key fence written on ${fence.unverified.join(', ')}, not probed: no fenced key for it is stored on this machine`,
+        );
+      }
       const { windowMs, createdAt, warning } = await settle;
       if (warning) log.warn(warning);
       if (windowMs === 0) return {};
@@ -393,8 +434,8 @@ export function assertBucketReady(result, role) {
  * row, the e2e upload gate's clock) only exists in the PRIOR record, so it is
  * carried from there, null included, the way compose-ha's pending save does.
  *
- * @param {{ bucket: string, bucketPin?: string, region: string, endpoint: string, stateBucket?: string, stateBucketRegion?: string, stateEndpoint?: string }} s3Config
- * @param {{ bucketCreatedAt?: string|null } | undefined} priorS3 - the env's persisted `s3`
+ * @param {{ bucket: string, bucketPin?: string, region: string, endpoint: string, stateBucket?: string, stateBucketRegion?: string, stateEndpoint?: string, appKey?: object|null }} s3Config
+ * @param {{ bucketCreatedAt?: string|null, appKey?: object } | undefined} priorS3 - the env's persisted `s3`
  */
 export function skeletonS3Block(s3Config, priorS3) {
   return {
@@ -409,7 +450,22 @@ export function skeletonS3Block(s3Config, priorS3) {
     stateBucket: s3Config.stateBucket,
     ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
     ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
+    ...appKeyBlock(s3Config, priorS3),
   };
+}
+
+/**
+ * The `appKey` record (R9: `{ id, scoping, tier, bucket }`, never a secret)
+ * for an env save. Once this deploy resolved the app credential,
+ * `s3Config.appKey` is the truth (null: the shared tier, no record). Before
+ * that, the prior record is carried, so a save ahead of the resolve never
+ * forgets a minted key that destroy must revoke.
+ * @param {{ appKey?: object|null }} s3Config
+ * @param {{ appKey?: object } | undefined} priorS3
+ */
+function appKeyBlock(s3Config, priorS3) {
+  if (Object.hasOwn(s3Config, 'appKey')) return s3Config.appKey ? { appKey: s3Config.appKey } : {};
+  return priorS3?.appKey ? { appKey: priorS3.appKey } : {};
 }
 
 /**
@@ -889,6 +945,55 @@ export async function executeDeployment(args, gatheredConfig) {
   // .vibecarbon.json so scale / failover / destroy resolve the same backend.
   s3Config.stateBucket = s3Result?.stateBucket || stateBucket;
 
+  // The app's own object-storage key (security plan R2, R9), resolved once
+  // the env bucket is ensured, on EVERY deploy (the s3-setup step above is
+  // skipped on a warm redeploy, but a missing local secret still needs a
+  // mint). The infra pair stays in s3Config for the buckets, CORS, Pulumi and
+  // WAL-G; the app gets `appCredential`. A failed mint fails here, before
+  // anything is provisioned, and never falls back to the infra key.
+  const storageProviderId = providerIdFor(envConfig);
+  let appStorage;
+  try {
+    appStorage = await resolveAppStorageCredential({
+      provider: storageProviderId,
+      environment,
+      envConfig,
+      projectConfig,
+      bucket: s3Config.bucket,
+      infraCredential: {
+        accessKey: s3Config.accessKey,
+        secretKey: s3Config.secretKey,
+        endpoint: s3Config.endpoint,
+      },
+      secrets: localAppStorageSecrets(),
+      apiToken,
+      log: p.log,
+    });
+  } catch (err) {
+    p.log.error(`App storage key: ${err.message}`);
+    writeLogDetail(`# app storage key error detail: ${err?.stack || err}`);
+    process.exit(1);
+  }
+  s3Config.appCredential = { accessKey: appStorage.accessKey, secretKey: appStorage.secretKey };
+  s3Config.appKey = appStorage.record;
+  p.log.info(`storage access: ${appStorage.tier} (${appStorage.reason})`);
+  if (appStorage.tier === 'shared' && appStorage.scoping === 'paste-fence') {
+    p.log.info(
+      `the app shares the deploy key; give it its own with \`vibecarbon configure storage ${environment}\``,
+    );
+  }
+  // Record the key right away: destroy revokes what is recorded.
+  saveSkeletonEnv();
+  const priorAppKey = envConfig.s3?.appKey;
+  const fenceNeeded =
+    appStorage.record?.scoping === 'paste-fence' ||
+    priorAppKey?.scoping === 'paste-fence' ||
+    Object.values(projectConfig.environments ?? {}).some(
+      (e) => e?.s3?.appKey?.scoping === 'paste-fence',
+    );
+  const appStorageClient = (accessKey, secretKey) =>
+    getObjectStorageProvider(storageProviderId, accessKey, secretKey, s3Config.region);
+
   // Browser uploads need CORS on the app bucket. Outside the s3-setup step on
   // purpose: that step is skipped on re-run, and existing deployments must
   // still pick the rule up. Started here, not awaited: provisioning does not
@@ -904,6 +1009,20 @@ export async function executeDeployment(args, gatheredConfig) {
       ),
     bucket: s3Config.bucket,
     domain,
+    ...(appStorage.record && {
+      createAppProvider: () =>
+        appStorageClient(s3Config.appCredential.accessKey, s3Config.appCredential.secretKey),
+    }),
+    ...(fenceNeeded && {
+      fence: () =>
+        syncHetznerFences({
+          projectConfig,
+          environment,
+          s3: s3Provider,
+          secrets: localAppStorageSecrets(),
+          createProbe: appStorageClient,
+        }),
+    }),
   });
 
   // SKELETON SAVE: persist the minimum env entry that `vibecarbon destroy`
@@ -1796,7 +1915,14 @@ export async function executeDeployment(args, gatheredConfig) {
   // it here, before the final save and the outro, and report its warnings.
   // On a provider with a settle window it also prints the young-bucket note;
   // it never waits for the bucket to settle (R5).
-  const appBucketFinal = await appBucketFinalize.finish(p.log);
+  let appBucketFinal;
+  try {
+    appBucketFinal = await appBucketFinalize.finish(p.log);
+  } catch (err) {
+    p.log.error(`App storage key: ${err.message}`);
+    writeLogDetail(`# app storage finalize error detail: ${err?.stack || err}`);
+    process.exit(1);
+  }
 
   // Re-read the on-disk project config before merging. Inner deploy paths
   // (compose/ha.js, k8s/ha/index.js) call saveProjectConfig themselves
@@ -1973,6 +2099,8 @@ export async function executeDeployment(args, gatheredConfig) {
           stateBucket: s3Config.stateBucket,
           ...(s3Config.stateBucketRegion && { stateBucketRegion: s3Config.stateBucketRegion }),
           ...(s3Config.stateEndpoint && { stateEndpoint: s3Config.stateEndpoint }),
+          // R9: the app key's record (no secret), so destroy can revoke it.
+          ...(s3Config.appKey && { appKey: s3Config.appKey }),
         },
         ...(backupS3Persist && { backupS3: backupS3Persist }),
         backup: backupConfig,

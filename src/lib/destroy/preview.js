@@ -113,6 +113,19 @@ export function destroyPreviewBody({
 `
     : '';
 
+  // The env's own app storage key (security plan R9): every destroy revokes
+  // a minted one; a pasted Hetzner key can only be deleted in the console.
+  const appKey = envConfig.s3?.appKey;
+  const appKeyBlock = appKey?.id
+    ? `${c.bold('Storage Key:')}
+    ${
+      appKey.scoping === 'mint'
+        ? `${c.error('•')} App storage key ${appKey.id} (WILL BE REVOKED)`
+        : `${c.error('•')} App storage key ${appKey.id} (pasted: taken out of the bucket fences; delete it in the console)`
+    }
+`
+    : '';
+
   // The backup bucket is per project: -purge deletes this env's folder, and
   // the bucket only with the last environment that keeps backups in it
   // (handleBackupBucket).
@@ -145,7 +158,7 @@ ${c.bold('SSH Keys:')}
 ${sshKeyLine}
 
 ${dnsBlock}
-${storageBlock}${backupBlock}
+${storageBlock}${appKeyBlock}${backupBlock}
 ${c.bold('GitHub:')}
     ${c.error('•')} Environment: ${envName}
 ${footer}

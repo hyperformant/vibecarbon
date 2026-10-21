@@ -206,6 +206,18 @@ Manage the list with `vibecarbon access`:
 
 **Caveat on shared NATs**: an IP behind a corporate office, café, or mobile hotspot is technically shared with strangers: the `/32` is a brute-force-noise reduction, not auth. SSH still requires a valid key for connection establishment.
 
+### Object storage access per environment
+
+Each environment's app gets the narrowest object storage key its provider allows. `vibecarbon status` prints the tier as `storage access: <tier> (<reason>)`.
+
+| Tier | Providers | What a compromised app can reach |
+|---|---|---|
+| `isolated` | Linode, DigitalOcean (minted per env on every deploy, revoked on every destroy) | Only its own environment's bucket. No backups, no Pulumi state, no other environment. |
+| `fenced` | Hetzner, after `vibecarbon configure storage <env>` | Denied on the state, backups and other environments' buckets vibecarbon manages. It can still list bucket names, create buckets, use any bucket vibecarbon does not manage, and delete a fenced bucket while it is empty. |
+| `shared` | Hetzner by default, Scaleway, Vultr | The account-wide key: every environment's uploads, all backups and the Pulumi state. |
+
+Scaleway could mint a one-bucket key only if the deploy key held org-wide IAM write, which would let the deploy credential mint org-wide keys, so it stays shared. Vultr has one key pair per subscription. The evidence is in [research/2026-10-object-storage-key-scoping.md](./research/2026-10-object-storage-key-scoping.md); the Hetzner paste steps are in [deploy-hetzner.md](./deploy-hetzner.md#the-apps-storage-key).
+
 ### Network security
 
 - **Firewall defaults**: 22 (SSH) and 6443 (K8s API) locked to `operatorCidrs`. 80 (HTTP → HTTPS) and 443 (HTTPS) open to the internet.

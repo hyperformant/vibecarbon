@@ -174,6 +174,13 @@ export function readProjectEnvFiles(cwd = process.cwd()) {
 }
 
 /**
+ * Every per-environment app storage key name in `.env.local` starts with
+ * this (deploy/app-storage-credential.js, security plan R9). Declared here so
+ * the drift check can skip them without importing the deploy module.
+ */
+export const APP_STORAGE_SECRET_PREFIX = 'VC_APP_S3_';
+
+/**
  * Find runtime env keys that would silently miss a deploy: set (non-empty)
  * in `.env.local` but empty or absent in `.env`.
  *
@@ -206,6 +213,9 @@ export function findEnvDrift(cwd = process.cwd()) {
   return Object.keys(local)
     .filter((key) => {
       if (operator.has(key)) return false;
+      // Per-environment app storage keys live only in .env.local by design:
+      // deploy hands them to that env's app alone.
+      if (key.startsWith(APP_STORAGE_SECRET_PREFIX)) return false;
       if (!local[key] || local[key].trim() === '') return false;
       const baseVal = base[key];
       return baseVal === undefined || baseVal.trim() === '';
