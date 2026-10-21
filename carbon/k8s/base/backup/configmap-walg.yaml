@@ -241,8 +241,13 @@ data:
     fi
     if [[ "$total_kb" =~ ^[0-9]+$ && "$free_kb" =~ ^[0-9]+$ ]] \
         && { [ "$free_kb" -lt $((2 * 1024 * 1024)) ] || [ "$((free_kb * 10))" -lt "$total_kb" ]; }; then
-        printf '%s %s\n' "$WAL_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WAL_GAP_FILE"
-        echo "WAL_ARCHIVE_DROPPED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts and pg_wal has $((free_kb / 1024)) MiB free (under 10% or 2 GiB): dropping it so the disk does not fill (PITR gap, recorded in $WAL_GAP_FILE)" >&2
+        # The drop is still exit 0 (the disk is the emergency), but a gap record that
+        # cannot be written is said so: the restore warning reads that file.
+        if printf '%s %s\n' "$WAL_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WAL_GAP_FILE" 2>/dev/null; then
+            echo "WAL_ARCHIVE_DROPPED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts and pg_wal has $((free_kb / 1024)) MiB free (under 10% or 2 GiB): dropping it so the disk does not fill (PITR gap, recorded in $WAL_GAP_FILE)" >&2
+        else
+            echo "WAL_ARCHIVE_DROPPED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts and pg_wal has $((free_kb / 1024)) MiB free (under 10% or 2 GiB): dropping it so the disk does not fill (PITR gap, gap record could not be written to $WAL_GAP_FILE)" >&2
+        fi
         exit 0
     fi
     echo "WAL_ARCHIVE_FAILED: wal-g wal-push '$WAL_PATH' failed after $RETRIES attempts; keeping the segment, postgres retries it" >&2

@@ -149,7 +149,7 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     );
     // The script ends holding the segment.
     expect(composeBody).toMatch(/WAL_ARCHIVE_FAILED[^\n]*keeping the segment[^\n]*\nexit 1\n?$/);
-    expect(composeBody).toMatch(/WAL_ARCHIVE_DROPPED[^\n]*\n\s*exit 0\n/);
+    expect(composeBody).toMatch(/WAL_ARCHIVE_DROPPED[^\n]*\n\s*fi\n\s*exit 0\n/);
   });
 
   it('the ConfigMap header no longer merely ASKS for sync — it names the pin', () => {
@@ -451,6 +451,19 @@ describe('wal-archive.sh when every push fails', () => {
       expect(gap()?.trim().split('\n')).toHaveLength(2);
     },
   );
+
+  it('a gap record that cannot be written is said so, still exit 0', () => {
+    const { run, pgdata } = setup('gap-unwritable');
+    // A directory at the record's path makes the append fail.
+    mkdirSync(join(pgdata, 'vibecarbon-wal-gap'));
+    const r = run({
+      VC_WAL_GUARD_TOTAL_BYTES: String(100 * GiB),
+      VC_WAL_GUARD_FREE_BYTES: String(1 * GiB),
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/WAL_ARCHIVE_DROPPED: [^\n]*gap record could not be written/);
+    expect(r.stderr).not.toContain('recorded in');
+  });
 
   it('free space it cannot read holds the segment', () => {
     const { run, gap } = setup('unreadable');
