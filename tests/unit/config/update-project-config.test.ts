@@ -10,7 +10,16 @@
  * leaves a truncated config.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -263,6 +272,20 @@ describe('the safety-critical records go through the locked path', () => {
 });
 
 describe('crash safety', () => {
+  it('keeps the file mode, whatever the umask', () => {
+    seed({ projectName: 'myapp' });
+    chmodSync(configPath(), 0o664);
+    const umask = process.umask(0o077);
+    try {
+      updateProjectConfig((config) => {
+        config.projectName = 'next';
+      }, dir);
+    } finally {
+      process.umask(umask);
+    }
+    expect(statSync(configPath()).mode & 0o777).toBe(0o664);
+  });
+
   it('a crash between the tmp write and the rename leaves the original file intact', () => {
     const original = { projectName: 'myapp', environments: { prod: { region: 'fsn1' } } };
     seed(original);
@@ -344,6 +367,42 @@ for (let i = 0; i < 25; i++) {
     expect(saved.counter).toBe(100);
     expect([saved.racer0, saved.racer1, saved.racer2, saved.racer3]).toEqual([25, 25, 25, 25]);
     expect(readdirSync(dir).filter((f) => f.startsWith('.vibecarbon.json.'))).toEqual([]);
+  });
+
+  it('a wait past a second prints one stderr line naming the lock and its holder', async () => {
+    seed({ projectName: 'myapp' });
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+    const lines: string[] = [];
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    try {
+      writeFileSync(join(dir, '.vibecarbon.json.lock'), `${live.pid}\n`);
+      expect(() =>
+        updateProjectConfig(() => undefined as never, dir, { lockTimeoutMs: 1300 }),
+      ).toThrow(/held by pid/);
+    } finally {
+      write.mockRestore();
+      live.kill();
+    }
+    const notices = lines.filter((l) => l.includes('waiting for'));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(join(dir, '.vibecarbon.json.lock'));
+    expect(notices[0]).toContain(`pid ${live.pid}`);
+  });
+
+  it('a quick wait prints nothing', async () => {
+    seed({ projectName: 'myapp' });
+    const write = vi.spyOn(process.stderr, 'write');
+    const holder = holderProcess('config.projectName = "held";', 200);
+    await holder.locked;
+    updateProjectConfig((config) => {
+      config.after = true;
+    }, dir);
+    await holder.exited;
+    expect(write.mock.calls.filter(([c]) => String(c).includes('waiting for'))).toEqual([]);
+    expect(readConfig()).toMatchObject({ projectName: 'held', after: true });
   });
 
   it('refuses a nested call instead of deadlocking on its own lock', () => {

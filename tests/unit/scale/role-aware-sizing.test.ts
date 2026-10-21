@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { projectConfigStore } from '../helpers/project-config-store.js';
+import { type Config as ConfigJson, projectConfigStore } from '../helpers/project-config-store.js';
 
 // Task 11: role-aware HA scale sizing. Stacks are cluster IDENTITIES named at
 // birth ("<env>-primary" / "<env>-standby"); ROLES flip at failover, persisted
@@ -372,6 +372,64 @@ describe('scaleUpdateK8sConfig — persists a worker-type scale into ha.standbyW
     });
     const saved = store.state.writes[0] as SavedProjectConfig;
     expect(saved.environments.prod.ha.standbyWorkerSpec.serverType).toBe('cx22');
+  });
+
+  it('keeps a write-fence marker with its cutover journal and a failover journal saved mid-scale', async () => {
+    const envConfig = { workerServerType: 'cx22', ha: { standbyWorkerSpec: { count: 1 } } };
+    const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    const writeFence = { ip: '1.1.1.1', source: 'scale', cutover: { newIp: '2.2.2.2', done: [] } };
+    store.reset({
+      projectName: 'proj',
+      environments: {
+        prod: { ...envConfig, ha: { ...envConfig.ha, writeFence, failoverInFlight: { id: 'j' } } },
+      },
+    });
+    await SCALE_EFFECTS.scaleUpdateK8sConfig({
+      environment: 'prod',
+      envConfig,
+      projectConfig,
+      newValues: { workerType: 'cx33' },
+      isHA: true,
+    });
+    const saved = store.state.writes[0] as { environments: ConfigJson };
+    expect(saved.environments.prod.ha.writeFence).toEqual(writeFence);
+    expect(saved.environments.prod.ha.failoverInFlight).toEqual({ id: 'j' });
+  });
+
+  it('the compose scale write keeps the safety records on disk too', async () => {
+    const envConfig = { serverType: 'cx22', servers: [{ id: 1, ip: '1.1.1.1' }] };
+    const projectConfig = { projectName: 'proj', environments: { prod: envConfig } };
+    const writeFence = {
+      ip: '1.1.1.1',
+      source: 'scale',
+      cutover: { newIp: '2.2.2.2', done: ['dns'] },
+    };
+    store.reset({
+      projectName: 'proj',
+      environments: {
+        prod: {
+          ...envConfig,
+          replication: 'degraded',
+          pendingServerState: [{ stack: 'proj-prod', serverId: 2 }],
+          ha: { writeFence },
+        },
+      },
+    });
+    const servers = [{ id: 1, ip: '1.1.1.1', _replacement: { id: 2, ip: '2.2.2.2' } }];
+    await SCALE_EFFECTS.scaleUpdateComposeConfig({
+      environment: 'prod',
+      envConfig,
+      projectConfig,
+      servers,
+      targetServers: servers,
+      newType: 'cx32',
+    });
+    const prod = (store.state.writes[0] as { environments: ConfigJson }).environments.prod;
+    expect(prod.servers).toEqual([{ id: 2, ip: '2.2.2.2' }]);
+    expect(prod.serverType).toBe('cx32');
+    expect(prod.ha).toEqual({ writeFence });
+    expect(prod.pendingServerState).toEqual([{ stack: 'proj-prod', serverId: 2 }]);
+    expect(prod.replication).toBe('degraded');
   });
 
   it('patches the env as it is on disk, keeping what was saved after the scale loaded its copy', async () => {

@@ -22,8 +22,8 @@ import { ciAvailable } from '../../../src/lib/ci-setup.js';
 const ROOT = process.cwd();
 const SRC = join(ROOT, 'src');
 
-/** `lib/config.js` owns the path; `lib/project.js` owns the same file's manifest half. */
-const CONFIG_OWNERS = [join('lib', 'config.js'), join('lib', 'project.js')];
+/** `lib/config.js` owns the path (lib/project.js reads the manifest half through it). */
+const CONFIG_OWNERS = [join('lib', 'config.js')];
 
 function jsFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -58,11 +58,11 @@ describe('project config is read through one accessor', () => {
   it('the owners really do reference the dotted filename (guards the matcher)', () => {
     // If the regex or the filename ever changes shape, this fails rather than
     // letting the sweep above pass over an empty search.
-    const owned = CONFIG_OWNERS.map((rel) => readFileSync(join(SRC, rel), 'utf-8'));
-    for (const src of owned) {
-      expect(src).toMatch(HAND_ROLLED);
-      expect(src).toContain('.vibecarbon.json');
-    }
+    expect(`join(cwd, '.vibecarbon.json')`).toMatch(HAND_ROLLED);
+    expect(`join(dir, 'vibecarbon.json')`).toMatch(HAND_ROLLED);
+    const owner = readFileSync(join(SRC, CONFIG_OWNERS[0]), 'utf-8');
+    expect(owner).toContain("export const CONFIG_FILE = '.vibecarbon.json';");
+    expect(owner).toMatch(/join\(cwd, CONFIG_FILE\)/);
   });
 
   it('ciAvailable reads the file that is actually written', () => {

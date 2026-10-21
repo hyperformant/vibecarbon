@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 /**
  * Finding #2: runK8sRestore performs a first-class VERIFIED standby re-seed for
  * k8s-HA envs (replacing the old warn-and-point-to-`deploy` behavior).
@@ -16,6 +19,14 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The real config writers (journal, proof, fence marker) run in these tests
+// against no project: point them at an empty dir, never the repo root, where
+// they would take the real config lock.
+const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+beforeEach(() => {
+  vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
+});
 
 // The db pod name (DB_POD in src/lib/deploy/db-workload.js), spelled out:
 // vi.mock factories are hoisted above every import.

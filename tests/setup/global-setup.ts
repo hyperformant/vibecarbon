@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,6 +21,19 @@ process.env.VIBECARBON_FINGERPRINT_KEY_DIR = mkdtempSync(join(tmpdir(), 'vc-test
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { cleanupAllTempDirs } from '../_shared/temp-dir.js';
 
+// A test that reaches the real updateProjectConfig without its own cwd writes
+// the repo's own .vibecarbon.json (and its lock or temp file). Record what is
+// there now; a file that appears during this test file's run (or a parallel
+// one's) fails it, and is removed so it cannot hide the next occurrence.
+const REPO_ROOT = join(import.meta.dirname, '..', '..');
+const CONFIG_RESIDUE = [
+  '.vibecarbon.json',
+  '.vibecarbon.json.lock',
+  '.vibecarbon.json.lock.break',
+  '.vibecarbon.json.tmp',
+];
+const residueAtStart = new Set(CONFIG_RESIDUE.filter((f) => existsSync(join(REPO_ROOT, f))));
+
 // Store original environment variables
 const originalEnv = { ...process.env };
 
@@ -40,6 +53,17 @@ afterEach(() => {
 afterAll(async () => {
   // Clean up any remaining temp directories
   await cleanupAllTempDirs();
+
+  const appeared = CONFIG_RESIDUE.filter(
+    (f) => !residueAtStart.has(f) && existsSync(join(REPO_ROOT, f)),
+  );
+  for (const f of appeared) rmSync(join(REPO_ROOT, f), { force: true });
+  if (appeared.length > 0) {
+    throw new Error(
+      `a test wrote ${appeared.join(', ')} at the repo root (removed now): stub ` +
+        'updateProjectConfig or point the test at a temp dir (vi.spyOn(process, "cwd"))',
+    );
+  }
 
   // Restore original environment
   process.env = originalEnv;

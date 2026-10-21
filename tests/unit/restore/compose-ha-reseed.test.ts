@@ -1,6 +1,17 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runComposeRestore } from '../../../src/restore.js';
+
+// The real config writers (journal, proof, fence marker) run in these tests
+// against no project: point them at an empty dir, never the repo root, where
+// they would take the real config lock.
+const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+beforeEach(() => {
+  vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
+});
 
 // ---------------------------------------------------------------------------
 // runComposeRestore() — compose-ha standby re-seed after a wal-g restore.

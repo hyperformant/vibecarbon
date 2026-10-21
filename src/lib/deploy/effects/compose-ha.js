@@ -67,6 +67,7 @@ import {
   waitForSSH,
 } from '../compose/index.js';
 import { requireDnsSetup } from '../dns-result.js';
+import { preserveSafetyFields } from '../env-safety-fields.js';
 import { readReplicaState } from '../failover-guard.js';
 import { resolvePublicA } from '../public-dns-lookup.js';
 import {
@@ -418,12 +419,19 @@ async function haPersistPendingConfig(ctx) {
 /**
  * Write this deploy's env entry (and the project provider) onto the file as it
  * is now, under the config lock: every other environment and top-level field
- * keeps what was saved since this deploy loaded the config.
+ * keeps what was saved since this deploy loaded the config, and so do the
+ * env's safety records (a stranded write fence, the journals, the standby's
+ * proof, a pending state sync), except the ones in `owns`.
  */
-function persistComposeHaEnv(environment, envConfig, envEntry) {
+function persistComposeHaEnv(environment, envConfig, envEntry, { owns = [] } = {}) {
   updateProjectConfig((config) => {
     config.provider = envConfig.provider ?? 'hetzner';
-    config.environments = { ...config.environments, [environment]: envEntry };
+    config.environments = config.environments ?? {};
+    config.environments[environment] = preserveSafetyFields(
+      config.environments[environment],
+      envEntry,
+      { owns },
+    );
   });
 }
 
@@ -1247,7 +1255,16 @@ async function haFinalizeConfig(ctx) {
     delete finalEnv.lastFailoverOverride;
     finalEnv.ha = { ...(finalEnv.ha ?? {}), systemIdentifier: ctx.systemIdentifier };
   }
-  persistComposeHaEnv(environment, envConfig, finalEnv);
+  persistComposeHaEnv(environment, envConfig, finalEnv, {
+    // Decided here: replication state, the backup-prefix fence record and, on
+    // a completed reconverge, the proven identifier. The rest stays as on disk.
+    owns: [
+      'replication',
+      'degraded',
+      'ha.backupFence',
+      ...(ctx.reconverge && reconvergeComplete ? ['ha.systemIdentifier'] : []),
+    ],
+  });
   registerProject(projectName, process.cwd());
 
   p.log.success('');

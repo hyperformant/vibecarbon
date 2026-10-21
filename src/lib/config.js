@@ -5,6 +5,7 @@
 import {
   closeSync,
   existsSync,
+  fchmodSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -18,6 +19,29 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parseDotenv } from './dotenv.js';
+
+/**
+ * The project config's file name. Only this module builds its path, and only
+ * updateProjectConfig writes it (census: tests/unit/config/no-stale-save-census.test.ts).
+ */
+export const CONFIG_FILE = '.vibecarbon.json';
+
+/** Whether `cwd` has a project config file. */
+export function projectConfigExists(cwd = process.cwd()) {
+  return existsSync(join(cwd, CONFIG_FILE));
+}
+
+/**
+ * The project config file as written (no synthesized fields), or null when
+ * there is none.
+ *
+ * @param {string} [cwd]
+ * @returns {object|null}
+ */
+export function readProjectConfigFile(cwd = process.cwd()) {
+  const configPath = join(cwd, CONFIG_FILE);
+  return existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf-8')) : null;
+}
 
 /**
  * Sanitize a project name to be a valid hostname
@@ -64,7 +88,7 @@ function sanitizeHostname(name) {
  */
 export function loadProjectConfig(cwd = process.cwd()) {
   // Try to load .vibecarbon.json
-  const configPath = join(cwd, '.vibecarbon.json');
+  const configPath = join(cwd, CONFIG_FILE);
   if (existsSync(configPath)) {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
 
@@ -135,6 +159,8 @@ const CONFIG_LOCK_TIMEOUT_MS = 30_000;
 /** A lock file with no readable pid yet is trusted for this long (its writer is mid-create). */
 const UNREADABLE_LOCK_GRACE_MS = 5_000;
 const CONFIG_LOCK_POLL_MS = 25;
+/** A wait this long gets one stderr line, so a queued write never reads as a hang. */
+const CONFIG_LOCK_NOTICE_MS = 1_000;
 
 /** Lock paths this process holds right now: a nested call would wait on itself. */
 const heldConfigLocks = new Set();
@@ -237,7 +263,9 @@ function acquireConfigLock(lockPath, timeoutMs) {
         'make the change inside the outer mutator',
     );
   }
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  let noticed = false;
   for (;;) {
     if (!createLockFile(lockPath)) {
       const holder = inspectLock(lockPath);
@@ -251,6 +279,13 @@ function acquireConfigLock(lockPath, timeoutMs) {
           `${lockPath} is held by pid ${holder.pid ?? 'unknown'} (another vibecarbon command ` +
             `writing the project config); waited ${Math.round(timeoutMs / 1000)}s. ` +
             'If no vibecarbon command is running, delete the lock file and rerun.',
+        );
+      }
+      if (!noticed && Date.now() - startedAt >= CONFIG_LOCK_NOTICE_MS) {
+        noticed = true;
+        process.stderr.write(
+          `waiting for ${lockPath}, held by pid ${holder.pid ?? 'unknown'} ` +
+            `(another vibecarbon command is writing the project config)\n`,
         );
       }
       sleepSync(CONFIG_LOCK_POLL_MS);
@@ -272,16 +307,20 @@ function acquireConfigLock(lockPath, timeoutMs) {
 /**
  * Write the config atomically: `.vibecarbon.json.tmp` in the same directory,
  * fsync, rename over the file, fsync the directory. A crash at any point
- * leaves either the old file or the new one, never a truncated one.
+ * leaves either the old file or the new one, never a truncated one. The file
+ * keeps its permission bits (set with fchmod, so the umask cannot narrow
+ * them). A symlinked .vibecarbon.json is replaced by a regular file holding
+ * the new config; the link's target is left as it was.
  * Internal: every write goes through updateProjectConfig.
  */
 function saveProjectConfig(config, cwd) {
-  const configPath = join(cwd, '.vibecarbon.json');
+  const configPath = join(cwd, CONFIG_FILE);
   const tmpPath = `${configPath}.tmp`;
   // Keep the file's mode: the rename replaces the inode.
   const mode = existsSync(configPath) ? statSync(configPath).mode & 0o777 : 0o644;
   const fd = openSync(tmpPath, 'w', mode);
   try {
+    fchmodSync(fd, mode);
     writeSync(fd, `${JSON.stringify(config, null, 2)}\n`);
     fsyncSync(fd);
   } finally {
@@ -329,7 +368,7 @@ export function updateProjectConfig(
   cwd = process.cwd(),
   { lockTimeoutMs = CONFIG_LOCK_TIMEOUT_MS } = {},
 ) {
-  const configPath = join(cwd, '.vibecarbon.json');
+  const configPath = join(cwd, CONFIG_FILE);
   const release = acquireConfigLock(`${configPath}.lock`, lockTimeoutMs);
   try {
     let current = {};
@@ -498,7 +537,7 @@ export function hasDockerCompose(cwd = process.cwd()) {
 export function findProjectRoot(startDir = process.cwd()) {
   let dir = resolve(startDir);
   for (;;) {
-    if (existsSync(join(dir, '.vibecarbon.json')) && hasDockerCompose(dir)) return dir;
+    if (existsSync(join(dir, CONFIG_FILE)) && hasDockerCompose(dir)) return dir;
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;

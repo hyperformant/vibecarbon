@@ -55,6 +55,7 @@ import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compo
 import { workingTreeDirty } from './delta.js';
 import { requireDnsSetup } from './dns-result.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
+import { preserveSafetyFields } from './env-safety-fields.js';
 import { assertNoFailoverInFlight, haSeedRecord, readReplicaState } from './failover-guard.js';
 import {
   createAcmeIssuanceWatchdog,
@@ -580,6 +581,22 @@ export function resolveKubeconfigPath(environment, envConfig) {
 }
 
 /**
+ * The env safety fields the deploy's final write decides (env-safety-fields.js);
+ * every other one keeps its value on disk. An HA deploy sets its replication
+ * state and the standby's proven identifier (or leaves none when it could not
+ * prove streaming); every deploy records its backup lineage, which names or
+ * clears the unrestored prior one.
+ *
+ * @param {boolean} isHADeploy
+ * @returns {string[]}
+ */
+export function finalSaveSafetyOwns(isHADeploy) {
+  return isHADeploy
+    ? ['replication', 'degraded', 'ha.systemIdentifier', 'backup.unrestoredPrior']
+    : ['backup.unrestoredPrior'];
+}
+
+/**
  * The k8s-ha half of "the reconverge is complete": a deploy that stamps
  * deployedAt (no retired fence kept) removes lastFailover and its override
  * from the env it is about to save. Mutates and returns `env`.
@@ -928,7 +945,7 @@ export async function executeDeployment(args, gatheredConfig) {
         lastAttempt: new Date().toISOString(),
       };
       onDisk.environments = onDisk.environments ?? {};
-      onDisk.environments[environment] = skeletonEnv;
+      onDisk.environments[environment] = preserveSafetyFields(existingEnv, skeletonEnv);
       if (retiredAppKey) {
         onDisk.retiredAppKeys = [...new Set([...(onDisk.retiredAppKeys ?? []), retiredAppKey])];
       }
@@ -2340,185 +2357,191 @@ export async function executeDeployment(args, gatheredConfig) {
   // on restore re-deploy.
   updateProjectConfig((persistedConfig) => {
     const persistedEnvConfig = persistedConfig.environments?.[environment] || envConfig;
+    const nextEnv = {
+      ...persistedEnvConfig,
+      status: 'deployed',
+      deployMode,
+      // Persist the region each side ACTUALLY deployed to (from the fan-out's
+      // per-side result), not the options-level `region`/`secondaryRegion`.
+      // After a failover swap, a redeploy passing the ORIGINAL flags deploys
+      // correctly (the fan-out follows haStacks), but persisting the flags
+      // un-swapped would feed later converges (scale/failover/deploy) the
+      // wrong Pulumi `location` for a stack — planning a full node+volume
+      // replacement of the serving cluster. Top-level region must equal
+      // ha.primary.region (status/scale read both). Non-HA/compose keep
+      // today's value (deployResult.primary is undefined there).
+      region: deployResult?.primary?.region ?? region,
+      ...(isHADeploy && {
+        secondaryRegion: deployResult?.standby?.region ?? secondaryRegion,
+        // Finding #1: persist DR posture. A default (gated) HA deploy that
+        // reaches this point is streaming; only `-allow-degraded` finalizes a
+        // warm/degraded standby, which the inner deploy flags on deployResult.
+        replication: deployResult?.degraded ? 'degraded' : 'streaming',
+        degraded: !!deployResult?.degraded,
+        // Persist per-cluster floatingIp + dbIp under ha.primary /
+        // ha.standby so failover.identifyServers takes the structured
+        // path that surfaces floatingIp. Without these, identifyServers
+        // falls through to the flat `servers[]` lookup which has only
+        // `ip` — failover then targets the standby's master IP for the
+        // DNS A record instead of the floating IP, bypassing the
+        // FIP-based design.
+        ha: {
+          enabled: true,
+          failoverRegion: secondaryRegion,
+          // The backup-prefix fence write's record (backup-fence.js), saved
+          // mid-deploy by the tier: this save rebuilds `ha`, so carry it.
+          ...(persistedEnvConfig.ha?.backupFence && {
+            backupFence: persistedEnvConfig.ha.backupFence,
+          }),
+          // The seeded standby's system identifier, set only when this deploy
+          // verified streaming. failover's replica proof (R1) compares the
+          // standby against it; a deploy that could not prove streaming
+          // leaves it unset, so an unplanned failover refuses until one does.
+          ...haSeedRecord(deployResult),
+          ...(deployResult.primary && {
+            primary: {
+              masterIp: deployResult.primary.masterIp,
+              floatingIp: deployResult.primary.floatingIp,
+              dbIp: deployResult.primary.dbIp,
+              // The database node's PRIVATE IP — the local WireGuard-relay
+              // endpoint the failover/restore re-seed dials (deterministic
+              // 10.0.1.2 in the IaC program; persisted so identifyServers
+              // can surface it without hardcoding).
+              dbPrivateIp: deployResult.primary.dbPrivateIp,
+              // The region + server types this side ACTUALLY deployed to,
+              // from the fan-out result (fall back to the options value only
+              // if absent). A failover/scale converge reads these back for the
+              // stack's Pulumi `location` and current server types, so they
+              // must reflect the deployed reality, not the (possibly swapped)
+              // options-level flags or the shared primary types.
+              region: deployResult.primary.region ?? region,
+              masterServerType: deployResult.primary.masterServerType,
+              dbServerType: deployResult.primary.dbServerType,
+              // Task 6/7: cluster identity (Pulumi stack name). A redeploy
+              // reads THIS back as `envConfig.ha.primary.stack` (see the
+              // haStacks derivation above, ~line 702) so a post-failover
+              // redeploy follows the role↔stack mapping instead of
+              // re-birthing the `${environment}-primary` default.
+              stack: deployResult.primary.stack,
+            },
+            standby: {
+              masterIp: deployResult.standby.masterIp,
+              floatingIp: deployResult.standby.floatingIp,
+              dbIp: deployResult.standby.dbIp,
+              dbPrivateIp: deployResult.standby.dbPrivateIp,
+              region: deployResult.standby.region ?? secondaryRegion,
+              // The standby's region-resolved types (may differ from the
+              // primary's) — provisionStandbyCapacity pins them so a failover
+              // converge never resizes the standby's master/db node.
+              masterServerType: deployResult.standby.masterServerType,
+              dbServerType: deployResult.standby.dbServerType,
+              stack: deployResult.standby.stack,
+            },
+            // Pilot-light failover config: what `vibecarbon failover` will
+            // provision (worker count/type) and bring up (app tier), derived
+            // from this deploy's own inputs — never hardcoded in failover.
+            standbyWorkerSpec: {
+              count: minWorkers ?? 1,
+              serverType: deployResult.standby.workerServerType,
+            },
+            scaleUpList: deriveScaleUpList({
+              appManifestText: readFileSync(
+                join(process.cwd(), 'k8s/base/app/deployment.yaml'),
+                'utf-8',
+              ),
+              // The pilot standby zeroes every declared add-on; failover
+              // brings back the ones in the app namespace.
+              addons: failoverAddonManifests(process.cwd()),
+            }),
+          }),
+        },
+      }),
+      domain,
+      dnsProvider,
+      // Persist the nested `dns: { provider, zoneId }` shape too.
+      // failover.detectScenario reads `envConfig.dns?.provider` (NOT the
+      // flat `dnsProvider`) — without this, failover falls through to
+      // ha_manual, prints "Update DNS yourself" instead of calling the
+      // provider API, and the public health probe in verify-failover never
+      // points at the standby. Registry-driven: ANY automated backend with
+      // a zone persists; the pre-convergence nested ternary returned null
+      // for unknown providers, which silently disabled failover's flip AND
+      // destroy's DNS cleanup (hazard H10 in the 2026-08-08 seam audit).
+      // Mirror of the shape compose-ha persists in deploy/compose/ha.js.
+      dns:
+        hasAutomatedDns(dnsProvider) && dnsZoneId
+          ? { provider: dnsProvider, zoneId: dnsZoneId }
+          : null,
+      // Prefer the inner deploy's richer `servers` (with `id`) when it
+      // already wrote one. Compose-HA persists
+      //   [{ name, id, ip, region, serverType, role }, ...]
+      // The outer `servers` we'd build here drops `id` (deployResult
+      // for compose-HA only carries primaryIp/standbyIp). Falling back
+      // to the inner save preserves the IDs that destroyComposeHA needs.
+      servers:
+        Array.isArray(persistedEnvConfig.servers) &&
+        persistedEnvConfig.servers.length > 0 &&
+        persistedEnvConfig.servers.some((s) => s.id != null)
+          ? persistedEnvConfig.servers
+          : servers,
+      // Persist k8s sizing inputs so post-deploy `vibecarbon scale` can
+      // rebuild the same Pulumi inputs without falling back to defaults.
+      // Without `minWorkers/maxWorkers` here, scale.js would read
+      // `envConfig.minWorkers/maxWorkers` as `undefined` and fall back to
+      // built-in defaults — which on a clean type-bump made Pulumi plan a
+      // delete of `worker-1`, replacing master+database along the way
+      // (etcd loss). Master/database/worker types are also persisted so
+      // the per-role split survives across deploy → scale.
+      ...(deployMode === 'kubernetes' && {
+        masterServerType,
+        dbServerType,
+        workerServerType,
+        // Single (non-HA) k8s's floating/reserved ingress IP (M3 Task 9f).
+        // `status.js` has read `envConfig.floatingIp` for a long time, but
+        // nothing ever wrote it — deployResult.floatingIp comes straight
+        // back from deployK3s/Pulumi outputs (same key both hetzner-k8s.js
+        // and digitalocean-k8s.js export) and was only ever used in-memory
+        // for the DNS warm-up above. Without persisting it, `destroy`
+        // can't attribute the k8s DNS A record to this env (it points at
+        // the floating IP, not any server's own IP) and, on DO, can't
+        // backstop-delete the Reserved IP by address either — both leaked
+        // silently. HA persists its own per-cluster floatingIp under
+        // `ha.primary/standby` above instead; this key is absent there
+        // since `deployResult.floatingIp` is undefined for an HA result
+        // shape.
+        ...(deployResult.floatingIp && { floatingIp: deployResult.floatingIp }),
+        minWorkers,
+        maxWorkers,
+      }),
+      deployedAt: deployResult.reconvergeIncomplete
+        ? persistedEnvConfig.deployedAt
+        : new Date().toISOString(),
+      deployedCommit,
+      ...(deployedDirty !== null && { deployedDirty }),
+      // bucketCreatedAt only on a provider with a settle window (status'
+      // "storage settling" row, the e2e upload gate); the fence marks the
+      // sync above wrote to disk; the app key's record (R9, no secret) so
+      // destroy can revoke it.
+      s3: envS3Record(s3Config, {
+        unfencedBuckets: persistedEnvConfig.s3?.unfencedBuckets,
+        ...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {
+          bucketCreatedAt: appBucketFinal.bucketCreatedAt,
+        }),
+      }),
+      ...(backupS3Persist && { backupS3: backupS3Persist }),
+      backup: { ...backupConfig, ...backupLineage },
+      services,
+    };
     const finalConfig = {
       ...persistedConfig,
       environments: {
         ...persistedConfig.environments,
-        [environment]: {
-          ...persistedEnvConfig,
-          status: 'deployed',
-          deployMode,
-          // Persist the region each side ACTUALLY deployed to (from the fan-out's
-          // per-side result), not the options-level `region`/`secondaryRegion`.
-          // After a failover swap, a redeploy passing the ORIGINAL flags deploys
-          // correctly (the fan-out follows haStacks), but persisting the flags
-          // un-swapped would feed later converges (scale/failover/deploy) the
-          // wrong Pulumi `location` for a stack — planning a full node+volume
-          // replacement of the serving cluster. Top-level region must equal
-          // ha.primary.region (status/scale read both). Non-HA/compose keep
-          // today's value (deployResult.primary is undefined there).
-          region: deployResult?.primary?.region ?? region,
-          ...(isHADeploy && {
-            secondaryRegion: deployResult?.standby?.region ?? secondaryRegion,
-            // Finding #1: persist DR posture. A default (gated) HA deploy that
-            // reaches this point is streaming; only `-allow-degraded` finalizes a
-            // warm/degraded standby, which the inner deploy flags on deployResult.
-            replication: deployResult?.degraded ? 'degraded' : 'streaming',
-            degraded: !!deployResult?.degraded,
-            // Persist per-cluster floatingIp + dbIp under ha.primary /
-            // ha.standby so failover.identifyServers takes the structured
-            // path that surfaces floatingIp. Without these, identifyServers
-            // falls through to the flat `servers[]` lookup which has only
-            // `ip` — failover then targets the standby's master IP for the
-            // DNS A record instead of the floating IP, bypassing the
-            // FIP-based design.
-            ha: {
-              enabled: true,
-              failoverRegion: secondaryRegion,
-              // The backup-prefix fence write's record (backup-fence.js), saved
-              // mid-deploy by the tier: this save rebuilds `ha`, so carry it.
-              ...(persistedEnvConfig.ha?.backupFence && {
-                backupFence: persistedEnvConfig.ha.backupFence,
-              }),
-              // The seeded standby's system identifier, set only when this deploy
-              // verified streaming. failover's replica proof (R1) compares the
-              // standby against it; a deploy that could not prove streaming
-              // leaves it unset, so an unplanned failover refuses until one does.
-              ...haSeedRecord(deployResult),
-              ...(deployResult.primary && {
-                primary: {
-                  masterIp: deployResult.primary.masterIp,
-                  floatingIp: deployResult.primary.floatingIp,
-                  dbIp: deployResult.primary.dbIp,
-                  // The database node's PRIVATE IP — the local WireGuard-relay
-                  // endpoint the failover/restore re-seed dials (deterministic
-                  // 10.0.1.2 in the IaC program; persisted so identifyServers
-                  // can surface it without hardcoding).
-                  dbPrivateIp: deployResult.primary.dbPrivateIp,
-                  // The region + server types this side ACTUALLY deployed to,
-                  // from the fan-out result (fall back to the options value only
-                  // if absent). A failover/scale converge reads these back for the
-                  // stack's Pulumi `location` and current server types, so they
-                  // must reflect the deployed reality, not the (possibly swapped)
-                  // options-level flags or the shared primary types.
-                  region: deployResult.primary.region ?? region,
-                  masterServerType: deployResult.primary.masterServerType,
-                  dbServerType: deployResult.primary.dbServerType,
-                  // Task 6/7: cluster identity (Pulumi stack name). A redeploy
-                  // reads THIS back as `envConfig.ha.primary.stack` (see the
-                  // haStacks derivation above, ~line 702) so a post-failover
-                  // redeploy follows the role↔stack mapping instead of
-                  // re-birthing the `${environment}-primary` default.
-                  stack: deployResult.primary.stack,
-                },
-                standby: {
-                  masterIp: deployResult.standby.masterIp,
-                  floatingIp: deployResult.standby.floatingIp,
-                  dbIp: deployResult.standby.dbIp,
-                  dbPrivateIp: deployResult.standby.dbPrivateIp,
-                  region: deployResult.standby.region ?? secondaryRegion,
-                  // The standby's region-resolved types (may differ from the
-                  // primary's) — provisionStandbyCapacity pins them so a failover
-                  // converge never resizes the standby's master/db node.
-                  masterServerType: deployResult.standby.masterServerType,
-                  dbServerType: deployResult.standby.dbServerType,
-                  stack: deployResult.standby.stack,
-                },
-                // Pilot-light failover config: what `vibecarbon failover` will
-                // provision (worker count/type) and bring up (app tier), derived
-                // from this deploy's own inputs — never hardcoded in failover.
-                standbyWorkerSpec: {
-                  count: minWorkers ?? 1,
-                  serverType: deployResult.standby.workerServerType,
-                },
-                scaleUpList: deriveScaleUpList({
-                  appManifestText: readFileSync(
-                    join(process.cwd(), 'k8s/base/app/deployment.yaml'),
-                    'utf-8',
-                  ),
-                  // The pilot standby zeroes every declared add-on; failover
-                  // brings back the ones in the app namespace.
-                  addons: failoverAddonManifests(process.cwd()),
-                }),
-              }),
-            },
-          }),
-          domain,
-          dnsProvider,
-          // Persist the nested `dns: { provider, zoneId }` shape too.
-          // failover.detectScenario reads `envConfig.dns?.provider` (NOT the
-          // flat `dnsProvider`) — without this, failover falls through to
-          // ha_manual, prints "Update DNS yourself" instead of calling the
-          // provider API, and the public health probe in verify-failover never
-          // points at the standby. Registry-driven: ANY automated backend with
-          // a zone persists; the pre-convergence nested ternary returned null
-          // for unknown providers, which silently disabled failover's flip AND
-          // destroy's DNS cleanup (hazard H10 in the 2026-08-08 seam audit).
-          // Mirror of the shape compose-ha persists in deploy/compose/ha.js.
-          dns:
-            hasAutomatedDns(dnsProvider) && dnsZoneId
-              ? { provider: dnsProvider, zoneId: dnsZoneId }
-              : null,
-          // Prefer the inner deploy's richer `servers` (with `id`) when it
-          // already wrote one. Compose-HA persists
-          //   [{ name, id, ip, region, serverType, role }, ...]
-          // The outer `servers` we'd build here drops `id` (deployResult
-          // for compose-HA only carries primaryIp/standbyIp). Falling back
-          // to the inner save preserves the IDs that destroyComposeHA needs.
-          servers:
-            Array.isArray(persistedEnvConfig.servers) &&
-            persistedEnvConfig.servers.length > 0 &&
-            persistedEnvConfig.servers.some((s) => s.id != null)
-              ? persistedEnvConfig.servers
-              : servers,
-          // Persist k8s sizing inputs so post-deploy `vibecarbon scale` can
-          // rebuild the same Pulumi inputs without falling back to defaults.
-          // Without `minWorkers/maxWorkers` here, scale.js would read
-          // `envConfig.minWorkers/maxWorkers` as `undefined` and fall back to
-          // built-in defaults — which on a clean type-bump made Pulumi plan a
-          // delete of `worker-1`, replacing master+database along the way
-          // (etcd loss). Master/database/worker types are also persisted so
-          // the per-role split survives across deploy → scale.
-          ...(deployMode === 'kubernetes' && {
-            masterServerType,
-            dbServerType,
-            workerServerType,
-            // Single (non-HA) k8s's floating/reserved ingress IP (M3 Task 9f).
-            // `status.js` has read `envConfig.floatingIp` for a long time, but
-            // nothing ever wrote it — deployResult.floatingIp comes straight
-            // back from deployK3s/Pulumi outputs (same key both hetzner-k8s.js
-            // and digitalocean-k8s.js export) and was only ever used in-memory
-            // for the DNS warm-up above. Without persisting it, `destroy`
-            // can't attribute the k8s DNS A record to this env (it points at
-            // the floating IP, not any server's own IP) and, on DO, can't
-            // backstop-delete the Reserved IP by address either — both leaked
-            // silently. HA persists its own per-cluster floatingIp under
-            // `ha.primary/standby` above instead; this key is absent there
-            // since `deployResult.floatingIp` is undefined for an HA result
-            // shape.
-            ...(deployResult.floatingIp && { floatingIp: deployResult.floatingIp }),
-            minWorkers,
-            maxWorkers,
-          }),
-          deployedAt: deployResult.reconvergeIncomplete
-            ? persistedEnvConfig.deployedAt
-            : new Date().toISOString(),
-          deployedCommit,
-          ...(deployedDirty !== null && { deployedDirty }),
-          // bucketCreatedAt only on a provider with a settle window (status'
-          // "storage settling" row, the e2e upload gate); the fence marks the
-          // sync above wrote to disk; the app key's record (R9, no secret) so
-          // destroy can revoke it.
-          s3: envS3Record(s3Config, {
-            unfencedBuckets: persistedEnvConfig.s3?.unfencedBuckets,
-            ...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {
-              bucketCreatedAt: appBucketFinal.bucketCreatedAt,
-            }),
-          }),
-          ...(backupS3Persist && { backupS3: backupS3Persist }),
-          backup: { ...backupConfig, ...backupLineage },
-          services,
-        },
+        // The HA `ha` rebuild above keeps an allowlist: the safety records
+        // (a stranded write fence, the journals, a pending state sync) come
+        // from disk unless this deploy decided them.
+        [environment]: preserveSafetyFields(persistedConfig.environments?.[environment], nextEnv, {
+          owns: finalSaveSafetyOwns(isHADeploy),
+        }),
       },
     };
     // The environment is live again: drop the identity `destroy` recorded for

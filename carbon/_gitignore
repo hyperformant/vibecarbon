@@ -55,6 +55,14 @@ volumes/db/data
 *.upgrade-backup
 *.upgrade-new
 
+# The CLI's project-config write (updateProjectConfig): a lock held for the
+# few milliseconds of a write, and the temp file it renames over
+# .vibecarbon.json. Only a killed command leaves one behind; the next write
+# reuses or removes it.
+.vibecarbon.json.lock
+.vibecarbon.json.lock.break
+.vibecarbon.json.tmp
+
 # Vibecarbon infra state — deploy keys, kubeconfig, terraform state, certs.
 # Never commit any of these; several contain live credentials.
 .vibecarbon/

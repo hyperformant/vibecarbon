@@ -8,7 +8,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { writeSecretFile } from './command.js';
-import { updateProjectConfig } from './config.js';
+import { projectConfigExists, readProjectConfigFile, updateProjectConfig } from './config.js';
 import { operatorSecretKeys } from './config-registry.js';
 import { formatDotenvLine, parseDotenv, readEnvFiles } from './dotenv.js';
 import { healLegacyDotenvQuoting, healLegacyDotenvText } from './dotenv-heal.js';
@@ -61,7 +61,7 @@ export function detectPackageManager(cwd = process.cwd()) {
  * @returns {boolean}
  */
 export function manifestExists(cwd = process.cwd()) {
-  return existsSync(join(cwd, '.vibecarbon.json'));
+  return projectConfigExists(cwd);
 }
 
 /**
@@ -72,11 +72,7 @@ export function manifestExists(cwd = process.cwd()) {
  * @returns {object} - Manifest object with version and services
  */
 export function loadManifest(cwd = process.cwd()) {
-  const manifestPath = join(cwd, '.vibecarbon.json');
-  if (existsSync(manifestPath)) {
-    return JSON.parse(readFileSync(manifestPath, 'utf-8'));
-  }
-  return { version: '1', services: {} };
+  return readProjectConfigFile(cwd) ?? { version: '1', services: {} };
 }
 
 /**

@@ -1,5 +1,5 @@
 // biome-ignore lint/suspicious/noExplicitAny: tests read deep, untyped JSON out of the writes
-type Config = Record<string, any>;
+export type Config = Record<string, any>;
 
 /**
  * An in-memory `.vibecarbon.json` behind a stand-in for `updateProjectConfig`

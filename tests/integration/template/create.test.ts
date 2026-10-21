@@ -500,6 +500,38 @@ describe('create-vibecarbon E2E', () => {
         }
       }
     });
+
+    it("gitignores the project-config write's lock and temp files", () => {
+      // updateProjectConfig (src/lib/config.js) holds .vibecarbon.json.lock
+      // (and .lock.break while removing a dead holder's lock) and renames
+      // .vibecarbon.json.tmp over the config. A killed command can leave one;
+      // `git add -A` must never commit it.
+      const relPaths = [
+        '.vibecarbon.json.lock',
+        '.vibecarbon.json.lock.break',
+        '.vibecarbon.json.tmp',
+      ];
+      for (const relPath of relPaths) writeFileSync(join(projectDir(), relPath), '1\n');
+      try {
+        for (const relPath of relPaths) {
+          const result = spawnSync('git', ['check-ignore', relPath], {
+            cwd: projectDir(),
+            encoding: 'utf-8',
+            env: gitScrubbedEnv(),
+          });
+          expect(result.status, `expected ${relPath} to be gitignored`).toBe(0);
+        }
+        // The config itself stays tracked.
+        const config = spawnSync('git', ['check-ignore', '.vibecarbon.json'], {
+          cwd: projectDir(),
+          encoding: 'utf-8',
+          env: gitScrubbedEnv(),
+        });
+        expect(config.status).toBe(1);
+      } finally {
+        for (const relPath of relPaths) rmSync(join(projectDir(), relPath), { force: true });
+      }
+    });
   });
 
   describe('initial commit succeeds with no git identity configured', () => {

@@ -61,6 +61,7 @@ import {
   syncScaledServerState,
 } from './lib/deploy/compose/server-state-sync.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
+import { preserveSafetyFields } from './lib/deploy/env-safety-fields.js';
 import { assertNoFailoverInFlight } from './lib/deploy/failover-guard.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import { planScale } from './lib/deploy/plan/scale-plan.js';
@@ -1800,10 +1801,12 @@ function saveScaledServers(ctx, extra = {}) {
   updateProjectConfig((fresh) => {
     const freshEnv = fresh.environments?.[environment] ?? envConfig;
     const updatedServers = (freshEnv.servers ?? servers).map((sv) => byOldId.get(sv.id) ?? sv);
-    fresh.environments = {
-      ...fresh.environments,
-      [environment]: { ...freshEnv, ...extra, servers: updatedServers },
-    };
+    fresh.environments = fresh.environments ?? {};
+    fresh.environments[environment] = preserveSafetyFields(fresh.environments[environment], {
+      ...freshEnv,
+      ...extra,
+      servers: updatedServers,
+    });
   });
 }
 
@@ -3022,10 +3025,11 @@ async function scaleUpdateK8sConfig(ctx) {
         }),
     };
 
-    config.environments = {
-      ...config.environments,
-      [environment]: { ...envConfig, ...updatedEnvFields },
-    };
+    config.environments = config.environments ?? {};
+    config.environments[environment] = preserveSafetyFields(config.environments[environment], {
+      ...envConfig,
+      ...updatedEnvFields,
+    });
   });
 }
 

@@ -21,7 +21,15 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The real config writers (journal, proof, fence marker) run in these tests
+// against no project: point them at an empty dir, never the repo root, where
+// they would take the real config lock.
+const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+beforeEach(() => {
+  vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
+});
 
 // The first base backup on the new timeline has its own tests
 // (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
