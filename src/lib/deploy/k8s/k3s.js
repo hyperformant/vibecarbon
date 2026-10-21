@@ -2784,8 +2784,7 @@ export function renderK8sBase(dir, values) {
   const hasRegistry = existsSync(join(dir, REGISTRY_MANIFEST));
   if (hasRegistry && !isIPv4(values.MASTER_PRIVATE_IP ?? '')) {
     throw new Error(
-      `renderK8sBase: MASTER_PRIVATE_IP is not an IPv4 address (${JSON.stringify(values.MASTER_PRIVATE_IP ?? null)}); ` +
-        "the registry hostPort binds the master's private IP, which the IaC program outputs",
+      `renderK8sBase: MASTER_PRIVATE_IP is not an IPv4 address (got ${JSON.stringify(values.MASTER_PRIVATE_IP ?? null)}), so the registry hostPort has no address to bind`,
     );
   }
   const rendered = renderK8sPlaceholders(dir, values, 'base');

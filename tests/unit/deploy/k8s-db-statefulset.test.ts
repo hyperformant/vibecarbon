@@ -657,6 +657,10 @@ describe('Flux never applies the unrendered db StatefulSet', () => {
   it('overlays/production drops StatefulSet/db and keeps Service/db and the app', () => {
     const docs = kustomize('carbon/k8s/overlays/production');
     expect(docs.some((d) => d.kind === 'StatefulSet')).toBe(false);
+    // The registry Deployment (hostIP {{MASTER_PRIVATE_IP}}) is CLI-owned too.
+    expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'local-registry')).toBe(
+      false,
+    );
     expect(docs.some((d) => d.kind === 'Service' && d.metadata.name === 'db')).toBe(true);
     expect(docs.some((d) => d.kind === 'Deployment' && d.metadata.name === 'app')).toBe(true);
   }, 60_000);
