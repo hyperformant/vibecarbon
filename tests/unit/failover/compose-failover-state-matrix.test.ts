@@ -641,7 +641,7 @@ describe('failoverComposeHA state matrix', () => {
     expect(captured.fencedIp).toBe(PRIMARY_IP);
     expect(order).not.toContain('swap');
     expect(thrown?.message).toMatch(/kept fenced/);
-    expect(thrown?.message).toMatch(/rerun vibecarbon failover prod to finish/);
+    expect(thrown?.message).toMatch(/rerun `vibecarbon failover prod` to finish/);
     // Nothing past the promote ran on the promoted node.
     expect(sshCalls.some((c) => c.command.includes('docker restart'))).toBe(false);
   });

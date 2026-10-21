@@ -507,7 +507,7 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
       Object.assign(h.state, state);
       const { provider, ctx } = makeCtx();
       await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
-        /where the records point now is unknown: .*The old server 1\.1\.1\.1 stays write-fenced and the new server 9\.9\.9\.9 is kept; rerun vibecarbon scale prod to finish it/,
+        /where the records point now is unknown: .*The old server 1\.1\.1\.1 stays write-fenced and the new server 9\.9\.9\.9 is kept; rerun `vibecarbon scale prod` to finish it/,
       );
       expect(h.events).not.toContain('unfence');
       expect(h.events).not.toContain('journal:clear');
@@ -534,7 +534,7 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
-      /the DNS update failed part way \(dns api 500\); still to point at 9\.9\.9\.9: \*\.example\.com \(now 1\.1\.1\.1\)\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced\. Still to run: the DNS flip, the old server's demote, the service recreate, the first base backup on the new timeline, the backup cron, the old server's destroy; rerun vibecarbon scale prod to finish it/,
+      /the DNS update failed part way \(dns api 500\); still to point at 9\.9\.9\.9: \*\.example\.com \(now 1\.1\.1\.1\)\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced\. Still to run: the DNS flip, the old server's demote, the service recreate, the first base backup on the new timeline, the backup cron, the old server's destroy; rerun `vibecarbon scale prod` to finish it/,
     );
     expect(h.events).not.toContain('unfence');
     expect(provider.deleteServer).not.toHaveBeenCalled();
@@ -559,7 +559,7 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     reset('push');
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
-      /database to the new server 9\.9\.9\.9, then failed: push failed\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced\. Still to run: the first base backup on the new timeline, the backup cron, the old server's destroy; rerun vibecarbon scale prod to finish it/,
+      /database to the new server 9\.9\.9\.9, then failed: push failed\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced\. Still to run: the first base backup on the new timeline, the backup cron, the old server's destroy; rerun `vibecarbon scale prod` to finish it/,
     );
     expect(h.events).not.toContain('unfence');
     expect(h.events).not.toContain('rearm:1.1.1.1');
@@ -795,7 +795,7 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
     h.state.dnsUnreadable = true;
     const { provider, ctx } = resumeCtx();
     await expect(resumeComposeCutover(ctx)).rejects.toThrow(
-      /records point is unknown .*rerun vibecarbon scale prod to finish it/,
+      /records point is unknown .*rerun `vibecarbon scale prod` to finish it/,
     );
     expect(h.events).not.toContain('unfence');
     expect(provider.deleteServer).not.toHaveBeenCalled();
@@ -821,7 +821,7 @@ describe('scaleFinishComposeOutro: a stack that still names a replaced server', 
       });
       expect(process.exitCode).toBe(1);
       expect(outros.at(-1)).toMatch(
-        /Pulumi state still names the old server.*run vibecarbon deploy prod first, which points Pulumi state at the new server/,
+        /Pulumi state still names the old server.*run `vibecarbon deploy prod` first, which points Pulumi state at the new server/,
       );
     } finally {
       process.exitCode = before;

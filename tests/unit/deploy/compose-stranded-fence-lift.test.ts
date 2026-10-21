@@ -134,7 +134,7 @@ describe('a scale killed after its cutover journal (the DNS call may have landed
     expect(() =>
       assertNoScaleCutoverInFlight({ environment: 'prod', envConfig: env, action: 'deploy' }),
     ).toThrow(
-      'Refusing to deploy "prod": a compose scale stopped mid-cutover (old server 1.1.1.1, new server 9.9.9.9); rerun vibecarbon scale prod to finish it, or roll it back if DNS never moved',
+      'Refusing to deploy "prod": a compose scale stopped mid-cutover (old server 1.1.1.1, new server 9.9.9.9); rerun `vibecarbon scale prod` to finish it, or roll it back if DNS never moved',
     );
   });
 
@@ -162,7 +162,7 @@ describe('a scale killed after its cutover journal (the DNS call may have landed
         exec: db.exec,
         warn: () => {},
       }),
-    ).rejects.toThrow(/compose scale cutover still in flight; rerun vibecarbon scale prod/);
+    ).rejects.toThrow(/compose scale cutover still in flight; rerun `vibecarbon scale prod`/);
     expect(db.sql.some((q) => q.startsWith('ALTER SYSTEM RESET'))).toBe(false);
   });
 

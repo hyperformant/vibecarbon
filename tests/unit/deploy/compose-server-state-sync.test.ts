@@ -146,7 +146,7 @@ describe('record, sync, clear (the scale side)', () => {
     expect(h.config?.environments.prod.pendingServerState).toMatchObject([entry]);
     expect(c.serverStateProblems).toEqual([
       'Pulumi stack prod-primary still names the server scale replaced (state bucket 503); ' +
-        'run vibecarbon deploy prod first, which points Pulumi state at the new server before anything else',
+        'run `vibecarbon deploy prod` first, which points Pulumi state at the new server before anything else',
     ]);
   });
 

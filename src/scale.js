@@ -1354,7 +1354,7 @@ async function scaleServers(ctx) {
     if (!LINEAGE_RE.test(String(liveLineage ?? ''))) {
       throw new Error(
         `scale restores ${environment}'s database onto the new server from its backup lineage, and none is on record. ` +
-          `Run vibecarbon deploy ${environment} to record it, then rerun.`,
+          `Run \`vibecarbon deploy ${environment}\` to record it, then rerun.`,
       );
     }
     backupS3 = await resolveS3Config({
@@ -1970,7 +1970,7 @@ export async function run(args) {
     .map(([name]) => name);
 
   if (deployedEnvs.length === 0) {
-    p.log.error('No deployed environments found. Run vibecarbon deploy first.');
+    p.log.error('No deployed environments found. Run `vibecarbon deploy` first.');
     process.exit(1);
   }
 

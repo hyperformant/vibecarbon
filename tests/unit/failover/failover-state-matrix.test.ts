@@ -600,7 +600,7 @@ describe('failoverHA state matrix', () => {
     expect(order.filter((s) => s === 'unquiesce')).toHaveLength(0);
     expect(order).not.toContain('clearJournal');
     expect(thrown?.message).toMatch(/kept fenced/);
-    expect(thrown?.message).toMatch(/rerun vibecarbon failover e4 to finish/);
+    expect(thrown?.message).toMatch(/rerun `vibecarbon failover e4` to finish/);
     // Nothing past the promote ran on an unconfirmed promotion.
     expect(order).not.toContain('scaleUp');
     expect(order).not.toContain('dns');

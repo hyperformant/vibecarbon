@@ -148,8 +148,8 @@ export function buildDeployUpsell({ verdict, deployTier = null, projectName, pro
         'This key is bound to a different project. Each project has its own subscription.',
         ...(proj ? [proj] : []),
         '',
-        'Release it there first (vibecarbon deactivate in that project, or from',
-        `${LICENSE_URL}), then run vibecarbon activate <key> here.`,
+        'Release it there first (`vibecarbon deactivate` in that project, or from',
+        `${LICENSE_URL}), then run \`vibecarbon activate <key>\` here.`,
         TERMS_LINE,
       ];
     default: {

@@ -135,7 +135,7 @@ describe('backup create while a compose scale cutover is journaled', () => {
         },
       }),
     ).rejects.toThrow(
-      'Refusing to back up "prod": a compose scale stopped mid-cutover (old server 10.0.0.5, new server 10.0.0.9); rerun vibecarbon scale prod',
+      'Refusing to back up "prod": a compose scale stopped mid-cutover (old server 10.0.0.5, new server 10.0.0.9); rerun `vibecarbon scale prod`',
     );
     expect(backupCompose).not.toHaveBeenCalled();
     expect(h.confirm).not.toHaveBeenCalled();

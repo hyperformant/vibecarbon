@@ -137,8 +137,8 @@ export function assertFailoverClassified(kind, parsed) {
  */
 export function failoverInFlightNextStep(environment) {
   return (
-    `rerun vibecarbon failover ${environment} to finish it, or run vibecarbon failover ` +
-    `${environment} -abort to call it off and keep the old primary`
+    `rerun \`vibecarbon failover ${environment}\` to finish it, or run \`vibecarbon failover ` +
+    `${environment} -abort\` to call it off and keep the old primary`
   );
 }
 

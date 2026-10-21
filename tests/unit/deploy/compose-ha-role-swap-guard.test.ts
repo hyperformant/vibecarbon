@@ -451,7 +451,7 @@ describe('deploy path wiring', () => {
       ha: { enabled: true, failoverInFlight: { id: 'j', target: 'standby' } },
     };
     await expect(executeDeployment({}, gathered(env))).rejects.toThrow(
-      /a failover is still in flight.*run vibecarbon failover prod to finish it/,
+      /a failover is still in flight.*run `vibecarbon failover prod` to finish it/,
     );
     expect(ensureOperatorIpAccess).not.toHaveBeenCalled();
   });

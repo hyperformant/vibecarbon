@@ -101,7 +101,7 @@ describe('deploy refuses while a failover journal is set, on every HA tier', () 
           environment: 'prod',
           envConfig: { deployMode, ha: { failoverInFlight: { id: 'x', target: 'standby' } } },
         }),
-      ).toThrow(/a failover is still in flight .*run vibecarbon failover prod to finish it/);
+      ).toThrow(/a failover is still in flight .*run `vibecarbon failover prod` to finish it/);
     }
     expect(() =>
       assertNoFailoverInFlight({ environment: 'prod', envConfig: { ha: { enabled: true } } }),

@@ -76,7 +76,7 @@ const fenceSource = (marker) =>
  * @returns {string}
  */
 export function scaleCutoverNextStep(environment) {
-  return `rerun vibecarbon scale ${environment} to finish it, or roll it back if DNS never moved`;
+  return `rerun \`vibecarbon scale ${environment}\` to finish it, or roll it back if DNS never moved`;
 }
 
 /**

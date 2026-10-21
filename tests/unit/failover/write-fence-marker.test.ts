@@ -231,7 +231,7 @@ describe('assertRolePrimaryWritable (deploy, after bring-up)', () => {
   it('fenced with a journal: refuses and names vibecarbon failover', async () => {
     const { p, r } = run('on', { ha: { writeFence: MARKER, failoverInFlight: JOURNAL } });
     await expect(p).rejects.toThrow(
-      /write-fenced by a failover still in flight; rerun vibecarbon failover prod to finish it, or run vibecarbon failover prod -abort/,
+      /write-fenced by a failover still in flight; rerun `vibecarbon failover prod` to finish it, or run `vibecarbon failover prod -abort`/,
     );
     expect(r.calls).toEqual([]);
   });

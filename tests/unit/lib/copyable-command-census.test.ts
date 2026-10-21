@@ -26,9 +26,18 @@ const files = execFileSync('git', ['ls-files', 'src/*.js', 'src/**/*.js'], {
   .filter(Boolean);
 
 const commands = KNOWN_COMMANDS.filter((c: string) => /^[a-z][a-z-]*$/.test(c)).join('|');
-const ARG = String.raw`(?:-[a-z][a-z-]*|<[a-z-]+>|\$\{[^}]+\})`;
+// Plain words count as arguments: `vibecarbon deploy staging.` copies `staging.`.
+const ARGS = String.raw`(?: [a-z0-9][a-z0-9-]*| -[a-z-]+| <[a-z-]+>| \$\{[^}]+\})*`;
 const VIBECARBON_THEN_PUNCT = new RegExp(
-  String.raw`\bvibecarbon (?:${commands})(?: ${ARG})*[.,;:](?=[\s'"\x60)]|$)`,
+  String.raw`\bvibecarbon (?:${commands})${ARGS}[.,;:](?=[\s'"\x60)]|$)`,
+);
+// The same for the tools a message hands the operator. They must open like a
+// real invocation (a subcommand, or ssh with a user@host), so prose and code
+// that merely mention the tool are not flagged; arguments may carry paths,
+// hosts and key=value pairs, so only the closing . , ; is looked for.
+const TOOL_ARGS = String.raw`(?: [A-Za-z0-9_@:=/.-]*[A-Za-z0-9_/-]| -[a-z-]+| <[a-z-]+>| \$\{[^}]+\})*`;
+const TOOL_THEN_PUNCT = new RegExp(
+  String.raw`\b(?:kubectl (?:get|exec|delete|apply|logs|scale|rollout|describe|patch|-n)|docker compose (?:up|down|start|stop|restart|logs|exec|ps|rm|pull)|ssh (?:-[a-z] \S+ )*[\w.-]+@[\w.\$\{\}-]+)${TOOL_ARGS}[.,;](?=[\s'"\x60)]|$)`,
 );
 const QUOTED_THEN_PUNCT = /'[.,;:]["`]/;
 
@@ -42,6 +51,8 @@ const ALLOW = [
   /No server IP found for environment '\$\{envName\}'\./,
   /stack '\$\{environment\}-\$\{role\}'\./,
   /for env '\$\{environment\}'\./,
+  // A code comment after an expression, not a message.
+  /: \/\/ kubectl scale, never a patch/,
 ];
 
 function offenders(text: string, file: string) {
@@ -50,7 +61,11 @@ function offenders(text: string, file: string) {
     const t = line.trim();
     if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return;
     if (ALLOW.some((a) => a.test(line))) return;
-    if (VIBECARBON_THEN_PUNCT.test(line) || QUOTED_THEN_PUNCT.test(line)) {
+    if (
+      VIBECARBON_THEN_PUNCT.test(line) ||
+      TOOL_THEN_PUNCT.test(line) ||
+      QUOTED_THEN_PUNCT.test(line)
+    ) {
       out.push(`${file}:${i + 1}: ${t.slice(0, 140)}`);
     }
   });
@@ -77,12 +92,18 @@ describe('copyable commands are never followed by punctuation', () => {
       `\`then rerun vibecarbon deploy: ${env}\``,
       "'No license here. Pass the key: vibecarbon deactivate <key>.',",
       `"&& docker compose start app'.",`,
+      `\`run vibecarbon deploy ${env} first, which points it\``,
+      "'check kubectl get pods -n vibecarbon, then retry',",
+      "'run docker compose logs db.',",
+      "'ssh root@10.0.0.1; then look',",
     ]) {
       expect(offenders(bad, 'x.js'), bad).toHaveLength(1);
     }
     for (const ok of [
       "'  vibecarbon restore',",
-      `\`run vibecarbon deploy ${env} first, which points it\``,
+      `\`run vibecarbon deploy ${env}\``,
+      "'  kubectl get pods -n vibecarbon',",
+      "'(\\`ssh -i key root@1.2.3.4\\`; the db)',",
       "'a dedicated API token per vibecarbon project.',",
     ]) {
       expect(offenders(ok, 'x.js'), ok).toEqual([]);

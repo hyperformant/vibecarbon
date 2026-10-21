@@ -161,7 +161,7 @@ export function markPendingServerOldDeleted(environment, stack) {
 
 /** The one recovery line for a stack that still names a replaced server. */
 export function serverStateRecovery(environment) {
-  return `run vibecarbon deploy ${environment} first, which points Pulumi state at the new server before anything else`;
+  return `run \`vibecarbon deploy ${environment}\` first, which points Pulumi state at the new server before anything else`;
 }
 
 /**

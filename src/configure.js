@@ -1653,7 +1653,7 @@ export async function runConfigureCicd(envName) {
     const targetKubeconfig = join(cwd, '.vibecarbon', `kubeconfig-${target.envName}`);
     if (!existsSync(targetKubeconfig)) {
       p.log.warn(
-        `Kubeconfig for ${target.envName} not found at ${targetKubeconfig}, skipping. Re-deploy that cluster with vibecarbon deploy first.`,
+        `Kubeconfig for ${target.envName} not found at ${targetKubeconfig}, skipping. Deploy that cluster first with \`vibecarbon deploy\`.`,
       );
       continue;
     }
