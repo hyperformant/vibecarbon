@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { FAILOVER_FENCE_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
@@ -332,6 +332,22 @@ function readHaPrimary(
     return { stack: primary?.stack ?? null, region: primary?.region ?? null };
   } catch {
     return { stack: null, region: null };
+  }
+}
+
+/**
+ * The compose writers a failover stops on the retired node: the app plus the
+ * env's enabled primary-only add-ons, from the persisted config (the same
+ * declaration-driven list the failover itself fences).
+ */
+function retiredNodeWriters(projectDir: string, env: string): string[] {
+  try {
+    const config = JSON.parse(readFileSync(join(projectDir, '.vibecarbon.json'), 'utf-8')) as {
+      environments?: Record<string, object>;
+    };
+    return failoverFenceServices(config.environments?.[env] ?? {});
+  } catch {
+    return failoverFenceServices({});
   }
 }
 
@@ -3855,7 +3871,7 @@ EOF`;
   if (options.includeFailover) {
     // compose-ha: the retired node (the one that is no longer the primary
     // after the role flip) keeps its app tier `docker stop`ped by design
-    // (failoverComposeHA's pre-promote fence, FAILOVER_FENCE_SERVICES: app and
+    // (failoverComposeHA's pre-promote fence, failoverFenceServices: the app and
     // the n8n/metabase add-ons when deployed) until a redeploy
     // converges it. `status` reports that truthfully as `exited`, so those
     // rows are excused on that node only; its db (recreated by the wal-g
@@ -3864,7 +3880,11 @@ EOF`;
     const retiredAfterFailover = (step: StepName): RetiredServer | undefined => {
       if (config.mode !== 'compose-ha') return undefined;
       const { standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
-      if (standbyIp) return { ip: standbyIp, allowedExited: FAILOVER_FENCE_SERVICES };
+      if (standbyIp)
+        return {
+          ip: standbyIp,
+          allowedExited: retiredNodeWriters(config.projectDir, config.envPrefix),
+        };
       console.log(
         `${tag} [${step}] no retired-node IP in .vibecarbon.json — the old ` +
           'primary is held to the full health bar',

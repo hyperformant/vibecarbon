@@ -360,6 +360,22 @@ describe('failoverComposeHA state matrix', () => {
     ).toBe(true);
   });
 
+  it('starts the enabled primary-only add-ons on the promoted node, no-deps, never the setup jobs', async () => {
+    const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
+    expect(thrown).toBeUndefined();
+    const starts = sshCalls.filter((c) => c.command.includes('replication.yml up -d --no-deps'));
+    expect(starts).toHaveLength(1);
+    expect(starts[0].ip).toBe(STANDBY_IP);
+    expect(starts[0].command).toContain('up -d --no-deps n8n');
+    expect(starts[0].command).not.toContain('setup');
+    expect(starts[0].command).not.toContain('app-migrate');
+  });
+
+  it('a run with no add-ons issues no add-on start', async () => {
+    await run();
+    expect(sshCalls.some((c) => c.command.includes('replication.yml up -d --no-deps'))).toBe(false);
+  });
+
   it('never re-runs app-migrate on the promoted standby (it replicated an already-migrated primary)', async () => {
     await run();
     expect(sshCalls.some((c) => c.command.includes('app-migrate'))).toBe(false);
@@ -773,30 +789,35 @@ describe('failoverComposeHA planned fence and catch-up (H1)', () => {
   });
 
   it('the writer stop skips absent add-ons and reports what it stopped; the start never runs app-migrate', async () => {
-    const { stopOldPrimaryWriters, startOldPrimaryWriters, FAILOVER_FENCE_SERVICES } = await import(
+    const { stopOldPrimaryWriters, startOldPrimaryWriters } = await import(
       '../../../src/lib/deploy/compose/ha.js'
     );
-    expect(FAILOVER_FENCE_SERVICES).toEqual(['app', 'n8n', 'metabase']);
     vi.mocked(composeSsh.sshRun).mockImplementationOnce(
       async () => 'STOPPED myapp-app\nFENCE_DONE',
     );
-    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp')).resolves.toEqual({
-      ok: true,
-      stopped: ['myapp-app'],
-    });
+    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp', ['app', 'n8n'])).resolves.toEqual(
+      {
+        ok: true,
+        stopped: ['myapp-app'],
+      },
+    );
     vi.mocked(composeSsh.sshRun).mockImplementationOnce(
       async () => 'STOPPED myapp-app\nFAILED myapp-n8n\nFENCE_DONE',
     );
-    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp')).resolves.toEqual({
-      ok: false,
-      stopped: ['myapp-app'],
-    });
+    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp', ['app', 'n8n'])).resolves.toEqual(
+      {
+        ok: false,
+        stopped: ['myapp-app'],
+      },
+    );
     // A dropped session never printed FENCE_DONE: not confirmed.
     vi.mocked(composeSsh.sshRun).mockImplementationOnce(async () => false);
-    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp')).resolves.toEqual({
-      ok: false,
-      stopped: [],
-    });
+    await expect(stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp', ['app', 'n8n'])).resolves.toEqual(
+      {
+        ok: false,
+        stopped: [],
+      },
+    );
     sshCalls.length = 0;
     await startOldPrimaryWriters(PRIMARY_IP, '/k', ['myapp-app']);
     expect(sshCalls).toEqual([{ ip: PRIMARY_IP, command: 'docker start myapp-app' }]);

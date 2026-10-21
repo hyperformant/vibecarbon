@@ -17,9 +17,12 @@
  * runs inside the app, so the app's DB-backed 200 covers sign-in too, and the
  * app is the only app-tier service holding database connections.)
  */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   APP_TIER_RESTART_SERVICES,
+  composeStartPrimaryOnlyCmd,
+  failoverFenceServices,
   NEW_PRIMARY_PROBE_EXEMPT,
   newPrimaryApiProbeCmd,
   waitForNewPrimaryApi,
@@ -172,5 +175,42 @@ describe('the restart list names only containers the stack runs', () => {
   // command, so a removed service left in the list breaks every failover.
   it('restarts and stops exactly the app (the only app-tier service on a database connection)', () => {
     expect(APP_TIER_RESTART_SERVICES).toEqual(['app']);
+  });
+});
+
+describe('primary-only add-ons on the promoted node', () => {
+  it('composeStartPrimaryOnlyCmd starts the declared services with --no-deps and the replication overlay', () => {
+    const cmd = composeStartPrimaryOnlyCmd('p', ['n8n', 'metabase']) as string;
+    expect(cmd).toContain('cd /opt/p');
+    expect(cmd).toContain('up -d --no-deps n8n metabase');
+    expect(cmd).toContain('reconcile.sh');
+    expect(cmd).toContain('-f docker-compose.replication.yml');
+    // No guessed fallback flag set: it would recreate db.
+    expect(cmd).not.toContain('-f docker-compose.yml');
+  });
+
+  it('composeStartPrimaryOnlyCmd is null with nothing to start', () => {
+    expect(composeStartPrimaryOnlyCmd('p', [])).toBeNull();
+  });
+
+  it('failoverFenceServices is the app plus the enabled primary-only add-ons', () => {
+    expect(failoverFenceServices({ n8n: true })).toEqual(['app', 'n8n']);
+    expect(failoverFenceServices({})).toEqual(['app']);
+  });
+
+  it('failoverComposeHA starts them after the role and issuer re-arm, before the API gate', () => {
+    const src = readFileSync('src/lib/deploy/compose/ha.js', 'utf8');
+    const body = src.slice(src.indexOf('export async function failoverComposeHA'));
+    const start = body.indexOf('composeStartPrimaryOnlyCmd(');
+    expect(start).toBeGreaterThan(-1);
+    expect(body.indexOf('restoreComposeWalgRole(')).toBeLessThan(start);
+    expect(body.indexOf('armComposeAcme(')).toBeLessThan(start);
+    expect(start).toBeLessThan(body.indexOf('waitForNewPrimaryApi('));
+  });
+
+  it('the hand list FAILOVER_FENCE_SERVICES is gone from src', () => {
+    for (const f of ['src/lib/deploy/compose/ha.js', 'src/lib/deploy/retired-fence.js']) {
+      expect(readFileSync(f, 'utf8'), f).not.toContain('FAILOVER_FENCE_SERVICES');
+    }
   });
 });

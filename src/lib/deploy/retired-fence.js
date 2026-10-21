@@ -46,6 +46,7 @@
  */
 
 import * as p from '@clack/prompts';
+import { composeWriterServices, enabledAddonNames } from '../services/standby-policy.js';
 import { getSSHKeyPath, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
@@ -420,7 +421,15 @@ async function probeCompose(ip, { run, projectName, writerContainers, psqlFor })
   };
 }
 
-function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, demoteWalgRole }) {
+function composeBackend({
+  run,
+  psqlFor,
+  projectName,
+  sshKeyPath,
+  zeroWorkloads,
+  demoteWalgRole,
+  writerServices,
+}) {
   const dbCt = `${projectName}-db`;
   const confirmed = async (ip, command) => {
     const out = await run(ip, `${command} && echo OK`, { timeout: 30_000 });
@@ -428,12 +437,11 @@ function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, 
   };
   return {
     probe: async (ip) => {
-      const { FAILOVER_FENCE_SERVICES } = await import('./compose/ha.js');
       return probeCompose(ip, {
         run,
         projectName,
         psqlFor,
-        writerContainers: FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`),
+        writerContainers: writerServices.map((svc) => `${projectName}-${svc}`),
       });
     },
     // Marker first (it refuses the nightly backup), then the PGDATA marker (it
@@ -459,7 +467,7 @@ function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, 
         apply: async (ip) => {
           if (zeroWorkloads) return zeroWorkloads(ip);
           const { stopOldPrimaryWriters } = await import('./compose/ha.js');
-          return (await stopOldPrimaryWriters(ip, sshKeyPath, projectName)).ok;
+          return (await stopOldPrimaryWriters(ip, sshKeyPath, projectName, writerServices)).ok;
         },
       },
       {
@@ -482,7 +490,7 @@ function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, 
   };
 }
 
-async function backendFor(tier, { projectName, sshKeyPath, deps }) {
+async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
   if (tier === 'k8s-ha') {
     return k8sBackend({
       kubectl: deps.kubectl ?? ((ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts)),
@@ -503,6 +511,7 @@ async function backendFor(tier, { projectName, sshKeyPath, deps }) {
       sshKeyPath,
       zeroWorkloads: deps.zeroWorkloads,
       demoteWalgRole: deps.demoteWalgRole,
+      writerServices: composeWriterServices(enabledAddonNames(envConfig)),
     });
   }
   throw new Error(`retired fence: unknown tier ${JSON.stringify(tier)}`);
@@ -514,7 +523,7 @@ async function backendFor(tier, { projectName, sshKeyPath, deps }) {
  * once the db settles, so one run fences fully.
  *
  * `deps.zeroWorkloads(ip) -> Promise<boolean>` replaces the built-in writer
- * stop (k8s: the app Deployment; compose: app, n8n, metabase). It is the seam
+ * stop (k8s: the app Deployment; compose: the declared writers). It is the seam
  * the primary-only add-ons plan fills with zeroWorkloadsOnStandby.
  *
  * @param {object} args
@@ -522,11 +531,19 @@ async function backendFor(tier, { projectName, sshKeyPath, deps }) {
  * @param {string} args.ip
  * @param {string} args.projectName
  * @param {string} args.sshKeyPath
+ * @param {object} [args.envConfig] the env config, whose enabled add-ons name the compose writers
  * @param {object} [args.deps] kubectl / run / psql / zeroWorkloads / demoteWalgRole seams
  * @returns {Promise<{ reachable: boolean, fenced: boolean, wrote: string[], missing: string[], walBytes: number|null }>}
  */
-export async function fenceRetiredNode({ tier, ip, projectName, sshKeyPath, deps = {} }) {
-  const backend = await backendFor(tier, { projectName, sshKeyPath, deps });
+export async function fenceRetiredNode({
+  tier,
+  ip,
+  projectName,
+  sshKeyPath,
+  envConfig,
+  deps = {},
+}) {
+  const backend = await backendFor(tier, { projectName, sshKeyPath, deps, envConfig });
   const state = await backend.probe(ip);
   if (!state) {
     return { reachable: false, fenced: false, wrote: [], missing: ['reachable'], walBytes: null };
@@ -606,6 +623,7 @@ export async function reconcileRetiredFence({
       ip,
       projectName: projectConfig?.projectName,
       sshKeyPath,
+      envConfig,
       deps,
     });
     result.nodes.push({

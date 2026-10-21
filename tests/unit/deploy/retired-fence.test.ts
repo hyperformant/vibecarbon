@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, describe, expect, it } from 'vitest';
-import { FAILOVER_FENCE_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
 import {
   clearRetiredFence,
   FLUX_SUSPENDED_BY,
@@ -544,12 +544,15 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     expect(node.writes).toEqual([]);
   });
 
-  it('the probe watches every writer the planned fence stops (app, n8n, metabase)', async () => {
-    expect(FAILOVER_FENCE_SERVICES).toEqual(expect.arrayContaining(['app', 'n8n', 'metabase']));
+  it('the probe watches every writer the planned fence stops (the app and the enabled primary-only add-ons)', async () => {
+    const envConfig = composeSwapped({ n8n: true });
+    const writers = failoverFenceServices(envConfig);
+    expect(writers).toEqual(['app', 'n8n']);
     const node = fakeNode();
-    await reconcileRetiredFence(argsFor(node));
+    await reconcileRetiredFence({ ...argsFor(node), envConfig });
     const probe = node.commands.find((c) => c.includes('PROBE_DONE')) ?? '';
-    for (const svc of FAILOVER_FENCE_SERVICES) expect(probe).toContain(`myapp-${svc}`);
+    for (const svc of writers) expect(probe).toContain(`myapp-${svc}`);
+    expect(probe).not.toContain('myapp-metabase');
   });
 
   it('a db that is down gets its PGDATA marker and read-only fence once the role recreate brings it up', async () => {

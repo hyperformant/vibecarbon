@@ -26,8 +26,14 @@ import {
   resolveDnsToken,
 } from '../../dns-provider.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import {
+  composePromotionServices,
+  composeWriterServices,
+  enabledAddonNames,
+} from '../../services/standby-policy.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
+import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import {
   assertFailoverClassified,
   assertFailoverPreconditions,
@@ -1504,20 +1510,50 @@ export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, op
  *
  * @returns {Promise<boolean>} false when the stop could not be confirmed
  */
-export async function stopOldPrimaryApp(ip, sshKeyPath, projectName) {
-  const containers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
+export async function stopOldPrimaryApp(
+  ip,
+  sshKeyPath,
+  projectName,
+  services = APP_TIER_RESTART_SERVICES,
+) {
+  const containers = services.map((svc) => `${projectName}-${svc}`).join(' ');
   const stopped = await sshRun(ip, sshKeyPath, `docker stop ${containers}`, { timeout: 90_000 });
   return stopped !== false;
 }
 
 /**
- * The containers a planned failover stops on the old primary before its write
- * fence: the app plus the add-ons that write to the database when deployed.
- * Stopping them is the outward signal; the database fence
- * (fenceDatabaseWrites) is the guarantee. The e2e health check excuses exactly
- * these on the retired node.
+ * The compose services a planned failover stops on the old primary before its
+ * write fence, and that a promoted node runs: the app plus the enabled
+ * primary-only add-ons, read from their `standby` declarations. Stopping them
+ * is the outward signal; the database fence (fenceDatabaseWrites) is the
+ * guarantee. The e2e health check excuses exactly these on the retired node.
+ *
+ * @param {object} envConfig the environment's persisted config
+ * @returns {string[]}
  */
-export const FAILOVER_FENCE_SERVICES = ['app', 'n8n', 'metabase'];
+export function failoverFenceServices(envConfig) {
+  return composeWriterServices(enabledAddonNames(envConfig));
+}
+
+/**
+ * The command that starts the primary-only add-ons on a freshly promoted node,
+ * or null when there are none. It rebuilds reconcile.sh's own `-f` set (so the
+ * rendered config matches what the next reconcile hashes) and adds the
+ * replication overlay. `--no-deps` never touches db, and there is no fallback
+ * `-f` set: a guessed one would recreate db.
+ *
+ * @param {string} projectName
+ * @param {string[]} services compose services to start (never the `*-setup` jobs)
+ * @returns {string|null}
+ */
+export function composeStartPrimaryOnlyCmd(projectName, services) {
+  if (services.length === 0) return null;
+  return (
+    `cd /opt/${projectName} && ` +
+    `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1) && [ -n "$FLAGS" ] && ` +
+    `docker compose $FLAGS -f docker-compose.replication.yml up -d --no-deps ${services.join(' ')}`
+  );
+}
 
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
@@ -1526,11 +1562,12 @@ const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
  * add-ons are skipped, a running one that will not stop fails the call). Every
  * container is tried, so `stopped` names all that did stop even on a failure.
  *
+ * @param {string[]} services the writer services (failoverFenceServices)
  * @returns {Promise<{ ok: boolean, stopped: string[] }>} the containers this
  *   call stopped, which the un-fence starts again
  */
-export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName) {
-  const containers = FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
+export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, services) {
+  const containers = services.map((svc) => `${projectName}-${svc}`).join(' ');
   const out = await sshRun(
     ip,
     sshKeyPath,
@@ -1699,7 +1736,7 @@ export function composeFailoverAbortBackend({
   }
   const remoteDir = `/opt/${projectName}`;
   const dbCt = `${projectName}-db`;
-  const writers = FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`);
+  const writers = failoverFenceServices(envConfig).map((svc) => `${projectName}-${svc}`);
   const quiet = { log: () => {}, warn: () => {} };
   const ok = (out, tag) =>
     String(out === false ? '' : (out ?? ''))
@@ -2043,7 +2080,12 @@ export async function failoverComposeHA(
   if (planned) {
     s.start('Fencing writes on the old primary (write outage begins)');
     try {
-      const stop = await stopWriters(primaryServer.ip, sshKeyPath, projectName);
+      const stop = await stopWriters(
+        primaryServer.ip,
+        sshKeyPath,
+        projectName,
+        failoverFenceServices(envConfig),
+      );
       stoppedWriters = stop.stopped;
       if (!stop.ok) {
         throw new Error(
@@ -2209,7 +2251,13 @@ export async function failoverComposeHA(
       // planned run fenced them already) so the two sides never both serve.
       // DNS is not flipped and the journal stays set.
       const appStopped =
-        fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName));
+        fenced ||
+        (await fenceOldPrimary(
+          primaryServer.ip,
+          sshKeyPath,
+          projectName,
+          failoverFenceServices(envConfig),
+        ));
       if (!appStopped) {
         p.log.warn(
           `Could not stop the app on the old primary (${primaryServer.ip}). If it is up, stop ` +
@@ -2283,6 +2331,33 @@ export async function failoverComposeHA(
     );
   }
 
+  // Step 1a4: Start the primary-only add-ons (declared in their manifests) on
+  // the promoted node. The database is read-write and .env says primary, so
+  // later reconciles keep them up. `--no-deps` never touches db; the one-shot
+  // setup jobs and app-migrate never run (the replicated database already
+  // holds their work). Best-effort and loud: a failed start must not abort a
+  // DR flip, it names the exact command to run by hand. Idempotent on a
+  // resumed run (`up -d` of a running service is a no-op).
+  const addonStart = composeStartPrimaryOnlyCmd(
+    projectName,
+    composePromotionServices(enabledAddonNames(envConfig)),
+  );
+  if (addonStart) {
+    s.start('Starting primary-only add-ons on the new primary');
+    const started = await sshRun(standbyServer.ip, sshKeyPath, addonStart, { timeout: 180_000 });
+    if (started === false) {
+      p.log.warn(
+        `Could not start the primary-only add-ons on the new primary (${standbyServer.ip}). ` +
+          `Start them by hand: ssh root@${standbyServer.ip} '${addonStart}'`,
+      );
+    }
+    s.stop(
+      started === false
+        ? 'Primary-only add-ons NOT started (continuing: see warning)'
+        : 'Primary-only add-ons started',
+    );
+  }
+
   // Step 1b: Restart the app tier on the new primary so it re-pools against
   // the now-read-write DB. The app was started during deploy while the local
   // DB was in recovery, and its DB handles can hold stale connections that
@@ -2346,11 +2421,18 @@ export async function failoverComposeHA(
   // still accepting writes.
   s.start('Stopping old primary services');
   // By container name, see stopOldPrimaryApp.
-  const oldPrimaryContainers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(
-    ' ',
-  );
+  const oldPrimaryContainers = failoverFenceServices(envConfig)
+    .map((svc) => `${projectName}-${svc}`)
+    .join(' ');
   // A planned run fenced it before the promote; stopping again is a no-op.
-  const stopped = fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName));
+  const stopped =
+    fenced ||
+    (await fenceOldPrimary(
+      primaryServer.ip,
+      sshKeyPath,
+      projectName,
+      failoverFenceServices(envConfig),
+    ));
   if (!stopped) {
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +

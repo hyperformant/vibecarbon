@@ -158,11 +158,6 @@ describe('standby-policy helpers', () => {
  */
 const SOURCE_ALLOWLIST: { file: string; contains: string; reason: string }[] = [
   {
-    file: 'src/lib/deploy/compose/ha.js',
-    contains: 'FAILOVER_FENCE_SERVICES = [',
-    reason: 'removed in Task 4 (replaced by composeWriterServices)',
-  },
-  {
     file: 'src/lib/deploy/bundle.js',
     contains: 'subs.push(',
     reason: 'HTTP-01 cert SAN subdomains per enabled feature, not a standby list',

@@ -740,6 +740,7 @@ async function reconvergeStandbyStack(ctx, serviceOpts) {
     ip: standby.ip,
     projectName,
     sshKeyPath,
+    envConfig: ctx.envConfig,
   });
   if (!fence.fenced) {
     throw new Error(
