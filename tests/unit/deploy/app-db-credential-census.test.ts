@@ -169,15 +169,14 @@ describe('k8s: only the migrate init container reads the owner password', () => 
   });
 
   it('the deploy points both containers at the deployed image', () => {
-    // Every `kubectl set image deployment/app` argv in the deploy, whatever
-    // the formatter made of its line breaks, names both containers.
+    // The one image change to deployment/app in the deploy is the template
+    // patch (it also stamps the secrets sha), and it names both containers.
     const src = read('src/lib/deploy/k8s/k3s.js').replace(/\s+/g, ' ');
-    const sites = [...src.matchAll(/'set', 'image', 'deployment\/app',([^\]]*)\]/g)].map(
-      (m) => m[1],
-    );
-    expect(sites).toHaveLength(1);
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: JS source text under test
-    expect(sites[0]).toContain('`app=${imageTag}`, `migrate=${imageTag}`');
+    expect(src.match(/'set', 'image', 'deployment\/app'/g)).toBeNull();
+    const patch = src.slice(src.indexOf('const appTemplatePatch = {'));
+    const body = patch.slice(0, patch.indexOf('await runKubectlWithRetry('));
+    expect(body).toContain("containers: [{ name: 'app', image: imageTag }]");
+    expect(body).toContain("initContainers: [{ name: 'migrate', image: imageTag }]");
   });
 });
 

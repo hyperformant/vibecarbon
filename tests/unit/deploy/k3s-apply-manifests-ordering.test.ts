@@ -1483,3 +1483,73 @@ describe('applyK3sManifests — S3-egress VPC allowance (M3 Task 9c)', () => {
     expect(findS3EgressVpcApply()).toBeUndefined();
   });
 });
+
+describe('a changed app Secret rolls deployment/app', () => {
+  // `set image` to the same tag is a no-op, and envFrom is read at container
+  // start, so a re-minted storage key or a rotated APP_DB_PASSWORD never
+  // reached the running pods (and the old key was then revoked under them).
+  // The pod template now carries a digest of everything the pod reads from
+  // the Secrets, so any change rolls the pods and reruns migrate.
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    installSpawnMock();
+  });
+
+  const appPatches = () =>
+    cmdCalls.filter(
+      (a) => a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app'),
+    );
+
+  it('points both containers at the image and stamps the secrets digest in one patch', async () => {
+    const { applyK3sManifests, appPodSecretsSha } = await k3sPromise;
+    const args = baseArgs(makeProjectDir());
+    await applyK3sManifests(args);
+    expect(
+      cmdCalls.some(
+        (a) => a.includes('set') && a.includes('image') && a.includes('deployment/app'),
+      ),
+    ).toBe(false);
+    const patches = appPatches();
+    expect(patches).toHaveLength(1);
+    const body = JSON.parse(String(patches[0][patches[0].indexOf('-p') + 1]));
+    expect(body.spec.template.metadata.annotations['vibecarbon.dev/app-secrets-sha']).toBe(
+      appPodSecretsSha({ envLocal: args.envLocal }),
+    );
+    expect(body.spec.template.spec.containers).toEqual([{ name: 'app', image: args.imageTag }]);
+    expect(body.spec.template.spec.initContainers).toEqual([
+      { name: 'migrate', image: args.imageTag },
+    ]);
+    // A digest, never a value, on argv.
+    expect(patches[0].join(' ')).not.toContain(args.envLocal.BETTER_AUTH_SECRET);
+  });
+
+  it('the digest moves with the app Secret, the owner password and the storage key, and nothing else', async () => {
+    const { appPodSecretsSha } = await k3sPromise;
+    const envLocal = {
+      APP_DB_PASSWORD: 'a',
+      DB_PASSWORD: 'o',
+      BETTER_AUTH_SECRET: 'b',
+    };
+    const s3Config = { accessKey: 'AK', secretKey: 'SK', bucket: 'b', endpoint: 'e', region: 'r' };
+    const base = appPodSecretsSha({ envLocal, s3Config });
+    expect(base).toMatch(/^[0-9a-f]{16}$/);
+    expect(appPodSecretsSha({ envLocal: { ...envLocal }, s3Config: { ...s3Config } })).toBe(base);
+    expect(
+      appPodSecretsSha({ envLocal: { ...envLocal, APP_DB_PASSWORD: 'a2' }, s3Config }),
+    ).not.toBe(base);
+    expect(appPodSecretsSha({ envLocal: { ...envLocal, DB_PASSWORD: 'o2' }, s3Config })).not.toBe(
+      base,
+    );
+    expect(appPodSecretsSha({ envLocal, s3Config: { ...s3Config, accessKey: 'AK2' } })).not.toBe(
+      base,
+    );
+    // A key the app never sees (not on the allowlist, not migrate's) leaves it alone.
+    expect(appPodSecretsSha({ envLocal: { ...envLocal, HCLOUD_TOKEN: 'x' }, s3Config })).toBe(base);
+  });
+});

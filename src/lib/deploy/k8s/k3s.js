@@ -15,7 +15,7 @@
  *   8. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
  *      traefik, app; cert-manager via infra/).
  *   9. `kubectl rollout status statefulset/db`.
- *   10. `kubectl set image deploy/app app=<tag>` + rollout-status.
+ *   10. `kubectl patch deploy/app` (image + secrets sha) + rollout-status.
  *
  * Warm path: skip 1-5; rebuild image (6); sideload (7) skipping unchanged tag;
  * apply changed manifests (8); rollout (10).
@@ -1905,6 +1905,31 @@ export function buildInfraSecretData({ envLocal, s3Config, backupBucketName }) {
   return stringData;
 }
 
+/** The app pod-template annotation that records appPodSecretsSha. */
+export const APP_SECRETS_SHA_ANNOTATION = 'vibecarbon.dev/app-secrets-sha';
+
+/**
+ * A digest of every Secret value the app pod reads: the whole app Secret
+ * (envFrom on the app container, APP_DB_PASSWORD on migrate) and the owner
+ * DB_PASSWORD the migrate init container reads from the infra Secret. The
+ * deploy stamps it on the pod template, so a changed value rolls the pods
+ * and reruns migrate. Without it nothing rolled: envFrom is read at
+ * container start and `set image` to the same tag is a no-op, so a
+ * re-minted storage key never reached the pods before the old one was
+ * revoked, and an APP_DB_PASSWORD rotation never took effect. Pure.
+ *
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}}} args
+ * @returns {string} 16 hex chars
+ */
+export function appPodSecretsSha({ envLocal, s3Config }) {
+  const app = buildAppSecretData({ envLocal, s3Config });
+  const read = {
+    app: Object.fromEntries(Object.entries(app).sort(([a], [b]) => a.localeCompare(b))),
+    migrateDbPassword: envLocal.DB_PASSWORD ?? '',
+  };
+  return createHash('sha256').update(JSON.stringify(read)).digest('hex').slice(0, 16);
+}
+
 /** A Secret manifest for `kubectl apply -f -`, values JSON-quoted, never on argv. */
 function secretManifest(name, stringData) {
   return [
@@ -3529,7 +3554,7 @@ export async function applyK3sManifests({
     // Pilot-light: nothing app-tier runs on the 2-node standby. Declarative
     // zero via the same patch-at-deploy pattern as the placeholder patches
     // below (TYPE and NAME as separate argv tokens, matching kubectl's own
-    // `patch TYPE NAME` form). Step 6 below still `set image`s this
+    // `patch TYPE NAME` form). Step 6 below still patches the image of this
     // Deployment so its pod template is failover-ready the moment CA (or
     // an operator) scales it back to 1.
     await runKubectlWithRetry(
@@ -3974,18 +3999,37 @@ export async function applyK3sManifests({
   //    ImagePullBackOff for the whole db wait. Switching now means the app
   //    pods come up on the sideloaded image immediately (their readiness stays
   //    503 until the db answers); we still wait for their rollout below.
+  //    One patch also stamps the digest of the Secret values the pod reads
+  //    (appPodSecretsSha), so a re-minted storage key or a rotated password
+  //    rolls the pods even when the image tag is unchanged; one template
+  //    change, one roll. Both containers: the app and its migrate init
+  //    container run one image.
+  const appTemplatePatch = {
+    spec: {
+      template: {
+        metadata: {
+          annotations: {
+            [APP_SECRETS_SHA_ANNOTATION]: appPodSecretsSha({ envLocal, s3Config }),
+          },
+        },
+        spec: {
+          containers: [{ name: 'app', image: imageTag }],
+          initContainers: [{ name: 'migrate', image: imageTag }],
+        },
+      },
+    },
+  };
   await runKubectlWithRetry(
-    // Both containers: the app and its migrate init container run one image.
     [
       '-n',
       'vibecarbon',
-      'set',
-      'image',
+      'patch',
       'deployment/app',
-      `app=${imageTag}`,
-      `migrate=${imageTag}`,
+      '--type=strategic',
+      '-p',
+      JSON.stringify(appTemplatePatch),
     ],
-    { env, description: 'applyK3sManifests: kubectl set image deployment/app' },
+    { env, description: 'applyK3sManifests: kubectl patch deployment/app (image, secrets sha)' },
   );
   // 7. Wait for the db StatefulSet (applied with base in step 5) to be Ready:
   //    WAL archiving is on from its first boot (startup flags, see
