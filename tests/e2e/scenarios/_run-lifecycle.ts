@@ -1309,6 +1309,9 @@ export async function runLifecycle(
   options: LifecycleOptions,
 ): Promise<ScenarioResult> {
   const tag = `[${config.mode}]`;
+  // The base the backup step reported pushed; the restore step restores it
+  // by name (destroy -y takes its own, newer, pre-backup).
+  let pushedBackupName: string | undefined;
   const steps: StepResult[] = [];
   // Set by the teardown sweep when it finds orphans or cannot fully
   // enumerate — gates the scenario verdict (see the sweep block).
@@ -3813,6 +3816,7 @@ EOF`;
                 `STDERR tail: ${(result.stderr || '').slice(-500)}`,
             );
           }
+          pushedBackupName = pushed[1];
           console.log(`${tag} [backup] base backup pushed: ${pushed[1]}`);
         }),
     },
@@ -3898,7 +3902,7 @@ EOF`;
           console.log(`${tag} Re-deployed. Server IPs: [${serverIps.join(', ')}]`);
 
           // Now restore the database backup
-          const restoreResult = await runRestore(config.envPrefix, {
+          const restoreResult = await runRestore(config.envPrefix, pushedBackupName ?? 'latest', {
             cwd: config.projectDir,
             timeout: TIMEOUTS.restore,
             env: { HCLOUD_TOKEN: hetznerToken },

@@ -1232,7 +1232,14 @@ export function composeBackupCmd(remoteDir, retain = 7) {
  * `sshRun` once, which returns `false` instead of throwing — so a failed
  * `backup-push` resolved as a SUCCESS, and a scale went on to restore an
  * OLDER base and destroy the old server. `sshRunAsync` throws on remote
- * non-zero and carries its own SSH-transport retry.
+ * non-zero.
+ *
+ * SSH RETRY: only a connection that provably never started the remote command
+ * (runWithTransportRetry: exit 255 plus a pre-exec wording). sshRunAsync's own
+ * ladder is switched off (`retries: 1`) here: it retries on
+ * /timed out|timeout/ anywhere in the message, which carries the REMOTE
+ * stderr, so a wal-g "i/o timeout" during retention (after a pushed base)
+ * re-ran the whole script and pushed a second base.
  *
  * The push is wrapped in the object-storage staleness retry for the same
  * reason the restore's fetch is: `wal-g backup-push` LISTs the prefix before
@@ -1255,17 +1262,17 @@ export async function backupCompose(ip, sshKeyPath, projectName, options = {}) {
   const run = await withWalgStaleStorageRetry(
     async () => {
       try {
-        const stdout = await sshRunAsync(
-          ip,
-          sshKeyPath,
-          composeBackupCmd(remoteDir, options.retain ?? 7),
-          { timeout: 900_000 },
+        const stdout = await runWithTransportRetry(() =>
+          sshRunAsync(ip, sshKeyPath, composeBackupCmd(remoteDir, options.retain ?? 7), {
+            timeout: 900_000,
+            retries: 1,
+          }),
         );
         return { stdout: String(stdout ?? '') };
       } catch (err) {
         // A marker means the script got past the push decision: the lock skip
-        // (exit 75) or a retention failure after a pushed base. Neither is a
-        // stale-storage read to retry.
+        // (exit 75) or a retention failure after a pushed base (exit 3).
+        // Neither is a stale-storage read to retry.
         const stdout = String(err?.stdout ?? '');
         if (hasBackupResult(stdout)) return { stdout, err };
         throw err;
@@ -1280,8 +1287,8 @@ export async function backupCompose(ip, sshKeyPath, projectName, options = {}) {
   if (outcome.result === 'skipped') return outcome;
   const stderr = String(run.err.stderr ?? '');
   const cause =
-    stderr.match(/^retention failed.*$/m)?.[0] ??
-    stderr.trim().split('\n').pop() ??
+    stderr.match(/^retention failed.*$/m)?.[0] ||
+    stderr.trim().split('\n').pop() ||
     run.err.message;
   return { ...outcome, retentionError: cause };
 }

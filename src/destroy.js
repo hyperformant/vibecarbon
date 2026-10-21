@@ -60,6 +60,7 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { envIdentityOf } from './lib/env-identity.js';
+import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
 import { describeCredentialSource } from './lib/project.js';
@@ -284,6 +285,44 @@ export function backupOfferIp(envConfig, envName, warn = (msg) => p.log.warn(msg
     if (!(err instanceof AmbiguousPrimaryError)) throw err;
     warn(`Skipping the pre-destroy backup offer, the primary is unknown. ${err.message}`, err);
     return undefined;
+  }
+}
+
+/**
+ * Put this operator's IP on the environment's firewall before destroy's first
+ * remote step, with the arguments `vibecarbon backup` uses
+ * (ensureFirewallAccessIfNeeded in src/backup.js). Without it, an operator
+ * whose IP changed since the deploy timed out on the pre-destroy backup and
+ * the CSI volume release, and the only override (-force) skipped the backup.
+ *
+ * A failed check warns and continues: destroy is the escape hatch, and a
+ * remote step that then cannot connect stops on its own cause (the backup
+ * names -force).
+ *
+ * @param {{projectConfig: object, envName: string, envConfig: object, apiToken: string, yes: boolean}} o
+ * @param {{ensure?: typeof ensureOperatorIpAccess, log?: typeof p.log}} [deps]
+ */
+export async function ensureDestroyOperatorAccess(
+  { projectConfig, envName, envConfig, apiToken, yes },
+  deps = {},
+) {
+  const { ensure = ensureOperatorIpAccess, log = p.log } = deps;
+  try {
+    const isHA = envConfig?.deployMode === 'compose-ha' || !!envConfig?.ha?.enabled;
+    const result = await ensure({
+      projectConfig,
+      environment: envName,
+      isHA,
+      apiToken,
+      yes,
+      onMessage: (msg) => log.info(msg),
+    });
+    if (result.added) log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
+  } catch (err) {
+    log.warn(
+      `Operator-IP check failed: ${err instanceof Error ? err.message : String(err)}. ` +
+        'Continuing; SSH steps (the pre-destroy backup) may not reach the servers.',
+    );
   }
 }
 
@@ -3706,6 +3745,27 @@ async function main(argv = []) {
     }
   }
 
+  // Get API tokens (env var → interactive prompt)
+  // Resolved once per flow — see providerFor() in lib/providers/index.js.
+  // Resolved BEFORE the first remote step: the operator-IP refresh below
+  // needs it to update the firewall.
+  const Provider = providerFor(envConfig);
+  const providerToken = await Provider.promptApiToken(projectConfig.projectName);
+  if (!providerToken) {
+    p.log.error(`${Provider.NAME} API token is required`);
+    process.exit(1);
+  }
+
+  // Every SSH/kubectl step below (the pre-destroy backup, the CSI volume
+  // release) needs this operator's IP on the firewall.
+  await ensureDestroyOperatorAccess({
+    projectConfig,
+    envName,
+    envConfig,
+    apiToken: providerToken,
+    yes: args.yes,
+  });
+
   // Back up before deleting anything; a failed or skipped backup stops here
   // unless -force (see preDestroyBackup).
   await preDestroyBackup({
@@ -3717,15 +3777,6 @@ async function main(argv = []) {
     purge: args.purgeBackups,
     force: args.force,
   });
-
-  // Get API tokens (env var → interactive prompt)
-  // Resolved once per flow — see providerFor() in lib/providers/index.js.
-  const Provider = providerFor(envConfig);
-  const providerToken = await Provider.promptApiToken(projectConfig.projectName);
-  if (!providerToken) {
-    p.log.error(`${Provider.NAME} API token is required`);
-    process.exit(1);
-  }
 
   // DNS cleanup credential: resolve up-front so the teardown never stalls on
   // a mid-flow prompt. Under the same-token rule, native DNS on the deploy's

@@ -47,7 +47,6 @@ class Exit extends Error {}
 const base = (isCompose: boolean, deps: Record<string, unknown>) => ({
   s: spinner(),
   isCompose,
-  useS3: true,
   s3Config: { bucket: 'bkt' },
   serverIp: '10.0.0.5',
   sshKeyPath: '/k',
@@ -69,7 +68,7 @@ const all = () => h.logs.map(([, m]) => m).join('\n');
 describe('backup create', () => {
   it.each([
     [true, 'backupCompose'],
-    [false, 'triggerBackupJob'],
+    [false, 'triggerJob'],
   ])('compose=%s prints the pushed name and offers no download', async (isCompose, fn) => {
     const call = vi.fn(async () => ({ result: 'pushed', name: 'base_000000010000000000000004' }));
     await runCreate(base(isCompose, { [fn]: call }));
@@ -86,7 +85,7 @@ describe('backup create', () => {
       throw new Exit();
     });
     const call = vi.fn(async () => ({ result: 'skipped', reason: 'in-recovery' }));
-    await expect(runCreate(base(false, { triggerBackupJob: call }))).rejects.toThrow(Exit);
+    await expect(runCreate(base(false, { triggerJob: call }))).rejects.toThrow(Exit);
     expect(process.exit).toHaveBeenCalledWith(1);
     expect(all()).toMatch(/backup skipped \(in-recovery\)/);
     expect(all()).not.toMatch(/base backup pushed/);

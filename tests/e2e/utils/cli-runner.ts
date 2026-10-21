@@ -534,12 +534,13 @@ export function extractLeakReport(result: CliResult): string {
 
 /**
  * Run vibecarbon restore. Restore's TTY guard insists on `-source` (or `-l`)
- * under `-y`; the lifecycle wants the most-recent S3 backup, so we pass the
- * `latest` sentinel which `pickInteractiveSource` resolves to the newest
- * upload.
+ * under `-y`. The lifecycle passes the base backup name its backup step
+ * reported (`base backup pushed: base_…`), so verify-restore proves THAT base
+ * restores, not whatever is newest (destroy -y takes its own pre-backup).
+ * `latest` is the newest base plus all WAL.
  */
-export function runRestore(env: string, options: RunOptions): Promise<CliResult> {
-  return runCli(`restore ${env} -y -source latest`, options);
+export function runRestore(env: string, source: string, options: RunOptions): Promise<CliResult> {
+  return runCli(`restore ${env} -y -source ${source}`, options);
 }
 
 /**

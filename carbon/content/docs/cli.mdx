@@ -651,7 +651,7 @@ are rebuilt (`ANALYZE`) once the restored cluster promotes.
 | `-y` | Skip confirmation prompts |
 | `-l` | List available backups (read-only; does not restore) |
 | `-env <name>` | Environment seed (alternative to positional) |
-| `-source <latest\|ISO-timestamp>` | Restore point: `latest` (newest base backup + all WAL) or an ISO-8601 timestamp (PITR) |
+| `-source <latest\|base-name\|ISO-timestamp>` | Restore point: `latest` (newest base backup + all WAL), a base backup name (that base + all WAL), or an ISO-8601 timestamp (PITR) |
 | `-confirm <value>` | Production only: supply the type-to-confirm value on the command line (scripts / no TTY) |
 {/* END GENERATED: flags restore */}
 

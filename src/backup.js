@@ -219,10 +219,11 @@ exit 1`;
  *
  * Returns `{ result: 'pushed', name, job }` or `{ result: 'skipped', reason,
  * job }`; callers read `.result`. A Job that FAILED after printing a pushed
- * marker (retention failed, then the container restarted under
- * restartPolicy OnFailure) returns `pushed` with `retentionError`: that base
- * is in the bucket, and a pushed base must never read as "no backup". A
- * failed Job with no pushed marker throws with the pod diagnostics.
+ * marker (retention failed: exit 3, which the CronJob's podFailurePolicy
+ * turns into a failed Job with no second pod, so no second push) returns
+ * `pushed` with `retentionError`: that base is in the bucket, and a pushed
+ * base must never read as "no backup". A failed Job with no pushed marker
+ * throws with the pod diagnostics.
  *
  * GATED on the condition the Job actually depends on (RCA 2026-08-16, run
  * 31927810430): the Job's first act is `kubectl exec` into the db pod, and
@@ -352,9 +353,16 @@ fi`,
     );
   }
 
-  const logs = await kubectlImpl(ip, sshKeyPath, ['logs', `job/${jobName}`, '-n', 'vibecarbon'], {
-    silent: true,
-  });
+  // Every pod of the Job, whole logs (a selector defaults to --tail=10). Under
+  // restartPolicy Never a push that failed first leaves a failed pod beside
+  // the succeeded one; only the succeeded pod printed a marker.
+  // `logs job/<name>` would read ONE pod, possibly the failed one.
+  const logs = await kubectlImpl(
+    ip,
+    sshKeyPath,
+    ['logs', '-n', 'vibecarbon', '-l', `job-name=${jobName}`, '--tail=-1'],
+    { silent: true },
+  );
   return { ...parseBackupResult(logs), job: jobName };
 }
 
@@ -653,15 +661,19 @@ export async function runCreate({
   s.start(
     isCompose ? 'Creating wal-g base backup...' : 'Creating backup (triggering Kubernetes Job)',
   );
+  const {
+    backupCompose = async (...a) => {
+      const { backupCompose: run } = await import('./lib/deploy/compose/index.js');
+      return run(...a);
+    },
+    triggerJob = triggerBackupJob,
+  } = deps;
   let backup;
   try {
     if (isCompose) {
-      const backupCompose =
-        deps.backupCompose ?? (await import('./lib/deploy/compose/index.js')).backupCompose;
       backup = await backupCompose(serverIp, sshKeyPath, projectName, { retain: backupRetain });
     } else {
-      const trigger = deps.triggerBackupJob ?? triggerBackupJob;
-      backup = await perfAsync('backup.triggerJob', () => trigger(serverIp, sshKeyPath));
+      backup = await perfAsync('backup.triggerJob', () => triggerJob(serverIp, sshKeyPath));
     }
   } catch (error) {
     s.stop('Backup failed');

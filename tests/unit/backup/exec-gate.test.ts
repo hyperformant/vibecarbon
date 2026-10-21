@@ -59,7 +59,14 @@ describe('triggerBackupJob exec+pg condition gate', () => {
       name: 'base_000000010000000000000004',
       job: expect.stringMatching(/^backup-manual-/),
     });
-    expect(calls.at(-1)?.slice(0, 2)).toEqual(['logs', `job/${backup.job}`]);
+    expect(calls.at(-1)).toEqual([
+      'logs',
+      '-n',
+      'vibecarbon',
+      '-l',
+      `job-name=${backup.job}`,
+      '--tail=-1',
+    ]);
     expect(readyAttempts).toBe(3);
 
     // The gate must EXEC into the db workload (proving the apiserver→kubelet

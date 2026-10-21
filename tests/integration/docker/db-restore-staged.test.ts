@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -22,7 +22,10 @@ import { REMOVE_DISCARD_SH, RETIRE_PREVIOUS_SH } from '../../../src/lib/walg/res
  * way restoreCompose runs it (a throwaway db container through db-guard.sh,
  * with RESTORE_BACKUP set):
  *
- *   1. a base backup is pushed, then a row is written after it;
+ *   1. a base backup is pushed by carbon/backup/compose-backup.sh itself (its
+ *      `docker compose exec -T db` routed to this container by a shim), whose
+ *      one BACKUP_RESULT=pushed:<name> must name the base wal-g lists; then
+ *      a row is written after it;
  *   2. a restore of a backup name that does not exist exits non-zero, and the
  *      original cluster (both rows) is still there;
  *   3. a restore of the real name completes, the cluster promotes, and the
@@ -175,6 +178,35 @@ function runRestoreScript(dir: string, backup: string) {
   );
 }
 
+/**
+ * Run carbon/backup/compose-backup.sh the way the cron and `vibecarbon backup`
+ * do (`cd <project> && RETAIN=n bash backup/compose-backup.sh`), with a
+ * `docker` shim that routes its `docker compose exec -T db …` into this
+ * test's db container. PGPASSWORD mirrors the compose db service env.
+ */
+function runComposeBackupScript(dir: string) {
+  const project = join(dir, 'project');
+  const bin = join(dir, 'bin');
+  mkdirSync(join(project, 'backup'), { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(project, 'backup/compose-backup.sh'),
+    readFileSync(join(ROOT, 'carbon/backup/compose-backup.sh')),
+  );
+  const realDocker = execFileSync('sh', ['-c', 'command -v docker'], { encoding: 'utf-8' }).trim();
+  writeFileSync(
+    join(bin, 'docker'),
+    `#!/bin/bash\n# docker compose exec -T db <cmd...>\nshift 4\nexec ${realDocker} exec -i -e PGPASSWORD=restore-staged-test ${DB_CT} "$@"\n`,
+  );
+  chmodSync(join(bin, 'docker'), 0o755);
+  return spawnSync('bash', ['backup/compose-backup.sh'], {
+    cwd: project,
+    encoding: 'utf-8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RETAIN: '7' },
+    timeout: 300_000,
+  });
+}
+
 /** ls of PGDATA, read through a throwaway container (the db is stopped). */
 function lsPgdata() {
   return docker([
@@ -259,12 +291,22 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     timeout: 300_000,
   }, async () => {
     psql("CREATE TABLE t (v text); INSERT INTO t VALUES ('before-base')");
-    docker(['exec', '-u', 'postgres', DB_CT, 'wal-g', 'backup-push', PGDATA]);
+    const pushed = runComposeBackupScript(dir);
+    expect(pushed.status, pushed.stdout + pushed.stderr).toBe(0);
+    const markers = pushed.stdout.split('\n').filter((l) => l.startsWith('BACKUP_RESULT='));
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatch(/^BACKUP_RESULT=pushed:base_[0-9A-F]{24}$/);
+    const markerName = markers[0].slice('BACKUP_RESULT=pushed:'.length);
+    // wal-g logs Started AND Wrote lines with the name; only Wrote is a push.
+    expect(pushed.stderr).toContain(`Wrote backup with name ${markerName}`);
+    const listed = docker(['exec', '-u', 'postgres', DB_CT, 'wal-g', 'backup-list']);
+    expect(listed.split('\n').filter((l) => l.startsWith(`${markerName} `))).toHaveLength(1);
     psql("INSERT INTO t VALUES ('after-base')");
 
     const backups = await listBaseBackups({ s3, bucket: BUCKET, prefix: PREFIX });
     expect(backups).toHaveLength(1);
     const base = resolveRestoreBase(backups, 'latest');
+    expect(base.name).toBe(markerName);
     expect(base.name).toMatch(/^base_000000010000000000000[0-9A-F]{3}$/);
     expect(base.timeline).toBe(1);
     expect(base.sizeBytes).toBeGreaterThan(0);

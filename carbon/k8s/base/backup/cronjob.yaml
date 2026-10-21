@@ -16,7 +16,13 @@
 # carbon/backup/compose-backup.sh): a run that exits 0 prints exactly one
 # BACKUP_RESULT=pushed:<name> or BACKUP_RESULT=skipped:<reason> line, which
 # `vibecarbon backup` and destroy read from the Job logs. The pushed line comes
-# before retention, so a retention failure (exit 1) still names the base.
+# before retention, so a retention failure still names the base; it exits 3.
+#
+# Retries never re-push a landed base: restartPolicy Never (no in-place
+# container restart) plus a podFailurePolicy that fails the Job at once on
+# exit 3 (base pushed, retention failed). A failed push (exit 1, no marker)
+# still gets a new pod under backoffLimit. podFailurePolicy is GA in
+# Kubernetes 1.31, the line K3S_VERSION (src/lib/deploy/k8s/k3s.js) pins.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -33,13 +39,20 @@ spec:
     spec:
       activeDeadlineSeconds: 3600
       backoffLimit: 2
+      podFailurePolicy:
+        rules:
+          - action: FailJob
+            onExitCodes:
+              containerName: backup
+              operator: In
+              values: [3]
       template:
         metadata:
           labels:
             app: vibecarbon-backup
             component: backup
         spec:
-          restartPolicy: OnFailure
+          restartPolicy: Never
           serviceAccountName: backup-sa
           containers:
             - name: backup
@@ -164,22 +177,26 @@ spec:
                         exit 1
                       fi
                     fi
-                    # The push. wal-g logs to stderr; its Wrote backup with name
-                    # line is the name the marker carries. A push that exits 0
-                    # without it proves nothing landed under a name, so it fails.
+                    # The push. wal-g logs to stderr only, and names the base on a
+                    # Started line and, once the sentinel is written, on a Wrote
+                    # backup with name line. Only the Wrote line proves a pushed
+                    # base, so the marker takes its name from it; a push that
+                    # exits 0 without it fails rather than guess.
                     push_out="$(wal-g backup-push "$PGDATA" 2>&1)" || {
                       printf "%s\n" "$push_out" >&2
                       exit 1
                     }
                     printf "%s\n" "$push_out" >&2
-                    name="$(printf "%s\n" "$push_out" | grep -o "backup with name base_[0-9A-Za-z_]*" | tail -n 1 | sed "s/^backup with name //")" || true
+                    name="$(printf "%s\n" "$push_out" | grep -o "Wrote backup with name base_[0-9A-Za-z_]*" | tail -n 1 | sed "s/^Wrote backup with name //")" || true
                     if [ -z "$name" ]; then
                       echo "backup-push exited 0 but printed no backup name (no Wrote backup with name line), so nothing proves what landed" >&2
                       exit 1
                     fi
                     echo "BACKUP_RESULT=pushed:$name"
                     # RETENTION, a separate step after the marker: the base above
-                    # is in the bucket whatever happens here. Sweep sentinel-less
+                    # is in the bucket whatever happens here, and a failure exits
+                    # 3, which the podFailurePolicy turns into a failed Job (no
+                    # new pod, so no second push). Sweep sentinel-less
                     # orphans (interrupted pushes) before retention, since
                     # `delete retain` hard-crashes on a backup whose
                     # stop-sentinel never got written, and retries cannot heal a
@@ -193,7 +210,7 @@ spec:
                     retain_out="$( { wal-g delete garbage BACKUPS --confirm && wal-g delete retain FULL '"${RETAIN}"' --confirm; } 2>&1)" || {
                       printf "%s\n" "$retain_out" >&2
                       echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
-                      exit 1
+                      exit 3
                     }
                     printf "%s\n" "$retain_out" >&2
                   '

@@ -12,8 +12,9 @@ set -e
 # 0 prints exactly one stdout line, `BACKUP_RESULT=pushed:<name>` (the base
 # name the push logged) or `BACKUP_RESULT=skipped:<reason>`. The lock
 # skip prints skipped:already-running and exits 75 (EX_TEMPFAIL). The pushed
-# line is printed BEFORE retention, so a retention failure (exit 1) still names
-# the base that landed. Refusals (retired node, backup-prefix fence) and a
+# line is printed BEFORE retention, so a retention failure still names the base
+# that landed; it exits 3, the one code meaning "base pushed, retention
+# failed" (the CronJob fails its Job on 3 instead of re-pushing). Refusals (retired node, backup-prefix fence) and a
 # failed push exit 1 with no marker.
 #
 # Invoked as `cd <project-dir> && RETAIN=<n> bash backup/compose-backup.sh`, so
@@ -123,22 +124,26 @@ docker compose exec -T db bash -c '
       exit 1
     fi
   fi
-  # The push. wal-g logs to stderr; its "Wrote backup with name base_..." line
-  # is the name the marker carries. A push that exits 0 without that line
-  # proves nothing landed under a name, so it fails rather than guess.
+  # The push. wal-g logs to stderr only, and names the base twice: "Started
+  # backup with name base_..." when it begins and "Wrote backup with name
+  # base_... to storage default" once the sentinel is written (verified on
+  # postgres:17.11-walg3.0.9-r2). Only the Wrote line proves a pushed base, so
+  # the marker takes its name from that line; a push that exits 0 without it
+  # fails rather than guess.
   push_out="$(wal-g backup-push "$PGDATA" 2>&1)" || {
     printf "%s\n" "$push_out" >&2
     exit 1
   }
   printf "%s\n" "$push_out" >&2
-  name="$(printf "%s\n" "$push_out" | grep -o "backup with name base_[0-9A-Za-z_]*" | tail -n 1 | sed "s/^backup with name //")" || true
+  name="$(printf "%s\n" "$push_out" | grep -o "Wrote backup with name base_[0-9A-Za-z_]*" | tail -n 1 | sed "s/^Wrote backup with name //")" || true
   if [ -z "$name" ]; then
     echo "backup-push exited 0 but printed no backup name (no Wrote backup with name line), so nothing proves what landed" >&2
     exit 1
   fi
   echo "BACKUP_RESULT=pushed:$name"
   # RETENTION, a separate step after the marker: the base above is in the
-  # bucket whatever happens here. `delete garbage BACKUPS` sweeps
+  # bucket whatever happens here, and a failure exits 3 (base pushed,
+  # retention failed), never 1. `delete garbage BACKUPS` sweeps
   # sentinel-less orphans (an interrupted backup-push writes its stop-sentinel
   # LAST, so a mid-upload failure leaves data files with no sentinel) BEFORE
   # `delete retain`, which hard-crashes on such an orphan ("object
@@ -150,7 +155,7 @@ docker compose exec -T db bash -c '
   retain_out="$( { wal-g delete garbage BACKUPS --confirm && wal-g delete retain FULL "'"${RETAIN}"'" --confirm; } 2>&1)" || {
     printf "%s\n" "$retain_out" >&2
     echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
-    exit 1
+    exit 3
   }
   printf "%s\n" "$retain_out" >&2
 '

@@ -121,9 +121,9 @@ const SPEC = {
     { name: 'env', value: '<name>', description: 'Environment seed (alternative to positional)' },
     {
       name: 'source',
-      value: '<latest|ISO-timestamp>',
+      value: '<latest|base-name|ISO-timestamp>',
       description:
-        'Restore point: `latest` (newest base backup + all WAL) or an ISO-8601 timestamp (PITR)',
+        'Restore point: `latest` (newest base backup + all WAL), a base backup name (that base + all WAL), or an ISO-8601 timestamp (PITR)',
     },
     {
       name: 'confirm',
@@ -269,13 +269,18 @@ export async function verifyPostgres(ip, sshKeyPath, opts = {}) {
  * path got as far as the SSH step before failing. Reject the unsupported
  * shapes here, naming the two that work.
  *
+ * A wal-g base backup name (`base_<24 hex>`, or a delta `…_D_<24 hex>`), as
+ * `vibecarbon backup` prints it, restores THAT base and replays all WAL:
+ * `{ kind: 's3', name: 'latest', base }`.
+ *
  * @param {string} source
- * @returns {{ kind: 's3', name: string }}
+ * @returns {{ kind: 's3', name: string, base?: string }}
  */
 
 export function resolveRestoreTarget(source) {
   if (source === 'latest') return { kind: 's3', name: 'latest' };
   if (RESTORE_PITR_RE.test(source)) return { kind: 's3', name: source };
+  if (BASE_BACKUP_NAME_RE.test(source)) return { kind: 's3', name: 'latest', base: source };
   const why = existsSync(source)
     ? 'Local backup files cannot be restored'
     : /\.(tar|sql)(\.gz)?$/.test(source)
@@ -283,10 +288,35 @@ export function resolveRestoreTarget(source) {
       : `"${source}" is not a restore point`;
   p.log.error(
     `${why}: restore is wal-g-based and pulls from S3. ` +
-      'Pass `-source latest` for the most recent base backup plus all WAL, or an ISO-8601 ' +
+      'Pass `-source latest` for the most recent base backup plus all WAL, a base backup ' +
+      'name (e.g. base_000000010000000000000004) for that base plus all WAL, or an ISO-8601 ' +
       'timestamp (e.g. 2026-06-22T14:30:00Z) for point-in-time recovery.',
   );
   process.exit(1);
+}
+
+/** A wal-g base backup name: full, or delta (`_D_` + the base it diffs from). */
+const BASE_BACKUP_NAME_RE = /^base_[0-9A-F]{24}(_D_[0-9A-F]{24})?$/;
+
+/**
+ * The base backup a chosen restore point fetches: the named one for
+ * `-source <base name>`, else resolveRestoreBase (newest, or newest at or
+ * before a PITR instant).
+ *
+ * @param {Array<{ name: string, finishTime: Date }>} backups
+ * @param {{ name: string, base?: string }} chosenSource
+ * @throws {NoRestorePointError}
+ */
+export function pickRestoreBase(backups, chosenSource) {
+  if (chosenSource.base) {
+    const named = backups.find((b) => b.name === chosenSource.base);
+    if (!named) throw new NoRestorePointError(`no base backup named ${chosenSource.base}`);
+    return named;
+  }
+  return resolveRestoreBase(
+    backups,
+    chosenSource.name === 'latest' ? 'latest' : new Date(chosenSource.name),
+  );
 }
 
 // ============================================================================
@@ -453,13 +483,12 @@ export async function run(args, deps = {}) {
   // stop: a point-in-time target older than every base refuses here.
   let base;
   try {
-    base = resolveRestoreBase(
-      backups,
-      chosenSource.name === 'latest' ? 'latest' : new Date(chosenSource.name),
-    );
+    base = pickRestoreBase(backups, chosenSource);
   } catch (err) {
     if (!(err instanceof NoRestorePointError)) throw err;
-    p.log.error(`Cannot restore ${chosenSource.name}: ${err.message} (in ${location}).`);
+    p.log.error(
+      `Cannot restore ${chosenSource.base ?? chosenSource.name}: ${err.message} (in ${location}).`,
+    );
     process.exit(1);
   }
 

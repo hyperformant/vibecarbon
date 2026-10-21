@@ -180,3 +180,71 @@ describe('preDestroyBackup', () => {
     expect(deps.backupCompose).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Fix round 1 (I1): destroy never refreshed the operator-IP allowlist, so
+ * after an IP change every remote step before Pulumi (the now-default
+ * pre-destroy backup, the CSI volume release) timed out, and the only remedy
+ * offered (-force) skipped the backup. destroy now resolves the provider token
+ * first and runs ensureOperatorIpAccess once, with the arguments backup.js
+ * uses, before its first remote step.
+ */
+describe('destroy refreshes the operator-IP allowlist before any remote step', () => {
+  it('calls ensureOperatorIpAccess with the backup.js arguments', async () => {
+    const { ensureDestroyOperatorAccess } = await import('../../../src/destroy.js');
+    const ensure = vi.fn(async () => ({ added: true, cidr: '203.0.113.7/32' }));
+    const { deps, logs } = harness({ ensure });
+    const projectConfig = { projectName: 'app', environments: { prod: compose() } };
+    await ensureDestroyOperatorAccess(
+      {
+        projectConfig,
+        envName: 'prod',
+        envConfig: { deployMode: 'compose-ha' },
+        apiToken: 'tok',
+        yes: true,
+      },
+      deps,
+    );
+    expect(ensure).toHaveBeenCalledWith({
+      projectConfig,
+      environment: 'prod',
+      isHA: true,
+      apiToken: 'tok',
+      yes: true,
+      onMessage: expect.any(Function),
+    });
+    expect(logs).toContainEqual([
+      'success',
+      'Firewall updated: SSH/k8s API now allow 203.0.113.7/32',
+    ]);
+  });
+
+  it('a failed check warns and continues (the backup then stops on its own cause)', async () => {
+    const { ensureDestroyOperatorAccess } = await import('../../../src/destroy.js');
+    const ensure = vi.fn(async () => {
+      throw new Error('could not detect your public IP');
+    });
+    const { deps, logs } = harness({ ensure });
+    await ensureDestroyOperatorAccess(
+      { projectConfig: {}, envName: 'prod', envConfig: {}, apiToken: 'tok', yes: false },
+      deps,
+    );
+    expect(
+      logs.some(([k, m]) => k === 'warn' && m.includes('could not detect your public IP')),
+    ).toBe(true);
+  });
+
+  it('in main: the token, then the allowlist, then the pre-destroy backup', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../../../src/destroy.js', import.meta.url), 'utf-8');
+    const main = src.slice(src.indexOf('async function main('));
+    const token = main.indexOf('Provider.promptApiToken(');
+    const access = main.indexOf('await ensureDestroyOperatorAccess(');
+    const backup = main.indexOf('await preDestroyBackup(');
+    expect(token).toBeGreaterThan(-1);
+    expect(access).toBeGreaterThan(token);
+    expect(backup).toBeGreaterThan(access);
+    // Exactly once.
+    expect(main.split('ensureDestroyOperatorAccess(').length - 1).toBe(1);
+  });
+});

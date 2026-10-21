@@ -403,6 +403,76 @@ describe('backupCompose — wal-g backup-push staleness retry', () => {
     expect(backupPushCount()).toBe(1);
   });
 
+  // The generic SSH ladder (sshRunAsync's isTransientSshCommandError) retries
+  // on /timed out|timeout/ ANYWHERE in the message, which carries the remote
+  // stderr. A retention "i/o timeout" (or any remote timeout wording) after a
+  // pushed base would re-run the script and push a second base. The backup
+  // call retries only an ssh transport failure that provably never started
+  // the remote command (exit 255 + a pre-exec wording).
+  it('a remote timeout wording is not an ssh retry: one run, pushed result', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => {
+      throw Object.assign(
+        execError(
+          'retention failed after pushing base_000000010000000000000003: dial tcp: i/o timeout',
+        ),
+        { stdout: PUSHED, status: 3 },
+      );
+    });
+    const r = await backupCompose('10.0.0.1', '/tmp/key', 'testapp', {
+      staleRetryDelaysMs: NO_DELAYS,
+    });
+    expect(r).toMatchObject({ result: 'pushed', name: 'base_000000010000000000000003' });
+    expect(backupPushCount()).toBe(1);
+  });
+
+  it('a push that failed on a remote timeout (no marker) is not re-run either', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => {
+      throw execError('ERROR: backup-push: context deadline exceeded (Client.Timeout exceeded)');
+    });
+    await expect(
+      backupCompose('10.0.0.1', '/tmp/key', 'testapp', { staleRetryDelaysMs: NO_DELAYS }),
+    ).rejects.toThrow(/Timeout exceeded/);
+    expect(backupPushCount()).toBe(1);
+  });
+
+  // The shared never-started ladder waits 5s before its retry (node:timers/
+  // promises, which fake timers do not reach), hence the longer timeout.
+  it('an ssh connection that never started (exit 255) is retried', {
+    timeout: 15_000,
+  }, async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup((n) => {
+      if (n === 1) {
+        throw Object.assign(
+          execError('ssh: connect to host 10.0.0.1 port 22: Connection refused'),
+          {
+            status: 255,
+          },
+        );
+      }
+      return PUSHED;
+    });
+    await expect(
+      backupCompose('10.0.0.1', '/tmp/key', 'testapp', { staleRetryDelaysMs: NO_DELAYS }),
+    ).resolves.toMatchObject({ result: 'pushed' });
+    expect(backupPushCount()).toBe(2);
+  });
+
+  it('a failure with empty stderr falls back to the error message (no empty cause)', async () => {
+    const { backupCompose } = await composePromise;
+    mockBackup(() => {
+      throw Object.assign(new Error('Command failed: ssh … (exit 3)'), {
+        stdout: PUSHED,
+        stderr: '',
+        status: 3,
+      });
+    });
+    const r = await backupCompose('10.0.0.1', '/tmp/key', 'testapp');
+    expect(r).toMatchObject({ retentionError: 'Command failed: ssh … (exit 3)' });
+  });
+
   it('a run with no marker throws (nothing proves what it did)', async () => {
     const { backupCompose } = await composePromise;
     mockBackup(() => 'Started\n');

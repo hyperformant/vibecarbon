@@ -248,7 +248,8 @@ echo "$*" >> ${log}
 # backup-push names the base it wrote (stderr, as wal-g logs); the backup
 # scripts carry that name in their BACKUP_RESULT marker.
 if [ "$1" = backup-push ]; then
-  echo "INFO: 2026/10/21 02:00:01.000000 Wrote backup with name base_000000010000000000000004" >&2
+  echo "INFO: 2026/10/21 02:00:00.000000 Started backup with name base_000000010000000000000004 at LSN 0/4000028" >&2
+  echo "INFO: 2026/10/21 02:00:01.000000 Wrote backup with name base_000000010000000000000004 to storage default" >&2
 fi
 exit 0
 `,

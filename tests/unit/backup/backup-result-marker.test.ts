@@ -72,7 +72,11 @@ afterAll(() => rmSync(work, { recursive: true, force: true }));
 
 type Stub = {
   recovery?: 't' | 'f';
-  /** stderr wal-g backup-push prints; default names NAME the way wal-g does. */
+  /**
+   * stderr wal-g backup-push prints. The default is what wal-g 3.0.9 logs
+   * (verified on postgres:17.11-walg3.0.9-r2): a Started line, then the Wrote
+   * line that only a finished push prints.
+   */
   pushOutput?: string;
   pushFails?: boolean;
   retainFails?: boolean;
@@ -83,7 +87,10 @@ type Stub = {
 function stubs(name: string, opts: Stub) {
   const {
     recovery = 'f',
-    pushOutput = `INFO: 2026/10/21 02:00:01.123456 Wrote backup with name ${NAME}`,
+    pushOutput = [
+      `INFO: 2026/10/21 02:00:00.000001 Started backup with name ${NAME} at LSN 0/7000028`,
+      `INFO: 2026/10/21 02:00:01.123456 Wrote backup with name ${NAME} to storage default`,
+    ].join('\n'),
     pushFails = false,
     retainFails = false,
     lockHeld = false,
@@ -102,7 +109,7 @@ if [ "$1" = st ] && [ "$2" = cat ]; then
 fi
 echo "$*" >> ${log}
 if [ "$1" = backup-push ]; then
-  ${pushFails ? 'echo "ERROR: pg_backup_start: permission denied" >&2; exit 1' : `echo "${pushOutput}" >&2`}
+  ${pushFails ? 'echo "ERROR: pg_backup_start: permission denied" >&2; exit 1' : `printf '%s\\n' "${pushOutput}" >&2`}
 fi
 if [ "$1" = delete ] && [ "$2" = retain ]; then
   ${retainFails ? 'echo "ERROR: failed to list s3 folder: AccessDenied" >&2; exit 1' : ''}
@@ -208,9 +215,11 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     expect(r.walg).toMatch(/backup-push[\s\S]*delete garbage BACKUPS[\s\S]*delete retain FULL 2/);
   });
 
-  it('a retention failure after the push: exit 1, the pushed marker stands, the cause names the base', () => {
+  it('a retention failure after the push: exit 3, the pushed marker stands, the cause names the base', () => {
     const r = runCompose('retain-fail', { retainFails: true });
-    expect(r.status).toBe(1);
+    // 3, not 1: the one exit code that means "the base landed, retention did
+    // not" (the CronJob fails the Job on it instead of re-pushing).
+    expect(r.status).toBe(3);
     expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
     expect(r.stderr).toContain(`retention failed after pushing ${NAME}: `);
     expect(r.stderr).toContain('AccessDenied');
@@ -229,6 +238,15 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     expect(r.status).toBe(1);
     expect(markers(r.stdout)).toEqual([]);
     expect(r.stderr).toMatch(/printed no backup name/);
+    expect(r.walg).not.toContain('delete');
+  });
+
+  it('a Started line alone is not a pushed base: exit 1, no marker', () => {
+    const r = runCompose('started-only', {
+      pushOutput: `INFO: 2026/10/21 02:00:00.000001 Started backup with name ${NAME} at LSN 0/7000028`,
+    });
+    expect(r.status).toBe(1);
+    expect(markers(r.stdout)).toEqual([]);
     expect(r.walg).not.toContain('delete');
   });
 
@@ -264,12 +282,12 @@ describe('the backup CronJob prints the same markers', () => {
     expect(b.walg).not.toContain('backup-push');
   });
 
-  it('success prints the pushed name; a retention failure keeps it and exits 1', () => {
+  it('success prints the pushed name; a retention failure keeps it and exits 3', () => {
     const ok = runCron('ok');
     expect(ok.status, ok.stderr).toBe(0);
     expect(markers(ok.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
     const bad = runCron('retain-fail', { retainFails: true });
-    expect(bad.status).toBe(1);
+    expect(bad.status).toBe(3);
     expect(markers(bad.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
     expect(bad.stderr).toContain(`retention failed after pushing ${NAME}: `);
   });
@@ -281,5 +299,48 @@ describe('the backup CronJob prints the same markers', () => {
     const n = runCron('no-name', { pushOutput: 'INFO: done' });
     expect(n.status).toBe(1);
     expect(markers(n.stdout)).toEqual([]);
+    const st = runCron('started-only', {
+      pushOutput: `INFO: 2026/10/21 02:00:00.000001 Started backup with name ${NAME} at LSN 0/7000028`,
+    });
+    expect(st.status).toBe(1);
+    expect(markers(st.stdout)).toEqual([]);
+  });
+});
+
+/**
+ * A retention failure must not re-push. Under restartPolicy OnFailure the
+ * container restarted and every attempt pushed another base. Now the pod
+ * never restarts in place, and exit 3 (retention failed after a pushed base)
+ * fails the Job at once through a podFailurePolicy rule; a failed push (exit
+ * 1) still retries under backoffLimit. podFailurePolicy is GA in Kubernetes
+ * 1.31, the line K3S_VERSION pins.
+ */
+describe('the backup Job fails, not retries, on a retention failure', () => {
+  const cron = loadYaml(readFileSync(CRONJOB, 'utf-8')) as {
+    spec: {
+      jobTemplate: {
+        spec: {
+          backoffLimit: number;
+          podFailurePolicy?: { rules: Array<Record<string, unknown>> };
+          template: { spec: { restartPolicy: string } };
+        };
+      };
+    };
+  };
+  const job = cron.spec.jobTemplate.spec;
+
+  it('restartPolicy Never and a FailJob rule on exit 3 of the backup container', () => {
+    expect(job.template.spec.restartPolicy).toBe('Never');
+    expect(job.backoffLimit).toBeGreaterThan(0);
+    expect(job.podFailurePolicy?.rules).toContainEqual({
+      action: 'FailJob',
+      onExitCodes: { containerName: 'backup', operator: 'In', values: [3] },
+    });
+  });
+
+  it('the pinned k3s is on a line where podFailurePolicy is GA (>= 1.31)', async () => {
+    const { K3S_VERSION } = await import('../../../src/lib/deploy/k8s/k3s.js');
+    const [maj, min] = K3S_VERSION.replace(/^v/, '').split('.').map(Number);
+    expect(maj * 100 + min).toBeGreaterThanOrEqual(131);
   });
 });
