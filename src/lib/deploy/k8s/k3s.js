@@ -64,8 +64,12 @@ import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
 import {
   BACKUP_NAME_RE,
+  PGDATA_PATH,
+  PREVIOUS_PGDATA_PATH,
   PROVEN_WRITABLE_STATES,
   REMOVE_DISCARD_SH,
+  RESTORE_ATTEMPT_RE,
+  RESTORE_LAYOUT,
   RETIRE_PREVIOUS_SH,
   restoreMarkerStringData,
 } from '../../walg/restore-layout.js';
@@ -1930,7 +1934,7 @@ export function buildInfraSecretData({ envLocal, s3Config, backupBucketName, res
   if (backupBucketName) {
     stringData.S3_BACKUP_BUCKET = backupBucketName;
   }
-  if (restore) Object.assign(stringData, restoreMarkerStringData(restore));
+  if (restore) Object.assign(stringData, restoreMarkerStringData({ ...restore, origin: 'deploy' }));
   return stringData;
 }
 
@@ -3054,10 +3058,11 @@ export function assertDeployRestorePoint({ restore }) {
     restore.target !== '' &&
     typeof restore.recoveryConf === 'string' &&
     restore.recoveryConf !== '' &&
-    Number.isFinite(restore.sizeBytes);
+    Number.isFinite(restore.sizeBytes) &&
+    RESTORE_ATTEMPT_RE.test(String(restore.attempt ?? ''));
   if (!ok) {
     throw new Error(
-      'deployK3s: incomplete restore point. Expected { backup, target, recoveryConf, sizeBytes } ' +
+      'deployK3s: incomplete restore point. Expected { backup, target, recoveryConf, sizeBytes, attempt } ' +
         'resolved from the backup bucket (resolveDeployRestorePoint) before the deploy starts',
     );
   }
@@ -3068,28 +3073,9 @@ function clearMarkerCommand() {
   return `kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '${JSON.stringify({ stringData: restoreMarkerStringData(null) })}'`;
 }
 
-/**
- * What the cluster's restore marker (RESTORE_BACKUP on vibecarbon-infra-secrets)
- * lets this deploy do. Read-only; runs in deployK3s once the cluster answers,
- * outside every step gate.
- *
- * - A plain deploy refuses while a restore is pending (Fix round 1, I1): the
- *   walg-restore init restores on every db pod start while the marker is set,
- *   so leaving it would hand the restore to the next drain or OOM, unproven,
- *   and an apply could drop the key and abandon it silently. It names the
- *   command that finishes the restore and the one that abandons it. A marker
- *   left by `vibecarbon restore` counts the same.
- * - `deploy -restore` seeds a NEW database: the restore runs in the db pod's
- *   first boot. On a cluster whose db StatefulSet already runs, nothing
- *   reboots the pod, so the live database would read as "promoted and
- *   writable" and the deploy would report a restore that never happened. It
- *   refuses, unless the marker already names this backup (a rerun finishing
- *   the same restore).
- *
- * @param {{ env: NodeJS.ProcessEnv, restore: { backup: string } | null, operatorEnv: string }} args
- */
-export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
-  const marked = await runKubectlWithRetry(
+/** The restore marker on vibecarbon-infra-secrets, decoded; {} when unset or absent. */
+async function readRestoreMarker(env) {
+  const out = await runKubectlWithRetry(
     [
       '-n',
       'vibecarbon',
@@ -3098,36 +3084,132 @@ export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
       'vibecarbon-infra-secrets',
       '--ignore-not-found',
       '-o',
-      'jsonpath={.data.RESTORE_BACKUP}',
+      'jsonpath={.data}',
     ],
     { env, captureStdout: true, description: 'assertRestoreMarkerState: read the restore marker' },
   );
-  const pending = Buffer.from(String(marked ?? '').trim(), 'base64').toString('utf8');
-  if (!restore) {
-    if (!pending) return;
-    throw new Error(
-      [
-        `a restore of ${pending} is pending on this cluster (RESTORE_BACKUP on vibecarbon-infra-secrets).`,
-        'A plain deploy would leave it to the next db pod start, unproven, so it stops here.',
-        'Finish the restore:',
-        `  vibecarbon deploy ${operatorEnv} -restore ${pending}`,
-        'or abandon it (the database keeps whatever it holds now):',
-        `  ${clearMarkerCommand()}`,
-      ].join('\n'),
+  const text = String(out ?? '').trim();
+  const data = text ? JSON.parse(text) : {};
+  const get = (k) => (data[k] ? Buffer.from(data[k], 'base64').toString('utf8') : '');
+  return {
+    backup: get('RESTORE_BACKUP'),
+    target: get('RESTORE_TARGET'),
+    attempt: get('RESTORE_ATTEMPT'),
+    origin: get('RESTORE_ORIGIN'),
+  };
+}
+
+/**
+ * Whether a pending restore has already swapped its copy into PGDATA, read
+ * from the db pod: 'swapped' (the attempt record names it, or the database
+ * from before sits in .vc-prev), 'not-swapped', or 'unknown' (the pod could
+ * not be exec'd, e.g. it is stuck in its init). `previous` says whether
+ * .vc-prev exists.
+ */
+async function readRestoreSwapState(env, marker) {
+  const record = `${PGDATA_PATH}/${RESTORE_LAYOUT.restoredFrom}`;
+  const probe =
+    `if [ -d ${PREVIOUS_PGDATA_PATH} ]; then echo prev; fi; ` +
+    `if [ -f ${record} ]; then printf 'record %s\\n' "$(cat ${record})"; fi`;
+  let out;
+  try {
+    out = await runCommandAsync(
+      ['kubectl', '-n', 'vibecarbon', 'exec', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', probe],
+      { env, silent: true },
     );
+  } catch {
+    return { state: 'unknown', previous: false };
+  }
+  const lines = String(out ?? '')
+    .split('\n')
+    .map((l) => l.trim());
+  const previous = lines.includes('prev');
+  const recorded =
+    Boolean(marker.attempt) && lines.includes(`record ${marker.backup} ${marker.attempt}`);
+  return { state: previous || recorded ? 'swapped' : 'not-swapped', previous };
+}
+
+/**
+ * What the cluster's restore marker (vibecarbon-infra-secrets) lets this
+ * deploy do. Read-only; runs in deployK3s once the cluster answers, outside
+ * every step gate.
+ *
+ * - A plain deploy refuses while a restore is pending (I1): the walg-restore
+ *   init restores on every db pod start while the marker is set, so leaving
+ *   it would hand the restore to the next drain or OOM, unproven, and an
+ *   apply could drop the key and abandon it silently. It names the command
+ *   that finishes THAT attempt (deploy -restore for one deploy set,
+ *   vibecarbon restore for one vibecarbon restore set; the base for 'latest',
+ *   else the target). It offers the abandon command only when nothing was
+ *   swapped in yet: once a copy is in, clearing the marker would boot it
+ *   unproven, with the database from before in .vc-prev (N2 ruling).
+ * - `deploy -restore` seeds a NEW database: on a cluster whose db StatefulSet
+ *   already runs, nothing reboots the pod, so the deploy would report a
+ *   restore that never happened. It refuses, unless the marker is this same
+ *   restore (base and target), a rerun finishing it.
+ *
+ * @param {{ env: NodeJS.ProcessEnv, restore: { backup: string, target: string } | null, operatorEnv: string }} args
+ */
+export async function assertRestoreMarkerState({ env, restore, operatorEnv }) {
+  const marker = await readRestoreMarker(env);
+  if (!restore) {
+    if (!marker.backup) return;
+    const point = marker.target && marker.target !== 'latest' ? marker.target : marker.backup;
+    const finish =
+      marker.origin === 'deploy'
+        ? [`  vibecarbon deploy ${operatorEnv} -restore ${point}`]
+        : marker.origin === 'restore'
+          ? [`  vibecarbon restore ${operatorEnv} -source ${point}`]
+          : [
+              `  vibecarbon restore ${operatorEnv} -source ${point}`,
+              `(or, on an environment deploy -restore was bringing up: vibecarbon deploy ${operatorEnv} -restore ${point})`,
+            ];
+    const { state, previous } = await readRestoreSwapState(env, marker);
+    const before = previous
+      ? `the database from before is kept in ${PREVIOUS_PGDATA_PATH}`
+      : 'there was no database before it';
+    const head = [
+      `a restore of ${marker.backup} (target ${marker.target || 'latest'}) is pending on this cluster (the marker on vibecarbon-infra-secrets).`,
+      'A plain deploy would leave it to the next db pod start, unproven, so it stops here.',
+    ];
+    const lines =
+      state === 'not-swapped'
+        ? [
+            ...head,
+            'Finish the restore:',
+            ...finish,
+            'or, since nothing was swapped in yet, abandon it (the database keeps what it holds now):',
+            `  ${clearMarkerCommand()}`,
+          ]
+        : state === 'swapped'
+          ? [
+              ...head,
+              `The restored copy is already swapped in, unproven, and ${before}.`,
+              'Clearing the marker would boot the restored copy as if it were proven, so finish the restore:',
+              ...finish,
+            ]
+          : [
+              ...head,
+              'Could not read the db pod to tell whether the restored copy was swapped in. Finish the restore:',
+              ...finish,
+              'If nothing was swapped in yet, it can be abandoned instead:',
+              `  ${clearMarkerCommand()}`,
+              `If it was, clearing the marker boots the restored copy unproven, and the database from before (if any) is in ${PREVIOUS_PGDATA_PATH}.`,
+            ];
+    throw new Error(lines.join('\n'));
   }
   const sts = await runKubectlWithRetry(
     ['-n', 'vibecarbon', 'get', 'statefulset', DB_STATEFULSET, '--ignore-not-found', '-o', 'name'],
     { env, captureStdout: true, description: 'assertRestoreMarkerState: get the db StatefulSet' },
   );
   if (!String(sts ?? '').trim()) return;
-  if (pending === restore.backup) return;
+  if (marker.backup === restore.backup && marker.target === restore.target) return;
   throw new Error(
     [
       `deploy -restore seeds a new database, and this cluster already runs one (statefulset/${DB_STATEFULSET}).`,
       'Restore into the running environment:',
-      `  vibecarbon restore ${operatorEnv} -source ${restore.backup}`,
-      `or destroy it first and run deploy -restore again.`,
+      `  vibecarbon restore ${operatorEnv} -source ${restore.target !== 'latest' ? restore.target : restore.backup}`,
+      'or destroy it first and run deploy -restore again.',
     ].join('\n'),
   );
 }

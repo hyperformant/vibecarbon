@@ -36,6 +36,10 @@ import { buildRecoveryConfig, renderRecoveryConf } from '../../../src/lib/walg/r
 
 const BACKUP = 'base_000000010000000000000002';
 const CONF = renderRecoveryConf(buildRecoveryConfig({ target: 'latest' }));
+// This attempt's id (the marker's RESTORE_ATTEMPT), and the record a
+// completed swap of it leaves.
+const ATTEMPT = '11111111-2222-4333-8444-555555555555';
+const RECORD = `${BACKUP} ${ATTEMPT}`;
 const hasFlock = spawnSync('sh', ['-c', 'command -v flock']).status === 0;
 
 function k8sInit(): string {
@@ -82,10 +86,11 @@ const TIERS: Array<[string, () => string[]]> = [
   [
     'compose',
     () => {
-      const script = composeRestoreScript({ backup: BACKUP, recoveryConf: CONF }).replace(
-        'PGDATA=/var/lib/postgresql/data',
-        `PGDATA=${pgdata}`,
-      );
+      const script = composeRestoreScript({
+        backup: BACKUP,
+        recoveryConf: CONF,
+        attempt: ATTEMPT,
+      }).replace('PGDATA=/var/lib/postgresql/data', `PGDATA=${pgdata}`);
       writeFileSync(join(dir, 'restore.sh'), script);
       return ['bash', join(dir, 'restore.sh')];
     },
@@ -99,7 +104,7 @@ const TIERS: Array<[string, () => string[]]> = [
   ],
 ];
 
-function run(argv: string[]) {
+function run(argv: string[], env: Record<string, string> = {}) {
   return spawnSync(argv[0], argv.slice(1), {
     encoding: 'utf-8',
     env: {
@@ -108,6 +113,8 @@ function run(argv: string[]) {
       RESTORE_BACKUP: BACKUP,
       RESTORE_RECOVERY_CONF: CONF,
       RESTORE_TARGET: 'latest',
+      RESTORE_ATTEMPT: ATTEMPT,
+      ...env,
     },
   });
 }
@@ -175,7 +182,7 @@ for (const [tier, build] of TIERS) {
       stubWalg('ok');
       const r = run(build());
       expect(r.status, r.stderr).toBe(0);
-      expect(read('.vc-restored-from')).toBe(BACKUP);
+      expect(read('.vc-restored-from')).toBe(RECORD);
       expect(ls()).not.toContain('.vc-restored-from.tmp');
     });
 
@@ -253,15 +260,15 @@ for (const [tier, build] of TIERS) {
  * the live cluster aside and restore it again: a silent rewind. Compose has
  * no such repeat: its script runs once, invoked by the CLI.
  */
-describe.skipIf(!hasFlock)('k8s walg-restore is idempotent per restored base', () => {
+describe.skipIf(!hasFlock)('k8s walg-restore is idempotent per restore attempt', () => {
   const k8s = () => {
     writeFileSync(join(dir, 'init.sh'), k8sInit());
     return ['bash', join(dir, 'init.sh')];
   };
 
-  it('marker set, the volume already restored from that base: no move, normal boot', () => {
+  it('marker set, this attempt already swapped in: no move, normal boot', () => {
     seedLive();
-    writeFileSync(join(pgdata, '.vc-restored-from'), BACKUP);
+    writeFileSync(join(pgdata, '.vc-restored-from'), RECORD);
     stubWalg('ok');
     const r = run(k8s());
     expect(r.status, r.stderr).toBe(0);
@@ -272,20 +279,52 @@ describe.skipIf(!hasFlock)('k8s walg-restore is idempotent per restored base', (
 
   it('marker set to a different base: restores it', () => {
     seedLive();
-    writeFileSync(join(pgdata, '.vc-restored-from'), 'base_000000010000000000000001');
+    writeFileSync(join(pgdata, '.vc-restored-from'), `base_000000010000000000000001 ${ATTEMPT}`);
     stubWalg('ok');
     const r = run(k8s());
     expect(r.status, r.stderr).toBe(0);
     expect(read('base/marker')).toBe('restored');
     expect(read('.vc-prev/base/marker')).toBe('live');
-    expect(read('.vc-restored-from')).toBe(BACKUP);
+    expect(read('.vc-restored-from')).toBe(RECORD);
   });
 
-  it('a swap left in progress is settled even when the record names the base', () => {
+  it('the same base to another target is another attempt: restores it (N1a)', () => {
+    seedLive();
+    writeFileSync(join(pgdata, '.vc-restored-from'), RECORD);
+    stubWalg('ok');
+    const other = '99999999-2222-4333-8444-555555555555';
+    const r = run(k8s(), { RESTORE_TARGET: '2026-10-19T12:00:00Z', RESTORE_ATTEMPT: other });
+    expect(r.status, r.stderr).toBe(0);
+    expect(read('base/marker')).toBe('restored');
+    expect(read('.vc-restored-from')).toBe(`${BACKUP} ${other}`);
+  });
+
+  it('a record an earlier attempt left behind does not stop a new attempt (N1b)', () => {
+    seedLive();
+    writeFileSync(
+      join(pgdata, '.vc-restored-from'),
+      `${BACKUP} 00000000-dead-4000-8000-000000000000`,
+    );
+    stubWalg('ok');
+    const r = run(k8s());
+    expect(r.status, r.stderr).toBe(0);
+    expect(read('base/marker')).toBe('restored');
+  });
+
+  it('a marker from an older CLI (no attempt) always restores', () => {
+    seedLive();
+    writeFileSync(join(pgdata, '.vc-restored-from'), `${BACKUP} `);
+    stubWalg('ok');
+    const r = run(k8s(), { RESTORE_ATTEMPT: '' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(read('base/marker')).toBe('restored');
+  });
+
+  it('a swap left in progress is settled even when the record names this attempt', () => {
     mkdirSync(join(pgdata, '.vc-prev', 'base'), { recursive: true });
     writeFileSync(join(pgdata, '.vc-prev', 'base', 'marker'), 'original\n');
     writeFileSync(join(pgdata, '.vc-restore-in-progress'), 'in\n');
-    writeFileSync(join(pgdata, '.vc-restored-from'), BACKUP);
+    writeFileSync(join(pgdata, '.vc-restored-from'), RECORD);
     stubWalg('ok');
     const r = run(k8s());
     expect(r.status, r.stderr).toBe(0);

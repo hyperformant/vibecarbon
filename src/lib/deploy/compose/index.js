@@ -6,7 +6,7 @@
  * Provisioning is Hetzner (automated): the HetznerProvider API creates the VPS.
  */
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -31,6 +31,7 @@ import {
   PREVIOUS_PGDATA_PATH,
   PROVEN_WRITABLE_STATES,
   REMOVE_DISCARD_SH,
+  RESTORE_ATTEMPT_RE,
   RESTORE_LAYOUT,
   RETIRE_PREVIOUS_SH,
   restoreFetchTimeoutS,
@@ -1389,7 +1390,9 @@ export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backup
  *   from renderRecoveryConf (src/lib/walg/recovery-config.js).
  * @returns {string} The bash script body.
  */
-export function composeRestoreScript({ backup, recoveryConf } = /** @type {any} */ ({})) {
+export function composeRestoreScript(
+  { backup, recoveryConf, attempt = randomUUID() } = /** @type {any} */ ({}),
+) {
   if (!BACKUP_NAME_RE.test(String(backup))) {
     throw new Error(
       `composeRestoreScript: ${JSON.stringify(backup)} is not a wal-g backup name; the CLI resolves one before any restore`,
@@ -1398,12 +1401,18 @@ export function composeRestoreScript({ backup, recoveryConf } = /** @type {any} 
   if (!recoveryConf || /^VC_RECOVERY_CONF_EOF$/m.test(recoveryConf)) {
     throw new Error('composeRestoreScript: recoveryConf (renderRecoveryConf) is required');
   }
+  if (!RESTORE_ATTEMPT_RE.test(String(attempt))) {
+    throw new Error(`composeRestoreScript: ${JSON.stringify(attempt)} is not a restore attempt id`);
+  }
   const { staging } = RESTORE_LAYOUT;
   return [
     '#!/bin/bash',
     'set -euo pipefail',
     `PGDATA=${PGDATA_PATH}`,
     `RESTORE_BACKUP='${backup}'`,
+    // The shared swap block records `<backup> <attempt>`; compose never reads
+    // it back (its script runs once per restore), the k8s init does.
+    `RESTORE_ATTEMPT='${attempt}'`,
     'VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf',
     'cat > "$VC_RECOVERY_CONF_FILE" <<\'VC_RECOVERY_CONF_EOF\'',
     recoveryConf,
@@ -1532,10 +1541,10 @@ function restoreStagedAndSwapLines() {
     '# only thing in PGDATA that says "swapped, not proven" is recovery.signal,',
     '# and nothing slow may follow.',
     `rm -rf "$PGDATA/${discard}"`,
-    '# Record the base PGDATA now holds (renamed in, never torn), before the marker',
-    '# goes: a k8s pod start while its restore marker is still set boots it',
-    '# instead of restoring it again.',
-    `printf '%s' "$RESTORE_BACKUP" > "$PGDATA/${restoredFrom}.tmp"`,
+    '# Record the attempt PGDATA now holds (renamed in, never torn), before the',
+    '# marker goes: a k8s pod start during this same attempt boots it instead of',
+    '# restoring it again.',
+    `printf '%s %s' "$RESTORE_BACKUP" "\${RESTORE_ATTEMPT:-}" > "$PGDATA/${restoredFrom}.tmp"`,
     `mv -f "$PGDATA/${restoredFrom}.tmp" "$PGDATA/${restoredFrom}"`,
     'rm -f "$VC_MARKER"',
     'echo "restore: $RESTORE_BACKUP staged and swapped in"',

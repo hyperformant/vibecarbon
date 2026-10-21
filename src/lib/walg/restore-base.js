@@ -18,6 +18,7 @@
  * Restore therefore needs the backup bucket's credentials locally (Decision 1):
  * the provider's object-storage env vars, or the interactive prompt.
  */
+import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
 import { formatInstant } from '../backup-format.js';
 import { formatBytes } from '../backup-s3.js';
@@ -276,8 +277,8 @@ export function restorePointOf(chosenSource) {
  * Reads only (ListObjectsV2, GetObject), with the deploy's own object-storage
  * credentials (Decision 1). Errors name the variables, never a value.
  *
- * @param {{ restore: string | null, k8s: boolean, environment?: string, deployedAt?: string | null, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
- * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number } | null>}
+ * @param {{ restore: string | null, k8s: boolean, s3Config: { bucket?: string, walgPrefix?: string, endpoint?: string, region?: string, accessKey?: string, secretKey?: string }, backupBucketName?: string | null, credentialVars: string, makeClient?: (cfg: object) => any }} args
+ * @returns {Promise<{ backup: string, target: string, recoveryConf: string, sizeBytes: number, attempt: string } | null>}
  * @throws {NoRestorePointError} when no base backup satisfies the restore point
  */
 export async function resolveDeployRestorePoint({
@@ -286,29 +287,10 @@ export async function resolveDeployRestorePoint({
   s3Config,
   backupBucketName,
   credentialVars,
-  environment,
-  deployedAt = null,
   makeClient = createS3Client,
 }) {
   if (!restore) return null;
-  if (!k8s) {
-    throw new Error(
-      'deploy -restore is k8s and k8s-ha only. On compose, deploy first, then run vibecarbon restore',
-    );
-  }
-  // A completed deploy is on record: the database runs, and deploy -restore
-  // only seeds a new one. Refused here, before anything is minted or
-  // provisioned (deployK3s refuses again on the cluster itself).
-  if (deployedAt) {
-    throw new Error(
-      [
-        `${environment} already runs a database (deployed ${deployedAt}); deploy -restore seeds a new one.`,
-        'Restore into the running environment:',
-        `  vibecarbon restore ${environment} -source ${restore}`,
-        'or destroy it first and run deploy -restore again.',
-      ].join('\n'),
-    );
-  }
+  assertDeployRestoreAllowed({ restore, k8s });
   const chosen = parseRestoreSource(String(restore));
   if (!chosen) {
     throw new Error(
@@ -334,7 +316,44 @@ export async function resolveDeployRestorePoint({
     throw new NoRestorePointError(`${err.message} in s3://${bucket}/${prefix}`);
   }
   const { target, recoveryConf } = restorePointOf(chosen);
-  return { backup: base.name, target, recoveryConf, sizeBytes: base.sizeBytes };
+  // A new attempt id per deploy: the walg-restore init records it after the
+  // swap, so a db pod start during this attempt boots instead of restoring
+  // again, and a later attempt of the same base always restores.
+  return {
+    backup: base.name,
+    target,
+    recoveryConf,
+    sizeBytes: base.sizeBytes,
+    attempt: randomUUID(),
+  };
+}
+
+/**
+ * The refusals `deploy -restore` needs nothing remote for, run before the
+ * orchestrator saves or mints anything (M1): k8s tiers only, and an
+ * environment with a completed deploy on record already runs a database
+ * (destroy deletes the record; a failed deploy -restore never stamps
+ * deployedAt, so its rerun passes). deployK3s refuses again on the cluster.
+ *
+ * @param {{ restore: string | null, k8s: boolean, environment?: string, deployedAt?: string | null }} args
+ */
+export function assertDeployRestoreAllowed({ restore, k8s, environment, deployedAt = null }) {
+  if (!restore) return;
+  if (!k8s) {
+    throw new Error(
+      'deploy -restore is k8s and k8s-ha only. On compose, deploy first, then run vibecarbon restore',
+    );
+  }
+  if (deployedAt) {
+    throw new Error(
+      [
+        `${environment} already runs a database (deployed ${deployedAt}); deploy -restore seeds a new one.`,
+        'Restore into the running environment:',
+        `  vibecarbon restore ${environment} -source ${restore}`,
+        'or destroy it first and run deploy -restore again.',
+      ].join('\n'),
+    );
+  }
 }
 
 /**

@@ -14,6 +14,8 @@ const MARKER = {
   backup: 'base_000000010000000000000002',
   target: 'latest',
   recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
+  attempt: 'a1b2c3d4-0000-4000-8000-000000000001',
+  origin: 'restore',
 };
 
 describe('restore marker keys', () => {
@@ -24,6 +26,15 @@ describe('restore marker keys', () => {
     expect(restoreMarkerStringData(null)).toEqual(
       Object.fromEntries(RESTORE_MARKER_KEYS.map((k) => [k, ''])),
     );
+  });
+
+  it('a set marker names its attempt and who set it (Fix round 2, N1/N2)', () => {
+    const data = restoreMarkerStringData(MARKER);
+    expect(data.RESTORE_ATTEMPT).toBe(MARKER.attempt);
+    expect(data.RESTORE_ORIGIN).toBe('restore');
+    expect(() => restoreMarkerStringData({ ...MARKER, attempt: '' })).toThrow(/attempt/);
+    expect(() => restoreMarkerStringData({ ...MARKER, attempt: 'two words' })).toThrow(/attempt/);
+    expect(() => restoreMarkerStringData({ ...MARKER, origin: 'cron' })).toThrow(/origin/);
   });
 
   it('refuses a marker without a real backup name or config', () => {

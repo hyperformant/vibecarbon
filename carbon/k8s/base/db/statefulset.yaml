@@ -139,11 +139,15 @@ spec:
                 exit 1
               fi
               # This init runs on EVERY boot while the marker is set. A completed swap
-              # of this same base (recorded in .vc-restored-from, no swap in progress)
-              # means the CLI has not cleared the marker yet: boot it, never move the
-              # live cluster aside and restore it again.
-              if [ ! -e "$VC_MARKER" ] && [ -f "$PGDATA/.vc-restored-from" ] && \
-                 [ "$(cat "$PGDATA/.vc-restored-from")" = "$RESTORE_BACKUP" ]; then
+              # of this same ATTEMPT (RESTORE_ATTEMPT, a new id per restore, recorded in
+              # .vc-restored-from; no swap in progress) means the CLI has not cleared the
+              # marker yet: boot it, never move the live cluster aside and restore it
+              # again. A new attempt of the same base (another target, or a record an
+              # earlier attempt left) has another id, so it restores. A marker with no
+              # attempt id always restores.
+              if [ -n "${RESTORE_ATTEMPT:-}" ] && [ ! -e "$VC_MARKER" ] && \
+                 [ -f "$PGDATA/.vc-restored-from" ] && \
+                 [ "$(cat "$PGDATA/.vc-restored-from")" = "$RESTORE_BACKUP $RESTORE_ATTEMPT" ]; then
                 echo "walg-restore: ${RESTORE_BACKUP} is already restored on this volume (marker not cleared yet), normal boot."
                 exit 0
               fi
@@ -270,10 +274,10 @@ spec:
               # only thing in PGDATA that says "swapped, not proven" is recovery.signal,
               # and nothing slow may follow.
               rm -rf "$PGDATA/.vc-discard"
-              # Record the base PGDATA now holds (renamed in, never torn), before the marker
-              # goes: a k8s pod start while its restore marker is still set boots it
-              # instead of restoring it again.
-              printf '%s' "$RESTORE_BACKUP" > "$PGDATA/.vc-restored-from.tmp"
+              # Record the attempt PGDATA now holds (renamed in, never torn), before the
+              # marker goes: a k8s pod start during this same attempt boots it instead of
+              # restoring it again.
+              printf '%s %s' "$RESTORE_BACKUP" "${RESTORE_ATTEMPT:-}" > "$PGDATA/.vc-restored-from.tmp"
               mv -f "$PGDATA/.vc-restored-from.tmp" "$PGDATA/.vc-restored-from"
               rm -f "$VC_MARKER"
               echo "restore: $RESTORE_BACKUP staged and swapped in"
@@ -298,6 +302,12 @@ spec:
                 secretKeyRef:
                   name: vibecarbon-infra-secrets
                   key: RESTORE_RECOVERY_CONF
+                  optional: true
+            - name: RESTORE_ATTEMPT
+              valueFrom:
+                secretKeyRef:
+                  name: vibecarbon-infra-secrets
+                  key: RESTORE_ATTEMPT
                   optional: true
             - name: WALG_S3_PREFIX
               value: "{{WALG_S3_PREFIX}}"

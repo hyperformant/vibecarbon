@@ -19,10 +19,13 @@ export const RESTORE_LAYOUT = Object.freeze({
   discard: '.vc-discard',
   inProgress: '.vc-restore-in-progress',
   lock: '.vc-restore.lock',
-  // The base a completed swap put here. The k8s init restores on every boot
-  // while the marker is set; with this naming the same base it boots
-  // normally instead of rewinding the live cluster again. Removed with the
-  // discard, after the CLI cleared the marker.
+  // The attempt a completed swap came from: `<backup> <attempt id>`. The k8s
+  // init restores on every boot while the marker is set; when the marker's
+  // RESTORE_ATTEMPT is the one recorded here it boots normally instead of
+  // rewinding the live cluster again. Keyed on the attempt, not the base, so
+  // a new restore of the same base (another target, or after a stale record
+  // survived) always restores. Removed first by REMOVE_DISCARD_SH, after the
+  // CLI cleared the marker.
   restoredFrom: '.vc-restored-from',
 });
 
@@ -37,14 +40,14 @@ export const DISCARD_PGDATA_PATH = `${PGDATA_PATH}/${RESTORE_LAYOUT.discard}`;
  * rename out of the `.vc-prev` name, into a per-call name under the discard,
  * with nothing removed in front of it (a crash at any point leaves either the
  * whole `.vc-prev` or garbage under `.vc-discard`). REMOVE_DISCARD_SH then
- * removes the discard and the restored-base record. Two steps so k8s can
- * clear its marker in between: the record must outlive the marker, or a pod
- * start in that gap would restore again. `$$`
+ * removes the attempt record (first, it is one small file) and then the
+ * discard. Two steps so k8s can clear its marker in between: the record must
+ * outlive the marker, or a pod start in that gap would restore again. `$$`
  * is the remote shell's pid: run it through `sh -c` with the text quoted so
  * only that shell expands it.
  */
 export const RETIRE_PREVIOUS_SH = `mkdir -p ${DISCARD_PGDATA_PATH} && if [ -e ${PREVIOUS_PGDATA_PATH} ]; then mv ${PREVIOUS_PGDATA_PATH} ${DISCARD_PGDATA_PATH}/prev.$$; fi`;
-export const REMOVE_DISCARD_SH = `rm -rf ${DISCARD_PGDATA_PATH} ${PGDATA_PATH}/${RESTORE_LAYOUT.restoredFrom}`;
+export const REMOVE_DISCARD_SH = `rm -f ${PGDATA_PATH}/${RESTORE_LAYOUT.restoredFrom} && rm -rf ${DISCARD_PGDATA_PATH}`;
 
 /** The restore states a writable proof accepts (assertRolePrimaryWritable). */
 export const PROVEN_WRITABLE_STATES = Object.freeze(['writable', 'lifted']);
@@ -61,29 +64,56 @@ export function restoreFetchTimeoutS(requiredBytes, floorS = 900) {
 /** wal-g backup names: base_<24 hex>, or a delta base_<24 hex>_D_<24 hex>. */
 export const BACKUP_NAME_RE = /^base_[0-9A-F]{24}(_D_[0-9A-F]{24})?$/;
 
-/** The Secret keys the k8s restore marker is made of. */
+/**
+ * The Secret keys the k8s restore marker is made of. RESTORE_ATTEMPT is a
+ * random id per restore attempt (not a secret): the walg-restore init records
+ * it after a swap, so a pod start during the same attempt does not restore
+ * again. RESTORE_ORIGIN says which command set it ('deploy' for deploy
+ * -restore onto a new cluster, 'restore' for vibecarbon restore), so a
+ * refusal can name the command that finishes it.
+ */
 export const RESTORE_MARKER_KEYS = Object.freeze([
   'RESTORE_TARGET',
   'RESTORE_BACKUP',
   'RESTORE_RECOVERY_CONF',
+  'RESTORE_ATTEMPT',
+  'RESTORE_ORIGIN',
 ]);
 
+/** Who set a restore marker. */
+export const RESTORE_ORIGINS = Object.freeze(['deploy', 'restore']);
+
+/** A restore attempt id: one shell word, safe in the init's record. */
+export const RESTORE_ATTEMPT_RE = /^[A-Za-z0-9-]{8,64}$/;
+
 /**
- * The marker's Secret stringData. A complete set, or all three empty (clear).
+ * The marker's Secret stringData. A complete set, or every key empty (clear).
  *
- * @param {{ backup: string, target: string, recoveryConf: string } | null} marker
+ * @param {{ backup: string, target: string, recoveryConf: string, attempt: string, origin: 'deploy'|'restore' } | null} marker
  * @returns {Record<string, string>}
  */
 export function restoreMarkerStringData(marker) {
   if (!marker) return Object.fromEntries(RESTORE_MARKER_KEYS.map((k) => [k, '']));
-  const { backup, target, recoveryConf } = marker;
+  const { backup, target, recoveryConf, attempt, origin } = marker;
   if (!BACKUP_NAME_RE.test(String(backup))) {
     throw new Error(`restore marker: ${JSON.stringify(backup)} is not a wal-g backup name`);
   }
   if (!target || !recoveryConf) {
     throw new Error('restore marker: target and recoveryConf are required with a backup');
   }
-  return { RESTORE_TARGET: target, RESTORE_BACKUP: backup, RESTORE_RECOVERY_CONF: recoveryConf };
+  if (!RESTORE_ATTEMPT_RE.test(String(attempt ?? ''))) {
+    throw new Error(`restore marker: ${JSON.stringify(attempt)} is not a restore attempt id`);
+  }
+  if (!RESTORE_ORIGINS.includes(origin)) {
+    throw new Error(`restore marker: origin ${JSON.stringify(origin)} is not deploy or restore`);
+  }
+  return {
+    RESTORE_TARGET: target,
+    RESTORE_BACKUP: backup,
+    RESTORE_RECOVERY_CONF: recoveryConf,
+    RESTORE_ATTEMPT: attempt,
+    RESTORE_ORIGIN: origin,
+  };
 }
 
 /**

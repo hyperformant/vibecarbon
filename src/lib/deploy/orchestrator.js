@@ -28,7 +28,11 @@ import {
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
 import { getSSHKeyPath } from '../ssh.js';
 import { createTracker } from '../tracker.js';
-import { backupCredentialVars, resolveDeployRestorePoint } from '../walg/restore-base.js';
+import {
+  assertDeployRestoreAllowed,
+  backupCredentialVars,
+  resolveDeployRestorePoint,
+} from '../walg/restore-base.js';
 import { useDnsChallenge } from './acme.js';
 import {
   finishAppKeyRotation,
@@ -869,6 +873,21 @@ export async function executeDeployment(args, gatheredConfig) {
   // ("Unknown deployMode: undefined", DO run 32670715722) so teardown never
   // ran at all. Region/endpoint fields may still be provisional here; the
   // post-s3 call re-persists the corrected values.
+  //
+  // Before it: the `deploy -restore` refusals that need nothing remote (k8s
+  // tiers only; a completed deploy on record means a database already runs).
+  // The base itself is resolved after s3-setup, below.
+  try {
+    assertDeployRestoreAllowed({
+      restore: args.restore,
+      k8s: isK8sTier(tier),
+      environment,
+      deployedAt: envConfig?.deployedAt ?? null,
+    });
+  } catch (err) {
+    p.log.error(`deploy -restore: ${err.message}`);
+    process.exit(1);
+  }
   saveSkeletonEnv();
 
   s3Spinner.start('Verifying S3 buckets');
@@ -1082,8 +1101,6 @@ export async function executeDeployment(args, gatheredConfig) {
       s3Config,
       backupBucketName: backupS3Config?.bucket || null,
       credentialVars: backupCredentialVars(envConfig),
-      environment,
-      deployedAt: envConfig?.deployedAt ?? null,
     });
   } catch (err) {
     p.log.error(`deploy -restore: ${err.message}`);

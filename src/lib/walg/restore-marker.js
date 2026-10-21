@@ -9,7 +9,8 @@
  *   (RESTORE_MARKER_KEYS). The db pod's walg-restore init container restores
  *   when RESTORE_BACKUP is set, fetching exactly that backup and applying
  *   RESTORE_RECOVERY_CONF. RESTORE_TARGET stays for the seed-standby init,
- *   which skips its seed while a restore runs. All three are set and cleared
+ *   which skips its seed while a restore runs. RESTORE_ATTEMPT (a new random
+ *   id per restore) and RESTORE_ORIGIN go with them. All are set and cleared
  *   together, by one patch.
  *
  * - The in-progress FILE inside PGDATA (RESTORE_LAYOUT.inProgress), on both
@@ -24,6 +25,7 @@
  * previous cluster stays until the restored database has promoted and proved
  * writable; only then does the CLI remove it.
  */
+import { randomUUID } from 'node:crypto';
 import * as p from '@clack/prompts';
 import { assertRolePrimaryWritable } from '../deploy/write-fence.js';
 import { sshKubectl } from '../ssh.js';
@@ -52,7 +54,17 @@ async function patchMarker(ip, sshKeyPath, stringData) {
  * @param {{ ip: string, sshKeyPath: string, backup: string, target: string, recoveryConf: string }} args
  */
 export async function setRestoreMarker({ ip, sshKeyPath, backup, target, recoveryConf }) {
-  await patchMarker(ip, sshKeyPath, restoreMarkerStringData({ backup, target, recoveryConf }));
+  await patchMarker(
+    ip,
+    sshKeyPath,
+    restoreMarkerStringData({
+      backup,
+      target,
+      recoveryConf,
+      attempt: randomUUID(),
+      origin: 'restore',
+    }),
+  );
 }
 
 /** Clear every marker key. Only once the restored database is proven. */

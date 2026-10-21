@@ -173,6 +173,8 @@ describe('k8s/base renders the db StatefulSet', () => {
         '"key":"RESTORE_TARGET"',
         '"key":"RESTORE_BACKUP"',
         '"key":"RESTORE_RECOVERY_CONF"',
+        // The restore marker's attempt id: the walg-restore init's repeat guard.
+        '"key":"RESTORE_ATTEMPT"',
         '"key":"REPL_PASSWORD"',
         '"key":"S3_CREDENTIALS_INI"',
       ]).toContain(k);

@@ -96,6 +96,9 @@ describe('runK8sRestore: the restore marker', () => {
     expect(Object.keys(data).sort()).toEqual([...RESTORE_MARKER_KEYS].sort());
     expect(data.RESTORE_BACKUP).toBe(BASE.name);
     expect(data.RESTORE_TARGET).toBe('latest');
+    // Each restore is its own attempt, and says it came from vibecarbon restore.
+    expect(data.RESTORE_ATTEMPT).toMatch(/^[0-9a-f-]{36}$/);
+    expect(data.RESTORE_ORIGIN).toBe('restore');
     expect(data.RESTORE_RECOVERY_CONF).toContain("recovery_target_timeline = 'current'");
     expect(data.RESTORE_RECOVERY_CONF).toContain('-default_transaction_read_only');
   });
@@ -164,6 +167,12 @@ describe('runK8sRestore: an unproven restore keeps the marker and .vc-prev (I4)'
     expect(remove).toBeGreaterThan(clear);
     expect(scale).toBeGreaterThan(remove);
     expect(msg).not.toMatch(/rm -rf \/var\/lib\/postgresql\/data\/\.vc-prev\b/);
+    // One command per line, never chained with &&.
+    expect(msg).not.toContain('&& kubectl');
+    const lines = msg.split('\n').map((l) => l.trim());
+    expect(
+      lines.filter((l) => l.startsWith('kubectl -n vibecarbon')).length,
+    ).toBeGreaterThanOrEqual(4);
     expect(events).not.toContain('marker:clear');
     expect(events).not.toContain('retirePrev');
     expect(events).not.toContain('scaleUp');

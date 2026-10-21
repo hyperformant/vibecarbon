@@ -154,10 +154,11 @@ describe('the CLI retires a proven .vc-prev with one rename and no removal in fr
     expect(RETIRE_PREVIOUS_SH).toBe(
       'mkdir -p /var/lib/postgresql/data/.vc-discard && if [ -e /var/lib/postgresql/data/.vc-prev ]; then mv /var/lib/postgresql/data/.vc-prev /var/lib/postgresql/data/.vc-discard/prev.$$; fi',
     );
-    // The restored-base record goes with the discard, after the marker clear
-    // (the k8s init's repeat guard must outlive the marker).
+    // The attempt record goes first and fast, after the marker clear (the k8s
+    // init's repeat guard must outlive the marker, never the attempt), then
+    // the slow discard.
     expect(REMOVE_DISCARD_SH).toBe(
-      'rm -rf /var/lib/postgresql/data/.vc-discard /var/lib/postgresql/data/.vc-restored-from',
+      'rm -f /var/lib/postgresql/data/.vc-restored-from && rm -rf /var/lib/postgresql/data/.vc-discard',
     );
   });
 });

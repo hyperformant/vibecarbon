@@ -38,8 +38,10 @@ const {
   deployK3s,
   DB_ROLLOUT_TIMEOUT_S,
 } = k3s;
-const { RESTORE_MARKER_KEYS } = await import('../../../src/lib/walg/restore-layout.js');
-const { NoRestorePointError, resolveDeployRestorePoint } = await import(
+const { RESTORE_MARKER_KEYS, restoreMarkerStringData } = await import(
+  '../../../src/lib/walg/restore-layout.js'
+);
+const { assertDeployRestoreAllowed, NoRestorePointError, resolveDeployRestorePoint } = await import(
   '../../../src/lib/walg/restore-base.js'
 );
 const { buildRecoveryConfig, renderRecoveryConf } = await import(
@@ -53,6 +55,7 @@ const RESTORE = {
   target: 'latest',
   recoveryConf: renderRecoveryConf(buildRecoveryConfig({ target: 'latest' })),
   sizeBytes: 50 * 1024 ** 3,
+  attempt: '0f1e2d3c-0000-4000-8000-00000000000a',
 };
 
 // ---------------------------------------------------------------------------
@@ -65,6 +68,8 @@ describe('buildInfraSecretData carries the restore marker', () => {
     expect(data.RESTORE_BACKUP).toBe(BACKUP);
     expect(data.RESTORE_TARGET).toBe('latest');
     expect(data.RESTORE_RECOVERY_CONF).toBe(RESTORE.recoveryConf);
+    expect(data.RESTORE_ATTEMPT).toBe(RESTORE.attempt);
+    expect(data.RESTORE_ORIGIN).toBe('deploy');
   });
 
   it('writes none without one, so an apply leaves a `vibecarbon restore` marker alone', () => {
@@ -139,7 +144,11 @@ describe('resolveDeployRestorePoint', () => {
 
   it('latest: the newest base, with its recovery config and size', async () => {
     const point = await resolve('latest');
-    expect(point).toEqual({ ...RESTORE, sizeBytes: 222 });
+    expect(point).toEqual({ ...RESTORE, sizeBytes: 222, attempt: expect.any(String) });
+    // A new attempt every time: the init container's repeat guard keys on it.
+    const again = await resolve('latest');
+    expect(again?.attempt).toMatch(/^[0-9a-f-]{36}$/);
+    expect(again?.attempt).not.toBe(point?.attempt);
   });
 
   it('an exact base name restores that base and replays all WAL', async () => {
@@ -176,22 +185,48 @@ describe('resolveDeployRestorePoint', () => {
     );
   });
 
-  it('refuses an environment that completed a deploy, before anything is minted (M1)', async () => {
-    const s3 = fakeS3(two);
-    const err = await resolve('latest', s3, {
-      environment: 'prod',
-      deployedAt: '2026-10-20T10:00:00Z',
-    }).catch((e) => e);
-    expect(err.message).toMatch(/prod already runs a database/);
-    expect(err.message).toContain(`vibecarbon restore prod -source latest`);
-    expect(s3.seen).toEqual([]);
-  });
-
   it('names the credential variables, never a value, when credentials are missing', async () => {
     const err = await resolve('latest', fakeS3(two), {
       s3Config: { ...S3, accessKey: '', secretKey: '' },
     }).catch((e) => e);
     expect(err.message).toContain('HETZNER_S3_ACCESS_KEY and HETZNER_S3_SECRET_KEY');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The orchestrator's first refusals (M1), before anything is saved or minted
+// ---------------------------------------------------------------------------
+
+describe('assertDeployRestoreAllowed', () => {
+  const allowed = (extra = {}) =>
+    assertDeployRestoreAllowed({
+      restore: 'latest',
+      k8s: true,
+      environment: 'prod',
+      deployedAt: null,
+      ...extra,
+    });
+
+  it('passes no -restore, and -restore onto a destroyed or fresh environment', () => {
+    expect(() => allowed({ restore: null, deployedAt: '2026-10-20T10:00:00Z' })).not.toThrow();
+    expect(() => allowed()).not.toThrow();
+  });
+
+  it('refuses an environment with a completed deploy on record, naming it', () => {
+    expect(() => allowed({ deployedAt: '2026-10-20T10:00:00Z' })).toThrow(
+      /prod already runs a database[\s\S]*\n {2}vibecarbon restore prod -source latest\n/,
+    );
+  });
+
+  it('refuses compose', () => {
+    expect(() => allowed({ k8s: false })).toThrow(/k8s and k8s-ha only/);
+  });
+
+  it('the orchestrator calls it before the first skeleton save', () => {
+    const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
+    const call = src.indexOf('assertDeployRestoreAllowed({');
+    expect(call).toBeGreaterThan(-1);
+    expect(call).toBeLessThan(src.indexOf('  saveSkeletonEnv();'));
   });
 });
 
@@ -211,6 +246,7 @@ describe('assertDeployRestorePoint', () => {
     ['no recovery config', { ...RESTORE, recoveryConf: '' }],
     ['no target', { ...RESTORE, target: '' }],
     ['no size', { ...RESTORE, sizeBytes: undefined }],
+    ['no attempt', { ...RESTORE, attempt: '' }],
   ])('refuses %s', (_label, restore) => {
     expect(() => assertDeployRestorePoint({ restore })).toThrow(/restore point/);
   });
@@ -237,10 +273,12 @@ let calls: string[][] = [];
 let stdin: { seq: number; data: string }[] = [];
 let dbRolloutExit = 0;
 let fence = 'off';
-// A db StatefulSet already in the cluster, and the RESTORE_BACKUP its infra
-// Secret carries (plain; the mock answers base64 as kubectl does).
+// A db StatefulSet already in the cluster, the restore marker its infra
+// Secret carries (plain; the mock answers base64 as kubectl does), and what
+// the db pod's PGDATA shows (null: the pod cannot be exec'd).
 let liveDbSts = false;
-let markedBackup = '';
+let marker: Record<string, string> = {};
+let pgdataState: string | null = '';
 
 function child(exitCode: number, stdout = '') {
   const c: Record<string, unknown> = {
@@ -291,8 +329,14 @@ function installSpawn() {
     if (cmd === 'kubectl' && has('get') && has('statefulset') && has('db')) {
       return child(0, liveDbSts ? 'statefulset.apps/db\n' : '');
     }
-    if (cmd === 'kubectl' && has('jsonpath={.data.RESTORE_BACKUP}')) {
-      return child(0, Buffer.from(markedBackup).toString('base64'));
+    if (cmd === 'kubectl' && has('jsonpath={.data}')) {
+      const data = Object.fromEntries(
+        Object.entries(marker).map(([k, v]) => [k, Buffer.from(v).toString('base64')]),
+      );
+      return child(0, JSON.stringify(data));
+    }
+    if (cmd === 'kubectl' && has('exec') && args.some((a) => a.includes('.vc-restored-from'))) {
+      return pgdataState === null ? child(1) : child(0, pgdataState);
     }
     if (cmd === 'kubectl' && has('exec') && /pg_is_in_recovery/.test(sql)) return child(0, 'f\n');
     if (cmd === 'kubectl' && has('exec') && /default_transaction_read_only/.test(sql)) {
@@ -384,7 +428,8 @@ const isMarkerClear = (a: string[]) =>
   a.some((x) => x.includes('"RESTORE_BACKUP":""'));
 const isRetire = (a: string[]) => a.includes('exec') && a.some((x) => x.includes('.vc-prev'));
 const isRemoveDiscard = (a: string[]) =>
-  a.includes('exec') && a.some((x) => /^rm -rf .*\.vc-discard .*\.vc-restored-from$/.test(x));
+  a.includes('exec') &&
+  a.some((x) => /^rm -f .*\.vc-restored-from && rm -rf .*\.vc-discard$/.test(x));
 const isAppPatch = (a: string[]) =>
   a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app');
 
@@ -396,7 +441,8 @@ describe('applyK3sManifests with a restore point', () => {
     dbRolloutExit = 0;
     fence = 'off';
     liveDbSts = false;
-    markedBackup = '';
+    marker = {};
+    pgdataState = '';
     installSpawn();
     vi.stubGlobal(
       'fetch',
@@ -466,6 +512,21 @@ describe('applyK3sManifests with a restore point', () => {
 
   const markerEnv = { ...process.env, KUBECONFIG: '/tmp/kc' };
 
+  const pending = (over: Record<string, string> = {}) => ({
+    RESTORE_BACKUP: BACKUP,
+    RESTORE_TARGET: 'latest',
+    RESTORE_RECOVERY_CONF: RESTORE.recoveryConf,
+    RESTORE_ATTEMPT: RESTORE.attempt,
+    RESTORE_ORIGIN: 'deploy',
+    ...over,
+  });
+  const lines = (msg: string) => msg.split('\n').map((l) => l.trim());
+  const plain = () =>
+    assertRestoreMarkerState({ env: markerEnv, restore: null, operatorEnv: 'prod' }).catch(
+      (e) => e,
+    );
+  const CLEAR = `kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '${JSON.stringify({ stringData: restoreMarkerStringData(null) })}'`;
+
   it('-restore: refuses a cluster that already runs a database, naming the env', async () => {
     liveDbSts = true;
     const err = await assertRestoreMarkerState({
@@ -474,34 +535,73 @@ describe('applyK3sManifests with a restore point', () => {
       operatorEnv: 'prod',
     }).catch((e) => e);
     expect(err.message).toMatch(/seeds a new database, and this cluster already runs one/);
-    expect(err.message).toContain(`\n  vibecarbon restore prod -source ${BACKUP}\n`);
+    expect(lines(err.message)).toContain(`vibecarbon restore prod -source ${BACKUP}`);
     expect(err.message).not.toContain('<env>');
   });
 
-  it('-restore: a rerun that finishes the same restore goes on', async () => {
+  it('-restore: a rerun that finishes the same restore (base AND target) goes on', async () => {
     liveDbSts = true;
-    markedBackup = BACKUP;
+    marker = pending();
     await expect(
       assertRestoreMarkerState({ env: markerEnv, restore: RESTORE, operatorEnv: 'prod' }),
     ).resolves.toBeUndefined();
   });
 
-  it('plain deploy: refuses a cluster with a pending restore marker (I1)', async () => {
+  it('-restore: the same base to another target is another restore, refused (N2)', async () => {
     liveDbSts = true;
-    markedBackup = BACKUP;
-    const err = await assertRestoreMarkerState({
-      env: markerEnv,
-      restore: null,
-      operatorEnv: 'prod',
-    }).catch((e) => e);
-    expect(err.message).toMatch(new RegExp(`restore of ${BACKUP} is pending`));
-    const lines = err.message.split('\n').map((l: string) => l.trim());
-    expect(lines).toContain(`vibecarbon deploy prod -restore ${BACKUP}`);
-    expect(lines).toContain(
-      `kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '{"stringData":{"RESTORE_TARGET":"","RESTORE_BACKUP":"","RESTORE_RECOVERY_CONF":""}}'`,
-    );
-    // Read-only: nothing applied, patched or exec'd.
-    expect(calls.every((a) => a.includes('get'))).toBe(true);
+    marker = pending({ RESTORE_TARGET: '2026-10-19T12:00:00Z' });
+    await expect(
+      assertRestoreMarkerState({ env: markerEnv, restore: RESTORE, operatorEnv: 'prod' }),
+    ).rejects.toThrow(/already runs one/);
+  });
+
+  it('plain deploy, a pending deploy -restore: names deploy -restore with its exact point', async () => {
+    liveDbSts = true;
+    marker = pending();
+    const err = await plain();
+    expect(err.message).toMatch(new RegExp(`restore of ${BACKUP} \\(target latest\\) is pending`));
+    expect(lines(err.message)).toContain(`vibecarbon deploy prod -restore ${BACKUP}`);
+    // Read-only: only gets, and the one PGDATA probe.
+    expect(calls.every((a) => a.includes('get') || a.includes('exec'))).toBe(true);
+    expect(calls.some((a) => a.includes('patch') || a.includes('apply'))).toBe(false);
+  });
+
+  it('plain deploy, a pending vibecarbon restore to a point in time: names vibecarbon restore and the target (N2)', async () => {
+    liveDbSts = true;
+    marker = pending({ RESTORE_ORIGIN: 'restore', RESTORE_TARGET: '2026-10-19T12:00:00Z' });
+    const err = await plain();
+    expect(lines(err.message)).toContain('vibecarbon restore prod -source 2026-10-19T12:00:00Z');
+    expect(err.message).not.toContain('deploy prod -restore');
+  });
+
+  it('plain deploy, no swap yet: offers the abandon line', async () => {
+    liveDbSts = true;
+    marker = pending();
+    pgdataState = '';
+    const err = await plain();
+    expect(lines(err.message)).toContain(CLEAR);
+    expect(err.message).toMatch(/nothing was swapped in yet/);
+  });
+
+  it('plain deploy, swapped in: no plain abandon, says what clearing would boot (ruling)', async () => {
+    liveDbSts = true;
+    marker = pending({ RESTORE_ORIGIN: 'restore' });
+    pgdataState = `prev\nrecord ${BACKUP} ${RESTORE.attempt}\n`;
+    const err = await plain();
+    expect(lines(err.message)).not.toContain(CLEAR);
+    expect(err.message).toMatch(/clearing the marker would boot the restored copy/i);
+    expect(err.message).toContain('/var/lib/postgresql/data/.vc-prev');
+    expect(lines(err.message)).toContain(`vibecarbon restore prod -source ${BACKUP}`);
+  });
+
+  it('plain deploy, the pod cannot be read: says both possibilities', async () => {
+    liveDbSts = true;
+    marker = pending();
+    pgdataState = null;
+    const err = await plain();
+    expect(err.message).toMatch(/could not read the db pod/i);
+    expect(err.message).toMatch(/if nothing was swapped in yet/i);
+    expect(err.message).toMatch(/if it was/i);
   });
 
   it('plain deploy: no marker, or a fresh cluster, goes on', async () => {

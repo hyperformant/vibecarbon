@@ -81,6 +81,7 @@ import {
   PROVEN_WRITABLE_STATES,
   REMOVE_DISCARD_SH,
   RETIRE_PREVIOUS_SH,
+  restoreMarkerStringData,
 } from './lib/walg/restore-layout.js';
 import {
   assertRestoredPrimaryWritable,
@@ -938,15 +939,19 @@ export async function runK8sRestore({
   //    and the previous cluster stay, the app stays down.
   const proof = await assertWritable();
   if (!PROVEN_WRITABLE_STATES.includes(proof)) {
+    const inDb = `kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} --`;
     throw new Error(
-      `could not prove the restored database writable (write fence ${proof ?? 'unread'}), so the restore ` +
-        `marker stays set and the database from before the restore is kept in ${PREVIOUS_PGDATA_PATH}. ` +
-        `Check it on ${serverIp} (expect off): kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- ` +
-        `psql -U postgres -At -c 'SHOW default_transaction_read_only'. Then finish on ${serverIp}: ` +
-        `kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- sh -c '${RETIRE_PREVIOUS_SH}' ` +
-        `&& kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '{"stringData":{"RESTORE_TARGET":"","RESTORE_BACKUP":"","RESTORE_RECOVERY_CONF":""}}' ` +
-        `&& kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- sh -c '${REMOVE_DISCARD_SH}' ` +
-        '&& kubectl scale deployment app -n vibecarbon --replicas=2',
+      [
+        `could not prove the restored database writable (write fence ${proof ?? 'unread'}), so the restore`,
+        `marker stays set and the database from before the restore is kept in ${PREVIOUS_PGDATA_PATH}.`,
+        `Check it on ${serverIp} (expect off):`,
+        `  ${inDb} psql -U postgres -At -c 'SHOW default_transaction_read_only'`,
+        `Then finish on ${serverIp}, one command at a time:`,
+        `  ${inDb} sh -c '${RETIRE_PREVIOUS_SH}'`,
+        `  kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '${JSON.stringify({ stringData: restoreMarkerStringData(null) })}'`,
+        `  ${inDb} sh -c '${REMOVE_DISCARD_SH}'`,
+        '  kubectl scale deployment app -n vibecarbon --replicas=2',
+      ].join('\n'),
     );
   }
   // 6. Proven. Rename the previous cluster out of the .vc-prev name first (a
