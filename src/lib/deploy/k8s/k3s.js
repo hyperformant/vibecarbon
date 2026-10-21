@@ -15,7 +15,7 @@
  *   8. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
  *      traefik, app; cert-manager via infra/).
  *   9. `kubectl rollout status statefulset/db`.
- *   10. `kubectl patch deploy/app` (image + secrets sha) + rollout-status.
+ *   10. `kubectl patch deploy/app` (image + Secret versions) + rollout-status.
  *
  * Warm path: skip 1-5; rebuild image (6); sideload (7) skipping unchanged tag;
  * apply changed manifests (8); rollout (10).
@@ -1905,29 +1905,49 @@ export function buildInfraSecretData({ envLocal, s3Config, backupBucketName }) {
   return stringData;
 }
 
-/** The app pod-template annotation that records appPodSecretsSha. */
+/** The app pod-template annotation that records the Secrets' resourceVersions. */
 export const APP_SECRETS_SHA_ANNOTATION = 'vibecarbon.dev/app-secrets-sha';
 
 /**
- * A digest of every Secret value the app pod reads: the whole app Secret
- * (envFrom on the app container, APP_DB_PASSWORD on migrate) and the owner
- * DB_PASSWORD the migrate init container reads from the infra Secret. The
- * deploy stamps it on the pod template, so a changed value rolls the pods
- * and reruns migrate. Without it nothing rolled: envFrom is read at
- * container start and `set image` to the same tag is a no-op, so a
- * re-minted storage key never reached the pods before the old one was
- * revoked, and an APP_DB_PASSWORD rotation never took effect. Pure.
+ * The resourceVersions of the two Secrets the app pod reads: the app Secret
+ * (envFrom on the app container, APP_DB_PASSWORD on migrate) and the infra
+ * Secret (the owner DB_PASSWORD the migrate init container reads). Stamped on
+ * the pod template, so a changed Secret rolls the pods and reruns migrate.
+ * Without it nothing rolled: envFrom is read at container start and `set
+ * image` to the same tag is a no-op, so a re-minted storage key never reached
+ * the pods before the old one was revoked, and an APP_DB_PASSWORD rotation
+ * never took effect. Nothing is derived from a Secret value: `kubectl apply`
+ * of unchanged data leaves resourceVersion alone (an unchanged deploy stays a
+ * no-op roll) and any real change bumps it. Must run after the Secrets are
+ * applied. An unreadable version throws: a silently skipped roll would leave
+ * the old credential live under the pods.
  *
- * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}}} args
- * @returns {string} 16 hex chars
+ * @param {{env: NodeJS.ProcessEnv}} args
+ * @returns {Promise<string>} e.g. "app:1234,infra:1235"
  */
-export function appPodSecretsSha({ envLocal, s3Config }) {
-  const app = buildAppSecretData({ envLocal, s3Config });
-  const read = {
-    app: Object.fromEntries(Object.entries(app).sort(([a], [b]) => a.localeCompare(b))),
-    migrateDbPassword: envLocal.DB_PASSWORD ?? '',
-  };
-  return createHash('sha256').update(JSON.stringify(read)).digest('hex').slice(0, 16);
+export async function readAppSecretVersions({ env }) {
+  const versions = [];
+  for (const [label, name] of [
+    ['app', 'vibecarbon-app-secrets'],
+    ['infra', 'vibecarbon-infra-secrets'],
+  ]) {
+    const out = await runKubectlWithRetry(
+      ['-n', 'vibecarbon', 'get', 'secret', name, '-o', 'jsonpath={.metadata.resourceVersion}'],
+      {
+        env,
+        captureStdout: true,
+        description: `applyK3sManifests: read Secret/${name} resourceVersion`,
+      },
+    );
+    const rv = String(out ?? '').trim();
+    if (!/^\d+$/.test(rv)) {
+      throw new Error(
+        `Could not read the resourceVersion of Secret/${name}; refusing to deploy without knowing whether the app must roll.`,
+      );
+    }
+    versions.push(`${label}:${rv}`);
+  }
+  return versions.join(',');
 }
 
 /** A Secret manifest for `kubectl apply -f -`, values JSON-quoted, never on argv. */
@@ -3999,8 +4019,8 @@ export async function applyK3sManifests({
   //    ImagePullBackOff for the whole db wait. Switching now means the app
   //    pods come up on the sideloaded image immediately (their readiness stays
   //    503 until the db answers); we still wait for their rollout below.
-  //    One patch also stamps the digest of the Secret values the pod reads
-  //    (appPodSecretsSha), so a re-minted storage key or a rotated password
+  //    One patch also stamps the resourceVersions of the Secrets the pod reads
+  //    (readAppSecretVersions), so a re-minted storage key or a rotated password
   //    rolls the pods even when the image tag is unchanged; one template
   //    change, one roll. Both containers: the app and its migrate init
   //    container run one image.
@@ -4009,7 +4029,7 @@ export async function applyK3sManifests({
       template: {
         metadata: {
           annotations: {
-            [APP_SECRETS_SHA_ANNOTATION]: appPodSecretsSha({ envLocal, s3Config }),
+            [APP_SECRETS_SHA_ANNOTATION]: await readAppSecretVersions({ env }),
           },
         },
         spec: {
@@ -4029,7 +4049,10 @@ export async function applyK3sManifests({
       '-p',
       JSON.stringify(appTemplatePatch),
     ],
-    { env, description: 'applyK3sManifests: kubectl patch deployment/app (image, secrets sha)' },
+    {
+      env,
+      description: 'applyK3sManifests: kubectl patch deployment/app (image, secret versions)',
+    },
   );
   // 7. Wait for the db StatefulSet (applied with base in step 5) to be Ready:
   //    WAL archiving is on from its first boot (startup flags, see

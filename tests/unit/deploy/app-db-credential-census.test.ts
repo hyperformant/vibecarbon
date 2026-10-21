@@ -209,3 +209,27 @@ describe('the app password rides the app allowlist; the owner password never doe
     });
   });
 });
+
+describe('k3s.js never hashes secret values', () => {
+  // The app rolls on Secret changes by resourceVersion (readAppSecretVersions),
+  // not by a digest of the values: a hash of a secret in a readable pod
+  // annotation is exactly what CodeQL js/insufficient-password-hash flags.
+  const src = read('src/lib/deploy/k8s/k3s.js');
+
+  it('appPodSecretsSha is gone and the annotation is built from readAppSecretVersions', () => {
+    expect(src).not.toMatch(/appPodSecretsSha/);
+    expect(src).toMatch(/\[APP_SECRETS_SHA_ANNOTATION\]:\s*await readAppSecretVersions\(/);
+  });
+
+  it('no hash call takes buildAppSecretData, buildInfraSecretData or envLocal values', () => {
+    const hashCalls = [...src.matchAll(/createHash\([^)]*\)[\s\S]{0,200}?\.digest\(/g)].map(
+      (m) => m[0],
+    );
+    expect(hashCalls.length).toBeGreaterThan(0);
+    for (const call of hashCalls) {
+      expect(call).not.toMatch(
+        /buildAppSecretData|buildInfraSecretData|envLocal|secretKey|PASSWORD/,
+      );
+    }
+  });
+});

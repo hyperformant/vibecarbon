@@ -51,6 +51,8 @@ let cmdCalls: string[][] = [];
 // cmdCalls index of the owning spawn, so a piped call can be ordered against
 // argv-only calls; runCommandAsync writes stdin synchronously after spawn
 // returns, so no other spawn can slip in between.
+// Empty = the default version below; set a name to override (an empty string is unreadable).
+let secretVersionOut: Record<string, string> = {};
 let stdinCalls: { argv: string[]; data: string; seq: number }[] = [];
 // A manual gate the `docker push` child's exit waits on (concurrency test).
 let pushGate: { promise: Promise<void>; release: () => void } | null = null;
@@ -240,6 +242,18 @@ function installSpawnMock() {
     }
     // The migration watch resolves the rollout's newest pod first
     // (readiness.js newestAppPod): one current ReplicaSet, one pod.
+    if (
+      cmd === 'kubectl' &&
+      argv.includes('get') &&
+      argv.includes('secret') &&
+      argv.includes('jsonpath={.metadata.resourceVersion}')
+    ) {
+      const name = String(argv[argv.indexOf('secret') + 1]);
+      return fakeChild({
+        stdout: secretVersionOut[name] ?? '1',
+        argv: full,
+      }) as unknown as ReturnType<typeof spawn>;
+    }
     if (cmd === 'kubectl' && argv.includes('get') && argv.includes('replicasets')) {
       return fakeChild({ stdout: APP_RS_JSON, argv: full }) as unknown as ReturnType<typeof spawn>;
     }
@@ -1488,8 +1502,10 @@ describe('a changed app Secret rolls deployment/app', () => {
   // `set image` to the same tag is a no-op, and envFrom is read at container
   // start, so a re-minted storage key or a rotated APP_DB_PASSWORD never
   // reached the running pods (and the old key was then revoked under them).
-  // The pod template now carries a digest of everything the pod reads from
-  // the Secrets, so any change rolls the pods and reruns migrate.
+  // The pod template carries the resourceVersions of the Secrets the pod
+  // reads, read back after they are applied: any change rolls the pods and
+  // reruns migrate, an unchanged apply leaves the versions alone, and no
+  // secret value is ever hashed.
   beforeEach(() => {
     vi.mocked(spawn).mockReset();
     cmdCalls = [];
@@ -1498,16 +1514,30 @@ describe('a changed app Secret rolls deployment/app', () => {
     pushExit = { code: 0, stderr: '' };
     webhookHelmExit = 0;
     webhookWaitExit = 0;
+    secretVersionOut = {
+      'vibecarbon-app-secrets': '4101',
+      'vibecarbon-infra-secrets': '4102',
+    };
     installSpawnMock();
+  });
+  afterEach(() => {
+    secretVersionOut = {};
   });
 
   const appPatches = () =>
     cmdCalls.filter(
       (a) => a[0] === 'kubectl' && a.includes('patch') && a.includes('deployment/app'),
     );
+  const rvReads = () =>
+    cmdCalls.filter(
+      (a) =>
+        a[0] === 'kubectl' &&
+        a.includes('secret') &&
+        a.includes('jsonpath={.metadata.resourceVersion}'),
+    );
 
-  it('points both containers at the image and stamps the secrets digest in one patch', async () => {
-    const { applyK3sManifests, appPodSecretsSha } = await k3sPromise;
+  it('points both containers at the image and stamps the Secret versions in one patch', async () => {
+    const { applyK3sManifests } = await k3sPromise;
     const args = baseArgs(makeProjectDir());
     await applyK3sManifests(args);
     expect(
@@ -1519,37 +1549,50 @@ describe('a changed app Secret rolls deployment/app', () => {
     expect(patches).toHaveLength(1);
     const body = JSON.parse(String(patches[0][patches[0].indexOf('-p') + 1]));
     expect(body.spec.template.metadata.annotations['vibecarbon.dev/app-secrets-sha']).toBe(
-      appPodSecretsSha({ envLocal: args.envLocal }),
+      'app:4101,infra:4102',
     );
     expect(body.spec.template.spec.containers).toEqual([{ name: 'app', image: args.imageTag }]);
     expect(body.spec.template.spec.initContainers).toEqual([
       { name: 'migrate', image: args.imageTag },
     ]);
-    // A digest, never a value, on argv.
+    // A version, never a value, on argv.
     expect(patches[0].join(' ')).not.toContain(args.envLocal.BETTER_AUTH_SECRET);
   });
 
-  it('the digest moves with the app Secret, the owner password and the storage key, and nothing else', async () => {
-    const { appPodSecretsSha } = await k3sPromise;
-    const envLocal = {
-      APP_DB_PASSWORD: 'a',
-      DB_PASSWORD: 'o',
-      BETTER_AUTH_SECRET: 'b',
-    };
-    const s3Config = { accessKey: 'AK', secretKey: 'SK', bucket: 'b', endpoint: 'e', region: 'r' };
-    const base = appPodSecretsSha({ envLocal, s3Config });
-    expect(base).toMatch(/^[0-9a-f]{16}$/);
-    expect(appPodSecretsSha({ envLocal: { ...envLocal }, s3Config: { ...s3Config } })).toBe(base);
-    expect(
-      appPodSecretsSha({ envLocal: { ...envLocal, APP_DB_PASSWORD: 'a2' }, s3Config }),
-    ).not.toBe(base);
-    expect(appPodSecretsSha({ envLocal: { ...envLocal, DB_PASSWORD: 'o2' }, s3Config })).not.toBe(
-      base,
+  it('reads the versions after both Secrets are applied, before the patch', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const secretApplySeqs = stdinCalls
+      .filter((c) => /kind: Secret/.test(c.data) || /"kind":\s*"Secret"/.test(c.data))
+      .map((c) => c.seq);
+    expect(secretApplySeqs.length).toBeGreaterThanOrEqual(2);
+    const reads = rvReads();
+    expect(reads.map((a) => a[a.indexOf('secret') + 1])).toEqual([
+      'vibecarbon-app-secrets',
+      'vibecarbon-infra-secrets',
+    ]);
+    const firstRead = cmdCalls.indexOf(reads[0]);
+    expect(firstRead).toBeGreaterThan(Math.max(...secretApplySeqs));
+    expect(firstRead).toBeLessThan(cmdCalls.indexOf(appPatches()[0]));
+  });
+
+  it('a bumped Secret version changes the annotation', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    secretVersionOut['vibecarbon-infra-secrets'] = '9999';
+    await applyK3sManifests(baseArgs(makeProjectDir()));
+    const p = appPatches()[0];
+    const body = JSON.parse(String(p[p.indexOf('-p') + 1]));
+    expect(body.spec.template.metadata.annotations['vibecarbon.dev/app-secrets-sha']).toBe(
+      'app:4101,infra:9999',
     );
-    expect(appPodSecretsSha({ envLocal, s3Config: { ...s3Config, accessKey: 'AK2' } })).not.toBe(
-      base,
+  });
+
+  it('an unreadable resourceVersion fails the deploy and never patches', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    secretVersionOut['vibecarbon-app-secrets'] = '';
+    await expect(applyK3sManifests(baseArgs(makeProjectDir()))).rejects.toThrow(
+      /resourceVersion of Secret\/vibecarbon-app-secrets/,
     );
-    // A key the app never sees (not on the allowlist, not migrate's) leaves it alone.
-    expect(appPodSecretsSha({ envLocal: { ...envLocal, HCLOUD_TOKEN: 'x' }, s3Config })).toBe(base);
+    expect(appPatches()).toHaveLength(0);
   });
 });
