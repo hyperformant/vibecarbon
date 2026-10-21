@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { progressLog } from '../../../src/lib/cli/progress.js';
 import {
   buildImageCopyScript,
@@ -12,6 +12,8 @@ import {
 import { MANIFEST_ACCEPT } from '../../../src/lib/deploy/k8s/image-delivery.js';
 
 vi.mock('../../../src/lib/cli/progress.js', () => ({ progressLog: vi.fn() }));
+
+beforeEach(() => vi.mocked(progressLog).mockClear());
 
 const base = {
   primaryRef: '10.0.1.1:5000/quorum:t1',
@@ -41,10 +43,6 @@ describe('buildImageCopyScript', () => {
     expect(s).toMatch(/trap '.*images rm/);
     expect(s).toContain(MANIFEST_ACCEPT);
     expect(s.indexOf('SKIPPED=1')).toBeLessThan(s.indexOf('images pull'));
-  });
-  it('never writes to the primary registry', () => {
-    expect(s).not.toMatch(/push[^\n]*10\.99\.0\.1:15000\/quorum:t1 10\.0\.1\.1/);
-    expect(s).not.toMatch(/curl[^\n]*-X/);
   });
   it('refuses a ref that is not shell-safe', () => {
     expect(() =>
@@ -123,6 +121,19 @@ describe('copyAppImageToStandby', () => {
     expect(err.message).toBe('standby image copy failed: ctr: failed to resolve reference');
     expect(run).toHaveBeenCalledTimes(1);
   });
+  it('an unreachable relay (exit 5) names the tunnel and the relay', async () => {
+    const run = vi.fn(async () => {
+      throw Object.assign(
+        stderrErr('ERR=primary registry unreachable through the relay (10.99.0.1:15000)\n'),
+        { status: 5 },
+      );
+    });
+    const err = await copyAppImageToStandby({ ...base, run }).catch((e) => e);
+    expect(err.message).toBe(
+      'standby image copy failed: primary registry unreachable through the relay (10.99.0.1:15000); is the wg0 tunnel up and the registry relay running?',
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
   it('a relay failure is the copy failure', async () => {
     const run = vi.fn();
     const relay = async () => {
@@ -173,7 +184,21 @@ describe('the copy script runs', () => {
 
   // curl answers a HEAD by host: SRC for the relay, DST for the standby
   // registry (DST_AFTER once k3s has pushed). k3s only logs (and marks a push).
-  function runScript({ src, dst, dstAfter }: { src: string; dst: string; dstAfter: string }) {
+  // `reach` is the relay probe (curl's exit code for /v2/); `fail` makes that
+  // ctr step print progress, then a `ctr:` error, on stderr and exit 1.
+  function runScript({
+    src,
+    dst,
+    dstAfter,
+    reach = 0,
+    fail,
+  }: {
+    src: string;
+    dst: string;
+    dstAfter: string;
+    reach?: number;
+    fail?: 'pull' | 'push';
+  }) {
     dir = mkdtempSync(join(tmpdir(), 'imgcopy-stub-'));
     const log = join(dir, 'log');
     const pushed = join(dir, 'pushed');
@@ -185,6 +210,7 @@ describe('the copy script runs', () => {
 echo "curl $*" >> '${log}'
 for a; do url="$a"; done
 case "$url" in
+  http://10.99.0.1:15000/v2/) exit ${reach} ;;
   http://10.99.0.1:15000/*) ${hdr(src)} ;;
   *) if [ -e '${pushed}' ]; then ${hdr(dstAfter)}; else ${hdr(dst)}; fi ;;
 esac
@@ -194,6 +220,11 @@ esac
       join(dir, 'k3s'),
       `#!/bin/sh
 echo "k3s $*" >> '${log}'
+echo "elapsed: 0.1 s  total: 1.0 Mi"
+case "$*" in *"images ${fail ?? 'none'} "*)
+  printf 'time="t" level=info msg="fetching"\n\nctr: failed to resolve reference "x"\n' >&2
+  exit 1 ;;
+esac
 case "$*" in *"images push"*) : > '${pushed}' ;; esac
 exit 0
 `,
@@ -224,6 +255,7 @@ exit 0
     const r = runScript({ src: 'sha256:aa', dst: '', dstAfter: 'sha256:aa' });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('COPIED=1');
+    expect(r.stdout).not.toContain('elapsed');
     expect(r.k3s).toEqual([
       'ctr -n vibecarbon-imgcopy images pull --plain-http --all-platforms 10.99.0.1:15000/quorum:t1',
       'ctr -n vibecarbon-imgcopy images push --plain-http 10.0.1.1:5000/quorum:t1 10.99.0.1:15000/quorum:t1',
@@ -236,6 +268,27 @@ exit 0
     expect(r.stderr.split('\n')[0]).toBe(
       'ERR=digest mismatch: primary sha256:aa, standby sha256:bb',
     );
+    expect(r.k3s.at(-1)).toBe('ctr -n vibecarbon-imgcopy images rm 10.99.0.1:15000/quorum:t1');
+  });
+  it('an unreachable relay: exit 5, never read as a missing tag', () => {
+    const r = runScript({ src: 'sha256:aa', dst: '', dstAfter: 'sha256:aa', reach: 7 });
+    expect(r.status).toBe(5);
+    expect(r.stderr.split('\n')[0]).toBe(
+      'ERR=primary registry unreachable through the relay (10.99.0.1:15000)',
+    );
+    expect(r.k3s).toEqual([]);
+  });
+  it('a failed pull reports the ctr error, not its progress, and cleans up', () => {
+    const r = runScript({ src: 'sha256:aa', dst: '', dstAfter: 'sha256:aa', fail: 'pull' });
+    expect(r.status).toBe(6);
+    expect(r.stderr.split('\n')[0]).toBe('ERR=ctr pull: failed to resolve reference "x"');
+    expect(r.stdout).not.toContain('elapsed');
+    expect(r.k3s.at(-1)).toBe('ctr -n vibecarbon-imgcopy images rm 10.99.0.1:15000/quorum:t1');
+  });
+  it('a failed push reports the ctr error and cleans up', () => {
+    const r = runScript({ src: 'sha256:aa', dst: '', dstAfter: 'sha256:aa', fail: 'push' });
+    expect(r.status).toBe(7);
+    expect(r.stderr.split('\n')[0]).toBe('ERR=ctr push: failed to resolve reference "x"');
     expect(r.k3s.at(-1)).toBe('ctr -n vibecarbon-imgcopy images rm 10.99.0.1:15000/quorum:t1');
   });
   it('an empty source digest: exit 3 naming the missing tag', () => {

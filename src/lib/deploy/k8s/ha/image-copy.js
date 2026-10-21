@@ -15,6 +15,8 @@ import { MANIFEST_DIGEST_SH, parseLocalRegistryRef, standbyImageRef } from '../i
 import { REGISTRY_RELAY_SOURCE_HOST, withRegistryRelay } from './index.js';
 
 const COPY_NAMESPACE = 'vibecarbon-imgcopy';
+const RELAY_UNREACHABLE = 'primary registry unreachable through the relay';
+const EXIT_UNREACHABLE = 5;
 
 // host[:port]/repo[/repo]:tag, every character shell-safe, because the refs
 // are written into the script unquoted.
@@ -30,7 +32,11 @@ function splitRef(ref) {
 /**
  * The POSIX sh script the standby db node runs. Prints SRC_DIGEST=, DST_DIGEST=
  * and SKIPPED=1 or COPIED=1 on stdout; a failure prints `ERR=<cause>` on stderr
- * (exit 3: the primary has no such tag; exit 4: digest mismatch after the push).
+ * (exit 5: the primary registry is unreachable through the relay; exit 3: it
+ * is reachable but has no such tag; exit 4: digest mismatch after the push;
+ * exit 6/7: `ctr pull`/`ctr push` failed). ctr's stdout (progress) is
+ * discarded so it cannot pollute the verdict lines, and its stderr is reduced
+ * to the `ctr: <error>` line.
  *
  * @param {object} o
  * @param {string} o.srcRef - the primary image, through the relay
@@ -43,6 +49,8 @@ export function buildImageCopyScript({ srcRef, dstRef }) {
   const ctr = `k3s ctr -n ${COPY_NAMESPACE}`;
   return `set -eu
 ${MANIFEST_DIGEST_SH}
+ctr_cause() { c=$(printf '%s\n' "$1" | sed -n 's/^ctr: //p' | head -n 1); [ -n "$c" ] || c=$(printf '%s\n' "$1" | awk 'NF{print; exit}'); printf '%s' "$c"; }
+curl -fsS -o /dev/null "http://${src.host}/v2/" 2>/dev/null || { echo "ERR=${RELAY_UNREACHABLE} (${src.host})" >&2; exit ${EXIT_UNREACHABLE}; }
 S=$(digest ${src.host} ${src.repo} ${src.tag})
 if [ -z "$S" ]; then echo "ERR=primary registry has no ${src.repoTag}" >&2; exit 3; fi
 echo "SRC_DIGEST=$S"
@@ -50,8 +58,8 @@ D=$(digest ${dst.host} ${dst.repo} ${dst.tag})
 echo "DST_DIGEST=$D"
 if [ "$D" = "$S" ]; then echo "SKIPPED=1"; exit 0; fi
 trap '${ctr} images rm ${srcRef} >/dev/null 2>&1 || true' EXIT
-${ctr} images pull --plain-http --all-platforms ${srcRef}
-${ctr} images push --plain-http ${dstRef} ${srcRef}
+if ! E=$(${ctr} images pull --plain-http --all-platforms ${srcRef} 2>&1 >/dev/null); then echo "ERR=ctr pull: $(ctr_cause "$E")" >&2; exit 6; fi
+if ! E=$(${ctr} images push --plain-http ${dstRef} ${srcRef} 2>&1 >/dev/null); then echo "ERR=ctr push: $(ctr_cause "$E")" >&2; exit 7; fi
 D=$(digest ${dst.host} ${dst.repo} ${dst.tag})
 if [ "$D" != "$S" ]; then echo "ERR=digest mismatch: primary $S, standby $D" >&2; exit 4; fi
 echo "COPIED=1"
@@ -140,7 +148,12 @@ export async function copyAppImageToStandby({
         .trim();
       if (rest) progressLog(`[image-copy] ${rest}`);
     }
-    throw new Error(`standby image copy failed: ${firstCauseLine(err)}`, { cause: err });
+    // Exit 5 is the transport, not the registry: say where to look.
+    const hint =
+      err?.status === EXIT_UNREACHABLE
+        ? '; is the wg0 tunnel up and the registry relay running?'
+        : '';
+    throw new Error(`standby image copy failed: ${firstCauseLine(err)}${hint}`, { cause: err });
   }
 
   const kv = parseCopyOutput(out);
