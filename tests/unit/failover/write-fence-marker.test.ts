@@ -288,7 +288,11 @@ describe('status shows a write-fenced primary', () => {
     );
     const r = await checkReplication(
       'prod',
-      { deployMode: 'kubernetes', ha: { enabled: true }, servers: [{ name: 'p', ip: '10.0.0.1' }] },
+      {
+        deployMode: 'kubernetes',
+        ha: { enabled: true },
+        servers: [{ name: 'p', role: 'primary', ip: '10.0.0.1' }],
+      },
       'myapp',
       {
         sshKubectl,

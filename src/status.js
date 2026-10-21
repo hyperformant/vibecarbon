@@ -17,6 +17,7 @@ import { basename, join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
+import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
@@ -506,8 +507,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
   const isHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
   if (!isHA) return null;
 
-  const servers = envConfig.servers || [];
-  const primary = servers.find((sv) => sv.role === 'primary') || servers[0];
+  const primary = resolvePrimary(envConfig);
   if (!primary?.ip) return null;
 
   const sshKeyPath = _getKey(envName);

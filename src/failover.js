@@ -17,6 +17,7 @@ import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
+import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
@@ -226,24 +227,19 @@ export function identifyServers(envName, envConfig, _projectConfig) {
     };
   }
 
-  // Fall back to servers array with role/region matching
+  // compose-ha: servers[] carries the persisted roles. A failover flips `role`
+  // in place and leaves array order and names alone (the name is a Pulumi
+  // resource identity), so position and name say nothing about who is primary;
+  // resolvePrimary is the one reader of the roles and refuses a roleless or
+  // contradictory list instead of guessing.
   const servers = envConfig.servers || [];
   const primaryRegion = envConfig.region;
   const standbyRegion = envConfig.secondaryRegion || envConfig.ha?.failoverRegion;
 
   if (servers.length >= 2 && primaryRegion && standbyRegion) {
-    // Prefer the `role` field — it is the only one a failover updates.
-    // failoverComposeHA flips role in place and leaves both the array order and
-    // the server names alone (the name is a Pulumi resource identity), so
-    // name/region/index matching keeps returning the OLD primary after a
-    // failover. Then name-based match (k8s HA stores { name: 'primary' /
-    // 'standby' }), then region match (pre-gitops compose-HA used server names
-    // that embedded the region).
-    const byRole = (role) => servers.find((s) => s.role === role);
-    const byName = (role) => servers.find((s) => s.name === role);
-    const byRegion = (region) => servers.find((s) => s.name?.includes(region));
-    const primary = byRole('primary') || byName('primary') || byRegion(primaryRegion) || servers[0];
-    const standby = byRole('standby') || byName('standby') || byRegion(standbyRegion) || servers[1];
+    const primaryIp = resolvePrimary(envConfig)?.ip;
+    const primary = servers.find((s) => s.ip === primaryIp);
+    const standby = servers.find((s) => s.role === 'standby') || servers.find((s) => s !== primary);
 
     return {
       primary: {
@@ -1355,6 +1351,12 @@ export function dnsStrategyFor(dnsProvider) {
 /** Manual DNS: no auth, no flip — failoverHA prints the epilogue instead. */
 const MANUAL_DNS_STRATEGY = {};
 
+/** Exchange the 'primary' and 'standby' roles in a servers[] list; other roles ride along. */
+function swapServerRoles(servers) {
+  const flip = { primary: 'standby', standby: 'primary' };
+  return (servers ?? []).map((sv) => (flip[sv.role] ? { ...sv, role: flip[sv.role] } : sv));
+}
+
 /**
  * Persist the post-failover role swap — the SINGLE terminal write that lets a
  * later `vibecarbon deploy` converge the recovered ex-primary to pilot-light
@@ -1385,6 +1387,10 @@ export function swapHaRoles(envName, { override } = {}) {
   const ha = envConfig.ha;
   // Swap the role objects wholesale (stack / region / IP fields ride along).
   [ha.primary, ha.standby] = [ha.standby, ha.primary];
+  // servers[] records the same roles; resolvePrimary refuses a config whose
+  // two records disagree. db, worker and master entries carry other roles.
+  envConfig.servers = swapServerRoles(envConfig.servers);
+
   // Swap the top-level regions to match the new primary / standby.
   [envConfig.region, envConfig.secondaryRegion] = [envConfig.secondaryRegion, envConfig.region];
   // failoverRegion tracks the standby's region — keep it consistent.

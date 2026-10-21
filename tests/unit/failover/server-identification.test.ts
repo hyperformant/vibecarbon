@@ -34,11 +34,11 @@ describe('identifyServers', () => {
     });
   });
 
-  it('identifies servers from servers array with region matching', () => {
+  it('identifies servers from the servers array by role', () => {
     const envConfig = {
       servers: [
-        { ip: '1.2.3.4', name: 'app-fsn1' },
-        { ip: '5.6.7.8', name: 'app-nbg1' },
+        { ip: '1.2.3.4', name: 'app-fsn1', role: 'primary' },
+        { ip: '5.6.7.8', name: 'app-nbg1', role: 'standby' },
       ],
       region: 'fsn1',
       secondaryRegion: 'nbg1',
@@ -51,7 +51,7 @@ describe('identifyServers', () => {
     });
   });
 
-  it('falls back to array order when names do not match regions', () => {
+  it('refuses a roleless servers array instead of guessing from order or names', () => {
     const envConfig = {
       servers: [
         { ip: '1.2.3.4', name: 'server-a' },
@@ -60,19 +60,16 @@ describe('identifyServers', () => {
       region: 'fsn1',
       secondaryRegion: 'nbg1',
     };
-
-    const result = identifyServers('prod', envConfig, { environments: {} });
-    expect(result).toEqual({
-      primary: { ip: '1.2.3.4', region: 'fsn1', envKey: 'prod' },
-      standby: { ip: '5.6.7.8', region: 'nbg1', envKey: 'prod' },
-    });
+    expect(() => identifyServers('prod', envConfig, { environments: {} })).toThrow(
+      /exactly one server with role 'primary'/,
+    );
   });
 
   it('uses ha.failoverRegion as secondary region', () => {
     const envConfig = {
       servers: [
-        { ip: '1.2.3.4', name: 'a' },
-        { ip: '5.6.7.8', name: 'b' },
+        { ip: '1.2.3.4', name: 'a', role: 'primary' },
+        { ip: '5.6.7.8', name: 'b', role: 'standby' },
       ],
       region: 'fsn1',
       ha: { failoverRegion: 'hel1' },
@@ -93,8 +90,8 @@ describe('identifyServers', () => {
   it('returns null when servers exist but no regions defined', () => {
     const envConfig = {
       servers: [
-        { ip: '1.2.3.4', name: 'a' },
-        { ip: '5.6.7.8', name: 'b' },
+        { ip: '1.2.3.4', name: 'a', role: 'primary' },
+        { ip: '5.6.7.8', name: 'b', role: 'standby' },
       ],
     };
     expect(identifyServers('prod', envConfig, { environments: {} })).toBeNull();

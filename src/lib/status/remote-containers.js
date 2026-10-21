@@ -12,6 +12,7 @@
  */
 
 import { existsSync as fsExistsSync } from 'node:fs';
+import { resolvePrimary } from '../cli/resolve-primary.js';
 import {
   getSSHKeyPath as defaultGetKey,
   sshKubectl as defaultKubectl,
@@ -24,34 +25,24 @@ export const APP_NAMESPACE = 'vibecarbon';
 /**
  * Pick the primary and standby entries of an HA `servers[]`.
  *
- * The product writes three shapes and a failover mutates two of them
- * differently, so no single field is authoritative:
- *   - effects/compose-ha.js: `{ name: '<proj>-<env>-primary', role: 'primary' }`;
- *     failoverComposeHA flips `role` in place and never renames.
- *   - orchestrator.js (compose-ha and kubernetes-ha): `{ name: 'primary' }`,
- *     no role at all.
- *   - kubernetes-ha additionally persists `ha.primary.masterIp` /
- *     `ha.standby.masterIp`, and swapHaRoles swaps THOSE, not `servers[]`.
- * So: the `ha.<side>.masterIp` match wins (it is the only thing a k8s-ha
- * failover updates), then `role` (the only thing a compose-ha failover
- * updates), then the name, then array position — the same ladder
- * failover.js's identifyServers walks. The returned entry keeps its own
- * `name`, so the Servers block can still find its rollup by name.
+ * The primary is whatever resolvePrimary names (k8s-ha: `ha.primary.masterIp`;
+ * compose-ha: the `role: 'primary'` entry), so this block can never disagree
+ * with backup, restore or failover about which node is live. The standby is
+ * the `ha.standby.masterIp` entry, else the `role: 'standby'` one. The
+ * returned entries keep their own `name`, so the Servers block can still find
+ * its rollup by name.
  *
  * @param {object} envConfig
  * @returns {object[]} `[primary, standby]`, minus any side that could not be resolved
  */
 function pickHaPair(envConfig) {
   const servers = envConfig.servers || [];
-  const byIp = (ip) => (ip ? servers.find((s) => s.ip === ip) : undefined);
-  const byRole = (role) => servers.find((s) => s.role === role);
-  const byName = (role) =>
-    servers.find((s) => s.name === role || (s.name || '').endsWith(`-${role}`));
-  const pick = (side, index) =>
-    byIp(envConfig.ha?.[side]?.masterIp) || byRole(side) || byName(side) || servers[index];
-  const primary = pick('primary', 0);
-  let standby = pick('standby', 1);
-  if (standby === primary) standby = servers.find((s) => s !== primary);
+  const primaryIp = resolvePrimary(envConfig)?.ip;
+  const standbyIp = envConfig.ha?.standby?.masterIp;
+  const primary = servers.find((s) => s.ip === primaryIp);
+  const standby =
+    (standbyIp && servers.find((s) => s.ip === standbyIp)) ||
+    servers.find((s) => s.role === 'standby');
   return [primary, standby].filter(Boolean);
 }
 
@@ -72,13 +63,12 @@ export function planContainerTargets(envConfig) {
   const mode = envConfig.deployMode || 'compose';
   const target = (s, kind) => ({ serverName: s.name || s.ip || '', ip: s.ip || '', kind });
 
-  if (mode === 'compose') return [target(servers[0], 'compose')];
+  if (mode === 'compose') return [target(resolvePrimary(envConfig) ?? {}, 'compose')];
   if (mode === 'compose-ha') return pickHaPair(envConfig).map((s) => target(s, 'compose'));
   if (mode === 'kubernetes-ha') return pickHaPair(envConfig).map((s) => target(s, 'k8s'));
-  // kubernetes: the control plane. Roles were not always recorded, so fall
-  // back to the first server, which the orchestrator writes as the master.
-  const master = servers.find((s) => s.role === 'master') || servers[0];
-  return [target(master, 'k8s')];
+  // kubernetes: the control plane, which resolvePrimary names (the master
+  // entry, or the only server for configs that never recorded roles).
+  return [target(resolvePrimary(envConfig) ?? {}, 'k8s')];
 }
 
 // Waiting reasons a pod passes through on its way up (not a retry

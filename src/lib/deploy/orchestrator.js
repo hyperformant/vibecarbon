@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { formatCommandNote } from '../cli/help.js';
 import { progressLog, spinner } from '../cli/progress.js';
+import { resolvePrimary } from '../cli/resolve-primary.js';
 import { c } from '../colors.js';
 import { runCommand, runCommandAsync } from '../command.js';
 import { loadProjectConfig, registerProject, saveProjectConfig } from '../config.js';
@@ -473,13 +474,8 @@ export function assertBucketReady(result, role) {
 const isHaTier = (tier) => tier === 'compose-ha' || tier === 'k8s-ha';
 
 /** The node the persisted roles call primary, as the write-fence marker names it. */
-function rolePrimaryOf(tier, envConfig) {
-  if (tier === 'compose-ha') {
-    const sv = (envConfig?.servers ?? []).find((x) => x.role === 'primary');
-    return sv?.ip ? { name: sv.name, ip: sv.ip } : null;
-  }
-  const ip = envConfig?.ha?.primary?.masterIp;
-  return ip ? { ip } : null;
+function rolePrimaryOf(_tier, envConfig) {
+  return resolvePrimary(envConfig);
 }
 
 /** psql on the role primary over the tier's transport (the write-fence checks). */
@@ -1507,16 +1503,18 @@ export async function executeDeployment(args, gatheredConfig) {
     // (serverIp / providerServerId / providerServerName) and the orchestrator
     // reads back into the single-server deployResult shape below.
     const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${environment}`);
+    // Single-node compose: its one server, whichever record resolvePrimary names.
+    const composeServer = envConfig.servers?.find((sv) => sv.ip === resolvePrimary(envConfig)?.ip);
     const composeCtx = {
       ...deployCtx,
       sshKeyPath,
       // Seed the mutable server identity from any prior deploy so the warm
       // path (`when: !ctx.serverIp`) skips provisioning. provisionServer sets
       // these on a fresh deploy.
-      serverIp: envConfig.servers?.[0]?.ip || null,
-      providerServerId: envConfig.servers?.[0]?.id || null,
-      providerServerName: envConfig.servers?.[0]?.providerServerName || null,
-      providerFirewallId: envConfig.servers?.[0]?.firewallId || null,
+      serverIp: composeServer?.ip || null,
+      providerServerId: composeServer?.id || null,
+      providerServerName: composeServer?.providerServerName || null,
+      providerFirewallId: composeServer?.firewallId || null,
       // Docker Hub creds gate + drive the dockerhub-login step. Loaded here so
       // the step's when-predicate stays pure (mirrors the compose-ha path,
       // which also loads dockerHub creds in the orchestrator).
@@ -1988,12 +1986,14 @@ export async function executeDeployment(args, gatheredConfig) {
     servers.push(
       {
         name: 'primary',
+        role: 'primary',
         ip: deployResult.primary.masterIp,
         dbIp: deployResult.primary.dbIp,
         region,
       },
       {
         name: 'standby',
+        role: 'standby',
         ip: deployResult.standby.masterIp,
         dbIp: deployResult.standby.dbIp,
         region: secondaryRegion,
@@ -2003,8 +2003,14 @@ export async function executeDeployment(args, gatheredConfig) {
     // compose-HA shape: { primaryIp, standbyIp } — no dbIp because
     // compose-HA runs the database on the same VM as the app.
     servers.push(
-      { name: 'primary', ip: deployResult.primaryIp, region, serverType },
-      { name: 'standby', ip: deployResult.standbyIp, region: secondaryRegion, serverType },
+      { name: 'primary', role: 'primary', ip: deployResult.primaryIp, region, serverType },
+      {
+        name: 'standby',
+        role: 'standby',
+        ip: deployResult.standbyIp,
+        region: secondaryRegion,
+        serverType,
+      },
     );
   } else if (deployResult.masterIp) {
     // Single-server fall-through: hit by compose (one VPS) and k8s

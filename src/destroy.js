@@ -12,6 +12,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
+import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { runCommand } from './lib/command.js';
 
 // Handle Ctrl+C — without this, SIGINT is swallowed during subprocess/fetch
@@ -1950,7 +1951,9 @@ async function destroyComposeTier({
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
   const provider = new Provider(providerToken);
-  const serverIp = envConfig.servers?.[0]?.ip;
+  // Compose single-node: its one server, found through the resolver.
+  const composeServer = envConfig.servers?.find((sv) => sv.ip === resolvePrimary(envConfig)?.ip);
+  const serverIp = composeServer?.ip;
   const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${environment}`);
 
   if (serverIp && existsSync(sshKeyPath)) {
@@ -1970,7 +1973,7 @@ async function destroyComposeTier({
   }
 
   // Delete Hetzner VPS if auto-provisioned (has server ID in config)
-  const serverId = envConfig.servers?.[0]?.id;
+  const serverId = composeServer?.id;
   // The `name` field in envConfig.servers is a role label ("master") set by
   // the orchestrator, not the Hetzner-assigned hostname. Pulumi's compose
   // program names the server `${projectName}-${environment}`. The
@@ -1979,7 +1982,7 @@ async function destroyComposeTier({
   // as a deterministic fallback — looking up "master" in Hetzner never
   // matches and leaks the VPS.
   const providerServerName =
-    envConfig.servers?.[0]?.providerServerName || `${projectConfig.projectName}-${environment}`;
+    composeServer?.providerServerName || `${projectConfig.projectName}-${environment}`;
   if (serverId && providerToken) {
     s.start(`Deleting VPS (${serverIp})...`);
     try {
@@ -2098,7 +2101,7 @@ async function destroyComposeTier({
   //   `${projectName}-${environment}-${location}-key`
   // — the location suffix is what kept the old `vibecarbon-` prefix from
   // ever matching. Same root cause as the firewall above.
-  const composeRegion = envConfig.region || envConfig.servers?.[0]?.region;
+  const composeRegion = envConfig.region || composeServer?.region;
   const hetznerSshKeyName = composeRegion
     ? `${projectConfig.projectName}-${environment}-${composeRegion}-key`
     : null;
@@ -3570,7 +3573,7 @@ async function main(argv = []) {
   }
 
   // Offer to create a backup before destroying
-  const serverIp = envConfig.servers?.[0]?.ip;
+  const serverIp = resolvePrimary(envConfig)?.ip;
   const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${envName}`);
   if (serverIp && existsSync(sshKeyPath) && !args.yes) {
     const offerBackup = await p.confirm({
