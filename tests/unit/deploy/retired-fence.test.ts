@@ -555,6 +555,20 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     expect(probe).not.toContain('myapp-metabase');
   });
 
+  it('the compose tier refuses to fence without an envConfig (it would shrink the writers to the app)', async () => {
+    const node = fakeNode();
+    const { fenceRetiredNode } = await import('../../../src/lib/deploy/retired-fence.js');
+    await expect(
+      fenceRetiredNode({
+        tier: 'compose-ha',
+        ip: RETIRED_IP,
+        projectName: 'myapp',
+        sshKeyPath: '/k',
+        deps: { ...quiet, run: node.run, psql: node.psql },
+      }),
+    ).rejects.toThrow(/needs envConfig/);
+  });
+
   it('a db that is down gets its PGDATA marker and read-only fence once the role recreate brings it up', async () => {
     const node = fakeNode({ walg: 'primary', running: [] });
     node.db.up = false;

@@ -1501,13 +1501,14 @@ export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, op
 }
 
 /**
- * Stop the old primary's app tier (the writers), by CONTAINER name: bare
- * `docker compose stop <svc>` could not resolve an overlay-only service and
- * exited in ~2s having stopped NOTHING (2026-08-09, the compose-invocation
- * census bans that shape). The same list as the promoted-side restart: the e2e
- * health check reads APP_TIER_RESTART_SERVICES as what the retired node is
- * allowed to show exited.
+ * Stop the old primary's writers (the app and the enabled primary-only
+ * add-ons), by CONTAINER name: bare `docker compose stop <svc>` could not
+ * resolve an overlay-only service and exited in ~2s having stopped NOTHING
+ * (2026-08-09, the compose-invocation census bans that shape). An add-on that
+ * is not deployed is skipped (see stopOldPrimaryWriters); only a running
+ * container that will not stop, or an unconfirmed session, fails the call.
  *
+ * @param {string[]} [services] defaults to the app tier
  * @returns {Promise<boolean>} false when the stop could not be confirmed
  */
 export async function stopOldPrimaryApp(
@@ -1516,9 +1517,7 @@ export async function stopOldPrimaryApp(
   projectName,
   services = APP_TIER_RESTART_SERVICES,
 ) {
-  const containers = services.map((svc) => `${projectName}-${svc}`).join(' ');
-  const stopped = await sshRun(ip, sshKeyPath, `docker stop ${containers}`, { timeout: 90_000 });
-  return stopped !== false;
+  return (await stopOldPrimaryWriters(ip, sshKeyPath, projectName, services)).ok;
 }
 
 /**
@@ -1929,6 +1928,7 @@ export async function failoverComposeHA(
   const servers = envConfig.servers || [];
   const primaryServer = servers.find((s) => s.role === 'primary');
   const standbyServer = servers.find((s) => s.role === 'standby');
+  const writerServices = failoverFenceServices(envConfig);
 
   if (!primaryServer || !standbyServer) {
     p.log.error('Could not identify primary and standby servers from config');
@@ -2080,12 +2080,7 @@ export async function failoverComposeHA(
   if (planned) {
     s.start('Fencing writes on the old primary (write outage begins)');
     try {
-      const stop = await stopWriters(
-        primaryServer.ip,
-        sshKeyPath,
-        projectName,
-        failoverFenceServices(envConfig),
-      );
+      const stop = await stopWriters(primaryServer.ip, sshKeyPath, projectName, writerServices);
       stoppedWriters = stop.stopped;
       if (!stop.ok) {
         throw new Error(
@@ -2252,16 +2247,11 @@ export async function failoverComposeHA(
       // DNS is not flipped and the journal stays set.
       const appStopped =
         fenced ||
-        (await fenceOldPrimary(
-          primaryServer.ip,
-          sshKeyPath,
-          projectName,
-          failoverFenceServices(envConfig),
-        ));
+        (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices));
       if (!appStopped) {
         p.log.warn(
-          `Could not stop the app on the old primary (${primaryServer.ip}). If it is up, stop ` +
-            `it before anything else: ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
+          `Could not stop the writers on the old primary (${primaryServer.ip}). If any is up, stop ` +
+            `it before anything else: ssh root@${primaryServer.ip} 'docker stop ${writerServices.map((svc) => `${projectName}-${svc}`).join(' ')}'`,
         );
       }
       throw new Error(promotionUnknownMessage(envName));
@@ -2421,18 +2411,10 @@ export async function failoverComposeHA(
   // still accepting writes.
   s.start('Stopping old primary services');
   // By container name, see stopOldPrimaryApp.
-  const oldPrimaryContainers = failoverFenceServices(envConfig)
-    .map((svc) => `${projectName}-${svc}`)
-    .join(' ');
+  const oldPrimaryContainers = writerServices.map((svc) => `${projectName}-${svc}`).join(' ');
   // A planned run fenced it before the promote; stopping again is a no-op.
   const stopped =
-    fenced ||
-    (await fenceOldPrimary(
-      primaryServer.ip,
-      sshKeyPath,
-      projectName,
-      failoverFenceServices(envConfig),
-    ));
+    fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices));
   if (!stopped) {
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +

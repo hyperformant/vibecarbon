@@ -499,6 +499,11 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
     });
   }
   if (tier === 'compose-ha') {
+    if (!envConfig) {
+      throw new Error(
+        'retired fence: the compose tier needs envConfig, whose enabled add-ons name the writers to fence',
+      );
+    }
     let psqlFor = deps.psql;
     if (!psqlFor) {
       const { composePsqlRunner } = await import('./compose/ha.js');

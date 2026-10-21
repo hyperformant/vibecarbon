@@ -23,6 +23,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sshCalls: Array<{ ip: string; command: string }> = [];
+let sshOverride: ((c: string) => string | undefined) | undefined;
+let addonStartResult: string | false = '';
 
 const WALG_AUDIT_PASS = [
   'WALG_AUDIT=probed',
@@ -41,6 +43,8 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     sshCalls.push({ ip, command: c });
     if (c.includes('WALG_AUDIT')) return WALG_AUDIT_PASS;
     if (c.includes('%{http_code}')) return 'app=200';
+    if (c.includes('FENCE_DONE')) return sshOverride?.(c) ?? 'STOPPED fake\nFENCE_DONE';
+    if (c.includes('replication.yml up -d --no-deps n8n')) return addonStartResult;
     return '';
   };
   const recChecked = async (ip: string, k: string, command: unknown) => rec(ip, k, command);
@@ -74,8 +78,13 @@ vi.mock('../../../src/lib/deploy/tls-ready.js', () => ({
 }));
 
 const composeSsh = await import('../../../src/lib/deploy/compose/index.js');
-const { failoverComposeHA, flipComposeDns, promoteComposeStandby, swapComposeHaRoles } =
-  await import('../../../src/lib/deploy/compose/ha.js');
+const {
+  failoverComposeHA,
+  flipComposeDns,
+  promoteComposeStandby,
+  stopOldPrimaryApp,
+  swapComposeHaRoles,
+} = await import('../../../src/lib/deploy/compose/ha.js');
 const { FailoverRefusedError } = await import('../../../src/lib/deploy/failover-guard.js');
 const { liftStrandedWriteFence } = await import('../../../src/lib/deploy/write-fence.js');
 
@@ -151,6 +160,8 @@ interface RunOpts {
   dnsFlip?: { ok: true } | { ok: false; reason: string };
   /** Pass no seams at all (the real ssh-backed defaults run). */
   noSeams?: boolean;
+  /** Drop the fenceOldPrimary seam so the real default (ssh-backed) fence runs. */
+  realFence?: boolean;
 }
 
 async function run(opts: RunOpts = {}) {
@@ -176,6 +187,7 @@ async function run(opts: RunOpts = {}) {
     clearJournalThrows = false,
     dnsFlip = { ok: true as const },
     noSeams = false,
+    realFence = false,
   } = opts;
   const order: string[] = [];
   const captured: Record<string, unknown> = {};
@@ -273,10 +285,10 @@ async function run(opts: RunOpts = {}) {
       order.push('assertUnfenced');
       if (standbyFenced) throw new Error('the reseeded standby carries the write fence');
     },
-    fenceOldPrimary: async (ip: string) => {
+    fenceOldPrimary: async (ip: string, key: string, project: string, services: string[]) => {
       order.push('fence');
       captured.fencedIp = ip;
-      return true;
+      return realFence ? stopOldPrimaryApp(ip, key, project, services) : true;
     },
     confirmUnproven: async () => {
       order.push('confirmUnproven');
@@ -338,6 +350,8 @@ function expectNoMutation(order: string[]) {
 
 beforeEach(() => {
   sshCalls.length = 0;
+  sshOverride = undefined;
+  addonStartResult = '';
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -369,6 +383,52 @@ describe('failoverComposeHA state matrix', () => {
     expect(starts[0].command).toContain('up -d --no-deps n8n');
     expect(starts[0].command).not.toContain('setup');
     expect(starts[0].command).not.toContain('app-migrate');
+  });
+
+  it('an add-on start that fails warns with the exact command and the failover continues', async () => {
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    addonStartResult = false;
+    const { order, thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('swap');
+    const start = sshCalls.find((c) => c.command.includes('replication.yml up -d --no-deps n8n'));
+    const warned = warn.mock.calls.map((c) => String(c[0]));
+    expect(
+      warned.some(
+        (w) => w.includes('primary-only add-ons') && w.includes(start?.command as string),
+      ),
+    ).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('the default fence skips an absent add-on container: no split-brain warning, the app still stops', async () => {
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    sshOverride = (c) =>
+      c.includes('docker stop "$c"') ? 'STOPPED myapp-app\nFENCE_DONE' : undefined;
+    const { order, thrown } = await run({
+      envConfig: baseEnvConfig({ n8n: true }),
+      realFence: true,
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('fence');
+    const fence = sshCalls.find(
+      (c) => c.ip === PRIMARY_IP && c.command.includes('for c in myapp-app myapp-n8n;'),
+    );
+    expect(fence?.command).toContain('docker container inspect');
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('SPLIT-BRAIN'))).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('the default fence warns split-brain only when a running container will not stop', async () => {
+    const p = await import('@clack/prompts');
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    sshOverride = (c) =>
+      c.includes('docker stop "$c"') ? 'FAILED myapp-app\nFENCE_DONE' : undefined;
+    await run({ envConfig: baseEnvConfig({ n8n: true }), realFence: true });
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('SPLIT-BRAIN'))).toBe(true);
+    warn.mockRestore();
   });
 
   it('a run with no add-ons issues no add-on start', async () => {
