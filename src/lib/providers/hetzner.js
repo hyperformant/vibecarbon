@@ -9,7 +9,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { BaseProvider } from './base.js';
+import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 import { HETZNER_API_BASE, listHetznerPages } from './hetzner-pagination.js';
 
 // C9 — operator firewall access. Verbatim value-move of operator-ip.js's old
@@ -1360,7 +1360,9 @@ export class HetznerProvider extends BaseProvider {
    * this also drops the stale TCP rules from that earlier architecture: the
    * retired NodePort 30432 rule (SNAT masked the source IP, breaking the /32
    * pg_hba scope) and the superseded 5433 rule — plus any udp/51821 rule
-   * pointing at a previous peer IP (server replacement). tcp/5432 is NOT
+   * pointing at a previous peer IP (server replacement; the shared
+   * replaceWireguardPeerRules reconcile, with the stale TCP ports as
+   * Hetzner's `isRetired`). tcp/5432 is NOT
    * scrubbed: the replication-era direct-5432 rule the scrub once targeted
    * never worked and predates every live rig.
    *
@@ -1376,28 +1378,20 @@ export class HetznerProvider extends BaseProvider {
    * @returns {Array<object>|null} Updated rules, or null if already correct.
    */
   buildReplicationFirewallRules(firewall, peerIp) {
-    const existingRules = firewall.rules || [];
     const wgPort = '51821';
     const staleTcpPorts = new Set(['5433', '30432']);
-    const isStaleTcp = (r) => r.protocol === 'tcp' && staleTcpPorts.has(r.port);
-    const isWgRule = (r) => r.protocol === 'udp' && r.port === wgPort;
-
-    const hasExactRule = existingRules.some(
-      (r) => isWgRule(r) && r.source_ips?.includes(`${peerIp}/32`),
-    );
-    const hasStale = existingRules.some((r) => isStaleTcp(r) || (isWgRule(r) && !hasExactRule));
-    if (hasExactRule && !hasStale) return null;
-    const cleaned = existingRules.filter((r) => !isStaleTcp(r) && !isWgRule(r));
-    return [
-      ...cleaned,
-      {
+    return replaceWireguardPeerRules(firewall.rules || [], peerIp, {
+      isWireguardRule: (r) => r.protocol === 'udp' && r.port === wgPort,
+      admitsOnlyPeer: (r, ip) => r.source_ips?.length === 1 && r.source_ips[0] === `${ip}/32`,
+      buildPeerRule: (ip) => ({
         direction: 'in',
         protocol: 'udp',
         port: wgPort,
-        source_ips: [`${peerIp}/32`],
+        source_ips: [`${ip}/32`],
         destination_ips: [],
-      },
-    ];
+      }),
+      isRetired: (r) => r.protocol === 'tcp' && staleTcpPorts.has(r.port),
+    });
   }
 
   // ── Teardown primitives (C10a) ───────────────────────────────────────
