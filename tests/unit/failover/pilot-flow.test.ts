@@ -588,8 +588,14 @@ async function runFailoverHA(opts: RunOpts) {
       captured.walgRoleArgs = a;
       order.push('walgRole');
       return walgRoleFails
-        ? { ok: false as const, error: new Error('wal-g audit: stale standby write-guard') }
-        : { ok: true as const };
+        ? {
+            promoted: {
+              ok: false as const,
+              error: new Error('wal-g audit: stale standby write-guard'),
+            },
+            demoted: { ok: true as const },
+          }
+        : { promoted: { ok: true as const }, demoted: { ok: true as const } };
     },
     gate: async (
       _domain: string,

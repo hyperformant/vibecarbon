@@ -1315,12 +1315,18 @@ export function swapHaRoles(envName, { override } = {}) {
  * standby is already promoted, so aborting here would strand it behind un-flipped
  * DNS. The caller finishes the failover and fails the command at the end.
  *
+ * Two verdicts, independent by construction (H3): arming the promoted side and
+ * disarming the old primary. The disarm runs in a `finally`, so a promoted
+ * rollout or audit that fails can never skip it. It used to: an early return
+ * left the stale ex-primary on WALG_ROLE=primary, and its nightly base backups
+ * could become LATEST in the shared prefix if it came back.
+ *
  * @param {object} args
  * @param {string} args.promotedIp    the promoted cluster's master (old standby)
  * @param {string} args.oldPrimaryIp  demoted best-effort; may be unreachable
  * @param {string} args.sshKeyPath
  * @param {object} [args.deps] injected seams for unit tests
- * @returns {Promise<{ok: boolean, error?: Error}>}
+ * @returns {Promise<{promoted: {ok: boolean, error?: Error}, demoted: {ok: boolean, error?: Error}}>}
  */
 export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKeyPath, deps = {} }) {
   const {
@@ -1330,6 +1336,8 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
     warn = (msg) => p.log.warn(msg),
   } = deps;
 
+  const asError = (err) => (err instanceof Error ? err : new Error(String(err)));
+  const health = { promoted: { ok: false }, demoted: { ok: false } };
   try {
     await kubectl(promotedIp, k8sSetWalgRoleArgv('primary'));
     // Blocks on the pod actually rolling. Budget sits just above the kubectl
@@ -1354,31 +1362,54 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
     log(
       `[walg-role] promoted cluster ${promotedIp} is archiving (WALG_ROLE=primary, audit passed).`,
     );
+    health.promoted = { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+    health.promoted = { ok: false, error: asError(err) };
+  } finally {
+    // Demote the old primary so the two clusters never write the same canonical
+    // WAL prefix at once, WHATEVER the promoted side's verdict. Best-effort by
+    // design (an unreachable old primary is the usual reason to fail over) and
+    // NOT waited on: nothing downstream reads it, and the StatefulSet write is
+    // what carries the intent.
+    //
+    // Safe to do here, unlike on compose, because the old primary's app tier is
+    // never serving at this point: a PLANNED failover quiesced it to zero before
+    // the promotion, and an UNPLANNED one is running precisely because its
+    // postgres stopped answering. So the roll this triggers on its db pod has no
+    // live traffic to disturb.
+    try {
+      await kubectl(oldPrimaryIp, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
+      log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
+      health.demoted = { ok: true };
+    } catch (err) {
+      const error = asError(err);
+      warn(
+        `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${error.message}. ` +
+          `If it comes back up it may archive into the same backup prefix as the new primary, ` +
+          `\`vibecarbon deploy\` fixes this when it converges the ex-primary to pilot-light.`,
+      );
+      health.demoted = { ok: false, error };
+    }
   }
+  return health;
+}
 
-  // Demote the old primary so the two clusters never write the same canonical
-  // WAL prefix at once. Best-effort by design (an unreachable old primary is
-  // the usual reason to fail over) and NOT waited on: nothing downstream reads
-  // it, and the StatefulSet write is what carries the intent.
-  //
-  // Safe to do here, unlike on compose, because the old primary's app tier is
-  // never serving at this point: a PLANNED failover quiesced it to zero before
-  // the promotion, and an UNPLANNED one is running precisely because its
-  // postgres stopped answering. So the roll this triggers on its db pod has no
-  // live traffic to disturb.
-  try {
-    await kubectl(oldPrimaryIp, k8sSetWalgRoleArgv('standby'), { timeout: 60_000 });
-    log(`[walg-role] old primary ${oldPrimaryIp} demoted to the standby write-guard.`);
-  } catch (err) {
-    warn(
-      `Could not demote the old primary's wal-g write-guard (${oldPrimaryIp}): ${err.message}. ` +
-        `If it comes back up it may archive into the same backup prefix as the new primary, ` +
-        `\`vibecarbon deploy\` fixes this when it converges the ex-primary to pilot-light.`,
-    );
-  }
-  return { ok: true };
+/**
+ * One line per verdict of restorePromotedWalgRole, for the failure banner and
+ * the terminal error, so an operator sees which side needs the fix.
+ *
+ * @param {{promoted: {ok: boolean, error?: Error}, demoted: {ok: boolean, error?: Error}}} health
+ * @returns {string}
+ */
+export function walgVerdictsDetail(health) {
+  const promoted = health.promoted.ok
+    ? 'promoted cluster: armed (WALG_ROLE=primary, audit passed).'
+    : `promoted cluster: write-guard not confirmed, ${health.promoted.error?.message ?? 'unknown failure'}.`;
+  const demoted = health.demoted.ok
+    ? 'old primary: demoted to WALG_ROLE=standby.'
+    : `old primary: NOT demoted, ${health.demoted.error?.message ?? 'unknown failure'}; ` +
+      'if it comes back it may archive into the shared backup prefix until a deploy converges it.';
+  return `${promoted} ${demoted}`;
 }
 
 /**
@@ -1823,18 +1854,22 @@ export async function failoverHA(
     oldPrimaryIp: servers.primary.ip,
     sshKeyPath,
   });
+  // Each verdict on its own: the old primary is disarmed whatever the promoted
+  // side's outcome, and a failed disarm is named even when the arm is clean.
   s.stop(
-    backupHealth.ok
-      ? 'wal-g write-guard moved, promoted cluster is archiving'
-      : 'wal-g write-guard NOT confirmed on the promoted cluster',
+    `${
+      backupHealth.promoted.ok
+        ? 'wal-g write-guard moved, promoted cluster is archiving'
+        : 'wal-g write-guard NOT confirmed on the promoted cluster'
+    }; ${backupHealth.demoted.ok ? 'old primary disarmed' : 'old primary NOT disarmed'}`,
   );
-  if (!backupHealth.ok) {
+  if (!backupHealth.promoted.ok) {
     p.log.error(
       walgRoleDegradedMessage({
         path: 'k8s',
         envName,
         promotedIp: servers.standby.ip,
-        detail: backupHealth.error?.message ?? 'unknown failure',
+        detail: walgVerdictsDetail(backupHealth),
       }),
     );
   }
@@ -1953,13 +1988,13 @@ export async function failoverHA(
       dnsDidNotMessage({ domain, ip: standbyFloatingIp, reason: dnsFlip.reason }),
     );
   }
-  if (!backupHealth.ok) {
+  if (!backupHealth.promoted.ok) {
     throw new Error(
       walgRoleDegradedMessage({
         path: 'k8s',
         envName,
         promotedIp: servers.standby.ip,
-        detail: backupHealth.error?.message ?? 'unknown failure',
+        detail: walgVerdictsDetail(backupHealth),
       }),
     );
   }

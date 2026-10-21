@@ -232,7 +232,10 @@ async function runK8s(primaryReachable: boolean) {
       order.push('promote');
       return 'promoted';
     },
-    restoreWalgRole: async () => ({ ok: true as const }),
+    restoreWalgRole: async () => ({
+      promoted: { ok: true as const },
+      demoted: { ok: true as const },
+    }),
     gate: async () => {},
     promoteIssuer: async () => ({ patched: [] }),
     swapRoles: () => {},

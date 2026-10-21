@@ -257,7 +257,7 @@ async function run(opts: RunOpts = {}) {
     },
     restoreWalgRole: async () => {
       order.push('walgRole');
-      return { ok: true as const };
+      return { promoted: { ok: true as const }, demoted: { ok: true as const } };
     },
     gate: async () => {
       order.push('gate');
