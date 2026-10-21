@@ -503,7 +503,7 @@ const HA_HANDLELESS: Record<
       haIntegrity.checkDnsFlipVerified({
         domain: D,
         expectedIp: null,
-        readA: async () => NODE,
+        readA: async () => [NODE],
       }),
   ],
   checkSecondFailoverRefused: [

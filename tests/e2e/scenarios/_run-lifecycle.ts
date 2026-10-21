@@ -127,6 +127,7 @@ import {
   provesObservabilityAfterReconverge,
   runPostReconvergeObservability,
 } from './observability-step-plan.js';
+import { expandSkippedSteps } from './step-dependencies.js';
 import type {
   ScenarioConfig,
   ScenarioResult,
@@ -343,14 +344,6 @@ function readHaPrimary(
 function isPostFailoverVerify(step: StepName): boolean {
   return step === 'verify-failover' || step === 'verify-failback';
 }
-
-/** Steps that assert a failed-over env, dropped with `--skip-steps failover`. */
-const AFTER_FAILOVER_STEPS: readonly StepName[] = [
-  'second-failover',
-  'reconverge-deploy',
-  'failback',
-  'verify-failback',
-];
 
 // ---------------------------------------------------------------------------
 // Lifecycle options
@@ -4118,26 +4111,36 @@ EOF`;
             // deploy proves the reconverge reshapes roles without touching
             // data (guards the fresh-k3s-token full-cluster-replace class).
             const reconvergeMarkerId = buildMarkerId(scenarioId, 'reconverge-survival', Date.now());
-            let reconvergeMarkerWritten = false;
+            // No silent skip: without the marker the survival assertion below
+            // could not run, and a reconverge that wiped data would pass.
             const preReconverge = resolveHaDbIps(config.projectDir, config.envPrefix);
-            if (preReconverge.primaryIp && sshKeyPath) {
-              const write = await writeReplicationMarker(
-                {
-                  ip: preReconverge.primaryIp,
-                  sshKeyPath,
-                  mode: config.mode,
-                  projectName: config.projectName,
-                  label: 'pre-reconverge-primary',
-                },
-                reconvergeMarkerId,
-              );
-              reconvergeMarkerWritten = write.ok;
-              console.log(
-                reconvergeMarkerWritten
-                  ? `${tag} [reconverge] wrote survival marker ${reconvergeMarkerId} on acting primary ${preReconverge.primaryIp}`
-                  : `${tag} [reconverge] could not write survival marker (${write.error}) — survival assertion will be skipped`,
+            if (!preReconverge.primaryIp || !sshKeyPath) {
+              throw new Error(
+                `reconverge-deploy: cannot write the survival marker (` +
+                  `${!preReconverge.primaryIp ? 'no acting primary IP in .vibecarbon.json' : 'no sshKeyPath'}), ` +
+                  'so the reconverge could not be proven to keep data',
               );
             }
+            const write = await writeReplicationMarker(
+              {
+                ip: preReconverge.primaryIp,
+                sshKeyPath,
+                mode: config.mode,
+                projectName: config.projectName,
+                label: 'pre-reconverge-primary',
+              },
+              reconvergeMarkerId,
+            );
+            if (!write.ok) {
+              throw new Error(
+                `reconverge-deploy: could not write survival marker ${reconvergeMarkerId} on the ` +
+                  `acting primary ${preReconverge.primaryIp} (${write.error ?? 'unknown'}), so the ` +
+                  'reconverge could not be proven to keep data',
+              );
+            }
+            console.log(
+              `${tag} [reconverge] wrote survival marker ${reconvergeMarkerId} on acting primary ${preReconverge.primaryIp}`,
+            );
 
             // The promoted primary keeps serving through the reconverge: its
             // db is never restarted or recreated (primary_not_restarted).
@@ -4232,22 +4235,21 @@ EOF`;
             // acting primary, proving the reconverge touched roles, not
             // data. (Uses its OWN marker — the failover-time one is
             // deleted by verify-failover's pass-path cleanup.)
-            if (reconvergeMarkerWritten) {
-              const survival = await runFailoverContinuityCheck({
-                mode: config.mode,
-                projectName: config.projectName,
-                newPrimaryIp,
-                sshKeyPath,
-                markerId: reconvergeMarkerId,
-              });
-              collector.recordVerifications(stepId, [survival]);
-              if (survival.status === 'fail') {
-                throw new Error(
-                  `reconverge-deploy: survival marker ${reconvergeMarkerId} written just ` +
-                    `before the redeploy is no longer readable on the acting primary ` +
-                    `(${newPrimaryIp}) — the reconverge destroyed data it must only reshape.`,
-                );
-              }
+            const survival = await runFailoverContinuityCheck({
+              mode: config.mode,
+              projectName: config.projectName,
+              newPrimaryIp,
+              sshKeyPath,
+              markerId: reconvergeMarkerId,
+            });
+            collector.recordVerifications(stepId, [survival]);
+            if (survival.status !== 'pass') {
+              throw new Error(
+                `reconverge-deploy: survival marker ${reconvergeMarkerId} written just ` +
+                  `before the redeploy is no longer readable on the acting primary ` +
+                  `(${newPrimaryIp}) — the reconverge destroyed data it must only reshape ` +
+                  `[${survival.status}: ${survival.errorMessage ?? JSON.stringify(survival.details ?? {})}]`,
+              );
             }
 
             // DR restored: the rebuilt side streams from the promoted primary
@@ -4387,12 +4389,10 @@ EOF`;
   // scenarios from ~60min → ~25min when iterating on failover-class bugs.
   if (options.skipSteps && options.skipSteps.size > 0) {
     const before = filteredStepDefs.length;
-    // The steps after the failover assert a failed-over env: without the
-    // failover they would fail on their own precondition, so they go with it.
-    const dropped = new Set<string>(options.skipSteps);
-    if (dropped.has('failover')) {
-      for (const s of AFTER_FAILOVER_STEPS) dropped.add(s);
-    }
+    // A skipped step takes its dependents with it (failover -> second-failover
+    // and reconverge-deploy -> failback -> verify-failback): they assert the
+    // state it leaves and would only fail on their own precondition.
+    const dropped = expandSkippedSteps(options.skipSteps);
     filteredStepDefs = filteredStepDefs.filter((s) => !dropped.has(s.name));
     const removed = before - filteredStepDefs.length;
     if (removed > 0) {

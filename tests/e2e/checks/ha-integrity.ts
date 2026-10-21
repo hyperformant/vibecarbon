@@ -45,6 +45,7 @@ import {
   hasAutomatedDns,
   resolveDnsToken,
 } from '../../../src/lib/dns-provider.js';
+import type { readARecord } from '../../../src/lib/hetzner-dns.js';
 import type { DeployMode, VerificationResult } from '../scenarios/types.js';
 import { buildPsqlCommand, runRemote } from './replication.js';
 
@@ -381,7 +382,12 @@ export async function checkAppEndpointsReady(opts: {
 // dns_flip_verified
 // ---------------------------------------------------------------------------
 
-type ReadA = (name: string) => Promise<string | null>;
+/**
+ * The backend read the CLI's flipAndVerifyDns uses, typed from a real backend
+ * so a change to its return shape breaks tsc here. Every A target at a name.
+ */
+type BackendReadARecord = typeof readARecord;
+type ReadA = (name: string) => ReturnType<BackendReadARecord>;
 
 interface RawEnv {
   lastFailover?: string;
@@ -453,11 +459,12 @@ export async function providerApiAReader(
     const row = (DNS_PROVIDERS as Record<string, { tokenEnv?: string }>)[dns.provider];
     return { readA: null, error: `${row?.tokenEnv ?? 'the DNS token'} is not set` };
   }
-  let backend: {
-    readARecord: (token: string, zoneId: string, name: string) => Promise<string | null>;
-  };
+  // getDnsProvider resolves a module typed `object`; the contract surface is
+  // uniform across backends (dns-mutation-status-census), so name its reader
+  // with the real backend's type rather than a hand-written one.
+  let backend: { readARecord: BackendReadARecord };
   try {
-    backend = (await getDnsProvider(dns.provider)) as typeof backend;
+    backend = (await getDnsProvider(dns.provider)) as { readARecord: BackendReadARecord };
   } catch (err) {
     return { readA: null, error: `no DNS backend for ${dns.provider}: ${(err as Error).message}` };
   }
@@ -483,7 +490,7 @@ export async function checkDnsFlipVerified(opts: {
   if (!readA) {
     return fail(checkName, `cannot read the A records: ${readerError ?? 'no DNS provider reader'}`);
   }
-  const seen: Record<string, string | null> = {};
+  const seen: Record<string, string[]> = {};
   for (const name of [domain, `*.${domain}`]) {
     try {
       seen[name] = await readA(name);
@@ -494,11 +501,17 @@ export async function checkDnsFlipVerified(opts: {
       );
     }
   }
-  const wrong = Object.entries(seen).filter(([, ip]) => ip !== expectedIp);
+  // Exactly [expectedIp], as flipAndVerifyDns requires: a stale second A
+  // record would keep sending part of the traffic to the retired node.
+  const wrong = Object.entries(seen).filter(
+    ([, ips]) => !Array.isArray(ips) || ips.length !== 1 || ips[0] !== expectedIp,
+  );
   if (wrong.length > 0) {
+    const shown = (ips: string[]) =>
+      Array.isArray(ips) && ips.length > 0 ? ips.join(', ') : 'nothing';
     return fail(
       checkName,
-      `the DNS provider holds ${wrong.map(([n, ip]) => `${n} -> ${ip ?? 'nothing'}`).join(', ')}, not ${expectedIp}`,
+      `the DNS provider holds ${wrong.map(([n, ips]) => `${n} -> ${shown(ips)}`).join('; ')}, not only ${expectedIp}`,
       { expectedIp, seen },
     );
   }

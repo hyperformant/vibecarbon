@@ -25,6 +25,7 @@ import {
   readServingIp,
   SLOT_WAL_CAP,
 } from '../../e2e/checks/ha-integrity.js';
+import { expandSkippedSteps } from '../../e2e/scenarios/step-dependencies.js';
 
 const KEY = '/tmp/key';
 const IP = '203.0.113.10';
@@ -331,7 +332,7 @@ describe('checkDnsFlipVerified', () => {
       expectedIp: IP,
       readA: async (name) => {
         seen.push(name);
-        return IP;
+        return [IP];
       },
     });
     expect(r.checkName).toBe('dns_flip_verified');
@@ -343,7 +344,27 @@ describe('checkDnsFlipVerified', () => {
     const r = await checkDnsFlipVerified({
       domain: D,
       expectedIp: IP,
-      readA: async (name) => (name.startsWith('*') ? '198.51.100.1' : IP),
+      readA: async (name) => (name.startsWith('*') ? ['198.51.100.1'] : [IP]),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/198\.51\.100\.1/);
+  });
+
+  it('fails when a name has no A record at all, reported as nothing', async () => {
+    const r = await checkDnsFlipVerified({
+      domain: D,
+      expectedIp: IP,
+      readA: async (name) => (name.startsWith('*') ? [] : [IP]),
+    });
+    expect(r.status).toBe('fail');
+    expect(r.errorMessage).toMatch(/nothing/);
+  });
+
+  it('fails when a stale second A record still sends traffic to the old primary', async () => {
+    const r = await checkDnsFlipVerified({
+      domain: D,
+      expectedIp: IP,
+      readA: async () => [IP, '198.51.100.1'],
     });
     expect(r.status).toBe('fail');
     expect(r.errorMessage).toMatch(/198\.51\.100\.1/);
@@ -361,7 +382,7 @@ describe('checkDnsFlipVerified', () => {
   });
 
   it('fails when there is no promoted IP to compare against', async () => {
-    const r = await checkDnsFlipVerified({ domain: D, expectedIp: null, readA: async () => IP });
+    const r = await checkDnsFlipVerified({ domain: D, expectedIp: null, readA: async () => [IP] });
     expect(r.status).toBe('fail');
   });
 
@@ -518,9 +539,39 @@ describe('_run-lifecycle.ts wires the HA integrity steps', async () => {
     expect(src.match(/await assertPrimaryNotRestartedAcross\(stepId, /g)).toHaveLength(2);
   });
 
-  it('a skipped failover drops the steps that assert a failed-over env', () => {
-    expect(src).toMatch(
-      /if \(dropped\.has\('failover'\)\) \{\s*for \(const s of AFTER_FAILOVER_STEPS\)/,
+  it('--skip-steps drops dependents through expandSkippedSteps', () => {
+    expect(src).toContain('const dropped = expandSkippedSteps(options.skipSteps);');
+  });
+
+  it('a reconverge that cannot write its survival marker fails instead of skipping the proof', () => {
+    expect(src).not.toContain('reconvergeMarkerWritten');
+    expect(src).toContain('reconverge-deploy: could not write survival marker');
+    expect(src).toContain("if (survival.status !== 'pass') {");
+  });
+});
+
+describe('expandSkippedSteps', () => {
+  const expand = (...s: string[]) => [...expandSkippedSteps(new Set(s))].sort();
+
+  it('skipping failover drops everything that needs a failed-over env', () => {
+    expect(expand('failover')).toEqual(
+      ['failback', 'failover', 'reconverge-deploy', 'second-failover', 'verify-failback'].sort(),
     );
+  });
+
+  it('skipping reconverge-deploy drops the failback and its verify', () => {
+    expect(expand('reconverge-deploy')).toEqual([
+      'failback',
+      'reconverge-deploy',
+      'verify-failback',
+    ]);
+  });
+
+  it('skipping failback drops verify-failback', () => {
+    expect(expand('failback')).toEqual(['failback', 'verify-failback']);
+  });
+
+  it('a step with no dependents is dropped alone', () => {
+    expect(expand('scale', 'verify-scale')).toEqual(['scale', 'verify-scale']);
   });
 });
