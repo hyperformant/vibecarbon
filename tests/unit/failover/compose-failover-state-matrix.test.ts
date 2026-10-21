@@ -66,6 +66,7 @@ const { failoverComposeHA, promoteComposeStandby, swapComposeHaRoles } = await i
   '../../../src/lib/deploy/compose/ha.js'
 );
 const { FailoverRefusedError } = await import('../../../src/lib/deploy/failover-guard.js');
+const { liftStrandedWriteFence } = await import('../../../src/lib/deploy/write-fence.js');
 
 const SYSID = '7412345678901234567';
 const OTHER_SYSID = '7499999999999999999';
@@ -129,6 +130,12 @@ interface RunOpts {
   dbFenceThrows?: boolean;
   /** The reseeded standby still carries the fence. */
   standbyFenced?: boolean;
+  /** Whether lifting a stranded fence succeeds. */
+  liftSucceeds?: boolean;
+  /** The journal write throws. */
+  journalThrows?: boolean;
+  /** The journal clear throws. */
+  clearJournalThrows?: boolean;
   /** Pass no seams at all (the real ssh-backed defaults run). */
   noSeams?: boolean;
 }
@@ -147,6 +154,9 @@ async function run(opts: RunOpts = {}) {
     fenceFails = false,
     dbFenceThrows = false,
     standbyFenced = false,
+    liftSucceeds = true,
+    journalThrows = false,
+    clearJournalThrows = false,
     noSeams = false,
   } = opts;
   const order: string[] = [];
@@ -174,8 +184,10 @@ async function run(opts: RunOpts = {}) {
     },
     clearJournal: async () => {
       order.push('clearJournal');
+      if (clearJournalThrows) throw new Error('config save failed');
     },
     writeJournal: async (_ctx: unknown, journal: Record<string, unknown>) => {
+      if (journalThrows) throw new Error('config save failed');
       order.push('journal');
       captured.journal = journal;
       return 'journal-id';
@@ -212,6 +224,26 @@ async function run(opts: RunOpts = {}) {
       captured.started = containers;
       return true;
     },
+    writeMarker: (_ctx: unknown, m: { node: string; ip: string }) => {
+      order.push('marker');
+      captured.marker = m;
+    },
+    clearMarker: () => {
+      order.push('clearMarker');
+    },
+    liftStranded: (o: Parameters<typeof liftStrandedWriteFence>[0]) =>
+      liftStrandedWriteFence({
+        ...o,
+        deps: {
+          unfence: async () => {
+            order.push('liftStranded');
+            return liftSucceeds;
+          },
+          clearMarker: () => {
+            order.push('clearMarker');
+          },
+        },
+      }),
     assertUnfenced: async () => {
       order.push('assertUnfenced');
       if (standbyFenced) throw new Error('the reseeded standby carries the write fence');
@@ -555,12 +587,13 @@ describe('failoverComposeHA planned fence and catch-up (H1)', () => {
     expect(order.indexOf('dbUnfence')).toBeLessThan(order.indexOf('startWriters'));
   });
 
-  it("first run, planned, promote 'not-issued': journal cleared, then the fence is lifted", async () => {
+  it("first run, planned, promote 'not-issued': the fence is lifted (marker cleared), then the journal", async () => {
     const { order, thrown } = await run({ primaryReachable: true, promoteVerdict: 'not-issued' });
     expect(thrown?.message).toMatch(/no promote was sent/);
-    expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('promote'));
-    expect(order.indexOf('dbUnfence')).toBeGreaterThan(order.indexOf('clearJournal'));
+    expect(order.indexOf('dbUnfence')).toBeGreaterThan(order.indexOf('promote'));
+    expect(order.indexOf('clearMarker')).toBeGreaterThan(order.indexOf('dbUnfence'));
     expect(order).toContain('startWriters');
+    expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('startWriters'));
   });
 
   it("resumed run, planned, promote 'not-issued': an earlier promote may land, so it stays fenced", async () => {
@@ -607,6 +640,82 @@ describe('failoverComposeHA planned fence and catch-up (H1)', () => {
     expect(order).not.toContain('journal');
     expect(order).not.toContain('promote');
     expect(order).toContain('dbUnfence');
+  });
+
+  it('the fence is recorded (primary name and ip) before it is applied; a first-run abort clears it', async () => {
+    const { order, captured } = await run({ primaryReachable: true, catchUpThrows: true });
+    expect(captured.marker).toEqual({ node: 'myapp-prod-primary', ip: PRIMARY_IP });
+    expect(order.indexOf('stopWriters')).toBeLessThan(order.indexOf('marker'));
+    expect(order.indexOf('marker')).toBeLessThan(order.indexOf('dbFence'));
+    expect(order.indexOf('clearMarker')).toBeGreaterThan(order.indexOf('dbUnfence'));
+  });
+
+  it('a proven promote keeps the marker for the swap save to clear', async () => {
+    const { order, thrown } = await run({ primaryReachable: true });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('marker');
+    expect(order).not.toContain('clearMarker');
+    expect(order).toContain('swap');
+  });
+
+  it('a journal write that throws is inside the abort path: the fence is lifted', async () => {
+    const { order, thrown } = await run({ primaryReachable: true, journalThrows: true });
+    expect(thrown?.message).toMatch(/config save failed/);
+    expect(order).not.toContain('promote');
+    expect(order).toContain('dbUnfence');
+    expect(order).toContain('startWriters');
+  });
+
+  it("'not-issued' with a journal clear that throws still lifted the fence first", async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      promoteVerdict: 'not-issued',
+      clearJournalThrows: true,
+    });
+    expect(thrown?.message).toMatch(/no promote was sent/);
+    expect(order.indexOf('dbUnfence')).toBeLessThan(order.indexOf('clearJournal'));
+    expect(order).toContain('startWriters');
+  });
+
+  it('SIGINT-equivalent rerun (marker, no journal): lifts the stranded fence before the proof, then fails over', async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      envConfig: baseEnvConfig({
+        ha: { writeFence: { node: 'myapp-prod-primary', ip: PRIMARY_IP, at: 'x' } },
+      }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(order[0]).toBe('liftStranded');
+    expect(order[1]).toBe('clearMarker');
+    expect(order.indexOf('liftStranded')).toBeLessThan(order.indexOf('readStandby'));
+    // The rerun fences again, after the lift.
+    expect(order.indexOf('marker')).toBeGreaterThan(order.indexOf('liftStranded'));
+    expect(order).toContain('promote');
+  });
+
+  it('rerun with a marker and a journal: the journal flow owns it, no lift', async () => {
+    const { order } = await run({
+      primaryReachable: true,
+      envConfig: baseEnvConfig({
+        ha: {
+          writeFence: { node: 'myapp-prod-primary', ip: PRIMARY_IP, at: 'x' },
+          failoverInFlight: { target: 'standby', systemIdentifier: SYSID },
+        },
+      }),
+    });
+    expect(order).not.toContain('liftStranded');
+  });
+
+  it('a stranded fence that cannot be lifted stops the rerun before anything else', async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      liftSucceeds: false,
+      envConfig: baseEnvConfig({
+        ha: { writeFence: { node: 'myapp-prod-primary', ip: PRIMARY_IP, at: 'x' } },
+      }),
+    });
+    expect(thrown?.message).toMatch(/still write-fenced from an interrupted failover/);
+    expect(order).toEqual(['liftStranded']);
   });
 
   it('unplanned: no fence, no gate, before the promote', async () => {

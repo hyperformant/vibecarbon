@@ -25,6 +25,7 @@ import {
   providerIdFor,
 } from '../providers/index.js';
 import { formatS3SetupFailure, projectStateBucketBase } from '../providers/s3-base.js';
+import { getSSHKeyPath } from '../ssh.js';
 import { createTracker } from '../tracker.js';
 import { useDnsChallenge } from './acme.js';
 import {
@@ -46,9 +47,11 @@ import { haSeedRecord } from './failover-guard.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
+import { k8sPsqlRunner } from './replication.js';
 import { envS3Record } from './s3-record.js';
 import { StateTracker } from './state.js';
 import { isComposeTier, isHATier, isK8sTier, resolveTier } from './tier-registry.js';
+import { assertRolePrimaryWritable, liftStrandedWriteFence } from './write-fence.js';
 
 /**
  * Probe the public /api/health endpoint to verify the app is reachable
@@ -460,6 +463,28 @@ export function assertBucketReady(result, role) {
  * @param {string} environment
  * @param {{ha?: {primary?: {stack?: string}}}} [envConfig]
  */
+const isHaTier = (tier) => tier === 'compose-ha' || tier === 'k8s-ha';
+
+/** The node the persisted roles call primary, as the write-fence marker names it. */
+function rolePrimaryOf(tier, envConfig) {
+  if (tier === 'compose-ha') {
+    const sv = (envConfig?.servers ?? []).find((x) => x.role === 'primary');
+    return sv?.ip ? { name: sv.name, ip: sv.ip } : null;
+  }
+  const ip = envConfig?.ha?.primary?.masterIp;
+  return ip ? { ip } : null;
+}
+
+/** psql on the role primary over the tier's transport (the write-fence checks). */
+async function rolePrimaryPsql(tier, environment, projectName, ip) {
+  const key = getSSHKeyPath(environment);
+  if (tier === 'compose-ha') {
+    const { composePsqlRunner } = await import('./compose/ha.js');
+    return composePsqlRunner(ip, key, `/opt/${projectName}`);
+  }
+  return k8sPsqlRunner(ip, key);
+}
+
 export function resolveKubeconfigPath(environment, envConfig) {
   const roleStack = envConfig?.ha?.primary?.stack;
   const candidates = [
@@ -521,6 +546,28 @@ export async function executeDeployment(args, gatheredConfig) {
   // swap is recorded. See compose/ha-role-swap.js for why compose-HA (unlike
   // k8s-HA) cannot converge a swapped environment.
   assertNoComposeHaRoleSwap({ projectName: projectConfig.projectName, environment, envConfig });
+  // A planned failover interrupted between its database write fence and its
+  // journal left the primary read-only with nothing promoted: lift it before
+  // this deploy restarts the app onto it (write-fence.js). Unreachable or
+  // failing here is a warning: the post-bring-up probe below checks again.
+  if (isHaTier(tier) && envConfig?.ha?.writeFence) {
+    const rolePrimary = rolePrimaryOf(tier, envConfig);
+    if (rolePrimary?.ip) {
+      try {
+        await liftStrandedWriteFence({
+          environment,
+          envConfig,
+          rolePrimary,
+          exec: await rolePrimaryPsql(tier, environment, projectConfig.projectName, rolePrimary.ip),
+          log: (line) => p.log.info(line),
+        });
+      } catch (err) {
+        p.log.warn(
+          `${String(err?.message ?? err).split('\n')[0]}; deploy checks the primary again after bring-up`,
+        );
+      }
+    }
+  }
   // Fail fast with install guidance if host-side tools (pulumi, ssh) are
   // missing — before any Pulumi/SSH work would otherwise ENOENT mid-deploy.
   // Provider passed so the pulumi VERSION assertion can fire: a CLI too old
@@ -1457,6 +1504,28 @@ export async function executeDeployment(args, gatheredConfig) {
       degraded: k8sHaCtx.replicationStatus !== 'streaming',
       systemIdentifier: k8sHaCtx.systemIdentifier ?? null,
     };
+  }
+
+  // Defence in depth (write-fence.js): after bring-up the role primary must take
+  // writes. Fenced with no failover in flight is lifted with a warning; with a
+  // journal, the failover is mid-flight and this deploy refuses.
+  if (isHaTier(tier)) {
+    const primaryIp =
+      tier === 'compose-ha' ? deployResult.primaryIp : deployResult.primary?.masterIp;
+    if (primaryIp) {
+      const writable = await assertRolePrimaryWritable({
+        environment,
+        envConfig: loadProjectConfig()?.environments?.[environment] ?? envConfig,
+        exec: await rolePrimaryPsql(tier, environment, projectConfig.projectName, primaryIp),
+        warn: (line) => p.log.warn(line),
+      });
+      if (writable === 'unknown') {
+        p.log.warn(
+          `could not read the primary's write-fence setting (${primaryIp}); ` +
+            'vibecarbon status shows it once the database answers',
+        );
+      }
+    }
   }
 
   if (isK8sTier(tier)) {

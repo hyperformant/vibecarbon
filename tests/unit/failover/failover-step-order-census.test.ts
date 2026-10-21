@@ -145,6 +145,7 @@ function expectPlannedOrder() {
     expect(order, `planned failover never reached ${step}`).toContain(step);
   }
   expect(at('stopWriters')).toBeLessThan(at('fence'));
+  expect(at('marker'), 'the fence is recorded before it is applied').toBeLessThan(at('fence'));
   expect(at('fence'), 'the database fence comes before its sessions are terminated').toBeLessThan(
     at('terminate'),
   );
@@ -217,6 +218,10 @@ async function runK8s(primaryReachable: boolean) {
       }
     },
     reseed: async () => {},
+    writeMarker: () => {
+      order.push('marker');
+    },
+    clearMarker: () => {},
     writeJournal: async () => 'journal-id',
     clearJournal: async () => {},
     promote: async () => {
@@ -291,6 +296,10 @@ async function runCompose(primaryReachable: boolean) {
       order.push('reseed');
     },
     recordSeeded: () => {},
+    writeMarker: () => {
+      order.push('marker');
+    },
+    clearMarker: () => {},
     writeJournal: async () => 'journal-id',
     clearJournal: async () => {},
     promote: async () => {

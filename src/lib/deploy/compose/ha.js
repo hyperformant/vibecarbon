@@ -67,6 +67,11 @@ import {
   WG_SUBNET_CIDR,
 } from '../wireguard.js';
 import {
+  clearWriteFenceMarker,
+  liftStrandedWriteFence,
+  writeWriteFenceMarker,
+} from '../write-fence.js';
+import {
   assertNoComposeHaRoleSwap,
   composeHaFailoverRecoveryInstructions,
 } from './ha-role-swap.js';
@@ -1533,6 +1538,9 @@ export function swapComposeHaRoles(envName, { override } = {}) {
   envConfig.secondaryRegion = oldPrimary?.region ?? envConfig.region;
   envConfig.ha = { ...(envConfig.ha ?? {}), failoverRegion: envConfig.secondaryRegion };
   delete envConfig.ha.failoverInFlight;
+  // The retired node's read-only state now belongs to the retired-node
+  // handling, not to the interrupted-fence marker.
+  delete envConfig.ha.writeFence;
   // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
   envConfig.replication = 'degraded';
   envConfig.degraded = true;
@@ -1595,6 +1603,9 @@ export async function failoverComposeHA(
     fenceWrites = (exec) => fenceDatabaseWrites({ exec }),
     unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
     assertUnfenced = (exec) => assertStandbyNotWriteFenced({ exec }),
+    writeMarker = writeWriteFenceMarker,
+    clearMarker = clearWriteFenceMarker,
+    liftStranded = liftStrandedWriteFence,
     fenceOldPrimary = stopOldPrimaryApp,
     confirmUnproven = confirmUnprovenFailover,
     swapRoles = swapComposeHaRoles,
@@ -1656,6 +1667,25 @@ export async function failoverComposeHA(
   // that fixes it; `resume` means a previous run of THIS failover (its journal)
   // already promoted the standby.
   const planned = await primaryReachable(primaryServer.ip, sshKeyPath, remoteDir);
+  const primaryPsql = psql(primaryServer.ip, sshKeyPath, remoteDir);
+  const standbyPsql = psql(standbyServer.ip, sshKeyPath, remoteDir);
+  // A planned run that died between its database fence and its journal left
+  // the primary read-only with nothing promoted: lift it first (a journal
+  // means the promote may have started, and the journal flow owns it).
+  if (planned) {
+    await liftStranded({
+      environment: envName,
+      envConfig,
+      rolePrimary: { name: primaryServer.name, ip: primaryServer.ip },
+      exec: primaryPsql,
+      log: (line) => p.log.info(line),
+    });
+  } else if (envConfig?.ha?.writeFence && !envConfig?.ha?.failoverInFlight) {
+    p.log.warn(
+      'an interrupted failover left a write fence on the primary, which does not answer; ' +
+        'the next deploy or failover that reaches it lifts it',
+    );
+  }
   const standbyState = await readStandby();
   const primaryState = planned ? await readState(primaryServer.ip, sshKeyPath, remoteDir) : null;
   // Whether an earlier run left a journal: only without one can a promote this
@@ -1675,9 +1705,6 @@ export async function failoverComposeHA(
     p.log.warn(UNPROVEN_RISK_LINE);
     await confirmUnproven(envName, parsed);
   }
-
-  const primaryPsql = psql(primaryServer.ip, sshKeyPath, remoteDir);
-  const standbyPsql = psql(standbyServer.ip, sshKeyPath, remoteDir);
 
   // Step 0a (PLANNED only): fence the old primary BEFORE the promote, so no
   // write can land on it once the standby takes over; the write outage opens
@@ -1708,12 +1735,14 @@ export async function failoverComposeHA(
     }
     p.log.warn('Failover aborted after the fence, lifting it on the old primary.');
     try {
-      if (dbFenceAttempted && !(await unfenceWrites(primaryPsql))) {
-        p.log.warn(
-          `Could not lift the database write fence on the old primary (${primaryServer.ip}). ` +
-            `Lift it by hand: ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose ` +
-            `exec -T db ${UNFENCE_SQL_HINT}'`,
-        );
+      if (dbFenceAttempted) {
+        if (await unfenceWrites(primaryPsql)) clearMarker({ environment: envName });
+        else
+          p.log.warn(
+            `Could not lift the database write fence on the old primary (${primaryServer.ip}). ` +
+              `Lift it by hand: ssh root@${primaryServer.ip} 'cd ${remoteDir} && docker compose ` +
+              `exec -T db ${UNFENCE_SQL_HINT}'`,
+          );
       }
       if (!(await startWriters(primaryServer.ip, sshKeyPath, stoppedWriters))) {
         p.log.warn(
@@ -1739,6 +1768,12 @@ export async function failoverComposeHA(
           `could not stop the app containers on the old primary (${primaryServer.ip})`,
         );
       }
+      // Recorded BEFORE it is applied: an interrupted run then leaves a marker
+      // the next failover or deploy lifts (write-fence.js).
+      writeMarker(
+        { environment: envName },
+        { node: primaryServer.name ?? primaryServer.ip, ip: primaryServer.ip },
+      );
       dbFenceAttempted = true;
       await fenceWrites(primaryPsql);
       fenced = true;
@@ -1841,6 +1876,19 @@ export async function failoverComposeHA(
           'Primary unreachable, skipping re-seed. Standby will promote with current state.',
         );
       }
+
+      // Step 1: journal, then promote (R2, R3). The journal goes down right
+      // before the promote; from here on only a never-sent promote on a run
+      // that started without a journal leaves the old primary untouched.
+      await writeJournal(
+        { environment: envName },
+        {
+          target: 'standby',
+          primaryLsn,
+          systemIdentifier,
+          ...(unproven && { override: 'force-unproven' }),
+        },
+      );
     } catch (err) {
       // Nothing is promoted before the journal: un-fence (on a first run) and
       // rethrow; the error names the cause and that nothing was promoted.
@@ -1848,18 +1896,6 @@ export async function failoverComposeHA(
       throw err;
     }
 
-    // Step 1: journal, then promote (R2, R3). The journal goes down right before
-    // the promote; from here on only a never-sent promote on a run that started
-    // without a journal leaves the old primary untouched.
-    await writeJournal(
-      { environment: envName },
-      {
-        target: 'standby',
-        primaryLsn,
-        systemIdentifier,
-        ...(unproven && { override: 'force-unproven' }),
-      },
-    );
     s.start('Promoting standby database');
     let verdict;
     try {
@@ -1871,8 +1907,12 @@ export async function failoverComposeHA(
       // Nothing was sent and no earlier run journaled a promote: the standby is
       // not promoting, so the old primary serves again (un-fenced if planned).
       s.stop('Promote never sent, aborting failover');
-      await clearJournal({ environment: envName });
+      // Un-fence first, and independently: a failed journal clear must not
+      // leave the serving primary read-only (unfence never throws).
       await unfence();
+      await clearJournal({ environment: envName }).catch((err) =>
+        p.log.warn(`Could not clear the failover journal: ${firstLine(err)}`),
+      );
       throw new Error(promotionNotIssuedMessage(envName, standbyServer.ip));
     }
     if (verdict !== 'promoted') {

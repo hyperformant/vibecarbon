@@ -555,6 +555,9 @@ async function runFailoverHA(opts: RunOpts) {
     fenceWrites: async () => {},
     unfenceWrites: async () => true,
     assertUnfenced: async () => {},
+    writeMarker: () => {},
+    clearMarker: () => {},
+    liftStranded: async () => 'none',
     catchUp: async () => {
       order.push('catchup');
       if (catchUpThrows) {

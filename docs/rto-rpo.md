@@ -82,7 +82,11 @@ refuses to promote a standby that has not replayed it, and the failover
 journal records it. A standby that is not streaming is reseeded from the fenced
 primary instead, and is proven free of the copied fence before it is promoted.
 A failover that aborts before anything could promote lifts the fence; after a
-completed failover the retired node stays read-only. Evidenced per run: the e2e
+completed failover the retired node stays read-only. The fence is recorded
+(`ha.writeFence`) before it is applied, so a run interrupted before its
+journal leaves a marker: the next `vibecarbon failover` or `vibecarbon deploy`
+lifts it, deploy also checks the primary takes writes after bring-up, and
+`vibecarbon status` shows a write-fenced primary. Evidenced per run: the e2e
 writes a marker row on the old primary immediately before failover and asserts
 it survived onto the promoted primary (`replication_failover_continuity`). The
 renderer **refuses to publish** figures from any run where that check is

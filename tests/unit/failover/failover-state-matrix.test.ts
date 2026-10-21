@@ -40,6 +40,7 @@ const {
   readReplicaState,
   writeFailoverJournal,
 } = await import('../../../src/lib/deploy/failover-guard.js');
+const { liftStrandedWriteFence } = await import('../../../src/lib/deploy/write-fence.js');
 const { PROMOTE_DEADLINE_MS, promoteStandby } = await import(
   '../../../src/lib/deploy/replication.js'
 );
@@ -191,6 +192,27 @@ async function run(opts: RunOpts = {}) {
       order.push('dbUnfence');
       return true;
     },
+    writeMarker: (_ctx: unknown, m: { node: string; ip: string }) => {
+      order.push('marker');
+      captured.marker = m;
+    },
+    clearMarker: () => {
+      order.push('clearMarker');
+    },
+    liftStranded: (o: Parameters<typeof liftStrandedWriteFence>[0]) =>
+      liftStrandedWriteFence({
+        ...o,
+        deps: {
+          unfence: async () => {
+            order.push('liftStranded');
+            return true;
+          },
+          clearMarker: () => {
+            order.push('clearMarker');
+          },
+        },
+      }),
+    psql: () => async () => '',
     assertUnfenced: async () => {
       order.push('assertUnfenced');
       if (standbyFenced) throw new Error('the reseeded standby carries the write fence');
@@ -308,6 +330,38 @@ describe('failoverHA state matrix', () => {
     expect(thrown?.message).toMatch(/^Failover aborted: write fence/);
     expect(order).not.toContain('catchup');
     expect(order.indexOf('dbUnfence')).toBeLessThan(order.indexOf('unquiesce'));
+  });
+
+  it('the fence is recorded before it is applied; a first-run abort clears it after the un-fence', async () => {
+    const { order, captured } = await run({ catchUpThrows: true });
+    expect(captured.marker).toEqual({ node: '10.0.0.1', ip: '10.0.0.1' });
+    expect(order.indexOf('quiesceConfirmed')).toBeLessThan(order.indexOf('marker'));
+    expect(order.indexOf('marker')).toBeLessThan(order.indexOf('dbFence'));
+    expect(order.indexOf('clearMarker')).toBeGreaterThan(order.indexOf('dbUnfence'));
+  });
+
+  it('SIGINT-equivalent rerun (marker, no journal): lifts the stranded fence first, then fails over', async () => {
+    const { order, thrown } = await run({
+      envConfig: baseEnvConfig({
+        ha: { writeFence: { node: '10.0.0.1', ip: '10.0.0.1', at: 'x' } },
+      }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(order.indexOf('liftStranded')).toBeLessThan(order.indexOf('quiesce'));
+    expect(order.indexOf('clearMarker')).toBeLessThan(order.indexOf('marker'));
+    expect(order).toContain('promote');
+  });
+
+  it('rerun with a marker and a journal: left to the journal flow, no lift', async () => {
+    const { order } = await run({
+      envConfig: baseEnvConfig({
+        ha: {
+          writeFence: { node: '10.0.0.1', ip: '10.0.0.1', at: 'x' },
+          failoverInFlight: { target: 'standby', systemIdentifier: SYSID },
+        },
+      }),
+    });
+    expect(order).not.toContain('liftStranded');
   });
 
   it('journal at entry + catch-up throws: the primary stays quiesced and fenced', async () => {

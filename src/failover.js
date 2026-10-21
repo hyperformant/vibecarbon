@@ -59,6 +59,11 @@ import {
   walgRoleDegradedMessage,
 } from './lib/deploy/walg-role.js';
 import {
+  clearWriteFenceMarker,
+  liftStrandedWriteFence,
+  writeWriteFenceMarker,
+} from './lib/deploy/write-fence.js';
+import {
   DNS_PROVIDERS,
   getDnsProvider,
   hasAutomatedDns,
@@ -1273,6 +1278,9 @@ export function swapHaRoles(envName, { override } = {}) {
   // R2: the journal is cleared by the same save that persists the swap, so no
   // crash can leave a swapped config that still claims a failover in flight.
   delete ha.failoverInFlight;
+  // The retired side's read-only state now belongs to the retired-node
+  // handling, not to the interrupted-fence marker.
+  delete ha.writeFence;
   saveProjectConfig(config);
 }
 
@@ -1401,6 +1409,9 @@ export async function failoverHA(
     fenceWrites = (exec) => fenceDatabaseWrites({ exec }),
     unfenceWrites = (exec) => unfenceDatabaseWrites({ exec }),
     assertUnfenced = (exec) => assertStandbyNotWriteFenced({ exec }),
+    writeMarker = writeWriteFenceMarker,
+    clearMarker = clearWriteFenceMarker,
+    liftStranded = liftStrandedWriteFence,
     catchUp = (srv, key) =>
       waitForStandbyCaughtUp({
         primaryExec: psql(srv.primary.ip, key),
@@ -1512,6 +1523,24 @@ export async function failoverHA(
   // fixes it; `resume` means a previous run of THIS failover (its journal) already
   // promoted the standby, so reseed and promote are skipped.
   const planned = await isPrimaryReady(servers.primary.ip, sshKeyPath);
+  const primaryPsql = psql(servers.primary.ip, sshKeyPath);
+  // A planned run that died between its database fence and its journal left
+  // the primary read-only with nothing promoted: lift it first (a journal
+  // means the promote may have started, and the journal flow owns it).
+  if (planned) {
+    await liftStranded({
+      environment: envName,
+      envConfig,
+      rolePrimary: { ip: servers.primary.ip },
+      exec: primaryPsql,
+      log: (line) => p.log.info(line),
+    });
+  } else if (envConfig?.ha?.writeFence && !envConfig?.ha?.failoverInFlight) {
+    p.log.warn(
+      'an interrupted failover left a write fence on the primary, which does not answer; ' +
+        'the next deploy or failover that reaches it lifts it',
+    );
+  }
   const standbyState = await readStandbyState(servers, sshKeyPath);
   const primaryState = planned ? await readPrimaryState(servers, sshKeyPath) : null;
   // Whether an earlier run left a journal: only without one can a promote this
@@ -1660,8 +1689,12 @@ export async function failoverHA(
     // earlier run, its promote may still be landing, so it reads as 'unknown'.
     if (verdict === 'not-issued' && !journalAtEntry) {
       s.stop('Promote never sent, aborting failover');
-      await clearJournal({ environment: envName });
+      // Un-fence first, and independently: a failed journal clear must not
+      // leave the serving primary read-only (unquiesce never throws).
       await unquiesce();
+      await clearJournal({ environment: envName }).catch((err) =>
+        p.log.warn(`Could not clear the failover journal: ${firstErrorLine(err)}`),
+      );
       throw new Error(promotionNotIssuedMessage(envName, servers.standby.ip));
     }
     s.stop('Promotion could not be confirmed, old primary kept fenced');
@@ -1682,7 +1715,6 @@ export async function failoverHA(
   // default, client sessions terminated). Only then is the primary's WAL
   // position final. A fence that cannot be proven aborts a promote-mode run.
   let dbFenceAttempted = false;
-  const primaryPsql = psql(servers.primary.ip, sshKeyPath);
 
   /**
    * Lift the fence after an abort that promoted nothing: only when this run
@@ -1701,12 +1733,17 @@ export async function failoverHA(
     }
     p.log.warn('Failover aborted after quiesce, lifting the fence on the primary.');
     try {
-      if (dbFenceAttempted && !(await unfenceWrites(primaryPsql))) {
-        p.log.warn(
-          `Could not lift the database write fence on the primary (${servers.primary.ip}). ` +
-            `Lift it by hand: ssh root@${servers.primary.ip} 'kubectl -n vibecarbon exec db-0 ` +
-            `-- ${UNFENCE_SQL_HINT}'`,
-        );
+      if (dbFenceAttempted) {
+        if (await unfenceWrites(primaryPsql)) {
+          clearMarker({ environment: envName });
+        } else {
+          const pod = await getPostgresPod(servers.primary.ip, sshKeyPath).catch(() => '');
+          p.log.warn(
+            `Could not lift the database write fence on the primary (${servers.primary.ip}). ` +
+              `Lift it by hand: ssh root@${servers.primary.ip} 'kubectl -n vibecarbon exec ` +
+              `${String(pod || '').trim() || '<db pod>'} -- ${UNFENCE_SQL_HINT}'`,
+          );
+        }
       }
       await scale(
         servers.primary.ip,
@@ -1732,6 +1769,9 @@ export async function failoverHA(
             `${gone.remaining.join(', ') || 'unknown'})`,
         );
       }
+      // Recorded BEFORE it is applied: an interrupted run then leaves a marker
+      // the next failover or deploy lifts (write-fence.js).
+      writeMarker({ environment: envName }, { node: servers.primary.ip, ip: servers.primary.ip });
       dbFenceAttempted = true;
       await fenceWrites(primaryPsql);
       s.stop('Primary fenced: app tier gone, database read-only');

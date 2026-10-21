@@ -359,6 +359,23 @@ function parseStandbyReplayRow(out) {
  *
  * @returns {Promise<{ streaming: boolean, state: string, lagBytes: number|null, lagLine: string, primaryRow: {state:string,lagSeconds:number}|null, standbyRow: {inRecovery:boolean,lastWalReplayLsn:string,secondsSinceReplay:number}|null } | null>}
  */
+/**
+ * The role primary's write-fence row: shown when an interrupted planned
+ * failover's marker is set or the primary reads read-only. Null otherwise.
+ *
+ * @param {object} envConfig
+ * @param {{ writeFenced?: 'on'|'off'|null } | null} replication
+ * @returns {string|null}
+ */
+export function writeFenceRow(envConfig, replication) {
+  const marker = envConfig?.ha?.writeFence;
+  if (!marker && replication?.writeFenced !== 'on') return null;
+  const why = envConfig?.ha?.failoverInFlight
+    ? 'a failover is in flight; vibecarbon failover finishes it'
+    : 'an interrupted failover left it; vibecarbon deploy or failover lifts it';
+  return `database write-fenced: the primary refuses writes (${why})`;
+}
+
 export async function checkReplication(envName, envConfig, projectName, deps = {}) {
   const {
     sshRun: _sshRun = sshRun,
@@ -486,10 +503,21 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
       }
     }
 
+    // The planned-failover write fence (write-fence.js): a primary left
+    // read-only refuses every write. SHOW, so the SQL carries no quotes.
+    let writeFenced = null;
+    try {
+      const v = String((await runPrimaryPsql('SHOW default_transaction_read_only')) ?? '').trim();
+      writeFenced = v === 'on' || v === 'off' ? v : null;
+    } catch {
+      writeFenced = null;
+    }
+
     return {
       ...replication,
       primaryRow,
       standbyRow,
+      writeFenced,
       lagLine: formatReplicationLagLine({ primaryRow, standbyRow }),
     };
   })();
@@ -1154,6 +1182,9 @@ function renderEnvironment(envName, envConfig, checks) {
         lines.push(`${c.dim('Repl. Lag')}      ${lagDisplay}`);
       }
     }
+
+    const fenceRow = writeFenceRow(envConfig, checks.replication);
+    if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
   }
 
   // Servers
