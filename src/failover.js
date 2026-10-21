@@ -877,7 +877,10 @@ export async function preflightPilotFailover(_envName, envConfig, deps = {}) {
   // Config-presence gate: these are written by `vibecarbon deploy` (Task 7).
   // Their absence means this env predates pilot-light HA (or was hand-edited) —
   // there is nothing to provision or scale, so fail fast with a fix-it hint.
-  if (!workerSpec || !Array.isArray(scaleUpList) || !standbyStack) {
+  // ha.primary / ha.standby are the role objects the terminal swap rewrites:
+  // without both, a promote would end with nothing to persist and the journal
+  // left set, so refuse here, before anything is written.
+  if (!workerSpec || !Array.isArray(scaleUpList) || !standbyStack || !ha.primary || !ha.standby) {
     p.log.error('Pilot-light failover config missing — run `vibecarbon deploy` first');
     process.exit(1);
   }

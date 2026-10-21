@@ -1289,25 +1289,39 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
   const remoteDir = `/opt/${projectName}`;
 
   try {
-    // composeRoleEnv: the only sanctioned compose-side role write.
-    await mergeEnv(
-      promotedIp,
-      pinnedSshOptsString(sshKeyPath),
-      remoteDir,
-      composeRoleEnv('primary'),
-    );
-    // 300s: a db container recreate plus the script's own 90s readiness wait,
-    // with room for a slow image start on a node that is mid-incident.
-    //
-    // `retries: 1` is load-bearing on the DR path. sshRunAsync defaults to 3
-    // attempts and classes a TIMEOUT as transient, so a wedged recreate would
-    // burn 3 × 300s — up to ~15 minutes of RTO before the DNS flip, while the
-    // site is down. One attempt, then report. (A script exit-1 is already
-    // non-transient and never retried.)
-    await run(promotedIp, sshKeyPath, composeDbRecreateShell(remoteDir), {
-      timeout: 300_000,
+    // A resumed failover may have moved the role already: the RUNNING db
+    // container reads it (env is fixed at create), and then the recreate,
+    // a needless restart of the new primary, is skipped. The audit still runs.
+    const running = await run(promotedIp, sshKeyPath, composeDbRoleProbeShell(projectName), {
+      timeout: 20_000,
       retries: 1,
     });
+    const alreadyPrimary = String(running === false ? '' : (running ?? ''))
+      .split('\n')
+      .some((l) => l.trim() === 'WALG_ROLE=primary');
+    if (alreadyPrimary) {
+      log(`[walg-role] ${promotedIp} already runs WALG_ROLE=primary; no db recreate needed.`);
+    } else {
+      // composeRoleEnv: the only sanctioned compose-side role write.
+      await mergeEnv(
+        promotedIp,
+        pinnedSshOptsString(sshKeyPath),
+        remoteDir,
+        composeRoleEnv('primary'),
+      );
+      // 300s: a db container recreate plus the script's own 90s readiness wait,
+      // with room for a slow image start on a node that is mid-incident.
+      //
+      // `retries: 1` is load-bearing on the DR path. sshRunAsync defaults to 3
+      // attempts and classes a TIMEOUT as transient, so a wedged recreate would
+      // burn 3 × 300s — up to ~15 minutes of RTO before the DNS flip, while the
+      // site is down. One attempt, then report. (A script exit-1 is already
+      // non-transient and never retried.)
+      await run(promotedIp, sshKeyPath, composeDbRecreateShell(remoteDir), {
+        timeout: 300_000,
+        retries: 1,
+      });
+    }
     // requirePrimary: the ONLY reason this audit is here is to catch a promoted
     // node still reading `standby`, which the deploy-time probe treats as a
     // legitimate skip.
@@ -1329,6 +1343,21 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
   }
+}
+
+/**
+ * Print the RUNNING db container's WALG_ROLE as `WALG_ROLE=<role>` (empty when
+ * the container is missing). The container env, not .env: a merged .env does
+ * nothing until the container is recreated.
+ *
+ * @param {string} projectName
+ * @returns {string}
+ */
+export function composeDbRoleProbeShell(projectName) {
+  return (
+    `echo "WALG_ROLE=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ` +
+    `${projectName}-db 2>/dev/null | sed -n 's/^WALG_ROLE=//p' | head -n1)"`
+  );
 }
 
 /**
@@ -1740,12 +1769,9 @@ export function composeFailoverAbortBackend({
     armPrimary: async () => {
       // The db recreate only when the running container lost the role: a
       // failover that got past its demote step left it on standby.
-      const out = await run(
-        primaryServer.ip,
-        sshKeyPath,
-        `echo "WALG_ROLE=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ${dbCt} 2>/dev/null | sed -n 's/^WALG_ROLE=//p' | head -n1)"`,
-        { timeout: 20_000 },
-      );
+      const out = await run(primaryServer.ip, sshKeyPath, composeDbRoleProbeShell(projectName), {
+        timeout: 20_000,
+      });
       const role = String(out === false ? '' : (out ?? ''))
         .split('\n')
         .map((l) => l.trim())
@@ -2378,6 +2404,33 @@ export async function failoverComposeHA(
     p.log.message(`  ${c.dim('New IP'.padEnd(14))} ${c.bold(standbyServer.ip)} (promoted standby)`);
   }
 
+  // Persist the swap; the same save clears the failover journal (R2). Right
+  // after the DNS verdict, before the TLS wait: the journal must not stay set
+  // through minutes of certificate issuance (a crash there would leave a
+  // finished failover looking mid-flight).
+  // On resume the override was recorded by the run that skipped the proof.
+  swapRoles(envName, {
+    override: unproven
+      ? 'force-unproven'
+      : mode === 'resume'
+        ? envConfig?.ha?.failoverInFlight?.override
+        : undefined,
+  });
+  // The old primary is now the retired side: fence it if it answers (marker,
+  // every writer stopped, not just the app, WALG_ROLE=standby). One that does
+  // not is fenced by the next status, failover or deploy that reaches it,
+  // before it can push a backup.
+  // Never fails the failover: it has completed, and the terminal checks below
+  // must still report.
+  try {
+    await reconcileRetired();
+  } catch (err) {
+    p.log.warn(
+      `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
+        'next status, failover or deploy that reaches it fences it',
+    );
+  }
+
   // Step 3b: TLS gate — the deploy rule, applied to failover: it is not done
   // until the domain serves a trusted certificate. The promoted node was
   // deployed with a DISARMED issuer (single-active-issuer policy), so its
@@ -2403,30 +2456,6 @@ export async function failoverComposeHA(
           `(docker compose logs traefik) for the ACME error.`,
       );
     }
-  }
-
-  // Persist the swap; the same save clears the failover journal (R2).
-  // On resume the override was recorded by the run that skipped the proof.
-  swapRoles(envName, {
-    override: unproven
-      ? 'force-unproven'
-      : mode === 'resume'
-        ? envConfig?.ha?.failoverInFlight?.override
-        : undefined,
-  });
-  // The old primary is now the retired side: fence it if it answers (marker,
-  // every writer stopped, not just the app, WALG_ROLE=standby). One that does
-  // not is fenced by the next status, failover or deploy that reaches it,
-  // before it can push a backup.
-  // Never fails the failover: it has completed, and the terminal checks below
-  // must still report.
-  try {
-    await reconcileRetired();
-  } catch (err) {
-    p.log.warn(
-      `could not fence the retired node (${String(err?.message ?? err).split('\n')[0]}); the ` +
-        'next status, failover or deploy that reaches it fences it',
-    );
   }
 
   if (dnsFlip.ok) p.log.success('Failover complete');

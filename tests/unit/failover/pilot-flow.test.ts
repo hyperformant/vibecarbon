@@ -844,6 +844,7 @@ describe('preflightPilotFailover exit branches', () => {
       ha: {
         standbyWorkerSpec: { count: 2, serverType: 'cx23' },
         scaleUpList: SCALE_UP_LIST,
+        primary: { stack: 'e4-primary' },
         standby: { stack: 'e4-standby' },
       },
     };
@@ -866,6 +867,7 @@ describe('preflightPilotFailover exit branches', () => {
         ha: {
           standbyWorkerSpec: { count: 2, serverType: 'cx23' },
           scaleUpList: SCALE_UP_LIST,
+          primary: { stack: 'e4-primary' },
           standby: { stack: 'e4-standby' },
         },
       },
