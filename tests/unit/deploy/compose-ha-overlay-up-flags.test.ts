@@ -22,19 +22,32 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { renderReconcileScript } from '../../../src/lib/deploy/bundle.js';
+import {
+  composeFileFlags,
+  RECONCILE_FLAGS_SED,
+  renderReconcileScript,
+  STANDBY_SCALE_FLAG,
+} from '../../../src/lib/deploy/bundle.js';
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 const EFFECTS_SRC = readFileSync(
   join(REPO_ROOT, 'src', 'lib', 'deploy', 'effects', 'compose-ha.js'),
   'utf-8',
 );
+const SCALE_SRC = readFileSync(join(REPO_ROOT, 'src', 'scale.js'), 'utf-8');
 
-/** The literal sed program as it appears in the effect (unescape JS \\ → \). */
-function sedProgramFromSource(): string {
-  const m = EFFECTS_SRC.match(/FLAGS=\$\(sed -n '([^']+)' reconcile\.sh \| tail -1\)/);
-  expect(m, 'the FLAGS extraction must exist in haWriteReplicationOverlay').not.toBeNull();
-  return (m as RegExpMatchArray)[1].replace(/\\\\/g, '\\');
+/** The one extraction call shape both recreators use (the program lives in bundle.js). */
+// biome-ignore lint/suspicious/noTemplateCurlyInString: the JS source text being matched, not a placeholder
+const EXTRACTION_CALL = "FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1)";
+
+/** Run the extraction program over a rendered reconcile.sh, as the node does. */
+function extract(script: string): string {
+  const res = spawnSync('bash', ['-c', `sed -n '${RECONCILE_FLAGS_SED}' | tail -1`], {
+    input: script,
+    encoding: 'utf-8',
+  });
+  expect(res.status).toBe(0);
+  return res.stdout.trim();
 }
 
 describe('haWriteReplicationOverlay flag extraction', () => {
@@ -42,24 +55,27 @@ describe('haWriteReplicationOverlay flag extraction', () => {
     '-f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.dns01.prod.yml ' +
     '-f docker-compose.observability.yml -f docker-compose.observability.prod.yml';
 
-  it('the sed in the source extracts the exact flag string from a real reconcile.sh rendering', () => {
-    const script = renderReconcileScript('myproj', FULL_FLAGS, false);
-    const res = spawnSync('bash', ['-c', `sed -n '${sedProgramFromSource()}' | tail -1`], {
-      input: script,
-      encoding: 'utf-8',
-    });
-    expect(res.status).toBe(0);
-    expect(res.stdout.trim()).toBe(FULL_FLAGS);
+  it('RECONCILE_FLAGS_SED extracts the exact flag string from a real reconcile.sh rendering', () => {
+    expect(extract(renderReconcileScript('myproj', FULL_FLAGS, false))).toBe(FULL_FLAGS);
   });
 
   it('extraction also works for the minimal (no-addon) flag set', () => {
     const minimal = '-f docker-compose.yml -f docker-compose.prod.yml';
-    const script = renderReconcileScript('myproj', minimal, true);
-    const res = spawnSync('bash', ['-c', `sed -n '${sedProgramFromSource()}' | tail -1`], {
-      input: script,
-      encoding: 'utf-8',
-    });
-    expect(res.stdout.trim()).toBe(minimal);
+    expect(extract(renderReconcileScript('myproj', minimal, true))).toBe(minimal);
+  });
+
+  it('lockstep: with n8n, metabase and redis on, it extracts exactly composeFileFlags(options) past the standby-scale fragment', () => {
+    const options = { n8n: true, metabase: true, redis: true };
+    const script = renderReconcileScript('myproj', composeFileFlags(options), false);
+    // The up line now carries trailing arguments (the standby --scale fragment).
+    expect(script).toContain(`up -d --remove-orphans ${STANDBY_SCALE_FLAG}`);
+    expect(extract(script)).toBe(composeFileFlags(options));
+    expect(composeFileFlags(options)).toContain('-f docker-compose.n8n.prod.yml');
+  });
+
+  it('compose-ha.js extracts through RECONCILE_FLAGS_SED and carries no inline sed program', () => {
+    expect(EFFECTS_SRC).toContain(EXTRACTION_CALL);
+    expect(EFFECTS_SRC).not.toMatch(/sed -n 's\/\^docker compose/);
   });
 
   it('the db up appends the replication overlay to the extracted flags and keeps the bounded fallback', () => {
@@ -83,22 +99,13 @@ describe('haWriteReplicationOverlay flag extraction', () => {
   // its overlay flags from the reconcile.sh extraction, never a hand-rolled
   // multi-overlay list.
   it('scale.js recreates via the reconcile.sh extraction and carries no hand-rolled overlay list', () => {
-    const scaleSrc = readFileSync(join(REPO_ROOT, 'src', 'scale.js'), 'utf-8');
-    const sed = scaleSrc.match(/FLAGS=\$\(sed -n '([^']+)' reconcile\.sh \| tail -1\)/);
-    expect(sed, 'scale.js must extract flags from reconcile.sh').not.toBeNull();
-    // The extraction program must be IDENTICAL to the effects file's (one
-    // program, two call sites — drift here means one site silently stops
-    // matching renderReconcileScript's shape).
-    expect((sed as RegExpMatchArray)[1]).toBe(
-      (
-        EFFECTS_SRC.match(
-          /FLAGS=\$\(sed -n '([^']+)' reconcile\.sh \| tail -1\)/,
-        ) as RegExpMatchArray
-      )[1],
-    );
+    // One program, two call sites: both recreators import it from bundle.js,
+    // so neither can silently stop matching renderReconcileScript's shape.
+    expect(SCALE_SRC, 'scale.js must extract flags from reconcile.sh').toContain(EXTRACTION_CALL);
+    expect(SCALE_SRC).not.toMatch(/sed -n 's\/\^docker compose/);
     // No hand-rolled overlay lists anywhere in scale.js: an addon overlay
     // referenced as a -f literal outside bundle.js is the drift vector.
-    expect(scaleSrc).not.toMatch(/-f docker-compose\.(observability|n8n|metabase|redis|dns01)/);
+    expect(SCALE_SRC).not.toMatch(/-f docker-compose\.(observability|n8n|metabase|redis|dns01)/);
   });
 
   // Structural half of the census (2026-08-07 test-architecture audit): the

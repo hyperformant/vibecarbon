@@ -314,10 +314,12 @@ minutes of operator-decided downtime). Their standby architectures are
 different, and each mode keeps its own failover path:
 
 - **`compose-ha`** keeps its existing always-warm architecture unchanged: two
-  always-on VPSs, both running the full stack, standby continuously
-  replicating. `vibecarbon failover` promotes the standby database and
-  repoints DNS. There's no idle floor to provision and no `-server-type`
-  step, because nothing is cold.
+  always-on VPSs, standby continuously replicating. The standby runs the app
+  tier, Redis and observability; n8n and Metabase write to the primary
+  database, so they stay at zero there until it becomes the primary.
+  `vibecarbon failover` promotes the standby database and repoints DNS.
+  There's no idle floor to provision and no `-server-type` step, because
+  nothing is cold.
 - **`k8s-ha`** uses the pilot-light standby described below: a 2-node idle
   floor with the app tier at zero, and failover provisions app-tier capacity
   before promoting.
