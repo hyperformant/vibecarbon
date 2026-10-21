@@ -17,10 +17,16 @@
  * Only then is the final base pushed, and the new server restores that exact
  * base. The write pause runs from the fence until the DNS flip.
  *
+ * The fence is recorded before it is applied (the durable write-fence marker,
+ * write-fence.js), so a scale killed mid-cutover (SIGINT exits 130 with no
+ * rollback) leaves a record `vibecarbon deploy` lifts. It is cleared when the
+ * fence is lifted, and after the old server is destroyed.
+ *
  * Any failure before the DNS flip rolls the old server back (C19): its
- * WALG_ROLE is re-promoted when it was demoted, its database is unfenced, its
- * writers start again and its backup cron returns. After the flip there is no
- * rollback: the new server serves.
+ * database is unfenced, its writers start again and its backup cron returns.
+ * Its WALG_ROLE is demoted only after the flip (a demoted node drops every WAL
+ * segment it completes, so a rollback after a demote could leave a gap), so
+ * the rollback never has to re-arm it. After the flip there is no rollback.
  *
  * compose-ha: a replaced standby is never restored from the bucket (a restored
  * copy is an independent primary, silent split-brain). rejoinComposeStandby
@@ -30,6 +36,7 @@
  */
 
 import * as p from '@clack/prompts';
+import { loadProjectConfig, saveProjectConfig } from '../../config.js';
 import { composeWriterServices } from '../../services/standby-policy.js';
 import {
   markStandbyUnproven,
@@ -44,6 +51,7 @@ import {
   verifyStreaming,
 } from '../replication.js';
 import { exchangeAndBringUpTunnel, wgIpOf } from '../wireguard.js';
+import { clearWriteFenceMarker, writeWriteFenceMarker } from '../write-fence.js';
 import {
   buildReplicationOverlay,
   composePsqlRunner,
@@ -51,7 +59,6 @@ import {
   ensurePrimaryReplicationAccess,
   openWireguardPortHetznerFirewall,
   openWireguardPortUfw,
-  restoreComposeWalgRole,
   startOldPrimaryWriters,
   stopOldPrimaryWriters,
 } from './ha.js';
@@ -100,12 +107,16 @@ export function walArchivedThrough(lastArchived, switchWal) {
 }
 
 /**
- * Fence writes on a compose primary before its database moves.
+ * Fence writes on a compose primary before its database moves. The durable
+ * marker (envConfig.ha.writeFence) is written first, before any writer stops.
  *
  * On any failure it rolls its own steps back (unfence, start the writers it
- * stopped) and throws the cause plus how that rollback went.
+ * stopped, clear the marker once unfenced) and throws the cause plus how that
+ * rollback went.
  *
  * @param {object} args
+ * @param {string} args.environment
+ * @param {string} [args.node] the old primary's servers[] name, for the marker
  * @param {string} args.ip the old primary
  * @param {string} args.sshKeyPath
  * @param {string} args.projectName
@@ -114,8 +125,17 @@ export function walArchivedThrough(lastArchived, switchWal) {
  * @returns {Promise<{ switchWal: string, stopped: string[], fencedAt: Date }>}
  *   stopped names the containers the stop took down, for the rollback
  */
-export async function fenceComposePrimary({ ip, sshKeyPath, projectName, services, deps = {} }) {
+export async function fenceComposePrimary({
+  environment,
+  node,
+  ip,
+  sshKeyPath,
+  projectName,
+  services,
+  deps = {},
+}) {
   const {
+    writeMarker = writeWriteFenceMarker,
     stopWriters = stopOldPrimaryWriters,
     psql = composePsqlRunner,
     fence = (exec) => fenceDatabaseWrites({ exec }),
@@ -127,6 +147,9 @@ export async function fenceComposePrimary({ ip, sshKeyPath, projectName, service
   const exec = psql(ip, sshKeyPath, `/opt/${projectName}`);
   const fencedAt = new Date(now());
   const writers = composeWriterServices(services ?? []);
+  // Recorded BEFORE anything is stopped or fenced: a kill from here on leaves
+  // the record deploy's stranded-fence lift acts on.
+  writeMarker({ environment }, { node: node ?? ip, ip });
   const stop = await stopWriters(ip, sshKeyPath, projectName, writers);
   const stopped = stop?.stopped ?? [];
   try {
@@ -160,7 +183,14 @@ export async function fenceComposePrimary({ ip, sshKeyPath, projectName, service
     }
     return { switchWal: switched, stopped, fencedAt };
   } catch (err) {
-    const back = await unfenceComposePrimary({ ip, sshKeyPath, projectName, stopped, deps });
+    const back = await unfenceComposePrimary({
+      environment,
+      ip,
+      sshKeyPath,
+      projectName,
+      stopped,
+      deps,
+    });
     throw new Error(
       `write fence on ${ip}: ${firstLine(err)}; ` +
         (back.ok ? 'writes resumed there' : back.problems.join('; ')),
@@ -169,22 +199,34 @@ export async function fenceComposePrimary({ ip, sshKeyPath, projectName, service
 }
 
 /**
- * Undo fenceComposePrimary: lift the database fence, then start the writers
- * the stop took down. Never throws; each step that cannot be proven is a
- * problem line with its manual fix.
+ * Undo fenceComposePrimary: lift the database fence (and clear its marker once
+ * it reads lifted), then start the writers the stop took down. Never throws;
+ * each step that cannot be proven is a problem line with its manual fix. A
+ * fence it cannot lift keeps its marker, so deploy lifts it.
  *
  * @returns {Promise<{ ok: boolean, problems: string[] }>}
  */
-export async function unfenceComposePrimary({ ip, sshKeyPath, projectName, stopped, deps = {} }) {
+export async function unfenceComposePrimary({
+  environment,
+  ip,
+  sshKeyPath,
+  projectName,
+  stopped,
+  deps = {},
+}) {
   const {
     psql = composePsqlRunner,
     unfence = (exec) => unfenceDatabaseWrites({ exec }),
     startWriters = startOldPrimaryWriters,
+    clearMarker = clearWriteFenceMarker,
   } = deps;
   const problems = [];
-  if (!(await unfence(psql(ip, sshKeyPath, `/opt/${projectName}`)))) {
+  if (await unfence(psql(ip, sshKeyPath, `/opt/${projectName}`))) {
+    clearMarker({ environment });
+  } else {
     problems.push(
-      `the database on ${ip} is still write-fenced; run this in its db container: ${UNFENCE_SQL_HINT}`,
+      `the database on ${ip} is still write-fenced (vibecarbon deploy lifts it); ` +
+        `or run this in its db container: ${UNFENCE_SQL_HINT}`,
     );
   }
   const containers = stopped ?? [];
@@ -225,44 +267,41 @@ export async function removeComposeBackupCron(ip, sshKeyPath, { run = sshRunAsyn
 
 /**
  * Roll the old primary back after a cutover failed before the DNS flip (C19):
- * re-promote its WALG_ROLE when the cutover demoted it (that recreates its db
- * container, so it runs first), lift the database fence, start its writers
- * and put its backup cron back. Deleting the new server is the caller's.
- * Never throws.
+ * lift the database fence, start its writers and put its backup cron back.
+ * Its WALG_ROLE was never demoted (that waits for the flip). Deleting the new
+ * server is the caller's. Never throws.
  *
  * @param {object} args
+ * @param {string} args.environment
  * @param {string} args.ip
  * @param {string} args.sshKeyPath
  * @param {string} args.projectName
  * @param {string[]} args.stopped the containers the fence stopped
- * @param {boolean} args.demoted
  * @param {boolean} args.cronRemoved
  * @param {object} [args.backupConfig] envConfig.backup, to reinstall the cron
  * @param {object} [args.deps]
  * @returns {Promise<{ ok: boolean, problems: string[] }>}
  */
 export async function rollbackComposeCutover({
+  environment,
   ip,
   sshKeyPath,
   projectName,
   stopped,
-  demoted,
   cronRemoved,
   backupConfig,
   deps = {},
 }) {
-  const { rearmWalgRole = restoreComposeWalgRole, setupCron = setupComposeBackupCron } = deps;
+  const { setupCron = setupComposeBackupCron } = deps;
   const problems = [];
-  if (demoted) {
-    const rearmed = await rearmWalgRole({ promotedIp: ip, sshKeyPath, projectName });
-    if (!rearmed?.ok) {
-      problems.push(
-        `${ip} still reads WALG_ROLE=standby, so it archives nothing (${firstLine(rearmed?.error)}); ` +
-          'run vibecarbon deploy to re-arm it',
-      );
-    }
-  }
-  const back = await unfenceComposePrimary({ ip, sshKeyPath, projectName, stopped, deps });
+  const back = await unfenceComposePrimary({
+    environment,
+    ip,
+    sshKeyPath,
+    projectName,
+    stopped,
+    deps,
+  });
   problems.push(...back.problems);
   if (cronRemoved && backupConfig) {
     try {
@@ -304,6 +343,22 @@ export async function writeComposeReplicationOverlay({
     `cat > /opt/${projectName}/docker-compose.replication.yml << 'REPL'\n${overlay}REPL`,
     { timeout: 10_000 },
   );
+}
+
+/**
+ * Record a standby the scale proved streaming: its system identifier (the
+ * failover replica proof) and the env's replication state, as a deploy that
+ * verified streaming records them. An earlier unproven reseed in the same
+ * scale (markStandbyUnproven) is then superseded.
+ */
+function recordProvenStandby(ctx, systemIdentifier) {
+  recordSystemIdentifier(ctx, systemIdentifier);
+  const config = loadProjectConfig();
+  const envConfig = config?.environments?.[ctx.environment];
+  if (!envConfig) return;
+  envConfig.replication = 'streaming';
+  envConfig.degraded = false;
+  saveProjectConfig(config);
 }
 
 /**
@@ -356,7 +411,7 @@ export async function rejoinComposeStandby({
     readState = (ip) =>
       readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
     verify = verifyStreaming,
-    record = recordSystemIdentifier,
+    record = recordProvenStandby,
     markUnproven = markStandbyUnproven,
     warn = (msg) => p.log.warn(msg),
   } = deps;

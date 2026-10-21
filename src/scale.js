@@ -58,6 +58,7 @@ import { buildRemote } from './lib/deploy/remote-build.js';
 import { isRetiredSide } from './lib/deploy/retired-fence.js';
 import { isHATier, resolveTier } from './lib/deploy/tier-registry.js';
 import { DEFAULT_WORKER_MAX, DEFAULT_WORKER_MIN } from './lib/deploy/utils.js';
+import { clearWriteFenceMarker } from './lib/deploy/write-fence.js';
 import { waitForDNSPropagation } from './lib/dns-propagation.js';
 import {
   DNS_PROVIDERS,
@@ -1008,10 +1009,10 @@ async function scaleServers(ctx) {
     let newIp;
     // What the cutover has done to the old server, for the rollback.
     let cutover = null;
-    let demoted = false;
     let cronRemoved = false;
-    // Set when the DNS flip starts: from here on the new server is the
-    // primary, and nothing rolls back.
+    let demoted = false;
+    // Set once DNS points at the new server (or may, after a DNS update that
+    // failed part way): from here on nothing rolls back.
     let flipped = false;
     try {
       newIp = await prepareReplacementServer(ctx, server, newServerId, s);
@@ -1021,7 +1022,14 @@ async function scaleServers(ctx) {
       //    the old server takes no writes, so the base pushed next holds them all.
       s.start(`Pausing writes on ${label} (write fence)...`);
       cutover = await perfAsync('scale.fenceOldPrimary', () =>
-        fenceComposePrimary({ ip: server.ip, sshKeyPath, projectName, services: addonNames }),
+        fenceComposePrimary({
+          environment,
+          node: server.name,
+          ip: server.ip,
+          sshKeyPath,
+          projectName,
+          services: addonNames,
+        }),
       );
       s.stop(`Writes paused on ${label}; WAL archived through ${cutover.switchWal}`);
 
@@ -1098,38 +1106,42 @@ async function scaleServers(ctx) {
       );
       s.stop('Database restored');
 
-      // 10. Demote the old server so it never archives next to the new
-      //     primary (demoteComposeWalgRole recreates its db with
-      //     WALG_ROLE=standby), and drop its backup cron. Marked before each
-      //     call: a half-applied demote is rolled back too.
-      s.start(`Demoting ${label} (wal-g write-guard, backup cron)...`);
-      demoted = true;
-      const demotedOk = await demoteComposeWalgRole({
-        oldPrimaryIp: server.ip,
-        sshKeyPath,
-        projectName,
-      });
-      if (!demotedOk) {
-        throw new Error(
-          `could not demote ${label}'s wal-g write-guard, so it could archive next to the new server`,
-        );
-      }
+      // 10. Drop the old server's backup cron, so no scheduled base lands
+      //     from it once the new server is the primary.
       cronRemoved = true;
       await removeComposeBackupCron(server.ip, sshKeyPath);
-      s.stop(`${label} demoted`);
 
-      // 11. Update DNS to the new server: the point of no return. On HTTP-01
-      // this must happen BEFORE recreating services (Traefik challenges the A
-      // record on startup; a stale record fails all challenges with a 30+ min
-      // retry). On DNS-01 the ordering is irrelevant — lego validates a TXT
-      // record, not the A record. Gated to ONE writer: the standby's
-      // replacement never touches apex (see shouldUpdateApexDns — the
-      // two-writer upsert race, run 31970876667). A DNS update that fails
-      // part way leaves the records unknown, so it is already past the flip.
-      flipped = true;
+      // 11. Update DNS to the new server. On HTTP-01 this must happen BEFORE
+      // recreating services (Traefik challenges the A record on startup; a
+      // stale record fails all challenges with a 30+ min retry). On DNS-01 the
+      // ordering is irrelevant — lego validates a TXT record, not the A record.
+      // Gated to ONE writer: the standby's replacement never touches apex (see
+      // shouldUpdateApexDns — the two-writer upsert race, run 31970876667).
+      // The new server is recorded first: once any record may point at it,
+      // every later command must reach it.
+      server._replacement = replacementEntry(ctx, server, { newServerId, newIp });
       if (domain && shouldUpdateApexDns(server)) {
         s.start('Updating DNS to new server...');
-        await perfAsync('scale.updateDNS', () => updateDNS(envConfig, apiToken, domain, newIp));
+        try {
+          await perfAsync('scale.updateDNS', () => updateDNS(envConfig, apiToken, domain, newIp));
+        } catch (dnsErr) {
+          s.stop('DNS update failed', 1);
+          // Read the records back: still all on the old server is before the
+          // flip (roll back); anything else is past it.
+          const move = await readDnsMove(envConfig, apiToken, domain, {
+            oldIp: server.ip,
+            newIp,
+          });
+          if (move.allOld) {
+            delete server._replacement;
+            throw dnsErr;
+          }
+          flipped = true;
+          throw new Error(
+            `the DNS update failed part way (${firstLineOf(dnsErr)}); ` +
+              `still to point at ${newIp}: ${move.pending.join(', ')}`,
+          );
+        }
         s.stop('DNS updated');
 
         // HTTP-01 only: poll until public resolvers return the new IP (max
@@ -1143,12 +1155,30 @@ async function scaleServers(ctx) {
           s.stop(dnsOk ? 'DNS propagated' : 'DNS propagation timed out (proceeding anyway)');
         }
       }
+      flipped = true;
       const pausedMs = Date.now() - cutover.fencedAt.getTime();
       ctx.writePauseMs = pausedMs;
       p.log.info(
         `writes paused from ${cutover.fencedAt.toISOString()} until DNS flip (${formatPause(pausedMs)})`,
       );
-      server._replacement = replacementEntry(ctx, server, { newServerId, newIp });
+
+      // 11b. Demote the old server's wal-g write-guard so it never archives
+      //      next to the new primary (demoteComposeWalgRole recreates its db
+      //      with WALG_ROLE=standby). After the flip, never before it: a
+      //      demoted node drops every WAL segment it completes, so a rollback
+      //      after a demote could leave a gap in the archive.
+      s.start(`Demoting ${label} (wal-g write-guard)...`);
+      demoted = await demoteComposeWalgRole({
+        oldPrimaryIp: server.ip,
+        sshKeyPath,
+        projectName,
+      });
+      if (!demoted) {
+        throw new Error(
+          `could not demote ${label}'s wal-g write-guard, so it could archive next to the new server`,
+        );
+      }
+      s.stop(`${label} demoted`);
 
       // 12a. HTTP-01 only: reset ACME state so Traefik retries challenges with
       // the corrected DNS — step 6's startComposeStack ran before the A record
@@ -1227,6 +1257,8 @@ async function scaleServers(ctx) {
       s.start(`Destroying old server ${server.ip}...`);
       await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
       s.stop(`Old server destroyed: ${server.ip}`);
+      // The fenced server is gone, and its record with it.
+      clearWriteFenceMarker({ environment });
       await renameReplacement(ctx, server._replacement);
     } catch (scaleErr) {
       if (!flipped) {
@@ -1235,11 +1267,11 @@ async function scaleServers(ctx) {
         if (cutover) {
           p.log.info(`Rolling ${label} back: it takes writes again...`);
           const back = await rollbackComposeCutover({
+            environment,
             ip: server.ip,
             sshKeyPath,
             projectName,
             stopped: cutover.stopped,
-            demoted,
             cronRemoved,
             backupConfig: envConfig.backup,
           });
@@ -1255,11 +1287,11 @@ async function scaleServers(ctx) {
         );
         throw scaleErr;
       }
-      // Past the flip: the new server serves, nothing rolls back.
+      // Past the flip: nothing rolls back.
       throw new Error(
-        `scale cut ${label} over to the new server ${newIp}, which serves now, then failed: ` +
+        `scale moved ${label}'s database to the new server ${newIp}, then failed: ` +
           `${firstLineOf(scaleErr)}. The old server ${server.ip} (id ${server.id}) is kept, ` +
-          'write-fenced and demoted; delete it once the new server is healthy.',
+          `write-fenced${demoted ? ' and demoted' : ''}; delete it once the new server is healthy.`,
       );
     }
   };
@@ -1307,6 +1339,41 @@ async function scaleServers(ctx) {
         ? 'New standby streaming from the primary'
         : 'New standby not proven streaming',
     );
+    if (replication !== 'streaming' && !primaryTarget) {
+      // A standby-only scale must not trade a working standby for an unproven
+      // one: keep the old standby, delete the new one, and point the tunnel
+      // and replication back at the old standby.
+      delete server._replacement;
+      await deleteUnusedReplacement(
+        provider,
+        newServerId,
+        newIp,
+        'New standby server deleted. The old standby is kept.',
+      );
+      s.start(`Reseeding the old standby ${server.ip} from the primary ${primary.ip}...`);
+      const back = await rejoinComposeStandby({
+        environment,
+        projectName,
+        envConfig,
+        primary,
+        standby: { ip: server.ip, entry: server },
+        sshKeyPath,
+        provider,
+      });
+      s.stop(
+        back === 'streaming'
+          ? 'Old standby streaming from the primary again'
+          : 'Old standby not proven streaming',
+      );
+      throw new Error(
+        `the new standby ${newIp} could not be proven streaming, so it was deleted and the old ` +
+          `standby ${server.ip} kept; ` +
+          (back === 'streaming'
+            ? 'it streams from the primary again. Rerun scale once the cause is fixed.'
+            : `it is not proven streaming either, replication is degraded: run vibecarbon deploy ${environment}.`),
+      );
+    }
+    if (replication !== 'streaming') ctx.replicationDegraded = true;
     s.start(`Destroying old standby ${server.ip}...`);
     await perfAsync('scale.destroyOldServer', () => provider.deleteServer(server.id));
     s.stop(`Old standby destroyed: ${server.ip}`);
@@ -1338,7 +1405,7 @@ async function scaleServers(ctx) {
     const standbyEntry = (envConfig.servers ?? []).find((sv) => sv.role === 'standby');
     if (standbyEntry?.ip) {
       // Never throws: an unproven reseed marks replication degraded and warns.
-      await rejoinComposeStandby({
+      const replication = await rejoinComposeStandby({
         environment,
         projectName,
         envConfig,
@@ -1347,6 +1414,7 @@ async function scaleServers(ctx) {
         sshKeyPath,
         provider,
       });
+      if (replication !== 'streaming') ctx.replicationDegraded = true;
     }
   }
 
@@ -1394,13 +1462,55 @@ async function scaleUpdateComposeConfig(ctx) {
 /** compose/compose-ha `finish-outro` effect. */
 async function scaleFinishComposeOutro(ctx) {
   const { currentType, newType, provider, projectName, environment, writePauseMs } = ctx;
+  const { replicationDegraded } = ctx;
   // Replacement servers are new droplets — re-file them into the dedicated
   // cloud project where the provider needs post-hoc assignment (DO).
   await runProjectAssignment(provider, { projectName, environment });
   const pause = Number.isFinite(writePauseMs)
     ? ` (writes paused ${formatPause(writePauseMs)})`
     : '';
-  p.outro(`${c.success('Scale complete!')} ${c.bold(currentType)} → ${c.bold(newType)}${pause}`);
+  const degraded = replicationDegraded
+    ? `. Replication is degraded: run vibecarbon deploy ${environment} to resync the standby`
+    : '';
+  p.outro(
+    `${c.success('Scale complete!')} ${c.bold(currentType)} → ${c.bold(newType)}${pause}${degraded}`,
+  );
+}
+
+/**
+ * Where the apex and wildcard A records point, read back through the DNS
+ * provider after an update that failed. `allOld` only when every record was
+ * read and still points at the old server alone; `pending` names each record
+ * not yet on the new IP (all of them when the read fails).
+ *
+ * @returns {Promise<{ allOld: boolean, pending: string[] }>}
+ */
+export async function readDnsMove(envConfig, apiToken, domain, { oldIp, newIp }, deps = {}) {
+  const names = [domain, `*.${domain}`];
+  const dnsProvider = envConfig.dnsProvider || envConfig.dns?.provider;
+  const zoneId = envConfig.dns?.zoneId;
+  const unread = { allOld: false, pending: names.map((n) => `${n} (could not read it back)`) };
+  if (!hasAutomatedDns(dnsProvider) || !zoneId) return unread;
+  const token = resolveDnsToken(dnsProvider, {
+    computeProviderId: providerIdFor(envConfig),
+    computeToken: apiToken,
+  });
+  if (!token) return unread;
+  let targets;
+  try {
+    const { getDnsProvider: load = getDnsProvider } = deps;
+    const dns = await load(dnsProvider);
+    targets = await Promise.all(names.map((n) => dns.readARecord(token, zoneId, n)));
+  } catch {
+    return unread;
+  }
+  const allOld = targets.every((t) => t.length > 0 && t.every((ip) => ip === oldIp));
+  const pending = names.flatMap((n, i) =>
+    targets[i].length === 1 && targets[i][0] === newIp
+      ? []
+      : [`${n} (now ${targets[i].join(', ') || 'no record'})`],
+  );
+  return { allOld, pending };
 }
 
 /**

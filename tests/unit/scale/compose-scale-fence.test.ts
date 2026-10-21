@@ -24,6 +24,10 @@ const h = vi.hoisted(() => {
   const state = {
     archived: '000000010000000000000003',
     failAt: '' as string,
+    // What the DNS provider reads back for apex and wildcard after a failed
+    // update (null: the update succeeds).
+    dnsReadBack: null as null | string[][],
+    saved: [] as unknown[],
   };
   return { events, state };
 });
@@ -54,7 +58,26 @@ vi.mock('@clack/prompts', async (orig) => {
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, loadProjectConfig: () => null, saveProjectConfig: () => {} };
+  return {
+    ...actual,
+    loadProjectConfig: () => null,
+    saveProjectConfig: (c: unknown) => {
+      h.state.saved.push(c);
+    },
+  };
+});
+
+vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    writeWriteFenceMarker: (_c: unknown, m: { ip: string }) => {
+      h.events.push(`marker:write:${m.ip}`);
+    },
+    clearWriteFenceMarker: () => {
+      h.events.push('marker:clear');
+    },
+  };
 });
 
 vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
@@ -178,7 +201,10 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
     getDnsProvider: async () => ({
       upsertApexAndWildcard: async (_t: unknown, _d: string, ip: string) => {
         h.events.push(`dns:${ip}`);
+        if (h.state.dnsReadBack) throw new Error('dns api 500');
       },
+      readARecord: async (_t: string, _z: string, name: string) =>
+        h.state.dnsReadBack?.[name.startsWith('*.') ? 1 : 0] ?? [],
     }),
   };
 });
@@ -243,6 +269,8 @@ function reset(failAt = '') {
   h.events.length = 0;
   h.state.archived = '000000010000000000000003';
   h.state.failAt = failAt;
+  h.state.dnsReadBack = null;
+  h.state.saved.length = 0;
 }
 
 describe('fenceComposePrimary', () => {
@@ -250,11 +278,15 @@ describe('fenceComposePrimary', () => {
     const calls: string[] = [];
     const reads = ['000000010000000000000002|', '000000010000000000000003|'];
     const out = await fenceComposePrimary({
+      environment: 'prod',
       ip: '1.1.1.1',
       sshKeyPath: '/key',
       projectName: 'myapp',
       services: [],
       deps: {
+        writeMarker: () => {
+          calls.push('marker');
+        },
         stopWriters: async (_ip: string, _k: string, _p: string, svc: string[]) => {
           calls.push(`stop:${svc.join(',')}`);
           return { ok: true, reached: true, stopped: ['myapp-app'] };
@@ -273,7 +305,9 @@ describe('fenceComposePrimary', () => {
         sleep: async () => {},
       },
     });
+    // The durable marker first: a kill after it leaves a record deploy lifts.
     expect(calls).toEqual([
+      'marker',
       'stop:app',
       'fence',
       'switch:readWrite=true',
@@ -289,11 +323,16 @@ describe('fenceComposePrimary', () => {
     let t = 0;
     await expect(
       fenceComposePrimary({
+        environment: 'prod',
         ip: '1.1.1.1',
         sshKeyPath: '/key',
         projectName: 'myapp',
         services: [],
         deps: {
+          writeMarker: () => {},
+          clearMarker: () => {
+            calls.push('clear');
+          },
           stopWriters: async () => ({ ok: true, reached: true, stopped: ['myapp-app'] }),
           fence: async () => {
             calls.push('fence');
@@ -319,29 +358,32 @@ describe('fenceComposePrimary', () => {
     ).rejects.toThrow(
       /WAL file 000000010000000000000003 was not archived within 120s \(last archived: 000000010000000000000002, last failed: 000000010000000000000003\); writes resumed there/,
     );
-    expect(calls).toEqual(['fence', 'unfence', 'start:myapp-app']);
+    expect(calls).toEqual(['fence', 'unfence', 'clear', 'start:myapp-app']);
   });
 });
 
 describe('scaleServers: the fenced cutover (single-server compose)', () => {
-  it('runs fence, final backup, restore of that name, demote, DNS flip, post-promote push, destroy in order', async () => {
+  it('runs fence, final backup, restore of that name, DNS flip, demote, post-promote push, destroy in order', async () => {
     reset();
     const { ctx } = makeCtx();
     await SCALE_EFFECTS.scaleServers(ctx);
     const order = [
       'create',
+      'marker:write:1.1.1.1',
       'writers:stop:app',
       'fence',
       'switch:1.1.1.1',
       'archive-wait:1.1.1.1',
       'backup:1.1.1.1',
       `restore:9.9.9.9:${PUSHED}`,
-      'demote:1.1.1.1',
       'cron:remove',
       'dns:9.9.9.9',
       'log:paused',
+      // M1: demoted only after the flip, so a rollback never follows a demote.
+      'demote:1.1.1.1',
       'push:9.9.9.9:5',
       'delete:old-id',
+      'marker:clear',
     ];
     const seen = h.events.filter((e) => order.includes(e));
     expect(seen).toEqual(order);
@@ -371,23 +413,54 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     expect(provider.deleteServer).not.toHaveBeenCalledWith('old-id');
   });
 
-  it('a failure after the demote, before the DNS flip, re-arms WALG_ROLE, unfences, restarts writers and deletes the new server', async () => {
+  it('a failure before the DNS flip unfences, restarts writers, reinstalls the cron and deletes the new server (never a demote)', async () => {
     reset('cron');
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(/could not remove|cron failed/);
-    const rearm = h.events.indexOf('rearm:1.1.1.1');
-    expect(rearm).toBeGreaterThan(h.events.indexOf('demote:1.1.1.1'));
-    expect(h.events.indexOf('unfence')).toBeGreaterThan(rearm);
-    expect(h.events.indexOf('writers:start:myapp-app')).toBeGreaterThan(
-      h.events.indexOf('unfence'),
-    );
+    expect(h.events).not.toContain('demote:1.1.1.1');
+    expect(h.events).not.toContain('rearm:1.1.1.1');
+    const unfence = h.events.indexOf('unfence');
+    expect(unfence).toBeGreaterThan(-1);
+    // Unfenced, so the marker goes with it.
+    expect(h.events.indexOf('marker:clear')).toBeGreaterThan(unfence);
+    expect(h.events.indexOf('writers:start:myapp-app')).toBeGreaterThan(unfence);
     expect(h.events).toContain('cron:install:1.1.1.1');
     expect(h.events.some((e) => e.startsWith('dns:'))).toBe(false);
     expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
     expect(provider.deleteServer).not.toHaveBeenCalledWith('old-id');
   });
 
-  it('a failed restore rolls back the fence (no WALG_ROLE re-arm: nothing was demoted)', async () => {
+  it('a DNS update that fails with every record still on the old server is before the flip: full rollback', async () => {
+    reset();
+    h.state.dnsReadBack = [['1.1.1.1'], ['1.1.1.1']];
+    const { provider, ctx } = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(/dns api 500/);
+    expect(h.events).toContain('unfence');
+    expect(h.events).toContain('writers:start:myapp-app');
+    expect(h.events).toContain('cron:install:1.1.1.1');
+    expect(h.events).not.toContain('demote:1.1.1.1');
+    expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
+    // The new server is never recorded.
+    expect(h.state.saved).toEqual([]);
+  });
+
+  it('a DNS update that fails part way goes forward: records the new server and names the records still to move', async () => {
+    reset();
+    h.state.dnsReadBack = [['9.9.9.9'], ['1.1.1.1']];
+    const { provider, ctx } = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      /the DNS update failed part way \(dns api 500\); still to point at 9\.9\.9\.9: \*\.example\.com \(now 1\.1\.1\.1\)\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced;/,
+    );
+    expect(h.events).not.toContain('unfence');
+    expect(provider.deleteServer).not.toHaveBeenCalled();
+    // The new server's entry is saved: later commands reach it.
+    const saved = h.state.saved.at(-1) as {
+      environments: Record<string, { servers: Array<{ ip: string }> }>;
+    };
+    expect(saved.environments.prod.servers.map((sv) => sv.ip)).toEqual(['9.9.9.9']);
+  });
+
+  it('a failed restore rolls back the fence', async () => {
     reset('restore');
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(/restore failed/);
@@ -401,7 +474,7 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     reset('push');
     const { provider, ctx } = makeCtx();
     await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
-      /new server 9\.9\.9\.9, which serves now, then failed: push failed\. The old server 1\.1\.1\.1 \(id old-id\) is kept/,
+      /database to the new server 9\.9\.9\.9, then failed: push failed\. The old server 1\.1\.1\.1 \(id old-id\) is kept, write-fenced and demoted/,
     );
     expect(h.events).not.toContain('unfence');
     expect(h.events).not.toContain('rearm:1.1.1.1');
@@ -410,23 +483,22 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
 });
 
 describe('rollbackComposeCutover', () => {
-  it('re-arms WALG_ROLE first (it recreates db), then unfences, starts the writers and reinstalls the cron', async () => {
+  it('unfences (clearing the marker), starts the writers and reinstalls the cron', async () => {
     const { rollbackComposeCutover } = await import(
       '../../../src/lib/deploy/compose/scale-cutover.js'
     );
     const calls: string[] = [];
     const out = await rollbackComposeCutover({
+      environment: 'prod',
       ip: '1.1.1.1',
       sshKeyPath: '/key',
       projectName: 'myapp',
       stopped: ['myapp-app', 'myapp-n8n'],
-      demoted: true,
       cronRemoved: true,
       backupConfig: { schedule: '0 2 * * *' },
       deps: {
-        rearmWalgRole: async () => {
-          calls.push('rearm');
-          return { ok: true };
+        clearMarker: () => {
+          calls.push('clear');
         },
         psql: () => async () => '',
         unfence: async () => {
@@ -442,31 +514,36 @@ describe('rollbackComposeCutover', () => {
         },
       },
     });
-    expect(calls).toEqual(['rearm', 'unfence', 'start:myapp-app,myapp-n8n', 'cron']);
+    expect(calls).toEqual(['unfence', 'clear', 'start:myapp-app,myapp-n8n', 'cron']);
     expect(out).toEqual({ ok: true, problems: [] });
   });
 
-  it('a fence it cannot lift is a problem line with the manual SQL, never a throw', async () => {
+  it('a fence it cannot lift keeps its marker and is a problem line with the manual SQL, never a throw', async () => {
     const { rollbackComposeCutover } = await import(
       '../../../src/lib/deploy/compose/scale-cutover.js'
     );
+    let cleared = false;
     const out = await rollbackComposeCutover({
+      environment: 'prod',
       ip: '1.1.1.1',
       sshKeyPath: '/key',
       projectName: 'myapp',
       stopped: ['myapp-app'],
-      demoted: false,
       cronRemoved: false,
       deps: {
+        clearMarker: () => {
+          cleared = true;
+        },
         psql: () => async () => '',
         unfence: async () => false,
         startWriters: async () => true,
       },
     });
     expect(out.ok).toBe(false);
+    expect(cleared).toBe(false);
     expect(out.problems).toEqual([
       expect.stringMatching(
-        /1\.1\.1\.1 is still write-fenced; run this in its db container: .*ALTER SYSTEM RESET default_transaction_read_only/,
+        /1\.1\.1\.1 is still write-fenced \(vibecarbon deploy lifts it\); or run this in its db container: .*ALTER SYSTEM RESET default_transaction_read_only/,
       ),
     ]);
   });

@@ -256,7 +256,7 @@ describe('assertRolePrimaryWritable (deploy, after bring-up)', () => {
 describe('deploy wires both checks (census)', () => {
   it('orchestrator lifts a stranded marker at entry and probes the role primary after bring-up', () => {
     const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
-    const entry = src.indexOf('await liftStrandedWriteFence(');
+    const entry = src.indexOf('await liftStrandedFenceAtEntry({');
     const roleSwap = src.indexOf(
       'assertNoComposeHaRoleSwap({ projectName: projectConfig.projectName',
     );
@@ -274,7 +274,7 @@ describe('status shows a write-fenced primary', () => {
     expect(writeFenceRow({ ha: {} }, { writeFenced: 'off' })).toBeNull();
     expect(writeFenceRow({ ha: {} }, null)).toBeNull();
     expect(writeFenceRow({ ha: { writeFence: MARKER } }, null)).toMatch(
-      /^database write-fenced: .*vibecarbon deploy or failover lifts it/,
+      /^database write-fenced: .*an interrupted failover or scale left it; vibecarbon deploy lifts it/,
     );
     expect(writeFenceRow({ ha: {} }, { writeFenced: 'on' })).toMatch(/database write-fenced/);
     expect(writeFenceRow({ ha: { writeFence: MARKER, failoverInFlight: JOURNAL } }, null)).toMatch(

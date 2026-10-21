@@ -1,5 +1,7 @@
 /**
  * The planned-failover write fence, as a recorded fact (HA-correctness Task 3).
+ * Compose scale writes the same marker around its cutover fence
+ * (compose/scale-cutover.js), so a killed scale is lifted the same way.
  *
  * A planned failover makes the old primary read-only at the database
  * (fenceDatabaseWrites in replication.js) before it promotes the standby. If
@@ -49,6 +51,9 @@ export function clearWriteFenceMarker(ctx) {
   const ha = config?.environments?.[ctx.environment]?.ha;
   if (!ha || !('writeFence' in ha)) return;
   delete ha.writeFence;
+  // A single-server compose env carries `ha` only for this marker (scale's
+  // fence): leave no empty `ha` behind, which status reads as HA.
+  if (Object.keys(ha).length === 0) delete config.environments[ctx.environment].ha;
   saveProjectConfig(config);
 }
 

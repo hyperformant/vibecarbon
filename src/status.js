@@ -435,7 +435,7 @@ export function writeFenceRow(envConfig, replication) {
   if (!marker && replication?.writeFenced !== 'on') return null;
   const why = envConfig?.ha?.failoverInFlight
     ? 'a failover is in flight; vibecarbon failover finishes it'
-    : 'an interrupted failover left it; vibecarbon deploy or failover lifts it';
+    : 'an interrupted failover or scale left it; vibecarbon deploy lifts it';
   return `database write-fenced: the primary refuses writes (${why})`;
 }
 
@@ -1309,8 +1309,10 @@ function renderEnvironment(envName, envConfig, checks) {
     lines.push(`${c.dim('Deployed')}       ${dateStr} ${c.dim(`(${relative})`)}`);
   }
 
-  // HA
-  if (envConfig.ha) {
+  // HA. A single-server compose env carries `ha` only for scale's write-fence
+  // marker, which is no HA config.
+  const haConfigured = !!envConfig.ha && Object.keys(envConfig.ha).some((k) => k !== 'writeFence');
+  if (haConfigured) {
     const failoverRegion = envConfig.secondaryRegion || envConfig.failoverRegion;
     const haDisplay = failoverRegion
       ? `${c.success('Enabled')} ${c.dim(`(failover: ${failoverRegion})`)}`
@@ -1357,12 +1359,14 @@ function renderEnvironment(envName, envConfig, checks) {
       lines.push(`${c.dim('Check failed')}   ${c.error(`${name}: ${reason}`)}`);
     }
 
-    const fenceRow = writeFenceRow(envConfig, checks.replication);
-    if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
-
     const backupFence = backupFenceRow(envConfig);
     if (backupFence) lines.push(`${c.dim('Backup fence')}   ${c.warning(backupFence)}`);
   }
+
+  // The write fence: an interrupted failover's or scale's marker, or a primary
+  // that reads read-only. Every tier, not only HA (compose scale fences too).
+  const fenceRow = writeFenceRow(envConfig, checks.replication);
+  if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
 
   // Servers
   const servers = envConfig.servers || [];
@@ -1383,7 +1387,7 @@ function renderEnvironment(envName, envConfig, checks) {
   if (envConfig.observability) enabledServices.push('observability');
   if (envConfig.n8n) enabledServices.push('n8n');
   if (envConfig.metabase) enabledServices.push('metabase');
-  if (envConfig.ha) enabledServices.push('ha');
+  if (haConfigured) enabledServices.push('ha');
   if (envConfig.cicd) enabledServices.push('cicd');
   if (envConfig.services) {
     for (const [key, val] of Object.entries(envConfig.services)) {

@@ -509,11 +509,57 @@ async function deployedPrimaryPsql(tier, environment, projectName, ip) {
 /** psql on the role primary over the tier's transport (the write-fence checks). */
 async function rolePrimaryPsql(tier, environment, projectName, ip) {
   const key = getSSHKeyPath(environment);
-  if (tier === 'compose-ha') {
+  if (isComposeTier(tier)) {
     const { composePsqlRunner } = await import('./compose/ha.js');
     return composePsqlRunner(ip, key, `/opt/${projectName}`);
   }
   return k8sPsqlRunner(ip, key);
+}
+
+/**
+ * Deploy's entry lift of a stranded write fence (write-fence.js): a planned
+ * failover interrupted between its database write fence and its journal, or a
+ * compose scale killed mid-cutover (scale-cutover.js), left the primary
+ * read-only with nothing promoted. Lift it before this deploy restarts the app
+ * onto it. Every tier that writes the marker: the HA tiers and compose.
+ * Unreachable or failing here is a warning: the post-bring-up probe checks
+ * again.
+ *
+ * @param {{ tier: string, environment: string, envConfig: object, projectName: string, deps?: object }} args
+ */
+export async function liftStrandedFenceAtEntry({
+  tier,
+  environment,
+  envConfig,
+  projectName,
+  deps = {},
+}) {
+  const {
+    lift = liftStrandedWriteFence,
+    psqlFor = rolePrimaryPsql,
+    log = (line) => p.log.info(line),
+    warn = (line) => p.log.warn(line),
+  } = deps;
+  if ((isHaTier(tier) || isComposeTier(tier)) && envConfig?.ha?.writeFence) {
+    // Inside the try: `vibecarbon deploy` is the remedy an ambiguous-roles
+    // error recommends, so that error can never be what stops this deploy.
+    try {
+      const rolePrimary = rolePrimaryOf(tier, envConfig, environment);
+      if (rolePrimary?.ip) {
+        await lift({
+          environment,
+          envConfig,
+          rolePrimary,
+          exec: await psqlFor(tier, environment, projectName, rolePrimary.ip),
+          log,
+        });
+      }
+    } catch (err) {
+      warn(
+        `${String(err?.message ?? err).split('\n')[0]}; deploy checks the primary again after bring-up`,
+      );
+    }
+  }
 }
 
 export function resolveKubeconfigPath(environment, envConfig) {
@@ -635,29 +681,14 @@ export async function executeDeployment(args, gatheredConfig) {
     envConfig,
   });
   // A planned failover interrupted between its database write fence and its
-  // journal left the primary read-only with nothing promoted: lift it before
-  // this deploy restarts the app onto it (write-fence.js). Unreachable or
-  // failing here is a warning: the post-bring-up probe below checks again.
-  if (isHaTier(tier) && envConfig?.ha?.writeFence) {
-    // Inside the try: `vibecarbon deploy` is the remedy an ambiguous-roles
-    // error recommends, so that error can never be what stops this deploy.
-    try {
-      const rolePrimary = rolePrimaryOf(tier, envConfig, environment);
-      if (rolePrimary?.ip) {
-        await liftStrandedWriteFence({
-          environment,
-          envConfig,
-          rolePrimary,
-          exec: await rolePrimaryPsql(tier, environment, projectConfig.projectName, rolePrimary.ip),
-          log: (line) => p.log.info(line),
-        });
-      }
-    } catch (err) {
-      p.log.warn(
-        `${String(err?.message ?? err).split('\n')[0]}; deploy checks the primary again after bring-up`,
-      );
-    }
-  }
+  // journal, or a compose scale killed mid-cutover, left the primary read-only:
+  // lift it before this deploy restarts the app onto it.
+  await liftStrandedFenceAtEntry({
+    tier,
+    environment,
+    envConfig,
+    projectName: projectConfig.projectName,
+  });
   // Fail fast with install guidance if host-side tools (pulumi, ssh) are
   // missing — before any Pulumi/SSH work would otherwise ENOENT mid-deploy.
   // Provider passed so the pulumi VERSION assertion can fire: a CLI too old
@@ -1730,9 +1761,8 @@ export async function executeDeployment(args, gatheredConfig) {
   // Defence in depth (write-fence.js): after bring-up the role primary must take
   // writes. Fenced with no failover in flight is lifted with a warning; with a
   // journal, the failover is mid-flight and this deploy refuses.
-  if (isHaTier(tier)) {
-    const primaryIp =
-      tier === 'compose-ha' ? deployResult.primaryIp : deployResult.primary?.masterIp;
+  if (isHaTier(tier) || isComposeTier(tier)) {
+    const primaryIp = deployedPrimaryIp(tier, deployResult);
     if (primaryIp) {
       const writable = await assertRolePrimaryWritable({
         environment,

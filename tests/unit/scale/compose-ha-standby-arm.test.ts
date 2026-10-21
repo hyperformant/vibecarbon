@@ -22,6 +22,10 @@ const h = vi.hoisted(() => ({
   reseeds: [] as Array<{ standby: string; primary: string; primaryHost: string }>,
   tunnels: [] as Array<{ primaryIp: string; standbyIp: string }>,
   streaming: { value: true },
+  // Standbys that never stream, whatever h.streaming says.
+  notStreaming: new Set<string>(),
+  outro: [] as string[],
+  failRestore: { value: false },
   recorded: [] as string[],
   degraded: { value: 0 },
 }));
@@ -33,7 +37,9 @@ vi.mock('@clack/prompts', async (orig) => {
     spinner: () => ({ start() {}, stop() {}, message() {} }),
     log: { info() {}, warn() {}, error() {}, step() {}, success() {}, message() {} },
     note() {},
-    outro() {},
+    outro(msg: string) {
+      h.outro.push(msg);
+    },
   };
 });
 
@@ -72,6 +78,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     },
     restoreCompose: async (ip: string) => {
       h.events.push(`restore:${ip}`);
+      if (h.failRestore.value) throw new Error('restore failed');
     },
     dockerLoginOnServer: async () => {},
     isLocalOnlyImageTag: () => false,
@@ -93,7 +100,7 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
       sql === '__ip__'
         ? h.primaries.has(ip)
           ? 'primary'
-          : 'standby'
+          : `standby:${ip}`
         : sql.includes('pg_switch_wal')
           ? '000000010000000000000003'
           : sql.includes('pg_stat_archiver')
@@ -123,6 +130,11 @@ vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) => {
   };
 });
 
+vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, writeWriteFenceMarker: () => {}, clearWriteFenceMarker: () => {} };
+});
+
 vi.mock('../../../src/lib/deploy/wireguard.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -140,12 +152,13 @@ vi.mock('../../../src/lib/deploy/failover-guard.js', async (orig) => {
     // The primary reads out of recovery; a standby reads in recovery, streaming
     // (or not), with the same system identifier.
     readReplicaState: async ({ exec }: { exec: (s: string) => Promise<string> }) => {
-      const ip = await exec('__ip__');
-      const isPrimary = ip === 'primary';
+      const who = await exec('__ip__');
+      const isPrimary = who === 'primary';
+      const streams = h.streaming.value && !h.notStreaming.has(who.replace('standby:', ''));
       return {
         inRecovery: !isPrimary,
         systemIdentifier: LINEAGE,
-        receiverStatus: isPrimary ? null : h.streaming.value ? 'streaming' : 'startup',
+        receiverStatus: isPrimary ? null : streams ? 'streaming' : 'startup',
       };
     },
     recordSystemIdentifier: (_c: unknown, sysid: string) => {
@@ -254,6 +267,9 @@ function reset() {
   h.recorded.length = 0;
   h.degraded.value = 0;
   h.streaming.value = true;
+  h.notStreaming.clear();
+  h.outro.length = 0;
+  h.failRestore.value = false;
 }
 
 describe('compose-ha scale: the standby arm reseeds, never restores', () => {
@@ -317,6 +333,46 @@ describe('compose-ha scale: the standby arm reseeds, never restores', () => {
     await SCALE_EFFECTS.scaleServers(ctx);
     expect(h.degraded.value).toBe(1);
     expect(h.recorded).toEqual([]);
+    // M4: the outro says so.
+    await SCALE_EFFECTS.scaleFinishComposeOutro({
+      ...ctx,
+      currentType: 'cpx21',
+      provider: { ...(ctx.provider as object) },
+    });
+    expect(h.outro.at(-1)).toMatch(
+      /Replication is degraded: run vibecarbon deploy prod to resync the standby/,
+    );
+  });
+
+  it('standby only, unproven: keeps the old standby, deletes the new one, rejoins the old one and fails', async () => {
+    reset();
+    h.notStreaming.add(NEW_STANDBY);
+    const { provider, ctx } = makeCtx('standby');
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      /the new standby 9\.9\.9\.2 could not be proven streaming, so it was deleted and the old standby 2\.2\.2\.2 kept; it streams from the primary again/,
+    );
+    expect(provider.deleteServer).toHaveBeenCalledWith('s-new');
+    expect(provider.deleteServer).not.toHaveBeenCalledWith('s-old');
+    // The second rejoin points the tunnel and replication back at the old standby.
+    expect(h.reseeds.map((r) => r.standby)).toEqual([NEW_STANDBY, OLD_STANDBY]);
+    expect(h.tunnels.at(-1)).toEqual({ primaryIp: OLD_PRIMARY, standbyIp: OLD_STANDBY });
+    expect(
+      (ctx.targetServers as Array<{ _replacement?: unknown }>)[0]._replacement,
+    ).toBeUndefined();
+  });
+
+  it('both arms, primary arm fails before the flip: the standby arm deletes its new server, the old pair stays', async () => {
+    reset();
+    h.failRestore.value = true;
+    const { provider, ctx } = makeCtx('both');
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(/restore failed/);
+    expect(provider.deleteServer).toHaveBeenCalledWith('p-new');
+    expect(provider.deleteServer).toHaveBeenCalledWith('s-new');
+    expect(provider.deleteServer).not.toHaveBeenCalledWith('p-old');
+    expect(provider.deleteServer).not.toHaveBeenCalledWith('s-old');
+    // Nothing was reseeded and no tunnel moved.
+    expect(h.reseeds).toEqual([]);
+    expect(h.tunnels).toEqual([]);
   });
 });
 

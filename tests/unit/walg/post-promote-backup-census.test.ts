@@ -107,8 +107,6 @@ const WRAPPERS: Record<string, string> = {
 const ALLOWLIST: Record<string, string> = {
   'src/lib/deploy/compose/ha.js#composeFailoverAbortBackend':
     'failover -abort re-arms the old primary, which stays on its own timeline: nothing was promoted',
-  'src/lib/deploy/compose/scale-cutover.js#rollbackComposeCutover':
-    "scale's rollback before the DNS flip re-arms the old primary, which stays on its own timeline: nothing was promoted",
 };
 
 type Fn = { file: string; name: string; start: number; end: number; body: string };
