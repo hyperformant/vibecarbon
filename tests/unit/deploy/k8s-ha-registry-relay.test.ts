@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import {
   REGISTRY_RELAY_SOURCE_HOST,
@@ -38,6 +39,26 @@ describe('registry relay manifest', () => {
       expect(readFileSync(join(ROOT, k), 'utf-8')).not.toContain('registry-relay');
     }
   });
+});
+
+describe('relay hardening', () => {
+  it.each(['registry-relay.yaml', 'repl-gateway.yaml'])(
+    '%s drops to an unprivileged read-only socat',
+    (file) => {
+      const text = readFileSync(join(ROOT, 'carbon/k8s/base/repl-gateway', file), 'utf-8');
+      // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
+      const docs = (text.split(/^---$/m).map((d) => load(d)) as any[]).filter(Boolean);
+      const workload = docs.find((d) => d.kind === 'Pod' || d.kind === 'Deployment');
+      const pod = workload.kind === 'Pod' ? workload.spec : workload.spec.template.spec;
+      expect(pod.containers[0].securityContext).toEqual({
+        runAsNonRoot: true,
+        runAsUser: 65534,
+        allowPrivilegeEscalation: false,
+        readOnlyRootFilesystem: true,
+        capabilities: { drop: ['ALL'] },
+      });
+    },
+  );
 });
 
 describe('withRegistryRelay', () => {
@@ -97,6 +118,30 @@ describe('withRegistryRelay', () => {
     );
     expect(ran).toBe(false);
     expect(calls.at(-1)).toMatch(/^P kubectl delete pod registry-relay/);
+  });
+  it('a relay that never gets Ready says its pod phase and last log lines', async () => {
+    const run = async (_ip: string, script: string) => {
+      if (script.startsWith('kubectl wait'))
+        throw Object.assign(new Error('x'), { stderr: 'timed out\n' });
+      if (script.includes('jsonpath')) return 'Failed\n';
+      if (script.startsWith('kubectl logs')) return 'socat: bind failed\n';
+      return '';
+    };
+    await expect(withRegistryRelay({ ...args, run }, async () => {})).rejects.toThrow(
+      /^registry relay not ready on the primary: timed out\npod phase: Failed\nrelay log:\nsocat: bind failed$/,
+    );
+  });
+  it('failing diagnostics are ignored', async () => {
+    const run = async (_ip: string, script: string) => {
+      if (script.startsWith('kubectl wait'))
+        throw Object.assign(new Error('x'), { stderr: 'timed out\n' });
+      if (script.startsWith('kubectl get') || script.startsWith('kubectl logs'))
+        throw new Error('boom');
+      return '';
+    };
+    await expect(withRegistryRelay({ ...args, run }, async () => {})).rejects.toThrow(
+      /^registry relay not ready on the primary: timed out$/,
+    );
   });
   it('a missing primary master IP rejects before any remote call', async () => {
     const calls: string[] = [];

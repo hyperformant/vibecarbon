@@ -157,6 +157,36 @@ export function renderRegistryRelayManifest({ template, primaryMasterPrivateIp }
     .replaceAll('__RELAY_TARGET__', `TCP:${primaryMasterPrivateIp}:5000`);
 }
 
+/** The first line of a failed command's stderr (or message): one-line causes only. */
+function firstErrorLine(err) {
+  return String(err?.stderr || err?.message || err)
+    .split('\n')[0]
+    .trim();
+}
+
+/**
+ * Why a relay never got Ready: its pod phase and last few log lines, so a
+ * crashed socat says why instead of only "timed out". One bounded call each;
+ * a failed lookup contributes nothing.
+ */
+async function relayDiagnostics(exec, primaryIp) {
+  const ask = async (script) => {
+    try {
+      return String((await exec(primaryIp, script)) ?? '').trim();
+    } catch {
+      return '';
+    }
+  };
+  const phase = await ask(
+    'kubectl get pod registry-relay -n vibecarbon -o jsonpath={.status.phase}',
+  );
+  const logs = await ask('kubectl logs registry-relay -n vibecarbon --tail=5');
+  const parts = [];
+  if (phase) parts.push(`pod phase: ${phase}`);
+  if (logs) parts.push(`relay log:\n${logs}`);
+  return parts.length ? `\n${parts.join('\n')}` : '';
+}
+
 const RELAY_DELETE = 'kubectl delete pod registry-relay -n vibecarbon --ignore-not-found';
 
 /**
@@ -197,20 +227,17 @@ export async function withRegistryRelay(
         'kubectl wait --for=condition=Ready pod/registry-relay -n vibecarbon --timeout=60s',
       );
     } catch (err) {
-      const detail = String(err?.stderr || err?.message || err)
-        .split('\n')[0]
-        .trim();
-      throw new Error(`registry relay not ready on the primary: ${detail}`);
+      const why = await relayDiagnostics(exec, primaryIp);
+      throw new Error(`registry relay not ready on the primary: ${firstErrorLine(err)}${why}`);
     }
     return await fn();
   } finally {
     try {
       await exec(primaryIp, `${RELAY_DELETE} --wait=false`);
     } catch (err) {
-      const detail = String(err?.stderr || err?.message || err)
-        .split('\n')[0]
-        .trim();
-      p.log.warn(`[image-copy] could not delete registry-relay on the primary: ${detail}`);
+      p.log.warn(
+        `[image-copy] could not delete registry-relay on the primary: ${firstErrorLine(err)}`,
+      );
     }
   }
 }
