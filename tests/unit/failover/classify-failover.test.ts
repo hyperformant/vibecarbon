@@ -130,6 +130,8 @@ async function runK8s({
     }),
     getKeyPath: () => '/fake/key',
     keyExists: () => true,
+    // The live standby image check (standby-image-precheck.test.ts): present.
+    assertStandbyImage: async () => 'sha256:aa',
     preflight: async () => ({ workerSpec: {}, scaleUpList: [], creds: {} }),
     provision: async () => {
       order.push('provision');

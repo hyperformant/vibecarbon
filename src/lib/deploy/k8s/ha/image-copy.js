@@ -7,6 +7,9 @@
  * tunnel is up. It reads the primary registry through the relay (GET/HEAD
  * only) and pushes into the standby master's registry over the standby
  * private network, then proves the two manifest digests match.
+ *
+ * Failover reads the standby's side back (`assertStandbyHasAppImage`) before
+ * promoting it, since a standby without the image serves nothing.
  */
 
 import { progressLog } from '../../../cli/progress.js';
@@ -170,4 +173,79 @@ export async function copyAppImageToStandby({
       : `[image-copy] copied ${repoTag} (${digest})`,
   );
   return { digest, skipped };
+}
+
+/**
+ * The POSIX sh script the standby MASTER runs to read what its app Deployment
+ * would start: `IMAGE=<ref>`, and for a cluster-local registry ref also
+ * `DIGEST=<digest>` (empty when that registry has no such tag). An external
+ * ref (ghcr, CI push mode) touches no registry. kubectl's failure exits the
+ * script with its stderr.
+ *
+ * @returns {string}
+ */
+export function buildStandbyImageCheckScript() {
+  return `set -eu
+${MANIFEST_DIGEST_SH}
+IMAGE=$(kubectl -n vibecarbon get deployment app -o jsonpath='{.spec.template.spec.containers[0].image}')
+echo "IMAGE=$IMAGE"
+case "$IMAGE" in
+  *:5000/*)
+    host=\${IMAGE%%/*}; rest=\${IMAGE#*/}; repo=\${rest%:*}; tag=\${rest##*:}
+    echo "DIGEST=$(digest "$host" "$repo" "$tag")"
+    ;;
+esac
+`;
+}
+
+/**
+ * Prove the standby's registry holds the image its app Deployment names, so a
+ * promoted standby can start the app. Read-only, one ssh round trip to the
+ * standby master.
+ *
+ * Every failure is one line and carries `standbyImage`, the data failover
+ * rules on: `{ state: 'missing', ref }` when the registry lacks the tag,
+ * `{ state: 'unknown', cause }` when the Deployment or registry could not be
+ * read.
+ *
+ * @param {object} o
+ * @param {string} o.standbyIp - standby master public IP
+ * @param {string} o.sshKeyPath
+ * @param {(script: string) => Promise<string>} [o.run] - test seam
+ * @returns {Promise<string>} the manifest digest, or `'external'` for an image
+ *   no cluster registry serves
+ */
+export async function assertStandbyHasAppImage({ standbyIp, sshKeyPath, run }) {
+  const exec =
+    run ?? ((s) => sshRun(standbyIp, sshKeyPath, ['sh', '-s'], { input: s, timeout: 60_000 }));
+  const unreadable = (cause, err) =>
+    Object.assign(
+      new Error(`could not read the standby app image: ${cause}`, err ? { cause: err } : {}),
+      { standbyImage: { state: 'unknown', cause } },
+    );
+
+  let out;
+  try {
+    out = await exec(buildStandbyImageCheckScript());
+  } catch (err) {
+    throw unreadable(firstCauseLine(err), err);
+  }
+  const kv = parseCopyOutput(out);
+  const ref = kv.IMAGE;
+  if (!ref) throw unreadable('the app deployment names no image');
+  if (!ref.includes(':5000/')) return 'external';
+  try {
+    parseLocalRegistryRef(ref);
+  } catch (err) {
+    throw unreadable(err.message, err);
+  }
+  if (!kv.DIGEST) {
+    throw Object.assign(
+      new Error(
+        `standby registry lacks the app image ${ref}; redeploy (vibecarbon deploy) while the primary is up`,
+      ),
+      { standbyImage: { state: 'missing', ref } },
+    );
+  }
+  return kv.DIGEST;
 }

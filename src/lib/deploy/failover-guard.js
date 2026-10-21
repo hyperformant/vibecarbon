@@ -191,6 +191,8 @@ export function swappedSinceLastDeploy(envConfig) {
  *   system identifier proof (the standby must still be in recovery)
  * @param {boolean} [args.allowDegraded] -allow-degraded: with forceUnproven only,
  *   also accepts a standby the last deploy flagged degraded
+ * @param {boolean} [args.standbyImageRuled] the live registry check found the
+ *   image missing or unreadable and `assertStandbyImageRule` already ruled
  * @returns {{ mode: 'promote'|'resume', unproven?: true }}
  */
 export function assertFailoverPreconditions({
@@ -202,6 +204,7 @@ export function assertFailoverPreconditions({
   primaryState = null,
   forceUnproven = false,
   allowDegraded = false,
+  standbyImageRuled = false,
 }) {
   if (tier !== 'compose-ha' && tier !== 'k8s-ha') {
     throw new Error(`assertFailoverPreconditions: unknown tier ${JSON.stringify(tier)}`);
@@ -256,31 +259,21 @@ export function assertFailoverPreconditions({
     );
   }
 
-  // A promoted standby without the app image serves nothing. With the
-  // primary up, a deploy copies it there first, so a planned failover refuses.
-  // With the primary dead nothing can copy it, so -force-unproven promotes
-  // anyway and says the app is down until a deploy builds it on the new
-  // primary. A failover already in flight is let finish (R6).
+  // A failover already in flight is let finish (R6). A live registry check
+  // that already ruled (standbyImageRuled) has said all of this once.
   if (
     envConfig?.degradedCause === DEGRADED_CAUSE.STANDBY_IMAGE_MISSING &&
-    !envConfig?.ha?.failoverInFlight
+    !envConfig?.ha?.failoverInFlight &&
+    !standbyImageRuled
   ) {
-    const missing =
-      `the standby is missing the app image (the last deploy could not copy it to the ` +
-      `standby's registry), so a promoted standby could not start the app.`;
-    if (planned) refuse(`${missing} ${repair('to copy it, then fail over')}`);
-    if (!forceUnproven) {
-      refuse(
-        `${missing} the primary is unreachable, so no deploy can copy it there now. pass ` +
-          `-force-unproven to promote it anyway; it serves nothing until a deploy builds ` +
-          `the image on it`,
-      );
-    }
-    p.log.warn(
-      'the promoted standby has no app image; it serves nothing until\n' +
-        `  vibecarbon deploy ${environment}\n` +
-        'builds it there',
-    );
+    assertStandbyImageRule({
+      environment,
+      planned,
+      forceUnproven,
+      missing:
+        `the standby is missing the app image (the last deploy could not copy it to the ` +
+        `standby's registry), so a promoted standby could not start the app.`,
+    });
   }
 
   const recorded = envConfig?.ha?.systemIdentifier ?? null;
@@ -325,6 +318,80 @@ export function assertFailoverPreconditions({
     differentDatabase(primaryState.systemIdentifier, 'the primary has');
   }
   return { mode: 'promote' };
+}
+
+/**
+ * The app-image rule, one wording for the recorded `standby-image-missing`
+ * cause and the live registry check. A promoted standby without the app image
+ * serves nothing. With the primary up, a deploy copies it there first, so a
+ * planned failover refuses. With the primary dead nothing can copy it, so
+ * -force-unproven promotes anyway and says the app is down until a deploy
+ * builds it on the new primary. Only for a run with no failover journal: the
+ * repair it names is a deploy, which refuses on a journal.
+ *
+ * @param {object} args
+ * @param {string} args.missing - one sentence: what is missing and why it matters
+ * @param {string} args.environment
+ * @param {boolean} args.planned - the old primary answered
+ * @param {boolean} args.forceUnproven
+ * @param {boolean} [args.known] false when the image could not be read at all
+ * @throws {FailoverRefusedError} unless unplanned with -force-unproven
+ */
+export function assertStandbyImageRule({
+  missing,
+  environment,
+  planned,
+  forceUnproven,
+  known = true,
+}) {
+  const deploy = `vibecarbon deploy ${environment}`;
+  if (planned) {
+    throw new FailoverRefusedError(
+      `Failover refused: ${missing} run ${deploy} to copy it, then fail over`,
+    );
+  }
+  if (!forceUnproven) {
+    throw new FailoverRefusedError(
+      `Failover refused: ${missing} the primary is unreachable, so no deploy can copy it there ` +
+        `now. pass -force-unproven to promote it anyway; it serves nothing until a deploy ` +
+        `builds the image on it`,
+    );
+  }
+  p.log.warn(
+    `the promoted standby ${known ? 'has' : 'may have'} no app image; it serves nothing until\n` +
+      `  ${deploy}\n` +
+      'builds it there',
+  );
+}
+
+/**
+ * The `missing` sentence for a live check's failure (`assertStandbyHasAppImage`
+ * attaches `standbyImage`). Anything else it threw reads as unreadable.
+ *
+ * @param {Error & { standbyImage?: { state: 'missing', ref: string } | { state: 'unknown', cause: string } }} err
+ * @returns {{ missing: string, known: boolean }}
+ */
+export function liveStandbyImageGap(err) {
+  const info = err?.standbyImage;
+  if (info?.state === 'missing') {
+    return {
+      known: true,
+      missing:
+        `the standby is missing the app image (its registry has no ${info.ref}), so a ` +
+        `promoted standby could not start the app.`,
+    };
+  }
+  const cause =
+    info?.cause ??
+    String(err?.message ?? err)
+      .split('\n')[0]
+      .trim();
+  return {
+    known: false,
+    missing:
+      `could not read the standby app image (${cause}), so nothing proves a promoted ` +
+      `standby could start the app.`,
+  };
 }
 
 /**

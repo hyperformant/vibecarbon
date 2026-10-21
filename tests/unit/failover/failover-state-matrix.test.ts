@@ -183,6 +183,8 @@ async function run(opts: RunOpts = {}) {
     confirmUnproven: async () => {
       order.push('confirmUnproven');
     },
+    // The live standby image check (standby-image-precheck.test.ts): present.
+    assertStandbyImage: async () => 'sha256:aa',
     preflight: async () => {
       order.push('preflight');
       return {
