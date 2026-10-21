@@ -11,6 +11,9 @@
  *   - promoted_db_not_recreated     compose-ha after a promotion: the db
  *                                    container id read on the standby before
  *                                    the failover equals the one after.
+ *   - n8n_key_shared                HA, n8n enabled: both nodes/clusters hand n8n the
+ *                                    same N8N_ENCRYPTION_KEY (SHA-256 fingerprints
+ *                                    computed remotely; the value never leaves).
  *   - promoted_addons_ready         k8s-ha after a promotion: every failover
  *                                    add-on Deployment on the promoted
  *                                    cluster has readyReplicas >= 1.
@@ -237,4 +240,68 @@ export async function checkPromotedAddonsReady(
     status: 'pass',
     details: { primaryIp, deployments: workloads.map((w) => w.name) },
   };
+}
+
+// ---------------------------------------------------------------------------
+// n8n_key_shared
+// ---------------------------------------------------------------------------
+
+const N8N_KEY = 'N8N_ENCRYPTION_KEY';
+const N8N_SECRET = 'vibecarbon-infra-secrets';
+const FP_SCRIPT =
+  'if [ -z "$v" ]; then echo FP=MISSING; else echo "FP=$(printf %s "$v" | sha256sum | cut -d" " -f1)"; fi; echo PROBE_DONE';
+
+/** Remote command printing `FP=<sha256 of the key>` or `FP=MISSING`; the value is never printed. */
+export function buildN8nKeyFingerprintCommand(mode: DeployMode, projectName: string): string {
+  const read = mode.startsWith('compose')
+    ? `v=$(sed -n 's/^${N8N_KEY}=//p' /opt/${projectName}/.env 2>/dev/null | head -n1 | tr -d '\\r' | sed -e 's/^"\\(.*\\)"$/\\1/' -e "s/^'\\(.*\\)'$/\\1/")`
+    : `v=$(${KUBECTL} get secret ${N8N_SECRET} -o jsonpath='{.data.${N8N_KEY}}' 2>/dev/null | base64 -d 2>/dev/null)`;
+  return `${read}; ${FP_SCRIPT}`;
+}
+
+/** The fingerprint, 'MISSING', or null when the probe output is unreadable. */
+export function parseN8nKeyFingerprint(output: string | null | undefined): string | null {
+  const lines = String(output ?? '')
+    .split('\n')
+    .map((l) => l.trim());
+  if (!lines.includes(PROBE_DONE)) return null;
+  const fp = lines.find((l) => l.startsWith('FP='))?.slice(3);
+  return fp && (fp === 'MISSING' || /^[0-9a-f]{64}$/.test(fp)) ? fp : null;
+}
+
+/** n8n_key_shared: primary and standby hand n8n the same encryption key, so credentials survive a failover. */
+export async function checkN8nKeyShared(
+  opts: SshArgs & { primaryIp: string | null; standbyIp: string | null },
+): Promise<VerificationResult> {
+  const checkName = 'n8n_key_shared';
+  if (!enabledAddons(opts.features).includes('n8n')) return skip(checkName, 'n8n not enabled');
+  const { mode, projectName, sshKeyPath } = opts;
+  const sides: Array<[string, string | null]> = [
+    ['primary', opts.primaryIp],
+    ['standby', opts.standbyIp],
+  ];
+  for (const [role, ip] of sides) {
+    const missing = missingHandle(ip, sshKeyPath, role);
+    if (missing) return fail(checkName, `cannot reach the ${role}: ${missing}`);
+  }
+  const fps: Record<string, string> = {};
+  for (const [role, ip] of sides) {
+    const run = opts.run ?? defaultRun(mode, projectName, sshKeyPath as string, role);
+    const res = await run(ip as string, buildN8nKeyFingerprintCommand(mode, projectName));
+    if (!res.ok)
+      return fail(checkName, `could not read ${N8N_KEY} on the ${role} ${ip}: ${res.error}`);
+    const fp = parseN8nKeyFingerprint(res.output);
+    if (!fp) return fail(checkName, `unreadable ${N8N_KEY} probe from the ${role} ${ip}`);
+    if (fp === 'MISSING')
+      return fail(checkName, `${N8N_KEY} is missing or empty on the ${role} ${ip}`);
+    fps[role] = fp;
+  }
+  if (fps.primary !== fps.standby) {
+    return fail(
+      checkName,
+      `${N8N_KEY} differs between primary and standby, so a promoted standby cannot decrypt n8n credentials`,
+      { primaryFingerprint: fps.primary, standbyFingerprint: fps.standby },
+    );
+  }
+  return { checkName, status: 'pass', details: { fingerprint: fps.primary } };
 }

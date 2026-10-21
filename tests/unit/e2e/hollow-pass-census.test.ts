@@ -585,6 +585,22 @@ const ADDON_HANDLELESS: Record<
         after: unread,
       }),
   ],
+  checkN8nKeyShared: [
+    () =>
+      standbyAddons.checkN8nKeyShared({
+        ...addonBase,
+        primaryIp: NODE,
+        standbyIp: NODE,
+        sshKeyPath: null,
+      }),
+    () =>
+      standbyAddons.checkN8nKeyShared({
+        ...addonBase,
+        primaryIp: NODE,
+        standbyIp: null,
+        sshKeyPath: KEY,
+      }),
+  ],
   checkPromotedAddonsReady: [
     () =>
       standbyAddons.checkPromotedAddonsReady({

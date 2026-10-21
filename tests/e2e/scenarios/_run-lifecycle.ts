@@ -72,6 +72,7 @@ import {
   writeReplicationMarker,
 } from '../checks/replication.js';
 import {
+  checkN8nKeyShared,
   checkPromotedAddonsReady,
   checkPromotedDbNotRecreated,
   checkPromotedPrimaryOnlyRunning,
@@ -2312,6 +2313,16 @@ export async function runLifecycle(
               replResults.push(await checkAppEndpointsReady({ primaryIp, sshKeyPath }));
             }
             if (stepName === 'verify-deploy') {
+              replResults.push(
+                await checkN8nKeyShared({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  sshKeyPath,
+                  features: config.features,
+                  primaryIp,
+                  standbyIp,
+                }),
+              );
               // Primary-only add-ons write to the primary database: none may
               // exist on the compose-ha standby (k8s-ha is covered by
               // pilot_light_deployments_zero above).
@@ -4333,7 +4344,19 @@ EOF`;
               sshKeyPath,
               markerId: reconvergeMarkerId,
             });
-            collector.recordVerifications(stepId, [survival]);
+            const reconverged = resolveHaDbIps(config.projectDir, config.envPrefix);
+            const n8nKey = await checkN8nKeyShared({
+              mode: config.mode,
+              projectName: config.projectName,
+              sshKeyPath,
+              features: config.features,
+              primaryIp: reconverged.primaryIp,
+              standbyIp: reconverged.standbyIp,
+            });
+            collector.recordVerifications(stepId, [survival, n8nKey]);
+            if (n8nKey.status === 'fail') {
+              throw new Error(`reconverge-deploy: ${n8nKey.checkName}: ${n8nKey.errorMessage}`);
+            }
             if (survival.status !== 'pass') {
               throw new Error(
                 `reconverge-deploy: survival marker ${reconvergeMarkerId} written just ` +
