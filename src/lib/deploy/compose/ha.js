@@ -27,6 +27,7 @@ import {
 } from '../../dns-provider.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
+import { backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import {
   assertFailoverClassified,
   assertFailoverPreconditions,
@@ -1639,6 +1640,7 @@ export function composeFailoverAbortBackend({
     armAcme = armComposeAcme,
     disarmAcme = disarmComposeAcme,
     flipDns = flipComposeDns,
+    writeFence = writeComposeBackupFence,
   } = deps;
   const servers = envConfig.servers || [];
   const primaryServer = servers.find((sv) => sv.role === 'primary');
@@ -1713,6 +1715,13 @@ export function composeFailoverAbortBackend({
         : null,
     primaryReachable: () => reachable(primaryServer.ip, sshKeyPath, remoteDir),
     unfencePrimary: () => unfenceWrites(psql(primaryServer.ip, sshKeyPath, remoteDir)),
+    writeBackupFence: () =>
+      writeFence({
+        ip: primaryServer.ip,
+        sshKeyPath,
+        projectName,
+        primaryNode: primaryServer.name ?? primaryServer.ip,
+      }),
     armPrimary: async () => {
       // The db recreate only when the running container lost the role: a
       // failover that got past its demote step left it on standby.
@@ -1818,6 +1827,7 @@ export async function failoverComposeHA(
     confirmUnproven = confirmUnprovenFailover,
     swapRoles = swapComposeHaRoles,
     flipDns = flipComposeDns,
+    writeFence = writeComposeBackupFence,
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -2158,6 +2168,19 @@ export async function failoverComposeHA(
       throw new Error(promotionUnknownMessage(envName));
     }
     s.stop('Standby database promoted to primary');
+  }
+
+  // Step 1a1: the backup-prefix fence (backup-fence.js), before the DNS flip
+  // and the swap save: an old primary that reboots unreached refuses its own
+  // pushes once it reads this. On resume it is written again (idempotent).
+  const fenceWrite = await writeFence({
+    ip: standbyServer.ip,
+    sshKeyPath,
+    projectName,
+    primaryNode: standbyServer.name ?? standbyServer.ip,
+  });
+  if (!fenceWrite.ok) {
+    p.log.warn(backupFenceWarning(standbyServer.name ?? standbyServer.ip, fenceWrite.reason));
   }
 
   // Step 1a2: Move the wal-g WRITE-GUARD with the promotion. The promoted node

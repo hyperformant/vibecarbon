@@ -41,8 +41,9 @@ data:
     #   2. On final failure, logs loudly to stderr (visible in the db container's
     #      logs) and exits 0 so PG can recycle the segment. PITR coverage degrades
     #      for the failed segment; the database stays up.
-    #   3. Refuses (exit 1) on a node a failover retired (its PGDATA carries the
-    #      vibecarbon-retired marker), the only non-zero exit: see the fence below.
+    #   3. Refuses (exit 1) on a node a failover retired: its PGDATA carries the
+    #      vibecarbon-retired marker, or the backup prefix's fence object names
+    #      its database on a newer timeline. The only non-zero exits: see below.
     #
     # THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR BOTH DEPLOY TIERS. compose mounts
     # it directly; k8s ships a byte-identical copy in the vibecarbon-wal-archive
@@ -63,6 +64,9 @@ data:
     RETRIES="${WAL_ARCHIVE_RETRIES:-3}"
     SLEEP_BASE="${WAL_ARCHIVE_SLEEP:-2}"
     PGDATA_DIR="${PGDATA:-/var/lib/postgresql/data}"
+    # The wal-g binary. WAL_ARCHIVE_WALG exists for the script tests only (a stub
+    # in place of the real binary); nothing in a deploy sets it.
+    WALG="${WAL_ARCHIVE_WALG:-/usr/local/bin/wal-g}"
 
     # RETIRED-NODE FENCE: a failover retired this node (the old primary), and the
     # CLI placed this marker in PGDATA when it next reached it. Its WAL belongs to a
@@ -124,9 +128,39 @@ data:
         exit 0
     fi
 
+    # BACKUP-PREFIX FENCE: a failover wrote vibecarbon-fence.json into this prefix,
+    # naming the promoted primary's database and the timeline it promoted onto. An
+    # old primary that rebooted unreached is the same database on an OLDER
+    # timeline: its segments would land in, and fork, the promoted node's stream.
+    # The segment's own timeline is the first 8 hex digits of its name. The
+    # .history and .partial files are what a promotion itself archives, on the
+    # promoted node, so they are exempt. No fence object (an env that never failed
+    # over) or another database is allowed; a fence that cannot be read falls
+    # through to the push, which fails the same way.
+    WAL_NAME="$(basename "$WAL_PATH")"
+    case "$WAL_NAME" in
+        *.history|*.partial) ;;
+        *)
+            fence="$("$WALG" st cat vibecarbon-fence.json 2>/dev/null)"
+            fence_tl="$(printf '%s' "$fence" | grep -o '"timeline":[0-9]*' | grep -o '[0-9]*$')"
+            fence_sysid="$(printf '%s' "$fence" | grep -o '"systemIdentifier":"[0-9]*"' | grep -o '[0-9][0-9]*')"
+            seg_tl="${WAL_NAME:0:8}"
+            if [ -n "$fence_tl" ] && [[ "$seg_tl" =~ ^[0-9A-Fa-f]{8}$ ]] && [ "$((16#$seg_tl))" -lt "$fence_tl" ]; then
+                local_sysid=""
+                if command -v psql >/dev/null 2>&1; then
+                    local_sysid="$(psql -U "${PGUSER:-postgres}" -d postgres -tAXc 'SELECT system_identifier FROM pg_control_system()' 2>/dev/null | tr -d '[:space:]')"
+                fi
+                if [ -z "$local_sysid" ] || [ "$local_sysid" = "$fence_sysid" ]; then
+                    echo "wal-archive: backup prefix fenced to another primary (timeline ${fence_tl}): not archiving '${WAL_PATH}' from timeline $((16#$seg_tl)) (a failover retired this node; run vibecarbon status, then vibecarbon deploy to rebuild it as the standby)." >&2
+                    exit 1
+                fi
+            fi
+            ;;
+    esac
+
     attempt=1
     while [ "$attempt" -le "$RETRIES" ]; do
-        if /usr/local/bin/wal-g wal-push "$WAL_PATH"; then
+        if "$WALG" wal-push "$WAL_PATH"; then
             exit 0
         fi
         if [ "$attempt" -lt "$RETRIES" ]; then

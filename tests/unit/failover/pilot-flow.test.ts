@@ -619,6 +619,8 @@ async function runFailoverHA(opts: RunOpts) {
       captured.swapEnv = envName;
       order.push('saveConfig');
     },
+    // The backup-prefix fence write (backup-fence.test.ts pins its place).
+    writeFence: async () => ({ ok: true }),
     reconcileRetired: async () => {
       order.push('fenceRetired');
       return { fenced: [], unreachable: [] };

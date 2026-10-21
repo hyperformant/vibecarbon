@@ -77,6 +77,36 @@ docker compose exec -T db bash -c '
     echo "db is in recovery (standby) — skipping base backup."
     exit 0
   fi
+  # BACKUP-PREFIX FENCE (src/lib/deploy/backup-fence.js): a failover wrote
+  # vibecarbon-fence.json into this prefix, naming the promoted primary database
+  # and the timeline it promoted onto. An old primary that rebooted unreached is
+  # the same database on an OLDER timeline: its base backup would become LATEST
+  # and its delete retain would prune the promoted node backups. Refuse loudly.
+  # No fence object (an env that never failed over) is allowed; one that cannot
+  # be read refuses, since nothing then proves this node is the primary.
+  fence="$(wal-g st cat vibecarbon-fence.json 2>&1)" || {
+    case "$fence" in
+      *"not found in storage"*) fence="" ;;
+      *)
+        echo "backup refused: could not read the backup-prefix fence (vibecarbon-fence.json): $fence" >&2
+        exit 1
+        ;;
+    esac
+  }
+  if [ -n "$fence" ]; then
+    fence_tl="$(printf %s "$fence" | grep -o "\"timeline\":[0-9]*" | grep -o "[0-9]*$")" || true
+    fence_sysid="$(printf %s "$fence" | grep -o "\"systemIdentifier\":\"[0-9]*\"" | grep -o "[0-9][0-9]*")" || true
+    local_sysid="$(psql -U postgres -d postgres -tAc "SELECT system_identifier FROM pg_control_system()")" || true
+    local_tl="$(psql -U postgres -d postgres -tAc "SELECT substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8)")" || true
+    if ! [[ "$fence_tl" =~ ^[0-9]+$ && "$local_sysid" =~ ^[0-9]+$ && "$local_tl" =~ ^[0-9A-Fa-f]{8}$ ]]; then
+      echo "backup refused: could not compare this node with the backup-prefix fence (timeline $fence_tl, local $local_tl)" >&2
+      exit 1
+    fi
+    if [ "$local_sysid" = "$fence_sysid" ] && [ "$((16#$local_tl))" -lt "$fence_tl" ]; then
+      echo "backup prefix fenced to another primary (timeline $fence_tl): this node is on timeline $((16#$local_tl)), a primary a failover retired; backups refused (run vibecarbon status, then vibecarbon deploy to rebuild it as the standby)" >&2
+      exit 1
+    fi
+  fi
   # `delete garbage BACKUPS` sweeps sentinel-less orphans (an interrupted
   # backup-push writes its stop-sentinel LAST, so a mid-upload failure leaves
   # data files with no sentinel) BEFORE retention runs — `delete retain`

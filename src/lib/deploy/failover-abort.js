@@ -16,7 +16,8 @@
  *      its database is already down);
  *   3. point DNS back at the old primary when the provider is managed;
  *   4. lift the old primary's database write fence, give it back its wal-g
- *      write-guard and ACME issuer, and start its writers;
+ *      write-guard and ACME issuer, name it in the backup-prefix fence (a
+ *      failover may have named the standby there), and start its writers;
  *   5. clear the journal (and the write-fence marker, when the lift is
  *      proven), drop the recorded system identifier and mark replication
  *      degraded, so the next `vibecarbon deploy` reseeds the standby.
@@ -26,6 +27,7 @@
  */
 
 import { loadProjectConfig, saveProjectConfig } from '../config.js';
+import { backupFenceWarning } from './backup-fence.js';
 import { FailoverRefusedError } from './failover-guard.js';
 
 /**
@@ -41,6 +43,9 @@ import { FailoverRefusedError } from './failover-guard.js';
  * @property {() => Promise<boolean>} unfencePrimary - proven lift of the db write fence
  * @property {() => Promise<boolean>} armPrimary - WALG_ROLE=primary and the ACME issuer
  * @property {() => Promise<boolean>} startPrimaryWriters
+ * @property {() => Promise<{ ok: boolean, reason?: string }>} writeBackupFence
+ *   name the old primary in the backup-prefix fence (backup-fence.js): a
+ *   failover may have named the standby there already
  * @property {string} unfenceHint - the manual lift, for a warning
  * @property {string} stopDbHint - the manual standby stop, for the refusal
  */
@@ -154,6 +159,8 @@ export async function abortFailover({
           `vibecarbon deploy ${environment} re-renders both`,
       );
     }
+    const fence = await backend.writeBackupFence();
+    if (!fence.ok) note(backupFenceWarning(primary, fence.reason));
     if (!(await backend.startPrimaryWriters())) {
       note(
         `could not start the old primary's app tier (${primary}); vibecarbon deploy ` +
@@ -162,8 +169,9 @@ export async function abortFailover({
     }
   } else {
     note(
-      `the old primary ${primary} does not answer, so its write fence stays recorded; the next ` +
-        `vibecarbon deploy ${environment} that reaches it lifts it`,
+      `the old primary ${primary} does not answer, so its write fence stays recorded and the ` +
+        `backup-prefix fence may still name the standby; the next vibecarbon deploy ` +
+        `${environment} that reaches it lifts the one and rewrites the other`,
     );
   }
 

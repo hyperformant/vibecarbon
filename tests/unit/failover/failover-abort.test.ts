@@ -66,6 +66,7 @@ const fakeBackend = (over: Record<string, unknown> = {}) => {
       primaryReachable: step('primaryReachable', true),
       unfencePrimary: step('unfencePrimary', true),
       armPrimary: step('armPrimary', true),
+      writeBackupFence: step('writeBackupFence', { ok: true }),
       startPrimaryWriters: step('startPrimaryWriters', true),
       ...over,
     },
@@ -122,6 +123,7 @@ describe('abortFailover: order and refusals', () => {
       'primaryReachable',
       'unfencePrimary',
       'armPrimary',
+      'writeBackupFence',
       'startPrimaryWriters',
     ]);
     expect(record).toHaveBeenCalledWith({ environment: 'prod' }, { fenceLifted: true });

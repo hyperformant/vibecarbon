@@ -39,6 +39,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
+import { backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   buildReplicationOverlay,
@@ -1196,6 +1197,15 @@ async function haFinalizeConfig(ctx) {
     }
   }
   ctx.reconvergeComplete = reconvergeComplete;
+  // The backup-prefix fence follows the role primary (backup-fence.js): a
+  // reconverge, an aborted failover or a recreated database moves it along.
+  const fence = await writeComposeBackupFence({
+    ip: primary.ip,
+    sshKeyPath: ctx.sshKeyPath,
+    projectName,
+    primaryNode: primary.name ?? primary.ip,
+  });
+  if (!fence.ok) p.log.warn(backupFenceWarning(primary.ip, fence.reason));
   const finalEnv = {
     ...pendingEnvConfig,
     status: 'deployed',

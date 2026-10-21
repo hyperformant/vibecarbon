@@ -274,6 +274,8 @@ async function run(opts: RunOpts = {}) {
       captured.swapOverride = o?.override;
       order.push('saveConfig');
     },
+    // The backup-prefix fence write (backup-fence.test.ts pins its place).
+    writeFence: async () => ({ ok: true }),
     reconcileRetired: async () => {
       order.push('fenceRetired');
       return { fenced: [], unreachable: [] };

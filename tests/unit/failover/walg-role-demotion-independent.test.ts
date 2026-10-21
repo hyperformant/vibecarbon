@@ -184,6 +184,7 @@ describe('failoverHA (k8s): a failed arm still disarms, and the exit names both 
       promoteIssuer: async () => ({ patched: [] }),
       swapRoles: () => {},
       reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
+      writeFence: async () => ({ ok: true }),
     };
     let flippedTo: string | null = null;
     const strategy = {

@@ -21,8 +21,8 @@ import { spinner } from './lib/cli/progress.js';
 import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { backupFenceWarning, writeK8sBackupFence } from './lib/deploy/backup-fence.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_STATEFULSET } from './lib/deploy/db-workload.js';
-
 import { abortFailover } from './lib/deploy/failover-abort.js';
 import {
   assertFailoverClassified,
@@ -1433,6 +1433,12 @@ export function k8sFailoverAbortBackend({ envName, envConfig, strategy, deps = {
       : null,
     primaryReachable: () => isPrimaryReady(primary.ip),
     unfencePrimary: () => unfenceWrites(psql(primary.ip)),
+    writeBackupFence: () =>
+      (deps.writeFence ?? writeK8sBackupFence)({
+        ip: primary.ip,
+        sshKeyPath,
+        primaryNode: primary.ip,
+      }),
     armPrimary: async () => {
       let role;
       try {
@@ -1639,6 +1645,8 @@ export async function failoverHA(
     gate = gatePromotedApiReadiness,
     swapRoles = swapHaRoles,
     promoteIssuer = promoteAcmeIssuer,
+    writeFence = (srv, key) =>
+      writeK8sBackupFence({ ip: srv.standby.ip, sshKeyPath: key, primaryNode: srv.standby.ip }),
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -2014,6 +2022,12 @@ export async function failoverHA(
   if (mode === 'promote') {
     await catchUpReseedAndPromote();
   }
+
+  // STEP 4a2 — The backup-prefix fence (backup-fence.js), before the DNS flip
+  // and the swap save: an old primary that reboots unreached refuses its own
+  // pushes once it reads this. On resume it is written again (idempotent).
+  const fenceWrite = await writeFence(servers, sshKeyPath);
+  if (!fenceWrite.ok) p.log.warn(backupFenceWarning(servers.standby.ip, fenceWrite.reason));
 
   // STEP 4b — Move the wal-g WRITE-GUARD onto the promoted cluster. The standby
   // was deployed with WALG_ROLE=standby, which no-ops the base-backup CronJob

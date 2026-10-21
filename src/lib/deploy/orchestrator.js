@@ -36,6 +36,7 @@ import {
   syncHetznerFences,
   waitForAppKeyReady,
 } from './app-storage-credential.js';
+import { backupFenceWarning, writeK8sBackupFence } from './backup-fence.js';
 import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
@@ -1598,6 +1599,16 @@ export async function executeDeployment(args, gatheredConfig) {
       projectName: projectConfig.projectName,
       environment,
     });
+    // The backup-prefix fence follows the role primary (backup-fence.js): a
+    // reconverge, an aborted failover or a recreated database moves it along.
+    const fencePrimaryIp = k8sHaCtx.primaryResult?.masterIp;
+    if (fencePrimaryIp) {
+      const fence = await writeK8sBackupFence({
+        ip: fencePrimaryIp,
+        sshKeyPath: getSSHKeyPath(environment),
+      });
+      if (!fence.ok) p.log.warn(backupFenceWarning(fencePrimaryIp, fence.reason));
+    }
     deployResult = {
       primary: k8sHaCtx.primaryResult,
       standby: k8sHaCtx.standbyResult,
