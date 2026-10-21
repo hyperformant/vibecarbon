@@ -40,10 +40,10 @@ import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
 import { completionSummaryLines, entryIpFor } from './completion-summary.js';
-import { assertNoComposeHaRoleSwap } from './compose/ha-role-swap.js';
+import { assertComposeHaReconvergeReady, planComposeHaReconverge } from './compose/ha-role-swap.js';
 import { workingTreeDirty } from './delta.js';
 import { resolveDockerHubCreds } from './docker-hub.js';
-import { haSeedRecord } from './failover-guard.js';
+import { haSeedRecord, readReplicaState } from './failover-guard.js';
 import { createAcmeIssuanceWatchdog, deriveScaleUpList } from './k8s/index.js';
 import { AMD64_BUILD_HINT, PLATFORM_BUILD_FLAG } from './platform.js';
 import { checkDeployPrerequisites, operatorCheckEnvs } from './preflight.js';
@@ -538,14 +538,39 @@ export async function executeDeployment(args, gatheredConfig) {
 
   const { deployMode } = config;
   const tier = resolveTier({ deployMode, ha: config.ha });
-  // DATA-LOSS REFUSAL, first thing after the tier is known and BEFORE any
-  // mutation (the operator-firewall patch below, the S3 buckets, the image
+  // COMPOSE-HA RECONVERGE (R12), first thing after the tier is known and BEFORE
+  // any mutation (the operator-firewall patch below, the S3 buckets, the image
   // push, the DNS warm-up, the plan itself). `envConfig` here is the
   // environment's persisted config as it stood before this invocation, so it
-  // still carries the roles a failover flipped — the one and only place the
-  // swap is recorded. See compose/ha-role-swap.js for why compose-HA (unlike
-  // k8s-HA) cannot converge a swapped environment.
-  assertNoComposeHaRoleSwap({ projectName: projectConfig.projectName, environment, envConfig });
+  // still carries the roles a failover flipped, the one and only place the swap
+  // is recorded. A swapped pair deploys by role (compose/ha-role-swap.js): the
+  // promoted node stays the primary and the retired one is rebuilt as the
+  // standby. It refuses while a failover is in flight, while the promoted node
+  // is still in recovery, and while DNS does not point at it yet.
+  const composeHaReconverge = planComposeHaReconverge({
+    projectName: projectConfig.projectName,
+    environment,
+    envConfig,
+  });
+  if (composeHaReconverge) {
+    await assertComposeHaReconvergeReady({
+      plan: composeHaReconverge,
+      environment,
+      domain,
+      readState: async (ip) =>
+        readReplicaState({
+          exec: await rolePrimaryPsql('compose-ha', environment, projectConfig.projectName, ip),
+        }),
+      resolveA: async (hostname) => {
+        const { resolvePublicA } = await import('./public-dns-lookup.js');
+        return resolvePublicA(hostname);
+      },
+    });
+    p.log.info(
+      `a failover swapped this environment's roles: ${composeHaReconverge.promoted.ip} stays ` +
+        `the primary and ${composeHaReconverge.retired.ip} is rebuilt as the standby`,
+    );
+  }
   // A planned failover interrupted between its database write fence and its
   // journal left the primary read-only with nothing promoted: lift it before
   // this deploy restarts the app onto it (write-fence.js). Unreachable or
@@ -1454,6 +1479,9 @@ export async function executeDeployment(args, gatheredConfig) {
       allowDegraded: !!args.allowDegraded,
       // Pure gate for the remote-build step (local-only image ⇒ build on-node).
       isLocalOnlyImage: isLocalOnlyImageTag(imageRef),
+      // Role mapping on a failed-over pair (null otherwise): the effects resolve
+      // ctx.primary / ctx.standby by role and keep each node's stack.
+      reconverge: composeHaReconverge,
       onProgress: (msg) => s.message(msg),
     };
     // Wrap the entire pipeline so the perf trace shows the headline cost
@@ -1462,17 +1490,23 @@ export async function executeDeployment(args, gatheredConfig) {
       runPlan(planDeploy('compose-ha', config), composeHaCtx, EFFECTS),
     );
     s.stop('Compose HA deployment complete');
+    // A reconverge that did not verify streaming and record the identifier
+    // stays degraded and keeps its last deployedAt (haFinalizeConfig), so the
+    // next deploy resumes it.
+    const reconvergeIncomplete = !!composeHaCtx.reconverge && !composeHaCtx.reconvergeComplete;
+    const haDegraded = !!composeHaCtx.degraded || reconvergeIncomplete;
     deployResult = {
       success: true,
       primaryIp: composeHaCtx.primary.ip,
       standbyIp: composeHaCtx.standby.ip,
       domain,
       deployMode: 'compose-ha',
-      degraded: composeHaCtx.degraded,
-      replication: composeHaCtx.degraded ? 'degraded' : 'streaming',
+      degraded: haDegraded,
+      replication: haDegraded ? 'degraded' : 'streaming',
       // haSeedRecord persists the identifier only when streaming was verified.
-      replicationStatus: composeHaCtx.replActive ? 'streaming' : 'degraded',
+      replicationStatus: composeHaCtx.replActive && !haDegraded ? 'streaming' : 'degraded',
       systemIdentifier: composeHaCtx.systemIdentifier ?? null,
+      reconvergeIncomplete,
     };
   } else if (tier === 'k8s') {
     // Single-cluster k3s runs through the plan as a single black-box step that
@@ -2157,7 +2191,9 @@ export async function executeDeployment(args, gatheredConfig) {
           minWorkers,
           maxWorkers,
         }),
-        deployedAt: new Date().toISOString(),
+        deployedAt: deployResult.reconvergeIncomplete
+          ? persistedEnvConfig.deployedAt
+          : new Date().toISOString(),
         deployedCommit,
         ...(deployedDirty !== null && { deployedDirty }),
         // bucketCreatedAt only on a provider with a settle window (status'

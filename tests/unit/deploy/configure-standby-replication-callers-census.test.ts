@@ -1,20 +1,21 @@
 /**
- * Census: nothing reseeds a compose-HA standby on a role-swapped env.
+ * Census: nothing reseeds a compose-HA standby on a role-swapped env except the
+ * role-aware deploy.
  *
  * C2: `configureStandbyReplication(standbyIp, primaryIp, …)` wipes the
- * target's PGDATA and basebackups it over WireGuard from 10.99.0.1, the address
- * of the node BORN as the primary. A compose failover flips only the `role`
- * fields, so on a swapped env the "standby" it targets is that same born-primary
- * node: the reseed copies the node from itself. Every caller must therefore
- * prove the env is not swapped before it reseeds.
+ * target's PGDATA and basebackups it from the role primary. A compose failover
+ * flips only the `role` fields, and until a deploy reconverges the pair, the
+ * node with role standby is the retired node frozen at the failover. Every
+ * caller outside the deploy must therefore check the swap before it reseeds.
  *
  * Rule: every use of `configureStandbyReplication` in `src/` (a call, or a
  * value handed on under another name, followed through aliases) sits in a
  * top-level function that calls `detectComposeHaRoleSwap` or
  * `assertNoComposeHaRoleSwap` earlier. The one exemption is the deploy effect
- * (effects/compose-ha.js), which only runs after the orchestrator's
- * `assertNoComposeHaRoleSwap` at the top of executeDeployment; that call is
- * asserted here too.
+ * (effects/compose-ha.js): the orchestrator classifies the env with
+ * `planComposeHaReconverge` at the top of executeDeployment and hands the role
+ * mapping to the effects (`reconverge:`), which resolve the pair by role; both
+ * are asserted here too.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -177,19 +178,22 @@ describe('configureStandbyReplication callers census (C2)', () => {
     );
   });
 
-  it('the deploy effect is exempt only because the orchestrator refuses a swapped env first', () => {
+  it('the deploy effect is exempt only because the orchestrator classifies a swapped env first', () => {
     const text = readFileSync(join(REPO, ORCHESTRATOR), 'utf-8');
     let calls = 0;
     walk(parseAst(text), (n) => {
       if (
         n.type === 'CallExpression' &&
         n.callee.type === 'Identifier' &&
-        n.callee.name === 'assertNoComposeHaRoleSwap'
+        n.callee.name === 'planComposeHaReconverge'
       ) {
         calls++;
       }
     });
     expect(calls).toBeGreaterThan(0);
+    // ...and threads the role mapping into the compose-ha effects.
+    const ctxBlock = text.slice(text.indexOf('const composeHaCtx = {'));
+    expect(ctxBlock.slice(0, ctxBlock.indexOf('};'))).toContain('reconverge: composeHaReconverge');
   });
 
   describe('planted fixtures', () => {

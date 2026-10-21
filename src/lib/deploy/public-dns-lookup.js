@@ -66,3 +66,38 @@ export function makePublicDnsLookup({
     });
   };
 }
+
+/**
+ * The A records a hostname resolves to, through the public resolvers first (a
+ * fresh view, no local negative cache) and the system resolver when public DNS
+ * is unreachable. Used by the compose-HA reconverge to check DNS already points
+ * at the promoted primary before it rebuilds the retired node.
+ *
+ * @param {string} hostname
+ * @param {object} [opts]
+ * @param {string[]} [opts.servers]
+ * @param {{resolve4: Function}} [opts.resolver] - injectable Resolver (tests)
+ * @param {Function} [opts.fallback] - injectable system lookup (tests)
+ * @returns {Promise<string[]>} empty when nothing resolves
+ */
+export async function resolvePublicA(
+  hostname,
+  { servers = PUBLIC_DNS_SERVERS, resolver, fallback = dnsCallback.lookup } = {},
+) {
+  let r = resolver;
+  if (!r) {
+    r = new dnsCallback.Resolver({ timeout: 3_000, tries: 2 });
+    r.setServers(servers);
+  }
+  const publicAnswer = await new Promise((resolve) => {
+    r.resolve4(hostname, (err, addresses) =>
+      resolve(!err && Array.isArray(addresses) ? addresses : []),
+    );
+  });
+  if (publicAnswer.length > 0) return publicAnswer;
+  return new Promise((resolve) => {
+    fallback(hostname, { all: true, family: 4 }, (err, addresses) =>
+      resolve(err || !Array.isArray(addresses) ? [] : addresses.map((a) => a.address)),
+    );
+  });
+}

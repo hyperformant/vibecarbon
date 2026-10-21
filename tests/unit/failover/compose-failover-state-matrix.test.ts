@@ -8,10 +8,11 @@
  * guard: `assertFailoverPreconditions` before any write, the journal right
  * before the promote, and an unconfirmed promote keeps the old primary fenced.
  *
- * C2: after one compose failover the roles are swapped in config, but the
- * WireGuard address the reseed dials (10.99.0.1) stays on the node born as the
- * primary. A second failover would reseed the retired node from its own
- * address. It is refused before any ssh call.
+ * C2: after one compose failover the roles are swapped in config and the
+ * retired node is frozen at the failover. A second failover before a deploy
+ * has reconverged the pair is refused before any ssh call; once reconverged,
+ * the reseed dials the role primary's own tunnel address (its birth stack's,
+ * wgIpOf), never a fixed 10.99.0.1.
  *
  * The guard reads, reseed, journal, promote, fence and swap are injected seams;
  * the post-promote steps run against the mocked compose ssh layer.
@@ -172,9 +173,16 @@ async function run(opts: RunOpts = {}) {
       order.push('readStandby');
       return reseeded ? seededState : standbyState;
     },
-    reseed: async (standbyIp: string, primaryIp: string) => {
+    reseed: async (
+      standbyIp: string,
+      primaryIp: string,
+      _key: string,
+      _project: string,
+      reseedOpts: unknown,
+    ) => {
       order.push('reseed');
       captured.reseedArgs = [standbyIp, primaryIp];
+      captured.reseedOpts = reseedOpts;
       reseeded = true;
       return true;
     },
@@ -482,6 +490,8 @@ describe('failoverComposeHA state matrix', () => {
     });
     expect(thrown).toBeUndefined();
     expect(captured.reseedArgs).toEqual([STANDBY_IP, PRIMARY_IP]);
+    // Over the primary's own tunnel address: it was born as the -primary stack.
+    expect(captured.reseedOpts).toEqual({ primaryHost: '10.99.0.1' });
     // Reseeded from the FENCED primary, after the gate found it not streaming,
     // and proven free of the fence the basebackup copied, before the journal.
     expect(order.indexOf('dbFence')).toBeLessThan(order.indexOf('catchUp'));
@@ -772,12 +782,11 @@ describe('failoverComposeHA on a role-swapped env (C2)', () => {
 
   it('throws before any ssh call, naming the retired node and the documented recovery', async () => {
     const { thrown } = await run({ envConfig: swapped(), noSeams: true });
-    expect(thrown?.message).toMatch(/swapped/);
+    expect(thrown?.message).toMatch(/already failed over/);
     expect(thrown?.message).toMatch(/second failover/);
     expect(thrown?.message).toContain(PRIMARY_IP);
-    expect(thrown?.message).toContain('vibecarbon destroy prod');
     expect(thrown?.message).toContain('vibecarbon deploy prod');
-    expect(thrown?.message).toContain('vibecarbon restore prod');
+    expect(thrown?.message).not.toContain('vibecarbon destroy');
     expect(thrown?.message).not.toMatch(/—/);
     expect(composeSsh.sshRun).not.toHaveBeenCalled();
     expect(composeSsh.sshRunAsync).not.toHaveBeenCalled();
@@ -797,8 +806,29 @@ describe('failoverComposeHA on a role-swapped env (C2)', () => {
           spinner: () => ({ start() {}, stop() {} }),
         },
       ),
-    ).rejects.toThrow(/swapped/);
+    ).rejects.toThrow(/already failed over/);
     expect(composeSsh.sshRun).not.toHaveBeenCalled();
+  });
+
+  it('a swapped pair a deploy reconverged fails over again, reseeding over the primary own address', async () => {
+    // The role primary (PRIMARY_IP) was born as the -standby stack: its tunnel
+    // address is 10.99.0.2, and that is what the reseed must dial.
+    const reconverged = baseEnvConfig({
+      servers: [
+        { name: 'myapp-prod-standby', role: 'primary', ip: PRIMARY_IP, region: 'ash' },
+        { name: 'myapp-prod-primary', role: 'standby', ip: STANDBY_IP, region: 'nbg1' },
+      ],
+    });
+    const { captured, thrown } = await run({
+      envConfig: reconverged,
+      primaryReachable: true,
+      standbyState: replica({ receiverStatus: null }),
+      primaryState: primaryDb(),
+      seededState: replica({ receiverStatus: 'streaming' }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(captured.reseedArgs).toEqual([STANDBY_IP, PRIMARY_IP]);
+    expect(captured.reseedOpts).toEqual({ primaryHost: '10.99.0.2' });
   });
 });
 

@@ -63,8 +63,8 @@ import { composeDbRecreateShell, composeRoleEnv, walgRoleDegradedMessage } from 
 import {
   exchangeAndBringUpTunnel,
   REPL_GATEWAY_PORT,
-  WG_PRIMARY_IP,
   WG_SUBNET_CIDR,
+  wgIpOf,
 } from '../wireguard.js';
 import {
   clearWriteFenceMarker,
@@ -74,6 +74,7 @@ import {
 import {
   assertNoComposeHaRoleSwap,
   composeHaFailoverRecoveryInstructions,
+  composeHaStackOf,
 } from './ha-role-swap.js';
 import { sshRun, sshRunAsync, sshRunChecked } from './index.js';
 
@@ -217,8 +218,9 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
  * standby dials the current primary's tunnel IP over wg0 (docker bridge → host
  * wg0), and the promoted node already exposes its db on its own tunnel IP.
  *
- * @param {string} selfWgIp - this node's WireGuard tunnel IP (WG_PRIMARY_IP on
- *   the primary, WG_STANDBY_IP on the standby)
+ * @param {string} selfWgIp - this node's WireGuard tunnel IP, from its BIRTH stack
+ *   (wgIpOf): it never changes with the node's role, so a failover never
+ *   rewrites this overlay or recreates the serving primary's db (R11)
  * @returns {string} the YAML overlay content
  */
 /**
@@ -282,9 +284,70 @@ export async function configurePrimaryReplication(primaryIp, standbyIp, sshKeyPa
   // IP (10.99.0.x) which only exists once `wg0` is up.
   await exchangeAndBringUpTunnel({ primaryIp, standbyIp, sshKeyPath });
 
+  await ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, projectName);
+
+  // Set WAL settings for replication
+  await sshRunChecked(
+    primaryIp,
+    sshKeyPath,
+    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_level = 'replica';" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET max_wal_senders = 5;" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_keep_size = '512MB';"`,
+    { timeout: 30_000, what: 'WAL replication settings (ALTER SYSTEM)' },
+  );
+
+  // No app-layer TLS. Replication runs over the WireGuard tunnel (brought up
+  // above), which encrypts the wire, so Postgres itself speaks plaintext — the
+  // retired verify-ca transport's cert install + `ALTER SYSTEM SET ssl='on'`
+  // are gone (public-IP-era plumbing).
+
+  // Restart PostgreSQL to apply WAL changes
+  await sshRunChecked(primaryIp, sshKeyPath, `cd ${remoteDir} && docker compose restart db`, {
+    timeout: 60_000,
+    what: 'primary db restart (to load the new WAL settings)',
+  });
+
+  // Wait for PostgreSQL to be ready again.
+  //
+  // This loop used to be `try { await sshRun(...); return; } catch { /* retry */ }`.
+  // sshRun answers `false` and never throws, so the catch was unreachable and
+  // the `return` fired unconditionally on the FIRST iteration — it waited for
+  // nothing, and had no sleep either. configurePrimaryReplication then returned
+  // while the restart above was still in flight, and the standby's
+  // pg_basebackup raced a postmaster that was not yet accepting connections.
+  for (let i = 0; i < 15; i++) {
+    const ready = await sshRun(
+      primaryIp,
+      sshKeyPath,
+      `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres`,
+      { timeout: 10_000 },
+    );
+    if (ready !== false) return;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error(
+    `Primary PostgreSQL did not become ready on ${primaryIp} within ~30s of the ` +
+      'WAL-settings restart; the standby base backup would race an unavailable postmaster.',
+  );
+}
+
+/**
+ * The primary side of replication that needs no restart: start this node's
+ * `repl-gateway` on its own tunnel address, create or update the `replicator`
+ * role and the `vibecarbon_standby_slot` physical slot, and admit replication
+ * in pg_hba (applied with `pg_reload_conf()`). Run on whichever node is the
+ * ROLE primary: `configurePrimaryReplication` on a first deploy, and the
+ * role-aware compose-HA reconverge on a promoted node, whose db must never be
+ * restarted (it is serving).
+ *
+ * @param {string} primaryIp - the role primary's public IP
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ */
+export async function ensurePrimaryReplicationAccess(primaryIp, sshKeyPath, projectName) {
+  const remoteDir = `/opt/${projectName}`;
   // Start the primary's repl-gateway (socat, host netns). The overlay file was
   // written to the node earlier in the deploy flow; `up -d repl-gateway` binds
-  // WG_PRIMARY_IP:REPL_GATEWAY_PORT → 127.0.0.1:REPL_PORT now that wg0 exists.
+  // this node's own tunnel address (its overlay's selfWgIp, from wgIpOf) on
+  // REPL_GATEWAY_PORT → 127.0.0.1:REPL_PORT now that wg0 exists.
   await sshRunChecked(
     primaryIp,
     sshKeyPath,
@@ -409,48 +472,6 @@ END $$;
         `connections would be rejected with "no pg_hba.conf entry".`,
     );
   }
-
-  // Set WAL settings for replication
-  await sshRunChecked(
-    primaryIp,
-    sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_level = 'replica';" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET max_wal_senders = 5;" && docker compose exec -T db psql -U postgres -d postgres -c "ALTER SYSTEM SET wal_keep_size = '512MB';"`,
-    { timeout: 30_000, what: 'WAL replication settings (ALTER SYSTEM)' },
-  );
-
-  // No app-layer TLS. Replication runs over the WireGuard tunnel (brought up
-  // above), which encrypts the wire, so Postgres itself speaks plaintext — the
-  // retired verify-ca transport's cert install + `ALTER SYSTEM SET ssl='on'`
-  // are gone (public-IP-era plumbing).
-
-  // Restart PostgreSQL to apply WAL changes
-  await sshRunChecked(primaryIp, sshKeyPath, `cd ${remoteDir} && docker compose restart db`, {
-    timeout: 60_000,
-    what: 'primary db restart (to load the new WAL settings)',
-  });
-
-  // Wait for PostgreSQL to be ready again.
-  //
-  // This loop used to be `try { await sshRun(...); return; } catch { /* retry */ }`.
-  // sshRun answers `false` and never throws, so the catch was unreachable and
-  // the `return` fired unconditionally on the FIRST iteration — it waited for
-  // nothing, and had no sleep either. configurePrimaryReplication then returned
-  // while the restart above was still in flight, and the standby's
-  // pg_basebackup raced a postmaster that was not yet accepting connections.
-  for (let i = 0; i < 15; i++) {
-    const ready = await sshRun(
-      primaryIp,
-      sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db pg_isready -h 127.0.0.1 -U postgres`,
-      { timeout: 10_000 },
-    );
-    if (ready !== false) return;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error(
-    `Primary PostgreSQL did not become ready on ${primaryIp} within ~30s of the ` +
-      'WAL-settings restart; the standby base backup would race an unavailable postmaster.',
-  );
 }
 
 /**
@@ -462,7 +483,22 @@ END $$;
  * 3. Atomically swap PGDATA on the HOST (shared buildNodePgdataSwapScript)
  * 4. `docker compose start db` and wait (loudly) for recovery mode
  */
-export async function configureStandbyReplication(standbyIp, primaryIp, sshKeyPath, projectName) {
+export async function configureStandbyReplication(
+  standbyIp,
+  primaryIp,
+  sshKeyPath,
+  projectName,
+  { primaryHost } = {},
+) {
+  // The role primary's tunnel address, from its stack identity (wgIpOf). No
+  // default: the address follows the node's birth stack, not its role, so a
+  // constant here would dial the retired node after a failover (R11).
+  if (!primaryHost) {
+    throw new Error(
+      'configureStandbyReplication: primaryHost is required (the role primary tunnel ' +
+        'address, wgIpOf({ stackIdentity }) of its stack)',
+    );
+  }
   const remoteDir = `/opt/${projectName}`;
   // replPassword is generated at create time from crypto.randomBytes and is
   // restricted to base64url characters — no shell escaping needed.
@@ -506,9 +542,10 @@ END $$;`;
   // Start the standby's repl-gateway (socat, host netns). The tunnel (host wg0)
   // is already up — configurePrimaryReplication brought it up on both nodes at
   // deploy time, and it persists across the restore/re-seed re-entry. Binding
-  // WG_STANDBY_IP:REPL_GATEWAY_PORT self-exposes the standby's LOCAL db over the
-  // tunnel so the transport is symmetric after a failover (the promoted standby
-  // is then the primary, and the old primary streams from WG_STANDBY_IP).
+  // its own tunnel address on REPL_GATEWAY_PORT self-exposes the standby's LOCAL
+  // db over the tunnel so the transport is symmetric after a failover (the
+  // promoted standby is then the primary, and the old primary streams from the
+  // promoted node's own address).
   await sshRunChecked(
     standbyIp,
     sshKeyPath,
@@ -538,20 +575,22 @@ END $$;`;
   // NOT throw), so a failed stage/stop/swap aborts loudly instead of booting a
   // silently-independent standby.
   //
-  // The connection targets the PRIMARY's WireGuard tunnel IP (WG_PRIMARY_IP) on
-  // the repl-gateway relay port (REPL_GATEWAY_PORT), NOT the primary's public
-  // IP: the standby db container reaches 10.99.0.1:15433 via the host's wg0
+  // The connection targets the PRIMARY's WireGuard tunnel address
+  // (`primaryHost`) on the repl-gateway relay port (REPL_GATEWAY_PORT), NOT the
+  // primary's public IP: the standby db container reaches it via the host's wg0
   // (docker bridge → host route → wg0), where the primary's socat relay
-  // forwards to the primary db (127.0.0.1:REPL_PORT). WG_PRIMARY_IP is fixed to
-  // whichever node is currently primary (exchangeAndBringUpTunnel assigns it),
-  // so this stays correct across a role swap once failover re-establishes the
-  // tunnel with swapped endpoints. probeFirst aborts cleanly (exit 0, nothing
-  // staged, db never stopped) when the primary's gateway is unreachable.
+  // forwards to the primary db (127.0.0.1:REPL_PORT). Tunnel addresses are bound
+  // to the node's BIRTH stack, not its role (exchangeAndBringUpTunnel gives the
+  // `-primary` stack's node the first address forever), so after a failover the
+  // role primary is the node born as the standby and the caller passes its
+  // address (wgIpOf of the role primary's stack). probeFirst aborts cleanly
+  // (exit 0, nothing staged, db never stopped) when the primary's gateway is
+  // unreachable.
   // Plaintext (no PGSSLMODE/PGSSLROOTCERT) — WireGuard is the encryption layer.
   const stagingDir = '/var/lib/postgresql/data/.reseed_staging';
   const basebackupScript = `${buildStagedBasebackupScript({
     replPassword,
-    primaryHost: WG_PRIMARY_IP,
+    primaryHost,
     primaryPort: String(REPL_GATEWAY_PORT),
     probeFirst: true,
     swap: false,
@@ -561,7 +600,7 @@ END $$;`;
     // backup connection, but we write our own anyway so it's byte-identical to
     // what the shared builder produces.
     primaryConninfo: buildPrimaryConninfo({
-      primaryHost: WG_PRIMARY_IP,
+      primaryHost,
       port: REPL_GATEWAY_PORT,
       replPassword,
     }),
@@ -593,7 +632,7 @@ echo COMPOSE_RESEED_STAGED
     // keeps serving its independent postgres. Loud (the caller decides whether
     // to warn-and-continue), and faster than burning the 180s recovery budget.
     throw new Error(
-      `configureStandbyReplication: primary's repl-gateway (${WG_PRIMARY_IP}:${REPL_GATEWAY_PORT}) ` +
+      `configureStandbyReplication: primary's repl-gateway (${primaryHost}:${REPL_GATEWAY_PORT}) ` +
         `is not reachable from the standby db container: pg_basebackup skipped, standby ` +
         `left untouched. Check the WireGuard tunnel (wg show) and the repl-gateway ` +
         `services on both nodes.`,
@@ -1582,10 +1621,11 @@ export async function failoverComposeHA(
   deps = {},
 ) {
   const projectName = projectConfig.projectName;
-  // C2/R4: on a swapped env the reseed below would dial the WireGuard primary
-  // address, which still sits on the retired node, and copy it from itself.
-  // Refuse before any ssh call, a dry run included.
-  assertNoComposeHaRoleSwap({ projectName, environment: envName, envConfig, action: 'failover' });
+  // C2/R4: until a deploy reconverges a swapped env, the node with role standby
+  // is the retired node, frozen at the last failover. Refuse before any ssh
+  // call, a dry run included. A reconverged pair passes: the reseed below dials
+  // the role primary's own tunnel address.
+  assertNoComposeHaRoleSwap({ projectName, environment: envName, envConfig });
 
   const {
     keyExists = existsSync,
@@ -1843,7 +1883,11 @@ export async function failoverComposeHA(
       } else if (planned) {
         s.start('Re-seeding standby from primary (pg_basebackup)');
         try {
-          await reseed(standbyServer.ip, primaryServer.ip, sshKeyPath, projectName);
+          await reseed(standbyServer.ip, primaryServer.ip, sshKeyPath, projectName, {
+            primaryHost: wgIpOf({
+              stackIdentity: composeHaStackOf(primaryServer, projectName, envName),
+            }),
+          });
           // A reseed rewrites the standby's identity: the journal names what
           // was just seeded, and that is recorded for the next failover's proof.
           const seeded = await readStandby();
@@ -2161,12 +2205,11 @@ export async function failoverComposeHA(
   });
 
   p.log.success('Failover complete');
-  // The roles persisted above are now inverted relative to the Pulumi stacks,
-  // and compose-HA deploy resolves the pair from the stacks — so a redeploy
-  // would re-point DNS at the retired node and re-seed (WIPE) the node just
-  // promoted. `deploy` refuses this environment outright (see
-  // ha-role-swap.js); these instructions are the operator-facing half of that
-  // refusal and are rendered from the same module so the two cannot drift.
+  // The roles persisted above are now inverted relative to the Pulumi stacks.
+  // `vibecarbon deploy` reconverges by role (ha-role-swap.js): it keeps the
+  // promoted node serving and rebuilds the retired one as the standby. These
+  // instructions come from the same module as the refusal, so the two cannot
+  // drift.
   p.log.info(c.bold('Recovery instructions:'));
   for (const line of composeHaFailoverRecoveryInstructions({
     envName,

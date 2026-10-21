@@ -170,28 +170,35 @@ how long the runner's public resolvers took to converge. `verify-deploy` and the
 other verification steps are deliberately **not** pinned: that path is the
 customer cold path, and pinning it would hide an unpublished record.
 
-## Compose-HA after a failover (no automated failback)
+## Compose-HA after a failover
 
 `vibecarbon failover` on a `compose-ha` environment promotes the standby,
 repoints DNS, and records the swap by flipping the `role` field on the two
 `servers[]` entries. The Pulumi stacks keep their birth identity (the promoted
 node is still stack `<env>-standby`, the retired node still `<env>-primary`),
-and **compose-HA deploy resolves the pair from those stack names, not from the
-roles**. `vibecarbon deploy` therefore REFUSES a swapped compose-HA environment
-(`src/lib/deploy/compose/ha-role-swap.js`); running it would repoint DNS at the
-retired node and re-seed (wipe) the promoted primary's database. There is no
-bypass flag, and no automated failback: restoring HA symmetry needs role-aware
-compose-HA redeploy support, which does not exist yet.
+and so do the WireGuard tunnel addresses: the `-primary` stack's node keeps
+`10.99.0.1` whatever its role, because re-addressing would recreate the serving
+primary's database.
 
-A second `vibecarbon failover` is refused the same way, before any ssh call, and
-`vibecarbon restore` skips its standby re-seed there (it prints why). Both would
-re-seed the node that now carries role `standby`, the retired born-primary, and
-the replication tunnel still gives that node the primary's WireGuard address,
-which is what the re-seed dials: it would copy the retired node from itself.
-Compose-HA failover is one-way. Today the way back to two nodes is to rebuild
-the environment from its backups: `vibecarbon destroy <env>` (it keeps the
-backup bucket by default), then `vibecarbon deploy <env>`, then
-`vibecarbon restore <env>`.
+To get back to two nodes, run `vibecarbon deploy <env>`. It rebuilds the
+retired node as the new standby, with no downtime. Deploy resolves the pair by
+role (`src/lib/deploy/compose/ha-role-swap.js`): the promoted node keeps
+serving as the primary and its database is never stopped, restarted or
+reseeded; the retired node's app tier is held at zero, and it is reseeded from
+the promoted node over the promoted node's own tunnel address. It refuses, with
+the cause, while a failover is still in flight (rerun `vibecarbon failover
+<env>` first), while the promoted node is still in recovery, and while DNS
+does not point at the promoted node yet. A deploy that fails part way leaves
+the environment swapped and degraded, and rerunning it resumes. Every later
+deploy of the pair stays role-aware, and skips the reseed while the standby
+streams.
+
+Until that deploy has verified streaming, a second `vibecarbon failover` is
+refused before any ssh call (the retired node is frozen at the failover and
+replicates nothing) and names `vibecarbon deploy <env>`. Once the deploy has
+reconverged the pair, failover works again in either direction.
+`vibecarbon restore` on a failed-over pair restores the primary and leaves the
+standby re-seed to `vibecarbon deploy <env>`, which rebuilds it by role.
 
 What the environment's DR posture actually is while it sits in that state:
 
@@ -208,7 +215,7 @@ What the environment's DR posture actually is while it sits in that state:
   failover that exited non-zero is not: treat the environment as unbacked-up
   until you have verified it.
 - `restore`, `scale` and `status` resolve the node by `role`, so they follow the
-  promotion correctly. `deploy` does not: it is the blocked path. `backup`
+  promotion correctly, and so does `deploy` (the reconverge above). `backup`
   resolves `servers[0]` (`serverIp: 'first'`), which post-failover is the
   **retired** node, so take on-demand backups against the promoted node until
   that path is role-aware. Do not assume a `backup create` against the retired
@@ -218,7 +225,7 @@ What the environment's DR posture actually is while it sits in that state:
   Check `WALG_ROLE` in `/opt/<project>/.env` on the retired node before running
   any manual backup there.
 
-The k8s-HA equivalent is different and is **not** blocked: `swapHaRoles` swaps
+The k8s-HA equivalent reconverges on its own model: `swapHaRoles` swaps
 `ha.primary` / `ha.standby` wholesale (each carries its own `.stack`), the
 orchestrator derives `haStacks` from them, and the reconverge deploy documented
 under "Recovery & Fail-back (k8s-ha)" in `docs/deploy-hetzner.md` is a green e2e

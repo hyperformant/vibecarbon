@@ -1,36 +1,35 @@
 /**
- * Compose-HA role-swap guard (data-loss refusal).
+ * Compose-HA role swap: the detector, and the role-aware reconverge plan.
  *
- * THE HAZARD. `vibecarbon failover` persists a compose-HA swap by flipping the
- * `role` FIELD on `envConfig.servers[]` (see failoverComposeHA in ./ha.js).
- * Nothing else moves: array order, entry `name`s, and the two Pulumi stacks
- * (`${env}-primary` / `${env}-standby`) all keep their birth identity. But the
- * compose-HA deploy resolves the pair from that PROVISIONING identity —
- * effects/compose-ha.js reads ctx.primary/ctx.standby straight out of the
- * `${env}-primary` / `${env}-standby` stack outputs and never consults the role
- * field. So a `vibecarbon deploy` against a swapped environment would:
+ * THE SHAPE. `vibecarbon failover` persists a compose-HA swap by flipping the
+ * `role` FIELD on `envConfig.servers[]` (see swapComposeHaRoles in ./ha.js).
+ * Nothing else moves: entry `name`s and the two Pulumi stacks (`${env}-primary`
+ * / `${env}-standby`) keep their birth identity, and so do the WireGuard tunnel
+ * addresses (the `-primary` stack's node keeps 10.99.0.1, R11: re-addressing
+ * would rewrite the serving primary's wg0 and replication overlay, which
+ * recreates its db).
  *
- *   1. persist role:'primary' back onto the retired node (silently undoing the
- *      swap the failover recorded),
- *   2. re-point apex + wildcard DNS at that retired node, and
- *   3. call configureStandbyReplication(<promoted node>, <retired node>) —
- *      destructive by design: it wipes the target's PGDATA and re-basebackups
- *      it from the source. The target here is the PROMOTED primary, holding
- *      every write taken since the failover.
+ * THE RECONVERGE (R12). `vibecarbon deploy` on such an environment resolves the
+ * pair by ROLE (`planComposeHaReconverge`): the promoted node stays the primary
+ * and the retired node is rebuilt as the new standby from it. Each node keeps
+ * its stack (Pulumi `up` runs on both, nothing is replaced) and its birth tunnel
+ * address; the reseed dials the promoted node's own address
+ * (`wgIpOf({ stackIdentity })`). The promoted node's db is never stopped,
+ * restarted or reseeded. It requires a finished failover:
+ *   - no failover journal (`ha.failoverInFlight`): rerun `vibecarbon failover`;
+ *   - the promoted node reads out of recovery;
+ *   - DNS already points at the promoted node.
  *
- * k8s-HA does not have this hole: `swapHaRoles` (src/failover.js) swaps
- * `ha.primary` / `ha.standby` — objects that carry their own `.stack` — and the
- * orchestrator derives `haStacks` from them, so its redeploy follows the role↔
- * stack mapping. Compose-HA has no such reconciler.
+ * k8s-HA reconverges on its own model: `swapHaRoles` (src/failover.js) swaps
+ * `ha.primary` / `ha.standby`, objects that carry their own `.stack`.
  *
- * Until role-aware compose-HA redeploy ships, the deploy REFUSES a swapped
- * environment. There is deliberately no bypass flag: the only outcomes of
- * proceeding are silent data loss or a manual recovery the operator could just
- * as well perform before deploying.
+ * Until a reconverge has verified streaming, `lastFailover` stays set, and a
+ * second `vibecarbon failover` and `restore`'s standby re-seed refuse with the
+ * reconverge (`vibecarbon deploy`) as the way back.
  *
- * This module is PURE (no I/O, no imports) so the detector can be unit-tested
- * against config fixtures and called at the very top of executeDeployment,
- * ahead of every infra mutation.
+ * This module does no I/O: the readers the readiness check needs are injected,
+ * so it is unit-tested against config fixtures and called at the very top of
+ * executeDeployment, ahead of every infra mutation.
  */
 
 const PRIMARY = 'primary';
@@ -131,111 +130,82 @@ export function detectComposeHaRoleSwap({ projectName, environment, envConfig } 
 }
 
 /**
- * Render the refusal. States what is true of THIS environment (which node holds
- * the writes, which stack each was born as) and exactly what a deploy would do
- * to it, so the operator can act without reading the source.
+ * The stack a servers[] entry belongs to, for the WireGuard address lookup
+ * (`wgIpOf`). A legacy entry with no stack-shaped name falls back to its role:
+ * the detector cannot read a swap there, so it is treated as never swapped.
+ *
+ * @returns {'primary'|'standby'|null}
  */
-export function composeHaRoleSwapMessage(detail) {
-  const { environment, byStack, lastFailover } = detail;
-  const live = byStack.standby; // provisioned as `${env}-standby`, promoted by the failover
-  const retired = byStack.primary; // provisioned as `${env}-primary`, retired by the failover
-  const liveIp = live.ip ?? '(ip unknown)';
-  const retiredIp = retired.ip ?? '(ip unknown)';
-  return [
-    `Refusing to deploy "${environment}": a failover has swapped the compose-HA roles in this environment.`,
-    '',
-    `  Live node      ${liveIp.padEnd(16)}role "${live.role}"  — provisioned as Pulumi stack "${environment}-standby"`,
-    `  Retired node   ${retiredIp.padEnd(16)}role "${retired.role}"  — provisioned as Pulumi stack "${environment}-primary"`,
-    ...(lastFailover ? [`  Last failover  ${lastFailover}`] : []),
-    '',
-    'Compose-HA deploy is not role-aware: it resolves the pair from the Pulumi stack',
-    'names, not from the roles the failover persisted. On this environment it would',
-    `  - re-point DNS (apex + wildcard) at the retired node ${retiredIp}, and`,
-    `  - re-seed ${liveIp} as the standby, which WIPES that node's PostgreSQL data`,
-    '    directory and re-basebackups it from the retired node, destroying every',
-    '    write taken since the failover.',
-    '',
-    'This path is blocked until role-aware compose-HA redeploy support ships. There is',
-    'no automated failback today: see the operational notes in docs/rto-rpo.md before',
-    'taking any recovery action on this environment.',
-  ].join('\n');
+export function composeHaStackOf(entry, projectName, environment) {
+  const stack = stackIdentityOf(entry, projectName, environment);
+  if (stack) return stack;
+  return entry?.role === PRIMARY || entry?.role === STANDBY ? entry.role : null;
+}
+
+/** A failover swapped the roles and no deploy has reconverged them since. */
+function failedOverSinceLastDeploy(envConfig) {
+  if (!envConfig?.lastFailover) return false;
+  const failedOverAt = Date.parse(envConfig.lastFailover);
+  const deployedAt = Date.parse(envConfig.deployedAt ?? '');
+  if (Number.isNaN(deployedAt)) return true;
+  return Number.isNaN(failedOverAt) || failedOverAt > deployedAt;
 }
 
 /**
- * Today's supported way back to two nodes after a compose-HA failover: rebuild
- * the environment from its backups. destroy keeps the backup bucket by default,
- * so the new deploy can restore the promoted node's data. The one place this
- * path is spelled, so a later change to it lands everywhere at once.
+ * The way back to two nodes after a compose-HA failover: one deploy. The one
+ * place this path is spelled, so the failover refusal, its recovery lines and
+ * restore's skip all name the same command.
  *
  * @param {string} environment
  * @returns {string[]}
  */
 export const COMPOSE_HA_SWAPPED_RECOVERY = (environment) => [
-  'To get back to two nodes, rebuild the environment from its backups:',
-  `  1. vibecarbon destroy ${environment}   (the backup bucket is kept by default)`,
-  `  2. vibecarbon deploy ${environment}`,
-  `  3. vibecarbon restore ${environment}`,
+  `Run vibecarbon deploy ${environment} to get back to two nodes: it keeps the promoted node`,
+  'serving as the primary and rebuilds the retired node as the new standby from it,',
+  'with no downtime.',
 ];
 
 /**
- * Render the failover refusal (R4). A second compose-HA failover on a swapped
- * environment would aim the reseed at the retired node: WireGuard gives the
- * primary tunnel address to the node BORN as the primary, and that address is
- * what configureStandbyReplication dials, so the retired node would be
- * basebackuped from itself and then promoted with data frozen at the last
- * failover.
+ * Render the failover refusal (R4). Until a deploy reconverges, the node with
+ * role standby is the retired node, frozen at the failover and not replicating:
+ * promoting it would serve a database missing every write since.
  */
 export function composeHaFailoverRefusalMessage(detail) {
   const { environment, byStack, lastFailover } = detail;
   const liveIp = byStack.standby.ip ?? '(ip unknown)';
   const retiredIp = byStack.primary.ip ?? '(ip unknown)';
   return [
-    `Failover refused: "${environment}" already failed over, and the compose-HA roles are still swapped.`,
+    `Failover refused: "${environment}" already failed over, and no deploy has rebuilt the retired node as the standby yet.`,
     '',
     `  Live node      ${liveIp.padEnd(16)}role "${byStack.standby.role}", born as Pulumi stack "${environment}-standby"`,
     `  Retired node   ${retiredIp.padEnd(16)}role "${byStack.primary.role}", born as Pulumi stack "${environment}-primary"`,
     ...(lastFailover ? [`  Last failover  ${lastFailover}`] : []),
     '',
-    "The replication tunnel still gives the primary's address to the node born as the",
-    `primary, which is the retired node ${retiredIp}. A second failover would re-seed it`,
-    'from its own address and promote a database frozen at the last failover, so',
-    'compose-HA failover is one-way.',
+    `The retired node ${retiredIp} is frozen at the last failover and does not replicate,`,
+    'so a second failover would promote a database missing every write since.',
     '',
     ...COMPOSE_HA_SWAPPED_RECOVERY(environment),
   ].join('\n');
 }
 
 /**
- * Entry guard for the commands that would act on a swapped environment as if
- * its roles matched its stacks. Throws when the environment is in the
- * post-failover swapped state; returns silently otherwise (including for every
- * non-compose-HA tier). Called from executeDeployment before any infra mutation
- * (`action: 'deploy'`, the default) and from failoverComposeHA before any ssh
- * call (`action: 'failover'`).
+ * Failover's entry guard. Throws when the environment failed over and no deploy
+ * has reconverged it (`lastFailover` is cleared only by a reconverge that
+ * verified streaming); returns silently otherwise, including on a swapped pair
+ * a deploy already rebuilt, where the reseed dials the role primary's address.
+ * Called from failoverComposeHA before any ssh call.
  *
- * @param {{ projectName: string, environment: string, envConfig: object, action?: 'deploy'|'failover' }} args
+ * @param {{ projectName: string, environment: string, envConfig: object }} args
  */
-export function assertNoComposeHaRoleSwap({
-  projectName,
-  environment,
-  envConfig,
-  action = 'deploy',
-}) {
+export function assertNoComposeHaRoleSwap({ projectName, environment, envConfig }) {
   const detail = detectComposeHaRoleSwap({ projectName, environment, envConfig });
-  if (!detail) return;
-  throw new Error(
-    action === 'failover'
-      ? composeHaFailoverRefusalMessage(detail)
-      : composeHaRoleSwapMessage(detail),
-  );
+  if (!detail || !envConfig?.lastFailover) return;
+  throw new Error(composeHaFailoverRefusalMessage(detail));
 }
 
 /**
  * The recovery steps `vibecarbon failover` prints after a compose-HA swap.
- *
- * Lives here so it cannot drift from the refusal above — the instructions used
- * to end with "3. Redeploy to update configuration", which walked the operator
- * into exactly the data loss that guard now blocks.
+ * Shares COMPOSE_HA_SWAPPED_RECOVERY with the refusal so the two cannot drift.
  *
  * @param {{envName: string, promotedIp: string, retiredIp: string}} args
  * @returns {string[]}
@@ -245,32 +215,169 @@ export function composeHaFailoverRecoveryInstructions({ envName, promotedIp, ret
     `1. ${promotedIp} is now the primary, every write from here on lands there.`,
     `2. Fix the issue on the retired node (${retiredIp}) but keep it out of service: its`,
     '   database is frozen at the moment of the failover.',
-    `3. Do NOT run \`vibecarbon deploy ${envName}\`, compose-HA deploy is not role-aware,`,
-    `   so it would re-point DNS at ${retiredIp} and WIPE ${promotedIp}'s database. Deploy`,
-    '   refuses this environment until role-aware redeploy support ships.',
-    '4. There is no automated failback today: see the operational notes in',
-    '   docs/rto-rpo.md before restoring HA symmetry.',
+    `3. Run \`vibecarbon deploy ${envName}\` once ${retiredIp} answers: it keeps ${promotedIp}`,
+    `   serving as the primary and rebuilds ${retiredIp} as the new standby from it.`,
   ];
 }
 
 /**
- * How to resync a compose-HA standby that a re-seed just failed to bring back
- * (restore.js's post-restore re-seed). `vibecarbon deploy` IS the resync for a
- * symmetric environment — it re-runs configureStandbyReplication — but on a
- * swapped one the same sentence points at a deploy that now refuses, so the
- * hint has to know which environment it is talking about. Shared with the
- * refusal above so the two can't disagree.
+ * How to resync a compose-HA standby that restore's re-seed did not (or must
+ * not) bring back. `vibecarbon deploy` is the resync in every case: on a failed
+ * over environment it is the role-aware reconverge. A failover still in flight
+ * has to finish first.
  *
  * @param {{projectName: string, environment: string, envConfig: object}} args
  * @returns {string}
  */
 export function composeHaStandbyResyncHint({ projectName, environment, envConfig }) {
-  if (detectComposeHaRoleSwap({ projectName, environment, envConfig })) {
+  if (envConfig?.ha?.failoverInFlight) {
     return (
-      `\`vibecarbon deploy ${environment}\` cannot resync it: a failover has swapped this ` +
-      "environment's roles and deploy refuses it (it would re-point DNS at the retired node " +
-      'and wipe the promoted primary). See the operational notes in docs/rto-rpo.md.'
+      `A failover is still in flight: run \`vibecarbon failover ${environment}\` to finish it, ` +
+      `then \`vibecarbon deploy ${environment}\` to rebuild the standby.`
+    );
+  }
+  if (
+    detectComposeHaRoleSwap({ projectName, environment, envConfig }) ||
+    failedOverSinceLastDeploy(envConfig)
+  ) {
+    return (
+      `Run \`vibecarbon deploy ${environment}\`: it rebuilds the standby from the primary by ` +
+      'role, with no downtime.'
     );
   }
   return `Run \`vibecarbon deploy ${environment}\` to resync the standby.`;
+}
+
+/** The fields of a servers[] entry a reconverge carries, plus its stack. */
+function reconvergeNode(entry, stack) {
+  return {
+    ip: entry.ip ?? null,
+    name: entry.name ?? null,
+    id: entry.id ?? null,
+    region: entry.region ?? null,
+    serverType: entry.serverType ?? null,
+    firewallId: entry.firewallId ?? null,
+    stack,
+  };
+}
+
+/**
+ * Classify a compose-HA deploy (R12): null for a pair that has not failed over
+ * since its last deploy and whose roles match its stacks (the normal deploy),
+ * otherwise the role mapping the deploy converges to. `promoted` is the node the
+ * persisted roles call primary, `retired` the other; each keeps its stack.
+ *
+ * A swapped pair stays a reconverge on every later deploy too (its roles never
+ * match its stacks again), which is idempotent: the reseed is skipped while the
+ * standby streams from the primary.
+ *
+ * @param {{ projectName: string, environment: string, envConfig: object }} args
+ * @returns {null | { promoted: object, retired: object }}
+ * @throws one line naming `vibecarbon failover` while a failover journal is set
+ */
+export function planComposeHaReconverge({ projectName, environment, envConfig } = {}) {
+  if (envConfig?.deployMode !== 'compose-ha') return null;
+  if (envConfig.ha?.failoverInFlight) {
+    throw new Error(
+      `Refusing to deploy "${environment}": a failover is still in flight (its journal is set), ` +
+        `so the roles may be mid-swap. run vibecarbon failover ${environment} to finish it, then deploy`,
+    );
+  }
+  const swapped = detectComposeHaRoleSwap({ projectName, environment, envConfig });
+  if (!swapped && !failedOverSinceLastDeploy(envConfig)) return null;
+
+  const servers = Array.isArray(envConfig.servers) ? envConfig.servers : [];
+  const promoted = servers.find((sv) => sv?.role === PRIMARY);
+  const retired = servers.find((sv) => sv?.role === STANDBY);
+  if (servers.length !== 2 || !promoted || !retired) return null;
+  // Stack identity must be read, never assumed: it picks each stack's Pulumi
+  // location and each node's tunnel address.
+  const promotedStack = stackIdentityOf(promoted, projectName, environment);
+  const retiredStack = stackIdentityOf(retired, projectName, environment);
+  if (!promotedStack || !retiredStack || promotedStack === retiredStack) return null;
+  return {
+    promoted: reconvergeNode(promoted, promotedStack),
+    retired: reconvergeNode(retired, retiredStack),
+  };
+}
+
+/**
+ * The reseed-target guard: refuse to wipe a node that may be the serving
+ * primary, out of recovery with DNS pointing at it. The target is the retired
+ * node by construction; this catches a config that says otherwise.
+ *
+ * @param {object} args
+ * @param {string} args.environment
+ * @param {{ ip: string }} args.target - the node about to be reseeded
+ * @param {{ inRecovery: boolean|null }} args.state - its replica state
+ * @param {string|null} args.domain
+ * @param {string[]} args.dnsAnswer - the domain's A records
+ */
+export function assertReseedTargetNotServing({ environment, target, state, domain, dnsAnswer }) {
+  if (state?.inRecovery === false && domain && dnsAnswer.includes(target.ip)) {
+    throw new Error(
+      `Refusing to reseed ${target.ip}: it is out of recovery and ${domain} resolves to it, so it ` +
+        `may be the serving primary. point DNS at the promoted primary only, then rerun ` +
+        `vibecarbon deploy ${environment}`,
+    );
+  }
+}
+
+/**
+ * The reconverge preconditions (R12), read before any infra mutation: the
+ * promoted node is out of recovery, DNS points at it, and the retired node is
+ * not serving. Throws one line naming the cause and the command that fixes it.
+ *
+ * @param {object} args
+ * @param {{ promoted: { ip: string }, retired: { ip: string } }} args.plan
+ * @param {string} args.environment
+ * @param {string|null} args.domain
+ * @param {(ip: string) => Promise<{ inRecovery: boolean|null }>} args.readState
+ * @param {(hostname: string) => Promise<string[]>} args.resolveA
+ */
+export async function assertComposeHaReconvergeReady({
+  plan,
+  environment,
+  domain,
+  readState,
+  resolveA,
+}) {
+  const refuse = (cause) => {
+    throw new Error(`Refusing to reconverge "${environment}": ${cause}`);
+  };
+  const { promoted, retired } = plan;
+  const promotedState = await readState(promoted.ip);
+  if (promotedState?.inRecovery == null) {
+    refuse(
+      `could not read the promoted primary's recovery state (${promoted.ip}). check its db is ` +
+        `up, then rerun vibecarbon deploy ${environment}`,
+    );
+  }
+  if (promotedState.inRecovery === true) {
+    refuse(
+      `the promoted node ${promoted.ip} is still in recovery, so the failover never finished ` +
+        `promoting it. run vibecarbon failover ${environment} to finish it, then deploy`,
+    );
+  }
+  if (!domain) return;
+  let dnsAnswer = [];
+  try {
+    dnsAnswer = (await resolveA(domain)) ?? [];
+  } catch {
+    dnsAnswer = [];
+  }
+  if (!dnsAnswer.includes(promoted.ip)) {
+    refuse(
+      `${domain} resolves to ${dnsAnswer.join(', ') || 'nothing'}, not the promoted primary ` +
+        `${promoted.ip}, so the failover's DNS flip has not landed. point the A records at ` +
+        `${promoted.ip}, then rerun vibecarbon deploy ${environment}`,
+    );
+  }
+  assertReseedTargetNotServing({
+    environment,
+    target: retired,
+    state: await readState(retired.ip),
+    domain,
+    dnsAnswer,
+  });
 }

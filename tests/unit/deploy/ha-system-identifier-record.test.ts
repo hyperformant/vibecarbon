@@ -109,7 +109,10 @@ describe('orchestrator persistence', () => {
     const after = src.slice(src.indexOf('const composeHaCtx = {'));
     const block = after.slice(after.indexOf('deployResult = {'));
     const result = block.slice(0, block.indexOf('};') + 2);
-    expect(result).toContain("replicationStatus: composeHaCtx.replActive ? 'streaming'");
+    // A reconverge that has not proven streaming records nothing (Task 3b).
+    expect(result).toContain(
+      "replicationStatus: composeHaCtx.replActive && !haDegraded ? 'streaming'",
+    );
     expect(result).toContain('systemIdentifier: composeHaCtx.systemIdentifier');
   });
 

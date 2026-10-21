@@ -191,7 +191,9 @@ describe('configurePrimaryReplication — WireGuard transport', () => {
 
 describe('configureStandbyReplication — WireGuard transport', () => {
   it('streams via the tunnel: basebackup + primary_conninfo target the peer tunnel IP:15433, plaintext', async () => {
-    await configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp');
+    await configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp', {
+      primaryHost: WG_PRIMARY_IP,
+    });
 
     // The standby gateway is started too (failover symmetry: self-exposes local db).
     expect(sshCalls.some((c) => c.command.includes('up -d repl-gateway'))).toBe(true);
@@ -223,7 +225,9 @@ describe('configureStandbyReplication — WireGuard transport', () => {
   });
 
   it('reseeds via stage-while-running → host-side stop → volume swap → start (container-kill fix)', async () => {
-    await configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp');
+    await configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp', {
+      primaryHost: WG_PRIMARY_IP,
+    });
 
     const standbyCmds = sshCalls.filter((c) => c.ip === STANDBY).map((c) => c.command);
     const all = sshCalls.map((c) => `${c.command}\n${c.input ?? ''}`).join('\n');
@@ -290,9 +294,9 @@ describe('configureStandbyReplication — WireGuard transport', () => {
       },
     );
 
-    await expect(configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp')).rejects.toThrow(
-      /staging the basebackup .* failed/i,
-    );
+    await expect(
+      configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp', { primaryHost: WG_PRIMARY_IP }),
+    ).rejects.toThrow(/staging the basebackup .* failed/i);
     // Nothing destructive happened: no stop, no swap.
     expect(sshCalls.some((c) => c.command.includes('stop db'))).toBe(false);
 
@@ -306,9 +310,9 @@ describe('configureStandbyReplication — WireGuard transport', () => {
         return orig?.(ip, k, command, options);
       },
     );
-    await expect(configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp')).rejects.toThrow(
-      /repl-gateway .* not reachable/i,
-    );
+    await expect(
+      configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp', { primaryHost: WG_PRIMARY_IP }),
+    ).rejects.toThrow(/repl-gateway .* not reachable/i);
     expect(sshCalls.some((c) => c.command.includes('stop db'))).toBe(false);
 
     sshRunMock.mockImplementation(orig as never);
@@ -382,7 +386,9 @@ describe('compose-ha replication + reseed connect as postgres', () => {
   // postgres, find pg_hba via SHOW hba_file, and chown the staged tree by name.
   it('every psql/pg_isready names postgres or replicator, and nothing names a retired role', async () => {
     await configurePrimaryReplication(PRIMARY, STANDBY, KEY, 'myapp');
-    await configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp');
+    await configureStandbyReplication(STANDBY, PRIMARY, KEY, 'myapp', {
+      primaryHost: WG_PRIMARY_IP,
+    });
     const text = sshCalls.map((c) => `${c.command}\n${c.input ?? ''}`).join('\n');
 
     expect(text).toContain('SHOW hba_file');

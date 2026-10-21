@@ -31,7 +31,7 @@ import { c } from './lib/colors.js';
 // while still accepting injected mocks for unit tests.
 import { configureStandbyReplication as realConfigureStandbyReplication } from './lib/deploy/compose/ha.js';
 import {
-  COMPOSE_HA_SWAPPED_RECOVERY,
+  composeHaStackOf,
   composeHaStandbyResyncHint,
   detectComposeHaRoleSwap,
 } from './lib/deploy/compose/ha-role-swap.js';
@@ -44,6 +44,7 @@ import {
   reseedStandbyFromPrimary as realReseedStandbyFromPrimary,
   verifyStreaming,
 } from './lib/deploy/replication.js';
+import { wgIpOf } from './lib/deploy/wireguard.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -568,39 +569,34 @@ export async function runComposeRestore({
   //
   // A re-seed failure is NOT a restore failure: the primary is restored and
   // serving — only the standby is degraded. Warn (don't rethrow) so the restore
-  // still reports success. `deploy` is the resync — but only for an environment
-  // whose roles still match its Pulumi stacks; on a failed-over one deploy
-  // refuses, so the hint is rendered by composeHaStandbyResyncHint rather than
-  // hard-coded (compose/ha-role-swap.js).
+  // still reports success, with `deploy` as the resync (composeHaStandbyResyncHint).
   //
-  // C2: on a role-swapped env (a failover ran and no rebuild since) the node
-  // with role standby is the retired born-primary, and WireGuard still gives it
-  // the primary address the re-seed dials: it would basebackup itself. Never
-  // re-seed there; say why and point at the recovery instead.
+  // C2: on a failed-over env (roles swapped against the stacks, or a failover
+  // after the last deploy) the standby is rebuilt by role, and that is the
+  // deploy's reconverge (compose/ha-role-swap.js): restore never re-seeds there,
+  // it says why and names `vibecarbon deploy` (or `vibecarbon failover` first
+  // while a failover is still in flight).
   if (envConfig.deployMode === 'compose-ha') {
+    const primary = envConfig.servers?.find((sv) => sv.role === 'primary');
     const standby = envConfig.servers?.find((sv) => sv.role === 'standby');
-    if (detectComposeHaRoleSwap({ projectName, environment: envName, envConfig })) {
+    if (
+      detectComposeHaRoleSwap({ projectName, environment: envName, envConfig }) ||
+      swappedSinceLastDeploy(envConfig) ||
+      envConfig.ha?.failoverInFlight
+    ) {
       p.log.warn(
-        'Primary restored and serving. Skipping the standby re-seed: this environment ' +
-          'failed over, and the re-seed would copy the retired node from its own address. ' +
+        'Primary restored and serving. Skipping the standby re-seed here: this environment ' +
+          'failed over, and its standby is rebuilt by the role-aware deploy. ' +
           composeHaStandbyResyncHint({ projectName, environment: envName, envConfig }),
-      );
-    } else if (swappedSinceLastDeploy(envConfig)) {
-      // An older config without stack names: the detector cannot read the
-      // roles against the stacks, but a failover after the last deploy says the
-      // same thing.
-      p.log.warn(
-        [
-          'Primary restored and serving. Skipping the standby re-seed: this environment ' +
-            `failed over (${envConfig.lastFailover}) after its last deploy, and the re-seed ` +
-            'would copy the retired node from its own address.',
-          ...COMPOSE_HA_SWAPPED_RECOVERY(envName),
-        ].join('\n'),
       );
     } else if (standby?.ip) {
       try {
         s.start('Re-seeding standby from restored primary (pg_basebackup)');
-        await configureStandbyReplication(standby.ip, serverIp, sshKeyPath, projectName);
+        await configureStandbyReplication(standby.ip, serverIp, sshKeyPath, projectName, {
+          primaryHost: wgIpOf({
+            stackIdentity: composeHaStackOf(primary, projectName, envName) ?? 'primary',
+          }),
+        });
         s.stop('Standby re-seeded from restored primary');
       } catch (err) {
         s.stop('Standby re-seed failed');

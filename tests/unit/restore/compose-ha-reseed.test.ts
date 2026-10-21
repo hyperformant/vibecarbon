@@ -75,12 +75,14 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
 
     // Primary restored first.
     expect(restoreCompose).toHaveBeenCalledWith('10.0.0.1', '/tmp/key', 'myapp', 'latest');
-    // Standby re-seeded FROM the restored primary: (standbyIp, primaryIp, key, name).
+    // Standby re-seeded FROM the restored primary: (standbyIp, primaryIp, key,
+    // name), dialing the primary's own tunnel address (its stack's, wgIpOf).
     expect(configureStandbyReplication).toHaveBeenCalledWith(
       '10.0.0.2',
       '10.0.0.1',
       '/tmp/key',
       'myapp',
+      { primaryHost: '10.99.0.1' },
     );
   });
 
@@ -173,11 +175,10 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
     expect(configureStandbyReplication).not.toHaveBeenCalled();
   });
 
-  it('never re-seeds a role-swapped env: the tunnel would copy the standby from itself', async () => {
-    // After a compose failover the retired node carries role standby, but
-    // WireGuard's primary address (10.99.0.1) is still on it (it was born the
-    // primary), and configureStandbyReplication always dials that address: a
-    // re-seed here would basebackup the retired node from its own database.
+  it('never re-seeds a role-swapped env: it names the role-aware deploy instead', async () => {
+    // After a compose failover the retired node carries role standby and is
+    // frozen at the failover; rebuilding it by role is the deploy's reconverge
+    // (compose/ha-role-swap.js), so restore leaves it to that.
     const restoreCompose = vi.fn().mockResolvedValue(undefined);
     const configureStandbyReplication = vi.fn().mockResolvedValue(true);
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
@@ -202,8 +203,10 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
     expect(restoreCompose).toHaveBeenCalledWith('10.0.0.2', '/tmp/key', 'myapp', 'latest');
     expect(configureStandbyReplication).not.toHaveBeenCalled();
     const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(text).toMatch(/cannot resync/);
-    expect(text).toMatch(/failover has swapped/);
+    expect(text).toMatch(/failed over/);
+    expect(text).toContain('vibecarbon deploy prod');
+    expect(text).toMatch(/rebuilds the standby/);
+    expect(text).not.toContain('vibecarbon destroy');
     warn.mockRestore();
   });
 
@@ -232,9 +235,34 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
 
     expect(configureStandbyReplication).not.toHaveBeenCalled();
     const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(text).toMatch(/failed over .* after its last deploy/);
-    expect(text).toContain('vibecarbon destroy prod');
-    expect(text).toContain('vibecarbon restore prod');
+    expect(text).toMatch(/failed over/);
+    expect(text).toContain('vibecarbon deploy prod');
+    expect(text).not.toContain('vibecarbon destroy');
+    warn.mockRestore();
+  });
+
+  it('with a failover still in flight, names vibecarbon failover before the deploy', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: {
+        deployMode: 'compose-ha',
+        ha: { failoverInFlight: { id: 'j', target: 'standby' } },
+        servers: [
+          { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
+          { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
+        ],
+      },
+      restoreCompose,
+      configureStandbyReplication,
+    });
+    expect(configureStandbyReplication).not.toHaveBeenCalled();
+    const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(text).toContain('vibecarbon failover prod');
+    expect(text).toContain('vibecarbon deploy prod');
     warn.mockRestore();
   });
 
