@@ -18,7 +18,11 @@
 
   "envVars": {
     "N8N_DB_PASSWORD": { "generate": "password", "length": 32 },
-    "N8N_ENCRYPTION_KEY": { "generate": "password", "length": 48 },
+    "N8N_ENCRYPTION_KEY": {
+      "generate": "password",
+      "length": 48,
+      "upgradeNote": "If n8n already ran for this project, copy encryptionKey from `docker exec {{PROJECT_NAME}}-n8n cat /home/node/.n8n/config` (on a deployed server, from the n8n data volume) into N8N_ENCRYPTION_KEY in .env and .env.local before `vibecarbon up` or deploy. Otherwise n8n refuses to start (\"Mismatching encryption keys\") and you lose its saved credentials."
+    },
     "N8N_WEBHOOK_URL": { "value": "http://localhost:5678" },
     "N8N_API_KEY": { "value": "" },
     "N8N_ADMIN_EMAIL": { "from": "ADMIN_EMAIL", "default": "admin@localhost" }

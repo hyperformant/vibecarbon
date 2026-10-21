@@ -196,8 +196,9 @@ export function ensureAppDbPassword(cwd, { dryRun = false } = {}) {
  *
  * @param {string} cwd
  * @param {{dryRun?: boolean, servicesDir?: string}} [opts]
- * @returns {{key: string, status: 'generated' | 'copied'}[]} what was (or,
- *   under -dry, would be) written
+ * @returns {{key: string, status: 'generated' | 'copied', upgradeNote?: string}[]}
+ *   what was (or, under -dry, would be) written; a generated key carries its
+ *   manifest `upgradeNote` when it declares one
  */
 export function ensureAddonSecrets(
   cwd,
@@ -220,10 +221,45 @@ export function ensureAddonSecrets(
       if (inLocal && inBase) continue;
       const existing = inLocal || inBase;
       if (!dryRun) setEnvVar(key, existing || generatePassword(config.length || 24), cwd);
-      written.push({ key, status: existing ? 'copied' : 'generated' });
+      const status = existing ? 'copied' : 'generated';
+      written.push(
+        status === 'generated' && config.upgradeNote
+          ? { key, status, upgradeNote: config.upgradeNote }
+          : { key, status },
+      );
     }
   }
   return written;
+}
+
+/**
+ * What `vibecarbon upgrade` says about one add-on secret it wrote. A
+ * generated role password needs the role to get it (a restart locally,
+ * `\password` on a server). A key whose manifest declares an `upgradeNote`
+ * (n8n's encryption key, which n8n already wrote into its own config) gets
+ * that note as a warning instead, with {{PROJECT_NAME}} filled in. Never
+ * includes a value.
+ *
+ * @param {{key: string, status: 'generated' | 'copied', upgradeNote?: string}} written
+ * @param {{dryRun?: boolean, projectName?: string}} [opts]
+ * @returns {{info: string, warn?: string}}
+ */
+export function addonSecretUpgradeNotes(
+  { key, status, upgradeNote },
+  { dryRun = false, projectName } = {},
+) {
+  const verb = dryRun ? 'Would set' : status === 'generated' ? 'Generated' : 'Copied';
+  const head = `${verb} ${key} in .env and .env.local`;
+  if (status !== 'generated') return { info: head };
+  if (upgradeNote) {
+    return {
+      info: head,
+      warn: upgradeNote.replaceAll('{{PROJECT_NAME}}', projectName || '<project>'),
+    };
+  }
+  return {
+    info: `${head}: restart the stack so the add-on role gets it (\`vibecarbon up\`; on a server, set it with \\password, see docs/security.md)`,
+  };
 }
 
 /**
@@ -311,14 +347,11 @@ function reconstructVariables(cwd, { dryRun = false } = {}) {
           : ''),
     );
   }
-  for (const { key, status } of ensureAddonSecrets(cwd, { dryRun })) {
-    const verb = status === 'generated' ? 'Generated' : 'Copied';
-    p.log.info(
-      `${dryRun ? `Would set` : verb} ${key} in .env and .env.local` +
-        (status === 'generated'
-          ? ': restart the stack so the add-on role gets it (`vibecarbon up`; on a server, set it with \\password, see docs/security.md)'
-          : ''),
-    );
+  const projectName = loadEnvVariables(cwd).PROJECT_NAME;
+  for (const written of ensureAddonSecrets(cwd, { dryRun })) {
+    const notes = addonSecretUpgradeNotes(written, { dryRun, projectName });
+    p.log.info(notes.info);
+    if (notes.warn) p.log.warn(notes.warn);
   }
   if (ensureDbImageEnv(cwd, { dryRun })) {
     const { ref } = resolveDbImage();
