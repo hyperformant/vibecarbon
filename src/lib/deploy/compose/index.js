@@ -28,7 +28,11 @@ import {
   BACKUP_NAME_RE,
   PGDATA_PATH,
   PREVIOUS_PGDATA_PATH,
+  PROVEN_WRITABLE_STATES,
+  REMOVE_DISCARD_SH,
   RESTORE_LAYOUT,
+  RETIRE_PREVIOUS_SH,
+  restoreFetchTimeoutS,
 } from '../../walg/restore-layout.js';
 import {
   ADMIN_PROBE_EXIT,
@@ -1303,30 +1307,39 @@ export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backup
 /**
  * Build the script that restores one NAMED wal-g base backup into a compose
  * db volume without destroying the live cluster before the backup is proven
- * (H2a). It runs inside a throwaway db container (`docker compose run --rm
- * ... db bash /restore.sh`), which mounts the real <project>_db_data volume
- * at $PGDATA.
+ * (H2a, C1). It runs inside a throwaway db container (`docker compose run
+ * --rm ... db bash /restore.sh`), which mounts the real <project>_db_data
+ * volume at $PGDATA.
  *
- *   1. Settle what an earlier unproven restore left: a `.vc-prev` that the CLI
- *      never removed (or a marker saying the staged copy was half moved in)
- *      means PGDATA holds that restore's copy and `.vc-prev` the database from
- *      before it. The copy goes to staging, which step 2 replaces; `.vc-prev`
- *      is kept.
- *   2. `wal-g backup-fetch` the named backup into `$PGDATA/.vc-restore`. A
- *      failed fetch clears staging and exits non-zero, the live cluster
- *      untouched.
- *   3. Write the recovery config and recovery.signal into staging.
- *   4. Swap under `.vc-restore-in-progress`: the live cluster's entries move
- *      into `$PGDATA/.vc-prev`, the staged ones into PGDATA, then the marker
- *      goes. A boot that finds the marker with no restore running refuses
- *      (carbon/volumes/db/db-guard.sh).
+ *   1. Take `$PGDATA/.vc-restore.lock` (flock): one restore at a time.
+ *   2. `wal-g backup-fetch` the named backup into `$PGDATA/.vc-restore`. The
+ *      only thing removed before it is that staging dir; no cluster entry
+ *      moves. A failed fetch clears staging and exits non-zero.
+ *   3. Prove the staged tree (PG_VERSION), drop any `.vc-*` entry it carries
+ *      (a base pushed while a restore's dirs sat in PGDATA), write the
+ *      recovery config and recovery.signal into it.
+ *   4. Settle and swap under `.vc-restore-in-progress`. What PGDATA holds
+ *      decides where its entries go:
+ *        - a marker reading "in", or a `.vc-prev` with no marker: PGDATA holds
+ *          an UNPROVEN copy (the CLI renames a proven restore's `.vc-prev` to
+ *          `.vc-discard` before anything else, so a surviving `.vc-prev` always
+ *          means its restore never proved itself); the copy goes to
+ *          `.vc-discard`, `.vc-prev` (the database from before) is kept;
+ *        - a marker reading anything else: the live cluster was half moved
+ *          into `.vc-prev`; finish that;
+ *        - otherwise: the live cluster moves to `.vc-prev` (not created when
+ *          PGDATA holds nothing, as on a fresh cluster).
+ *      Then the staged entries move into PGDATA, the marker goes, and
+ *      `.vc-discard` is removed. A boot that finds the marker with no restore
+ *      running refuses (carbon/volumes/db/db-guard.sh).
  *
- * PGDATA is the volume's mount point, so it cannot be renamed: staging and the
- * previous cluster live inside it, and the swap moves entries. Nothing here
- * removes `.vc-prev`; the CLI does, once the restored database promoted and
- * proved writable. The k8s walg-restore init container in
- * carbon/k8s/base/db/statefulset.yaml runs the same steps
- * (tests/unit/deploy/restore-destroy-before-verify-census.test.ts).
+ * PGDATA is the volume's mount point, so it cannot be renamed: staging, the
+ * previous cluster and the discard live inside it, and the swap moves
+ * entries. Nothing here removes `.vc-prev`; the CLI does, once the restored
+ * database promoted and proved writable. The k8s walg-restore init container
+ * in carbon/k8s/base/db/statefulset.yaml runs the same prelude, staged and
+ * swap steps (tests/unit/deploy/restore-destroy-before-verify-census.test.ts,
+ * tests/unit/walg/restore-script-states.test.ts).
  *
  * Pure (no I/O) so it can be tested without SSH.
  *
@@ -1344,24 +1357,18 @@ export function composeRestoreScript({ backup, recoveryConf } = /** @type {any} 
   if (!recoveryConf || /^VC_RECOVERY_CONF_EOF$/m.test(recoveryConf)) {
     throw new Error('composeRestoreScript: recoveryConf (renderRecoveryConf) is required');
   }
-  const { staging, previous, inProgress } = RESTORE_LAYOUT;
+  const { staging } = RESTORE_LAYOUT;
   return [
     '#!/bin/bash',
     'set -euo pipefail',
     `PGDATA=${PGDATA_PATH}`,
     `RESTORE_BACKUP='${backup}'`,
-    `VC_MARKER="$PGDATA/${inProgress}"`,
     'VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf',
     'cat > "$VC_RECOVERY_CONF_FILE" <<\'VC_RECOVERY_CONF_EOF\'',
     recoveryConf,
     'VC_RECOVERY_CONF_EOF',
     '',
-    "# The cluster's own entries in PGDATA: everything but the restore's.",
-    'vc_cluster_entries() {',
-    `  find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name ${staging} ! -name ${previous} ! -name ${inProgress}`,
-    '}',
-    '',
-    ...restoreSettleLines(),
+    ...restorePreludeLines(),
     '',
     '# 2. Fetch the named base backup into staging. The live cluster is untouched.',
     `rm -rf "$PGDATA/${staging}"`,
@@ -1371,7 +1378,7 @@ export function composeRestoreScript({ backup, recoveryConf } = /** @type {any} 
     '  echo "restore: wal-g backup-fetch $RESTORE_BACKUP failed; nothing was moved" >&2',
     '  exit 1',
     'fi',
-    ...restoreConfigureAndSwapLines(),
+    ...restoreStagedAndSwapLines(),
   ].join('\n');
 }
 
@@ -1379,38 +1386,43 @@ export function composeRestoreScript({ backup, recoveryConf } = /** @type {any} 
  * Step 1 of both restore scripts, shared text (the k8s init carries the same
  * lines; the census compares them).
  */
-function restoreSettleLines() {
-  const { staging, previous } = RESTORE_LAYOUT;
+function restorePreludeLines() {
+  const { inProgress, lock } = RESTORE_LAYOUT;
   return [
-    '# --- settle ---',
-    '# 1. A .vc-prev the CLI never removed means the restore that made it never',
-    '#    proved itself: .vc-prev still holds the database from before it, and',
-    '#    PGDATA holds that restore\'s copy. So does a marker reading "in" (the',
-    '#    staged copy was half moved in). Hand the copy to staging, which the',
-    '#    fetch replaces. A marker reading anything else means the live cluster',
-    '#    was half moved into .vc-prev: the swap below finishes that move.',
-    'if { [ -f "$VC_MARKER" ] && [ "$(cat "$VC_MARKER")" = in ]; } || \\',
-    `   { [ ! -f "$VC_MARKER" ] && [ -d "$PGDATA/${previous}" ]; }; then`,
-    '  echo in > "$VC_MARKER"',
-    `  mkdir -p "$PGDATA/${staging}"`,
-    `  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${staging}/"; done`,
+    '# --- prelude ---',
+    `VC_MARKER="$PGDATA/${inProgress}"`,
+    '# 1. One restore at a time on this volume.',
+    `exec 9>"$PGDATA/${lock}"`,
+    'if ! flock -n 9; then',
+    `  echo "restore: another restore holds $PGDATA/${lock}; refusing" >&2`,
+    '  exit 75',
     'fi',
-    '# --- end settle ---',
+    "# The cluster's own entries in PGDATA: everything but the restore's .vc-*.",
+    'vc_cluster_entries() {',
+    `  find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name '.vc-*'`,
+    '}',
+    '# --- end prelude ---',
   ];
 }
 
 /** Steps 3 and 4 of both restore scripts, shared text. */
-function restoreConfigureAndSwapLines() {
-  const { staging, previous } = RESTORE_LAYOUT;
+function restoreStagedAndSwapLines() {
+  const { staging, previous, discard, inProgress, lock } = RESTORE_LAYOUT;
+  const stagedVc = [staging, previous, discard, inProgress, lock]
+    .map((name) => `"$PGDATA/${staging}/${name}"`)
+    .join(' ');
   return [
+    '# --- staged ---',
     `if [ ! -f "$PGDATA/${staging}/PG_VERSION" ]; then`,
     `  rm -rf "$PGDATA/${staging}"`,
     '  echo "restore: $RESTORE_BACKUP fetched no PG_VERSION; nothing was moved" >&2',
     '  exit 1',
     'fi',
-    '',
-    '# 3. Recovery config into staging: strip the settings it rewrites, append the',
-    '#    new ones (rendered by the CLI, the same text on both tiers).',
+    '# 3. A base pushed while a restore left its dirs in PGDATA carries them:',
+    '#    drop them from the staged tree so they cannot wedge the swap.',
+    `rm -rf ${stagedVc}`,
+    '# Recovery config into staging: strip the settings it rewrites, append the',
+    '# new ones (rendered by the CLI, the same text on both tiers).',
     `VC_AUTO_CONF="$PGDATA/${staging}/postgresql.auto.conf"`,
     'touch "$VC_AUTO_CONF"',
     'while IFS= read -r vc_line; do',
@@ -1424,20 +1436,44 @@ function restoreConfigureAndSwapLines() {
     `chown -R postgres:postgres "$PGDATA/${staging}"`,
     '',
     '# --- swap ---',
-    '# 4. Swap under the in-progress marker: the live cluster into .vc-prev, the',
-    '#    staged one into PGDATA. .vc-prev stays until the CLI has proven the',
-    '#    restored database.',
-    'if [ ! -f "$VC_MARKER" ]; then',
-    '  : > "$VC_MARKER"',
+    '# 4. Settle what PGDATA holds, then swap under the in-progress marker.',
+    "#    .vc-discard is only ever an unproven copy or a proven restore's old",
+    '#    cluster the CLI was removing: garbage.',
+    `rm -rf "$PGDATA/${discard}"`,
+    'if [ -f "$VC_MARKER" ] && [ "$(cat "$VC_MARKER")" = in ]; then',
+    '  vc_root=unproven',
+    'elif [ -f "$VC_MARKER" ]; then',
+    '  vc_root=half-out',
+    `elif [ -d "$PGDATA/${previous}" ]; then`,
+    '  vc_root=unproven',
+    'else',
+    '  vc_root=live',
     'fi',
-    'if [ "$(cat "$VC_MARKER")" != in ]; then',
-    `  mkdir -p "$PGDATA/${previous}"`,
-    `  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${previous}/"; done`,
-    '  echo in > "$VC_MARKER"',
-    'fi',
+    'case "$vc_root" in',
+    '  unproven)',
+    `    # .vc-prev holds the database from before; PGDATA an unproven copy.`,
+    '    echo in > "$VC_MARKER"',
+    `    mkdir -p "$PGDATA/${discard}"`,
+    `    vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${discard}/"; done`,
+    '    ;;',
+    '  half-out)',
+    `    mkdir -p "$PGDATA/${previous}"`,
+    `    vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${previous}/"; done`,
+    '    echo in > "$VC_MARKER"',
+    '    ;;',
+    '  live)',
+    '    if [ -n "$(vc_cluster_entries)" ]; then',
+    '      : > "$VC_MARKER"',
+    `      mkdir -p "$PGDATA/${previous}"`,
+    `      vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/${previous}/"; done`,
+    '    fi',
+    '    echo in > "$VC_MARKER"',
+    '    ;;',
+    'esac',
     `find "$PGDATA/${staging}" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done`,
     `rmdir "$PGDATA/${staging}"`,
     'rm -f "$VC_MARKER"',
+    `rm -rf "$PGDATA/${discard}"`,
     'echo "restore: $RESTORE_BACKUP staged and swapped in"',
     '# --- end swap ---',
   ];
@@ -1488,7 +1524,7 @@ async function composeVolumeFreeBytes(ip, sshKeyPath) {
  * @param {string} ip
  * @param {string} sshKeyPath
  * @param {string} projectName
- * @param {{ backup: string, target: 'latest' | string, recoveryConf: string, requiredBytes?: number, assertWritable: () => Promise<void> }} restore
+ * @param {{ backup: string, target: 'latest' | string, recoveryConf: string, requiredBytes?: number, assertWritable: () => Promise<'writable' | 'lifted' | 'unknown'> }} restore
  *   `backup`: the resolved base backup name. `target`: 'latest' or the
  *   ISO-8601 PITR instant, for messages. `recoveryConf`: renderRecoveryConf's
  *   text. `requiredBytes`: the backup's uncompressed size, for the free-space
@@ -1551,36 +1587,71 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   // in docs/mitigations.yml): this exec is where a compose scale died on
   // 2026-07-31 — a Hetzner frontend that had not caught up with a push seconds
   // earlier answered `NoSuchBucket: status code: 404`. Re-running the whole
-  // script is the unit of retry: each run clears staging before it fetches and
-  // never touches the live cluster until a fetch completed. RESTORE_BACKUP in
-  // the container env lets the run past db-guard.sh's interrupted-restore
-  // check. See src/lib/deploy/walg-staleness.js.
+  // script is the unit of that retry: each run clears staging before it fetches
+  // and never touches the live cluster until a fetch completed. RESTORE_BACKUP
+  // in the container env lets the run past db-guard.sh's interrupted-restore
+  // check.
+  //
+  // One writer (I2): `retries: 1`, so an ssh transport error never re-runs a
+  // restore that may still be running on the server, and the script's flock
+  // refuses a second one outright. The timeout grows with the backup, like the
+  // k8s rollout wait. The run container is named so the failure path can make
+  // sure it is gone. See src/lib/deploy/walg-staleness.js.
+  const runContainer = `${projectName}-db-restore`;
+  const fetchTimeoutS = restoreFetchTimeoutS(requiredBytes);
   try {
     await withWalgStaleStorageRetry(
       () =>
         sshRunAsync(
           ip,
           sshKeyPath,
-          `cd ${remoteDir} && docker compose run --rm -e RESTORE_BACKUP=${backup} -v ${remoteDir}/restore-walg.sh:/restore.sh:ro db bash /restore.sh`,
-          { timeout: 900_000 },
+          `cd ${remoteDir} && docker compose run --rm --name ${runContainer} -e RESTORE_BACKUP=${backup} -v ${remoteDir}/restore-walg.sh:/restore.sh:ro db bash /restore.sh`,
+          { timeout: fetchTimeoutS * 1000, retries: 1 },
         ),
       'backup-fetch (restore)',
       { delaysMs: options.staleRetryDelaysMs },
     );
   } catch (err) {
-    // The script moves nothing until a fetch completed, so the database from
-    // before the restore is still in place: bring it back. If an earlier
-    // restore was interrupted mid-swap, db-guard.sh keeps the db down and
-    // says so.
-    await sshRunAsync(
+    const cause = err instanceof Error ? err.message : String(err);
+    // An ssh timeout leaves the run container going on the server: stop that
+    // one container (and only it) before reading what it left.
+    await sshRunAsync(ip, sshKeyPath, `docker rm -f ${runContainer} 2>/dev/null || true`, {
+      ignoreError: true,
+    });
+    // The marker says whether a swap began. The entrypoint is bypassed for
+    // this read, so db-guard.sh does not refuse it.
+    const probe = await sshRunAsync(
       ip,
       sshKeyPath,
-      `cd ${remoteDir} && docker compose start db && docker compose start app`,
-      { ignoreError: true },
+      `cd ${remoteDir} && docker compose run --rm --no-deps --entrypoint sh db -c ` +
+        `'if [ -e ${PGDATA_PATH}/${RESTORE_LAYOUT.inProgress} ]; then echo VC_MARKER_PRESENT; else echo VC_MARKER_ABSENT; fi'`,
+      { ignoreError: true, retries: 1 },
     );
+    const marker = String(probe ?? '');
+    if (marker.includes('VC_MARKER_ABSENT')) {
+      // No swap began: the database from before the restore is untouched.
+      await sshRunAsync(
+        ip,
+        sshKeyPath,
+        `cd ${remoteDir} && docker compose start db && docker compose start app`,
+        { ignoreError: true },
+      );
+      throw new Error(
+        `restoreCompose: the restore of ${backup} did not complete and nothing was moved, so the database ` +
+          `from before it was started again: ${cause}`,
+      );
+    }
+    if (marker.includes('VC_MARKER_PRESENT')) {
+      throw new Error(
+        `restoreCompose: the restore of ${backup} was interrupted mid-swap (${cause}). The db stays down ` +
+          `(db-guard.sh refuses to boot it) and the database from before the restore is in ` +
+          `${PREVIOUS_PGDATA_PATH}; rerun vibecarbon restore to finish or redo the swap.`,
+      );
+    }
     throw new Error(
-      `restoreCompose: the restore of ${backup} did not complete, and the database from before it was started again: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+      `restoreCompose: the restore of ${backup} did not complete (${cause}), and whether a swap began could ` +
+        `not be read. The db and app are left stopped. Check \`docker compose logs db\` on ${ip}, then rerun ` +
+        'vibecarbon restore.',
     );
   }
 
@@ -1627,11 +1698,29 @@ export async function restoreCompose(ip, sshKeyPath, projectName, restore, optio
   // 6. Prove the restored database takes writes, then drop the previous
   //    cluster. Never the other way round: until this proof the previous
   //    cluster is the only copy of the database from before the restore.
-  await assertWritable();
+  //    An unreadable fence is not a proof (I4): the previous cluster stays.
+  const proof = await assertWritable();
+  if (!PROVEN_WRITABLE_STATES.includes(proof)) {
+    throw new Error(
+      `restoreCompose: could not prove the restored database writable (write fence ${proof ?? 'unread'}), ` +
+        `so it kept the database from before the restore in ${PREVIOUS_PGDATA_PATH} and left the app ` +
+        'stopped. Once vibecarbon status shows the database writable, remove it and start the app: ' +
+        `ssh root@${ip} "cd ${remoteDir} && docker compose exec -T db rm -rf ${PREVIOUS_PGDATA_PATH} && docker compose start app"`,
+    );
+  }
+  //    Rename first, then remove: a crash mid-delete leaves .vc-discard
+  //    (garbage), never a .vc-prev that the next restore would read as the
+  //    database from before an unproven restore.
   await sshRunAsync(
     ip,
     sshKeyPath,
-    `cd ${remoteDir} && docker compose exec -T db rm -rf ${PREVIOUS_PGDATA_PATH}`,
+    `cd ${remoteDir} && docker compose exec -T db sh -c '${RETIRE_PREVIOUS_SH}'`,
+    { timeout: 60_000 },
+  );
+  await sshRunAsync(
+    ip,
+    sshKeyPath,
+    `cd ${remoteDir} && docker compose exec -T db ${REMOVE_DISCARD_SH}`,
     { timeout: 300_000 },
   );
 

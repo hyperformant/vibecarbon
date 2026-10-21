@@ -136,6 +136,48 @@ describe('restore run(): no restorable base refuses before any stop', () => {
   });
 });
 
+describe('restore run(): the real credential lookup with -y', () => {
+  // Off a TTY a prompt would fail with assertInteractiveStdin's wording, not
+  // this one: the message proves -y took the skipPrompts path.
+  it('reads the env vars, never prompts, and exits 1 naming them when they are missing', async () => {
+    // The real resolveS3Config: the backup bucket from .vibecarbon.json in the
+    // cwd, the keys from the provider's env vars, skipPrompts from -y.
+    envConfig = { deployMode: 'compose', provider: 'hetzner', servers: [{ ip: '10.0.0.1' }] };
+    const projectDir = mkdtempSync(join(tmpdir(), 'vc-restore-creds-'));
+    writeFileSync(
+      join(projectDir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'myapp',
+        environments: {
+          prod: { ...envConfig, backupS3: { bucket: 'myapp-backups', region: 'fsn1' } },
+        },
+      }),
+    );
+    const saved = {
+      HETZNER_ACCESS_KEY: process.env.HETZNER_ACCESS_KEY,
+      HETZNER_SECRET_KEY: process.env.HETZNER_SECRET_KEY,
+    };
+    delete process.env.HETZNER_ACCESS_KEY;
+    delete process.env.HETZNER_SECRET_KEY;
+    vi.spyOn(process, 'cwd').mockReturnValue(projectDir);
+    const errors: string[] = [];
+    vi.spyOn(p.log, 'error').mockImplementation((m: string) => {
+      errors.push(String(m));
+    });
+    exitSpy();
+    try {
+      await expect(run(['prod', '-y', '-source', 'latest', '-confirm', 'prod'])).rejects.toThrow(
+        'process.exit(1)',
+      );
+      expect(errors.join('\n')).toContain('HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY');
+      noServerTouched();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('the runners refuse without a resolved base', () => {
   const s = { start: vi.fn(), stop: vi.fn(), message: vi.fn() };
   const chosenSource = { kind: 's3' as const, name: 'latest' };

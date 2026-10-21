@@ -2392,7 +2392,8 @@ async function failoverSingleServer(envName, envConfig) {
       envName,
       envConfig,
       projectName,
-      skipPrompts: !process.stdin.isTTY,
+      // A recovery guide never stops to ask: env vars or nothing.
+      skipPrompts: true,
     });
     s.stop('Backup check complete');
     if (listing.s3Config) {

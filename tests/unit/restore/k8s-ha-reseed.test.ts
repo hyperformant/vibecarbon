@@ -68,6 +68,7 @@ const baseArgs = {
     uncompressedBytes: 23_439_374,
   },
   readFreeBytes: async () => 100 * 1024 ** 3,
+  assertWritable: async () => 'writable' as const,
   envName: 'prod',
   serverIp: '10.0.1.1', // restored primary master
   sshKeyPath: '/tmp/key',
@@ -401,6 +402,7 @@ describe('runK8sRestore: the restored primary is proven writable before the app 
       envConfig: { deployMode: 'kubernetes' },
       assertWritable: async () => {
         order.push('writable');
+        return 'writable' as const;
       },
     });
     expect(order[0]).toBe('writable');

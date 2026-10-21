@@ -67,8 +67,10 @@ beforeEach(() => {
       if (rolloutFails) throw new Error('timed out waiting for the condition');
     } else if (line.includes('pg_is_in_recovery')) {
       return 'f';
-    } else if (line.includes('.vc-prev')) {
-      events.push('discardPrev');
+    } else if (line.includes('mv /var/lib/postgresql/data/.vc-prev')) {
+      events.push('retirePrev');
+    } else if (line.includes('rm -rf /var/lib/postgresql/data/.vc-discard')) {
+      events.push('rmDiscard');
     } else if (argv[0] === 'scale' && line.includes('--replicas=0')) {
       events.push('scaleDown');
     } else if (argv[0] === 'scale') {
@@ -80,7 +82,7 @@ beforeEach(() => {
 
 describe('runK8sRestore: the restore marker', () => {
   it('sets every marker key in one patch, with the named backup and rendered conf', async () => {
-    await runK8sRestore(args({ assertWritable: async () => {} }));
+    await runK8sRestore(args({ assertWritable: async () => 'writable' }));
     const set = vi
       .mocked(ssh.sshKubectl)
       .mock.calls.map(([, , argv]) => argv as string[])
@@ -99,6 +101,7 @@ describe('runK8sRestore: the restore marker', () => {
       args({
         assertWritable: async () => {
           events.push('writable');
+          return 'writable';
         },
       }),
     );
@@ -107,19 +110,20 @@ describe('runK8sRestore: the restore marker', () => {
       'scaleDown',
       'rollout',
       'writable',
+      'retirePrev',
       'marker:clear',
-      'discardPrev',
+      'rmDiscard',
       'scaleUp',
     ]);
   });
 
   it('a rollout failure leaves the keys set and names the init container logs', async () => {
     rolloutFails = true;
-    await expect(runK8sRestore(args({ assertWritable: async () => {} }))).rejects.toThrow(
+    await expect(runK8sRestore(args({ assertWritable: async () => 'writable' }))).rejects.toThrow(
       'kubectl logs db-0 -c walg-restore',
     );
     expect(events).not.toContain('marker:clear');
-    expect(events).not.toContain('discardPrev');
+    expect(events).not.toContain('retirePrev');
   });
 
   it('a failed writable proof leaves the keys set and keeps .vc-prev', async () => {
@@ -133,7 +137,18 @@ describe('runK8sRestore: the restore marker', () => {
       ),
     ).rejects.toThrow(/write-fenced/);
     expect(events).not.toContain('marker:clear');
-    expect(events).not.toContain('discardPrev');
+    expect(events).not.toContain('retirePrev');
+  });
+});
+
+describe('runK8sRestore: an unproven restore keeps the marker and .vc-prev (I4)', () => {
+  it('an unreadable fence fails loudly, the keys stay set and the app stays down', async () => {
+    await expect(runK8sRestore(args({ assertWritable: async () => 'unknown' }))).rejects.toThrow(
+      /could not prove .* writable.*kept .*\.vc-prev.*rm -rf \/var\/lib\/postgresql\/data\/\.vc-prev/s,
+    );
+    expect(events).not.toContain('marker:clear');
+    expect(events).not.toContain('retirePrev');
+    expect(events).not.toContain('scaleUp');
   });
 });
 
@@ -141,7 +156,7 @@ describe('runK8sRestore: the staged fetch must fit (S1c)', () => {
   it('refuses before the marker or any scale when the volume lacks room', async () => {
     await expect(
       runK8sRestore(
-        args({ readFreeBytes: async () => 10 * 1024 ** 3, assertWritable: async () => {} }),
+        args({ readFreeBytes: async () => 10 * 1024 ** 3, assertWritable: async () => 'writable' }),
       ),
     ).rejects.toThrow(/refused before stopping anything/);
     expect(events).toEqual([]);
@@ -158,7 +173,7 @@ describe('runK8sRestore: the rollout wait scales with the backup', () => {
   }
 
   it('a 40 GiB base waits ceil(size / 20 MiB/s) seconds', async () => {
-    await runK8sRestore(args({ assertWritable: async () => {} }));
+    await runK8sRestore(args({ assertWritable: async () => 'writable' }));
     const call = rolloutCall();
     expect(call?.[2]).toContain('--timeout=2048s');
     expect(call?.[3]).toMatchObject({ timeout: (2048 + 30) * 1000 });
@@ -166,7 +181,7 @@ describe('runK8sRestore: the rollout wait scales with the backup', () => {
 
   it('a small base keeps the DB_STS_BOOT_TIMEOUT_S floor', async () => {
     await runK8sRestore(
-      args({ base: { ...BASE, sizeBytes: 1024 ** 2 }, assertWritable: async () => {} }),
+      args({ base: { ...BASE, sizeBytes: 1024 ** 2 }, assertWritable: async () => 'writable' }),
     );
     expect(rolloutCall()?.[2]).toContain('--timeout=600s');
   });

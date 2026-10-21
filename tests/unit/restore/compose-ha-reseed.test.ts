@@ -49,7 +49,7 @@ const baseArgs = {
   readStandbyState: async () => ({ inRecovery: true, systemIdentifier: '7412345678901234567' }),
   markStandbyUnproven: () => {},
   recordSystemIdentifier: () => {},
-  assertWritable: async () => {},
+  assertWritable: async () => 'writable',
 };
 
 // The restore target (serverIp) is derived in run() as the role==='primary'

@@ -77,7 +77,13 @@ import {
   resolveRestoreBase,
   resolveS3Config,
 } from './lib/walg/restore-base.js';
-import { assertRestoreFits, PREVIOUS_PGDATA_PATH } from './lib/walg/restore-layout.js';
+import {
+  assertRestoreFits,
+  PREVIOUS_PGDATA_PATH,
+  PROVEN_WRITABLE_STATES,
+  REMOVE_DISCARD_SH,
+  RETIRE_PREVIOUS_SH,
+} from './lib/walg/restore-layout.js';
 import {
   assertRestoredPrimaryWritable,
   clearRestoreMarker,
@@ -943,26 +949,34 @@ export async function runK8sRestore({
     }
   });
   // 5. Before the marker goes and the app comes back: the restored database
-  //    must take writes.
-  await assertWritable();
-  // 6. Proven: clear the marker (a later pod restart boots normally), then
-  //    drop the database from before the restore.
+  //    must take writes. An unreadable fence is not a proof (I4): the marker
+  //    and the previous cluster stay, the app stays down.
+  const proof = await assertWritable();
+  if (!PROVEN_WRITABLE_STATES.includes(proof)) {
+    throw new Error(
+      `could not prove the restored database writable (write fence ${proof ?? 'unread'}), so the restore ` +
+        `marker stays set and the database from before the restore is kept in ${PREVIOUS_PGDATA_PATH}. ` +
+        'Once vibecarbon status shows the database writable, finish by hand: ' +
+        `kubectl -n vibecarbon patch secret vibecarbon-infra-secrets --type=merge -p '{"stringData":{"RESTORE_TARGET":"","RESTORE_BACKUP":"","RESTORE_RECOVERY_CONF":""}}' ` +
+        `&& kubectl -n vibecarbon exec ${DB_POD} -c ${DB_CONTAINER} -- rm -rf ${PREVIOUS_PGDATA_PATH} ` +
+        '&& kubectl scale deployment app -n vibecarbon --replicas=2',
+    );
+  }
+  // 6. Proven. Rename the previous cluster out of the .vc-prev name first (a
+  //    crash after this can only leave garbage, never a .vc-prev the next
+  //    restore reads as "unproven"), clear the marker (a later pod restart
+  //    boots normally), then remove the discard.
+  await sshKubectl(
+    serverIp,
+    sshKeyPath,
+    ['exec', '-n', 'vibecarbon', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', RETIRE_PREVIOUS_SH],
+    { timeout: 60_000 },
+  );
   await clearRestoreMarker({ ip: serverIp, sshKeyPath });
   await sshKubectl(
     serverIp,
     sshKeyPath,
-    [
-      'exec',
-      '-n',
-      'vibecarbon',
-      DB_POD,
-      '-c',
-      DB_CONTAINER,
-      '--',
-      'rm',
-      '-rf',
-      PREVIOUS_PGDATA_PATH,
-    ],
+    ['exec', '-n', 'vibecarbon', DB_POD, '-c', DB_CONTAINER, '--', 'sh', '-c', REMOVE_DISCARD_SH],
     { timeout: 300_000 },
   );
   // 7. Bring the app back.

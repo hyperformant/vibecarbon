@@ -99,10 +99,12 @@ spec:
         # vibecarbon-infra-secrets, with RESTORE_RECOVERY_CONF rendered by the
         # CLI): fetch exactly that base backup into $PGDATA/.vc-restore,
         # write the recovery config and recovery.signal into it, then swap it
-        # in under the marker, the live cluster moving to $PGDATA/.vc-prev.
-        # Nothing touches the live cluster until the fetch is complete, and
-        # nothing here removes .vc-prev: the CLI does once the restored
-        # database promoted and proved writable. Staging and .vc-prev live
+        # in under the marker, the live cluster moving to $PGDATA/.vc-prev
+        # (or, when a surviving .vc-prev says PGDATA holds an unproven copy,
+        # that copy moving to $PGDATA/.vc-discard). Nothing touches the live
+        # cluster until the fetch is complete, and nothing here removes
+        # .vc-prev: the CLI renames it to .vc-discard and removes it once the
+        # restored database promoted and proved writable. Staging and .vc-prev live
         # inside PGDATA because PGDATA is a mount point and cannot be
         # renamed. The same steps as the compose restore script
         # (composeRestoreScript, src/lib/deploy/compose/index.js); the census
@@ -140,25 +142,19 @@ spec:
               VC_RECOVERY_CONF_FILE=/tmp/vc-recovery.conf
               printf '%s\n' "$RESTORE_RECOVERY_CONF" > "$VC_RECOVERY_CONF_FILE"
 
-              # The cluster's own entries in PGDATA: everything but the restore's.
-              vc_cluster_entries() {
-                find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name .vc-restore ! -name .vc-prev ! -name .vc-restore-in-progress
-              }
-
-              # --- settle ---
-              # 1. A .vc-prev the CLI never removed means the restore that made it never
-              #    proved itself: .vc-prev still holds the database from before it, and
-              #    PGDATA holds that restore's copy. So does a marker reading "in" (the
-              #    staged copy was half moved in). Hand the copy to staging, which the
-              #    fetch replaces. A marker reading anything else means the live cluster
-              #    was half moved into .vc-prev: the swap below finishes that move.
-              if { [ -f "$VC_MARKER" ] && [ "$(cat "$VC_MARKER")" = in ]; } || \
-                 { [ ! -f "$VC_MARKER" ] && [ -d "$PGDATA/.vc-prev" ]; }; then
-                echo in > "$VC_MARKER"
-                mkdir -p "$PGDATA/.vc-restore"
-                vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-restore/"; done
+              # --- prelude ---
+              VC_MARKER="$PGDATA/.vc-restore-in-progress"
+              # 1. One restore at a time on this volume.
+              exec 9>"$PGDATA/.vc-restore.lock"
+              if ! flock -n 9; then
+                echo "restore: another restore holds $PGDATA/.vc-restore.lock; refusing" >&2
+                exit 75
               fi
-              # --- end settle ---
+              # The cluster's own entries in PGDATA: everything but the restore's .vc-*.
+              vc_cluster_entries() {
+                find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name '.vc-*'
+              }
+              # --- end prelude ---
 
               # 2. Fetch the named base backup into staging. The live cluster is untouched.
               #
@@ -196,14 +192,17 @@ spec:
                 walg_attempt=$((walg_attempt + 1))
                 walg_delay=$((walg_delay * 2))
               done
+              # --- staged ---
               if [ ! -f "$PGDATA/.vc-restore/PG_VERSION" ]; then
                 rm -rf "$PGDATA/.vc-restore"
                 echo "restore: $RESTORE_BACKUP fetched no PG_VERSION; nothing was moved" >&2
                 exit 1
               fi
-
-              # 3. Recovery config into staging: strip the settings it rewrites, append the
-              #    new ones (rendered by the CLI, the same text on both tiers).
+              # 3. A base pushed while a restore left its dirs in PGDATA carries them:
+              #    drop them from the staged tree so they cannot wedge the swap.
+              rm -rf "$PGDATA/.vc-restore/.vc-restore" "$PGDATA/.vc-restore/.vc-prev" "$PGDATA/.vc-restore/.vc-discard" "$PGDATA/.vc-restore/.vc-restore-in-progress" "$PGDATA/.vc-restore/.vc-restore.lock"
+              # Recovery config into staging: strip the settings it rewrites, append the
+              # new ones (rendered by the CLI, the same text on both tiers).
               VC_AUTO_CONF="$PGDATA/.vc-restore/postgresql.auto.conf"
               touch "$VC_AUTO_CONF"
               while IFS= read -r vc_line; do
@@ -216,20 +215,44 @@ spec:
               chown -R postgres:postgres "$PGDATA/.vc-restore"
 
               # --- swap ---
-              # 4. Swap under the in-progress marker: the live cluster into .vc-prev, the
-              #    staged one into PGDATA. .vc-prev stays until the CLI has proven the
-              #    restored database.
-              if [ ! -f "$VC_MARKER" ]; then
-                : > "$VC_MARKER"
+              # 4. Settle what PGDATA holds, then swap under the in-progress marker.
+              #    .vc-discard is only ever an unproven copy or a proven restore's old
+              #    cluster the CLI was removing: garbage.
+              rm -rf "$PGDATA/.vc-discard"
+              if [ -f "$VC_MARKER" ] && [ "$(cat "$VC_MARKER")" = in ]; then
+                vc_root=unproven
+              elif [ -f "$VC_MARKER" ]; then
+                vc_root=half-out
+              elif [ -d "$PGDATA/.vc-prev" ]; then
+                vc_root=unproven
+              else
+                vc_root=live
               fi
-              if [ "$(cat "$VC_MARKER")" != in ]; then
-                mkdir -p "$PGDATA/.vc-prev"
-                vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-prev/"; done
-                echo in > "$VC_MARKER"
-              fi
+              case "$vc_root" in
+                unproven)
+                  # .vc-prev holds the database from before; PGDATA an unproven copy.
+                  echo in > "$VC_MARKER"
+                  mkdir -p "$PGDATA/.vc-discard"
+                  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-discard/"; done
+                  ;;
+                half-out)
+                  mkdir -p "$PGDATA/.vc-prev"
+                  vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-prev/"; done
+                  echo in > "$VC_MARKER"
+                  ;;
+                live)
+                  if [ -n "$(vc_cluster_entries)" ]; then
+                    : > "$VC_MARKER"
+                    mkdir -p "$PGDATA/.vc-prev"
+                    vc_cluster_entries | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/.vc-prev/"; done
+                  fi
+                  echo in > "$VC_MARKER"
+                  ;;
+              esac
               find "$PGDATA/.vc-restore" -mindepth 1 -maxdepth 1 | while IFS= read -r vc_entry; do mv "$vc_entry" "$PGDATA/"; done
               rmdir "$PGDATA/.vc-restore"
               rm -f "$VC_MARKER"
+              rm -rf "$PGDATA/.vc-discard"
               echo "restore: $RESTORE_BACKUP staged and swapped in"
               # --- end swap ---
           env:

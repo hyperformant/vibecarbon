@@ -65,22 +65,20 @@ export async function clearRestoreMarker({ ip, sshKeyPath }) {
  * strips default_transaction_read_only from the fetched cluster, so a base
  * taken under a stranded write fence comes back writable; this is the proof.
  * Same check and lift as the deploy's (write-fence.js): fenced is lifted with
- * a warning, a lift that fails throws with the manual fix, an unreadable
- * setting warns.
+ * a warning, a lift that fails throws with the manual fix.
+ *
+ * Returns the state. Only 'writable' or 'lifted' (PROVEN_WRITABLE_STATES) is a
+ * proof: on 'unknown' (the setting could not be read) the callers keep the
+ * previous cluster and the k8s marker, and say how to finish by hand (I4).
  *
  * @param {{ environment: string, envConfig: object, exec: (sql: string, o?: object) => Promise<string> }} args
+ * @returns {Promise<'writable' | 'lifted' | 'unknown'>}
  */
 export async function assertRestoredPrimaryWritable({ environment, envConfig, exec }) {
-  const state = await assertRolePrimaryWritable({
+  return assertRolePrimaryWritable({
     environment,
     envConfig,
     exec,
     warn: (line) => p.log.warn(`restored database: ${line}`),
   });
-  if (state === 'unknown') {
-    p.log.warn(
-      "could not read the restored database's write-fence setting; vibecarbon status shows it " +
-        'once the database answers',
-    );
-  }
 }

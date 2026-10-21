@@ -13,11 +13,40 @@ export const PGDATA_PATH = '/var/lib/postgresql/data';
 export const RESTORE_LAYOUT = Object.freeze({
   staging: '.vc-restore',
   previous: '.vc-prev',
+  // Garbage only: an unproven copy a restore set aside, or a proven restore's
+  // old cluster on its way out (the CLI renames .vc-prev here first, so a
+  // .vc-prev that survives always means its restore never proved itself).
+  discard: '.vc-discard',
   inProgress: '.vc-restore-in-progress',
+  lock: '.vc-restore.lock',
 });
 
 /** The previous cluster, removed once the restored one is proven. */
 export const PREVIOUS_PGDATA_PATH = `${PGDATA_PATH}/${RESTORE_LAYOUT.previous}`;
+
+/** Where the CLI renames the previous cluster before removing it. */
+export const DISCARD_PGDATA_PATH = `${PGDATA_PATH}/${RESTORE_LAYOUT.discard}`;
+
+/**
+ * The shell that retires a proven restore's previous cluster: rename it out
+ * of the `.vc-prev` name first (one atomic rename, so a crash mid-delete can
+ * never leave a `.vc-prev` that reads as unproven), then remove the discard.
+ * Two steps so k8s can clear its marker in between.
+ */
+export const RETIRE_PREVIOUS_SH = `rm -rf ${DISCARD_PGDATA_PATH} && if [ -e ${PREVIOUS_PGDATA_PATH} ]; then mv ${PREVIOUS_PGDATA_PATH} ${DISCARD_PGDATA_PATH}; fi`;
+export const REMOVE_DISCARD_SH = `rm -rf ${DISCARD_PGDATA_PATH}`;
+
+/** The restore states a writable proof accepts (assertRolePrimaryWritable). */
+export const PROVEN_WRITABLE_STATES = Object.freeze(['writable', 'lifted']);
+
+/**
+ * The staged fetch's wait, sized from the backup like the k8s rollout wait:
+ * the floor, or the fetch at 20 MiB/s plus five minutes for the swap.
+ */
+export function restoreFetchTimeoutS(requiredBytes, floorS = 900) {
+  const bytes = Number(requiredBytes) || 0;
+  return Math.max(floorS, Math.ceil(bytes / (20 * 1024 ** 2)) + 300);
+}
 
 /** wal-g backup names: base_<24 hex>, or a delta base_<24 hex>_D_<24 hex>. */
 export const BACKUP_NAME_RE = /^base_[0-9A-F]{24}(_D_[0-9A-F]{24})?$/;

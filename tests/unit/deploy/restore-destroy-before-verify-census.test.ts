@@ -54,8 +54,10 @@ const SCRIPTS: Array<[string, () => string]> = [
 ];
 
 const PGDATA_REF = /\$\{?PGDATA(?::\?)?\}?/;
+// Staging, the previous cluster, the set-aside unproven copy, the marker, and
+// the .vc-* names a staged tree may carry (dropped before the swap).
 const ALLOWED_RM_TARGET =
-  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-restore-in-progress)"$/;
+  /^"\$\{?PGDATA(?::\?)?\}?\/(\.vc-restore|\.vc-prev|\.vc-discard|\.vc-restore-in-progress|\.vc-restore\/\.vc-[a-z.-]+)"$/;
 
 function codeLines(script: string): string[] {
   return script
@@ -93,20 +95,28 @@ for (const [label, build] of SCRIPTS) {
       }
     });
 
-    it('removes the previous cluster only after the fetch', () => {
-      lines.forEach((l, i) => {
-        if (/\brm\b/.test(l) && l.includes('.vc-prev')) {
-          expect(i, `rm of .vc-prev before backup-fetch: ${l}`).toBeGreaterThan(fetchIdx);
+    it('before the fetch, removes nothing but the staging dir', () => {
+      lines.slice(0, fetchIdx).forEach((l) => {
+        if (!/\brm\s+-[a-z]*r/.test(l)) return;
+        expect(l, `rm before backup-fetch: ${l}`).toMatch(/^rm -rf "\$PGDATA\/\.vc-restore"$/);
+      });
+    });
+
+    it('moves no cluster entries anywhere before the fetch', () => {
+      lines.slice(0, fetchIdx).forEach((l) => {
+        expect(l, `cluster move before backup-fetch: ${l}`).not.toMatch(
+          /vc_cluster_entries\s*\|.*\bmv\b/,
+        );
+        if (/\bmv\b/.test(l)) {
+          expect(l, `mv before backup-fetch: ${l}`).not.toMatch(/\.vc-(prev|discard)/);
         }
       });
     });
 
-    it('moves the live cluster aside only after the fetch', () => {
-      lines.forEach((l, i) => {
-        if (/\bmv\b/.test(l) && l.includes('.vc-prev')) {
-          expect(i, `move into .vc-prev before backup-fetch: ${l}`).toBeGreaterThan(fetchIdx);
-        }
-      });
+    it('removes the previous cluster nowhere: the CLI does, after the proof', () => {
+      for (const l of lines) {
+        if (/\brm\b/.test(l)) expect(l, l).not.toMatch(/"\$PGDATA\/\.vc-prev"/);
+      }
     });
 
     it('never find -deletes inside PGDATA', () => {
@@ -117,7 +127,7 @@ for (const [label, build] of SCRIPTS) {
   });
 }
 
-describe('both tiers run the same settle and swap steps', () => {
+describe('both tiers run the same staged-tree, settle and swap steps', () => {
   function block(script: string, start: string, end: string): string {
     const i = script.indexOf(start);
     const j = script.indexOf(end, i);
@@ -128,10 +138,7 @@ describe('both tiers run the same settle and swap steps', () => {
       .map((l) => l.trim())
       .join('\n');
   }
-  for (const [start, end] of [
-    ['# --- settle ---', '# --- end settle ---'],
-    ['# --- swap ---', '# --- end swap ---'],
-  ]) {
+  for (const [start, end] of [['# --- staged ---', '# --- end swap ---']]) {
     it(start, () => {
       expect(block(k8sInitScript(), start, end)).toBe(block(composeScript(), start, end));
     });

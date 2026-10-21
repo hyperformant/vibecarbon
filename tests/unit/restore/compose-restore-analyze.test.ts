@@ -24,7 +24,7 @@ const RESTORE = {
   backup: 'base_000000010000000000000002',
   target: 'latest',
   recoveryConf: '-restore_command\nrestore_command = \'wal-g wal-fetch "%f" "%p"\'',
-  assertWritable: async () => {},
+  assertWritable: async () => 'writable',
 };
 
 /** The remote shell each sshRunAsync call carries — the last argv element. */

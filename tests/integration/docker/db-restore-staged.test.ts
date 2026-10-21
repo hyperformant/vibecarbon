@@ -10,6 +10,7 @@ import {
   listBaseBackups,
   resolveRestoreBase,
 } from '../../../src/lib/walg/restore-base.js';
+import { REMOVE_DISCARD_SH, RETIRE_PREVIOUS_SH } from '../../../src/lib/walg/restore-layout.js';
 
 /**
  * The staged compose restore against a real db image and a real S3 (H2a, H3).
@@ -321,7 +322,34 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     expect(psql("SELECT count(*) FROM t WHERE v = 'before-base'")).toBe('1');
     expect(psql('SHOW default_transaction_read_only')).toBe('off');
     // What restoreCompose does once the database is proven writable.
-    docker(['exec', DB_CT, 'rm', '-rf', `${PGDATA}/.vc-prev`]);
-    expect(docker(['exec', DB_CT, 'ls', '-A', PGDATA])).not.toContain('.vc-prev');
+    docker(['exec', DB_CT, 'sh', '-c', RETIRE_PREVIOUS_SH]);
+    docker(['exec', DB_CT, 'sh', '-c', REMOVE_DISCARD_SH]);
+    const after = docker(['exec', DB_CT, 'ls', '-A', PGDATA]);
+    expect(after).not.toContain('.vc-prev');
+    expect(after).not.toContain('.vc-discard');
+  });
+
+  it('a stale .vc-prev from a proven restore plus a failed fetch: the live rows survive (C1)', {
+    timeout: 300_000,
+  }, async () => {
+    // The state the first version mishandled: a proven restore whose cleanup
+    // never ran left .vc-prev, and the live cluster then took writes.
+    psql("INSERT INTO t VALUES ('after-restore')");
+    docker([
+      'exec',
+      DB_CT,
+      'sh',
+      '-c',
+      `mkdir -p ${PGDATA}/.vc-prev/base && echo 17 > ${PGDATA}/.vc-prev/PG_VERSION`,
+    ]);
+    stopDb();
+    const r = runRestoreScript(dir, 'base_0000000100000000000000FF');
+    expect(r.status, r.stdout + r.stderr).not.toBe(0);
+    expect(r.stderr + r.stdout).toContain('nothing was moved');
+    expect(lsPgdata()).not.toContain('.vc-restore-in-progress');
+
+    startDb();
+    await waitPromoted();
+    expect(psql("SELECT count(*) FROM t WHERE v IN ('before-base', 'after-restore')")).toBe('2');
   });
 });

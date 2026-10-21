@@ -40,13 +40,22 @@ describe('composeRestoreScript', () => {
 
   it('swaps under the in-progress marker and leaves .vc-prev for the CLI', () => {
     const script = composeRestoreScript({ backup: BACKUP, recoveryConf: conf('latest') });
-    const lines = script.split('\n');
-    const markerOn = lines.findIndex((l) => l.includes(': > "$VC_MARKER"'));
+    const lines = script.split('\n').map((l) => l.trim());
     const markerOff = lines.indexOf('rm -f "$VC_MARKER"');
-    const intoPrev = lines.findIndex((l) => l.includes('"$PGDATA/.vc-prev/"'));
-    expect(markerOn).toBeGreaterThan(-1);
-    expect(intoPrev).toBeGreaterThan(markerOn);
-    expect(markerOff).toBeGreaterThan(intoPrev);
+    const swapIn = lines.findIndex((l) => l.includes('mv "$vc_entry" "$PGDATA/"'));
+    const lastAside = lines.reduce(
+      (last, l, i) => (/mv "\$vc_entry" "\$PGDATA\/\.vc-(prev|discard)\/"/.test(l) ? i : last),
+      -1,
+    );
+    expect(lastAside).toBeGreaterThan(-1);
+    expect(swapIn).toBeGreaterThan(lastAside);
+    expect(markerOff).toBeGreaterThan(swapIn);
+    // Every move aside happens with the marker already written.
+    const firstAside = lines.findIndex((l) =>
+      /mv "\$vc_entry" "\$PGDATA\/\.vc-(prev|discard)\/"/.test(l),
+    );
+    const firstMarker = lines.findIndex((l) => /(: |echo in )> "\$VC_MARKER"/.test(l));
+    expect(firstMarker).toBeLessThan(firstAside);
     expect(script).not.toMatch(/rm -rf "\$PGDATA\/\.vc-prev"/);
   });
 
