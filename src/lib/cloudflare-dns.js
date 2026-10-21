@@ -93,6 +93,24 @@ export async function getZones(apiToken) {
 // ============================================================================
 
 /**
+ * Cloudflare reports failure two ways: a non-2xx status, or a 200 whose JSON
+ * carries `success: false`. Both must stop the caller; a 401/403 used to fall
+ * through as "DNS updated". Returns the parsed body on success. Never
+ * interpolates the token.
+ * @param {Response} response
+ * @param {string} prefix
+ * @returns {Promise<object>}
+ */
+async function readCloudflareJson(response, prefix) {
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.success === false) {
+    const detail = body.errors?.[0]?.message || response.statusText || 'request failed';
+    throw new Error(`${prefix} (HTTP ${response.status}): ${detail}`);
+  }
+  return body;
+}
+
+/**
  * Create or update a DNS record (uniform backend contract: the record
  * target arrives as `value`; Cloudflare's wire field `content` is an
  * internal mapping here).
@@ -121,7 +139,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
     },
   );
 
-  const listData = await listResponse.json();
+  const listData = await readCloudflareJson(listResponse, 'Failed to look up DNS record');
   const existing = listData.result?.find((r) => r.name === name && r.type === type);
 
   if (existing) {
@@ -137,7 +155,7 @@ export async function createDNSRecord(apiToken, zoneId, config) {
         body: JSON.stringify({ content, proxied, ttl }),
       },
     );
-    return updateResponse.json();
+    return readCloudflareJson(updateResponse, 'Failed to update DNS record');
   }
 
   // Create new record
@@ -153,7 +171,25 @@ export async function createDNSRecord(apiToken, zoneId, config) {
     },
   );
 
-  return response.json();
+  return readCloudflareJson(response, 'Failed to create DNS record');
+}
+
+/**
+ * Read the A record's current target, for verifying a flip. Null when the
+ * name has no A record.
+ *
+ * @param {string} apiToken - Cloudflare API token
+ * @param {string} zoneId - Zone ID
+ * @param {string} name - Record name (FQDN)
+ * @returns {Promise<string|null>}
+ */
+export async function readARecord(apiToken, zoneId, name) {
+  const response = await fetchWithRetry(
+    `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&name=${name}`,
+    { headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' } },
+  );
+  const body = await readCloudflareJson(response, 'Failed to read DNS record');
+  return body.result?.find((r) => r.name === name && r.type === 'A')?.content ?? null;
 }
 
 /**
@@ -379,7 +415,7 @@ async function createHealthCheck(apiToken, zoneId, config) {
     },
   );
 
-  return response.json();
+  return readCloudflareJson(response, 'Failed to create health check');
 }
 
 /**

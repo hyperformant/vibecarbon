@@ -105,6 +105,10 @@ interface RunOpts {
   fenceThrows?: boolean;
   /** The reseeded standby still carries the fence. */
   standbyFenced?: boolean;
+  /** The provider write throws. */
+  dnsUpdateThrows?: boolean;
+  /** What the provider reads back after the write (default: the flipped IP). */
+  dnsReadsBack?: string | null;
 }
 
 /**
@@ -128,6 +132,8 @@ async function run(opts: RunOpts = {}) {
     quiesceUnconfirmed = false,
     fenceThrows = false,
     standbyFenced = false,
+    dnsUpdateThrows = false,
+    dnsReadsBack,
   } = opts;
   const order: string[] = [];
   const captured: Record<string, unknown> = {};
@@ -262,11 +268,15 @@ async function run(opts: RunOpts = {}) {
       order.push('saveConfig');
     },
   };
+  let flippedTo: string | null = null;
   const strategy = {
     getAuth: async () => ({ token: 't', zoneId: 'z' }),
-    updateDns: async () => {
+    updateDns: async (_auth: unknown, _domain: string, ip: string) => {
       order.push('dns');
+      if (dnsUpdateThrows) throw new Error('Failed to create DNS record (HTTP 403)');
+      flippedTo = ip;
     },
+    readDns: async () => (dnsReadsBack === undefined ? flippedTo : dnsReadsBack),
   };
   const parsed = { dryRun: false, yes: true, serverType: null, ...flags };
   const tracker = { spinner: () => ({ start: () => {}, stop: () => {} }) };
@@ -960,5 +970,38 @@ describe('failover journal (R2)', () => {
     expect(Date.parse(env.lastFailover)).toBeGreaterThan(Date.parse(env.deployedAt));
     // The promoted side keeps the same lineage: the identifier survives.
     expect(env.ha.systemIdentifier).toBe(SYSID);
+  });
+});
+
+describe('failoverHA DNS flip is verified (R5)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('a confirmed flip completes cleanly', async () => {
+    const { order, thrown } = await run();
+    expect(thrown).toBeUndefined();
+    expect(order.indexOf('promote')).toBeLessThan(order.indexOf('dns'));
+    expect(order.indexOf('dns')).toBeLessThan(order.indexOf('saveConfig'));
+  });
+
+  it('a rejected DNS update persists the swap, then exits non-zero with DNS DID NOT', async () => {
+    const { order, thrown } = await run({ dnsUpdateThrows: true });
+    expect(thrown?.message).toMatch(/DNS DID NOT/);
+    expect(thrown?.message).toContain('10.0.0.99');
+    expect(thrown?.message).toContain('403');
+    expect(thrown?.name).toBe('FailoverDnsError');
+    expect(order).toContain('saveConfig');
+    expect(order.indexOf('saveConfig')).toBeGreaterThan(order.indexOf('dns'));
+  });
+
+  it('a read-back that disagrees with the promoted IP counts as not flipped', async () => {
+    const { order, thrown } = await run({ dnsReadsBack: '10.0.0.1' });
+    expect(thrown?.message).toMatch(/DNS DID NOT/);
+    expect(thrown?.message).toContain('reads back as 10.0.0.1');
+    expect(order).toContain('saveConfig');
+  });
+
+  it('a record that reads back as nothing counts as not flipped', async () => {
+    const { thrown } = await run({ dnsReadsBack: null });
+    expect(thrown?.message).toMatch(/DNS DID NOT/);
   });
 });

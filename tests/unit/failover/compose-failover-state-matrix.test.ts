@@ -62,10 +62,20 @@ vi.mock('node:fs', async (orig) => {
   return { ...actual, existsSync: () => true };
 });
 
+// Managed-DNS rows: the token resolves unless a row says otherwise, and the
+// trusted-TLS gate never touches the network.
+let dnsToken = 'dns-token';
+vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, resolveDnsToken: () => dnsToken };
+});
+vi.mock('../../../src/lib/deploy/tls-ready.js', () => ({
+  waitForTrustedTls: async () => ({ trusted: true, elapsedMs: 0 }),
+}));
+
 const composeSsh = await import('../../../src/lib/deploy/compose/index.js');
-const { failoverComposeHA, promoteComposeStandby, swapComposeHaRoles } = await import(
-  '../../../src/lib/deploy/compose/ha.js'
-);
+const { failoverComposeHA, flipComposeDns, promoteComposeStandby, swapComposeHaRoles } =
+  await import('../../../src/lib/deploy/compose/ha.js');
 const { FailoverRefusedError } = await import('../../../src/lib/deploy/failover-guard.js');
 const { liftStrandedWriteFence } = await import('../../../src/lib/deploy/write-fence.js');
 
@@ -137,6 +147,8 @@ interface RunOpts {
   journalThrows?: boolean;
   /** The journal clear throws. */
   clearJournalThrows?: boolean;
+  /** What the managed-DNS flip reports (default: flipped and verified). */
+  dnsFlip?: { ok: true } | { ok: false; reason: string };
   /** Pass no seams at all (the real ssh-backed defaults run). */
   noSeams?: boolean;
 }
@@ -158,6 +170,7 @@ async function run(opts: RunOpts = {}) {
     liftSucceeds = true,
     journalThrows = false,
     clearJournalThrows = false,
+    dnsFlip = { ok: true as const },
     noSeams = false,
   } = opts;
   const order: string[] = [];
@@ -263,6 +276,11 @@ async function run(opts: RunOpts = {}) {
     },
     confirmUnproven: async () => {
       order.push('confirmUnproven');
+    },
+    flipDns: async (_env: unknown, ip: string) => {
+      order.push('dns');
+      captured.dnsIp = ip;
+      return dnsFlip;
     },
     swapRoles: (_env: string, o?: { override?: string }) => {
       order.push('swap');
@@ -928,5 +946,49 @@ describe('swapComposeHaRoles (the terminal save)', () => {
     expect(saved.ha.systemIdentifier).toBe(SYSID);
     expect(saved.lastFailoverOverride).toBe('force-unproven');
     expect(typeof saved.lastFailover).toBe('string');
+  });
+});
+
+describe('failoverComposeHA DNS flip is verified (R5)', () => {
+  const managedDns = () =>
+    baseEnvConfig({ domain: 'app.example.com', dns: { provider: 'cloudflare', zoneId: 'z1' } });
+
+  it('a confirmed flip completes cleanly, after the promote and before the swap', async () => {
+    const { order, captured, thrown } = await run({ envConfig: managedDns() });
+    expect(thrown).toBeUndefined();
+    expect(captured.dnsIp).toBe(STANDBY_IP);
+    expect(order.indexOf('promote')).toBeLessThan(order.indexOf('dns'));
+    expect(order.indexOf('dns')).toBeLessThan(order.indexOf('swap'));
+  });
+
+  it('a flip the provider does not confirm persists the swap, then exits non-zero with DNS DID NOT', async () => {
+    const { order, thrown } = await run({
+      envConfig: managedDns(),
+      dnsFlip: { ok: false, reason: 'app.example.com reads back as 10.0.0.1, not 10.0.0.2' },
+    });
+    expect(thrown?.message).toMatch(/DNS DID NOT/);
+    expect(thrown?.message).toContain('app.example.com');
+    expect(thrown?.message).toContain(STANDBY_IP);
+    expect(thrown?.name).toBe('FailoverDnsError');
+    // The promote happened, so the roles must be saved (the journal clears with them).
+    expect(order).toContain('swap');
+    expect(order.indexOf('swap')).toBeGreaterThan(order.indexOf('dns'));
+  });
+
+  it('manual DNS is not an error: instructions print and the failover completes', async () => {
+    const { order, thrown } = await run();
+    expect(thrown).toBeUndefined();
+    expect(order).not.toContain('dns');
+  });
+
+  it('flipComposeDns: a missing DNS token is a failed flip, never a skipped one', async () => {
+    dnsToken = '';
+    try {
+      const result = await flipComposeDns(managedDns(), STANDBY_IP);
+      expect(result.ok).toBe(false);
+      expect(result).toMatchObject({ reason: expect.stringMatching(/not set/) });
+    } finally {
+      dnsToken = 'dns-token';
+    }
   });
 });

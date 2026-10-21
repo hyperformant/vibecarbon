@@ -338,3 +338,65 @@ export function promotionNotIssuedMessage(envName, standbyIp) {
     `standby db is up, then rerun vibecarbon failover ${envName}`
   );
 }
+
+/**
+ * Raised when the role swap is persisted but the DNS flip is not proven. The
+ * failover itself happened (the standby is promoted, the swap is saved), so the
+ * only thing left undone is pointing the A records at the new primary. The
+ * message names that one manual step; the compose reconverge deploy refuses
+ * until DNS answers with the promoted node, so the env stays resumable.
+ */
+export class FailoverDnsError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'FailoverDnsError';
+  }
+}
+
+/**
+ * @param {{ domain: string, ip: string, reason?: string }} args
+ * @returns {string}
+ */
+export function dnsDidNotMessage({ domain, ip, reason }) {
+  return (
+    `FAILOVER COMPLETED, DNS DID NOT: point A records for ${domain} (apex and *.${domain}) at ${ip}` +
+    (reason ? `. ${reason}` : '') +
+    '. the roles are saved; once DNS answers with the promoted node, run vibecarbon deploy to rebuild the old primary'
+  );
+}
+
+/**
+ * Flip apex + wildcard to `ip`, then read both back through the provider's own
+ * API. A provider that accepted the write but holds a different value (or a
+ * flip that threw) is "not flipped": success is only ever what the read-back
+ * confirms. Never throws.
+ *
+ * @param {object} args
+ * @param {() => Promise<unknown>} args.update - writes the apex + wildcard records
+ * @param {(name: string) => Promise<string|null>} args.read - the A record's current target
+ * @param {string} args.domain
+ * @param {string} args.ip
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ */
+export async function flipAndVerifyDns({ update, read, domain, ip }) {
+  try {
+    await update();
+  } catch (error) {
+    return { ok: false, reason: `the DNS update failed: ${error.message}` };
+  }
+  for (const name of [domain, `*.${domain}`]) {
+    let seen;
+    try {
+      seen = await read(name);
+    } catch (error) {
+      return { ok: false, reason: `could not read ${name} back: ${error.message}` };
+    }
+    if (seen !== ip) {
+      return {
+        ok: false,
+        reason: `${name} reads back as ${seen ?? 'nothing'}, not ${ip}`,
+      };
+    }
+  }
+  return { ok: true };
+}

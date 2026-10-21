@@ -349,6 +349,21 @@ export async function createDNSRecord(apiToken, zoneId, config) {
 }
 
 /**
+ * Read the A record's current target, for verifying a flip. Null when the
+ * name has no A record.
+ *
+ * @param {string} apiToken
+ * @param {string} zoneId - Zone identity
+ * @param {string} name - Record name (FQDN)
+ * @returns {Promise<string|null>}
+ */
+export async function readARecord(apiToken, zoneId, name) {
+  const records = await getRecords(apiToken, zoneId);
+  const fqdn = String(name).replace(/\.$/, '');
+  return matching(records, fqdnToRelative(name, zoneId), fqdn, 'A')[0]?.data ?? null;
+}
+
+/**
  * Delete a DNS record, but only if its target IP belongs to this caller.
  *
  * Scaleway stores one row per record (like Cloudflare, unlike Hetzner's

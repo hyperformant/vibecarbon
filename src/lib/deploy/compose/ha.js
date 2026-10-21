@@ -31,6 +31,9 @@ import {
   assertFailoverPreconditions,
   clearFailoverJournal,
   confirmUnprovenFailover,
+  dnsDidNotMessage,
+  FailoverDnsError,
+  flipAndVerifyDns,
   promotionNotIssuedMessage,
   promotionUnknownMessage,
   readReplicaState,
@@ -1590,6 +1593,36 @@ export function swapComposeHaRoles(envName, { override } = {}) {
 }
 
 /**
+ * The managed-DNS flip: every backend's upsertApexAndWildcard repoints apex +
+ * wildcard at the promoted node (per-provider wire details live with the
+ * backends), then the provider's own API reads both back. No compute token is
+ * in scope (failover is DNS-only), so resolveDnsToken resolves env-first. A
+ * missing token is a failed flip, never a silent skip.
+ *
+ * @param {object} envConfig
+ * @param {string} ip - promoted node
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ */
+export async function flipComposeDns(envConfig, ip) {
+  const dnsProvider = envConfig.dns.provider;
+  const token = resolveDnsToken(dnsProvider, {
+    computeProviderId: providerIdFor(envConfig),
+    computeToken: undefined,
+  });
+  if (!token) {
+    return { ok: false, reason: `${DNS_PROVIDERS[dnsProvider].tokenEnv} is not set` };
+  }
+  const auth = { token, zoneId: envConfig.dns.zoneId };
+  const dns = await getDnsProvider(dnsProvider);
+  return flipAndVerifyDns({
+    update: () => dns.upsertApexAndWildcard(auth, envConfig.domain, ip),
+    read: (name) => dns.readARecord(token, auth.zoneId, name),
+    domain: envConfig.domain,
+    ip,
+  });
+}
+
+/**
  * Perform failover for a Compose HA environment: prove the standby (the shared
  * failover guard); when the primary answers (planned), stop its writers and
  * fence its database read-only so no write can land after the promote,
@@ -1649,6 +1682,7 @@ export async function failoverComposeHA(
     fenceOldPrimary = stopOldPrimaryApp,
     confirmUnproven = confirmUnprovenFailover,
     swapRoles = swapComposeHaRoles,
+    flipDns = flipComposeDns,
   } = deps ?? {};
 
   const servers = envConfig.servers || [];
@@ -2138,26 +2172,18 @@ export async function failoverComposeHA(
   // proxied:false RCA inside its module; Hetzner its ttl:60 — the per-provider
   // wire details live with the backends, not here). No compute token in scope
   // (failover is DNS-only), so resolveDnsToken resolves env-first.
-  if (hasAutomatedDns(envConfig.dns?.provider) && envConfig.dns?.zoneId) {
-    const dnsProvider = envConfig.dns.provider;
-    const zoneId = envConfig.dns.zoneId;
-    const domain = envConfig.domain;
-    const token = resolveDnsToken(dnsProvider, {
-      computeProviderId: providerIdFor(envConfig),
-      computeToken: undefined,
-    });
-    if (token) {
-      s.start('Updating DNS A record');
-      try {
-        const dns = await getDnsProvider(dnsProvider);
-        await dns.upsertApexAndWildcard({ token, zoneId }, domain, standbyServer.ip);
-        s.stop(`DNS updated: ${domain} → ${standbyServer.ip}`);
-      } catch (error) {
-        s.stop(`DNS update failed: ${error.message}`);
-        p.log.warn(`Manually update the A record for ${domain} to ${standbyServer.ip}`);
-      }
+  // A flip counts only after the provider's own API reads the record back at
+  // the promoted node (R5); a missing token is the same "not flipped".
+  let dnsFlip = { ok: true };
+  const dnsAutomated = hasAutomatedDns(envConfig.dns?.provider) && envConfig.dns?.zoneId;
+  if (dnsAutomated) {
+    s.start('Updating DNS A record');
+    dnsFlip = await flipDns(envConfig, standbyServer.ip);
+    if (dnsFlip.ok) {
+      s.stop(`DNS updated and verified: ${envConfig.domain} → ${standbyServer.ip}`);
     } else {
-      p.log.warn(`${DNS_PROVIDERS[dnsProvider].tokenEnv} not set, update DNS A record manually`);
+      s.stop('DNS update not confirmed');
+      p.log.error(dnsFlip.reason);
     }
   } else {
     // Manual DNS instructions
@@ -2176,7 +2202,7 @@ export async function failoverComposeHA(
   // Warn-don't-abort: the DR flip is complete and the site serves; a pending
   // cert is degraded TLS, not a failed failover. Managed DNS only — on
   // manual DNS the operator hasn't repointed the domain yet.
-  if (hasAutomatedDns(envConfig.dns?.provider) && envConfig.domain) {
+  if (dnsFlip.ok && hasAutomatedDns(envConfig.dns?.provider) && envConfig.domain) {
     s.start(`Waiting for ${envConfig.domain} to serve a trusted TLS certificate`);
     const tls = await waitForTrustedTls(envConfig.domain, {
       onProgress: (msg) => s.message(msg),
@@ -2204,7 +2230,8 @@ export async function failoverComposeHA(
         : undefined,
   });
 
-  p.log.success('Failover complete');
+  if (dnsFlip.ok) p.log.success('Failover complete');
+  else p.log.warn('The standby is promoted and the roles are saved, but DNS was not flipped.');
   // The roles persisted above are now inverted relative to the Pulumi stacks.
   // `vibecarbon deploy` reconverges by role (ha-role-swap.js): it keeps the
   // promoted node serving and rebuilds the retired one as the standby. These
@@ -2217,6 +2244,14 @@ export async function failoverComposeHA(
     retiredIp: primaryServer.ip,
   })) {
     p.log.message(`  ${line}`);
+  }
+
+  // TERMINAL: an unproven DNS flip is the more urgent failure (the site is
+  // unreachable), so it throws first; the roles are already saved.
+  if (!dnsFlip.ok) {
+    throw new FailoverDnsError(
+      dnsDidNotMessage({ domain: envConfig.domain, ip: standbyServer.ip, reason: dnsFlip.reason }),
+    );
   }
 
   // TERMINAL: the failover itself succeeded (promoted, DNS flipped, roles

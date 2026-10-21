@@ -24,6 +24,9 @@ import {
   assertFailoverPreconditions,
   clearFailoverJournal,
   confirmUnprovenFailover,
+  dnsDidNotMessage,
+  FailoverDnsError,
+  flipAndVerifyDns,
   promotionNotIssuedMessage,
   promotionUnknownMessage,
   readReplicaState,
@@ -1226,6 +1229,10 @@ function dnsStrategyFor(dnsProvider) {
       const dns = await getDnsProvider(dnsProvider);
       return dns.upsertApexAndWildcard(auth, domain, ip);
     },
+    async readDns(auth, name) {
+      const dns = await getDnsProvider(dnsProvider);
+      return dns.readARecord(auth.token, auth.zoneId, name);
+    },
   };
 }
 
@@ -1872,15 +1879,20 @@ export async function failoverHA(
 
   // STEP 7 — Switch apex + wildcard A records to the standby floating IP.
   // Manual DNS skips this — instructions are printed in the epilogue.
+  let dnsFlip = { ok: true };
   if (strategy.updateDns) {
     s.start('Updating DNS A record');
-    try {
-      await strategy.updateDns(auth, domain, standbyFloatingIp);
-      s.stop(`DNS updated: ${domain} → ${standbyFloatingIp}`);
-    } catch (error) {
-      s.stop('DNS update failed');
-      p.log.error(error.message);
-      p.log.warn(`Manually update the A record for ${domain} to ${standbyFloatingIp}`);
+    dnsFlip = await flipAndVerifyDns({
+      update: () => strategy.updateDns(auth, domain, standbyFloatingIp),
+      read: (name) => strategy.readDns(auth, name),
+      domain,
+      ip: standbyFloatingIp,
+    });
+    if (dnsFlip.ok) {
+      s.stop(`DNS updated and verified: ${domain} → ${standbyFloatingIp}`);
+    } else {
+      s.stop('DNS update not confirmed');
+      p.log.error(dnsFlip.reason);
     }
   }
 
@@ -1897,7 +1909,11 @@ export async function failoverHA(
       : undefined;
   swapRoles(envName, override ? { override } : undefined);
 
-  if (strategy.updateDns) {
+  if (!dnsFlip.ok) {
+    p.log.warn(
+      'The standby is promoted and the roles are saved, but DNS still points at the old primary.',
+    );
+  } else if (strategy.updateDns) {
     p.log.success('Failover complete');
     p.log.info(c.bold('Recovery instructions:'));
     p.log.message(
@@ -1925,6 +1941,11 @@ export async function failoverHA(
   // LAST so the command exits non-zero — a failover that leaves the new primary
   // archiving nothing must never be reported as a clean success, and an
   // automated caller has to be able to see that.
+  if (!dnsFlip.ok) {
+    throw new FailoverDnsError(
+      dnsDidNotMessage({ domain, ip: standbyFloatingIp, reason: dnsFlip.reason }),
+    );
+  }
   if (!backupHealth.ok) {
     throw new Error(
       walgRoleDegradedMessage({

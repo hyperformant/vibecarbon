@@ -62,15 +62,19 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   return { ...actual, mergeRemoteDotenv: vi.fn(async () => {}) };
 });
 
+let composeFlippedTo: string | null = null;
+
 vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
     resolveDnsToken: () => 'dns-token',
     getDnsProvider: async () => ({
-      upsertApexAndWildcard: async () => {
+      upsertApexAndWildcard: async (_auth: unknown, _domain: string, ip: string) => {
         order.push('dns');
+        composeFlippedTo = ip;
       },
+      readARecord: async () => composeFlippedTo,
     }),
   };
 });
@@ -233,11 +237,14 @@ async function runK8s(primaryReachable: boolean) {
     promoteIssuer: async () => ({ patched: [] }),
     swapRoles: () => {},
   };
+  let flippedTo: string | null = null;
   const strategy = {
     getAuth: async () => ({ token: 't', zoneId: 'z' }),
-    updateDns: async () => {
+    updateDns: async (_auth: unknown, _domain: string, ip: string) => {
       order.push('dns');
+      flippedTo = ip;
     },
+    readDns: async () => flippedTo,
   };
   // The real waitForAppTierGone reads the quiesced Deployment's selector, then
   // its pods: none left is the proof (writersGone).

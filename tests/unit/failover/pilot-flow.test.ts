@@ -613,13 +613,16 @@ async function runFailoverHA(opts: RunOpts) {
     },
   };
 
+  let flippedTo: string | null = null;
   const strategy = manualDns
     ? {}
     : {
         getAuth: async () => ({ token: 't', zoneId: 'z' }),
-        updateDns: async () => {
+        updateDns: async (_auth: unknown, _domain: string, ip: string) => {
           order.push('dns');
+          flippedTo = ip;
         },
+        readDns: async () => flippedTo,
       };
 
   const envConfig = {

@@ -106,6 +106,23 @@ vi.mock('node:fs', async (orig) => {
 });
 
 // The post-flip TLS gate would otherwise open a real socket to the test domain.
+// The DNS flip is verified through the provider's own API now (R5); fake a
+// provider that holds whatever it was last told.
+let dnsHeld: string | null = null;
+vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    resolveDnsToken: () => 'dns-token',
+    getDnsProvider: async () => ({
+      upsertApexAndWildcard: async (_auth: unknown, _domain: string, ip: string) => {
+        dnsHeld = ip;
+      },
+      readARecord: async () => dnsHeld,
+    }),
+  };
+});
+
 vi.mock('../../../src/lib/deploy/tls-ready.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {

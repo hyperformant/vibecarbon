@@ -321,6 +321,22 @@ export async function createDNSRecord(apiToken, zoneId, config) {
 }
 
 /**
+ * Read the A record's current target, for verifying a flip. Null when the
+ * name has no A record.
+ *
+ * @param {string} apiToken
+ * @param {string} zoneId - Zone identity
+ * @param {string} name - Record name (FQDN)
+ * @returns {Promise<string|null>}
+ */
+export async function readARecord(apiToken, zoneId, name) {
+  const zoneName = await getZoneName(apiToken, zoneId);
+  const records = await getRecords(apiToken, zoneId);
+  const fqdn = String(name).replace(/\.$/, '');
+  return matching(records, fqdnToRelative(name, zoneName), fqdn, 'A')[0]?.target ?? null;
+}
+
+/**
  * Delete a DNS record, but only if its target IP belongs to this caller.
  *
  * Linode stores one row per record (like Cloudflare, unlike Hetzner's rrsets),

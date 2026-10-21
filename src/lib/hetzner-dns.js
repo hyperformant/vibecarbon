@@ -257,6 +257,22 @@ export async function createDNSRecord(apiToken, zoneId, config) {
 }
 
 /**
+ * Read the A record's current target, for verifying a flip. Null when the
+ * name has no A rrset.
+ *
+ * @param {string} apiToken
+ * @param {string} zoneId - Zone ID
+ * @param {string} name - Record name (FQDN)
+ * @returns {Promise<string|null>}
+ */
+export async function readARecord(apiToken, zoneId, name) {
+  const zoneName = await zoneNameForId(apiToken, zoneId);
+  const relativeName = fqdnToRelative(name, zoneName);
+  const rrsets = await getRrsets(apiToken, zoneId);
+  return rrsets.find((r) => r.type === 'A' && r.name === relativeName)?.records?.[0]?.value ?? null;
+}
+
+/**
  * Delete a DNS rrset by FQDN and type — but only if every value in the
  * rrset belongs to this caller's stack.
  *
