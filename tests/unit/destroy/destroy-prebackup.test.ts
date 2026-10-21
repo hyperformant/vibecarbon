@@ -97,6 +97,22 @@ describe('preDestroyBackup', () => {
     ]);
   });
 
+  it('a nightly Job holding the lock says to wait and rerun, one command per line', async () => {
+    const { deps, logs } = harness({
+      triggerBackupJob: vi.fn(async () => ({ result: 'skipped', reason: 'already-running' })),
+    });
+    await expect(preDestroyBackup(opts(k8sHa()), deps)).rejects.toThrow(new Exit(1));
+    expect(logs).toContainEqual([
+      'error',
+      [
+        'backup skipped (already-running); destroy stopped: a backup is running; wait for it and rerun',
+        '  vibecarbon destroy prod',
+        'Or destroy without a backup:',
+        '  vibecarbon destroy prod -force',
+      ].join('\n'),
+    ]);
+  });
+
   it('-force continues past a skip, saying so', async () => {
     const { deps, logs } = harness({
       triggerBackupJob: vi.fn(async () => ({ result: 'skipped', reason: 'in-recovery' })),

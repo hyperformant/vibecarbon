@@ -411,6 +411,20 @@ export async function preDestroyBackup(
       log.warn(`backup ${what} (${why}); -force set, destroying anyway`);
       return;
     }
+    if (why === 'already-running') {
+      // Another backup (the nightly Job) holds the lock: nothing is wrong, the
+      // answer is to wait. One command per line, so each copies cleanly.
+      log.error(
+        [
+          `backup ${what} (${why}); destroy stopped: a backup is running; wait for it and rerun`,
+          `  vibecarbon destroy ${envName}`,
+          'Or destroy without a backup:',
+          `  vibecarbon destroy ${envName} -force`,
+        ].join('\n'),
+      );
+      exit(1);
+      return;
+    }
     log.error(`backup ${what} (${why}); destroy stopped; rerun with -force to destroy anyway`);
     exit(1);
   };
