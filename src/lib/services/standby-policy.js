@@ -50,21 +50,21 @@ export function loadAddonStandby(name) {
   return { name, policy: standby.policy, composeServices, composeSetup, k8s };
 }
 
-/** Add-on names in `services/index.json` order. */
-function allAddonNames() {
+/** Every add-on name, in `services/index.json` order (installed or not). */
+export function declaredAddonNames() {
   return readJson(join(SERVICES_DIR, 'index.json')).map((s) => s.name);
 }
 
 /** The add-ons an env config turns on, as `envConfig[name]` or `envConfig.services[name]`. */
 export function enabledAddonNames(envConfig) {
-  return allAddonNames().filter((name) =>
+  return declaredAddonNames().filter((name) =>
     Boolean(envConfig?.[name] || envConfig?.services?.[name]),
   );
 }
 
 /** The add-ons deployed into a project's k8s tree (`k8s/base/<name>/kustomization.yaml`). */
 export function enabledK8sAddonNames(projectDir) {
-  return allAddonNames().filter((name) =>
+  return declaredAddonNames().filter((name) =>
     existsSync(join(projectDir, 'k8s', 'base', name, 'kustomization.yaml')),
   );
 }

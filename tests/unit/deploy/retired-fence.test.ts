@@ -135,6 +135,7 @@ function fakeCluster(
     role: init.role ?? '',
     replicas: init.replicas ?? 2,
     addons: { ...(init.addons ?? {}) } as Record<string, number>,
+    addonNsReadFails: false,
     walg: init.walg ?? 'primary',
     dbMarker: false,
     reachable: true,
@@ -169,6 +170,11 @@ function fakeCluster(
       if (ann === null) delete k.annotations[FLUX_SUSPENDED_BY];
       else k.annotations[FLUX_SUSPENDED_BY] = ann;
       writes.push(`flux ${body.spec.suspend ? 'suspend' : 'resume'} ${name}`);
+      return '';
+    }
+    if (argv.includes('get') && argv[0] === '-n' && argv[1] !== 'vibecarbon') {
+      // An add-on namespace of its own (observability): none installed here.
+      if (state.addonNsReadFails) throw new Error('Unable to connect to the server: EOF');
       return '';
     }
     if (argv.includes('rollout')) {
@@ -496,43 +502,51 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     expect(cluster.writes).not.toContain('scale app 0');
   });
 
-  it('with n8n and redis installed, the default zeroes the app and both add-ons, and the probe needs all three at 0', async () => {
-    const projectDir = mkdtempSync(join(tmpdir(), 'vc-fence-addons-'));
-    for (const name of ['n8n', 'redis']) {
-      mkdirSync(join(projectDir, 'k8s', 'base', name), { recursive: true });
-      writeFileSync(join(projectDir, 'k8s', 'base', name, 'kustomization.yaml'), 'kind: x\n');
+  it('with n8n and redis on the cluster, the default zeroes the app and both add-ons, and the probe needs all three at 0', async () => {
+    const cluster = fakeCluster({ addons: { n8n: 1, redis: 1 } });
+    const first = await reconcileRetiredFence(argsFor(cluster));
+    expect(first.fenced).toEqual([RETIRED_IP]);
+    expect(cluster.writes.filter((w) => w.startsWith('scale '))).toEqual([
+      'scale app 0',
+      'scale n8n 0',
+      'scale redis 0',
+    ]);
+    // kubectl scale only: a patch or set image would roll the pods.
+    for (const a of cluster.argvs.filter((x) => x.includes('n8n') || x.includes('redis'))) {
+      expect(a).not.toContain('patch');
     }
-    try {
-      const cluster = fakeCluster({ addons: { n8n: 1, redis: 1 } });
-      const first = await reconcileRetiredFence(argsFor(cluster, { projectDir }));
-      expect(first.fenced).toEqual([RETIRED_IP]);
-      expect(cluster.writes.filter((w) => w.startsWith('scale '))).toEqual([
-        'scale app 0',
-        'scale n8n 0',
-        'scale redis 0',
-      ]);
-      // kubectl scale only: a patch or set image would roll the pods.
-      for (const a of cluster.argvs.filter((x) => x.includes('n8n') || x.includes('redis'))) {
-        expect(a).not.toContain('patch');
-      }
-      // A fenced cluster reads clean; one add-on scaled back up reads as missing.
-      cluster.writes.length = 0;
-      await reconcileRetiredFence(argsFor(cluster, { projectDir }));
-      expect(cluster.writes).toEqual([]);
-      cluster.state.addons.redis = 1;
-      await reconcileRetiredFence(argsFor(cluster, { projectDir }));
-      expect(cluster.writes).toEqual(['scale redis 0']);
-    } finally {
-      rmSync(projectDir, { recursive: true, force: true });
-    }
+    // A fenced cluster reads clean; one add-on scaled back up reads as missing.
+    cluster.writes.length = 0;
+    await reconcileRetiredFence(argsFor(cluster));
+    expect(cluster.writes).toEqual([]);
+    cluster.state.addons.redis = 1;
+    await reconcileRetiredFence(argsFor(cluster));
+    expect(cluster.writes).toEqual(['scale redis 0']);
   });
 
-  it('with no add-on installed the default is app-only (an add-on Deployment left over is not listed)', async () => {
-    const cluster = fakeCluster({ addons: { n8n: 1 } });
+  it('the fence reads every declared add-on whatever the local tree holds (no add-on on the cluster: app only)', async () => {
+    // The retired side is the old primary: its add-ons need not match the
+    // local k8s tree, and status can run outside the project directory.
+    const cluster = fakeCluster();
     const result = await reconcileRetiredFence(argsFor(cluster));
     expect(result.fenced).toEqual([RETIRED_IP]);
     expect(cluster.writes.filter((w) => w.startsWith('scale '))).toEqual(['scale app 0']);
-    expect(cluster.argvs.some((a) => a.includes('deployment/n8n'))).toBe(false);
+    const mainRead = cluster.argvs.find((a) => a.includes('configmap/vibecarbon-config')) ?? [];
+    for (const name of ['n8n', 'redis', 'metabase']) {
+      expect(mainRead).toContain(`deployment/${name}`);
+    }
+  });
+
+  it('an unreadable observability namespace still lets the app be zeroed (NotFound scales count as zero)', async () => {
+    const cluster = fakeCluster();
+    cluster.state.addonNsReadFails = true;
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(cluster.writes).toContain('scale app 0');
+    // Its declared Deployments are scaled blind; absent ones answer NotFound.
+    expect(
+      cluster.argvs.some((a) => a.includes('vibecarbon-observability') && a.includes('scale')),
+    ).toBe(true);
+    expect(result.fenced).toEqual([RETIRED_IP]);
   });
 
   it('the fence log says the domain is down while DNS still points at the node', async () => {

@@ -55,7 +55,11 @@ import { readOperatorVar } from '../../operator-env.js';
 import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
-import { enabledK8sAddonNames, k8sStandbyZeroedWorkloads } from '../../services/standby-policy.js';
+import {
+  declaredAddonNames,
+  enabledK8sAddonNames,
+  k8sStandbyZeroedWorkloads,
+} from '../../services/standby-policy.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
 import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
@@ -2927,15 +2931,19 @@ export async function zeroWorkloadsOnStandby({ env, workloads, kubectl = runKube
  * stack left from this cluster's primary life at the standby's self-signed
  * issuer (the real issuer rides the promote annotation, as on vibecarbon-tls).
  * The stack's Deployments are zeroed by zeroWorkloadsOnStandby from the
- * declaration. No-op when the namespace is absent, which is every freshly
- * deployed standby.
+ * declaration when the add-on is in the project tree; `leftoverWorkloads`
+ * are the namespace's declared Deployments that list did not cover (the
+ * add-on left the tree but its stack is still on the cluster), zeroed here
+ * once the namespace is found. No-op when the namespace is absent, which is
+ * every freshly deployed standby.
  *
- * @param {{ env: Record<string, string|undefined>, issuerName: string, kubectl?: typeof runKubectlWithRetry }} args
+ * @param {{ env: Record<string, string|undefined>, issuerName: string, leftoverWorkloads?: Array<{kind: string, name: string, namespace: string}>, kubectl?: typeof runKubectlWithRetry }} args
  * @returns {Promise<boolean>} true when a leftover stack's namespace was found
  */
 export async function repointObservabilityCertOnStandby({
   env,
   issuerName,
+  leftoverWorkloads = [],
   kubectl = runKubectlWithRetry,
 }) {
   const ns = String(
@@ -2949,6 +2957,7 @@ export async function repointObservabilityCertOnStandby({
     )) ?? '',
   ).trim();
   if (!ns) return false;
+  await zeroWorkloadsOnStandby({ env, workloads: leftoverWorkloads, kubectl });
   const cert = String(
     (await kubectl(
       [
@@ -3100,6 +3109,11 @@ export async function applyK3sManifests({
   // patches are NOT gated — failover needs the registry (CA-spawned workers
   // pull the app image from it) and the serving master.
   const pilotStandby = role === 'standby';
+  // The add-on workloads a pilot standby holds at zero: every add-on deployed
+  // into the project's k8s tree, both policies (the app tier is zeroed).
+  const standbyAddonWorkloads = pilotStandby
+    ? k8sStandbyZeroedWorkloads(enabledK8sAddonNames(projectDir))
+    : [];
   // 0. Validate DNS-01 prerequisites BEFORE any apply so the failure
   //    surfaces at deploy-start, not 20 min in when an Order pins Pending.
   //    Throws on missing token for any DNS01_PROVIDERS row; manual returns null.
@@ -3628,10 +3642,7 @@ export async function applyK3sManifests({
     // database; with-app-tier ones follow the zeroed app tier), in the same
     // window after `apply -k` as the app. Failover scales the app-namespace
     // ones back up from ha.scaleUpList.
-    await zeroWorkloadsOnStandby({
-      env,
-      workloads: k8sStandbyZeroedWorkloads(enabledK8sAddonNames(projectDir)),
-    });
+    await zeroWorkloadsOnStandby({ env, workloads: standbyAddonWorkloads });
 
     // Reap stale worker Node OBJECTS. A pilot standby has minWorkers:0, so
     // ANY '-worker-' node here is stale by definition — after a failover,
@@ -3911,7 +3922,17 @@ export async function applyK3sManifests({
     // the vibecarbon-tls patch above); the apply restores `replicas: 1` and
     // the issuer the day this cluster is promoted again. A fresh standby has
     // no such namespace and this is a no-op.
-    await repointObservabilityCertOnStandby({ env, issuerName });
+    await repointObservabilityCertOnStandby({
+      env,
+      issuerName,
+      // A stack left on the cluster after its add-on left the project tree:
+      // nothing above zeroed it, so the namespace check does.
+      leftoverWorkloads: k8sStandbyZeroedWorkloads(declaredAddonNames()).filter(
+        (w) =>
+          w.namespace === OBSERVABILITY_NAMESPACE &&
+          !standbyAddonWorkloads.some((z) => z.namespace === w.namespace && z.name === w.name),
+      ),
+    });
   } else if (
     existsSync(join(observabilityDir, 'kustomization.yaml')) &&
     !baseAggregatesObservability

@@ -78,6 +78,29 @@ describe('gatePromotedApiReadiness', () => {
     expect(lastRollout).toBeLessThan(firstProbe);
   });
 
+  it('awaits only the app tier: an add-on entry is scaled up but never rollout-waited before the flip', async () => {
+    // Metabase's cold JVM start can take minutes; the gate sits before the DNS
+    // flip, so waiting on it would lengthen the outage. A never-settling add-on
+    // rollout must not hold the gate.
+    const kubectl = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      if (argv.includes('deployment/metabase')) return new Promise<string>(() => {});
+      return '';
+    });
+    const runner = vi.fn(async () => '200');
+    await gatePromotedApiReadiness('app.example.com', '9.9.9.9', '/key', noopSpinner(), {
+      scaleUpList: [
+        { name: 'app', namespace: 'vibecarbon', replicas: 2 },
+        { name: 'metabase', namespace: 'vibecarbon', replicas: 1, addon: true },
+        { name: 'cluster-autoscaler', namespace: 'kube-system', replicas: 1 },
+      ],
+      kubectl,
+      runner,
+    });
+    const rolled = kubectl.mock.calls.map((c) => (c[2] as string[])[2]);
+    expect(rolled).toEqual(['deployment/app', 'deployment/cluster-autoscaler']);
+    expect(runner).toHaveBeenCalled();
+  });
+
   it('dispatches all rollout-status waits in PARALLEL, not serially', async () => {
     // The gate now includes real provisioning + a scale-up + up to ~11 rollout
     // waits; serially at 130s each that alone could blow the e2e failover

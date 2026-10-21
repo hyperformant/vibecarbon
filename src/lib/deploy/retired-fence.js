@@ -49,8 +49,8 @@
 import * as p from '@clack/prompts';
 import {
   composeWriterServices,
+  declaredAddonNames,
   enabledAddonNames,
-  enabledK8sAddonNames,
   k8sStandbyZeroedWorkloads,
 } from '../services/standby-policy.js';
 import { getSSHKeyPath, sshKubectl } from '../ssh.js';
@@ -240,14 +240,17 @@ async function listFluxKustomizations(ip, kubectl, opts) {
 }
 
 /**
- * The workloads the k8s fence holds at zero: the app, then every add-on
- * deployed into the project's k8s tree (k8sStandbyZeroedWorkloads, the same
- * list the pilot standby zeroes).
+ * The workloads the k8s fence holds at zero: the app, then every declared
+ * add-on workload (k8sStandbyZeroedWorkloads over all of services/), installed
+ * on the retired cluster or not. The retired side is the old primary, whose
+ * add-ons need not match the local k8s tree (or a command run outside the
+ * project), so the fence never narrows the list to what is installed here: an
+ * absent Deployment reads as zero and costs only its share of a read.
  */
-function k8sFencedWorkloads(projectDir) {
+function k8sFencedWorkloads() {
   return [
     { kind: 'Deployment', name: K8S_APP_DEPLOYMENT, namespace: NS },
-    ...k8sStandbyZeroedWorkloads(enabledK8sAddonNames(projectDir)),
+    ...k8sStandbyZeroedWorkloads(declaredAddonNames()),
   ];
 }
 
@@ -261,31 +264,39 @@ const listItems = (out) => {
 /**
  * The fenced workloads not at zero, as `{kind, name, namespace}`. One read per
  * namespace beyond the app's (the app namespace rides the probe's main read);
- * a workload that does not exist counts as zero.
+ * a workload that does not exist counts as zero. A namespace whose read fails
+ * lists all its workloads: the zero step scales them anyway (kubectl scale is
+ * idempotent and a NotFound counts as zero), so one unreadable add-on
+ * namespace never keeps the app from being zeroed.
  */
 async function k8sWorkloadsNotZero(ip, { kubectl, workloads, appNsItems, opts }) {
   const byNs = new Map();
   for (const w of workloads) byNs.set(w.namespace, [...(byNs.get(w.namespace) ?? []), w]);
   const live = [];
   for (const [namespace, list] of byNs) {
-    const items =
-      namespace === NS
-        ? appNsItems
-        : listItems(
-            await kubectl(
-              ip,
-              [
-                '-n',
-                namespace,
-                'get',
-                ...list.map((w) => `${w.kind.toLowerCase()}/${w.name}`),
-                '-o',
-                'json',
-                '--ignore-not-found',
-              ],
-              opts,
-            ),
-          );
+    let items = appNsItems;
+    if (namespace !== NS) {
+      try {
+        items = listItems(
+          await kubectl(
+            ip,
+            [
+              '-n',
+              namespace,
+              'get',
+              ...list.map((w) => `${w.kind.toLowerCase()}/${w.name}`),
+              '-o',
+              'json',
+              '--ignore-not-found',
+            ],
+            opts,
+          ),
+        );
+      } catch {
+        live.push(...list);
+        continue;
+      }
+    }
     for (const w of list) {
       const obj = items.find((i) => i?.kind === w.kind && i?.metadata?.name === w.name);
       if (obj && obj.spec?.replicas !== 0) live.push(w);
@@ -293,6 +304,8 @@ async function k8sWorkloadsNotZero(ip, { kubectl, workloads, appNsItems, opts })
   }
   return live;
 }
+
+const NOT_FOUND = /NotFound|not found/i;
 
 /** One read of everything the k8s fence covers; null when the cluster does not answer. */
 async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
@@ -322,19 +335,12 @@ async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
     return null;
   }
   const of = (kind) => items.find((i) => i?.kind === kind);
-  let workloadsZero = 'unknown';
-  let workloadsToZero = [];
-  try {
-    workloadsToZero = await k8sWorkloadsNotZero(ip, {
-      kubectl,
-      workloads,
-      appNsItems: items,
-      opts,
-    });
-    workloadsZero = workloadsToZero.length === 0;
-  } catch {
-    // an add-on namespace unreadable: reported as missing, never guessed zero
-  }
+  const workloadsToZero = await k8sWorkloadsNotZero(ip, {
+    kubectl,
+    workloads,
+    appNsItems: items,
+    opts,
+  });
   const db = (of('StatefulSet')?.spec?.template?.spec?.containers ?? []).find(
     (ct) => ct.name === DB_CONTAINER,
   );
@@ -367,7 +373,7 @@ async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
     walBytes: dbState.walBytes,
     fluxSuspended,
     fluxToSuspend,
-    workloadsZero,
+    workloadsZero: workloadsToZero.length === 0,
     workloadsToZero,
     walgStandby: (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value === 'standby',
   };
@@ -433,17 +439,25 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads }) {
           zeroWorkloads
             ? zeroWorkloads(ip)
             : // kubectl scale, never a patch or set image: those would roll pods.
+              // Every workload is tried (the app first), so one failing add-on
+              // namespace never leaves the app running; NotFound is zero.
               attempt(async () => {
+                let ok = true;
                 for (const w of state.workloadsToZero) {
-                  await kubectl(ip, [
-                    '-n',
-                    w.namespace,
-                    'scale',
-                    w.kind.toLowerCase(),
-                    w.name,
-                    '--replicas=0',
-                  ]);
+                  try {
+                    await kubectl(ip, [
+                      '-n',
+                      w.namespace,
+                      'scale',
+                      w.kind.toLowerCase(),
+                      w.name,
+                      '--replicas=0',
+                    ]);
+                  } catch (err) {
+                    if (!NOT_FOUND.test(String(err?.message ?? err))) ok = false;
+                  }
                 }
+                return ok;
               }),
       },
       {
@@ -580,7 +594,7 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
       kubectl: deps.kubectl ?? ((ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts)),
       psqlFor: deps.psql ?? ((ip) => k8sPsqlRunner(ip, sshKeyPath)),
       zeroWorkloads: deps.zeroWorkloads,
-      workloads: k8sFencedWorkloads(deps.projectDir ?? process.cwd()),
+      workloads: k8sFencedWorkloads(),
     });
   }
   if (tier === 'compose-ha') {
@@ -613,9 +627,8 @@ async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
  * once the db settles, so one run fences fully.
  *
  * `deps.zeroWorkloads(ip) -> Promise<boolean>` replaces the built-in writer
- * stop (k8s: the app Deployment and every add-on deployed into the project's
- * k8s tree, the list the pilot standby zeroes; compose: the declared writers).
- * `deps.projectDir` (default: the cwd) is where the k8s add-ons are read.
+ * stop (k8s: the app Deployment and every declared add-on workload, the
+ * pilot-standby list over all of services/; compose: the declared writers).
  *
  * @param {object} args
  * @param {'compose-ha'|'k8s-ha'} args.tier

@@ -109,6 +109,31 @@ describe('repointObservabilityCertOnStandby', () => {
   });
 });
 
+describe('repointObservabilityCertOnStandby with a leftover stack', () => {
+  it('zeroes the leftover Deployments once the namespace is found', async () => {
+    const { calls, kubectl } = fakeKubectl(['vibecarbon-observability', 'grafana', 'loki']);
+    await repointObservabilityCertOnStandby({
+      env: {},
+      issuerName: 'le',
+      leftoverWorkloads: k8sStandbyZeroedWorkloads(['observability']),
+      kubectl,
+    });
+    const scaled = calls.filter((a) => a.includes('scale')).map((a) => a[4]);
+    expect(scaled).toEqual(['grafana', 'loki']);
+  });
+
+  it('without the namespace nothing is read for the leftovers', async () => {
+    const { calls, kubectl } = fakeKubectl([]);
+    await repointObservabilityCertOnStandby({
+      env: {},
+      issuerName: 'le',
+      leftoverWorkloads: k8sStandbyZeroedWorkloads(['observability']),
+      kubectl,
+    });
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('applyK3sManifests pilot-standby block (source order)', () => {
   const body = K3S_SRC.slice(K3S_SRC.indexOf('export async function applyK3sManifests('));
 
@@ -119,13 +144,14 @@ describe('applyK3sManifests pilot-standby block (source order)', () => {
     expect(appZero).toBeGreaterThan(-1);
     expect(addonZero).toBeGreaterThan(appZero);
     expect(addonZero).toBeLessThan(reap);
-    expect(body.slice(addonZero, reap)).toMatch(
-      /k8sStandbyZeroedWorkloads\(enabledK8sAddonNames\(projectDir\)\)/,
+    expect(body.slice(addonZero, reap)).toContain('workloads: standbyAddonWorkloads');
+    expect(body).toMatch(
+      /const standbyAddonWorkloads = pilotStandby\s*\?\s*k8sStandbyZeroedWorkloads\(enabledK8sAddonNames\(projectDir\)\)/,
     );
   });
 
   it('the observability branch only re-points the cert; nothing scales a whole namespace', () => {
-    expect(body).toContain('await repointObservabilityCertOnStandby({ env, issuerName })');
+    expect(body).toMatch(/await repointObservabilityCertOnStandby\(\{\s*env,\s*issuerName,/);
     expect(K3S_SRC).not.toContain('demoteObservabilityOnStandby');
     expect(K3S_SRC).not.toMatch(/'scale',\s*'deployment',\s*'--all'/);
   });

@@ -681,6 +681,18 @@ export async function waitForPromotedApiServing(domain, ip, sshKeyPath, opts = {
 export async function gatePromotedApiReadiness(domain, promotedIp, sshKeyPath, s, opts = {}) {
   const { scaleUpList = [], kubectl = sshKubectl, runner = sshRun } = opts;
 
+  // Add-on entries (deriveScaleUpList marks them `addon: true`) were scaled up
+  // with the app but are not awaited: this gate sits before the DNS flip, and
+  // a slow add-on (Metabase's cold JVM start) must not lengthen the outage.
+  // `vibecarbon status` reports their health once they settle.
+  const appTier = scaleUpList.filter((dep) => dep.addon !== true);
+  const addons = scaleUpList.filter((dep) => dep.addon === true).map((dep) => dep.name);
+  if (addons.length > 0) {
+    p.log.info(
+      `add-ons scaled up, not awaited before the DNS flip: ${addons.join(', ')} ` +
+        '(vibecarbon status shows them once they settle)',
+    );
+  }
   s.start('Waiting for the promoted app tier to roll out');
   // Roll out every deployment IN PARALLEL. Serially, this gate waits up to
   // ~11 deployments × 130s ≈ 24 min in the worst case — enough to blow the e2e
@@ -690,7 +702,7 @@ export async function gatePromotedApiReadiness(domain, promotedIp, sshKeyPath, s
   // timeout per call. The deleted restartPromotedPostgresDependents fanned out
   // exactly like this.
   await Promise.all(
-    scaleUpList.map(async (dep) => {
+    appTier.map(async (dep) => {
       const ns = dep.namespace || 'vibecarbon';
       try {
         // 120s server-side inside a 130s client cap: the kubectl --timeout must

@@ -859,6 +859,28 @@ describe('applyK3sManifests pilot-standby role', () => {
     expect(Object.values(body.metadata.annotations)[0]).toMatch(/^letsencrypt/);
   });
 
+  it('a leftover observability stack whose add-on left the project tree is zeroed too', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    const projectDir = makeProjectDir();
+    leftoverObservability = true;
+    try {
+      await applyK3sManifests({ ...baseArgs(projectDir), role: 'standby' });
+    } finally {
+      leftoverObservability = false;
+    }
+    for (const name of ['grafana', 'prometheus', 'loki']) {
+      expect(cmdCalls).toContainEqual([
+        'kubectl',
+        '-n',
+        'vibecarbon-observability',
+        'scale',
+        'deployment',
+        name,
+        '--replicas=0',
+      ]);
+    }
+  });
+
   it('a fresh standby (no leftover namespace) scales and patches nothing in observability', async () => {
     const { applyK3sManifests } = await k3sPromise;
     const projectDir = makeProjectDir({ withObservability: true });
