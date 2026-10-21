@@ -276,13 +276,14 @@ describe('no plain hash is fed secret values anywhere in src/', () => {
   }
 
   it('bites on the old split chain (digestEnvLocalSecrets before the HMAC fix)', () => {
-    const old = `
-      const hash = createHash('sha256');
-      for (const key of watched) {
-        const value = envLocal[key];
-        hash.update(\`\${key}=\${value}\\n\`);
-      }
-      return hash.digest('hex');`;
+    const old = [
+      "const hash = createHash('sha256');",
+      'for (const key of watched) {',
+      '  const value = envLocal[key];',
+      "  hash.update(key + '=' + value + '\\n');",
+      '}',
+      "return hash.digest('hex');",
+    ].join('\n');
     expect(hashFeeds(old).some((f) => SECRETISH.test(f))).toBe(true);
     const inline = "createHash('sha256').update(appStorageAccessKey).digest('hex')";
     expect(hashFeeds(inline).some((f) => SECRETISH.test(f))).toBe(true);
