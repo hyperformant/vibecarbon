@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -66,6 +66,9 @@ let webhookWaitExit = 0;
 // short-circuit test.
 let appProbeExit = 0;
 let rolloutHangs = false;
+// The rendered registry manifest as `kubectl apply -k <rendered base>` saw it
+// (the rendered copy is removed right after the apply).
+let registryAtBaseApply: string | null = null;
 
 function makeGate() {
   let release!: () => void;
@@ -162,6 +165,13 @@ function installSpawnMock() {
     cmdCalls.push([cmd, ...(args ?? [])]);
     const argv = args ?? [];
     const full = [cmd, ...argv];
+    if (cmd === 'kubectl' && argv.includes('apply') && argv.includes('-k')) {
+      const target = String(argv[argv.indexOf('-k') + 1]);
+      const registry = join(target, 'registry', 'local-registry.yaml');
+      if (/k8s-base/.test(target) && existsSync(registry)) {
+        registryAtBaseApply = readFileSync(registry, 'utf-8');
+      }
+    }
     if (
       cmd === 'kubectl' &&
       argv.includes('get') &&
@@ -273,7 +283,7 @@ function installSpawnMock() {
   }) as unknown as typeof spawn);
 }
 
-function makeProjectDir({ withObservability = false } = {}) {
+function makeProjectDir({ withObservability = false, withRegistry = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'vc-k3s-apply-'));
   // renderK8sBase refuses a base without the db StatefulSet, so the project
   // carries the real one, as `create` lays it down.
@@ -283,6 +293,16 @@ function makeProjectDir({ withObservability = false } = {}) {
     join(dir, 'k8s', 'base', 'db', 'statefulset.yaml'),
     readFileSync(join(__dirname, '../../../carbon/k8s/base/db/statefulset.yaml'), 'utf-8'),
   );
+  if (withRegistry) {
+    mkdirSync(join(dir, 'k8s', 'base', 'registry'), { recursive: true });
+    writeFileSync(
+      join(dir, 'k8s', 'base', 'registry', 'local-registry.yaml'),
+      readFileSync(
+        join(__dirname, '../../../carbon/k8s/base/registry/local-registry.yaml'),
+        'utf-8',
+      ),
+    );
+  }
   if (withObservability) {
     // The isolated observability stack applies via `kubectl apply -k
     // k8s/base/observability` only when this dir exists (present after
@@ -482,6 +502,39 @@ describe('applyK3sManifests refuses a chart-era cluster', () => {
           a.some((x) => /k8s-base/.test(String(x))),
       ),
     ).toBe(true);
+  });
+});
+
+describe("applyK3sManifests binds the registry hostPort to the deploy's master private IP", () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockReset();
+    cmdCalls = [];
+    stdinCalls = [];
+    pushGate = null;
+    pushExit = { code: 0, stderr: '' };
+    webhookHelmExit = 0;
+    webhookWaitExit = 0;
+    registryAtBaseApply = null;
+    installSpawnMock();
+  });
+
+  it('renders hostIP from masterPrivateIp into the applied base (DO-shaped address)', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await applyK3sManifests({
+      ...baseArgs(makeProjectDir({ withRegistry: true })),
+      imageTag: '10.10.0.7:5000/proj:abc-20260101000000',
+      masterPrivateIp: '10.10.0.7',
+    });
+    expect(registryAtBaseApply).toMatch(/hostIP: "10\.10\.0\.7"/);
+    expect(registryAtBaseApply).not.toContain('{{MASTER_PRIVATE_IP}}');
+  });
+
+  it('refuses to apply the base when masterPrivateIp is missing', async () => {
+    const { applyK3sManifests } = await k3sPromise;
+    await expect(
+      applyK3sManifests(baseArgs(makeProjectDir({ withRegistry: true }))),
+    ).rejects.toThrow(/MASTER_PRIVATE_IP/);
+    expect(registryAtBaseApply).toBeNull();
   });
 });
 

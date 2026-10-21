@@ -274,7 +274,9 @@ describe('buildDbManifestValues', () => {
 
 describe('renderK8sBase on the shipped base', () => {
   it('leaves no placeholder in the StatefulSet and pins the provider class', () => {
-    const rendered = renderK8sBase(BASE, values());
+    // The shipped base carries the registry too; its hostPort binds the
+    // master's private IP (hostport-binding-census.test.ts).
+    const rendered = renderK8sBase(BASE, { ...values(), MASTER_PRIVATE_IP: '10.0.1.1' });
     try {
       const raw = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8');
       expect(raw).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);

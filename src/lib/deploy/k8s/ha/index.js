@@ -121,21 +121,22 @@ export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
 }
 
 /**
- * Strategic-merge patch that binds the primary's postgres to REPL_PORT (hostPort)
- * → containerPort 5432 on the node. The primary repl-gateway (hostNetwork socat)
- * relays tunnel traffic to `127.0.0.1:REPL_PORT` — this hostPort IS that local
- * listener. NOTE: the port is NOT opened in the Hetzner firewall (the firewall
- * now admits only WG udp/51821), so postgres is reachable only via localhost on
- * the node, never cross-cluster over the public internet. Without this hostPort
- * the db is reachable only inside the cluster and the gateway's local relay
- * target would have nothing to connect to. Mirrors the traefik/registry hostPort
- * pattern. One db pod per node (StatefulSet), so the node's :REPL_PORT is
- * uncontended.
+ * Strategic-merge patch that binds the primary's postgres to
+ * `127.0.0.1:REPL_PORT` (hostPort + hostIP) → containerPort 5432 on the node.
+ * The primary repl-gateway (hostNetwork socat) relays tunnel traffic to
+ * `127.0.0.1:REPL_PORT`; this hostPort IS that local listener, and its only
+ * consumer. `hostIP: '127.0.0.1'` is what makes "localhost-only" true: a
+ * hostPort with no hostIP is published on EVERY node address (public and
+ * private), leaving the cloud firewall (which admits only WG udp/51821) as the
+ * sole barrier. Without this hostPort the db is reachable only inside the
+ * cluster and the gateway's local relay target would have nothing to connect
+ * to. One db pod per node (StatefulSet), so the node's :REPL_PORT is
+ * uncontended. Enforced by tests/unit/deploy/hostport-binding-census.test.ts.
  *
  * Patched in here rather than written into k8s/base/db/statefulset.yaml: only
  * an HA cluster needs the node port, and a single cluster's db stays
  * cluster-internal. A strategic-merge patch keyed by container `name` + port
- * `containerPort` updates the existing port entry in place (adds hostPort)
+ * `containerPort` updates the existing port entry in place (adds hostPort + hostIP)
  * rather than appending a duplicate, and a later `kubectl apply` of k8s/base
  * leaves it alone (the three-way merge only removes fields the previous apply
  * set).
@@ -149,7 +150,7 @@ export function buildDbHostPortPatch() {
           containers: [
             {
               name: DB_CONTAINER,
-              ports: [{ containerPort: 5432, hostPort: REPL_PORT }],
+              ports: [{ containerPort: 5432, hostPort: REPL_PORT, hostIP: '127.0.0.1' }],
             },
           ],
         },
@@ -510,10 +511,11 @@ export async function configurePrimaryForReplication({ primaryIp, sshKeyPath }) 
     }
   });
 
-  // 1b. Bind the primary's postgres to a node hostPort (REPL_PORT → containerPort
-  // 5432) so the primary repl-gateway's socat can relay tunnel traffic to it at
-  // 127.0.0.1:REPL_PORT. Not opened in the firewall — localhost-only on the node
-  // (the gateway is hostNetwork, so it shares the node netns). Without the
+  // 1b. Bind the primary's postgres to a node hostPort on loopback
+  // (127.0.0.1:REPL_PORT → containerPort 5432) so the primary repl-gateway's
+  // socat can relay tunnel traffic to it. Localhost-only on the node by its
+  // hostIP, not only by the firewall (the gateway is hostNetwork, so it shares
+  // the node netns). Without the
   // hostPort the db is cluster-internal only and the gateway relay target has
   // nothing to connect to. The strategic-merge patch travels via stdin
   // (--patch-file /dev/stdin) so the JSON never hits argv / the remote shell's

@@ -36,6 +36,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { isIPv4 } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2740,11 +2741,15 @@ function renderK8sPlaceholders(dir, values, label) {
   return tmpDir;
 }
 
+/** The in-cluster registry manifest, relative to `k8s/base`. */
+const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
+
 /**
  * Render `k8s/base` for apply: every db StatefulSet placeholder
  * (buildDbManifestValues) plus `{{K8S_STORAGE_CLASS}}`, which the db's
  * volumeClaimTemplate and the add-on PVCs `add redis` / `add n8n` copy into
- * `k8s/base/<addon>/` share, into a temp copy of the tree.
+ * `k8s/base/<addon>/` share, and the registry's `{{MASTER_PRIVATE_IP}}`
+ * (the one address its hostPort binds), into a temp copy of the tree.
  *
  * Always a temp copy, never an in-place rewrite: the placeholders must be
  * resolved BEFORE `kubectl apply` creates the objects (a StatefulSet's
@@ -2773,16 +2778,30 @@ export function renderK8sBase(dir, values) {
         'StatefulSet; run `vibecarbon upgrade` to bring the k8s manifests up to date.',
     );
   }
-  const rendered = renderK8sPlaceholders(dir, values, 'base');
-  const leftover = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8').match(
-    /\{\{[A-Z0-9_]+\}\}/g,
-  );
-  if (leftover) {
-    rmSync(rendered, { recursive: true, force: true });
+  // The registry's hostPort binds only this address (hostIP). A missing
+  // value would render the literal `undefined`, and a hostIP that is not an
+  // address of the master leaves every node's image pull with nothing to dial.
+  const hasRegistry = existsSync(join(dir, REGISTRY_MANIFEST));
+  if (hasRegistry && !isIPv4(values.MASTER_PRIVATE_IP ?? '')) {
     throw new Error(
-      `renderK8sBase: db/statefulset.yaml still carries ${[...new Set(leftover)].join(', ')} after rendering; ` +
-        'refusing to apply a database with an unresolved image, prefix or StorageClass.',
+      `renderK8sBase: MASTER_PRIVATE_IP is not an IPv4 address (${JSON.stringify(values.MASTER_PRIVATE_IP ?? null)}); ` +
+        "the registry hostPort binds the master's private IP, which the IaC program outputs",
     );
+  }
+  const rendered = renderK8sPlaceholders(dir, values, 'base');
+  const checks = [
+    ['db/statefulset.yaml', 'a database with an unresolved image, prefix or StorageClass'],
+    ...(hasRegistry ? [[REGISTRY_MANIFEST, 'a registry with an unresolved bind address']] : []),
+  ];
+  for (const [file, what] of checks) {
+    const leftover = readFileSync(join(rendered, file), 'utf-8').match(/\{\{[A-Z0-9_]+\}\}/g);
+    if (leftover) {
+      rmSync(rendered, { recursive: true, force: true });
+      throw new Error(
+        `renderK8sBase: ${file} still carries ${[...new Set(leftover)].join(', ')} after rendering; ` +
+          `refusing to apply ${what}.`,
+      );
+    }
   }
   return rendered;
 }
@@ -2961,7 +2980,7 @@ export async function applyK3sManifests({
   khPath,
   // HA runs primary+standby deploys in parallel; both call this
   // function from the same operator host. Without distinct ports, the
-  // second `ssh -L 5000:localhost:5000` loses the bind race and
+  // second `ssh -L 5000:<masterPrivateIp>:5000` loses the bind race and
   // ExitOnForwardFailure=yes aborts the deploy. Default 5000 is the
   // single-cluster path; HA passes 5000 (primary) and 5001 (standby).
   localTunnelPort = 5000,
@@ -3481,9 +3500,8 @@ export async function applyK3sManifests({
   // one beside it would be empty. Refuse before anything is created.
   await assertNoRetiredChartDb({ env });
   await assertDbStorageClass({ storageClass, env });
-  const baseDir = renderK8sBase(
-    join(projectDir, 'k8s/base'),
-    buildDbManifestValues({
+  const baseDir = renderK8sBase(join(projectDir, 'k8s/base'), {
+    ...buildDbManifestValues({
       dbImageTag,
       s3Config,
       backupBucketName,
@@ -3492,7 +3510,10 @@ export async function applyK3sManifests({
       storageClass,
       walArchiveSha: walArchiveConfigSha(projectDir),
     }),
-  );
+    // The registry hostPort's bind address (hostIP). No default: renderK8sBase
+    // refuses a missing one rather than assume Hetzner's 10.0.1.1.
+    MASTER_PRIVATE_IP: masterPrivateIp,
+  });
   try {
     await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
       runKubectlWithRetry(['apply', '-k', baseDir], {
