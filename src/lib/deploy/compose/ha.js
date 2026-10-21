@@ -290,8 +290,6 @@ export const REPL_COMPOSE_FLAGS =
  * so the primary that is serving traffic keeps serving through a deploy.
  */
 export async function configurePrimaryReplication(primaryIp, standbyIp, sshKeyPath, projectName) {
-  const remoteDir = `/opt/${projectName}`;
-
   // Establish the WireGuard replication transport. Keys are generated on-node
   // (private key never leaves the node); only the derived public keys transit
   // the orchestrator. Endpoints/SSH targets are the two VPS PUBLIC IPs. This

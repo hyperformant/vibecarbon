@@ -442,7 +442,7 @@ describe('assertComposeHaReconvergeReady (refusals before any ssh write)', () =>
         plan: plan(),
         environment: 'prod',
         domain: 'prod.example.com',
-        readState: async (ip: string) => state(ip === PROMOTED_IP ? false : false),
+        readState: async () => state(false),
         resolveA,
         repointDns,
       });

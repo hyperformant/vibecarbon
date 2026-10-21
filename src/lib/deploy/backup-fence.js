@@ -86,7 +86,7 @@ export function backupFenceWriteScript(fence) {
   const b64 = Buffer.from(`${JSON.stringify(fence)}\n`).toString('base64');
   const tmp = `/tmp/${BACKUP_FENCE_OBJECT}`;
   return [
-    'case "${WALG_S3_PREFIX:-}" in ""|s3:///*) echo FENCE_SKIPPED; exit 0;; esac',
+    'case "$WALG_S3_PREFIX" in ""|s3:///*) echo FENCE_SKIPPED; exit 0;; esac',
     `echo ${b64} | base64 -d > ${tmp}`,
     `wal-g st put --no-compress --no-encrypt -f ${tmp} ${BACKUP_FENCE_OBJECT} >/dev/null 2>&1 || exit 1`,
     `rm -f ${tmp}`,

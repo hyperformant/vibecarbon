@@ -41,13 +41,15 @@ export const DROP_INACTIVE_SLOTS_SQL =
   'SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE NOT active';
 
 /**
- * The persistent slot's wal_status and the WAL it holds, as `status|bytes`.
- * No string literals, so it survives both status transports' quoting. A lost
- * slot has no restart_lsn, which reads as 0 bytes.
+ * The persistent slot's wal_status and the WAL it holds, as `status|bytes`,
+ * for the standby's slot by name (any other slot, a reseed's or an operator's,
+ * says nothing about it). A lost slot has no restart_lsn, which reads as 0
+ * bytes. It carries a string literal, so it travels by a quoting-safe
+ * transport only: base64 on stdin (compose), a kubectl argv (k8s).
  */
 export const REPLICATION_SLOT_HEALTH_SQL =
   'SELECT wal_status, coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0) ' +
-  'FROM pg_replication_slots WHERE NOT temporary ORDER BY slot_name LIMIT 1';
+  `FROM pg_replication_slots WHERE slot_name = '${REPLICATION_SLOT}'`;
 
 /**
  * Idempotent slot ensure: drop the slot if it is lost, then create it if it is

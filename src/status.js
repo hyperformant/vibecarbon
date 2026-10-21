@@ -621,10 +621,25 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
     }
 
     // The replication slot (replication-slot.js): its WAL is capped, so a
-    // standby away long enough finds it lost. No quotes in the SQL.
+    // standby away long enough finds it lost. Its SQL names the slot in a
+    // string literal, so compose sends it base64 on stdin, never inside the
+    // double-quoted -tAc above; the k8s argv is quoting-safe as it is.
     let slot = null;
     try {
-      slot = parseReplicationSlotRow(await runPrimaryPsql(REPLICATION_SLOT_HEALTH_SQL));
+      const slotSql = Buffer.from(REPLICATION_SLOT_HEALTH_SQL).toString('base64');
+      const slotOut = isCompose
+        ? await _sshRun(
+            primary.ip,
+            sshKeyPath,
+            [
+              'bash',
+              '-lc',
+              `cd /opt/${projectName} && echo ${slotSql} | base64 -d | docker compose exec -T db psql -U postgres -d postgres -tA`,
+            ],
+            { timeout: timeoutMs },
+          )
+        : await runPrimaryPsql(REPLICATION_SLOT_HEALTH_SQL);
+      slot = parseReplicationSlotRow(slotOut);
     } catch {
       slot = null;
     }

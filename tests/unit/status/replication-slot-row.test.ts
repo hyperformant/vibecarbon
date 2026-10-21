@@ -89,3 +89,45 @@ describe('checkReplication reads the slot on the primary', () => {
     expect(result?.slot).toEqual({ walStatus: 'lost', retainedBytes: 0 });
   });
 });
+
+// Final review I6: the query read the first non-temporary slot, which could be
+// any other one (a reseed's, an operator's). It names the standby slot now, a
+// string literal, so compose carries it base64 on stdin, never inside -tAc "...".
+describe('the slot query names the standby slot and travels quoting-safe', () => {
+  it('filters by slot_name', () => {
+    expect(REPLICATION_SLOT_HEALTH_SQL).toContain("WHERE slot_name = 'vibecarbon_standby_slot'");
+    expect(REPLICATION_SLOT_HEALTH_SQL).not.toMatch(/LIMIT 1|NOT temporary/);
+  });
+
+  it('compose sends it base64 on stdin', async () => {
+    const commands: string[] = [];
+    const sshRun = vi.fn(async (_ip: string, _key: string, argv: string[]) => {
+      const cmd = argv[argv.length - 1];
+      commands.push(cmd);
+      const b64 = cmd.match(/echo (\S+) \| base64 -d/)?.[1];
+      if (b64 && Buffer.from(b64, 'base64').toString() === REPLICATION_SLOT_HEALTH_SQL) {
+        return 'extended|1024';
+      }
+      return '';
+    });
+    const result = await checkReplication(
+      'prod',
+      {
+        deployMode: 'compose-ha',
+        ha: { enabled: true },
+        servers: [{ name: 'p', role: 'primary', ip: '10.0.0.1' }],
+      },
+      'myproj',
+      {
+        getPostgresPod: vi.fn(),
+        sshKubectl: vi.fn(),
+        sshRun,
+        getSSHKeyPath: vi.fn(() => fileURLToPath(import.meta.url)),
+        timeoutMs: 5000,
+      },
+    );
+    expect(result?.slot).toEqual({ walStatus: 'extended', retainedBytes: 1024 });
+    // The literal never rides a double-quoted -tAc.
+    expect(commands.some((c) => c.includes("'vibecarbon_standby_slot'"))).toBe(false);
+  });
+});
