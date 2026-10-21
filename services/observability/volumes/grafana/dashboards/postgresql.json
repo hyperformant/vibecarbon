@@ -323,7 +323,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Seconds since postgres last archived a WAL segment (pg_stat_archiver). Archiving is idle-quiet: archive_timeout is 900s, so a healthy database stays under about 15 minutes. It cannot see wal-g pushes the archive wrapper gave up on; vibecarbon status counts those from the logs.",
+      "description": "Seconds since postgres last archived a WAL segment (pg_stat_archiver). An idle database archives nothing, so a high value alone is not a failure: vibecarbon status judges it against the current WAL segment. It also cannot see wal-g pushes the archive wrapper gave up on; vibecarbon status counts those from the logs.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -331,8 +331,7 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1800 }
+              { "color": "green", "value": null }
             ]
           },
           "unit": "s"

@@ -19,6 +19,7 @@ import { existsSync } from 'node:fs';
 import { DEFAULT_BACKUP_SCHEDULE } from '../../../carbon/scripts/render-backup-settings.mjs';
 import { resolvePrimary } from '../cli/resolve-primary.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from '../ssh.js';
+import { hasBackupResult, pushedBackupNames } from '../walg/backup-result.js';
 import { backupCredentialVars, readEnvBaseBackups } from '../walg/restore-base.js';
 
 const MINUTE = 60_000;
@@ -99,10 +100,59 @@ function ageText(ms) {
   return h < 48 ? `${h}h` : `${Math.round(h / 24)} days`;
 }
 
+/** Segments per log file at the 16 MB default segment size. */
+const SEGMENTS_PER_LOG = 0x100;
+
+/**
+ * Timeline and absolute segment number from a WAL file name. Takes the
+ * leading 24 hex of a name that may carry a .history/.backup/.partial suffix.
+ *
+ * @param {string} name
+ * @returns {{ timeline: number, segment: number } | null}
+ */
+export function parseWalName(name) {
+  const m = /^([0-9A-Fa-f]{8})([0-9A-Fa-f]{8})([0-9A-Fa-f]{8})/.exec(String(name ?? '').trim());
+  if (!m) return null;
+  return {
+    timeline: Number.parseInt(m[1], 16),
+    segment: Number.parseInt(m[2], 16) * SEGMENTS_PER_LOG + Number.parseInt(m[3], 16),
+  };
+}
+
+/**
+ * The WAL verdict from pg_stat_archiver. An idle database keeps an old
+ * last_archived_time (postgres only switches on archive_timeout when WAL was
+ * written), so age alone proves nothing: caught up with the current segment is
+ * healthy at any age. Red is a failure newer than the last success, or
+ * segments pending with nothing archived for 2 x archive_timeout. Another
+ * timeline cannot be compared, so only the failure check applies.
+ */
+function archiveVerdict(archiver) {
+  const secs = archiver.lastArchivedAgeSeconds;
+  const last = parseWalName(archiver.lastArchivedWal);
+  const current = parseWalName(archiver.currentWal);
+  const age = secs === null || secs < 0 ? null : secs < 60 ? `${secs}s` : ageText(secs * 1000);
+  if (archiver.failing) {
+    return {
+      bad: `archiver failing (last failure is newer than the last archived WAL${age ? `, archived ${age} ago` : ''})`,
+    };
+  }
+  if (!last) return { warn: 'no WAL archived yet' };
+  if (!current || current.timeline !== last.timeline) {
+    return { good: `WAL archived ${age} ago` };
+  }
+  const pending = current.segment - last.segment;
+  if (pending <= 1) return { good: `WAL caught up (archived ${age} ago)` };
+  if (secs > 2 * ARCHIVE_TIMEOUT_SECONDS) {
+    return { bad: `last WAL archived ${age} ago, ${pending - 1} segments pending` };
+  }
+  return { good: `WAL archived ${age} ago` };
+}
+
 /**
  * The row's verdict and text from already-gathered facts. Pure.
  *
- * @param {{ lineage: string, schedule: string, backups: Array<{ name?: string, finishTime: Date }>, archiver: { lastArchivedAgeSeconds: number|null, failedCount: number } | null, walFailures: number | null, job: { name: string, failed: boolean, retentionFailed?: boolean } | null, unrestoredPrior?: string|null, unknown?: string[], now?: number }} i
+ * @param {{ lineage: string, schedule: string, backups: Array<{ name?: string, finishTime: Date }>, archiver: { lastArchivedAgeSeconds: number|null, lastArchivedWal: string, currentWal: string, failing: boolean } | null, walFailures: { count: number, lastAt?: Date|null, since?: Date|null } | null, job: { name: string, failed: boolean, retentionFailed?: boolean, log?: boolean, detail?: string } | null, unrestoredPrior?: string|null, unknown?: string[], now?: number }} i
  * @returns {{ level: 'ok'|'warn'|'error', text: string }}
  */
 export function backupHealthRow(i) {
@@ -113,6 +163,7 @@ export function backupHealthRow(i) {
 
   const interval = cronIntervalMs(i.schedule);
   const newest = i.backups.at(-1);
+  if (interval === null) warn.push('schedule unreadable, no age limit');
   if (!newest) {
     bad.push(`no base backup in lineage ${i.lineage}`);
   } else {
@@ -122,19 +173,38 @@ export function backupHealthRow(i) {
   }
 
   if (i.archiver) {
-    const secs = i.archiver.lastArchivedAgeSeconds;
-    if (secs === null || secs < 0) warn.push('no WAL archived yet');
-    else if (secs > 2 * ARCHIVE_TIMEOUT_SECONDS) {
-      bad.push(`last WAL archived ${ageText(secs * 1000)} ago`);
-    } else good.push(`WAL archived ${secs < 60 ? `${secs}s` : ageText(secs * 1000)} ago`);
-    if (i.archiver.failedCount > 0)
-      warn.push(`${i.archiver.failedCount} archiver failures (lifetime)`);
+    const v = archiveVerdict(i.archiver);
+    if (v.bad) bad.push(v.bad);
+    if (v.warn) warn.push(v.warn);
+    if (v.good) good.push(v.good);
   }
-  if (i.walFailures > 0) bad.push(`${i.walFailures} WAL_ARCHIVE_FAILED in 24h`);
+
+  // The wrapper exits 0 after giving up on a segment, so these lines are the
+  // only drop detector. A drop is an open PITR gap until a base backup lands
+  // after it, and a live problem while it is newer than the last archive.
+  const drops = i.walFailures;
+  if (drops && drops.count > 0) {
+    const lastArchivedAt =
+      i.archiver && i.archiver.lastArchivedAgeSeconds >= 0
+        ? now - i.archiver.lastArchivedAgeSeconds * 1000
+        : null;
+    const at = drops.lastAt ? drops.lastAt.getTime() : null;
+    const open =
+      at === null ||
+      lastArchivedAt === null ||
+      at > lastArchivedAt ||
+      !newest ||
+      at > newest.finishTime.getTime();
+    const window = drops.since ? `since ${drops.since.toISOString().slice(0, 16)}Z` : 'in 24h';
+    if (open) bad.push(`${drops.count} WAL_ARCHIVE_FAILED ${window}`);
+    else warn.push(`${drops.count} drops in the last 24h (archiving has since recovered)`);
+  }
 
   if (i.job?.failed) {
     bad.push(
-      `last scheduled backup job ${i.job.name} failed${i.job.retentionFailed ? ' (base pushed, retention failed)' : ''}`,
+      i.job.log
+        ? `last scheduled backup failed${i.job.retentionFailed ? ' (base pushed, retention failed)' : ''} (see backups/backup.log)${i.job.detail ? `: ${i.job.detail}` : ''}`
+        : `last scheduled backup job ${i.job.name} failed${i.job.retentionFailed ? ' (base pushed, retention failed)' : ''}`,
     );
   }
   for (const u of i.unknown ?? []) warn.push(u);
@@ -148,16 +218,108 @@ export function backupHealthRow(i) {
   return { level, text: `backups: ${[...bad, ...warn, ...good].join(', ')}` };
 }
 
+const TS_RE = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/;
+
+/**
+ * WAL_ARCHIVE_FAILED lines from `logs --timestamps` output (plus an optional
+ * `STARTED=<iso>` line naming the container's start). The count is labelled
+ * "since <start>" when the log cannot cover 24 h.
+ *
+ * @param {string} text
+ * @param {{ now?: number, previousRead?: boolean }} [opts] previousRead: the prior container's log was read too, so a restart does not shorten coverage
+ * @returns {{ count: number, lastAt: Date|null, since: Date|null }}
+ */
+export function parseWalFailureLog(text, { now = Date.now(), previousRead = false } = {}) {
+  let count = 0;
+  let lastAt = null;
+  let started = null;
+  for (const line of String(text ?? '').split('\n')) {
+    const st = /^STARTED=(\S+)/.exec(line);
+    if (st) {
+      const d = new Date(st[1]);
+      if (!Number.isNaN(d.getTime())) started = d;
+      continue;
+    }
+    if (!line.includes('WAL_ARCHIVE_FAILED')) continue;
+    count += 1;
+    const m = TS_RE.exec(line);
+    if (m) {
+      const d = new Date(m[1]);
+      if (!lastAt || d > lastAt) lastAt = d;
+    }
+  }
+  const since = !previousRead && started && now - started.getTime() < DAY ? started : null;
+  return { count, lastAt, since };
+}
+
+const SECRETISH = /([A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASS)[A-Za-z0-9_]*)\s*[=:]\s*\S+/gi;
+
+/**
+ * The newest scheduled compose backup from the tail of backups/backup.log.
+ * Failed = the last "Started at" block ended without a BACKUP_RESULT marker
+ * (and nothing is still running), or pushed a base and then lost retention.
+ * Returns null when it succeeded, skipped, is running, or there is no block.
+ *
+ * @param {string} text tail of backup.log, then a `__RUNNING__=0|1` line
+ * @returns {{ name: string, failed: true, retentionFailed: boolean, log: true, detail: string } | null}
+ */
+export function parseComposeBackupLog(text) {
+  const running = /__RUNNING__=1/.test(text);
+  const lines = String(text ?? '')
+    .split('\n')
+    .filter((l) => !l.startsWith('__RUNNING__='));
+  const start = lines.findLastIndex((l) => l.startsWith('Started at'));
+  if (start < 0) return null;
+  const block = lines.slice(start);
+  const blockText = block.join('\n');
+  const marker = hasBackupResult(blockText);
+  const completed = block.some((l) => l.startsWith('=== Backup completed'));
+  const retentionFailed = pushedBackupNames(blockText).length > 0 && !completed;
+  if (marker && !retentionFailed) return null;
+  if (!marker && running) return null;
+  const last = [...block].reverse().find((l) => l.trim() && !hasBackupResult(l));
+  const detail = (last ?? '').replace(SECRETISH, '$1=<redacted>').trim().slice(0, 200);
+  return { name: 'backup.log', failed: true, retentionFailed, log: true, detail };
+}
+
+/** The one pg_stat_archiver query: age, last archived WAL, current WAL, failing now. */
+export const ARCHIVER_SQL =
+  'SELECT coalesce(extract(epoch from now() - last_archived_time)::bigint, -1), ' +
+  "coalesce(last_archived_wal, ''), pg_walfile_name(pg_current_wal_lsn()), " +
+  'coalesce(last_failed_time > last_archived_time, last_failed_time IS NOT NULL) ' +
+  'FROM pg_stat_archiver';
+
+/** Parse ARCHIVER_SQL's `-tA` row. Null when psql gave no row. */
+export function parseArchiverRow(out) {
+  const line = String(out ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!line) return null;
+  const [age, lastWal, currentWal, failing] = line.split('|');
+  const secs = Number.parseInt(age, 10);
+  if (Number.isNaN(secs)) return null;
+  return {
+    lastArchivedAgeSeconds: secs,
+    lastArchivedWal: lastWal ?? '',
+    currentWal: currentWal ?? '',
+    failing: failing === 't',
+  };
+}
+
 /** Read-only probes against the role primary, over this env's transport. */
-function primaryProbes(envName, envConfig, projectName, primary) {
+function primaryProbes(envName, envConfig, projectName) {
   const isCompose = envConfig.deployMode === 'compose' || envConfig.deployMode === 'compose-ha';
+  const remoteDir = `/opt/${projectName}`;
   const key = () => {
     const path = getSSHKeyPath(envName);
     if (!existsSync(path)) throw new Error('no ssh key for this environment');
     return path;
   };
-  const kubectl = (argv) => sshKubectl(primary.ip, key(), argv, { timeout: PROBE_TIMEOUT_MS });
+  const opts = { timeout: PROBE_TIMEOUT_MS, transportRetry: false };
+  const bash = (ip, script) => sshRun(ip, key(), ['bash', '-lc', script], opts);
   return {
+    // The SQL goes in on stdin: no quoting layer between it and psql.
     runOnPrimary: async (ip, sql) => {
       if (isCompose) {
         return sshRun(
@@ -166,9 +328,9 @@ function primaryProbes(envName, envConfig, projectName, primary) {
           [
             'bash',
             '-lc',
-            `cd /opt/${projectName} && docker compose exec -T db psql -U postgres -d postgres -tAc "${sql}"`,
+            `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tA`,
           ],
-          { timeout: PROBE_TIMEOUT_MS, transportRetry: false },
+          { ...opts, input: sql },
         );
       }
       const pod = await getPostgresPod(ip, key());
@@ -177,6 +339,7 @@ function primaryProbes(envName, envConfig, projectName, primary) {
         key(),
         [
           'exec',
+          '-i',
           '-n',
           NAMESPACE,
           pod,
@@ -186,39 +349,66 @@ function primaryProbes(envName, envConfig, projectName, primary) {
           'postgres',
           '-d',
           'postgres',
-          '-tAc',
-          sql,
+          '-tA',
         ],
-        { timeout: PROBE_TIMEOUT_MS },
+        { timeout: PROBE_TIMEOUT_MS, input: sql },
       );
     },
     // The archive wrapper logs WAL_ARCHIVE_FAILED to the db's own stderr.
     countWalFailures: async (ip) => {
       if (isCompose) {
-        const out = await sshRun(
+        const out = await bash(
           ip,
-          key(),
-          [
-            'bash',
-            '-lc',
-            `cd /opt/${projectName} && (docker compose logs --no-color --since 24h db 2>&1 | grep -c WAL_ARCHIVE_FAILED || true)`,
-          ],
-          { timeout: PROBE_TIMEOUT_MS, transportRetry: false },
+          `cd ${remoteDir} && cid="$(docker compose ps -q db)" && ` +
+            'echo "STARTED=$(docker inspect -f \'{{.State.StartedAt}}\' "$cid")" && ' +
+            '(docker compose logs --no-color -t --since 24h db 2>&1 | grep WAL_ARCHIVE_FAILED || true)',
         );
-        return Number.parseInt(out.trim().split('\n').pop(), 10) || 0;
+        return parseWalFailureLog(out);
       }
       const pod = await getPostgresPod(ip, key());
-      const logs = await sshKubectl(ip, key(), ['logs', '-n', NAMESPACE, pod, '--since=24h'], {
+      const kube = (argv) => sshKubectl(ip, key(), argv, { timeout: PROBE_TIMEOUT_MS });
+      const current = await kube(['logs', '-n', NAMESPACE, pod, '--timestamps', '--since=24h']);
+      let previous = '';
+      let previousRead = false;
+      try {
+        previous = await kube([
+          'logs',
+          '-n',
+          NAMESPACE,
+          pod,
+          '--previous',
+          '--timestamps',
+          '--since=24h',
+        ]);
+        previousRead = true;
+      } catch (err) {
+        // A pod that never restarted has no previous container: not a finding.
+        if (!/previous terminated container|not found/i.test(String(err?.message ?? err)))
+          throw err;
+      }
+      const started = await kube([
+        'get',
+        'pod',
+        '-n',
+        NAMESPACE,
+        pod,
+        '-o',
+        'jsonpath=STARTED={.status.containerStatuses[0].state.running.startedAt}',
+      ]);
+      return parseWalFailureLog(`${started}\n${previous}\n${current}`, { previousRead });
+    },
+    // The newest finished scheduled backup: a k8s Job, or compose's cron log.
+    lastJob: async (ip) => {
+      if (isCompose) {
+        const out = await bash(
+          ip,
+          `tail -n 40 ${remoteDir}/backups/backup.log 2>/dev/null; echo "__RUNNING__=$(pgrep -f '[c]ompose-backup' >/dev/null && echo 1 || echo 0)"`,
+        );
+        return parseComposeBackupLog(out);
+      }
+      const out = await sshKubectl(ip, key(), ['get', 'jobs', '-n', NAMESPACE, '-o', 'json'], {
         timeout: PROBE_TIMEOUT_MS,
       });
-      return String(logs)
-        .split('\n')
-        .filter((l) => l.includes('WAL_ARCHIVE_FAILED')).length;
-    },
-    // The newest finished scheduled backup Job (k8s only; compose runs cron).
-    lastJob: async () => {
-      if (isCompose) return null;
-      const out = await kubectl(['get', 'jobs', '-n', NAMESPACE, '-o', 'json']);
       const jobs = (JSON.parse(out || '{"items":[]}').items ?? [])
         .filter((j) => String(j.metadata?.name).startsWith('backup'))
         .map((j) => {
@@ -279,27 +469,18 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
     };
   }
 
-  const probes = deps.runOnPrimary ? deps : primaryProbes(envName, envConfig, projectName, primary);
-  const sql =
-    'SELECT coalesce(extract(epoch from now() - last_archived_time)::bigint, -1), failed_count FROM pg_stat_archiver';
+  const probes = deps.runOnPrimary ? deps : primaryProbes(envName, envConfig, projectName);
   const [archiver, walFailures, job] = await Promise.allSettled([
-    probes.runOnPrimary(primary.ip, sql),
+    probes.runOnPrimary(primary.ip, ARCHIVER_SQL),
     probes.countWalFailures(primary.ip),
-    probes.lastJob(),
+    probes.lastJob(primary.ip),
   ]);
 
   const unknown = [];
   let archiverFacts = null;
   if (archiver.status === 'fulfilled') {
-    const [age, failed] = String(archiver.value).trim().split('\n')[0].split('|');
-    archiverFacts = {
-      lastArchivedAgeSeconds: Number.parseInt(age, 10),
-      failedCount: Number.parseInt(failed, 10) || 0,
-    };
-    if (Number.isNaN(archiverFacts.lastArchivedAgeSeconds)) {
-      archiverFacts = null;
-      unknown.push('WAL archiving unknown (pg_stat_archiver gave no answer)');
-    }
+    archiverFacts = parseArchiverRow(archiver.value);
+    if (!archiverFacts) unknown.push('WAL archiving unknown (pg_stat_archiver gave no answer)');
   } else unknown.push(`WAL archiving unknown (${archiver.reason?.message ?? archiver.reason})`);
   if (walFailures.status === 'rejected') {
     unknown.push(
@@ -329,8 +510,8 @@ export async function checkBackupHealth(envName, envConfig, projectName, deps = 
     newestBaseAt: newest ? newest.finishTime.toISOString() : null,
     baseCount: listing.backups.length,
     lastArchivedAgeSeconds: archiverFacts?.lastArchivedAgeSeconds ?? null,
-    archiverFailedCount: archiverFacts?.failedCount ?? null,
-    walArchiveFailures24h: facts.walFailures,
+    archiverFailing: archiverFacts?.failing ?? null,
+    walArchiveFailures24h: facts.walFailures?.count ?? null,
     lastJob: facts.job,
     unrestoredPrior: facts.unrestoredPrior,
   };

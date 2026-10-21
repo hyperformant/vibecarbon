@@ -515,6 +515,11 @@ export function rejectedChecks(settled) {
   return Object.keys(failed).length > 0 ? failed : null;
 }
 
+/** The Backups check into `checks`, so the table and --json carry the same row. */
+export function attachBackups(checks, settled) {
+  if (settled.status === 'fulfilled' && settled.value) checks.backups = settled.value;
+}
+
 export async function checkReplication(envName, envConfig, projectName, deps = {}) {
   const {
     sshRun: _sshRun = sshRun,
@@ -1691,9 +1696,7 @@ async function main(argv = []) {
         containers: containersResult,
         backups: backupsResult,
       });
-      if (backupsResult.status === 'fulfilled' && backupsResult.value) {
-        checks.backups = backupsResult.value;
-      }
+      attachBackups(checks, backupsResult);
       if (failed) checks.checkErrors = failed;
       // Omitted, not null, when there is nothing to query (no servers, no
       // project name) — spec §6; consumers key on the key's absence.
