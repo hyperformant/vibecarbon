@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { FAILOVER_FENCE_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { parseDotenv } from '../../../src/lib/dotenv.js';
 import { pauseImageRef } from '../../../src/lib/images.js';
@@ -71,6 +71,13 @@ import {
   runReplicationChecks,
   writeReplicationMarker,
 } from '../checks/replication.js';
+import {
+  checkN8nKeyShared,
+  checkPromotedAddonsReady,
+  checkPromotedDbNotRecreated,
+  checkPromotedPrimaryOnlyRunning,
+  checkStandbyPrimaryOnlyAbsent,
+} from '../checks/standby-addons.js';
 import { checkStatusHealth, type RetiredServer } from '../checks/status-health.js';
 import type { E2EDb, SweepBreakdown } from '../metrics/db.js';
 import { classifyFailure, rollUpScenarioCategory } from '../utils/classify-failure.js';
@@ -241,6 +248,8 @@ const TIMEOUTS: Record<string, number> = {
   // budget predates provisioning. Generous on purpose; real e2e perf rows will
   // calibrate it down.
   failover: 1_800_000,
+  // Bounds the post-failover waitForHealthy only; executeStep has no step
+  // kill, so promoted_addons_ready's own 600s deadline is independent of it.
   'verify-failover': 600_000,
   // The refusal happens in the guard before any remote write; the budget is
   // the status -json poll that follows it.
@@ -332,6 +341,22 @@ function readHaPrimary(
     return { stack: primary?.stack ?? null, region: primary?.region ?? null };
   } catch {
     return { stack: null, region: null };
+  }
+}
+
+/**
+ * The compose writers a failover stops on the retired node: the app plus the
+ * env's enabled primary-only add-ons, from the persisted config (the same
+ * declaration-driven list the failover itself fences).
+ */
+function retiredNodeWriters(projectDir: string, env: string): string[] {
+  try {
+    const config = JSON.parse(readFileSync(join(projectDir, '.vibecarbon.json'), 'utf-8')) as {
+      environments?: Record<string, object>;
+    };
+    return failoverFenceServices(config.environments?.[env] ?? {});
+  } catch {
+    return failoverFenceServices({});
   }
 }
 
@@ -1326,6 +1351,9 @@ export async function runLifecycle(
   // Kept so verify-failover can prove it is not simply re-reading the marker
   // off its own origin node — see the false-green guard below.
   let failoverMarkerOriginIp: string | null = null;
+  // compose-ha: the promotion target's db container read just before the
+  // failover/failback, compared after it (promoted_db_not_recreated).
+  let preFailoverStandbyDb: Awaited<ReturnType<typeof readDbIncarnation>> | null = null;
   // The primary before the first failover: compose-ha's failback must hand
   // the primary role back to it.
   let originalPrimaryIp: string | null = null;
@@ -2209,6 +2237,44 @@ export async function runLifecycle(
                 markerId: failoverContinuityMarkerId,
               }),
             );
+            // Primary-only add-ons follow the promotion: up on the promoted
+            // node (compose: containers running and the db untouched; k8s:
+            // Deployments ready). Each skips when no such add-on is enabled.
+            if (config.mode === 'compose-ha') {
+              replResults.push(
+                await checkPromotedPrimaryOnlyRunning({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  sshKeyPath,
+                  features: config.features,
+                  primaryIp,
+                }),
+                checkPromotedDbNotRecreated({
+                  features: config.features,
+                  ip: primaryIp,
+                  before: preFailoverStandbyDb ?? {
+                    ok: false,
+                    error: 'the pre-failover db read was never taken',
+                  },
+                  after: await readDbIncarnation({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    ip: primaryIp,
+                    sshKeyPath,
+                  }),
+                }),
+              );
+            } else {
+              replResults.push(
+                await checkPromotedAddonsReady({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  sshKeyPath,
+                  features: config.features,
+                  primaryIp,
+                }),
+              );
+            }
             // The retired side (role standby now) must archive nothing and
             // refuse its backups until a deploy rebuilds it.
             replResults.push(
@@ -2249,6 +2315,30 @@ export async function runLifecycle(
               replResults.push(await checkAppEndpointsReady({ primaryIp, sshKeyPath }));
             }
             if (stepName === 'verify-deploy') {
+              replResults.push(
+                await checkN8nKeyShared({
+                  mode: config.mode,
+                  projectName: config.projectName,
+                  sshKeyPath,
+                  features: config.features,
+                  primaryIp,
+                  standbyIp,
+                }),
+              );
+              // Primary-only add-ons write to the primary database: none may
+              // exist on the compose-ha standby (k8s-ha is covered by
+              // pilot_light_deployments_zero above).
+              if (config.mode === 'compose-ha') {
+                replResults.push(
+                  await checkStandbyPrimaryOnlyAbsent({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    sshKeyPath,
+                    features: config.features,
+                    standbyIp,
+                  }),
+                );
+              }
               replResults.push(
                 await checkSlotCapped({
                   mode: config.mode,
@@ -3855,7 +3945,7 @@ EOF`;
   if (options.includeFailover) {
     // compose-ha: the retired node (the one that is no longer the primary
     // after the role flip) keeps its app tier `docker stop`ped by design
-    // (failoverComposeHA's pre-promote fence, FAILOVER_FENCE_SERVICES: app and
+    // (failoverComposeHA's pre-promote fence, failoverFenceServices: the app and
     // the n8n/metabase add-ons when deployed) until a redeploy
     // converges it. `status` reports that truthfully as `exited`, so those
     // rows are excused on that node only; its db (recreated by the wal-g
@@ -3864,7 +3954,11 @@ EOF`;
     const retiredAfterFailover = (step: StepName): RetiredServer | undefined => {
       if (config.mode !== 'compose-ha') return undefined;
       const { standbyIp } = resolveHaDbIps(config.projectDir, config.envPrefix);
-      if (standbyIp) return { ip: standbyIp, allowedExited: FAILOVER_FENCE_SERVICES };
+      if (standbyIp)
+        return {
+          ip: standbyIp,
+          allowedExited: retiredNodeWriters(config.projectDir, config.envPrefix),
+        };
       console.log(
         `${tag} [${step}] no retired-node IP in .vibecarbon.json — the old ` +
           'primary is held to the full health bar',
@@ -3936,6 +4030,16 @@ EOF`;
                 `${tag} [${name}] no primary IP/ssh key to write continuity marker — continuity check will self-skip`,
               );
             }
+
+            preFailoverStandbyDb =
+              config.mode === 'compose-ha'
+                ? await readDbIncarnation({
+                    mode: config.mode,
+                    projectName: config.projectName,
+                    ip: preFailover.standbyIp,
+                    sshKeyPath: sshKeyPath ?? getSshKeyPath(config.projectDir, config.envPrefix),
+                  })
+                : null;
 
             const result = await runFailover(config.envPrefix, {
               cwd: config.projectDir,
@@ -4242,7 +4346,19 @@ EOF`;
               sshKeyPath,
               markerId: reconvergeMarkerId,
             });
-            collector.recordVerifications(stepId, [survival]);
+            const reconverged = resolveHaDbIps(config.projectDir, config.envPrefix);
+            const n8nKey = await checkN8nKeyShared({
+              mode: config.mode,
+              projectName: config.projectName,
+              sshKeyPath,
+              features: config.features,
+              primaryIp: reconverged.primaryIp,
+              standbyIp: reconverged.standbyIp,
+            });
+            collector.recordVerifications(stepId, [survival, n8nKey]);
+            if (n8nKey.status === 'fail') {
+              throw new Error(`reconverge-deploy: ${n8nKey.checkName}: ${n8nKey.errorMessage}`);
+            }
             if (survival.status !== 'pass') {
               throw new Error(
                 `reconverge-deploy: survival marker ${reconvergeMarkerId} written just ` +

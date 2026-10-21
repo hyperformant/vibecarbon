@@ -30,7 +30,7 @@ export { awaitPostgresAccepting } from './readiness.js';
 // Re-exported so the orchestrator's finalize (outside src/lib/deploy/k8s/)
 // can derive the pilot-light scale-up list without reaching into
 // ./standby-config.js directly — see paid-boundary guard.
-export { deriveScaleUpList } from './standby-config.js';
+export { deriveScaleUpList, failoverAddonManifests } from './standby-config.js';
 
 /**
  * Destroy a K8s deployment.

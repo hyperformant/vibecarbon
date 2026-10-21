@@ -336,6 +336,7 @@ export function buildPerEnvSecrets(envLocal, { appStorage } = {}) {
     // when the add-on is not installed.
     METABASE_DB_PASSWORD: envLocal.METABASE_DB_PASSWORD,
     N8N_DB_PASSWORD: envLocal.N8N_DB_PASSWORD,
+    N8N_ENCRYPTION_KEY: envLocal.N8N_ENCRYPTION_KEY,
   };
   /** @type {Record<string,string|undefined>} */
   const features = {};

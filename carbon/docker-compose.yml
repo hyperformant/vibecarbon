@@ -99,6 +99,7 @@ services:
       - POSTGRES_PASSWORD=
       - REPL_PASSWORD=
       - N8N_DB_PASSWORD=
+      - N8N_ENCRYPTION_KEY=
       - METABASE_DB_PASSWORD=
       - OBSERVABILITY_DB_PASSWORD=
     depends_on:

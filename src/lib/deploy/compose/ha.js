@@ -26,8 +26,14 @@ import {
   resolveDnsToken,
 } from '../../dns-provider.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
+import {
+  composePromotionServices,
+  composeWriterServices,
+  enabledAddonNames,
+} from '../../services/standby-policy.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
+import { RECONCILE_FLAGS_SED } from '../bundle.js';
 import {
   assertFailoverClassified,
   assertFailoverPreconditions,
@@ -1287,6 +1293,9 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
     log = (msg) => p.log.info(msg),
   } = deps;
   const remoteDir = `/opt/${projectName}`;
+  // Whether .env on the promoted node says WALG_ROLE=primary. Until it does,
+  // its reconcile (standby-scale.sh) holds the primary-only add-ons at zero.
+  let roleWritten = false;
 
   try {
     // A resumed failover may have moved the role already: the RUNNING db
@@ -1300,6 +1309,7 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
       .split('\n')
       .some((l) => l.trim() === 'WALG_ROLE=primary');
     if (alreadyPrimary) {
+      roleWritten = true;
       log(`[walg-role] ${promotedIp} already runs WALG_ROLE=primary; no db recreate needed.`);
     } else {
       // composeRoleEnv: the only sanctioned compose-side role write.
@@ -1309,6 +1319,7 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
         remoteDir,
         composeRoleEnv('primary'),
       );
+      roleWritten = true;
       // 300s: a db container recreate plus the script's own 90s readiness wait,
       // with room for a slow image start on a node that is mid-incident.
       //
@@ -1341,7 +1352,7 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
     log(`[walg-role] new primary ${promotedIp} is archiving (WALG_ROLE=primary, audit passed).`);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+    return { ok: false, error: err instanceof Error ? err : new Error(String(err)), roleWritten };
   }
 }
 
@@ -1495,49 +1506,92 @@ export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, op
 }
 
 /**
- * Stop the old primary's app tier (the writers), by CONTAINER name: bare
- * `docker compose stop <svc>` could not resolve an overlay-only service and
- * exited in ~2s having stopped NOTHING (2026-08-09, the compose-invocation
- * census bans that shape). The same list as the promoted-side restart: the e2e
- * health check reads APP_TIER_RESTART_SERVICES as what the retired node is
- * allowed to show exited.
+ * Stop the old primary's writers (the app and the enabled primary-only
+ * add-ons), by CONTAINER name: bare `docker compose stop <svc>` could not
+ * resolve an overlay-only service and exited in ~2s having stopped NOTHING
+ * (2026-08-09, the compose-invocation census bans that shape). An add-on that
+ * is not deployed is skipped (see stopOldPrimaryWriters); only a running
+ * container that will not stop, or an unconfirmed session, fails the call.
  *
- * @returns {Promise<boolean>} false when the stop could not be confirmed
+ * @param {string[]} [services] defaults to the app tier
+ * @returns {Promise<{ ok: boolean, reached: boolean }>} ok is false when the
+ *   stop could not be confirmed; reached is true when the stop loop ran on
+ *   the node (it answered), so `!ok && reached` is a node that refused
  */
-export async function stopOldPrimaryApp(ip, sshKeyPath, projectName) {
-  const containers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
-  const stopped = await sshRun(ip, sshKeyPath, `docker stop ${containers}`, { timeout: 90_000 });
-  return stopped !== false;
+export async function stopOldPrimaryApp(
+  ip,
+  sshKeyPath,
+  projectName,
+  services = APP_TIER_RESTART_SERVICES,
+) {
+  const { ok, reached } = await stopOldPrimaryWriters(ip, sshKeyPath, projectName, services);
+  return { ok, reached };
 }
 
 /**
- * The containers a planned failover stops on the old primary before its write
- * fence: the app plus the add-ons that write to the database when deployed.
- * Stopping them is the outward signal; the database fence
- * (fenceDatabaseWrites) is the guarantee. The e2e health check excuses exactly
- * these on the retired node.
+ * The compose services a planned failover stops on the old primary before its
+ * write fence, and that a promoted node runs: the app plus the enabled
+ * primary-only add-ons, read from their `standby` declarations. Stopping them
+ * is the outward signal; the database fence (fenceDatabaseWrites) is the
+ * guarantee. The e2e health check excuses exactly these on the retired node.
+ *
+ * @param {object} envConfig the environment's persisted config
+ * @returns {string[]}
  */
-export const FAILOVER_FENCE_SERVICES = ['app', 'n8n', 'metabase'];
+export function failoverFenceServices(envConfig) {
+  return composeWriterServices(enabledAddonNames(envConfig));
+}
+
+/**
+ * The command that starts the primary-only add-ons on a freshly promoted node,
+ * or null when there are none. It rebuilds reconcile.sh's own `-f` set (so the
+ * rendered config matches what the next reconcile hashes) and adds the
+ * replication overlay. `--no-deps` never touches db, and there is no fallback
+ * `-f` set: a guessed one would recreate db.
+ *
+ * @param {string} projectName
+ * @param {string[]} services compose services to start (never the `*-setup` jobs)
+ * @returns {string|null}
+ */
+export function composeStartPrimaryOnlyCmd(projectName, services) {
+  if (services.length === 0) return null;
+  return (
+    `cd /opt/${projectName} && ` +
+    `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1) && [ -n "$FLAGS" ] && ` +
+    `docker compose $FLAGS -f docker-compose.replication.yml up -d --no-deps ${services.join(' ')}`
+  );
+}
 
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
 /**
- * Stop the old primary's writers that are running, by container name (absent
- * add-ons are skipped, a running one that will not stop fails the call). Every
+ * Stop the old primary's writers, by container name. Fail closed: only docker's
+ * "No such container" skips an absent add-on; any other inspect error, or an
+ * existing container whose stop fails, fails the call. Every
  * container is tried, so `stopped` names all that did stop even on a failure.
  *
- * @returns {Promise<{ ok: boolean, stopped: string[] }>} the containers this
- *   call stopped, which the un-fence starts again
+ * @param {string[]} services the writer services (failoverFenceServices)
+ * @returns {Promise<{ ok: boolean, stopped: string[], reached: boolean }>} the
+ *   containers this call stopped, which the un-fence starts again; reached
+ *   is true when the loop ran to its end on the node
  */
-export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName) {
-  const containers = FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
+export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, services) {
+  const containers = services.map((svc) => `${projectName}-${svc}`).join(' ');
   const out = await sshRun(
     ip,
     sshKeyPath,
+    // Fail closed: only docker's own "No such container" is absent. Any other
+    // inspect error is FAILED, and an existing container is always stopped,
+    // whatever its status (a restarting one included). STOPPED names what was
+    // live (any status but exited or created), which is what the un-fence
+    // starts again.
     `for c in ${containers}; do ` +
-      `if [ "$(docker container inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ]; then ` +
-      `if docker stop "$c" >/dev/null; then echo "STOPPED $c"; else echo "FAILED $c"; fi; ` +
-      `fi; done; echo FENCE_DONE`,
+      `if st=$(docker container inspect -f '{{.State.Status}}' "$c" 2>&1); then ` +
+      `if docker stop "$c" >/dev/null; then ` +
+      `case "$st" in exited|created) ;; *) echo "STOPPED $c" ;; esac; ` +
+      `else echo "FAILED $c"; fi; ` +
+      `else case "$st" in *[Nn]"o such container"*) ;; *) echo "FAILED $c" ;; esac; fi; ` +
+      `done; echo FENCE_DONE`,
     { timeout: 120_000 },
   );
   const lines = String(out === false ? '' : (out ?? ''))
@@ -1547,8 +1601,9 @@ export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName) {
     lines.filter((l) => l.startsWith(`${tag} `)).map((l) => l.slice(tag.length + 1));
   const stopped = named('STOPPED');
   // FENCE_DONE proves the loop ran to its end over a live ssh session.
-  const ok = lines.includes('FENCE_DONE') && named('FAILED').length === 0;
-  return { ok, stopped };
+  const reached = lines.includes('FENCE_DONE');
+  const ok = reached && named('FAILED').length === 0;
+  return { ok, stopped, reached };
 }
 
 /**
@@ -1699,7 +1754,7 @@ export function composeFailoverAbortBackend({
   }
   const remoteDir = `/opt/${projectName}`;
   const dbCt = `${projectName}-db`;
-  const writers = FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`);
+  const writers = failoverFenceServices(envConfig).map((svc) => `${projectName}-${svc}`);
   const quiet = { log: () => {}, warn: () => {} };
   const ok = (out, tag) =>
     String(out === false ? '' : (out ?? ''))
@@ -1892,6 +1947,8 @@ export async function failoverComposeHA(
   const servers = envConfig.servers || [];
   const primaryServer = servers.find((s) => s.role === 'primary');
   const standbyServer = servers.find((s) => s.role === 'standby');
+  const writerServices = failoverFenceServices(envConfig);
+  const promotionServices = composePromotionServices(enabledAddonNames(envConfig));
 
   if (!primaryServer || !standbyServer) {
     p.log.error('Could not identify primary and standby servers from config');
@@ -2043,7 +2100,7 @@ export async function failoverComposeHA(
   if (planned) {
     s.start('Fencing writes on the old primary (write outage begins)');
     try {
-      const stop = await stopWriters(primaryServer.ip, sshKeyPath, projectName);
+      const stop = await stopWriters(primaryServer.ip, sshKeyPath, projectName, writerServices);
       stoppedWriters = stop.stopped;
       if (!stop.ok) {
         throw new Error(
@@ -2071,7 +2128,7 @@ export async function failoverComposeHA(
       }
       p.log.warn(
         `Could not fence the old primary (${primaryServer.ip}): ${firstLine(err)}. Stop its ` +
-          `app by hand: ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
+          `writers by hand: ssh root@${primaryServer.ip} 'docker stop ${writerServices.map((svc) => `${projectName}-${svc}`).join(' ')}'`,
       );
     }
   }
@@ -2209,11 +2266,12 @@ export async function failoverComposeHA(
       // planned run fenced them already) so the two sides never both serve.
       // DNS is not flipped and the journal stays set.
       const appStopped =
-        fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName));
+        fenced ||
+        (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices)).ok;
       if (!appStopped) {
         p.log.warn(
-          `Could not stop the app on the old primary (${primaryServer.ip}). If it is up, stop ` +
-            `it before anything else: ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
+          `Could not stop the writers on the old primary (${primaryServer.ip}). If any is up, stop ` +
+            `it before anything else: ssh root@${primaryServer.ip} 'docker stop ${writerServices.map((svc) => `${projectName}-${svc}`).join(' ')}'`,
         );
       }
       throw new Error(promotionUnknownMessage(envName));
@@ -2279,6 +2337,7 @@ export async function failoverComposeHA(
         envName,
         promotedIp: standbyServer.ip,
         detail: backupHealth.error?.message ?? 'unknown failure',
+        heldAtZero: backupHealth.roleWritten === false ? promotionServices : [],
       }),
     );
   }
@@ -2346,11 +2405,15 @@ export async function failoverComposeHA(
   // still accepting writes.
   s.start('Stopping old primary services');
   // By container name, see stopOldPrimaryApp.
-  const oldPrimaryContainers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(
-    ' ',
-  );
+  const oldPrimaryContainers = writerServices.map((svc) => `${projectName}-${svc}`).join(' ');
   // A planned run fenced it before the promote; stopping again is a no-op.
-  const stopped = fenced || (await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName));
+  const stop = fenced
+    ? { ok: true, reached: true }
+    : await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName, writerServices);
+  const stopped = stop.ok;
+  // It answered (the stop loop ran) yet a writer would not stop: it may still
+  // run its primary-only add-ons, so step 2a must not start ours.
+  const oldPrimaryStillWriting = !stop.ok && stop.reached;
   if (!stopped) {
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +
@@ -2363,6 +2426,40 @@ export async function failoverComposeHA(
       ? 'Old primary NOT stopped, split-brain risk (see warning)'
       : 'Old primary services stopped',
   );
+
+  // Step 2a: Start the primary-only add-ons (declared in their manifests) on
+  // the promoted node, only now that the old primary's writers are stopped
+  // (step 2; a planned run stopped them before the promote, and an
+  // unreachable old primary was tried and skipped). Started earlier, a
+  // reachable old primary and the promoted node would both run n8n and fire
+  // the same cron and webhooks. The database is read-write and .env says
+  // primary, so later reconciles keep them up. `--no-deps` never touches db;
+  // the one-shot setup jobs and app-migrate never run (the replicated
+  // database already holds their work). Best-effort and loud: a failed start
+  // must not abort a DR flip, it names the exact command to run by hand.
+  // Idempotent on a resumed run (`up -d` of a running service is a no-op).
+  const addonStart = composeStartPrimaryOnlyCmd(projectName, promotionServices);
+  if (addonStart && oldPrimaryStillWriting) {
+    p.log.warn(
+      `Not starting the primary-only add-ons on the new primary: the old primary ` +
+        `(${primaryServer.ip}) answered but its writers did not stop, so both would run them. ` +
+        `Once its writers are stopped, start them: ssh root@${standbyServer.ip} '${addonStart}'`,
+    );
+  } else if (addonStart) {
+    s.start('Starting primary-only add-ons on the new primary');
+    const started = await sshRun(standbyServer.ip, sshKeyPath, addonStart, { timeout: 180_000 });
+    if (started === false) {
+      p.log.warn(
+        `Could not start the primary-only add-ons on the new primary (${standbyServer.ip}). ` +
+          `Start them by hand: ssh root@${standbyServer.ip} '${addonStart}'`,
+      );
+    }
+    s.stop(
+      started === false
+        ? 'Primary-only add-ons NOT started (continuing: see warning)'
+        : 'Primary-only add-ons started',
+    );
+  }
 
   // Step 2b: Demote the old primary's wal-g write-guard, so it stops pushing
   // WAL into the prefix the new primary now owns. Deliberately AFTER step 2:
@@ -2505,6 +2602,7 @@ export async function failoverComposeHA(
         envName,
         promotedIp: standbyServer.ip,
         detail: backupHealth.error?.message ?? 'unknown failure',
+        heldAtZero: backupHealth.roleWritten === false ? promotionServices : [],
       }),
     );
   }

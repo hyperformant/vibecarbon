@@ -19,7 +19,7 @@ describe('renderSystemdUnit', () => {
 
   it('ExecStart recreates through bash with the runtime replication-overlay conditional', () => {
     expect(unit).toMatch(
-      /ExecStart=\/bin\/bash -c 'docker compose -f docker-compose\.yml -f docker-compose\.prod\.yml \$\$\(\[ -f docker-compose\.replication\.yml \] && echo "-f docker-compose\.replication\.yml"\) up -d --remove-orphans'/,
+      /ExecStart=\/bin\/bash -c 'docker compose -f docker-compose\.yml -f docker-compose\.prod\.yml \$\$\(\[ -f docker-compose\.replication\.yml \] && echo "-f docker-compose\.replication\.yml"\) up -d --remove-orphans \$\$\(\[ -f standby-scale\.sh \] && sh standby-scale\.sh\)'/,
     );
   });
 

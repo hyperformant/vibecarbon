@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
 import { afterAll, describe, expect, it } from 'vitest';
-import { FAILOVER_FENCE_SERVICES } from '../../../src/lib/deploy/compose/ha.js';
+import { failoverFenceServices } from '../../../src/lib/deploy/compose/ha.js';
 import {
   clearRetiredFence,
   FLUX_SUSPENDED_BY,
@@ -122,11 +122,20 @@ type Kustomization = { name: string; suspend?: boolean; annotations?: Record<str
 
 /** A fake k8s cluster behind `kubectl`, recording every mutating call. */
 function fakeCluster(
-  init: { replicas?: number; walg?: string; role?: string; flux?: Kustomization[] } = {},
+  init: {
+    replicas?: number;
+    walg?: string;
+    role?: string;
+    flux?: Kustomization[];
+    /** Add-on Deployments installed on the cluster: name -> replicas (namespace vibecarbon). */
+    addons?: Record<string, number>;
+  } = {},
 ) {
   const state = {
     role: init.role ?? '',
     replicas: init.replicas ?? 2,
+    addons: { ...(init.addons ?? {}) } as Record<string, number>,
+    addonNsReadFails: false,
     walg: init.walg ?? 'primary',
     dbMarker: false,
     reachable: true,
@@ -163,6 +172,11 @@ function fakeCluster(
       writes.push(`flux ${body.spec.suspend ? 'suspend' : 'resume'} ${name}`);
       return '';
     }
+    if (argv.includes('get') && argv[0] === '-n' && argv[1] !== 'vibecarbon') {
+      // An add-on namespace of its own (observability): none installed here.
+      if (state.addonNsReadFails) throw new Error('Unable to connect to the server: EOF');
+      return '';
+    }
     if (argv.includes('rollout')) {
       db.up = true;
       return 'statefulset rolling update complete';
@@ -180,6 +194,13 @@ function fakeCluster(
             },
           },
           { kind: 'Deployment', metadata: { name: 'app' }, spec: { replicas: state.replicas } },
+          ...Object.entries(state.addons)
+            .filter(([name]) => argv.includes(`deployment/${name}`))
+            .map(([name, replicas]) => ({
+              kind: 'Deployment',
+              metadata: { name },
+              spec: { replicas },
+            })),
           {
             kind: 'StatefulSet',
             metadata: { name: 'db' },
@@ -218,8 +239,12 @@ function fakeCluster(
       return 'OK';
     }
     if (argv.includes('scale')) {
-      state.replicas = Number(a.match(/--replicas=(\d+)/)?.[1]);
-      writes.push(`scale ${argv[argv.indexOf('scale') + 2]} ${state.replicas}`);
+      const name = argv[argv.indexOf('scale') + 2];
+      const replicas = Number(a.match(/--replicas=(\d+)/)?.[1]);
+      if (name === 'app') state.replicas = replicas;
+      else if (name in state.addons) state.addons[name] = replicas;
+      else throw new Error(`Error from server (NotFound): deployments.apps "${name}" not found`);
+      writes.push(`scale ${name} ${replicas}`);
       return '';
     }
     if (argv.includes('set') && argv.includes('env')) {
@@ -477,6 +502,53 @@ describe('reconcileRetiredFence (k8s-ha)', () => {
     expect(cluster.writes).not.toContain('scale app 0');
   });
 
+  it('with n8n and redis on the cluster, the default zeroes the app and both add-ons, and the probe needs all three at 0', async () => {
+    const cluster = fakeCluster({ addons: { n8n: 1, redis: 1 } });
+    const first = await reconcileRetiredFence(argsFor(cluster));
+    expect(first.fenced).toEqual([RETIRED_IP]);
+    expect(cluster.writes.filter((w) => w.startsWith('scale '))).toEqual([
+      'scale app 0',
+      'scale n8n 0',
+      'scale redis 0',
+    ]);
+    // kubectl scale only: a patch or set image would roll the pods.
+    for (const a of cluster.argvs.filter((x) => x.includes('n8n') || x.includes('redis'))) {
+      expect(a).not.toContain('patch');
+    }
+    // A fenced cluster reads clean; one add-on scaled back up reads as missing.
+    cluster.writes.length = 0;
+    await reconcileRetiredFence(argsFor(cluster));
+    expect(cluster.writes).toEqual([]);
+    cluster.state.addons.redis = 1;
+    await reconcileRetiredFence(argsFor(cluster));
+    expect(cluster.writes).toEqual(['scale redis 0']);
+  });
+
+  it('the fence reads every declared add-on whatever the local tree holds (no add-on on the cluster: app only)', async () => {
+    // The retired side is the old primary: its add-ons need not match the
+    // local k8s tree, and status can run outside the project directory.
+    const cluster = fakeCluster();
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(result.fenced).toEqual([RETIRED_IP]);
+    expect(cluster.writes.filter((w) => w.startsWith('scale '))).toEqual(['scale app 0']);
+    const mainRead = cluster.argvs.find((a) => a.includes('configmap/vibecarbon-config')) ?? [];
+    for (const name of ['n8n', 'redis', 'metabase']) {
+      expect(mainRead).toContain(`deployment/${name}`);
+    }
+  });
+
+  it('an unreadable observability namespace still lets the app be zeroed (NotFound scales count as zero)', async () => {
+    const cluster = fakeCluster();
+    cluster.state.addonNsReadFails = true;
+    const result = await reconcileRetiredFence(argsFor(cluster));
+    expect(cluster.writes).toContain('scale app 0');
+    // Its declared Deployments are scaled blind; absent ones answer NotFound.
+    expect(
+      cluster.argvs.some((a) => a.includes('vibecarbon-observability') && a.includes('scale')),
+    ).toBe(true);
+    expect(result.fenced).toEqual([RETIRED_IP]);
+  });
+
   it('the fence log says the domain is down while DNS still points at the node', async () => {
     const cluster = fakeCluster();
     const logged: string[] = [];
@@ -544,12 +616,29 @@ describe('reconcileRetiredFence (compose-ha)', () => {
     expect(node.writes).toEqual([]);
   });
 
-  it('the probe watches every writer the planned fence stops (app, n8n, metabase)', async () => {
-    expect(FAILOVER_FENCE_SERVICES).toEqual(expect.arrayContaining(['app', 'n8n', 'metabase']));
+  it('the probe watches every writer the planned fence stops (the app and the enabled primary-only add-ons)', async () => {
+    const envConfig = composeSwapped({ n8n: true });
+    const writers = failoverFenceServices(envConfig);
+    expect(writers).toEqual(['app', 'n8n']);
     const node = fakeNode();
-    await reconcileRetiredFence(argsFor(node));
+    await reconcileRetiredFence({ ...argsFor(node), envConfig });
     const probe = node.commands.find((c) => c.includes('PROBE_DONE')) ?? '';
-    for (const svc of FAILOVER_FENCE_SERVICES) expect(probe).toContain(`myapp-${svc}`);
+    for (const svc of writers) expect(probe).toContain(`myapp-${svc}`);
+    expect(probe).not.toContain('myapp-metabase');
+  });
+
+  it('the compose tier refuses to fence without an envConfig (it would shrink the writers to the app)', async () => {
+    const node = fakeNode();
+    const { fenceRetiredNode } = await import('../../../src/lib/deploy/retired-fence.js');
+    await expect(
+      fenceRetiredNode({
+        tier: 'compose-ha',
+        ip: RETIRED_IP,
+        projectName: 'myapp',
+        sshKeyPath: '/k',
+        deps: { ...quiet, run: node.run, psql: node.psql },
+      }),
+    ).rejects.toThrow(/needs envConfig/);
   });
 
   it('a db that is down gets its PGDATA marker and read-only fence once the role recreate brings it up', async () => {

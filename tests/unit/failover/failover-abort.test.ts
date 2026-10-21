@@ -216,12 +216,16 @@ describe('recordFailoverAbort: the one save', () => {
 });
 
 describe('compose-ha abort backend', () => {
-  const make = (answers: Record<string, string | false>, over: Record<string, unknown> = {}) => {
+  const make = (
+    answers: Record<string, string | false>,
+    over: Record<string, unknown> = {},
+    envConfig: Record<string, unknown> = journalEnv(),
+  ) => {
     const commands: Array<{ ip: string; command: string }> = [];
     const rearm = vi.fn(async () => ({ ok: true }));
     const backend = composeFailoverAbortBackend({
       envName: 'prod',
-      envConfig: journalEnv(),
+      envConfig,
       projectName: 'myapp',
       sshKeyPath: '/k',
       deps: {
@@ -317,11 +321,14 @@ describe('compose-ha abort backend', () => {
     expect(lost.rearm).toHaveBeenCalledWith(expect.objectContaining({ promotedIp: '10.0.0.1' }));
   });
 
-  it('starts the stopped writers on the old primary', async () => {
-    const { backend, commands } = make({ START_DONE: 'START_DONE' });
-    await expect(backend.startPrimaryWriters()).resolves.toBe(true);
-    expect(commands[0].ip).toBe('10.0.0.1');
-    expect(commands[0].command).toMatch(/myapp-app myapp-n8n myapp-metabase/);
+  it('starts the declared writers on the old primary: the app plus the enabled primary-only add-ons', async () => {
+    const withAddons = make({ START_DONE: 'START_DONE' }, {}, journalEnv({ n8n: true }));
+    await expect(withAddons.backend.startPrimaryWriters()).resolves.toBe(true);
+    expect(withAddons.commands[0].ip).toBe('10.0.0.1');
+    expect(withAddons.commands[0].command).toMatch(/in myapp-app myapp-n8n;/);
+    const bare = make({ START_DONE: 'START_DONE' });
+    await bare.backend.startPrimaryWriters();
+    expect(bare.commands[0].command).toMatch(/in myapp-app;/);
   });
 });
 

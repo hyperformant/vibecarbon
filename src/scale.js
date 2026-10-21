@@ -26,6 +26,7 @@ import { c } from './lib/colors.js';
 import { runCommand } from './lib/command.js';
 import { saveProjectConfig } from './lib/config.js';
 import { useDnsChallenge } from './lib/deploy/acme.js';
+import { RECONCILE_FLAGS_SED, STANDBY_SCALE_FLAG } from './lib/deploy/bundle.js';
 import { collectComposeBuildArgs } from './lib/deploy/compose/build-args.js';
 import {
   backupCompose,
@@ -912,6 +913,8 @@ async function scaleServers(ctx) {
       // is bounded (base + prod = at worst one extra recreate churn, never a failure).
       // The replication overlay is appended when present, same runtime conditional as
       // reconcile.sh itself — on single-server compose the file never exists.
+      // STANDBY_SCALE_FLAG keeps primary-only add-ons at zero when the node's
+      // .env says WALG_ROLE=standby, the same fragment reconcile.sh's up runs.
       const replOverlayFlag =
         "$([ -f docker-compose.replication.yml ] && echo '-f docker-compose.replication.yml')";
       s.start('Recreating all services after restore...');
@@ -919,9 +922,9 @@ async function scaleServers(ctx) {
         newIp,
         sshKeyPath,
         `cd ${remoteDir} && ` +
-          `FLAGS=$(sed -n 's/^docker compose \\(.*\\) \\$(\\[ -f docker-compose.replication.yml.*up -d --remove-orphans$/\\1/p' reconcile.sh | tail -1); ` +
+          `FLAGS=$(sed -n '${RECONCILE_FLAGS_SED}' reconcile.sh | tail -1); ` +
           `[ -n "$FLAGS" ] || FLAGS='-f docker-compose.yml -f docker-compose.prod.yml'; ` +
-          `docker compose $FLAGS ${replOverlayFlag} up -d --force-recreate 2>&1`,
+          `docker compose $FLAGS ${replOverlayFlag} up -d --force-recreate ${STANDBY_SCALE_FLAG} 2>&1`,
         { timeout: 600_000 },
       );
       s.stop('All services running');

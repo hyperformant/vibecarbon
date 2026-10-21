@@ -28,9 +28,10 @@
  * fence uses, so every writer is covered, app, add-ons and pg_cron alike, and
  * open sessions are terminated). A db in recovery cannot write and is left
  * alone. Besides that the fence holds the retired side's writers at zero (k8s:
- * `kubectl scale deployment app --replicas=0`, never a patch that would roll
- * pods, after suspending any Flux Kustomization that would scale it back;
- * compose: app, n8n and metabase) and WALG_ROLE=standby.
+ * the app and every deployed add-on through `kubectl scale --replicas=0`,
+ * never a patch that would roll pods, after suspending any Flux Kustomization
+ * that would scale them back; compose: the app and the primary-only add-ons)
+ * and WALG_ROLE=standby.
  *
  * `vibecarbon status`, `failover` and `deploy` call reconcileRetiredFence
  * first, and failover again once its role swap is saved, so an old primary
@@ -46,6 +47,12 @@
  */
 
 import * as p from '@clack/prompts';
+import {
+  composeWriterServices,
+  declaredAddonNames,
+  enabledAddonNames,
+  k8sStandbyZeroedWorkloads,
+} from '../services/standby-policy.js';
 import { getSSHKeyPath, sshKubectl } from '../ssh.js';
 import { sshRun as composeSshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
@@ -232,12 +239,80 @@ async function listFluxKustomizations(ip, kubectl, opts) {
   );
 }
 
+/**
+ * The workloads the k8s fence holds at zero: the app, then every declared
+ * add-on workload (k8sStandbyZeroedWorkloads over all of services/), installed
+ * on the retired cluster or not. The retired side is the old primary, whose
+ * add-ons need not match the local k8s tree (or a command run outside the
+ * project), so the fence never narrows the list to what is installed here: an
+ * absent Deployment reads as zero and costs only its share of a read.
+ */
+function k8sFencedWorkloads() {
+  return [
+    { kind: 'Deployment', name: K8S_APP_DEPLOYMENT, namespace: NS },
+    ...k8sStandbyZeroedWorkloads(declaredAddonNames()),
+  ];
+}
+
+const listItems = (out) => {
+  const text = String(out ?? '').trim();
+  if (!text) return [];
+  const listed = JSON.parse(text);
+  return listed?.kind === 'List' ? (listed.items ?? []) : [listed];
+};
+
+/**
+ * The fenced workloads not at zero, as `{kind, name, namespace}`. One read per
+ * namespace beyond the app's (the app namespace rides the probe's main read);
+ * a workload that does not exist counts as zero. A namespace whose read fails
+ * lists all its workloads: the zero step scales them anyway (kubectl scale is
+ * idempotent and a NotFound counts as zero), so one unreadable add-on
+ * namespace never keeps the app from being zeroed.
+ */
+async function k8sWorkloadsNotZero(ip, { kubectl, workloads, appNsItems, opts }) {
+  const byNs = new Map();
+  for (const w of workloads) byNs.set(w.namespace, [...(byNs.get(w.namespace) ?? []), w]);
+  const live = [];
+  for (const [namespace, list] of byNs) {
+    let items = appNsItems;
+    if (namespace !== NS) {
+      try {
+        items = listItems(
+          await kubectl(
+            ip,
+            [
+              '-n',
+              namespace,
+              'get',
+              ...list.map((w) => `${w.kind.toLowerCase()}/${w.name}`),
+              '-o',
+              'json',
+              '--ignore-not-found',
+            ],
+            opts,
+          ),
+        );
+      } catch {
+        live.push(...list);
+        continue;
+      }
+    }
+    for (const w of list) {
+      const obj = items.find((i) => i?.kind === w.kind && i?.metadata?.name === w.name);
+      if (obj && obj.spec?.replicas !== 0) live.push(w);
+    }
+  }
+  return live;
+}
+
+const NOT_FOUND = /NotFound|not found/i;
+
 /** One read of everything the k8s fence covers; null when the cluster does not answer. */
-async function probeK8s(ip, { kubectl, psqlFor }) {
+async function probeK8s(ip, { kubectl, psqlFor, workloads }) {
   const opts = { timeout: PROBE_TIMEOUT_MS, transportRetry: false };
-  let listed;
+  let items;
   try {
-    listed = JSON.parse(
+    items = listItems(
       await kubectl(
         ip,
         [
@@ -245,7 +320,9 @@ async function probeK8s(ip, { kubectl, psqlFor }) {
           NS,
           'get',
           'configmap/vibecarbon-config',
-          `deployment/${K8S_APP_DEPLOYMENT}`,
+          ...workloads
+            .filter((w) => w.namespace === NS)
+            .map((w) => `${w.kind.toLowerCase()}/${w.name}`),
           `statefulset/${DB_STATEFULSET}`,
           '-o',
           'json',
@@ -257,9 +334,13 @@ async function probeK8s(ip, { kubectl, psqlFor }) {
   } catch {
     return null;
   }
-  const items = listed?.kind === 'List' ? (listed.items ?? []) : [listed];
   const of = (kind) => items.find((i) => i?.kind === kind);
-  const dep = of('Deployment');
+  const workloadsToZero = await k8sWorkloadsNotZero(ip, {
+    kubectl,
+    workloads,
+    appNsItems: items,
+    opts,
+  });
   const db = (of('StatefulSet')?.spec?.template?.spec?.containers ?? []).find(
     (ct) => ct.name === DB_CONTAINER,
   );
@@ -292,14 +373,15 @@ async function probeK8s(ip, { kubectl, psqlFor }) {
     walBytes: dbState.walBytes,
     fluxSuspended,
     fluxToSuspend,
-    workloadsZero: !dep || dep.spec?.replicas === 0,
+    workloadsZero: workloadsToZero.length === 0,
+    workloadsToZero,
     walgStandby: (db?.env ?? []).find((e) => e.name === 'WALG_ROLE')?.value === 'standby',
   };
 }
 
-function k8sBackend({ kubectl, psqlFor, zeroWorkloads }) {
+function k8sBackend({ kubectl, psqlFor, zeroWorkloads, workloads }) {
   return {
-    probe: (ip) => probeK8s(ip, { kubectl, psqlFor }),
+    probe: (ip) => probeK8s(ip, { kubectl, psqlFor, workloads }),
     // Ordered so backups are refused first, the database stops taking writes
     // next, Flux cannot scale the app back before it is zeroed, and the db
     // marker lands before the WALG_ROLE change rolls the db pod.
@@ -352,14 +434,31 @@ function k8sBackend({ kubectl, psqlFor, zeroWorkloads }) {
       },
       {
         key: 'workloadsZero',
-        what: 'its app at zero',
-        apply: (ip) =>
+        what: 'its app and add-ons at zero',
+        apply: (ip, state) =>
           zeroWorkloads
             ? zeroWorkloads(ip)
             : // kubectl scale, never a patch or set image: those would roll pods.
-              attempt(() =>
-                kubectl(ip, ['-n', NS, 'scale', 'deployment', K8S_APP_DEPLOYMENT, '--replicas=0']),
-              ),
+              // Every workload is tried (the app first), so one failing add-on
+              // namespace never leaves the app running; NotFound is zero.
+              attempt(async () => {
+                let ok = true;
+                for (const w of state.workloadsToZero) {
+                  try {
+                    await kubectl(ip, [
+                      '-n',
+                      w.namespace,
+                      'scale',
+                      w.kind.toLowerCase(),
+                      w.name,
+                      '--replicas=0',
+                    ]);
+                  } catch (err) {
+                    if (!NOT_FOUND.test(String(err?.message ?? err))) ok = false;
+                  }
+                }
+                return ok;
+              }),
       },
       {
         key: 'walgStandby',
@@ -420,7 +519,15 @@ async function probeCompose(ip, { run, projectName, writerContainers, psqlFor })
   };
 }
 
-function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, demoteWalgRole }) {
+function composeBackend({
+  run,
+  psqlFor,
+  projectName,
+  sshKeyPath,
+  zeroWorkloads,
+  demoteWalgRole,
+  writerServices,
+}) {
   const dbCt = `${projectName}-db`;
   const confirmed = async (ip, command) => {
     const out = await run(ip, `${command} && echo OK`, { timeout: 30_000 });
@@ -428,12 +535,11 @@ function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, 
   };
   return {
     probe: async (ip) => {
-      const { FAILOVER_FENCE_SERVICES } = await import('./compose/ha.js');
       return probeCompose(ip, {
         run,
         projectName,
         psqlFor,
-        writerContainers: FAILOVER_FENCE_SERVICES.map((svc) => `${projectName}-${svc}`),
+        writerContainers: writerServices.map((svc) => `${projectName}-${svc}`),
       });
     },
     // Marker first (it refuses the nightly backup), then the PGDATA marker (it
@@ -459,7 +565,7 @@ function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, 
         apply: async (ip) => {
           if (zeroWorkloads) return zeroWorkloads(ip);
           const { stopOldPrimaryWriters } = await import('./compose/ha.js');
-          return (await stopOldPrimaryWriters(ip, sshKeyPath, projectName)).ok;
+          return (await stopOldPrimaryWriters(ip, sshKeyPath, projectName, writerServices)).ok;
         },
       },
       {
@@ -482,15 +588,21 @@ function composeBackend({ run, psqlFor, projectName, sshKeyPath, zeroWorkloads, 
   };
 }
 
-async function backendFor(tier, { projectName, sshKeyPath, deps }) {
+async function backendFor(tier, { projectName, sshKeyPath, deps, envConfig }) {
   if (tier === 'k8s-ha') {
     return k8sBackend({
       kubectl: deps.kubectl ?? ((ip, argv, opts) => sshKubectl(ip, sshKeyPath, argv, opts)),
       psqlFor: deps.psql ?? ((ip) => k8sPsqlRunner(ip, sshKeyPath)),
       zeroWorkloads: deps.zeroWorkloads,
+      workloads: k8sFencedWorkloads(),
     });
   }
   if (tier === 'compose-ha') {
+    if (!envConfig) {
+      throw new Error(
+        'retired fence: the compose tier needs envConfig, whose enabled add-ons name the writers to fence',
+      );
+    }
     let psqlFor = deps.psql;
     if (!psqlFor) {
       const { composePsqlRunner } = await import('./compose/ha.js');
@@ -503,6 +615,7 @@ async function backendFor(tier, { projectName, sshKeyPath, deps }) {
       sshKeyPath,
       zeroWorkloads: deps.zeroWorkloads,
       demoteWalgRole: deps.demoteWalgRole,
+      writerServices: composeWriterServices(enabledAddonNames(envConfig)),
     });
   }
   throw new Error(`retired fence: unknown tier ${JSON.stringify(tier)}`);
@@ -514,19 +627,27 @@ async function backendFor(tier, { projectName, sshKeyPath, deps }) {
  * once the db settles, so one run fences fully.
  *
  * `deps.zeroWorkloads(ip) -> Promise<boolean>` replaces the built-in writer
- * stop (k8s: the app Deployment; compose: app, n8n, metabase). It is the seam
- * the primary-only add-ons plan fills with zeroWorkloadsOnStandby.
+ * stop (k8s: the app Deployment and every declared add-on workload, the
+ * pilot-standby list over all of services/; compose: the declared writers).
  *
  * @param {object} args
  * @param {'compose-ha'|'k8s-ha'} args.tier
  * @param {string} args.ip
  * @param {string} args.projectName
  * @param {string} args.sshKeyPath
+ * @param {object} [args.envConfig] the env config, whose enabled add-ons name the compose writers
  * @param {object} [args.deps] kubectl / run / psql / zeroWorkloads / demoteWalgRole seams
  * @returns {Promise<{ reachable: boolean, fenced: boolean, wrote: string[], missing: string[], walBytes: number|null }>}
  */
-export async function fenceRetiredNode({ tier, ip, projectName, sshKeyPath, deps = {} }) {
-  const backend = await backendFor(tier, { projectName, sshKeyPath, deps });
+export async function fenceRetiredNode({
+  tier,
+  ip,
+  projectName,
+  sshKeyPath,
+  envConfig,
+  deps = {},
+}) {
+  const backend = await backendFor(tier, { projectName, sshKeyPath, deps, envConfig });
   const state = await backend.probe(ip);
   if (!state) {
     return { reachable: false, fenced: false, wrote: [], missing: ['reachable'], walBytes: null };
@@ -555,6 +676,7 @@ export async function fenceRetiredNode({ tier, ip, projectName, sshKeyPath, deps
         if (state[step.key] === 'unknown') state[step.key] = again[step.key];
       }
       state.fluxToSuspend = again.fluxToSuspend ?? state.fluxToSuspend;
+      state.workloadsToZero = again.workloadsToZero ?? state.workloadsToZero;
       state.walBytes = state.walBytes ?? again.walBytes;
       await pass();
     }
@@ -606,6 +728,7 @@ export async function reconcileRetiredFence({
       ip,
       projectName: projectConfig?.projectName,
       sshKeyPath,
+      envConfig,
       deps,
     });
     result.nodes.push({

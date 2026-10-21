@@ -68,6 +68,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { testConfig } from '../config.js';
+import { haScenarioFeatures } from './checks/standby-addons.js';
 import { MetricsCollector } from './metrics/collector.js';
 import { E2EDb } from './metrics/db.js';
 import {
@@ -931,6 +932,14 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       /* no resolvectl or no systemd-resolved — nothing to flush */
     }
 
+    // HA scenarios also run the add-ons so the primary-only standby policy is
+    // proved end to end; non-HA modes and an explicit --features keep their set.
+    const scenarioFeatures = haScenarioFeatures(
+      mode,
+      effectiveFeatures,
+      featureOverride !== undefined,
+    );
+
     const scenarioConfig: ScenarioConfig = {
       mode: mode as DeployMode,
       dnsProvider,
@@ -939,7 +948,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       region,
       ...(secondaryRegion && { secondaryRegion }),
       domain,
-      features: effectiveFeatures,
+      features: scenarioFeatures,
       adminEmail: config.adminEmail,
       adminPassword: config.adminPassword,
       scaleToType,
@@ -954,7 +963,7 @@ async function runE2E(overrides?: Partial<RunnerOptions>): Promise<RunnerResult>
       mode,
       dnsProvider,
       domain,
-      features: [...effectiveFeatures],
+      features: [...scenarioFeatures],
       // (project_name, env_prefix) tuple drives the cold/warm classifier in
       // db.classifyColdWarm — without these the scenario's steps default to
       // 'cold' regardless of run history.

@@ -314,10 +314,12 @@ minutes of operator-decided downtime). Their standby architectures are
 different, and each mode keeps its own failover path:
 
 - **`compose-ha`** keeps its existing always-warm architecture unchanged: two
-  always-on VPSs, both running the full stack, standby continuously
-  replicating. `vibecarbon failover` promotes the standby database and
-  repoints DNS. There's no idle floor to provision and no `-server-type`
-  step, because nothing is cold.
+  always-on VPSs, standby continuously replicating. The standby runs the app
+  tier, Redis and observability; n8n and Metabase write to the primary
+  database, so they stay at zero there until it becomes the primary.
+  `vibecarbon failover` promotes the standby database and repoints DNS.
+  There's no idle floor to provision and no `-server-type` step, because
+  nothing is cold.
 - **`k8s-ha`** uses the pilot-light standby described below: a 2-node idle
   floor with the app tier at zero, and failover provisions app-tier capacity
   before promoting.
@@ -330,6 +332,7 @@ Fail-back) describes **k8s-ha** specifically.
 The k8s-ha standby region is deployed as a minimal, cost-optimized replica:
 - **Idle floor: 2 nodes**, a master (control plane, ingress, replication gateway) and a dedicated database node (the streaming replica database)
 - **Cold app tier:** All app-tier workloads are at `replicas: 0` (the app and cluster-autoscaler)
+- **Add-ons held at zero:** every installed add-on (n8n, Metabase, Redis, observability) is scaled to zero with the app tier; failover scales n8n, Metabase and Redis back up with the app, and the follow-up `vibecarbon deploy` brings observability back
 - **Seeded at deploy:** The database boots from a seed snapshot on first start, immediately becoming a live streaming replica, with no separate reseed cycle
 - **Workers provisioned at failover time** via the IaC layer, not idling in advance
 
