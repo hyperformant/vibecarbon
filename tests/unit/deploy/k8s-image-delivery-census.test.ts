@@ -120,6 +120,22 @@ function findSites(path: string, text: string): Site[] {
   return out;
 }
 
+/**
+ * `import { sideloadK3s as ship }` would hide every call from the name match
+ * above, so a rename of a primitive on import is itself a finding.
+ */
+function findAliasedImports(path: string, text: string): string[] {
+  const out: string[] = [];
+  walk(parseAst(text), (n) => {
+    if (n.type !== 'ImportSpecifier') return;
+    const imported = n.imported?.name ?? n.imported?.value;
+    if (PRIMITIVES.has(imported) && n.local?.name !== imported) {
+      out.push(`${path}: ${imported} imported as ${n.local?.name}`);
+    }
+  });
+  return out;
+}
+
 function jsFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
     const p = join(dir, e.name);
@@ -174,7 +190,31 @@ describe('k8s image-delivery call-site census', () => {
   });
 });
 
+describe('image-delivery primitives are never imported under another name', () => {
+  it('no file in src/ aliases one', () => {
+    const aliased = jsFiles(SRC).flatMap((abs) =>
+      findAliasedImports(relative(SRC, abs), readFileSync(abs, 'utf-8')),
+    );
+    expect(aliased).toEqual([]);
+  });
+});
+
 describe('planted fixtures', () => {
+  it('flags a primitive imported under another name', () => {
+    expect(
+      findAliasedImports('f.js', "import { sideloadK3s as ship, other } from './k3s.js';"),
+    ).toEqual(['f.js: sideloadK3s imported as ship']);
+  });
+
+  it('accepts a plain import, an unrelated alias, and an export-only rename', () => {
+    expect(
+      findAliasedImports(
+        'f.js',
+        "import { sideloadK3s, buildAppImage } from './k3s.js';\nimport { other as o } from './x.js';",
+      ),
+    ).toEqual([]);
+  });
+
   it('flags a member call and names its enclosing function', () => {
     const s = findSites('f.js', 'async function scratch(d) { await d.sideloadK3s({}); }');
     expect(s.map((x) => x.key)).toEqual(['f.js:scratch']);
