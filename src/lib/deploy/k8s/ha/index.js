@@ -27,7 +27,7 @@ import {
   seedKnownHosts,
 } from '../../../host-keys.js';
 import { perfAsync } from '../../../perf.js';
-import { scpWithRetry } from '../../../ssh.js';
+import { scpWithRetry, sshRun } from '../../../ssh.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from '../../db-workload.js';
 import {
   buildPrimaryConninfo,
@@ -44,8 +44,10 @@ import {
 import { readReplPassword } from '../../utils.js';
 import {
   exchangeAndBringUpTunnel,
+  REGISTRY_RELAY_PORT,
   REPL_GATEWAY_PORT,
   WG_PRIMARY_IP,
+  WG_STANDBY_IP,
   WG_SUBNET_CIDR,
 } from '../../wireguard.js';
 
@@ -70,6 +72,10 @@ const K3S_POD_CIDR = '10.42.0.0/16';
 const REPL_GATEWAY_MANIFEST = join(
   __dirname,
   '../../../../../carbon/k8s/base/repl-gateway/repl-gateway.yaml',
+);
+const REGISTRY_RELAY_MANIFEST = join(
+  __dirname,
+  '../../../../../carbon/k8s/base/repl-gateway/registry-relay.yaml',
 );
 
 /**
@@ -120,6 +126,93 @@ export function renderReplGatewayManifest({ template, role, nodePrivateIp }) {
     .replaceAll('__RELAY_LISTEN__', relayListen)
     .replaceAll('__RELAY_TARGET__', relayTarget)
     .replaceAll('__DB_PRIVATE_IP__', nodePrivateIp);
+}
+
+/**
+ * Where the standby's image copy reads the primary's registry: the primary's
+ * wg0 address and the relay port. k8s-ha addresses wg0 by ROLE
+ * (exchangeAndBringUpTunnel is always called with the role primary's db node
+ * first), so the role primary is always WG_PRIMARY_IP.
+ */
+export const REGISTRY_RELAY_SOURCE_HOST = `${WG_PRIMARY_IP}:${REGISTRY_RELAY_PORT}`;
+
+/**
+ * Render the registry-relay Pod: listen only on the primary's wg0 address,
+ * admit only the standby's tunnel IP, forward to the primary master's registry.
+ *
+ * @param {object} o
+ * @param {string} o.template - the raw registry-relay.yaml
+ * @param {string} o.primaryMasterPrivateIp - the primary master's private IP (registry hostPort bind)
+ * @returns {string}
+ */
+export function renderRegistryRelayManifest({ template, primaryMasterPrivateIp }) {
+  if (!primaryMasterPrivateIp) {
+    throw new Error('renderRegistryRelayManifest: primaryMasterPrivateIp is required');
+  }
+  return template
+    .replaceAll(
+      '__RELAY_LISTEN__',
+      `TCP-LISTEN:${REGISTRY_RELAY_PORT},bind=${WG_PRIMARY_IP},fork,reuseaddr,range=${WG_STANDBY_IP}/32`,
+    )
+    .replaceAll('__RELAY_TARGET__', `TCP:${primaryMasterPrivateIp}:5000`);
+}
+
+const RELAY_DELETE = 'kubectl delete pod registry-relay -n vibecarbon --ignore-not-found';
+
+/**
+ * Run `fn` while a registry-relay Pod is up on the primary. wg0 must already
+ * be up. The relay is owned by the copy: a leftover from a dead process (or a
+ * role swap) is deleted first, the new one is applied and waited Ready, and it
+ * is deleted when `fn` settles. A failed cleanup is logged, never masks `fn`:
+ * the next copy deletes a stray relay in step 1/2 anyway.
+ *
+ * @param {object} o
+ * @param {string} o.primaryIp - primary master public IP (ssh)
+ * @param {string} o.standbyIp - standby master public IP (ssh)
+ * @param {string} o.primaryMasterPrivateIp
+ * @param {string} o.sshKeyPath
+ * @param {(ip: string, script: string, input?: string) => Promise<unknown>} [o.run]
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ * @template T
+ */
+export async function withRegistryRelay(
+  { primaryIp, standbyIp, primaryMasterPrivateIp, sshKeyPath, run },
+  fn,
+) {
+  const exec =
+    run ??
+    ((ip, script, input) =>
+      sshRun(ip, sshKeyPath, ['sh', '-c', script], { input, timeout: 120_000 }));
+  const manifest = renderRegistryRelayManifest({
+    template: readFileSync(REGISTRY_RELAY_MANIFEST, 'utf-8'),
+    primaryMasterPrivateIp,
+  });
+  await exec(standbyIp, RELAY_DELETE);
+  try {
+    await exec(primaryIp, `${RELAY_DELETE} && kubectl apply -f -`, manifest);
+    try {
+      await exec(
+        primaryIp,
+        'kubectl wait --for=condition=Ready pod/registry-relay -n vibecarbon --timeout=60s',
+      );
+    } catch (err) {
+      const detail = String(err?.stderr || err?.message || err)
+        .split('\n')[0]
+        .trim();
+      throw new Error(`registry relay not ready on the primary: ${detail}`);
+    }
+    return await fn();
+  } finally {
+    try {
+      await exec(primaryIp, `${RELAY_DELETE} --wait=false`);
+    } catch (err) {
+      const detail = String(err?.stderr || err?.message || err)
+        .split('\n')[0]
+        .trim();
+      p.log.warn(`[image-copy] could not delete registry-relay on the primary: ${detail}`);
+    }
+  }
 }
 
 /**

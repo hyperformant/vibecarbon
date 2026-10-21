@@ -5283,6 +5283,9 @@ export async function deployK3s(options) {
     // site). setupReplication renders it into the repl-gateway egress
     // NetworkPolicy + socat bind for this cluster.
     dbPrivateIp,
+    // The master's private IP: the registry hostPort bind the standby image
+    // copy's relay targets (withRegistryRelay).
+    masterPrivateIp,
     workerIps,
     networkId,
     kubeconfig,

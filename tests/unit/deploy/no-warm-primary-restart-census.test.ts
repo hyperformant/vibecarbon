@@ -36,9 +36,11 @@ type Node = any;
 /** Shapes that bounce the db: `compose restart db`, `delete pod <db pod>`, a statefulset rollout restart. */
 const RESTART_SHAPES = [
   /\brestart\s+db\b/,
-  // Any pod delete but the legacy bare repl-gateway Pod's (final review M6:
-  // a socat relay, never the db; removed once so its Deployment can bind).
-  /\bdelete\s+pod\b(?!\s+repl-gateway\s)/,
+  // Any pod delete but a socat relay's, never the db: the legacy bare
+  // repl-gateway Pod (final review M6; removed once so its Deployment can bind)
+  // and the per-copy registry-relay Pod (withRegistryRelay deletes it after
+  // every image copy).
+  /\bdelete\s+pod\b(?!\s+(repl-gateway|registry-relay)\s)/,
   /\brollout\s+restart\s+(statefulset|sts)\b/,
 ];
 
