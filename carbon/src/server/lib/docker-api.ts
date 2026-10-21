@@ -3,10 +3,12 @@
  *
  * The server never shells out to the docker CLI for container discovery or
  * logs: the production app image ships no CLI, no compose files, and no
- * socket — only the read-only docker-socket-proxy is reachable over TCP
- * (docker-compose.prod.yml sets DOCKER_API_PROXY and grants CONTAINERS-only
- * GET access). In local dev the host's /var/run/docker.sock is used
- * directly. This mirrors the Kubernetes branch of the services-status
+ * socket. In production it reaches app-docker-proxy over TCP
+ * (docker-compose.prod.yml sets DOCKER_API_PROXY), which answers exactly the
+ * two GETs below (the container list and one container's logs) plus /_ping,
+ * and refuses everything else, container inspect and its env included. A new
+ * call here needs a matching allow rule in that proxy's haproxy config. In
+ * local dev the host's /var/run/docker.sock is used directly. This mirrors the Kubernetes branch of the services-status
  * routes, which talks to the K8s API over HTTPS instead of exec'ing kubectl.
  */
 
@@ -23,7 +25,7 @@ interface DockerTarget {
 
 /**
  * Where to reach the Docker Engine API, or null if nowhere.
- * DOCKER_API_PROXY (e.g. "http://docker-socket-proxy:2375") wins over the
+ * DOCKER_API_PROXY (e.g. "http://app-docker-proxy:2375") wins over the
  * local socket so a containerized deploy never depends on a socket mount.
  */
 export function dockerApiTarget(): DockerTarget | null {

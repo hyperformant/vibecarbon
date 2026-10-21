@@ -6,7 +6,7 @@
 # - Enhanced resource limits
 # - Production-optimized settings
 # - Secure Traefik configuration (disables insecure dashboard)
-# - Docker socket proxy for safer container discovery
+# - Docker API only through socket proxies: one for Traefik, one for the app
 
 services:
   # ===========================================
@@ -25,13 +25,12 @@ services:
       - app.env
     environment:
       # Admin Infrastructure pages (service discovery + container logs) reach
-      # the Docker Engine API through the read-only socket proxy below — the
-      # app image ships no docker CLI and never mounts the socket. POST=0
-      # means a compromised app cannot start, stop, exec, or create anything;
-      # but CONTAINERS=1 still permits GET /containers/{id}/json, whose
-      # Config.Env exposes every container's env (secrets included) host-wide.
-      # The proxy is a write barrier, not a confidentiality boundary.
-      - DOCKER_API_PROXY=http://docker-socket-proxy:2375
+      # the Docker Engine API through app-docker-proxy below, which answers
+      # only the container list and container logs. The app image ships no
+      # docker CLI and never mounts the socket, and it cannot reach Traefik's
+      # proxy, so it can never inspect a container and read its env (db's
+      # password, app-migrate's owner password, Traefik's DNS token).
+      - DOCKER_API_PROXY=http://app-docker-proxy:2375
       # Fail closed: without the secret the app cannot sign a session.
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET missing — vibecarbon create writes it to .env.local}
       # The app creates its super admin from these at startup, and a deploy
@@ -43,6 +42,12 @@ services:
       # so a missing value fails deploy's preflight, before anything is
       # created; the owner password never reaches the app.
       - DB_PASSWORD=${APP_DB_PASSWORD:?APP_DB_PASSWORD missing, run vibecarbon upgrade to write it to .env}
+    # vibecarbon-network for everything it serves and calls; app-docker-proxy
+    # for its Docker API path. Traefik dials it on vibecarbon-network
+    # (--providers.docker.network below).
+    networks:
+      - vibecarbon-network
+      - app-docker-proxy
     labels:
       - "traefik.enable=true"
       # HTTP to HTTPS redirect (whole host)
@@ -85,13 +90,10 @@ services:
   # SECURITY HARDENING
   # ===========================================
 
-  # Docker socket proxy - limits Traefik's (and the app's) access to the
-  # Docker API. Traefik uses it for router discovery; the app uses it for the
-  # admin Infrastructure pages (GET /containers list + logs via
-  # DOCKER_API_PROXY above). POST:0 blocks all mutations, but the enabled GET
-  # sections (CONTAINERS/SERVICES/TASKS/NETWORKS) still expose read state for
-  # EVERY container on the host — including env secrets via container
-  # inspect — so treat this as a write barrier, not a secrets boundary.
+  # Traefik's Docker socket proxy, for router discovery. POST:0 blocks every
+  # mutation, but its GET sections (CONTAINERS/SERVICES/TASKS/NETWORKS) serve
+  # container inspect, env included, so it sits on the internal socket-proxy
+  # network that only traefik joins. Nothing else can resolve or reach it.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     container_name: ${PROJECT_NAME}-socket-proxy
@@ -126,7 +128,38 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - vibecarbon-network
+      - socket-proxy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+  # The app's Docker socket proxy: the same image with its own haproxy config
+  # (configs below), which answers GET /containers/json (name, state, health:
+  # the list carries no env), GET /containers/{id}/logs (the log viewer) and
+  # GET /_ping (the Infrastructure page's proxy health row). Everything else
+  # is refused with 403: inspect, top, stats, export, archive, attach, every
+  # other section and every non-GET. Only the app shares its network.
+  # Guarded by tests/integration/docker/compose-secret-reach.test.ts.
+  app-docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    container_name: ${PROJECT_NAME}-app-docker-proxy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    configs:
+      # The image's entrypoint renders this template to /tmp/haproxy.cfg and
+      # runs haproxy on it, so this replaces the image's env-gated sections
+      # whole.
+      - source: app-docker-proxy-haproxy
+        target: /usr/local/etc/haproxy/haproxy.cfg.template
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - app-docker-proxy
     deploy:
       resources:
         limits:
@@ -140,6 +173,14 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.endpoint=tcp://docker-socket-proxy:2375"
       - "--providers.docker.exposedbydefault=false"
+      # This project's containers only (see the base file), restated because
+      # Compose replaces the whole command list.
+      - "--providers.docker.constraints=Label(`com.docker.compose.project`,`${PROJECT_NAME}`)"
+      # The app is on two networks; without this Traefik may dial it on the
+      # internal app-docker-proxy one, which Traefik is not on. The deploy's
+      # compose project is the /opt/${PROJECT_NAME} folder name, the same
+      # assumption the constraint above makes.
+      - "--providers.docker.network=${PROJECT_NAME}_vibecarbon-network"
       - "--providers.file.directory=/etc/traefik/dynamic"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
@@ -155,9 +196,14 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    volumes:
+    # !override drops the base file's raw /var/run/docker.sock mount: in
+    # production Traefik reaches Docker only through docker-socket-proxy.
+    volumes: !override
       - letsencrypt_data:/letsencrypt
       - ./volumes/traefik:/etc/traefik/dynamic:ro
+    networks:
+      - vibecarbon-network
+      - socket-proxy
     depends_on:
       - docker-socket-proxy
     labels:
@@ -197,3 +243,47 @@ services:
 
 volumes:
   letsencrypt_data:
+
+networks:
+  # Traefik and its socket proxy. Internal: no route out, no other member.
+  socket-proxy:
+    internal: true
+  # The app and its socket proxy. Internal: no route out, no other member.
+  app-docker-proxy:
+    internal: true
+
+configs:
+  # app-docker-proxy's whole haproxy config. Paths are matched raw (no URL
+  # decoding) against anchored patterns whose id class has no `/` or `%`, so
+  # `..` segments and encoded slashes cannot reach another endpoint. The
+  # version prefix is optional because the app calls unversioned paths
+  # (src/server/lib/docker-api.ts). `$$` is Compose's escape for a literal `$`.
+  app-docker-proxy-haproxy:
+    content: |
+      global
+          log stdout format raw daemon info
+          maxconn 1000
+
+      defaults
+          mode http
+          log global
+          option httplog
+          option dontlognull
+          option http-server-close
+          timeout http-request 10s
+          timeout connect 10s
+          timeout client 10m
+          timeout server 10m
+          errorfile 403 /usr/local/etc/haproxy/errors/403.http
+
+      backend dockerbackend
+          server dockersocket /var/run/docker.sock
+
+      frontend dockerfrontend
+          bind :2375
+          http-request deny unless METH_GET
+          http-request allow if { path -m reg ^(/v[0-9.]+)?/containers/json$$ }
+          http-request allow if { path -m reg ^(/v[0-9.]+)?/containers/[a-zA-Z0-9_.-]+/logs$$ }
+          http-request allow if { path -m reg ^(/v[0-9.]+)?/_ping$$ }
+          http-request deny
+          default_backend dockerbackend

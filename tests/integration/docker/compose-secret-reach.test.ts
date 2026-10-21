@@ -7,10 +7,23 @@
  * may hold a DNS token; the app and the add-ons hold no provider token; the
  * redis overlay's REDIS_URL still reaches the app after `env_file: !override`.
  *
- * No container runs: `config` only resolves the files. Values are sentinels.
+ * Task 3 adds who reaches the Docker API: only traefik reaches its socket
+ * proxy, only the app reaches app-docker-proxy, and that proxy, run live from
+ * its rendered config, answers list and logs and refuses inspect.
+ *
+ * Only that last block runs containers (its own, removed after); the rest
+ * only resolves the files with `config`. Values are sentinels.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -114,7 +127,8 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  const render = (files: string[]): Record<string, Service> => {
+  // biome-ignore lint/suspicious/noExplicitAny: the whole rendered compose model
+  const renderConfig = (files: string[]): any => {
     const out = execFileSync(
       'docker',
       ['compose', ...files.flatMap((f) => ['-f', f]), 'config', '--format', 'json'],
@@ -126,8 +140,10 @@ describeDocker('compose: secrets reach only the services that use them', () => {
         timeout: 60_000,
       },
     );
-    return JSON.parse(out).services as Record<string, Service>;
+    return JSON.parse(out);
   };
+  const render = (files: string[]): Record<string, Service> =>
+    renderConfig(files).services as Record<string, Service>;
 
   /** Services whose rendered config contains `value` anywhere. */
   const holders = (services: Record<string, Service>, value: string) =>
@@ -135,13 +151,13 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       .filter(([, svc]) => JSON.stringify(svc).includes(value))
       .map(([name]) => name);
 
-  const full = () =>
-    render([
-      'docker-compose.yml',
-      'docker-compose.prod.yml',
-      'docker-compose.dns01.prod.yml',
-      ...ADDON_FILES.map((f) => f.to),
-    ]);
+  const FULL_FILES = () => [
+    'docker-compose.yml',
+    'docker-compose.prod.yml',
+    'docker-compose.dns01.prod.yml',
+    ...ADDON_FILES.map((f) => f.to),
+  ];
+  const full = () => render(FULL_FILES());
 
   it('found the add-on overlays', () => {
     expect(ADDONS).toEqual(expect.arrayContaining(['metabase', 'n8n', 'observability', 'redis']));
@@ -203,5 +219,206 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     const appEnv = services.app.environment as Record<string, string>;
     expect(appEnv.REDIS_URL).toBe(`redis://:${sentinel('REDIS_PASSWORD')}@redis:6379`);
     expect(appEnv.BETTER_AUTH_SECRET).toBe(sentinel('BETTER_AUTH_SECRET'));
+  });
+  // ---------------------------------------------------------------------------
+  // Task 3 (R11): who reaches the Docker API, and what it serves them.
+  //
+  // Every service that binds the Docker socket, with what it may do with it. A
+  // new one fails the census below until it is added here with its paths.
+  const SOCKET_HOLDERS: Record<string, string> = {
+    // Traefik's provider: the GET sections it discovers routers from. Only
+    // traefik shares its network.
+    'docker-socket-proxy': 'GET containers, services, tasks, networks (Traefik provider)',
+    // The app's admin Infrastructure page: list and logs, nothing else.
+    'app-docker-proxy': 'GET /containers/json, GET /containers/{id}/logs, GET /_ping',
+    // The observability add-on's log shipper reads container logs from the
+    // socket itself; it serves no Docker API to anyone.
+    promtail: 'reads container logs (observability add-on)',
+  };
+  const PROXIES = ['docker-socket-proxy', 'app-docker-proxy'];
+
+  const bindsSocket = (svc: Service) =>
+    ((svc.volumes as Array<{ source?: string }> | undefined) ?? []).some(
+      (v) => v.source === '/var/run/docker.sock',
+    );
+  const networksOf = (svc: Service) => Object.keys((svc.networks as object | undefined) ?? {});
+  /** The socket proxies `name` shares a network with. */
+  const proxiesReachedBy = (services: Record<string, Service>, name: string) =>
+    PROXIES.filter(
+      (p) =>
+        p !== name &&
+        services[p] &&
+        networksOf(services[name]).some((n) => networksOf(services[p]).includes(n)),
+    );
+
+  for (const [label, files] of [
+    ['base + prod', () => ['docker-compose.yml', 'docker-compose.prod.yml']],
+    ['full deploy set', FULL_FILES],
+  ] as const) {
+    it(`${label}: only the socket holders in the table bind the Docker socket`, () => {
+      const services = render(files());
+      const binders = Object.keys(services).filter((name) => bindsSocket(services[name]));
+      for (const name of binders) expect(Object.keys(SOCKET_HOLDERS), name).toContain(name);
+      expect(binders).not.toContain('traefik');
+      expect(binders).toEqual(expect.arrayContaining(PROXIES));
+    });
+
+    it(`${label}: Traefik reads Docker through its proxy, scoped to this project`, () => {
+      const command = render(files()).traefik.command as string[];
+      expect(command).toContain('--providers.docker.endpoint=tcp://docker-socket-proxy:2375');
+      expect(command).toContain(
+        '--providers.docker.constraints=Label(`com.docker.compose.project`,`reach`)',
+      );
+      // The app sits on two networks; Traefik must dial it on the shared one.
+      expect(command).toContain('--providers.docker.network=reach_vibecarbon-network');
+    });
+
+    it(`${label}: only traefik reaches docker-socket-proxy, only the app reaches app-docker-proxy`, () => {
+      const services = render(files());
+      for (const name of Object.keys(services)) {
+        expect(services[name].network_mode, `${name} network_mode`).toBeUndefined();
+        if (PROXIES.includes(name)) continue;
+        const expected =
+          name === 'traefik' ? ['docker-socket-proxy'] : name === 'app' ? ['app-docker-proxy'] : [];
+        expect(proxiesReachedBy(services, name), name).toEqual(expected);
+      }
+      const appEnv = services.app.environment as Record<string, string>;
+      expect(appEnv.DOCKER_API_PROXY).toBe('http://app-docker-proxy:2375');
+    });
+  }
+
+  it('full deploy set: the proxies sit on internal networks of their own', () => {
+    const config = renderConfig(FULL_FILES());
+    for (const p of PROXIES) {
+      const nets = networksOf(config.services[p]);
+      expect(nets, p).not.toContain('vibecarbon-network');
+      for (const n of nets) expect(config.networks[n]?.internal, `${p} on ${n}`).toBe(true);
+    }
+  });
+
+  // The container list the app may read carries each container's Command and
+  // Labels (never its Env), so no secret the app does not already hold may
+  // ride in either. (redis's `--requirepass` is one the app holds: it is in
+  // the app's REDIS_URL.)
+  it('full deploy set: no command, entrypoint or label carries a secret the app lacks', () => {
+    const services = full();
+    const appHolds = new Set(JSON.stringify(services.app).match(/SENTINEL_[A-Z0-9_]+/g) ?? []);
+    for (const [name, svc] of Object.entries(services)) {
+      const exposed = JSON.stringify([svc.command, svc.entrypoint, svc.labels]);
+      const foreign = (exposed.match(/SENTINEL_[A-Z0-9_]+/g) ?? []).filter((s) => !appHolds.has(s));
+      expect(foreign, name).toEqual([]);
+    }
+  });
+
+  // The shipped app-docker-proxy, run against the real daemon: list and logs
+  // answer, every other path is refused, and a neighbour's env never shows.
+  describe('app-docker-proxy against a live daemon', () => {
+    const project = `vc-socket-reach-${process.pid}`;
+    const SECRET = sentinel('NEIGHBOUR_ENV');
+    let liveDir: string;
+    let victimId: string;
+    const compose = (args: string[]) =>
+      execFileSync('docker', ['compose', '-p', project, ...args], {
+        cwd: liveDir,
+        encoding: 'utf-8',
+        env: { PATH: process.env.PATH, HOME: process.env.HOME } as NodeJS.ProcessEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 180_000,
+      });
+
+    beforeAll(() => {
+      const config = renderConfig(FULL_FILES());
+      const proxy = config.services['app-docker-proxy'];
+      liveDir = join(dir, 'live');
+      mkdirSync(liveDir);
+      // The proxy exactly as the deploy renders it: image, haproxy config,
+      // socket mount. Only the network is this test's own.
+      const live = {
+        services: {
+          'app-docker-proxy': {
+            image: proxy.image,
+            configs: proxy.configs,
+            volumes: proxy.volumes,
+            networks: ['probe'],
+          },
+          // A neighbour holding a secret in its env, the way db holds the
+          // owner password. Its command never names the secret.
+          victim: {
+            image: 'busybox:1.36',
+            command: ['sh', '-c', 'echo neighbour-started; sleep 600'],
+            environment: { NEIGHBOUR_ENV: SECRET },
+            networks: ['probe'],
+          },
+          probe: { image: 'busybox:1.36', networks: ['probe'] },
+        },
+        configs: config.configs,
+        networks: { probe: { internal: true } },
+      };
+      writeFileSync(join(liveDir, 'docker-compose.yml'), JSON.stringify(live, null, 2));
+      compose(['up', '-d', '--quiet-pull', 'app-docker-proxy', 'victim']);
+      victimId = compose(['ps', '-q', 'victim']).trim();
+    });
+
+    afterAll(() => {
+      if (liveDir) compose(['down', '-v', '--remove-orphans']);
+    });
+
+    /** Raw HTTP/1.0 from a container on the proxy's network: status code and body. */
+    const ask = (method: string, path: string) => {
+      const out = compose([
+        'run',
+        '--rm',
+        '-T',
+        '--no-deps',
+        'probe',
+        'sh',
+        '-c',
+        // Retry the connect while haproxy binds (a fresh container); one
+        // request per call, the response printed raw.
+        'for i in 1 2 3 4 5 6 7 8 9 10; do ' +
+          `printf '%s %s HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n' "$0" "$1" | nc app-docker-proxy 2375 && exit 0; sleep 1; done; exit 1`,
+        method,
+        path,
+      ]);
+      const status = Number(out.match(/^HTTP\/1\.[01] (\d{3})/)?.[1]);
+      return { status, body: out };
+    };
+
+    it('lists containers without their env', () => {
+      const res = ask('GET', '/containers/json');
+      expect(res.status).toBe(200);
+      expect(res.body).toContain(victimId);
+      expect(res.body.includes(SECRET)).toBe(false);
+    });
+
+    it('serves logs, versioned or not', () => {
+      for (const prefix of ['', '/v1.43']) {
+        const res = ask('GET', `${prefix}/containers/${victimId}/logs?stdout=1&stderr=1`);
+        expect(res.status, prefix).toBe(200);
+        expect(res.body).toContain('neighbour-started');
+      }
+    });
+
+    it('refuses inspect and every other path or method', () => {
+      for (const [method, path] of [
+        ['GET', `/containers/${victimId}/json`],
+        ['GET', `/v1.43/containers/${victimId}/json`],
+        ['HEAD', `/containers/${victimId}/json`],
+        ['GET', `/containers/${victimId}/top`],
+        ['GET', `/containers/${victimId}/stats?stream=0`],
+        ['GET', `/containers/${victimId}/export`],
+        ['GET', `/containers/${victimId}/archive?path=/`],
+        ['GET', `/containers/${victimId}/logs/../json`],
+        ['GET', `/containers/${victimId}%2Fjson/logs`],
+        ['POST', `/containers/${victimId}/restart`],
+        ['POST', `/containers/${victimId}/logs`],
+        ['GET', '/info'],
+        ['GET', '/images/json'],
+      ]) {
+        const res = ask(method, path);
+        expect(res.status, `${method} ${path}`).toBe(403);
+        expect(res.body.includes(SECRET), `${method} ${path}`).toBe(false);
+      }
+    });
   });
 });

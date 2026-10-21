@@ -50,8 +50,9 @@ interface ServiceConfig {
   k8sUnavailable?: boolean; // Service cannot be checked in Kubernetes
 }
 
-// The app reaches the Docker API through the read-only socket proxy in a
-// production compose deployment (docker-compose.prod.yml sets this). Local
+// The app reaches the Docker API through its own list-and-logs socket proxy
+// (app-docker-proxy) in a production compose deployment
+// (docker-compose.prod.yml sets this). Local
 // dev talks to the host socket and k8s has no Docker API, so neither runs
 // the proxy and neither lists it.
 const dockerApiProxy = process.env.DOCKER_API_PROXY;
@@ -289,7 +290,7 @@ async function getRunningContainers(): Promise<Map<string, DockerContainer> | nu
   }
 
   // Engine API, not the docker CLI: the production app container ships no
-  // CLI — it reaches the read-only docker-socket-proxy instead (local dev
+  // CLI — it reaches the list-and-logs app-docker-proxy instead (local dev
   // uses the host socket directly). See lib/docker-api.ts.
   const project = process.env.PROJECT_NAME;
   if (!project) return null;
@@ -963,7 +964,7 @@ servicesStatusRoutes.get('/logs', async (c) => {
 
   // --- Docker: fetch logs via the Engine API ---
   // Never the docker CLI: the production app container ships no CLI, no
-  // compose files, and no socket — only the read-only docker-socket-proxy
+  // compose files, and no socket — only the list-and-logs app-docker-proxy
   // (DOCKER_API_PROXY, set in docker-compose.prod.yml). Local dev talks to
   // /var/run/docker.sock directly. Same shape as the k8s branch above:
   // per-container fetch over HTTP, lines prefixed with the service name.
