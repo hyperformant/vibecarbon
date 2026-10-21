@@ -11,9 +11,11 @@
  * anywhere (the post-DNAT destination is the master's node IP, which changes
  * every deploy).
  *
- * A workload that no Egress policy selects is unrestricted (cluster-autoscaler
- * in kube-system), so it is not a gap. The census also bans the retired
- * "service-role" wording in manifest comments.
+ * A workload that no Egress policy selects is unrestricted. That is allowed
+ * only for the clients named in UNRESTRICTED_API_CLIENTS, with the reason:
+ * any other unselected API client fails, so a new one gets a policy (or a
+ * deliberate entry) instead of silently running with open egress. The census
+ * also bans the retired "service-role" wording in manifest comments.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
@@ -21,6 +23,13 @@ import { loadAll } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = join(__dirname, '../../..');
+
+// "namespace/workload" of every API client that no Egress policy selects, and why.
+const UNRESTRICTED_API_CLIENTS: Record<string, string> = {
+  // kube-system carries no NetworkPolicy: the autoscaler talks to the API and
+  // the cloud provider's API (whose address the provider owns).
+  'kube-system/cluster-autoscaler': 'kube-system has no NetworkPolicy; it calls the cloud API',
+};
 const DEFAULT_NAMESPACE = 'vibecarbon';
 
 // biome-ignore lint/suspicious/noExplicitAny: parsed YAML
@@ -86,6 +95,7 @@ const clients = all
     const tpl = podTemplate(m.doc);
     return {
       id: `${relative(ROOT, m.file)} ${m.doc.kind}/${m.doc.metadata?.name}`,
+      key: `${m.namespace}/${m.doc.metadata?.name}`,
       namespace: m.namespace,
       labels: (tpl?.metadata?.labels ?? {}) as Record<string, string>,
       sa: tpl?.spec?.serviceAccountName as string | undefined,
@@ -126,9 +136,23 @@ describe('every Kubernetes API client can reach the API server', () => {
     expect(ids).toContain('traefik/deployment.yaml');
   });
 
+  it('every allowlisted unrestricted client exists and is still unselected', () => {
+    for (const key of Object.keys(UNRESTRICTED_API_CLIENTS)) {
+      const w = clients.find((c) => c.key === key);
+      expect(w, `${key} is allowlisted but is no API client in the manifests`).toBeDefined();
+      expect(egressRulesFor(w as (typeof clients)[number]), `${key} is now selected`).toBeNull();
+    }
+  });
+
   it.each(clients)('$id', (w) => {
     const rules = egressRulesFor(w);
-    if (rules === null) return;
+    if (rules === null) {
+      expect(
+        Object.keys(UNRESTRICTED_API_CLIENTS),
+        `${w.id} talks to the API with no Egress NetworkPolicy selecting it. Give it one, or allowlist it with the reason.`,
+      ).toContain(w.key);
+      return;
+    }
     expect(
       admits(rules, 6443, wideOpen),
       `No Egress NetworkPolicy in ${w.namespace} lets ${w.id} reach TCP 6443 on 0.0.0.0/0 (the apiserver).`,
