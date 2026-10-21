@@ -44,6 +44,7 @@ import {
 } from './lib/deploy/k8s/acme-issuer-policy.js';
 import {
   assertStandbyNotWriteFenced,
+  DB_STS_BOOT_TIMEOUT_S,
   fenceDatabaseWrites,
   getReplPasswordFromSecret,
   isStandbyStreaming,
@@ -1353,7 +1354,9 @@ export async function restorePromotedWalgRole({ promotedIp, oldPrimaryIp, sshKey
     // Blocks on the pod actually rolling. Budget sits just above the kubectl
     // --timeout so the remote command reports the rollout failure rather than
     // the SSH layer reporting a timeout with no detail.
-    await kubectl(promotedIp, k8sDbRolloutStatusArgv(300), { timeout: 330_000 });
+    await kubectl(promotedIp, k8sDbRolloutStatusArgv(DB_STS_BOOT_TIMEOUT_S), {
+      timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000,
+    });
     // requirePrimary: the ONLY reason this audit is here is to catch a promoted
     // node still reading `standby`, which the deploy-time probe treats as a
     // legitimate skip.

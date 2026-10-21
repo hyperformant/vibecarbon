@@ -87,8 +87,8 @@ describe('runK8sRestore — k8s-HA standby re-seed', () => {
         (argv as string[]).join(' ').includes('statefulset/'),
     );
     expect(call).toBeTruthy();
-    expect(call?.[2]).toContain('--timeout=120s');
-    expect(call?.[3]).toMatchObject({ timeout: 130_000 });
+    expect(call?.[2]).toContain('--timeout=600s');
+    expect(call?.[3]).toMatchObject({ timeout: 630_000 });
   });
 
   it('recreates the replication slot, re-seeds the standby, and verifies streaming', async () => {

@@ -39,6 +39,7 @@ import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import { recordSystemIdentifier, swappedSinceLastDeploy } from './lib/deploy/failover-guard.js';
 import {
+  DB_STS_BOOT_TIMEOUT_S,
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
   reseedStandbyFromPrimary as realReseedStandbyFromPrimary,
@@ -695,9 +696,9 @@ export async function runK8sRestore({
           `statefulset/${DB_STATEFULSET}`,
           '-n',
           'vibecarbon',
-          '--timeout=120s',
+          `--timeout=${DB_STS_BOOT_TIMEOUT_S}s`,
         ],
-        { timeout: 130_000 },
+        { timeout: (DB_STS_BOOT_TIMEOUT_S + 30) * 1000 },
       );
     });
     // 4. Confirm postgres accepts connections post-recovery.

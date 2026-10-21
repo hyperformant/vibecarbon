@@ -50,6 +50,7 @@
 
 import { COMPOSE_BASE_FILES, COMPOSE_REPLICATION_OVERLAY } from './bundle.js';
 import { DB_CONTAINER, DB_POD, DB_STATEFULSET } from './db-workload.js';
+import { DB_STS_BOOT_TIMEOUT_S } from './replication.js';
 import { dropInactiveReplicationSlots, slotDropWarning } from './replication-slot.js';
 
 /** The env var both tiers read as the wal-g write-guard. */
@@ -312,7 +313,7 @@ export async function demoteK8sWalgRole({ ip, kubectl, warn }) {
  * @param {number} [timeoutSeconds]
  * @returns {string[]}
  */
-export function k8sDbRolloutStatusArgv(timeoutSeconds = 300) {
+export function k8sDbRolloutStatusArgv(timeoutSeconds = DB_STS_BOOT_TIMEOUT_S) {
   return [
     '-n',
     'vibecarbon',
