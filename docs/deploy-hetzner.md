@@ -424,8 +424,10 @@ vibecarbon cannot revoke a key it did not make. So when you destroy an
 environment, or paste a replacement key, the old pasted key is retired: it
 stays denied in every bucket fence, and destroy reminds you to delete it in
 the console. Once it is deleted there, run
-`vibecarbon configure storage -forget <access key id>`; the next deploy then
-drops it from the fences.
+`vibecarbon configure storage -forget <access key id>`. The next deploy that
+syncs the fences (any deploy while the project still has a pasted or retired
+key) takes it out of them. If no such deploy runs, the old deny stays in
+place, which does no harm since the key no longer exists.
 
 A fenced environment's key must be on the machine that deploys it. If it is
 missing (a fresh checkout, say), the deploy stops and asks you to paste it

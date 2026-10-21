@@ -92,8 +92,9 @@ function pastedKeys(projectConfig) {
  * only if the caller did not retire it (destroy does retire it).
  *
  * `mayBeAbsent` marks a bucket no env that references it has finished a
- * deploy into (no `deployed` status, no recorded `bucketCreatedAt`): only such
- * a bucket may be skipped when the provider says it does not exist.
+ * deploy into (no `deployed` status, no recorded `bucketCreatedAt`), and that
+ * the env being deployed (`environment`, unless `leaving`) does not use: only
+ * such a bucket may be skipped when the provider says it does not exist.
  *
  * @param {{ projectConfig: object, environment: string, leaving?: boolean }} args
  * @returns {{ bucket: string, deniedAccessKeyIds: string[], mayBeAbsent: boolean }[]}
@@ -106,20 +107,25 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
   const retired = (projectConfig.retiredAppKeys ?? []).filter(
     (id) => typeof id === 'string' && id && !keys.some((k) => k.id === id),
   );
-  const completed = (e) =>
-    e?.status === 'deployed' || Object.hasOwn(e?.s3 ?? {}, 'bucketCreatedAt');
+  // The env being deployed counts as complete: s3-setup created or verified
+  // every bucket it references this very run, so a NoSuchBucket from one of
+  // them is Hetzner's young-bucket noise, never a reason to skip its fence.
+  const completed = (name, e) =>
+    (!leaving && name === environment) ||
+    e?.status === 'deployed' ||
+    Object.hasOwn(e?.s3 ?? {}, 'bucketCreatedAt');
   /** @type {Map<string, { owner: string|null, completed: boolean }>} */
   const buckets = new Map();
-  const note = (bucket, owner, e) => {
+  const note = (bucket, owner, name, e) => {
     const prev = buckets.get(bucket);
     buckets.set(bucket, {
       owner: prev ? prev.owner : owner,
-      completed: (prev?.completed ?? false) || completed(e),
+      completed: (prev?.completed ?? false) || completed(name, e),
     });
   };
-  for (const [, e] of envs) {
+  for (const [name, e] of envs) {
     for (const shared of [e?.s3?.stateBucket, e?.backupS3?.bucket]) {
-      if (shared) note(shared, null, e);
+      if (shared) note(shared, null, name, e);
     }
   }
   for (const [name, e] of envs) {
@@ -127,8 +133,8 @@ export function fenceTargets({ projectConfig, environment, leaving = false }) {
     // A pinned bucket may be one several envs share; it is not this env's
     // own, so it denies every pasted key like the state and backups buckets.
     if (!own) continue;
-    if (buckets.has(own)) note(own, null, e);
-    else note(own, e.s3.bucketPin ? null : name, e);
+    if (buckets.has(own)) note(own, null, name, e);
+    else note(own, e.s3.bucketPin ? null : name, name, e);
   }
   return [...buckets.entries()]
     .map(([bucket, { owner, completed: done }]) => ({

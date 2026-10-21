@@ -1767,7 +1767,7 @@ export async function runForgetAppStorageKey(id) {
   else delete projectConfig.retiredAppKeys;
   saveProjectConfig(projectConfig);
   p.outro(
-    `Forgot ${id}. The next deploy takes it out of the bucket fences, so make sure it is deleted in the Hetzner console.`,
+    `Forgot ${id}. The next deploy that syncs the bucket fences (one with a pasted key in the project) takes it out of them; without one, the old deny stays, which does no harm to a deleted key. Make sure it is deleted in the Hetzner console.`,
   );
 }
 

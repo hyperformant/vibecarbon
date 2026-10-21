@@ -363,6 +363,38 @@ export async function storedAppStoragePair({
   return { accessKey: infraCredential.accessKey, secretKey: infraCredential.secretKey };
 }
 
+/**
+ * Record, on every env that references one, the buckets the last fence sync
+ * had to skip (absent, and no env finished a deploy into them), and clear
+ * the record everywhere else. Mutates and returns `projectConfig`.
+ * @param {object} projectConfig
+ * @param {string[]} skipped
+ */
+export function markUnfencedBuckets(projectConfig, skipped) {
+  const missing = new Set(skipped);
+  for (const e of Object.values(projectConfig.environments ?? {})) {
+    if (!e?.s3) continue;
+    const hits = [e.s3.bucket, e.s3.stateBucket, e.backupS3?.bucket].filter(
+      (b, i, all) => b && missing.has(b) && all.indexOf(b) === i,
+    );
+    if (hits.length > 0) e.s3.unfencedBuckets = hits;
+    else delete e.s3.unfencedBuckets;
+  }
+  return projectConfig;
+}
+
+/**
+ * The `status` row for an env with buckets its app-key fence could not
+ * cover, or null.
+ * @param {{ s3?: { unfencedBuckets?: string[] } }} envConfig
+ * @returns {string|null}
+ */
+export function unfencedBucketsLine(envConfig) {
+  const list = envConfig?.s3?.unfencedBuckets;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return `storage fence: not set on ${list.join(', ')} (the bucket did not exist at the last fence sync; deploy again to fence it)`;
+}
+
 /** How long a new app key gets to start answering HeadBucket (R9: 5 to 10 s seen). */
 export const APP_KEY_READY_BUDGET_MS = 60_000;
 export const APP_KEY_READY_INTERVAL_MS = 2_000;

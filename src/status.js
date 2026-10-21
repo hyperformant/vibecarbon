@@ -20,7 +20,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
-import { storageAccessLine } from './lib/deploy/app-storage-credential.js';
+import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
 import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
@@ -1109,6 +1109,7 @@ function renderEnvironment(envName, envConfig, checks) {
       const color = checks.storageAccess.startsWith('storage access: shared') ? c.warning : c.dim;
       lines.push(`               ${color(checks.storageAccess)}`);
     }
+    if (checks.storageUnfenced) lines.push(`               ${c.warning(checks.storageUnfenced)}`);
   }
 
   // Deployed date
@@ -1427,6 +1428,8 @@ async function main(argv = []) {
       if (storageSettle) checks.storageSettle = storageSettle;
       const storageAccess = await storageAccessRow(envConfig);
       if (storageAccess) checks.storageAccess = storageAccess;
+      const unfenced = unfencedBucketsLine(envConfig);
+      if (unfenced) checks.storageUnfenced = unfenced;
 
       // Real replication state for HA envs (best-effort, hard-bounded) and
       // per-server container/pod health (spec: remote-container-health) run

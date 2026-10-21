@@ -6,8 +6,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   APP_STORAGE_SECRET_PREFIX,
   appStorageSecretKeys,
+  markUnfencedBuckets,
   resolveAppStorageCredential,
   syncHetznerFences,
+  unfencedBucketsLine,
 } from '../../../src/lib/deploy/app-storage-credential.js';
 import {
   applyHetznerFences,
@@ -326,11 +328,11 @@ describe('applyHetznerFences', () => {
     ).rejects.toThrow(/proj-abc-prod answered NoSuchBucket.*deployed environment/);
   });
 
-  it('mayBeAbsent is true only for buckets no referencing env finished a deploy into', () => {
+  it('mayBeAbsent is true only for buckets no referencing env finished a deploy into, and never for the deploying env', () => {
     const cfg = project();
     Object.assign(cfg.environments.prod, { status: 'deployed' });
     const by = Object.fromEntries(
-      fenceTargets({ projectConfig: cfg, environment: 'staging' }).map((t) => [
+      fenceTargets({ projectConfig: cfg, environment: 'prod' }).map((t) => [
         t.bucket,
         t.mayBeAbsent,
       ]),
@@ -341,6 +343,90 @@ describe('applyHetznerFences', () => {
       'proj-abc-staging': true,
       'proj-abc-state': false,
     });
+    // The env being deployed: s3-setup just ensured its buckets.
+    const deploying = fenceTargets({ projectConfig: cfg, environment: 'staging' });
+    expect(deploying.every((t) => t.mayBeAbsent === false)).toBe(true);
+  });
+});
+
+describe('absent fence targets on a deploy (round 2)', () => {
+  const noSuch = () =>
+    Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket' });
+
+  it('a first deploy whose own bucket answers NoSuchBucket and HeadBucket 404 is not skipped: it fails with the cause', async () => {
+    // prod is mid first deploy: no status, no bucketCreatedAt.
+    const cfg = project({ staging: false });
+    const targets = fenceTargets({ projectConfig: cfg, environment: 'prod' });
+    expect(targets.every((t) => t.mayBeAbsent === false)).toBe(true);
+    const s3 = {
+      ...makeS3(),
+      getBucketPolicy: vi.fn(async (b: string) => {
+        if (b === 'proj-abc-state') throw noSuch();
+        return null;
+      }),
+      bucketExists: vi.fn(async () => false),
+    };
+    await expect(
+      applyHetznerFences({
+        s3,
+        ownerId: OWNER,
+        targets,
+        probes: { AK_P: scriptedProbe([true]) },
+        ...fakeClock(),
+      }),
+    ).rejects.toThrow(/proj-abc-state answered NoSuchBucket/);
+  });
+
+  it("a never-deployed other env's absent bucket is skipped, warned about, and marked for status", async () => {
+    const cfg = project();
+    Object.assign(cfg.environments.prod, { status: 'deployed' });
+    // prod is the one deploying; staging never finished a deploy and its
+    // bucket is gone.
+    const s3 = {
+      ...makeS3(),
+      getBucketPolicy: vi.fn(async (b: string) => {
+        if (b === 'proj-abc-staging') throw noSuch();
+        return null;
+      }),
+      bucketExists: vi.fn(async (b: string) => b !== 'proj-abc-staging'),
+    };
+    const out = await syncHetznerFences({
+      projectConfig: cfg,
+      environment: 'prod',
+      s3,
+      secrets: { get: () => undefined },
+      createProbe: async () => scriptedProbe([true]),
+      ...fakeClock(),
+    });
+    expect(out.skipped).toEqual(['proj-abc-staging']);
+
+    // finish() warns (not info) and hands the skip back for persisting.
+    const { startAppBucketFinalize } = await import('../../../src/lib/deploy/orchestrator.js');
+    const finalize = startAppBucketFinalize({
+      providerId: 'digitalocean',
+      createProvider: async () => ({
+        getBucketCorsOrigins: async () => ['https://prod.dev'],
+        setBucketCors: async () => {},
+      }),
+      bucket: 'proj-abc-prod',
+      domain: 'prod.dev',
+      fence: async () => out,
+    });
+    const log = { warn: vi.fn(), info: vi.fn() };
+    await expect(finalize.finish(log)).resolves.toEqual({ fenceSkipped: ['proj-abc-staging'] });
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/fence NOT set on proj-abc-staging/),
+    );
+
+    markUnfencedBuckets(cfg, out.skipped);
+    expect(cfg.environments.staging.s3).toMatchObject({ unfencedBuckets: ['proj-abc-staging'] });
+    expect(cfg.environments.prod.s3).not.toHaveProperty('unfencedBuckets');
+    expect(unfencedBucketsLine(cfg.environments.staging)).toMatch(
+      /^storage fence: not set on proj-abc-staging/,
+    );
+    // A later sync that fences everything clears the mark.
+    markUnfencedBuckets(cfg, []);
+    expect(unfencedBucketsLine(cfg.environments.staging)).toBeNull();
   });
 });
 

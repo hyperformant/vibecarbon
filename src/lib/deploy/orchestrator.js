@@ -30,6 +30,7 @@ import { useDnsChallenge } from './acme.js';
 import {
   finishAppKeyRotation,
   localAppStorageSecrets,
+  markUnfencedBuckets,
   resolveAppStorageCredential,
   syncHetznerFences,
   waitForAppKeyReady,
@@ -362,8 +363,8 @@ export function startAppBucketFinalize({
       await appKeyReady;
       const fence = await fenced;
       if (fence?.skipped?.length) {
-        log.info(
-          `app key fence skipped for ${fence.skipped.join(', ')}: the bucket does not exist and no environment finished a deploy into it`,
+        log.warn(
+          `app key fence NOT set on ${fence.skipped.join(', ')}: the bucket does not exist and no environment finished a deploy into it. A pasted app key could use it once it is created; \`vibecarbon status\` marks it until a deploy fences it.`,
         );
       }
       if (fence?.unverified?.length) {
@@ -371,12 +372,15 @@ export function startAppBucketFinalize({
           `app key fence written on ${fence.unverified.join(', ')}, not probed: no fenced key for it is stored on this machine`,
         );
       }
+      // Present only when the fence ran, so the caller can persist (or clear)
+      // the unfenced marker status shows.
+      const fenceOut = fence ? { fenceSkipped: fence.skipped ?? [] } : {};
       const { windowMs, createdAt, warning } = await settle;
       if (warning) log.warn(warning);
-      if (windowMs === 0) return {};
+      if (windowMs === 0) return fenceOut;
       const status = storageSettleStatus(createdAt, Date.now(), windowMs);
       if (status.settling) log.info(bucketSettleNote(status, windowMs));
-      return { bucketCreatedAt: createdAt ? createdAt.toISOString() : null };
+      return { ...fenceOut, bucketCreatedAt: createdAt ? createdAt.toISOString() : null };
     },
   };
 }
@@ -1939,6 +1943,14 @@ export async function executeDeployment(args, gatheredConfig) {
   // The deploy succeeded with the new key in place: only now revoke the keys
   // a re-mint replaced (R9). A failure is a warn line, and the id stays
   // recorded so the next deploy or destroy revokes it.
+  // A fence target the sync skipped (an absent bucket of an env that never
+  // finished a deploy) is marked on that env, for `status`; a sync that
+  // fenced everything clears the marks.
+  if (appBucketFinal.fenceSkipped) {
+    const onDisk = loadProjectConfig() || projectConfig;
+    markUnfencedBuckets(onDisk, appBucketFinal.fenceSkipped);
+    saveProjectConfig(onDisk);
+  }
   s3Config.appKey = await finishAppKeyRotation({
     provider: storageProviderId,
     record: s3Config.appKey,
