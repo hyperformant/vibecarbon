@@ -70,7 +70,7 @@ spec:
         # skipped when the header is absent. RESIDUAL RISK: the app pod is allowed
         # to reach :3000 for that health poll, so a COMPROMISED app pod could forge
         # X-Authenticated-User → Grafana admin. Bounded (that pod already holds the
-        # service-role key), and much smaller than before isolation, when EVERY
+        # database role and storage key), and much smaller than before isolation, when EVERY
         # vibecarbon-namespace pod (n8n/metabase/storage/…) could reach :3000.
         # Closing even the app-pod vector needs the app's Grafana liveness check
         # moved off :3000 (documented follow-up).
@@ -78,8 +78,8 @@ spec:
           value: 10.42.0.0/16
         # H-9: scoped config/secret local to vibecarbon-observability. Grafana gets
         # ONLY the three keys it needs (SITE_URL here; ADMIN_EMAIL/ADMIN_PASSWORD
-        # above) — NOT the whole vibecarbon-secrets bundle (no DB / service-role
-        # creds cross into the observability namespace). Both are provisioned into
+        # above) — NOT the whole vibecarbon-secrets bundle (no DB or
+        # storage creds cross into the observability namespace). Both are provisioned into
         # this namespace at deploy time (applyObservabilitySecrets in k3s.js).
         - name: SITE_URL
           valueFrom:

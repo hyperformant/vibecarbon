@@ -93,7 +93,8 @@ spec:
     # COMPROMISED app pod could instead send a forged X-Authenticated-User here and
     # reach Grafana's auth-proxy. This is the one remaining forge vector after the
     # namespace move (n8n/metabase/storage/etc. can no longer reach :3000 at all),
-    # and it's bounded — a compromised app pod already holds the service-role key.
+    # and it's bounded — a compromised app pod already holds the app's least-privilege
+    # database role and its own scoped storage key.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -179,6 +180,23 @@ spec:
       ports:
         - protocol: TCP
           port: 10250
+    # Kubernetes API (kubernetes_sd_configs: node/pod/endpoint discovery). Without
+    # this, discovery fails silently and the k8s dashboards stay empty. Same pair
+    # as carbon/k8s/base/traefik/network-policy.yaml, which has the full RCA:
+    # 10.43.0.1:443 is the kubernetes Service ClusterIP; 6443 to any destination
+    # covers the post-DNAT master node IP, which changes every deploy.
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6443
 
 ---
 # =============================================================================
