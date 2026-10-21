@@ -1423,6 +1423,9 @@ export async function executeDeployment(args, gatheredConfig) {
       deployMode: 'compose-ha',
       degraded: composeHaCtx.degraded,
       replication: composeHaCtx.degraded ? 'degraded' : 'streaming',
+      // haSeedRecord persists the identifier only when streaming was verified.
+      replicationStatus: composeHaCtx.replActive ? 'streaming' : 'degraded',
+      systemIdentifier: composeHaCtx.systemIdentifier ?? null,
     };
   } else if (tier === 'k8s') {
     // Single-cluster k3s runs through the plan as a single black-box step that

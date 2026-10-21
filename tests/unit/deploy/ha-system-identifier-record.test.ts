@@ -13,6 +13,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
+vi.mock('../../../src/lib/deploy/compose/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../src/lib/deploy/compose/index.js')>()),
+  sshRun: vi.fn(),
+}));
+
 vi.mock('../../../src/lib/deploy/k8s/ha/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../src/lib/deploy/k8s/ha/index.js')>()),
   setupReplication: vi.fn(),
@@ -21,6 +26,8 @@ vi.mock('../../../src/lib/deploy/k8s/ha/index.js', async (importOriginal) => ({
 const { setupReplication } = await import('../../../src/lib/deploy/k8s/ha/index.js');
 const { K8S_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/k8s-ha.js');
 const { haSeedRecord } = await import('../../../src/lib/deploy/failover-guard.js');
+const composeSsh = await import('../../../src/lib/deploy/compose/index.js');
+const { COMPOSE_HA_EFFECTS } = await import('../../../src/lib/deploy/effects/compose-ha.js');
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 const SYSID = '7412345678901234567';
@@ -98,10 +105,78 @@ describe('orchestrator persistence', () => {
     expect(result).toContain('systemIdentifier: k8sHaCtx.systemIdentifier');
   });
 
+  it('the compose-ha deployResult carries the replication status and the identifier', () => {
+    const after = src.slice(src.indexOf('const composeHaCtx = {'));
+    const block = after.slice(after.indexOf('deployResult = {'));
+    const result = block.slice(0, block.indexOf('};') + 2);
+    expect(result).toContain("replicationStatus: composeHaCtx.replActive ? 'streaming'");
+    expect(result).toContain('systemIdentifier: composeHaCtx.systemIdentifier');
+  });
+
   it('the persisted ha block records it only through haSeedRecord', () => {
     expect(src).toContain('...haSeedRecord(deployResult),');
-    // No second, ungated write of the field.
-    const writes = src.match(/systemIdentifier:/g) ?? [];
-    expect(writes).toHaveLength(1);
+    // No ungated write of the field: the only other spellings are the two HA
+    // tiers' deployResult copies from their ctx.
+    const writes = src.split('\n').filter((l) => /systemIdentifier:/.test(l));
+    expect(writes.map((l) => l.trim())).toEqual([
+      'systemIdentifier: composeHaCtx.systemIdentifier ?? null,',
+      'systemIdentifier: k8sHaCtx.systemIdentifier ?? null,',
+    ]);
+  });
+});
+
+describe('compose-ha verify-streaming effect', () => {
+  const ctx = () => ({
+    projectConfig: { projectName: 'myapp' },
+    primary: { ip: '1.1.1.1' },
+    standby: { ip: '2.2.2.2' },
+    sshKeyPath: '/k',
+    allowDegraded: true,
+    onProgress: () => {},
+  });
+  const answer = (primaryState: string, standbyRow: string) =>
+    vi.mocked(composeSsh.sshRun).mockImplementation((async (
+      ip: string,
+      _k: string,
+      cmd: string,
+    ) => {
+      if (cmd.includes('pg_stat_replication')) return primaryState;
+      if (ip === '2.2.2.2' && cmd.includes('pg_control_system')) return standbyRow;
+      return '';
+    }) as never);
+
+  it('records the identifier the standby reports in recovery when streaming was verified', async () => {
+    answer('streaming', `t|${SYSID}|0/3000060|streaming|1`);
+    const c = ctx() as Record<string, unknown>;
+    await COMPOSE_HA_EFFECTS.haVerifyStreaming(c);
+    expect(c.replActive).toBe(true);
+    expect(c.systemIdentifier).toBe(SYSID);
+  });
+
+  it('records nothing when the standby does not read in recovery', async () => {
+    answer('streaming', `f|${SYSID}|0/3000060||`);
+    const c = ctx() as Record<string, unknown>;
+    await COMPOSE_HA_EFFECTS.haVerifyStreaming(c);
+    expect(c.systemIdentifier).toBeNull();
+  });
+
+  it('records nothing for a degraded deploy, and never reads the standby', async () => {
+    answer('', `t|${SYSID}|0/3000060|streaming|1`);
+    const c = ctx() as Record<string, unknown>;
+    // verifyStreaming backs off between its reads; run its sleeps on a fake clock.
+    vi.useFakeTimers();
+    try {
+      const done = COMPOSE_HA_EFFECTS.haVerifyStreaming(c);
+      await vi.runAllTimersAsync();
+      await done;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(c.replActive).toBe(false);
+    expect(c.systemIdentifier).toBeNull();
+    const reads = vi
+      .mocked(composeSsh.sshRun)
+      .mock.calls.filter((call) => String(call[2]).includes('pg_control_system'));
+    expect(reads).toEqual([]);
   });
 });

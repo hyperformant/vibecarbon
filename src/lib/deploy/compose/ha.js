@@ -16,7 +16,7 @@ import * as p from '@clack/prompts';
 import { reapChallengeRecords } from '../../acme-challenge.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
 import { c } from '../../colors.js';
-import { saveProjectConfig } from '../../config.js';
+import { loadProjectConfig, saveProjectConfig } from '../../config.js';
 import { environmentServerNames } from '../../destroy/server-naming.js';
 import {
   DNS_PROVIDERS,
@@ -28,10 +28,20 @@ import {
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import {
+  assertFailoverPreconditions,
+  confirmUnprovenFailover,
+  promotionUnknownMessage,
+  readReplicaState,
+  recordSystemIdentifier,
+  UNPROVEN_RISK_LINE,
+  writeFailoverJournal,
+} from '../failover-guard.js';
+import {
   buildNodePgdataSwapScript,
   buildPrimaryConninfo,
   buildReplicationHbaLines,
   buildStagedBasebackupScript,
+  promoteWithProof,
   REPL_PORT,
 } from '../replication.js';
 import { waitForTrustedTls } from '../tls-ready.js';
@@ -48,7 +58,10 @@ import {
   WG_PRIMARY_IP,
   WG_SUBNET_CIDR,
 } from '../wireguard.js';
-import { composeHaFailoverRecoveryInstructions } from './ha-role-swap.js';
+import {
+  assertNoComposeHaRoleSwap,
+  composeHaFailoverRecoveryInstructions,
+} from './ha-role-swap.js';
 import { sshRun, sshRunAsync, sshRunChecked } from './index.js';
 
 /**
@@ -845,33 +858,6 @@ async function isPrimaryReachable(primaryIp, sshKeyPath, remoteDir) {
   }
 }
 
-/**
- * Is the standby ALREADY streaming, read from the STANDBY side (compose)?
- *
- * Queries pg_stat_wal_receiver.status inside the standby's db container — the
- * standby's own view of its walreceiver. Returns true only when
- * status='streaming'. Used by failover to SKIP the pre-promotion re-seed: an
- * already-streaming standby is in-parity with the primary, so the basebackup is
- * wasted RTO, and its live walreceiver holds the persistent replication slot
- * (a `pg_basebackup -S <slot>` against it would error "slot is active"). The
- * standby-side signal is preferred because failover often runs when the primary
- * is unreachable. Non-throwing — any failure returns false so the caller falls
- * back to a normal re-seed. Exported for unit-test access.
- */
-export async function isComposeStandbyStreaming(standbyIp, sshKeyPath, remoteDir) {
-  try {
-    const result = await sshRun(
-      standbyIp,
-      sshKeyPath,
-      `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT status FROM pg_stat_wal_receiver'`,
-      { silent: true, timeout: 10_000 },
-    );
-    return (typeof result === 'string' ? result : '').trim() === 'streaming';
-  } catch {
-    return false;
-  }
-}
-
 // ============================================================================
 // DESTROY
 // ============================================================================
@@ -1385,10 +1371,149 @@ export async function demoteComposeWalgRole({ oldPrimaryIp, sshKeyPath, projectN
 }
 
 /**
- * Perform failover for a Compose HA environment.
- * Promotes the standby database and updates DNS if Cloudflare configured.
+ * A psql runner for a compose node's db container: `exec(sql) -> Promise<string>`,
+ * the shape failover-guard's readReplicaState takes. sshRun answers `false` on
+ * a remote failure, which readReplicaState reads as unknown.
+ *
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} remoteDir
+ * @returns {(sql: string) => Promise<string>}
  */
-export async function failoverComposeHA(envName, envConfig, projectConfig, parsed, tracker) {
+export function composePsqlRunner(ip, sshKeyPath, remoteDir) {
+  return async (sql) => {
+    const quoted = `'${sql.replaceAll("'", "'\\''")}'`;
+    const out = await sshRun(
+      ip,
+      sshKeyPath,
+      `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc ${quoted}`,
+      { silent: true, timeout: 10_000 },
+    );
+    return typeof out === 'string' ? out : '';
+  };
+}
+
+/**
+ * Promote the compose standby: SQL `pg_promote(wait => true)` in its db
+ * container, proven by promoteWithProof (a reading in recovery right before the
+ * call, then one out of recovery before the deadline). There is no retry and no
+ * un-fence answer: anything short of that proof is 'unknown'.
+ *
+ * SQL, not `pg_ctl promote`: pg_ctl only writes the signal file and can no-op
+ * against a postmaster that has not bound its socket yet (compose-ha
+ * 2026-04-29), while pg_promote runs inside the server through a live
+ * connection. hot_standby=on (carbon/docker-compose.yml) is what lets psql in.
+ *
+ * @param {string} standbyIp
+ * @param {string} sshKeyPath
+ * @param {string} remoteDir
+ * @param {object} opts - promoteWithProof's options, minus issuePromote
+ * @returns {Promise<'promoted'|'unknown'>}
+ */
+export async function promoteComposeStandby(standbyIp, sshKeyPath, remoteDir, opts = {}) {
+  return promoteWithProof({
+    ...opts,
+    issuePromote: () =>
+      sshRun(
+        standbyIp,
+        sshKeyPath,
+        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => true, wait_seconds => 120)"`,
+        { silent: true, timeout: 150_000 },
+      ),
+  });
+}
+
+/**
+ * Stop the old primary's app tier (the writers), by CONTAINER name: bare
+ * `docker compose stop <svc>` could not resolve an overlay-only service and
+ * exited in ~2s having stopped NOTHING (2026-08-09, the compose-invocation
+ * census bans that shape). The same list as the promoted-side restart: the e2e
+ * health check reads APP_TIER_RESTART_SERVICES as what the retired node is
+ * allowed to show exited.
+ *
+ * @returns {Promise<boolean>} false when the stop could not be confirmed
+ */
+export async function stopOldPrimaryApp(ip, sshKeyPath, projectName) {
+  const containers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(' ');
+  const stopped = await sshRun(ip, sshKeyPath, `docker stop ${containers}`, { timeout: 90_000 });
+  return stopped !== false;
+}
+
+/**
+ * Persist a compose-HA failover: flip the two `role` fields in place (names and
+ * array order keep their Pulumi identity, see ha-role-swap.js), swap the
+ * regions, stamp lastFailover and clear the failover journal in the same save
+ * (R2). Loads a fresh config: the journal and a reseed's identifier were saved
+ * mid-run, and an in-memory copy would write them back stale.
+ *
+ * @param {string} envName
+ * @param {{ override?: string }} [opts]
+ */
+export function swapComposeHaRoles(envName, { override } = {}) {
+  const config = loadProjectConfig();
+  const envConfig = config?.environments?.[envName];
+  if (!envConfig) {
+    throw new Error(`could not persist the role swap: ${envName} is not in .vibecarbon.json`);
+  }
+  const servers = envConfig.servers || [];
+  const oldPrimary = servers.find((sv) => sv.role === 'primary');
+  const oldStandby = servers.find((sv) => sv.role === 'standby');
+  envConfig.servers = servers.map((sv) => ({
+    ...sv,
+    role: sv.role === 'primary' ? 'standby' : 'primary',
+  }));
+  envConfig.region = oldStandby?.region ?? envConfig.secondaryRegion;
+  envConfig.secondaryRegion = oldPrimary?.region ?? envConfig.region;
+  envConfig.ha = { ...(envConfig.ha ?? {}), failoverRegion: envConfig.secondaryRegion };
+  delete envConfig.ha.failoverInFlight;
+  envConfig.lastFailover = new Date().toISOString();
+  if (override) envConfig.lastFailoverOverride = override;
+  else delete envConfig.lastFailoverOverride;
+  saveProjectConfig(config);
+}
+
+/**
+ * Perform failover for a Compose HA environment: prove the standby (the shared
+ * failover guard), reseed it when it is not streaming and the primary answers,
+ * journal, promote, then move the write-guard and issuer, restart the app,
+ * stop the old primary, flip DNS and persist the swap.
+ *
+ * Refuses a role-swapped environment before any ssh call (R4), and decides
+ * promote, resume or refuse from the guard before any write (R1). Once the
+ * journal is written nothing un-fences: a promote that cannot be proven stops
+ * the old primary's app and exits non-zero, and the rerun resumes (R3).
+ * `app-migrate` is never re-run here: the promoted standby replicated an
+ * already-migrated primary.
+ *
+ * @param {object} [deps] test seams; production passes none
+ */
+export async function failoverComposeHA(
+  envName,
+  envConfig,
+  projectConfig,
+  parsed,
+  tracker,
+  deps = {},
+) {
+  const projectName = projectConfig.projectName;
+  // C2/R4: on a swapped env the reseed below would dial the WireGuard primary
+  // address, which still sits on the retired node, and copy it from itself.
+  // Refuse before any ssh call, a dry run included.
+  assertNoComposeHaRoleSwap({ projectName, environment: envName, envConfig, action: 'failover' });
+
+  const {
+    keyExists = existsSync,
+    isPrimaryReachable: primaryReachable = isPrimaryReachable,
+    readState = (ip, key, dir) => readReplicaState({ exec: composePsqlRunner(ip, key, dir) }),
+    reseed = configureStandbyReplication,
+    recordSeeded = recordSystemIdentifier,
+    writeJournal = writeFailoverJournal,
+    promote = promoteComposeStandby,
+    fenceOldPrimary = stopOldPrimaryApp,
+    confirmUnproven = confirmUnprovenFailover,
+    swapRoles = swapComposeHaRoles,
+  } = deps ?? {};
+
   const servers = envConfig.servers || [];
   const primaryServer = servers.find((s) => s.role === 'primary');
   const standbyServer = servers.find((s) => s.role === 'standby');
@@ -1400,12 +1525,11 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
   }
 
   const sshKeyPath = join(process.cwd(), '.vibecarbon', `deploy_key_${envName}`);
-  if (!existsSync(sshKeyPath)) {
+  if (!keyExists(sshKeyPath)) {
     p.log.error(`SSH key not found: ${sshKeyPath}`);
     process.exit(1);
   }
 
-  const projectName = projectConfig.projectName;
   const remoteDir = `/opt/${projectName}`;
 
   p.log.info(c.bold('Current Compose HA state:'));
@@ -1437,182 +1561,108 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
   }
 
   const s = tracker.spinner();
+  const readStandby = () => readState(standbyServer.ip, sshKeyPath, remoteDir);
 
-  // Step 0: Re-seed standby from primary if primary is still reachable.
-  //
-  // Streaming replication is best-effort; without a replication slot (which
-  // we don't configure), the standby can fall behind if primary churns
-  // through WAL faster than `wal_keep_size`. A stale standby yields
-  // "undefined column" (PG code 42703) errors post-promotion because recent
-  // migrations on primary never streamed over.
-  //
-  // For planned failover (the e2e-test case), primary is still alive
-  // — run pg_basebackup to guarantee schema parity, then promote. For a
-  // real disaster failover where primary is unreachable, skip the re-seed
-  // and promote whatever state standby has (best-effort recovery).
-  //
-  // WAL-G archiving invariant (Invariant 1): the promoted node starts
-  // archiving on the new timeline immediately after pg_promote() — the
-  // docker-compose.yml command hardcodes archive_mode=on + archive_command
-  // on the db image. WALG_S3_PREFIX is the same on both nodes (same .env),
-  // so the WAL timeline is continuous in S3 across the failover. No extra
-  // action needed here.
-  // Skip the re-seed entirely when the standby is already verifiably streaming:
-  // parity is guaranteed by the streaming state, the full basebackup is wasted
-  // RTO, and the standby's live walreceiver holds the persistent slot (this is
-  // the exact live RCA — compose-ha 2026-07-07 — where the reseed's
-  // `pg_basebackup -S vibecarbon_standby_slot` failed "slot is active for PID").
-  // Read from the standby side so it works even if the primary is unhealthy.
-  const standbyStreaming = await isComposeStandbyStreaming(standbyServer.ip, sshKeyPath, remoteDir);
-  if (standbyStreaming) {
+  // Step 0: positive replica proof (R1), before any write. The primary
+  // answering makes this a planned failover, and then its identifier is read
+  // too. A refusal throws FailoverRefusedError naming the reason and the deploy
+  // that fixes it; `resume` means a previous run of THIS failover (its journal)
+  // already promoted the standby.
+  const planned = await primaryReachable(primaryServer.ip, sshKeyPath, remoteDir);
+  const standbyState = await readStandby();
+  const primaryState = planned ? await readState(primaryServer.ip, sshKeyPath, remoteDir) : null;
+  const { mode, unproven } = assertFailoverPreconditions({
+    envConfig,
+    environment: envName,
+    standbyState,
+    tier: 'compose-ha',
+    planned,
+    primaryState,
+    forceUnproven: !!parsed.forceUnproven,
+    allowDegraded: !!parsed.allowDegraded,
+  });
+  if (unproven) {
+    p.log.warn(UNPROVEN_RISK_LINE);
+    await confirmUnproven(envName, parsed);
+  }
+
+  if (mode === 'resume') {
     p.log.info(
-      'Standby already streaming, skipping re-seed (parity guaranteed by streaming state)',
+      'Standby already promoted by an unfinished run of this failover (journal set), ' +
+        'resuming after the promote',
     );
-  } else if (await isPrimaryReachable(primaryServer.ip, sshKeyPath, remoteDir)) {
-    s.start('Re-seeding standby from primary (pg_basebackup)');
-    try {
-      await configureStandbyReplication(
-        standbyServer.ip,
-        primaryServer.ip,
-        sshKeyPath,
-        projectName,
-      );
-      s.stop('Standby re-seeded with primary state');
-    } catch (err) {
-      // Hard fail (was once catch+warn+proceed — misleading). Since the
-      // 2026-07-06 restructure the re-seed stages first and swaps PGDATA
-      // atomically host-side, so on failure the standby's PREVIOUS data dir is
-      // intact and running — but its state relative to the primary is unknown,
-      // so promoting it silently would still be wrong. Abort so the operator
-      // sees the issue instead of a confusing pg_promote failure 5 minutes
-      // later.
-      s.stop('Re-seed failed, aborting failover');
-      throw new Error(
-        `Failover aborted: re-seed failed; the standby keeps its previous data ` +
-          `directory (the staged swap is atomic), but its parity with the primary is ` +
-          `not guaranteed. Fix the re-seed issue and retry.\nUnderlying error: ${err.message}`,
-      );
-    }
   } else {
-    p.log.warn('Primary unreachable, skipping re-seed. Standby will promote with current state.');
-  }
-
-  // Step 1: Promote standby database.
-  //
-  // Use SQL `pg_promote(wait => true, wait_seconds => 120)` instead of
-  // `pg_ctl promote`. Why: pg_ctl is fire-and-forget — it writes the promote
-  // signal file and returns. If the postmaster hasn't fully bound the socket
-  // yet (configureStandbyReplication's `docker compose start db` finished
-  // mere seconds earlier), pg_ctl can fail or no-op silently, leaving the
-  // standby in recovery mode. The downstream poll loop then sees `t` for its
-  // entire budget and we declare "Promotion may still be in progress" while
-  // the function continues to restart app-tier + DNS-flip — verify-failover
-  // ends up hitting a read-only DB and fails with 500 "Database error finding
-  // user" (auth) + 544 "DatabaseTimeout" (storage).
-  // (Observed compose-ha 2026-04-29 — 2m 40s of polling with promoted=false.)
-  //
-  // pg_promote() is server-side and synchronous: with `wait=>true` it blocks
-  // until the standby has actually exited recovery (or `wait_seconds` lapses)
-  // and returns the result. We retry a handful of times because the very
-  // first call can race the postmaster startup ("connection refused" /
-  // "the database system is starting up").
-  // `silent: true` is load-bearing: the shared compose sshRun wraps runCommand,
-  // which on non-zero exit returns `false` (not throws) unless silent — so
-  // without it, a still-booting postmaster's exit-1 manifests downstream as
-  // `false?.trim is not a function`, the catch records it, and all 5 attempts
-  // fail with the same TypeError instead of actually retrying the SQL call.
-  // Helper: probe pg_is_in_recovery() and return 't'/'f'/'' (unknown).
-  // Used after pg_promote to disambiguate three cases:
-  //   - pg_promote returned 't' → success
-  //   - pg_promote returned 'f' (timed out internally) → check probe
-  //   - pg_promote threw (psql exit 1, e.g. "recovery is not in progress"
-  //     because a previous attempt actually promoted) → check probe
-  // Without the catch-side probe, the first attempt's success was silently
-  // converted to "did not exit recovery mode after 5 attempts" because
-  // attempts 2-5 hit the same not-in-recovery error and never re-checked.
-  // RCA: compose-ha 2026-05-01 fanout4b failover.
-  const probeRecovery = async () => {
-    try {
-      const r = await sshRun(
-        standbyServer.ip,
-        sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()'`,
-        { silent: true, timeout: 10_000 },
-      );
-      return typeof r === 'string' ? r.trim() : '';
-    } catch {
-      return '';
-    }
-  };
-
-  s.start('Promoting standby database');
-  // Use SQL pg_promote(wait => true). hot_standby=on (set in carbon/
-  // docker-compose.yml) guarantees the standby accepts read connections,
-  // so psql can reach pg_promote even before promotion finishes. Verified
-  // 2026-05-01 fanout13 — without hot_standby the standby rejects every
-  // psql connection with "Hot standby mode is disabled" and pg_promote
-  // can't be invoked at all.
-  let promoted = false;
-  let lastPromoteError = null;
-  const MAX_PROMOTE_ATTEMPTS = 5;
-  for (let attempt = 1; attempt <= MAX_PROMOTE_ATTEMPTS && !promoted; attempt++) {
-    try {
-      const result = await sshRun(
-        standbyServer.ip,
-        sshKeyPath,
-        `cd ${remoteDir} && docker compose exec -T db psql -U postgres -d postgres -tAc "SELECT pg_promote(wait => true, wait_seconds => 120)"`,
-        { silent: true, timeout: 150_000 },
-      );
-      const trimmed = typeof result === 'string' ? result.trim() : '';
-      if (trimmed === 't') {
-        promoted = true;
-        break;
+    // Step 0b: re-seed when the standby is not streaming and the primary
+    // answers. A streaming standby is in parity already, and its walreceiver
+    // holds the replication slot a basebackup would need (compose-ha
+    // 2026-07-07: "slot is active for PID"). The reseed stages first and swaps
+    // PGDATA atomically, so on failure the standby keeps its previous data.
+    // WAL-G archiving on the promoted node needs nothing here: archive_mode is
+    // in the db command line and WALG_S3_PREFIX is shared, so the timeline
+    // continues in S3.
+    let systemIdentifier = standbyState.systemIdentifier;
+    if (standbyState.receiverStatus === 'streaming') {
+      p.log.info('Standby already streaming, skipping re-seed (parity guaranteed by streaming)');
+    } else if (planned) {
+      s.start('Re-seeding standby from primary (pg_basebackup)');
+      try {
+        await reseed(standbyServer.ip, primaryServer.ip, sshKeyPath, projectName);
+        // A reseed rewrites the standby's identity: the journal names what was
+        // just seeded, and that is recorded for the next failover's proof.
+        const seeded = await readStandby();
+        if (seeded.inRecovery !== true || !seeded.systemIdentifier) {
+          throw new Error(
+            'the re-seeded standby did not read back as a replica with a system identifier',
+          );
+        }
+        systemIdentifier = seeded.systemIdentifier;
+        recordSeeded({ environment: envName }, systemIdentifier);
+        s.stop('Standby re-seeded with primary state');
+      } catch (err) {
+        s.stop('Re-seed failed, aborting failover');
+        throw new Error(
+          `Failover aborted: re-seed failed; the standby keeps its previous data ` +
+            `directory (the staged swap is atomic), but its parity with the primary is ` +
+            `not guaranteed. Fix the re-seed issue and retry.\nUnderlying error: ${err.message}`,
+        );
       }
-      const probeTrimmed = await probeRecovery();
-      if (probeTrimmed === 'f') {
-        promoted = true;
-        break;
-      }
-      lastPromoteError = new Error(
-        `pg_promote returned ${JSON.stringify(trimmed)}; pg_is_in_recovery=${JSON.stringify(probeTrimmed)}`,
-      );
-    } catch (err) {
-      const probeTrimmed = await probeRecovery();
-      if (probeTrimmed === 'f') {
-        promoted = true;
-        break;
-      }
-      lastPromoteError = err;
+    } else {
+      p.log.warn('Primary unreachable, skipping re-seed. Standby will promote with current state.');
     }
-    if (!promoted && attempt < MAX_PROMOTE_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 5_000));
-    }
-  }
 
-  if (!promoted) {
-    // Capture diagnostics so the operator can see why the promotion failed
-    // instead of guessing. Best-effort — failover-step abort is what matters.
-    let dbLogs = '';
-    try {
-      dbLogs = await sshRun(
-        standbyServer.ip,
-        sshKeyPath,
-        `cd ${remoteDir} && docker compose logs db --tail=60`,
-        { silent: true, timeout: 30_000 },
-      );
-      if (typeof dbLogs !== 'string') dbLogs = '(db logs returned non-string)';
-    } catch (err) {
-      dbLogs = `(failed to capture db logs: ${err.message})`;
-    }
-    s.stop('Promotion failed, standby still in recovery mode');
-    throw new Error(
-      `Failover aborted: standby ${standbyServer.ip} did not exit recovery mode after ${MAX_PROMOTE_ATTEMPTS} pg_promote attempts. ` +
-        `Last error: ${lastPromoteError?.message || 'unknown'}.\n` +
-        `--- db container logs (last 60 lines) ---\n${dbLogs}`,
+    // Step 1: journal, then promote (R2, R3). The journal goes down right before
+    // the promote; from here on nothing un-fences the old primary.
+    await writeJournal(
+      { environment: envName },
+      {
+        target: 'standby',
+        primaryLsn: null,
+        systemIdentifier,
+        ...(unproven && { override: 'force-unproven' }),
+      },
     );
+    s.start('Promoting standby database');
+    let verdict;
+    try {
+      verdict = await promote(standbyServer.ip, sshKeyPath, remoteDir, { readState: readStandby });
+    } catch {
+      verdict = 'unknown';
+    }
+    if (verdict !== 'promoted') {
+      s.stop('Promotion could not be confirmed, fencing the old primary');
+      // The standby may yet promote: stop the old primary's writers so the two
+      // sides never both serve. DNS is not flipped and the journal stays set.
+      const fenced = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
+      if (!fenced) {
+        p.log.warn(
+          `Could not stop the app on the old primary (${primaryServer.ip}). If it is up, stop ` +
+            `it before anything else: ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
+        );
+      }
+      throw new Error(promotionUnknownMessage(envName));
+    }
+    s.stop('Standby database promoted to primary');
   }
-
-  s.stop('Standby database promoted to primary');
 
   // Step 1a2: Move the wal-g WRITE-GUARD with the promotion. The promoted node
   // was deployed as the standby, so its db container still reads
@@ -1724,26 +1774,12 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
   // case this step exists to prevent, where the old primary is still up and
   // still accepting writes.
   s.start('Stopping old primary services');
-  // CONTAINER names, not compose service names — same RCA as the app-tier
-  // restart above (2026-08-09): bare `docker compose stop …` could not
-  // resolve an overlay-only service and exited in ~2s having stopped
-  // NOTHING, so the old primary kept serving writes behind the SPLIT-BRAIN
-  // warning on every failover. The compose-invocation census
-  // (compose-invocation-service-names.test.ts) bans the old shape. The same
-  // list as the restart: the e2e health check reads APP_TIER_RESTART_SERVICES
-  // as what the retired node is allowed to show exited.
+  // By container name, see stopOldPrimaryApp.
   const oldPrimaryContainers = APP_TIER_RESTART_SERVICES.map((svc) => `${projectName}-${svc}`).join(
     ' ',
   );
-  const stopped = await sshRun(
-    primaryServer.ip,
-    sshKeyPath,
-    `docker stop ${oldPrimaryContainers}`,
-    {
-      timeout: 90_000,
-    },
-  );
-  if (stopped === false) {
+  const stopped = await fenceOldPrimary(primaryServer.ip, sshKeyPath, projectName);
+  if (!stopped) {
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +
         'it may still be serving writes. Stop it by hand before pointing clients at the ' +
@@ -1751,7 +1787,7 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     );
   }
   s.stop(
-    stopped === false
+    !stopped
       ? 'Old primary NOT stopped, split-brain risk (see warning)'
       : 'Old primary services stopped',
   );
@@ -1842,26 +1878,8 @@ export async function failoverComposeHA(envName, envConfig, projectConfig, parse
     }
   }
 
-  // Update config: swap primary/standby roles so subsequent commands reflect reality
-  const updatedServers = servers.map((s) => ({
-    ...s,
-    role: s.role === 'primary' ? 'standby' : 'primary',
-  }));
-  const updatedEnvConfig = {
-    ...envConfig,
-    servers: updatedServers,
-    region: standbyServer.region,
-    secondaryRegion: primaryServer.region,
-    ha: { ...envConfig.ha, failoverRegion: primaryServer.region },
-    lastFailover: new Date().toISOString(),
-  };
-  saveProjectConfig({
-    ...projectConfig,
-    environments: {
-      ...projectConfig.environments,
-      [envName]: updatedEnvConfig,
-    },
-  });
+  // Persist the swap; the same save clears the failover journal (R2).
+  swapRoles(envName, { override: unproven ? 'force-unproven' : undefined });
 
   p.log.success('Failover complete');
   // The roles persisted above are now inverted relative to the Pulumi stacks,

@@ -162,14 +162,55 @@ export function composeHaRoleSwapMessage(detail) {
 }
 
 /**
- * Deploy-entry guard. Throws when the environment is in the post-failover
- * swapped state; returns silently otherwise (including for every non-compose-HA
- * tier). Called from executeDeployment before any infra mutation.
+ * Render the failover refusal (R4). A second compose-HA failover on a swapped
+ * environment would aim the reseed at the retired node: WireGuard gives the
+ * primary tunnel address to the node BORN as the primary, and that address is
+ * what configureStandbyReplication dials, so the retired node would be
+ * basebackuped from itself and then promoted with data frozen at the last
+ * failover.
  */
-export function assertNoComposeHaRoleSwap({ projectName, environment, envConfig }) {
+export function composeHaFailoverRefusalMessage(detail) {
+  const { environment, byStack, lastFailover } = detail;
+  const liveIp = byStack.standby.ip ?? '(ip unknown)';
+  const retiredIp = byStack.primary.ip ?? '(ip unknown)';
+  return [
+    `Failover refused: "${environment}" already failed over, and the compose-HA roles are still swapped.`,
+    '',
+    `  Live node      ${liveIp.padEnd(16)}role "${byStack.standby.role}", born as Pulumi stack "${environment}-standby"`,
+    `  Retired node   ${retiredIp.padEnd(16)}role "${byStack.primary.role}", born as Pulumi stack "${environment}-primary"`,
+    ...(lastFailover ? [`  Last failover  ${lastFailover}`] : []),
+    '',
+    "The replication tunnel still gives the primary's address to the node born as the",
+    `primary, which is the retired node ${retiredIp}. A second failover would re-seed it`,
+    `from its own address and promote a database frozen at the last failover, so`,
+    'compose-HA failover is one-way until the environment is rebuilt: destroy the',
+    'retired node and redeploy. see the operational notes in docs/rto-rpo.md.',
+  ].join('\n');
+}
+
+/**
+ * Entry guard for the commands that would act on a swapped environment as if
+ * its roles matched its stacks. Throws when the environment is in the
+ * post-failover swapped state; returns silently otherwise (including for every
+ * non-compose-HA tier). Called from executeDeployment before any infra mutation
+ * (`action: 'deploy'`, the default) and from failoverComposeHA before any ssh
+ * call (`action: 'failover'`).
+ *
+ * @param {{ projectName: string, environment: string, envConfig: object, action?: 'deploy'|'failover' }} args
+ */
+export function assertNoComposeHaRoleSwap({
+  projectName,
+  environment,
+  envConfig,
+  action = 'deploy',
+}) {
   const detail = detectComposeHaRoleSwap({ projectName, environment, envConfig });
   if (!detail) return;
-  throw new Error(composeHaRoleSwapMessage(detail));
+  throw new Error(
+    action === 'failover'
+      ? composeHaFailoverRefusalMessage(detail)
+      : composeHaRoleSwapMessage(detail),
+  );
 }
 
 /**

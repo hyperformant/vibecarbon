@@ -30,7 +30,10 @@ import { c } from './lib/colors.js';
 // restore.js). Aliased so runComposeRestore can default to the real functions
 // while still accepting injected mocks for unit tests.
 import { configureStandbyReplication as realConfigureStandbyReplication } from './lib/deploy/compose/ha.js';
-import { composeHaStandbyResyncHint } from './lib/deploy/compose/ha-role-swap.js';
+import {
+  composeHaStandbyResyncHint,
+  detectComposeHaRoleSwap,
+} from './lib/deploy/compose/ha-role-swap.js';
 import { restoreCompose as realRestoreCompose } from './lib/deploy/compose/index.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import { recordSystemIdentifier } from './lib/deploy/failover-guard.js';
@@ -568,9 +571,20 @@ export async function runComposeRestore({
   // whose roles still match its Pulumi stacks; on a failed-over one deploy
   // refuses, so the hint is rendered by composeHaStandbyResyncHint rather than
   // hard-coded (compose/ha-role-swap.js).
+  //
+  // C2: on a role-swapped env (a failover ran and no rebuild since) the node
+  // with role standby is the retired born-primary, and WireGuard still gives it
+  // the primary address the re-seed dials: it would basebackup itself. Never
+  // re-seed there; say why and point at the recovery instead.
   if (envConfig.deployMode === 'compose-ha') {
     const standby = envConfig.servers?.find((sv) => sv.role === 'standby');
-    if (standby?.ip) {
+    if (detectComposeHaRoleSwap({ projectName, environment: envName, envConfig })) {
+      p.log.warn(
+        'Primary restored and serving. Skipping the standby re-seed: this environment ' +
+          'failed over, and the re-seed would copy the retired node from its own address. ' +
+          composeHaStandbyResyncHint({ projectName, environment: envName, envConfig }),
+      );
+    } else if (standby?.ip) {
       try {
         s.start('Re-seeding standby from restored primary (pg_basebackup)');
         await configureStandbyReplication(standby.ip, serverIp, sshKeyPath, projectName);

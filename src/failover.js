@@ -22,11 +22,14 @@ import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import {
   assertFailoverPreconditions,
-  clearFailoverJournal,
+  confirmUnprovenFailover,
+  promotionUnknownMessage,
   readReplicaState,
   recordSystemIdentifier,
+  UNPROVEN_RISK_LINE,
   writeFailoverJournal,
 } from './lib/deploy/failover-guard.js';
+
 import {
   PROMOTABLE_CERTIFICATES,
   PROMOTE_ISSUER_ANNOTATION,
@@ -63,6 +66,10 @@ import { pollUntil } from './lib/retry.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { listWalgBackups } from './lib/walg-backups.js';
+
+// Shared with the compose-ha failover; re-exported where tests and callers
+// have always found them.
+export { confirmUnprovenFailover, promotionUnknownMessage, UNPROVEN_RISK_LINE };
 
 // ============================================================================
 // COMMAND SPEC — single source of truth for argv parsing AND help output.
@@ -316,39 +323,6 @@ async function reseedStandbyOrAbort(servers, sshKeyPath, s, { onSeeded } = {}) {
     result === 'reseeded'
       ? 'Standby re-seeded with primary state'
       : 'Primary unreachable mid-probe, promoting standby with current state',
-  );
-}
-
-/** The one-line risk statement for -force-unproven. */
-export const UNPROVEN_RISK_LINE =
-  '-force-unproven: nothing proves the standby holds this database, so the promoted side may ' +
-  'be missing writes or hold different data entirely';
-
-/**
- * Typed confirmation for -force-unproven: the env name, or -y. Without a TTY
- * and without -y it refuses rather than hanging on a prompt.
- *
- * @param {string} envName
- * @param {{ yes?: boolean }} parsed
- */
-export async function confirmUnprovenFailover(envName, parsed) {
-  if (parsed.yes) return;
-  if (!process.stdin.isTTY) {
-    p.log.error('-force-unproven needs a typed confirmation; pass -y in a script');
-    process.exit(1);
-  }
-  const typed = await p.text({
-    message: `Type ${envName} to promote a standby nothing proves is a replica`,
-  });
-  if (p.isCancel(typed)) exitCancelled();
-  if (typed !== envName) exitDeclined();
-}
-
-/** R3: the exit message for a promotion the flow could not confirm. */
-export function promotionUnknownMessage(envName) {
-  return (
-    `promotion state unknown: old primary kept fenced; rerun vibecarbon failover ${envName} ` +
-    `to finish`
   );
 }
 
@@ -1438,7 +1412,6 @@ export async function failoverHA(
     catchUp = waitForStandbyCaughtUp,
     reseed = reseedStandbyOrAbort,
     writeJournal = writeFailoverJournal,
-    clearJournal = clearFailoverJournal,
     promote = (srv, key) => promoteStandbyDatabase(srv.standby.ip, key),
     confirmUnproven = confirmUnprovenFailover,
     restoreWalgRole = restorePromotedWalgRole,
@@ -1595,10 +1568,10 @@ export async function failoverHA(
   /**
    * STEP 4: final catch-up gate, re-seed, journal, promote. Until the journal is
    * written nothing is promoted, so any throw un-quiesces the primary (planned)
-   * and aborts. From the promote call on, only an 'in-recovery' verdict (the
-   * promote was never issued) un-fences it (R3); anything else keeps the old
-   * primary fenced, leaves the journal set and exits non-zero, and the rerun
-   * resumes from the journal.
+   * and aborts. From the journal write on nothing un-fences it (R3): anything but
+   * a proven 'promoted' keeps the old primary fenced, leaves the journal set and
+   * exits non-zero, and the rerun resumes from the journal. Even a promote this
+   * run never issued proves nothing, since a previous run's may still be landing.
    */
   async function catchUpReseedAndPromote() {
     const unquiesce = async () => {
@@ -1667,16 +1640,6 @@ export async function failoverHA(
     if (verdict === 'promoted') {
       s.stop('Standby database promoted to primary');
       return;
-    }
-    if (verdict === 'in-recovery') {
-      s.stop('Promotion was never issued, aborting failover');
-      await clearJournal({ environment: envName });
-      await unquiesce();
-      throw new Error(
-        `Failover aborted: the promote was never issued on standby ${servers.standby.ip} ` +
-          `(its db pod could not be resolved), so it is still a replica. Refusing to flip DNS ` +
-          `onto a read-only standby. Verify the standby db pod and retry.`,
-      );
     }
     s.stop('Promotion could not be confirmed, old primary kept fenced');
     throw new Error(promotionUnknownMessage(envName));

@@ -1,3 +1,4 @@
+import * as p from '@clack/prompts';
 import { describe, expect, it, vi } from 'vitest';
 import { runComposeRestore } from '../../../src/restore.js';
 
@@ -170,5 +171,39 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
 
     expect(restoreCompose).not.toHaveBeenCalled();
     expect(configureStandbyReplication).not.toHaveBeenCalled();
+  });
+
+  it('never re-seeds a role-swapped env: the tunnel would copy the standby from itself', async () => {
+    // After a compose failover the retired node carries role standby, but
+    // WireGuard's primary address (10.99.0.1) is still on it (it was born the
+    // primary), and configureStandbyReplication always dials that address: a
+    // re-seed here would basebackup the retired node from its own database.
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const s = makeSpinner();
+
+    await runComposeRestore({
+      ...baseArgs,
+      serverIp: '10.0.0.2',
+      s,
+      envConfig: {
+        deployMode: 'compose-ha',
+        lastFailover: '2026-10-05T00:00:00.000Z',
+        servers: [
+          { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'standby' },
+          { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'primary' },
+        ],
+      },
+      restoreCompose,
+      configureStandbyReplication,
+    });
+
+    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.2', '/tmp/key', 'myapp', 'latest');
+    expect(configureStandbyReplication).not.toHaveBeenCalled();
+    const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(text).toMatch(/cannot resync/);
+    expect(text).toMatch(/failover has swapped/);
+    warn.mockRestore();
   });
 });

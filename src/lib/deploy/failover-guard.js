@@ -19,6 +19,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import * as p from '@clack/prompts';
+import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
 import { loadProjectConfig, saveProjectConfig } from '../config.js';
 
 /** Refusal raised before any write. The message names the reason and `vibecarbon deploy`. */
@@ -286,4 +288,37 @@ export function recordSystemIdentifier(ctx, systemIdentifier) {
 export function haSeedRecord(deployResult) {
   const { replicationStatus, systemIdentifier } = deployResult ?? {};
   return replicationStatus === 'streaming' && systemIdentifier ? { systemIdentifier } : {};
+}
+
+/** The one-line risk statement for -force-unproven. */
+export const UNPROVEN_RISK_LINE =
+  '-force-unproven: nothing proves the standby holds this database, so the promoted side may ' +
+  'be missing writes or hold different data entirely';
+
+/**
+ * Typed confirmation for -force-unproven: the env name, or -y. Without a TTY
+ * and without -y it refuses rather than hanging on a prompt.
+ *
+ * @param {string} envName
+ * @param {{ yes?: boolean }} parsed
+ */
+export async function confirmUnprovenFailover(envName, parsed) {
+  if (parsed.yes) return;
+  if (!process.stdin.isTTY) {
+    p.log.error('-force-unproven needs a typed confirmation; pass -y in a script');
+    process.exit(1);
+  }
+  const typed = await p.text({
+    message: `Type ${envName} to promote a standby nothing proves is a replica`,
+  });
+  if (p.isCancel(typed)) exitCancelled();
+  if (typed !== envName) exitDeclined();
+}
+
+/** R3: the exit message for a promotion the flow could not confirm. */
+export function promotionUnknownMessage(envName) {
+  return (
+    `promotion state unknown: old primary kept fenced; rerun vibecarbon failover ${envName} ` +
+    `to finish`
+  );
 }

@@ -81,8 +81,9 @@ const {
   configurePrimaryReplication,
   configureStandbyReplication,
   buildReplicationOverlay,
-  isComposeStandbyStreaming,
+  composePsqlRunner,
 } = await import('../../../src/lib/deploy/compose/ha.js');
+const { readReplicaState } = await import('../../../src/lib/deploy/failover-guard.js');
 
 const KEY = '/tmp/key';
 const PRIMARY = '1.1.1.1';
@@ -314,48 +315,60 @@ describe('configureStandbyReplication — WireGuard transport', () => {
   });
 });
 
-describe('isComposeStandbyStreaming (standby-side wal-receiver signal for failover skip)', () => {
-  it('returns true only when pg_stat_wal_receiver.status is "streaming"', async () => {
+// The standby-side walreceiver read failover uses to skip the reseed now comes
+// from the guard's replica-state row, run through the compose psql runner.
+describe('composePsqlRunner (the compose transport for readReplicaState)', () => {
+  it("runs the SQL in the given node's db container, single-quoted", async () => {
     const composeIndex = await import('../../../src/lib/deploy/compose/index.js');
     const sshRunMock = composeIndex.sshRun as ReturnType<typeof vi.fn>;
     const orig = sshRunMock.getMockImplementation();
     sshRunMock.mockImplementation(async (ip: string, _k: string, command: unknown) => {
       sshCalls.push({ ip, command: String(command) });
-      if (String(command).includes('pg_stat_wal_receiver')) return 'streaming\n';
+      return 't|7412345678901234567|0/3000060|streaming|1\n';
+    });
+    try {
+      const state = await readReplicaState({
+        exec: composePsqlRunner(STANDBY, KEY, '/opt/myapp'),
+      });
+      expect(state.receiverStatus).toBe('streaming');
+      expect(state.inRecovery).toBe(true);
+      const q = sshCalls.find((c) => c.command.includes('pg_stat_wal_receiver'));
+      expect(q?.ip).toBe(STANDBY);
+      expect(q?.command).toMatch(
+        /^cd \/opt\/myapp && docker compose exec -T db psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery\(\)/,
+      );
+    } finally {
+      sshRunMock.mockImplementation(orig as never);
+    }
+  });
+
+  it('escapes a single quote in the SQL for the remote shell', async () => {
+    const composeIndex = await import('../../../src/lib/deploy/compose/index.js');
+    const sshRunMock = composeIndex.sshRun as ReturnType<typeof vi.fn>;
+    const orig = sshRunMock.getMockImplementation();
+    sshRunMock.mockImplementation(async (ip: string, _k: string, command: unknown) => {
+      sshCalls.push({ ip, command: String(command) });
       return '';
     });
     try {
-      await expect(isComposeStandbyStreaming(STANDBY, KEY, '/opt/myapp')).resolves.toBe(true);
-      // The query targets the STANDBY's own walreceiver view.
-      const q = sshCalls.find((c) => c.command.includes('pg_stat_wal_receiver'));
-      expect(q?.ip).toBe(STANDBY);
-      expect(q?.command).toContain('SELECT status FROM pg_stat_wal_receiver');
+      await composePsqlRunner(STANDBY, KEY, '/opt/myapp')("SELECT 'x'");
+      expect(sshCalls.at(-1)?.command.endsWith(String.raw`-tAc 'SELECT '\''x'\'''`)).toBe(true);
     } finally {
       sshRunMock.mockImplementation(orig as never);
     }
   });
 
-  it('returns false when the walreceiver view is empty (not streaming)', async () => {
+  it('a failed exec (sshRun answers false) reads as unknown, never as a state', async () => {
     const composeIndex = await import('../../../src/lib/deploy/compose/index.js');
     const sshRunMock = composeIndex.sshRun as ReturnType<typeof vi.fn>;
     const orig = sshRunMock.getMockImplementation();
-    sshRunMock.mockImplementation(async () => '');
+    sshRunMock.mockImplementation(async () => false);
     try {
-      await expect(isComposeStandbyStreaming(STANDBY, KEY, '/opt/myapp')).resolves.toBe(false);
-    } finally {
-      sshRunMock.mockImplementation(orig as never);
-    }
-  });
-
-  it('returns false (never throws) when the exec fails', async () => {
-    const composeIndex = await import('../../../src/lib/deploy/compose/index.js');
-    const sshRunMock = composeIndex.sshRun as ReturnType<typeof vi.fn>;
-    const orig = sshRunMock.getMockImplementation();
-    sshRunMock.mockImplementation(async () => {
-      throw new Error('db container down');
-    });
-    try {
-      await expect(isComposeStandbyStreaming(STANDBY, KEY, '/opt/myapp')).resolves.toBe(false);
+      const state = await readReplicaState({
+        exec: composePsqlRunner(STANDBY, KEY, '/opt/myapp'),
+      });
+      expect(state.inRecovery).toBeNull();
+      expect(state.receiverStatus).toBeNull();
     } finally {
       sshRunMock.mockImplementation(orig as never);
     }

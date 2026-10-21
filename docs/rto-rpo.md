@@ -168,6 +168,13 @@ retired node and re-seed (wipe) the promoted primary's database. There is no
 bypass flag, and no automated failback: restoring HA symmetry needs role-aware
 compose-HA redeploy support, which does not exist yet.
 
+A second `vibecarbon failover` is refused the same way, before any ssh call, and
+`vibecarbon restore` skips its standby re-seed there (it prints why). Both would
+re-seed the node that now carries role `standby`, the retired born-primary, and
+the replication tunnel still gives that node the primary's WireGuard address,
+which is what the re-seed dials: it would copy the retired node from itself.
+Compose-HA failover is one-way until the environment is rebuilt.
+
 What the environment's DR posture actually is while it sits in that state:
 
 - It is serving from **one** node. There is no standby and no streaming

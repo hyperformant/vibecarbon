@@ -1716,47 +1716,46 @@ export function k8sPsqlRunner(ip, sshKeyPath) {
 }
 
 /**
- * Promote the standby database (k8s transport) and report what happened:
- *   - 'promoted': it was seen IN recovery before the promote, then out of it;
- *   - 'in-recovery': it read IN recovery and pg_ctl promote was never issued
- *     (the db pod could not be resolved), so nothing can promote it;
- *   - 'unknown': anything else. That includes a first reading that is already
- *     out of recovery (not proof THIS call promoted it, so pg_ctl promote is
- *     not issued) and, once pg_ctl promote has been issued, any deadline
- *     without a proven out-of-recovery reading. An issued promote cannot be
- *     taken back: postgres deletes promote.signal itself when it accepts the
- *     request and still reads in recovery while it finishes, so a late
- *     "still in recovery" proves nothing.
+ * Issue a promote and prove it landed, for any transport. The verdict:
+ *   - 'promoted': it was read IN recovery immediately before the promote was
+ *     issued, then read out of it before the deadline;
+ *   - 'unknown': anything else. That includes a first reading that is not
+ *     in recovery (no proof THIS call would promote it, so nothing is issued),
+ *     an issue that throws, and any deadline without a proven out-of-recovery
+ *     reading. An issued promote cannot be taken back: postgres deletes
+ *     promote.signal itself when it accepts the request and still reads in
+ *     recovery while it finishes, so a late "still in recovery" proves nothing.
  *
- * Only 'in-recovery' lets a caller un-fence the old primary: on 'unknown' the
- * standby may yet promote, and serving from both sides is a split brain. The
- * caller's journal lets a rerun finish instead.
+ * There is no un-fence answer. Even a promote this call never issued proves
+ * nothing on a rerun, since a previous run's promote may still be landing. On
+ * 'unknown' the caller keeps the old primary fenced and its journal set, and
+ * the rerun finishes the job (R3).
  *
- * @param {string} standbyIp
- * @param {string} sshKeyPath
  * @param {object} opts
  * @param {() => Promise<{ inRecovery: boolean|null }>} opts.readState - the
  *   standby's failover-guard readReplicaState (required: the 't'/'f' parse
  *   lives there and nowhere else)
+ * @param {() => Promise<unknown>} opts.issuePromote - sends the promote; its
+ *   result is ignored (the reads decide)
  * @param {number} [opts.deadlineMs]
  * @param {number} [opts.pollMs]
  * @param {() => number} [opts.now]
  * @param {(ms: number) => Promise<void>} [opts.sleep]
- * @returns {Promise<'promoted'|'in-recovery'|'unknown'>}
+ * @returns {Promise<'promoted'|'unknown'>}
  */
-export async function promoteStandby(
-  standbyIp,
-  sshKeyPath,
-  {
-    readState,
-    deadlineMs = PROMOTE_DEADLINE_MS,
-    pollMs = 2000,
-    now = Date.now,
-    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  } = {},
-) {
+export async function promoteWithProof({
+  readState,
+  issuePromote,
+  deadlineMs = PROMOTE_DEADLINE_MS,
+  pollMs = 2000,
+  now = Date.now,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
   if (typeof readState !== 'function') {
-    throw new TypeError('promoteStandby: readState is required');
+    throw new TypeError('promoteWithProof: readState is required');
+  }
+  if (typeof issuePromote !== 'function') {
+    throw new TypeError('promoteWithProof: issuePromote is required');
   }
   const read = async () => {
     try {
@@ -1768,38 +1767,54 @@ export async function promoteStandby(
 
   if ((await read()) !== true) return 'unknown';
 
-  let pod;
   try {
-    pod = await getPostgresPod(standbyIp, sshKeyPath);
+    await issuePromote();
   } catch {
-    // Read in recovery a moment ago, and no promote was issued.
-    return 'in-recovery';
-  }
-  try {
-    await sshKubectl(standbyIp, sshKeyPath, [
-      'exec',
-      '-n',
-      'vibecarbon',
-      pod,
-      '--',
-      'su',
-      'postgres',
-      '-c',
-      'pg_ctl promote -D /var/lib/postgresql/data',
-    ]);
-  } catch {
-    // pg_ctl promote may exit non-zero even on success; the reads below decide.
+    // It may have landed anyway (a promote can exit non-zero on success, an
+    // ssh session can drop after the server accepted it): the reads decide.
   }
 
-  // From here on the promote is issued and may land at any time: only a proven
-  // out-of-recovery reading is an answer, and the deadline without one is
-  // 'unknown', never 'in-recovery'.
+  // From here on a promote may land at any time: only a proven out-of-recovery
+  // reading is an answer, and the deadline without one is 'unknown'.
   const deadline = now() + deadlineMs;
   for (;;) {
     if ((await read()) === false) return 'promoted';
     if (now() >= deadline) return 'unknown';
     await sleep(pollMs);
   }
+}
+
+/**
+ * Promote the standby database (k8s transport): `pg_ctl promote` in its db pod,
+ * proven by promoteWithProof. A db pod that cannot be resolved is 'unknown' like
+ * any other unconfirmed promote, never an un-fence.
+ *
+ * @param {string} standbyIp
+ * @param {string} sshKeyPath
+ * @param {object} opts - promoteWithProof's options, minus issuePromote
+ * @returns {Promise<'promoted'|'unknown'>}
+ */
+export async function promoteStandby(standbyIp, sshKeyPath, opts = {}) {
+  if (typeof opts.readState !== 'function') {
+    throw new TypeError('promoteStandby: readState is required');
+  }
+  return promoteWithProof({
+    ...opts,
+    issuePromote: async () => {
+      const pod = await getPostgresPod(standbyIp, sshKeyPath);
+      await sshKubectl(standbyIp, sshKeyPath, [
+        'exec',
+        '-n',
+        'vibecarbon',
+        pod,
+        '--',
+        'su',
+        'postgres',
+        '-c',
+        'pg_ctl promote -D /var/lib/postgresql/data',
+      ]);
+    },
+  });
 }
 
 /**

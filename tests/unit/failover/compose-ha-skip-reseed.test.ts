@@ -30,14 +30,24 @@ const WALG_AUDIT_PASS = [
 
 /** What the audit probe reports this run; a test may swap in a failing shape. */
 let auditPayload = WALG_AUDIT_PASS;
+/** Flipped by the mocked pg_promote, so later replica-state reads see a primary. */
+let promoted = false;
+const SYSID = '7412345678901234567';
 
 vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   const rec = (ip: string, _k: string, command: unknown, options?: { input?: string }) => {
     const c = String(command);
     sshCalls.push({ ip, command: c, input: options?.input });
-    if (c.includes('pg_stat_wal_receiver')) return 'streaming'; // standby is streaming
-    if (c.includes('pg_promote')) return 't'; // promotion succeeds
+    // The failover guard's replica-state read: the standby streams in recovery
+    // until pg_promote lands, then reads out of recovery.
+    if (c.includes('pg_control_system')) {
+      return promoted ? `f|${SYSID}|0/3000060||` : `t|${SYSID}|0/3000060|streaming|1`;
+    }
+    if (c.includes('pg_promote')) {
+      promoted = true;
+      return 't';
+    }
     if (c.includes('WALG_AUDIT')) return auditPayload; // backup audit verdict
     // new-primary app tier serves — the gate needs every labeled probe up
     if (c.includes('%{http_code}')) return 'app=200';
@@ -78,10 +88,15 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   };
 });
 
-// saveProjectConfig writes .vibecarbon.json — stub it.
+// The journal and the role swap load and save .vibecarbon.json: serve a fresh
+// copy of the fixture and record the saves instead.
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, saveProjectConfig: vi.fn() };
+  return {
+    ...actual,
+    loadProjectConfig: vi.fn(() => structuredClone(projectConfig)),
+    saveProjectConfig: vi.fn(),
+  };
 });
 
 // The deploy_key existence gate in failoverComposeHA must pass.
@@ -105,6 +120,9 @@ const { saveProjectConfig } = await import('../../../src/lib/config.js');
 
 const envConfig = {
   deployMode: 'compose-ha',
+  replication: 'streaming',
+  deployedAt: '2026-10-01T00:00:00.000Z',
+  ha: { enabled: true, systemIdentifier: SYSID },
   domain: 'app.example.com',
   // Managed DNS so the post-flip TLS gate is reachable; no token in the test
   // env, so the DNS flip itself takes its warn branch without touching the
@@ -123,6 +141,7 @@ beforeEach(() => {
   sshCalls.length = 0;
   envMerges.length = 0;
   auditPayload = WALG_AUDIT_PASS;
+  promoted = false;
   vi.mocked(saveProjectConfig).mockClear();
 });
 
@@ -130,7 +149,8 @@ describe('failoverComposeHA — standby already streaming', () => {
   it('skips the pg_basebackup re-seed and proceeds straight to promotion', async () => {
     await failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker);
 
-    // The standby-side streaming probe ran against the STANDBY.
+    // The guard's replica-state read (which carries the walreceiver status) ran
+    // against the STANDBY.
     const probe = sshCalls.find((c) => c.command.includes('pg_stat_wal_receiver'));
     expect(probe?.ip).toBe('2.2.2.2');
 

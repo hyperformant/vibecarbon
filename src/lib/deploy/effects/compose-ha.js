@@ -37,6 +37,7 @@ import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   buildReplicationOverlay,
+  composePsqlRunner,
   configurePrimaryReplication,
   configureStandbyReplication,
   openWireguardPortHetznerFirewall,
@@ -56,6 +57,7 @@ import {
   waitForDockerReady,
   waitForSSH,
 } from '../compose/index.js';
+import { readReplicaState } from '../failover-guard.js';
 import { assertReplicationStreamingOrDegraded, verifyStreaming } from '../replication.js';
 import { envS3Record } from '../s3-record.js';
 import { generateSSHKeyPair, mergeRemoteDotenv, pinnedSshOptsString } from '../utils.js';
@@ -843,6 +845,17 @@ async function haVerifyStreaming(ctx) {
   ctx.replActive = replActive;
   ctx.replLastState = replLastState;
   ctx.degraded = degraded;
+  // Failover's replica proof (R1): record the identifier of the standby this
+  // deploy just proved streaming, read on the standby itself. Only a reading in
+  // recovery counts; anything else records nothing, and an unplanned failover
+  // then refuses until a deploy proves it.
+  ctx.systemIdentifier = null;
+  if (replActive) {
+    const standbyState = await readReplicaState({
+      exec: composePsqlRunner(ctx.standby.ip, sshKeyPath, `/opt/${projectName}`),
+    });
+    if (standbyState.inRecovery === true) ctx.systemIdentifier = standbyState.systemIdentifier;
+  }
   if (replActive) {
     p.log.success('Streaming replication active');
   } else {

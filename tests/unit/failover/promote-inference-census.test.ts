@@ -30,9 +30,6 @@ const GUARD = 'src/lib/deploy/failover-guard.js';
  * its removal here.
  */
 const ALLOWED: Record<string, string> = {
-  // HA-correctness Task 2 moves compose failover onto the guard and deletes
-  // these accepts (probeRecovery() === 'f' after a failed pg_promote).
-  'src/lib/deploy/compose/ha.js': 'compose failover, replaced by the guard in Task 2',
   // Single-server restore: postgres was started in recovery by the restore
   // itself, so 'f' means "recovery target reached", not "someone promoted it".
   'src/lib/deploy/compose/index.js': 'restore boots its own recovery and waits for it to end',

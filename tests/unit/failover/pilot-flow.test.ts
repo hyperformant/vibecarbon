@@ -438,8 +438,8 @@ const SCALE_UP_LIST = [
 
 interface RunOpts {
   primaryReachable: boolean;
-  /** The promote verdict is 'in-recovery': the promote was never issued. */
-  promoteInRecovery?: boolean;
+  /** The promote verdict is 'unknown': the promotion could not be confirmed. */
+  promoteUnknown?: boolean;
   manualDns?: boolean;
   provisionThrows?: unknown;
   catchUpThrows?: boolean;
@@ -457,7 +457,7 @@ interface RunOpts {
 async function runFailoverHA(opts: RunOpts) {
   const {
     primaryReachable,
-    promoteInRecovery = false,
+    promoteUnknown = false,
     manualDns = false,
     provisionThrows,
     catchUpThrows = false,
@@ -545,7 +545,7 @@ async function runFailoverHA(opts: RunOpts) {
     },
     promote: async () => {
       order.push('promote');
-      return promoteInRecovery ? ('in-recovery' as const) : ('promoted' as const);
+      return promoteUnknown ? ('unknown' as const) : ('promoted' as const);
     },
     restoreWalgRole: async (a: { promotedIp: string; oldPrimaryIp: string }) => {
       captured.walgRoleArgs = a;
@@ -688,11 +688,11 @@ describe('failoverHA step order', () => {
     expect(thrown).toBeUndefined();
   });
 
-  it('a promote never issued (in-recovery) un-quiesces the primary and aborts (no dns, no swap, no scale-up)', async () => {
-    const { order } = await runFailoverHA({ primaryReachable: true, promoteInRecovery: true });
-    // The aborted planned failover must NOT leave the primary quiesced.
-    expect(order).toContain('unquiesce');
-    expect(order.indexOf('unquiesce')).toBeGreaterThan(order.indexOf('quiesce'));
+  it('an unconfirmed promote keeps the primary quiesced and aborts (no dns, no swap, no scale-up)', async () => {
+    const { order } = await runFailoverHA({ primaryReachable: true, promoteUnknown: true });
+    // The standby may yet promote: un-quiescing the old primary would serve
+    // writes from both sides (R3).
+    expect(order).not.toContain('unquiesce');
     // Nothing past the promote ran: no scale-up, no gate, no dns, no swap.
     expect(order).not.toContain('scaleUp');
     expect(order).not.toContain('dns');

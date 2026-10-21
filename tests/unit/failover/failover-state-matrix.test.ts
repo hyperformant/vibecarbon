@@ -86,8 +86,10 @@ interface RunOpts {
   standbyState?: StandbyState;
   primaryState?: StandbyState;
   envConfig?: Record<string, unknown>;
+  /** The promote seam throws instead of returning a verdict. */
+  promoteThrows?: boolean;
   /** What the promote seam resolves to. */
-  promoteVerdict?: 'promoted' | 'in-recovery' | 'unknown';
+  promoteVerdict?: 'promoted' | 'unknown';
   /** Flags as parsed from the command line (-force-unproven, -allow-degraded, -y). */
   flags?: { forceUnproven?: boolean; allowDegraded?: boolean; yes?: boolean };
   /** The system identifier the reseed seam reports through onSeeded (null: no reseed ran). */
@@ -107,6 +109,7 @@ async function run(opts: RunOpts = {}) {
     primaryState = streamingStandby({ inRecovery: false, receiverStatus: null }),
     envConfig = baseEnvConfig(),
     promoteVerdict = 'promoted',
+    promoteThrows = false,
     flags = {},
     seededSysid = null,
   } = opts;
@@ -183,6 +186,7 @@ async function run(opts: RunOpts = {}) {
     },
     promote: async () => {
       order.push('promote');
+      if (promoteThrows) throw new Error('kubectl exec failed');
       return promoteVerdict;
     },
     restoreWalgRole: async () => {
@@ -418,12 +422,12 @@ describe('failoverHA state matrix', () => {
     expect((captured.journal as { systemIdentifier: string }).systemIdentifier).toBe(SYSID);
   });
 
-  it("promote 'in-recovery' (never issued) un-quiesces once and clears the journal", async () => {
-    const { order, thrown } = await run({ promoteVerdict: 'in-recovery' });
-    expect(order.filter((s) => s === 'unquiesce')).toHaveLength(1);
-    expect(order).toContain('clearJournal');
-    expect(order.indexOf('clearJournal')).toBeGreaterThan(order.indexOf('promote'));
-    expect(thrown).toBeInstanceOf(Error);
+  it('a thrown promote is unconfirmed too: fenced, journal kept, never cleared', async () => {
+    const { order, thrown } = await run({ promoteThrows: true });
+    expect(order).toContain('promote');
+    expect(order.filter((s) => s === 'unquiesce')).toHaveLength(0);
+    expect(order).not.toContain('clearJournal');
+    expect(thrown?.message).toMatch(/kept fenced/);
     expect(order).not.toContain('dns');
     expect(order).not.toContain('saveConfig');
   });
@@ -673,14 +677,23 @@ describe('promoteStandby (tri-state, deadline not poll count)', () => {
     ]);
   });
 
-  it("in recovery and the promote never issued is 'in-recovery'", async () => {
+  it("a db pod that cannot be resolved is 'unknown', never an un-fence (a resumed run may have a promote pending)", async () => {
+    // Security review of 4a3f55f: this used to return 'in-recovery' ("no
+    // promote issued"), which un-fenced the old primary. On a rerun a previous
+    // run's promote may still be landing, so not issuing one now proves
+    // nothing: fail closed and let the journal finish it.
     vi.mocked(ssh.getPostgresPod).mockRejectedValueOnce(new Error('no db pod'));
     const verdict = await promoteStandby('10.0.0.9', '/k', {
       readState: readSeq([true]),
       ...fakeTime(),
     });
-    expect(verdict).toBe('in-recovery');
+    expect(verdict).toBe('unknown');
     expect(ssh.sshKubectl).not.toHaveBeenCalled();
+  });
+
+  it("promoteStandby never answers 'in-recovery' (nothing un-fences once a failover is journaled)", () => {
+    const src = readFileSync(join(process.cwd(), 'src/lib/deploy/replication.js'), 'utf-8');
+    expect(src).not.toMatch(/return 'in-recovery'/);
   });
 
   it("an unreadable state at the deadline is 'unknown'", async () => {
