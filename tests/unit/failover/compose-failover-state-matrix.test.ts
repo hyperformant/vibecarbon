@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sshCalls: Array<{ ip: string; command: string }> = [];
-let sshOverride: ((c: string) => string | undefined) | undefined;
+let sshOverride: ((c: string) => string | Error | undefined) | undefined;
 let addonStartResult: string | false = '';
 
 const WALG_AUDIT_PASS = [
@@ -41,9 +41,12 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const rec = (ip: string, _k: string, command: unknown) => {
     const c = String(command);
     sshCalls.push({ ip, command: c });
+    const over = sshOverride?.(c);
+    if (over instanceof Error) throw over;
+    if (over !== undefined) return over;
     if (c.includes('WALG_AUDIT')) return WALG_AUDIT_PASS;
     if (c.includes('%{http_code}')) return 'app=200';
-    if (c.includes('FENCE_DONE')) return sshOverride?.(c) ?? 'STOPPED fake\nFENCE_DONE';
+    if (c.includes('FENCE_DONE')) return 'STOPPED fake\nFENCE_DONE';
     if (c.includes('replication.yml up -d --no-deps n8n')) return addonStartResult;
     return '';
   };
@@ -288,6 +291,9 @@ async function run(opts: RunOpts = {}) {
     fenceOldPrimary: async (ip: string, key: string, project: string, services: string[]) => {
       order.push('fence');
       captured.fencedIp = ip;
+      captured.addonStartedBeforeFence = sshCalls.some((c) =>
+        c.command.includes('replication.yml up -d --no-deps'),
+      );
       return realFence ? stopOldPrimaryApp(ip, key, project, services) : true;
     },
     confirmUnproven: async () => {
@@ -429,6 +435,57 @@ describe('failoverComposeHA state matrix', () => {
     await run({ envConfig: baseEnvConfig({ n8n: true }), realFence: true });
     expect(warn.mock.calls.some((c) => String(c[0]).includes('SPLIT-BRAIN'))).toBe(true);
     warn.mockRestore();
+  });
+
+  it('unplanned: the primary-only add-ons start only after the old primary writer stop', async () => {
+    // Two reachable n8n instances would both fire cron and webhooks, so the
+    // promoted node starts its own only once the old primary's are stopped
+    // (or the stop attempt found it unreachable).
+    const { order, captured, thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('fence');
+    expect(captured.addonStartedBeforeFence).toBe(false);
+    expect(sshCalls.some((c) => c.command.includes('replication.yml up -d --no-deps n8n'))).toBe(
+      true,
+    );
+  });
+
+  it('planned: the add-ons start after the pre-promote writer stop and the app restart', async () => {
+    const { order, thrown } = await run({
+      primaryReachable: true,
+      envConfig: baseEnvConfig({ n8n: true }),
+    });
+    expect(thrown).toBeUndefined();
+    expect(order.indexOf('stopWriters')).toBeLessThan(order.indexOf('promote'));
+    const restart = sshCalls.findIndex((c) => c.command === 'docker restart myapp-app');
+    const start = sshCalls.findIndex((c) => c.command.includes('replication.yml up -d --no-deps'));
+    expect(restart).toBeGreaterThan(-1);
+    expect(start).toBeGreaterThan(restart);
+  });
+
+  it('a wal-g role write that never landed says the next reconcile holds the add-ons at zero', async () => {
+    const p = await import('@clack/prompts');
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const utils = await import('../../../src/lib/deploy/utils.js');
+    vi.mocked(utils.mergeRemoteDotenv).mockRejectedValueOnce(new Error('ssh: connection reset'));
+    const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
+    expect(thrown?.message).toMatch(/FAILOVER COMPLETED, BACKUPS DID NOT/);
+    expect(thrown?.message).toMatch(/next reconcile scales n8n back to 0/);
+    expect(
+      error.mock.calls.some((c) => /next reconcile scales n8n back to 0/.test(String(c[0]))),
+    ).toBe(true);
+    error.mockRestore();
+  });
+
+  it('a db recreate failure after the role was written does not claim the add-ons go to zero', async () => {
+    const p = await import('@clack/prompts');
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    sshOverride = (c) =>
+      c.includes('refusing to recreate blind') ? new Error('db recreate failed') : undefined;
+    const { thrown } = await run({ envConfig: baseEnvConfig({ n8n: true }) });
+    expect(thrown?.message).toMatch(/FAILOVER COMPLETED, BACKUPS DID NOT/);
+    expect(thrown?.message).not.toMatch(/next reconcile/);
+    error.mockRestore();
   });
 
   it('a run with no add-ons issues no add-on start', async () => {

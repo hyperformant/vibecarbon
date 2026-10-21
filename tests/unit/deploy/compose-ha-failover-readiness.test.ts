@@ -198,14 +198,22 @@ describe('primary-only add-ons on the promoted node', () => {
     expect(failoverFenceServices({})).toEqual(['app']);
   });
 
-  it('failoverComposeHA starts them after the role and issuer re-arm, before the API gate', () => {
+  it('failoverComposeHA starts them after the old primary writer stop, before the DNS flip', () => {
+    // Started before the stop, a reachable old primary and the promoted node
+    // would both run the add-ons (two n8n instances firing the same cron).
     const src = readFileSync('src/lib/deploy/compose/ha.js', 'utf8');
     const body = src.slice(src.indexOf('export async function failoverComposeHA'));
     const start = body.indexOf('composeStartPrimaryOnlyCmd(');
     expect(start).toBeGreaterThan(-1);
+    expect(body.indexOf('composeStartPrimaryOnlyCmd(', start + 1)).toBe(-1);
     expect(body.indexOf('restoreComposeWalgRole(')).toBeLessThan(start);
     expect(body.indexOf('armComposeAcme(')).toBeLessThan(start);
-    expect(start).toBeLessThan(body.indexOf('waitForNewPrimaryApi('));
+    expect(body.indexOf('waitForNewPrimaryApi(')).toBeLessThan(start);
+    const step2Stop = body.indexOf("s.start('Stopping old primary services')");
+    expect(step2Stop).toBeGreaterThan(-1);
+    expect(step2Stop).toBeLessThan(start);
+    expect(start).toBeLessThan(body.indexOf('demoteComposeWalgRole('));
+    expect(start).toBeLessThan(body.indexOf('flipDns('));
   });
 
   it('the hand list FAILOVER_FENCE_SERVICES is gone from src', () => {

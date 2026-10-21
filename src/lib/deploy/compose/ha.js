@@ -1293,6 +1293,9 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
     log = (msg) => p.log.info(msg),
   } = deps;
   const remoteDir = `/opt/${projectName}`;
+  // Whether .env on the promoted node says WALG_ROLE=primary. Until it does,
+  // its reconcile (standby-scale.sh) holds the primary-only add-ons at zero.
+  let roleWritten = false;
 
   try {
     // A resumed failover may have moved the role already: the RUNNING db
@@ -1306,6 +1309,7 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
       .split('\n')
       .some((l) => l.trim() === 'WALG_ROLE=primary');
     if (alreadyPrimary) {
+      roleWritten = true;
       log(`[walg-role] ${promotedIp} already runs WALG_ROLE=primary; no db recreate needed.`);
     } else {
       // composeRoleEnv: the only sanctioned compose-side role write.
@@ -1315,6 +1319,7 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
         remoteDir,
         composeRoleEnv('primary'),
       );
+      roleWritten = true;
       // 300s: a db container recreate plus the script's own 90s readiness wait,
       // with room for a slow image start on a node that is mid-incident.
       //
@@ -1347,7 +1352,7 @@ export async function restoreComposeWalgRole({ promotedIp, sshKeyPath, projectNa
     log(`[walg-role] new primary ${promotedIp} is archiving (WALG_ROLE=primary, audit passed).`);
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+    return { ok: false, error: err instanceof Error ? err : new Error(String(err)), roleWritten };
   }
 }
 
@@ -1572,9 +1577,10 @@ export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, service
     ip,
     sshKeyPath,
     // Fail closed: only docker's own "No such container" is absent. Any other
-    // inspect error is FAILED, and an existing container is always stopped
-    // (a restarting one reads Running=false). STOPPED names what was live, which
-    // is what the un-fence starts again.
+    // inspect error is FAILED, and an existing container is always stopped,
+    // whatever its status (a restarting one included). STOPPED names what was
+    // live (any status but exited or created), which is what the un-fence
+    // starts again.
     `for c in ${containers}; do ` +
       `if st=$(docker container inspect -f '{{.State.Status}}' "$c" 2>&1); then ` +
       `if docker stop "$c" >/dev/null; then ` +
@@ -1937,6 +1943,7 @@ export async function failoverComposeHA(
   const primaryServer = servers.find((s) => s.role === 'primary');
   const standbyServer = servers.find((s) => s.role === 'standby');
   const writerServices = failoverFenceServices(envConfig);
+  const promotionServices = composePromotionServices(enabledAddonNames(envConfig));
 
   if (!primaryServer || !standbyServer) {
     p.log.error('Could not identify primary and standby servers from config');
@@ -2116,7 +2123,7 @@ export async function failoverComposeHA(
       }
       p.log.warn(
         `Could not fence the old primary (${primaryServer.ip}): ${firstLine(err)}. Stop its ` +
-          `app by hand: ssh root@${primaryServer.ip} 'docker stop ${projectName}-app'`,
+          `writers by hand: ssh root@${primaryServer.ip} 'docker stop ${writerServices.map((svc) => `${projectName}-${svc}`).join(' ')}'`,
       );
     }
   }
@@ -2325,34 +2332,8 @@ export async function failoverComposeHA(
         envName,
         promotedIp: standbyServer.ip,
         detail: backupHealth.error?.message ?? 'unknown failure',
+        heldAtZero: backupHealth.roleWritten === false ? promotionServices : [],
       }),
-    );
-  }
-
-  // Step 1a4: Start the primary-only add-ons (declared in their manifests) on
-  // the promoted node. The database is read-write and .env says primary, so
-  // later reconciles keep them up. `--no-deps` never touches db; the one-shot
-  // setup jobs and app-migrate never run (the replicated database already
-  // holds their work). Best-effort and loud: a failed start must not abort a
-  // DR flip, it names the exact command to run by hand. Idempotent on a
-  // resumed run (`up -d` of a running service is a no-op).
-  const addonStart = composeStartPrimaryOnlyCmd(
-    projectName,
-    composePromotionServices(enabledAddonNames(envConfig)),
-  );
-  if (addonStart) {
-    s.start('Starting primary-only add-ons on the new primary');
-    const started = await sshRun(standbyServer.ip, sshKeyPath, addonStart, { timeout: 180_000 });
-    if (started === false) {
-      p.log.warn(
-        `Could not start the primary-only add-ons on the new primary (${standbyServer.ip}). ` +
-          `Start them by hand: ssh root@${standbyServer.ip} '${addonStart}'`,
-      );
-    }
-    s.stop(
-      started === false
-        ? 'Primary-only add-ons NOT started (continuing: see warning)'
-        : 'Primary-only add-ons started',
     );
   }
 
@@ -2435,6 +2416,34 @@ export async function failoverComposeHA(
       ? 'Old primary NOT stopped, split-brain risk (see warning)'
       : 'Old primary services stopped',
   );
+
+  // Step 2a: Start the primary-only add-ons (declared in their manifests) on
+  // the promoted node, only now that the old primary's writers are stopped
+  // (step 2; a planned run stopped them before the promote, and an
+  // unreachable old primary was tried and skipped). Started earlier, a
+  // reachable old primary and the promoted node would both run n8n and fire
+  // the same cron and webhooks. The database is read-write and .env says
+  // primary, so later reconciles keep them up. `--no-deps` never touches db;
+  // the one-shot setup jobs and app-migrate never run (the replicated
+  // database already holds their work). Best-effort and loud: a failed start
+  // must not abort a DR flip, it names the exact command to run by hand.
+  // Idempotent on a resumed run (`up -d` of a running service is a no-op).
+  const addonStart = composeStartPrimaryOnlyCmd(projectName, promotionServices);
+  if (addonStart) {
+    s.start('Starting primary-only add-ons on the new primary');
+    const started = await sshRun(standbyServer.ip, sshKeyPath, addonStart, { timeout: 180_000 });
+    if (started === false) {
+      p.log.warn(
+        `Could not start the primary-only add-ons on the new primary (${standbyServer.ip}). ` +
+          `Start them by hand: ssh root@${standbyServer.ip} '${addonStart}'`,
+      );
+    }
+    s.stop(
+      started === false
+        ? 'Primary-only add-ons NOT started (continuing: see warning)'
+        : 'Primary-only add-ons started',
+    );
+  }
 
   // Step 2b: Demote the old primary's wal-g write-guard, so it stops pushing
   // WAL into the prefix the new primary now owns. Deliberately AFTER step 2:
@@ -2577,6 +2586,7 @@ export async function failoverComposeHA(
         envName,
         promotedIp: standbyServer.ip,
         detail: backupHealth.error?.message ?? 'unknown failure',
+        heldAtZero: backupHealth.roleWritten === false ? promotionServices : [],
       }),
     );
   }

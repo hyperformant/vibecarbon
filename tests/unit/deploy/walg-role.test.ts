@@ -197,6 +197,21 @@ describe('walgRoleDegradedMessage', () => {
     expect(msg).toContain('vibecarbon deploy prod');
   });
 
+  it('names the add-ons the next reconcile holds at zero only when it is given them', () => {
+    expect(msg).not.toContain('next reconcile');
+    const held = walgRoleDegradedMessage({
+      path: 'compose',
+      envName: 'prod',
+      promotedIp: '2.2.2.2',
+      detail: 'x',
+      heldAtZero: ['n8n', 'metabase'],
+    });
+    expect(held).toContain(
+      "Until WALG_ROLE=primary is in the new primary's .env, its next reconcile scales n8n, metabase back to 0",
+    );
+    expect(held).not.toMatch(/\u2014/);
+  });
+
   it('gives the k8s check on the k8s path', () => {
     const k8s = walgRoleDegradedMessage({
       path: 'k8s',
