@@ -246,6 +246,9 @@ spec:
               # Recovery config into staging: strip the settings it rewrites, append the
               # new ones (rendered by the CLI, the same text on both tiers).
               VC_AUTO_CONF="$PGDATA/.vc-restore/postgresql.auto.conf"
+              # These writes run as root inside a tree fetched from the bucket: a
+              # symlink the base carries at either path is removed, never followed.
+              [ -L "$VC_AUTO_CONF" ] && rm -f "$VC_AUTO_CONF"
               touch "$VC_AUTO_CONF"
               while IFS= read -r vc_line; do
                 case "$vc_line" in
@@ -253,6 +256,7 @@ spec:
                   ?*) printf '%s\n' "$vc_line" >> "$VC_AUTO_CONF" ;;
                 esac
               done < "$VC_RECOVERY_CONF_FILE"
+              [ -L "$PGDATA/.vc-restore/recovery.signal" ] && rm -f "$PGDATA/.vc-restore/recovery.signal"
               touch "$PGDATA/.vc-restore/recovery.signal"
               chown -R postgres:postgres "$PGDATA/.vc-restore"
 

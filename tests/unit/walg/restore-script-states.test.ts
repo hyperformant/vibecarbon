@@ -20,6 +20,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -63,7 +64,7 @@ let pgdata: string;
 let bin: string;
 
 /** A stub wal-g: `backup-fetch <dir> <name>` writes a fake cluster, or fails. */
-function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap') {
+function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap' | 'ok-with-links') {
   const body =
     mode === 'fail'
       ? 'echo "ERROR: Backup $3 does not exist" >&2; exit 1'
@@ -71,7 +72,13 @@ function stubWalg(mode: 'ok' | 'fail' | 'ok-with-vc' | 'ok-with-gap') {
           'mkdir -p "$2/base" "$2/global"',
           'echo 17 > "$2/PG_VERSION"',
           'echo restored > "$2/base/marker"',
-          'echo "port = 5432" > "$2/postgresql.auto.conf"',
+          // A base whose recovery files are symlinks to somewhere else.
+          ...(mode === 'ok-with-links'
+            ? [
+                `ln -s "${join(dir, 'victim')}" "$2/postgresql.auto.conf"`,
+                `ln -s "${join(dir, 'victim')}" "$2/recovery.signal"`,
+              ]
+            : ['echo "port = 5432" > "$2/postgresql.auto.conf"']),
           ...(mode === 'ok-with-vc'
             ? [
                 'mkdir -p "$2/.vc-prev/base" "$2/.vc-restore" "$2/.vc-discard"',
@@ -253,6 +260,19 @@ for (const [tier, build] of TIERS) {
       expect(r.status, r.stderr).toBe(0);
       expect(read('base/marker')).toBe('restored');
       expect(readFileSync(victim, 'utf-8')).toBe('precious\n');
+    });
+
+    it('recovery files a fetched base carries as symlinks are replaced, never written through', () => {
+      seedLive();
+      writeFileSync(join(dir, 'victim'), 'precious\n');
+      stubWalg('ok-with-links');
+      const r = run(build());
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(join(dir, 'victim'), 'utf-8')).toBe('precious\n');
+      expect(read('base/marker')).toBe('restored');
+      expect(read('postgresql.auto.conf')).toContain('recovery_target_action');
+      expect(lstatSync(join(pgdata, 'postgresql.auto.conf')).isSymbolicLink()).toBe(false);
+      expect(lstatSync(join(pgdata, 'recovery.signal')).isSymbolicLink()).toBe(false);
     });
 
     it('a restored base never carries the source database WAL gap record', () => {
