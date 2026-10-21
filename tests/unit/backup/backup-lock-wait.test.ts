@@ -12,7 +12,15 @@
  * file in a scratch dir (VC_BACKUP_LOCKFILE), held by a real `flock` process.
  */
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,6 +102,26 @@ describe('compose-backup.sh lock wait', () => {
     expect(r.stdout).toContain('BACKUP_RESULT=skipped:already-running');
     expect(r.elapsedMs).toBeGreaterThanOrEqual(900);
     expect(r.calls).toBe('');
+  });
+
+  it('a symlink at the lock path is refused, its target untouched', () => {
+    const p = project();
+    const target = join(p.dir, 'victim');
+    writeFileSync(target, 'keep');
+    symlinkSync(target, p.lock);
+    const r = runBackup(p);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('is a symlink, refusing');
+    expect(r.calls).toBe('');
+    expect(readFileSync(target, 'utf-8')).toBe('keep');
+  });
+
+  it('the lock is opened without truncation', () => {
+    const p = project();
+    writeFileSync(p.lock, 'keep');
+    const r = runBackup(p);
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(p.lock, 'utf-8')).toBe('keep');
   });
 
   it('a LOCK_WAIT that is not a whole number of seconds is no wait', async () => {

@@ -55,7 +55,13 @@ fi
 LOCKFILE="${VC_BACKUP_LOCKFILE:-/tmp/vibecarbon-backup.lock}"
 LOCK_WAIT="${LOCK_WAIT:-0}"
 [[ "$LOCK_WAIT" =~ ^[0-9]+$ ]] || LOCK_WAIT=0
-exec 200>"${LOCKFILE}"
+# /tmp is writable by others: a symlink planted at the lock path would make this
+# open (as root) write through it, so a symlink is refused, and >> never truncates.
+if [ -L "${LOCKFILE}" ]; then
+  echo "Backup lock ${LOCKFILE} is a symlink, refusing" >&2
+  exit 1
+fi
+exec 200>>"${LOCKFILE}"
 if [ "$LOCK_WAIT" -gt 0 ]; then
   flock -w "$LOCK_WAIT" 200
 else

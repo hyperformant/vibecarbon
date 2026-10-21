@@ -393,6 +393,28 @@ describe('the backup CronJob prints the same markers', () => {
     expect(markers(waited.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
   });
 
+  it('a symlink at the lock path is refused and its target is never written', () => {
+    const target = join(work, 'cron-symlink-target');
+    writeFileSync(target, 'keep');
+    const lockfile = join(work, 'cron-symlink.lock');
+    rmSync(lockfile, { force: true });
+    symlinkSync(target, lockfile);
+    const r = runCron('symlink-lock', { realFlock: true }, { VC_BACKUP_LOCKFILE: lockfile });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('is a symlink, refusing');
+    expect(markers(r.stdout)).toEqual([]);
+    expect(r.walg).toBe('');
+    expect(readFileSync(target, 'utf-8')).toBe('keep');
+  });
+
+  it('the lock is opened without truncation', () => {
+    const lockfile = join(work, 'cron-notrunc.lock');
+    writeFileSync(lockfile, 'keep');
+    const r = runCron('notrunc-lock', { realFlock: true }, { VC_BACKUP_LOCKFILE: lockfile });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(lockfile, 'utf-8')).toBe('keep');
+  });
+
   it('a LOCK_WAIT that is not a whole number of seconds is refused before kubectl exec', () => {
     const r = runCron('bad-wait', {}, { LOCK_WAIT: '5;rm' });
     expect(r.status).toBe(1);

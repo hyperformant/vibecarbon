@@ -147,7 +147,14 @@ spec:
                     # the lock is a file in the db container, held for the whole
                     # run. busybox flock has no -w, so the bounded wait polls -n.
                     # VC_BACKUP_LOCKFILE exists for the script tests only.
-                    exec 9>"${VC_BACKUP_LOCKFILE:-/tmp/vc-backup.lock}"
+                    # /tmp is writable by the postgres user and this opens as root:
+                    # a symlink at the path is refused, and >> never truncates.
+                    lock_path="${VC_BACKUP_LOCKFILE:-/tmp/vc-backup.lock}"
+                    if [ -L "$lock_path" ]; then
+                      echo "backup lock $lock_path is a symlink, refusing" >&2
+                      exit 1
+                    fi
+                    exec 9>>"$lock_path"
                     lock_until=$(( $(date +%s) + LOCK_WAIT ))
                     until flock -n 9; do
                       if [ "$(date +%s)" -ge "$lock_until" ]; then
