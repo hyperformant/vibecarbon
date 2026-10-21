@@ -40,13 +40,16 @@ const SYSID = '7699032860122738725';
 
 describe('the fence record', () => {
   it('parses sysid|timeline-hex, and refuses anything else', () => {
-    expect(parseBackupFenceState(`${SYSID}|00000002\n`)).toEqual({
+    expect(parseBackupFenceState(`${SYSID}|00000002|0000000000000005\n`)).toEqual({
       systemIdentifier: SYSID,
       timeline: 2,
+      switchSegment: '0000000000000005',
     });
-    expect(parseBackupFenceState(`${SYSID}|0000001A`)).toEqual({
+    // A primary that never recovered has no switch point (pg_last_wal_replay_lsn is NULL).
+    expect(parseBackupFenceState(`${SYSID}|0000001A|`)).toEqual({
       systemIdentifier: SYSID,
       timeline: 26,
+      switchSegment: null,
     });
     for (const bad of [
       '',
@@ -77,7 +80,8 @@ describe('the fence record', () => {
     const scripts: string[] = [];
     const r = await writeBackupFence({
       primaryNode: 'myapp-prod-standby',
-      exec: async (sql) => (sql === BACKUP_FENCE_STATE_SQL ? `${SYSID}|00000002` : ''),
+      exec: async (sql) =>
+        sql === BACKUP_FENCE_STATE_SQL ? `${SYSID}|00000002|0000000000000005` : '',
       runInDb: async (script) => {
         scripts.push(script);
         return 'FENCE_WRITTEN\n';
@@ -90,6 +94,7 @@ describe('the fence record', () => {
         primaryNode: 'myapp-prod-standby',
         systemIdentifier: SYSID,
         timeline: 2,
+        switchSegment: '0000000000000005',
         at: '2026-10-21T00:00:00.000Z',
       },
     });
@@ -218,8 +223,8 @@ esac
   return { bin, pushes: () => readFileSync(log, 'utf-8') };
 }
 
-const fenceJson = (timeline: number, sysid = SYSID) =>
-  JSON.stringify({ primaryNode: 'b', systemIdentifier: sysid, timeline, at: 'x' });
+const fenceJson = (timeline: number, sysid = SYSID, switchSegment: string | null = null) =>
+  JSON.stringify({ primaryNode: 'b', systemIdentifier: sysid, timeline, switchSegment, at: 'x' });
 
 const env = (bin: string) => ({
   PATH: `${bin}:${process.env.PATH}`,
@@ -275,6 +280,25 @@ describe('wal-archive.sh against the fence', () => {
     const r = archive('a6', '000000010000000000000004', { fence: fenceJson(2), psqlFails: true });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(BACKUP_FENCE_REFUSAL);
+  });
+
+  // A planned failover with an archive backlog on the old primary: the
+  // segments before the branch are history both timelines need. Refusing them
+  // would leave a gap every pre-failover base backup replays through.
+  it('the old timeline before the switch segment pushes; from the switch on it refuses', () => {
+    const fence = fenceJson(2, SYSID, '0000000000000005');
+    const before = archive('s1', '000000010000000000000004', { fence });
+    expect(before.status).toBe(0);
+    expect(before.pushes).toContain('wal-push pg_wal/000000010000000000000004');
+    for (const seg of ['000000010000000000000005', '000000010000000000000009']) {
+      const r = archive(`s2-${seg}`, seg, { fence });
+      expect(r.status, seg).toBe(1);
+      expect(r.stderr, seg).toContain(BACKUP_FENCE_REFUSAL);
+    }
+    // Compared numerically across the log id half too.
+    const hi = fenceJson(2, SYSID, '0000000100000002');
+    expect(archive('s3', '0000000100000000000000FF', { fence: hi }).status).toBe(0);
+    expect(archive('s4', '000000010000000100000002', { fence: hi }).status).toBe(1);
   });
 
   it('the .history and .partial files a promotion archives are exempt', () => {

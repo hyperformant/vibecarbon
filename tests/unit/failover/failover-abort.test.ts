@@ -233,11 +233,10 @@ describe('compose-ha abort backend', () => {
     return { backend, commands, rearm };
   };
 
-  it('stops the standby db by container name with its restart policy cleared, and proves it', async () => {
+  it('stops the standby db by container name, and proves it', async () => {
     const { backend, commands } = make({ 'docker stop myapp-db': 'DB_RUNNING=false' });
     await expect(backend.stopStandbyDb()).resolves.toEqual({ ok: true });
     expect(commands[0].ip).toBe('10.0.0.2');
-    expect(commands[0].command).toMatch(/docker update --restart=no myapp-db/);
     expect(commands[0].command).toMatch(/docker stop myapp-db/);
   });
 

@@ -13,15 +13,19 @@
  * root of WALG_S3_PREFIX, read and written with `wal-g st` from inside the db
  * container (its WALG_S3_PREFIX and AWS_* are the ones every push uses):
  *
- *   { "primaryNode", "systemIdentifier", "timeline", "at" }
+ *   { "primaryNode", "systemIdentifier", "timeline", "switchSegment", "at" }
  *
- * It names the primary's database (system identifier) and its timeline at the
- * moment it became primary. A promotion always moves to a new timeline and the
- * old primary never does, so every push path refuses when the fence names its
- * database on a newer timeline than its own: wal-archive.sh (both tiers, by the
- * pushed segment's own timeline; the .history and .partial files a promotion
- * itself archives are exempt), backup/compose-backup.sh and the k8s backup
- * CronJob (by the current WAL insert timeline). No fence object means an env
+ * It names the primary's database (system identifier), its timeline at the
+ * moment it became primary, and the segment that timeline branched in. A
+ * promotion always moves to a new timeline and the old primary never does, so
+ * every push path refuses when the fence names its database on a newer
+ * timeline than its own: wal-archive.sh (both tiers, by the pushed segment's
+ * own timeline), backup/compose-backup.sh and the k8s backup CronJob (by the
+ * current WAL insert timeline). The archive wrapper still lets through what
+ * the old timeline shares with the new one: segments before the switch
+ * segment (an old primary's archive backlog at the moment of a planned
+ * failover, which a refusal would turn into a gap every pre-failover backup
+ * needs), and the .history and .partial files a promotion itself archives. No fence object means an env
  * that never failed over: allowed. Another system identifier is another
  * database (a destroyed and recreated env): allowed. `wal-g delete garbage` and
  * `delete retain` only touch basebackups_005/ and wal_005/, never the root
@@ -46,31 +50,39 @@ export const BACKUP_FENCE_OBJECT = 'vibecarbon-fence.json';
 export const BACKUP_FENCE_REFUSAL = 'backup prefix fenced to another primary';
 
 /**
- * The fenced primary's identity: `sysid|timeline-hex`. pg_walfile_name of the
- * insert position carries the current timeline in its first 8 hex digits, even
- * right after a promotion (pg_control_checkpoint lags until a checkpoint). No
- * string literals, so it survives every psql transport's quoting. Errors on a
- * server in recovery, which is never a primary to fence to.
+ * The fenced primary's identity: `sysid|timeline-hex|switch-segment`.
+ * pg_walfile_name of the insert position carries the current timeline in its
+ * first 8 hex digits, even right after a promotion (pg_control_checkpoint lags
+ * until a checkpoint). The switch segment is the segment number (16 hex) that
+ * holds the end of the recovery that promoted it: pg_last_wal_replay_lsn()
+ * stays there after a promotion (NULL on a server that never recovered, read
+ * as no switch point). Verified on postgres:17.11-walg3.0.9-r2: a standby
+ * promoted at 0/5000060 reads 0000000000000005 while writing
+ * 000000020000000000000005. No string literals, so it survives every psql
+ * transport's quoting. Errors on a server in recovery, never a primary.
  */
 export const BACKUP_FENCE_STATE_SQL =
   'SELECT (SELECT system_identifier FROM pg_control_system()), ' +
-  'substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8)';
+  'substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8), ' +
+  'substr(pg_walfile_name(pg_last_wal_replay_lsn()), 9, 16)';
 
 /**
  * Parse BACKUP_FENCE_STATE_SQL's row.
  *
  * @param {unknown} out
- * @returns {{ systemIdentifier: string, timeline: number } | null}
+ * @returns {{ systemIdentifier: string, timeline: number, switchSegment: string|null } | null}
  */
 export function parseBackupFenceState(out) {
   const row = String(out ?? '')
     .trim()
     .split('\n')
     .pop();
-  const [sysid, tl] = (row ?? '').split('|').map((s) => s.trim());
+  const [sysid, tl, sw] = (row ?? '').split('|').map((s) => s.trim());
   if (!/^\d+$/.test(sysid ?? '') || !/^[0-9A-Fa-f]{8}$/.test(tl ?? '')) return null;
   const timeline = Number.parseInt(tl, 16);
-  return timeline > 0 ? { systemIdentifier: sysid, timeline } : null;
+  if (!(timeline > 0)) return null;
+  const switchSegment = /^[0-9A-Fa-f]{16}$/.test(sw ?? '') ? sw.toUpperCase() : null;
+  return { systemIdentifier: sysid, timeline, switchSegment };
 }
 
 /**

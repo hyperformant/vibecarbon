@@ -99,12 +99,14 @@ if [ "$in_recovery" = "t" ]; then
 fi
 
 # BACKUP-PREFIX FENCE: a failover wrote vibecarbon-fence.json into this prefix,
-# naming the promoted primary's database and the timeline it promoted onto. An
-# old primary that rebooted unreached is the same database on an OLDER
-# timeline: its segments would land in, and fork, the promoted node's stream.
-# The segment's own timeline is the first 8 hex digits of its name. The
-# .history and .partial files are what a promotion itself archives, on the
-# promoted node, so they are exempt. No fence object (an env that never failed
+# naming the promoted primary's database, the timeline it promoted onto and the
+# segment that timeline branched in. An old primary that rebooted unreached is
+# the same database on an OLDER timeline: its segments from the branch on
+# would land in, and fork, the promoted node's stream. The segment's timeline
+# is the first 8 hex digits of its name, its number the next 16. Segments
+# before the branch are history both timelines share (an archive backlog at a
+# planned failover), and the .history and .partial files are what a promotion
+# itself archives, so those pass. No fence object (an env that never failed
 # over) or another database is allowed; a fence that cannot be read falls
 # through to the push, which fails the same way.
 WAL_NAME="$(basename "$WAL_PATH")"
@@ -114,8 +116,19 @@ case "$WAL_NAME" in
         fence="$("$WALG" st cat vibecarbon-fence.json 2>/dev/null)"
         fence_tl="$(printf '%s' "$fence" | grep -o '"timeline":[0-9]*' | grep -o '[0-9]*$')"
         fence_sysid="$(printf '%s' "$fence" | grep -o '"systemIdentifier":"[0-9]*"' | grep -o '[0-9][0-9]*')"
+        fence_switch="$(printf '%s' "$fence" | grep -o '"switchSegment":"[0-9A-F]\{16\}"' | grep -o '[0-9A-F]\{16\}')"
         seg_tl="${WAL_NAME:0:8}"
-        if [ -n "$fence_tl" ] && [[ "$seg_tl" =~ ^[0-9A-Fa-f]{8}$ ]] && [ "$((16#$seg_tl))" -lt "$fence_tl" ]; then
+        seg_no="${WAL_NAME:8:16}"
+        before_switch=0
+        if [ -n "$fence_switch" ] && [[ "$seg_no" =~ ^[0-9A-F]{16}$ ]]; then
+            # Numerically, in two 32-bit halves (log id, segment).
+            s_hi=$((16#${seg_no:0:8})); s_lo=$((16#${seg_no:8:8}))
+            f_hi=$((16#${fence_switch:0:8})); f_lo=$((16#${fence_switch:8:8}))
+            if [ "$s_hi" -lt "$f_hi" ] || { [ "$s_hi" -eq "$f_hi" ] && [ "$s_lo" -lt "$f_lo" ]; }; then
+                before_switch=1
+            fi
+        fi
+        if [ "$before_switch" = 0 ] && [ -n "$fence_tl" ] && [[ "$seg_tl" =~ ^[0-9A-Fa-f]{8}$ ]] && [ "$((16#$seg_tl))" -lt "$fence_tl" ]; then
             local_sysid=""
             if command -v psql >/dev/null 2>&1; then
                 local_sysid="$(psql -U "${PGUSER:-postgres}" -d postgres -tAXc 'SELECT system_identifier FROM pg_control_system()' 2>/dev/null | tr -d '[:space:]')"

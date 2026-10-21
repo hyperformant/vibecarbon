@@ -1655,9 +1655,11 @@ export async function flipComposeDnsWith({ dnsProvider, token, zoneId, domain, i
 /**
  * The compose-HA backend of `vibecarbon failover <env> -abort` (failover-abort.js).
  * By container name throughout (`container_name: ${PROJECT_NAME}-<svc>`), so no
- * compose file resolution is involved. The standby's db is stopped AND its
- * restart policy cleared: `unless-stopped` already keeps a stopped container
- * down, `--restart=no` keeps it down through a daemon restart too.
+ * compose file resolution is involved. The standby's db is stopped: its
+ * `unless-stopped` policy keeps a stopped container down through a daemon
+ * restart. A host reboot runs the bundle's `compose up` unit, which would
+ * start it again, so its .env also gets WALG_ROLE=standby (it can archive
+ * nothing) until the next deploy reseeds it.
  *
  * @param {object} args
  * @param {string} args.envName
@@ -1712,7 +1714,7 @@ export function composeFailoverAbortBackend({
       const out = await run(
         standbyServer.ip,
         sshKeyPath,
-        `docker update --restart=no ${dbCt} >/dev/null 2>&1; docker stop ${dbCt} >/dev/null 2>&1; ` +
+        `docker stop ${dbCt} >/dev/null 2>&1; ` +
           `echo "DB_RUNNING=$(docker container inspect -f '{{.State.Running}}' ${dbCt} 2>/dev/null || echo absent)"`,
         { timeout: 120_000 },
       );
