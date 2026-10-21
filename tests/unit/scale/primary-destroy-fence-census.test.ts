@@ -60,6 +60,10 @@ const SITES: Record<string, { rule: Rule; why: string }> = {
     rule: 'fenced',
     why: 'the old primary goes only after its fence, a pushed final base restored on the new server, and the flip',
   },
+  'src/scale.js#resumeComposeCutover': {
+    rule: 'no-database',
+    why: 'the resume deletes the new server only when DNS never moved off the old one, so its restored copy took no write; the old server is unfenced after it',
+  },
   'src/scale.js#deleteUnusedReplacement': {
     rule: 'no-database',
     why: 'a replacement that never took over: DNS never pointed at it, so its restored copy never took a write',

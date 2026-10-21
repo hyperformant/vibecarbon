@@ -22,6 +22,7 @@ import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import { awaitPostgresAccepting } from './lib/deploy/k8s/index.js';
+import { assertNoScaleCutoverInFlight } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { assertInProjectDir } from './lib/project-guard.js';
@@ -518,6 +519,7 @@ export async function run(args) {
     sshKeyPath,
     projectName,
     envName,
+    envConfig,
     backupRetain: envConfig.backup?.retentionDays,
     yes: !!values.y,
   });
@@ -655,10 +657,14 @@ export async function runCreate({
   sshKeyPath,
   projectName,
   envName,
+  envConfig,
   backupRetain,
   yes,
   deps = {},
 }) {
+  // A compose scale stopped mid-cutover: a base pushed now would come from the
+  // fenced old server, not yet demoted, while the database may serve elsewhere.
+  assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'back up' });
   if (!yes) {
     const confirm = await p.confirm({
       message: `Create a database backup for ${c.bold(envName)} (${serverIp})?`,

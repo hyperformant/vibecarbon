@@ -234,7 +234,7 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
   // journal names both servers, and the config may still name the old one.
   if (envConfig.ha?.writeFence?.cutover) {
     const dnsProviderId = envConfig.dnsProvider || envConfig.dns?.provider || null;
-    const outcome = await resumeComposeCutover({
+    const resumeCtx = {
       tier,
       environment,
       envConfig,
@@ -248,12 +248,24 @@ async function scaleCompose(environment, envConfig, projectConfig, options = {})
       apiToken,
       region: envConfig.region,
       services: projectConfig.services || {},
-    });
-    p.outro(
-      outcome === 'finished'
-        ? `${c.success('Scale finished.')} The new server serves; rerun scale for another change.`
-        : `${c.success('Scale rolled back.')} The old server serves again; rerun scale to try again.`,
-    );
+    };
+    const outcome = await resumeComposeCutover(resumeCtx);
+    const problems = resumeCtx.resumeProblems ?? [];
+    if (outcome === 'finished') {
+      p.outro(
+        `${c.success('Scale finished.')} The new server serves; rerun scale for another change.`,
+      );
+    } else if (problems.length === 0) {
+      p.outro(
+        `${c.success('Scale rolled back.')} The old server serves again; rerun scale to try again.`,
+      );
+    } else {
+      p.outro(
+        `${c.warning('Scale rolled back with problems.')} The new server is gone; ` +
+          `${problems.length} problem(s) above still need fixing on the old server before it serves.`,
+      );
+      process.exitCode = 1;
+    }
     return;
   }
 
@@ -556,6 +568,9 @@ export async function readOldAppEnv(
   return dropUnportableEnv(parseDotenv(String(text ?? '')), { log });
 }
 
+/** How long a rolled-back resume waits before it reads DNS once more. */
+const DNS_RESETTLE_MS = 15_000;
+
 /** The post-flip steps of a compose cutover, in order, with the words a message uses. */
 const CUTOVER_STEPS = [
   ['dns', 'the DNS flip'],
@@ -744,7 +759,19 @@ export async function resumeComposeCutover(ctx) {
     );
   }
   if (state === 'old') {
-    p.log.info(`DNS never moved: rolling ${label} back, it takes writes again...`);
+    // The new server goes FIRST: a DNS write the provider applies late can
+    // then only point at a server that is gone (an outage), never at a second
+    // writable primary next to the unfenced old one.
+    p.log.info(`DNS never moved: deleting the new server ${newIp}, then rolling ${label} back...`);
+    try {
+      await provider.deleteServer(newServerId);
+    } catch (err) {
+      throw new Error(
+        `could not delete the new server ${newIp} (id ${newServerId}): ${firstLineOf(err)}; ` +
+          `the old server stays write-fenced so two primaries never take writes. ` +
+          `Delete it, then ${scaleCutoverNextStep(environment)}.`,
+      );
+    }
     const back = await rollbackComposeCutover({
       environment,
       ip: cutover.oldIp,
@@ -754,14 +781,33 @@ export async function resumeComposeCutover(ctx) {
       cronRemoved: cutover.cronRemoved !== false,
       backupConfig: envConfig.backup,
     });
-    for (const problem of back.problems) p.log.error(problem);
     clearScaleCutoverJournal({ environment });
-    await deleteUnusedReplacement(
-      provider,
-      newServerId,
-      newIp,
-      'New server deleted. Old server is still running.',
-    );
+    const problems = [...back.problems];
+    // Point DNS at the old server again (a no-op unless a late write moved
+    // it), wait a settle, and read once more: anything still off the old
+    // server is named, loudly.
+    if (managesDns) {
+      try {
+        await updateDNS(envConfig, apiToken, domain, cutover.oldIp);
+        await (ctx.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(DNS_RESETTLE_MS);
+        // Read with the roles swapped: `moved` means every record is on the old server.
+        const again = await readDnsMove(envConfig, apiToken, domain, {
+          oldIp: newIp,
+          newIp: cutover.oldIp,
+        });
+        if (again.state !== 'moved') {
+          problems.push(
+            `DNS is not all on the old server ${cutover.oldIp} after the rollback: ${again.pending.join(', ')}; point them at it`,
+          );
+        }
+      } catch (err) {
+        problems.push(
+          `could not point DNS back at the old server ${cutover.oldIp} (${firstLineOf(err)}); check ${domain} and *.${domain}`,
+        );
+      }
+    }
+    for (const problem of problems) p.log.error(problem);
+    ctx.resumeProblems = problems;
     return 'rolled-back';
   }
 
@@ -1450,11 +1496,18 @@ async function scaleServers(ctx) {
                 `and the new server ${newIp} is kept; ${scaleCutoverNextStep(environment)}.`,
             );
           }
-          flipped = true;
-          saveScaledServers(ctx);
-          throw new Error(
-            `the DNS update failed part way (${firstLineOf(dnsErr)}); ` +
-              `still to point at ${newIp}: ${move.pending.join(', ')}`,
+          if (move.state === 'partial') {
+            flipped = true;
+            saveScaledServers(ctx);
+            throw new Error(
+              `the DNS update failed part way (${firstLineOf(dnsErr)}); ` +
+                `still to point at ${newIp}: ${move.pending.join(', ')}`,
+            );
+          }
+          // `moved`: the update reported an error, but every record reads back
+          // on the new server. The flip landed; carry on.
+          p.log.warn(
+            `The DNS update reported an error (${firstLineOf(dnsErr)}), but every record now points at ${newIp}.`,
           );
         }
         s.stop('DNS updated');

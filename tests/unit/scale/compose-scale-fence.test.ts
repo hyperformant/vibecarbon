@@ -30,6 +30,7 @@ const h = vi.hoisted(() => {
     // The DNS update's error (null: it succeeds), and a read-back that fails.
     dnsError: null as null | string,
     dnsUnreadable: false,
+    dnsReadBackLater: null as null | string[][],
     saved: [] as unknown[],
   };
   return { events, state };
@@ -217,7 +218,12 @@ vi.mock('../../../src/lib/dns-provider.js', async (orig) => {
       },
       readARecord: async (_t: string, _z: string, name: string) => {
         if (h.state.dnsUnreadable) throw new Error('dns read 503');
-        return h.state.dnsReadBack?.[name.startsWith('*.') ? 1 : 0] ?? [];
+        // After a re-point, a late provider write may show (dnsReadBackLater).
+        const table =
+          h.state.dnsReadBackLater && h.events.includes('dns:1.1.1.1')
+            ? h.state.dnsReadBackLater
+            : h.state.dnsReadBack;
+        return table?.[name.startsWith('*.') ? 1 : 0] ?? [];
       },
     }),
   };
@@ -286,6 +292,7 @@ function reset(failAt = '') {
   h.state.dnsReadBack = null;
   h.state.dnsError = null;
   h.state.dnsUnreadable = false;
+  h.state.dnsReadBackLater = null;
   h.state.saved.length = 0;
 }
 
@@ -487,6 +494,17 @@ describe('scaleServers: the fenced cutover (single-server compose)', () => {
     },
   );
 
+  it('a DNS update that errors but reads back fully moved carries on (no empty pending list)', async () => {
+    reset();
+    h.state.dnsError = 'dns api 500';
+    h.state.dnsReadBack = [['9.9.9.9'], ['9.9.9.9']];
+    const { provider, ctx } = makeCtx();
+    await SCALE_EFFECTS.scaleServers(ctx);
+    expect(h.events).toContain('push:9.9.9.9:5');
+    expect(provider.deleteServer).toHaveBeenCalledWith('old-id');
+    expect(h.events).not.toContain('unfence');
+  });
+
   it('a DNS update that fails part way goes forward: records the new server and names the records still to move', async () => {
     reset();
     h.state.dnsError = 'dns api 500';
@@ -625,21 +643,54 @@ describe('resumeComposeCutover (a scale stopped mid-cutover)', () => {
       domain: 'example.com',
       ha: { writeFence: { ip: '1.1.1.1', source: 'scale', cutover: { ...journal } } },
     };
-    return { provider, ctx: { ...ctx, envConfig, servers: undefined } };
+    return {
+      provider,
+      ctx: { ...ctx, envConfig, servers: undefined, sleep: async () => {} } as Record<
+        string,
+        unknown
+      >,
+    };
   };
 
-  it('DNS still all on the old server: rolls back (unfence, writers, cron), drops the journal, deletes the new server', async () => {
+  it('DNS still all on the old server: deletes the new server FIRST, then rolls back, re-points DNS at the old one and reads it again', async () => {
     reset();
     h.state.dnsReadBack = [['1.1.1.1'], ['1.1.1.1']];
     const { provider, ctx } = resumeCtx();
     await expect(resumeComposeCutover(ctx)).resolves.toBe('rolled-back');
-    expect(h.events).toContain('unfence');
+    const del = h.events.indexOf('delete:new-id');
+    expect(del).toBeGreaterThan(-1);
+    // A late DNS write can then only reach a server that is gone.
+    expect(del).toBeLessThan(h.events.indexOf('unfence'));
     expect(h.events).toContain('writers:start:myapp-app');
     expect(h.events).toContain('cron:install:1.1.1.1');
     expect(h.events).toContain('journal:clear');
-    expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
+    expect(h.events.indexOf('dns:1.1.1.1')).toBeGreaterThan(h.events.indexOf('unfence'));
     expect(provider.deleteServer).not.toHaveBeenCalledWith('old-id');
     expect(h.events.some((e) => e.startsWith('demote:'))).toBe(false);
+    expect(ctx.resumeProblems).toEqual([]);
+  });
+
+  it('a record a late write moved after the rollback is named as a problem', async () => {
+    reset();
+    h.state.dnsReadBack = [['1.1.1.1'], ['1.1.1.1']];
+    h.state.dnsReadBackLater = [['1.1.1.1'], ['9.9.9.9']];
+    const { ctx } = resumeCtx();
+    await expect(resumeComposeCutover(ctx)).resolves.toBe('rolled-back');
+    expect(ctx.resumeProblems).toEqual([
+      'DNS is not all on the old server 1.1.1.1 after the rollback: *.example.com (now 9.9.9.9); point them at it',
+    ]);
+  });
+
+  it('a new server it cannot delete stops the rollback: the old server stays fenced', async () => {
+    reset();
+    h.state.dnsReadBack = [['1.1.1.1'], ['1.1.1.1']];
+    const { provider, ctx } = resumeCtx();
+    provider.deleteServer.mockRejectedValueOnce(new Error('api 500'));
+    await expect(resumeComposeCutover(ctx)).rejects.toThrow(
+      /could not delete the new server 9\.9\.9\.9 \(id new-id\): api 500; the old server stays write-fenced/,
+    );
+    expect(h.events).not.toContain('unfence');
+    expect(h.events).not.toContain('journal:clear');
   });
 
   it('DNS part way: adopts the new server, points DNS at it again and runs the remaining post-flip steps', async () => {

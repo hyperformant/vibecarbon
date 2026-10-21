@@ -116,3 +116,28 @@ describe('backup create', () => {
     expect(src).not.toMatch(/listS3Backups|downloadS3Backup|No backups found in S3/);
   });
 });
+
+describe('backup create while a compose scale cutover is journaled', () => {
+  it('refuses before any prompt or push: the old server is fenced, not yet demoted', async () => {
+    const backupCompose = vi.fn();
+    h.confirm.mockClear();
+    await expect(
+      runCreate({
+        ...base(true, { backupCompose }),
+        envConfig: {
+          ha: {
+            writeFence: {
+              ip: '10.0.0.5',
+              source: 'scale',
+              cutover: { oldIp: '10.0.0.5', newIp: '10.0.0.9' },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      'Refusing to back up "prod": a compose scale stopped mid-cutover (old server 10.0.0.5, new server 10.0.0.9); rerun vibecarbon scale prod',
+    );
+    expect(backupCompose).not.toHaveBeenCalled();
+    expect(h.confirm).not.toHaveBeenCalled();
+  });
+});

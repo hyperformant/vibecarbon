@@ -277,6 +277,18 @@ describe('deploy wires both checks (census)', () => {
 });
 
 describe('status shows a write-fenced primary', () => {
+  it('a journaled scale cutover names the env in its resume command', () => {
+    expect(
+      writeFenceRow(
+        { ha: { writeFence: { ip: '1.1.1.1', source: 'scale', cutover: { newIp: '9.9.9.9' } } } },
+        null,
+        'prod',
+      ),
+    ).toMatch(
+      /a compose scale stopped mid-cutover; rerun vibecarbon scale prod to finish or roll it back/,
+    );
+  });
+
   it('the row appears for a marker, or a primary that reads read-only, and names the fix', () => {
     expect(writeFenceRow({ ha: {} }, { writeFenced: 'off' })).toBeNull();
     expect(writeFenceRow({ ha: {} }, null)).toBeNull();

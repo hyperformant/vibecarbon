@@ -428,15 +428,16 @@ export function retiredFenceRow(fence, envConfig, now = Date.now()) {
  *
  * @param {object} envConfig
  * @param {{ writeFenced?: 'on'|'off'|null } | null} replication
+ * @param {string} [envName] for the scale resume command
  * @returns {string|null}
  */
-export function writeFenceRow(envConfig, replication) {
+export function writeFenceRow(envConfig, replication, envName) {
   const marker = envConfig?.ha?.writeFence;
   if (!marker && replication?.writeFenced !== 'on') return null;
   const why = envConfig?.ha?.failoverInFlight
     ? 'a failover is in flight; vibecarbon failover finishes it'
     : marker?.cutover
-      ? 'a compose scale stopped mid-cutover; rerun vibecarbon scale to finish or roll it back'
+      ? `a compose scale stopped mid-cutover; rerun vibecarbon scale${envName ? ` ${envName}` : ''} to finish or roll it back`
       : 'an interrupted failover or scale left it; vibecarbon deploy lifts it';
   return `database write-fenced: the primary refuses writes (${why})`;
 }
@@ -1367,7 +1368,7 @@ function renderEnvironment(envName, envConfig, checks) {
 
   // The write fence: an interrupted failover's or scale's marker, or a primary
   // that reads read-only. Every tier, not only HA (compose scale fences too).
-  const fenceRow = writeFenceRow(envConfig, checks.replication);
+  const fenceRow = writeFenceRow(envConfig, checks.replication, envName);
   if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
 
   // Servers
