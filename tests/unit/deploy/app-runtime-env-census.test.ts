@@ -72,6 +72,7 @@ const INFRA_ONLY = [
   'REPL_PASSWORD',
   'METABASE_DB_PASSWORD',
   'N8N_DB_PASSWORD',
+  'N8N_ENCRYPTION_KEY',
   'POSTGRES_PASSWORD',
 ];
 
@@ -263,6 +264,7 @@ describe('k8s: the app Secret and the infra Secret', () => {
     expect(infra.REPL_PASSWORD).toBe('SENTINEL_REPL_PASSWORD');
     expect(infra.METABASE_DB_PASSWORD).toBe('SENTINEL_METABASE_DB_PASSWORD');
     expect(infra.N8N_DB_PASSWORD).toBe('SENTINEL_N8N_DB_PASSWORD');
+    expect(infra.N8N_ENCRYPTION_KEY).toBe('SENTINEL_N8N_ENCRYPTION_KEY');
     expect(infra.REDIS_PASSWORD).toBe('SENTINEL_REDIS_PASSWORD');
     expect(infra.S3_CREDENTIALS_INI).toContain('aws_access_key_id=SENTINEL_S3_ACCESS_KEY');
     for (const k of ['BETTER_AUTH_SECRET', 'ADMIN_PASSWORD', 'STRIPE_SECRET_KEY', 'REDIS_URL']) {
@@ -288,6 +290,7 @@ describe('compose bundle: app.env', () => {
         'POSTGRES_PASSWORD=SENTINEL_POSTGRES_PASSWORD',
         'STRIPE_SECRET_KEY=SENTINEL_STRIPE_SECRET_KEY',
         'N8N_DB_PASSWORD=SENTINEL_N8N_DB_PASSWORD',
+        'N8N_ENCRYPTION_KEY=SENTINEL_N8N_ENCRYPTION_KEY',
         '',
       ].join('\n'),
     );
@@ -328,7 +331,13 @@ describe('compose bundle: app.env', () => {
     expect(appEnv.SITE_URL).toBe('https://example.com');
     expect(appEnv.S3_ACCESS_KEY).toBe('SENTINEL_S3_ACCESS_KEY');
     expect(appEnv.S3_BUCKET).toBe('myapp-abc123-storage');
-    for (const k of ['HETZNER_API_TOKEN', 'POSTGRES_PASSWORD', 'N8N_DB_PASSWORD', 'VC_ENV']) {
+    for (const k of [
+      'HETZNER_API_TOKEN',
+      'POSTGRES_PASSWORD',
+      'N8N_DB_PASSWORD',
+      'N8N_ENCRYPTION_KEY',
+      'VC_ENV',
+    ]) {
       expect(appEnv, k).not.toHaveProperty(k);
     }
     expect(appEnvText).not.toContain('SENTINEL_HETZNER_API_TOKEN');

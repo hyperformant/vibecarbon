@@ -20,7 +20,7 @@
  *                    key, from appStorageCredential's resolution; never the
  *                    infra pair on a provider that scopes keys),
  *                    ADMIN_EMAIL, ADMIN_PASSWORD, SMTP_*, and the add-ons'
- *                    METABASE_DB_PASSWORD / N8N_DB_PASSWORD when installed
+ *                    METABASE_DB_PASSWORD / N8N_DB_PASSWORD / N8N_ENCRYPTION_KEY when installed
  *   Per-env vars:    HCLOUD_NETWORK_ID, SITE_URL, DNS_PROVIDER
  */
 

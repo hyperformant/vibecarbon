@@ -65,6 +65,12 @@ spec:
             secretKeyRef:
               name: vibecarbon-infra-secrets
               key: N8N_DB_PASSWORD
+        # One key per environment, so a promoted standby reads replicated credentials.
+        - name: N8N_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-infra-secrets
+              key: N8N_ENCRYPTION_KEY
         - name: N8N_SECURE_COOKIE
           value: 'true'
         volumeMounts:

@@ -139,7 +139,7 @@ const TEMPLATE_APP_ONLY_KEYS: Record<string, string> = {
     'to the operator GRAFANA_URL. The observability module lives outside carbon/, copied in ' +
     'by `vibecarbon add observability`.',
   N8N_ENCRYPTION_KEY:
-    'carbon/docker-compose.n8n.yml:38 — N8N_ENCRYPTION_KEY defaults from the operator ' +
+    'carbon/docker-compose.n8n.yml:41 — N8N_ENCRYPTION_KEY is required from the operator ' +
     'N8N_ENCRYPTION_KEY of the same name (a genuine self-referencing read, not just a same name).',
   N8N_HOST: 'carbon/docker-compose.n8n.yml:31 — N8N_HOST defaults from the operator N8N_HOST.',
   N8N_PROTOCOL:

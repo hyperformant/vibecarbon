@@ -110,6 +110,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
       REDIS_ENABLED: 'true',
       REDIS_PASSWORD: sentinel('REDIS_PASSWORD'),
       N8N_DB_PASSWORD: sentinel('N8N_DB_PASSWORD'),
+      N8N_ENCRYPTION_KEY: sentinel('N8N_ENCRYPTION_KEY'),
       METABASE_DB_PASSWORD: sentinel('METABASE_DB_PASSWORD'),
       OBSERVABILITY_DB_PASSWORD: sentinel('OBSERVABILITY_DB_PASSWORD'),
       VC_ENV: 'prod',
@@ -219,6 +220,7 @@ describeDocker('compose: secrets reach only the services that use them', () => {
     for (const k of [
       'POSTGRES_PASSWORD',
       'N8N_DB_PASSWORD',
+      'N8N_ENCRYPTION_KEY',
       'METABASE_DB_PASSWORD',
       'OBSERVABILITY_DB_PASSWORD',
     ]) {
@@ -232,7 +234,12 @@ describeDocker('compose: secrets reach only the services that use them', () => {
 
   it('full deploy set: the app gets no infra password, and REDIS_URL still reaches it', () => {
     const services = full();
-    for (const k of ['N8N_DB_PASSWORD', 'METABASE_DB_PASSWORD', 'OBSERVABILITY_DB_PASSWORD']) {
+    for (const k of [
+      'N8N_DB_PASSWORD',
+      'N8N_ENCRYPTION_KEY',
+      'METABASE_DB_PASSWORD',
+      'OBSERVABILITY_DB_PASSWORD',
+    ]) {
       expect(holders(services, sentinel(k)), k).not.toContain('app');
     }
     const appEnv = services.app.environment as Record<string, string>;

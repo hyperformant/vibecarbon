@@ -131,14 +131,40 @@ describe('add-on database passwords', () => {
       expect(env(dir, '.env.local').N8N_DB_PASSWORD).toBeUndefined();
     });
 
+    it('n8n also gets one N8N_ENCRYPTION_KEY, so a promoted standby can read credentials', () => {
+      const manifest = JSON.parse(read('services/n8n/manifest.json'));
+      expect(manifest.envVars.N8N_ENCRYPTION_KEY).toEqual({ generate: 'password', length: 48 });
+      const dir = project(['n8n'], '');
+      expect(ensureAddonSecrets(dir)).toEqual([
+        { key: 'N8N_DB_PASSWORD', status: 'generated' },
+        { key: 'N8N_ENCRYPTION_KEY', status: 'generated' },
+      ]);
+      expect(env(dir, '.env.local').N8N_ENCRYPTION_KEY).toHaveLength(48);
+      expect(env(dir, '.env').N8N_ENCRYPTION_KEY).toBe(env(dir, '.env.local').N8N_ENCRYPTION_KEY);
+      for (const f of [
+        'services/n8n/compose/docker-compose.yml',
+        'carbon/docker-compose.n8n.yml',
+      ]) {
+        expect(read(f), f).toContain('N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?');
+        expect(read(f), f).not.toContain('n8n_dev_encryption_key');
+      }
+      expect(read('services/n8n/k8s/deployment.yaml')).toMatch(
+        /name: N8N_ENCRYPTION_KEY\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: vibecarbon-infra-secrets\n\s+key: N8N_ENCRYPTION_KEY/,
+      );
+    });
+
     it('never rotates one that is set, and copies it to the file that lacks it', () => {
       const dir = project(['n8n'], '');
       writeFileSync(
         join(dir, '.env.local'),
-        `PROJECT_NAME=demo\n${formatDotenvLine('N8N_DB_PASSWORD', 'k'.repeat(32))}\n`,
+        `PROJECT_NAME=demo\n${formatDotenvLine('N8N_DB_PASSWORD', 'k'.repeat(32))}\n${formatDotenvLine('N8N_ENCRYPTION_KEY', 'e'.repeat(48))}\n`,
       );
-      expect(ensureAddonSecrets(dir)).toEqual([{ key: 'N8N_DB_PASSWORD', status: 'copied' }]);
+      expect(ensureAddonSecrets(dir)).toEqual([
+        { key: 'N8N_DB_PASSWORD', status: 'copied' },
+        { key: 'N8N_ENCRYPTION_KEY', status: 'copied' },
+      ]);
       expect(env(dir, '.env').N8N_DB_PASSWORD).toBe('k'.repeat(32));
+      expect(env(dir, '.env').N8N_ENCRYPTION_KEY).toBe('e'.repeat(48));
       expect(ensureAddonSecrets(dir)).toEqual([]);
     });
 

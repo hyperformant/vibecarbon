@@ -18,6 +18,7 @@
 
   "envVars": {
     "N8N_DB_PASSWORD": { "generate": "password", "length": 32 },
+    "N8N_ENCRYPTION_KEY": { "generate": "password", "length": 48 },
     "N8N_WEBHOOK_URL": { "value": "http://localhost:5678" },
     "N8N_API_KEY": { "value": "" },
     "N8N_ADMIN_EMAIL": { "from": "ADMIN_EMAIL", "default": "admin@localhost" }
