@@ -49,12 +49,14 @@ import {
 } from './lib/deploy/failover-guard.js';
 import {
   DB_STS_BOOT_TIMEOUT_S,
+  k8sPsqlRunner,
   ensureReplicationSlot as realEnsureReplicationSlot,
   readK8sReplicationState as realReadK8sReplicationState,
   reseedStandbyFromPrimary as realReseedStandbyFromPrimary,
   verifyStreaming,
 } from './lib/deploy/replication.js';
 import { wgIpOf } from './lib/deploy/wireguard.js';
+import { assertRolePrimaryWritable } from './lib/deploy/write-fence.js';
 import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit } from './lib/prod-confirm.js';
@@ -571,6 +573,12 @@ export async function runComposeRestore({
   recordSystemIdentifier = realRecordSystemIdentifier,
   readStandbyState = (ip) =>
     readReplicaState({ exec: composePsqlRunner(ip, sshKeyPath, `/opt/${projectName}`) }),
+  assertWritable = () =>
+    assertRestoredPrimaryWritable({
+      environment: envName,
+      envConfig,
+      exec: composePsqlRunner(serverIp, sshKeyPath, `/opt/${projectName}`),
+    }),
 }) {
   // Also here, for every caller: see run().
   assertNoFailoverInFlight({ environment: envName, envConfig, action: 'restore' });
@@ -589,6 +597,7 @@ export async function runComposeRestore({
   s.start('Restoring database via wal-g (app will be temporarily unavailable)');
   await restoreCompose(serverIp, sshKeyPath, projectName, target);
   s.stop('Database restored');
+  await assertWritable();
 
   // compose-ha: the wal-g restore rewound the primary to an earlier LSN, so the
   // standby now has WAL AHEAD of the primary and cannot resume streaming. Re-seed
@@ -655,6 +664,31 @@ export async function runComposeRestore({
   p.log.info(`Verify with: ${c.info(`vibecarbon status ${envName}`)}`);
 }
 
+/**
+ * A restored database must take writes (final review M4). A base backup taken
+ * while a planned failover's write fence was stranded on the primary carries
+ * default_transaction_read_only=on in its postgresql.auto.conf, so the restore
+ * would bring back a read-only primary. Same check and lift as the deploy's
+ * (write-fence.js): fenced is lifted with a warning, a lift that fails throws
+ * with the manual fix, an unreadable setting warns.
+ *
+ * @param {{ environment: string, envConfig: object, exec: (sql: string, o?: object) => Promise<string> }} args
+ */
+export async function assertRestoredPrimaryWritable({ environment, envConfig, exec }) {
+  const state = await assertRolePrimaryWritable({
+    environment,
+    envConfig,
+    exec,
+    warn: (line) => p.log.warn(`restored database: ${line}`),
+  });
+  if (state === 'unknown') {
+    p.log.warn(
+      "could not read the restored database's write-fence setting; vibecarbon status shows it " +
+        'once the database answers',
+    );
+  }
+}
+
 // k8s restore is wal-g-native: postgres + wal-g live in the db pod,
 // which continuously archives WAL + base backups to S3. Restore = set a
 // RESTORE_TARGET marker on vibecarbon-infra-secrets → bounce the db StatefulSet so
@@ -692,6 +726,12 @@ export async function runK8sRestore({
   readReplicationState = realReadK8sReplicationState,
   markStandbyUnproven = realMarkStandbyUnproven,
   recordSystemIdentifier = realRecordSystemIdentifier,
+  assertWritable = () =>
+    assertRestoredPrimaryWritable({
+      environment: envName,
+      envConfig,
+      exec: k8sPsqlRunner(serverIp, sshKeyPath),
+    }),
   // Pacing for the post-reseed streaming verify — injectable so tests don't wait
   // on real timers. Production uses the default setTimeout-backed sleep.
   verifySleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -771,6 +811,8 @@ export async function runK8sRestore({
     //    re-fetch and wipe live data. Runs even if the restore failed.
     await setRestoreMarker(serverIp, sshKeyPath, '');
   }
+  // 5b. Before the app comes back: the restored database must take writes.
+  await assertWritable();
   // 6. Bring the app back.
   await perfAsync('restore.scaleUpApp', async () => scaleUpApp(serverIp, sshKeyPath));
   s.stop('Database restored');

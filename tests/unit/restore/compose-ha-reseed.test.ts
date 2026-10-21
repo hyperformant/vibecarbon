@@ -29,6 +29,7 @@ const baseArgs = {
   readStandbyState: async () => ({ inRecovery: true, systemIdentifier: '7412345678901234567' }),
   markStandbyUnproven: () => {},
   recordSystemIdentifier: () => {},
+  assertWritable: async () => {},
 };
 
 // The restore target (serverIp) is derived in run() as the role==='primary'
@@ -353,5 +354,68 @@ describe('runComposeRestore: a standby not re-seeded and verified is marked unpr
       },
     });
     expect(markStandbyUnproven).toHaveBeenCalledOnce();
+  });
+});
+
+// Final review M4: a backup taken under a stranded write fence carries
+// default_transaction_read_only=on, so the restored primary must be proven
+// writable (or lifted) before anything else.
+describe('runComposeRestore: the restored primary is proven writable first (M4)', () => {
+  it('right after the restore, before the standby reseed', async () => {
+    const order: string[] = [];
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: {
+        deployMode: 'compose-ha',
+        servers: [
+          { name: 'myapp-prod-primary', ip: '10.0.0.1', role: 'primary' },
+          { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
+        ],
+      },
+      restoreCompose: vi.fn(async () => {
+        order.push('restore');
+      }),
+      configureStandbyReplication: vi.fn(async () => {
+        order.push('reseed');
+        return true;
+      }),
+      assertWritable: async () => {
+        order.push('writable');
+      },
+    });
+    expect(order).toEqual(['restore', 'writable', 'reseed']);
+  });
+});
+
+describe('assertRestoredPrimaryWritable', () => {
+  it('lifts a fence the backup carried, proving it off', async () => {
+    const { assertRestoredPrimaryWritable } = await import('../../../src/restore.js');
+    let setting = 'on';
+    const sqls: string[] = [];
+    const exec = vi.fn(async (sql: string) => {
+      sqls.push(sql);
+      if (sql.startsWith('ALTER SYSTEM RESET')) setting = 'off';
+      if (sql.includes('current_setting')) return setting;
+      return '';
+    });
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    await assertRestoredPrimaryWritable({ environment: 'prod', envConfig: {}, exec });
+    expect(sqls).toContain('ALTER SYSTEM RESET default_transaction_read_only');
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(
+      /restored database: the primary was write-fenced/,
+    );
+    warn.mockRestore();
+  });
+
+  it('a lift that fails throws with the manual fix', async () => {
+    const { assertRestoredPrimaryWritable } = await import('../../../src/restore.js');
+    const exec = vi.fn(async (sql: string) => {
+      if (sql.startsWith('ALTER')) throw new Error('permission denied');
+      return 'on';
+    });
+    await expect(
+      assertRestoredPrimaryWritable({ environment: 'prod', envConfig: {}, exec }),
+    ).rejects.toThrow(/write-fenced and could not be lifted/);
   });
 });

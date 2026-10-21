@@ -368,3 +368,30 @@ describe('markStandbyUnproven', () => {
     }
   });
 });
+
+describe('runK8sRestore: the restored primary is proven writable before the app returns (M4)', () => {
+  it('after the db is back, before the app is scaled up', async () => {
+    const order: string[] = [];
+    vi.mocked(ssh.sshKubectl).mockImplementation(
+      async (_ip: string, _k: string, argv: string[]) => {
+        if (
+          argv.includes('scale') &&
+          argv.some((a) => a.startsWith('--replicas=') && a !== '--replicas=0')
+        ) {
+          order.push('scaleUp');
+        }
+        return '';
+      },
+    );
+    await runK8sRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: { deployMode: 'kubernetes' },
+      assertWritable: async () => {
+        order.push('writable');
+      },
+    });
+    expect(order[0]).toBe('writable');
+    expect(order).toContain('scaleUp');
+  });
+});
