@@ -1525,6 +1525,25 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     );
   }
 
-  // 7. Bring the app back up
+  // 7. Rerun the migrate step before the app: the app no longer migrates at
+  //    boot, so a restore to a point before a deployed migration would leave
+  //    it 503, and a backup older than the last APP_DB_PASSWORD carries the
+  //    old app_service password. app-migrate applies the ledger and resets
+  //    the role from .env. Foreground, so its exit code is the verdict.
+  try {
+    await sshRunAsync(
+      ip,
+      sshKeyPath,
+      `cd ${remoteDir} && docker compose run --rm --no-deps app-migrate`,
+      // One attempt: a timed-out migration is never relaunched blind.
+      { timeout: 600_000, retries: 1 },
+    );
+  } catch (err) {
+    throw new Error(
+      `restoreCompose: app-migrate failed after the restore, so the app stays stopped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 8. Bring the app back up
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start app`);
 }
