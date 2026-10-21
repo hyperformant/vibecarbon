@@ -133,7 +133,7 @@ describe('failover on a standby without the app image', () => {
     const primaryState = { ...standbyState, inRecovery: false, receiverStatus: null };
     expect(failover({ planned: true, primaryState })).toThrow(FailoverRefusedError);
     expect(failover({ planned: true, primaryState })).toThrow(
-      /missing the app image.*run vibecarbon deploy e4 to copy it, then fail over/,
+      /missing the app image.*run this to copy it, then fail over:\n {2}vibecarbon deploy e4$/,
     );
   });
 

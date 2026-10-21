@@ -159,6 +159,7 @@ interface Run {
   forceUnproven?: boolean;
   journal?: boolean;
   recordedMissing?: boolean;
+  present?: string;
 }
 
 async function runFailover({
@@ -167,6 +168,7 @@ async function runFailover({
   forceUnproven,
   journal,
   recordedMissing,
+  present = 'sha256:aa',
 }: Run) {
   const order: string[] = [];
   const errors: string[] = [];
@@ -195,7 +197,7 @@ async function runFailover({
   const assertStandbyImage = vi.fn(async (srv: { standby: { ip: string } }, key: string) => {
     order.push(`assertStandbyImage(${srv.standby.ip},${key})`);
     if (image) throw image;
-    return 'sha256:aa';
+    return present;
   });
   const deps = {
     identify: () => servers,
@@ -324,8 +326,9 @@ describe('failoverHA: the live standby image check', () => {
     const { order, errors } = await runFailover({ primaryReachable: true, image: MISSING });
     expect(order).toContain('exit(1)');
     expect(touched(order)).toEqual([]);
+    // The command ends the message on its own line, so it copies cleanly.
     expect(errors.join('\n')).toMatch(
-      /^Failover refused: .*10\.0\.1\.9:5000\/quorum:t1.*run vibecarbon deploy e4 to copy it, then fail over$/,
+      /^Failover refused: .*10\.0\.1\.9:5000\/quorum:t1.*run this to copy it, then fail over:\n {2}vibecarbon deploy e4$/,
     );
   });
 
@@ -333,19 +336,34 @@ describe('failoverHA: the live standby image check', () => {
     const { order, errors } = await runFailover({ primaryReachable: true, image: UNREADABLE });
     expect(order).toContain('exit(1)');
     expect(touched(order)).toEqual([]);
-    expect(errors.join('\n')).toMatch(
-      /could not read the standby app image \(ssh: connect to host 10\.0\.0\.9 port 22: refused\)/,
+    expect(errors.join('\n')).toBe(
+      'Failover refused: could not read the standby app image (ssh: connect to host 10.0.0.9 ' +
+        'port 22: refused), so nothing proves a promoted standby could start the app. Fix ' +
+        'ssh/kubectl access to the standby master, then fail over again.',
     );
+    // A deploy does not fix an unreachable standby master.
+    expect(errors.join('\n')).not.toMatch(/vibecarbon deploy/);
   });
 
-  it('unplanned without -force-unproven: exits 1 naming the flag, not a deploy that cannot work', async () => {
-    for (const image of [MISSING, UNREADABLE]) {
-      const { order, errors } = await runFailover({ primaryReachable: false, image });
-      expect(order).toContain('exit(1)');
-      expect(touched(order)).toEqual([]);
-      expect(errors.join('\n')).toMatch(/primary is unreachable.*-force-unproven/);
-      expect(errors.join('\n')).not.toMatch(/run vibecarbon deploy/);
-    }
+  it('unplanned without -force-unproven, image missing: exits 1 naming the flag, not a deploy', async () => {
+    const { order, errors } = await runFailover({ primaryReachable: false, image: MISSING });
+    expect(order).toContain('exit(1)');
+    expect(touched(order)).toEqual([]);
+    expect(errors.join('\n')).toMatch(
+      /primary is unreachable, so no deploy can copy it there now.*-force-unproven/,
+    );
+    expect(errors.join('\n')).not.toMatch(/run vibecarbon deploy/);
+  });
+
+  it('unplanned without -force-unproven, registry unreadable: names the cause and the flag', async () => {
+    const { order, errors } = await runFailover({ primaryReachable: false, image: UNREADABLE });
+    expect(order).toContain('exit(1)');
+    expect(touched(order)).toEqual([]);
+    const msg = errors.join('\n');
+    expect(msg).toMatch(/^Failover refused: could not read the standby app image \(ssh: connect/);
+    expect(msg).toMatch(/Fix ssh\/kubectl access to the standby master.*-force-unproven/);
+    expect(msg).not.toMatch(/no deploy can copy it/);
+    expect(msg).not.toMatch(/vibecarbon deploy/);
   });
 
   it('unplanned with -force-unproven: promotes, warning once with the command on its own line', async () => {
@@ -373,10 +391,31 @@ describe('failoverHA: the live standby image check', () => {
     expect(warns.filter((w) => /app image/.test(w))).toHaveLength(1);
   });
 
-  it('a recorded cause still refuses a planned failover when the live check finds the image', async () => {
+  it('a live "present" overrides a recorded cause: a planned failover proceeds', async () => {
     const { order, thrown } = await runFailover({ primaryReachable: true, recordedMissing: true });
-    expect(String((thrown as Error)?.message)).toMatch(/last deploy could not copy it/);
-    expect(order).not.toContain('provision');
+    expect(thrown).toBeUndefined();
+    expect(order).not.toContain('exit(1)');
+    expect(order).toContain('promote');
+  });
+
+  it('a live "external" image overrides a recorded cause too', async () => {
+    const { order, thrown } = await runFailover({
+      primaryReachable: true,
+      recordedMissing: true,
+      present: 'external',
+    });
+    expect(thrown).toBeUndefined();
+    expect(order).toContain('promote');
+  });
+
+  it('unplanned -force-unproven, recorded cause, live present: no image warning', async () => {
+    const { order, warns } = await runFailover({
+      primaryReachable: false,
+      recordedMissing: true,
+      forceUnproven: true,
+    });
+    expect(order).toContain('promote');
+    expect(warns.filter((w) => /app image/.test(w))).toEqual([]);
   });
 
   it('an unreadable registry under -force-unproven warns that it may have no image', async () => {
@@ -386,7 +425,13 @@ describe('failoverHA: the live standby image check', () => {
       forceUnproven: true,
     });
     expect(order).toContain('promote');
-    expect(warns.join('\n')).toMatch(/the promoted standby may have no app image/);
+    const imageWarns = warns.filter((w) => /app image/.test(w));
+    expect(imageWarns).toHaveLength(1);
+    expect(imageWarns[0].split('\n')).toEqual([
+      'the promoted standby may have no app image; if it has none it serves nothing until',
+      '  vibecarbon deploy e4',
+      'builds it there',
+    ]);
   });
 
   it('a journal resume skips the check and proceeds after the promote (R6)', async () => {
@@ -394,6 +439,7 @@ describe('failoverHA: the live standby image check', () => {
       primaryReachable: false,
       image: MISSING,
       journal: true,
+      recordedMissing: true,
     });
     expect(assertStandbyImage).not.toHaveBeenCalled();
     expect(order).not.toContain('exit(1)');

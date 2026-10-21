@@ -1685,7 +1685,7 @@ export function walgVerdictsDetail(health) {
 /**
  * Pilot-light HA failover core (shared across DNS-provider strategies). Order:
  *   1. preflight (verify persisted config + probe standby state backend)
- *  1a. standby app image present (refuse = nothing touched; skipped on resume)
+ *  1a. live standby app image check                    (refuse = nothing touched; skipped on resume)
  *  1b. replica proof (failover-guard)                  (refuse = nothing touched)
  *   2. provision standby worker capacity 0→N          (abort = clean exit)
  *   3. quiesce + write-fence the primary               (planned only; unproven = abort)
@@ -1859,11 +1859,14 @@ export async function failoverHA(
   // cause: planned refuses (a deploy copies it), unplanned needs
   // -force-unproven. A resumed failover already promoted, so it is let finish
   // (R6); its readiness gate reports a missing image.
-  let standbyImageRuled = false;
+  // `present` (an external image included) overrides a recorded
+  // standby-image-missing; `ruled` means the rule below already spoke.
+  let standbyImageLive;
   if (!envConfig?.ha?.failoverInFlight) {
     let gap = null;
     try {
       await assertStandbyImage(servers, sshKeyPath);
+      standbyImageLive = 'present';
     } catch (err) {
       gap = liveStandbyImageGap(err);
     }
@@ -1879,7 +1882,7 @@ export async function failoverHA(
         p.log.error(err.message);
         process.exit(1);
       }
-      standbyImageRuled = true;
+      standbyImageLive = 'ruled';
     }
   }
 
@@ -1925,7 +1928,7 @@ export async function failoverHA(
     primaryState,
     forceUnproven: !!parsed.forceUnproven,
     allowDegraded: !!parsed.allowDegraded,
-    standbyImageRuled,
+    standbyImageLive,
   });
   if (unproven) {
     // The operator asked to skip the identifier proof on a dead primary. Say the

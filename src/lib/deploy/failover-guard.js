@@ -191,8 +191,10 @@ export function swappedSinceLastDeploy(envConfig) {
  *   system identifier proof (the standby must still be in recovery)
  * @param {boolean} [args.allowDegraded] -allow-degraded: with forceUnproven only,
  *   also accepts a standby the last deploy flagged degraded
- * @param {boolean} [args.standbyImageRuled] the live registry check found the
- *   image missing or unreadable and `assertStandbyImageRule` already ruled
+ * @param {'present'|'ruled'} [args.standbyImageLive] the live registry check's
+ *   outcome when it ran: `present` (the image is there, or is external) overrides
+ *   a recorded standby-image-missing; `ruled` means `assertStandbyImageRule`
+ *   already ruled on a missing or unreadable image. Either skips the recorded check
  * @returns {{ mode: 'promote'|'resume', unproven?: true }}
  */
 export function assertFailoverPreconditions({
@@ -204,7 +206,7 @@ export function assertFailoverPreconditions({
   primaryState = null,
   forceUnproven = false,
   allowDegraded = false,
-  standbyImageRuled = false,
+  standbyImageLive,
 }) {
   if (tier !== 'compose-ha' && tier !== 'k8s-ha') {
     throw new Error(`assertFailoverPreconditions: unknown tier ${JSON.stringify(tier)}`);
@@ -260,11 +262,11 @@ export function assertFailoverPreconditions({
   }
 
   // A failover already in flight is let finish (R6). A live registry check
-  // that already ruled (standbyImageRuled) has said all of this once.
+  // knows better than the record: it found the image, or it has already ruled.
   if (
     envConfig?.degradedCause === DEGRADED_CAUSE.STANDBY_IMAGE_MISSING &&
     !envConfig?.ha?.failoverInFlight &&
-    !standbyImageRuled
+    !standbyImageLive
   ) {
     assertStandbyImageRule({
       environment,
@@ -345,9 +347,25 @@ export function assertStandbyImageRule({
   known = true,
 }) {
   const deploy = `vibecarbon deploy ${environment}`;
+  if (!known) {
+    // Unreadable: the fault is reaching the standby master, which no deploy fixes.
+    const fix = 'Fix ssh/kubectl access to the standby master, then fail over again';
+    if (planned) throw new FailoverRefusedError(`Failover refused: ${missing} ${fix}.`);
+    if (!forceUnproven) {
+      throw new FailoverRefusedError(
+        `Failover refused: ${missing} ${fix}, or pass -force-unproven to promote it anyway.`,
+      );
+    }
+    p.log.warn(
+      'the promoted standby may have no app image; if it has none it serves nothing until\n' +
+        `  ${deploy}\n` +
+        'builds it there',
+    );
+    return;
+  }
   if (planned) {
     throw new FailoverRefusedError(
-      `Failover refused: ${missing} run ${deploy} to copy it, then fail over`,
+      `Failover refused: ${missing} run this to copy it, then fail over:\n  ${deploy}`,
     );
   }
   if (!forceUnproven) {
@@ -358,7 +376,7 @@ export function assertStandbyImageRule({
     );
   }
   p.log.warn(
-    `the promoted standby ${known ? 'has' : 'may have'} no app image; it serves nothing until\n` +
+    'the promoted standby has no app image; it serves nothing until\n' +
       `  ${deploy}\n` +
       'builds it there',
   );
