@@ -157,6 +157,7 @@ export async function sweepOrphanedLinodeResources(
     s3Buckets: 0,
     sshKeys: 0,
     loadBalancers: 0, // NodeBalancers
+    storageKeys: 0,
   };
   let enumFailed = false;
   const markIncomplete = (what: string) => {
@@ -412,6 +413,46 @@ export async function sweepOrphanedLinodeResources(
     console.warn(`${tag} [sweep] VPC cleanup failed: ${e instanceof Error ? e.message : e}`);
   }
 
+  // 3c. App storage keys (security plan R9). Every deploy mints the env app a
+  // key labelled `vc-app-<env bucket>`, and env buckets start with the project
+  // name, so a key whose label starts with `vc-app-<project>` is this run's.
+  // Destroy revokes them; one left here is a destroy leak, or a deploy that
+  // crashed between the mint and the record (no destroy can see that one).
+  try {
+    const { appKeyLabel } = (await import('../../../src/lib/providers/app-key-api.js')) as {
+      appKeyLabel: (bucket: string, max: number) => string;
+    };
+    const labelPrefix = appKeyLabel(projectName, 50);
+    const { items, complete } = await walkPages<{ id: number; label: string }>(
+      '/object-storage/keys',
+    );
+    if (!complete) markIncomplete('app storage key list');
+    for (const key of items) {
+      if (!String(key.label ?? '').startsWith(labelPrefix)) continue;
+      console.log(`${tag} [sweep] Revoking orphaned app storage key (${key.label})`);
+      try {
+        const res = await fetchImpl(`${API_BASE}/object-storage/keys/${key.id}`, {
+          method: 'DELETE',
+        });
+        if (res.ok || res.status === 404) counts.storageKeys = (counts.storageKeys ?? 0) + 1;
+        else {
+          enumFailed = true;
+          console.warn(`${tag} [sweep] app storage key ${key.label} revoke returned ${res.status}`);
+        }
+      } catch (err) {
+        enumFailed = true;
+        console.warn(
+          `${tag} [sweep] app storage key ${key.label} revoke failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+  } catch (e) {
+    markIncomplete('app storage key list');
+    console.warn(
+      `${tag} [sweep] App storage key cleanup failed: ${e instanceof Error ? e.message : e}`,
+    );
+  }
+
   // 5. Object Storage buckets — enumerated account-wide via the Linode
   // management API (each row carries its assigned cluster), emptied and
   // deleted via bucket-level S3 ops against that cluster.
@@ -469,7 +510,8 @@ export async function sweepOrphanedLinodeResources(
     (counts.loadBalancers ?? 0) +
     counts.networks +
     counts.s3Buckets +
-    counts.sshKeys;
+    counts.sshKeys +
+    (counts.storageKeys ?? 0);
   if (totalOrphans > 0) {
     const breakdown = [
       `instances=${counts.servers}`,
@@ -479,6 +521,7 @@ export async function sweepOrphanedLinodeResources(
       `vpcs=${counts.networks}`,
       `buckets=${counts.s3Buckets}`,
       `ssh-keys=${counts.sshKeys}`,
+      `app-storage-keys=${counts.storageKeys ?? 0}`,
     ].join(', ');
     console.warn(
       `${tag} [sweep] REGRESSION: destroy left ${totalOrphans} Linode orphan resource(s) (${breakdown}). vibecarbon destroy did not free these — fix the corresponding destroy code path.`,

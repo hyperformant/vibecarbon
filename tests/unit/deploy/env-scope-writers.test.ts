@@ -9,13 +9,13 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildVibecarbonSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
+import { buildAppSecretData, buildInfraSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
 
 const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
 
-describe('k8s vibecarbon-secrets', () => {
-  it('carries the bucket, and neither VC_ENV nor S3_KEY_PREFIX', () => {
-    const stringData = buildVibecarbonSecretData({
+describe('k8s app and infra Secrets', () => {
+  it('carry the bucket, and neither VC_ENV nor S3_KEY_PREFIX', () => {
+    const args = {
       envLocal: {},
       s3Config: {
         accessKey: 'ak',
@@ -25,10 +25,14 @@ describe('k8s vibecarbon-secrets', () => {
         region: 'fsn1',
       },
       backupBucketName: null,
-    });
-    expect(stringData).not.toHaveProperty('S3_KEY_PREFIX');
-    expect(stringData).not.toHaveProperty('VC_ENV');
-    expect(stringData.S3_BUCKET).toBe('myapp-abc123-storage');
+    };
+    const app = buildAppSecretData(args);
+    const infra = buildInfraSecretData(args);
+    for (const stringData of [app, infra]) {
+      expect(stringData).not.toHaveProperty('S3_KEY_PREFIX');
+      expect(stringData).not.toHaveProperty('VC_ENV');
+    }
+    expect(app.S3_BUCKET).toBe('myapp-abc123-storage');
   });
 
   it('applyK3sManifests hands the Secret no environment', () => {
@@ -41,7 +45,11 @@ describe('k8s vibecarbon-secrets', () => {
 });
 
 describe('no writer knows S3_KEY_PREFIX', () => {
-  it.each(['src/lib/deploy/bundle.js', 'src/lib/deploy/k8s/k3s.js'])('%s', (rel) => {
+  it.each([
+    'src/lib/deploy/bundle.js',
+    'src/lib/deploy/k8s/k3s.js',
+    'src/lib/deploy/app-runtime-env.js',
+  ])('%s', (rel) => {
     expect(src(rel).match(/S3_KEY_PREFIX|keyPrefix/g) ?? []).toEqual([]);
   });
 });

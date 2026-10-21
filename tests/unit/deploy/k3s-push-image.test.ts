@@ -238,8 +238,8 @@ describe('pushImageToLocalRegistry (Phase 6)', () => {
     expect(sshCalls.length).toBe(2);
     const firstArgv = sshCalls[0][1] as string[];
     const secondArgv = sshCalls[1][1] as string[];
-    expect(firstArgv[firstArgv.indexOf('-L') + 1]).toBe('5000:localhost:5000');
-    expect(secondArgv[secondArgv.indexOf('-L') + 1]).toBe('5001:localhost:5000');
+    expect(firstArgv[firstArgv.indexOf('-L') + 1]).toBe('5000:10.0.1.1:5000');
+    expect(secondArgv[secondArgv.indexOf('-L') + 1]).toBe('5001:10.0.1.1:5000');
 
     // The push must dial the walked-to port.
     const pushCall = vi
@@ -316,7 +316,7 @@ describe('pushImageToLocalRegistry (Phase 6)', () => {
     const [sshBin, sshArgv] = calls[0] as [string, string[]];
     expect(sshBin).toBe('ssh');
     expect(sshArgv).toContain('-L');
-    expect(sshArgv).toContain('5000:localhost:5000');
+    expect(sshArgv).toContain('5000:10.0.1.1:5000');
     expect(sshArgv).toContain('-N');
     expect(sshArgv).toContain('-f');
     expect(sshArgv).toContain('root@1.2.3.4');
@@ -329,7 +329,7 @@ describe('pushImageToLocalRegistry (Phase 6)', () => {
 
     // Call 2: pkill teardown in finally — scoped to OUR port.
     expect(calls[2][0]).toBe('pkill');
-    expect(calls[2][1]).toEqual(['-f', 'ssh.*-L.*5000:localhost:5000']);
+    expect(calls[2][1]).toEqual(['-f', 'ssh.*-L.*5000:10.0.1.1:5000']);
 
     // Call 3: best-effort cleanup of the localhost alias
     expect(calls[3][0]).toBe('docker');
@@ -389,7 +389,7 @@ describe('pushImageToLocalRegistry (Phase 6)', () => {
     expect(sshCall).toBeDefined();
     const sshArgv = (sshCall as [string, string[]])[1];
     const lIdx = sshArgv.indexOf('-L');
-    expect(sshArgv[lIdx + 1]).toBe('5001:localhost:5000');
+    expect(sshArgv[lIdx + 1]).toBe('5001:10.0.1.1:5000');
 
     // The pushed tag must dial localhost:5001, not :5000.
     const pushCall = vi
@@ -403,7 +403,27 @@ describe('pushImageToLocalRegistry (Phase 6)', () => {
     const pkillCall = nonPushCalls().find((c) => c[0] === 'pkill');
     expect(pkillCall).toBeDefined();
     const pkillArgv = (pkillCall as [string, string[]])[1];
-    expect(pkillArgv).toEqual(['-f', 'ssh.*-L.*5001:localhost:5000']);
+    expect(pkillArgv).toEqual(['-f', 'ssh.*-L.*5001:10.0.1.1:5000']);
+  });
+
+  it("the tunnel's far end is the master's private IP, where the registry hostPort binds (DO shape)", async () => {
+    // The registry hostPort binds only the master's private address
+    // (hostIP, security plan Task 6), so sshd on the master must dial that
+    // address, not loopback. DigitalOcean's master IP is a Pulumi output, not
+    // Hetzner's static 10.0.1.1.
+    const { pushImageToLocalRegistry } = await k3sModulePromise;
+    const tmp = mkdtempSync(join(tmpdir(), 'vc-k3s-push-'));
+    await pushImageToLocalRegistry({
+      tag: '10.10.0.7:5000/proj:tag',
+      masterIp: '9.9.9.9',
+      sshKey: '/tmp/k',
+      khPath: join(tmp, '.vibecarbon', 'known_hosts_e2e'),
+      masterPrivateIp: '10.10.0.7',
+      settleDelaysMs: [0, 0, 0, 0, 0],
+    });
+    const sshCall = nonPushCalls().find((c) => c[0] === 'ssh' && (c[1] as string[]).includes('-L'));
+    const sshArgv = (sshCall as [string, string[]])[1];
+    expect(sshArgv[sshArgv.indexOf('-L') + 1]).toBe('5000:10.10.0.7:5000');
   });
 
   it('rejects an invalid localTunnelPort', async () => {

@@ -20,9 +20,13 @@ describe('k8s local — applyVibecarbonSecrets allowlist', () => {
     }
   });
 
-  it('SECRET_KEYS never carries a client-build (VITE_*) key', () => {
+  it('SECRET_KEYS never carries a client-build (VITE_*) key the server does not read', () => {
     const allowed = new Set(SECRET_KEYS);
-    for (const key of clientBuildKeys()) {
+    // The app server reads the Plausible pair at runtime too (its CSP and
+    // setup status, carbon/src/server/index.ts and routes/v1/setup.ts), so
+    // the app allowlist carries it; every other VITE_* key is build-time only.
+    const serverRead = new Set(['VITE_PLAUSIBLE_DOMAIN', 'VITE_PLAUSIBLE_SCRIPT_URL']);
+    for (const key of clientBuildKeys().filter((k) => !serverRead.has(k))) {
       expect(allowed.has(key), `${key} is build-time and must not be in the Secret`).toBe(false);
     }
   });

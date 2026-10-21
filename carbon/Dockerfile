@@ -112,9 +112,10 @@ COPY --from=deps /deps/node_modules ./node_modules
 # Copy built application
 COPY --from=builder /app/dist ./dist
 
-# The database migrations. The server applies them at startup
-# (src/server/db/migrate.ts reads db/migrations under its working directory),
-# so they ship inside the image and no deploy step pipes SQL anywhere.
+# The database migrations. The migrate step in this same image applies them
+# (dist/server/migrate-cli.js reads db/migrations under its working directory)
+# and the server checks its ledger against them, so they ship inside the
+# image and no deploy step pipes SQL anywhere.
 COPY db/migrations/ ./db/migrations/
 
 # Copy entrypoint

@@ -1,7 +1,7 @@
 /**
  * Regression (findings #1 + #2 + the 2026-07-06 pod-kill + WG-relay fixes):
  * the k8s failover/restore standby re-seed must
- *   - read REPL_PASSWORD from the `vibecarbon-secrets` k8s Secret (NOT a
+ *   - read REPL_PASSWORD from the `vibecarbon-infra-secrets` k8s Secret (NOT a
  *     compose-style `.env.local`, which k8s nodes never have),
  *   - HARD-ERROR when the password is missing (abort — never silently skip),
  *   - SKIP (no destructive work) when the primary is unreachable,
@@ -111,7 +111,7 @@ beforeEach(() => {
 });
 
 describe('getReplPasswordFromSecret', () => {
-  it('decodes the base64 secret value from vibecarbon-secrets', async () => {
+  it('decodes the base64 secret value from vibecarbon-infra-secrets', async () => {
     (ssh.sshKubectl as ReturnType<typeof vi.fn>).mockResolvedValue(b64('s3cret-pw'));
     await expect(getReplPasswordFromSecret('10.0.0.2', '/k')).resolves.toBe('s3cret-pw');
     // Reads the Secret via jsonpath — the same source the db uses.
@@ -120,7 +120,7 @@ describe('getReplPasswordFromSecret', () => {
       expect.arrayContaining([
         'get',
         'secret',
-        'vibecarbon-secrets',
+        'vibecarbon-infra-secrets',
         '-o',
         'jsonpath={.data.REPL_PASSWORD}',
       ]),

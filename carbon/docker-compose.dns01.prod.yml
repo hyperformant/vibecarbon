@@ -33,6 +33,8 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.endpoint=tcp://docker-socket-proxy:2375"
       - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.constraints=Label(`com.docker.compose.project`,`${PROJECT_NAME}`)"
+      - "--providers.docker.network=${PROJECT_NAME}_vibecarbon-network"
       - "--providers.file.directory=/etc/traefik/dynamic"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"

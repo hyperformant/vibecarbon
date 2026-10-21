@@ -32,6 +32,12 @@ import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
 import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js';
+import {
+  appStorageSecretKeys,
+  localAppStorageSecrets,
+  revokeAppStorageCredential,
+  syncHetznerFences,
+} from './lib/deploy/app-storage-credential.js';
 import { planDestroy } from './lib/deploy/plan/destroy-plan.js';
 import { runPlan } from './lib/deploy/plan/runner.js';
 import {
@@ -1417,6 +1423,91 @@ async function deleteAppBucketEffect(ctx) {
       hint: `Empty manually via the ${Provider.NAME} Object Storage console, then DeleteBucket. Bucket continues to incur storage charges until deleted.`,
     });
   }
+}
+
+// 0. The env's own app storage key (security plan R9), before the buckets:
+//    no server uses it once the servers are gone, and a redeploy mints a
+//    fresh one. Plain destroy and -purge alike. A minted key (Linode,
+//    DigitalOcean) is revoked over the API; one that could not be is a leak.
+//    A pasted Hetzner key cannot be revoked by the CLI: destroy retires it
+//    (projectConfig.retiredAppKeys, still denied in every fence) and prints
+//    the console step plus the `configure storage -forget` step.
+async function revokeAppStorageKeyEffect(ctx) {
+  const { envConfig, projectConfig, environment, results, spinner, cwd } = ctx;
+  const record = envConfig.s3?.appKey;
+  if (!record?.id) return;
+  const Provider = providerFor(envConfig);
+  const providerId = providerIdFor(envConfig);
+  const secrets = localAppStorageSecrets(cwd);
+  const names = appStorageSecretKeys(environment);
+  const forget = () => {
+    if (secrets.get(names.accessKey)) secrets.set(names.accessKey, '');
+    if (secrets.get(names.secretKey)) secrets.set(names.secretKey, '');
+  };
+  if (record.scoping === 'mint') {
+    spinner.start(`Revoking app storage key ${record.id}`);
+    const outcome = await revokeAppStorageCredential({
+      provider: providerId,
+      envConfig,
+      apiToken: ctx.providerToken,
+    });
+    if (outcome.revoked) {
+      forget();
+      spinner.stop(`App storage key revoked: ${record.id}`);
+      return;
+    }
+    spinner.stop(`App storage key not revoked: ${record.id}`);
+    results.leaks.leak({
+      resourceClass: 'storage-key',
+      resource: record.id,
+      reason: outcome.leak ?? 'not revoked',
+      hint: `Delete it in the ${Provider.NAME} console under the object storage access keys. It can reach bucket ${record.bucket ?? envConfig.s3?.bucket}.`,
+    });
+    return;
+  }
+  if (record.scoping !== 'paste-fence') return;
+  // Retire the key before anything else: it stays denied in every fence
+  // until the operator deletes it in the console and forgets it.
+  projectConfig.retiredAppKeys = [...new Set([...(projectConfig.retiredAppKeys ?? []), record.id])];
+  saveProjectConfig(projectConfig);
+  spinner.start('App storage key fence');
+  try {
+    const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
+      save: false,
+      skipPrompts: !process.stdin.isTTY,
+    });
+    if (s3Creds) {
+      const s3Region = envConfig.s3?.region || 'fsn1';
+      const s3 = await getObjectStorageProvider(
+        providerId,
+        s3Creds.accessKey,
+        s3Creds.secretKey,
+        s3Region,
+      );
+      await syncHetznerFences({
+        projectConfig,
+        environment,
+        leaving: true,
+        s3,
+        secrets,
+        createProbe: (accessKey, secretKey) =>
+          getObjectStorageProvider(providerId, accessKey, secretKey, s3Region),
+      });
+      spinner.stop(`App storage key ${record.id} retired; it stays denied in every bucket fence`);
+    } else {
+      spinner.stop(
+        `App storage key ${record.id} retired; the bucket fences were not updated (no object storage keys here), and they still deny it`,
+      );
+    }
+  } catch (err) {
+    spinner.stop(
+      `App storage key ${record.id} retired; the bucket fences were not updated (${err.message}), and they still deny it`,
+    );
+  }
+  forget();
+  p.log.warn(
+    `Delete the pasted app storage key ${record.id} in the ${Provider.NAME} console (Security, S3 credentials); vibecarbon cannot revoke a key it did not make. It stays denied in every bucket fence until you run \`vibecarbon configure storage -forget ${record.id}\` after deleting it.`,
+  );
 }
 
 // 2. State bucket: kept on purpose, so the next deploy reuses a warm bucket
@@ -3203,6 +3294,7 @@ export const DESTROY_EFFECTS = {
   removePulumiStackState: finishThenReport('remove-stack-state', removePulumiStackStateEffect),
   destroyK8sInfra: finishThenReport('destroy-k8s-infra', destroyK8sInfraEffect),
   // shared teardown tail (buckets-last ordering)
+  revokeAppStorageKey: finishThenReport('revoke-app-storage-key', revokeAppStorageKeyEffect),
   deleteAppBucket: finishThenReport('delete-app-bucket', deleteAppBucketEffect),
   retainStateBucket: finishThenReport('retain-state-bucket', retainStateBucketEffect),
   handleBackupBucket: finishThenReport('handle-backup-bucket', handleBackupBucketEffect),

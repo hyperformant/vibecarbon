@@ -21,6 +21,7 @@ import { planStepNames } from '../../../../src/lib/deploy/plan/step.js';
 const EXPECTED_COMPOSE_SEQUENCE = [
   'destroy-compose-services',
   'remove-stack-state',
+  'revoke-app-storage-key',
   'delete-app-bucket',
   'retain-state-bucket',
   'handle-backup-bucket',
@@ -32,6 +33,7 @@ const EXPECTED_COMPOSE_SEQUENCE = [
 const EXPECTED_COMPOSE_HA_SEQUENCE = [
   'destroy-compose-ha',
   'remove-stack-state',
+  'revoke-app-storage-key',
   'delete-app-bucket',
   'retain-state-bucket',
   'handle-backup-bucket',
@@ -47,6 +49,7 @@ const EXPECTED_COMPOSE_HA_SEQUENCE = [
 // step.
 const EXPECTED_K8S_SEQUENCE = [
   'destroy-k8s-infra',
+  'revoke-app-storage-key',
   'delete-app-bucket',
   'retain-state-bucket',
   'handle-backup-bucket',

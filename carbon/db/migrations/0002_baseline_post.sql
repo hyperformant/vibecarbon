@@ -19,8 +19,10 @@
 -- So "server-only" is a catalog fact, and this function enforces it: every
 -- public table with RLS on and no policy, plus the Better Auth tables by
 -- name, loses every privilege for PUBLIC and for every role that is not a
--- superuser, its owner or the caller (the role running migrations, which
--- must keep what it was granted). Postgres' predefined pg_* roles are
+-- superuser, its owner, the caller (the role running migrations, which
+-- must keep what it was granted) or app_service, the app's own connection
+-- role (src/server/db/app-service-role.ts), which reads and writes these
+-- tables through adminDb. Postgres' predefined pg_* roles are
 -- operator grants and are left alone. It derives the set each time, so a
 -- table a later migration adds is covered with no list to maintain.
 --
@@ -55,6 +57,7 @@ BEGIN
       SELECT rolname FROM pg_catalog.pg_roles
       WHERE NOT rolsuper AND rolname NOT LIKE 'pg\_%'
         AND rolname <> current_user
+        AND rolname <> 'app_service'
         AND oid <> t.relowner
     LOOP
       EXECUTE format('REVOKE ALL ON TABLE %s FROM %I', t.tbl, r);

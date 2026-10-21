@@ -101,4 +101,30 @@ describe('haPersistPendingConfig keeps the per-environment storage fields', () =
     await COMPOSE_HA_EFFECTS.haPersistPendingConfig(ctx({ provider: 'hetzner' }));
     expect(s3Of(disk.saved)).not.toHaveProperty('bucketPin');
   });
+
+  it('carries the app key record and the unfenced-bucket marks, so a failed deploy never orphans a key', async () => {
+    const appKey = {
+      id: 'k-1',
+      scoping: 'paste-fence',
+      tier: 'env',
+      bucket: 'myapp-cd9ecc-prod-storage',
+    };
+    disk.config = {
+      projectName: 'myapp',
+      environments: {
+        prod: { s3: { bucket: 'myapp-cd9ecc-prod-storage', appKey, unfencedBuckets: ['b-1'] } },
+      },
+    };
+    await COMPOSE_HA_EFFECTS.haPersistPendingConfig(ctx({ provider: 'hetzner' }));
+    expect(s3Of(disk.saved)).toMatchObject({ appKey, unfencedBuckets: ['b-1'] });
+  });
+
+  it('a resolved credential on s3Config wins over the prior record (null: the shared tier)', async () => {
+    const appKey = { id: 'k-1', scoping: 'mint', tier: 'env', bucket: 'b' };
+    disk.config = { projectName: 'myapp', environments: { prod: { s3: { appKey } } } };
+    const c = ctx({ provider: 'hetzner' });
+    (c.s3Config as Record<string, unknown>).appKey = null;
+    await COMPOSE_HA_EFFECTS.haPersistPendingConfig(c);
+    expect(s3Of(disk.saved)).not.toHaveProperty('appKey');
+  });
 });

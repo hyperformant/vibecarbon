@@ -687,7 +687,10 @@ export class BaseProvider {
   /**
    * Compute the updated firewall rule set admitting a peer's replication
    * (WireGuard, udp/51821) endpoint, or null when no update is needed
-   * (idempotent no-op — the peer's rule is already present). Pure — no I/O,
+   * (idempotent no-op: the current peer's rule is the only WireGuard rule).
+   * Every implementation routes through replaceWireguardPeerRules (below), so
+   * a rule naming an old peer is always dropped; the census
+   * (wireguard-peer-rules-census.test.ts) walks the registry. Pure — no I/O,
    * no `this` reference; each provider encodes its own firewall-rule wire
    * shape (e.g. Hetzner's flat `{direction, protocol, port, source_ips}`
    * vs DigitalOcean's `{protocol, ports, sources:{addresses}}`), so this
@@ -1316,4 +1319,35 @@ export class BaseProvider {
     if (!type) return serverType;
     return `${serverType} (${type.vcpu} vCPU, ${type.ram}GB RAM, ${type.disk}GB SSD)`;
   }
+}
+
+/**
+ * The one reconcile behind every provider's buildReplicationFirewallRules:
+ * the WireGuard (udp/51821) rule follows the CURRENT HA peer. Every
+ * WireGuard rule that is not exactly "admit the current peer" is dropped
+ * (an old peer after a server replacement or role swap, a duplicate, a rule
+ * naming several sources), one rule for the current peer is appended, and
+ * every other rule is kept as read. Returns null when the rules already hold
+ * exactly the current peer's rule and nothing to drop, so callers skip the
+ * write.
+ *
+ * Each provider supplies only its rule shape, never the policy:
+ * @param {object[]} rules - The provider-native inbound rules as read.
+ * @param {string} peerIp - The current peer's public IPv4.
+ * @param {{
+ *   isWireguardRule: (rule: object) => boolean,
+ *   admitsOnlyPeer: (rule: object, peerIp: string) => boolean,
+ *   buildPeerRule: (peerIp: string) => object,
+ *   isRetired?: (rule: object) => boolean,
+ * }} shape - `isRetired` marks extra provider-specific rules to drop
+ *   (Hetzner's stale TCP replication ports).
+ * @returns {object[]|null} The full replacement rules, or null if already correct.
+ */
+export function replaceWireguardPeerRules(rules, peerIp, shape) {
+  const { isWireguardRule, admitsOnlyPeer, buildPeerRule, isRetired = () => false } = shape;
+  const wgRules = rules.filter(isWireguardRule);
+  const alreadyCorrect =
+    wgRules.length === 1 && admitsOnlyPeer(wgRules[0], peerIp) && !rules.some(isRetired);
+  if (alreadyCorrect) return null;
+  return [...rules.filter((r) => !isWireguardRule(r) && !isRetired(r)), buildPeerRule(peerIp)];
 }

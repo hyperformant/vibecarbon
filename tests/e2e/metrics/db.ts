@@ -89,6 +89,8 @@ export interface SweepBreakdown {
   /** DigitalOcean load balancers (CCM-created for k8s Services). Optional so
    *  the Hetzner sweep's historical rows stay shape-compatible. */
   loadBalancers?: number;
+  /** Minted app storage keys (Linode, DigitalOcean; security plan R9). */
+  storageKeys?: number;
 }
 
 /**
@@ -651,7 +653,8 @@ export class E2EDb {
       breakdown.networks +
       breakdown.s3Buckets +
       breakdown.sshKeys +
-      (breakdown.loadBalancers ?? 0);
+      (breakdown.loadBalancers ?? 0) +
+      (breakdown.storageKeys ?? 0);
     this.updateScenarioOrphans.run(total, JSON.stringify(breakdown), scenarioId);
   }
 

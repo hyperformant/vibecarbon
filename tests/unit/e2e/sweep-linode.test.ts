@@ -271,4 +271,29 @@ describe('sweepOrphanedLinodeResources', () => {
   it('pins the protected-bucket set empty — Linode has no subscription-anchor bucket', () => {
     expect([...PROTECTED_OBJECT_STORAGE_BUCKETS]).toEqual([]);
   });
+
+  it("revokes this run's app storage keys (vc-app-<project>…) and leaves every other key", async () => {
+    const fetchImpl = fakeFetch({
+      '/object-storage/keys': {
+        data: [
+          { id: 11, label: 'vc-app-testapp-l1-abc123-prod' },
+          { id: 12, label: 'vc-app-otherapp-xyz-prod' },
+          { id: 13, label: 'operator-key' },
+        ],
+        page: 1,
+        pages: 1,
+      },
+    });
+    const { counts, enumFailed } = await sweepOrphanedLinodeResources(TAG, 'testapp-l1', {
+      provider: fakeProvider(),
+      objectStorage: fakeStorage(),
+      fetchImpl,
+    });
+    const deletes = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+      .map(([url]) => String(url));
+    expect(deletes).toEqual(['https://api.linode.com/v4/object-storage/keys/11']);
+    expect(counts.storageKeys).toBe(1);
+    expect(enumFailed).toBe(false);
+  });
 });

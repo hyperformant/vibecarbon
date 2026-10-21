@@ -774,6 +774,21 @@ export async function startComposeStack(ip, sshKeyPath, projectName, _options = 
     } catch (logErr) {
       err.message = `${err.message}\n(failed to capture db logs: ${logErr.message})`;
     }
+    // A failed migration fails app-migrate, which keeps the app from
+    // starting; its log has the one-line cause.
+    try {
+      const migrateLogs = await sshRunAsync(
+        ip,
+        sshKeyPath,
+        `cd ${remoteDir} && docker compose logs app-migrate --tail=30 2>&1 || true`,
+        { timeout: 30_000 },
+      );
+      if (typeof migrateLogs === 'string' && migrateLogs.trim()) {
+        err.message = `${err.message}\n--- app-migrate logs (last 30 lines) ---\n${migrateLogs.trim()}`;
+      }
+    } catch (logErr) {
+      err.message = `${err.message}\n(failed to capture app-migrate logs: ${logErr.message})`;
+    }
     throw err;
   }
 }
@@ -926,7 +941,7 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       (await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose ps --format '{{.Name}}\\t{{.State}}\\t{{.Status}}' 2>&1 | head -20`,
+        `cd ${remoteDir} && docker compose ps -a --format '{{.Name}}\\t{{.State}}\\t{{.Status}}' 2>&1 | head -20`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   } catch {
@@ -937,7 +952,8 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
       (await sshRunAsync(
         ip,
         sshKeyPath,
-        `cd ${remoteDir} && docker compose logs --tail=40 app 2>&1 | tail -40`,
+        // app-migrate too: a failed migration stops the app from starting.
+        `cd ${remoteDir} && docker compose logs --tail=40 app-migrate app 2>&1 | tail -60`,
         { timeout: 15_000, ignoreError: true },
       )) || '';
   } catch {
@@ -946,17 +962,17 @@ export async function verifyAppHealth(ip, sshKeyPath, projectName, options = {})
   const details =
     `Health probe failed after ${attempts} attempts (last status: ${lastStatus})\n` +
     `--- docker compose ps ---\n${ps.trim()}\n` +
-    `--- app container log tail ---\n${logs.trim()}`;
+    `--- app-migrate and app log tail ---\n${logs.trim()}`;
   return { healthy: false, status: lastStatus, details };
 }
 
 /**
  * Wait until the app reports its migrations applied and its super admin
  * ready (`migrationStatus: 'applied'` and `adminReady: true` on its own
- * /api/health, one probe). The app applies db/migrations itself at startup,
- * then creates the admin from
+ * /api/health, one probe). The app-migrate step applies db/migrations before
+ * the app starts; the app checks the ledger, then creates the admin from
  * ADMIN_EMAIL / ADMIN_PASSWORD, which reach the container through the
- * bundled `.env` (env_file); the prod overlay refuses to start without them,
+ * bundled `app.env` (env_file); the prod overlay refuses to start without them,
  * and deploy's required-env preflight checks them before anything is
  * provisioned. The probe runs inside the app container with its own `node`
  * (see src/lib/deploy/admin-ready.js), so no tunnel or published port is
@@ -1509,6 +1525,25 @@ export async function restoreCompose(ip, sshKeyPath, projectName, target = 'late
     );
   }
 
-  // 7. Bring the app back up
+  // 7. Rerun the migrate step before the app: the app no longer migrates at
+  //    boot, so a restore to a point before a deployed migration would leave
+  //    it 503, and a backup older than the last APP_DB_PASSWORD carries the
+  //    old app_service password. app-migrate applies the ledger and resets
+  //    the role from .env. Foreground, so its exit code is the verdict.
+  try {
+    await sshRunAsync(
+      ip,
+      sshKeyPath,
+      `cd ${remoteDir} && docker compose run --rm --no-deps app-migrate`,
+      // One attempt: a timed-out migration is never relaunched blind.
+      { timeout: 600_000, retries: 1 },
+    );
+  } catch (err) {
+    throw new Error(
+      `restoreCompose: app-migrate failed after the restore, so the app stays stopped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 8. Bring the app back up
   await sshRunAsync(ip, sshKeyPath, `cd ${remoteDir} && docker compose start app`);
 }

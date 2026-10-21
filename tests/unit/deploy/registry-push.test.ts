@@ -257,8 +257,8 @@ describe('pushImageOverSshTunnel (compose-shaped)', () => {
     expect(sshCalls.length).toBe(2);
     const firstArgv = sshCalls[0][1] as string[];
     const secondArgv = sshCalls[1][1] as string[];
-    expect(firstArgv[firstArgv.indexOf('-L') + 1]).toBe('5000:localhost:5000');
-    expect(secondArgv[secondArgv.indexOf('-L') + 1]).toBe('5001:localhost:5000');
+    expect(firstArgv[firstArgv.indexOf('-L') + 1]).toBe('5000:127.0.0.1:5000');
+    expect(secondArgv[secondArgv.indexOf('-L') + 1]).toBe('5001:127.0.0.1:5000');
 
     // The push must dial the walked-to port.
     const pushCall = pushCalls()[0];

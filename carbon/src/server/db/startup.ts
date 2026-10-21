@@ -6,13 +6,15 @@ import {
 } from '../auth/admin-status';
 import { logger } from '../lib/logger';
 import { assertBypassRole, connectionConfig, DbRoleError } from './client';
-import { dbErrorForLog } from './errors';
-import { type MigrationOutcome, runMigrationsOnOwnConnection } from './migrate';
+import { dbErrorForLog, isConnectionLoss } from './errors';
+import { verifyMigrationsOnOwnConnection } from './migrate';
 import {
   type MigrationStatus,
   migrationFailureReason,
   setMigrationStatus,
 } from './migration-status';
+
+export { isConnectionLoss };
 
 interface StartupDeps {
   assert: () => Promise<void>;
@@ -82,7 +84,7 @@ export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {})
       return;
     } catch (err) {
       if (err instanceof DbRoleError) {
-        log.fatal({ err }, 'Refusing to start: the database connection role is RLS-scoped');
+        log.fatal({ err }, 'Refusing to start: the database connection role is wrong for the app');
         exit(1);
         return;
       }
@@ -105,45 +107,6 @@ export async function checkDbRoleAtStartup(overrides: Partial<StartupDeps> = {})
       await new Promise((resolve) => setTimeout(resolve, retryMs));
     }
   }
-}
-
-// Connection loss only: the database went away or refused us. These are a
-// dependency wait (the db container restarting, a failover), the same wait
-// checkDbRoleAtStartup does before the bootstrap ever runs. Node errno codes
-// for the socket, SQLSTATE class 08 (connection exception) and 57P01-03
-// (admin/crash shutdown, cannot connect now).
-const CONNECTION_ERRNO = new Set([
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ETIMEDOUT',
-  'EPIPE',
-  'ENOTFOUND',
-  'EAI_AGAIN',
-]);
-const CONNECTION_SQLSTATE = new Set(['57P01', '57P02', '57P03']);
-
-/**
- * True when a bootstrap error is the connection to Postgres dropping or
- * being refused. Looks through Drizzle's (and Better Auth's) `cause`
- * wrapping like isDbAuthFailure.
- */
-export function isConnectionLoss(err: unknown): boolean {
-  let current: unknown = err;
-  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
-    const code = (current as { code?: unknown }).code;
-    if (typeof code === 'string') {
-      if (CONNECTION_ERRNO.has(code) || CONNECTION_SQLSTATE.has(code) || code.startsWith('08')) {
-        return true;
-      }
-    } else if (/^Connection terminated/.test(current.message)) {
-      // node-pg raises "Connection terminated (unexpectedly)" with no code at
-      // all when the server closes the socket mid-query. Matched only when
-      // there is no code, as the same dependency wait as the codes above.
-      return true;
-    }
-    current = current.cause;
-  }
-  return false;
 }
 
 /** SQLSTATE 25006: the database is a read-only replica (a compose-ha standby). */
@@ -179,7 +142,7 @@ const adminDefaults: AdminStartupDeps = {
 
 /**
  * Ensure the ADMIN_EMAIL super admin exists, as the last step of startup:
- * call it once migrations are applied (migrateAtStartup) and
+ * call it once migrations are applied (verifyMigrationsAtStartup) and
  * checkDbRoleAtStartup has confirmed the role, so every table the bootstrap
  * writes exists. Never rejects; run it without awaiting. Every wait below
  * runs on the startup loop's cadence (`retryMs`).
@@ -274,76 +237,80 @@ export async function ensureAdminAtStartup(
 }
 
 interface MigrateStartupDeps {
-  run: () => Promise<MigrationOutcome>;
+  verify: () => Promise<{ upToDate: boolean }>;
   setStatus: (status: MigrationStatus, reason?: string) => void;
   log: Pick<typeof logger, 'error' | 'info' | 'warn'>;
   retryMs: number;
+  /** Waits between looks; defaults to `retryMs`. */
+  pause?: () => Promise<void>;
 }
 
 const migrateDefaults: MigrateStartupDeps = {
-  run: () => runMigrationsOnOwnConnection(connectionConfig),
+  verify: () => verifyMigrationsOnOwnConnection(connectionConfig),
   setStatus: setMigrationStatus,
   log: logger,
   retryMs: defaults.retryMs,
 };
 
 /**
- * Apply pending database migrations (db/migrate.ts runMigrations) and
- * publish the outcome for /api/health and the migrations gate. Never
- * rejects; resolves with the final status.
+ * Wait until the database has every migration, and publish that for
+ * /api/health and the migrations gate. The app never applies a migration:
+ * the migrate step does, as the owner, before the app starts (compose
+ * `app-migrate`, the k8s `migrate` init container, `npm run db:migrate`
+ * locally; db/migrate-cli.ts). This only reads drizzle's ledger
+ * (verifyMigrations), so it runs as the app's own role. Never rejects;
+ * resolves with the final status.
  *
- * - Waits through connection loss (isConnectionLoss, the same narrow
- *   dependency wait as the admin bootstrap), warning once. The run is one
- *   transaction, so a dropped connection leaves nothing half-applied.
- * - On a standby, waits until replication has brought the ledger up to date
- *   (the primary applies migrations), then reports `applied`.
- * - Any other error is a failed migration: logged at error level, published
- *   as `failed` with its SQLSTATE, and terminal for this boot. No retry: the
- *   same SQL fails the same way until someone fixes it and restarts the app.
+ * - While the ledger is behind db/migrations, logs "migrations pending"
+ *   once, keeps the status `pending` (readiness answers 503) and looks again
+ *   every `retryMs`. That covers a standby waiting for replication too.
+ * - Waits through connection loss (isConnectionLoss), warning once.
+ * - Any other error (the role may not read the ledger) is published as
+ *   `failed` with its SQLSTATE, logged at error level, and terminal for this
+ *   boot, as a failed migration was.
  */
-export async function migrateAtStartup(
+export async function verifyMigrationsAtStartup(
   overrides: Partial<MigrateStartupDeps> = {}
 ): Promise<MigrationStatus> {
-  const { run, setStatus, log, retryMs } = { ...migrateDefaults, ...overrides };
+  const { verify, setStatus, log, retryMs, pause } = { ...migrateDefaults, ...overrides };
+  const wait = pause ?? (() => new Promise<void>((resolve) => setTimeout(resolve, retryMs)));
   let warnedConnection = false;
-  let notedStandby = false;
-  const pause = () => new Promise((resolve) => setTimeout(resolve, retryMs));
+  let notedPending = false;
   for (;;) {
     try {
-      const outcome = await run();
-      if (outcome.kind === 'standby' && !outcome.upToDate) {
-        if (!notedStandby) {
-          log.info("The database is a standby; waiting for the primary's migrations to replicate");
-          notedStandby = true;
+      const { upToDate } = await verify();
+      if (!upToDate) {
+        if (!notedPending) {
+          log.info(
+            'Database migrations pending: the migrate step applies them (app-migrate, the ' +
+              'migrate init container, or `npm run db:migrate`). Serving with readiness down'
+          );
+          notedPending = true;
         }
-        await pause();
+        await wait();
         continue;
       }
       setStatus('applied');
-      if (outcome.kind === 'applied' && outcome.newlyApplied > 0) {
-        log.info({ applied: outcome.newlyApplied }, 'Applied database migrations');
-      } else {
-        log.info('Database migrations are up to date');
-      }
+      log.info('Database migrations are up to date');
       return 'applied';
     } catch (err) {
       if (isConnectionLoss(err)) {
         if (!warnedConnection) {
           log.warn(
             { err: dbErrorForLog(err) },
-            'Database migrations are waiting for the database connection'
+            'The database migration check is waiting for the database connection'
           );
           warnedConnection = true;
         }
-        await pause();
+        await wait();
         continue;
       }
       const reason = migrationFailureReason(err);
       setStatus('failed', reason);
       log.error(
         { err: dbErrorForLog(err) },
-        'Database migrations failed; the app serves only /api/health until the migration is ' +
-          'fixed and the app restarted'
+        'Could not read the database migration ledger; the app serves only /api/health until ' +
+          'the cause is fixed and the app restarted'
       );
       return 'failed';
     }
@@ -358,15 +325,16 @@ interface DatabaseStartupDeps {
 
 /**
  * The app's database startup, in order: wait until Postgres answers as a
- * role that bypasses RLS, apply migrations, confirm the role is a member of
- * the `app_user` the baseline creates, then bootstrap the super admin. A
- * failed migration stops the sequence (the admin bootstrap never runs
+ * role that bypasses RLS, wait until the migrate step has applied every
+ * migration (the app applies none itself), confirm the role is a member of
+ * the `app_user` the baseline creates, then bootstrap the super admin. An
+ * unreadable ledger stops the sequence (the admin bootstrap never runs
  * against a half-known schema). Never rejects; run it without awaiting.
  */
 export async function startDatabase(overrides: Partial<DatabaseStartupDeps> = {}): Promise<void> {
   const { checkRole, migrate, ensureAdmin } = {
     checkRole: checkDbRoleAtStartup,
-    migrate: () => migrateAtStartup(),
+    migrate: () => verifyMigrationsAtStartup(),
     ensureAdmin: () => ensureAdminAtStartup(),
     ...overrides,
   };

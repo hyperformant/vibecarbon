@@ -3,7 +3,6 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { createMiddleware } from 'hono/factory';
-import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
 import { auth } from './auth';
@@ -16,6 +15,7 @@ import { handleAppError } from './lib/errors';
 import { logger } from './lib/logger';
 import { createRateLimiter } from './lib/rate-limiter';
 import { createSeoShell } from './lib/seo';
+import { accessLog } from './middleware/access-log';
 import { applyAuthRateLimits } from './middleware/auth-rate-limits';
 import { apiCors } from './middleware/cors';
 import { crawlerTracking } from './middleware/crawler-tracking';
@@ -115,10 +115,10 @@ app.use(
 app.use('*', timeout(30000));
 
 // Request logging
-app.use('*', honoLogger());
+app.use('*', accessLog());
 
 // Nothing but /api/health is served until the database migrations are
-// applied (db/startup.ts migrateAtStartup). Before every middleware that
+// applied (db/startup.ts verifyMigrationsAtStartup). Before every middleware that
 // touches the database (crawler tracking, sessions).
 app.use('*', migrationsGate());
 
@@ -599,10 +599,11 @@ const server = serve({
 
 // Not awaited: the server must come up even while Postgres is still starting
 // (readiness reports it down meanwhile, and the migrations gate answers 503).
-// Once the database answers: apply pending migrations, confirm the
-// connection role (the process exits if it does not bypass RLS), then ensure
-// the ADMIN_EMAIL super admin exists (db/startup.ts startDatabase). A failed
-// migration is terminal for this boot: /api/health reports it.
+// Once the database answers: wait until the migrate step has applied every
+// migration (the app applies none: db/migrate-cli.ts runs them as the owner),
+// confirm the connection role (the process exits if it does not bypass RLS,
+// or, in production, is a superuser or owns a table), then ensure the
+// ADMIN_EMAIL super admin exists (db/startup.ts startDatabase).
 void startDatabase();
 
 // Graceful shutdown handler - drain in-flight requests before exiting

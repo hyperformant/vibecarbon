@@ -94,13 +94,14 @@ describe('deploy.yml creates a Secret for every ClusterIssuer that references on
     }
   });
 
-  it('excludes every DNS-01 provider token from the app-facing vibecarbon-secrets bag', () => {
-    // vibecarbon-secrets is envFrom'd wholesale into the app pod, and it is
+  it('excludes every DNS-01 provider token from the app-facing vibecarbon-app-secrets bag', () => {
+    // vibecarbon-app-secrets is envFrom'd wholesale into the app pod, and it is
     // built from toJSON(secrets) minus an exclude list. An infra credential
     // that has its own cert-manager Secret must not also be handed to
     // application code.
     const wf = read('carbon/.github/workflows/deploy.yml');
-    const excludeList = wf.match(/del\(([\s\S]*?)\)/)?.[1] ?? '';
+    // The jq del( … ) block, not a comment that names it.
+    const excludeList = wf.match(/del\(\n([\s\S]*?)\n\s*\)/)?.[1] ?? '';
     const armTokens = [...wf.matchAll(/^\s+([A-Z0-9_]+): \$\{\{ secrets\.\1 \}\}$/gm)].map(
       (m) => m[1],
     );

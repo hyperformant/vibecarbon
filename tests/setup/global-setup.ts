@@ -12,6 +12,12 @@ process.env.VIBECARBON_UPLINK_LOCK_DIR = join(
   'uplink-push.lock',
 );
 
+// The secret-fingerprint HMAC key (src/lib/deploy/secret-fingerprint.js) is
+// minted under the home dir by default; tests get a per-worker temp dir so no
+// caller (digestEnvLocalSecrets, tokenFingerprint) touches the developer's
+// real ~/.vibecarbon.
+process.env.VIBECARBON_FINGERPRINT_KEY_DIR = mkdtempSync(join(tmpdir(), 'vc-test-fpkey-'));
+
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { cleanupAllTempDirs } from '../_shared/temp-dir.js';
 

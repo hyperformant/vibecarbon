@@ -3,9 +3,8 @@ import { areMigrationsApplied } from '../db/migration-status';
 
 /**
  * Serve nothing but the health routes until the database migrations are
- * applied (db/startup.ts migrateAtStartup). Before that, a route could read
- * or write a table that does not exist yet, or one a failed migration left
- * as it was; a 503 says "not ready" plainly instead. /api/health keeps
+ * applied (db/startup.ts verifyMigrationsAtStartup). Before that, a route
+ * could read or write a table that does not exist yet; a 503 says "not ready" plainly instead. /api/health keeps
  * answering, so `vibecarbon deploy` and the orchestrator's probes see
  * `migrationStatus` (and /api/health/ready reports not ready).
  *

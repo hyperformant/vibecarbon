@@ -411,6 +411,51 @@ export function dropUnportableEnv(env, { log = p.log } = {}) {
   return kept;
 }
 
+/** What the old server prints instead of app.env when it has none. */
+export const NO_APP_ENV_MARKER = '__VC_NO_APP_ENV__';
+
+/**
+ * The old server's `app.env`, for the scale replay: it holds the storage pair
+ * the old app used, which need not be the `.env`'s (the db's WAL-G pair, and
+ * on an isolated or fenced env the app's own key, security plan R2).
+ *
+ * `null` only when the server answers that it has no app.env (the remote
+ * marker): a server deployed before app.env existed gave its app the whole
+ * `.env`, so renderBundle carries the pair from the replayed `.env`, which is
+ * what that app read. A read that FAILS throws instead: guessing would hand
+ * the new app the `.env`'s infra pair, the account-wide key, so the caller
+ * aborts that server's scale (its catch deletes the new server).
+ * `run` and `log` are injectable for tests.
+ * @param {string} ip
+ * @param {string} sshKeyPath
+ * @param {string} projectName
+ * @param {{ run?: typeof sshRun, log?: { warn: (m: string) => void } }} [opts]
+ * @returns {Promise<Record<string, string> | null>}
+ */
+export async function readOldAppEnv(
+  ip,
+  sshKeyPath,
+  projectName,
+  { run = sshRun, log = p.log } = {},
+) {
+  let text;
+  try {
+    text = await run(ip, sshKeyPath, [
+      'sh',
+      '-c',
+      `if [ -f "$1" ]; then cat "$1"; else printf '%s' ${NO_APP_ENV_MARKER}; fi`,
+      'sh',
+      `/opt/${projectName}/app.env`,
+    ]);
+  } catch (err) {
+    throw new Error(
+      `could not read app.env on the old server ${ip} (${err.message}), so scale stopped rather than give the new app the account-wide storage key. Run scale again once the old server answers.`,
+    );
+  }
+  if (String(text ?? '').trim() === NO_APP_ENV_MARKER) return null;
+  return dropUnportableEnv(parseDotenv(String(text ?? '')), { log });
+}
+
 /**
  * compose/compose-ha `scale-servers` effect: blue-green replace every target
  * server (backup old → create new → wait for SSH → provision → copy files →
@@ -590,6 +635,8 @@ async function scaleServers(ctx) {
       // between "Docker installed" and "Copying project files" — the exact
       // stalled-spinner symptom flaky links produce.
       let oldEnv = {};
+      /** @type {Record<string, string> | null} */
+      let oldAppEnv = null;
       s.start('Reading current server configuration...');
       try {
         const envText = await sshRun(server.ip, sshKeyPath, ['cat', `/opt/${projectName}/.env`]);
@@ -599,13 +646,20 @@ async function scaleServers(ctx) {
         // or `'` beside `"`) — mid-scale, after the new server exists. Drop
         // and warn here instead; the operator re-enters it with configure.
         oldEnv = dropUnportableEnv(parseDotenv(envText));
-      } catch {
-        // Old server may be unreachable; renderBundle will fall back to the
-        // project's local `.env`. That path is degraded (missing S3 secrets)
-        // but at least surfaces a meaningful error during reconcile rather
-        // than crashing scale silently.
-        s.stop('Could not read old-server config, falling back to project .env');
+      } catch (err) {
+        // No fallback to the project's local `.env`: it lacks the values the
+        // deploy merged in, and its S3_* would be the account-wide pair, not
+        // the app's own key (security plan R2). Stop this server's scale; the
+        // catch below deletes the new server.
+        s.stop('Could not read old-server config, so this server is not scaled', 1);
+        throw new Error(
+          `could not read .env on the old server ${server.ip} (${err?.message ?? err}), so scale stopped rather than build the new server from the project .env. Run scale again once the old server answers.`,
+        );
       }
+      // Only once the .env replay is in hand. A failed app.env read throws
+      // here, so the catch below deletes the new server instead of guessing
+      // a pair.
+      oldAppEnv = await readOldAppEnv(server.ip, sshKeyPath, projectName);
       const oldAppImage = oldEnv.APP_IMAGE || '';
 
       s.start('Copying project files...');
@@ -637,6 +691,7 @@ async function scaleServers(ctx) {
           // SITE_URL, APP_IMAGE, etc.) on top — so the new bundle is a
           // superset of both sources.
           envOverrides: oldEnv,
+          appEnvReplay: oldAppEnv,
         }),
       );
       s.stop('Project files copied');

@@ -18,8 +18,8 @@ build on the connection below.
 ## Connection Details
 
 - **URL**: `REDIS_URL` (`redis://:<password>@redis:6379`) — wired into the app
-  container by the addon overlay (compose) and the `vibecarbon-secrets` Secret
-  (k8s); this is the variable your code should read
+  container by the addon overlay (compose) and the `vibecarbon-app-secrets`
+  Secret (k8s); this is the variable your code should read
 - **Host**: `redis` (internal) / `localhost` (external, dev only)
 - **Port**: `6379`
 - **Password**: See `REDIS_PASSWORD` in `.env.local` (keep it URL-safe — it is
@@ -115,7 +115,7 @@ REDIS_PASSWORD=<generated, URL-safe>
 ```
 
 `REDIS_URL` is derived from them at deploy time (compose overlay env / k8s
-`vibecarbon-secrets`) — read it via `env.REDIS_URL` in server code.
+`vibecarbon-app-secrets`) — read it via `env.REDIS_URL` in server code.
 
 ## Docker Commands
 

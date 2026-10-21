@@ -35,7 +35,13 @@ services:
 // What the shipped template's docker-compose.prod.yml requires. The removed
 // services' secrets (gateway JWT keys, realtime, vault, meta, ...) are not
 // among them: nothing in the stack reads them any more.
-const LEAN_REQUIRED = ['ADMIN_EMAIL', 'ADMIN_PASSWORD', 'BETTER_AUTH_SECRET', 'POSTGRES_PASSWORD'];
+const LEAN_REQUIRED = [
+  'ADMIN_EMAIL',
+  'ADMIN_PASSWORD',
+  'APP_DB_PASSWORD',
+  'BETTER_AUTH_SECRET',
+  'POSTGRES_PASSWORD',
+];
 const TEMPLATE_PROD_COMPOSE = readFileSync(
   join(process.cwd(), 'carbon', 'docker-compose.prod.yml'),
   'utf8',

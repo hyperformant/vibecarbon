@@ -55,6 +55,13 @@ Server sizes can be selected interactively during deploy or pre-configured in `.
 ### S3 & NetworkPolicy Egress (DO Spaces)
 On DigitalOcean, same-region Spaces endpoints resolve internally to a VPC gateway IP address (e.g. `nyc3.digitaloceanspaces.com` → `10.10.15.254`). Vibecarbon's `DigitalOceanProvider` automatically injects the DO VPC CIDR into the cluster's Kubernetes NetworkPolicies (`s3-egress-vpc.yaml`), allowing continuous WAL-G backups to reach Spaces without breaching network isolation.
 
+### The app's own storage key
+Every deploy gives the environment's app a Spaces key of its own, minted through the DigitalOcean API with a `readwrite` grant on that environment's bucket only (never `fullaccess`). The Spaces keys you configured stay with the infrastructure: bucket setup, CORS, the Pulumi state and `wal-g` backups. `vibecarbon status` shows the result as `storage access: isolated`.
+
+- **What the app can reach:** its own environment's bucket. Not the backups, not the Pulumi state, not another environment's uploads.
+- **Lifecycle:** the key's id (never its secret) is recorded in `.vibecarbon.json`; the secret stays in `.env.local` on the machine that deployed. A deploy from a fresh checkout mints a new key and revokes the old one. Every `vibecarbon destroy`, with or without `-purge`, revokes it.
+- **Token scopes:** a custom-scoped Personal Access Token needs the `spaces_key` create and delete scopes (plus read for the redeploy check). Without them the deploy stops before anything is provisioned; it never falls back to the account-wide key.
+
 ### StorageClass
 For Kubernetes stateful workloads (`k8s`), PVCs target DigitalOcean's Block Storage CSI driver using the StorageClass `do-block-storage`.
 

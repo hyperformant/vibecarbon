@@ -20,8 +20,8 @@ const {
   ensureAdminAtStartup,
   isConnectionLoss,
   isDbAuthFailure,
-  migrateAtStartup,
   startDatabase,
+  verifyMigrationsAtStartup,
 } = await import('@server/db/startup');
 const { migrationFailureReason } = await import('@server/db/migration-status');
 
@@ -153,12 +153,44 @@ describe('pool', () => {
 });
 
 describe('assertBypassRole', () => {
-  type Row = { role: string; bypass: boolean | null; hasAppUser: boolean; member: boolean };
+  type Row = {
+    role: string;
+    bypass: boolean | null;
+    privileged: boolean | null;
+    hasAppUser: boolean;
+    member: boolean;
+  };
   const executor = (row: Row) =>
     ({ execute: async () => ({ rows: [row] }) }) as unknown as Parameters<
       typeof assertBypassRole
     >[0];
-  const ok: Row = { role: 'postgres', bypass: true, hasAppUser: true, member: true };
+  const ok: Row = {
+    role: 'app_service',
+    bypass: true,
+    privileged: false,
+    hasAppUser: true,
+    member: true,
+  };
+
+  // Production: the app connects as app_service, which owns nothing. A
+  // superuser or a table owner could alter the schema or reach the host.
+  it('in production, refuses a superuser or table-owning role, before app_user is required', async () => {
+    const owner = { ...ok, role: 'postgres', privileged: true };
+    const err = await assertBypassRole(executor(owner), { production: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(DbRoleError);
+    expect(err.message).toMatch(/superuser or owns tables/);
+    await expect(
+      assertBypassRole(executor(owner), { production: true, requireAppUser: false })
+    ).rejects.toBeInstanceOf(DbRoleError);
+    await expect(assertBypassRole(executor(ok), { production: true })).resolves.toBeUndefined();
+  });
+
+  it('outside production, the owner is still accepted (tests and tools may use it)', async () => {
+    const owner = { ...ok, role: 'postgres', privileged: true };
+    await expect(
+      assertBypassRole(executor(owner), { production: false })
+    ).resolves.toBeUndefined();
+  });
 
   it('accepts a bypass role that is a member of app_user', async () => {
     await expect(assertBypassRole(executor(ok))).resolves.toBeUndefined();
@@ -327,14 +359,14 @@ describe('ensureAdminAtStartup: the super admin bootstrap settles, waiting only 
   });
 });
 
-describe('migrateAtStartup: migrations apply once, a failure is terminal', () => {
+describe('verifyMigrationsAtStartup: the app checks the ledger, the migrate step applies', () => {
   const pgError = (code: string) =>
-    new DrizzleQueryError('create table', [], Object.assign(new Error(`pg ${code}`), { code }));
-  const start = (run: () => Promise<unknown>) => {
+    new DrizzleQueryError('select', [], Object.assign(new Error(`pg ${code}`), { code }));
+  const start = (verify: () => Promise<unknown>) => {
     const statuses: [string, string | undefined][] = [];
     const log = fakeLog();
-    const done = migrateAtStartup({
-      run: run as never,
+    const done = verifyMigrationsAtStartup({
+      verify: verify as never,
       setStatus: (st, reason) => statuses.push([st, reason]),
       log,
       retryMs: 0,
@@ -342,46 +374,49 @@ describe('migrateAtStartup: migrations apply once, a failure is terminal', () =>
     return { done, statuses, log };
   };
 
-  it('reports applied after a run', async () => {
-    const { done, statuses, log } = start(async () => ({ kind: 'applied', newlyApplied: 3 }));
+  it('reports applied once the ledger is current', async () => {
+    const { done, statuses, log } = start(async () => ({ upToDate: true }));
     expect(await done).toBe('applied');
     expect(statuses).toEqual([['applied', undefined]]);
-    expect(log.info).toHaveBeenCalledWith({ applied: 3 }, 'Applied database migrations');
+    expect(log.info).toHaveBeenCalledWith('Database migrations are up to date');
   });
 
-  it('waits through connection loss (warning once), then applies', async () => {
+  it('waits through connection loss (warning once), then reports applied', async () => {
     const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
-    const run = vi
+    const verify = vi
       .fn()
       .mockRejectedValueOnce(refused)
       .mockRejectedValueOnce(pgError('57P03'))
-      .mockResolvedValueOnce({ kind: 'applied', newlyApplied: 0 });
-    const { done, statuses, log } = start(run);
+      .mockResolvedValueOnce({ upToDate: true });
+    const { done, statuses, log } = start(verify);
     expect(await done).toBe('applied');
-    expect(run).toHaveBeenCalledTimes(3);
+    expect(verify).toHaveBeenCalledTimes(3);
     expect(statuses).toEqual([['applied', undefined]]);
     expect(log.warn).toHaveBeenCalledTimes(1);
   });
 
-  it('a failed migration is terminal: published with its SQLSTATE, logged once, never retried', async () => {
-    const run = vi.fn().mockRejectedValue(pgError('42P07'));
-    const { done, statuses, log } = start(run);
+  it('an unreadable ledger is terminal: published with its SQLSTATE, logged once, never retried', async () => {
+    const verify = vi.fn().mockRejectedValue(pgError('42501'));
+    const { done, statuses, log } = start(verify);
     expect(await done).toBe('failed');
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(statuses).toEqual([['failed', 'SQLSTATE 42P07']]);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual([['failed', 'SQLSTATE 42501']]);
     expect(log.error).toHaveBeenCalledTimes(1);
   });
 
-  it('a standby waits until its ledger has replicated', async () => {
-    const run = vi
+  it('waits, with ready down, while the ledger is behind (pending migrations or a standby)', async () => {
+    const verify = vi
       .fn()
-      .mockResolvedValueOnce({ kind: 'standby', upToDate: false })
-      .mockResolvedValueOnce({ kind: 'standby', upToDate: false })
-      .mockResolvedValueOnce({ kind: 'standby', upToDate: true });
-    const { done, statuses } = start(run);
+      .mockResolvedValueOnce({ upToDate: false })
+      .mockResolvedValueOnce({ upToDate: false })
+      .mockResolvedValueOnce({ upToDate: true });
+    const { done, statuses, log } = start(verify);
     expect(await done).toBe('applied');
-    expect(run).toHaveBeenCalledTimes(3);
+    expect(verify).toHaveBeenCalledTimes(3);
     expect(statuses).toEqual([['applied', undefined]]);
+    expect(
+      log.info.mock.calls.filter(([m]) => String(m).includes('migrations pending'))
+    ).toHaveLength(1);
   });
 
   it('the public reason is the SQLSTATE only, never the message', () => {
@@ -393,7 +428,7 @@ describe('migrateAtStartup: migrations apply once, a failure is terminal', () =>
   });
 });
 
-describe('startDatabase: role check, then migrations, then the admin', () => {
+describe('startDatabase: role check, then the migration check, then the admin', () => {
   it('runs the steps in order, the first role check without requiring app_user', async () => {
     const order: string[] = [];
     const checkRole = vi.fn(async (o?: { assert?: () => Promise<void> }) => {

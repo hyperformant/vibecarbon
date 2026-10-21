@@ -244,7 +244,7 @@ vibecarbon deploy <env> -mode k8s -restore 2026-08-05T14:30:00Z -y
 ### What actually happens
 
 1. Pulumi provisions fresh nodes, firewalls, and S3 bindings as on any cold
-   deploy; the restore target is stamped into the `vibecarbon-secrets` Secret
+   deploy; the restore target is stamped into the `vibecarbon-infra-secrets` Secret
    as `RESTORE_TARGET` (empty on normal boots, making the next step a no-op).
 2. The database StatefulSet's `walg-restore` init container
    (`carbon/k8s/base/db/statefulset.yaml`) sees `RESTORE_TARGET`, clears
@@ -255,10 +255,11 @@ vibecarbon deploy <env> -mode k8s -restore 2026-08-05T14:30:00Z -y
    archive recovery pinned to the base backup's own timeline, and (for PITR)
    `recovery_target_time` stops replay at the requested instant. On reaching
    the target (or the end of WAL), Postgres promotes to read-write.
-4. The app applies its migrations itself at startup, once the restored
-   database accepts connections. The restored dataset carries its migration
-   ledger, so only migrations newer than the backup run (none, when the backup
-   came from the same release). The app's super-admin creation also runs at
+4. The migrate step (the compose `app-migrate` one-shot, the k8s `migrate`
+   init container) applies the migrations once the restored database accepts
+   connections, before the app starts. The restored dataset carries its
+   migration ledger, so only migrations newer than the backup run (none, when
+   the backup came from the same release). The app's super-admin creation also runs at
    startup and is idempotent against restored data.
 5. The app tier rolls out normally and the deploy finishes with the standard
    public health probe.

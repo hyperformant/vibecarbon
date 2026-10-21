@@ -10,6 +10,7 @@
  */
 
 import { existsSync, rmSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { reapChallengeRecords } from '../../acme-challenge.js';
@@ -735,11 +736,49 @@ echo COMPOSE_RESEED_STAGED
  * never the public internet. The raw replication port (5433) is no longer
  * exposed to the peer at the host firewall — the socat relay binds the tunnel
  * IP and is reachable only over wg0.
+ *
+ * The allow follows the CURRENT peer: every other 51821/udp allow (an old
+ * peer after a server replacement or role swap) is deleted first, see
+ * ufwWireguardPeerCommands.
  */
 export async function openWireguardPortUfw(ip, peerIp, sshKeyPath) {
-  await sshRunAsync(ip, sshKeyPath, `ufw allow from ${peerIp} to any port 51821 proto udp`, {
-    timeout: 15_000,
-  });
+  const status = await sshRunAsync(ip, sshKeyPath, 'ufw status', { timeout: 15_000 });
+  for (const command of ufwWireguardPeerCommands(String(status ?? ''), peerIp)) {
+    await sshRunAsync(ip, sshKeyPath, command, { timeout: 15_000 });
+  }
+}
+
+/**
+ * The UFW commands that make the current peer the only source allowed on
+ * udp/51821: one `ufw delete` per other 51821/udp allow listed in
+ * `ufw status` (an old peer after a server replacement or role swap, or an
+ * any-source allow), then the peer's allow. `ufw allow` is idempotent, so the
+ * current peer's rule is re-added harmlessly and never deleted.
+ *
+ * Every source parsed from the status output is validated before it reaches a
+ * command; an unrecognized one throws instead of leaving a rule we cannot read.
+ * @param {string} ufwStatus - `ufw status` output from the node.
+ * @param {string} peerIp - The current peer's public IPv4.
+ * @returns {string[]}
+ */
+export function ufwWireguardPeerCommands(ufwStatus, peerIp) {
+  const deletes = new Set();
+  for (const line of ufwStatus.split('\n')) {
+    const m = line.match(/^51821\/udp(\s+\(v6\))?\s+ALLOW(?:\s+IN)?\s+(\S+)/);
+    if (!m) continue;
+    const source = m[2];
+    if (source === 'Anywhere') {
+      deletes.add('ufw delete allow 51821/udp');
+      continue;
+    }
+    const [addr, prefix] = source.split('/');
+    if (!isIP(addr) || (prefix !== undefined && !/^\d{1,3}$/.test(prefix))) {
+      throw new Error(`ufw lists a 51821/udp allow from an unrecognized source: ${source}`);
+    }
+    if (source === peerIp) continue;
+    deletes.add(`ufw delete allow from ${source} to any port 51821 proto udp`);
+  }
+  return [...deletes, `ufw allow from ${peerIp} to any port 51821 proto udp`];
 }
 
 /**

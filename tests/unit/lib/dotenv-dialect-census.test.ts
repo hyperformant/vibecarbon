@@ -156,7 +156,9 @@ function fileWriterHelpers(src: string): string[] {
   }
   return out;
 }
-const ENV_LITERAL_ARG = String.raw`(?:(?:join|resolve|path\.join|path\.resolve)\([^)\n]*)?['"\x60]\.env(?:\.local|\.e2e|\.example)?['"\x60]`;
+// `app.env` too: the deploy bundle's app-only env file (renderBundle), read by
+// the app container through the prod overlay's env_file.
+const ENV_LITERAL_ARG = String.raw`(?:(?:join|resolve|path\.join|path\.resolve)\([^)\n]*)?['"\x60](?:app)?\.env(?:\.local|\.e2e|\.example)?['"\x60]`;
 /**
  * Does this file write to a `.env*` path: inline, through a variable assigned
  * from one, or through a local helper called with one?
@@ -238,6 +240,7 @@ describe('dotenv dialect census', () => {
     expect(DOTENV_LIBRARY.test('const env = loadEnv(cwd) ?? {};')).toBe(false);
     // WRITER: inline target, tracked variable, and a non-env target.
     expect(writesEnvFile("writeFileSync(join(projectDir, '.env'), envLocal);")).toBe(true);
+    expect(writesEnvFile("writeFileSync(join(stageDir, 'app.env'), text);")).toBe(true);
     expect(
       writesEnvFile("const envPath = join(cwd, '.env.local');\nwriteFileSync(envPath, text);"),
     ).toBe(true);
@@ -358,6 +361,15 @@ describe('dotenv dialect census', () => {
     expect(noImport).toEqual([]);
     const handBuilt = writers.filter((f) => HAND_BUILT_ENV_LINE.test(read(f)));
     expect(handBuilt).toEqual([]);
+  });
+
+  it('bundle.js writes app.env only through formatDotenvLine', () => {
+    const src = read('src/lib/deploy/bundle.js');
+    const write = src.match(
+      /writeFileSync\(\s*join\(stageDir, 'app\.env'\),[\s\S]*?\n {2}\);/,
+    )?.[0];
+    expect(write, 'app.env write not found').toBeTruthy();
+    expect(write).toMatch(/\.map\(\(\[k, v\]\) => formatDotenvLine\(k, v\)\)/);
   });
 
   for (const rewriter of REWRITERS) {

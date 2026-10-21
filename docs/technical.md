@@ -49,7 +49,7 @@ my-app/
 │   │   └── lib/                 # env.ts, logger.ts, rate-limiter.ts, storage.ts
 │   └── shared/                  # Shared TypeScript types
 ├── db/
-│   └── migrations/              # Drizzle migrations with RLS, applied by the app at startup
+│   └── migrations/              # Drizzle migrations with RLS, applied by the migrate step
 ├── k8s/                         # Kubernetes manifests with Kustomize overlays
 ├── volumes/                     # Docker volume mounts
 │   ├── traefik/                 # Traefik routing and ForwardAuth middlewares
@@ -208,9 +208,9 @@ The session is an HttpOnly cookie Better Auth sets on the app's own origin. Page
 The browser never queries Postgres. It calls the Hono API (`/api/v1/...`), and the API server queries Postgres directly with Drizzle through `src/server/db/client.ts`, which exports two handles:
 
 - **`withUserDb(userId, fn)`** opens a transaction, switches to the `app_user` role, and sets `app.user_id` for that transaction in one parameterized statement (`select set_config('role', 'app_user', true), set_config('app.user_id', $1, true)`). Every statement `fn` runs is filtered by RLS. `userId = null` is an anonymous request: `app.user_id()` reads `NULL`, so user-scoped policies match nothing. This is the default for anything done on behalf of a user.
-- **`adminDb`** runs as the connection role (`DB_USER`, default `postgres`), which bypasses RLS. It is reserved for the server acting for itself (webhooks, admin tools, background jobs); `tests/structural/db-access-census.test.ts` lists the files allowed to import it.
+- **`adminDb`** runs as the connection role (`DB_USER`, `app_service`), which bypasses RLS but is no superuser and owns nothing. It is reserved for the server acting for itself (webhooks, admin tools, background jobs); `tests/structural/db-access-census.test.ts` lists the files allowed to import it.
 
-At startup the server applies any pending migrations from `db/migrations/` itself (drizzle-orm's migrator under a Postgres advisory lock, ledger in `drizzle.__drizzle_migrations`; no deploy step applies SQL, and every route but `/api/health` answers 503 until they are applied), then checks that the connection role bypasses RLS and is a member of `app_user`, and exits if not, so `adminDb` can never silently become RLS-scoped. The connection comes from discrete env vars (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`), never a URL, so passwords need no URL-encoding.
+The migrate step (`src/server/db/migrate-cli.ts`: the compose `app-migrate` one-shot, the k8s `migrate` init container, `npm run db:migrate` locally) applies pending migrations from `db/migrations/` as the owner, `postgres` (drizzle-orm's migrator under a Postgres advisory lock, ledger in `drizzle.__drizzle_migrations`), then creates or updates `app_service` with `APP_DB_PASSWORD`. The server never migrates: at startup it waits until the ledger is current (every route but `/api/health` answers 503 until then), then checks that the connection role bypasses RLS and is a member of `app_user`, and in production that it is no superuser and owns no table, and exits if not, so `adminDb` can never silently become RLS-scoped or hold the owner's powers. The connection comes from discrete env vars (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`), never a URL, so passwords need no URL-encoding.
 
 Policies target `app_user` and read the caller from `app.user_id()`:
 
@@ -384,14 +384,15 @@ When accessing an admin dashboard without a valid session:
 
 ### Database Security
 - **Row Level Security** - Policies enforced at database level; user requests run as `app_user` with `app.user_id` set per transaction
-- **Role separation** - `app_user` (user requests, RLS enforced), `postgres` (the API server's connection role, bypasses RLS, used by `adminDb`)
+- **Role separation** - `app_user` (user requests, RLS enforced), `app_service` (the API server's connection role, bypasses RLS, used by `adminDb`, owns nothing), `postgres` (owner; migrations and pg_cron only)
 - **No public database port** - Postgres listens on the private network only; operators reach it through `vibecarbon shell` (SSH)
 
 ### Database Roles
 
 | Role | Used By | Purpose |
 |------|---------|---------|
-| `postgres` | API server (`adminDb`), migrations | Connection role; bypasses RLS and is a member of `app_user` |
+| `postgres` | Migrations (the migrate step), pg_cron | Owner of every table and SECURITY DEFINER function; the app never holds its password |
+| `app_service` | API server (`adminDb`) | The app's connection role: LOGIN, BYPASSRLS, member of `app_user`; no superuser, owns nothing, EXECUTE only on the server-only functions it calls |
 | `app_user` | API server (`withUserDb`) | NOLOGIN; every user request switches to it, RLS enforced |
 
 ### Authentication Security

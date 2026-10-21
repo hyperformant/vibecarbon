@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { buildAppSecretData, buildInfraSecretData } from '../../../src/lib/deploy/k8s/k3s.js';
 
 /**
  * Redis addon wiring contract (2026-07-23): `vibecarbon add redis` must wire
@@ -28,17 +29,22 @@ describe('redis addon: app wiring', () => {
 });
 
 describe('redis addon: k8s wiring', () => {
-  it('applyVibecarbonSecrets injects REDIS_PASSWORD + REDIS_URL when the addon is on', () => {
-    // The redis Deployment's secretKeyRef REQUIRES REDIS_PASSWORD in
-    // vibecarbon-secrets (pod cannot start without it), and the app receives
-    // REDIS_URL via envFrom on the same Secret. Both shipped missing for
-    // months — the k8s redis addon was DOA. Source-contract guard.
-    const k3s = readFileSync(join(process.cwd(), 'src/lib/deploy/k8s/k3s.js'), 'utf-8');
-    expect(k3s).toContain("envLocal.REDIS_ENABLED === 'true' && envLocal.REDIS_PASSWORD");
-    expect(k3s).toContain('stringData.REDIS_PASSWORD = envLocal.REDIS_PASSWORD;');
-    expect(k3s).toContain(
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserted source is a JS template literal
-      'stringData.REDIS_URL = `redis://:${envLocal.REDIS_PASSWORD}@redis:6379`;',
-    );
+  it('the redis pod gets REDIS_PASSWORD from the infra Secret, the app REDIS_URL from its own', () => {
+    // The redis Deployment's secretKeyRef REQUIRES REDIS_PASSWORD (pod cannot
+    // start without it), and the app receives REDIS_URL via envFrom on its
+    // Secret. Both shipped missing for months — the k8s redis addon was DOA.
+    const envLocal = { REDIS_ENABLED: 'true', REDIS_PASSWORD: 'SENTINEL_REDIS_PASSWORD' };
+    expect(buildInfraSecretData({ envLocal }).REDIS_PASSWORD).toBe('SENTINEL_REDIS_PASSWORD');
+    const app = buildAppSecretData({ envLocal });
+    expect(app.REDIS_URL).toBe('redis://:SENTINEL_REDIS_PASSWORD@redis:6379');
+    expect(app).not.toHaveProperty('REDIS_PASSWORD');
+    const redis = readFileSync(join(process.cwd(), 'services/redis/k8s/deployment.yaml'), 'utf-8');
+    expect(redis).toMatch(/secretKeyRef:\s+name: vibecarbon-infra-secrets\s+key: REDIS_PASSWORD/);
+  });
+
+  it('neither Secret wires redis when the addon is off', () => {
+    const envLocal = { REDIS_PASSWORD: 'SENTINEL_REDIS_PASSWORD' };
+    expect(buildInfraSecretData({ envLocal })).not.toHaveProperty('REDIS_PASSWORD');
+    expect(buildAppSecretData({ envLocal })).not.toHaveProperty('REDIS_URL');
   });
 });

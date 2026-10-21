@@ -11,7 +11,7 @@
  * (single-cluster) effect lives in ./k8s.js and the k8s-ha effects in
  * ./k8s-ha.js — all spread into EFFECTS below.
  */
-import { createHash } from 'node:crypto';
+
 import { readFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { progressLog, spinner } from '../../cli/progress.js';
@@ -21,6 +21,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { sideloadCompose } from '../image.js';
 import { buildRemote } from '../remote-build.js';
+import { fingerprintSecret } from '../secret-fingerprint.js';
 import { generateSSHKeyPair } from '../utils.js';
 import { COMPOSE_HA_EFFECTS } from './compose-ha.js';
 import { K8S_EFFECTS } from './k8s.js';
@@ -271,11 +272,11 @@ async function transferImage(ctx) {
  * said it was trying to avoid. A real digest fixes both at once.
  *
  * @param {string|undefined} token
- * @returns {string} '' when absent, else a truncated sha256
+ * @returns {string} '' when absent, else a truncated keyed HMAC
  */
 function tokenFingerprint(token) {
   if (!token) return '';
-  return createHash('sha256').update(token).digest('hex').slice(0, 16);
+  return fingerprintSecret(token);
 }
 
 async function dockerhubLogin(ctx) {

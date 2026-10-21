@@ -66,6 +66,18 @@ spec:
       target:
         kind: StatefulSet
         name: db
+    # The registry's hostPort binds {{MASTER_PRIVATE_IP}}, rendered per
+    # cluster by the CLI's deploy (renderK8sBase), so the CLI owns this
+    # Deployment like the db. Its Service and NetworkPolicy stay with Flux.
+    - patch: |
+        $patch: delete
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: local-registry
+      target:
+        kind: Deployment
+        name: local-registry
   healthChecks:
     - apiVersion: apps/v1
       kind: StatefulSet

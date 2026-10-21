@@ -62,6 +62,15 @@ describe('classifyContainer', () => {
     });
   });
 
+  it('treats the app-migrate one-shot as done after exit 0 and unhealthy after a failure', () => {
+    expect(classifyContainer('app-migrate', 'exited', 'Exited (0) 2 minutes ago').health).toBe(
+      'done',
+    );
+    expect(classifyContainer('app-migrate', 'exited', 'Exited (1) 2 minutes ago').health).toBe(
+      'unhealthy',
+    );
+  });
+
   it('does not treat a core service that exited 0 as done', () => {
     expect(classifyContainer('db', 'exited', 'Exited (0) 5 minutes ago').health).toBe('unhealthy');
   });

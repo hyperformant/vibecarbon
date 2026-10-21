@@ -63,7 +63,7 @@ spec:
         - name: DB_POSTGRESDB_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: vibecarbon-secrets
+              name: vibecarbon-infra-secrets
               key: N8N_DB_PASSWORD
         - name: N8N_SECURE_COOKIE
           value: 'true'

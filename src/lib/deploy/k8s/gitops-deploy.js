@@ -10,7 +10,8 @@
  *   4. Trigger .github/workflows/deploy.yml + wait for completion.
  *
  * The workflow (Phase 4.3b.C) installs Flux + root Kustomization + applies
- * vibecarbon-secrets / cert-manager `hetzner` / kube-system/hcloud Secrets.
+ * vibecarbon-app-secrets / vibecarbon-infra-secrets / cert-manager `hetzner` /
+ * kube-system/hcloud Secrets.
  * Flux reconciles the rest from the committed k8s/ tree.
  *
  * Callers: `vibecarbon configure cicd <env>` (PR 7) layers this onto an
@@ -192,7 +193,9 @@ function commitAndPushManifests(cwd, message) {
  * @param {string} args.dnsProvider - "cloudflare" | "hetzner" | "manual"
  * @param {object} args.providerCreds - operator-secret values read from
  *   process.env by the caller (see config-registry.js's operator-secret
- *   class): { hetznerApiToken, dnsTokens, s3AccessKey, s3SecretKey }
+ *   class): { hetznerApiToken, dnsTokens }
+ * @param {{ accessKey: string, secretKey: string }} args.appStorage - the env
+ *   app's own storage pair (storedAppStoragePair), seeded per environment
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
  * @param {number} [args.workflowTimeoutSec] - default 60 min. deploy.yml's
  *   internal Flux wait caps at 10m (vibecarbon-base), on top of ~5m Flux
@@ -210,6 +213,7 @@ export async function deployK8sGitOps(args) {
     networkId,
     dnsProvider,
     providerCreds,
+    appStorage,
     imageTag,
     workflowTimeoutSec = 3600,
     skipCi = false,
@@ -269,7 +273,7 @@ export async function deployK8sGitOps(args) {
   await seedOrgSecrets(providerCreds);
 
   const envLocal = parseEnvLocal(projectDir);
-  const perEnvSecrets = buildPerEnvSecrets(envLocal);
+  const perEnvSecrets = buildPerEnvSecrets(envLocal, { appStorage });
   const perEnvVars = {
     SITE_URL: domain ? `https://${domain}` : '',
     DNS_PROVIDER: dnsProvider || '',
@@ -310,12 +314,20 @@ export async function deployK8sGitOps(args) {
  * unconfigured features upload nothing. Canonical SMTP key is SMTP_PASS (no
  * SMTP_PASSWORD rename — the app and manifests read SMTP_PASS).
  *
+ * `appStorage` is the env app's own object-storage pair. It is seeded at
+ * environment scope as S3_ACCESS_KEY / S3_SECRET_KEY, which the workflow's
+ * APP_KEYS pick into the app Secret; the infra pair is never seeded for it.
+ *
  * @param {Record<string,string>} envLocal
+ * @param {{ appStorage?: { accessKey: string, secretKey: string } }} [opts]
  * @returns {Record<string,string|undefined>}
  */
-export function buildPerEnvSecrets(envLocal) {
+export function buildPerEnvSecrets(envLocal, { appStorage } = {}) {
   const infra = {
     DB_PASSWORD: envLocal.DB_PASSWORD,
+    // The app's own database role's password (app_service); the owner
+    // password above reaches only the migrate init container.
+    APP_DB_PASSWORD: envLocal.APP_DB_PASSWORD,
     // The app's session signing key; the app pod envFrom's the Secret.
     BETTER_AUTH_SECRET: envLocal.BETTER_AUTH_SECRET,
     ADMIN_EMAIL: envLocal.ADMIN_EMAIL,
@@ -330,7 +342,12 @@ export function buildPerEnvSecrets(envLocal) {
   for (const key of [...featureSecretKeys(), ...featureConfigKeys()]) {
     features[key] = envLocal[key];
   }
-  return { ...infra, ...features };
+  return {
+    ...infra,
+    ...features,
+    S3_ACCESS_KEY: appStorage?.accessKey,
+    S3_SECRET_KEY: appStorage?.secretKey,
+  };
 }
 
 /**

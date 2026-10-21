@@ -485,7 +485,7 @@ export const CONFIG_KEYS = [
   // <PROVIDER> prefix as <PROVIDER>_API_TOKEN. This is the OPERATOR-facing name
   // the CLI reads (Provider.OBJECT_STORAGE_ENV) — distinct from the deployed
   // stack's provider-agnostic server-side S3_* namespace (renderBundle /
-  // vibecarbon-secrets → AWS_* for wal-g), which is NOT a configure-managed key
+  // the k8s Secrets → AWS_* for wal-g), which is NOT a configure-managed key
   // and stays S3_*. Scaleway keeps OPERATOR-facing SCALEWAY_* names like every
   // other provider; the tool-imposed SCW_* spelling the Pulumi plugin demands
   // exists only inside ScalewayProvider.buildIacEnv.

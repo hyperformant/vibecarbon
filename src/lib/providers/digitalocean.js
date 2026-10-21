@@ -22,7 +22,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { BaseProvider } from './base.js';
+import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // C9-equivalent — the ingress ports applyOperatorCidrs's rule-rewrite
 // touches, mirroring Hetzner's set: SSH and the k8s API.
@@ -1392,26 +1392,30 @@ export class DigitalOceanProvider extends BaseProvider {
    * DO's inbound rules live under `firewall.inbound_rules` (not Hetzner's
    * flat `firewall.rules`), and use the shape
    * `{protocol, ports, sources:{addresses:[...]}}` (not Hetzner's flat
-   * `{direction, protocol, port, source_ips}`). Idempotent: returns null
-   * when the peer's udp/51821 rule is already present; otherwise appends it.
+   * `{direction, protocol, port, source_ips}`). The reconcile itself is the
+   * shared replaceWireguardPeerRules: the udp/51821 rule follows the current
+   * peer (an old peer's rule is dropped), null when already correct.
    * @param {object} firewall - The firewall object as returned by
    *   findFirewallByName. DO's `inbound_rules` field is extracted here.
    * @param {string} peerIp - the peer node's public IPv4.
    * @returns {object[]|null}
    */
   buildReplicationFirewallRules(firewall, peerIp) {
-    const existingRules = firewall.inbound_rules || [];
-    const hasExactRule = existingRules.some(
-      (r) =>
-        r.protocol === 'udp' &&
-        r.ports === WG_PORT &&
-        r.sources?.addresses?.includes(`${peerIp}/32`),
-    );
-    if (hasExactRule) return null;
-    return [
-      ...existingRules,
-      { protocol: 'udp', ports: WG_PORT, sources: { addresses: [`${peerIp}/32`] } },
-    ];
+    return replaceWireguardPeerRules(firewall.inbound_rules || [], peerIp, {
+      isWireguardRule: (r) => r.protocol === 'udp' && String(r.ports) === WG_PORT,
+      admitsOnlyPeer: (r, ip) => {
+        const { addresses = [], ...otherSources } = r.sources || {};
+        const noOtherSources = Object.values(otherSources).every(
+          (v) => !Array.isArray(v) || v.length === 0,
+        );
+        return noOtherSources && addresses.length === 1 && addresses[0] === `${ip}/32`;
+      },
+      buildPeerRule: (ip) => ({
+        protocol: 'udp',
+        ports: WG_PORT,
+        sources: { addresses: [`${ip}/32`] },
+      }),
+    });
   }
 
   /**

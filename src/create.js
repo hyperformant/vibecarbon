@@ -713,6 +713,9 @@ async function bootstrap(cliArgs) {
 
   // Generate secure secrets
   const dbPassword = generatePassword();
+  // The app's own database role (app_service): the app connects with this,
+  // never with the owner password above (security plan 2026-10-20, R8).
+  const appDbPassword = generatePassword();
   // Session signing key for the app's in-process auth (env.ts requires >= 32).
   const betterAuthSecret = generatePassword(64);
   const replPassword = generateReplPassword();
@@ -722,6 +725,7 @@ async function bootstrap(cliArgs) {
     PROJECT_DISPLAY_NAME: displayName,
     GITHUB_OWNER: projectName, // Default to project name; rewritten by `vibecarbon configure` → CI/CD (or by deploy's rewriteOwnerAndRepo fallback)
     DB_PASSWORD: dbPassword,
+    APP_DB_PASSWORD: appDbPassword,
     BETTER_AUTH_SECRET: betterAuthSecret,
     REPL_PASSWORD: replPassword,
     SITE_URL: 'http://localhost:5173',
@@ -1485,15 +1489,19 @@ ${formatDotenvLine('PROJECT_DISPLAY_NAME', variables.PROJECT_DISPLAY_NAME)}
 # Signs the app's session cookies and auth tokens. Changing it signs everyone out.
 ${formatDotenvLine('BETTER_AUTH_SECRET', variables.BETTER_AUTH_SECRET)}
 
-# Database. The API server connects with the DB_* vars. Local values: the dev
-# db container on localhost (DB_PORT is the base port; DEV_DB_PORT or
-# DEV_PORT_OFFSET is applied at runtime). Deploys override DB_HOST.
+# Database. Local values: the dev db container on localhost (DB_PORT is the
+# base port; DEV_DB_PORT or DEV_PORT_OFFSET is applied at runtime). Deploys
+# override DB_HOST. DB_USER / DB_PASSWORD / POSTGRES_PASSWORD are the owner,
+# which only migrations use (\`npm run db:migrate\` locally, the migrate step
+# on a server). The app connects as its own role, app_service, with
+# APP_DB_PASSWORD, and never gets the owner password.
 ${formatDotenvLine('DB_HOST', 'localhost')}
 ${formatDotenvLine('DB_PORT', '5432')}
 ${formatDotenvLine('DB_USER', 'postgres')}
 ${formatDotenvLine('DB_PASSWORD', variables.DB_PASSWORD)}
 ${formatDotenvLine('DB_NAME', 'postgres')}
 ${formatDotenvLine('POSTGRES_PASSWORD', variables.DB_PASSWORD)}
+${formatDotenvLine('APP_DB_PASSWORD', variables.APP_DB_PASSWORD)}
 
 # HA PostgreSQL replication (used by HA deploy modes: -mode compose-ha / k8s-ha)
 ${formatDotenvLine('REPL_PASSWORD', variables.REPL_PASSWORD)}
@@ -1723,6 +1731,7 @@ export {
   PLACEHOLDERS,
   RECOMMENDED_VERSIONS,
   runCommand,
+  SECRET_PLACEHOLDERS,
   SPEC,
   TEMPLATE_DIR,
   VERSION,

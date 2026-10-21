@@ -21,11 +21,13 @@ resources:
   - db/
   - app/
   - backup/
-  # `registry/` runs an S3-backed image registry on the master node (hostPort
-  # 5000 on the private network). Sideload remains primary for static workers,
-  # but cluster-autoscaler-spawned workers don't exist at sideload time —
-  # they pull from this registry on first schedule via the registries.yaml
-  # mirror config laid down in cloud-init.
+  # `registry/` runs a disk-backed image registry on the master node
+  # (hostPort 5000 bound to the master's private IP, rendered by
+  # renderK8sBase; Flux strips the Deployment, see flux/clusters/*). Sideload
+  # remains primary for static workers, but cluster-autoscaler-spawned
+  # workers don't exist at sideload time — they pull from this registry on
+  # first schedule via the registries.yaml mirror config laid down in
+  # cloud-init.
   - registry/
   # Note: cluster-autoscaler is installed separately by applyK3sManifests
   # (Phase 5) because it lives in `kube-system`, not `vibecarbon` — listing

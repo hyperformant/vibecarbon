@@ -13,6 +13,11 @@ describe('buildDbHostPortPatch', () => {
     expect(port.hostPort).toBe(REPL_PORT);
   });
 
+  it('binds loopback only: the primary repl-gateway (hostNetwork) relays to 127.0.0.1', () => {
+    const port = buildDbHostPortPatch().spec.template.spec.containers[0].ports[0];
+    expect(port.hostIP).toBe('127.0.0.1');
+  });
+
   it('is a strategic-merge shape (spec.template.spec.containers)', () => {
     const patch = buildDbHostPortPatch();
     expect(Array.isArray(patch.spec.template.spec.containers)).toBe(true);

@@ -15,7 +15,7 @@
  *   8. `kubectl apply -k` a rendered copy of `k8s/base/` (db StatefulSet,
  *      traefik, app; cert-manager via infra/).
  *   9. `kubectl rollout status statefulset/db`.
- *   10. `kubectl set image deploy/app app=<tag>` + rollout-status.
+ *   10. `kubectl patch deploy/app` (image + Secret versions) + rollout-status.
  *
  * Warm path: skip 1-5; rebuild image (6); sideload (7) skipping unchanged tag;
  * apply changed manifests (8); rollout (10).
@@ -36,12 +36,12 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { isIPv4 } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
-import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
 import { DNS01_PROVIDERS } from '../../dns-provider.js';
 import { parseDotenv } from '../../dotenv.js';
 import { buildHostKeyOptsForPath, knownHostsPath, seedKnownHosts } from '../../host-keys.js';
@@ -57,12 +57,14 @@ import { providerFor, providerIdFor } from '../../providers/index.js';
 import { pollUntil, runWithRetry } from '../../retry.js';
 import { shEscape } from '../../shell.js';
 import { scpWithRetry } from '../../ssh.js';
+import { APP_RUNTIME_KEYS, appStorageCredential, buildAppRuntimeEnv } from '../app-runtime-env.js';
 import { collectComposeBuildArgs } from '../compose/build-args.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_PVC, DB_STATEFULSET } from '../db-workload.js';
 import { digestDir, digestPaths } from '../digest.js';
 import { pushImageOverSshTunnel } from '../registry-push.js';
 import { buildStandbySeedInitScript } from '../replication.js';
 import { RLS_AUDIT_SQL, rlsAuditFailureMessage } from '../rls-audit.js';
+import { fingerprintSecret, secretHmac } from '../secret-fingerprint.js';
 import {
   assertWalgBackupsWorking,
   k8sWalgAuditArgv,
@@ -309,8 +311,13 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * render. Normalized the same way as walgRole below, so single-cluster deploys
  * (role undefined) hash as 'primary'.
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby' }} args
- * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', manifestDigest: string, bundledManifestDigest: string }}
+ * `appStorageKeyDigest` folds in the app's own object-storage key (security
+ * plan R9): a redeploy that mints a new one (its secret was missing here)
+ * revokes the old key, so a skipped apply would leave the app Secret holding
+ * a dead key. Only a digest of the access key id, never the key itself.
+ *
+ * @param {{ imageTag: string, dbImageTag: string, restore?: string, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string }} args
+ * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
   imageTag,
@@ -319,6 +326,7 @@ export function buildK3sApplyInputs({
   projectDir,
   storageClass,
   role,
+  appStorageAccessKey,
 }) {
   return {
     imageTag,
@@ -326,6 +334,7 @@ export function buildK3sApplyInputs({
     restore: restore ?? '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
+    appStorageKeyDigest: appStorageAccessKey ? fingerprintSecret(appStorageAccessKey) : '',
     manifestDigest: digestDir(join(projectDir, 'k8s')),
     bundledManifestDigest: digestDir(BUNDLED_K8S_DIR),
     envLocalDigest: digestEnvLocalSecrets(projectDir),
@@ -340,7 +349,7 @@ export function buildK3sApplyInputs({
  * in #244): a gate input that does not cover something the step reads.
  *
  * `k3s-apply` loads `.env.local` and feeds it to applyVibecarbonSecrets (the
- * whole vibecarbon-secrets Secret — every configure-managed OAuth/SMTP/billing
+ * app and infra Secrets — every configure-managed OAuth/SMTP/billing
  * key plus REDIS_*) and to ACME_CA_SERVER. None of that was in the gate. `.env.local` sits in neither
  * digested manifest tree, and .dockerignore keeps it out of the build context
  * so no source digest sees it either.
@@ -370,7 +379,9 @@ export function digestEnvLocalSecrets(projectDir) {
   if (!existsSync(envPath)) return 'no-env-local';
   const envLocal = loadEnvLocal(envPath);
   if (!envLocal) return 'no-env-local';
-  const hash = createHash('sha256');
+  // Keyed (HMAC under a machine-local key): the digest lands in the persisted
+  // deploy state and must reveal nothing about the values.
+  const hash = secretHmac();
   // Sorted so key ORDER in the file is not a change. ACME_CA_SERVER joins
   // SECRET_KEYS because the issuer pick reads it directly.
   const watched = [...new Set([...SECRET_KEYS, 'ACME_CA_SERVER'])].sort();
@@ -1798,74 +1809,91 @@ export async function pushImageToLocalRegistry({
 }
 
 /**
- * Generated infra secrets that must land in the in-cluster vibecarbon-secrets
- * Secret. The app Deployment reads DB_PASSWORD, BETTER_AUTH_SECRET and
- * ADMIN_EMAIL/ADMIN_PASSWORD via envFrom; the db StatefulSet reads
- * DB_PASSWORD (its superuser password) and REPL_PASSWORD (the standby's seed
- * init).
+ * Generated infra passwords that land in Secret `vibecarbon-infra-secrets`,
+ * never in the app's Secret. Each is read by key (secretKeyRef), only by the
+ * pod that uses it: DB_PASSWORD (the db superuser; the db StatefulSet and the
+ * app pod's migrate init container, never the app container), REPL_PASSWORD
+ * (the standby's seed init) and the add-on roles' own database passwords
+ * (generated by `vibecarbon add`, healed by `upgrade`; read by the metabase
+ * and n8n Deployments, present only when the add-on is installed).
  *
  * These are generated at deploy time (not user-configured), so they stay
  * local here rather than in the config-registry.
  */
-const INFRA_SECRET_KEYS = [
+export const INFRA_SECRET_KEYS = [
   'DB_PASSWORD',
   'REPL_PASSWORD',
-  // The app's session signing key (carbon/src/server/auth/).
-  'BETTER_AUTH_SECRET',
-  // The app creates its super admin from these at startup.
-  'ADMIN_EMAIL',
-  'ADMIN_PASSWORD',
-  // The add-on roles' own database passwords (generated by `vibecarbon add`,
-  // healed by `upgrade`), never the superuser's. Present only when the add-on
-  // is installed; the metabase and n8n Deployments read them by key.
   'METABASE_DB_PASSWORD',
   'N8N_DB_PASSWORD',
 ];
 
 /**
- * Full allowlist of .env.local keys that land in vibecarbon-secrets: generated
- * infra secrets plus every configure-managed runtime key (billing/OAuth/SMTP,
- * both secret and non-secret) from the config-registry. The app Deployment
- * pulls the whole Secret via `envFrom`, so feature config reaches the pod
- * without a second per-key list here. Client-side VITE_* keys are deliberately
- * excluded — they're baked into the image at build time, not runtime env.
+ * Every `.env.local` key that reaches either cluster Secret: the infra
+ * passwords above plus the app's runtime keys (APP_RUNTIME_KEYS, which folds
+ * in every configure-managed billing/OAuth/SMTP key from the config-registry).
+ * The k3s-apply gate digests these values. Client-side VITE_* keys are
+ * excluded except the Plausible pair the app server also reads at runtime.
  */
-export const SECRET_KEYS = [...INFRA_SECRET_KEYS, ...featureSecretKeys(), ...featureConfigKeys()];
+export const SECRET_KEYS = [...new Set([...INFRA_SECRET_KEYS, ...APP_RUNTIME_KEYS])];
 
 /**
- * The `stringData` of the `vibecarbon-secrets` Secret: the allow-listed
- * `.env.local` keys, the Redis addon wiring and the S3 storage keys (bucket and
- * credentials). Pure, so the Secret's contents are testable without a cluster.
+ * The single Secret the app and infra keys shared before they were split.
+ * applyK3sManifests deletes it once the rollout has moved every pod off it.
+ */
+export const LEGACY_VIBECARBON_SECRET = 'vibecarbon-secrets';
+
+/** The Redis add-on's password, when the add-on is on. */
+function redisPassword(envLocal) {
+  return envLocal.REDIS_ENABLED === 'true' && envLocal.REDIS_PASSWORD
+    ? envLocal.REDIS_PASSWORD
+    : null;
+}
+
+/**
+ * The `stringData` of Secret `vibecarbon-app-secrets`, which the app
+ * Deployment reads whole through envFrom: the app's runtime keys
+ * (buildAppRuntimeEnv), its object-storage keys from the appStorageCredential
+ * hand-off, and the Redis add-on's REDIS_URL (`redis` is the add-on's
+ * ClusterIP Service; compose's equivalent lives in
+ * services/redis/compose/docker-compose.yml). No infra password, cloud or DNS
+ * token ever lands here. Pure, so the contents are testable without a cluster.
  *
  * No VC_ENV: compose's WAL-G prefix reads it, but k8s renders WALG_S3_PREFIX
  * from s3Config.walgPrefix (buildDbManifestValues) and nothing in carbon/k8s
  * reads it; in k8s-ha the stack env (prod-primary) is not even the env's name.
  *
+ * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}}} args
+ * @returns {Record<string,string>}
+ */
+export function buildAppSecretData({ envLocal, s3Config }) {
+  /** @type {Record<string,string>} */
+  const extras = appStorageCredential({ s3Config });
+  const redis = redisPassword(envLocal);
+  if (redis) extras.REDIS_URL = `redis://:${redis}@redis:6379`;
+  return buildAppRuntimeEnv(envLocal, extras);
+}
+
+/**
+ * The `stringData` of Secret `vibecarbon-infra-secrets`: the infra passwords
+ * (INFRA_SECRET_KEYS), the Redis add-on's REDIS_PASSWORD (the redis
+ * Deployment's required secretKeyRef), WAL-G's credentials file and the
+ * backup bucket name. Every consumer reads it by key, never whole, and the
+ * app container reads none of it (only the migrate init container reads
+ * DB_PASSWORD, to run the migrations as the owner). Also the Secret
+ * `vibecarbon restore` sets RESTORE_TARGET on. Pure.
+ *
  * @param {{envLocal: Record<string,string>, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null}} args
  * @returns {Record<string,string>}
  */
-export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName }) {
+export function buildInfraSecretData({ envLocal, s3Config, backupBucketName }) {
   /** @type {Record<string,string>} */
   const stringData = {};
-  for (const key of SECRET_KEYS) {
+  for (const key of INFRA_SECRET_KEYS) {
     if (envLocal[key]) stringData[key] = envLocal[key];
   }
-  // Redis addon: the redis Deployment reads REDIS_PASSWORD from this Secret
-  // (required secretKeyRef — without it the pod can never start), and the
-  // app's distributed rate-limit store connects via REDIS_URL, delivered by
-  // the app Deployment's envFrom on this Secret. `redis` is the addon's
-  // ClusterIP Service in the same namespace. Compose's equivalent wiring
-  // lives in services/redis/compose/docker-compose.yml (app env extension).
-  if (envLocal.REDIS_ENABLED === 'true' && envLocal.REDIS_PASSWORD) {
-    stringData.REDIS_PASSWORD = envLocal.REDIS_PASSWORD;
-    stringData.REDIS_URL = `redis://:${envLocal.REDIS_PASSWORD}@redis:6379`;
-  }
+  const redis = redisPassword(envLocal);
+  if (redis) stringData.REDIS_PASSWORD = redis;
   if (s3Config) {
-    stringData.S3_ACCESS_KEY = s3Config.accessKey;
-    stringData.S3_SECRET_KEY = s3Config.secretKey;
-    stringData.S3_BUCKET = s3Config.bucket;
-    stringData.S3_ENDPOINT = s3Config.endpoint;
-    stringData.S3_REGION = s3Config.region;
     // AWS-SDK-format credentials file for wal-g in the db pod, mounted as a
     // file (AWS_SHARED_CREDENTIALS_FILE) rather than env so a rotated key
     // reaches wal-g without a pod-template change. See the walg-s3-creds
@@ -1878,17 +1906,74 @@ export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName
   return stringData;
 }
 
+/** The app pod-template annotation that records the Secrets' resourceVersions. */
+export const APP_SECRETS_SHA_ANNOTATION = 'vibecarbon.dev/app-secrets-sha';
+
 /**
- * Apply the in-cluster `vibecarbon-secrets` Secret from the project's
- * `.env.local`. Idempotent: rendered as a Secret manifest and piped to
- * `kubectl apply -f -` (server-side apply semantics) so re-runs upsert
- * cleanly.
+ * The resourceVersions of the two Secrets the app pod reads: the app Secret
+ * (envFrom on the app container, APP_DB_PASSWORD on migrate) and the infra
+ * Secret (the owner DB_PASSWORD the migrate init container reads). Stamped on
+ * the pod template, so a changed Secret rolls the pods and reruns migrate.
+ * Without it nothing rolled: envFrom is read at container start and `set
+ * image` to the same tag is a no-op, so a re-minted storage key never reached
+ * the pods before the old one was revoked, and an APP_DB_PASSWORD rotation
+ * never took effect. Nothing is derived from a Secret value: `kubectl apply`
+ * of unchanged data leaves resourceVersion alone (an unchanged deploy stays a
+ * no-op roll) and any real change bumps it. Must run after the Secrets are
+ * applied. An unreadable version throws: a silently skipped roll would leave
+ * the old credential live under the pods.
  *
- * Must run BEFORE the base/ kustomization apply, because the app
- * Deployment in base/ references this Secret via envFrom.
+ * @param {{env: NodeJS.ProcessEnv}} args
+ * @returns {Promise<string>} e.g. "app:1234,infra:1235"
+ */
+export async function readAppSecretVersions({ env }) {
+  const versions = [];
+  for (const [label, name] of [
+    ['app', 'vibecarbon-app-secrets'],
+    ['infra', 'vibecarbon-infra-secrets'],
+  ]) {
+    const out = await runKubectlWithRetry(
+      ['-n', 'vibecarbon', 'get', 'secret', name, '-o', 'jsonpath={.metadata.resourceVersion}'],
+      {
+        env,
+        captureStdout: true,
+        description: `applyK3sManifests: read Secret/${name} resourceVersion`,
+      },
+    );
+    const rv = String(out ?? '').trim();
+    if (!/^\d+$/.test(rv)) {
+      throw new Error(
+        `Could not read the resourceVersion of Secret/${name}; refusing to deploy without knowing whether the app must roll.`,
+      );
+    }
+    versions.push(`${label}:${rv}`);
+  }
+  return versions.join(',');
+}
+
+/** A Secret manifest for `kubectl apply -f -`, values JSON-quoted, never on argv. */
+function secretManifest(name, stringData) {
+  return [
+    'apiVersion: v1',
+    'kind: Secret',
+    'metadata:',
+    `  name: ${name}`,
+    '  namespace: vibecarbon',
+    'type: Opaque',
+    'stringData:',
+    ...Object.entries(stringData).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
+  ].join('\n');
+}
+
+/**
+ * Apply the two in-cluster Secrets, `vibecarbon-app-secrets` and
+ * `vibecarbon-infra-secrets`, from the project's `.env.local`. Idempotent:
+ * each is rendered as a Secret manifest and piped to `kubectl apply -f -`
+ * so re-runs upsert cleanly.
  *
- * S3 backup credentials (S3_ACCESS_KEY/SECRET_KEY/BUCKET/ENDPOINT/REGION)
- * are merged in if `s3Config` is provided — backup CronJob reads them.
+ * Must run BEFORE the base/ kustomization apply, because the app Deployment
+ * (envFrom) and the db StatefulSet (secretKeyRef) reference them.
+ *
  * `backupBucketName` is the dedicated backup bucket (separate from the
  * storage bucket in s3Config.bucket); without it, backup.sh falls back to
  * the storage bucket and uploads dumps next to user files (observed
@@ -1898,7 +1983,6 @@ export function buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName
  */
 export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const stringData = buildVibecarbonSecretData({ envLocal, s3Config, backupBucketName });
   // Ensure the namespace exists before we try to land a Secret in it.
   // base/ kustomization creates it too, but we run before base/.
   // Two-step (render → apply) instead of `bash -c '… | kubectl apply -f -'`
@@ -1913,23 +1997,17 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
     input: namespaceYaml,
     description: 'applyVibecarbonSecrets: kubectl apply namespace/vibecarbon',
   });
-  // Build secret YAML; pipe to kubectl apply via stdin (values never hit
-  // a shell argv). stringData → kubectl base64-encodes for us.
-  const secretYaml = [
-    'apiVersion: v1',
-    'kind: Secret',
-    'metadata:',
-    '  name: vibecarbon-secrets',
-    '  namespace: vibecarbon',
-    'type: Opaque',
-    'stringData:',
-    ...Object.entries(stringData).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
-  ].join('\n');
-  await runKubectlWithRetry(['apply', '-f', '-'], {
-    env,
-    input: secretYaml,
-    description: 'applyVibecarbonSecrets: kubectl apply Secret/vibecarbon-secrets',
-  });
+  const secrets = {
+    'vibecarbon-app-secrets': buildAppSecretData({ envLocal, s3Config }),
+    'vibecarbon-infra-secrets': buildInfraSecretData({ envLocal, s3Config, backupBucketName }),
+  };
+  for (const [name, stringData] of Object.entries(secrets)) {
+    await runKubectlWithRetry(['apply', '-f', '-'], {
+      env,
+      input: secretManifest(name, stringData),
+      description: `applyVibecarbonSecrets: kubectl apply Secret/${name}`,
+    });
+  }
 }
 
 /**
@@ -1940,7 +2018,7 @@ export async function applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, b
  *
  * SECURITY: this deliberately ships ONLY the three keys Grafana reads —
  * ADMIN_EMAIL + ADMIN_PASSWORD (its login) and SITE_URL (root URL) — NOT the
- * whole vibecarbon-secrets bundle. No DB / service-role / JWT material crosses
+ * whole vibecarbon-app-secrets bundle. No DB / service-role / JWT material crosses
  * into the observability namespace, so a Grafana/observability compromise can't
  * read app credentials. Values are piped via stdin (never argv), same as
  * applyVibecarbonSecrets.
@@ -2709,11 +2787,15 @@ function renderK8sPlaceholders(dir, values, label) {
   return tmpDir;
 }
 
+/** The in-cluster registry manifest, relative to `k8s/base`. */
+const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
+
 /**
  * Render `k8s/base` for apply: every db StatefulSet placeholder
  * (buildDbManifestValues) plus `{{K8S_STORAGE_CLASS}}`, which the db's
  * volumeClaimTemplate and the add-on PVCs `add redis` / `add n8n` copy into
- * `k8s/base/<addon>/` share, into a temp copy of the tree.
+ * `k8s/base/<addon>/` share, and the registry's `{{MASTER_PRIVATE_IP}}`
+ * (the one address its hostPort binds), into a temp copy of the tree.
  *
  * Always a temp copy, never an in-place rewrite: the placeholders must be
  * resolved BEFORE `kubectl apply` creates the objects (a StatefulSet's
@@ -2742,16 +2824,29 @@ export function renderK8sBase(dir, values) {
         'StatefulSet; run `vibecarbon upgrade` to bring the k8s manifests up to date.',
     );
   }
-  const rendered = renderK8sPlaceholders(dir, values, 'base');
-  const leftover = readFileSync(join(rendered, 'db', 'statefulset.yaml'), 'utf-8').match(
-    /\{\{[A-Z0-9_]+\}\}/g,
-  );
-  if (leftover) {
-    rmSync(rendered, { recursive: true, force: true });
+  // The registry's hostPort binds only this address (hostIP). A missing
+  // value would render the literal `undefined`, and a hostIP that is not an
+  // address of the master leaves every node's image pull with nothing to dial.
+  const hasRegistry = existsSync(join(dir, REGISTRY_MANIFEST));
+  if (hasRegistry && !isIPv4(values.MASTER_PRIVATE_IP ?? '')) {
     throw new Error(
-      `renderK8sBase: db/statefulset.yaml still carries ${[...new Set(leftover)].join(', ')} after rendering; ` +
-        'refusing to apply a database with an unresolved image, prefix or StorageClass.',
+      `renderK8sBase: MASTER_PRIVATE_IP is not an IPv4 address (got ${JSON.stringify(values.MASTER_PRIVATE_IP ?? null)}), so the registry hostPort has no address to bind`,
     );
+  }
+  const rendered = renderK8sPlaceholders(dir, values, 'base');
+  const checks = [
+    ['db/statefulset.yaml', 'a database with an unresolved image, prefix or StorageClass'],
+    ...(hasRegistry ? [[REGISTRY_MANIFEST, 'a registry with an unresolved bind address']] : []),
+  ];
+  for (const [file, what] of checks) {
+    const leftover = readFileSync(join(rendered, file), 'utf-8').match(/\{\{[A-Z0-9_]+\}\}/g);
+    if (leftover) {
+      rmSync(rendered, { recursive: true, force: true });
+      throw new Error(
+        `renderK8sBase: ${file} still carries ${[...new Set(leftover)].join(', ')} after rendering; ` +
+          `refusing to apply ${what}.`,
+      );
+    }
   }
   return rendered;
 }
@@ -2865,7 +2960,7 @@ export async function demoteObservabilityOnStandby({ env, issuerName }) {
 }
 
 /**
- * Apply cert-manager + vibecarbon-secrets + the project's k8s/infra +
+ * Apply cert-manager + the app and infra Secrets + the project's k8s/infra +
  * k8s/base kustomizations (the db StatefulSet included, rendered), wait for
  * the db, patch the app deployment to use the locally-sideloaded image, and
  * wait for rollout.
@@ -2930,7 +3025,7 @@ export async function applyK3sManifests({
   khPath,
   // HA runs primary+standby deploys in parallel; both call this
   // function from the same operator host. Without distinct ports, the
-  // second `ssh -L 5000:localhost:5000` loses the bind race and
+  // second `ssh -L 5000:<masterPrivateIp>:5000` loses the bind race and
   // ExitOnForwardFailure=yes aborts the deploy. Default 5000 is the
   // single-cluster path; HA passes 5000 (primary) and 5001 (standby).
   localTunnelPort = 5000,
@@ -3362,9 +3457,9 @@ export async function applyK3sManifests({
     env,
     description: 'applyK3sManifests: kubectl apply -k traefik-crds',
   });
-  // 4. Create vibecarbon-secrets BEFORE base/ — base/'s Deployment
-  //    references it via envFrom; without it kubelet fails container
-  //    creation with `secret "vibecarbon-secrets" not found`.
+  // 4. Create the app and infra Secrets BEFORE base/ — base/'s Deployment
+  //    and StatefulSet reference them; without them kubelet fails container
+  //    creation with `secret "vibecarbon-app-secrets" not found`.
   await applyVibecarbonSecrets({ kubeconfig, envLocal, s3Config, backupBucketName });
   // 4b. Create the kube-system/carbon-autoscaler-config Secret the
   //     carbon-autoscaler sidecar reads on startup (and on every
@@ -3450,9 +3545,8 @@ export async function applyK3sManifests({
   // one beside it would be empty. Refuse before anything is created.
   await assertNoRetiredChartDb({ env });
   await assertDbStorageClass({ storageClass, env });
-  const baseDir = renderK8sBase(
-    join(projectDir, 'k8s/base'),
-    buildDbManifestValues({
+  const baseDir = renderK8sBase(join(projectDir, 'k8s/base'), {
+    ...buildDbManifestValues({
       dbImageTag,
       s3Config,
       backupBucketName,
@@ -3461,7 +3555,10 @@ export async function applyK3sManifests({
       storageClass,
       walArchiveSha: walArchiveConfigSha(projectDir),
     }),
-  );
+    // The registry hostPort's bind address (hostIP). No default: renderK8sBase
+    // refuses a missing one rather than assume Hetzner's 10.0.1.1.
+    MASTER_PRIVATE_IP: masterPrivateIp,
+  });
   try {
     await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
       runKubectlWithRetry(['apply', '-k', baseDir], {
@@ -3478,7 +3575,7 @@ export async function applyK3sManifests({
     // Pilot-light: nothing app-tier runs on the 2-node standby. Declarative
     // zero via the same patch-at-deploy pattern as the placeholder patches
     // below (TYPE and NAME as separate argv tokens, matching kubectl's own
-    // `patch TYPE NAME` form). Step 6 below still `set image`s this
+    // `patch TYPE NAME` form). Step 6 below still patches the image of this
     // Deployment so its pod template is failover-ready the moment CA (or
     // an operator) scales it back to 1.
     await runKubectlWithRetry(
@@ -3923,9 +4020,40 @@ export async function applyK3sManifests({
   //    ImagePullBackOff for the whole db wait. Switching now means the app
   //    pods come up on the sideloaded image immediately (their readiness stays
   //    503 until the db answers); we still wait for their rollout below.
+  //    One patch also stamps the resourceVersions of the Secrets the pod reads
+  //    (readAppSecretVersions), so a re-minted storage key or a rotated password
+  //    rolls the pods even when the image tag is unchanged; one template
+  //    change, one roll. Both containers: the app and its migrate init
+  //    container run one image.
+  const appTemplatePatch = {
+    spec: {
+      template: {
+        metadata: {
+          annotations: {
+            [APP_SECRETS_SHA_ANNOTATION]: await readAppSecretVersions({ env }),
+          },
+        },
+        spec: {
+          containers: [{ name: 'app', image: imageTag }],
+          initContainers: [{ name: 'migrate', image: imageTag }],
+        },
+      },
+    },
+  };
   await runKubectlWithRetry(
-    ['-n', 'vibecarbon', 'set', 'image', 'deployment/app', `app=${imageTag}`],
-    { env, description: 'applyK3sManifests: kubectl set image deployment/app' },
+    [
+      '-n',
+      'vibecarbon',
+      'patch',
+      'deployment/app',
+      '--type=strategic',
+      '-p',
+      JSON.stringify(appTemplatePatch),
+    ],
+    {
+      env,
+      description: 'applyK3sManifests: kubectl patch deployment/app (image, secret versions)',
+    },
   );
   // 7. Wait for the db StatefulSet (applied with base in step 5) to be Ready:
   //    WAL archiving is on from its first boot (startup flags, see
@@ -3943,10 +4071,12 @@ export async function applyK3sManifests({
   // check whose subject can rot with ZERO in-cluster change (keys revoked at the
   // provider, bucket deleted), so it must not sit behind the persisted
   // `k3s-apply` skip gate — see deployK3s, which runs it unconditionally.
-  // 8. No migration step: the app applies db/migrations itself at startup
-  //    (under an advisory lock, so replicas take turns) and the readiness
-  //    probe stays 503 until it has. A restored database carries its ledger,
-  //    so there is no restore special case either.
+  // 8. No separate migration step here: each app pod's `migrate` init
+  //    container applies db/migrations as the owner (under an advisory lock,
+  //    so replicas take turns) and sets up app_service before the app
+  //    container starts, and the readiness probe stays 503 until the ledger
+  //    is current. A restored database carries its ledger, so there is no
+  //    restore special case either.
   // 9. Wait for app rollout. The deployment template already has
   //    imagePullPolicy: IfNotPresent, so kubelet uses the sideloaded image
   //    without pulling. 300s wasn't enough on a cold deploy where the app
@@ -4042,10 +4172,20 @@ export async function applyK3sManifests({
       migrationWatch.catch(() => {});
     }
   }
+  // 9a. Delete the pre-split `vibecarbon-secrets` Secret. The app, the db and
+  //     the add-ons now read vibecarbon-app-secrets and
+  //     vibecarbon-infra-secrets, and this deploy's rollout replaced every pod
+  //     that referenced the old Secret, so nothing uses it any more. Leaving
+  //     it would keep a copy of every infra password in a Secret no one owns.
+  //     A no-op once it is gone.
+  await runKubectlWithRetry(
+    ['-n', 'vibecarbon', 'delete', 'secret', LEGACY_VIBECARBON_SECRET, '--ignore-not-found'],
+    { env, description: `applyK3sManifests: delete Secret/${LEGACY_VIBECARBON_SECRET}` },
+  );
   // 9b. Wait for the app to report its migrations applied and its super
   //     admin ready (one probe). The app migrates, then creates the admin
   //     at startup from ADMIN_EMAIL / ADMIN_PASSWORD (delivered through the
-  //     vibecarbon-secrets envFrom, see SECRET_KEYS) once the database
+  //     vibecarbon-app-secrets envFrom, see buildAppSecretData) once the database
   //     answers; the deploy is not done until the operator can sign in.
   //     Runs on restore too (a backup predating the admin still gets one).
   //     SKIPPED on a pilot standby: its app tier is zeroed until failover,
@@ -4501,6 +4641,8 @@ export async function deployK3s(options) {
     // The pilot-light role: a failover swaps it between stacks, and each
     // role renders a different cluster — see buildK3sApplyInputs.
     role: options.role,
+    // A re-minted app storage key must reach the app Secret.
+    appStorageAccessKey: options.s3Config?.appCredential?.accessKey,
   });
   if (!state.shouldSkip('k3s-apply', applyInputs)) {
     state.startStep('k3s-apply', applyInputs);

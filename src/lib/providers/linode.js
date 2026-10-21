@@ -16,7 +16,7 @@
 
 import { fetchWithRetry } from '../fetch-retry.js';
 import { pollUntil } from '../retry.js';
-import { BaseProvider } from './base.js';
+import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as
 // HetznerProvider/DigitalOceanProvider (SSH, k8s API for future parity).
@@ -1153,29 +1153,29 @@ export class LinodeProvider extends BaseProvider {
    * Linode-shaped replication-firewall rule builder — see BaseProvider's
    * abstract doc. Takes the firewall OBJECT (findFirewallByName's return);
    * Linode's inbound rules live under `firewall.rules.inbound` with shape
-   * `{protocol, ports, addresses: {ipv4, ipv6}, action, label}`. Idempotent:
-   * null when the peer's UDP/51821 rule is already present.
+   * `{protocol, ports, addresses: {ipv4, ipv6}, action, label}`. The reconcile
+   * is the shared replaceWireguardPeerRules: the UDP/51821 rule follows the
+   * current peer (an old peer's rule is dropped), null when already correct.
    * @param {object} firewall
    * @param {string} peerIp - the peer node's public IPv4
    * @returns {object[]|null}
    */
   buildReplicationFirewallRules(firewall, peerIp) {
-    const existingRules = firewall.rules?.inbound || [];
-    const hasExactRule = existingRules.some(
-      (r) =>
-        r.protocol === 'UDP' && r.ports === WG_PORT && r.addresses?.ipv4?.includes(`${peerIp}/32`),
-    );
-    if (hasExactRule) return null;
-    return [
-      ...existingRules,
-      {
+    return replaceWireguardPeerRules(firewall.rules?.inbound || [], peerIp, {
+      isWireguardRule: (r) => r.protocol === 'UDP' && String(r.ports) === WG_PORT,
+      admitsOnlyPeer: (r, ip) =>
+        r.action === 'ACCEPT' &&
+        r.addresses?.ipv4?.length === 1 &&
+        r.addresses.ipv4[0] === `${ip}/32` &&
+        !r.addresses.ipv6?.length,
+      buildPeerRule: (ip) => ({
         label: 'wg-replication',
         action: 'ACCEPT',
         protocol: 'UDP',
         ports: WG_PORT,
-        addresses: { ipv4: [`${peerIp}/32`] },
-      },
-    ];
+        addresses: { ipv4: [`${ip}/32`] },
+      }),
+    });
   }
 
   /**

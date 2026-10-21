@@ -55,7 +55,7 @@
 import { fetchWithRetry } from '../fetch-retry.js';
 import { readOperatorVar } from '../operator-env.js';
 import { pollUntil } from '../retry.js';
-import { BaseProvider } from './base.js';
+import { BaseProvider, replaceWireguardPeerRules } from './base.js';
 
 // Ports whose inbound rules applyOperatorCidrs rewrites — same set as the
 // sibling providers (SSH, k8s API for future parity).
@@ -1388,33 +1388,29 @@ export class ScalewayProvider extends BaseProvider {
   /**
    * Scaleway-shaped replication-rule builder — see BaseProvider's abstract
    * doc. Operates on the AUGMENTED group object findFirewallByName returns
-   * (rules attached). Idempotent: null when the peer's UDP/51821 rule is
-   * already present.
+   * (rules attached). The reconcile is the shared replaceWireguardPeerRules:
+   * the UDP/51821 rule follows the current peer (an old peer's rule is
+   * dropped), null when already correct.
    * @param {object} firewall - augmented group ({...group, zone, rules})
    * @param {string} peerIp
    * @returns {object[]|null}
    */
   buildReplicationFirewallRules(firewall, peerIp) {
-    const existingRules = firewall.rules || [];
-    const hasExactRule = existingRules.some(
-      (r) =>
-        r.protocol === 'UDP' &&
-        r.direction === 'inbound' &&
-        Number(r.dest_port_from) === WG_PORT &&
-        r.ip_range === `${peerIp}/32`,
-    );
-    if (hasExactRule) return null;
-    return [
-      ...existingRules.map(({ id: _id, ...rest }) => rest),
-      {
+    const rules = replaceWireguardPeerRules(firewall.rules || [], peerIp, {
+      isWireguardRule: (r) =>
+        r.protocol === 'UDP' && r.direction === 'inbound' && Number(r.dest_port_from) === WG_PORT,
+      admitsOnlyPeer: (r, ip) =>
+        r.action === 'accept' && r.ip_range === `${ip}/32` && Number(r.dest_port_to) === WG_PORT,
+      buildPeerRule: (ip) => ({
         action: 'accept',
         protocol: 'UDP',
         direction: 'inbound',
-        ip_range: `${peerIp}/32`,
+        ip_range: `${ip}/32`,
         dest_port_from: WG_PORT,
         dest_port_to: WG_PORT,
-      },
-    ];
+      }),
+    });
+    return rules === null ? null : rules.map(({ id: _id, ...rest }) => rest);
   }
 
   /**

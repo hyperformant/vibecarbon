@@ -20,6 +20,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
+import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
 import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
@@ -921,6 +922,27 @@ async function storageSettleLine(envConfig, now = Date.now()) {
 }
 
 /**
+ * The `storage access` row (security plan R2/R4): which tier the env's app
+ * key is on and why, from the recorded `s3.appKey` and the provider's
+ * declared scoping. No network. Never fails the env's checks.
+ *
+ * @param {{ provider?: string, s3?: { bucket?: string, appKey?: object } }} envConfig
+ * @returns {Promise<string|null>}
+ */
+async function storageAccessRow(envConfig) {
+  const providerId =
+    envConfig?.provider && hasProvider(envConfig.provider)
+      ? envConfig.provider.toLowerCase()
+      : 'hetzner';
+  try {
+    return await storageAccessLine(envConfig, providerId);
+  } catch (err) {
+    console.warn(`storage access unknown: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Is one server's container view fully healthy? Counts rows other than
  * `done`, and for k8s also every platform namespace and every node.
  */
@@ -1083,6 +1105,11 @@ function renderEnvironment(envName, envConfig, checks) {
     const s3Region = envConfig.s3.region ? ` ${c.dim(`(${envConfig.s3.region})`)}` : '';
     lines.push(`${c.dim('S3 Bucket')}      ${envConfig.s3.bucket}${s3Region}`);
     if (checks.storageSettle) lines.push(`               ${c.warning(checks.storageSettle)}`);
+    if (checks.storageAccess) {
+      const color = checks.storageAccess.startsWith('storage access: shared') ? c.warning : c.dim;
+      lines.push(`               ${color(checks.storageAccess)}`);
+    }
+    if (checks.storageUnfenced) lines.push(`               ${c.warning(checks.storageUnfenced)}`);
   }
 
   // Deployed date
@@ -1399,6 +1426,10 @@ async function main(argv = []) {
 
       const storageSettle = await storageSettleLine(envConfig);
       if (storageSettle) checks.storageSettle = storageSettle;
+      const storageAccess = await storageAccessRow(envConfig);
+      if (storageAccess) checks.storageAccess = storageAccess;
+      const unfenced = unfencedBucketsLine(envConfig);
+      if (unfenced) checks.storageUnfenced = unfenced;
 
       // Real replication state for HA envs (best-effort, hard-bounded) and
       // per-server container/pod health (spec: remote-container-health) run
@@ -1541,6 +1572,7 @@ export {
   providerDisplayName,
   resolveEnvProvider,
   SPEC,
+  storageAccessRow,
   storageSettleLine,
   VERSION,
 };

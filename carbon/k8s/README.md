@@ -86,9 +86,14 @@ Before deploying, update the secrets with real values:
 
 ```bash
 # Create secrets manually (recommended for initial setup)
-kubectl create secret generic vibecarbon-secrets \
+kubectl create secret generic vibecarbon-infra-secrets \
   --namespace=vibecarbon \
   --from-literal=DB_PASSWORD=<your-password>
+
+# The app's own keys (BETTER_AUTH_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, ...)
+kubectl create secret generic vibecarbon-app-secrets \
+  --namespace=vibecarbon \
+  --from-literal=BETTER_AUTH_SECRET=<64 random characters>
 
 kubectl create secret generic hcloud-token \
   --namespace=vibecarbon \

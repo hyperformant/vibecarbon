@@ -29,16 +29,108 @@
  * endpoint hostname (s3-provider-contract pins both).
  *
  * Note: Object Storage keys are minted via POST /object-storage/keys
- * (linode-guided-setup.js walks the operator through it).
+ * (linode-guided-setup.js walks the operator through it). The deploy also
+ * mints each environment's app key there, limited to that env's bucket
+ * (appKeyScoping 'mint', security plan R2).
  *
  * API Documentation: https://techdocs.akamai.com/cloud-computing/docs/object-storage
  */
 
+import { fetchWithRetry } from '../fetch-retry.js';
+import { appKeyLabel, appKeyMintError, readJson } from './app-key-api.js';
 import { deriveStateBucketName, S3CompatibleProvider, sanitizeBucketName } from './s3-base.js';
+
+const API_BASE = 'https://api.linode.com/v4';
 
 export class LinodeObjectStorageProvider extends S3CompatibleProvider {
   /** No settle window has been observed on a new bucket here. */
   static bucketSettleWindowMs = 0;
+
+  /**
+   * The API mints a key limited to one bucket (`bucket_access` read_write),
+   * which gets 403 on every other bucket (security plan R2, measured
+   * 2026-10-20).
+   */
+  static appKeyScoping = 'mint';
+
+  /**
+   * Mint the env's app key: `read_write` on `bucket` only, never an
+   * account-wide key. The key's region is the one Linode lists for this
+   * endpoint's cluster (`GET /object-storage/endpoints`). One POST, never
+   * retried (a retried create can mint twice): a failure throws one line that
+   * names the token scope it needs.
+   * @param {string} bucket
+   * @param {{ endpoint: string, apiToken: string }} opts
+   * @returns {Promise<{ id: string, accessKey: string, secretKey: string }>}
+   */
+  static async mintAppKey(bucket, { endpoint, apiToken }) {
+    const headers = { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' };
+    const host = new URL(endpoint).host;
+    let entry;
+    for (let page = 1, pages = 1; page <= pages && !entry; page++) {
+      const listed = await fetchWithRetry(
+        `${API_BASE}/object-storage/endpoints?page_size=500&page=${page}`,
+        { headers },
+      );
+      if (!listed.ok) throw appKeyMintError('Linode', listed.status, LINODE_SCOPE);
+      const body = await readJson(listed);
+      pages = body.pages ?? 1;
+      entry = (body.data ?? []).find(
+        (e) => e.s3_endpoint && new URL(`https://${e.s3_endpoint}`).host === host,
+      );
+    }
+    if (!entry?.region) {
+      throw new Error(
+        `Linode lists no object storage region for ${host}, so no app storage key can be minted for ${bucket}`,
+      );
+    }
+    const { region } = entry;
+    const res = await fetch(`${API_BASE}/object-storage/keys`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        label: appKeyLabel(bucket, 50),
+        regions: [region],
+        bucket_access: [{ region, bucket_name: bucket, permissions: 'read_write' }],
+      }),
+    });
+    if (!res.ok) throw appKeyMintError('Linode', res.status, LINODE_SCOPE);
+    const key = await readJson(res);
+    return { id: String(key.id), accessKey: key.access_key, secretKey: key.secret_key };
+  }
+
+  /**
+   * Revoke an app key. One that is already gone counts as revoked.
+   * @param {string} id - the Linode key id
+   * @param {{ apiToken: string }} opts
+   * @returns {Promise<void>}
+   */
+  static async revokeAppKey(id, { apiToken }) {
+    const res = await fetchWithRetry(`${API_BASE}/object-storage/keys/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`Linode refused to revoke app storage key ${id} (HTTP ${res.status})`);
+    }
+  }
+
+  /**
+   * Does Linode still list this key?
+   * @param {string} id
+   * @param {{ apiToken: string }} opts
+   * @returns {Promise<boolean>}
+   */
+  static async appKeyExists(id, { apiToken }) {
+    const res = await fetchWithRetry(`${API_BASE}/object-storage/keys/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    if (res.status === 404) return false;
+    if (!res.ok) {
+      throw new Error(`Linode could not look up app storage key ${id} (HTTP ${res.status})`);
+    }
+    return true;
+  }
 
   /**
    * SIGNING region for every S3 client this class builds (s3-base's
@@ -137,5 +229,8 @@ export class LinodeObjectStorageProvider extends S3CompatibleProvider {
     return 'us-iad-1';
   }
 }
+
+/** The scope a Linode token needs to mint and revoke app keys. */
+const LINODE_SCOPE = 'the Object Storage read/write scope (object_storage:read_write)';
 
 export { deriveStateBucketName, sanitizeBucketName };

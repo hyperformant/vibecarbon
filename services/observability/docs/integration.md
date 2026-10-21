@@ -49,9 +49,9 @@ the stack up alongside the app.
   and the app (for `/api/health`) can reach `grafana:3000` — not the other
   workloads in the `vibecarbon` namespace (n8n/metabase/storage/…). Grafana gets a
   SCOPED secret/config (only `ADMIN_EMAIL`/`ADMIN_PASSWORD`/`SITE_URL`; no
-  DB/service-role creds cross the boundary). **Residual risk:** only a COMPROMISED
+  DB or storage creds cross the boundary). **Residual risk:** only a COMPROMISED
   app pod could still forge the header (its health poll is a required path) —
-  bounded, since that pod already holds the service-role key. **This applies to the
+  bounded, since that pod already holds the app's database role and storage key. **This applies to the
   CLI/direct k3s deploy path only.** The stack is applied there as a separate
   kustomization (never under `k8s/base`, whose `namespace: vibecarbon` transformer
   would undo the isolation). On the **gitops/Flux** path observability is NOT

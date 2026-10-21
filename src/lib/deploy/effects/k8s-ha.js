@@ -189,7 +189,7 @@ async function haK8sProvisionClusters(ctx) {
   // CA's headroom (maxWorkers - caBoundsMin) matches what primary would have
   // once the standby is promoted.
   // Distinct local tunnel ports per cluster — both deployK3s calls run
-  // on the same operator host and each opens `ssh -L <port>:localhost:5000`
+  // on the same operator host and each opens `ssh -L <port>:<masterPrivateIp>:5000`
   // for the registry push. Default 5000 collides; the loser of the
   // bind race aborts via ExitOnForwardFailure=yes (RCA from k8s-ha
   // 2026-04-30: primary deploy failed at the tunnel-open step while

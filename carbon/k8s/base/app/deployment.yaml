@@ -33,6 +33,67 @@ spec:
     spec:
       terminationGracePeriodSeconds: 30
       serviceAccountName: vibecarbon-app
+      # The migrate step (src/server/db/migrate-cli.ts): applies db/migrations
+      # as the owner, postgres, then creates or updates the app's own role,
+      # app_service, with APP_DB_PASSWORD. It is the only container in the pod
+      # that reads the owner password, and its env is not shared with the app
+      # container. Replicas take turns on the migrations advisory lock; on a
+      # standby (read-only database) it exits 0 at once. While the db is not
+      # up yet it waits; a failed migration exits 1.
+      initContainers:
+      - name: migrate
+        image: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}:main
+        imagePullPolicy: IfNotPresent
+        command: ["node", "dist/server/migrate-cli.js"]
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: NODE_ENV
+          value: production
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: vibecarbon-config
+              key: DB_NAME
+        - name: DB_USER
+          value: postgres
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-infra-secrets
+              key: DB_PASSWORD
+        - name: APP_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vibecarbon-app-secrets
+              key: APP_DB_PASSWORD
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       containers:
       - name: app
         image: ghcr.io/{{GITHUB_OWNER}}/{{PROJECT_NAME}}:main
@@ -52,11 +113,14 @@ spec:
         envFrom:
         - configMapRef:
             name: vibecarbon-config
-        # All configure-managed runtime keys (billing/OAuth/SMTP) live in
-        # vibecarbon-secrets; envFrom makes them available to the app without a
-        # per-key list here. Explicit env entries below still win on conflict.
+        # The app's own runtime keys (auth, admin, billing/OAuth/SMTP, its
+        # storage keys) live in vibecarbon-app-secrets, built from one
+        # allowlist (src/lib/deploy/app-runtime-env.js); envFrom makes them
+        # available without a per-key list here. Infra passwords live in
+        # vibecarbon-infra-secrets, which the app never reads whole.
+        # Explicit env entries below still win on conflict.
         - secretRef:
-            name: vibecarbon-secrets
+            name: vibecarbon-app-secrets
         env:
         - name: NODE_ENV
           value: production
@@ -67,16 +131,18 @@ spec:
               key: SITE_URL
         # Auth runs in-process (src/server/auth/): its public URL is SITE_URL,
         # and BETTER_AUTH_SECRET (session signing key) arrives through the
-        # vibecarbon-secrets envFrom above.
+        # vibecarbon-app-secrets envFrom above.
         - name: BETTER_AUTH_URL
           valueFrom:
             configMapKeyRef:
               name: vibecarbon-config
               key: SITE_URL
-        # The API server talks to Postgres directly (src/server/db/client.ts).
-        # Named explicitly, not left to envFrom, so a stray DB_HOST in the
-        # Secret (e.g. the local-dev localhost) can never win. The host is the
-        # `db` Service (k8s/base/db/service.yaml); DB_USER defaults to postgres.
+        # The API server talks to Postgres directly (src/server/db/client.ts),
+        # as its own role, app_service, with APP_DB_PASSWORD from the app's
+        # Secret: never as the owner, whose password only the migrate init
+        # container reads. Named explicitly, not left to envFrom, so a stray
+        # DB_HOST in the Secret (e.g. the local-dev localhost) can never win.
+        # The host is the `db` Service (k8s/base/db/service.yaml).
         - name: DB_HOST
           valueFrom:
             configMapKeyRef:
@@ -92,11 +158,13 @@ spec:
             configMapKeyRef:
               name: vibecarbon-config
               key: DB_NAME
+        - name: DB_USER
+          value: app_service
         - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: vibecarbon-secrets
-              key: DB_PASSWORD
+              name: vibecarbon-app-secrets
+              key: APP_DB_PASSWORD
         resources:
           requests:
             cpu: 100m
