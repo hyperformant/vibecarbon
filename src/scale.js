@@ -895,6 +895,9 @@ async function scaleServers(ctx) {
         envName: environment,
         envConfig,
         projectName,
+        // The live database's own lineage (C7), never a resolved one: an
+        // unrestored prior lineage is a restore question, not scale's.
+        live: true,
         skipPrompts: !process.stdin.isTTY,
       });
       if (!listing.s3Config) {

@@ -2398,6 +2398,8 @@ async function failoverSingleServer(envName, envConfig) {
       envName,
       envConfig,
       projectName,
+      // The lost server's database: its recorded lineage, never resolved.
+      live: true,
       // A recovery guide never stops to ask: env vars or nothing.
       skipPrompts: true,
     });

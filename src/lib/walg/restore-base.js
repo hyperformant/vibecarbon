@@ -396,10 +396,16 @@ export function restoredLineageRecord(backup, lineage) {
  * resolveRestoreLineage picks for `target`. `lineage` comes back null when
  * no lineage is recorded and none holds a base (an empty listing).
  *
+ * `live: true` is for callers that work on the LIVE database (scale's
+ * restore onto the new server, the single-server failover guide): they read
+ * the recorded `backup.lineage` folder directly and never resolve, so an
+ * ambiguity or `unrestoredPrior` (a restore question) never stops them. No
+ * lineage on record refuses, naming the deploy that records it.
+ *
  * `s3Config` is null when there is no backup bucket on record or no
  * credentials for it; callers name the variables (backupCredentialVars).
  *
- * @param {{ envName: string, envConfig: object, projectName: string, skipPrompts?: boolean, s3Config?: object, lineage?: string|null, target?: 'latest' | Date, resolveS3?: typeof resolveS3Config, makeClient?: (cfg: object) => any }} args
+ * @param {{ envName: string, envConfig: object, projectName: string, skipPrompts?: boolean, s3Config?: object, lineage?: string|null, target?: 'latest' | Date, live?: boolean, resolveS3?: typeof resolveS3Config, makeClient?: (cfg: object) => any }} args
  * @returns {Promise<{ s3Config: object | null, location: string | null, lineage: string | null, lineages?: Awaited<ReturnType<typeof listLineages>>, backups: Awaited<ReturnType<typeof listBaseBackups>> }>}
  * @throws {AmbiguousLineageError}
  */
@@ -411,15 +417,27 @@ export async function readEnvBaseBackups({
   s3Config: given,
   lineage: flag = null,
   target = 'latest',
+  live = false,
   resolveS3 = resolveS3Config,
   makeClient = createS3Client,
 }) {
+  const recorded = envConfig?.backup?.lineage ? String(envConfig.backup.lineage) : null;
+  if (live && !LINEAGE_RE.test(recorded ?? '')) {
+    throw new NoRestorePointError(
+      `no backup lineage on record for ${envName}: run vibecarbon deploy ${envName} to record the database it runs`,
+    );
+  }
   const isCompose = envConfig?.deployMode === 'compose' || envConfig?.deployMode === 'compose-ha';
   const s3Config =
     given ?? (await resolveS3({ isCompose, envName, projectName, envConfig, skipPrompts }));
   if (!s3Config?.bucket) return { s3Config: null, location: null, lineage: null, backups: [] };
   const base = walgPrefixFor(projectName, envName);
   const s3 = await makeClient(s3Config);
+  if (live) {
+    const prefix = `${base}/${recorded}`;
+    const backups = await listBaseBackups({ s3, bucket: s3Config.bucket, prefix });
+    return { s3Config, location: `s3://${s3Config.bucket}/${prefix}`, lineage: recorded, backups };
+  }
   const lineages = await listLineages({ s3, bucket: s3Config.bucket, base });
   const lineage = resolveRestoreLineage({ envConfig, lineages, flag, target });
   const prefix = lineage ? `${base}/${lineage}` : base;

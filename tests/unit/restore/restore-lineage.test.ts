@@ -9,6 +9,7 @@
  * each lineage with its newest base, rather than silently restore the new
  * empty database or an old one.
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -717,5 +718,100 @@ describe('a chosen point in time is checked against the resolved lineage', () =>
     expect(restore.indexOf('assertLineageCoversPoint({')).toBeLessThan(
       restore.indexOf('base = pickRestoreBase(backups, chosenSource);'),
     );
+  });
+});
+
+// Fix round 2: scale and the single-server failover guide work on the LIVE
+// database, never a chosen lineage. While backup.unrestoredPrior is set a
+// resolved listing refuses, which failed compose scale after provisioning.
+// They read the recorded lineage's folder directly (C7).
+describe('callers of the live database read the recorded lineage, never resolve', () => {
+  const S3 = {
+    bucket: 'myapp-backups',
+    endpoint: 'e',
+    region: 'r',
+    accessKey: 'a',
+    secretKey: 's',
+  };
+  // The DR redeploy after the new database's first base, old lineage marked.
+  const objects = {
+    ...destroyedAndRedeployed,
+    ...base(NEW, 'base_00000001000000000000000C', '2026-10-21T02:00:00Z'),
+  };
+  const marked = {
+    deployMode: 'compose',
+    backup: { lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD },
+  };
+
+  it('under the mark, a live read lists the recorded lineage and proceeds', async () => {
+    const s3 = fakeS3(objects);
+    const listing = await readEnvBaseBackups({
+      envName: 'prod',
+      envConfig: marked,
+      projectName: 'myapp',
+      s3Config: S3,
+      live: true,
+      makeClient: () => s3,
+    });
+    expect(listing.lineage).toBe(NEW);
+    expect(listing.backups.map((b) => b.name)).toEqual(['base_00000001000000000000000C']);
+    // Its folder only: no lineage listing, no resolution.
+    const prefixes = s3.calls
+      .filter((c) => c.command === 'ListObjectsV2Command')
+      .map((c) => c.input.Prefix);
+    expect(prefixes).toEqual([`${BASE}/${NEW}/basebackups_005/`]);
+  });
+
+  it('the same read resolving (a bare restore) still refuses under the mark', async () => {
+    await expect(
+      readEnvBaseBackups({
+        envName: 'prod',
+        envConfig: marked,
+        projectName: 'myapp',
+        s3Config: S3,
+        makeClient: () => fakeS3(objects),
+      }),
+    ).rejects.toThrow(AmbiguousLineageError);
+  });
+
+  it('no lineage on record: a live read refuses, naming the deploy that records it', async () => {
+    await expect(
+      readEnvBaseBackups({
+        envName: 'prod',
+        envConfig: { deployMode: 'compose' },
+        projectName: 'myapp',
+        s3Config: S3,
+        live: true,
+        makeClient: () => fakeS3(objects),
+      }),
+    ).rejects.toThrow(/no backup lineage on record for prod[\s\S]*vibecarbon deploy prod/);
+  });
+
+  it('census: only restore and backup -l resolve; every other caller reads the live lineage', () => {
+    const callers = spawnSync('git', ['grep', '-l', 'readEnvBaseBackups(', '--', 'src'], {
+      encoding: 'utf-8',
+    })
+      .stdout.split('\n')
+      .filter((f) => f && f !== 'src/lib/walg/restore-base.js');
+    expect(callers.sort()).toEqual([
+      'src/backup.js',
+      'src/failover.js',
+      'src/restore.js',
+      'src/scale.js',
+    ]);
+    for (const f of callers.filter((c) => !['src/restore.js', 'src/backup.js'].includes(c))) {
+      const text = readFileSync(f, 'utf-8');
+      const calls = text.split('readEnvBaseBackups(').slice(1);
+      expect(calls.length, f).toBeGreaterThan(0);
+      for (const call of calls)
+        expect(call.slice(0, call.indexOf('})')), f).toMatch(/\blive: true\b/);
+    }
+    // listBaseBackups is read only through restore-base.js's own paths.
+    const direct = spawnSync('git', ['grep', '-l', 'listBaseBackups(', '--', 'src'], {
+      encoding: 'utf-8',
+    })
+      .stdout.split('\n')
+      .filter(Boolean);
+    expect(direct).toEqual(['src/lib/walg/restore-base.js']);
   });
 });
