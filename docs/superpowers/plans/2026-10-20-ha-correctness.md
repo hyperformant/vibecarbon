@@ -108,6 +108,7 @@ All 10 findings hold; none dropped. Corrections and additions:
 3. **A Cloudflare token without DNS edit.** Failover exits non-zero and the output never says "DNS updated". Tested in Task 4.
 4. **Operator partitioned from a healthy primary.** Failover refuses without `-force-unplanned`. Tested in Task 6.
 5. **Warm HA redeploy.** The serving primary's postgres is not restarted (no `restart db`, no `delete pod db-0` reached). Tested in Task 8.
+6. **compose-ha reconverge after failover.** `vibecarbon deploy` on a swapped env rebuilds the retired node as the standby from the promoted primary. The promoted node's db is never stopped, restarted or reseeded, and a rerun after a mid-reconverge failure resumes. Tested in Task 3b.
 
 ---
 
@@ -212,6 +213,78 @@ All 10 findings hold; none dropped. Corrections and additions:
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `pnpm vitest run tests/unit/failover tests/unit/deploy`. Expected: PASS.
 - [ ] **Step 5: Commit** `fix(compose-ha): planned failover stops writes and waits for the standby to catch up before promoting`.
+
+### Task 3b: Role-aware compose-HA reconverge after failover
+
+**Why:** after a compose-ha failover, `vibecarbon deploy` (orchestrator.js:523 `assertNoComposeHaRoleSwap`), `failover` (compose/ha.js) and the restore resync all refuse the swapped env, and there is no single-node destroy. The only way back to a healthy pair is `destroy` + `deploy` + `restore`: downtime, and every write since the last WAL archive lost. k8s-ha already reconverges (PR #232: `ha.primary`/`ha.standby` carry their `.stack`; `buildK3sApplyInputs` includes the cluster role). Compose-HA has no role↔stack reconciler: `effects/compose-ha.js:227-236` builds `ctx.primary`/`ctx.standby` straight from the `${env}-primary`/`${env}-standby` stack outputs (birth identity) and never reads `servers[].role`.
+
+**Ruling R11, resolve by role; never re-address WireGuard.** WireGuard addresses stay bound to BIRTH identity forever: the `-primary` stack's node keeps `10.99.0.1`, the `-standby` node keeps `10.99.0.2`. Every consumer that needs "the primary's tunnel address" resolves it from the current role mapping through one helper.
+- Rejected alternative, re-addressing so `10.99.0.1` always follows the primary: it rewrites the SERVING primary's `wg0` and its `docker-compose.replication.yml` (`buildReplicationOverlay(selfWgIp)` binds the db and repl-gateway to the node's own tunnel IP, `effects/compose-ha.js:731-732`). That overlay change recreates `db` on the serving primary, which is a restart (violates Task 8 and "never touch the serving primary"), and it blips the tunnel the reseed depends on.
+- The transport is already symmetric. `configureStandbyReplication` starts each node's repl-gateway on that node's OWN tunnel IP (compose/ha.js:493-504: "the promoted standby is then the primary, and the old primary streams from WG_STANDBY_IP"). What breaks today is only the CONNECT TARGET, hard-coded to `WG_PRIMARY_IP` at compose/ha.js:541, :551 and :583.
+- The comment at compose/ha.js:528-536 claims `WG_PRIMARY_IP` "is fixed to whichever node is currently primary". That is false; fix the comment.
+- Pulumi stacks keep their birth names. Reconverge runs `up` on both stacks, as a normal deploy does, so the stack-to-node mapping never changes and nothing is replaced.
+
+**Ruling R12, reconverge order (deploy on a swapped env).** The detector (`detectComposeHaRoleSwap`) switches deploy from refuse to reconverge. Reconverge requires all of these, and refuses with a one-line cause otherwise:
+- no failover journal (`ha.failoverInFlight`) is set (a crashed failover must be finished by rerunning `failover` first);
+- the promoted node answers `pg_is_in_recovery() = false`;
+- DNS already points at the promoted node.
+
+Order:
+1. `ctx.primary` = the node whose `servers[].role === 'primary'` (the promoted one), `ctx.standby` = the retired node. Each keeps its stack and its birth tunnel IP (`wgIpOf(node)` from the stack identity).
+2. Provision/apply as a normal deploy, with every role-dependent write driven by `ctx` roles:
+   - `WALG_ROLE`;
+   - app tier up on the primary, zeroed on the standby;
+   - primary-only add-ons per the add-ons plan;
+   - the Task 6 retirement fence stays armed on the retired node until step 4 proves streaming.
+3. Primary-side replication setup on the PROMOTED node: replication user, `vibecarbon_standby_slot` (create if missing), and its repl-gateway on its own tunnel IP, without restarting its db (Task 8 rule).
+4. Reseed the RETIRED node from the promoted one: `configureStandbyReplication(primary=promoted, standby=retired, primaryHost=wgIpOf(promoted))`. The target is the retired node by construction; a guard refuses if the target is the role primary (`pg_is_in_recovery() = false` and it serves DNS).
+5. Only after verified streaming plus a recorded `ha.systemIdentifier` (`haSeedRecord`):
+   - clear `lastFailover`, `replication:'degraded'` and the retired marker;
+   - normalize `servers[]` (roles already correct; stack identity unchanged);
+   - stamp `deployedAt`.
+
+   A failure at any step leaves the env swapped and degraded, so a rerun of `deploy` resumes. The step is idempotent: reseed skips when the standby already streams from the primary with a matching identifier.
+
+**Files:**
+- Modify:
+  - `src/lib/deploy/compose/ha-role-swap.js`: replace the deploy refusal with a classification (`detectComposeHaRoleSwap` stays the detector). Update the exported refusal-message constant from Task 2's fix to name `vibecarbon deploy` as the recovery for failover and restore. Update the module header (no longer "until role-aware redeploy ships").
+  - `src/lib/deploy/orchestrator.js:523`: call `planComposeHaReconverge` instead of `assertNoComposeHaRoleSwap`. Thread `ctx.reconverge = { promoted, retired }` into the compose-ha effects.
+  - `src/lib/deploy/effects/compose-ha.js:227-236`: resolve `ctx.primary`/`ctx.standby` by role when `ctx.reconverge` is set. Use `wgIpOf` at :731-732 so each node keeps its birth tunnel IP whatever its role. Run the primary-side replication setup against `ctx.primary`.
+  - `src/lib/deploy/compose/ha.js`: `configureStandbyReplication` takes `primaryHost` (the resolved tunnel IP) instead of the `WG_PRIMARY_IP` constant at :541, :551 and :583. Fix the :528-536 comment.
+  - `src/lib/deploy/wireguard.js`: export `wgIpOf({ stackIdentity })`, returning `WG_PRIMARY_IP` for the `-primary` stack and `WG_STANDBY_IP` for the `-standby` stack.
+  - `src/restore.js` (resync): on a swapped env with no journal, direct the operator to `vibecarbon deploy` (reconverge) instead of resyncing.
+  - `docs/rto-rpo.md` (~43-48): replace the destroy + deploy + restore path with "run `vibecarbon deploy`; it rebuilds the retired node as the new standby; no downtime".
+- Test:
+  - `tests/unit/deploy/compose-ha-reconverge.test.ts` (new);
+  - `tests/unit/deploy/compose-ha-primary-address-census.test.ts` (new).
+
+**Interfaces:**
+- Consumes: Task 1/2 `failover-guard.js` (`readReplicaState`, `haSeedRecord`), Task 2's exported refusal constant, Task 6's retirement fence, Task 8's no-restart rule.
+- Produces:
+  - `planComposeHaReconverge({ projectName, environment, envConfig }) -> null | { promoted, retired }`. Null for an unswapped env. Throws a one-line refusal when a journal is set.
+  - `wgIpOf({ stackIdentity: 'primary'|'standby' }) -> string`.
+  - `configureStandbyReplication({ ..., primaryHost })`. `primaryHost` is required; there is no default.
+
+- [ ] **Step 1: Failing tests** (`compose-ha-reconverge.test.ts`).
+  - A swapped env (servers' roles flipped, stack names by birth) with no journal: the reconverge plan names the promoted node primary and the retired node standby.
+  - Effects with injected seams record:
+    - (a) no `stop`/`restart`/`recreate` of `db` on the promoted node (argv census);
+    - (b) a slot ensure on the promoted node;
+    - (c) a reseed whose TARGET ip is the retired node and whose `primaryHost` is `10.99.0.2` (the promoted node's birth tunnel IP);
+    - (d) the replication overlay written with each node's BIRTH tunnel IP, unchanged;
+    - (e) app tier up on the promoted node and zeroed on the retired one;
+    - (f) `lastFailover`/`degraded` cleared only after verified streaming and `ha.systemIdentifier` recorded.
+  - Refusals, each before any SSH write: a journal is set (names `vibecarbon failover`); the promoted node reads in recovery; the reseed target reads `pg_is_in_recovery() = false` while serving DNS.
+  - Idempotence: a second run with the standby already streaming from the promoted node with a matching identifier makes zero reseed calls.
+  - Failure resume: a reseed throw leaves `degraded` set and roles unchanged; a rerun reseeds and clears.
+- [ ] **Step 2: Census** (`compose-ha-primary-address-census.test.ts`, a walk over `src/`):
+  - outside `wireguard.js` (definitions and `wgIpOf`), no file uses `WG_PRIMARY_IP`/`WG_STANDBY_IP` as a CONNECT target (`primaryHost`, `relayTarget`, `TCP:` connect, conninfo);
+  - the only allowed uses are tunnel self-binding (`selfWgIp` at the `wgIpOf` site) and k8s-ha's pilot-light gateway (`k8s/ha/index.js`, which has its own role model);
+  - planted fixtures, plus an arm-bite: re-add `primaryHost: WG_PRIMARY_IP` in compose/ha.js and see the census fail.
+- [ ] **Step 3: Run** `pnpm vitest run tests/unit/deploy/compose-ha-reconverge.test.ts tests/unit/deploy/compose-ha-primary-address-census.test.ts`. Expected: FAIL.
+- [ ] **Step 4: Implement** the files above.
+- [ ] **Step 5: Run** `pnpm vitest run tests/unit/deploy tests/unit/failover tests/unit/restore`, then `pnpm test:unit`. Expected: PASS (update the Task 2 refusal-message tests to the new `vibecarbon deploy` text).
+- [ ] **Step 6: Commit** `feat(compose-ha): deploy reconverges a failed-over pair, rebuilding the retired node as the standby`.
 
 ### Task 4: DNS mutations check status, and failover verifies the flip (H2)
 
@@ -347,6 +420,12 @@ All 10 findings hold; none dropped. Corrections and additions:
 **Files:**
 - Modify:
   - `tests/e2e/scenarios/` (the k8s-ha and compose-ha failover steps): after `verify-failover`, add an immediate second `failover` invocation that must exit non-zero with `/vibecarbon deploy/`, with no infra change. Confirm via `status` that roles are unchanged and DNS still points at the promoted side.
+  - compose-ha scenario: add a `reconverge-deploy` step after the refused second failover, mirroring k8s-ha's. `vibecarbon deploy` on the swapped env must:
+    - exit 0, with streaming verified from the promoted primary to the rebuilt retired node;
+    - keep the promoted node's db start time unchanged (`primary_not_restarted`);
+    - keep app rows written after failover #1 present.
+
+    Then add a `failback` step: a planned `failover` succeeds and DNS returns to the original node, and `verify-failback` reruns the data checks.
   - `tests/e2e/checks/` (new `checks/ha-integrity.ts`):
     - `dns_flip_verified`: the A record equals the promoted IP through the provider API;
     - `old_primary_disarmed`: `WALG_ROLE=standby` and the retired marker on the old side;
@@ -362,7 +441,7 @@ All 10 findings hold; none dropped. Corrections and additions:
 ## Compatibility (PR body)
 
 - An HA env deployed before this change has no `ha.systemIdentifier`. Unplanned failover refuses until the next `vibecarbon deploy` records it. Planned failover with a streaming standby works.
-- compose-ha failover stays one-way until a redeploy. A second failover now refuses instead of reseeding the retired node from itself.
+- compose-ha failover is no longer one-way: `vibecarbon deploy` on a failed-over env reconverges (rebuilds the retired node as the new standby). A second failover before that reconverge refuses instead of reseeding the retired node from itself.
 - `failover` gains `-force-unplanned` for an operator who knows the primary is gone even though the standby still reports a recent stream.
 
 ## Verification
