@@ -59,6 +59,8 @@ const SAFE_PATTERNS = [
   // Docker would mount an empty directory there and the local S3 would not
   // start.
   'volumes/s3/**',
+  // The n8n addon's hook and setup scripts docker-compose.n8n.yml mounts.
+  'volumes/n8n/**',
   'AGENTS.md',
   'CLAUDE.md',
   'PRODUCTION.md',
@@ -71,11 +73,27 @@ const SAFE_PATTERNS = [
   '.claude/agents/**',
 ];
 
-// Template-owned files under a NEVER directory that upgrade must still ship.
-// volumes/db/db-guard.sh is the compose db service's entrypoint
-// (docker-compose.yml mounts it): a project that takes the compose merge
-// without it gets an empty directory mounted there and no database.
-const SAFE_DESPITE_NEVER = ['volumes/db/db-guard.sh'];
+// Template-owned files under a NEVER directory that upgrade must still ship:
+// every one is bind-mounted by a shipped compose file or sourced by a
+// shipped script, so stranding it pairs a new caller with an old (or
+// missing) dependency. tests/unit/lib/upgrade-mount-census.test.ts enforces
+// that every mount and every sourced container path resolves to a shipped file.
+// - db-guard.sh is the compose db service's entrypoint: missing, Docker
+//   mounts an empty directory there and there is no database.
+// - walg-env.sh is sourced by compose-backup.sh (safe) and wal-archive.sh:
+//   missing, every compose backup exits 1.
+// - wal-archive.sh is the archive_command: an old copy reads the
+//   WALG_S3_PREFIX the merged docker-compose.yml no longer sets
+//   (WALG_S3_PREFIX_BASE now) and archives nothing.
+// - metabase-init.sh / n8n-init.sh are the addons' initdb scripts their
+//   (safe) compose files mount.
+const SAFE_DESPITE_NEVER = [
+  'volumes/db/db-guard.sh',
+  'volumes/db/walg-env.sh',
+  'volumes/db/wal-archive.sh',
+  'volumes/db/metabase-init.sh',
+  'volumes/db/n8n-init.sh',
+];
 
 // Files that always require user review
 const MERGE_PATTERNS = [
