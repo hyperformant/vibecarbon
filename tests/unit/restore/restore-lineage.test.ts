@@ -19,6 +19,7 @@ import {
 import { envIdentityOf, resolveEnvSeed } from '../../../src/lib/env-identity.js';
 import {
   AmbiguousLineageError,
+  assertLineageCoversPoint,
   listLineages,
   NoRestorePointError,
   readEnvBaseBackups,
@@ -26,6 +27,7 @@ import {
   resolveDeployRestorePoint,
   resolveRestoreLineage,
   restoredLineageRecord,
+  restoreLineageCommands,
 } from '../../../src/lib/walg/restore-base.js';
 import {
   RESTORE_MARKER_KEYS,
@@ -592,5 +594,128 @@ describe('backup.unrestoredPrior: a replaced database is never silently skipped'
     expect(restore).toMatch(/restoredLineageRecord\(envConfig\.backup, lineage\)/);
     const orch = readFileSync('src/lib/deploy/orchestrator.js', 'utf-8');
     expect(orch).toMatch(/restored: !!restorePoint,/);
+  });
+});
+
+// Fix round 1 M2: backup has no -lineage, so backup -l on ambiguity names the
+// restore listing of each lineage instead.
+describe('the per-lineage commands an ambiguity prints', () => {
+  const lineages = [
+    L(NEW, null, null),
+    L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z'),
+    L('1', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'),
+  ];
+
+  it('one per lineage with bases, newest first, with the caller suffix', () => {
+    expect(restoreLineageCommands({ envName: 'prod', lineages, suffix: ' -l' })).toEqual([
+      `  vibecarbon restore prod -lineage ${OLD} -l`,
+      '  vibecarbon restore prod -lineage 1 -l',
+    ]);
+  });
+
+  it('backup -l prints the restore listing per lineage; restore prints its own', () => {
+    const backup = readFileSync('src/backup.js', 'utf-8');
+    expect(backup).toMatch(
+      /restoreLineageCommands\(\{ envName, lineages: err\.lineages, suffix: ' -l' \}\)/,
+    );
+    const restore = readFileSync('src/restore.js', 'utf-8');
+    expect(restore).toMatch(/restoreLineageCommands\(\{/);
+  });
+});
+
+// Fix round 1 M3: one bounded re-read when the first read failed on the
+// transport (ssh dropped); a definitive answer is never retried.
+describe('the deploy lineage read', () => {
+  const log = { info: () => {}, warn: () => {} };
+  const transport = Object.assign(
+    new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused'),
+    {},
+  );
+
+  it('a transport failure is read once more, and the second answer counts', async () => {
+    const exec = vi.fn().mockRejectedValueOnce(transport).mockResolvedValueOnce(`${NEW}\n`);
+    await expect(
+      recordDeployedLineage({
+        environment: 'prod',
+        backup: { lineage: NEW },
+        exec,
+        where: '10.0.0.1',
+        log,
+      }),
+    ).resolves.toEqual({ lineage: NEW });
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it('two transport failures fail, naming the rerun; never a third read', async () => {
+    const exec = vi.fn().mockRejectedValue(transport);
+    await expect(
+      recordDeployedLineage({ environment: 'prod', backup: {}, exec, where: '10.0.0.1', log }),
+    ).rejects.toThrow(/Connection refused[\s\S]*Rerun vibecarbon deploy/);
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it('a definitive failure (an answer that is no system identifier, or a psql error) is not re-read', async () => {
+    for (const exec of [
+      vi.fn().mockResolvedValue('ERROR: permission denied'),
+      vi.fn().mockRejectedValue(new Error('psql: FATAL: role "postgres" does not exist')),
+    ]) {
+      await expect(
+        recordDeployedLineage({ environment: 'prod', backup: {}, exec, where: '10.0.0.1', log }),
+      ).rejects.toThrow(/Rerun vibecarbon deploy/);
+      expect(exec).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+// Fix round 1 M5: the interactive chooser resolves the lineage for latest,
+// then the operator may pick an earlier point. Re-check it against that
+// lineage's oldest base and say which lineage would cover it.
+describe('a chosen point in time is checked against the resolved lineage', () => {
+  const backups = [
+    { name: 'base_000000010000000000000004', finishTime: at('2026-10-15T02:00:00Z') },
+    { name: 'base_000000010000000000000008', finishTime: at('2026-10-20T02:00:00Z') },
+  ];
+  const lineages = [
+    L(OLD, '2026-10-01T02:00:00Z', '2026-10-09T02:00:00Z'),
+    L(NEW, '2026-10-15T02:00:00Z', '2026-10-20T02:00:00Z'),
+  ];
+
+  it('a point before the lineage refuses, naming the lineage, its oldest base and the lineage that covers it', () => {
+    let err: unknown;
+    try {
+      assertLineageCoversPoint({
+        envName: 'prod',
+        lineage: NEW,
+        backups,
+        lineages,
+        point: '2026-10-05T00:00:00Z',
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NoRestorePointError);
+    const message = (err as Error).message;
+    expect(message).toContain(
+      `before the oldest base backup of lineage ${NEW} (2026-10-15T02:00:00Z)`,
+    );
+    expect(message).toContain(
+      `vibecarbon restore prod -lineage ${OLD} -source 2026-10-05T00:00:00Z`,
+    );
+  });
+
+  it('a point inside the lineage, latest, or a base name passes', () => {
+    for (const point of ['2026-10-16T00:00:00Z', 'latest', 'base_000000010000000000000004']) {
+      expect(() =>
+        assertLineageCoversPoint({ envName: 'prod', lineage: NEW, backups, lineages, point }),
+      ).not.toThrow();
+    }
+  });
+
+  it('restore checks the chosen point before it resolves the base', () => {
+    const restore = readFileSync('src/restore.js', 'utf-8');
+    expect(restore.indexOf('assertLineageCoversPoint({')).toBeGreaterThan(-1);
+    expect(restore.indexOf('assertLineageCoversPoint({')).toBeLessThan(
+      restore.indexOf('base = pickRestoreBase(backups, chosenSource);'),
+    );
   });
 });

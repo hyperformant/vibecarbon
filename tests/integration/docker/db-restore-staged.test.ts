@@ -492,18 +492,22 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
   it('WALG_PREVENT_WAL_OVERWRITE refuses a segment name already archived with other bytes', {
     timeout: 300_000,
   }, async () => {
-    const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+    const { HeadObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
     const lineageB = sysidOf();
     const walFolder = `${PREFIX}/${lineageB}/wal_005/`;
     // A segment the new lineage archived (the base push switched WAL).
     const segment = await until('an archived WAL segment in the new lineage', async () => {
       const page = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: walFolder }));
-      const key = (page.Contents ?? [])
+      return (page.Contents ?? [])
         .map((o) => String(o.Key).slice(walFolder.length))
         .find((k) => /^[0-9A-F]{24}\./.test(k));
-      return key ? key.slice(0, 24) : '';
     });
-    const forged = `/tmp/${segment}`;
+    const segmentKey = `${walFolder}${segment}`;
+    const etag = async () =>
+      (await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: segmentKey }))).ETag;
+    const etagBefore = await etag();
+    expect(etagBefore).toBeTruthy();
+    const forged = `/tmp/${segment.slice(0, 24)}`;
     docker([
       'exec',
       '-u',
@@ -515,10 +519,11 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     ]);
     const r = walgInDb(`wal-push ${forged}`);
     expect(r.status, r.stdout + r.stderr).not.toBe(0);
-    expect(r.stdout + r.stderr).toMatch(/overwrit|already archived|differ/i);
-    // The archived segment is still the one postgres wrote.
+    expect(r.stdout + r.stderr).toContain('already archived, contents differ');
+    // The archived segment is still the one postgres wrote, byte for byte.
+    expect(await etag()).toBe(etagBefore);
     const again = await s3.send(
-      new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${walFolder}${segment}` }),
+      new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${walFolder}${segment.slice(0, 24)}` }),
     );
     expect(again.Contents?.length).toBe(1);
   });

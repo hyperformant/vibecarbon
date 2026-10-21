@@ -16,6 +16,7 @@
  * is fine; the operator decides whether the old data matters).
  */
 
+import { isTransientSshCommandError } from '../ssh.js';
 import { recordBackupLineage } from '../walg/restore-base.js';
 import { LINEAGE_RE } from '../walg/restore-layout.js';
 
@@ -48,6 +49,7 @@ export function parseSystemIdentifier(out) {
  * @param {(() => Promise<Array<{ lineage: string, newestFinish: Date|null }>>) | null} [args.listLineages]
  *   the lineages under the env's prefix, or null when the bucket cannot be read from here
  * @param {boolean} [args.restored]  a deploy -restore: the operator chose the lineage
+ * @param {(err: unknown) => boolean} [args.isTransient]  transport classifier for the one re-read
  * @param {{ info: (m: string) => void, warn: (m: string) => void }} args.log
  * @returns {Promise<{ lineage: string, priorLineages?: string[], unrestoredPrior?: string }>}
  *
@@ -65,14 +67,22 @@ export async function recordDeployedLineage({
   where,
   listLineages = null,
   restored = false,
+  isTransient = isTransientSshCommandError,
   log,
 }) {
   let sysid = null;
   let cause = 'no system identifier in the reply';
-  try {
-    sysid = parseSystemIdentifier(await exec(SYSTEM_IDENTIFIER_SQL));
-  } catch (err) {
-    cause = String(err?.message ?? err).split('\n')[0];
+  // One read, and one more only when the first never reached psql (a
+  // transport failure, which isTransient classifies). Any answer, or any
+  // other error, is definitive: a read-only SELECT, but no ladder.
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      sysid = parseSystemIdentifier(await exec(SYSTEM_IDENTIFIER_SQL));
+      break;
+    } catch (err) {
+      cause = String(err?.message ?? err).split('\n')[0];
+      if (!isTransient(err)) break;
+    }
   }
   if (!sysid) {
     throw new Error(

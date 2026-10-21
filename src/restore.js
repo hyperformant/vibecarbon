@@ -67,6 +67,7 @@ import { createTracker } from './lib/tracker.js';
 import { RESTORE_PITR_RE } from './lib/walg/recovery-config.js';
 import {
   AmbiguousLineageError,
+  assertLineageCoversPoint,
   backupCredentialVars,
   createS3Client,
   NoRestorePointError,
@@ -76,6 +77,7 @@ import {
   readEnvBaseBackups,
   resolveS3Config,
   restoredLineageRecord,
+  restoreLineageCommands,
   restorePointOf,
 } from './lib/walg/restore-base.js';
 import {
@@ -416,10 +418,7 @@ export async function run(args, deps = {}) {
       if (err instanceof AmbiguousLineageError) {
         const source = values.source ? ` -source ${values.source}` : '';
         p.log.info(
-          err.lineages
-            .filter((l) => l.newestFinish)
-            .map((l) => `  vibecarbon restore ${envName} -lineage ${l.lineage}${source}`)
-            .join('\n'),
+          restoreLineageCommands({ envName, lineages: err.lineages, suffix: source }).join('\n'),
         );
       }
       process.exit(1);
@@ -503,8 +502,17 @@ export async function run(args, deps = {}) {
 
   // The exact base backup this restore fetches, before any confirmation or
   // stop: a point-in-time target older than every base refuses here.
+  // A point picked in the chooser after the lineage was resolved for latest
+  // must lie in that lineage (M5): say which lineage would cover it.
   let base;
   try {
+    assertLineageCoversPoint({
+      envName,
+      lineage: listing.lineage,
+      backups,
+      lineages: listing.lineages,
+      point: chosenSource.base ? 'latest' : chosenSource.name,
+    });
     base = pickRestoreBase(backups, chosenSource);
   } catch (err) {
     if (!(err instanceof NoRestorePointError)) throw err;

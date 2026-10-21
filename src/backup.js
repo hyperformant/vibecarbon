@@ -43,6 +43,7 @@ import {
   printBaseBackupList,
   readEnvBaseBackups,
   resolveS3Config,
+  restoreLineageCommands,
 } from './lib/walg/restore-base.js';
 
 // ============================================================================
@@ -574,6 +575,13 @@ async function runList({ envName, envConfig, projectName, yes }) {
     // listing (vibecarbon restore -lineage <id> -l shows one's backups).
     if (err instanceof AmbiguousLineageError) {
       p.log.info(err.message);
+      // backup has no -lineage: name the restore listing of each one.
+      p.log.info(
+        [
+          'List one lineage with:',
+          ...restoreLineageCommands({ envName, lineages: err.lineages, suffix: ' -l' }),
+        ].join('\n'),
+      );
       return;
     }
     p.log.error(

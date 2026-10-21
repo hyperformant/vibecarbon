@@ -312,6 +312,20 @@ export function resolveRestoreLineage({ envConfig, lineages, flag = null, target
   );
 }
 
+/**
+ * The restore command for each lineage an ambiguity listed that holds bases,
+ * newest first, one per line: `vibecarbon restore <env> -lineage <id><suffix>`.
+ *
+ * @param {{ envName: string, lineages: Array<{ lineage: string, newestFinish: Date|null }>, suffix?: string }} args
+ * @returns {string[]}
+ */
+export function restoreLineageCommands({ envName, lineages, suffix = '' }) {
+  return lineages
+    .filter((l) => l.newestFinish)
+    .sort((a, b) => b.newestFinish.getTime() - a.newestFinish.getTime())
+    .map((l) => `  vibecarbon restore ${envName} -lineage ${l.lineage}${suffix}`);
+}
+
 /** The refusal: each lineage with its newest and oldest base, and the flag. */
 function ambiguousLineage(head, withBases, current) {
   const cur = withBases.find((l) => l.lineage === current);
@@ -386,7 +400,7 @@ export function restoredLineageRecord(backup, lineage) {
  * credentials for it; callers name the variables (backupCredentialVars).
  *
  * @param {{ envName: string, envConfig: object, projectName: string, skipPrompts?: boolean, s3Config?: object, lineage?: string|null, target?: 'latest' | Date, resolveS3?: typeof resolveS3Config, makeClient?: (cfg: object) => any }} args
- * @returns {Promise<{ s3Config: object | null, location: string | null, lineage: string | null, backups: Awaited<ReturnType<typeof listBaseBackups>> }>}
+ * @returns {Promise<{ s3Config: object | null, location: string | null, lineage: string | null, lineages?: Awaited<ReturnType<typeof listLineages>>, backups: Awaited<ReturnType<typeof listBaseBackups>> }>}
  * @throws {AmbiguousLineageError}
  */
 export async function readEnvBaseBackups({
@@ -411,7 +425,39 @@ export async function readEnvBaseBackups({
   const prefix = lineage ? `${base}/${lineage}` : base;
   const location = `s3://${s3Config.bucket}/${prefix}`;
   const backups = lineage ? await listBaseBackups({ s3, bucket: s3Config.bucket, prefix }) : [];
-  return { s3Config, location, lineage, backups };
+  return { s3Config, location, lineage, lineages, backups };
+}
+
+/**
+ * A point in time chosen after the lineage was resolved (the interactive
+ * chooser resolves it for latest) must lie in that lineage: at or after its
+ * oldest base. Refuses with the lineage, its oldest base, and the restore of
+ * any other lineage whose bases cover the point. latest and base names pass.
+ *
+ * @param {{ envName: string, lineage: string, backups: Array<{ finishTime: Date }>, lineages?: Array<{ lineage: string, oldestFinish: Date|null }>, point: string }} args
+ * @throws {NoRestorePointError}
+ */
+export function assertLineageCoversPoint({ envName, lineage, backups, lineages = [], point }) {
+  if (!RESTORE_PITR_RE.test(String(point))) return;
+  const at = new Date(point);
+  const oldest = [...backups].sort((a, b) => a.finishTime.getTime() - b.finishTime.getTime())[0];
+  if (!oldest || oldest.finishTime <= at) return;
+  const covering = lineages.filter(
+    (l) => l.lineage !== lineage && l.oldestFinish && l.oldestFinish <= at,
+  );
+  throw new NoRestorePointError(
+    [
+      `${point} is before the oldest base backup of lineage ${lineage} (${instant(oldest.finishTime)}), so this lineage cannot restore it.`,
+      ...(covering.length > 0
+        ? [
+            'An earlier database lineage covers it:',
+            ...covering.map(
+              (l) => `  vibecarbon restore ${envName} -lineage ${l.lineage} -source ${point}`,
+            ),
+          ]
+        : ['No other lineage holds a base that early either.']),
+    ].join('\n'),
+  );
 }
 
 /**

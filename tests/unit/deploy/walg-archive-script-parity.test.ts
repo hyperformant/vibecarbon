@@ -319,3 +319,54 @@ describe('walg-env.sh exports the lineage folder', () => {
     expect(walgEnvBody).not.toMatch(/\[\[|\$\{[A-Za-z_]+:[0-9]/);
   });
 });
+
+// Fix round 1 M1: with WALG_PREVENT_WAL_OVERWRITE on, wal-g refuses a segment
+// name the archive already holds with other bytes. Retrying cannot change
+// that, so the wrapper logs a distinct line at once (plus the usual
+// WAL_ARCHIVE_FAILED, exit 0, as for any segment it gives up on).
+describe('wal-archive.sh on an overwrite refusal', () => {
+  it('one attempt, no backoff, a distinct line, then WAL_ARCHIVE_FAILED and exit 0', () => {
+    const bin = controldataBin('overwrite');
+    const calls = join(bin, 'walg-calls');
+    writeFileSync(calls, '');
+    writeFileSync(
+      join(bin, 'wal-g'),
+      [
+        '#!/bin/sh',
+        `echo "$*" >> ${calls}`,
+        'if [ "$1" = st ]; then echo "object not found in storage" >&2; exit 1; fi',
+        `echo "ERROR: 2026/10/21 10:00:00.000000 WAL file '000000010000000000000001' already archived, contents differ, unable to overwrite" >&2`,
+        'exit 1',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'wal-g'), 0o755);
+    const started = Date.now();
+    const r = spawnSync(
+      'bash',
+      [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
+      {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+          WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+          WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
+          WAL_ARCHIVE_RETRIES: '3',
+          // A real backoff: an overwrite refusal must never sleep through it.
+          WAL_ARCHIVE_SLEEP: '5',
+          PGDATA: '/nonexistent',
+        },
+        timeout: 20_000,
+      },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(
+      readFileSync(calls, 'utf-8')
+        .split('\n')
+        .filter((l) => l.startsWith('wal-push')),
+    ).toHaveLength(1);
+    expect(r.stderr).toMatch(/WAL_ARCHIVE_OVERWRITE_REFUSED: [^\n]*000000010000000000000001/);
+    expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
+  });
+});

@@ -158,9 +158,22 @@ esac
 
 attempt=1
 while [ "$attempt" -le "$RETRIES" ]; do
-    if "$WALG" wal-push "$WAL_PATH"; then
+    push_out="$("$WALG" wal-push "$WAL_PATH" 2>&1)"
+    push_rc=$?
+    [ -n "$push_out" ] && printf '%s\n' "$push_out" >&2
+    if [ "$push_rc" -eq 0 ]; then
         exit 0
     fi
+    # WALG_PREVENT_WAL_OVERWRITE: the archive already holds this segment name
+    # with other bytes. No retry can change that, so no backoff either: say so
+    # on its own line, then give the segment up like any other failure.
+    case "$push_out" in
+        *"already archived, contents differ"*)
+            echo "WAL_ARCHIVE_OVERWRITE_REFUSED: wal-g refused to overwrite '$WAL_PATH': the archive already holds this segment name with other bytes (WALG_PREVENT_WAL_OVERWRITE); check for a second writer on this lineage" >&2
+            echo "WAL_ARCHIVE_FAILED: wal-g wal-push '$WAL_PATH' refused (overwrite); allowing PG to recycle (PITR gap for this segment)" >&2
+            exit 0
+            ;;
+    esac
     if [ "$attempt" -lt "$RETRIES" ]; then
         sleep_for=$((SLEEP_BASE ** attempt))
         sleep "$sleep_for"
