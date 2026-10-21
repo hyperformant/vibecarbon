@@ -848,6 +848,56 @@ describe('failoverComposeHA planned fence and catch-up (H1)', () => {
     expect((captured.journal as { primaryLsn: unknown }).primaryLsn).toBeNull();
   });
 
+  describe('the writer stop shell, run for real against a fake docker', () => {
+    const fence = async (script: string) => {
+      const { spawnSync } = await import('node:child_process');
+      const { chmodSync, mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+      const { stopOldPrimaryWriters } = await import('../../../src/lib/deploy/compose/ha.js');
+      const dir = mkdtempSync(join(tmpdir(), 'vc-fence-docker-'));
+      try {
+        writeFileSync(join(dir, 'docker'), `#!/bin/bash\n${script}\n`);
+        chmodSync(join(dir, 'docker'), 0o755);
+        vi.mocked(composeSsh.sshRun).mockImplementationOnce(
+          async (_ip: string, _k: string, command: unknown) =>
+            spawnSync('bash', ['-c', String(command)], {
+              encoding: 'utf-8',
+              env: { PATH: `${dir}:${process.env.PATH}` },
+            }).stdout,
+        );
+        return await stopOldPrimaryWriters(PRIMARY_IP, '/k', 'myapp', ['app', 'n8n']);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const inspectAs = (n8n: string) =>
+      `if [ "$1" = container ]; then case "$5" in myapp-app) echo running; exit 0;; *) ${n8n};; esac; fi\n` +
+      'if [ "$1" = stop ]; then exit 0; fi';
+
+    it('absent (No such container) is skipped', async () => {
+      const r = await fence(
+        inspectAs('echo "Error response from daemon: No such container: $5" >&2; exit 1'),
+      );
+      expect(r).toEqual({ ok: true, stopped: ['myapp-app'] });
+    });
+
+    it('a restarting container is stopped, not skipped', async () => {
+      const r = await fence(inspectAs('echo restarting; exit 0'));
+      expect(r).toEqual({ ok: true, stopped: ['myapp-app', 'myapp-n8n'] });
+    });
+
+    it('an inspect error that is not "No such container" fails', async () => {
+      const r = await fence(inspectAs('echo "Cannot connect to the Docker daemon" >&2; exit 1'));
+      expect(r.ok).toBe(false);
+    });
+
+    it('an existing container whose stop fails fails', async () => {
+      const r = await fence(
+        'if [ "$1" = container ]; then echo running; exit 0; fi\nif [ "$1" = stop ]; then exit 1; fi',
+      );
+      expect(r).toEqual({ ok: false, stopped: [] });
+    });
+  });
+
   it('the writer stop skips absent add-ons and reports what it stopped; the start never runs app-migrate', async () => {
     const { stopOldPrimaryWriters, startOldPrimaryWriters } = await import(
       '../../../src/lib/deploy/compose/ha.js'

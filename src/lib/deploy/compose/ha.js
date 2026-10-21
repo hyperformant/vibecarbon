@@ -1557,8 +1557,9 @@ export function composeStartPrimaryOnlyCmd(projectName, services) {
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
 
 /**
- * Stop the old primary's writers that are running, by container name (absent
- * add-ons are skipped, a running one that will not stop fails the call). Every
+ * Stop the old primary's writers, by container name. Fail closed: only docker's
+ * "No such container" skips an absent add-on; any other inspect error, or an
+ * existing container whose stop fails, fails the call. Every
  * container is tried, so `stopped` names all that did stop even on a failure.
  *
  * @param {string[]} services the writer services (failoverFenceServices)
@@ -1570,10 +1571,17 @@ export async function stopOldPrimaryWriters(ip, sshKeyPath, projectName, service
   const out = await sshRun(
     ip,
     sshKeyPath,
+    // Fail closed: only docker's own "No such container" is absent. Any other
+    // inspect error is FAILED, and an existing container is always stopped
+    // (a restarting one reads Running=false). STOPPED names what was live, which
+    // is what the un-fence starts again.
     `for c in ${containers}; do ` +
-      `if [ "$(docker container inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ]; then ` +
-      `if docker stop "$c" >/dev/null; then echo "STOPPED $c"; else echo "FAILED $c"; fi; ` +
-      `fi; done; echo FENCE_DONE`,
+      `if st=$(docker container inspect -f '{{.State.Status}}' "$c" 2>&1); then ` +
+      `if docker stop "$c" >/dev/null; then ` +
+      `case "$st" in exited|created) ;; *) echo "STOPPED $c" ;; esac; ` +
+      `else echo "FAILED $c"; fi; ` +
+      `else case "$st" in *[Nn]"o such container"*) ;; *) echo "FAILED $c" ;; esac; fi; ` +
+      `done; echo FENCE_DONE`,
     { timeout: 120_000 },
   );
   const lines = String(out === false ? '' : (out ?? ''))
