@@ -23,6 +23,7 @@ import {
   runWithTransportRetry,
   sshRunScript,
 } from '../../ssh.js';
+import { hasBackupResult, parseBackupResult } from '../../walg/backup-result.js';
 import {
   assertRestoreFits,
   BACKUP_NAME_RE,
@@ -1208,27 +1209,36 @@ export function composeBackupCmd(remoteDir, retain = 7) {
 }
 
 /**
- * Trigger a wal-g base backup on a Compose VPS via compose-backup.sh.
+ * Trigger a wal-g base backup on a Compose VPS via compose-backup.sh, and
+ * report what it did.
  *
  * wal-g pushes the backup directly to S3 from inside the db container —
- * there is no local archive to scp or upload. Success = exit 0.
+ * there is no local archive to scp or upload. The script prints one
+ * result marker (src/lib/walg/backup-result.js), and the return value
+ * is that marker: `{ result: 'pushed', name }` or `{ result: 'skipped',
+ * reason }`. A skip (no S3 target, a standby, a db in recovery, another
+ * backup holding the lock: exit 75) is NOT a backup; callers read `.result`
+ * (census: tests/unit/backup/backup-result-consumed-census.test.ts).
  *
- * FAILURE MUST PROPAGATE. This used the string-command `sshRun` above, which
- * returns `false` instead of throwing — so a failed `backup-push` resolved as
- * a SUCCESS. That silently broke a documented invariant: scale.js awaits this
- * promise specifically so "a backup failure still aborts scale there (before
- * any restore/destroy)", and `vibecarbon backup` has a catch that could never
- * fire. Worse, on the scale path a swallowed push means the following
- * `restoreCompose` fetches an OLDER base backup and the old server is then
- * destroyed — silent data loss dressed as a clean scale. `sshRunAsync` throws
- * on remote non-zero and carries its own SSH-transport retry, so the transient
- * SSH failures the old runner absorbed are still absorbed.
+ * A retention failure after a good push exits 1 with the pushed marker
+ * already printed. The base IS in the bucket, so this returns `pushed` with
+ * `retentionError` (the script's one-line cause) instead of throwing: a pushed
+ * base must never read as "no backup" to scale or destroy, and
+ * `vibecarbon backup` fails the command on it. It is not retried either: a
+ * retry would push a second base.
+ *
+ * FAILURE MUST PROPAGATE. A failed push, a refusal (retired node, backup
+ * fence) or a run with no marker throws. This used the string-command
+ * `sshRun` once, which returns `false` instead of throwing — so a failed
+ * `backup-push` resolved as a SUCCESS, and a scale went on to restore an
+ * OLDER base and destroy the old server. `sshRunAsync` throws on remote
+ * non-zero and carries its own SSH-transport retry.
  *
  * The push is wrapped in the object-storage staleness retry for the same
  * reason the restore's fetch is: `wal-g backup-push` LISTs the prefix before
- * writing and `wal-g delete retain` LISTs it again immediately after — a
- * read-after-write against a bucket that may have been created minutes ago.
- * See src/lib/deploy/walg-staleness.js.
+ * writing — a read-after-write against a bucket that may have been created
+ * minutes ago. See src/lib/deploy/walg-staleness.js. Only a run that printed
+ * no marker is retried.
  *
  * @param {string} ip
  * @param {string} sshKeyPath
@@ -1237,19 +1247,43 @@ export function composeBackupCmd(remoteDir, retain = 7) {
  * @param {number} [options.retain]  Full base backups to keep (default 7).
  * @param {number[]} [options.staleRetryDelaysMs]  Test seam for the staleness
  *   retry ladder; production callers omit it.
+ * @returns {Promise<{result: 'pushed', name: string, retentionError?: string} | {result: 'skipped', reason: string}>}
  */
 export async function backupCompose(ip, sshKeyPath, projectName, options = {}) {
   const remoteDir = `/opt/${projectName}`;
   const t = perfTimer('backup.walgPush');
-  await withWalgStaleStorageRetry(
-    () =>
-      sshRunAsync(ip, sshKeyPath, composeBackupCmd(remoteDir, options.retain ?? 7), {
-        timeout: 900_000,
-      }),
+  const run = await withWalgStaleStorageRetry(
+    async () => {
+      try {
+        const stdout = await sshRunAsync(
+          ip,
+          sshKeyPath,
+          composeBackupCmd(remoteDir, options.retain ?? 7),
+          { timeout: 900_000 },
+        );
+        return { stdout: String(stdout ?? '') };
+      } catch (err) {
+        // A marker means the script got past the push decision: the lock skip
+        // (exit 75) or a retention failure after a pushed base. Neither is a
+        // stale-storage read to retry.
+        const stdout = String(err?.stdout ?? '');
+        if (hasBackupResult(stdout)) return { stdout, err };
+        throw err;
+      }
+    },
     'backup-push',
     { delaysMs: options.staleRetryDelaysMs },
   );
   t.end();
+  const outcome = parseBackupResult(run.stdout);
+  if (!run.err) return outcome;
+  if (outcome.result === 'skipped') return outcome;
+  const stderr = String(run.err.stderr ?? '');
+  const cause =
+    stderr.match(/^retention failed.*$/m)?.[0] ??
+    stderr.trim().split('\n').pop() ??
+    run.err.message;
+  return { ...outcome, retentionError: cause };
 }
 
 /**

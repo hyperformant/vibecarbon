@@ -64,10 +64,10 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
     ...actual,
     backupCompose: () => {
       h.events.push('backup:call');
-      return new Promise<void>((res) => {
+      return new Promise((res) => {
         setTimeout(() => {
           h.events.push('backup:resolved');
-          res();
+          res({ result: 'pushed', name: 'base_000000010000000000000002' });
         }, h.backupDeferMs);
       });
     },
@@ -153,6 +153,24 @@ describe('scaleServers — background backup overlap (finding #2)', () => {
 
     // 2. Correctness: the backup completes before the restore that consumes it.
     expect(h.events.indexOf('backup:resolved')).toBeLessThan(h.events.indexOf('restore:call'));
+  });
+
+  it('a skipped backup of the primary aborts before the restore (a skip is not a backup)', async () => {
+    h.events.length = 0;
+    const { provider, ctx } = makeCtx();
+    const compose = await import('../../../src/lib/deploy/compose/index.js');
+    const spy = vi
+      .spyOn(compose, 'backupCompose')
+      .mockResolvedValueOnce({ result: 'skipped', reason: 'already-running' });
+    try {
+      await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+        /backup of .* was skipped \(already-running\)/,
+      );
+      expect(provider.deleteServer).toHaveBeenCalledWith('new-id');
+      expect(h.events).not.toContain('restore:call');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('still aborts (and cleans up the new server) if the background backup fails', async () => {

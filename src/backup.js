@@ -13,7 +13,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { downloadS3Backup, listS3Backups } from './lib/backup-s3.js';
 import { resolveEnvContext } from './lib/cli/env-context.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
@@ -37,6 +36,7 @@ import {
 } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
 import { validateBackupFilename } from './lib/validators.js';
+import { parseBackupResult, pushedBackupNames } from './lib/walg/backup-result.js';
 import {
   backupCredentialVars,
   printBaseBackupList,
@@ -212,8 +212,17 @@ exit 1`;
 // and restore.js address.
 
 /**
- * Trigger a one-off backup Job from the CronJob template and poll it to
- * completion.
+ * Trigger a one-off backup Job from the CronJob template, poll it to
+ * completion, and report what it did from the Job's logs (the CronJob prints
+ * the same BACKUP_RESULT marker compose-backup.sh does; see
+ * src/lib/walg/backup-result.js).
+ *
+ * Returns `{ result: 'pushed', name, job }` or `{ result: 'skipped', reason,
+ * job }`; callers read `.result`. A Job that FAILED after printing a pushed
+ * marker (retention failed, then the container restarted under
+ * restartPolicy OnFailure) returns `pushed` with `retentionError`: that base
+ * is in the bucket, and a pushed base must never read as "no backup". A
+ * failed Job with no pushed marker throws with the pod diagnostics.
  *
  * GATED on the condition the Job actually depends on (RCA 2026-08-16, run
  * 31927810430): the Job's first act is `kubectl exec` into the db pod, and
@@ -235,6 +244,7 @@ exit 1`;
  * @param {typeof sshRunScript} [opts.runScriptImpl]
  * @param {Function} [opts.sleep]
  * @param {Function} [opts.nowFn]
+ * @returns {Promise<({result: 'pushed', name: string, retentionError?: string} | {result: 'skipped', reason: string}) & {job: string}>}
  */
 export async function triggerBackupJob(ip, sshKeyPath, opts = {}) {
   const { kubectlImpl = sshKubectl, runScriptImpl = sshRunScript, sleep, nowFn } = opts;
@@ -273,6 +283,9 @@ export async function triggerBackupJob(ip, sshKeyPath, opts = {}) {
   try {
     await runScriptImpl(ip, sshKeyPath, buildBackupJobWaitScript(jobName), { timeout: 420_000 });
   } catch (waitErr) {
+    // The wait script's inline diagnostics (stdout of the failed run) carry
+    // the pod logs captured before GC.
+    const inlineDiag = String(waitErr?.stdout ?? '');
     // Dump pod status, events, AND logs to help diagnose why the job didn't
     // complete. An earlier version of this block gated the --previous log
     // capture on a label-selector query that mysteriously returned "No
@@ -323,12 +336,26 @@ fi`,
     } catch {
       podDiag = '(diagnostic SSH failed)';
     }
+    const diag = `${inlineDiag}\n${podDiag}`;
+    const pushed = [...new Set(pushedBackupNames(diag))];
+    if (pushed.length > 0) {
+      const cause = /retention failed after pushing .*$/m.exec(diag)?.[0];
+      return {
+        result: 'pushed',
+        name: pushed[pushed.length - 1],
+        retentionError: `backup Job ${jobName} failed after it pushed ${pushed.join(', ')}: ${cause ?? waitErr.message.split('\n')[0]}`,
+        job: jobName,
+      };
+    }
     throw new Error(
       `Backup job ${jobName} did not complete:\n${podDiag}\n\nkubectl wait error: ${waitErr.message}`,
     );
   }
 
-  return jobName;
+  const logs = await kubectlImpl(ip, sshKeyPath, ['logs', `job/${jobName}`, '-n', 'vibecarbon'], {
+    silent: true,
+  });
+  return { ...parseBackupResult(logs), job: jobName };
 }
 
 // ============================================================================
@@ -476,7 +503,6 @@ export async function run(args) {
   await runCreate({
     s,
     isCompose,
-    useS3,
     s3Config,
     serverIp,
     sshKeyPath,
@@ -593,10 +619,14 @@ export async function runDownload({
   }
 }
 
-async function runCreate({
+/**
+ * `-action create`: push a base backup and report it. Exits 1 on a skip and on
+ * a retention failure after the push (naming the base that was pushed).
+ * `deps` is a test seam for the two backup runners.
+ */
+export async function runCreate({
   s,
   isCompose,
-  useS3,
   s3Config,
   serverIp,
   sshKeyPath,
@@ -604,6 +634,7 @@ async function runCreate({
   envName,
   backupRetain,
   yes,
+  deps = {},
 }) {
   if (!yes) {
     const confirm = await p.confirm({
@@ -619,72 +650,43 @@ async function runCreate({
     }
   }
 
-  if (isCompose) {
-    s.start('Creating wal-g base backup...');
-    try {
-      const { backupCompose } = await import('./lib/deploy/compose/index.js');
-      await backupCompose(serverIp, sshKeyPath, projectName, { retain: backupRetain });
-      // "uploaded to S3" wording matches the k8s path (line ~689) and the e2e
-      // backup-step verification (which greps /uploaded to s3/i to confirm the
-      // backup is durable before allowing destroy → restore).
-      s.stop('wal-g base backup uploaded to S3');
-      p.log.success('Backup uploaded to S3, wal-g pushed the base backup directly.');
-      p.log.info(`List backups: ${c.info(`vibecarbon backup ${envName} -l`)}`);
-    } catch (error) {
-      s.stop('Backup failed');
-      p.log.error(error.message);
-      process.exit(1);
-    }
-    return;
-  }
-
-  // K8s — trigger via CronJob template
-  s.start('Creating backup (triggering Kubernetes Job)');
+  s.start(
+    isCompose ? 'Creating wal-g base backup...' : 'Creating backup (triggering Kubernetes Job)',
+  );
+  let backup;
   try {
-    const jobName = await perfAsync(
-      'backup.triggerJob',
-      async () => await triggerBackupJob(serverIp, sshKeyPath),
-    );
-    s.stop('Backup created');
-
-    if (useS3) {
-      p.log.success(`Backup uploaded to S3: ${c.bold(s3Config.bucket)}/backups/`);
-      p.log.info(`Job: ${c.dim(jobName)}`);
-      p.log.info(`List backups: ${c.info(`vibecarbon backup ${envName} -l`)}`);
+    if (isCompose) {
+      const backupCompose =
+        deps.backupCompose ?? (await import('./lib/deploy/compose/index.js')).backupCompose;
+      backup = await backupCompose(serverIp, sshKeyPath, projectName, { retain: backupRetain });
     } else {
-      p.log.warn(`Backup Job ran: ${c.bold(jobName)}`);
-      p.log.warn('No S3 configured, backup was NOT persisted (lost when pod terminated).');
-      p.log.info('Configure S3 storage during deploy to enable persistent backups.');
-    }
-
-    // On a TTY, offer to download the freshly-created backup.
-    if (useS3 && !yes) {
-      const shouldDownload = await p.confirm({
-        message: 'Download the latest backup locally?',
-        initialValue: false,
-      });
-      if (shouldDownload && !p.isCancel(shouldDownload)) {
-        s.start('Fetching latest backup from S3');
-        const backups = await perfAsync('backup.listS3', () => listS3Backups(s3Config));
-        if (backups.length > 0) {
-          const latest = backups[0];
-          const localPath = join(process.cwd(), latest.name);
-          s.message(`Downloading ${latest.name} (${latest.size})`);
-          await perfAsync('backup.downloadS3', () =>
-            downloadS3Backup(s3Config, latest.key, localPath),
-          );
-          s.stop('Download complete');
-          p.log.success(`Saved to ${c.bold(localPath)}`);
-        } else {
-          s.stop('No backups found in S3 (backup may still be uploading).');
-        }
-      }
+      const trigger = deps.triggerBackupJob ?? triggerBackupJob;
+      backup = await perfAsync('backup.triggerJob', () => trigger(serverIp, sshKeyPath));
     }
   } catch (error) {
     s.stop('Backup failed');
     p.log.error(error.message);
     process.exit(1);
   }
+
+  if (backup.result !== 'pushed') {
+    s.stop('Backup skipped');
+    p.log.error(
+      `backup skipped (${backup.reason}): nothing was pushed to ${s3Config?.bucket ?? 'the backup bucket'}.`,
+    );
+    process.exit(1);
+  }
+
+  // The e2e backup step keys on this line (tests/e2e/scenarios/_run-lifecycle.ts).
+  s.stop(`base backup pushed: ${backup.name}`);
+  if (backup.job) p.log.info(`Job: ${c.dim(backup.job)}`);
+  if (backup.retentionError) {
+    p.log.error(
+      `Base backup ${backup.name} was pushed and is restorable, but pruning old backups failed: ${backup.retentionError}`,
+    );
+    process.exit(1);
+  }
+  p.log.info(`List backups: ${c.info(`vibecarbon backup ${envName} -l`)}`);
 }
 
 // SPEC is exported for the arg-parser unit tests.

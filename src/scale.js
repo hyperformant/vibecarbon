@@ -552,6 +552,13 @@ export async function readOldAppEnv(
 export function shouldUpdateApexDns(server) {
   return server?.role !== 'standby';
 }
+
+/**
+ * The backup skips a standby's arm expects (compose-backup.sh BACKUP_RESULT
+ * reasons): a standby never pushes into the canonical prefix.
+ */
+const STANDBY_BACKUP_SKIPS = new Set(['standby-role', 'in-recovery']);
+
 async function scaleServers(ctx) {
   const {
     tier,
@@ -584,12 +591,24 @@ async function scaleServers(ctx) {
     // up front. It is awaited just before restoreDb (the step that consumes it);
     // a backup failure still aborts scale there (before any restore/destroy),
     // and the try/catch below still cleans up the new server on that abort.
+    //
+    // The backup must report `pushed`: a skip (no S3 target, a db in recovery,
+    // another backup holding the lock) took no base, and restoring "latest"
+    // after one would rebuild the new server from an OLDER base and then
+    // destroy the old one. The one expected skip is a standby's own (it never
+    // writes the canonical prefix; its replacement restores from the
+    // primary's bases).
     p.log.info(`Backing up ${label} in the background (wal-g base backup → S3)`);
-    const backupPromise = perfAsync('scale.backupOldServer', async () =>
-      backupCompose(server.ip, sshKeyPath, projectName, {
+    const backupPromise = perfAsync('scale.backupOldServer', async () => {
+      const backup = await backupCompose(server.ip, sshKeyPath, projectName, {
         retain: envConfig.backup?.retentionDays,
-      }),
-    );
+      });
+      if (backup.result === 'pushed') return backup;
+      if (server.role === 'standby' && STANDBY_BACKUP_SKIPS.has(backup.reason)) return backup;
+      throw new Error(
+        `the backup of ${label} was skipped (${backup.reason}), so there is no new base to restore; scale stopped before anything was restored or destroyed`,
+      );
+    });
     // Swallow the rejection HERE only to avoid an unhandled-rejection warning if
     // a provisioning step throws before we reach the await; the real await at
     // step 7 still observes the rejection and aborts.
@@ -851,8 +870,17 @@ async function scaleServers(ctx) {
       // the enclosing try/catch, deletes the new server before we restore or
       // destroy anything. On the happy path provisioning already hid its cost.
       s.start('Finalizing old-server backup before restore...');
-      await backupPromise;
-      s.stop('Database backed up (wal-g base backup pushed to S3)');
+      const oldServerBackup = await backupPromise;
+      s.stop(
+        oldServerBackup.result === 'pushed'
+          ? `Database backed up (base backup pushed: ${oldServerBackup.name})`
+          : `Standby backup skipped (${oldServerBackup.reason}); it restores from the primary's base backups`,
+      );
+      if (oldServerBackup.retentionError) {
+        p.log.warn(
+          `The base backup is in the bucket, but pruning old backups failed: ${oldServerBackup.retentionError}`,
+        );
+      }
 
       // Remote compose project dir on the new server — used by the restore's
       // writable proof, the ACME reset and the post-restore service recreate.

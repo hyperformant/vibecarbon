@@ -578,6 +578,7 @@ deletes it along with the backup bucket.
 | `-env <name>` | Environment seed (alternative to positional) |
 | `-orphans` | Destroy stray Pulumi stacks not tracked in config |
 | `-purge` | Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved) |
+| `-force` | Destroy even when the pre-destroy backup fails or is skipped (default: the destroy stops) |
 | `-confirm <value>` | Production only: supply the type-to-confirm value (project and env joined by a dash, like my-saas-prod) on the command line (scripts / no TTY) |
 {/* END GENERATED: flags destroy */}
 

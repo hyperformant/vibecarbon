@@ -11,6 +11,12 @@
 # backup on the PRIMARY. On the standby (in recovery) it no-ops, and after a
 # failover the new primary's CronJob transparently starts taking base backups —
 # no per-cluster config.
+#
+# Result marker (src/lib/walg/backup-result.js; same contract as
+# carbon/backup/compose-backup.sh): a run that exits 0 prints exactly one
+# BACKUP_RESULT=pushed:<name> or BACKUP_RESULT=skipped:<reason> line, which
+# `vibecarbon backup` and destroy read from the Job logs. The pushed line comes
+# before retention, so a retention failure (exit 1) still names the base.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -99,7 +105,8 @@ spec:
                     # by this kubectl-exec. Closes the bring-up window the recovery
                     # check below cannot (independent primary, not yet in recovery).
                     if [ "${WALG_ROLE:-primary}" = "standby" ]; then
-                      echo "WALG_ROLE=standby — skipping base backup (only the primary writes the canonical prefix)."
+                      echo "WALG_ROLE=standby, skipping base backup (only the primary writes the canonical prefix)."
+                      echo "BACKUP_RESULT=skipped:standby-role"
                       exit 0
                     fi
                     # The recovery probe must FAIL LOUD when it cannot prove
@@ -115,7 +122,8 @@ spec:
                     }
                     case "$REC" in
                       t)
-                        echo "db is in recovery (standby) — skipping base backup."
+                        echo "db is in recovery (standby), skipping base backup."
+                        echo "BACKUP_RESULT=skipped:in-recovery"
                         exit 0
                         ;;
                       f) ;;
@@ -156,19 +164,38 @@ spec:
                         exit 1
                       fi
                     fi
-                    wal-g backup-push "$PGDATA"
-                    # Sweep sentinel-less orphans (interrupted pushes) before
-                    # retention — `delete retain` hard-crashes on a backup
-                    # whose stop-sentinel never got written, and retries
-                    # cannot heal a permanently missing object (2026-08-30
-                    # RCA). Safe under concurrencyPolicy: Forbid — no
-                    # concurrent push can look like an orphan mid-flight.
-                    # NO APOSTROPHES in this wrapper, comments included — a
+                    # The push. wal-g logs to stderr; its Wrote backup with name
+                    # line is the name the marker carries. A push that exits 0
+                    # without it proves nothing landed under a name, so it fails.
+                    push_out="$(wal-g backup-push "$PGDATA" 2>&1)" || {
+                      printf "%s\n" "$push_out" >&2
+                      exit 1
+                    }
+                    printf "%s\n" "$push_out" >&2
+                    name="$(printf "%s\n" "$push_out" | grep -o "backup with name base_[0-9A-Za-z_]*" | tail -n 1 | sed "s/^backup with name //")" || true
+                    if [ -z "$name" ]; then
+                      echo "backup-push exited 0 but printed no backup name (no Wrote backup with name line), so nothing proves what landed" >&2
+                      exit 1
+                    fi
+                    echo "BACKUP_RESULT=pushed:$name"
+                    # RETENTION, a separate step after the marker: the base above
+                    # is in the bucket whatever happens here. Sweep sentinel-less
+                    # orphans (interrupted pushes) before retention, since
+                    # `delete retain` hard-crashes on a backup whose
+                    # stop-sentinel never got written, and retries cannot heal a
+                    # permanently missing object (2026-08-30 RCA). Safe under
+                    # concurrencyPolicy: Forbid, as no concurrent push can look
+                    # like an orphan mid-flight.
+                    # NO APOSTROPHES in this wrapper, comments included: a
                     # single quote ends the bash -c string (enforced by
                     # tests/unit/template/embedded-shell-syntax.test.ts;
                     # run 33319907805 is the day one broke every backup).
-                    wal-g delete garbage BACKUPS --confirm
-                    wal-g delete retain FULL '"${RETAIN}"' --confirm
+                    retain_out="$( { wal-g delete garbage BACKUPS --confirm && wal-g delete retain FULL '"${RETAIN}"' --confirm; } 2>&1)" || {
+                      printf "%s\n" "$retain_out" >&2
+                      echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
+                      exit 1
+                    }
+                    printf "%s\n" "$retain_out" >&2
                   '
               resources:
                 requests:

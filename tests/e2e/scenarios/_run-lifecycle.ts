@@ -3799,35 +3799,21 @@ EOF`;
             );
           }
 
-          // S3 upload is REQUIRED for restore-after-destroy. Previously this
-          // was a soft warning, which let the lifecycle continue through
-          // destroy → restore — failing at restore with the misleading
-          // "No backups found in S3" message instead of at the actual
-          // fault site (backup). The detail line in stderr from
-          // src/backup.js (name=/code=/status=/bucket=/endpoint=/region=)
-          // is captured here so the next iteration has the AWS SDK error
-          // for RCA without a re-run.
-          //
-          // Case-insensitive match: compose path emits `Uploaded to S3`
-          // (src/backup.js:511, capital U); k8s/k3s path emits
-          // `Backup uploaded to S3` (src/backup.js:655, lowercase u).
-          // Anchoring to the exact compose phrasing falsely failed every
-          // k8s scenario whose backup actually succeeded.
+          // A pushed base is REQUIRED for restore-after-destroy. `vibecarbon
+          // backup` prints `base backup pushed: <name>` only when the backup
+          // script's BACKUP_RESULT marker said pushed (src/backup.js runCreate;
+          // a skip exits 1). Matching that line, not a generic "uploaded to S3",
+          // fails here, at the fault site, instead of at restore.
           const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
-          const s3UploadOk = /uploaded to s3/i.test(combined);
-          const s3UploadFail = /s3 upload failed/i.test(combined);
-          if (s3UploadFail || !s3UploadOk) {
-            const detail = (result.stderr || '')
-              .split('\n')
-              .filter((l) => l.includes('[backup] S3 upload failed') || l.startsWith('    at '))
-              .join('\n')
-              .slice(-2000);
+          const pushed = /base backup pushed: (base_[0-9A-Za-z_]+)/.exec(combined);
+          if (!pushed) {
             throw new Error(
-              `Backup S3 upload failed — restore-after-destroy cannot succeed.\n` +
-                `STDERR detail:\n${detail || '(no [backup] line in stderr)'}\n` +
-                `STDOUT tail: ${(result.stdout || '').slice(-500)}`,
+              `Backup exited 0 but reported no pushed base backup; restore-after-destroy cannot succeed.\n` +
+                `STDOUT tail: ${(result.stdout || '').slice(-1000)}\n` +
+                `STDERR tail: ${(result.stderr || '').slice(-500)}`,
             );
           }
+          console.log(`${tag} [backup] base backup pushed: ${pushed[1]}`);
         }),
     },
 

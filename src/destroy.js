@@ -191,6 +191,12 @@ const SPEC = {
         'Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved)',
     },
     {
+      name: 'force',
+      boolean: true,
+      description:
+        'Destroy even when the pre-destroy backup fails or is skipped (default: the destroy stops)',
+    },
+    {
       name: 'confirm',
       value: '<value>',
       description:
@@ -268,7 +274,7 @@ async function findOrphanPulumiStacks(projectConfig) {
  *
  * @param {object} envConfig
  * @param {string} envName
- * @param {(msg: string) => void} [warn]
+ * @param {(msg: string, err: AmbiguousPrimaryError) => void} [warn]
  * @returns {string|undefined}
  */
 export function backupOfferIp(envConfig, envName, warn = (msg) => p.log.warn(msg)) {
@@ -276,8 +282,115 @@ export function backupOfferIp(envConfig, envName, warn = (msg) => p.log.warn(msg
     return resolvePrimary(envConfig, { env: envName })?.ip;
   } catch (err) {
     if (!(err instanceof AmbiguousPrimaryError)) throw err;
-    warn(`Skipping the pre-destroy backup offer, the primary is unknown. ${err.message}`);
+    warn(`Skipping the pre-destroy backup offer, the primary is unknown. ${err.message}`, err);
     return undefined;
+  }
+}
+
+/**
+ * The backup destroy takes before it deletes anything, and what it does with
+ * the answer.
+ *
+ * While backups are kept (no -purge), -y backs up by default and an
+ * interactive run asks (default yes). The backup runs on the primary
+ * resolvePrimary names (backupOfferIp): compose through backupCompose, k8s
+ * through the backup Job. A backup that fails or reports `skipped`, an
+ * unknown primary, or a missing deploy key stops the destroy with the reason
+ * and the override, unless -force; with -force it warns and goes on. A pushed
+ * base whose retention failed counts as backed up (the base is in the bucket).
+ *
+ * @param {object} o
+ * @param {object} o.envConfig
+ * @param {string} o.envName
+ * @param {string} o.projectName
+ * @param {string} o.sshKeyPath
+ * @param {boolean} o.yes
+ * @param {boolean} o.purge
+ * @param {boolean} o.force
+ * @param {object} [deps] test seams
+ */
+export async function preDestroyBackup(
+  { envConfig, envName, projectName, sshKeyPath, yes, purge, force },
+  deps = {},
+) {
+  const {
+    log = p.log,
+    confirm = p.confirm,
+    exit = process.exit,
+    keyExists = existsSync,
+    spinner: makeSpinner = spinner,
+    backupCompose = async (...a) => {
+      const { backupCompose: run } = await import('./lib/deploy/compose/index.js');
+      return run(...a);
+    },
+    triggerBackupJob = async (...a) => {
+      const { triggerBackupJob: run } = await import('./backup.js');
+      return run(...a);
+    },
+  } = deps;
+
+  if (purge) {
+    log.info('-purge deletes the backups, so destroy takes no backup first.');
+    return;
+  }
+
+  const stop = (what, why) => {
+    if (force) {
+      log.warn(`backup ${what} (${why}); -force set, destroying anyway`);
+      return;
+    }
+    log.error(`backup ${what} (${why}); destroy stopped; rerun with -force to destroy anyway`);
+    exit(1);
+  };
+
+  let unknownPrimary;
+  const ip = backupOfferIp(envConfig, envName, (_msg, err) => {
+    unknownPrimary = err;
+  });
+  if (unknownPrimary) return stop('skipped', `the primary is unknown: ${unknownPrimary.message}`);
+  if (!ip) {
+    log.info(`No server is recorded for ${envName}, so there is no database to back up.`);
+    return;
+  }
+
+  if (!yes) {
+    const wanted = await confirm({
+      message: 'Create a backup before destroying? (recommended)',
+      initialValue: true,
+    });
+    if (p.isCancel(wanted)) exitCancelled();
+    if (!wanted) return;
+  }
+
+  if (!keyExists(sshKeyPath)) return stop('failed', `SSH key not found: ${sshKeyPath}`);
+
+  const s = makeSpinner();
+  s.start('Backing up the database before destroying...');
+  let backup;
+  try {
+    if (isComposeTier(resolveTier(envConfig))) {
+      backup = await backupCompose(ip, sshKeyPath, projectName, {
+        retain: envConfig.backup?.retentionDays,
+      });
+    } else {
+      backup = await triggerBackupJob(ip, sshKeyPath);
+    }
+  } catch (err) {
+    s.stop('Backup failed');
+    const message = err instanceof Error ? err.message : String(err);
+    const [first, ...rest] = message.split('\n');
+    if (rest.length > 0) log.message(rest.join('\n'));
+    return stop('failed', first);
+  }
+  if (backup.result !== 'pushed') {
+    s.stop('Backup skipped');
+    return stop('skipped', backup.reason);
+  }
+  s.stop(`base backup pushed: ${backup.name}`);
+  if (backup.retentionError) {
+    log.warn(
+      `The base backup is in the bucket, but pruning old backups failed: ${backup.retentionError}`,
+    );
   }
 }
 
@@ -3350,6 +3463,7 @@ async function main(argv = []) {
     yes: !!values.y,
     destroyOrphans: !!values.orphans,
     purgeBackups: !!values.purge,
+    force: !!values.force,
     confirm: values.confirm ?? undefined,
   };
 
@@ -3592,32 +3706,17 @@ async function main(argv = []) {
     }
   }
 
-  // Offer to create a backup before destroying
-  const serverIp = backupOfferIp(envConfig, envName);
-  const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${envName}`);
-  if (serverIp && existsSync(sshKeyPath) && !args.yes) {
-    const offerBackup = await p.confirm({
-      message: 'Create a backup before destroying? (recommended)',
-      initialValue: true,
-    });
-
-    if (!p.isCancel(offerBackup) && offerBackup) {
-      const backupSpinner = spinner();
-      backupSpinner.start('Creating backup...');
-      try {
-        if (isComposeTier(resolveTier(envConfig))) {
-          const { backupCompose } = await import('./lib/deploy/compose/index.js');
-          await backupCompose(serverIp, sshKeyPath, projectConfig.projectName, {
-            retain: envConfig.backup?.retentionDays,
-          });
-          backupSpinner.stop('wal-g base backup pushed to S3');
-        }
-      } catch (backupError) {
-        backupSpinner.stop(`Backup failed: ${backupError.message}`);
-        p.log.warn('Continuing with destroy...');
-      }
-    }
-  }
+  // Back up before deleting anything; a failed or skipped backup stops here
+  // unless -force (see preDestroyBackup).
+  await preDestroyBackup({
+    envConfig,
+    envName,
+    projectName: projectConfig.projectName,
+    sshKeyPath: join(cwd, '.vibecarbon', `deploy_key_${envName}`),
+    yes: args.yes,
+    purge: args.purgeBackups,
+    force: args.force,
+  });
 
   // Get API tokens (env var → interactive prompt)
   // Resolved once per flow — see providerFor() in lib/providers/index.js.

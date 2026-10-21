@@ -97,7 +97,6 @@ classes:
       - site: "src/lib/providers/s3-base.js :: isTransientS3Error"
       - site: "src/lib/deploy/plan/runner.js :: DEPLOY_TRANSIENT"
       - site: "src/lib/deploy/prompts.js :: isTransient"
-      - site: "src/lib/backup-s3.js :: isTransient@1"
 
   - class: cluster-network-transients
     attribution: external-asserted

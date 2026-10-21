@@ -58,7 +58,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    backupCompose: async () => {},
+    backupCompose: async () => ({ result: 'pushed', name: 'base_000000010000000000000002' }),
     waitForSSH: vi.fn(async () => true),
     setupServer: async () => {},
     setupServerFiles: async () => {},

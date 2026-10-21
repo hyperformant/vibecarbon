@@ -245,6 +245,11 @@ if [ "$1" = st ] && [ "$2" = cat ]; then
   exit 0
 fi
 echo "$*" >> ${log}
+# backup-push names the base it wrote (stderr, as wal-g logs); the backup
+# scripts carry that name in their BACKUP_RESULT marker.
+if [ "$1" = backup-push ]; then
+  echo "INFO: 2026/10/21 02:00:01.000000 Wrote backup with name base_000000010000000000000004" >&2
+fi
 exit 0
 `,
   );
