@@ -961,6 +961,8 @@ describe('the k8s backup CronJob refuses on a retired cluster', () => {
       encoding: 'utf-8',
       env: {
         PATH: `${join(base, 'bin')}:${process.env.PATH}`,
+        // From the per-cluster vibecarbon-backup-settings ConfigMap; no default.
+        BACKUP_RETENTION_DAYS: '7',
         ...(role !== undefined && { [RETIRED_ROLE_KEY]: role }),
       },
       timeout: 10_000,

@@ -60,11 +60,13 @@ describe('mutateConfigMapManifest (against the real template)', () => {
     expect(lines[dataIdx + 1]).toBe(`  ${WARM_REDEPLOY_CONFIGMAP_KEY}: "e2e-warm-abc"`);
   });
 
-  it('preserves the keys the deploy and the backup CronJob depend on', () => {
+  it('preserves the keys the deploy depends on', () => {
     const out = mutateConfigMapManifest(template, 'e2e-warm-abc');
-    for (const key of ['SITE_URL', 'DB_HOST', 'DB_PORT', 'BACKUP_RETENTION_DAYS']) {
+    for (const key of ['SITE_URL', 'DB_HOST', 'DB_PORT']) {
       expect(out).toContain(`${key}:`);
     }
+    // The backup retention is per environment: not in the shared base ConfigMap.
+    expect(out).not.toContain('BACKUP_RETENTION_DAYS');
   });
 
   it('is idempotent for the same marker', () => {

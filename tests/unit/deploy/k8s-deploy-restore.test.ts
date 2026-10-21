@@ -687,14 +687,26 @@ describe('applyK3sManifests with a restore point', () => {
     expect(body.slice(push, push + 300)).toMatch(/tier: 'k8s',\s+ip: masterIp,/);
   });
 
-  it('the configured backup schedule and retention are in the files kubectl applies', async () => {
-    appliedBackup = null;
-    await applyK3sManifests({
-      ...args(null),
-      backupConfig: { schedule: '0 */6 * * *', retentionDays: 14 },
-    });
-    expect(appliedBackup?.cronjob).toMatch(/^ {2}schedule: "0 \*\/6 \* \* \*"$/m);
-    expect(appliedBackup?.configmap).toMatch(/^ {2}BACKUP_RETENTION_DAYS: "14"$/m);
+  it('each environment applies its own backup schedule (CronJob) and retention (ConfigMap)', async () => {
+    const settingsMap = () =>
+      stdin.filter((s) => s.data.includes('name: vibecarbon-backup-settings')).at(-1)?.data ?? '';
+    for (const [cfg, cron, days] of [
+      [{ schedule: '0 */6 * * *', retentionDays: 14 }, '0 */6 * * *', '14'],
+      [{ schedule: '30 4 * * *', retentionDays: 90 }, '30 4 * * *', '90'],
+    ] as const) {
+      appliedBackup = null;
+      stdin.length = 0;
+      await applyK3sManifests({ ...args(null), backupConfig: cfg });
+      // The CronJob in the rendered copy kubectl apply -k is handed ...
+      expect(appliedBackup?.cronjob).toContain(`schedule: "${cron}"`);
+      expect(appliedBackup?.cronjob).not.toContain('{{BACKUP_SCHEDULE}}');
+      // ... and the per-cluster settings ConfigMap, applied after it.
+      expect(settingsMap()).toContain(`BACKUP_RETENTION_DAYS: "${days}"`);
+      // Never patched onto vibecarbon-config, which Flux's base also owns.
+      expect(calls.some((c) => c.includes('patch') && c.some((x) => /BACKUP_/.test(x)))).toBe(
+        false,
+      );
+    }
   });
 
   it('a malformed schedule fails before any kubectl call', async () => {

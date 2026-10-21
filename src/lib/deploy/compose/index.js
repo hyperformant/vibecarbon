@@ -11,6 +11,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { runCommandAsync } from '../../command.js';
 import { buildHostKeyOpts } from '../../host-keys.js';
@@ -1336,11 +1337,9 @@ export async function backupCompose(ip, sshKeyPath, projectName, options = {}) {
 export async function setupComposeBackupCron(ip, sshKeyPath, projectName, backupConfig, opts = {}) {
   const { runScript = sshRunScript } = opts;
   const remoteDir = `/opt/${projectName}`;
-  const schedule = backupConfig?.schedule || '0 2 * * *';
-  const retain =
-    Number.isInteger(backupConfig?.retentionDays) && backupConfig.retentionDays > 0
-      ? backupConfig.retentionDays
-      : 7;
+  // The same defaults and validation as the k8s side (one resolver): a retention
+  // of 0 or NaN throws instead of becoming some other number.
+  const { schedule, retentionDays: retain } = resolveBackupSettings(backupConfig);
 
   const cronLine = `${schedule} ${composeBackupCmd(remoteDir, retain)} >> ${remoteDir}/backups/backup.log 2>&1`;
 

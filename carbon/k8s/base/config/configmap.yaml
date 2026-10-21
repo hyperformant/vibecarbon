@@ -27,7 +27,3 @@ data:
   DB_HOST: "db"
   DB_PORT: "5432"
   DB_NAME: "postgres"
-
-  # Backup Configuration
-  # Default. A deploy patches envConfig.backup.retentionDays over it (applyK3sManifests).
-  BACKUP_RETENTION_DAYS: "7"

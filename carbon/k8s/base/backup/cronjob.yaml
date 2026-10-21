@@ -27,12 +27,18 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: backup
+  annotations:
+    # Deploy-owned (see spec.schedule): Flux never garbage-collects the live one.
+    kustomize.toolkit.fluxcd.io/prune: disabled
   labels:
     app: vibecarbon-backup
     component: backup
 spec:
-  # Default. A deploy patches envConfig.backup.schedule over it (applyK3sManifests).
-  schedule: 0 2 * * *
+  # DEPLOY-owned, per environment: the CLI deploy and the deploy workflow fill
+  # this in (scripts/render-backup-settings.mjs) from the environment backup
+  # config. Flux does not build this object (see the vibecarbon-base patches
+  # in k8s/flux/clusters/*), so it never sees the placeholder.
+  schedule: "{{BACKUP_SCHEDULE}}"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -71,8 +77,10 @@ spec:
                 - name: BACKUP_RETENTION_DAYS
                   valueFrom:
                     configMapKeyRef:
-                      name: vibecarbon-config
+                      name: vibecarbon-backup-settings
                       key: BACKUP_RETENTION_DAYS
+                      # Optional only so the script below can say what is wrong
+                      # and name the fix; there is no default retention.
                       optional: true
                 # The retirement marker (HA-correctness R7): a failover retired
                 # this cluster, and the CLI patched VIBECARBON_ROLE=retired into
@@ -99,12 +107,14 @@ spec:
                     echo "retired node: backups refused (run vibecarbon deploy to rebuild it as the standby)" >&2
                     exit 1
                   fi
-                  RETAIN="${BACKUP_RETENTION_DAYS:-7}"
-                  # Spliced into the db-container script and its date arithmetic:
-                  # only a positive whole number of days is accepted.
+                  RETAIN="${BACKUP_RETENTION_DAYS:-}"
+                  # No default: the days come from the vibecarbon-backup-settings
+                  # ConfigMap that a deploy creates per environment. It is spliced
+                  # into the db-container script and its date arithmetic, so only a
+                  # positive whole number of days is accepted.
                   case "$RETAIN" in
                     ""|*[!0-9]*|0|0[0-9]*)
-                      echo "BACKUP_RETENTION_DAYS must be a positive whole number of days (got: $RETAIN)" >&2
+                      echo "BACKUP_RETENTION_DAYS from ConfigMap vibecarbon-backup-settings is missing or not a positive whole number of days (got: $RETAIN). Run vibecarbon deploy for this environment (or the deploy workflow) to create it." >&2
                       exit 1
                       ;;
                   esac

@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import {
+  DEFAULT_BACKUP_RETENTION_DAYS,
+  DEFAULT_BACKUP_SCHEDULE,
+} from '../../../carbon/scripts/render-backup-settings.mjs';
 import { setupComposeBackupCron } from '../../../src/lib/deploy/compose/index.js';
 
 // ---------------------------------------------------------------------------
@@ -26,18 +30,18 @@ describe('setupComposeBackupCron', () => {
     expect(runScript).toHaveBeenCalledTimes(1);
     const s = script();
     expect(s).toContain('crontab');
-    expect(s).toContain('RETAIN=7 bash backup/compose-backup.sh');
+    expect(s).toContain(`RETAIN=${DEFAULT_BACKUP_RETENTION_DAYS} bash backup/compose-backup.sh`);
     expect(s).toContain('cd /opt/myapp');
     expect(s).toContain('/opt/myapp/backups/backup.log');
   });
 
-  it('defaults the schedule to 0 2 * * * and retain to 7 when no backupConfig is given', () => {
+  it('defaults the schedule and retain to the shared defaults when no backupConfig is given', () => {
     const { script, runScript } = capture();
     setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', undefined, { runScript });
 
     const s = script();
-    expect(s).toContain('0 2 * * * cd /opt/myapp');
-    expect(s).toContain('RETAIN=7');
+    expect(s).toContain(`${DEFAULT_BACKUP_SCHEDULE} cd /opt/myapp`);
+    expect(s).toContain(`RETAIN=${DEFAULT_BACKUP_RETENTION_DAYS}`);
   });
 
   it('honours a provided schedule and retentionDays', () => {
@@ -64,9 +68,14 @@ describe('setupComposeBackupCron', () => {
     expect(script()).toContain("grep -v 'compose-backup.sh'");
   });
 
-  it('falls back to retain 7 for a non-positive / non-integer retentionDays', () => {
-    const { script, runScript } = capture();
-    setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', { retentionDays: -3 }, { runScript });
-    expect(script()).toContain('RETAIN=7');
-  });
+  it.each([-3, 0, Number.NaN, 2.5])(
+    'refuses a retentionDays of %j instead of installing some other number',
+    async (retentionDays) => {
+      const { runScript } = capture();
+      await expect(
+        setupComposeBackupCron('10.0.0.1', '/tmp/key', 'myapp', { retentionDays }, { runScript }),
+      ).rejects.toThrow(/positive whole number of days/);
+      expect(runScript).not.toHaveBeenCalled();
+    },
+  );
 });

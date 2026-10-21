@@ -104,6 +104,13 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
       expect(has('NetworkPolicy', 'registry-policy')).toBe(true);
       expect(has('Deployment', 'local-registry')).toBe(false);
       expect(has('StatefulSet', 'db')).toBe(false);
+      // The backup CronJob is deploy-owned (per environment): Flux never builds
+      // it, and the shared base carries no retention setting for it either.
+      expect(has('CronJob', 'backup')).toBe(false);
+      const cfg = docs.find(
+        (d) => d.kind === 'ConfigMap' && d.metadata?.name === 'vibecarbon-config',
+      );
+      expect(cfg?.data?.BACKUP_RETENTION_DAYS).toBeUndefined();
     }, 60_000);
 
     it(`${cluster}: every object stripped with $patch: delete carries prune: disabled`, () => {
@@ -117,6 +124,7 @@ describe('Flux applies no unrendered placeholder from k8s/base', () => {
         expect.arrayContaining([
           { kind: 'StatefulSet', name: 'db' },
           { kind: 'Deployment', name: 'local-registry' },
+          { kind: 'CronJob', name: 'backup' },
         ]),
       );
       const docs = (loadAll(fluxBuild([])) as Doc[]).filter(Boolean);

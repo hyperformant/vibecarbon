@@ -53,3 +53,14 @@ patches:
     target:
       kind: Deployment
       name: local-registry
+  # And the backup CronJob: deploy-owned, per environment (its schedule is
+  # filled in by the CLI deploy and deploy.yml, not by anything Flux builds).
+  - patch: |
+      $patch: delete
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: backup
+    target:
+      kind: CronJob
+      name: backup

@@ -40,6 +40,11 @@ import { isIPv4 } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  renderBackupCronJob,
+  renderBackupSettingsConfigMap,
+  resolveBackupSettings,
+} from '../../../../carbon/scripts/render-backup-settings.mjs';
 import { progressLog, spinner } from '../../cli/progress.js';
 import { checkDependency, runCommandAsync } from '../../command.js';
 import { DNS01_PROVIDERS } from '../../dns-provider.js';
@@ -95,7 +100,6 @@ import {
 } from '../walg-audit.js';
 import { REPL_GATEWAY_PORT } from '../wireguard.js';
 import { PROMOTE_ISSUER_ANNOTATION, STANDBY_SELFSIGNED_ISSUER } from './acme-issuer-policy.js';
-import { resolveBackupSettings, writeBackupConfigIntoTree } from './backup-config.js';
 import {
   awaitAppAdminReady,
   awaitCertManagerAdmission,
@@ -2870,7 +2874,7 @@ const REGISTRY_MANIFEST = 'registry/local-registry.yaml';
  * @param {Record<string, string>} values - buildDbManifestValues' output
  * @returns {string} the rendered temp copy to pass to `kubectl apply -k`
  */
-export function renderK8sBase(dir, values) {
+export function renderK8sBase(dir, values, backupConfig) {
   if (!values?.K8S_STORAGE_CLASS) {
     throw new Error('renderK8sBase: K8S_STORAGE_CLASS is empty, refusing to render the db PVC');
   }
@@ -2891,7 +2895,19 @@ export function renderK8sBase(dir, values) {
     );
   }
   const rendered = renderK8sPlaceholders(dir, values, 'base');
+  // The backup CronJob's schedule is per environment (deploy-owned, Flux does
+  // not build it): filled in by the renderer deploy.yml also runs.
+  const cronjob = join(rendered, 'backup', 'cronjob.yaml');
+  if (existsSync(cronjob)) {
+    writeFileSync(
+      cronjob,
+      renderBackupCronJob(readFileSync(cronjob, 'utf-8'), resolveBackupSettings(backupConfig)),
+    );
+  }
   const checks = [
+    ...(existsSync(cronjob)
+      ? [['backup/cronjob.yaml', 'a backup CronJob with an unresolved schedule']]
+      : []),
     ['db/statefulset.yaml', 'a database with an unresolved image, prefix or StorageClass'],
     ...(hasRegistry ? [[REGISTRY_MANIFEST, 'a registry with an unresolved bind address']] : []),
   ];
@@ -3425,8 +3441,9 @@ export async function applyK3sManifests({
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
   // The schedule and retention this environment runs backups with, validated
-  // before anything is created (writeBackupConfigIntoTree, below).
-  resolveBackupSettings(backupConfig);
+  // before anything is created; rendered into the CronJob (renderK8sBase) and
+  // the vibecarbon-backup-settings ConfigMap applied below.
+  const backupSettings = resolveBackupSettings(backupConfig);
   // Pilot-light: on the standby cluster nothing app-tier runs until a
   // failover promotes it — no app pods, no CA-spawned workers. Everything
   // below gated on this const either declaratively zeroes a Deployment
@@ -3921,24 +3938,25 @@ export async function applyK3sManifests({
   // one beside it would be empty. Refuse before anything is created.
   await assertNoRetiredChartDb({ env });
   await assertDbStorageClass({ storageClass, env });
-  const baseDir = renderK8sBase(join(projectDir, 'k8s/base'), {
-    ...buildDbManifestValues({
-      dbImageTag,
-      s3Config,
-      backupBucketName,
-      walgRole,
-      dbPrivateIp,
-      storageClass,
-      walArchiveSha: walArchiveConfigSha(projectDir),
-    }),
-    // The registry hostPort's bind address (hostIP). No default: renderK8sBase
-    // refuses a missing one rather than assume Hetzner's 10.0.1.1.
-    MASTER_PRIVATE_IP: masterPrivateIp,
-  });
+  const baseDir = renderK8sBase(
+    join(projectDir, 'k8s/base'),
+    {
+      ...buildDbManifestValues({
+        dbImageTag,
+        s3Config,
+        backupBucketName,
+        walgRole,
+        dbPrivateIp,
+        storageClass,
+        walArchiveSha: walArchiveConfigSha(projectDir),
+      }),
+      // The registry hostPort's bind address (hostIP). No default: renderK8sBase
+      // refuses a missing one rather than assume Hetzner's 10.0.1.1.
+      MASTER_PRIVATE_IP: masterPrivateIp,
+    },
+    backupConfig,
+  );
   try {
-    // The configured backup schedule and retention, into the rendered copy
-    // (the same call the GitOps commit makes on the project tree).
-    writeBackupConfigIntoTree(baseDir, backupConfig);
     await perfAsync(`deploy.${perfPrefix}.applyBase`, () =>
       runKubectlWithRetry(['apply', '-k', baseDir], {
         env,
@@ -3950,6 +3968,13 @@ export async function applyK3sManifests({
     // one apply.
     rmSync(baseDir, { recursive: true, force: true });
   }
+  // The per-environment retention the backup CronJob reads (in no manifest
+  // tree, so no Flux reconcile can touch it).
+  await runKubectlWithRetry(['-n', 'vibecarbon', 'apply', '-f', '-'], {
+    env,
+    input: renderBackupSettingsConfigMap(backupSettings),
+    description: 'applyK3sManifests: kubectl apply ConfigMap/vibecarbon-backup-settings',
+  });
   if (pilotStandby) {
     // Pilot-light: nothing app-tier runs on the 2-node standby. Declarative
     // zero via the same patch-at-deploy pattern as the placeholder patches

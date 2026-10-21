@@ -4,6 +4,11 @@
  */
 
 import * as p from '@clack/prompts';
+import {
+  DEFAULT_BACKUP_RETENTION_DAYS,
+  DEFAULT_BACKUP_SCHEDULE,
+  resolveBackupSettings,
+} from '../../../carbon/scripts/render-backup-settings.mjs';
 import { exitCancelled, exitDeclined } from '../cli/exit-guard.js';
 import { spinner } from '../cli/progress.js';
 import { c, printBanner } from '../colors.js';
@@ -92,15 +97,18 @@ const COMPOSE_HA_OPTION = {
  * @param {{backupSchedule?: string, backupRetentionDays?: string|number|null}} args
  * @param {{backup?: {schedule?: string, retentionDays?: number|string}}} envConfig
  * @returns {{schedule: string, retentionDays: number}}
+ * @throws {Error} on a schedule that is not a 5-field cron expression, or a retention that is not a positive whole number
  */
 export function resolveBackupConfig(args, envConfig) {
-  return {
-    schedule: args.backupSchedule || envConfig.backup?.schedule || '0 */6 * * *',
+  const config = {
+    schedule: args.backupSchedule || envConfig.backup?.schedule || DEFAULT_BACKUP_SCHEDULE,
     retentionDays: Number.parseInt(
-      args.backupRetentionDays || envConfig.backup?.retentionDays || '30',
+      args.backupRetentionDays || envConfig.backup?.retentionDays || DEFAULT_BACKUP_RETENTION_DAYS,
       10,
     ),
   };
+  // Throws on a malformed cron expression or a retention of 0 or NaN.
+  return resolveBackupSettings(config);
 }
 
 /**
@@ -1091,7 +1099,15 @@ export async function gatherDeploymentConfig(args) {
     p.log.error(err.message);
     process.exit(1);
   }
-  const backupConfig = resolveBackupConfig(args, envConfig);
+  // Before Pulumi creates anything: a malformed schedule or a retention of 0 or
+  // NaN stops the deploy here, not at the k8s apply after the servers exist.
+  let backupConfig;
+  try {
+    backupConfig = resolveBackupConfig(args, envConfig);
+  } catch (err) {
+    p.log.error(`deploy: ${err.message}`);
+    process.exit(1);
+  }
 
   const branchName = getBranchName(config.environment);
 

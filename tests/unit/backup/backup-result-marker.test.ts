@@ -455,7 +455,10 @@ describe('retention deletes by time, inside the current lineage', () => {
         { BACKUP_RETENTION_DAYS: bad },
       );
       expect(b.status).toBe(1);
-      expect(b.stderr).toMatch(/BACKUP_RETENTION_DAYS must be a positive whole number of days/);
+      expect(b.stderr).toMatch(
+        /BACKUP_RETENTION_DAYS from ConfigMap vibecarbon-backup-settings is missing or not a positive whole number/,
+      );
+      expect(b.stderr).toContain('vibecarbon deploy');
       expect(b.walg).toBe('');
     },
   );
