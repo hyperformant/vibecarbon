@@ -3,7 +3,6 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { createMiddleware } from 'hono/factory';
-import { logger as honoLogger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timeout } from 'hono/timeout';
 import { auth } from './auth';
@@ -16,6 +15,7 @@ import { handleAppError } from './lib/errors';
 import { logger } from './lib/logger';
 import { createRateLimiter } from './lib/rate-limiter';
 import { createSeoShell } from './lib/seo';
+import { accessLog } from './middleware/access-log';
 import { applyAuthRateLimits } from './middleware/auth-rate-limits';
 import { apiCors } from './middleware/cors';
 import { crawlerTracking } from './middleware/crawler-tracking';
@@ -115,7 +115,7 @@ app.use(
 app.use('*', timeout(30000));
 
 // Request logging
-app.use('*', honoLogger());
+app.use('*', accessLog());
 
 // Nothing but /api/health is served until the database migrations are
 // applied (db/startup.ts verifyMigrationsAtStartup). Before every middleware that
