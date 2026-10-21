@@ -17,6 +17,7 @@ import { basename, join } from 'node:path';
 import * as p from '@clack/prompts';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
+import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
@@ -42,6 +43,7 @@ import { readProjectEnvFiles } from './lib/project.js';
 import { HetznerProvider } from './lib/providers/hetzner.js';
 import { hasProvider, PROVIDERS, providerFor } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
+import { checkBackupHealth } from './lib/status/backup-health.js';
 import {
   CORE_SERVICE_ORDER,
   classifyContainer,
@@ -427,14 +429,17 @@ export function retiredFenceRow(fence, envConfig, now = Date.now()) {
  *
  * @param {object} envConfig
  * @param {{ writeFenced?: 'on'|'off'|null } | null} replication
+ * @param {string} [envName] for the scale resume command
  * @returns {string|null}
  */
-export function writeFenceRow(envConfig, replication) {
+export function writeFenceRow(envConfig, replication, envName) {
   const marker = envConfig?.ha?.writeFence;
   if (!marker && replication?.writeFenced !== 'on') return null;
   const why = envConfig?.ha?.failoverInFlight
     ? 'a failover is in flight; vibecarbon failover finishes it'
-    : 'an interrupted failover left it; vibecarbon deploy or failover lifts it';
+    : marker?.cutover
+      ? `a compose scale stopped mid-cutover; rerun vibecarbon scale${envName ? ` ${envName}` : ''} to finish or roll it back`
+      : 'an interrupted failover or scale left it; vibecarbon deploy lifts it';
   return `database write-fenced: the primary refuses writes (${why})`;
 }
 
@@ -494,6 +499,27 @@ export function replicationSlotRow(slot, envName) {
   return { level: 'ok', text };
 }
 
+/**
+ * The reasons behind rejected Promise.allSettled entries, by check name, or
+ * null when every check settled. A rejected check is a finding, not an absence.
+ *
+ * @param {Record<string, PromiseSettledResult<unknown>>} settled
+ * @returns {Record<string, string>|null}
+ */
+export function rejectedChecks(settled) {
+  const failed = Object.fromEntries(
+    Object.entries(settled)
+      .filter(([, r]) => r.status === 'rejected')
+      .map(([name, r]) => [name, r.reason?.message || String(r.reason)]),
+  );
+  return Object.keys(failed).length > 0 ? failed : null;
+}
+
+/** The Backups check into `checks`, so the table and --json carry the same row. */
+export function attachBackups(checks, settled) {
+  if (settled.status === 'fulfilled' && settled.value) checks.backups = settled.value;
+}
+
 export async function checkReplication(envName, envConfig, projectName, deps = {}) {
   const {
     sshRun: _sshRun = sshRun,
@@ -506,8 +532,7 @@ export async function checkReplication(envName, envConfig, projectName, deps = {
   const isHA = !!(envConfig.ha?.enabled || envConfig.ha === true || envConfig.secondaryRegion);
   if (!isHA) return null;
 
-  const servers = envConfig.servers || [];
-  const primary = servers.find((sv) => sv.role === 'primary') || servers[0];
+  const primary = resolvePrimary(envConfig, { env: envName });
   if (!primary?.ip) return null;
 
   const sshKeyPath = _getKey(envName);
@@ -1293,8 +1318,10 @@ function renderEnvironment(envName, envConfig, checks) {
     lines.push(`${c.dim('Deployed')}       ${dateStr} ${c.dim(`(${relative})`)}`);
   }
 
-  // HA
-  if (envConfig.ha) {
+  // HA. A single-server compose env carries `ha` only for scale's write-fence
+  // marker, which is no HA config.
+  const haConfigured = !!envConfig.ha && Object.keys(envConfig.ha).some((k) => k !== 'writeFence');
+  if (haConfigured) {
     const failoverRegion = envConfig.secondaryRegion || envConfig.failoverRegion;
     const haDisplay = failoverRegion
       ? `${c.success('Enabled')} ${c.dim(`(failover: ${failoverRegion})`)}`
@@ -1337,12 +1364,27 @@ function renderEnvironment(envName, envConfig, checks) {
       }
     }
 
-    const fenceRow = writeFenceRow(envConfig, checks.replication);
-    if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
+    for (const [name, reason] of Object.entries(checks.checkErrors || {})) {
+      lines.push(`${c.dim('Check failed')}   ${c.error(`${name}: ${reason}`)}`);
+    }
 
     const backupFence = backupFenceRow(envConfig);
     if (backupFence) lines.push(`${c.dim('Backup fence')}   ${c.warning(backupFence)}`);
   }
+
+  // Backup and WAL archiving health. Every tier; yellow when it cannot tell
+  // (no credentials), red when a base or the archive is stale or failing.
+  if (checks.backups) {
+    const paint = { ok: c.success, warn: c.warning, error: c.error }[checks.backups.level];
+    lines.push(
+      `${c.dim('Backups')}        ${paint(checks.backups.text.replace(/^backups: /, ''))}`,
+    );
+  }
+
+  // The write fence: an interrupted failover's or scale's marker, or a primary
+  // that reads read-only. Every tier, not only HA (compose scale fences too).
+  const fenceRow = writeFenceRow(envConfig, checks.replication, envName);
+  if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
 
   // Servers
   const servers = envConfig.servers || [];
@@ -1363,7 +1405,7 @@ function renderEnvironment(envName, envConfig, checks) {
   if (envConfig.observability) enabledServices.push('observability');
   if (envConfig.n8n) enabledServices.push('n8n');
   if (envConfig.metabase) enabledServices.push('metabase');
-  if (envConfig.ha) enabledServices.push('ha');
+  if (haConfigured) enabledServices.push('ha');
   if (envConfig.cicd) enabledServices.push('cicd');
   if (envConfig.services) {
     for (const [key, val] of Object.entries(envConfig.services)) {
@@ -1640,13 +1682,22 @@ async function main(argv = []) {
       // serially would double an HA environment's worst case. Independent of
       // noLocal — that flag is about THIS machine's dev stack.
       // allSettled so a throw in one check can never take the other's result with it.
-      const [replicationResult, containersResult] = await Promise.allSettled([
+      const [replicationResult, containersResult, backupsResult] = await Promise.allSettled([
         checkReplication(envName, envConfig, projectConfig.projectName),
         checkRemoteContainers(envName, envConfig, projectConfig.projectName),
+        checkBackupHealth(envName, envConfig, projectConfig.projectName),
       ]);
       checks.replication =
         replicationResult.status === 'fulfilled' ? replicationResult.value : null;
       const containers = containersResult.status === 'fulfilled' ? containersResult.value : null;
+      // Say which check failed and why, so a missing row never reads as healthy.
+      const failed = rejectedChecks({
+        replication: replicationResult,
+        containers: containersResult,
+        backups: backupsResult,
+      });
+      attachBackups(checks, backupsResult);
+      if (failed) checks.checkErrors = failed;
       // Omitted, not null, when there is nothing to query (no servers, no
       // project name) — spec §6; consumers key on the key's absence.
       if (containers) checks.containers = containers;

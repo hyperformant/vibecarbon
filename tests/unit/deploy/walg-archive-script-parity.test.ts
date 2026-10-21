@@ -23,19 +23,41 @@
  * signalling.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const COMPOSE_SCRIPT = 'carbon/volumes/db/wal-archive.sh';
+const WALG_ENV_SCRIPT = 'carbon/volumes/db/walg-env.sh';
 const K8S_CONFIGMAP = 'carbon/k8s/base/backup/configmap-walg.yaml';
 
 const composeBody = readFileSync(`${repoRoot}${COMPOSE_SCRIPT}`, 'utf-8');
+const walgEnvBody = readFileSync(`${repoRoot}${WALG_ENV_SCRIPT}`, 'utf-8');
 const configMapRaw = readFileSync(`${repoRoot}${K8S_CONFIGMAP}`, 'utf-8');
 const configMap = loadYaml(configMapRaw) as { data: Record<string, string> };
 const k8sBody = configMap.data['wal-archive.sh'];
+const k8sWalgEnvBody = configMap.data['walg-env.sh'];
+
+const SYSID = '7699032860122738725';
+const work = mkdtempSync(join(tmpdir(), 'vc-walg-env-'));
+afterAll(() => rmSync(work, { recursive: true, force: true }));
+/** A bin dir whose pg_controldata prints SYSID, or fails like an unreadable PGDATA. */
+function controldataBin(name: string, readable = true) {
+  const bin = join(work, name);
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, 'pg_controldata'),
+    readable
+      ? `#!/bin/sh\nprintf 'pg_control version number:            1700\\nDatabase system identifier:           ${SYSID}\\n'\n`
+      : '#!/bin/sh\necho "pg_controldata: error: could not open file" >&2\nexit 1\n',
+  );
+  chmodSync(join(bin, 'pg_controldata'), 0o755);
+  return bin;
+}
 
 describe('wal-archive.sh is byte-identical across compose and k8s', () => {
   it('the ConfigMap block scalar dedents to exactly the compose script', () => {
@@ -52,6 +74,31 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
       );
     }
     expect(k8sBody).toBe(composeBody);
+  });
+
+  it('the ConfigMap carries walg-env.sh byte-identical too', () => {
+    if (k8sWalgEnvBody !== walgEnvBody) {
+      const paste = walgEnvBody
+        .split('\n')
+        .map((l) => (l.length ? `    ${l}` : l))
+        .join('\n');
+      throw new Error(
+        `${K8S_CONFIGMAP} has drifted from ${WALG_ENV_SCRIPT}. Replace everything under ` +
+          `\`walg-env.sh: |\` with:\n\n${paste}`,
+      );
+    }
+    expect(k8sWalgEnvBody).toBe(walgEnvBody);
+  });
+
+  it('both tiers source walg-env.sh before anything reads the prefix', () => {
+    for (const body of [composeBody, k8sBody]) {
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      const source = body.indexOf('. "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}"');
+      expect(source).toBeGreaterThan(-1);
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in the script text, not a JS placeholder
+      expect(source).toBeLessThan(body.indexOf('case "${WALG_S3_PREFIX:-}" in'));
+      expect(source).toBeLessThan(body.indexOf('st cat vibecarbon-fence.json'));
+    }
   });
 
   it('both tiers therefore carry the WALG_ROLE write-guard', () => {
@@ -81,17 +128,15 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     }
   });
 
-  it('every exit but the two retired-node refusals is exit 0 — a non-zero archive_command fills the disk', () => {
-    const exits = composeBody.match(/^\s*exit \d+/gm) ?? [];
-    expect(exits.length).toBeGreaterThanOrEqual(5); // retired, role guard, recovery gate, push success, exhausted
-    // The one deliberate exception (HA-correctness R7): a node a failover
-    // retired must refuse loudly rather than skip, and pg_wal growth on a node
-    // awaiting its rebuild is the lesser harm than its WAL in the new primary's
-    // prefix. It is the first guard and the only exit 1.
-    // The second (final review I1): the backup-prefix fence object names this
-    // database on a newer timeline, the same retired node seen from S3.
-    const nonZero = exits.filter((e) => e.trim() !== 'exit 0');
-    expect(nonZero.map((e) => e.trim())).toEqual(['exit 1', 'exit 1']);
+  // Final review ruling (e): a segment given up on a failing bucket is a
+  // silent PITR gap, the worst outcome for a backup. Exhausted retries now
+  // hold the segment (exit 1: postgres keeps it and retries, and
+  // pg_stat_archiver turns status red); only disk pressure drops one, with a
+  // durable record. The old pin (every exhausted path exits 0) was that bug.
+  it('exit codes: refusals and a held segment exit 1; only the disk-pressure drop and the overwrite refusal give a segment up', () => {
+    const exits = (composeBody.match(/^\s*exit \d+/gm) ?? []).map((e) => e.trim());
+    // retired, the walg-env source (|| exit 1, not a line of its own), fence, final hold
+    expect(exits.filter((e) => e === 'exit 1')).toHaveLength(3);
     expect(composeBody).toMatch(/backup prefix fenced to another primary[^\n]*\n\s*exit 1\n/);
     expect(composeBody.indexOf('vibecarbon-fence.json')).toBeLessThan(
       composeBody.indexOf('wal-push "$WAL_PATH"'),
@@ -102,9 +147,9 @@ describe('wal-archive.sh is byte-identical across compose and k8s', () => {
     expect(composeBody.indexOf('vibecarbon-retired')).toBeLessThan(
       composeBody.indexOf('WALG_ROLE:-primary'),
     );
-    // Including the one that runs after all retries are exhausted, which is the
-    // whole reason this wrapper exists rather than a bare `wal-g wal-push %p`.
-    expect(composeBody).toMatch(/WAL_ARCHIVE_FAILED[\s\S]*\nexit 0\n?$/);
+    // The script ends holding the segment.
+    expect(composeBody).toMatch(/WAL_ARCHIVE_FAILED[^\n]*keeping the segment[^\n]*\nexit 1\n?$/);
+    expect(composeBody).toMatch(/WAL_ARCHIVE_DROPPED[^\n]*\n\s*fi\n\s*exit 0\n/);
   });
 
   it('the ConfigMap header no longer merely ASKS for sync — it names the pin', () => {
@@ -152,12 +197,14 @@ describe('a changed wal-archive.sh actually reaches the running db pod', () => {
 // attempts and logged WAL_ARCHIVE_FAILED. The script now exits 0 before any
 // wal-g call, like backup/compose-backup.sh. Runs the real script with bash.
 describe('wal-archive.sh with no backup target', () => {
-  const run = (prefix: string) =>
+  const bin = controldataBin('no-target');
+  const run = (base: string) =>
     spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'], {
       encoding: 'utf-8',
       env: {
-        PATH: process.env.PATH,
-        WALG_S3_PREFIX: prefix,
+        PATH: `${bin}:${process.env.PATH}`,
+        WALG_S3_PREFIX_BASE: base,
+        WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
         PGDATA: '/nonexistent',
@@ -175,9 +222,29 @@ describe('wal-archive.sh with no backup target', () => {
     });
   }
 
+  it('a missing walg-env.sh refuses (exit 1, postgres retries), never a silent no-target skip', () => {
+    const r = spawnSync(
+      'bash',
+      [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
+      {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+          WALG_ENV_SH: '/nonexistent/walg-env.sh',
+          PGDATA: '/nonexistent',
+        },
+        timeout: 10_000,
+      },
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).not.toContain('no backup target');
+  });
+
   it('a real target still goes through the wal-g attempts (control)', () => {
     const r = run('s3://bucket/backups/acme');
-    expect(r.status).toBe(0);
+    // No wal-g here, so every attempt fails and the segment is held.
+    expect(r.status).toBe(1);
     expect(r.stderr).not.toContain('no backup target');
     expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
   });
@@ -187,5 +254,222 @@ describe('wal-archive.sh with no backup target', () => {
       expect(body.indexOf('""|s3:///*)')).toBeGreaterThan(-1);
       expect(body.indexOf('""|s3:///*)')).toBeLessThan(body.indexOf('wal-push "$WAL_PATH"'));
     }
+  });
+});
+
+// walg-env.sh, run for real (sourced by sh, as every caller does), with a stub
+// pg_controldata standing in for the cluster in PGDATA.
+describe('walg-env.sh exports the lineage folder', () => {
+  const source = (env: Record<string, string>, readable = true) =>
+    spawnSync(
+      'sh',
+      ['-c', `set -eu; . "${repoRoot}${WALG_ENV_SCRIPT}"; printf '%s' "$WALG_S3_PREFIX"`],
+      {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${controldataBin(readable ? 'ok' : 'unreadable', readable)}:${process.env.PATH}`,
+          PGDATA: '/var/lib/postgresql/data',
+          ...env,
+        },
+        timeout: 10_000,
+      },
+    );
+  const BASE = 's3://b/backups/p/prod/walg';
+
+  it("the cluster's system identifier, read from pg_controldata", () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`${BASE}/${SYSID}`);
+  });
+
+  it('RESTORE_LINEAGE wins (a restore fetches before PGDATA holds that database)', () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE, RESTORE_LINEAGE: '7612000000000000001' }, false);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`${BASE}/7612000000000000001`);
+  });
+
+  it('no base, or a bucketless one, is no target: nothing is read', () => {
+    expect(source({ WALG_S3_PREFIX_BASE: '' }, false)).toMatchObject({ status: 0, stdout: '' });
+    expect(source({}, false)).toMatchObject({ status: 0, stdout: '' });
+    expect(source({ WALG_S3_PREFIX_BASE: 's3:///backups/p/prod/walg' }, false)).toMatchObject({
+      status: 0,
+      stdout: 's3:///backups/p/prod/walg',
+    });
+  });
+
+  it('a PGDATA it cannot read exits 1 with the one-line cause', () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE }, false);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe('');
+    expect(r.stderr.trim()).toBe(
+      'walg-env: no database system identifier in /var/lib/postgresql/data',
+    );
+  });
+
+  it('a RESTORE_LINEAGE that is no system identifier exits 1', () => {
+    const r = source({ WALG_S3_PREFIX_BASE: BASE, RESTORE_LINEAGE: '../other' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('is not a database system identifier');
+  });
+
+  it('runs under busybox-style sh with set -u (no bashisms)', () => {
+    const r = spawnSync('sh', ['-n', `${repoRoot}${WALG_ENV_SCRIPT}`], { encoding: 'utf-8' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(walgEnvBody).not.toMatch(/\[\[|\$\{[A-Za-z_]+:[0-9]/);
+  });
+});
+
+// Fix round 1 M1: with WALG_PREVENT_WAL_OVERWRITE on, wal-g refuses a segment
+// name the archive already holds with other bytes. Retrying cannot change
+// that, so the wrapper logs a distinct line at once (plus the usual
+// WAL_ARCHIVE_FAILED, exit 0, as for any segment it gives up on).
+describe('wal-archive.sh on an overwrite refusal', () => {
+  it('one attempt, no backoff, a distinct line, then WAL_ARCHIVE_FAILED and exit 0', () => {
+    const bin = controldataBin('overwrite');
+    const calls = join(bin, 'walg-calls');
+    writeFileSync(calls, '');
+    writeFileSync(
+      join(bin, 'wal-g'),
+      [
+        '#!/bin/sh',
+        `echo "$*" >> ${calls}`,
+        'if [ "$1" = st ]; then echo "object not found in storage" >&2; exit 1; fi',
+        `echo "ERROR: 2026/10/21 10:00:00.000000 WAL file '000000010000000000000001' already archived, contents differ, unable to overwrite" >&2`,
+        'exit 1',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'wal-g'), 0o755);
+    const started = Date.now();
+    const r = spawnSync(
+      'bash',
+      [`${repoRoot}${COMPOSE_SCRIPT}`, 'pg_wal/000000010000000000000001'],
+      {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+          WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+          WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
+          WAL_ARCHIVE_RETRIES: '3',
+          // A real backoff: an overwrite refusal must never sleep through it.
+          WAL_ARCHIVE_SLEEP: '5',
+          PGDATA: '/nonexistent',
+        },
+        timeout: 20_000,
+      },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(
+      readFileSync(calls, 'utf-8')
+        .split('\n')
+        .filter((l) => l.startsWith('wal-push')),
+    ).toHaveLength(1);
+    expect(r.stderr).toMatch(/WAL_ARCHIVE_OVERWRITE_REFUSED: [^\n]*000000010000000000000001/);
+    expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
+  });
+});
+
+// The exhausted-retry policy, run for real with bash against a wal-g stub that
+// always fails. The disk numbers come from the test-only overrides (the
+// Docker test runs the same paths on the db image's busybox df).
+describe('wal-archive.sh when every push fails', () => {
+  const GiB = 1024 ** 3;
+  const SEG = '000000010000000000000007';
+  function setup(name: string) {
+    const bin = controldataBin(`exhausted-${name}`);
+    writeFileSync(
+      join(bin, 'wal-g'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = st ]; then echo "object not found in storage" >&2; exit 1; fi',
+        'echo "ERROR: dial tcp: connection refused" >&2',
+        'exit 1',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'wal-g'), 0o755);
+    const pgdata = join(work, `pgdata-${name}`);
+    mkdirSync(join(pgdata, 'pg_wal'), { recursive: true });
+    writeFileSync(join(pgdata, 'pg_wal', SEG), 'x');
+    const run = (env: Record<string, string> = {}) =>
+      spawnSync('bash', [`${repoRoot}${COMPOSE_SCRIPT}`, join(pgdata, 'pg_wal', SEG)], {
+        encoding: 'utf-8',
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+          WALG_ENV_SH: `${repoRoot}${WALG_ENV_SCRIPT}`,
+          WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
+          WAL_ARCHIVE_RETRIES: '2',
+          WAL_ARCHIVE_SLEEP: '0',
+          PGDATA: pgdata,
+          ...env,
+        },
+        timeout: 10_000,
+      });
+    const gap = () => {
+      try {
+        return readFileSync(join(pgdata, 'vibecarbon-wal-gap'), 'utf-8');
+      } catch {
+        return null;
+      }
+    };
+    return { run, gap, pgdata };
+  }
+
+  it('room on the disk: exit 1 (postgres keeps the segment and retries), no gap record', () => {
+    const { run, gap } = setup('room');
+    const r = run({
+      VC_WAL_GUARD_TOTAL_BYTES: String(100 * GiB),
+      VC_WAL_GUARD_FREE_BYTES: String(50 * GiB),
+    });
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toMatch(
+      /WAL_ARCHIVE_FAILED: [^\n]*failed after 2 attempts; keeping the segment/,
+    );
+    expect(r.stderr).not.toContain('WAL_ARCHIVE_DROPPED');
+    expect(gap()).toBeNull();
+  });
+
+  it.each([
+    ['under 2 GiB free', 100 * GiB, 1.5 * GiB],
+    ['under 10% free', 100 * GiB, 9 * GiB],
+  ])(
+    '%s: exit 0, WAL_ARCHIVE_DROPPED, and the segment appended to the gap record',
+    (_l, total, free) => {
+      const { run, gap } = setup(`pressure-${free}`);
+      const env = {
+        VC_WAL_GUARD_TOTAL_BYTES: String(total),
+        VC_WAL_GUARD_FREE_BYTES: String(Math.floor(free)),
+      };
+      const r = run(env);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stderr).toMatch(/WAL_ARCHIVE_DROPPED: [^\n]*under 10% or 2 GiB/);
+      expect(r.stderr).not.toContain('WAL_ARCHIVE_FAILED');
+      expect(gap()).toMatch(new RegExp(`^${SEG} \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z\\n$`));
+      // A second drop appends.
+      expect(run(env).status).toBe(0);
+      expect(gap()?.trim().split('\n')).toHaveLength(2);
+    },
+  );
+
+  it('a gap record that cannot be written is said so, still exit 0', () => {
+    const { run, pgdata } = setup('gap-unwritable');
+    // A directory at the record's path makes the append fail.
+    mkdirSync(join(pgdata, 'vibecarbon-wal-gap'));
+    const r = run({
+      VC_WAL_GUARD_TOTAL_BYTES: String(100 * GiB),
+      VC_WAL_GUARD_FREE_BYTES: String(1 * GiB),
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/WAL_ARCHIVE_DROPPED: [^\n]*gap record could not be written/);
+    expect(r.stderr).not.toContain('recorded in');
+  });
+
+  it('free space it cannot read holds the segment', () => {
+    const { run, gap } = setup('unreadable');
+    const r = run({ PGDATA: '/nonexistent' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('WAL_ARCHIVE_FAILED');
+    expect(gap()).toBeNull();
   });
 });

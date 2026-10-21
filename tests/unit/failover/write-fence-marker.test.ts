@@ -231,7 +231,7 @@ describe('assertRolePrimaryWritable (deploy, after bring-up)', () => {
   it('fenced with a journal: refuses and names vibecarbon failover', async () => {
     const { p, r } = run('on', { ha: { writeFence: MARKER, failoverInFlight: JOURNAL } });
     await expect(p).rejects.toThrow(
-      /write-fenced by a failover still in flight; rerun vibecarbon failover prod to finish it, or run vibecarbon failover prod -abort/,
+      /write-fenced by a failover still in flight; rerun `vibecarbon failover prod` to finish it, or run `vibecarbon failover prod -abort`/,
     );
     expect(r.calls).toEqual([]);
   });
@@ -256,7 +256,14 @@ describe('assertRolePrimaryWritable (deploy, after bring-up)', () => {
 describe('deploy wires both checks (census)', () => {
   it('orchestrator lifts a stranded marker at entry and probes the role primary after bring-up', () => {
     const src = readFileSync(join(__dirname, '../../../src/lib/deploy/orchestrator.js'), 'utf-8');
-    const entry = src.indexOf('await liftStrandedWriteFence(');
+    const entry = src.indexOf('await liftStrandedFenceAtEntry({');
+    // A journaled scale cutover is refused before the lift ever reads the marker.
+    expect(
+      src.indexOf("assertNoScaleCutoverInFlight({ environment, envConfig, action: 'deploy' })"),
+    ).toBeGreaterThan(-1);
+    expect(
+      src.indexOf("assertNoScaleCutoverInFlight({ environment, envConfig, action: 'deploy' })"),
+    ).toBeLessThan(entry);
     const roleSwap = src.indexOf(
       'assertNoComposeHaRoleSwap({ projectName: projectConfig.projectName',
     );
@@ -270,11 +277,23 @@ describe('deploy wires both checks (census)', () => {
 });
 
 describe('status shows a write-fenced primary', () => {
+  it('a journaled scale cutover names the env in its resume command', () => {
+    expect(
+      writeFenceRow(
+        { ha: { writeFence: { ip: '1.1.1.1', source: 'scale', cutover: { newIp: '9.9.9.9' } } } },
+        null,
+        'prod',
+      ),
+    ).toMatch(
+      /a compose scale stopped mid-cutover; rerun vibecarbon scale prod to finish or roll it back/,
+    );
+  });
+
   it('the row appears for a marker, or a primary that reads read-only, and names the fix', () => {
     expect(writeFenceRow({ ha: {} }, { writeFenced: 'off' })).toBeNull();
     expect(writeFenceRow({ ha: {} }, null)).toBeNull();
     expect(writeFenceRow({ ha: { writeFence: MARKER } }, null)).toMatch(
-      /^database write-fenced: .*vibecarbon deploy or failover lifts it/,
+      /^database write-fenced: .*an interrupted failover or scale left it; vibecarbon deploy lifts it/,
     );
     expect(writeFenceRow({ ha: {} }, { writeFenced: 'on' })).toMatch(/database write-fenced/);
     expect(writeFenceRow({ ha: { writeFence: MARKER, failoverInFlight: JOURNAL } }, null)).toMatch(
@@ -288,7 +307,11 @@ describe('status shows a write-fenced primary', () => {
     );
     const r = await checkReplication(
       'prod',
-      { deployMode: 'kubernetes', ha: { enabled: true }, servers: [{ name: 'p', ip: '10.0.0.1' }] },
+      {
+        deployMode: 'kubernetes',
+        ha: { enabled: true },
+        servers: [{ name: 'p', role: 'primary', ip: '10.0.0.1' }],
+      },
       'myapp',
       {
         sshKubectl,

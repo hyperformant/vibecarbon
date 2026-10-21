@@ -12,15 +12,15 @@
 
 import { existsSync } from 'node:fs';
 import * as p from '@clack/prompts';
-import { formatInstant } from './lib/backup-format.js';
 import { resolveEnvContext } from './lib/cli/env-context.js';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
 import { introCommand } from './lib/cli/intro.js';
 import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
+import { resolvePrimary } from './lib/cli/resolve-primary.js';
 import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { loadProjectConfig, updateProjectConfig } from './lib/config.js';
 import {
   backupFenceWarning,
   recordBackupFence,
@@ -94,7 +94,12 @@ import { pollUntil } from './lib/retry.js';
 import { declaredAddonNames, k8sPrimaryOnlyWorkloads } from './lib/services/standby-policy.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl, sshRun } from './lib/ssh.js';
 import { createTracker } from './lib/tracker.js';
-import { listWalgBackups } from './lib/walg-backups.js';
+import { pushBaseBackupAfterPromote } from './lib/walg/post-promote-backup.js';
+import {
+  backupCredentialVars,
+  printBaseBackupList,
+  readEnvBaseBackups,
+} from './lib/walg/restore-base.js';
 
 // Shared with the compose-ha failover; re-exported where tests and callers
 // have always found them.
@@ -223,24 +228,19 @@ export function identifyServers(envName, envConfig, _projectConfig) {
     };
   }
 
-  // Fall back to servers array with role/region matching
+  // compose-ha: servers[] carries the persisted roles. A failover flips `role`
+  // in place and leaves array order and names alone (the name is a Pulumi
+  // resource identity), so position and name say nothing about who is primary;
+  // resolvePrimary is the one reader of the roles and refuses a roleless or
+  // contradictory list instead of guessing.
   const servers = envConfig.servers || [];
   const primaryRegion = envConfig.region;
   const standbyRegion = envConfig.secondaryRegion || envConfig.ha?.failoverRegion;
 
   if (servers.length >= 2 && primaryRegion && standbyRegion) {
-    // Prefer the `role` field — it is the only one a failover updates.
-    // failoverComposeHA flips role in place and leaves both the array order and
-    // the server names alone (the name is a Pulumi resource identity), so
-    // name/region/index matching keeps returning the OLD primary after a
-    // failover. Then name-based match (k8s HA stores { name: 'primary' /
-    // 'standby' }), then region match (pre-gitops compose-HA used server names
-    // that embedded the region).
-    const byRole = (role) => servers.find((s) => s.role === role);
-    const byName = (role) => servers.find((s) => s.name === role);
-    const byRegion = (region) => servers.find((s) => s.name?.includes(region));
-    const primary = byRole('primary') || byName('primary') || byRegion(primaryRegion) || servers[0];
-    const standby = byRole('standby') || byName('standby') || byRegion(standbyRegion) || servers[1];
+    const primaryIp = resolvePrimary(envConfig, { env: envName })?.ip;
+    const primary = servers.find((s) => s.ip === primaryIp);
+    const standby = servers.find((s) => s.role === 'standby') || servers.find((s) => s !== primary);
 
     return {
       primary: {
@@ -1352,6 +1352,12 @@ export function dnsStrategyFor(dnsProvider) {
 /** Manual DNS: no auth, no flip — failoverHA prints the epilogue instead. */
 const MANUAL_DNS_STRATEGY = {};
 
+/** Exchange the 'primary' and 'standby' roles in a servers[] list; other roles ride along. */
+function swapServerRoles(servers) {
+  const flip = { primary: 'standby', standby: 'primary' };
+  return (servers ?? []).map((sv) => (flip[sv.role] ? { ...sv, role: flip[sv.role] } : sv));
+}
+
 /**
  * Persist the post-failover role swap — the SINGLE terminal write that lets a
  * later `vibecarbon deploy` converge the recovered ex-primary to pilot-light
@@ -1365,43 +1371,50 @@ const MANUAL_DNS_STRATEGY = {};
  * role-agnostic pilot config (standbyWorkerSpec, scaleUpList) is preserved
  * untouched — it describes whatever cluster is currently the standby.
  *
- * Loads a FRESH project config (never a stale in-memory envConfig — the deploy
- * paths save mid-flight) and saves via saveProjectConfig. Exported for tests.
+ * Patches the FRESH project config under the config lock (never a stale
+ * in-memory envConfig — the deploy paths save mid-flight). Exported for tests.
  *
  * @param {string} envName
  */
 export function swapHaRoles(envName, { override } = {}) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[envName];
-  if (!envConfig?.ha?.primary || !envConfig.ha.standby) {
-    // Nothing structured to swap. The promotion + DNS flip already happened, so
-    // warn rather than throw — a role reconcile just can't be persisted here.
+  let swapped = false;
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[envName];
+    // Nothing structured to swap: leave the file untouched (warned below).
+    if (!envConfig?.ha?.primary || !envConfig.ha.standby) return;
+    swapped = true;
+    const ha = envConfig.ha;
+    // Swap the role objects wholesale (stack / region / IP fields ride along).
+    [ha.primary, ha.standby] = [ha.standby, ha.primary];
+    // servers[] records the same roles; resolvePrimary refuses a config whose
+    // two records disagree. db, worker and master entries carry other roles.
+    envConfig.servers = swapServerRoles(envConfig.servers);
+
+    // Swap the top-level regions to match the new primary / standby.
+    [envConfig.region, envConfig.secondaryRegion] = [envConfig.secondaryRegion, envConfig.region];
+    // failoverRegion tracks the standby's region — keep it consistent.
+    ha.failoverRegion = envConfig.secondaryRegion;
+    // Honest DR posture until a reconverge deploy re-establishes streaming.
+    envConfig.replication = 'degraded';
+    envConfig.degraded = true;
+    // The failback guard compares this with deployedAt: until a deploy
+    // reconverges, the new standby is the old primary and holds no replica.
+    envConfig.lastFailover = new Date().toISOString();
+    // A failover that skipped the replica proof says so on the record.
+    if (override) envConfig.lastFailoverOverride = override;
+    else delete envConfig.lastFailoverOverride;
+    // R2: the journal is cleared by the same save that persists the swap, so no
+    // crash can leave a swapped config that still claims a failover in flight.
+    delete ha.failoverInFlight;
+    // The retired side's read-only state now belongs to the retired-node
+    // handling, not to the interrupted-fence marker.
+    delete ha.writeFence;
+  });
+  if (!swapped) {
+    // The promotion + DNS flip already happened, so warn rather than throw — a
+    // role reconcile just can't be persisted here.
     p.log.warn('Could not persist role swap, ha.primary/standby missing from config');
-    return;
   }
-  const ha = envConfig.ha;
-  // Swap the role objects wholesale (stack / region / IP fields ride along).
-  [ha.primary, ha.standby] = [ha.standby, ha.primary];
-  // Swap the top-level regions to match the new primary / standby.
-  [envConfig.region, envConfig.secondaryRegion] = [envConfig.secondaryRegion, envConfig.region];
-  // failoverRegion tracks the standby's region — keep it consistent.
-  ha.failoverRegion = envConfig.secondaryRegion;
-  // Honest DR posture until a reconverge deploy re-establishes streaming.
-  envConfig.replication = 'degraded';
-  envConfig.degraded = true;
-  // The failback guard compares this with deployedAt: until a deploy
-  // reconverges, the new standby is the old primary and holds no replica.
-  envConfig.lastFailover = new Date().toISOString();
-  // A failover that skipped the replica proof says so on the record.
-  if (override) envConfig.lastFailoverOverride = override;
-  else delete envConfig.lastFailoverOverride;
-  // R2: the journal is cleared by the same save that persists the swap, so no
-  // crash can leave a swapped config that still claims a failover in flight.
-  delete ha.failoverInFlight;
-  // The retired side's read-only state now belongs to the retired-node
-  // handling, not to the interrupted-fence marker.
-  delete ha.writeFence;
-  saveProjectConfig(config);
 }
 
 /** How long `-abort` waits for the standby's db pod to be gone after the scale to zero. */
@@ -1738,6 +1751,7 @@ export async function failoverHA(
         projectConfig,
         tier: 'k8s-ha',
       }),
+    pushBaseBackup = pushBaseBackupAfterPromote,
   } = deps;
 
   const servers = identify(envName, envConfig, projectConfig);
@@ -2315,6 +2329,30 @@ export async function failoverHA(
     }
   }
 
+  // The first base backup on the new timeline (post-promote-backup.js): after
+  // the DNS flip, the add-ons, the WALG_ROLE move and the swap save, so it never
+  // holds the outage open. Not attempted while the promoted cluster still reads
+  // standby (it would skip), nor after a DNS flip that was not confirmed (the
+  // site is down, and minutes of upload would only delay the error that says
+  // so): the degraded and DNS errors below name the missing base.
+  let basePush = { ok: true };
+  if (backupHealth.promoted.ok && dnsFlip.ok) {
+    s.start('Pushing the first base backup on the new timeline');
+    try {
+      const { name } = await pushBaseBackup({
+        tier: 'k8s',
+        ip: servers.standby.ip,
+        sshKeyPath,
+        envName,
+      });
+      s.stop(`Base backup ${name} pushed on the new timeline`);
+    } catch (err) {
+      s.stop('First base backup on the new timeline NOT pushed');
+      p.log.error(err.message);
+      basePush = { ok: false, error: err };
+    }
+  }
+
   if (!dnsFlip.ok) {
     p.log.warn(
       'The standby is promoted and the roles are saved, but DNS still points at the old primary.',
@@ -2353,7 +2391,12 @@ export async function failoverHA(
   // automated caller has to be able to see that.
   if (!dnsFlip.ok) {
     throw new FailoverDnsError(
-      dnsDidNotMessage({ domain, ip: standbyFloatingIp, reason: dnsFlip.reason }),
+      dnsDidNotMessage({
+        domain,
+        ip: standbyFloatingIp,
+        reason: dnsFlip.reason,
+        noBaseFor: envName,
+      }),
     );
   }
   if (!backupHealth.promoted.ok) {
@@ -2366,6 +2409,7 @@ export async function failoverHA(
       }),
     );
   }
+  if (!basePush.ok) throw basePush.error;
 }
 
 // ============================================================================
@@ -2373,35 +2417,45 @@ export async function failoverHA(
 // ============================================================================
 
 async function failoverSingleServer(envName, envConfig) {
-  const serverIp = envConfig.servers?.[0]?.ip;
-  const sshKeyPath = getSSHKeyPath(envName);
-
   p.log.warn('This environment has no standby region');
   p.log.info('Recovery requires deploying a new server and restoring from backup');
 
-  // Check for available backups. wal-g is the SINGLE SOURCE OF TRUTH for what is
-  // actually restorable — the legacy `/backups/*_full.tar.gz` + `*.sql.gz` S3
-  // objects are NOT wal-g backups and `vibecarbon restore` cannot replay them,
-  // so listing them here would tempt an operator to pick a non-restorable
-  // artifact mid-disaster. List wal-g base backups only.
-  if (serverIp && existsSync(sshKeyPath)) {
-    const s = spinner();
-    s.start('Checking for available backups (wal-g)');
-    const projectConfig = loadProjectConfig();
-    const projectName = projectConfig?.projectName || 'project';
-    const isCompose = envConfig.deployMode === 'compose' || envConfig.deployMode === 'compose-ha';
-    const backups = await listWalgBackups({ serverIp, sshKeyPath, projectName, isCompose });
+  // The restorable base backups, read from the backup bucket's stop sentinels
+  // (the listing restore resolves from). Never SSH: the server may be the
+  // thing that is gone. The legacy `/backups/*_full.tar.gz` + `*.sql.gz`
+  // objects are not wal-g backups and restore cannot replay them, so they are
+  // never offered here.
+  const s = spinner();
+  s.start('Checking for available backups');
+  const projectName = loadProjectConfig()?.projectName || 'project';
+  try {
+    const listing = await readEnvBaseBackups({
+      envName,
+      envConfig,
+      projectName,
+      // The lost server's database: its recorded lineage, never resolved.
+      live: true,
+      // A recovery guide never stops to ask: env vars or nothing.
+      skipPrompts: true,
+    });
     s.stop('Backup check complete');
-
-    if (backups.length > 0) {
-      p.log.info(c.bold(`Available wal-g base backups (${backups.length}, newest first):`));
-      for (const b of backups.slice(0, 5)) {
-        p.log.message(`  ${formatInstant(b.time).padEnd(22)} ${c.dim(b.name)}`);
-      }
+    if (listing.s3Config) {
+      printBaseBackupList({
+        backups: listing.backups,
+        envName,
+        location: listing.location,
+        limit: 5,
+      });
     } else {
-      p.log.info('No wal-g base backups found on the server');
-      p.log.info(`Create one with: ${c.info(`vibecarbon backup ${envName}`)}`);
+      p.log.info(
+        `Export ${backupCredentialVars(envConfig)} to list the backups ${c.info(`vibecarbon restore ${envName}`)} can use.`,
+      );
     }
+  } catch (err) {
+    s.stop('Backup check failed');
+    p.log.warn(
+      `Could not read the base backups from the backup bucket: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   p.log.info(c.bold('Recovery steps:'));

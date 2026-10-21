@@ -67,6 +67,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DB_CONTAINER, DB_POD } from '../../../src/lib/deploy/db-workload.js';
 import { getObjectStorageProvider, getProviderClass } from '../../../src/lib/providers/index.js';
+import { WALG_ENV_SOURCE } from '../../../src/lib/walg/restore-layout.js';
 import type { VerificationResult } from '../scenarios/types.js';
 import { e2eSshOpts } from '../utils/ssh.js';
 
@@ -103,9 +104,18 @@ export function walgPrefixFor(projectName: string, envName: string): string {
   return `backups/${projectName}/${envName}/walg/`;
 }
 
-/** Object key (prefix form) of one archived WAL segment. */
-export function walSegmentKeyPrefix(projectName: string, envName: string, segment: string): string {
-  return `${walgPrefixFor(projectName, envName)}${WALG_WAL_SUBDIR}${segment}`;
+/**
+ * Object key (prefix form) of one archived WAL segment. Each database lineage
+ * archives in its own folder under the env prefix, named by its system
+ * identifier (carbon/volumes/db/walg-env.sh); the probe reports it.
+ */
+export function walSegmentKeyPrefix(
+  projectName: string,
+  envName: string,
+  lineage: string,
+  segment: string,
+): string {
+  return `${walgPrefixFor(projectName, envName)}${lineage}/${WALG_WAL_SUBDIR}${segment}`;
 }
 
 /**
@@ -198,6 +208,10 @@ export function resolveObjectStorageCreds(
 export function buildWalSwitchProbe(): string {
   return [
     'set -u',
+    // The lineage folder every push uses (walg-env.sh); tried in a subshell
+    // first so the probe still exits 0 and reports.
+    `if ! ( ${WALG_ENV_SOURCE} ) >/dev/null 2>&1; then echo "WAL_SWITCH=fail:no-lineage"; exit 0; fi`,
+    WALG_ENV_SOURCE,
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a JS placeholder
     'PFX="${WALG_S3_PREFIX:-}"',
     'case "$PFX" in "" | s3:///*) echo "WAL_SWITCH=skip:no-backup-target"; exit 0 ;; esac',
@@ -219,6 +233,8 @@ export function buildWalSwitchProbe(): string {
     'fi',
     'echo "WAL_SWITCH=switched"',
     'echo "WAL_SWITCH_PREFIX=$PFX"',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a JS placeholder
+    'echo "WAL_SWITCH_LINEAGE=${PFX##*/}"',
     'echo "WAL_SWITCH_SEGMENT=$SEG"',
     'exit 0',
   ].join('\n');
@@ -230,12 +246,14 @@ export type WalSwitchStatus =
   | 'fail:standby-role'
   | 'fail:in-recovery'
   | 'fail:switch-returned-nothing'
+  | 'fail:no-lineage'
   | 'unparsed';
 
 export interface WalSwitchResult {
   status: WalSwitchStatus;
   prefix?: string;
   segment?: string;
+  lineage?: string;
 }
 
 const KNOWN_STATUSES: WalSwitchStatus[] = [
@@ -244,6 +262,7 @@ const KNOWN_STATUSES: WalSwitchStatus[] = [
   'fail:standby-role',
   'fail:in-recovery',
   'fail:switch-returned-nothing',
+  'fail:no-lineage',
 ];
 
 /**
@@ -266,6 +285,8 @@ export function parseWalSwitchOutput(raw: string): WalSwitchResult {
       out.prefix = value;
     } else if (key === 'WAL_SWITCH_SEGMENT') {
       out.segment = value;
+    } else if (key === 'WAL_SWITCH_LINEAGE' && /^[0-9]+$/.test(value)) {
+      out.lineage = value;
     }
   }
   return out;
@@ -436,7 +457,7 @@ export async function runBackupEvidenceChecks(
       skip('backup_walg_canonical_prefix', { skipped: 'WALG_S3_PREFIX empty (backups off)' }),
     ];
   }
-  if (probe.status !== 'switched' || !probe.segment) {
+  if (probe.status !== 'switched' || !probe.segment || !probe.lineage) {
     const why =
       probe.status === 'fail:standby-role'
         ? 'the node resolved as PRIMARY still carries WALG_ROLE=standby — its archive path is write-guarded off, so nothing is being backed up (the rot #218 fixed)'
@@ -444,7 +465,9 @@ export async function runBackupEvidenceChecks(
           ? 'the node resolved as PRIMARY is still in recovery — it cannot archive WAL'
           : probe.status === 'fail:switch-returned-nothing'
             ? 'pg_switch_wal() returned no segment name (psql unreachable inside the container?)'
-            : `unrecognized probe output: ${probeRaw.slice(0, 300)}`;
+            : probe.status === 'fail:no-lineage'
+              ? 'walg-env.sh could not read the database system identifier, so the node cannot name its archive folder'
+              : `unrecognized probe output: ${probeRaw.slice(0, 300)}`;
     return [
       fail('backup_walg_wal_archived', `WAL-switch probe did not close a segment — ${why}`, {
         probeStatus: probe.status,
@@ -484,7 +507,7 @@ export async function runBackupEvidenceChecks(
     probePrefix = (prefix: string) => s3.hasObjectsWithPrefix(target.bucket, prefix);
   }
 
-  const segmentPrefix = walSegmentKeyPrefix(projectName, envPrefix, probe.segment);
+  const segmentPrefix = walSegmentKeyPrefix(projectName, envPrefix, probe.lineage, probe.segment);
   const deadline = Date.now() + budgetMs;
   let landed = false;
   let lastError: string | undefined;

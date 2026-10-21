@@ -1,6 +1,17 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as p from '@clack/prompts';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runComposeRestore } from '../../../src/restore.js';
+
+// The real config writers (journal, proof, fence marker) run in these tests
+// against no project: point them at an empty dir, never the repo root, where
+// they would take the real config lock.
+const noProjectDir = mkdtempSync(join(tmpdir(), 'vc-no-project-'));
+beforeEach(() => {
+  vi.spyOn(process, 'cwd').mockReturnValue(noProjectDir);
+});
 
 // ---------------------------------------------------------------------------
 // runComposeRestore() — compose-ha standby re-seed after a wal-g restore.
@@ -19,8 +30,34 @@ function makeSpinner() {
   return { start: vi.fn(), stop: vi.fn(), message: vi.fn() };
 }
 
+// The base run() resolved from the bucket's stop sentinels.
+const BASE = {
+  name: 'base_000000010000000000000002',
+  timeline: 1,
+  finishTime: new Date('2026-10-20T01:00:00Z'),
+  sizeBytes: 4_290_228,
+  uncompressedBytes: 23_439_374,
+};
+
+/** restoreCompose's 4th argument for BASE restored to `latest`. */
+const restorePoint = () =>
+  expect.objectContaining({
+    backup: BASE.name,
+    lineage: '7699032860122738725',
+    target: 'latest',
+    // Pinned to the lineage run() resolved (I1); the timeline line follows it.
+    recoveryConf: expect.stringMatching(
+      /export RESTORE_LINEAGE=7699032860122738725;[\s\S]*recovery_target_timeline = 'current'/,
+    ),
+    requiredBytes: BASE.uncompressedBytes,
+    assertWritable: expect.any(Function),
+  });
+
 const baseArgs = {
   chosenSource: { kind: 's3' as const, name: 'latest' },
+  base: BASE,
+  // The lineage run() resolved (its archive folder holds BASE).
+  lineage: '7699032860122738725',
   envName: 'prod',
   projectName: 'myapp',
   serverIp: '10.0.0.1', // primary (servers[0])
@@ -29,7 +66,8 @@ const baseArgs = {
   readStandbyState: async () => ({ inRecovery: true, systemIdentifier: '7412345678901234567' }),
   markStandbyUnproven: () => {},
   recordSystemIdentifier: () => {},
-  assertWritable: async () => {},
+  assertWritable: async () => 'writable',
+  pushBaseBackup: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
 };
 
 // The restore target (serverIp) is derived in run() as the role==='primary'
@@ -79,7 +117,7 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
     });
 
     // Primary restored first.
-    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.1', '/tmp/key', 'myapp', 'latest');
+    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.1', '/tmp/key', 'myapp', restorePoint());
     // Standby re-seeded FROM the restored primary: (standbyIp, primaryIp, key,
     // name), dialing the primary's own tunnel address (its stack's, wgIpOf).
     expect(configureStandbyReplication).toHaveBeenCalledWith(
@@ -205,7 +243,7 @@ describe('runComposeRestore — compose-ha standby re-seed', () => {
       configureStandbyReplication,
     });
 
-    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.2', '/tmp/key', 'myapp', 'latest');
+    expect(restoreCompose).toHaveBeenCalledWith('10.0.0.2', '/tmp/key', 'myapp', restorePoint());
     expect(configureStandbyReplication).not.toHaveBeenCalled();
     const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
     expect(text).toMatch(/failed over/);
@@ -360,6 +398,8 @@ describe('runComposeRestore: a standby not re-seeded and verified is marked unpr
 // Final review M4: a backup taken under a stranded write fence carries
 // default_transaction_read_only=on, so the restored primary must be proven
 // writable (or lifted) before anything else.
+// restoreCompose runs the proof (before it drops the previous cluster), so the
+// injected restoreCompose calls the assertWritable it is handed.
 describe('runComposeRestore: the restored primary is proven writable first (M4)', () => {
   it('right after the restore, before the standby reseed', async () => {
     const order: string[] = [];
@@ -373,8 +413,9 @@ describe('runComposeRestore: the restored primary is proven writable first (M4)'
           { name: 'myapp-prod-standby', ip: '10.0.0.2', role: 'standby' },
         ],
       },
-      restoreCompose: vi.fn(async () => {
+      restoreCompose: vi.fn(async (_ip, _key, _project, point) => {
         order.push('restore');
+        await point.assertWritable();
       }),
       configureStandbyReplication: vi.fn(async () => {
         order.push('reseed');
@@ -417,5 +458,80 @@ describe('assertRestoredPrimaryWritable', () => {
     await expect(
       assertRestoredPrimaryWritable({ environment: 'prod', envConfig: {}, exec }),
     ).rejects.toThrow(/write-fenced and could not be lifted/);
+  });
+});
+
+describe('runComposeRestore: the first base on the restored timeline (H2b)', () => {
+  const haEnv = {
+    deployMode: 'compose-ha',
+    backup: { retentionDays: 14 },
+    servers: [
+      { ip: '10.0.0.1', role: 'primary' },
+      { ip: '10.0.0.2', role: 'standby' },
+    ],
+  };
+
+  it('pushes on the restored primary after restoreCompose (which retired .vc-prev), before the re-seed', async () => {
+    const restoreCompose = vi.fn().mockResolvedValue(undefined);
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const pushBaseBackup = vi.fn(async () => ({ name: 'base_000000020000000000000004' }));
+    await runComposeRestore({
+      ...baseArgs,
+      s: makeSpinner(),
+      envConfig: haEnv,
+      restoreCompose,
+      configureStandbyReplication,
+      pushBaseBackup,
+    });
+    expect(pushBaseBackup).toHaveBeenCalledWith({
+      tier: 'compose',
+      ip: '10.0.0.1',
+      sshKeyPath: '/tmp/key',
+      projectName: 'myapp',
+      envName: 'prod',
+      retain: 14,
+    });
+    expect(restoreCompose.mock.invocationCallOrder[0]).toBeLessThan(
+      pushBaseBackup.mock.invocationCallOrder[0],
+    );
+    expect(pushBaseBackup.mock.invocationCallOrder[0]).toBeLessThan(
+      configureStandbyReplication.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('a failed push still re-seeds the standby, then fails the restore with its message', async () => {
+    const fail = new Error(
+      'promoted, but the first base backup on the new timeline failed: boom; run vibecarbon backup prod now',
+    );
+    const configureStandbyReplication = vi.fn().mockResolvedValue(true);
+    const success = vi.spyOn(p.log, 'success');
+    await expect(
+      runComposeRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: haEnv,
+        restoreCompose: vi.fn().mockResolvedValue(undefined),
+        configureStandbyReplication,
+        pushBaseBackup: vi.fn().mockRejectedValue(fail),
+      }),
+    ).rejects.toBe(fail);
+    expect(configureStandbyReplication).toHaveBeenCalled();
+    expect(success).not.toHaveBeenCalledWith('Restore completed successfully');
+    success.mockRestore();
+  });
+
+  it('a restore that fails never pushes', async () => {
+    const pushBaseBackup = vi.fn();
+    await expect(
+      runComposeRestore({
+        ...baseArgs,
+        s: makeSpinner(),
+        envConfig: haEnv,
+        restoreCompose: vi.fn().mockRejectedValue(new Error('fetch failed')),
+        configureStandbyReplication: vi.fn(),
+        pushBaseBackup,
+      }),
+    ).rejects.toThrow('fetch failed');
+    expect(pushBaseBackup).not.toHaveBeenCalled();
   });
 });

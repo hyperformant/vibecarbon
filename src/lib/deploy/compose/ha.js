@@ -15,8 +15,9 @@ import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { reapChallengeRecords } from '../../acme-challenge.js';
 import { exitCancelled, exitDeclined } from '../../cli/exit-guard.js';
+import { resolvePrimary } from '../../cli/resolve-primary.js';
 import { c } from '../../colors.js';
-import { loadProjectConfig, saveProjectConfig } from '../../config.js';
+import { loadProjectConfig, updateProjectConfig } from '../../config.js';
 import { environmentServerNames } from '../../destroy/server-naming.js';
 import {
   DNS_PROVIDERS,
@@ -31,6 +32,7 @@ import {
   composeWriterServices,
   enabledAddonNames,
 } from '../../services/standby-policy.js';
+import { pushBaseBackupAfterPromote } from '../../walg/post-promote-backup.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
 import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
 import { RECONCILE_FLAGS_SED } from '../bundle.js';
@@ -86,6 +88,7 @@ import {
   wgIpOf,
 } from '../wireguard.js';
 import {
+  assertNoScaleCutoverInFlight,
   clearWriteFenceMarker,
   liftStrandedWriteFence,
   writeWriteFenceMarker,
@@ -177,9 +180,11 @@ export async function resolveHaServers({ projectName, environment, envConfig, pr
 //   container's `command:`. A promoted standby runs the SAME image/command,
 //   so it starts archiving WAL on the new timeline immediately after promotion.
 //   No extra step is needed.
-//   WALG_S3_PREFIX is derived from S3_BACKUP_BUCKET + PROJECT_NAME (see
-//   docker-compose.yml:197) and is identical on both nodes — same .env is
-//   deployed to both servers via setupServerFiles. The WAL timeline is therefore
+//   WALG_S3_PREFIX_BASE is derived from S3_BACKUP_BUCKET + PROJECT_NAME (see
+//   docker-compose.yml) and is identical on both nodes — same .env is
+//   deployed to both servers via setupServerFiles — and both nodes hold one
+//   database (one system identifier), so walg-env.sh resolves the same
+//   lineage folder on either. The WAL timeline is therefore
 //   continuous across failover: pre-promotion WAL is on TL1, post-promotion WAL
 //   is on TL2, both under the same S3 prefix.
 //   Note: a PostgreSQL standby with archive_mode=on does NOT archive while it is
@@ -1625,39 +1630,40 @@ export async function startOldPrimaryWriters(ip, sshKeyPath, containers) {
  * Persist a compose-HA failover: flip the two `role` fields in place (names and
  * array order keep their Pulumi identity, see ha-role-swap.js), swap the
  * regions, stamp lastFailover and clear the failover journal in the same save
- * (R2). Loads a fresh config: the journal and a reseed's identifier were saved
- * mid-run, and an in-memory copy would write them back stale.
+ * (R2). Patches the fresh config under the config lock: the journal and a
+ * reseed's identifier were saved mid-run, and an in-memory copy would write
+ * them back stale.
  *
  * @param {string} envName
  * @param {{ override?: string }} [opts]
  */
 export function swapComposeHaRoles(envName, { override } = {}) {
-  const config = loadProjectConfig();
-  const envConfig = config?.environments?.[envName];
-  if (!envConfig) {
-    throw new Error(`could not persist the role swap: ${envName} is not in .vibecarbon.json`);
-  }
-  const servers = envConfig.servers || [];
-  const oldPrimary = servers.find((sv) => sv.role === 'primary');
-  const oldStandby = servers.find((sv) => sv.role === 'standby');
-  envConfig.servers = servers.map((sv) => ({
-    ...sv,
-    role: sv.role === 'primary' ? 'standby' : 'primary',
-  }));
-  envConfig.region = oldStandby?.region ?? envConfig.secondaryRegion;
-  envConfig.secondaryRegion = oldPrimary?.region ?? envConfig.region;
-  envConfig.ha = { ...(envConfig.ha ?? {}), failoverRegion: envConfig.secondaryRegion };
-  delete envConfig.ha.failoverInFlight;
-  // The retired node's read-only state now belongs to the retired-node
-  // handling, not to the interrupted-fence marker.
-  delete envConfig.ha.writeFence;
-  // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
-  envConfig.replication = 'degraded';
-  envConfig.degraded = true;
-  envConfig.lastFailover = new Date().toISOString();
-  if (override) envConfig.lastFailoverOverride = override;
-  else delete envConfig.lastFailoverOverride;
-  saveProjectConfig(config);
+  updateProjectConfig((config) => {
+    const envConfig = config.environments?.[envName];
+    if (!envConfig) {
+      throw new Error(`could not persist the role swap: ${envName} is not in .vibecarbon.json`);
+    }
+    const servers = envConfig.servers || [];
+    const oldPrimary = servers.find((sv) => sv.role === 'primary');
+    const oldStandby = servers.find((sv) => sv.role === 'standby');
+    envConfig.servers = servers.map((sv) => ({
+      ...sv,
+      role: sv.role === 'primary' ? 'standby' : 'primary',
+    }));
+    envConfig.region = oldStandby?.region ?? envConfig.secondaryRegion;
+    envConfig.secondaryRegion = oldPrimary?.region ?? envConfig.region;
+    envConfig.ha = { ...(envConfig.ha ?? {}), failoverRegion: envConfig.secondaryRegion };
+    delete envConfig.ha.failoverInFlight;
+    // The retired node's read-only state now belongs to the retired-node
+    // handling, not to the interrupted-fence marker.
+    delete envConfig.ha.writeFence;
+    // Honest DR posture, as k8s swapHaRoles: the retired node replicates nothing.
+    envConfig.replication = 'degraded';
+    envConfig.degraded = true;
+    envConfig.lastFailover = new Date().toISOString();
+    if (override) envConfig.lastFailoverOverride = override;
+    else delete envConfig.lastFailoverOverride;
+  });
 }
 
 /**
@@ -1744,7 +1750,11 @@ export function composeFailoverAbortBackend({
     writeFence = writeComposeBackupFence,
   } = deps;
   const servers = envConfig.servers || [];
-  const primaryServer = servers.find((sv) => sv.role === 'primary');
+  // Zero primaries keeps the refusal below; two throw from the resolver
+  // instead of first-wins.
+  const primaryServer = servers.some((sv) => sv.role === 'primary')
+    ? resolvePrimary(envConfig, { env: envName })?.entry
+    : undefined;
   const standbyServer = servers.find((sv) => sv.role === 'standby');
   if (!primaryServer?.ip || !standbyServer?.ip) {
     throw new FailoverRefusedError(
@@ -1908,6 +1918,8 @@ export async function failoverComposeHA(
   // call, a dry run included. A reconverged pair passes: the reseed below dials
   // the role primary's own tunnel address.
   assertNoComposeHaRoleSwap({ projectName, environment: envName, envConfig });
+  // A compose scale stopped mid-cutover may have moved the primary already.
+  assertNoScaleCutoverInFlight({ environment: envName, envConfig, action: 'fail over' });
 
   const {
     keyExists = existsSync,
@@ -1934,6 +1946,8 @@ export async function failoverComposeHA(
     flipDns = flipComposeDns,
     writeFence = writeComposeBackupFence,
     recordFence = recordBackupFence,
+    restoreWalgRole = restoreComposeWalgRole,
+    pushBaseBackup = pushBaseBackupAfterPromote,
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -1945,7 +1959,11 @@ export async function failoverComposeHA(
   } = deps ?? {};
 
   const servers = envConfig.servers || [];
-  const primaryServer = servers.find((s) => s.role === 'primary');
+  // Zero primaries keeps the "could not identify" exit below; two throw from
+  // the resolver instead of first-wins.
+  const primaryServer = servers.some((s) => s.role === 'primary')
+    ? resolvePrimary(envConfig, { env: envName })?.entry
+    : undefined;
   const standbyServer = servers.find((s) => s.role === 'standby');
   const writerServices = failoverFenceServices(envConfig);
   const promotionServices = composePromotionServices(enabledAddonNames(envConfig));
@@ -2175,8 +2193,9 @@ export async function failoverComposeHA(
       // need (compose-ha 2026-07-07: "slot is active for PID"). The reseed
       // stages first and swaps PGDATA atomically, so on failure the standby
       // keeps its previous data. WAL-G archiving on the promoted node needs
-      // nothing here: archive_mode is in the db command line and WALG_S3_PREFIX
-      // is shared, so the timeline continues in S3.
+      // nothing here: archive_mode is in the db command line and the promoted
+      // node is the same database lineage (walg-env.sh resolves the same
+      // folder), so the timeline continues in S3.
       if (!needsReseed) {
         p.log.info('Standby streaming, skipping re-seed');
       } else if (planned) {
@@ -2302,7 +2321,7 @@ export async function failoverComposeHA(
   // recreated database. Never throws — the verdict is carried to the end of the
   // failover (see restoreComposeWalgRole).
   s.start('Moving the wal-g write-guard to the new primary');
-  const backupHealth = await restoreComposeWalgRole({
+  const backupHealth = await restoreWalgRole({
     promotedIp: standbyServer.ip,
     sshKeyPath,
     projectName,
@@ -2418,7 +2437,7 @@ export async function failoverComposeHA(
     p.log.warn(
       `Could not stop services on the old primary (${primaryServer.ip}). SPLIT-BRAIN RISK: ` +
         'it may still be serving writes. Stop it by hand before pointing clients at the ' +
-        `new primary — ssh root@${primaryServer.ip} 'docker stop ${oldPrimaryContainers}'.`,
+        `new primary:\n  ssh root@${primaryServer.ip} 'docker stop ${oldPrimaryContainers}'`,
     );
   }
   s.stop(
@@ -2566,6 +2585,32 @@ export async function failoverComposeHA(
     }
   }
 
+  // The first base backup on the new timeline (post-promote-backup.js): after
+  // the DNS flip, the add-ons, the WALG_ROLE move and the swap save, so it never
+  // holds the outage open. Not attempted while the promoted node still reads
+  // standby (it would skip), nor after a DNS flip that was not confirmed (the
+  // site is down, and minutes of upload would only delay the error that says
+  // so): the degraded and DNS errors below name the missing base.
+  let basePush = { ok: true };
+  if (backupHealth.ok && dnsFlip.ok) {
+    s.start('Pushing the first base backup on the new timeline');
+    try {
+      const { name } = await pushBaseBackup({
+        tier: 'compose',
+        ip: standbyServer.ip,
+        sshKeyPath,
+        projectName,
+        envName,
+        retain: envConfig.backup?.retentionDays,
+      });
+      s.stop(`Base backup ${name} pushed on the new timeline`);
+    } catch (err) {
+      s.stop('First base backup on the new timeline NOT pushed');
+      p.log.error(err.message);
+      basePush = { ok: false, error: err };
+    }
+  }
+
   if (dnsFlip.ok) p.log.success('Failover complete');
   else p.log.warn('The standby is promoted and the roles are saved, but DNS was not flipped.');
   // The roles persisted above are now inverted relative to the Pulumi stacks.
@@ -2586,7 +2631,12 @@ export async function failoverComposeHA(
   // unreachable), so it throws first; the roles are already saved.
   if (!dnsFlip.ok) {
     throw new FailoverDnsError(
-      dnsDidNotMessage({ domain: envConfig.domain, ip: standbyServer.ip, reason: dnsFlip.reason }),
+      dnsDidNotMessage({
+        domain: envConfig.domain,
+        ip: standbyServer.ip,
+        reason: dnsFlip.reason,
+        noBaseFor: envName,
+      }),
     );
   }
 
@@ -2606,4 +2656,5 @@ export async function failoverComposeHA(
       }),
     );
   }
+  if (!basePush.ok) throw basePush.error;
 }

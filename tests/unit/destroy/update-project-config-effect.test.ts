@@ -15,18 +15,21 @@
  *
  * Exercises the effect directly via DESTROY_EFFECTS (matches
  * destroy-plan.test.ts's own access pattern) rather than driving the whole
- * plan/CLI, with `lib/config.js`'s `saveProjectConfig` mocked so no real
- * file write happens.
+ * plan/CLI, with `lib/config.js`'s `updateProjectConfig` backed by an
+ * in-memory file (ctx.projectConfig is what is on disk) so no real write
+ * happens.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { projectConfigStore } from '../helpers/project-config-store.js';
 
-const saveProjectConfigMock = vi.fn();
+const store = projectConfigStore();
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    saveProjectConfig: (...a: unknown[]) => saveProjectConfigMock(...a),
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
+      store.updateProjectConfig(fn),
   };
 });
 
@@ -38,7 +41,7 @@ function fakeSpinner() {
 }
 
 function makeCtx(overrides: { pulumiDestroyFailed: boolean }) {
-  return {
+  const ctx = {
     projectConfig: {
       projectName: 'proj',
       environments: { prod: { deployMode: 'kubernetes', status: 'deployed' } },
@@ -50,24 +53,27 @@ function makeCtx(overrides: { pulumiDestroyFailed: boolean }) {
       pulumiDestroyFailed: overrides.pulumiDestroyFailed,
     },
   };
+  // What is on disk: the test's later edits to ctx.projectConfig land there too.
+  store.reset(ctx.projectConfig);
+  return ctx;
 }
 
 describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () => {
   beforeEach(() => {
-    saveProjectConfigMock.mockReset();
+    store.reset();
   });
 
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  it('deletes the environment entry and calls saveProjectConfig when pulumiDestroyFailed is false (unchanged behavior)', async () => {
+  it('deletes the environment entry and writes the config when pulumiDestroyFailed is false (unchanged behavior)', async () => {
     const ctx = makeCtx({ pulumiDestroyFailed: false });
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
-    expect(saveProjectConfigMock).toHaveBeenCalledTimes(1);
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
+    expect(store.state.writes).toHaveLength(1);
+    const savedConfig = store.state.writes[0];
     expect(savedConfig.environments).not.toHaveProperty('prod');
     expect(ctx.results.leaks.entries).toEqual([]);
     expect(ctx.spinner.stop).toHaveBeenCalledWith('Configuration updated');
@@ -96,7 +102,7 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
       s3: { bucket: 'proj-a1b2c3-prod-storage', stateBucket: 'proj-state' },
     } as never;
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
-    const saved = saveProjectConfigMock.mock.calls[0][0];
+    const saved = store.state.writes[0];
     expect(saved.environments.prod).toBeUndefined();
     expect(saved.destroyedEnvironments.prod).toMatchObject({
       deployMode: 'kubernetes',
@@ -123,12 +129,12 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
     expect(ctx.projectConfig).not.toHaveProperty('destroyedEnvironments');
   });
 
-  it('keeps the environment entry and never calls saveProjectConfig when pulumiDestroyFailed is true', async () => {
+  it('keeps the environment entry and never writes the config when pulumiDestroyFailed is true', async () => {
     const ctx = makeCtx({ pulumiDestroyFailed: true });
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
-    expect(saveProjectConfigMock).not.toHaveBeenCalled();
+    expect(store.state.writes).toEqual([]);
     // The ORIGINAL projectConfig object is untouched — the entry is still there.
     expect(ctx.projectConfig.environments).toHaveProperty('prod');
   });
@@ -173,7 +179,7 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
+    const savedConfig = store.state.writes[0];
     expect(savedConfig.stateBucketGeneration).toBe('aaaaaa');
     // bucketSalt still must NEVER rotate — the surviving backup bucket is found
     // by names embedding it (restore flows depend on this).
@@ -186,7 +192,7 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
+    const savedConfig = store.state.writes[0];
     expect(savedConfig).not.toHaveProperty('stateBucketGeneration');
   });
 
@@ -196,14 +202,14 @@ describe('updateProjectConfigEffect (DESTROY_EFFECTS.updateProjectConfig)', () =
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
-    expect(saveProjectConfigMock).not.toHaveBeenCalled();
+    expect(store.state.writes).toEqual([]);
     expect(ctx.projectConfig.stateBucketGeneration).toBe('aaaaaa');
   });
 });
 
 describe('storageBucketGeneration', () => {
   beforeEach(() => {
-    saveProjectConfigMock.mockReset();
+    store.reset();
   });
 
   it('never writes storageBucketGeneration', async () => {
@@ -213,7 +219,7 @@ describe('storageBucketGeneration', () => {
 
     await DESTROY_EFFECTS.updateProjectConfig(ctx);
 
-    const savedConfig = saveProjectConfigMock.mock.calls[0][0];
+    const savedConfig = store.state.writes[0];
     expect(savedConfig.storageBucketGeneration).toBe('aaaaaa');
   });
 });

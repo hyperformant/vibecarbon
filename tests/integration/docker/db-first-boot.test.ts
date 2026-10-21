@@ -48,10 +48,12 @@ describeDocker('db image first boot with an unreachable backup bucket', () => {
     copyFileSync(join(ROOT, 'carbon', 'docker-compose.yml'), join(dir, 'docker-compose.yml'));
     mkdirSync(join(dir, 'volumes', 'db'), { recursive: true });
     mkdirSync(join(dir, 'db', 'migrations'), { recursive: true });
-    copyFileSync(
-      join(ROOT, 'carbon', 'volumes', 'db', 'wal-archive.sh'),
-      join(dir, 'volumes', 'db', 'wal-archive.sh'),
-    );
+    for (const script of ['wal-archive.sh', 'db-guard.sh']) {
+      copyFileSync(
+        join(ROOT, 'carbon', 'volumes', 'db', script),
+        join(dir, 'volumes', 'db', script),
+      );
+    }
     const prefix = pickFreeSubnetPrefix(listDockerNetworks() ?? [], PROJECT);
     if (!prefix) throw new Error('no free 172.30.x.0/24 for the test network');
     const env = {

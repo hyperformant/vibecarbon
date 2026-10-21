@@ -5,7 +5,7 @@
  * is usually why it ran). When that node comes back it still believes it is
  * the primary: its app and add-ons write, its WAL archiver and nightly base
  * backup push into the shared prefix the new primary owns, and
- * `wal-g delete retain` can prune the new primary's backups. So the retired
+ * `wal-g delete before` can prune the new primary's backups. So the retired
  * side is fenced by markers it enforces itself, and every HA command (status,
  * failover, deploy) re-applies it on any reachable side the persisted roles
  * call retired:
@@ -852,12 +852,20 @@ describe('wal-archive.sh refuses on a retired node', () => {
     mkdirSync(pgdata);
     if (marker) writeFileSync(join(pgdata, RETIRED_DB_MARKER), '');
     const calls = stubBin(join(base, 'bin'), ['wal-g', 'psql']);
+    writeFileSync(
+      join(base, 'bin', 'pg_controldata'),
+      '#!/bin/sh\necho "Database system identifier:           7699032860122738725"\n',
+    );
+    chmodSync(join(base, 'bin', 'pg_controldata'), 0o755);
     const r = spawnSync('bash', [script, 'pg_wal/000000010000000000000001'], {
       encoding: 'utf-8',
       env: {
         PATH: `${join(base, 'bin')}:${process.env.PATH}`,
         PGDATA: pgdata,
-        WALG_S3_PREFIX: 's3://bucket/backups/acme',
+        // The base; walg-env.sh (the real file, with a stub pg_controldata)
+        // appends the lineage folder.
+        WALG_S3_PREFIX_BASE: 's3://bucket/backups/acme',
+        WALG_ENV_SH: join(repoRoot, 'carbon/volumes/db/walg-env.sh'),
         WALG_ROLE: 'primary',
         WAL_ARCHIVE_RETRIES: '1',
         WAL_ARCHIVE_SLEEP: '0',
@@ -953,6 +961,8 @@ describe('the k8s backup CronJob refuses on a retired cluster', () => {
       encoding: 'utf-8',
       env: {
         PATH: `${join(base, 'bin')}:${process.env.PATH}`,
+        // From the per-cluster vibecarbon-backup-settings ConfigMap; no default.
+        BACKUP_RETENTION_DAYS: '7',
         ...(role !== undefined && { [RETIRED_ROLE_KEY]: role }),
       },
       timeout: 10_000,

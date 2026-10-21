@@ -53,7 +53,7 @@ vi.mock('../../../src/lib/project-guard.js', () => guardMock);
 
 const configMock = vi.hoisted(() => ({
   loadProjectConfig: vi.fn(() => null),
-  saveProjectConfig: vi.fn(),
+  updateProjectConfig: vi.fn(),
 }));
 vi.mock('../../../src/lib/config.js', () => configMock);
 

@@ -24,7 +24,7 @@ vi.mock('../../../src/lib/iac/converge-cluster.js', () => ({
   convergeClusterInfra: vi.fn(async () => ({ outputs: {} })),
 }));
 vi.mock('../../../src/lib/command.js', () => ({ runCommand: vi.fn(() => '') }));
-vi.mock('../../../src/lib/config.js', () => ({ saveProjectConfig: vi.fn() }));
+vi.mock('../../../src/lib/config.js', () => ({ updateProjectConfig: vi.fn() }));
 
 const { NO_APP_ENV_MARKER, readOldAppEnv } = await import('../../../src/scale.js');
 
@@ -68,12 +68,23 @@ describe('scale keeps the .env replay when the app.env read fails', () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const src = readFileSync(join(process.cwd(), 'src/scale.js'), 'utf-8');
-    const tryStart = src.indexOf('let newIp;\n    try {');
-    const appRead = src.indexOf('oldAppEnv = await readOldAppEnv(', tryStart);
-    expect(tryStart).toBeGreaterThan(-1);
-    expect(appRead).toBeGreaterThan(tryStart);
-    // Not wrapped in its own catch that would swallow it.
+    // The read lives in prepareReplacementServer, not in a catch of its own...
+    const prepStart = src.indexOf('async function prepareReplacementServer(');
+    const prepEnd = src.indexOf('\n}\n', prepStart);
+    const appRead = src.indexOf('oldAppEnv = await readOldAppEnv(', prepStart);
+    expect(prepStart).toBeGreaterThan(-1);
+    expect(appRead).toBeGreaterThan(prepStart);
+    expect(appRead).toBeLessThan(prepEnd);
     expect(src.slice(appRead - 200, appRead)).not.toMatch(/try\s*\{\s*$/);
+    // ...and every arm calls it inside the try whose catch deletes the new server.
+    const calls = [...src.matchAll(/newIp = await prepareReplacementServer\(/g)];
+    expect(calls.length).toBe(2);
+    for (const call of calls) {
+      const before = src.slice(0, call.index);
+      expect(before.lastIndexOf('try {')).toBeGreaterThan(
+        before.lastIndexOf('createReplacementServer('),
+      );
+    }
   });
 
   it('reads app.env only after, and outside, the .env read', async () => {

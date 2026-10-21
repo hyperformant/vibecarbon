@@ -312,7 +312,7 @@ Before deploying, test the full production stack locally.
 Use `docker stats` to ensure limits are appropriate.
 
 ### 4. Scale Horizontally
-For more capacity, resize the server (Compose, blue-green with no downtime) or add workers (Kubernetes, the autoscaler's floor and ceiling):
+For more capacity, resize the server (Compose, blue-green: the app pauses while its database moves) or add workers (Kubernetes, the autoscaler's floor and ceiling):
 ```bash
 vibecarbon scale <env>
 ```

@@ -6,7 +6,7 @@
  * it is the primary. Its app serves stale data to any client on old DNS, its
  * add-ons and pg_cron keep writing, its archive_command pushes WAL into the
  * backup prefix the new primary owns, and its nightly base backup does too,
- * ending in a `wal-g delete retain` that can prune the new primary's backups.
+ * ending in a `wal-g delete before` that can prune the new primary's backups.
  * Until a deploy rebuilds it as the standby, the side the persisted roles call
  * retired is fenced by markers it enforces itself:
  *

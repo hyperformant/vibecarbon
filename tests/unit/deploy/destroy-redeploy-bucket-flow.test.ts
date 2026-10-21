@@ -27,14 +27,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { projectConfigStore } from '../helpers/project-config-store.js';
 
-const saveProjectConfigMock = vi.fn();
+const store = projectConfigStore();
 
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    saveProjectConfig: (...a: unknown[]) => saveProjectConfigMock(...a),
+    updateProjectConfig: (fn: (c: Record<string, unknown>) => unknown) =>
+      store.updateProjectConfig(fn),
   };
 });
 
@@ -80,6 +82,7 @@ function deployedProject() {
 
 /** Run destroy's config effect the way a plain destroy (bucket kept) does. */
 async function destroyE1(projectConfig: ReturnType<typeof deployedProject>) {
+  store.reset(structuredClone(projectConfig));
   await DESTROY_EFFECTS.updateProjectConfig({
     projectConfig,
     environment: 'e1',
@@ -90,8 +93,8 @@ async function destroyE1(projectConfig: ReturnType<typeof deployedProject>) {
       s3Bucket: null,
     },
   });
-  expect(saveProjectConfigMock).toHaveBeenCalledTimes(1);
-  return saveProjectConfigMock.mock.calls[0][0];
+  expect(store.state.writes).toHaveLength(1);
+  return store.state.writes[0];
 }
 
 describe('app bucket name across destroy -> redeploy -> restore', () => {
@@ -100,7 +103,7 @@ describe('app bucket name across destroy -> redeploy -> restore', () => {
   const stages: string[] = [];
 
   beforeEach(() => {
-    saveProjectConfigMock.mockReset();
+    store.reset();
     cwdBackup = process.cwd();
     projectDir = mkdtempSync(join(tmpdir(), 'vc-bucket-flow-'));
   });

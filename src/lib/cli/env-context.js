@@ -16,8 +16,11 @@
  */
 
 import * as p from '@clack/prompts';
+import { resolvePrimary } from './resolve-primary.js';
 import { selectEnvironment } from './select-environment.js';
 import { requireTTYOrFlags } from './tty-guard.js';
+
+export { AmbiguousPrimaryError, resolvePrimary } from './resolve-primary.js';
 
 /**
  * @param {object} opts
@@ -29,13 +32,10 @@ import { requireTTYOrFlags } from './tty-guard.js';
  * @param {object} opts.projectConfig - return value of assertInProjectDir()
  * @param {Array<{flag: string, description: string, satisfied: boolean}>} [opts.extraRequirements]
  *   - additional TTY-guard requirements, appended after the env requirement
- * @param {'first'|'primary'} [opts.serverIp] - also resolve the target server
- *   IP (exit 1 with the canonical message when none exists):
- *   - 'primary': pick the CURRENT primary by role — a prior failover may have
- *     swapped roles while preserving array order, so servers[0] is not
- *     reliably the primary. Falls back to servers[0] for non-HA modes that
- *     have no role.
- *   - 'first': servers[0].
+ * @param {'primary'} [opts.serverIp] - also resolve the target server IP via
+ *   resolvePrimary (exit 1 with the canonical message when none exists). A
+ *   prior failover swaps roles while preserving array order, so servers[0] is
+ *   not the primary; resolvePrimary is the one place that knows which is.
  * @returns {Promise<{envName: string, envConfig: object, serverIp?: string}>}
  */
 export async function resolveEnvContext({
@@ -73,9 +73,7 @@ export async function resolveEnvContext({
 
   if (!serverIp) return { envName, envConfig };
 
-  const primaryServer =
-    serverIp === 'primary' ? envConfig.servers?.find((sv) => sv.role === 'primary') : undefined;
-  const ip = primaryServer?.ip || envConfig.servers?.[0]?.ip;
+  const ip = resolvePrimary(envConfig, { env: envName })?.ip;
   if (!ip) {
     p.log.error(`No server IP found for environment '${envName}'.`);
     process.exit(1);

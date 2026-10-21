@@ -40,11 +40,11 @@
  *     single byte has been fetched.
  *   - `backup-push` writes a NEW base backup whose sentinel is written last,
  *     so a failed push leaves nothing selectable. It DOES leave a
- *     sentinel-less orphan that `delete retain` hard-crashes on ("object
+ *     sentinel-less orphan that `wal-g delete` hard-crashes on ("object
  *     …_backup_stop_sentinel.json not found in storage") — a PERMANENT
  *     failure this retry ladder cannot heal (proven 2026-08-30: all five
  *     attempts died on the same orphan). The backup scripts therefore run
- *     `wal-g delete garbage BACKUPS --confirm` before `delete retain`
+ *     `wal-g delete garbage BACKUPS --confirm` before the delete
  *     (census: tests/unit/deploy/walg-retention-orphan-sweep.test.ts), which
  *     makes each retry attempt self-healing again.
  *
@@ -70,7 +70,7 @@ import { runWithRetry } from '../retry.js';
  *
  *  - `NoSuchBucket`: the bucket itself 404s. This is the observed incident.
  *  - `NoSuchKey`: an object 404s. On a fetch this is a just-written base
- *    backup part or sentinel; on the push path it is `delete retain` listing
+ *    backup part or sentinel; on the push path it is the retention delete listing
  *    back what the push just wrote. (Unlike the pulumi lock-blob case, there
  *    is no path prefix worth pinning on: every key wal-g reads here belongs to
  *    the backup it is actively fetching or pruning.)

@@ -29,15 +29,12 @@
  * failure: a brand-new environment legitimately has no base backups until the
  * first `vibecarbon backup` or the nightly cron runs.
  *
- * `pg_stat_archiver` is read too, but it is deliberately NOT the primary
- * signal, because on this stack it cannot see the failure mode we care about:
- * `wal-archive.sh` retries and then exits 0 on purpose (a non-zero
- * archive_command pins pg_wal and fills the disk — RCA prod-1 2026-05-26), so
- * postgres counts every push as a success and `failed_count` stays 0 even when
- * every WAL segment is being dropped on the floor. What pg_stat_archiver DOES
- * see is the archive_command itself being broken — missing script, bad mount,
- * wrong interpreter — which surfaces as a real non-zero exit. So we use it for
- * exactly that, and only when the MOST RECENT archiver event was a failure
+ * `pg_stat_archiver` is read too. `wal-archive.sh` holds a segment it cannot
+ * push (exit 1 after its retries, so postgres keeps it and retries), which
+ * makes a failing push visible here as well as a broken archive_command
+ * (missing script, bad mount, wrong interpreter). It drops a segment (exit 0)
+ * only under disk pressure, with a record status reads. The audit fails only
+ * when the MOST RECENT archiver event was a failure
  * (`last_failed_time` newer than `last_archived_time`). Comparing timestamps
  * instead of `failed_count > 0` means a historical failure that has since been
  * fixed cannot false-red a warm redeploy, and it is computed in SQL so no
@@ -45,15 +42,15 @@
  *
  * A fresh cluster that has archived nothing yet has both timestamps NULL and is
  * reported as a PASS with a note — never a failure. Forcing a WAL switch to
- * manufacture a data point was considered and rejected: because the wrapper
- * exits 0 regardless, a forced switch would prove nothing that backup-list
- * hasn't already proven, at the cost of a 16 MiB segment on every deploy.
+ * manufacture a data point was considered and rejected: it would prove little
+ * that backup-list hasn't already proven, at the cost of a 16 MiB segment on
+ * every deploy.
  *
  * WHEN IT RUNS
  * ------------
  * Wherever wal-g is deployed, on both paths, gated on backups actually being
  * configured. Backups CAN be disabled (a deploy with no S3 bucket renders
- * `WALG_S3_PREFIX` as the empty-bucket form `s3:///backups/...` — see
+ * `WALG_S3_PREFIX_BASE` as the empty-bucket form `s3:///backups/...` — see
  * carbon/docker-compose.yml and carbon/k8s/base/db/statefulset.yaml), and
  * the probe detects that from INSIDE the container and reports a skip. Testing
  * the env wal-g actually sees is the same technique
@@ -97,7 +94,7 @@
 
 import { progressLog } from '../cli/progress.js';
 import { runWithRetry } from '../retry.js';
-import { parseWalgBackupList } from '../walg-backups.js';
+import { WALG_ENV_SOURCE } from '../walg/restore-layout.js';
 import { DB_POD } from './db-workload.js';
 
 /**
@@ -134,6 +131,10 @@ export const WALG_ARCHIVER_SQL =
  *
  * GUARD ORDER IS THE WHOLE POINT — it is what separates "configured" from
  * "working":
+ *   0. walg-env.sh resolves WALG_S3_PREFIX, this database lineage's folder (the
+ *      prefix every push uses). One that cannot read the system identifier
+ *      FAILS (`no-lineage`): nothing could archive from this node. It is
+ *      tried in a subshell first, so the probe still exits 0 and reports.
  *   1. No prefix at all (empty, or the `s3:///…` empty-bucket form both paths
  *      render when no bucket is set) → backups are deliberately OFF → skip.
  *   2. WALG_ROLE=standby → normally write-guarded by design → skip, before the
@@ -166,6 +167,8 @@ export function buildWalgAuditProbe({ requirePrimary = false } = {}) {
     : ['  echo "WALG_AUDIT=skip:standby-write-guard"; exit 0'];
   return [
     'set -u',
+    `if ! ( ${WALG_ENV_SOURCE} ) >/dev/null 2>&1; then echo "WALG_AUDIT=fail:no-lineage"; exit 0; fi`,
+    WALG_ENV_SOURCE,
     // biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion inside a shell script string, not a JS template placeholder
     'PFX="${WALG_S3_PREFIX:-}"',
     'case "$PFX" in "" | s3:///*) echo "WALG_AUDIT=skip:no-backup-target"; exit 0 ;; esac',
@@ -219,9 +222,9 @@ export const WALG_AUDIT_PROBE_TIMEOUT_MS = 120_000;
  * Human-readable "check this by hand" command per deploy path. Keyed by the
  * `path` a caller passes; unknown keys fall back to naming both.
  */
-const VERIFY_HINTS = {
-  compose: 'docker compose exec -T db wal-g backup-list',
-  k8s: `kubectl -n vibecarbon exec ${DB_POD} -- wal-g backup-list`,
+export const VERIFY_HINTS = {
+  compose: `docker compose exec -T db sh -c '${WALG_ENV_SOURCE} && wal-g backup-list'`,
+  k8s: `kubectl -n vibecarbon exec ${DB_POD} -- sh -c '${WALG_ENV_SOURCE} && wal-g backup-list'`,
 };
 
 /** Keep operator-facing error bodies bounded without losing the useful tail. */
@@ -324,7 +327,7 @@ export function parseWalgAuditOutput(raw) {
  * Count base backups out of `wal-g backup-list --json` output for the success
  * line. The probe merges stderr into the capture (wal-g logs INFO lines there
  * and we want them in failure messages), so slice out the JSON array before
- * handing it to the shared parser. Returns null when no array is present —
+ * counting. Returns null when no array is present —
  * reported as "unknown", never as a misleading 0.
  *
  * @param {string} listOutput
@@ -335,14 +338,16 @@ export function countWalgBackups(listOutput) {
   const start = text.indexOf('[');
   const end = text.lastIndexOf(']');
   if (start < 0 || end <= start) return null;
-  const arr = text.slice(start, end + 1);
+  let parsed;
   try {
-    const parsed = JSON.parse(arr);
-    if (!Array.isArray(parsed)) return null;
+    parsed = JSON.parse(text.slice(start, end + 1));
   } catch {
     return null;
   }
-  return parseWalgBackupList(arr).length;
+  if (!Array.isArray(parsed)) return null;
+  // An entry counts when it names a backup (wal-g's field name has drifted
+  // across versions).
+  return parsed.filter((b) => b && (b.backup_name ?? b.BackupName ?? b.name)).length;
 }
 
 /**
@@ -353,6 +358,13 @@ export function countWalgBackups(listOutput) {
  * @returns {string}
  */
 function preflightFailureDetail(parsed) {
+  if (parsed.reason === 'no-lineage') {
+    return (
+      'walg-env.sh could not read the database system identifier in PGDATA (pg_controldata), ' +
+      'so the db container cannot name its own archive folder and nothing will be archived. ' +
+      'Check that /etc/postgresql/walg-env.sh is mounted in the db container'
+    );
+  }
   if (parsed.reason === 'stale-standby-role') {
     // Only reachable under `requirePrimary`, i.e. from a failover that has
     // already promoted this node. Name the mechanism, because the symptom
@@ -450,8 +462,9 @@ export function evaluateWalgAudit(raw) {
         `pg_stat_archiver reports the most recent archive attempt FAILED ` +
         `(last_failed_wal=${parsed.archiver.lastFailedWal || '?'} at ` +
         `${parsed.archiver.lastFailedTime || '?'}, failed_count=` +
-        `${parsed.archiver.failedCount ?? '?'}). postgres could not even run ` +
-        `archive_command to completion, so this is the wrapper script itself: check that ` +
+        `${parsed.archiver.failedCount ?? '?'}). Either wal-g could not push the segment ` +
+        `(postgres keeps it and retries; the db log has a WAL_ARCHIVE_FAILED line with ` +
+        `wal-g's error) or the wrapper itself did not run: check that ` +
         `/etc/postgresql/wal-archive.sh is mounted and readable in the db container`,
     });
   }
@@ -528,7 +541,7 @@ export function walgAuditFailureMessage(result, path, { context = 'deploy' } = {
  * `stale-standby-role` belongs here for the same reason and one more: it is
  * raised mid-failover, where 20s of pointless backoff is 20s of RTO.
  */
-const NON_RETRYABLE_CODES = new Set(['no-credentials', 'stale-standby-role']);
+const NON_RETRYABLE_CODES = new Set(['no-credentials', 'stale-standby-role', 'no-lineage']);
 
 /** Success/skip one-liner, so a passing audit is visible rather than silent. */
 function successLine(result) {

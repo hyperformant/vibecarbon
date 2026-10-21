@@ -22,6 +22,7 @@
 import * as p from '@clack/prompts';
 import { c } from '../colors.js';
 import { exitCancelled } from './exit-guard.js';
+import { resolvePrimary } from './resolve-primary.js';
 
 /**
  * @param {object} projectConfig - parsed `.vibecarbon.json`.
@@ -87,7 +88,7 @@ export async function selectEnvironment(projectConfig, options) {
 
 /**
  * Build the hint string shown next to each env in the picker.
- * Combines status + region + first server IP so operators can
+ * Combines status + region + primary server IP so operators can
  * disambiguate by deploy state at a glance.
  *
  * @param {object} envConfig
@@ -97,7 +98,11 @@ function formatEnvHint(envConfig) {
   const parts = [];
   if (envConfig.status) parts.push(envConfig.status);
   if (envConfig.region) parts.push(envConfig.region);
-  const ip = envConfig.servers?.[0]?.ip;
+  // An ambiguous HA env still lists; the hint just omits the address.
+  let ip;
+  try {
+    ip = resolvePrimary(envConfig)?.ip;
+  } catch {}
   if (ip) parts.push(ip);
   return parts.join(' · ');
 }

@@ -448,7 +448,7 @@ async function main() {
         // arrives here as that file name, which reads as a baffling error.
         if (command.length === 1 && existsSync(join(process.cwd(), command))) {
           console.log(
-            "Your shell may have expanded ? to a file name. Quote it (vibecarbon '?') or run vibecarbon next.",
+            "Your shell may have expanded ? to a file name. Quote it (vibecarbon '?') or run vibecarbon next instead",
           );
         }
         console.log(`\nRun ${c.info('vibecarbon -h')} for usage information.`);

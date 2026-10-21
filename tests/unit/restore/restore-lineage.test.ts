@@ -1,0 +1,817 @@
+/**
+ * One archive folder per database lineage (H1, B1, B8; Decision 2, C16).
+ *
+ * The environment's backup prefix holds one folder per database, named by its
+ * system identifier. `.vibecarbon.json` records the current one
+ * (`backup.lineage`) and the ones before it (`backup.priorLineages`). Restore
+ * reads one lineage's folder: -lineage when given, the recorded one when it
+ * covers the target and no other is newer, and otherwise it refuses, listing
+ * each lineage with its newest base, rather than silently restore the new
+ * empty database or an old one.
+ */
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  parseSystemIdentifier,
+  recordDeployedLineage,
+  SYSTEM_IDENTIFIER_SQL,
+} from '../../../src/lib/deploy/backup-lineage.js';
+import { envIdentityOf, resolveEnvSeed } from '../../../src/lib/env-identity.js';
+import {
+  AmbiguousLineageError,
+  assertLineageCoversPoint,
+  listLineages,
+  NoRestorePointError,
+  readEnvBaseBackups,
+  recordBackupLineage,
+  resolveDeployRestorePoint,
+  resolveRestoreLineage,
+  restoredLineageRecord,
+  restoreLineageCommands,
+} from '../../../src/lib/walg/restore-base.js';
+import {
+  RESTORE_MARKER_KEYS,
+  restoreMarkerStringData,
+} from '../../../src/lib/walg/restore-layout.js';
+
+const OLD = '7612000000000000001';
+const NEW = '7699032860122738725';
+const BASE = 'backups/myapp/prod/walg';
+
+const sentinel = (finish: string) =>
+  JSON.stringify({ FinishTime: finish, LSN: 67108904, CompressedSize: 10, UncompressedSize: 20 });
+
+/** S3 with ListObjectsV2 Prefix/Delimiter semantics (Contents + CommonPrefixes). */
+function fakeS3(objects: Record<string, string>) {
+  const calls: Array<{ command: string; input: Record<string, unknown> }> = [];
+  return {
+    calls,
+    async send(cmd: { constructor: { name: string }; input: Record<string, unknown> }) {
+      calls.push({ command: cmd.constructor.name, input: cmd.input });
+      if (cmd.constructor.name === 'ListObjectsV2Command') {
+        const prefix = String(cmd.input.Prefix ?? '');
+        const under = Object.keys(objects).filter((k) => k.startsWith(prefix));
+        const contents = under.filter((k) => !k.slice(prefix.length).includes('/'));
+        const common = [
+          ...new Set(
+            under
+              .filter((k) => k.slice(prefix.length).includes('/'))
+              .map((k) => `${prefix}${k.slice(prefix.length).split('/')[0]}/`),
+          ),
+        ];
+        return {
+          Contents: contents.map((Key) => ({ Key })),
+          CommonPrefixes: common.map((Prefix) => ({ Prefix })),
+          IsTruncated: false,
+        };
+      }
+      if (cmd.constructor.name === 'GetObjectCommand') {
+        const body = objects[String(cmd.input.Key)];
+        if (body === undefined) throw Object.assign(new Error('NoSuchKey'), { name: 'NoSuchKey' });
+        return { Body: { transformToString: async () => body } };
+      }
+      throw new Error(`unexpected S3 command ${cmd.constructor.name}`);
+    },
+  };
+}
+
+const base = (lineage: string, name: string, finish: string) => ({
+  [`${BASE}/${lineage}/basebackups_005/${name}_backup_stop_sentinel.json`]: sentinel(finish),
+});
+
+/** The old database's two bases; the new database archived WAL only. */
+const destroyedAndRedeployed = {
+  ...base(OLD, 'base_000000010000000000000004', '2026-10-18T02:00:00Z'),
+  ...base(OLD, 'base_000000010000000000000008', '2026-10-19T02:00:00Z'),
+  [`${BASE}/${NEW}/wal_005/000000010000000000000001.lz4`]: 'x',
+  // Not a lineage folder (an object at the base root is no lineage).
+  [`${BASE}/vibecarbon-notes.txt`]: 'x',
+};
+
+const at = (iso: string) => new Date(iso);
+
+describe('listLineages', () => {
+  it('lists each system-identifier folder with its oldest and newest base', async () => {
+    const s3 = fakeS3(destroyedAndRedeployed);
+    const lineages = await listLineages({ s3, bucket: 'myapp-backups', base: BASE });
+    expect(lineages).toEqual([
+      { lineage: NEW, oldestFinish: null, newestFinish: null },
+      {
+        lineage: OLD,
+        oldestFinish: at('2026-10-18T02:00:00Z'),
+        newestFinish: at('2026-10-19T02:00:00Z'),
+      },
+    ]);
+    expect(s3.calls[0]).toEqual({
+      command: 'ListObjectsV2Command',
+      input: expect.objectContaining({ Prefix: `${BASE}/`, Delimiter: '/' }),
+    });
+  });
+
+  it('a missing bucket is no lineages', async () => {
+    const gone = {
+      send: async () => {
+        throw Object.assign(new Error('gone'), { name: 'NoSuchBucket' });
+      },
+    };
+    expect(await listLineages({ s3: gone, bucket: 'b', base: BASE })).toEqual([]);
+  });
+});
+
+const L = (lineage: string, oldest: string | null, newest: string | null) => ({
+  lineage,
+  oldestFinish: oldest ? at(oldest) : null,
+  newestFinish: newest ? at(newest) : null,
+});
+
+describe('resolveRestoreLineage (no -lineage)', () => {
+  const env = (lineage?: string) => ({ backup: lineage ? { lineage } : {} });
+
+  it('uses the recorded lineage when it covers the target and nothing else is newer', () => {
+    const lineages = [
+      L(OLD, '2026-10-01T00:00:00Z', '2026-10-10T00:00:00Z'),
+      L(NEW, '2026-10-15T00:00:00Z', '2026-10-20T00:00:00Z'),
+    ];
+    expect(resolveRestoreLineage({ envConfig: env(NEW), lineages })).toBe(NEW);
+    expect(
+      resolveRestoreLineage({
+        envConfig: env(NEW),
+        lineages,
+        target: at('2026-10-16T00:00:00Z'),
+      }),
+    ).toBe(NEW);
+  });
+
+  it('the recorded lineage has no base and a prior one does: refuses, listing both with their newest base', () => {
+    const lineages = [L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z'), L(NEW, null, null)];
+    let err: unknown;
+    try {
+      resolveRestoreLineage({ envConfig: env(NEW), lineages });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AmbiguousLineageError);
+    const message = (err as Error).message;
+    expect(message).toContain(`${OLD}  newest base 2026-10-19T02:00:00Z`);
+    expect(message).toContain(`${NEW}  no base backups yet (recorded for this environment)`);
+    expect(message).toContain('-lineage');
+    expect((err as AmbiguousLineageError).lineages.map((l) => l.lineage)).toEqual([OLD, NEW]);
+  });
+
+  it('a recorded lineage absent from the bucket, beside one that holds bases, is listed too', () => {
+    const lineages = [L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z')];
+    expect(() => resolveRestoreLineage({ envConfig: env(NEW), lineages })).toThrow(
+      new RegExp(`${NEW}  no base backups yet`),
+    );
+  });
+
+  it('a prior lineage with a newer base than the recorded one refuses', () => {
+    const lineages = [
+      L(NEW, '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'),
+      L(OLD, '2026-10-01T00:00:00Z', '2026-10-09T00:00:00Z'),
+    ];
+    expect(() => resolveRestoreLineage({ envConfig: env(NEW), lineages })).toThrow(
+      AmbiguousLineageError,
+    );
+  });
+
+  it('a point in time before the recorded lineage, with another lineage beside it, refuses', () => {
+    const lineages = [
+      L(OLD, '2026-10-01T00:00:00Z', '2026-10-05T00:00:00Z'),
+      L(NEW, '2026-10-15T00:00:00Z', '2026-10-20T00:00:00Z'),
+    ];
+    expect(() =>
+      resolveRestoreLineage({
+        envConfig: env(NEW),
+        lineages,
+        target: at('2026-10-03T00:00:00Z'),
+      }),
+    ).toThrow(AmbiguousLineageError);
+  });
+
+  it('only one lineage: it, recorded or not; a point before it still resolves (the base pick names the window)', () => {
+    const one = [L(NEW, '2026-10-15T00:00:00Z', '2026-10-20T00:00:00Z')];
+    expect(resolveRestoreLineage({ envConfig: env(NEW), lineages: one })).toBe(NEW);
+    expect(resolveRestoreLineage({ envConfig: {}, lineages: one })).toBe(NEW);
+    expect(
+      resolveRestoreLineage({
+        envConfig: env(NEW),
+        lineages: one,
+        target: at('2026-10-01T00:00:00Z'),
+      }),
+    ).toBe(NEW);
+  });
+
+  it('nothing recorded and two lineages with bases refuses', () => {
+    const lineages = [
+      L(OLD, '2026-10-01T00:00:00Z', '2026-10-05T00:00:00Z'),
+      L(NEW, '2026-10-15T00:00:00Z', '2026-10-20T00:00:00Z'),
+    ];
+    expect(() => resolveRestoreLineage({ envConfig: {}, lineages })).toThrow(AmbiguousLineageError);
+  });
+
+  it('no base anywhere: the recorded lineage, or null', () => {
+    expect(resolveRestoreLineage({ envConfig: env(NEW), lineages: [L(NEW, null, null)] })).toBe(
+      NEW,
+    );
+    expect(resolveRestoreLineage({ envConfig: {}, lineages: [] })).toBeNull();
+  });
+});
+
+describe('resolveRestoreLineage (-lineage)', () => {
+  const lineages = [L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z'), L(NEW, null, null)];
+
+  it('-lineage overrides the record and the ambiguity', () => {
+    expect(
+      resolveRestoreLineage({ envConfig: { backup: { lineage: NEW } }, lineages, flag: OLD }),
+    ).toBe(OLD);
+  });
+
+  it('a -lineage with no base backups, or that is no system identifier, refuses', () => {
+    expect(() => resolveRestoreLineage({ envConfig: {}, lineages, flag: NEW })).toThrow(
+      NoRestorePointError,
+    );
+    expect(() => resolveRestoreLineage({ envConfig: {}, lineages, flag: NEW })).toThrow(
+      new RegExp(`lineages with base backups: ${OLD}`),
+    );
+    expect(() => resolveRestoreLineage({ envConfig: {}, lineages, flag: '../x' })).toThrow(
+      /not a database system identifier/,
+    );
+  });
+});
+
+describe('readEnvBaseBackups reads one lineage folder', () => {
+  const S3 = {
+    bucket: 'myapp-backups',
+    endpoint: 'e',
+    region: 'r',
+    accessKey: 'a',
+    secretKey: 's',
+  };
+
+  it('the recorded new lineage with no base, beside the old one, refuses (never the empty one)', async () => {
+    await expect(
+      readEnvBaseBackups({
+        envName: 'prod',
+        envConfig: { deployMode: 'compose', backup: { lineage: NEW, priorLineages: [OLD] } },
+        projectName: 'myapp',
+        s3Config: S3,
+        makeClient: () => fakeS3(destroyedAndRedeployed),
+      }),
+    ).rejects.toThrow(AmbiguousLineageError);
+  });
+
+  it('-lineage reads that folder and names it in the location', async () => {
+    const s3 = fakeS3(destroyedAndRedeployed);
+    const listing = await readEnvBaseBackups({
+      envName: 'prod',
+      envConfig: { deployMode: 'compose', backup: { lineage: NEW, priorLineages: [OLD] } },
+      projectName: 'myapp',
+      s3Config: S3,
+      lineage: OLD,
+      makeClient: () => s3,
+    });
+    expect(listing.lineage).toBe(OLD);
+    expect(listing.location).toBe(`s3://myapp-backups/${BASE}/${OLD}`);
+    expect(listing.backups.map((b) => b.name)).toEqual([
+      'base_000000010000000000000004',
+      'base_000000010000000000000008',
+    ]);
+    const lists = s3.calls.filter((c) => c.command === 'ListObjectsV2Command');
+    expect(lists.at(-1)?.input.Prefix).toBe(`${BASE}/${OLD}/basebackups_005/`);
+  });
+
+  it('no lineage on record and none with bases: an empty listing at the base', async () => {
+    const listing = await readEnvBaseBackups({
+      envName: 'prod',
+      envConfig: { deployMode: 'compose' },
+      projectName: 'myapp',
+      s3Config: S3,
+      makeClient: () => fakeS3({}),
+    });
+    expect(listing).toMatchObject({
+      lineage: null,
+      backups: [],
+      location: `s3://myapp-backups/${BASE}`,
+    });
+  });
+});
+
+describe('deploy -restore resolves the lineage too', () => {
+  const s3Config = {
+    bucket: 'myapp-backups',
+    walgPrefix: BASE,
+    endpoint: 'e',
+    region: 'r',
+    accessKey: 'a',
+    secretKey: 's',
+  };
+  const args = (over: Record<string, unknown> = {}) => ({
+    restore: 'latest',
+    k8s: true,
+    s3Config,
+    credentialVars: 'HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY',
+    makeClient: () => fakeS3(destroyedAndRedeployed),
+    ...over,
+  });
+
+  it("the destroyed environment's recorded lineage: its newest base, and the marker names the lineage", async () => {
+    const point = await resolveDeployRestorePoint(
+      args({ envConfig: { backup: { lineage: OLD } } }),
+    );
+    expect(point).toMatchObject({ backup: 'base_000000010000000000000008', lineage: OLD });
+    // restore_command is pinned to the same lineage (I1).
+    expect(point?.recoveryConf).toContain(`export RESTORE_LINEAGE=${OLD};`);
+    const marker = restoreMarkerStringData({ ...point, origin: 'deploy' } as never);
+    expect(marker.RESTORE_LINEAGE).toBe(OLD);
+  });
+
+  it('ambiguous refuses; -lineage chooses; -lineage without -restore refuses', async () => {
+    await expect(
+      resolveDeployRestorePoint(args({ envConfig: { backup: { lineage: NEW } } })),
+    ).rejects.toThrow(AmbiguousLineageError);
+    await expect(
+      resolveDeployRestorePoint(args({ envConfig: { backup: { lineage: NEW } }, lineage: OLD })),
+    ).resolves.toMatchObject({ lineage: OLD });
+    await expect(resolveDeployRestorePoint(args({ restore: null, lineage: OLD }))).rejects.toThrow(
+      /pass it with -restore/,
+    );
+  });
+});
+
+describe('the restore marker carries RESTORE_LINEAGE', () => {
+  const marker = {
+    backup: 'base_000000010000000000000004',
+    target: 'latest',
+    recoveryConf: '-restore_command',
+    attempt: '0f0e5c1a-0000-4000-8000-000000000001',
+    origin: 'restore' as const,
+  };
+
+  it('set with the rest, cleared with the rest', () => {
+    expect(RESTORE_MARKER_KEYS).toContain('RESTORE_LINEAGE');
+    expect(restoreMarkerStringData({ ...marker, lineage: OLD }).RESTORE_LINEAGE).toBe(OLD);
+    expect(restoreMarkerStringData(null).RESTORE_LINEAGE).toBe('');
+  });
+
+  it('a marker with no lineage is refused', () => {
+    expect(() => restoreMarkerStringData(marker as never)).toThrow(
+      /not a database system identifier/,
+    );
+  });
+});
+
+describe('a destroyed and redeployed environment keeps its old lineage on record (B8)', () => {
+  const project = {
+    projectName: 'myapp',
+    environments: {},
+    destroyedEnvironments: {
+      prod: {
+        destroyedAt: '2026-10-19T12:00:00Z',
+        deployMode: 'compose',
+        backup: { schedule: '0 */6 * * *', retentionDays: 30, lineage: OLD },
+      },
+    },
+  };
+
+  it('destroy keeps backup.lineage in the identity record', () => {
+    expect(
+      envIdentityOf({ deployMode: 'compose', backup: { lineage: OLD, priorLineages: ['1'] } }),
+    ).toMatchObject({ backup: { lineage: OLD, priorLineages: ['1'] } });
+    expect(resolveEnvSeed(project, 'prod').envConfig.backup).toMatchObject({ lineage: OLD });
+  });
+
+  it('the redeploy records the new lineage and pushes the old one to priorLineages', () => {
+    const seed = resolveEnvSeed(project, 'prod').envConfig.backup as { lineage: string };
+    expect(recordBackupLineage(seed, NEW)).toEqual({ lineage: NEW, priorLineages: [OLD] });
+    // The same database again changes nothing; priorLineages never repeats.
+    expect(recordBackupLineage({ lineage: NEW, priorLineages: [OLD] }, NEW)).toEqual({
+      lineage: NEW,
+      priorLineages: [OLD],
+    });
+    expect(recordBackupLineage({ lineage: OLD, priorLineages: [NEW] }, NEW)).toEqual({
+      lineage: NEW,
+      priorLineages: [OLD],
+    });
+    expect(recordBackupLineage(undefined, NEW)).toEqual({ lineage: NEW });
+  });
+
+  it('the deploy reads the system identifier and names the restore of each earlier lineage', async () => {
+    const info: string[] = [];
+    const record = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: OLD },
+      exec: async (sql) => (sql === SYSTEM_IDENTIFIER_SQL ? `${NEW}\n` : ''),
+      where: '10.0.0.1',
+      listLineages: async () => [
+        L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z'),
+        L(NEW, null, null),
+      ],
+      log: { info: (m) => info.push(m), warn: () => {} },
+    });
+    expect(record).toEqual({ lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD });
+    expect(info.join('\n')).toContain(`vibecarbon restore prod -lineage ${OLD}`);
+    expect(info.join('\n')).not.toContain(`-lineage ${NEW}`);
+  });
+
+  it('the same lineage lists nothing; an unreadable system identifier fails the deploy', async () => {
+    const list = vi.fn();
+    await expect(
+      recordDeployedLineage({
+        environment: 'prod',
+        backup: { lineage: NEW },
+        exec: async () => NEW,
+        where: '10.0.0.1',
+        listLineages: list,
+        log: { info: () => {}, warn: () => {} },
+      }),
+    ).resolves.toEqual({ lineage: NEW });
+    expect(list).not.toHaveBeenCalled();
+    await expect(
+      recordDeployedLineage({
+        environment: 'prod',
+        backup: { lineage: NEW },
+        exec: async () => 'ERROR: connection refused',
+        where: '10.0.0.1',
+        log: { info: () => {}, warn: () => {} },
+      }),
+    ).rejects.toThrow(/could not read the database system identifier on 10\.0\.0\.1/);
+    expect(parseSystemIdentifier(`${NEW}\n`)).toBe(NEW);
+    expect(parseSystemIdentifier('')).toBeNull();
+  });
+
+  it("every deploy's final save records it, from the pre-deploy backup block", () => {
+    const orch = readFileSync('src/lib/deploy/orchestrator.js', 'utf-8');
+    expect(orch).toMatch(/recordDeployedLineage\(\{\s*environment,\s*backup: envConfig\.backup,/);
+    expect(orch).toContain('backup: { ...backupConfig, ...backupLineage },');
+    // Before the final save.
+    expect(orch.indexOf('recordDeployedLineage({')).toBeLessThan(
+      orch.indexOf('return clearDestroyedRecord(finalConfig, environment);'),
+    );
+  });
+});
+
+// Decision 2 hardening: the refusal above only lasts until the new database's
+// first scheduled base lands. After that the new lineage is newer and a bare
+// restore would pick it silently. A deploy that replaced an archived database
+// marks the old lineage `backup.unrestoredPrior`; a bare restore refuses while
+// it is set, and a restore that names a lineage clears it.
+describe('backup.unrestoredPrior: a replaced database is never silently skipped', () => {
+  const info = { info: () => {}, warn: () => {} };
+  const oldWithBases = L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z');
+
+  it('a deploy that records a new lineage beside an archived one marks the old one', async () => {
+    const record = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: OLD },
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: async () => [oldWithBases, L(NEW, null, null)],
+      log: info,
+    });
+    expect(record).toEqual({ lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD });
+  });
+
+  it('nothing recorded before: the newest other lineage with bases is the one marked', async () => {
+    const record = await recordDeployedLineage({
+      environment: 'prod',
+      backup: undefined,
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: async () => [
+        L('1', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'),
+        oldWithBases,
+      ],
+      log: info,
+    });
+    expect(record.unrestoredPrior).toBe(OLD);
+  });
+
+  it('the bucket unreadable from here: the replaced recorded lineage is marked anyway', async () => {
+    const record = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: OLD },
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: null,
+      log: info,
+    });
+    expect(record.unrestoredPrior).toBe(OLD);
+  });
+
+  it('no earlier lineage with bases, or a deploy -restore that chose its lineage: nothing marked', async () => {
+    const fresh = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: OLD },
+      exec: async () => NEW,
+      where: '10.0.0.1',
+      listLineages: async () => [L(OLD, null, null), L(NEW, null, null)],
+      log: info,
+    });
+    expect(fresh).not.toHaveProperty('unrestoredPrior');
+    const restored = await recordDeployedLineage({
+      environment: 'prod',
+      backup: { lineage: NEW, unrestoredPrior: OLD },
+      exec: async () => OLD,
+      where: '10.0.0.1',
+      listLineages: async () => [
+        oldWithBases,
+        L(NEW, '2026-10-20T02:00:00Z', '2026-10-20T02:00:00Z'),
+      ],
+      restored: true,
+      log: info,
+    });
+    expect(restored).toEqual({ lineage: OLD, priorLineages: [NEW] });
+  });
+
+  it('a later deploy of the same database keeps the mark', () => {
+    expect(
+      recordBackupLineage({ lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD }, NEW),
+    ).toEqual({
+      lineage: NEW,
+      priorLineages: [OLD],
+      unrestoredPrior: OLD,
+    });
+  });
+
+  // The DR redeploy after the new database's first base: NEW is newer.
+  const afterFirstNewBase = [oldWithBases, L(NEW, '2026-10-21T02:00:00Z', '2026-10-21T02:00:00Z')];
+  const marked = { backup: { lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD } };
+
+  it('a bare restore refuses, listing both lineages with their newest base and naming -lineage', () => {
+    let err: unknown;
+    try {
+      resolveRestoreLineage({ envConfig: marked, lineages: afterFirstNewBase });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AmbiguousLineageError);
+    const message = (err as Error).message;
+    expect(message).toContain(`${NEW}  newest base 2026-10-21T02:00:00Z`);
+    expect(message).toContain(`${OLD}  newest base 2026-10-19T02:00:00Z`);
+    expect(message).toContain('-lineage');
+    expect(message).toMatch(/replaced/);
+  });
+
+  it('-lineage <old> and -lineage <new> both restore', () => {
+    expect(
+      resolveRestoreLineage({ envConfig: marked, lineages: afterFirstNewBase, flag: OLD }),
+    ).toBe(OLD);
+    expect(
+      resolveRestoreLineage({ envConfig: marked, lineages: afterFirstNewBase, flag: NEW }),
+    ).toBe(NEW);
+  });
+
+  it('a mark on a lineage that holds no base does not refuse', () => {
+    expect(
+      resolveRestoreLineage({
+        envConfig: marked,
+        lineages: [L(OLD, null, null), L(NEW, '2026-10-21T02:00:00Z', '2026-10-21T02:00:00Z')],
+      }),
+    ).toBe(NEW);
+  });
+
+  it('a completed restore of either lineage clears the mark and records what now serves', () => {
+    expect(restoredLineageRecord(marked.backup, OLD)).toEqual({
+      lineage: OLD,
+      priorLineages: [NEW],
+    });
+    expect(restoredLineageRecord(marked.backup, NEW)).toEqual({
+      lineage: NEW,
+      priorLineages: [OLD],
+    });
+    // Then a bare restore resolves again.
+    expect(
+      resolveRestoreLineage({
+        envConfig: { backup: restoredLineageRecord(marked.backup, NEW) },
+        lineages: afterFirstNewBase,
+      }),
+    ).toBe(NEW);
+  });
+
+  it('restore persists the cleared record; the deploy passes whether it restored', () => {
+    const restore = readFileSync('src/restore.js', 'utf-8');
+    expect(restore).toMatch(/restoredLineageRecord\(envConfig\.backup, lineage\)/);
+    const orch = readFileSync('src/lib/deploy/orchestrator.js', 'utf-8');
+    expect(orch).toMatch(/restored: !!restorePoint,/);
+  });
+});
+
+// Fix round 1 M2: backup has no -lineage, so backup -l on ambiguity names the
+// restore listing of each lineage instead.
+describe('the per-lineage commands an ambiguity prints', () => {
+  const lineages = [
+    L(NEW, null, null),
+    L(OLD, '2026-10-18T02:00:00Z', '2026-10-19T02:00:00Z'),
+    L('1', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'),
+  ];
+
+  it('one per lineage with bases, newest first, with the caller suffix', () => {
+    expect(restoreLineageCommands({ envName: 'prod', lineages, suffix: ' -l' })).toEqual([
+      `  vibecarbon restore prod -lineage ${OLD} -l`,
+      '  vibecarbon restore prod -lineage 1 -l',
+    ]);
+  });
+
+  it('backup -l prints the restore listing per lineage; restore prints its own', () => {
+    const backup = readFileSync('src/backup.js', 'utf-8');
+    expect(backup).toMatch(
+      /restoreLineageCommands\(\{ envName, lineages: err\.lineages, suffix: ' -l' \}\)/,
+    );
+    const restore = readFileSync('src/restore.js', 'utf-8');
+    expect(restore).toMatch(/restoreLineageCommands\(\{/);
+  });
+});
+
+// Fix round 1 M3: one bounded re-read when the first read failed on the
+// transport (ssh dropped); a definitive answer is never retried.
+describe('the deploy lineage read', () => {
+  const log = { info: () => {}, warn: () => {} };
+  const transport = Object.assign(
+    new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused'),
+    {},
+  );
+
+  it('a transport failure is read once more, and the second answer counts', async () => {
+    const exec = vi.fn().mockRejectedValueOnce(transport).mockResolvedValueOnce(`${NEW}\n`);
+    await expect(
+      recordDeployedLineage({
+        environment: 'prod',
+        backup: { lineage: NEW },
+        exec,
+        where: '10.0.0.1',
+        log,
+      }),
+    ).resolves.toEqual({ lineage: NEW });
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it('two transport failures fail, naming the rerun; never a third read', async () => {
+    const exec = vi.fn().mockRejectedValue(transport);
+    await expect(
+      recordDeployedLineage({ environment: 'prod', backup: {}, exec, where: '10.0.0.1', log }),
+    ).rejects.toThrow(/Connection refused[\s\S]*Rerun vibecarbon deploy/);
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it('a definitive failure (an answer that is no system identifier, or a psql error) is not re-read', async () => {
+    for (const exec of [
+      vi.fn().mockResolvedValue('ERROR: permission denied'),
+      vi.fn().mockRejectedValue(new Error('psql: FATAL: role "postgres" does not exist')),
+    ]) {
+      await expect(
+        recordDeployedLineage({ environment: 'prod', backup: {}, exec, where: '10.0.0.1', log }),
+      ).rejects.toThrow(/Rerun vibecarbon deploy/);
+      expect(exec).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+// Fix round 1 M5: the interactive chooser resolves the lineage for latest,
+// then the operator may pick an earlier point. Re-check it against that
+// lineage's oldest base and say which lineage would cover it.
+describe('a chosen point in time is checked against the resolved lineage', () => {
+  const backups = [
+    { name: 'base_000000010000000000000004', finishTime: at('2026-10-15T02:00:00Z') },
+    { name: 'base_000000010000000000000008', finishTime: at('2026-10-20T02:00:00Z') },
+  ];
+  const lineages = [
+    L(OLD, '2026-10-01T02:00:00Z', '2026-10-09T02:00:00Z'),
+    L(NEW, '2026-10-15T02:00:00Z', '2026-10-20T02:00:00Z'),
+  ];
+
+  it('a point before the lineage refuses, naming the lineage, its oldest base and the lineage that covers it', () => {
+    let err: unknown;
+    try {
+      assertLineageCoversPoint({
+        envName: 'prod',
+        lineage: NEW,
+        backups,
+        lineages,
+        point: '2026-10-05T00:00:00Z',
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NoRestorePointError);
+    const message = (err as Error).message;
+    expect(message).toContain(
+      `before the oldest base backup of lineage ${NEW} (2026-10-15T02:00:00Z)`,
+    );
+    expect(message).toContain(
+      `vibecarbon restore prod -lineage ${OLD} -source 2026-10-05T00:00:00Z`,
+    );
+  });
+
+  it('a point inside the lineage, latest, or a base name passes', () => {
+    for (const point of ['2026-10-16T00:00:00Z', 'latest', 'base_000000010000000000000004']) {
+      expect(() =>
+        assertLineageCoversPoint({ envName: 'prod', lineage: NEW, backups, lineages, point }),
+      ).not.toThrow();
+    }
+  });
+
+  it('restore checks the chosen point before it resolves the base', () => {
+    const restore = readFileSync('src/restore.js', 'utf-8');
+    expect(restore.indexOf('assertLineageCoversPoint({')).toBeGreaterThan(-1);
+    expect(restore.indexOf('assertLineageCoversPoint({')).toBeLessThan(
+      restore.indexOf('base = pickRestoreBase(backups, chosenSource);'),
+    );
+  });
+});
+
+// Fix round 2: scale and the single-server failover guide work on the LIVE
+// database, never a chosen lineage. While backup.unrestoredPrior is set a
+// resolved listing refuses, which failed compose scale after provisioning.
+// They read the recorded lineage's folder directly (C7).
+describe('callers of the live database read the recorded lineage, never resolve', () => {
+  const S3 = {
+    bucket: 'myapp-backups',
+    endpoint: 'e',
+    region: 'r',
+    accessKey: 'a',
+    secretKey: 's',
+  };
+  // The DR redeploy after the new database's first base, old lineage marked.
+  const objects = {
+    ...destroyedAndRedeployed,
+    ...base(NEW, 'base_00000001000000000000000C', '2026-10-21T02:00:00Z'),
+  };
+  const marked = {
+    deployMode: 'compose',
+    backup: { lineage: NEW, priorLineages: [OLD], unrestoredPrior: OLD },
+  };
+
+  it('under the mark, a live read lists the recorded lineage and proceeds', async () => {
+    const s3 = fakeS3(objects);
+    const listing = await readEnvBaseBackups({
+      envName: 'prod',
+      envConfig: marked,
+      projectName: 'myapp',
+      s3Config: S3,
+      live: true,
+      makeClient: () => s3,
+    });
+    expect(listing.lineage).toBe(NEW);
+    expect(listing.backups.map((b) => b.name)).toEqual(['base_00000001000000000000000C']);
+    // Its folder only: no lineage listing, no resolution.
+    const prefixes = s3.calls
+      .filter((c) => c.command === 'ListObjectsV2Command')
+      .map((c) => c.input.Prefix);
+    expect(prefixes).toEqual([`${BASE}/${NEW}/basebackups_005/`]);
+  });
+
+  it('the same read resolving (a bare restore) still refuses under the mark', async () => {
+    await expect(
+      readEnvBaseBackups({
+        envName: 'prod',
+        envConfig: marked,
+        projectName: 'myapp',
+        s3Config: S3,
+        makeClient: () => fakeS3(objects),
+      }),
+    ).rejects.toThrow(AmbiguousLineageError);
+  });
+
+  it('no lineage on record: a live read refuses, naming the deploy that records it', async () => {
+    await expect(
+      readEnvBaseBackups({
+        envName: 'prod',
+        envConfig: { deployMode: 'compose' },
+        projectName: 'myapp',
+        s3Config: S3,
+        live: true,
+        makeClient: () => fakeS3(objects),
+      }),
+    ).rejects.toThrow(/no backup lineage on record for prod[\s\S]*vibecarbon deploy prod/);
+  });
+
+  it('census: only restore and backup -l resolve; every other caller reads the live lineage', () => {
+    const callers = spawnSync('git', ['grep', '-l', 'readEnvBaseBackups(', '--', 'src'], {
+      encoding: 'utf-8',
+    })
+      .stdout.split('\n')
+      .filter((f) => f && f !== 'src/lib/walg/restore-base.js');
+    expect(callers.sort()).toEqual([
+      'src/backup.js',
+      'src/failover.js',
+      'src/restore.js',
+      'src/scale.js',
+    ]);
+    for (const f of callers.filter((c) => !['src/restore.js', 'src/backup.js'].includes(c))) {
+      const text = readFileSync(f, 'utf-8');
+      const calls = text.split('readEnvBaseBackups(').slice(1);
+      expect(calls.length, f).toBeGreaterThan(0);
+      for (const call of calls)
+        expect(call.slice(0, call.indexOf('})')), f).toMatch(/\blive: true\b/);
+    }
+    // listBaseBackups is read only through restore-base.js's own paths.
+    const direct = spawnSync('git', ['grep', '-l', 'listBaseBackups(', '--', 'src'], {
+      encoding: 'utf-8',
+    })
+      .stdout.split('\n')
+      .filter(Boolean);
+    expect(direct).toEqual(['src/lib/walg/restore-base.js']);
+  });
+});

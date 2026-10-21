@@ -12,6 +12,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { exitCancelled, exitDeclined } from './lib/cli/exit-guard.js';
+import { AmbiguousPrimaryError, resolvePrimary } from './lib/cli/resolve-primary.js';
 import { runCommand } from './lib/command.js';
 
 // Handle Ctrl+C — without this, SIGINT is swallowed during subprocess/fetch
@@ -30,7 +31,7 @@ import { parseFlagsOrExit } from './lib/cli/parse-flags.js';
 import { spinner } from './lib/cli/progress.js';
 import { requireTTYOrFlags } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
-import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
+import { loadProjectConfig, updateProjectConfig } from './lib/config.js';
 import { captureClusterCsiVolumes, isCsiVolumeName } from './lib/csi-volumes.js';
 import {
   appStorageSecretKeys,
@@ -59,6 +60,7 @@ import {
   resolveDnsToken,
 } from './lib/dns-provider.js';
 import { envIdentityOf } from './lib/env-identity.js';
+import { ensureOperatorIpAccess } from './lib/operator-ip.js';
 import { perfAsync } from './lib/perf.js';
 import { confirmProdOrExit, requiresProdTypeToConfirm } from './lib/prod-confirm.js';
 import { describeCredentialSource } from './lib/project.js';
@@ -190,6 +192,12 @@ const SPEC = {
         'Also delete the backup S3 bucket and the Pulumi state bucket (default: both preserved)',
     },
     {
+      name: 'force',
+      boolean: true,
+      description:
+        'Destroy even when the pre-destroy backup fails or is skipped (default: the destroy stops)',
+    },
+    {
       name: 'confirm',
       value: '<value>',
       description:
@@ -260,6 +268,218 @@ async function findOrphanPulumiStacks(projectConfig) {
  * observed in compose restore re-deploys hitting this exact NoSuchBucket
  * error.
  */
+/**
+ * The server a pre-destroy backup would run on, or null. Destroy is the escape
+ * hatch for a misconfigured environment, so roles that name no single primary
+ * skip the backup offer with a warning instead of blocking teardown.
+ *
+ * @param {object} envConfig
+ * @param {string} envName
+ * @param {(msg: string, err: AmbiguousPrimaryError) => void} [warn]
+ * @returns {string|undefined}
+ */
+export function backupOfferIp(envConfig, envName, warn = (msg) => p.log.warn(msg)) {
+  try {
+    return resolvePrimary(envConfig, { env: envName })?.ip;
+  } catch (err) {
+    if (!(err instanceof AmbiguousPrimaryError)) throw err;
+    warn(`Skipping the pre-destroy backup offer, the primary is unknown. ${err.message}`, err);
+    return undefined;
+  }
+}
+
+/**
+ * Put this operator's IP on the environment's firewall before destroy's first
+ * remote step, with the arguments `vibecarbon backup` uses
+ * (ensureFirewallAccessIfNeeded in src/backup.js). Without it, an operator
+ * whose IP changed since the deploy timed out on the pre-destroy backup and
+ * the CSI volume release, and the only override (-force) skipped the backup.
+ *
+ * A failed check warns and continues: destroy is the escape hatch, and a
+ * remote step that then cannot connect stops on its own cause (the backup
+ * names -force).
+ *
+ * @param {{projectConfig: object, envName: string, envConfig: object, apiToken: string, yes: boolean}} o
+ * @param {{ensure?: typeof ensureOperatorIpAccess, log?: typeof p.log}} [deps]
+ */
+export async function ensureDestroyOperatorAccess(
+  { projectConfig, envName, envConfig, apiToken, yes },
+  deps = {},
+) {
+  const { ensure = ensureOperatorIpAccess, log = p.log } = deps;
+  try {
+    const isHA = envConfig?.deployMode === 'compose-ha' || !!envConfig?.ha?.enabled;
+    const result = await ensure({
+      projectConfig,
+      environment: envName,
+      isHA,
+      apiToken,
+      yes,
+      onMessage: (msg) => log.info(msg),
+    });
+    if (result.added) log.success(`Firewall updated: SSH/k8s API now allow ${result.cidr}`);
+  } catch (err) {
+    log.warn(
+      `Operator-IP check failed: ${err instanceof Error ? err.message : String(err)}. ` +
+        'Continuing; SSH steps (the pre-destroy backup) may not reach the servers.',
+    );
+  }
+}
+
+/**
+ * The backup destroy takes before it deletes anything, and what it does with
+ * the answer.
+ *
+ * While backups are kept (no -purge), -y backs up by default and an
+ * interactive run asks (default yes). The backup runs on the primary
+ * resolvePrimary names (backupOfferIp): compose through backupCompose, k8s
+ * through the backup Job. A backup that fails or reports `skipped`, an
+ * unknown primary, or a missing deploy key stops the destroy with the reason
+ * and the override, unless -force; with -force it warns and goes on. A pushed
+ * base whose retention failed counts as backed up (the base is in the bucket).
+ * A compose scale cutover journal (ha.writeFence.cutover) stops the destroy
+ * before any backup and names the scale that finishes it; -force destroys
+ * with no backup.
+ *
+ * @param {object} o
+ * @param {object} o.envConfig
+ * @param {string} o.envName
+ * @param {string} o.projectName
+ * @param {string} o.sshKeyPath
+ * @param {boolean} o.yes
+ * @param {boolean} o.purge
+ * @param {boolean} o.force
+ * @param {object} [deps] test seams
+ */
+export async function preDestroyBackup(
+  { envConfig, envName, projectName, sshKeyPath, yes, purge, force },
+  deps = {},
+) {
+  const {
+    log = p.log,
+    confirm = p.confirm,
+    exit = process.exit,
+    keyExists = existsSync,
+    spinner: makeSpinner = spinner,
+    backupCompose = async (...a) => {
+      const { backupCompose: run } = await import('./lib/deploy/compose/index.js');
+      return run(...a);
+    },
+    triggerBackupJob = async (...a) => {
+      const { triggerBackupJob: run } = await import('./backup.js');
+      return run(...a);
+    },
+  } = deps;
+
+  if (purge) {
+    log.info('-purge deletes the backups, so destroy takes no backup first.');
+    return;
+  }
+
+  // A compose scale killed after its cutover journal was written: the new
+  // server may already take writes on the next timeline while the config
+  // still names the fenced old one. A base pushed from the old server would
+  // become the newest in the lineage, and `restore latest` would lose every
+  // write after the flip. No backup from either side is trustworthy until the
+  // scale finishes or rolls back.
+  const cutover = envConfig?.ha?.writeFence?.cutover;
+  if (cutover) {
+    const state = `a compose scale stopped mid-cutover (old server ${cutover.oldIp}, new server ${cutover.newIp})`;
+    if (force) {
+      log.warn(
+        `${state}; -force set, so destroy takes NO backup: a base from the old server would ` +
+          'sit in the lineage newer than the writes the new server may have taken',
+      );
+      return;
+    }
+    log.error(
+      [
+        `destroy stopped: ${state}. The database may already take writes on the new server, ` +
+          'so a backup from the old one would land in the lineage without them.',
+        'Finish the scale, or roll it back if DNS never moved, then destroy:',
+        `  vibecarbon scale ${envName}`,
+        'Or destroy without a backup:',
+        `  vibecarbon destroy ${envName} -force`,
+      ].join('\n'),
+    );
+    exit(1);
+    return;
+  }
+
+  const stop = (what, why) => {
+    if (force) {
+      log.warn(`backup ${what} (${why}); -force set, destroying anyway`);
+      return;
+    }
+    if (why === 'already-running') {
+      // Another backup (the nightly Job) holds the lock: nothing is wrong, the
+      // answer is to wait. One command per line, so each copies cleanly.
+      log.error(
+        [
+          `backup ${what} (${why}); destroy stopped: a backup is running; wait for it and rerun`,
+          `  vibecarbon destroy ${envName}`,
+          'Or destroy without a backup:',
+          `  vibecarbon destroy ${envName} -force`,
+        ].join('\n'),
+      );
+      exit(1);
+      return;
+    }
+    log.error(`backup ${what} (${why}); destroy stopped; rerun with -force to destroy anyway`);
+    exit(1);
+  };
+
+  let unknownPrimary;
+  const ip = backupOfferIp(envConfig, envName, (_msg, err) => {
+    unknownPrimary = err;
+  });
+  if (unknownPrimary) return stop('skipped', `the primary is unknown: ${unknownPrimary.message}`);
+  if (!ip) {
+    log.info(`No server is recorded for ${envName}, so there is no database to back up.`);
+    return;
+  }
+
+  if (!yes) {
+    const wanted = await confirm({
+      message: 'Create a backup before destroying? (recommended)',
+      initialValue: true,
+    });
+    if (p.isCancel(wanted)) exitCancelled();
+    if (!wanted) return;
+  }
+
+  if (!keyExists(sshKeyPath)) return stop('failed', `SSH key not found: ${sshKeyPath}`);
+
+  const s = makeSpinner();
+  s.start('Backing up the database before destroying...');
+  let backup;
+  try {
+    if (isComposeTier(resolveTier(envConfig))) {
+      backup = await backupCompose(ip, sshKeyPath, projectName, {
+        retain: envConfig.backup?.retentionDays,
+      });
+    } else {
+      backup = await triggerBackupJob(ip, sshKeyPath);
+    }
+  } catch (err) {
+    s.stop('Backup failed');
+    const message = err instanceof Error ? err.message : String(err);
+    const [first, ...rest] = message.split('\n');
+    if (rest.length > 0) log.message(rest.join('\n'));
+    return stop('failed', first);
+  }
+  if (backup.result !== 'pushed') {
+    s.stop('Backup skipped');
+    return stop('skipped', backup.reason);
+  }
+  s.stop(`base backup pushed: ${backup.name}`);
+  if (backup.retentionError) {
+    log.warn(
+      `The base backup is in the bucket, but pruning old backups failed: ${backup.retentionError}`,
+    );
+  }
+}
+
 /**
  * Release all Hetzner CSI volumes via the cluster's own finalizers
  * before Pulumi tears the cluster down, so the underlying volumes
@@ -1195,8 +1415,8 @@ async function retainStateBucket(envConfig, projectConfig, args, spinner, leaks,
   // rotates only when -purge deletes the bucket), and recording the kept name
   // also covers a bucket derived under an older scheme, so a redeploy finds
   // this bucket again instead of orphaning it (vibecarbon-web 2026-09-15).
-  // resolveStateBucketName reads it ahead of derivation, and
-  // updateProjectConfig persists this same object.
+  // resolveStateBucketName reads it ahead of derivation; the
+  // update-project-config step writes it (results.retainedStateBucket).
   projectConfig.retainedStateBucket = stateBucket;
   spinner.start('Pulumi state bucket');
   spinner.stop(
@@ -1468,8 +1688,11 @@ async function revokeAppStorageKeyEffect(ctx) {
   if (record.scoping !== 'paste-fence') return;
   // Retire the key before anything else: it stays denied in every fence
   // until the operator deletes it in the console and forgets it.
-  projectConfig.retiredAppKeys = [...new Set([...(projectConfig.retiredAppKeys ?? []), record.id])];
-  saveProjectConfig(projectConfig);
+  const retire = (keys) => [...new Set([...(keys ?? []), record.id])];
+  projectConfig.retiredAppKeys = retire(projectConfig.retiredAppKeys);
+  updateProjectConfig((config) => {
+    config.retiredAppKeys = retire(config.retiredAppKeys);
+  });
   spinner.start('App storage key fence');
   try {
     const s3Creds = await Provider.promptObjectStorageCredentials(projectConfig.projectName, {
@@ -1514,6 +1737,7 @@ async function revokeAppStorageKeyEffect(ctx) {
 //    instead of recreating one under the same name — see retainStateBucket.
 async function retainStateBucketEffect(ctx) {
   const { envConfig, projectConfig, environment, args, spinner, results } = ctx;
+  const before = projectConfig.retainedStateBucket;
   const outcome = await retainStateBucket(
     envConfig,
     projectConfig,
@@ -1523,6 +1747,11 @@ async function retainStateBucketEffect(ctx) {
     environment,
   );
   if (outcome?.purged) results.stateBucketPurged = true;
+  // What this destroy decided about retainedStateBucket, for the config write
+  // (which patches the file as it is then, not this in-memory copy).
+  if (projectConfig.retainedStateBucket !== before) {
+    results.retainedStateBucket = { value: projectConfig.retainedStateBucket };
+  }
 }
 
 // 3. Backup bucket: preserved by default, deleted with -purge.
@@ -1587,41 +1816,50 @@ async function updateProjectConfigEffect(ctx) {
     return;
   }
   spinner.start('Updating project configuration');
-  const updatedConfig = { ...projectConfig };
-  if (updatedConfig.environments) {
-    // Keep what the environment WAS (placement, domain, DNS, backup bucket,
-    // sizing) under a sibling key `deploy` reads when this name is deployed
-    // again — a destroy→deploy move no longer needs a hand-typed block. A
-    // sibling key rather than a stub in `environments`: every other command
-    // treats presence there as "deployed" (see lib/env-identity.js).
-    const identity = envIdentityOf(updatedConfig.environments[environment]);
-    if (Object.keys(identity).length > 0) {
-      updatedConfig.destroyedEnvironments = {
-        ...(updatedConfig.destroyedEnvironments ?? {}),
-        [environment]: {
-          ...identity,
-          // This env's backup folder is gone, so it no longer holds the
-          // backup bucket (preservedBackupHolders).
-          ...(results.backupsPurged && { backupsPurged: true }),
-          destroyedAt: new Date().toISOString(),
-        },
-      };
+  // One locked write onto the file as it is now: the in-memory projectConfig
+  // was loaded when this destroy started, and a failover journal or another
+  // environment's record saved since must survive.
+  updateProjectConfig((updatedConfig) => {
+    if (results.retainedStateBucket) {
+      if (results.retainedStateBucket.value === undefined) delete updatedConfig.retainedStateBucket;
+      else updatedConfig.retainedStateBucket = results.retainedStateBucket.value;
     }
-    delete updatedConfig.environments[environment];
-  }
-  // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
-  // deleted the derived state bucket (the last live environment). The next
-  // deploy then derives a FRESH state-bucket name rather than recreating the
-  // one just deleted: Hetzner Object Storage can ack writes into a
-  // just-recreated same-name bucket and lose them (e4 restore->failover,
-  // 2026-08-07). Every other destroy keeps the state bucket (see
-  // retainStateBucket), and rotating then would strand the warm bucket.
-  //
-  // The app bucket name stays stable; it is not rotated here.
-  if (results.stateBucketPurged) {
-    updatedConfig.stateBucketGeneration = generateBucketSalt();
-  }
-  saveProjectConfig(updatedConfig);
+    if (updatedConfig.environments) {
+      // Keep what the environment WAS (placement, domain, DNS, backup bucket,
+      // sizing) under a sibling key `deploy` reads when this name is deployed
+      // again — a destroy→deploy move no longer needs a hand-typed block. A
+      // sibling key rather than a stub in `environments`: every other command
+      // treats presence there as "deployed" (see lib/env-identity.js).
+      const identity = envIdentityOf(
+        updatedConfig.environments[environment] ?? projectConfig.environments?.[environment],
+      );
+      if (Object.keys(identity).length > 0) {
+        updatedConfig.destroyedEnvironments = {
+          ...(updatedConfig.destroyedEnvironments ?? {}),
+          [environment]: {
+            ...identity,
+            // This env's backup folder is gone, so it no longer holds the
+            // backup bucket (preservedBackupHolders).
+            ...(results.backupsPurged && { backupsPurged: true }),
+            destroyedAt: new Date().toISOString(),
+          },
+        };
+      }
+      delete updatedConfig.environments[environment];
+    }
+    // `stateBucketGeneration` rotates ONLY when this destroy's -purge actually
+    // deleted the derived state bucket (the last live environment). The next
+    // deploy then derives a FRESH state-bucket name rather than recreating the
+    // one just deleted: Hetzner Object Storage can ack writes into a
+    // just-recreated same-name bucket and lose them (e4 restore->failover,
+    // 2026-08-07). Every other destroy keeps the state bucket (see
+    // retainStateBucket), and rotating then would strand the warm bucket.
+    //
+    // The app bucket name stays stable; it is not rotated here.
+    if (results.stateBucketPurged) {
+      updatedConfig.stateBucketGeneration = generateBucketSalt();
+    }
+  });
   spinner.stop('Configuration updated');
 }
 
@@ -1950,7 +2188,9 @@ async function destroyComposeTier({
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
   const Provider = providerFor(envConfig);
   const provider = new Provider(providerToken);
-  const serverIp = envConfig.servers?.[0]?.ip;
+  // Compose single-node: its one server, found through the resolver.
+  const composeServer = resolvePrimary(envConfig, { env: environment })?.entry;
+  const serverIp = composeServer?.ip;
   const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${environment}`);
 
   if (serverIp && existsSync(sshKeyPath)) {
@@ -1970,7 +2210,7 @@ async function destroyComposeTier({
   }
 
   // Delete Hetzner VPS if auto-provisioned (has server ID in config)
-  const serverId = envConfig.servers?.[0]?.id;
+  const serverId = composeServer?.id;
   // The `name` field in envConfig.servers is a role label ("master") set by
   // the orchestrator, not the Hetzner-assigned hostname. Pulumi's compose
   // program names the server `${projectName}-${environment}`. The
@@ -1979,7 +2219,7 @@ async function destroyComposeTier({
   // as a deterministic fallback — looking up "master" in Hetzner never
   // matches and leaks the VPS.
   const providerServerName =
-    envConfig.servers?.[0]?.providerServerName || `${projectConfig.projectName}-${environment}`;
+    composeServer?.providerServerName || `${projectConfig.projectName}-${environment}`;
   if (serverId && providerToken) {
     s.start(`Deleting VPS (${serverIp})...`);
     try {
@@ -2098,7 +2338,7 @@ async function destroyComposeTier({
   //   `${projectName}-${environment}-${location}-key`
   // — the location suffix is what kept the old `vibecarbon-` prefix from
   // ever matching. Same root cause as the firewall above.
-  const composeRegion = envConfig.region || envConfig.servers?.[0]?.region;
+  const composeRegion = envConfig.region || composeServer?.region;
   const hetznerSshKeyName = composeRegion
     ? `${projectConfig.projectName}-${environment}-${composeRegion}-key`
     : null;
@@ -3327,6 +3567,7 @@ async function main(argv = []) {
     yes: !!values.y,
     destroyOrphans: !!values.orphans,
     purgeBackups: !!values.purge,
+    force: !!values.force,
     confirm: values.confirm ?? undefined,
   };
 
@@ -3569,41 +3810,38 @@ async function main(argv = []) {
     }
   }
 
-  // Offer to create a backup before destroying
-  const serverIp = envConfig.servers?.[0]?.ip;
-  const sshKeyPath = join(cwd, '.vibecarbon', `deploy_key_${envName}`);
-  if (serverIp && existsSync(sshKeyPath) && !args.yes) {
-    const offerBackup = await p.confirm({
-      message: 'Create a backup before destroying? (recommended)',
-      initialValue: true,
-    });
-
-    if (!p.isCancel(offerBackup) && offerBackup) {
-      const backupSpinner = spinner();
-      backupSpinner.start('Creating backup...');
-      try {
-        if (isComposeTier(resolveTier(envConfig))) {
-          const { backupCompose } = await import('./lib/deploy/compose/index.js');
-          await backupCompose(serverIp, sshKeyPath, projectConfig.projectName, {
-            retain: envConfig.backup?.retentionDays,
-          });
-          backupSpinner.stop('wal-g base backup pushed to S3');
-        }
-      } catch (backupError) {
-        backupSpinner.stop(`Backup failed: ${backupError.message}`);
-        p.log.warn('Continuing with destroy...');
-      }
-    }
-  }
-
   // Get API tokens (env var → interactive prompt)
   // Resolved once per flow — see providerFor() in lib/providers/index.js.
+  // Resolved BEFORE the first remote step: the operator-IP refresh below
+  // needs it to update the firewall.
   const Provider = providerFor(envConfig);
   const providerToken = await Provider.promptApiToken(projectConfig.projectName);
   if (!providerToken) {
     p.log.error(`${Provider.NAME} API token is required`);
     process.exit(1);
   }
+
+  // Every SSH/kubectl step below (the pre-destroy backup, the CSI volume
+  // release) needs this operator's IP on the firewall.
+  await ensureDestroyOperatorAccess({
+    projectConfig,
+    envName,
+    envConfig,
+    apiToken: providerToken,
+    yes: args.yes,
+  });
+
+  // Back up before deleting anything; a failed or skipped backup stops here
+  // unless -force (see preDestroyBackup).
+  await preDestroyBackup({
+    envConfig,
+    envName,
+    projectName: projectConfig.projectName,
+    sshKeyPath: join(cwd, '.vibecarbon', `deploy_key_${envName}`),
+    yes: args.yes,
+    purge: args.purgeBackups,
+    force: args.force,
+  });
 
   // DNS cleanup credential: resolve up-front so the teardown never stalls on
   // a mid-flow prompt. Under the same-token rule, native DNS on the deploy's
@@ -3737,6 +3975,5 @@ export {
   main,
   retainStateBucket,
   SPEC,
-  saveProjectConfig,
   VERSION,
 };

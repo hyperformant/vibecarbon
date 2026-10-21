@@ -38,6 +38,21 @@ import { REPL_GATEWAY_PORT } from './wireguard.js';
  */
 export const DB_STS_BOOT_TIMEOUT_S = 600;
 
+/** Staged restore fetches stream at least this fast; it sizes the rollout wait (M1). */
+export const RESTORE_FETCH_FLOOR_BYTES_PER_S = 20 * 1024 ** 2;
+
+/**
+ * The db rollout wait for a restore of `sizeBytes`: the boot floor, or the
+ * time the fetch needs at RESTORE_FETCH_FLOOR_BYTES_PER_S, whichever is
+ * longer. Shared by `vibecarbon restore` and `deploy -restore` (C13).
+ */
+export function restoreRolloutTimeoutS(sizeBytes) {
+  return Math.max(
+    DB_STS_BOOT_TIMEOUT_S,
+    Math.ceil((Number(sizeBytes) || 0) / RESTORE_FETCH_FLOOR_BYTES_PER_S),
+  );
+}
+
 // Staging subdir INSIDE PGDATA for the swap:false re-seed — on the PVC
 // filesystem so the node-side promotion is an atomic same-fs rename.
 const RESEED_STAGING_DIR = '/var/lib/postgresql/data/.reseed_staging';

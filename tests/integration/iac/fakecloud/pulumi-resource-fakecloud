@@ -1,0 +1,3 @@
+#!/bin/sh
+# Pulumi resource plugin for the server-state test: a fake cloud over a JSON file.
+exec node "$(dirname "$0")/provider.mjs" "$@"

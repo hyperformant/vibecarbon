@@ -860,3 +860,72 @@ export async function runFailoverContinuityCheck(opts: {
     await dropProbeTable(newPrimary);
   }
 }
+
+/**
+ * restore_deploy_continuity — after `destroy` and `deploy -restore latest`,
+ * the marker row written before the backup must be in the restored primary:
+ * the deploy seeded the new database from the backup, not from initdb.
+ *
+ * FAILS (never skips) without a marker or an SSH handle: a restore-deploy
+ * that cannot be checked is not a pass. Drops the probe table afterwards, as
+ * every marker check does (the RLS audit).
+ */
+export async function runRestoreDeployContinuityCheck(opts: {
+  mode: DeployMode;
+  projectName: string;
+  primaryIp: string | null;
+  sshKeyPath: string | null;
+  markerId: string | null;
+}): Promise<VerificationResult> {
+  const start = Date.now();
+  const { mode, projectName, primaryIp, sshKeyPath, markerId } = opts;
+  if (!markerId || !sshKeyPath || !primaryIp) {
+    return {
+      checkName: 'restore_deploy_continuity',
+      status: 'fail',
+      responseTimeMs: 0,
+      errorMessage:
+        `cannot check the restored database: ` +
+        `${!markerId ? 'no marker row was written before the backup' : !sshKeyPath ? 'no SSH key' : 'no primary IP'}`,
+    };
+  }
+  const primary: ReplTarget = {
+    ip: primaryIp,
+    sshKeyPath,
+    mode,
+    projectName,
+    label: 'restored-primary',
+  };
+  try {
+    const res = await markerPresent(primary, markerId);
+    if (!res.present) {
+      const transportFailed = continuityTransportFailed(
+        res,
+        sshUnreachableSince(primaryIp) !== null,
+      );
+      return {
+        checkName: 'restore_deploy_continuity',
+        status: 'fail',
+        responseTimeMs: Date.now() - start,
+        errorMessage: transportFailed
+          ? `Restore UNVERIFIED for marker ${markerId}: could not reach the restored primary ` +
+            `(${res.failureKind ?? 'ssh-transport'}). ${sshUnreachableDiagnosis(primaryIp)}`
+          : await withDiagnostics(
+              `Marker ${markerId} written before the backup is NOT in the database ` +
+                `deploy -restore brought up: it was not seeded from the backup` +
+                `${res.ok ? '' : ` (query error: ${res.error})`}`,
+              primary,
+            ),
+        details: { markerId, primaryIp, transportFailed },
+      };
+    }
+    return {
+      checkName: 'restore_deploy_continuity',
+      status: 'pass',
+      responseTimeMs: Date.now() - start,
+      details: { markerId, restored: true },
+    };
+  } finally {
+    await dropProbeTable(primary);
+  }
+}

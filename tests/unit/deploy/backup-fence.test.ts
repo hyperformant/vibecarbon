@@ -3,7 +3,7 @@
  *
  * The retirement fence only reaches a node the CLI can reach. An old primary
  * that stays unreachable through a failover and reboots on its own still reads
- * WALG_ROLE=primary and pushes WAL, base backups and a `delete retain` into
+ * WALG_ROLE=primary and pushes WAL, base backups and a `delete before` into
  * the shared prefix. Failover now writes `vibecarbon-fence.json` into that
  * prefix (S3 is reachable when the old primary is not), naming the promoted
  * database and the timeline it promoted onto, and every push path refuses when
@@ -40,7 +40,9 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const ARCHIVE = join(ROOT, 'carbon/volumes/db/wal-archive.sh');
 const COMPOSE_BACKUP = join(ROOT, 'carbon/backup/compose-backup.sh');
 const CRONJOB = join(ROOT, 'carbon/k8s/base/backup/cronjob.yaml');
+const WALG_ENV = join(ROOT, 'carbon/volumes/db/walg-env.sh');
 const SYSID = '7699032860122738725';
+const BASE_PREFIX = 's3://bkt/backups/p/e/walg';
 
 describe('the fence record', () => {
   it('parses sysid|timeline-hex, and refuses anything else', () => {
@@ -96,6 +98,16 @@ describe('the fence record', () => {
     expect(script).toContain(
       `wal-g st put --no-compress --no-encrypt -f /tmp/${BACKUP_FENCE_OBJECT} ${BACKUP_FENCE_OBJECT}`,
     );
+  });
+
+  it('the write script sources walg-env.sh before it reads the prefix or puts the fence', () => {
+    // So the fence lands in the database lineage's own folder, where that
+    // lineage's push paths read it.
+    const script = backupFenceWriteScript({ primaryNode: 'a', timeline: 2 });
+    const source = script.indexOf('. /etc/postgresql/walg-env.sh');
+    expect(source).toBe(0);
+    expect(source).toBeLessThan(script.indexOf('$WALG_S3_PREFIX'));
+    expect(source).toBeLessThan(script.indexOf('wal-g st put'));
   });
 
   it('writes { primaryNode, systemIdentifier, timeline, at } read from the primary', async () => {
@@ -240,11 +252,23 @@ function stubs(
   writeFileSync(
     join(bin, 'wal-g'),
     `#!/bin/bash
+# Every call records the prefix it ran against: the lineage folder.
+echo "$WALG_S3_PREFIX" >> ${join(bin, 'prefix.log')}
 if [ "$1" = st ] && [ "$2" = cat ]; then
   ${fence === null ? `echo "ERROR: download the file: object 'p/vibecarbon-fence.json' not found in storage" >&2; exit 1` : `printf '%s\\n' '${fence}'`}
   exit 0
 fi
 echo "$*" >> ${log}
+# One base 10 days old, so retention (RETAIN=2 days) has a target to delete before.
+if [ "$1" = backup-list ]; then
+  printf '[{"backup_name":"base_000000010000000000000001","finish_time":"%s"}]\\n' "$(date -u -d "@$(( $(date +%s) - 864000 ))" +%Y-%m-%dT%H:%M:%S.000000Z)"
+fi
+# backup-push names the base it wrote (stderr, as wal-g logs); the backup
+# scripts carry that name in their BACKUP_RESULT marker.
+if [ "$1" = backup-push ]; then
+  echo "INFO: 2026/10/21 02:00:00.000000 Started backup with name base_000000010000000000000004 at LSN 0/4000028" >&2
+  echo "INFO: 2026/10/21 02:00:01.000000 Wrote backup with name base_000000010000000000000004 to storage default" >&2
+fi
 exit 0
 `,
   );
@@ -261,13 +285,25 @@ esac
 `,
   );
   // docker compose exec -T db <cmd...> / kubectl exec ... -- <cmd...>: run <cmd...> here.
+  // walg-env.sh reads the system identifier from pg_controldata.
+  writeFileSync(
+    join(bin, 'pg_controldata'),
+    `#!/bin/sh\necho "Database system identifier:           ${sysid}"\n`,
+  );
   writeFileSync(join(bin, 'docker'), '#!/bin/bash\nshift 4\nexec "$@"\n');
   writeFileSync(
     join(bin, 'kubectl'),
     '#!/bin/bash\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
   );
-  for (const f of ['wal-g', 'psql', 'docker', 'kubectl']) chmodSync(join(bin, f), 0o755);
-  return { bin, pushes: () => readFileSync(log, 'utf-8') };
+  for (const f of ['wal-g', 'psql', 'docker', 'kubectl', 'pg_controldata']) {
+    chmodSync(join(bin, f), 0o755);
+  }
+  writeFileSync(join(bin, 'prefix.log'), '');
+  return {
+    bin,
+    pushes: () => readFileSync(log, 'utf-8'),
+    prefixes: () => readFileSync(join(bin, 'prefix.log'), 'utf-8').split('\n').filter(Boolean),
+  };
 }
 
 const fenceJson = (timeline: number, sysid = SYSID, switchSegment: string | null = null) =>
@@ -275,7 +311,8 @@ const fenceJson = (timeline: number, sysid = SYSID, switchSegment: string | null
 
 const env = (bin: string) => ({
   PATH: `${bin}:${process.env.PATH}`,
-  WALG_S3_PREFIX: 's3://bkt/backups/p/e/walg',
+  WALG_S3_PREFIX_BASE: BASE_PREFIX,
+  WALG_ENV_SH: WALG_ENV,
   AWS_ACCESS_KEY_ID: 'k',
   AWS_SECRET_ACCESS_KEY: 's',
   WAL_ARCHIVE_WALG: join(bin, 'wal-g'),
@@ -293,10 +330,17 @@ const archive = (name: string, segment: string, opts: Parameters<typeof stubs>[1
     env: env(st.bin),
     timeout: 10_000,
   });
-  return { ...r, pushes: st.pushes() };
+  return { ...r, pushes: st.pushes(), prefixes: st.prefixes() };
 };
 
 describe('wal-archive.sh against the fence', () => {
+  it('every wal-g call runs against the lineage folder (the base plus the system identifier)', () => {
+    const r = archive('a0', '000000010000000000000004', { fence: fenceJson(2) });
+    expect(r.status).toBe(1);
+    expect(r.prefixes.length).toBeGreaterThan(0);
+    expect(new Set(r.prefixes)).toEqual(new Set([`${BASE_PREFIX}/${SYSID}`]));
+  });
+
   it('no fence object (never failed over): pushes', () => {
     const r = archive('a1', '000000010000000000000004', { fence: null });
     expect(r.status).toBe(0);
@@ -400,13 +444,26 @@ describe.each(Object.entries(backupRuns))('%s base backup against the fence', (t
   const run = (name: string, opts: Parameters<typeof stubs>[1]) => {
     const st = stubs(`${tier}-${name}`, opts);
     const r = runBackup(st.bin);
-    return { ...r, pushes: st.pushes() };
+    return { ...r, pushes: st.pushes(), prefixes: st.prefixes() };
   };
+
+  it('reads the fence and pushes in the lineage folder', () => {
+    const refused = run('b0', { fence: fenceJson(2) });
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain(BACKUP_FENCE_REFUSAL);
+    const pushed = run('b0p', { fence: null });
+    expect(pushed.status).toBe(0);
+    for (const r of [refused, pushed]) {
+      expect(new Set(r.prefixes)).toEqual(new Set([`${BASE_PREFIX}/${SYSID}`]));
+    }
+  });
 
   it('no fence object: backs up and prunes', () => {
     const r = run('b1', { fence: null });
     expect(r.status).toBe(0);
-    expect(r.pushes).toMatch(/backup-push[\s\S]*delete retain FULL 2/);
+    expect(r.pushes).toMatch(
+      /backup-push[\s\S]*delete before FIND_FULL base_000000010000000000000001 --confirm/,
+    );
   });
 
   it('the fence names this database on a newer timeline: refuses, no push and no delete', () => {
@@ -433,7 +490,7 @@ describe.each(Object.entries(backupRuns))('%s base backup against the fence', (t
 });
 
 describe('census: every backup push path checks the fence first', () => {
-  const PUSH = /wal-g (?:wal-push|backup-push|delete retain)|"\$WALG" wal-push/;
+  const PUSH = /wal-g (?:wal-push|backup-push|delete before)|"\$WALG" wal-push/;
   const walk = (dir: string): string[] =>
     spawnSync('git', ['ls-files', dir], { cwd: ROOT, encoding: 'utf-8' })
       .stdout.split('\n')

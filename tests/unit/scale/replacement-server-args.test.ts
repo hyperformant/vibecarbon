@@ -38,7 +38,7 @@ vi.mock('../../../src/lib/command.js', () => ({
 }));
 
 vi.mock('../../../src/lib/config.js', () => ({
-  saveProjectConfig: vi.fn(),
+  updateProjectConfig: vi.fn(),
 }));
 
 // Stubs `fetchWithRetry`, which transparently intercepts calls made through

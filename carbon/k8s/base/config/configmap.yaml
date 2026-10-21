@@ -27,6 +27,3 @@ data:
   DB_HOST: "db"
   DB_PORT: "5432"
   DB_NAME: "postgres"
-
-  # Backup Configuration
-  BACKUP_RETENTION_DAYS: "7"

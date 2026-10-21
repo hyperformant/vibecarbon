@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
 import { writeSecretFile } from './command.js';
+import { projectConfigExists, readProjectConfigFile, updateProjectConfig } from './config.js';
 import { operatorSecretKeys } from './config-registry.js';
 import { formatDotenvLine, parseDotenv, readEnvFiles } from './dotenv.js';
 import { healLegacyDotenvQuoting, healLegacyDotenvText } from './dotenv-heal.js';
@@ -60,7 +61,7 @@ export function detectPackageManager(cwd = process.cwd()) {
  * @returns {boolean}
  */
 export function manifestExists(cwd = process.cwd()) {
-  return existsSync(join(cwd, '.vibecarbon.json'));
+  return projectConfigExists(cwd);
 }
 
 /**
@@ -71,22 +72,7 @@ export function manifestExists(cwd = process.cwd()) {
  * @returns {object} - Manifest object with version and services
  */
 export function loadManifest(cwd = process.cwd()) {
-  const manifestPath = join(cwd, '.vibecarbon.json');
-  if (existsSync(manifestPath)) {
-    return JSON.parse(readFileSync(manifestPath, 'utf-8'));
-  }
-  return { version: '1', services: {} };
-}
-
-/**
- * Save the project manifest (.vibecarbon.json)
- *
- * @param {object} manifest - Manifest object to save
- * @param {string} [cwd] - Working directory (defaults to process.cwd())
- */
-export function saveManifest(manifest, cwd = process.cwd()) {
-  const manifestPath = join(cwd, '.vibecarbon.json');
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return readProjectConfigFile(cwd) ?? { version: '1', services: {} };
 }
 
 /**
@@ -113,16 +99,16 @@ export function saveManifest(manifest, cwd = process.cwd()) {
 export function ensureProjectId(projectConfig, cwd = process.cwd()) {
   if (projectConfig?.projectId) return projectConfig.projectId;
 
-  // loadManifest returns the empty-project default when no file exists, so
-  // this also covers a hand-made project that has docker-compose.yml but no
-  // manifest: saveManifest creates one carrying just the id.
-  const manifest = loadManifest(cwd);
-  if (!manifest.projectId) {
+  // Under the config lock, so two commands backfilling at once agree on one
+  // id. A hand-made project with docker-compose.yml but no manifest gets one
+  // carrying the empty-project default plus the id.
+  const written = updateProjectConfig((manifest) => {
+    if (manifest.projectId) return;
+    if (Object.keys(manifest).length === 0) Object.assign(manifest, loadManifest(cwd));
     manifest.projectId = randomUUID();
-    saveManifest(manifest, cwd);
-  }
-  if (projectConfig) projectConfig.projectId = manifest.projectId;
-  return manifest.projectId;
+  }, cwd);
+  if (projectConfig) projectConfig.projectId = written.projectId;
+  return written.projectId;
 }
 
 // ============================================================================

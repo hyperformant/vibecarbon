@@ -11,29 +11,65 @@
 # backup on the PRIMARY. On the standby (in recovery) it no-ops, and after a
 # failover the new primary's CronJob transparently starts taking base backups —
 # no per-cluster config.
+#
+# Result marker (src/lib/walg/backup-result.js; same contract as
+# carbon/backup/compose-backup.sh): a run that exits 0 prints exactly one
+# BACKUP_RESULT=pushed:<name> or BACKUP_RESULT=skipped:<reason> line, which
+# `vibecarbon backup` and destroy read from the Job logs. The pushed line comes
+# before retention, so a retention failure still names the base; it exits 3.
+#
+# One backup at a time per database: every Job (the schedule, and each
+# `kubectl create job --from=cronjob/backup` the CLI starts, which
+# concurrencyPolicy Forbid does not see) takes a lock inside the db container
+# before wal-g runs. A held lock prints BACKUP_RESULT=skipped:already-running
+# and the Job completes; LOCK_WAIT (seconds, set on the Job the CLI starts
+# after a promotion) waits for it first. Two concurrent runs would each run
+# `wal-g delete garbage`, which can delete the base the other is still pushing.
+#
+# Retries never re-push a landed base: restartPolicy Never (no in-place
+# container restart) plus a podFailurePolicy that fails the Job at once on
+# exit 3 (base pushed, retention failed). A failed push (exit 1, no marker)
+# still gets a new pod under backoffLimit. podFailurePolicy is GA in
+# Kubernetes 1.31, the line K3S_VERSION (src/lib/deploy/k8s/k3s.js) pins.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: backup
+  annotations:
+    # Deploy-owned (see spec.schedule): Flux never garbage-collects the live one.
+    kustomize.toolkit.fluxcd.io/prune: disabled
   labels:
     app: vibecarbon-backup
     component: backup
 spec:
-  schedule: 0 2 * * *
+  # DEPLOY-owned, per environment: the CLI deploy and the deploy workflow fill
+  # this in (scripts/render-backup-settings.mjs) from the environment backup
+  # config. Flux does not build this object (see the vibecarbon-base patches
+  # in k8s/flux/clusters/*), so it never sees the placeholder.
+  schedule: "{{BACKUP_SCHEDULE}}"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # BACKUP_JOB_ACTIVE_DEADLINE_S (src/backup.js) is this value: the CLI
+      # waits for a Job as long as it may run.
       activeDeadlineSeconds: 3600
       backoffLimit: 2
+      podFailurePolicy:
+        rules:
+          - action: FailJob
+            onExitCodes:
+              containerName: backup
+              operator: In
+              values: [3]
       template:
         metadata:
           labels:
             app: vibecarbon-backup
             component: backup
         spec:
-          restartPolicy: OnFailure
+          restartPolicy: Never
           serviceAccountName: backup-sa
           containers:
             - name: backup
@@ -51,8 +87,10 @@ spec:
                 - name: BACKUP_RETENTION_DAYS
                   valueFrom:
                     configMapKeyRef:
-                      name: vibecarbon-config
+                      name: vibecarbon-backup-settings
                       key: BACKUP_RETENTION_DAYS
+                      # Optional only so the script below can say what is wrong
+                      # and name the fix; there is no default retention.
                       optional: true
                 # The retirement marker (HA-correctness R7): a failover retired
                 # this cluster, and the CLI patched VIBECARBON_ROLE=retired into
@@ -71,7 +109,7 @@ spec:
                   set -euo pipefail
                   # A retired cluster (the old primary after a failover) holds a
                   # timeline the promoted cluster has left: a base backup plus
-                  # delete retain from here would land in, and prune, the
+                  # delete before from here would land in, and prune, the
                   # promoted cluster backups. Refuse loudly, never a skip, before
                   # kubectl exec reaches wal-g. vibecarbon deploy rebuilds this
                   # cluster as the standby and clears the marker once it streams.
@@ -79,11 +117,53 @@ spec:
                     echo "retired node: backups refused (run vibecarbon deploy to rebuild it as the standby)" >&2
                     exit 1
                   fi
-                  RETAIN="${BACKUP_RETENTION_DAYS:-7}"
+                  RETAIN="${BACKUP_RETENTION_DAYS:-}"
+                  # No default: the days come from the vibecarbon-backup-settings
+                  # ConfigMap that a deploy creates per environment. It is spliced
+                  # into the db-container script and its date arithmetic, so only a
+                  # positive whole number of days is accepted.
+                  case "$RETAIN" in
+                    ""|*[!0-9]*|0|0[0-9]*)
+                      echo "BACKUP_RETENTION_DAYS from ConfigMap vibecarbon-backup-settings is missing or not a positive whole number of days (got: $RETAIN). Run vibecarbon deploy for this environment (or the deploy workflow) to create it." >&2
+                      exit 1
+                      ;;
+                  esac
+                  # Seconds to wait for another backup run before skipping. It is
+                  # spliced into the db-container command, so only a whole number.
+                  LOCK_WAIT="${LOCK_WAIT:-0}"
+                  case "$LOCK_WAIT" in
+                    ""|*[!0-9]*)
+                      echo "LOCK_WAIT must be a whole number of seconds (got: $LOCK_WAIT)" >&2
+                      exit 1
+                      ;;
+                  esac
                   # Exec wal-g inside the db pod. The guard makes this a no-op on
                   # a standby (in recovery) so only the primary takes base backups.
-                  kubectl exec -n vibecarbon statefulset/db -c db -- bash -c '
+                  # Exit 75 is the lock skip (marker printed): the Job completes.
+                  rc=0
+                  kubectl exec -n vibecarbon statefulset/db -c db -- env "LOCK_WAIT=$LOCK_WAIT" bash -c '
                     set -euo pipefail
+                    # ONE BACKUP AT A TIME per database, whichever Job runs this:
+                    # the lock is a file in the db container, held for the whole
+                    # run. busybox flock has no -w, so the bounded wait polls -n.
+                    # VC_BACKUP_LOCKFILE exists for the script tests only.
+                    # /tmp is writable by the postgres user and this opens as root:
+                    # a symlink at the path is refused, and >> never truncates.
+                    lock_path="${VC_BACKUP_LOCKFILE:-/tmp/vc-backup.lock}"
+                    if [ -L "$lock_path" ]; then
+                      echo "backup lock $lock_path is a symlink, refusing" >&2
+                      exit 1
+                    fi
+                    exec 9>>"$lock_path"
+                    lock_until=$(( $(date +%s) + LOCK_WAIT ))
+                    until flock -n 9; do
+                      if [ "$(date +%s)" -ge "$lock_until" ]; then
+                        echo "Backup already running, skipping" >&2
+                        echo "BACKUP_RESULT=skipped:already-running"
+                        exit 75
+                      fi
+                      sleep 2
+                    done
                     # wal-g backup-push connects to Postgres (pg_backup_start) using
                     # libpq env. Unset, PGUSER defaults to the container OS user
                     # "root" → "role \"root\" does not exist". And only the cluster
@@ -93,13 +173,23 @@ spec:
                     # (wal-push/archiving and backup-fetch/restore do not connect to
                     # PG, which is why this only bit backup-push. RCA 2026-05-30.)
                     export PGUSER=postgres PGHOST=localhost PGPORT=5432 PGDATABASE=postgres
+                    # This database lineage folder: walg-env.sh (mounted from the
+                    # vibecarbon-wal-archive ConfigMap) turns WALG_S3_PREFIX_BASE into
+                    # the folder named by the system identifier in PGDATA, so the push,
+                    # the fence read and the retention act on this lineage only. One it
+                    # cannot read exits 1 with no marker. WALG_ENV_SH exists for the
+                    # script tests only. A segment name already archived with other
+                    # bytes is refused, never overwritten (as on the db container).
+                    . "${WALG_ENV_SH:-/etc/postgresql/walg-env.sh}" || exit 1
+                    export WALG_PREVENT_WAL_OVERWRITE=true
                     # WRITE-GUARD (finding #3): never base-backup on a standby into
-                    # the single canonical WALG_S3_PREFIX. WALG_ROLE is rendered
+                    # the single canonical lineage prefix. WALG_ROLE is rendered
                     # into the db container env (db/statefulset.yaml) and inherited
                     # by this kubectl-exec. Closes the bring-up window the recovery
                     # check below cannot (independent primary, not yet in recovery).
                     if [ "${WALG_ROLE:-primary}" = "standby" ]; then
-                      echo "WALG_ROLE=standby — skipping base backup (only the primary writes the canonical prefix)."
+                      echo "WALG_ROLE=standby, skipping base backup (only the primary writes the canonical prefix)."
+                      echo "BACKUP_RESULT=skipped:standby-role"
                       exit 0
                     fi
                     # The recovery probe must FAIL LOUD when it cannot prove
@@ -115,7 +205,8 @@ spec:
                     }
                     case "$REC" in
                       t)
-                        echo "db is in recovery (standby) — skipping base backup."
+                        echo "db is in recovery (standby), skipping base backup."
+                        echo "BACKUP_RESULT=skipped:in-recovery"
                         exit 0
                         ;;
                       f) ;;
@@ -130,7 +221,7 @@ spec:
                     # vibecarbon-fence.json into this prefix, naming the promoted primary database
                     # and the timeline it promoted onto. An old primary that rebooted unreached is
                     # the same database on an OLDER timeline: its base backup would become LATEST
-                    # and its delete retain would prune the promoted node backups. Refuse loudly.
+                    # and its retention would prune the promoted node backups. Refuse loudly.
                     # No fence object (an env that never failed over) is allowed; one that cannot
                     # be read refuses, since nothing then proves this node is the primary.
                     fence="$(wal-g st cat vibecarbon-fence.json 2>&1)" || {
@@ -156,20 +247,82 @@ spec:
                         exit 1
                       fi
                     fi
-                    wal-g backup-push "$PGDATA"
-                    # Sweep sentinel-less orphans (interrupted pushes) before
-                    # retention — `delete retain` hard-crashes on a backup
-                    # whose stop-sentinel never got written, and retries
-                    # cannot heal a permanently missing object (2026-08-30
-                    # RCA). Safe under concurrencyPolicy: Forbid — no
+                    # The push. wal-g logs to stderr only, and names the base on a
+                    # Started line and, once the sentinel is written, on a Wrote
+                    # backup with name line. Only the Wrote line proves a pushed
+                    # base, so the marker takes its name from it; a push that
+                    # exits 0 without it fails rather than guess.
+                    push_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    push_out="$(wal-g backup-push "$PGDATA" 2>&1)" || {
+                      printf "%s\n" "$push_out" >&2
+                      exit 1
+                    }
+                    printf "%s\n" "$push_out" >&2
+                    name="$(printf "%s\n" "$push_out" | grep -o "Wrote backup with name base_[0-9A-Za-z_]*" | tail -n 1 | sed "s/^Wrote backup with name //")" || true
+                    if [ -z "$name" ]; then
+                      echo "backup-push exited 0 but printed no backup name (no Wrote backup with name line), so nothing proves what landed" >&2
+                      exit 1
+                    fi
+                    echo "BACKUP_RESULT=pushed:$name"
+                    # WAL GAP RECORD (wal-archive.sh drops a segment only under disk pressure
+                    # and records it here): a drop before this base started is behind it now,
+                    # so its entry goes; one recorded while the push ran stays (this base needs
+                    # that WAL). The record moves aside first, so an entry wal-archive.sh
+                    # appends meanwhile lands in a new file and is never lost. It runs as the
+                    # postgres user (gosu): this shell is root, and PGDATA is the postgres
+                    # user directory, so a root write there could follow a planted symlink. A
+                    # symlinked record is refused. A failure here only warns: the base is in
+                    # the bucket.
+                    gap="$PGDATA/vibecarbon-wal-gap"
+                    if [ -e "$gap" ] || [ -e "$gap.clearing" ] || [ -L "$gap" ] || [ -L "$gap.clearing" ]; then
+                      gosu postgres sh -c "
+                        g=\"\$1\"; s=\"\$2\"
+                        for f in \"\$g\" \"\$g.clearing\"; do
+                          if [ -L \"\$f\" ]; then echo \"refusing the WAL gap record \$f: it is a symlink\" >&2; exit 1; fi
+                        done
+                        { [ ! -f \"\$g\" ] || mv -f \"\$g\" \"\$g.clearing\"; } &&
+                          kept=\"\$(awk -v s=\"\$s\" \"\\\$2 >= s\" \"\$g.clearing\")\" &&
+                          { [ -z \"\$kept\" ] || printf \"%s\\n\" \"\$kept\" >> \"\$g\"; } &&
+                          rm -f \"\$g.clearing\"
+                      " sh "$gap" "$push_started" || echo "could not clear the WAL gap record $gap after pushing $name" >&2
+                    fi
+                    # RETENTION, a separate step after the marker: the base above
+                    # is in the bucket whatever happens here, and a failure exits
+                    # 3, which the podFailurePolicy turns into a failed Job (no
+                    # new pod, so no second push). Sweep sentinel-less
+                    # orphans (interrupted pushes) before the delete, since
+                    # it hard-crashes on a backup whose
+                    # stop-sentinel never got written, and retries cannot heal a
+                    # permanently missing object (2026-08-30 RCA). Safe under the
+                    # db-container lock above, which every backup Job takes, so no
                     # concurrent push can look like an orphan mid-flight.
-                    # NO APOSTROPHES in this wrapper, comments included — a
+                    # Retention is by TIME and keeps the full retention window. The
+                    # cutoff is that many days ago; the target is the NEWEST base that
+                    # finished at or before it, and delete before FIND_FULL on that
+                    # base removes what precedes it, so the base and its WAL stay and
+                    # a restore to any moment in the window has its base. No base that
+                    # old: nothing is deleted, and the newest base always survives.
+                    # The list is parsed without jq (Alpine busybox db image): the
+                    # cutoff is epoch arithmetic, the JSON is split with tr and sed.
+                    # It acts on this lineage folder only (walg-env.sh). The fence
+                    # object is read back after the delete, and one that changed or
+                    # vanished fails retention.
+                    # NO APOSTROPHES in this wrapper, comments included: a
                     # single quote ends the bash -c string (enforced by
                     # tests/unit/template/embedded-shell-syntax.test.ts;
                     # run 33319907805 is the day one broke every backup).
-                    wal-g delete garbage BACKUPS --confirm
-                    wal-g delete retain FULL '"${RETAIN}"' --confirm
-                  '
+                    RETAIN_DAYS='"${RETAIN}"'
+                    retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && list="$(wal-g backup-list --detail --json)" && target="$(printf "%s" "$list" | tr "}" "\n" | sed -n "s/.*\"backup_name\":\"\([^\"]*\)\".*\"finish_time\":\"\([^\"]*\)\".*/\2 \1/p" | awk -v c="$cutoff" "substr(\$1,1,19) <= substr(c,1,19)" | sort | tail -n 1 | cut -d " " -f 2)" && { if [ -n "$target" ]; then wal-g delete before FIND_FULL "$target" --confirm; else echo "no base backup is older than ${RETAIN_DAYS} days, nothing to delete"; fi; } && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
+                      printf "%s\n" "$retain_out" >&2
+                      echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
+                      exit 3
+                    }
+                    printf "%s\n" "$retain_out" >&2
+                  ' || rc=$?
+                  if [ "$rc" -eq 75 ]; then
+                    exit 0
+                  fi
+                  exit "$rc"
               resources:
                 requests:
                   cpu: 50m

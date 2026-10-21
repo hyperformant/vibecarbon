@@ -82,6 +82,10 @@ export type StepName =
   | 'verify-scale'
   | 'backup'
   | 'destroy'
+  // k8s and k8s-ha. Right after `destroy`: `deploy -restore latest` stands the
+  // environment up again from the preserved backups, and the marker row
+  // written before the backup must be there.
+  | 'restore-deploy'
   | 'restore'
   | 'verify-restore'
   | 'failover'

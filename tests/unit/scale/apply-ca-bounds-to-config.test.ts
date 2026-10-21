@@ -39,7 +39,7 @@ vi.mock('../../../src/lib/command.js', () => ({
 }));
 
 vi.mock('../../../src/lib/config.js', () => ({
-  saveProjectConfig: vi.fn(),
+  updateProjectConfig: vi.fn(),
 }));
 
 const { applyCaBoundsToConfig } = await import('../../../src/scale.js');

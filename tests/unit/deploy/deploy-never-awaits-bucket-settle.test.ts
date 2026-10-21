@@ -118,8 +118,8 @@ describe('orchestrator wiring', () => {
   );
 
   it('persists bucketCreatedAt only when finish produced one', () => {
-    expect(src).toContain(
-      "...(Object.hasOwn(appBucketFinal, 'bucketCreatedAt') && {\n            bucketCreatedAt: appBucketFinal.bucketCreatedAt,",
+    expect(src).toMatch(
+      /\.\.\.\(Object\.hasOwn\(appBucketFinal, 'bucketCreatedAt'\) && \{\n\s+bucketCreatedAt: appBucketFinal\.bucketCreatedAt,/,
     );
   });
 

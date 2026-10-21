@@ -31,7 +31,7 @@ vi.mock('../../../src/lib/project-guard.js', () => ({
 }));
 vi.mock('../../../src/lib/config.js', () => ({
   loadProjectConfig: vi.fn(() => null),
-  saveProjectConfig: vi.fn(),
+  updateProjectConfig: vi.fn(),
 }));
 vi.mock('../../../src/lib/cli/intro.js', () => ({ introCommand: vi.fn() }));
 vi.mock('../../../src/lib/cli/progress.js', () => ({

@@ -15,6 +15,39 @@ const H = vi.hoisted(() => ({
   setupServerCalls: [] as Array<{ ip: string; sshKeyPath: string; timeoutMs: number | undefined }>,
 }));
 
+// scale resolves the restore's base backup from the backup bucket's stop
+// sentinels; here, a bucket holding one base backup.
+vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
+  const actual = await orig<typeof import('../../../src/lib/walg/restore-base.js')>();
+  return {
+    ...actual,
+    // The backup bucket's credentials, as scale's preflight resolves them.
+    resolveS3Config: async () => ({
+      bucket: 'myapp-backups',
+      endpoint: 'e',
+      region: 'r',
+      accessKey: 'a',
+      secretKey: 's',
+    }),
+    readEnvBaseBackups: async () => ({
+      s3Config: { bucket: 'myapp-backups' },
+      location: 's3://myapp-backups/backups/myapp/prod/walg/7699032860122738725',
+      // The lineage the listing read: the restore pins restore_command to it.
+      lineage: '7699032860122738725',
+      backups: [
+        {
+          name: 'base_000000010000000000000002',
+          timeline: 1,
+          startLsn: '0/2000028',
+          finishTime: new Date('2026-10-20T01:00:00Z'),
+          sizeBytes: 1024,
+          uncompressedBytes: 4096,
+        },
+      ],
+    }),
+  };
+});
+
 vi.mock('@clack/prompts', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -30,7 +63,7 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    backupCompose: async () => {},
+    backupCompose: async () => ({ result: 'pushed', name: 'base_000000010000000000000002' }),
     waitForSSH: async () => true,
     setupServer: vi.fn(async (ip: string, sshKeyPath: string, timeoutMs?: number) => {
       H.setupServerCalls.push({ ip, sshKeyPath, timeoutMs });
@@ -45,6 +78,23 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => {
   };
 });
 
+// The fenced cutover's remote steps (compose-scale-fence.test.ts covers them).
+vi.mock('../../../src/lib/deploy/compose/scale-cutover.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubScaleCutover(await orig()),
+);
+vi.mock('../../../src/lib/deploy/compose/ha.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubDemote(await orig()),
+);
+
+vi.mock('../../../src/lib/deploy/write-fence.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubWriteFence(await orig()),
+);
+vi.mock('../../../src/lib/deploy/compose/server-state-sync.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubServerStateSync(await orig()),
+);
+vi.mock('../../../src/lib/config.js', async (orig) =>
+  (await import('../helpers/scale-cutover-stub.js')).stubProjectConfig(await orig()),
+);
 vi.mock('../../../src/lib/build.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return { ...actual, getGHCRCredentials: async () => ({}) };
@@ -75,7 +125,9 @@ function makeCtx(Provider: typeof HetznerProvider | typeof DigitalOceanProvider)
     newType: 'x',
     region: 'r1',
     sshKeyId: 42,
-    envConfig: {},
+    // Single-server (non-HA), no backup cron; the live lineage on record
+    // (scale's preflight refuses without it).
+    envConfig: { backup: { lineage: '7699032860122738725' } },
     projectName: 'myapp',
     environment: 'prod',
     sshKeyPath: '/key',
@@ -84,6 +136,7 @@ function makeCtx(Provider: typeof HetznerProvider | typeof DigitalOceanProvider)
     dnsChallenge: true,
     dnsProvider: null,
     apiToken: 'tok',
+    projectConfig: { projectName: 'myapp', environments: {} },
     targetServers: [{ ip: '1.1.1.1', id: 'old-id' }],
   };
 }

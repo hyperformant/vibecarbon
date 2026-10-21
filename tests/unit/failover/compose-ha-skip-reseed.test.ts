@@ -15,6 +15,14 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// The first base backup on the new timeline has its own tests
+// (tests/unit/walg/post-promote-backup-census.test.ts, the step-order census);
+// here it lands.
+vi.mock('../../../src/lib/walg/post-promote-backup.js', async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  pushBaseBackupAfterPromote: vi.fn(async () => ({ name: 'base_000000020000000000000004' })),
+}));
+
 const sshCalls: Array<{ ip: string; command: string; input?: string }> = [];
 
 /** A passing wal-g audit payload: storage reachable, one base backup visible. */
@@ -88,14 +96,17 @@ vi.mock('../../../src/lib/deploy/utils.js', async (orig) => {
   };
 });
 
-// The journal and the role swap load and save .vibecarbon.json: serve a fresh
-// copy of the fixture and record the saves instead.
+// The journal and the role swap write .vibecarbon.json: patch a fresh copy of
+// the fixture and record the writes instead.
 vi.mock('../../../src/lib/config.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
     loadProjectConfig: vi.fn(() => structuredClone(projectConfig)),
-    saveProjectConfig: vi.fn(),
+    updateProjectConfig: vi.fn((fn: (c: Record<string, unknown>) => unknown) => {
+      const current = structuredClone(projectConfig) as Record<string, unknown>;
+      return fn(current) ?? current;
+    }),
   };
 });
 
@@ -133,7 +144,7 @@ vi.mock('../../../src/lib/deploy/tls-ready.js', async (orig) => {
 
 const { failoverComposeHA } = await import('../../../src/lib/deploy/compose/ha.js');
 const { waitForTrustedTls } = await import('../../../src/lib/deploy/tls-ready.js');
-const { saveProjectConfig } = await import('../../../src/lib/config.js');
+const { updateProjectConfig } = await import('../../../src/lib/config.js');
 
 const envConfig = {
   deployMode: 'compose-ha',
@@ -162,7 +173,7 @@ beforeEach(() => {
   envMerges.length = 0;
   auditPayload = WALG_AUDIT_PASS;
   promoted = false;
-  vi.mocked(saveProjectConfig).mockClear();
+  vi.mocked(updateProjectConfig).mockClear();
 });
 
 describe('failoverComposeHA — standby already streaming', () => {
@@ -332,6 +343,6 @@ describe('failoverComposeHA — standby already streaming', () => {
       failoverComposeHA('prod', envConfig, projectConfig, parsed, tracker),
     ).rejects.toThrow(/FAILOVER COMPLETED, BACKUPS DID NOT/);
     expect(sshCalls.some((c) => c.command.includes('pg_promote'))).toBe(true);
-    expect(saveProjectConfig).toHaveBeenCalled();
+    expect(updateProjectConfig).toHaveBeenCalled();
   });
 });

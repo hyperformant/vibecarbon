@@ -146,6 +146,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      # The real-engine Pulumi test (tests/integration/iac/server-state-follows-scale.test.ts)
+      # needs the pulumi CLI, and fails rather than skips under CI without it.
+      # Pinned to the @pulumi/pulumi SDK version the lockfile installed, so the
+      # CLI and SDK move together with no second version literal to keep in sync.
+      - name: Install Pulumi CLI
+        run: |
+          version="$(node -p "require('@pulumi/pulumi/package.json').version")"
+          curl -fsSL https://get.pulumi.com | sh -s -- --version "$version" --no-edit-path
+          echo "$HOME/.pulumi/bin" >> "$GITHUB_PATH"
+
       - name: Run integration tests
         run: pnpm test:integration
         timeout-minutes: 10

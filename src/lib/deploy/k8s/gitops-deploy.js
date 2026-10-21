@@ -23,6 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as p from '@clack/prompts';
+import { resolveBackupSettings } from '../../../../carbon/scripts/render-backup-settings.mjs';
 import { spinner } from '../../cli/progress.js';
 import { gitSafeEnv } from '../../command.js';
 import { featureConfigKeys, featureSecretKeys } from '../../config-registry.js';
@@ -196,6 +197,9 @@ function commitAndPushManifests(cwd, message) {
  *   class): { hetznerApiToken, dnsTokens }
  * @param {{ accessKey: string, secretKey: string }} args.appStorage - the env
  *   app's own storage pair (storedAppStoragePair), seeded per environment
+ * @param {{schedule?: string, retentionDays?: number}} [args.backupConfig] - envConfig.backup:
+ *   seeded as the environment's BACKUP_SCHEDULE / BACKUP_RETENTION_DAYS vars, which deploy.yml renders
+ *   into the backup CronJob and its settings ConfigMap (never into the shared committed k8s/base)
  * @param {string} [args.imageTag] - specific image tag to bake into app Deployment (default "main")
  * @param {number} [args.workflowTimeoutSec] - default 60 min. deploy.yml's
  *   internal Flux wait caps at 10m (vibecarbon-base), on top of ~5m Flux
@@ -215,6 +219,7 @@ export async function deployK8sGitOps(args) {
     providerCreds,
     appStorage,
     imageTag,
+    backupConfig,
     workflowTimeoutSec = 3600,
     skipCi = false,
   } = args;
@@ -225,6 +230,9 @@ export async function deployK8sGitOps(args) {
   if (obsWarning) {
     p.log.warn(obsWarning);
   }
+
+  // Before anything is committed or seeded: a malformed backup config fails here.
+  const backupSettings = resolveBackupSettings(backupConfig);
 
   const s = spinner();
   const skipCiStr = skipCi ? ' [skip ci]' : '';
@@ -278,6 +286,11 @@ export async function deployK8sGitOps(args) {
     SITE_URL: domain ? `https://${domain}` : '',
     DNS_PROVIDER: dnsProvider || '',
     HCLOUD_NETWORK_ID: networkId || '',
+    // Per environment, never in the committed k8s/base every environment
+    // shares: deploy.yml renders the backup CronJob and its settings from
+    // these (scripts/render-backup-settings.mjs).
+    BACKUP_SCHEDULE: backupSettings.schedule,
+    BACKUP_RETENTION_DAYS: String(backupSettings.retentionDays),
   };
   await seedEnvironmentSecrets(environment, perEnvSecrets, perEnvVars);
   await uploadKubeconfig(environment, kubeconfigPath);
