@@ -30,6 +30,14 @@ vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
   const actual = await orig<typeof import('../../../src/lib/walg/restore-base.js')>();
   return {
     ...actual,
+    // The backup bucket's credentials, as scale's preflight resolves them.
+    resolveS3Config: async () => ({
+      bucket: 'myapp-backups',
+      endpoint: 'e',
+      region: 'r',
+      accessKey: 'a',
+      secretKey: 's',
+    }),
     readEnvBaseBackups: async () => ({
       s3Config: { bucket: 'myapp-backups' },
       location: 's3://myapp-backups/backups/myapp/prod/walg/7699032860122738725',
@@ -121,7 +129,9 @@ function makeCtx() {
       newType: 'cpx31',
       region: 'fsn1',
       sshKeyId: 42,
-      envConfig: {}, // no backup cron, single-server (non-HA)
+      // Single-server (non-HA), no backup cron; the live lineage on record
+      // (scale's preflight refuses without it).
+      envConfig: { backup: { lineage: '7699032860122738725' } },
       projectName: 'myapp',
       environment: 'prod',
       sshKeyPath: '/key',

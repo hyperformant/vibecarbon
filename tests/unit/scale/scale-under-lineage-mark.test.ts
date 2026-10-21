@@ -46,7 +46,20 @@ const h = vi.hoisted(() => {
       return { Body: { transformToString: async () => body } };
     },
   });
-  return { restores: [] as Array<Record<string, unknown>>, fakeS3 };
+  const creds = {
+    bucket: 'myapp-backups',
+    endpoint: 'e',
+    region: 'r',
+    accessKey: 'a',
+    secretKey: 's',
+  };
+  return {
+    restores: [] as Array<Record<string, unknown>>,
+    fakeS3,
+    creds,
+    // What the backup bucket's credential lookup answers (null: none set).
+    s3: { value: creds as typeof creds | null },
+  };
 });
 
 vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
@@ -54,6 +67,7 @@ vi.mock('../../../src/lib/walg/restore-base.js', async (orig) => {
   return {
     ...actual,
     // The real listing, over the fake bucket.
+    resolveS3Config: async () => h.s3.value,
     readEnvBaseBackups: (args: Parameters<typeof actual.readEnvBaseBackups>[0]) =>
       actual.readEnvBaseBackups({
         ...args,
@@ -152,10 +166,34 @@ function makeCtx() {
 describe('compose scale under an unrestored prior lineage', () => {
   it('restores the live lineage onto the new server and proceeds', async () => {
     h.restores.length = 0;
+    h.s3.value = h.creds;
     const { ctx } = makeCtx();
     await SCALE_EFFECTS.scaleServers(ctx);
     expect(h.restores).toHaveLength(1);
     expect(h.restores[0]).toMatchObject({ backup: 'base_00000001000000000000000C', lineage: NEW });
     expect(String(h.restores[0].recoveryConf)).toContain(`export RESTORE_LINEAGE=${NEW};`);
+  });
+});
+
+// Fix round 3: scale's restore needs a recorded lineage and the backup
+// bucket's credentials. Both are local facts, so both refuse before any
+// server is built (the late refusals deleted a server just provisioned).
+describe('compose scale preflight, before any provisioning', () => {
+  it('no recorded lineage: refuses naming vibecarbon deploy, and no server is created', async () => {
+    h.s3.value = h.creds;
+    const { ctx, provider } = makeCtx();
+    ctx.envConfig = { deployMode: 'compose', backup: {} };
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(/vibecarbon deploy prod/);
+    expect(provider.createServer).not.toHaveBeenCalled();
+  });
+
+  it('no backup credentials: refuses naming the variables, and no server is created', async () => {
+    h.s3.value = null;
+    const { ctx, provider } = makeCtx();
+    await expect(SCALE_EFFECTS.scaleServers(ctx)).rejects.toThrow(
+      /HETZNER_ACCESS_KEY and HETZNER_SECRET_KEY/,
+    );
+    expect(provider.createServer).not.toHaveBeenCalled();
+    h.s3.value = h.creds;
   });
 });

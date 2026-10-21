@@ -73,7 +73,9 @@ import {
   backupCredentialVars,
   readEnvBaseBackups,
   resolveRestoreBase,
+  resolveS3Config,
 } from './lib/walg/restore-base.js';
+import { LINEAGE_RE } from './lib/walg/restore-layout.js';
 import { assertRestoredPrimaryWritable } from './lib/walg/restore-marker.js';
 
 // ============================================================================
@@ -579,6 +581,32 @@ async function scaleServers(ctx) {
     targetServers,
   } = ctx;
 
+  // PREFLIGHT, before any server is built. Every server this replaces is
+  // restored from the backup bucket (the primary from its own pushed base, a
+  // standby from the primary's), which needs the live database's recorded
+  // lineage (C7) and the bucket's credentials locally. Both are local facts:
+  // refusing late deleted a server just provisioned, set up and started.
+  const liveLineage = envConfig.backup?.lineage;
+  if (!LINEAGE_RE.test(String(liveLineage ?? ''))) {
+    throw new Error(
+      `scale restores ${environment}'s database onto the new server from its backup lineage, and none is on record. ` +
+        `Run vibecarbon deploy ${environment} to record it, then rerun.`,
+    );
+  }
+  const backupS3 = await resolveS3Config({
+    isCompose: true,
+    envName: environment,
+    projectName,
+    envConfig,
+    skipPrompts: !process.stdin.isTTY,
+  });
+  if (!backupS3) {
+    throw new Error(
+      `scale restores the new server from ${environment}'s backup bucket and needs its credentials: ` +
+        `export ${backupCredentialVars(envConfig)}, then rerun.`,
+    );
+  }
+
   const scaleSingleServer = async (server) => {
     const label = isHATier(tier) ? `${server.role} (${server.ip})` : server.ip;
     const s = spinner();
@@ -898,7 +926,8 @@ async function scaleServers(ctx) {
         // The live database's own lineage (C7), never a resolved one: an
         // unrestored prior lineage is a restore question, not scale's.
         live: true,
-        skipPrompts: !process.stdin.isTTY,
+        // Resolved by the preflight, before anything was provisioned.
+        s3Config: backupS3,
       });
       if (!listing.s3Config) {
         throw new Error(
