@@ -629,6 +629,9 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     // finds no target, deletes nothing, and the fence reads back unchanged.
     const before = await names();
     const first = pushedName(runComposeBackupScript(dir));
+    // The retention compares finish times to the second: two pushes finishing
+    // inside one second would leave no cutoff that separates them.
+    await sleep(2100);
     const second = pushedName(runComposeBackupScript(dir));
     const afterRuns = await names();
     expect(afterRuns).toEqual(expect.arrayContaining([...before, first, second]));
@@ -663,9 +666,10 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     // A cutoff before every base: no target, nothing to delete.
     expect(targetFor('2000-01-01T00:00:00Z')).toBe('');
 
-    // A cutoff between the two pushes: the earlier push is the target, so it
-    // and everything after stay, and only what precedes it goes.
-    const mid = iso(Math.floor((finish(first) + finish(second)) / 2000) * 1000);
+    // A cutoff at the earlier push's own second (the second push finished more
+    // than 2s later): the earlier push is the target, so it and everything
+    // after stay, and only what precedes it goes.
+    const mid = iso(Math.floor(finish(first) / 1000) * 1000);
     expect(targetFor(mid)).toBe(first);
     const del1 = walgInDb(`delete before FIND_FULL ${first} --confirm`);
     expect(del1.status, del1.stderr).toBe(0);
