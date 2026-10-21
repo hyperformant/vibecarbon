@@ -65,6 +65,7 @@ import { confirmProdOrExit } from './lib/prod-confirm.js';
 import { assertInProjectDir } from './lib/project-guard.js';
 import { providerIdFor, resolveProviderToken } from './lib/providers/index.js';
 import { getPostgresPod, getSSHKeyPath, sshKubectl } from './lib/ssh.js';
+import { readPrimaryWalGap } from './lib/status/backup-health.js';
 import { createTracker } from './lib/tracker.js';
 import {
   PostPromoteBackupError,
@@ -328,6 +329,7 @@ export { pickRestoreBase };
  * @param {object} [deps]  Test seams; production passes none.
  * @param {typeof resolveS3Config} [deps.resolveS3Config]
  * @param {(cfg: object) => any} [deps.createS3Client]
+ * @param {typeof readPrimaryWalGap} [deps.readWalGap]
  */
 export async function run(args, deps = {}) {
   const { values, positional, handled } = parseFlagsOrExit(args, SPEC);
@@ -540,6 +542,23 @@ export async function run(args, deps = {}) {
   p.log.message(
     `  ${c.dim('Restore to'.padEnd(14))} ${c.bold(chosenSource.name === 'latest' ? 'latest (all WAL)' : chosenSource.name)}`,
   );
+
+  // A restore to `latest` replays WAL to the end, and stops at the first
+  // segment the primary dropped under disk pressure (its gap record). Said
+  // before the confirmation; a primary that cannot be read says nothing.
+  if (chosenSource.name === 'latest') {
+    let gap = null;
+    try {
+      gap = await (deps.readWalGap ?? readPrimaryWalGap)(envName, envConfig, projectName, serverIp);
+    } catch {
+      gap = null;
+    }
+    if (gap) {
+      p.log.warn(
+        `Recovery will stop at the first recorded WAL gap, ${gap.first} (${gap.count} segment${gap.count === 1 ? '' : 's'} dropped under disk pressure on ${serverIp}). Anything written after it is not restored.`,
+      );
+    }
+  }
 
   if (!values.y) {
     const confirm = await p.confirm({

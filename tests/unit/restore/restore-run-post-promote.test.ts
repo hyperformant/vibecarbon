@@ -58,6 +58,17 @@ vi.mock('../../../src/lib/deploy/compose/index.js', async (orig) => ({
   restoreCompose: vi.fn(async () => {}),
 }));
 const push = vi.fn();
+// The read-only WAL gap probe on the primary (no ssh in this test).
+const walGap = vi.fn();
+const confirmFn = vi.fn();
+vi.mock('@clack/prompts', async (orig) => ({
+  ...(await orig<typeof import('@clack/prompts')>()),
+  confirm: (...a: unknown[]) => confirmFn(...a),
+}));
+vi.mock('../../../src/lib/status/backup-health.js', async (orig) => ({
+  ...(await orig<typeof import('../../../src/lib/status/backup-health.js')>()),
+  readPrimaryWalGap: (...a: unknown[]) => walGap(...a),
+}));
 const stops: string[] = [];
 vi.mock('../../../src/lib/tracker.js', () => ({
   createTracker: () => ({
@@ -84,6 +95,8 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 beforeEach(() => {
   vi.restoreAllMocks();
   push.mockReset();
+  walGap.mockReset();
+  walGap.mockResolvedValue(null);
   writeFileSync(
     join(dir, '.vibecarbon.json'),
     JSON.stringify({ projectName: 'myapp', environments: { prod: envConfig } }),
@@ -141,5 +154,70 @@ describe('restore run(): the restore succeeded, its first base did not', () => {
     expect(stops).not.toContain('Restore failed');
     const saved = JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8'));
     expect(saved.environments.prod.backup.lineage).toBe(LINEAGE);
+  });
+});
+
+describe('restore run(): a live WAL gap record on the primary', () => {
+  const GAP = { count: 2, first: '000000010000000000000007', last: '000000010000000000000009' };
+
+  /** Runs a restore to latest with a confirmation; returns what was said, in order. */
+  async function restoreLatest() {
+    const order: string[] = [];
+    vi.spyOn(p.log, 'warn').mockImplementation((m: string) => {
+      order.push(`warn: ${m}`);
+    });
+    confirmFn.mockImplementation(async () => {
+      order.push('confirm');
+      return true;
+    });
+    push.mockResolvedValue(undefined);
+    vi.spyOn(p.log, 'error').mockImplementation((m: string) => {
+      order.push(`error: ${m}`);
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    // What follows the confirmation is not under test (the stubs end it early).
+    await run(['prod', '-source', 'latest', '-confirm', 'prod']).catch(() => {});
+    return order;
+  }
+
+  it('warns before the confirmation, naming the first gap', async () => {
+    walGap.mockResolvedValue(GAP);
+    const order = await restoreLatest();
+    const warn = order.findIndex((m) => m.includes('first recorded WAL gap'));
+    expect(warn).toBeGreaterThanOrEqual(0);
+    expect(order[warn]).toContain('000000010000000000000007');
+    expect(order[warn]).toContain('2 segments');
+    expect(order.indexOf('confirm')).toBeGreaterThan(warn);
+    expect(walGap).toHaveBeenCalledWith('prod', envConfig, 'myapp', '10.0.0.1');
+  });
+
+  it('says nothing when there is no gap record', async () => {
+    const order = await restoreLatest();
+    expect(order.join('\n')).not.toContain('WAL gap');
+    expect(order).toContain('confirm');
+  });
+
+  it('says nothing, and still restores, when the primary cannot be read', async () => {
+    walGap.mockRejectedValue(
+      new Error('ssh: connect to host 10.0.0.1 port 22: Connection refused'),
+    );
+    const order = await restoreLatest();
+    expect(order.join('\n')).not.toContain('WAL gap');
+    expect(order).toContain('confirm');
+  });
+
+  it('is for latest only: a point-in-time target is not warned', async () => {
+    walGap.mockResolvedValue(GAP);
+    confirmFn.mockResolvedValue(true);
+    push.mockResolvedValue(undefined);
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    await run(['prod', '-y', '-source', '2026-10-20T01:30:00Z', '-confirm', 'prod']).catch(
+      () => {},
+    );
+    expect(walGap).not.toHaveBeenCalled();
   });
 });

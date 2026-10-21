@@ -546,6 +546,20 @@ function primaryProbes(envName, envConfig, projectName) {
 }
 
 /**
+ * The WAL gap record on the role primary, read-only: `{ count, first, last }`,
+ * or null when there is none. Throws when it cannot be read (the caller decides
+ * whether that is silence or a finding).
+ *
+ * @param {string} envName
+ * @param {object} envConfig
+ * @param {string} projectName
+ * @param {string} ip the role primary
+ */
+export function readPrimaryWalGap(envName, envConfig, projectName, ip) {
+  return primaryProbes(envName, envConfig, projectName).readWalGap(ip);
+}
+
+/**
  * The Backups row for one environment: `{ level, text, ...facts }` or null
  * when nothing is deployed. Never throws on a failed probe; the row says so.
  *
