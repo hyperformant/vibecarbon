@@ -241,6 +241,7 @@ async function runK8s(primaryReachable: boolean) {
     swapRoles: () => {},
     reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
     writeFence: async () => ({ ok: true }),
+    recordFence: () => {},
   };
   let flippedTo: string | null = null;
   const strategy = {
@@ -334,6 +335,7 @@ async function runCompose(primaryReachable: boolean) {
     swapRoles: () => {},
     reconcileRetired: async () => ({ fenced: [], unreachable: [] }),
     writeFence: async () => ({ ok: true }),
+    recordFence: () => {},
   };
   await failoverComposeHA(
     'prod',

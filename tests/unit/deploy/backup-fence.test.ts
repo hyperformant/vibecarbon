@@ -20,15 +20,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load as loadYaml } from 'js-yaml';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   BACKUP_FENCE_OBJECT,
   BACKUP_FENCE_REFUSAL,
   BACKUP_FENCE_STATE_SQL,
   BACKUP_FENCE_SWITCH_SQL,
+  backupFenceRow,
   backupFenceWriteScript,
   parseBackupFenceState,
   parseBackupFenceSwitch,
+  recordBackupFence,
   writeBackupFence,
   writeComposeBackupFence,
   writeK8sBackupFence,
@@ -493,5 +495,78 @@ describe('census: every backup push path checks the fence first', () => {
       expect(write, file).toBeLessThan(body.indexOf(flip));
       expect(write, file).toBeLessThan(body.indexOf(swap));
     }
+  });
+});
+
+// Re-review: a failed fence write was a warn only. Its outcome is now on the
+// record (ha.backupFence), status shows a failed one, and a later write that
+// lands replaces it.
+describe('the fence write outcome is persisted and shown', () => {
+  const setup = async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vc-fence-rec-'));
+    writeFileSync(
+      join(dir, '.vibecarbon.json'),
+      JSON.stringify({
+        projectName: 'myapp',
+        environments: { prod: { ha: { enabled: true, systemIdentifier: SYSID } } },
+      }),
+    );
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    const read = () =>
+      JSON.parse(readFileSync(join(dir, '.vibecarbon.json'), 'utf-8')).environments.prod;
+    return { dir, cwd, read };
+  };
+
+  it('a failure is recorded with its reason and shows a status row; a later success clears it', async () => {
+    const { dir, cwd, read } = await setup();
+    try {
+      recordBackupFence(
+        { environment: 'prod' },
+        { ok: false, reason: 'wal-g st put did not confirm the write' },
+      );
+      const failed = read();
+      expect(failed.ha).toEqual({
+        enabled: true,
+        systemIdentifier: SYSID,
+        backupFence: {
+          written: false,
+          at: expect.any(String),
+          reason: 'wal-g st put did not confirm the write',
+        },
+      });
+      const row = backupFenceRow(failed);
+      expect(row).toMatch(
+        /^not written \(wal-g st put did not confirm the write\): an old primary/,
+      );
+      expect(row).toMatch(/run vibecarbon deploy to write it$/);
+      expect(row).not.toMatch(/\u2014/);
+
+      recordBackupFence({ environment: 'prod' }, { ok: true, fence: {} });
+      const ok = read();
+      expect(ok.ha.backupFence).toEqual({ written: true, at: expect.any(String) });
+      expect(backupFenceRow(ok)).toBeNull();
+      expect(backupFenceRow({ ha: { enabled: true } })).toBeNull();
+    } finally {
+      cwd.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('every write site records its outcome, and the deploy save carries it', () => {
+    const at = (file: string) => readFileSync(join(ROOT, file), 'utf-8');
+    expect(at('src/lib/deploy/compose/ha.js')).toMatch(
+      /recordFence\(\{ environment: envName \}, fenceWrite\)/,
+    );
+    expect(at('src/failover.js')).toMatch(/recordFence\(\{ environment: envName \}, fenceWrite\)/);
+    expect(at('src/lib/deploy/failover-abort.js')).toMatch(
+      /fenceRecord = backupFenceRecord\(fence\)/,
+    );
+    expect(at('src/lib/deploy/effects/compose-ha.js')).toMatch(
+      /backupFence: backupFenceRecord\(fence\)/,
+    );
+    const orch = at('src/lib/deploy/orchestrator.js');
+    expect(orch).toMatch(/recordBackupFence\(\{ environment \}, fence\)/);
+    expect(orch).toMatch(/backupFence: persistedEnvConfig\.ha\.backupFence/);
+    expect(at('src/status.js')).toMatch(/backupFenceRow\(envConfig\)/);
   });
 });

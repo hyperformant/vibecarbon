@@ -27,7 +27,7 @@
  */
 
 import { loadProjectConfig, saveProjectConfig } from '../config.js';
-import { backupFenceWarning } from './backup-fence.js';
+import { backupFenceRecord, backupFenceWarning } from './backup-fence.js';
 import { FailoverRefusedError } from './failover-guard.js';
 
 /**
@@ -55,9 +55,10 @@ import { FailoverRefusedError } from './failover-guard.js';
  * not proven, so the next deploy or failover that reaches the primary lifts it.
  *
  * @param {{ environment: string }} ctx
- * @param {{ fenceLifted: boolean }} opts
+ * @param {{ fenceLifted: boolean, backupFence?: object|null }} opts - backupFence:
+ *   the backup-prefix fence write's record (backup-fence.js), when one was tried
  */
-export function recordFailoverAbort(ctx, { fenceLifted }) {
+export function recordFailoverAbort(ctx, { fenceLifted, backupFence = null }) {
   const config = loadProjectConfig();
   const envConfig = config?.environments?.[ctx.environment];
   if (!envConfig) {
@@ -69,6 +70,7 @@ export function recordFailoverAbort(ctx, { fenceLifted }) {
   // it holds this database until a deploy reseeds it.
   delete ha.systemIdentifier;
   if (fenceLifted) delete ha.writeFence;
+  if (backupFence) ha.backupFence = backupFence;
   envConfig.ha = ha;
   envConfig.replication = 'degraded';
   envConfig.degraded = true;
@@ -145,6 +147,7 @@ export async function abortFailover({
 
   // 4. The old primary serves again.
   let fenceLifted = false;
+  let fenceRecord = null;
   if (await backend.primaryReachable()) {
     fenceLifted = await backend.unfencePrimary();
     if (!fenceLifted) {
@@ -161,6 +164,7 @@ export async function abortFailover({
     }
     const fence = await backend.writeBackupFence();
     if (!fence.ok) note(backupFenceWarning(primary, fence.reason));
+    fenceRecord = backupFenceRecord(fence);
     if (!(await backend.startPrimaryWriters())) {
       note(
         `could not start the old primary's app tier (${primary}); vibecarbon deploy ` +
@@ -175,7 +179,7 @@ export async function abortFailover({
     );
   }
 
-  record({ environment }, { fenceLifted });
+  record({ environment }, { fenceLifted, backupFence: fenceRecord });
   log(
     `failover called off: ${primary} stays the primary. replication is marked degraded; run ` +
       `vibecarbon deploy ${environment} to reseed the standby ${standby} from it`,

@@ -21,6 +21,7 @@ import { c } from './lib/colors.js';
 import { runCommand, runCommandAsync } from './lib/command.js';
 import { cleanStaleProjects, loadGlobalRegistry, loadProjectConfig } from './lib/config.js';
 import { storageAccessLine, unfencedBucketsLine } from './lib/deploy/app-storage-credential.js';
+import { backupFenceRow } from './lib/deploy/backup-fence.js';
 import { settleWindowFor, storageSettleStatus } from './lib/deploy/bucket-settle.js';
 import { resolveDockerHubCreds } from './lib/deploy/docker-hub.js';
 import { operatorCheckEnvs } from './lib/deploy/preflight.js';
@@ -1338,6 +1339,9 @@ function renderEnvironment(envName, envConfig, checks) {
 
     const fenceRow = writeFenceRow(envConfig, checks.replication);
     if (fenceRow) lines.push(`${c.dim('Write fence')}    ${c.error(fenceRow)}`);
+
+    const backupFence = backupFenceRow(envConfig);
+    if (backupFence) lines.push(`${c.dim('Backup fence')}   ${c.warning(backupFence)}`);
   }
 
   // Servers

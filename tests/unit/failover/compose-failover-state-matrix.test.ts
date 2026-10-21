@@ -292,6 +292,7 @@ async function run(opts: RunOpts = {}) {
     },
     // The backup-prefix fence write (backup-fence.test.ts pins its place).
     writeFence: async () => ({ ok: true }),
+    recordFence: () => {},
     reconcileRetired: async () => {
       order.push('fenceRetired');
       return { fenced: [], unreachable: [] };

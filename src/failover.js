@@ -21,7 +21,11 @@ import { spinner } from './lib/cli/progress.js';
 import { assertInteractiveStdin } from './lib/cli/tty-guard.js';
 import { c } from './lib/colors.js';
 import { loadProjectConfig, saveProjectConfig } from './lib/config.js';
-import { backupFenceWarning, writeK8sBackupFence } from './lib/deploy/backup-fence.js';
+import {
+  backupFenceWarning,
+  recordBackupFence,
+  writeK8sBackupFence,
+} from './lib/deploy/backup-fence.js';
 import { DB_CONTAINER, DB_POD, DB_POD_SELECTOR, DB_STATEFULSET } from './lib/deploy/db-workload.js';
 import { abortFailover } from './lib/deploy/failover-abort.js';
 import {
@@ -1650,6 +1654,7 @@ export async function failoverHA(
     promoteIssuer = promoteAcmeIssuer,
     writeFence = (srv, key) =>
       writeK8sBackupFence({ ip: srv.standby.ip, sshKeyPath: key, primaryNode: srv.standby.ip }),
+    recordFence = recordBackupFence,
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -2031,6 +2036,7 @@ export async function failoverHA(
   // pushes once it reads this. On resume it is written again (idempotent).
   const fenceWrite = await writeFence(servers, sshKeyPath);
   if (!fenceWrite.ok) p.log.warn(backupFenceWarning(servers.standby.ip, fenceWrite.reason));
+  recordFence({ environment: envName }, fenceWrite);
 
   // STEP 4b — Move the wal-g WRITE-GUARD onto the promoted cluster. The standby
   // was deployed with WALG_ROLE=standby, which no-ops the base-backup CronJob

@@ -36,7 +36,7 @@ import {
   syncHetznerFences,
   waitForAppKeyReady,
 } from './app-storage-credential.js';
-import { backupFenceWarning, writeK8sBackupFence } from './backup-fence.js';
+import { backupFenceWarning, recordBackupFence, writeK8sBackupFence } from './backup-fence.js';
 import { bucketSettleNote, settleWindowFor, storageSettleStatus } from './bucket-settle.js';
 import { renderBundle } from './bundle.js';
 import { armDeployCompletionGuard, markDeployCompleted } from './completion-guard.js';
@@ -1633,6 +1633,7 @@ export async function executeDeployment(args, gatheredConfig) {
         sshKeyPath: getSSHKeyPath(environment),
       });
       if (!fence.ok) p.log.warn(backupFenceWarning(fencePrimaryIp, fence.reason));
+      recordBackupFence({ environment }, fence);
     }
     deployResult = {
       primary: k8sHaCtx.primaryResult,
@@ -2184,6 +2185,11 @@ export async function executeDeployment(args, gatheredConfig) {
           ha: {
             enabled: true,
             failoverRegion: secondaryRegion,
+            // The backup-prefix fence write's record (backup-fence.js), saved
+            // mid-deploy by the tier: this save rebuilds `ha`, so carry it.
+            ...(persistedEnvConfig.ha?.backupFence && {
+              backupFence: persistedEnvConfig.ha.backupFence,
+            }),
             // The seeded standby's system identifier, set only when this deploy
             // verified streaming. failover's replica proof (R1) compares the
             // standby against it; a deploy that could not prove streaming

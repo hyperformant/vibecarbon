@@ -126,7 +126,10 @@ describe('abortFailover: order and refusals', () => {
       'writeBackupFence',
       'startPrimaryWriters',
     ]);
-    expect(record).toHaveBeenCalledWith({ environment: 'prod' }, { fenceLifted: true });
+    expect(record).toHaveBeenCalledWith(
+      { environment: 'prod' },
+      { fenceLifted: true, backupFence: { written: true, at: expect.any(String) } },
+    );
     expect(warnings).toEqual([]);
   });
 
@@ -135,7 +138,10 @@ describe('abortFailover: order and refusals', () => {
     const { result, record, warnings } = run(journalEnv(), backend);
     await expect(result).resolves.toMatchObject({ fenceLifted: false });
     expect(calls).not.toContain('unfencePrimary');
-    expect(record).toHaveBeenCalledWith({ environment: 'prod' }, { fenceLifted: false });
+    expect(record).toHaveBeenCalledWith(
+      { environment: 'prod' },
+      { fenceLifted: false, backupFence: null },
+    );
     expect(warnings.join('\n')).toMatch(/does not answer.*next vibecarbon deploy prod/);
   });
 
@@ -143,7 +149,10 @@ describe('abortFailover: order and refusals', () => {
     const { backend } = fakeBackend({ unfencePrimary: async () => false });
     const { result, record, warnings } = run(journalEnv(), backend);
     await expect(result).resolves.toMatchObject({ fenceLifted: false });
-    expect(record).toHaveBeenCalledWith({ environment: 'prod' }, { fenceLifted: false });
+    expect(record).toHaveBeenCalledWith(
+      { environment: 'prod' },
+      { fenceLifted: false, backupFence: { written: true, at: expect.any(String) } },
+    );
     expect(warnings.join('\n')).toMatch(/could not lift the database write fence.*psql -c reset/);
   });
 

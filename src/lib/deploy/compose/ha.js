@@ -27,7 +27,7 @@ import {
 } from '../../dns-provider.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { armComposeAcme, disarmComposeAcme } from '../acme-role.js';
-import { backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
+import { backupFenceWarning, recordBackupFence, writeComposeBackupFence } from '../backup-fence.js';
 import {
   assertFailoverClassified,
   assertFailoverPreconditions,
@@ -1871,6 +1871,7 @@ export async function failoverComposeHA(
     swapRoles = swapComposeHaRoles,
     flipDns = flipComposeDns,
     writeFence = writeComposeBackupFence,
+    recordFence = recordBackupFence,
     reconcileRetired = () =>
       reconcileRetiredFence({
         environment: envName,
@@ -2225,6 +2226,7 @@ export async function failoverComposeHA(
   if (!fenceWrite.ok) {
     p.log.warn(backupFenceWarning(standbyServer.name ?? standbyServer.ip, fenceWrite.reason));
   }
+  recordFence({ environment: envName }, fenceWrite);
 
   // Step 1a2: Move the wal-g WRITE-GUARD with the promotion. The promoted node
   // was deployed as the standby, so its db container still reads

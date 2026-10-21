@@ -39,7 +39,7 @@ import { perfAsync } from '../../perf.js';
 import { providerFor, providerIdFor } from '../../providers/index.js';
 import { useDnsChallenge } from '../acme.js';
 import { ACME_DISARM_ENV, ACME_DISARMED_CA_SERVER } from '../acme-role.js';
-import { backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
+import { backupFenceRecord, backupFenceWarning, writeComposeBackupFence } from '../backup-fence.js';
 import { assertDbMadeByThisStack } from '../compose/db-ledger-preflight.js';
 import {
   buildReplicationOverlay,
@@ -1218,6 +1218,8 @@ async function haFinalizeConfig(ctx) {
     deployedAt: reconvergeComplete ? new Date().toISOString() : pendingEnvConfig.deployedAt,
     lastAttempt: undefined,
   };
+  // The fence write's outcome, on the record (status shows a failed one).
+  finalEnv.ha = { ...(finalEnv.ha ?? {}), backupFence: backupFenceRecord(fence) };
   if (ctx.reconverge && reconvergeComplete) {
     delete finalEnv.lastFailover;
     delete finalEnv.lastFailoverOverride;

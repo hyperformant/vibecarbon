@@ -40,6 +40,8 @@
  * retirement fence, never a reason to strand a promoted primary behind DNS.
  */
 
+import * as p from '@clack/prompts';
+import { loadProjectConfig, saveProjectConfig } from '../config.js';
 import { sshKubectl } from '../ssh.js';
 import { sshRun } from './compose/index.js';
 import { DB_CONTAINER, DB_POD } from './db-workload.js';
@@ -174,6 +176,67 @@ export async function writeBackupFence({ exec, runInDb, primaryNode, now = () =>
     return { ok: false, reason: 'wal-g st put did not confirm the write' };
   }
   return { ok: true, fence };
+}
+
+/**
+ * The `ha.backupFence` record for a write result: `{ written: false, at,
+ * reason }` after a failure (status shows it until a write lands), `{ written:
+ * true, at }` after a success (`skipped: true` when the db has no backup
+ * target, so there is nothing to fence).
+ *
+ * @param {{ ok: boolean, skipped?: boolean, reason?: string }} result
+ * @param {() => Date} [now]
+ * @returns {{ written: boolean, at: string, reason?: string, skipped?: true }}
+ */
+export function backupFenceRecord(result, now = () => new Date()) {
+  const at = now().toISOString();
+  if (!result?.ok) return { written: false, at, reason: result?.reason ?? 'unknown' };
+  return { written: true, at, ...(result.skipped && { skipped: true }) };
+}
+
+/**
+ * Persist a write result as `ha.backupFence`, through a fresh config load (the
+ * failover and deploy paths save mid-run). A save that fails warns only: the
+ * record is an operator hint, never a reason to fail the run.
+ *
+ * @param {{ environment: string }} ctx
+ * @param {{ ok: boolean, skipped?: boolean, reason?: string }} result
+ * @returns {object} the record
+ */
+export function recordBackupFence(ctx, result) {
+  const record = backupFenceRecord(result);
+  try {
+    const config = loadProjectConfig();
+    const envConfig = config?.environments?.[ctx.environment];
+    if (!envConfig) return record;
+    envConfig.ha = {
+      ...(typeof envConfig.ha === 'object' ? envConfig.ha : {}),
+      backupFence: record,
+    };
+    saveProjectConfig(config);
+  } catch (err) {
+    p.log.warn(
+      `could not record the backup-prefix fence outcome in .vibecarbon.json ` +
+        `(${String(err?.message ?? err).split('\n')[0]})`,
+    );
+  }
+  return record;
+}
+
+/**
+ * The `vibecarbon status` row for a fence the last write could not land, or
+ * null when it landed (or none was ever attempted).
+ *
+ * @param {object} envConfig
+ * @returns {string|null}
+ */
+export function backupFenceRow(envConfig) {
+  const rec = envConfig?.ha?.backupFence;
+  if (rec?.written !== false) return null;
+  return (
+    `not written (${rec.reason}): an old primary that comes back unreached could still push ` +
+    'backups into the shared prefix. run vibecarbon deploy to write it'
+  );
 }
 
 /**
