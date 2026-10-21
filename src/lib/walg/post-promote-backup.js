@@ -72,7 +72,7 @@ const firstLine = (err) =>
  * @param {string} args.sshKeyPath
  * @param {string} [args.projectName] compose: the project (its /opt/<project> dir)
  * @param {string} args.envName the environment as the operator names it
- * @param {number} [args.retain] compose: base backups to keep (envConfig.backup.retentionDays)
+ * @param {number} [args.retain] compose: days of base backups to keep (envConfig.backup.retentionDays)
  * @param {{ warn?: (msg: string) => void }} [args.deps]
  * @returns {Promise<{ name: string }>}
  * @throws {PostPromoteBackupError} when no base was pushed

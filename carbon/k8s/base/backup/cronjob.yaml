@@ -31,6 +31,7 @@ metadata:
     app: vibecarbon-backup
     component: backup
 spec:
+  # Default. A deploy patches envConfig.backup.schedule over it (applyK3sManifests).
   schedule: 0 2 * * *
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
@@ -90,7 +91,7 @@ spec:
                   set -euo pipefail
                   # A retired cluster (the old primary after a failover) holds a
                   # timeline the promoted cluster has left: a base backup plus
-                  # delete retain from here would land in, and prune, the
+                  # delete before from here would land in, and prune, the
                   # promoted cluster backups. Refuse loudly, never a skip, before
                   # kubectl exec reaches wal-g. vibecarbon deploy rebuilds this
                   # cluster as the standby and clears the marker once it streams.
@@ -99,6 +100,14 @@ spec:
                     exit 1
                   fi
                   RETAIN="${BACKUP_RETENTION_DAYS:-7}"
+                  # Spliced into the db-container script and its date arithmetic:
+                  # only a positive whole number of days is accepted.
+                  case "$RETAIN" in
+                    ""|*[!0-9]*|0|0[0-9]*)
+                      echo "BACKUP_RETENTION_DAYS must be a positive whole number of days (got: $RETAIN)" >&2
+                      exit 1
+                      ;;
+                  esac
                   # Exec wal-g inside the db pod. The guard makes this a no-op on
                   # a standby (in recovery) so only the primary takes base backups.
                   kubectl exec -n vibecarbon statefulset/db -c db -- bash -c '
@@ -160,7 +169,7 @@ spec:
                     # vibecarbon-fence.json into this prefix, naming the promoted primary database
                     # and the timeline it promoted onto. An old primary that rebooted unreached is
                     # the same database on an OLDER timeline: its base backup would become LATEST
-                    # and its delete retain would prune the promoted node backups. Refuse loudly.
+                    # and its retention would prune the promoted node backups. Refuse loudly.
                     # No fence object (an env that never failed over) is allowed; one that cannot
                     # be read refuses, since nothing then proves this node is the primary.
                     fence="$(wal-g st cat vibecarbon-fence.json 2>&1)" || {
@@ -206,17 +215,26 @@ spec:
                     # is in the bucket whatever happens here, and a failure exits
                     # 3, which the podFailurePolicy turns into a failed Job (no
                     # new pod, so no second push). Sweep sentinel-less
-                    # orphans (interrupted pushes) before retention, since
-                    # `delete retain` hard-crashes on a backup whose
+                    # orphans (interrupted pushes) before the delete, since
+                    # it hard-crashes on a backup whose
                     # stop-sentinel never got written, and retries cannot heal a
                     # permanently missing object (2026-08-30 RCA). Safe under
                     # concurrencyPolicy: Forbid, as no concurrent push can look
                     # like an orphan mid-flight.
+                    # Retention is by TIME: delete before FIND_FULL removes what
+                    # precedes the first base made at or after the cutoff (RETAIN
+                    # days ago) and keeps that base and everything after it; with
+                    # every base older than the cutoff it deletes nothing, so the
+                    # newest base always survives. It acts on this lineage folder only (walg-env.sh). The db image
+                    # is Alpine (busybox date, no relative dates), so the cutoff is
+                    # epoch arithmetic. The fence object is read back after the
+                    # delete, and one that changed or vanished fails retention.
                     # NO APOSTROPHES in this wrapper, comments included: a
                     # single quote ends the bash -c string (enforced by
                     # tests/unit/template/embedded-shell-syntax.test.ts;
                     # run 33319907805 is the day one broke every backup).
-                    retain_out="$( { wal-g delete garbage BACKUPS --confirm && wal-g delete retain FULL '"${RETAIN}"' --confirm; } 2>&1)" || {
+                    RETAIN_DAYS='"${RETAIN}"'
+                    retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && wal-g delete before FIND_FULL "$cutoff" --confirm && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
                       printf "%s\n" "$retain_out" >&2
                       echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
                       exit 3

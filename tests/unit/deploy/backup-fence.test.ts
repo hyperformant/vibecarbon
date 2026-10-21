@@ -3,7 +3,7 @@
  *
  * The retirement fence only reaches a node the CLI can reach. An old primary
  * that stays unreachable through a failover and reboots on its own still reads
- * WALG_ROLE=primary and pushes WAL, base backups and a `delete retain` into
+ * WALG_ROLE=primary and pushes WAL, base backups and a `delete before` into
  * the shared prefix. Failover now writes `vibecarbon-fence.json` into that
  * prefix (S3 is reachable when the old primary is not), naming the promoted
  * database and the timeline it promoted onto, and every push path refuses when
@@ -457,7 +457,7 @@ describe.each(Object.entries(backupRuns))('%s base backup against the fence', (t
   it('no fence object: backs up and prunes', () => {
     const r = run('b1', { fence: null });
     expect(r.status).toBe(0);
-    expect(r.pushes).toMatch(/backup-push[\s\S]*delete retain FULL 2/);
+    expect(r.pushes).toMatch(/backup-push[\s\S]*delete before FIND_FULL \S+ --confirm/);
   });
 
   it('the fence names this database on a newer timeline: refuses, no push and no delete', () => {
@@ -484,7 +484,7 @@ describe.each(Object.entries(backupRuns))('%s base backup against the fence', (t
 });
 
 describe('census: every backup push path checks the fence first', () => {
-  const PUSH = /wal-g (?:wal-push|backup-push|delete retain)|"\$WALG" wal-push/;
+  const PUSH = /wal-g (?:wal-push|backup-push|delete before)|"\$WALG" wal-push/;
   const walk = (dir: string): string[] =>
     spawnSync('git', ['ls-files', dir], { cwd: ROOT, encoding: 'utf-8' })
       .stdout.split('\n')

@@ -572,9 +572,13 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     // A segment the new lineage archived (the base push switched WAL).
     const segment = await until('an archived WAL segment in the new lineage', async () => {
       const page = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: walFolder }));
-      return (page.Contents ?? [])
-        .map((o) => String(o.Key).slice(walFolder.length))
-        .find((k) => /^[0-9A-F]{24}\./.test(k));
+      return (
+        (page.Contents ?? [])
+          .map((o) => String(o.Key).slice(walFolder.length))
+          // A WAL segment (`<24 hex>.lz4`), never the `<segment>.<offset>.backup`
+          // label a base push archives beside it.
+          .find((k) => /^[0-9A-F]{24}\.[a-z0-9]+$/.test(k))
+      );
     });
     const segmentKey = `${walFolder}${segment}`;
     const etag = async () =>
@@ -596,11 +600,68 @@ describeDocker('staged restore: the live cluster survives until the backup is pr
     expect(r.stdout + r.stderr).toContain('already archived, contents differ');
     // The archived segment is still the one postgres wrote, byte for byte.
     expect(await etag()).toBe(etagBefore);
-    const again = await s3.send(
-      new ListObjectsV2Command({ Bucket: BUCKET, Prefix: `${walFolder}${segment.slice(0, 24)}` }),
-    );
+    const again = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: segmentKey }));
     expect(again.Contents?.length).toBe(1);
   });
+
+  it('retention is by time: it keeps the newest base whatever the cutoff, and never touches the fence', {
+    timeout: 600_000,
+  }, async () => {
+    const lineage = sysidOf();
+    const folder = `${PREFIX}/${lineage}`;
+    const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+    const fence = await writeBackupFence({
+      exec: async (sql) => psql(sql),
+      runInDb: async (script) => docker(['exec', DB_CT, 'sh', '-c', script]),
+      primaryNode: DB_CT,
+    });
+    expect(fence.ok, JSON.stringify(fence)).toBe(true);
+    const fenceKey = `${folder}/vibecarbon-fence.json`;
+    const etag = async () =>
+      (await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: fenceKey }))).ETag;
+    const etagBefore = await etag();
+    expect(etagBefore).toBeTruthy();
+
+    // The script's own retention (RETAIN=7 days): nothing is old enough, the
+    // fence reads back unchanged, and the run reports the base it pushed.
+    const first = pushedName(runComposeBackupScript(dir));
+    const second = pushedName(runComposeBackupScript(dir));
+    expect(
+      (await listBaseBackups({ s3, bucket: BUCKET, prefix: folder })).map((b) => b.name),
+    ).toEqual(expect.arrayContaining([first, second]));
+    expect(await etag()).toBe(etagBefore);
+
+    // wal-g's `delete before FIND_FULL <time>` (verified on 3.0.9): the target
+    // is the first base made at or after the time, everything before it is
+    // deleted, and a time past every base deletes nothing. So the newest base
+    // survives any cutoff. A cutoff past all of them (now; wal-g refuses a
+    // future one) leaves every base and the fence as they were ...
+    await sleep(2000);
+    const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
+    const nothing = walgInDb(`delete before FIND_FULL ${iso(Date.now())} --confirm`);
+    expect(nothing.status, nothing.stderr).toBe(0);
+    expect(
+      (await listBaseBackups({ s3, bucket: BUCKET, prefix: folder })).map((b) => b.name),
+    ).toEqual(expect.arrayContaining([first, second]));
+    expect(await etag()).toBe(etagBefore);
+
+    // ... and a cutoff at the newest base's own second deletes the older ones
+    // and keeps that base, with the lineage root's fence object untouched.
+    const listed = JSON.parse(walgInDb('backup-list --detail --json').stdout) as Array<{
+      backup_name: string;
+      time: string;
+    }>;
+    const secondTime = Date.parse(String(listed.find((b) => b.backup_name === second)?.time));
+    const del = walgInDb(
+      `delete before FIND_FULL ${iso(Math.floor(secondTime / 1000) * 1000)} --confirm`,
+    );
+    expect(del.status, del.stderr).toBe(0);
+    const left = (await listBaseBackups({ s3, bucket: BUCKET, prefix: folder })).map((b) => b.name);
+    expect(left).toContain(second);
+    expect(left).not.toContain(first);
+    expect(await etag()).toBe(etagBefore);
+  });
+
   it('a promoted standby pushes the first base on its timeline; restore latest keeps a later write', {
     timeout: 900_000,
   }, async () => {

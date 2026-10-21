@@ -38,7 +38,7 @@ describe('compose-backup.sh (the single source of truth)', () => {
     expect(script).toContain('PGUSER=postgres');
     expect(script).toContain('pg_is_in_recovery');
     expect(script).toContain('wal-g backup-push');
-    expect(script).toContain('wal-g delete retain FULL');
+    expect(script).toContain('wal-g delete before FIND_FULL');
     expect(script).toContain('--confirm');
   });
 

@@ -1202,7 +1202,7 @@ export async function destroyCompose(ip, sshKeyPath, projectName) {
  *
  * @param {string} remoteDir  Absolute path to the project directory on the VPS
  *                            (e.g. /opt/myapp)
- * @param {number} [retain=7]  Number of full base backups to keep. Validated
+ * @param {number} [retain=7]  Days of base backups to keep. Validated
  *                             to a positive integer (injection-safe + sane).
  * @param {{ lockWaitS?: number }} [opts]  lockWaitS: seconds the script waits
  *   for another run's lock before it skips (LOCK_WAIT); omitted, it skips at
@@ -1258,7 +1258,7 @@ export function composeBackupCmd(remoteDir, retain = 7, { lockWaitS } = {}) {
  * @param {string} sshKeyPath
  * @param {string} projectName
  * @param {object} [options]
- * @param {number} [options.retain]  Full base backups to keep (default 7).
+ * @param {number} [options.retain]  Days of base backups to keep (default 7).
  * @param {number} [options.lockWaitS]  Seconds to wait for another backup run's
  *   lock before skipping (LOCK_WAIT); added to the ssh timeout. Omitted: skip
  *   at once (today's behaviour).

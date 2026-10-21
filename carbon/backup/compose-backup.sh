@@ -6,8 +6,8 @@ set -e
 #
 # Runs via cron on the VPS (and on-demand from the CLI). Triggers a wal-g base
 # backup from inside the db container (which already has WALG_S3_PREFIX_BASE +
-# AWS_* configured from .env) and prunes old base backups via `wal-g delete
-# retain`. The in-container script sources /etc/postgresql/walg-env.sh first,
+# AWS_* configured from .env) and prunes base backups older than RETAIN days via
+# `wal-g delete before FIND_FULL <cutoff>`. The in-container script sources /etc/postgresql/walg-env.sh first,
 # so the push, the fence read and the retention all act on this database's own
 # lineage folder (its system identifier) and never on another lineage's.
 #
@@ -27,13 +27,16 @@ set -e
 # can never drift.
 #
 # Environment Variables:
-#   RETAIN     - Number of full base backups to keep (default: 7)
+#   RETAIN     - Days of base backups to keep (default: 7). wal-g keeps the
+#                first base made at or after the cutoff and everything after
+#                it, and deletes nothing when every base is older, so the
+#                newest base survives any cutoff.
 #   LOCK_WAIT  - Seconds to wait for another run's lock before skipping (default: 0)
 # ============================================================================
 
 # RETIRED-NODE FENCE: a failover retired this node (the old primary), and the
 # CLI placed this marker when it next reached it. Its database is a timeline
-# the promoted node has left, and a base backup plus `delete retain` from here
+# the promoted node has left, and a base backup plus `delete before` from here
 # would land in, and prune, the promoted node's backups. Refuse loudly (exit 1,
 # never a skip) before anything touches the db container. `vibecarbon deploy`
 # rebuilds this node as the standby and removes the marker once it streams.
@@ -64,10 +67,16 @@ fi || {
 }
 
 RETAIN="${RETAIN:-7}"
+# The value is spliced into the db-container script below and into date
+# arithmetic there: only a positive whole number of days is accepted.
+[[ "$RETAIN" =~ ^[1-9][0-9]*$ ]] || {
+  echo "RETAIN must be a positive whole number of days (got: ${RETAIN})" >&2
+  exit 1
+}
 
 echo "=== Vibecarbon Compose Backup (wal-g) ==="
 echo "Started at $(date)"
-echo "Retain: ${RETAIN} full base backups"
+echo "Retain: ${RETAIN} days of base backups"
 
 # wal-g connects to PG via libpq; PGUSER=postgres is REQUIRED (only the
 # superuser may call pg_backup_start; unset, libpq defaults to OS user root →
@@ -119,7 +128,7 @@ docker compose exec -T db bash -c '
   # vibecarbon-fence.json into this prefix, naming the promoted primary database
   # and the timeline it promoted onto. An old primary that rebooted unreached is
   # the same database on an OLDER timeline: its base backup would become LATEST
-  # and its delete retain would prune the promoted node backups. Refuse loudly.
+  # and its retention would prune the promoted node backups. Refuse loudly.
   # No fence object (an env that never failed over) is allowed; one that cannot
   # be read refuses, since nothing then proves this node is the primary.
   fence="$(wal-g st cat vibecarbon-fence.json 2>&1)" || {
@@ -167,13 +176,23 @@ docker compose exec -T db bash -c '
   # retention failed), never 1. `delete garbage BACKUPS` sweeps
   # sentinel-less orphans (an interrupted backup-push writes its stop-sentinel
   # LAST, so a mid-upload failure leaves data files with no sentinel) BEFORE
-  # `delete retain`, which hard-crashes on such an orphan ("object
+  # the delete, which hard-crashes on such an orphan ("object
   # …_backup_stop_sentinel.json not found in storage") on every run until
   # someone deletes it by hand (2026-08-30 RCA: a stale-storage-frontend
   # window orphaned one push and wedged all five retry attempts). Safe under
   # the flock above: no concurrent push on this host can look like an orphan
   # mid-flight.
-  retain_out="$( { wal-g delete garbage BACKUPS --confirm && wal-g delete retain FULL "'"${RETAIN}"'" --confirm; } 2>&1)" || {
+  # Retention is by TIME: `delete before FIND_FULL <cutoff>` removes what
+  # precedes the first base made at or after the cutoff (RETAIN days ago) and
+  # keeps that base and everything after it; with every base older than the
+  # cutoff it deletes nothing. So the newest base always survives (verified
+  # on wal-g 3.0.9, tests/integration/docker/db-restore-staged.test.ts). It acts on this lineage folder only (WALG_S3_PREFIX from
+  # walg-env.sh). The db image is Alpine (busybox date, no relative dates),
+  # so the cutoff is epoch arithmetic. The fence object lives at the lineage
+  # root, outside what the delete touches; it is read back after, and a
+  # fence that changed or vanished fails retention loudly.
+  RETAIN_DAYS='"${RETAIN}"'
+  retain_out="$( { cutoff="$(date -u -d "@$(( $(date +%s) - RETAIN_DAYS * 86400 ))" +%Y-%m-%dT%H:%M:%SZ)" && [ -n "$cutoff" ] && wal-g delete garbage BACKUPS --confirm && wal-g delete before FIND_FULL "$cutoff" --confirm && { [ -z "$fence" ] || [ "$(wal-g st cat vibecarbon-fence.json 2>&1)" = "$fence" ] || { echo "the backup-prefix fence (vibecarbon-fence.json) changed or vanished during retention"; false; }; }; } 2>&1)" || {
     printf "%s\n" "$retain_out" >&2
     echo "retention failed after pushing $name: $(printf "%s\n" "$retain_out" | grep -v "^$" | tail -n 1)" >&2
     exit 3

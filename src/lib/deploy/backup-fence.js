@@ -5,7 +5,7 @@
  * reach: it places markers the node's own scripts check. An old primary that
  * stays unreachable through the failover and then reboots on its own still
  * reads WALG_ROLE=primary, out of recovery, and its archive_command and backup
- * cron push WAL, base backups and a `delete retain` into the shared prefix,
+ * cron push WAL, base backups and a `delete before` into the shared prefix,
  * where LATEST can become its stale timeline.
  *
  * So failover also writes a fence object into the env's backup prefix, which
@@ -32,7 +32,7 @@
  * file; when it cannot be read the fence records none and exempts nothing. No fence object means an env
  * that never failed over: allowed. Another system identifier is another
  * database (a destroyed and recreated env): allowed. `wal-g delete garbage` and
- * `delete retain` only touch basebackups_005/ and wal_005/, never the root
+ * `delete before` only touch basebackups_005/ and wal_005/, never the root
  * (verified on postgres:17.11-walg3.0.9-r2 against MinIO).
  *
  * Written BEFORE the DNS flip and the role-swap save of every failover, by

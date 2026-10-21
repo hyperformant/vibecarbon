@@ -288,6 +288,51 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
   };
 }
 
+/** The backup CronJob schedule and retention when the deploy carries no backup config. */
+const DEFAULT_BACKUP_SCHEDULE = '0 2 * * *';
+const DEFAULT_BACKUP_RETENTION_DAYS = 7;
+
+/**
+ * The backup schedule and retention the k8s cluster runs with, from
+ * `envConfig.backup` (the same pair the compose cron installs). The schedule
+ * lands in a JSON merge patch, so only cron characters are accepted.
+ *
+ * @param {{schedule?: string, retentionDays?: number}} [backupConfig]
+ * @returns {{schedule: string, retentionDays: number}}
+ */
+export function resolveBackupSettings(backupConfig) {
+  const schedule = backupConfig?.schedule || DEFAULT_BACKUP_SCHEDULE;
+  if (!/^[0-9A-Za-z*/,\- ]+$/.test(schedule)) {
+    throw new Error(
+      `backup schedule ${JSON.stringify(schedule)} is not a cron expression (digits, letters, * / , - and spaces only)`,
+    );
+  }
+  const days = backupConfig?.retentionDays;
+  return {
+    schedule,
+    retentionDays: Number.isInteger(days) && days > 0 ? days : DEFAULT_BACKUP_RETENTION_DAYS,
+  };
+}
+
+/**
+ * The deploy-time backup settings as the two merge patches that carry them:
+ * the retention days into the `vibecarbon-config` ConfigMap (read by the
+ * CronJob per run) and the schedule onto the `backup` CronJob. They are
+ * patched, not rendered into the manifests, because Flux reconciles the raw
+ * `k8s/base` too and must find no placeholder there (the same reason SITE_URL
+ * is patched). Pure.
+ *
+ * @param {{schedule?: string, retentionDays?: number}} [backupConfig]
+ * @returns {{configMapData: {BACKUP_RETENTION_DAYS: string}, cronJobSpec: {schedule: string}}}
+ */
+export function buildBackupConfigPatches(backupConfig) {
+  const { schedule, retentionDays } = resolveBackupSettings(backupConfig);
+  return {
+    configMapData: { BACKUP_RETENTION_DAYS: String(retentionDays) },
+    cronJobSpec: { schedule },
+  };
+}
+
 /**
  * Build the `k3s-apply` step's skip-gate inputs.
  *
@@ -343,7 +388,7 @@ export function buildK3sBuildInputs({ projectName, domain, masterPrivateIp, proj
  * `restore` is the resolved `deploy -restore` point: its backup and target
  * are an input, so a rerun that restores another base re-applies.
  *
- * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string }} args
+ * @param {{ imageTag: string, dbImageTag: string, restore?: {backup: string, target: string}|null, projectDir: string, storageClass?: string, role?: 'primary'|'standby', appStorageAccessKey?: string, backupConfig?: {schedule?: string, retentionDays?: number} }} args
  * @returns {{ imageTag: string, dbImageTag: string, restore: string, storageClass: string, role: 'primary'|'standby', appStorageKeyDigest: string, manifestDigest: string, bundledManifestDigest: string }}
  */
 export function buildK3sApplyInputs({
@@ -354,10 +399,16 @@ export function buildK3sApplyInputs({
   storageClass,
   role,
   appStorageAccessKey,
+  backupConfig,
 }) {
+  const backup = resolveBackupSettings(backupConfig);
   return {
     imageTag,
     dbImageTag,
+    // Patched onto the backup CronJob and the retention ConfigMap key after
+    // the apply: no manifest digest sees them.
+    backupSchedule: backup.schedule,
+    backupRetentionDays: backup.retentionDays,
     restore: restore ? `${restore.backup} ${restore.target}` : '',
     storageClass: storageClass ?? '',
     role: role === 'standby' ? 'standby' : 'primary',
@@ -3316,7 +3367,7 @@ export async function finishDeployRestore({ env, restore, environment, operatorE
  * Local-first by default — no Flux on the deploy path; Flux is opt-in
  * via `vibecarbon configure cicd`.
  *
- * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
+ * @param {{kubeconfig: string, projectDir: string, projectName: string, imageTag: string, dbImageTag: string, envLocal: Record<string,string>, domain: string, s3Config?: {accessKey: string, secretKey: string, bucket: string, endpoint: string, region: string}, backupBucketName?: string|null, backupConfig?: {schedule?: string, retentionDays?: number}, restore?: {backup: string, target: string, recoveryConf: string, sizeBytes: number}|null, dnsProvider?: string|null, dnsToken?: string|null, apiToken?: string, providerId?: string, ProviderClass?: typeof import('../../providers/base.js').BaseProvider, region?: string, environment?: string, minWorkers?: number, maxWorkers?: number, caBoundsMin?: number, workerServerType?: string, k3sToken?: string, masterIp?: string, sshKeyPath?: string, khPath?: string, dbPrivateIp?: string, masterPrivateIp?: string, vpcCidr?: string, role?: 'primary'|'standby'}} args
  *   `restore` is the resolved `deploy -restore` point (resolveDeployRestorePoint,
  *   src/lib/walg/restore-base.js). With it the restore marker goes into the
  *   infra Secret before the db StatefulSet applies, so the db pod's
@@ -3336,6 +3387,7 @@ export async function applyK3sManifests({
   domain,
   s3Config,
   backupBucketName,
+  backupConfig,
   dnsProvider,
   // The ONE DNS-01 credential, already resolved for whichever `dnsProvider`
   // is selected (see DNS01_PROVIDERS). Never five per-provider token args:
@@ -3416,6 +3468,9 @@ export async function applyK3sManifests({
   operatorEnv,
 }) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
+  // The schedule and retention this environment runs backups with, validated
+  // before anything is created; patched onto the CronJob/ConfigMap below.
+  const backupPatches = buildBackupConfigPatches(backupConfig);
   // Pilot-light: on the standby cluster nothing app-tier runs until a
   // failover promotes it — no app pods, no CA-spawned workers. Everything
   // below gated on this const either declaratively zeroes a Deployment
@@ -4197,9 +4252,25 @@ export async function applyK3sManifests({
       'vibecarbon-config',
       '--type=merge',
       '-p',
-      JSON.stringify({ data: { SITE_URL: `https://${domain}` } }),
+      JSON.stringify({
+        data: { SITE_URL: `https://${domain}`, ...backupPatches.configMapData },
+      }),
     ],
     { env, description: 'applyK3sManifests: kubectl patch configmap/vibecarbon-config' },
+  );
+  // The backup schedule from envConfig.backup (the base carries the default).
+  await runKubectlWithRetry(
+    [
+      '-n',
+      'vibecarbon',
+      'patch',
+      'cronjob',
+      'backup',
+      '--type=merge',
+      '-p',
+      JSON.stringify({ spec: backupPatches.cronJobSpec }),
+    ],
+    { env, description: 'applyK3sManifests: kubectl patch cronjob/backup' },
   );
   // 5c'. Isolated observability stack (H-9). Applied SEPARATELY from k8s/base for
   //      the SAME reason as cluster-autoscaler above: base/'s parent kustomization
@@ -5067,6 +5138,8 @@ export async function deployK3s(options) {
     role: options.role,
     // A re-minted app storage key must reach the app Secret.
     appStorageAccessKey: options.s3Config?.appCredential?.accessKey,
+    // The schedule and retention rendered into the backup CronJob/ConfigMap.
+    backupConfig: options.backupConfig,
   });
   if (!state.shouldSkip('k3s-apply', applyInputs)) {
     state.startStep('k3s-apply', applyInputs);
@@ -5084,6 +5157,7 @@ export async function deployK3s(options) {
         domain: options.domain || 'localhost',
         s3Config: options.s3Config,
         backupBucketName: options.backupBucketName,
+        backupConfig: options.backupConfig,
         restore: options.restore,
         operatorEnv: options.operatorEnv ?? options.environment,
         dnsProvider: options.dnsProvider,

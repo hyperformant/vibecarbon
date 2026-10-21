@@ -80,6 +80,8 @@ type Stub = {
   pushOutput?: string;
   pushFails?: boolean;
   retainFails?: boolean;
+  /** The fence object disappears when `delete before` runs. */
+  fenceVanishes?: boolean;
   lockHeld?: boolean;
   fence?: string | null;
 };
@@ -93,6 +95,7 @@ function stubs(name: string, opts: Stub) {
     ].join('\n'),
     pushFails = false,
     retainFails = false,
+    fenceVanishes = false,
     lockHeld = false,
     fence = null,
   } = opts;
@@ -100,10 +103,12 @@ function stubs(name: string, opts: Stub) {
   mkdirSync(bin, { recursive: true });
   const log = join(bin, 'walg.log');
   writeFileSync(log, '');
+  writeFileSync(join(bin, 'fence-present'), '');
   writeFileSync(
     join(bin, 'wal-g'),
     `#!/bin/bash
 if [ "$1" = st ] && [ "$2" = cat ]; then
+  ${fence !== null ? `[ -e ${join(bin, 'fence-present')} ] || { echo "ERROR: object 'p/vibecarbon-fence.json' not found in storage" >&2; exit 1; }` : ''}
   ${fence === null ? `echo "ERROR: object 'p/vibecarbon-fence.json' not found in storage" >&2; exit 1` : `printf '%s\\n' '${fence}'`}
   exit 0
 fi
@@ -111,7 +116,8 @@ echo "$*" >> ${log}
 if [ "$1" = backup-push ]; then
   ${pushFails ? 'echo "ERROR: pg_backup_start: permission denied" >&2; exit 1' : `printf '%s\\n' "${pushOutput}" >&2`}
 fi
-if [ "$1" = delete ] && [ "$2" = retain ]; then
+if [ "$1" = delete ] && [ "$2" = before ]; then
+  ${fenceVanishes ? `rm -f ${join(bin, 'fence-present')}` : ''}
   ${retainFails ? 'echo "ERROR: failed to list s3 folder: AccessDenied" >&2; exit 1' : ''}
   :
 fi
@@ -221,7 +227,9 @@ describe('compose-backup.sh prints one BACKUP_RESULT per exit-0 run', () => {
     expect(r.status, r.stderr).toBe(0);
     expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
     expect(parseBackupResult(r.stdout)).toEqual({ result: 'pushed', name: NAME });
-    expect(r.walg).toMatch(/backup-push[\s\S]*delete garbage BACKUPS[\s\S]*delete retain FULL 2/);
+    expect(r.walg).toMatch(
+      /backup-push[\s\S]*delete garbage BACKUPS[\s\S]*delete before FIND_FULL \S+ --confirm/,
+    );
   });
 
   it('a retention failure after the push: exit 3, the pushed marker stands, the cause names the base', () => {
@@ -314,6 +322,136 @@ describe('the backup CronJob prints the same markers', () => {
     expect(st.status).toBe(1);
     expect(markers(st.stdout)).toEqual([]);
   });
+});
+
+/**
+ * Retention is by time: `wal-g delete before FIND_FULL <cutoff>`, cutoff =
+ * now minus RETAIN days. wal-g keeps the first base at or after the cutoff and
+ * deletes nothing when every base is older, so the newest base survives any
+ * cutoff (proved against the real wal-g in
+ * tests/integration/docker/db-restore-staged.test.ts).
+ */
+describe('retention deletes by time, inside the current lineage', () => {
+  const deleteArgs = (walg: string) =>
+    walg.split('\n').find((l) => l.startsWith('delete before ')) ?? '';
+  const cutoffOf = (walg: string) =>
+    deleteArgs(walg).match(/^delete before FIND_FULL (\S+) --confirm$/)?.[1] ?? '';
+  const expectCutoff = (cutoff: string, days: number) => {
+    expect(cutoff).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    const want = Date.now() - days * 86_400_000;
+    expect(Math.abs(Date.parse(cutoff) - want)).toBeLessThan(120_000);
+  };
+
+  it.each([
+    ['compose', () => runCompose('time-compose')],
+    ['k8s CronJob', () => runCron('time-cron')],
+  ])('%s: sweeps orphans, then delete before FIND_FULL at now minus RETAIN days', (_t, run) => {
+    const r = run();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.walg).toMatch(
+      /delete garbage BACKUPS --confirm\ndelete before FIND_FULL \S+ --confirm/,
+    );
+    expect(r.walg).not.toMatch(/retain/);
+    expectCutoff(cutoffOf(r.walg), 2);
+  });
+
+  it('the scripts hold no count-based retention', () => {
+    for (const file of [COMPOSE_BACKUP, CRONJOB]) {
+      const code = readFileSync(file, 'utf-8')
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      expect(code, file).toContain('delete before FIND_FULL');
+      expect(code, file).not.toMatch(/retain FULL/);
+    }
+  });
+
+  it('RETAIN reaches the cutoff: 5 days back, not the default', () => {
+    const r = runCompose('time-5', {}, { RETAIN: '5' });
+    expect(r.status, r.stderr).toBe(0);
+    expectCutoff(cutoffOf(r.walg), 5);
+    const c = runCron('time-5', {}, { BACKUP_RETENTION_DAYS: '5' });
+    expect(c.status, c.stderr).toBe(0);
+    expectCutoff(cutoffOf(c.walg), 5);
+  });
+
+  it.each(['0', '-1', '7; rm -rf /', 'abc', '01', '2.5'])(
+    'a RETAIN of %j is refused before any wal-g call',
+    (bad) => {
+      const a = runCompose(`bad-${bad.length}${bad.charCodeAt(0)}`, {}, { RETAIN: bad });
+      expect(a.status).toBe(1);
+      expect(a.stderr).toMatch(/RETAIN must be a positive whole number of days/);
+      expect(a.walg).toBe('');
+      const b = runCron(
+        `bad-${bad.length}${bad.charCodeAt(0)}`,
+        {},
+        { BACKUP_RETENTION_DAYS: bad },
+      );
+      expect(b.status).toBe(1);
+      expect(b.stderr).toMatch(/BACKUP_RETENTION_DAYS must be a positive whole number of days/);
+      expect(b.walg).toBe('');
+    },
+  );
+
+  it('the fence object surviving the delete is checked: unchanged passes, vanished is exit 3', () => {
+    const fence = JSON.stringify({ systemIdentifier: '7699032860122738725', timeline: 1 });
+    const ok = runCompose('fence-kept', { fence });
+    expect(ok.status, ok.stderr).toBe(0);
+    for (const run of [
+      () => runCompose('fence-gone', { fence, fenceVanishes: true }),
+      () => runCron('fence-gone', { fence, fenceVanishes: true }),
+    ]) {
+      const r = run();
+      // The base landed; only retention failed: exit 3 with the marker kept.
+      expect(r.status).toBe(3);
+      expect(markers(r.stdout)).toEqual([`BACKUP_RESULT=pushed:${NAME}`]);
+      expect(r.stderr).toContain('retention failed after pushing');
+      expect(r.stderr).toContain('fence (vibecarbon-fence.json) changed or vanished');
+    }
+  });
+
+  /**
+   * The db image is Alpine: busybox date, no coreutils, so a relative date
+   * ("-7 days") is rejected and the cutoff has to be epoch arithmetic. Run the
+   * scripts' own cutoff expression under busybox (the db image's date is
+   * /bin/busybox) and compare with the host.
+   */
+  const dockerUp = spawnSync('docker', ['info'], { timeout: 20_000 }).status === 0;
+  it.skipIf(!dockerUp)(
+    'the cutoff expression runs under busybox date',
+    { timeout: 120_000 },
+    () => {
+      const expr = (src: string) =>
+        src.match(
+          /cutoff="\$\((date -u -d "@\$\(\( \$\(date \+%s\) - RETAIN_DAYS \* 86400 \)\)" \+[^)]*)\)"/,
+        )?.[1];
+      const fromCompose = expr(readFileSync(COMPOSE_BACKUP, 'utf-8'));
+      const fromCron = expr(readFileSync(CRONJOB, 'utf-8'));
+      expect(fromCompose).toBeTruthy();
+      expect(fromCron).toBe(fromCompose);
+      const name = `vcdate${process.pid}`;
+      try {
+        const r = spawnSync(
+          'docker',
+          [
+            'run',
+            '--rm',
+            '--name',
+            name,
+            'busybox:1.36',
+            'sh',
+            '-c',
+            `RETAIN_DAYS=3; ${fromCompose}`,
+          ],
+          { encoding: 'utf-8', timeout: 100_000 },
+        );
+        expect(r.status, r.stderr).toBe(0);
+        expectCutoff(r.stdout.trim(), 3);
+      } finally {
+        spawnSync('docker', ['rm', '-f', '-v', name], { timeout: 30_000 });
+      }
+    },
+  );
 });
 
 /**

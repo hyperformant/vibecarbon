@@ -5,7 +5,7 @@
  * is usually why it ran). When that node comes back it still believes it is
  * the primary: its app and add-ons write, its WAL archiver and nightly base
  * backup push into the shared prefix the new primary owns, and
- * `wal-g delete retain` can prune the new primary's backups. So the retired
+ * `wal-g delete before` can prune the new primary's backups. So the retired
  * side is fenced by markers it enforces itself, and every HA command (status,
  * failover, deploy) re-applies it on any reachable side the persisted roles
  * call retired:
