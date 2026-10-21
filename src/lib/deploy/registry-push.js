@@ -55,11 +55,13 @@
  * `-o BatchMode=yes` so a key-auth failure aborts cleanly instead of falling
  * back to interactive prompt (via `buildHostKeyOptsForPath`).
  *
- * Concurrency: calls are SERIALIZED process-wide by a mutex — an HA deploy
- * fans primary + standby out concurrently, and two simultaneous uploads over
- * one operator uplink stall each other's blobs into `unknown blob` failures.
- * See the "Uplink serialization" block below for the evidence and the
- * alternatives that were rejected.
+ * Concurrency: calls are SERIALIZED process-wide by a mutex, because two
+ * simultaneous uploads over one operator uplink stall each other's blobs into
+ * `unknown blob` failures. A k8s-ha deploy now makes ONE tunnel push (the
+ * standby gets its image by copy over wg0); the mutex still serves compose-ha's
+ * two servers. Separate processes are covered by uplink-lock.js. See the
+ * "Uplink serialization" block below for the evidence and the alternatives
+ * that were rejected.
  *
  * Throws on persistent push failure; tunnel-teardown and local-tag cleanup
  * failures are non-fatal.
@@ -96,8 +98,10 @@ export function isPermanentPushError(err) {
 //
 // CLASS: concurrent tunnel pushes contend on the operator uplink.
 //
-// An HA deploy fans `applyK3sManifests` out over primary + standby at once,
-// and each side backgrounds its own `pushImageOverSshTunnel`. That puts TWO
+// An HA deploy used to fan `applyK3sManifests` out over primary + standby at
+// once, each side backgrounding its own `pushImageOverSshTunnel` (a k8s-ha
+// deploy now makes one tunnel push; compose-ha's two servers still do this,
+// see effects/index.js). That put TWO
 // multi-hundred-MB image uploads on the operator's single uplink
 // simultaneously, both funnelled through SSH tunnels. When the link can't
 // carry both, a blob PUT stalls long enough for the registry to drop the
@@ -133,8 +137,9 @@ export function isPermanentPushError(err) {
 // external tooling, and turns a 5-attempt thrash into two clean transfers.
 //
 // Scope: per-PROCESS. Two separate `vibecarbon deploy` processes (or e2e
-// matrix siblings) still share the uplink; that's what the retry ladder and
-// the bind-race port walk remain for.
+// matrix siblings) also share the uplink; the cross-process lock in
+// uplink-lock.js covers them. The retry ladder and the bind-race port walk
+// are not an answer to that contention.
 
 /**
  * Tail of the push chain. Only ever RESOLVES — each holder's slot is a promise

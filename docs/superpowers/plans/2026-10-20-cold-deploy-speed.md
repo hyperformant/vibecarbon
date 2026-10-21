@@ -274,6 +274,7 @@ Sources: the archived private repo `brandonpowers/vibecarbon` (cloned, filter=bl
 ### Task 5: k8s delivers once, into the master registry, and nodes pull
 
 **Files:**
+- Note (R7): `tests/unit/deploy/k8s-image-delivery-census.test.ts` (registry-copy plan, Task 7) classifies every image-delivery call site. Its `SITES` table must follow `deliverImage` when this task lands: whichever of the two plans lands second updates it.
 - Modify: `src/lib/deploy/k8s/k3s.js`:
   - replace the `sideloadK3s` fan-out (`:4458`, app and backup images) and the backgrounded `pushImageToLocalRegistry` (`:3583-3601`, awaited `:4105`) with one `deliverImage({ tag, sshTarget: master, runtime: 'k3s', registryRef: tag })` per image;
   - before it, run `k3s ctr -n k8s.io images pull <baseRef>` on the master;
